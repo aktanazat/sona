@@ -332,7 +332,7 @@ fn fragments(folded_quote: &str) -> impl Iterator<Item = &str> {
 /// characters or fewer, which leaves a short receipt unchecked. Every fragment
 /// is checked here, because a short receipt is exactly where an invented quote
 /// hides, and a quote that folds to nothing is not evidence of anything.
-fn quote_is_verbatim(quote: &str, folded_haystack: &str) -> bool {
+pub(crate) fn quote_is_verbatim(quote: &str, folded_haystack: &str) -> bool {
     let folded = fold(quote);
     let mut checked = 0_usize;
     for fragment in fragments(&folded) {

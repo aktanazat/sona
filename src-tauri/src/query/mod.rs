@@ -35,6 +35,7 @@
 pub mod card;
 pub mod external;
 pub mod pack;
+pub mod plans_page;
 pub mod semantic;
 #[cfg(test)]
 mod tests;

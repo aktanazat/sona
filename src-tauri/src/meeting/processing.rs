@@ -1269,6 +1269,15 @@ impl MeetingProcessingService {
             .filter(|generator| generator.is_available())
     }
 
+    /// Hold a reading that follows the notes while anything records, as every
+    /// notes request is held: the request in flight finishes, and the next
+    /// waits for the stop.
+    pub(crate) fn wait_while_recording(&self) {
+        while self.recording_live() {
+            thread::sleep(Duration::from_millis(25));
+        }
+    }
+
     /// Where the next meeting's text would go, for a series not kept here.
     /// The same rule as [`Self::text_generator_for_session`] with the series
     /// consent taken as given, which is all a page can know before the meeting
@@ -7955,8 +7964,8 @@ pub(crate) mod tests {
 
     /// An engine that writes the fixture notes and ledger about the first
     /// turn of whatever transcript it is shown, so a whole run writes notes
-    /// without its test knowing the segments in advance, and confirms every
-    /// decision it is asked to check.
+    /// without its test knowing the segments in advance, confirms every
+    /// decision it is asked to check, and hears no plans to meet.
     pub(crate) struct EchoingGenerator;
 
     impl MeetingTextGenerator for EchoingGenerator {
@@ -7985,6 +7994,9 @@ pub(crate) mod tests {
         ) -> Result<String, MeetingTextGenerationError> {
             if evidence.starts_with("Decision: ") {
                 return Ok(r#"{"settled": true}"#.to_owned());
+            }
+            if evidence.starts_with(r#"{"lines":"#) {
+                return Ok(r#"{"plans": []}"#.to_owned());
             }
             let pack: serde_json::Value =
                 serde_json::from_str(evidence).expect("a JSON evidence pack");

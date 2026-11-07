@@ -8,6 +8,7 @@ pub mod detection;
 pub mod documents;
 pub mod evening;
 pub mod followup;
+pub mod heard_plans;
 pub mod history;
 pub mod hud;
 pub mod learning;

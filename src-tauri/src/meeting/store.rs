@@ -27,6 +27,9 @@ mod folders;
 #[cfg(test)]
 mod folders_tests;
 mod follow_up;
+mod heard_plans;
+#[cfg(test)]
+mod heard_plans_tests;
 pub(crate) mod learning;
 #[cfg(test)]
 mod learning_tests;
@@ -1559,6 +1562,7 @@ static MIGRATIONS: &[M] = &[
     M::up(include_str!("store/calendar_found_under_way.sql")),
     M::up(include_str!("store/user_voiceprint.sql")),
     M::up(include_str!("store/evening.sql")),
+    M::up(include_str!("store/heard_plans.sql")),
 ];
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StoreError {

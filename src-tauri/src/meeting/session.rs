@@ -7210,6 +7210,9 @@ pub(crate) mod tests {
         manager
             .processing
             .set_vad_factory(Arc::new(AlwaysVoiceFactory));
+        manager
+            .processing
+            .set_text_generators(no_engine(), no_engine());
         (directory, manager)
     }
 

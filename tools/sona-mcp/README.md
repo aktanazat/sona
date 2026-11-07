@@ -50,6 +50,7 @@ claude mcp add sona --env SONA_BIN=/path/to/sona/src-tauri/target/debug/sona \
 | `sona_person_changes`  | `person_id`, `since_utc_ms`             | `sona --person-changes <id> --since-utc-ms …`                            |
 | `sona_person_stats`    | `person_id`                             | `sona --person-stats <id>`                                              |
 | `sona_upcoming`      | `limit?`                                 | `sona --upcoming [--limit …]`                                           |
+| `sona_plans`         | `limit?`                                 | `sona --plans [--limit …]`                                              |
 | `sona_projects`      | `limit?`                                 | `sona --projects [--limit …]`                                           |
 | `sona_project`       | `project_id`                             | `sona --project <uuid>`                                                |
 | `sona_notes`         | `limit?`                                 | `sona --notes [--limit …]`                                              |
@@ -160,7 +161,8 @@ permission for an agent to send those records to another provider.
 
 One JSON object per call, as one text block. Every payload carries a
 `schema_version`. Calendar occurrences from `sona_upcoming` have no `sona://`
-address. Project rows carry ids for `sona_project`, not a new app route.
+address. Project rows carry ids for `sona_project`, not a new app route. A
+plan from `sona_plans` links to the meeting it was heard in.
 Meeting, loop, person, dictation and note rows carry addresses the app can open:
 `sona://meeting/<uuid>`, `sona://loop/<id>`, `sona://person/<uuid>`,
 `sona://dictation/<id>`, `sona://note/<uuid>`.
