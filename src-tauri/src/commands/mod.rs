@@ -37,6 +37,7 @@ pub mod updates;
 pub mod vocabulary;
 pub mod voice_identity;
 pub mod workflows;
+pub mod wrap;
 
 use crate::settings::{get_settings, update_settings, AppSettings, LogLevel};
 use crate::utils::cancel_current_operation;

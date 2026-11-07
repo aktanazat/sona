@@ -3561,6 +3561,11 @@ pub(super) async fn call(
                 .await,
             )
         }
+        "meeting_wrap" => {
+            let mut args = Args::parse(params)?;
+            let session_id = args.take("sessionId")?;
+            reply(crate::commands::wrap::meeting_wrap(app.state(), session_id).await)
+        }
         "meeting_prep_preferences_get" => {
             let handle = app.clone();
             on_main_thread(app, move || {

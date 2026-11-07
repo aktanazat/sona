@@ -85,6 +85,9 @@ pub(crate) mod workflow_core_tests;
 #[cfg(test)]
 mod workflow_receipt_tests;
 mod workflows;
+mod wrap;
+#[cfg(test)]
+mod wrap_tests;
 
 use super::analytics::{
     AnalyticsSegment, MeetingActionItemState, MeetingAnalytics, MeetingNotesTemplate,
