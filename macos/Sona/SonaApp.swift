@@ -280,11 +280,8 @@ struct ScreenRecordingStatus: View {
 
     var body: some View {
         switch store.phase {
-        case .recording:
-            TimelineView(.periodic(from: .now, by: 1)) { _ in
-                Text("Recording the screen \(store.elapsed.clock)")
-            }
-        case .paused: Text("Screen recording paused \(store.elapsed.clock)")
+        case .recording: Text("Recording the screen")
+        case .paused: Text("Screen recording paused")
         case .starting: Text("Starting the screen recording…")
         case .finalizing: Text("Saving the screen recording…")
         case .checking, .permission, .idle, .selectingSource, .previewing, .saved, .failed: EmptyView()
