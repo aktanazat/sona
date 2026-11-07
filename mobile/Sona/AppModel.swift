@@ -22,6 +22,8 @@ enum BoardState: Equatable {
     case offline
 }
 
+enum AppPage { case board, capture, recording, dictation, library }
+
 /// A photo or screenshot on its way into a thought, already on disk.
 struct CapturedImage {
     var url: URL
@@ -49,6 +51,7 @@ final class AppModel: NSObject, ObservableObject {
     @Published var vaultIdDraft: String
     @Published var consentAccepted: Bool
     @Published private(set) var startingRecording = false
+    @Published var page = AppPage.capture
     /// The draft the keyboard can insert, or nothing waiting for it.
     @Published private(set) var keyboardDraft: UUID?
     @Published var meetingTitle = UserDefaults.standard.string(forKey: "sona.meeting.title") ?? "" {
@@ -164,6 +167,8 @@ final class AppModel: NSObject, ObservableObject {
     }
 
     func handle(_ url: URL) {
+        if DictationLink.opens(url) { page = .dictation }
+        if url == DictationLink.meetingURL { page = .recording }
         pendingURL = url
         guard consentAccepted else { return }
         if url == DictationLink.meetingURL {

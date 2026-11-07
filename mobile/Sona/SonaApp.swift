@@ -3,28 +3,25 @@ import SwiftUI
 @main
 struct SonaApp: App {
     @StateObject private var model = AppModel()
-    @State private var page = Page.capture
-
-    private enum Page { case board, capture, recording, dictation, library }
 
     var body: some Scene {
         WindowGroup {
-            TabView(selection: $page) {
+            TabView(selection: $model.page) {
                 BoardScreen(model: model)
                     .tabItem { Label("tab.board", systemImage: "square.grid.2x2") }
-                    .tag(Page.board)
+                    .tag(AppPage.board)
                 CaptureScreen(model: model, dictation: model.dictation, recorder: model.recorder)
                     .tabItem { Label("tab.capture", systemImage: "plus.bubble") }
-                    .tag(Page.capture)
+                    .tag(AppPage.capture)
                 RecordingScreen(model: model, recorder: model.recorder, calendar: model.calendar)
                     .tabItem { Label("tab.recording", systemImage: "waveform") }
-                    .tag(Page.recording)
+                    .tag(AppPage.recording)
                 DictationScreen(model: model, dictation: model.dictation, recorder: model.recorder)
                     .tabItem { Label("tab.dictation", systemImage: "keyboard") }
-                    .tag(Page.dictation)
+                    .tag(AppPage.dictation)
                 PhoneLibraryScreen(model: model, library: model.library)
                     .tabItem { Label("tab.library", systemImage: "note.text") }
-                    .tag(Page.library)
+                    .tag(AppPage.library)
             }
             .tint(Theme.accent)
             /* On the TabView, not on one screen: consent covers the microphone, and
@@ -33,11 +30,7 @@ struct SonaApp: App {
                 ConsentScreen(model: model)
                     .interactiveDismissDisabled()
             }
-            .onOpenURL { url in
-                if DictationLink.opens(url) { page = .dictation }
-                if url == DictationLink.meetingURL { page = .recording }
-                model.handle(url)
-            }
+            .onOpenURL { model.handle($0) }
         }
     }
 }
