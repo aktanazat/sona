@@ -8,7 +8,10 @@ use super::evening::{
     accept_filing_in, event_target, filed_event_keys_in, insert_suggestion_in, near_events,
 };
 use super::workflows::calendar_facts_in;
-use super::{decode_json, id, session_row, MeetingStore, StoreError};
+use super::{
+    canonical_speaker_ids, decode_json, effective_segments_for_session, id, session_row,
+    MeetingStore, StoreError,
+};
 use crate::meeting::context::{
     ConversationContext, ConversationContextUpdate, ConversationKind, ConversationLocation,
 };
@@ -17,7 +20,7 @@ use crate::meeting::detection::machine::SLACK_BUNDLE_ID;
 use crate::meeting::evening::{FilingReason, FilingSuggestion, FilingTarget};
 use crate::meeting::types::{MeetingOrigin, MeetingPhase, MeetingSessionId};
 use rusqlite::{Connection, TransactionBehavior};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// A start by hand offers at most this many events.
 const MAX_START_EVENTS: usize = 2;
@@ -138,9 +141,9 @@ pub(super) fn suggest_place_in(
     )
 }
 
-/// The kind a finished recording's tracks point to while its kind is open:
-/// a call when a recorded app's audio carried voices, in person when only the
-/// microphone heard any and no app was recorded.
+/// The kind a finished recording's lines point to while its kind is open: a
+/// call when a recorded app's audio carried voices, in person when two or
+/// more voices spoke into the microphone alone and no app was recorded.
 fn heard_kind_in(
     connection: &Connection,
     context: &ConversationContext,
@@ -151,18 +154,32 @@ fn heard_kind_in(
     {
         return Ok(None);
     }
-    let mut statement = connection.prepare(
-        "SELECT DISTINCT t.source_kind
-           FROM meeting_sessions m
-           JOIN meeting_transcript_segments s
-             ON s.transcript_revision_id = m.current_transcript_revision_id
-           JOIN meeting_source_tracks t ON t.track_id = s.track_id
-          WHERE m.id = ?1",
-    )?;
-    let heard = statement
-        .query_map([id(context.session_id)], |row| row.get::<_, String>(0))?
-        .collect::<Result<HashSet<_>, _>>()?;
-    let system_audio = heard.contains("system_audio");
+    let mut statement = connection
+        .prepare("SELECT track_id, source_kind FROM meeting_source_tracks WHERE session_id = ?1")?;
+    let source_kinds = statement
+        .query_map([id(context.session_id)], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<Result<HashMap<_, _>, _>>()?;
+    let canonical = canonical_speaker_ids(connection, context.session_id)?;
+    let mut system_audio = false;
+    let mut microphone_voices = HashSet::new();
+    for segment in effective_segments_for_session(connection, context.session_id)? {
+        if segment.removed {
+            continue;
+        }
+        match source_kinds
+            .get(&id(segment.base.track_id))
+            .map(String::as_str)
+        {
+            Some("system_audio") => system_audio = true,
+            Some("microphone") => {
+                let speaker = segment.assigned_speaker_id;
+                microphone_voices.insert(canonical.get(&speaker).copied().unwrap_or(speaker));
+            }
+            _ => {}
+        }
+    }
     Ok(match context.application_bundle_ids.first() {
         Some(bundle_id) if system_audio => Some((
             if bundle_id == SLACK_BUNDLE_ID {
@@ -174,7 +191,7 @@ fn heard_kind_in(
                 bundle_id: bundle_id.clone(),
             },
         )),
-        None if heard.contains("microphone") && !system_audio => {
+        None if microphone_voices.len() >= 2 && !system_audio => {
             Some((ConversationKind::InPerson, FilingReason::OnlyMicrophone))
         }
         _ => None,

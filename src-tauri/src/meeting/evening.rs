@@ -137,7 +137,8 @@ pub enum FilingReason {
         count: u32,
         segment_id: TranscriptSegmentId,
     },
-    /// Voices came only through the microphone, and no call app was recorded.
+    /// Two or more voices came only through the microphone, and no call app
+    /// was recorded.
     OnlyMicrophone,
     /// Voices came through the recorded audio of this app.
     AppAudio { bundle_id: String },
