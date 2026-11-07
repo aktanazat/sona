@@ -34,11 +34,13 @@ struct AboutView: View {
                     )
                     ChoiceRow(
                         title: "Material",
-                        detail: "Solid keeps Sona's surfaces opaque. Glass lets the desktop show through the top bar, the command palette, and the recording HUD.",
+                        detail: store.material == store.materialChoice
+                            ? "Glass applies to the sidebar, the command palette and floating bars."
+                            : "Solid while Reduce Transparency or Increase Contrast is on.",
                         choices: AppearanceMaterial.allCases,
                         label: { $0.label },
                         selection: Binding(
-                            get: { store.material },
+                            get: { store.materialChoice },
                             set: { store.setMaterial($0) }
                         )
                     )
