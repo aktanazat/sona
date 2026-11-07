@@ -1252,6 +1252,55 @@ mod tests {
         assert_eq!(states, [LedgerThreadState::Decided]);
     }
 
+    /// Parts that share lines write the same items, and a part can file what
+    /// another decided as a risk; the notes Sona joins as written hold each
+    /// once.
+    #[test]
+    fn notes_joined_as_written_hold_an_item_parts_repeat_once() {
+        let evidence = evidence();
+        let cited = |index: usize, text: &str| json!({"text": text, "citations": [evidence.transcript[index].citation.entity_id]});
+        let section = |decisions: Vec<Value>, risks: Vec<Value>| {
+            let raw: RawArtifactOutput = serde_json::from_value(json!({
+                "summary": [cited(0, "The release was planned.")], "outline": [],
+                "decisions": decisions, "action_items": [], "key_questions": [],
+                "risks": risks, "follow_up_draft": cited(0, "Share the plan.")
+            }))
+            .expect("section notes");
+            let content = validate_artifact_output(
+                &raw,
+                &evidence.transcript,
+                &HashMap::new(),
+                &evidence.template,
+            )
+            .expect("cited section notes");
+            (raw.summary, content)
+        };
+        let design = || cited(0, "The team chose the blue design.");
+        let blocker = || cited(80, "The login bug is a release blocker.");
+        let content = joined_as_written(
+            vec![
+                section(vec![design()], vec![blocker()]),
+                section(vec![design(), blocker()], Vec::new()),
+            ],
+            Vec::new(),
+            &evidence,
+        )
+        .expect("notes joined as written");
+        let decisions: Vec<_> = content
+            .decisions
+            .iter()
+            .map(|decision| decision.text.as_str())
+            .collect();
+        assert_eq!(
+            decisions,
+            [
+                "The team chose the blue design.",
+                "The login bug is a release blocker."
+            ]
+        );
+        assert!(content.risks.is_empty());
+    }
+
     #[test]
     fn a_notes_row_names_its_speaker_and_not_its_meeting() {
         let mut evidence = evidence();

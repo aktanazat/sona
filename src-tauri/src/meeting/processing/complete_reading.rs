@@ -1249,19 +1249,12 @@ fn joined_as_written(
         });
     }
     outline.truncate(32);
-    let action_items = even_share(action_items, 64, |_| true);
-    let mut decisions = even_share(decisions, 64, |_| true);
-    decisions.retain(|decision| {
-        !action_items
-            .iter()
-            .any(|item| restates_task(decision, item))
-    });
     let mut content = GeneratedMeetingArtifacts {
         summary,
         summary_trace,
         outline,
-        decisions,
-        action_items,
+        decisions: even_share(decisions, 64, |_| true),
+        action_items: even_share(action_items, 64, |_| true),
         key_questions: even_share(key_questions, 64, |_| true),
         risks: even_share(risks, 64, |_| true),
         follow_up_draft: follow_up_draft.ok_or(EngineFailureCause::EvidencePack)?,
@@ -1271,6 +1264,8 @@ fn joined_as_written(
         plain: false,
         left_out: left_out_spans(evidence, left_out),
     };
+    drop_repeated_items(&mut content);
+    drop_restated_items(&mut content);
     keep_marked_moments(&mut content, evidence);
     Ok(content)
 }
