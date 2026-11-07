@@ -72,12 +72,56 @@ impl DeliveryReceipt {
     }
 }
 
+/// The control keyboard input went to when the recording stopped. Delivery
+/// compares it with the control that has focus once the text is ready, so a
+/// dictation never lands in, or gets submitted to, a window the user switched
+/// to while it was transcribed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct KeyboardFocus {
+    /// The frontmost app's process id.
+    pub(crate) pid: Option<i32>,
+    /// `CFHash` of the focused accessibility element. Equal elements hash
+    /// equally, so the same control always matches itself.
+    pub(crate) element: Option<usize>,
+}
+
+impl KeyboardFocus {
+    /// Reads the focus now. Off macOS nothing is read, and delivery goes ahead
+    /// as it always has.
+    pub fn now() -> Self {
+        #[cfg(target_os = "macos")]
+        {
+            crate::context::macos::keyboard_focus()
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            Self::default()
+        }
+    }
+
+    /// Whether `current` is known to be another control. A part either read
+    /// could not reach proves nothing, so it never refuses a delivery.
+    fn differs_from(self, current: Self) -> bool {
+        fn known_and_different<T: PartialEq>(stopped: Option<T>, current: Option<T>) -> bool {
+            matches!((stopped, current), (Some(stopped), Some(current)) if stopped != current)
+        }
+        known_and_different(self.pid, current.pid)
+            || known_and_different(self.element, current.element)
+    }
+}
+
 /// Dispatches text from one frozen mode. Optional learning reads its own consent.
 ///
 /// This function owns the two decisions every route shares: the exact text
 /// that gets dispatched, and what still has to happen once a route dispatched
 /// it. Routes below only move bytes.
-pub fn deliver(app: &AppHandle, text: String, settings: &DeliveryPlan) -> DeliveryReceipt {
+pub fn deliver(
+    app: &AppHandle,
+    text: String,
+    settings: &DeliveryPlan,
+    stopped_at: KeyboardFocus,
+) -> DeliveryReceipt {
     let text = compose_final_text(text, settings);
     #[cfg(target_os = "macos")]
     let observation = if !settings.auto_submit
@@ -90,7 +134,7 @@ pub fn deliver(app: &AppHandle, text: String, settings: &DeliveryPlan) -> Delive
         crate::context::macos::corrections::cancel();
         None
     };
-    let receipt = dispatch(app, &text, settings);
+    let receipt = dispatch(app, &text, settings, stopped_at);
     #[cfg(target_os = "macos")]
     if let Some(observation) = observation {
         let _ = observation.send(receipt.outcome);
@@ -98,8 +142,17 @@ pub fn deliver(app: &AppHandle, text: String, settings: &DeliveryPlan) -> Delive
     receipt
 }
 
-fn dispatch(app: &AppHandle, text: &str, settings: &DeliveryPlan) -> DeliveryReceipt {
+fn dispatch(
+    app: &AppHandle,
+    text: &str,
+    settings: &DeliveryPlan,
+    stopped_at: KeyboardFocus,
+) -> DeliveryReceipt {
     let primary = primary_method(settings);
+    if focus_left(settings, stopped_at, KeyboardFocus::now) {
+        log::warn!("Keyboard focus moved after the recording stopped; text was not delivered");
+        return DeliveryReceipt::new(primary, DeliveryOutcome::DefinitelyNotDispatched);
+    }
     #[cfg(target_os = "macos")]
     if should_prefer_accessibility(settings) {
         match crate::context::macos::insert_into_focused_editable(&text) {
@@ -150,6 +203,17 @@ fn dispatch(app: &AppHandle, text: &str, settings: &DeliveryPlan) -> DeliveryRec
         | ClipboardDispatch::DispatchedWithBackendError
         | ClipboardDispatch::DispatchedAndFinished => DeliveryReceipt::new(primary, dispatched),
     }
+}
+
+/// Whether the user left the control that had focus when the recording
+/// stopped. Only routes where Sona inserts at the focus are checked: `None`
+/// inserts nothing, and an external script picks its own target.
+fn focus_left(
+    settings: &DeliveryPlan,
+    stopped_at: KeyboardFocus,
+    now: impl FnOnce() -> KeyboardFocus,
+) -> bool {
+    sona_inserts(settings.paste_method) && stopped_at.differs_from(now())
 }
 
 /// Whether this route inserts text by posting synthetic key events, which is
@@ -253,13 +317,17 @@ struct Finishing {
 /// insertion — pressing Enter or rewriting the clipboard behind it would fight
 /// the script.
 fn finishing_plan(settings: &DeliveryPlan) -> Finishing {
-    let handy_inserted =
-        is_clipboard_family(settings.paste_method) || settings.paste_method == PasteMethod::Direct;
+    let handy_inserted = sona_inserts(settings.paste_method);
     Finishing {
         auto_submit: handy_inserted && settings.auto_submit,
         copy_final_to_clipboard: handy_inserted
             && settings.clipboard_handling == ClipboardHandling::CopyToClipboard,
     }
+}
+
+/// The methods where Sona inserts the text at the keyboard focus itself.
+fn sona_inserts(method: PasteMethod) -> bool {
+    is_clipboard_family(method) || method == PasteMethod::Direct
 }
 
 /// Gives the target application time to process the insertion before the
@@ -432,6 +500,62 @@ mod tests {
         assert!(!clipboard_dispatch_owes_finishing(
             &ClipboardDispatch::DispatchedAndFinished
         ));
+    }
+
+    /// Text dictated into one window must not be typed into, or submitted
+    /// in, the window the user switched to while it was transcribed. Only a
+    /// part both reads reached can prove a move; anything unread keeps the
+    /// old behavior of delivering.
+    #[test]
+    fn delivery_refuses_a_control_the_user_left_after_stopping() {
+        let stopped_at = KeyboardFocus {
+            pid: Some(100),
+            element: Some(7),
+        };
+        let moved = [
+            KeyboardFocus {
+                pid: Some(200),
+                element: Some(9),
+            },
+            KeyboardFocus {
+                pid: Some(100),
+                element: Some(8),
+            },
+            KeyboardFocus {
+                pid: Some(200),
+                element: None,
+            },
+        ];
+        let unproven = [
+            stopped_at,
+            KeyboardFocus {
+                pid: Some(100),
+                element: None,
+            },
+            KeyboardFocus::default(),
+        ];
+
+        for method in EVERY_METHOD {
+            let mut settings = plan(method);
+            settings.auto_submit = true;
+            for current in moved {
+                assert_eq!(
+                    focus_left(&settings, stopped_at, || current),
+                    sona_inserts(method),
+                    "{method:?} after focus moved to {current:?}"
+                );
+            }
+            for current in unproven {
+                assert!(
+                    !focus_left(&settings, stopped_at, || current),
+                    "{method:?} with focus {current:?}"
+                );
+            }
+            assert!(
+                !focus_left(&settings, KeyboardFocus::default(), || moved[0]),
+                "{method:?} with nothing read at stop"
+            );
+        }
     }
 
     /// A dictation that vanishes into a password field used to produce the
