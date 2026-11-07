@@ -2309,6 +2309,24 @@ pub(super) async fn call(
             let request = args.take("request")?;
             reply(crate::commands::voice_identity::voice_remove_profile(app.state(), request).await)
         }
+        "voice_user_status" => {
+            reply(crate::commands::voice_identity::voice_user_status(app.state()).await)
+        }
+        "voice_user_learn" => {
+            let mut args = Args::parse(params)?;
+            let consent_version = args.take("consentVersion")?;
+            reply(
+                crate::commands::voice_identity::voice_user_learn(
+                    app.state(),
+                    app.state(),
+                    consent_version,
+                )
+                .await,
+            )
+        }
+        "voice_user_forget" => {
+            reply(crate::commands::voice_identity::voice_user_forget(app.state()).await)
+        }
         "conversation_context" => {
             let mut args = Args::parse(params)?;
             let session_id = args.take("sessionId")?;

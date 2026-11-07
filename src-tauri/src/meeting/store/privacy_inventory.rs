@@ -32,6 +32,7 @@ pub struct RecordingHoldings {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Type)]
 pub struct VoiceprintHoldings {
+    /// People whose voice is kept, the user's own among them.
     pub people: u64,
     pub sample_ms: u64,
     /// Meeting speakers whose voice is kept to suggest who they are.
@@ -102,8 +103,9 @@ fn holding_rows_in(connection: &Connection, now_utc_ms: i64) -> Result<HoldingRo
         |row| row.get(0),
     )?;
     let (people, sample_ns, speakers): (i64, i64, i64) = connection.query_row(
-        "SELECT (SELECT COUNT(*) FROM voice_profiles),
-                COALESCE((SELECT SUM(end_offset_ns - start_offset_ns) FROM voice_profile_samples), 0),
+        "SELECT (SELECT COUNT(*) FROM voice_profiles) + (SELECT COUNT(*) FROM user_voiceprint),
+                COALESCE((SELECT SUM(end_offset_ns - start_offset_ns) FROM voice_profile_samples), 0)
+                    + COALESCE((SELECT SUM(speech_ms) FROM user_voiceprint), 0) * 1000000,
                 (SELECT COUNT(*) FROM meeting_speaker_voiceprints)",
         [],
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),

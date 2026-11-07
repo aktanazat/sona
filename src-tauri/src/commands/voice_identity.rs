@@ -1,8 +1,9 @@
+use crate::managers::history::HistoryManager;
 use crate::meeting::people_types::PersonId;
 use crate::meeting::session::MeetingSessionManager;
 use crate::meeting::store::voice_identity::{
     MeetingSpeakerIdentifyDisposition, MeetingSpeakerIdentifyRequest, MeetingSpeakerIdentifyTarget,
-    VoiceProfileStatus, VoiceSpeakerSuggestion,
+    UserVoiceprint, VoiceProfileStatus, VoiceSpeakerSuggestion,
 };
 use crate::meeting::types::{
     MeetingCommandError, MeetingOperationId, MeetingSessionId, OperationReceipt, SpeakerId,
@@ -74,6 +75,11 @@ pub struct VoiceProfileEnrollmentStatus {
     pub sample_count: u64,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+pub struct UserVoiceStatus {
+    pub voiceprint: Option<UserVoiceprint>,
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn voice_identity_status(
@@ -141,6 +147,37 @@ pub async fn voice_remove_profile(
             .remove_voice_profile(request.person_id, request.expected_people_revision)
             .await?,
     ))
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn voice_user_status(
+    manager: State<'_, Arc<MeetingSessionManager>>,
+) -> Result<UserVoiceStatus, MeetingCommandError> {
+    Ok(UserVoiceStatus {
+        voiceprint: manager.user_voiceprint().await?,
+    })
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn voice_user_learn(
+    manager: State<'_, Arc<MeetingSessionManager>>,
+    history: State<'_, Arc<HistoryManager>>,
+    consent_version: u32,
+) -> Result<UserVoiceStatus, MeetingCommandError> {
+    Ok(UserVoiceStatus {
+        voiceprint: Some(manager.learn_user_voice(&history, consent_version).await?),
+    })
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn voice_user_forget(
+    manager: State<'_, Arc<MeetingSessionManager>>,
+) -> Result<UserVoiceStatus, MeetingCommandError> {
+    manager.forget_user_voice().await?;
+    Ok(UserVoiceStatus { voiceprint: None })
 }
 
 fn identity_disposition(action: VoiceSpeakerIdentityAction) -> MeetingSpeakerIdentifyDisposition {

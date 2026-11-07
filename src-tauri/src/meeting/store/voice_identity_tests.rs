@@ -1,8 +1,8 @@
 use super::encode_json;
 use super::voice_identity::{
     ExplicitVoiceConsent, MeetingSpeakerIdentifyDisposition, MeetingSpeakerIdentifyRequest,
-    MeetingSpeakerIdentifyTarget, VoiceEnrollmentEvidence, VoiceProfileEnrollmentRequest,
-    VoiceProfileStatus, VoiceSpeakerSuggestion,
+    MeetingSpeakerIdentifyTarget, UserVoiceprint, UserVoiceprintRequest, VoiceEnrollmentEvidence,
+    VoiceProfileEnrollmentRequest, VoiceProfileStatus, VoiceSpeakerSuggestion,
 };
 use super::workflow_core_tests::{meeting, person, reviewable_meeting, store};
 use super::*;
@@ -2032,5 +2032,46 @@ fn a_person_named_after_the_user_counts_as_the_users_voice() -> Result<(), Store
             display_name: "Aktan Azat".to_owned(),
         }]
     );
+    Ok(())
+}
+
+/// A voice the user taught Sona from their dictations is suggested as theirs
+/// with nobody renamed to them, names nobody, and goes when forgotten.
+#[test]
+fn a_learned_voice_is_suggested_as_the_users_until_forgotten() -> Result<(), StoreError> {
+    let (_directory, store) = store();
+    let user = Some("Aktan Azat");
+    let session = meeting(&store, "Standup", 1);
+    let same_voice = store.diarization_speaker(session, 0)?;
+    let other_voice = store.diarization_speaker(session, 1)?;
+    keep_voices(&store, session, &[(same_voice, 0), (other_voice, 1)])?;
+    assert!(store.voice_speaker_suggestions(session, user)?.is_empty());
+
+    let learned = UserVoiceprint {
+        dictation_count: 12,
+        speech_ms: 18_000,
+    };
+    store.save_user_voiceprint(UserVoiceprintRequest {
+        consent: ExplicitVoiceConsent::granted(1)?,
+        model: wespeaker_embedding_model_key(),
+        embedding: voice(0)?,
+        voiceprint: learned,
+        created_at_utc_ms: 2,
+    })?;
+    assert_eq!(store.user_voiceprint()?, Some(learned));
+    assert_eq!(
+        store.voice_speaker_suggestions(session, user)?,
+        [VoiceSpeakerSuggestion {
+            speaker_id: same_voice,
+            person_id: None,
+            display_name: "Aktan Azat".to_owned(),
+        }]
+    );
+    assert!(store.voice_speaker_suggestions(session, None)?.is_empty());
+    assert!(people_named(&store, "Aktan Azat")?.is_empty());
+
+    store.forget_user_voiceprint()?;
+    assert_eq!(store.user_voiceprint()?, None);
+    assert!(store.voice_speaker_suggestions(session, user)?.is_empty());
     Ok(())
 }

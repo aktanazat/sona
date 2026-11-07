@@ -229,6 +229,23 @@ pub struct VoiceSpeakerSuggestion {
     pub display_name: String,
 }
 
+/// The user's own voice as Sona learned it from their dictations.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+pub struct UserVoiceprint {
+    pub dictation_count: u32,
+    pub speech_ms: u64,
+}
+
+/// A print of the user's own voice, made from their dictations once they
+/// asked for it.
+pub(crate) struct UserVoiceprintRequest {
+    pub consent: ExplicitVoiceConsent,
+    pub model: SpeakerEmbeddingModelKey,
+    pub embedding: SpeakerEmbedding,
+    pub voiceprint: UserVoiceprint,
+    pub created_at_utc_ms: i64,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ManualVoiceSpeakerResolution {
     Identified(PersonId),
@@ -702,9 +719,74 @@ impl MeetingStore {
         Ok(())
     }
 
+    /// Keep the user's voice, replacing any voice learned before. Only
+    /// `voice_speaker_suggestions` reads it, so it names nobody by itself.
+    pub(crate) fn save_user_voiceprint(
+        &self,
+        request: UserVoiceprintRequest,
+    ) -> Result<UserVoiceprint, StoreError> {
+        let UserVoiceprintRequest {
+            consent,
+            model,
+            embedding,
+            voiceprint,
+            created_at_utc_ms,
+        } = request;
+        require_expected_model(model)?;
+        self.connection()?.execute(
+            "INSERT OR REPLACE INTO user_voiceprint (
+                singleton, model_id, model_revision, model_sha256, embedding_dimensions,
+                sample_rate_hz, feature_bins, feature_pipeline_revision, normalization,
+                embedding, dictation_count, speech_ms, consent_version, created_at_utc_ms
+             ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            params![
+                model.model_id,
+                model.model_revision,
+                model.model_sha256,
+                i64::try_from(model.embedding_dimensions)
+                    .map_err(|_| StoreError::VoiceInvariant)?,
+                i64::from(model.sample_rate_hz),
+                i64::try_from(model.feature_bins).map_err(|_| StoreError::VoiceInvariant)?,
+                model.feature_pipeline_revision,
+                model.normalization,
+                embedding_blob(&embedding),
+                i64::from(voiceprint.dictation_count),
+                to_i64(voiceprint.speech_ms)?,
+                i64::from(consent.version()),
+                created_at_utc_ms,
+            ],
+        )?;
+        Ok(voiceprint)
+    }
+
+    pub(crate) fn forget_user_voiceprint(&self) -> Result<(), StoreError> {
+        self.connection()?
+            .execute("DELETE FROM user_voiceprint", [])?;
+        Ok(())
+    }
+
+    pub(crate) fn user_voiceprint(&self) -> Result<Option<UserVoiceprint>, StoreError> {
+        let row = self
+            .connection()?
+            .query_row(
+                "SELECT dictation_count, speech_ms FROM user_voiceprint",
+                [],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional()?;
+        row.map(|(dictation_count, speech_ms)| {
+            Ok(UserVoiceprint {
+                dictation_count: u32::try_from(dictation_count).map_err(|_| StoreError::Corrupt)?,
+                speech_ms: from_i64(speech_ms)?,
+            })
+        })
+        .transpose()
+    }
+
     /// For each speaker still waiting for a name, the one person whose
     /// confirmed voices from any meeting it matches, or the user, whose voice
-    /// is every speaker given `user_name` and every person who carries it.
+    /// is every speaker given `user_name`, every person who carries it and
+    /// the voice they taught Sona from their dictations.
     /// Nothing is written: the speaker is named only when the user confirms,
     /// through `identify_speaker` for a person and a rename to `user_name`
     /// for the user.
@@ -720,6 +802,7 @@ impl MeetingStore {
         let model = wespeaker_embedding_model_key();
         let connection = self.connection()?;
         let user_speakers = user_named_speakers_in(&connection, user_name)?;
+        let user_voiceprint = user_voiceprint_in(&connection, model)?;
         let mut statement = connection.prepare(
             "SELECT voiceprint.speaker_id, person.id, person.display_name, voiceprint.embedding,
                     speaker.display_name
@@ -789,6 +872,7 @@ impl MeetingStore {
                 None => {}
             }
         }
+        user_voices.extend(user_voiceprint);
         if let Some(user_name) = user_name.filter(|_| !user_voices.is_empty()) {
             people.push((None, user_name.to_owned(), user_voices));
         }
@@ -1169,6 +1253,36 @@ fn user_named_speakers_in(
         }
     }
     Ok(serde_json::Value::from(speaker_ids).to_string())
+}
+
+/// The voice the user taught Sona, when the model in use is the one that
+/// made it.
+fn user_voiceprint_in(
+    connection: &Connection,
+    model: SpeakerEmbeddingModelKey,
+) -> Result<Option<SpeakerEmbedding>, StoreError> {
+    connection
+        .query_row(
+            "SELECT embedding FROM user_voiceprint
+              WHERE model_id = ?1 AND model_revision = ?2 AND model_sha256 = ?3
+                AND embedding_dimensions = ?4 AND sample_rate_hz = ?5 AND feature_bins = ?6
+                AND feature_pipeline_revision = ?7 AND normalization = ?8",
+            params![
+                model.model_id,
+                model.model_revision,
+                model.model_sha256,
+                i64::try_from(model.embedding_dimensions)
+                    .map_err(|_| StoreError::VoiceInvariant)?,
+                i64::from(model.sample_rate_hz),
+                i64::try_from(model.feature_bins).map_err(|_| StoreError::VoiceInvariant)?,
+                model.feature_pipeline_revision,
+                model.normalization,
+            ],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .optional()?
+        .map(|blob| embedding_from_blob(&blob))
+        .transpose()
 }
 
 /// A name the user gives a speaker settles whose voice it is, the way
@@ -1956,11 +2070,12 @@ fn require_profile_model(
         .ok_or(StoreError::ProfileModelIncompatible)
 }
 
-/// One model key, four readers: this conversion plus `require_profile_model`,
-/// and the SQL predicates inside `unresolved_active_voice_speaker_ids` and
-/// `voice_speaker_suggestions`. Adding a field to `SpeakerEmbeddingModelKey`
-/// means changing all four, both writers (`insert_profile_in` and
-/// `store_speaker_voiceprints`) and both tables' migrations.
+/// One model key, five readers: this conversion plus `require_profile_model`,
+/// and the SQL predicates inside `unresolved_active_voice_speaker_ids`,
+/// `voice_speaker_suggestions` and `user_voiceprint_in`. Adding a field to
+/// `SpeakerEmbeddingModelKey` means changing all five, the three writers
+/// (`insert_profile_in`, `store_speaker_voiceprints` and
+/// `save_user_voiceprint`) and the three tables' migrations.
 impl From<SpeakerEmbeddingModelKey> for VoiceProfileModelStatus {
     fn from(value: SpeakerEmbeddingModelKey) -> Self {
         Self {

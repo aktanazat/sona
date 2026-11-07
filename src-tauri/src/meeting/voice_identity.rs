@@ -19,6 +19,14 @@ const FALLBACK_MIN_VOICED_FRAMES: u32 = 50;
 const FALLBACK_MIN_CANDIDATES: u8 = 2;
 const MAX_CANDIDATES_PER_SPEAKER: u8 = 3;
 const MAX_TRACKED_CANDIDATE_SPEAKERS: usize = 16;
+/// The newest dictations a print of the user's voice reads.
+pub(crate) const USER_VOICE_MAX_DICTATIONS: u32 = 50;
+const USER_VOICE_WINDOW_FRAMES: usize = PRIMARY_CANDIDATE_SAMPLES / VAD_FRAME_SAMPLES;
+/// How far a window with too little speech moves on: 300 ms.
+const USER_VOICE_WINDOW_HOP_FRAMES: usize = 10;
+/// Eighteen seconds of speech, twice the most a meeting keeps of one speaker.
+const USER_VOICE_MIN_WINDOWS: u32 = 6;
+const USER_VOICE_MAX_WINDOWS: u32 = 40;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct AudioSpan {
@@ -548,20 +556,96 @@ impl EmbeddingAccumulator {
         if self.accepted < minimum_candidates || self.duration_ns < minimum_duration_ns {
             return None;
         }
-        let norm = self
-            .sum
-            .iter()
-            .map(|value| value * value)
-            .sum::<f32>()
-            .sqrt();
-        if !norm.is_finite() || norm <= f32::EPSILON {
+        unit_mean(self.sum)
+    }
+}
+
+fn unit_mean(sum: [f32; SPEAKER_EMBEDDING_DIMENSIONS]) -> Option<SpeakerEmbedding> {
+    let norm = sum.iter().map(|value| value * value).sum::<f32>().sqrt();
+    if !norm.is_finite() || norm <= f32::EPSILON {
+        return None;
+    }
+    let mut normalized = sum;
+    for value in &mut normalized {
+        *value /= norm;
+    }
+    SpeakerEmbedding::from_normalized_slice(&normalized)
+}
+
+/// The user's voice from their own dictations: the mean of every 3-second
+/// window that holds as much speech as a meeting asks of one speaker's.
+pub(crate) struct DictationVoiceprint {
+    sum: [f32; SPEAKER_EMBEDDING_DIMENSIONS],
+    windows: u32,
+    voiced_frames: u64,
+    dictations: u32,
+}
+
+pub(crate) struct UserVoiceSample {
+    pub(crate) embedding: SpeakerEmbedding,
+    pub(crate) dictations: u32,
+    pub(crate) speech_ms: u64,
+}
+
+impl DictationVoiceprint {
+    pub(crate) const fn new() -> Self {
+        Self {
+            sum: [0.0; SPEAKER_EMBEDDING_DIMENSIONS],
+            windows: 0,
+            voiced_frames: 0,
+            dictations: 0,
+        }
+    }
+
+    pub(crate) const fn is_full(&self) -> bool {
+        self.windows >= USER_VOICE_MAX_WINDOWS
+    }
+
+    /// `voice` holds whether each 30 ms frame of the 16 kHz `samples` is speech.
+    pub(crate) fn add_dictation(
+        &mut self,
+        samples: &[f32],
+        voice: &[bool],
+        embedder: &mut dyn SpeakerEmbedder,
+    ) -> Result<(), DiarizationError> {
+        let mut used = false;
+        let mut start = 0;
+        while !self.is_full() {
+            let end = start + USER_VOICE_WINDOW_FRAMES;
+            let (Some(frames), Some(window)) = (
+                voice.get(start..end),
+                samples.get(start * VAD_FRAME_SAMPLES..end * VAD_FRAME_SAMPLES),
+            ) else {
+                break;
+            };
+            let voiced: u32 = frames.iter().map(|&frame| u32::from(frame)).sum();
+            if voiced < PRIMARY_MIN_VOICED_FRAMES {
+                start += USER_VOICE_WINDOW_HOP_FRAMES;
+                continue;
+            }
+            let embedding = embedder.embed_candidate(window)?;
+            for (sum, value) in self.sum.iter_mut().zip(embedding.as_slice()) {
+                *sum += value;
+            }
+            self.windows += 1;
+            self.voiced_frames += u64::from(voiced);
+            used = true;
+            start = end;
+        }
+        self.dictations += u32::from(used);
+        Ok(())
+    }
+
+    /// `None` until the dictations held enough speech for a steady print.
+    pub(crate) fn finish(self) -> Option<UserVoiceSample> {
+        if self.windows < USER_VOICE_MIN_WINDOWS {
             return None;
         }
-        let mut normalized = self.sum;
-        for value in &mut normalized {
-            *value /= norm;
-        }
-        SpeakerEmbedding::from_normalized_slice(&normalized)
+        Some(UserVoiceSample {
+            embedding: unit_mean(self.sum)?,
+            dictations: self.dictations,
+            speech_ms: self.voiced_frames * (VAD_FRAME_NS / 1_000_000),
+        })
     }
 }
 
@@ -817,5 +901,32 @@ mod tests {
         let candidates = collector.into_candidates();
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].cluster, 5);
+    }
+
+    /// A print from dictations holding this many 3 s windows of speech each;
+    /// a zero is a silent dictation.
+    fn learned(dictations: &[usize]) -> Option<UserVoiceSample> {
+        let mut embedder = RecordingEmbedder {
+            sample_counts: Arc::default(),
+        };
+        let mut print = DictationVoiceprint::new();
+        for &windows in dictations {
+            let frames = windows.max(1) * USER_VOICE_WINDOW_FRAMES;
+            print
+                .add_dictation(
+                    &vec![0.5; frames * VAD_FRAME_SAMPLES],
+                    &vec![windows > 0; frames],
+                    &mut embedder,
+                )
+                .expect("embedded");
+        }
+        print.finish()
+    }
+
+    #[test]
+    fn a_dictated_voice_needs_eighteen_seconds_of_speech() {
+        assert!(learned(&[2, 0, 3]).is_none());
+        let voice = learned(&[2, 0, 4]).expect("six windows of speech");
+        assert_eq!((voice.dictations, voice.speech_ms), (2, 18_000));
     }
 }

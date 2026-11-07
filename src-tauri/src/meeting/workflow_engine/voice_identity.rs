@@ -1,14 +1,17 @@
 use super::{map_store_error, now_utc_ms, MEETING_EVENT_SCHEMA_VERSION};
+use crate::managers::history::HistoryManager;
 use crate::meeting::people_types::PersonId;
 use crate::meeting::session::MeetingSessionManager;
 use crate::meeting::store::voice_identity::{
-    ExplicitVoiceConsent, MeetingSpeakerIdentifyRequest, VoiceProfileEnrollmentRequest,
-    VoiceProfileStatus, VoiceSpeakerIdentityResult, VoiceSpeakerSuggestion,
+    ExplicitVoiceConsent, MeetingSpeakerIdentifyRequest, UserVoiceprint, UserVoiceprintRequest,
+    VoiceProfileEnrollmentRequest, VoiceProfileStatus, VoiceSpeakerIdentityResult,
+    VoiceSpeakerSuggestion,
 };
 use crate::meeting::transcript_correction_types::TranscriptCorrectionChangedSession;
 use crate::meeting::types::{
     MeetingCommandError, MeetingEventPayload, MeetingSessionId, SpeakerId,
 };
+use crate::meeting::voice_identity::USER_VOICE_MAX_DICTATIONS;
 use tauri::Emitter;
 
 /// The ids and fences one enrollment needs, as one value. Three adjacent
@@ -149,5 +152,57 @@ impl MeetingSessionManager {
                 .map_err(map_store_error)?,
         );
         Ok(status)
+    }
+
+    /// Learn the user's voice from their newest dictations, replacing any
+    /// voice learned before. It only lets a waiting speaker be suggested as
+    /// the user; naming one stays the user's call.
+    pub(crate) async fn learn_user_voice(
+        &self,
+        history: &HistoryManager,
+        consent_version: u32,
+    ) -> Result<UserVoiceprint, MeetingCommandError> {
+        let consent = ExplicitVoiceConsent::granted(consent_version).map_err(map_store_error)?;
+        let store = self.store().await?;
+        let recordings = history
+            .recent_dictation_recordings(USER_VOICE_MAX_DICTATIONS)
+            .await
+            .map_err(|error| {
+                log::warn!("Dictation recordings could not be listed: {error}");
+                MeetingCommandError::StorageUnavailable
+            })?;
+        let (model, sample) = self
+            .processing()
+            .embed_user_voice(&store, recordings)
+            .await
+            .map_err(map_store_error)?;
+        store
+            .save_user_voiceprint(UserVoiceprintRequest {
+                consent,
+                model,
+                embedding: sample.embedding,
+                voiceprint: UserVoiceprint {
+                    dictation_count: sample.dictations,
+                    speech_ms: sample.speech_ms,
+                },
+                created_at_utc_ms: now_utc_ms(),
+            })
+            .map_err(map_store_error)
+    }
+
+    pub(crate) async fn forget_user_voice(&self) -> Result<(), MeetingCommandError> {
+        self.store()
+            .await?
+            .forget_user_voiceprint()
+            .map_err(map_store_error)
+    }
+
+    pub(crate) async fn user_voiceprint(
+        &self,
+    ) -> Result<Option<UserVoiceprint>, MeetingCommandError> {
+        self.store()
+            .await?
+            .user_voiceprint()
+            .map_err(map_store_error)
     }
 }
