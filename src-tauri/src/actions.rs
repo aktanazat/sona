@@ -2283,7 +2283,6 @@ impl TranscribeAction {
                                         );
                                         return;
                                     }
-
                                 }
                                 if post_process {
                                     if use_streaming_overlay {
@@ -2440,7 +2439,6 @@ impl TranscribeAction {
                                         },
                                     ),
                                 );
-
                             }
                         }
                     }
