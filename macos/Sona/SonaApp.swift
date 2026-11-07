@@ -35,7 +35,7 @@ struct SonaApp: App {
             CommandMenu("Capture") {
                 CaptureMenuItem(model: model)
                 Button("Record a Meeting") { model.recordMeeting() }
-                Button("Record the Screen") { model.recordScreen() }
+                ScreenRecordingMenuItem(model: model)
                 Divider()
                 Button("Search Sona…") { model.toggleSearch() }
                     .keyboardShortcut("k", modifiers: .command)
@@ -227,7 +227,7 @@ struct MenuBarMark: View {
 
     var body: some View {
         HStack(spacing: 6) {
-            Image(model.capture.mark)
+            Image(model.recorder.phase.activity == .running ? "MarkRecording" : model.capture.mark)
             if model.prep.preferences?.menuBarEnabled == true && model.prep.upcoming?.access == .authorized {
                 Text(model.prep.menuSummary.label)
                     .lineLimit(1)
@@ -260,6 +260,38 @@ struct CaptureMenuItem: View {
     }
 }
 
+/// The screen recorder's item of a menu: a way in while the screen is not
+/// recording, a stop that saves while it is.
+struct ScreenRecordingMenuItem: View {
+    let model: AppModel
+
+    var body: some View {
+        switch model.recorder.phase.activity {
+        case .none: Button("Record the Screen") { model.recordScreen() }
+        case .running: Button("Stop Screen Recording") { model.stopScreenRecording() }
+        case .settling: Button("Stop Screen Recording") {}.disabled(true)
+        }
+    }
+}
+
+/// The screen recording's line of the menu bar menu, while there is one.
+struct ScreenRecordingStatus: View {
+    let store: RecorderStore
+
+    var body: some View {
+        switch store.phase {
+        case .recording:
+            TimelineView(.periodic(from: .now, by: 1)) { _ in
+                Text("Recording the screen \(store.elapsed.clock)")
+            }
+        case .paused: Text("Screen recording paused \(store.elapsed.clock)")
+        case .starting: Text("Starting the screen recording…")
+        case .finalizing: Text("Saving the screen recording…")
+        case .checking, .permission, .idle, .selectingSource, .previewing, .saved, .failed: EmptyView()
+        }
+    }
+}
+
 /// The menu bar item: the state, the actions, the way in.
 struct MenuBarMenu: View {
     @Environment(AppModel.self) private var model
@@ -271,7 +303,13 @@ struct MenuBarMenu: View {
             Button("Restart the Engine") { model.restartCore() }
                 .disabled(model.coreRestarting)
         } else {
-            CaptureClock(state: model.capture, idleText: "Ready · \(model.pillMode ?? "Dictate")")
+            let screen = model.recorder.phase.activity != .none
+            if screen {
+                ScreenRecordingStatus(store: model.recorder)
+            }
+            if !screen || model.capture != .idle {
+                CaptureClock(state: model.capture, idleText: "Ready · \(model.pillMode ?? "Dictate")")
+            }
             if model.prep.preferences?.menuBarEnabled == true {
                 let summary = model.prep.menuSummary
                 Divider()
@@ -290,7 +328,7 @@ struct MenuBarMenu: View {
             Divider()
             CaptureMenuItem(model: model)
             Button("Record a Meeting") { model.recordMeeting() }
-            Button("Record the Screen") { model.recordScreen() }
+            ScreenRecordingMenuItem(model: model)
         }
         Divider()
         Button("Open Sona") { model.reveal() }
