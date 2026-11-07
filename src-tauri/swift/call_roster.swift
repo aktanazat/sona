@@ -2,9 +2,11 @@ import AppKit
 import ApplicationServices
 import Foundation
 
-// Read-only Accessibility. Never selects a tile, opens a panel, posts a key,
-// requests a permission, or touches a camera/microphone. English layouts only;
-// an unrecognised tree is unavailable, not an invitation to infer a name.
+// Read-only Accessibility, apart from Electron's AXManualAccessibility opt-in
+// on a Slack the user chose to read. Never selects a tile, opens a panel,
+// posts a key, requests a permission, or touches a camera/microphone. English
+// layouts only; an unrecognised tree is unavailable, not an invitation to
+// infer a name.
 private struct CallTarget: Codable {
     let id: String
     let label: String
@@ -38,6 +40,8 @@ private final class HeldCall {
     let url: String?
     let pid: pid_t
     var participants: [(AXUIElement, String)] = []
+    var treeRequested = false
+    var spareRead = false
 
     init(target: CallTarget, window: AXUIElement, root: AXUIElement, url: String?, pid: pid_t) {
         self.target = target
@@ -298,7 +302,12 @@ private func callTargets() -> CallTargets {
                 }
             } else { roots = [(window, nil)] }
             for (root, url) in roots {
-                guard let provider = callProvider(bundle, url: url), let tree = callTree(root), callJoined(tree, provider: provider) else { continue }
+                // Slack, like any Electron app, shows a window's page to
+                // Accessibility only once an assistive app opts in, so a Slack
+                // window with no page in it may still hold the huddle.
+                guard let provider = callProvider(bundle, url: url), let tree = callTree(root),
+                      callJoined(tree, provider: provider)
+                        || (provider == "slack" && !tree.contains { $0.role == "AXWebArea" }) else { continue }
                 let existing = heldCalls.values.first { $0.pid == app.processIdentifier && CFEqual($0.root, root) && $0.url == url }
                 if let existing { targets.append(existing.target); continue }
                 guard heldCalls.count < 64 else { continue }
@@ -319,11 +328,23 @@ private func callSample(_ id: String) -> CallRead {
     }
     let application = AXUIElementCreateApplication(held.pid)
     AXUIElementSetMessagingTimeout(application, 0.1)
+    if held.target.provider == "slack", !held.treeRequested {
+        held.treeRequested = true
+        // Chromium may build the page's tree after this returns, so the
+        // first read that finds nothing gets one more try.
+        held.spareRead = AXUIElementSetAttributeValue(
+            application, "AXManualAccessibility" as CFString, kCFBooleanTrue) == .success
+    }
     let windows = callAttribute(application, kAXWindowsAttribute as CFString) as? [AXUIElement] ?? []
     guard windows.contains(where: { CFEqual($0, held.window) }), callURL(held.root) == held.url,
           let nodes = callTree(held.root), callJoined(nodes, provider: held.target.provider) else {
+        if held.spareRead {
+            held.spareRead = false
+            return CallRead(state: "reading", detail: "Waiting for Slack to show who is in the huddle.")
+        }
         return CallRead(state: "unavailable", detail: "The selected call ended, changed, or is not readable. Sona has stopped reading names.")
     }
+    held.spareRead = false
     return callRoster(held, nodes: nodes)
 }
 
