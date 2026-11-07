@@ -633,7 +633,8 @@ struct HomeToday: Decodable, Equatable {
         let late: Int
     }
 
-    let meetings: TodayCount<Meetings>
+    /// Absent when no calendar is connected, so there is nothing to count.
+    let meetings: TodayCount<Meetings>?
     let processing: TodayCount<Int>
     let unknownSpeakers: TodayCount<Tally>
     let untracked: TodayCount<Tally>

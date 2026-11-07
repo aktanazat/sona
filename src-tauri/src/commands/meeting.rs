@@ -45,7 +45,8 @@ pub fn meeting_suggestions_list(
 /// Home's Today strip in one round trip: today's meetings, what is still
 /// processing, speakers nobody named, promises no project holds, and what the
 /// user owes. Each count answers on its own, and one whose source cannot be
-/// read says so rather than reading as zero.
+/// read says so rather than reading as zero. Today's meetings are absent
+/// when no calendar is connected, since there is nothing to count them from.
 #[tauri::command]
 #[specta::specta]
 pub async fn home_today(
@@ -57,14 +58,16 @@ pub async fn home_today(
         match crate::commands::upcoming::meeting_upcoming_events(manager.clone(), detection, 0)
             .await
         {
-            Ok(events) if events.access == CalendarAccess::Authorized => TodayCount::Available {
-                value: today_meetings(&events.rows),
-            },
+            Ok(events) if events.access == CalendarAccess::Authorized => {
+                Some(TodayCount::Available {
+                    value: today_meetings(&events.rows),
+                })
+            }
             Ok(events) => {
                 log::info!("home_today: calendar access is {:?}", events.access);
-                TodayCount::Unavailable
+                None
             }
-            Err(error) => TodayCount::read("meetings", Err(error)),
+            Err(error) => Some(TodayCount::read("meetings", Err(error))),
         };
     let untracked = TodayCount::read(
         "untracked",

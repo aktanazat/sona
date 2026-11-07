@@ -73,7 +73,8 @@ pub struct TodayOwed {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Type)]
 pub struct HomeToday {
-    pub meetings: TodayCount<TodayMeetings>,
+    /// Absent when no calendar is connected.
+    pub meetings: Option<TodayCount<TodayMeetings>>,
     pub processing: TodayCount<u32>,
     pub unknown_speakers: TodayCount<TodayTally>,
     pub untracked: TodayCount<TodayTally>,
