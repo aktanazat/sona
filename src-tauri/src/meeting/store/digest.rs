@@ -31,8 +31,14 @@ impl MeetingStore {
         day_start_utc_ms: i64,
         day_end_utc_ms: i64,
     ) -> Result<MeetingDigestCounts, StoreError> {
+        let user_name = self.user_name();
         let connection = self.connection()?;
-        digest_counts_in(&connection, day_start_utc_ms, day_end_utc_ms)
+        digest_counts_in(
+            &connection,
+            day_start_utc_ms,
+            day_end_utc_ms,
+            user_name.as_deref(),
+        )
     }
 }
 
@@ -40,6 +46,7 @@ pub(super) fn digest_counts_in(
     connection: &Connection,
     day_start_utc_ms: i64,
     day_end_utc_ms: i64,
+    user_name: Option<&str>,
 ) -> Result<MeetingDigestCounts, StoreError> {
     Ok(MeetingDigestCounts {
         meetings: meetings_captured_in(connection, day_start_utc_ms, day_end_utc_ms)?,
@@ -47,7 +54,7 @@ pub(super) fn digest_counts_in(
         suggestions_waiting: suggestions_waiting_in(connection)?,
         // The day's end is this run's "now", so replaying the event counts the
         // same evening rather than today's.
-        waiting_on_stale: waiting_on_stale_in(connection, day_end_utc_ms)?,
+        waiting_on_stale: waiting_on_stale_in(connection, day_end_utc_ms, user_name)?,
     })
 }
 
@@ -58,9 +65,13 @@ pub(super) fn digest_counts_in(
 /// evening nudge is for. Both registers count, because "waiting on them" is
 /// mostly commitments and a question left hanging on somebody is the same
 /// debt.
-fn waiting_on_stale_in(connection: &Connection, now_utc_ms: i64) -> Result<u64, StoreError> {
+fn waiting_on_stale_in(
+    connection: &Connection,
+    now_utc_ms: i64,
+    user_name: Option<&str>,
+) -> Result<u64, StoreError> {
     let mut count: u64 = 0;
-    for meeting in ledger_rows_in(connection)? {
+    for meeting in ledger_rows_in(connection, user_name)? {
         for row in &meeting.rows {
             if waiting_on_is_stale(
                 row.direction,

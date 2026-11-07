@@ -41,6 +41,7 @@ pub(super) fn run_event(
     record_skips: bool,
     inputs: &dyn LearningInputs,
 ) -> Result<Vec<WorkflowRunReceipt>, StoreError> {
+    let user_name = store.user_name();
     let (event, workflows, floor) = {
         let connection = store.connection()?;
         let event = stored_event_in(&connection, event_id)?;
@@ -75,7 +76,14 @@ pub(super) fn run_event(
             workflow_id,
             record_skips,
             |connection, event, workflow_id| {
-                execute_workflow_in(connection, event, workflow_id, inputs, &corpus)
+                execute_workflow_in(
+                    connection,
+                    event,
+                    workflow_id,
+                    inputs,
+                    &corpus,
+                    user_name.as_deref(),
+                )
             },
         )? {
             receipts.push(receipt);
@@ -157,11 +165,12 @@ fn execute_workflow_in(
     workflow_id: WorkflowId,
     inputs: &dyn LearningInputs,
     corpus: &DictationCorpus,
+    user_name: Option<&str>,
 ) -> Result<String, StoreError> {
     match workflow_id {
-        WorkflowId::PersonLinking => run_person_linking_in(connection, event),
-        WorkflowId::PreMeetingBriefing => run_briefing_in(connection, event),
-        WorkflowId::Continuity => run_continuity_in(connection, event),
+        WorkflowId::PersonLinking => run_person_linking_in(connection, event, user_name),
+        WorkflowId::PreMeetingBriefing => run_briefing_in(connection, event, user_name),
+        WorkflowId::Continuity => run_continuity_in(connection, event, user_name),
         WorkflowId::VocabularyMining => run_vocabulary_in(connection, event),
         WorkflowId::DocumentLinking => run_document_linking_in(connection, event),
         WorkflowId::SpokenPunctuation => {
@@ -185,7 +194,7 @@ fn execute_workflow_in(
             Ok(format!("series_priming:terms={terms}"))
         }
         WorkflowId::MeetingActivity => run_meeting_activity_in(event),
-        WorkflowId::DailyDigest => run_daily_digest_in(connection, event),
+        WorkflowId::DailyDigest => run_daily_digest_in(connection, event, user_name),
     }
 }
 
@@ -226,6 +235,7 @@ fn run_correction_learning_in(
 fn run_person_linking_in(
     connection: &Connection,
     event: &StoredWorkflowEvent,
+    user_name: Option<&str>,
 ) -> Result<String, StoreError> {
     let session_id = payload_uuid(&event.payload, "session_id")?;
     let session_id = MeetingSessionId::from_uuid(session_id);
@@ -251,6 +261,7 @@ fn run_person_linking_in(
                 connection,
                 session_id,
                 display_name,
+                user_name,
                 event.occurred_at_utc_ms,
             )?
         }
@@ -277,6 +288,7 @@ fn run_person_linking_in(
 fn run_briefing_in(
     connection: &Connection,
     event: &StoredWorkflowEvent,
+    user_name: Option<&str>,
 ) -> Result<String, StoreError> {
     let calendar = event
         .payload
@@ -285,16 +297,17 @@ fn run_briefing_in(
         .ok_or(StoreError::Invalid)?;
     let calendar: CalendarEventSummary =
         serde_json::from_value(calendar).map_err(|_| StoreError::Invalid)?;
-    let context = calendar_context_in(connection, &calendar.attendees)?;
+    let context = calendar_context_in(connection, &calendar.attendees, user_name)?;
     Ok(format!("briefing:persons={}", context.rows.len()))
 }
 
 fn run_continuity_in(
     connection: &Connection,
     event: &StoredWorkflowEvent,
+    user_name: Option<&str>,
 ) -> Result<String, StoreError> {
     let session_id = MeetingSessionId::from_uuid(payload_uuid(&event.payload, "session_id")?);
-    let (series, carried) = continuity_summary_in(connection, session_id)?;
+    let (series, carried) = continuity_summary_in(connection, session_id, user_name)?;
     Ok(format!("continuity:series={series},carried={carried}"))
 }
 
@@ -373,13 +386,14 @@ fn run_meeting_activity_in(event: &StoredWorkflowEvent) -> Result<String, StoreE
 fn run_daily_digest_in(
     connection: &Connection,
     event: &StoredWorkflowEvent,
+    user_name: Option<&str>,
 ) -> Result<String, StoreError> {
     let day_start_utc_ms = payload_i64(&event.payload, "day_start_utc_ms")?;
     let day_end_utc_ms = payload_i64(&event.payload, "day_end_utc_ms")?;
     if day_end_utc_ms <= day_start_utc_ms {
         return Err(StoreError::Invalid);
     }
-    let counts = digest_counts_in(connection, day_start_utc_ms, day_end_utc_ms)?;
+    let counts = digest_counts_in(connection, day_start_utc_ms, day_end_utc_ms, user_name)?;
     Ok(format!(
         "daily_digest:meetings={},loops_closed={},suggestions_waiting={},waiting_on_stale={}",
         counts.meetings, counts.loops_closed, counts.suggestions_waiting, counts.waiting_on_stale

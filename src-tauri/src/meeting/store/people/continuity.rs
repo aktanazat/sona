@@ -31,6 +31,7 @@ impl MeetingStore {
         person_id: PersonId,
         since_utc_ms: Option<i64>,
     ) -> Result<PersonMemorySnapshot, StoreError> {
+        let user_name = self.user_name();
         let mut connection = self.connection()?;
         let transaction = connection.transaction()?;
         let person = person_by_id_in(&transaction, person_id)?;
@@ -115,6 +116,7 @@ impl MeetingStore {
                     &mut conversation,
                     &mut snapshot,
                     &mut topic_indices,
+                    user_name.as_deref(),
                 )?;
             }
             snapshot.conversations.push(conversation);
@@ -149,6 +151,7 @@ fn read_conversation(
     conversation: &mut PersonMemoryConversation,
     snapshot: &mut PersonMemorySnapshot,
     topic_indices: &mut HashMap<String, usize>,
+    user_name: Option<&str>,
 ) -> Result<(), StoreError> {
     let canonical = canonical_speaker_ids(connection, session_id)?;
     let speakers = speakers_for_session(connection, session_id)?;
@@ -275,6 +278,7 @@ fn read_conversation(
         connection,
         session_id,
         ledger_loop_seeds(session_id, &ledger),
+        user_name,
     )? {
         if row.kind != MeetingLoopKind::Commitment {
             continue;

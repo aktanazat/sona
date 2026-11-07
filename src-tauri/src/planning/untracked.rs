@@ -54,8 +54,9 @@ pub async fn meeting_untracked_actions(
     meetings: State<'_, Arc<MeetingSessionManager>>,
     session_id: MeetingSessionId,
 ) -> Result<UntrackedActions, String> {
+    let user_name = meetings.user_name();
     super::with_sources(&history_state, &meetings, |history, meetings| {
-        read(history, meetings, session_id)
+        read(history, meetings, session_id, user_name.as_deref())
     })
     .await
 }
@@ -131,18 +132,23 @@ pub(crate) async fn tally(
     history: &HistoryManager,
     meetings: &MeetingSessionManager,
 ) -> Result<TodayTally, String> {
+    let user_name = meetings.user_name();
     super::with_sources(history, meetings, |history, meetings| {
-        tally_in(history, meetings)
+        tally_in(history, meetings, user_name.as_deref())
     })
     .await
 }
 
-fn tally_in(history: &Connection, meetings: &Connection) -> StorageResult<TodayTally> {
+fn tally_in(
+    history: &Connection,
+    meetings: &Connection,
+    user_name: Option<&str>,
+) -> StorageResult<TodayTally> {
     let finished = finished_meeting_ids(meetings)
         .map_err(|_| anyhow::anyhow!("finished meetings could not be read"))?;
     let mut tally = TodayTally::default();
     for session_id in finished {
-        let waiting = untracked_in(history, meetings, session_id)?.len();
+        let waiting = untracked_in(history, meetings, session_id, user_name)?.len();
         if waiting == 0 {
             continue;
         }
@@ -156,9 +162,10 @@ fn read(
     history: &Connection,
     meetings: &Connection,
     session_id: MeetingSessionId,
+    user_name: Option<&str>,
 ) -> StorageResult<UntrackedActions> {
     Ok(UntrackedActions {
-        actions: untracked_in(history, meetings, session_id)?,
+        actions: untracked_in(history, meetings, session_id, user_name)?,
         projects: store::projects_by_activity(history)?,
     })
 }
@@ -167,8 +174,9 @@ fn untracked_in(
     history: &Connection,
     meetings: &Connection,
     session_id: MeetingSessionId,
+    user_name: Option<&str>,
 ) -> StorageResult<Vec<MeetingLoopRow>> {
-    let loops = loops::loops_in(meetings, session_id).map_err(|error| match error {
+    let loops = loops::loops_in(meetings, session_id, user_name).map_err(|error| match error {
         StoreError::NotFound => anyhow::Error::from(Refusal::NotFound),
         _ => anyhow::anyhow!("meeting loops could not be read"),
     })?;
@@ -453,7 +461,7 @@ mod tests {
 
         meetings
             .with_planning_snapshot(|connection| {
-                let untracked = read(&history, connection, session_id).expect("first read");
+                let untracked = read(&history, connection, session_id, None).expect("first read");
                 assert_eq!(texts(&untracked), ["Send the outline", "Book the venue"]);
                 assert_eq!(untracked.projects, [project.clone()]);
                 let outline = untracked.actions[0].loop_id.as_str();
@@ -475,7 +483,7 @@ mod tests {
                     && link.source_kind == EvidenceSourceKind::Loop
                     && link.source_id == outline));
                 assert_eq!(
-                    texts(&read(&history, connection, session_id).expect("second read")),
+                    texts(&read(&history, connection, session_id, None).expect("second read")),
                     ["Book the venue"]
                 );
 
@@ -502,7 +510,7 @@ mod tests {
 
                 dismiss(&mut history, venue, &Uuid::new_v4().to_string(), AT)
                     .expect("set the venue aside");
-                assert!(read(&history, connection, session_id)
+                assert!(read(&history, connection, session_id, None)
                     .expect("third read")
                     .actions
                     .is_empty());
@@ -510,7 +518,7 @@ mod tests {
                 restore(&mut history, venue, &Uuid::new_v4().to_string(), AT)
                     .expect("ask about the venue again");
                 assert_eq!(
-                    texts(&read(&history, connection, session_id).expect("fourth read")),
+                    texts(&read(&history, connection, session_id, None).expect("fourth read")),
                     ["Book the venue"]
                 );
                 Ok(())

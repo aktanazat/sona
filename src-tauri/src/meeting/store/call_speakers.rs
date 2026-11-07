@@ -212,6 +212,7 @@ impl MeetingStore {
     /// gate protects both suggestions and automatic use; neither renames a
     /// local voice, a manually edited label, a merged speaker, or a voice match.
     pub(crate) fn apply_call_names(&self, session_id: MeetingSessionId) -> Result<(), StoreError> {
+        let user_name = self.user_name();
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let state = call_status_in(&transaction, session_id)?;
@@ -325,6 +326,7 @@ impl MeetingStore {
                         &transaction,
                         session_id,
                         suggestion.name,
+                        user_name.as_deref(),
                         utc_now_ms(),
                     )? > 0;
                 }

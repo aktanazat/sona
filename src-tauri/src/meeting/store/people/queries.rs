@@ -60,9 +60,10 @@ impl MeetingStore {
         person_id: PersonId,
         hidden: &HashSet<MeetingSessionId>,
     ) -> Result<PersonDetailResult, StoreError> {
+        let user_name = self.user_name();
         let mut connection = self.connection()?;
         let transaction = connection.transaction()?;
-        let result = person_detail_in(&transaction, person_id, hidden)?;
+        let result = person_detail_in(&transaction, person_id, hidden, user_name.as_deref())?;
         transaction.commit()?;
         Ok(result)
     }
@@ -87,9 +88,10 @@ impl MeetingStore {
         &self,
         person_ids: &[PersonId],
     ) -> Result<PersonContextResult, StoreError> {
+        let user_name = self.user_name();
         let mut connection = self.connection()?;
         let transaction = connection.transaction()?;
-        let result = context_for_ids_in(&transaction, person_ids)?;
+        let result = context_for_ids_in(&transaction, person_ids, user_name.as_deref())?;
         transaction.commit()?;
         Ok(result)
     }
@@ -98,9 +100,10 @@ impl MeetingStore {
         &self,
         meeting_id: MeetingSessionId,
     ) -> Result<MeetingPeopleContextResult, StoreError> {
+        let user_name = self.user_name();
         let mut connection = self.connection()?;
         let transaction = connection.transaction()?;
-        let result = meeting_people_context_in(&transaction, meeting_id)?;
+        let result = meeting_people_context_in(&transaction, meeting_id, user_name.as_deref())?;
         transaction.commit()?;
         Ok(result)
     }
@@ -109,11 +112,12 @@ impl MeetingStore {
         &self,
         limit: usize,
     ) -> Result<OpenLoopsInboxResult, StoreError> {
+        let user_name = self.user_name();
         let mut connection = self.connection()?;
         let transaction = connection.transaction()?;
         let revision = people_revision_in(&transaction)?;
         let mut entries = Vec::new();
-        for entry in all_open_loops_in(&transaction)? {
+        for entry in all_open_loops_in(&transaction, user_name.as_deref())? {
             if workflow_succeeded_for_session_in(
                 &transaction,
                 WorkflowId::Continuity,
@@ -136,10 +140,11 @@ impl MeetingStore {
         &self,
         event: &CalendarEventSummary,
     ) -> Result<PersonContextResult, StoreError> {
+        let user_name = self.user_name();
         let mut connection = self.connection()?;
         let transaction = connection.transaction()?;
         let result = if workflow_succeeded_for_calendar_event_in(&transaction, &event.event_key)? {
-            calendar_context_in(&transaction, &event.attendees)?
+            calendar_context_in(&transaction, &event.attendees, user_name.as_deref())?
         } else {
             PersonContextResult {
                 schema_version: SCHEMA_VERSION,
@@ -225,18 +230,20 @@ impl MeetingStore {
         &self,
         slug: &str,
     ) -> Result<OrganizationDetailResult, StoreError> {
+        let user_name = self.user_name();
         let mut connection = self.connection()?;
         let transaction = connection.transaction()?;
-        let result = organization_detail_in(&transaction, slug)?;
+        let result = organization_detail_in(&transaction, slug, user_name.as_deref())?;
         transaction.commit()?;
         Ok(result)
     }
 
     /// Every organization its people carry, with the counts its page shows.
     pub(crate) fn companies_list(&self) -> Result<CompaniesListResult, StoreError> {
+        let user_name = self.user_name();
         let mut connection = self.connection()?;
         let transaction = connection.transaction()?;
-        let result = companies_list_in(&transaction)?;
+        let result = companies_list_in(&transaction, user_name.as_deref())?;
         transaction.commit()?;
         Ok(result)
     }
@@ -398,10 +405,11 @@ fn person_detail_in(
     connection: &Connection,
     person_id: PersonId,
     hidden: &HashSet<MeetingSessionId>,
+    user_name: Option<&str>,
 ) -> Result<PersonDetailResult, StoreError> {
     let revision = people_revision_in(connection)?;
     let person = person_by_id_in(connection, person_id)?;
-    let mut facts = facts_for_person_in(connection, &person)?;
+    let mut facts = facts_for_person_in(connection, &person, user_name)?;
     gate_continuity_facts_in(connection, &mut facts)?;
     facts
         .open_loops
@@ -442,6 +450,7 @@ const ORGANIZATION_PAGE_ROWS: usize = 25;
 fn organization_detail_in(
     connection: &Connection,
     slug: &str,
+    user_name: Option<&str>,
 ) -> Result<OrganizationDetailResult, StoreError> {
     let slug = organization_slug(slug);
     let list = people_list_in(connection, &HashSet::new())?;
@@ -465,7 +474,7 @@ fn organization_detail_in(
     let mut seen_meetings = HashSet::new();
     let mut open_loops = Vec::new();
     for entry in &people {
-        let mut facts = facts_for_person_in(connection, &entry.person)?;
+        let mut facts = facts_for_person_in(connection, &entry.person, user_name)?;
         gate_continuity_facts_in(connection, &mut facts)?;
         for meeting in facts.meetings {
             // Two people from one organization in one meeting is the ordinary
@@ -508,7 +517,10 @@ fn organization_detail_in(
 /// The companies list: every organization slug its people carry, each read
 /// through the same gated facts `organization_detail_in` lists, with a
 /// meeting or an open item that several people share counted once.
-fn companies_list_in(connection: &Connection) -> Result<CompaniesListResult, StoreError> {
+fn companies_list_in(
+    connection: &Connection,
+    user_name: Option<&str>,
+) -> Result<CompaniesListResult, StoreError> {
     struct Tally {
         name: String,
         people: u64,
@@ -526,7 +538,7 @@ fn companies_list_in(connection: &Connection) -> Result<CompaniesListResult, Sto
         if slug.is_empty() {
             continue;
         }
-        let mut facts = facts_for_person_in(connection, &entry.person)?;
+        let mut facts = facts_for_person_in(connection, &entry.person, user_name)?;
         gate_continuity_facts_in(connection, &mut facts)?;
         let tally = tallies.entry(slug).or_insert_with(|| Tally {
             name: name.to_owned(),
@@ -575,6 +587,7 @@ fn companies_list_in(connection: &Connection) -> Result<CompaniesListResult, Sto
 fn meeting_people_context_in(
     connection: &Connection,
     meeting_id: MeetingSessionId,
+    user_name: Option<&str>,
 ) -> Result<MeetingPeopleContextResult, StoreError> {
     let revision = people_revision_in(connection)?;
     let mut statement = connection.prepare(
@@ -597,7 +610,7 @@ fn meeting_people_context_in(
             .map(PersonId)
             .map_err(|_| StoreError::Corrupt)?;
         let person = person_by_id_in(connection, person_id)?;
-        let mut facts = facts_for_person_in(connection, &person)?;
+        let mut facts = facts_for_person_in(connection, &person, user_name)?;
         gate_continuity_facts_in(connection, &mut facts)?;
         // The facts list runs newest first with a fixed tie-break, so the
         // meetings before this one are the ones after it in that list. A
@@ -659,6 +672,7 @@ fn evidence_sources_from_csv(value: &str) -> Result<Vec<PersonLinkSource>, Store
 pub(in crate::meeting::store) fn calendar_context_in(
     connection: &Connection,
     attendees: &[CalendarAttendee],
+    user_name: Option<&str>,
 ) -> Result<PersonContextResult, StoreError> {
     let people = all_people_in(connection)?;
     let emails = attendees
@@ -678,12 +692,13 @@ pub(in crate::meeting::store) fn calendar_context_in(
         })
         .map(|person| person.id)
         .collect::<Vec<_>>();
-    context_for_ids_in(connection, &person_ids)
+    context_for_ids_in(connection, &person_ids, user_name)
 }
 
 pub(in crate::meeting::store) fn continuity_summary_in(
     connection: &Connection,
     meeting_id: MeetingSessionId,
+    user_name: Option<&str>,
 ) -> Result<(u64, usize), StoreError> {
     let mut statement = connection.prepare(
         "SELECT person_id FROM meeting_person_links
@@ -699,7 +714,7 @@ pub(in crate::meeting::store) fn continuity_summary_in(
     for id in ids {
         let id = Uuid::parse_str(&id).map_err(|_| StoreError::Corrupt)?;
         let person = person_by_id_in(connection, PersonId(id))?;
-        let facts = facts_for_person_in(connection, &person)?;
+        let facts = facts_for_person_in(connection, &person, user_name)?;
         largest_series = largest_series.max(
             facts
                 .meetings
@@ -720,12 +735,13 @@ pub(in crate::meeting::store) fn continuity_summary_in(
 fn context_for_ids_in(
     connection: &Connection,
     person_ids: &[PersonId],
+    user_name: Option<&str>,
 ) -> Result<PersonContextResult, StoreError> {
     let revision = people_revision_in(connection)?;
     let mut rows = Vec::with_capacity(person_ids.len());
     for person_id in person_ids {
         let person = person_by_id_in(connection, *person_id)?;
-        let mut facts = facts_for_person_in(connection, &person)?;
+        let mut facts = facts_for_person_in(connection, &person, user_name)?;
         gate_continuity_facts_in(connection, &mut facts)?;
         let last = facts
             .meetings

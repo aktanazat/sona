@@ -46,6 +46,8 @@ struct Review {
 struct Speaker {
     speaker_id: SpeakerId,
     display_name: String,
+    #[serde(default)]
+    source_kind: Option<SourceKind>,
 }
 
 #[derive(Deserialize)]
@@ -543,10 +545,10 @@ fn notes_probe() {
             .map(|item| item.text.len())
             .sum::<usize>()
     );
-    let about_me = settings
+    let user_name = settings
         .as_ref()
-        .map(|settings| settings.meeting_prep.about_me.name.trim().to_lowercase())
-        .unwrap_or_default();
+        .map(|settings| settings.meeting_prep.about_me.name.trim().to_owned())
+        .filter(|name| !name.is_empty());
     let voiced: HashSet<SpeakerId> = export
         .review
         .transcript
@@ -554,35 +556,46 @@ fn notes_probe() {
         .filter(|line| !line.removed)
         .map(|line| line.assigned_speaker_id)
         .collect();
-    let names: Vec<&str> = export
+    let speakers: Vec<&Speaker> = export
         .review
         .speakers
         .iter()
         .filter(|speaker| voiced.contains(&speaker.speaker_id))
-        .map(|speaker| speaker.display_name.as_str())
         .collect();
-    let numbered = names
+    let numbered = speakers
         .iter()
-        .filter(|name| {
-            **name == "Local speaker"
-                || name
+        .filter(|speaker| {
+            speaker.display_name == "Local speaker"
+                || speaker
+                    .display_name
                     .strip_prefix("Speaker ")
                     .is_some_and(|number| number.parse::<u32>().is_ok())
         })
         .count();
-    let yours = !about_me.is_empty()
-        && names
-            .iter()
-            .any(|name| name.trim().to_lowercase() == about_me);
+    // An export says neither where the meeting came from nor which names a
+    // voice match wrote, so this reads it as recorded on this Mac with every
+    // name confirmed. A speaker without a lane counts by name alone.
+    let yours = speakers
+        .iter()
+        .filter(|speaker| {
+            crate::meeting::store::voice_identity::speaker_is_user(
+                &speaker.display_name,
+                speaker.source_kind.unwrap_or(SourceKind::SystemAudio),
+                false,
+                false,
+                user_name.as_deref(),
+            )
+        })
+        .count();
     println!(
-        "speakers: {} with lines, {numbered} still numbered, {}; about me name {}",
-        names.len(),
-        if yours {
-            "one named as you"
+        "speakers: {} with lines, {numbered} still numbered, {yours} counted as you{}; about me name {}",
+        speakers.len(),
+        if speakers.iter().any(|speaker| speaker.source_kind.is_none()) {
+            " (some without a lane, counted by name)"
         } else {
-            "none named as you"
+            ""
         },
-        if about_me.is_empty() { "empty" } else { "set" }
+        if user_name.is_some() { "set" } else { "empty" }
     );
     if evidence.transcript.is_empty() {
         println!("nothing left to write notes from");

@@ -62,6 +62,7 @@ impl MeetingStore {
                 &connection,
                 lines.session_id,
                 ledger_loop_seeds(lines.session_id, &ledger),
+                user_name,
             )?;
             for row in rows {
                 let picks = if loop_concerns_person(&person, &row) {
@@ -153,6 +154,7 @@ impl MeetingStore {
                     &connection,
                     session_id,
                     ledger_loop_seeds(session_id, &ledger),
+                    user_name,
                 )?
                 .into_iter()
                 .find(|row| row.loop_id == occurrence),

@@ -16,10 +16,11 @@
 //! left behind by a regeneration that dropped the row, is `NotFound` rather
 //! than a state row pointing at nothing.
 
+use super::voice_identity::speaker_is_user;
 use super::{
-    committed_receipt, decode_json, from_i64, id, insert_operation_receipt, rejected_receipt,
-    session_row, to_i64, utc_now_ms, MeetingStore, ReceiptSpeakers, StoreError, StoreMutation,
-    READABLE_ARTIFACT_CONTENT, READABLE_ARTIFACT_ID,
+    committed_receipt, decode_json, encode_json, from_i64, id, insert_operation_receipt,
+    rejected_receipt, session_row, source_kind_from_db, to_i64, utc_now_ms, MeetingStore,
+    ReceiptSpeakers, StoreError, StoreMutation, READABLE_ARTIFACT_CONTENT, READABLE_ARTIFACT_ID,
 };
 use crate::meeting::ledger::{LedgerFirmness, LedgerOutcome, MeetingLedger};
 use crate::meeting::loop_types::{
@@ -30,8 +31,8 @@ use crate::meeting::loop_types::{
 use crate::meeting::people_types::PersonId;
 use crate::meeting::types::{
     ArtifactCitation, GeneratedMeetingArtifacts, MeetingActionItem, MeetingCommandKind,
-    MeetingOperationId, MeetingPhase, MeetingReasonCode, MeetingSessionId, OperationActor,
-    OperationReceipt, SourceKind,
+    MeetingOperationId, MeetingOrigin, MeetingPhase, MeetingReasonCode, MeetingSessionId,
+    OperationActor, OperationReceipt,
 };
 use crate::meeting::workflow_types::WorkflowId;
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
@@ -104,8 +105,9 @@ impl MeetingStore {
         &self,
         session_id: MeetingSessionId,
     ) -> Result<MeetingLoopsResult, StoreError> {
+        let user_name = self.user_name();
         let connection = self.connection()?;
-        loops_in(&connection, session_id)
+        loops_in(&connection, session_id, user_name.as_deref())
     }
 
     /// The meeting's readable ledger, the one its loops are read off, with
@@ -134,10 +136,11 @@ impl MeetingStore {
     /// from another: a corpus with no commitments in it and a corpus whose
     /// ledgers are all waiting on their continuity pass both scan to nothing.
     pub(crate) fn corpus_loops(&self) -> Result<CorpusLoops, StoreError> {
+        let user_name = self.user_name();
         let connection = self.connection()?;
         let mut meetings = Vec::new();
         let mut awaiting_continuity = Vec::new();
-        for meeting in ledger_rows_in(&connection)? {
+        for meeting in ledger_rows_in(&connection, user_name.as_deref())? {
             if super::workflows::workflow_succeeded_for_session_in(
                 &connection,
                 WorkflowId::Continuity,
@@ -303,6 +306,7 @@ impl MeetingStore {
             let loops = self.meeting_loops(session_id)?;
             return Ok(MeetingLoopMutationResult { receipt, loops });
         }
+        let user_name = self.user_name();
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let session = session_row(&transaction, session_id)?;
@@ -330,7 +334,7 @@ impl MeetingStore {
                 MeetingReasonCode::StaleRevision,
             );
             insert_operation_receipt(&transaction, &receipt, utc_now_ms())?;
-            let loops = loops_in(&transaction, session_id)?;
+            let loops = loops_in(&transaction, session_id, user_name.as_deref())?;
             transaction.commit()?;
             return Ok(MeetingLoopMutationResult { receipt, loops });
         }
@@ -366,7 +370,7 @@ impl MeetingStore {
             vec![loop_id.0.clone()],
         );
         insert_operation_receipt(&transaction, &receipt, now)?;
-        let loops = loops_in(&transaction, session_id)?;
+        let loops = loops_in(&transaction, session_id, user_name.as_deref())?;
         transaction.commit()?;
         Ok(MeetingLoopMutationResult { receipt, loops })
     }
@@ -402,6 +406,7 @@ pub(crate) struct CorpusLoops {
 /// meeting's rows are.
 pub(crate) fn ledger_rows_in(
     connection: &Connection,
+    user_name: Option<&str>,
 ) -> Result<Vec<MeetingLedgerRows>, StoreError> {
     let mut statement = connection.prepare(&format!(
         "SELECT m.id, m.title, COALESCE(m.started_at_utc_ms, m.created_at_utc_ms),
@@ -443,6 +448,7 @@ pub(crate) fn ledger_rows_in(
                 connection,
                 session_id,
                 ledger_loop_seeds(session_id, &ledger),
+                user_name,
             )?,
             action_items: content.action_items,
         });
@@ -567,9 +573,10 @@ pub(crate) fn rows_from_seeds_in(
     connection: &Connection,
     session_id: MeetingSessionId,
     seeds: Vec<LoopSeed>,
+    user_name: Option<&str>,
 ) -> Result<Vec<MeetingLoopRow>, StoreError> {
     let states = states_in(connection, session_id)?;
-    let mine = microphone_speaker_labels_in(connection, session_id)?;
+    let mine = user_speaker_labels_in(connection, session_id, user_name)?;
     let mut owner_names = HashMap::<PersonId, String>::new();
     let mut rows = Vec::with_capacity(seeds.len());
     for seed in seeds {
@@ -631,34 +638,58 @@ pub(crate) fn rows_from_seeds_in(
     Ok(rows)
 }
 
-/// The display names of this session's microphone speakers, merged-away ones
-/// excluded.
+/// The display names of this session's speakers that are the user, by
+/// [`speaker_is_user`], merged-away ones excluded.
 ///
-/// This is the whole answer to "which voice is the user's". Sona has no
-/// voiceprints and no self `Person`, so the microphone track is the evidence:
-/// what was captured on this machine's own input was said by whoever is
-/// sitting at it. Renaming that speaker to a real name keeps working, because
-/// the row is matched by the name it currently carries.
-pub(in crate::meeting::store) fn microphone_speaker_labels_in(
+/// This is the whole answer to "which voice is the user's": every reader that
+/// sorts the user's rows from everyone else's asks it. Renaming a speaker
+/// keeps working, because a row is matched by the name the speaker carries
+/// now.
+pub(in crate::meeting::store) fn user_speaker_labels_in(
     connection: &Connection,
     session_id: MeetingSessionId,
+    user_name: Option<&str>,
 ) -> Result<Vec<String>, StoreError> {
     let mut statement = connection.prepare(
-        "SELECT display_name FROM meeting_speakers
-          WHERE session_id = ?1 AND source_kind = ?2 AND merged_into_speaker_id IS NULL",
+        "SELECT s.display_name, s.source_kind, m.origin_kind = ?2,
+                EXISTS (SELECT 1 FROM voice_speaker_matches v JOIN persons p ON p.id = v.person_id
+                         WHERE v.speaker_id = s.speaker_id AND v.speaker_revision = s.revision
+                           AND p.display_name = s.display_name)
+           FROM meeting_speakers s JOIN meeting_sessions m ON m.id = s.session_id
+          WHERE s.session_id = ?1 AND s.merged_into_speaker_id IS NULL",
     )?;
-    let labels = statement
+    let speakers = statement
         .query_map(
-            params![id(session_id), SourceKind::Microphone.as_str()],
-            |row| row.get::<_, String>(0),
+            params![id(session_id), encode_json(&MeetingOrigin::Import)?],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, bool>(2)?,
+                    row.get::<_, bool>(3)?,
+                ))
+            },
         )?
         .collect::<Result<Vec<_>, _>>()?;
+    let mut labels = Vec::new();
+    for (display_name, lane, imported, named_by_voice_match) in speakers {
+        if speaker_is_user(
+            &display_name,
+            source_kind_from_db(&lane)?,
+            imported,
+            named_by_voice_match,
+            user_name,
+        ) {
+            labels.push(display_name);
+        }
+    }
     Ok(labels)
 }
 
 pub(crate) fn loops_in(
     connection: &Connection,
     session_id: MeetingSessionId,
+    user_name: Option<&str>,
 ) -> Result<MeetingLoopsResult, StoreError> {
     let revision: i64 = connection
         .query_row(
@@ -672,7 +703,7 @@ pub(crate) fn loops_in(
     Ok(MeetingLoopsResult {
         schema_version: SCHEMA_VERSION,
         revision: from_i64(revision)?,
-        rows: rows_from_seeds_in(connection, session_id, seeds)?,
+        rows: rows_from_seeds_in(connection, session_id, seeds, user_name)?,
     })
 }
 

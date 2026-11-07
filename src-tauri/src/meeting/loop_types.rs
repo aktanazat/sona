@@ -194,9 +194,11 @@ fn normalized_loop_text(value: &str) -> String {
         .collect()
 }
 
-/// Ledger owner names that name the speaker rather than a person. The model
-/// fills `who` from the labelled transcript and usually writes the speaker's
-/// label, but a first-person promise sometimes comes back in the first person.
+/// Ledger owner names that point back at whoever said the words rather than
+/// naming anybody. The model fills `who` from the labelled transcript and
+/// usually writes the speaker's label, but a first-person promise sometimes
+/// comes back in the first person, and then the speaker is the owner, or the
+/// user when the words carry no speaker, as before speakers were told apart.
 const FIRST_PERSON_OWNERS: [&str; 3] = ["i", "me", "myself"];
 
 /// How long a row somebody else owes may stay open before it is worth
@@ -207,10 +209,11 @@ pub const WAITING_ON_STALE_AFTER_MS: i64 = 7 * 24 * 60 * 60 * 1_000;
 /// Which way one ledger row points.
 ///
 /// Precedence runs strongest claim first: the person the user picked, then the
-/// owner name the ledger read, then the speaker who said it. Names are matched
-/// against `my_speaker_labels` — the display names of this session's
-/// microphone speakers — because the microphone track is the only thing that
-/// says which voice is the user's without a voiceprint.
+/// owner name the ledger read, then the speaker who said it; a first-person
+/// owner name defers to that speaker and is the user's when there is none.
+/// Names are matched against `my_speaker_labels`, the display names of the
+/// session's speakers that are the user, as
+/// `store::loops::user_speaker_labels_in` reads them.
 pub fn loop_direction(
     owner_person_id: Option<PersonId>,
     owner_text: Option<&str>,
@@ -224,20 +227,25 @@ pub fn loop_direction(
     }
     for name in [owner_text, speaker].into_iter().flatten() {
         let normalized = normalized_loop_text(name);
-        if normalized.is_empty() {
+        if normalized.is_empty() || FIRST_PERSON_OWNERS.contains(&normalized.as_str()) {
             continue;
         }
-        let mine = FIRST_PERSON_OWNERS.contains(&normalized.as_str())
-            || my_speaker_labels
-                .iter()
-                .any(|label| normalized_loop_text(label) == normalized);
-        return if mine {
+        return if my_speaker_labels
+            .iter()
+            .any(|label| normalized_loop_text(label) == normalized)
+        {
             MeetingLoopDirection::Mine
         } else {
             MeetingLoopDirection::WaitingOn
         };
     }
-    MeetingLoopDirection::Unattributed
+    let first_person = owner_text
+        .is_some_and(|name| FIRST_PERSON_OWNERS.contains(&normalized_loop_text(name).as_str()));
+    if first_person {
+        MeetingLoopDirection::Mine
+    } else {
+        MeetingLoopDirection::Unattributed
+    }
 }
 
 /// Whether a row somebody else owes has been open long enough to say so.
@@ -415,7 +423,7 @@ mod tests {
 
     /// The whole precedence table in one place: a picked person beats the
     /// ledger's owner name, which beats the speaker who said it, and every
-    /// name is decided against the microphone speakers of that session.
+    /// name is decided against the session's speakers that are the user.
     #[test]
     fn direction_reads_the_pick_then_the_owner_then_the_speaker() {
         let mine = ["Local speaker".to_string(), "Ada".to_string()];
@@ -424,7 +432,7 @@ mod tests {
             Option<&str>,
             Option<&str>,
             MeetingLoopDirection,
-        ); 9] = [
+        ); 11] = [
             // A picked person is always somebody else, even when the user
             // spoke the words and the ledger agreed they were the user's.
             (
@@ -450,8 +458,16 @@ mod tests {
                 None,
                 MeetingLoopDirection::Mine,
             ),
-            // A first-person promise the model did not resolve to a label.
-            (None, Some("I"), Some("Amir"), MeetingLoopDirection::Mine),
+            // A first-person owner is whoever said it, and the user when the
+            // words carry no speaker.
+            (
+                None,
+                Some("I"),
+                Some("Amir"),
+                MeetingLoopDirection::WaitingOn,
+            ),
+            (None, Some("me"), Some("Ada"), MeetingLoopDirection::Mine),
+            (None, Some("I"), None, MeetingLoopDirection::Mine),
             // No owner name: the voice that said it decides.
             (None, None, Some("Ada"), MeetingLoopDirection::Mine),
             (None, None, Some("Amir"), MeetingLoopDirection::WaitingOn),
