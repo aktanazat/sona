@@ -32,6 +32,9 @@
 //! row's revision, then writes against it, so it requires both external-consent
 //! rows and returns the store receipt verbatim.
 
+use super::conversation_pages::{
+    bookmarks_page, place, roster, ExternalBookmarksPage, ExternalPlace, ExternalRoster,
+};
 use super::plans_page::{plans_page, ExternalPlansPage};
 use super::{
     loop_link, meeting_link, note_link, person_link, KeptLocal, QueryError, QueryEventsPage,
@@ -319,6 +322,16 @@ pub enum ExternalRequest {
     Plans {
         limit: usize,
     },
+    Bookmarks {
+        limit: usize,
+    },
+    Roster {
+        session_id: MeetingSessionId,
+    },
+    Place {
+        session_id: MeetingSessionId,
+        limit: usize,
+    },
     Projects {
         limit: usize,
     },
@@ -366,6 +379,9 @@ impl ExternalRequest {
             | Self::Events { .. }
             | Self::Upcoming { .. }
             | Self::Plans { .. }
+            | Self::Bookmarks { .. }
+            | Self::Roster { .. }
+            | Self::Place { .. }
             | Self::Projects { .. }
             | Self::Project { .. }
             | Self::Notes { .. }
@@ -421,6 +437,9 @@ pub fn is_external_query(args: &CliArgs) -> bool {
         || args.events
         || args.upcoming
         || args.plans
+        || args.bookmarks
+        || args.roster.is_some()
+        || args.place.is_some()
         || args.projects
         || args.project.is_some()
         || args.loop_resolve.is_some()
@@ -465,6 +484,8 @@ fn foreign_modifier(args: &CliArgs) -> Option<&'static str> {
         || args.events
         || args.upcoming
         || args.plans
+        || args.bookmarks
+        || args.place.is_some()
         || args.projects
         || args.notes
         || args.note_context.is_some();
@@ -508,7 +529,7 @@ fn foreign_modifier(args: &CliArgs) -> Option<&'static str> {
         (
             args.limit.is_some(),
             pages,
-            "--limit is only read by --query, --meetings, --loops, --people, --events, --upcoming, --plans, --projects, --notes or --note-context.",
+            "--limit is only read by --query, --meetings, --loops, --people, --events, --upcoming, --plans, --bookmarks, --place, --projects, --notes or --note-context.",
         ),
         (
             args.from_version.is_some(),
@@ -640,6 +661,20 @@ impl ExternalRequest {
         if args.plans {
             return Ok(Self::Plans { limit });
         }
+        if args.bookmarks {
+            return Ok(Self::Bookmarks { limit });
+        }
+        if let Some(id) = args.roster.as_ref() {
+            return Ok(Self::Roster {
+                session_id: session_id(id)?,
+            });
+        }
+        if let Some(id) = args.place.as_ref() {
+            return Ok(Self::Place {
+                session_id: session_id(id)?,
+                limit,
+            });
+        }
         if args.projects {
             return Ok(Self::Projects { limit });
         }
@@ -690,7 +725,7 @@ impl ExternalRequest {
             });
         }
         Err(ExternalError::invalid(
-            "No verb was named. Pass --query, --meetings, --meeting, --transcript, --loops, --people, --person-catch-up, --person-changes, --person-stats, --events, --upcoming, --plans, --projects, --project, --notes, --note, --note-context, --note-versions, --note-diff, --stats or --loop-resolve.",
+            "No verb was named. Pass --query, --meetings, --meeting, --transcript, --loops, --people, --person-catch-up, --person-changes, --person-stats, --events, --upcoming, --plans, --bookmarks, --roster, --place, --projects, --project, --notes, --note, --note-context, --note-versions, --note-diff, --stats or --loop-resolve.",
         ))
     }
 }
@@ -1293,6 +1328,9 @@ pub enum ExternalResponse {
     Events(QueryEventsPage),
     Upcoming(ExternalUpcomingPage),
     Plans(ExternalPlansPage),
+    Bookmarks(ExternalBookmarksPage),
+    Roster(ExternalRoster),
+    Place(ExternalPlace),
     Projects(ExternalProjectsPage),
     Project(ExternalProjectDetail),
     LoopResolve(ExternalReceipt),
@@ -1449,6 +1487,19 @@ pub async fn answer(
         )),
         ExternalRequest::Plans { limit } => Ok(ExternalResponse::Plans(plans_page(
             store(meetings).await?.as_ref(),
+            *limit,
+        )?)),
+        ExternalRequest::Bookmarks { limit } => Ok(ExternalResponse::Bookmarks(bookmarks_page(
+            store(meetings).await?.as_ref(),
+            *limit,
+        )?)),
+        ExternalRequest::Roster { session_id } => Ok(ExternalResponse::Roster(roster(
+            store(meetings).await?.as_ref(),
+            *session_id,
+        )?)),
+        ExternalRequest::Place { session_id, limit } => Ok(ExternalResponse::Place(place(
+            store(meetings).await?.as_ref(),
+            *session_id,
             *limit,
         )?)),
         ExternalRequest::Projects { limit } => {
@@ -2293,15 +2344,33 @@ fn review(
     store: &MeetingStore,
     session_id: MeetingSessionId,
 ) -> Result<MeetingReviewSnapshot, ExternalError> {
-    if kept_local(store)?.hides(session_id) {
-        return Err(missing_meeting(session_id));
-    }
+    visible_meeting(store, session_id)?;
     store
         .review_snapshot(session_id)
-        .map_err(|error| match error {
-            crate::meeting::store::StoreError::NotFound => missing_meeting(session_id),
-            error => QueryError::from(error).into(),
-        })
+        .map_err(|error| meeting_refusal(session_id, error))
+}
+
+/// Refuses a meeting kept on this Mac as absent; otherwise the kept-local
+/// set, for a verb that lists other meetings beside it.
+pub(super) fn visible_meeting(
+    store: &MeetingStore,
+    session_id: MeetingSessionId,
+) -> Result<KeptLocal, ExternalError> {
+    let kept_local = kept_local(store)?;
+    if kept_local.hides(session_id) {
+        return Err(missing_meeting(session_id));
+    }
+    Ok(kept_local)
+}
+
+pub(super) fn meeting_refusal(
+    session_id: MeetingSessionId,
+    error: crate::meeting::store::StoreError,
+) -> ExternalError {
+    match error {
+        crate::meeting::store::StoreError::NotFound => missing_meeting(session_id),
+        error => QueryError::from(error).into(),
+    }
 }
 
 fn missing_meeting(session_id: MeetingSessionId) -> ExternalError {
@@ -3248,6 +3317,63 @@ fn text_response(response: &ExternalResponse) -> String {
             }
             page_footer(&mut text, page.has_more);
         }
+        ExternalResponse::Bookmarks(page) => {
+            for row in &page.entries {
+                let _ = writeln!(
+                    text,
+                    "{}  {} in  [{}]",
+                    row.meeting_title,
+                    duration(row.at_ms),
+                    label(&row.kind)
+                );
+                if let Some(bookmark) = &row.label {
+                    let _ = writeln!(text, "{bookmark}");
+                }
+                let _ = writeln!(text, "{}\n", row.link);
+            }
+            if page.entries.is_empty() {
+                text.push_str("no bookmarks.\n");
+            }
+            page_footer(&mut text, page.has_more);
+        }
+        ExternalResponse::Roster(roster) => {
+            match &roster.app {
+                Some(app) => {
+                    let _ = writeln!(text, "names from {app}");
+                }
+                None => text.push_str("no call was chosen for names.\n"),
+            }
+            for name in &roster.names {
+                let _ = writeln!(text, "{name}");
+            }
+            let _ = writeln!(text, "\n{}", roster.link);
+        }
+        ExternalResponse::Place(page) => match &page.place {
+            None => {
+                let _ = writeln!(text, "no place set.\n{}", page.link);
+            }
+            Some(here) => {
+                let _ = writeln!(
+                    text,
+                    "{} ({:.5}, {:.5})\n{}\n",
+                    here.name, here.latitude, here.longitude, page.link
+                );
+                for row in &page.nearby {
+                    let when = row
+                        .started_at_utc_ms
+                        .map_or_else(|| "time unknown".to_string(), local_time);
+                    let _ = writeln!(
+                        text,
+                        "{when}  {}  at {}\n{}\n",
+                        row.title, row.place.name, row.link
+                    );
+                }
+                if page.nearby.is_empty() {
+                    text.push_str("nothing else recorded within 100 m.\n");
+                }
+                page_footer(&mut text, page.has_more);
+            }
+        },
         ExternalResponse::Projects(page) => {
             for row in &page.entries {
                 let _ = writeln!(
@@ -3915,6 +4041,23 @@ mod tests {
             ExternalRequest::Plans { limit: 5 }
         );
         assert_eq!(
+            request(&["--bookmarks", "--limit", "5"]),
+            ExternalRequest::Bookmarks { limit: 5 }
+        );
+        assert_eq!(
+            request(&["--roster", MEETING]),
+            ExternalRequest::Roster {
+                session_id: MeetingSessionId::from_uuid(Uuid::parse_str(MEETING).unwrap()),
+            }
+        );
+        assert_eq!(
+            request(&["--place", MEETING, "--limit", "3"]),
+            ExternalRequest::Place {
+                session_id: MeetingSessionId::from_uuid(Uuid::parse_str(MEETING).unwrap()),
+                limit: 3,
+            }
+        );
+        assert_eq!(
             request(&["--loop-resolve", LOOP]),
             ExternalRequest::LoopResolve {
                 loop_id: MeetingLoopId(LOOP.to_string()),
@@ -4363,6 +4506,9 @@ mod tests {
             vec!["--events"],
             vec!["--upcoming"],
             vec!["--plans"],
+            vec!["--bookmarks"],
+            vec!["--roster", MEETING],
+            vec!["--place", MEETING],
             vec!["--person-stats", PERSON],
         ] {
             assert_eq!(

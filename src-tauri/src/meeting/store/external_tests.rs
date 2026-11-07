@@ -18,6 +18,7 @@
 use super::workflow_core_tests::{event, inputs, person, store};
 use super::MeetingStore;
 use crate::cli::CliArgs;
+use crate::meeting::context::{ConversationContextUpdate, ConversationKind, ConversationLocation};
 use crate::meeting::detection::machine::CalendarEventSummary;
 use crate::meeting::loop_types::{
     MeetingLoopId, MeetingLoopKind, MeetingLoopReopenRequest, MeetingLoopResolution,
@@ -31,6 +32,7 @@ use crate::meeting::types::{
     OperationActor, OperationResult, ProcessingFailure, ProcessingStatus, SourceKind, SpeakerId,
 };
 use crate::meeting::workflow_types::WorkflowEventKind;
+use crate::query::conversation_pages::{bookmarks_page, place, roster};
 use crate::query::external::{
     loops_page, meeting_detail, meetings_page, people_page, person_stats, resolve_loop,
     transcript as transcript_of, AllowedRequest, ExternalConsent, ExternalErrorCode,
@@ -1351,4 +1353,102 @@ fn a_series_kept_on_this_mac_never_reaches_an_external_reader() {
             MeetingLoopStatus::Open
         );
     });
+
+    let cafe = ConversationLocation {
+        name: "Blue Bottle, Mint Plaza".to_string(),
+        latitude: 37.78264,
+        longitude: -122.40765,
+    };
+    let coffee = meeting(&corpus.store, "Coffee with Dana", EARLIER - 60 * 60 * 1_000);
+    for session_id in [corpus.session_id, corpus.older_id, coffee] {
+        corpus
+            .store
+            .update_conversation_context(ConversationContextUpdate {
+                session_id,
+                expected_revision: 0,
+                kind: ConversationKind::InPerson,
+                location: Some(cafe.clone()),
+            })
+            .unwrap();
+    }
+    let connection = corpus.store.connection().unwrap();
+    for session_id in [corpus.session_id, corpus.older_id] {
+        let session = session_id.uuid().to_string();
+        connection
+            .execute(
+                "INSERT INTO conversation_bookmarks (
+                    bookmark_id, session_id, start_offset_ns, label, kind, created_at_utc_ms
+                 ) VALUES (?1, ?2, 90000000000, 'Tier picked', 'decision', ?3)",
+                params![Uuid::new_v4().to_string(), session, NOW],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO meeting_call_name_runs (session_id, plan_id, target_json, state, detail)
+                 SELECT session_id, plan_id,
+                        '{\"id\":\"zoom\",\"label\":\"Zoom\",\"bundle_id\":\"us.zoom.xos\",\"provider\":\"zoom\"}',
+                        'stopped', ''
+                   FROM meeting_run_plans WHERE session_id = ?1",
+                params![session],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO meeting_call_participants (session_id, participant_id, display_name, is_local)
+                 VALUES (?1, 'dana', 'Dana Reyes', 0)",
+                params![session],
+            )
+            .unwrap();
+    }
+    drop(connection);
+
+    assert_eq!(
+        corpus
+            .store
+            .conversation_bookmarks(corpus.session_id)
+            .unwrap()
+            .len(),
+        1
+    );
+    let bookmarks = value(&bookmarks_page(&corpus.store, 25).unwrap());
+    assert!(!shows_kept(&bookmarks), "{bookmarks}");
+    assert_eq!(
+        bookmarks["entries"][0]["meeting_id"],
+        json!(corpus.older_id.uuid().to_string())
+    );
+
+    assert_eq!(
+        corpus
+            .store
+            .call_name_status(corpus.session_id)
+            .unwrap()
+            .roster,
+        vec!["Dana Reyes"]
+    );
+    assert_eq!(
+        roster(&corpus.store, corpus.older_id).unwrap().names,
+        vec!["Dana Reyes"]
+    );
+
+    let in_app = corpus
+        .store
+        .conversation_place_review(corpus.older_id)
+        .unwrap();
+    assert!(in_app
+        .sessions
+        .iter()
+        .any(|session| session.session_id == corpus.session_id));
+    let here = value(&place(&corpus.store, corpus.older_id, 25).unwrap());
+    assert!(!shows_kept(&here), "{here}");
+    assert_eq!(
+        here["nearby"][0]["meeting_id"],
+        json!(coffee.uuid().to_string())
+    );
+
+    for refused in [
+        roster(&corpus.store, corpus.session_id).unwrap_err(),
+        place(&corpus.store, corpus.session_id, 25).unwrap_err(),
+    ] {
+        assert_eq!(refused.error, ExternalErrorCode::NotFound);
+    }
 }

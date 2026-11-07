@@ -176,6 +176,39 @@ impl MeetingStore {
         export_bookmarks_in(&connection, session_id)
     }
 
+    /// Every bookmark with its meeting's title, newest meeting first, then in
+    /// the order they were pressed.
+    pub(crate) fn all_conversation_bookmarks(
+        &self,
+    ) -> Result<Vec<(ConversationBookmark, String)>, StoreError> {
+        let connection = self.connection()?;
+        let mut query = connection.prepare(
+            "SELECT bookmark.bookmark_id, bookmark.session_id, bookmark.start_offset_ns, bookmark.label,
+                    bookmark.kind, bookmark.created_at_utc_ms, session.title
+             FROM conversation_bookmarks bookmark JOIN meeting_sessions session ON session.id = bookmark.session_id
+             WHERE session.phase != 'deleting'
+             ORDER BY COALESCE(session.started_at_utc_ms, session.created_at_utc_ms) DESC, session.id,
+                      bookmark.start_offset_ns, bookmark.bookmark_id",
+        )?;
+        let mut bookmarks = Vec::new();
+        let mut rows = query.query([])?;
+        while let Some(row) = rows.next()? {
+            bookmarks.push((
+                ConversationBookmark {
+                    bookmark_id: row.get(0)?,
+                    session_id: MeetingSessionId::from_uuid(parse_uuid(&row.get::<_, String>(1)?)?),
+                    start_offset_ns: from_i64(row.get(2)?)?,
+                    label: row.get(3)?,
+                    kind: ConversationBookmarkKind::parse(&row.get::<_, String>(4)?)
+                        .ok_or(StoreError::Corrupt)?,
+                    created_at_utc_ms: row.get(5)?,
+                },
+                row.get(6)?,
+            ));
+        }
+        Ok(bookmarks)
+    }
+
     pub(crate) fn conversation_bookmark_create(
         &self,
         request: ConversationBookmarkRequest,

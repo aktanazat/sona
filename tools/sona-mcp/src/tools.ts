@@ -364,6 +364,51 @@ export const TOOLS: readonly ToolDefinition[] = [
     argv: (input) => ["--plans", ...optional("--limit", count(input, "limit"))],
   },
   {
+    name: "sona_bookmarks",
+    title: "List bookmarks pressed while recording",
+    description:
+      "List the bookmarks pressed during recordings, newest meeting first: each one's kind (mark, decision, question or todo), its label if one was typed, how far into the recording it was pressed, and a sona://meeting link that opens at that moment. Meetings from a series kept on this Mac are left out. Requires external access; no writes.",
+    inputSchema: {
+      type: "object",
+      properties: { limit: LIMIT },
+      additionalProperties: false,
+    },
+    argv: (input) => [
+      "--bookmarks",
+      ...optional("--limit", count(input, "limit")),
+    ],
+  },
+  {
+    name: "sona_roster",
+    title: "Read the names a call listed",
+    description:
+      "Read the names of the other people a meeting's call app listed while it was recorded, as the call showed them, and which app they came from (null when names were not read). Names are never linked to people here. A meeting from a series kept on this Mac is refused as not found. Requires external access; no writes.",
+    inputSchema: {
+      type: "object",
+      properties: { meeting_id: MEETING_ID },
+      required: ["meeting_id"],
+      additionalProperties: false,
+    },
+    argv: (input) => ["--roster", text(input, "meeting_id", true)],
+  },
+  {
+    name: "sona_place",
+    title: "Read where a meeting was recorded",
+    description:
+      "Read the place set for a meeting (name, latitude, longitude; null when none was set) and the other recordings within 100 m of it, newest first. A meeting from a series kept on this Mac is refused as not found and never listed nearby. Requires external access; no writes and no map lookups.",
+    inputSchema: {
+      type: "object",
+      properties: { meeting_id: MEETING_ID, limit: LIMIT },
+      required: ["meeting_id"],
+      additionalProperties: false,
+    },
+    argv: (input) => [
+      "--place",
+      text(input, "meeting_id", true),
+      ...optional("--limit", count(input, "limit")),
+    ],
+  },
+  {
     name: "sona_projects",
     title: "List Sona personal projects",
     description:

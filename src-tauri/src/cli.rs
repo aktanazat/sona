@@ -25,7 +25,8 @@ use std::path::PathBuf;
 ))]
 #[command(group(ArgGroup::new("read").args([
     "query", "meetings", "meeting", "transcript", "loops", "people", "events",
-    "upcoming", "plans", "loop_resolve", "notes", "note", "note_versions", "note_diff", "stats",
+    "upcoming", "plans", "bookmarks", "roster", "place", "loop_resolve", "notes", "note",
+    "note_versions", "note_diff", "stats",
     "person_catch_up", "person_changes", "person_stats", "note_context", "projects", "project",
 ])))]
 #[command(group(ArgGroup::new("loop_side").args(["mine", "waiting"])))]
@@ -220,6 +221,20 @@ pub struct CliArgs {
     /// calendar, happened, or passed with no recording.
     #[arg(long)]
     pub plans: bool,
+
+    /// List the bookmarks pressed while recording, newest meeting first, as
+    /// JSON: each with its kind, label and the moment it marks.
+    #[arg(long)]
+    pub bookmarks: bool,
+
+    /// Print the names a meeting's call listed as JSON.
+    #[arg(long, value_name = "MEETING_ID")]
+    pub roster: Option<String>,
+
+    /// Print where a meeting was recorded and the other recordings within
+    /// 100 m of it as JSON.
+    #[arg(long, value_name = "MEETING_ID")]
+    pub place: Option<String>,
 
     /// Mark one loop done and print the receipt as JSON. The one flag on this
     /// surface that writes, so it needs its own consent row on top of the read

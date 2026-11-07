@@ -33,6 +33,7 @@
 //! literally matched as its snippet.
 
 pub mod card;
+pub mod conversation_pages;
 pub mod external;
 pub mod pack;
 pub mod plans_page;
