@@ -15,8 +15,8 @@ pub use audio::{
 pub use lang_id::detect_output_language;
 pub use spoken_edits::{apply_spoken_edits, split_spoken_instruction, SpokenInstruction};
 pub use text::{
-    apply_british_spelling, apply_emoji_replacements, apply_exact_vocabulary_entries,
-    apply_literal_punctuation, apply_text_replacements, apply_vocabulary_entries,
+    apply_british_spelling, apply_emoji_replacements, apply_literal_punctuation,
+    apply_prompted_vocabulary_entries, apply_text_replacements, apply_vocabulary_entries,
     normalize_transcription_output, remove_filler_words, OutputLanguageEvidence,
 };
 pub use utils::get_cpal_host;
