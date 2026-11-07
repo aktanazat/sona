@@ -677,7 +677,7 @@ pub async fn connections_undo_send(
 #[tauri::command]
 #[specta::specta]
 pub async fn connections_edit_chat_action(
-    manager: State<'_, Arc<crate::agent_panel::AgentPanelManager>>,
+    manager: State<'_, crate::agent_panel::AgentPanelManager>,
     request: crate::agent_panel::AgentPanelActionRequestV1,
     action: crate::agent_panel::protocol::SonaChatActionV1,
 ) -> Result<crate::agent_panel::AgentPanelTurnStatusV1, crate::agent_panel::AgentPanelCommandErrorV1>
