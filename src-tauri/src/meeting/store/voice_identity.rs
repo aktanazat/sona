@@ -18,7 +18,7 @@ use crate::meeting::types::{
     MeetingCommandKind, MeetingDiarizationGenerationId, MeetingOperationId, MeetingOrigin,
     MeetingPhase, MeetingSessionId, OperationActor, OperationReceipt, SourceTrackId, SpeakerId,
 };
-use rusqlite::{params, OptionalExtension, Transaction, TransactionBehavior};
+use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use std::collections::HashSet;
@@ -710,8 +710,7 @@ impl MeetingStore {
         }
         let model = wespeaker_embedding_model_key();
         let connection = self.connection()?;
-        // SQLite's lower() folds ASCII only, so names_user below has the final
-        // say on which of these rows name the user.
+        let user_speakers = user_named_speakers_in(&connection, user_name)?;
         let mut statement = connection.prepare(
             "SELECT voiceprint.speaker_id, person.id, person.display_name, voiceprint.embedding,
                     speaker.display_name
@@ -729,18 +728,9 @@ impl MeetingStore {
                 AND voiceprint.sample_rate_hz = ?6 AND voiceprint.feature_bins = ?7
                 AND voiceprint.feature_pipeline_revision = ?8 AND voiceprint.normalization = ?9
                 AND (person.id IS NOT NULL OR voiceprint.session_id = ?1
-                     OR lower(replace(speaker.display_name, ' ', '')) IN (?10, ?11))
+                     OR voiceprint.speaker_id IN (SELECT value FROM json_each(?10)))
               ORDER BY person.id, voiceprint.speaker_id",
         )?;
-        let user_names = user_name.map_or_else(Default::default, |name| {
-            (
-                normalized(name),
-                name.split_whitespace()
-                    .next()
-                    .map(normalized)
-                    .unwrap_or_default(),
-            )
-        });
         let rows = statement.query_map(
             params![
                 id(session_id),
@@ -753,8 +743,7 @@ impl MeetingStore {
                 i64::try_from(model.feature_bins).map_err(|_| StoreError::VoiceInvariant)?,
                 model.feature_pipeline_revision,
                 model.normalization,
-                user_names.0,
-                user_names.1,
+                user_speakers,
             ],
             |row| {
                 Ok((
@@ -1131,6 +1120,43 @@ pub(crate) fn names_user(name: &str, user_name: Option<&str>) -> bool {
                 .split_whitespace()
                 .next()
                 .is_some_and(|first| normalized(first) == name))
+}
+
+/// Every kept voice's speaker, from any meeting, that no person claims and
+/// whose name is the user's, as the JSON array `json_each` reads. Names are
+/// compared here because SQLite's `lower` folds ASCII only.
+fn user_named_speakers_in(
+    connection: &Connection,
+    user_name: Option<&str>,
+) -> Result<String, StoreError> {
+    if user_name.is_none() {
+        return Ok("[]".to_owned());
+    }
+    let mut statement = connection.prepare(
+        "SELECT speaker.speaker_id, speaker.display_name
+           FROM meeting_speakers speaker
+          WHERE speaker.merged_into_speaker_id IS NULL
+            AND EXISTS (
+                SELECT 1 FROM meeting_speaker_voiceprints voiceprint
+                 WHERE voiceprint.speaker_id = speaker.speaker_id
+            )
+            AND NOT EXISTS (
+                SELECT 1 FROM meeting_voice_speaker_resolutions resolution
+                 WHERE resolution.speaker_id = speaker.speaker_id
+                   AND resolution.is_current = 1
+                   AND resolution.resolution_kind = 'identified'
+            )",
+    )?;
+    let mut speaker_ids = Vec::new();
+    for row in statement.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })? {
+        let (speaker_id, display_name) = row?;
+        if names_user(&display_name, user_name) {
+            speaker_ids.push(speaker_id);
+        }
+    }
+    Ok(serde_json::Value::from(speaker_ids).to_string())
 }
 
 /// A name the user gives a speaker settles whose voice it is, the way
