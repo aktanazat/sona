@@ -42,12 +42,10 @@
 //! in the next round and asks differently, or stops.
 
 use super::external::{current_artifacts, loops_reason, speaker_names, transcript_line};
-use super::pack::{
-    folder_search, one_line, series_opted_out_of_remote, without_excluded_series, FolderScope,
-};
+use super::pack::{folder_search, one_line, without_excluded_series, FolderScope};
 use super::{
-    bounded, dictation_row, loop_link, meeting_link, person_link, token, QueryError, QueryRow,
-    QueryRowKind, QueryScope, MAX_SNIPPET_CHARS, MAX_TITLE_CHARS,
+    bounded, dictation_row, loop_link, meeting_link, person_link, token, KeptLocal, QueryError,
+    QueryRow, QueryRowKind, QueryScope, MAX_SNIPPET_CHARS, MAX_TITLE_CHARS,
 };
 use crate::analytics::{local_days_start_utc_ms, DashboardTrendRange, DashboardTrendRequest};
 use crate::managers::history::{
@@ -1408,9 +1406,10 @@ fn loops_result(
     let mut scanned = 0usize;
     let mut more = false;
     let corpus = store.corpus_loops().map_err(store_refusal)?;
+    let kept_local = KeptLocal::read(store).map_err(store_refusal)?;
     'corpus: for meeting in corpus.meetings {
         if folder.is_some_and(|folder| !folder.allows(meeting.session_id))
-            || series_opted_out_of_remote(store, meeting.session_id)
+            || kept_local.hides(meeting.session_id)
         {
             continue;
         }
@@ -1456,8 +1455,7 @@ fn loops_result(
     );
     value.insert("more".to_string(), Value::Bool(more));
     let awaiting_continuity = corpus.awaiting_continuity.iter().any(|session_id| {
-        folder.is_none_or(|folder| folder.allows(*session_id))
-            && !series_opted_out_of_remote(store, *session_id)
+        folder.is_none_or(|folder| folder.allows(*session_id)) && !kept_local.hides(*session_id)
     });
     if let Some(reason) = loops_reason(rows.len(), scanned, awaiting_continuity) {
         value.insert("reason".to_string(), json!(reason));

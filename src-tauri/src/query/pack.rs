@@ -31,10 +31,10 @@
 //! per-series escape hatch — "a series listed here is always written on this
 //! Mac, even while meeting intelligence is on" — therefore has to hold here as
 //! well as in `processing::choose_text_engine`, and it holds the same way:
-//! [`without_excluded_series`] joins each meeting and loop row to the series
-//! behind it and drops the rows that series kept local. An unreadable
-//! preference counts as excluded, the direction `processing.rs` already leans
-//! for exactly this fact.
+//! [`without_excluded_series`] checks each meeting and loop row against the
+//! meetings kept local ([`KeptLocal`]) and drops the ones it names. A store
+//! that cannot say which meetings those are drops every meeting and loop
+//! row, the direction `processing.rs` already leans for exactly this fact.
 //!
 //! The header says nothing about it. A dropped quote at the byte ceiling is
 //! reported because the model would otherwise answer "nothing else came up"
@@ -55,7 +55,8 @@
 //! see. The tools (`tools.rs`) hold the same line with the same type.
 
 use super::{
-    loop_link, meeting_link, QueryError, QueryRow, QueryRowKind, QueryScope, QUERY_SCHEMA_VERSION,
+    loop_link, meeting_link, KeptLocal, QueryError, QueryRow, QueryRowKind, QueryScope,
+    QUERY_SCHEMA_VERSION,
 };
 use crate::agent_panel::protocol::MAX_CONTEXT_PACK_BYTES;
 use crate::managers::history::HistoryManager;
@@ -69,7 +70,7 @@ use crate::meeting::types::{MeetingFolderId, MeetingSessionId};
 use chrono::TimeZone;
 use serde::{Deserialize, Serialize};
 use specta::Type;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
 use uuid::Uuid;
@@ -239,10 +240,15 @@ impl FolderScope {
     /// Count only meetings whose series may leave this Mac, just as the
     /// unscoped corpus card does.
     fn line(&self, store: &MeetingStore) -> String {
+        let kept_local = readable_kept_local(store);
         let count = self
             .members
             .iter()
-            .filter(|session_id| !series_opted_out_of_remote(store, **session_id))
+            .filter(|session_id| {
+                kept_local
+                    .as_ref()
+                    .is_some_and(|kept_local| !kept_local.hides(**session_id))
+            })
             .count();
         format!(
             "folder scope: \"{}\" ({count} {}); only these meetings can be read",
@@ -361,11 +367,8 @@ pub(crate) fn for_person(store: &MeetingStore, detail: &PersonDetail) -> QueryPa
 /// meeting's own words. `more_matches` is left alone — it answers "does the
 /// corpus hold more matches than this page", which an exclusion here does not
 /// change.
-///
-/// One store read per distinct meeting, memoised, because a page of twelve is
-/// usually a handful of meetings and the read is a two-statement join.
 pub(crate) fn without_excluded_series(store: &MeetingStore, rows: Vec<QueryRow>) -> Vec<QueryRow> {
-    let mut excluded: HashMap<MeetingSessionId, bool> = HashMap::new();
+    let kept_local = readable_kept_local(store);
     rows.into_iter()
         .filter(|row| {
             if row.kind == QueryRowKind::Note {
@@ -374,9 +377,9 @@ pub(crate) fn without_excluded_series(store: &MeetingStore, rows: Vec<QueryRow>)
             let Some(session_id) = session_behind(row) else {
                 return true;
             };
-            !*excluded
-                .entry(session_id)
-                .or_insert_with(|| series_opted_out_of_remote(store, session_id))
+            kept_local
+                .as_ref()
+                .is_some_and(|kept_local| !kept_local.hides(session_id))
         })
         .collect()
 }
@@ -395,25 +398,19 @@ pub(super) fn session_behind(row: &QueryRow) -> Option<MeetingSessionId> {
     }
 }
 
-/// Whether this meeting's series has been kept off the server.
-///
-/// A preference the store cannot read counts as opted out, which is the
-/// direction `processing::series_opted_out_of_remote` already leans for the
-/// same fact: the failure being guarded is evidence leaving the machine for a
-/// series whose answer we could not read.
-pub(super) fn series_opted_out_of_remote(
-    store: &MeetingStore,
-    session_id: MeetingSessionId,
-) -> bool {
-    match store.series_preferences_for_session(session_id) {
-        Ok(preferences) => preferences.remote_intelligence_opt_out,
-        Err(error) => {
+/// `None` when the store cannot say which meetings are kept local; callers
+/// treat that as every meeting kept, the direction
+/// `processing::series_opted_out_of_remote` already leans for the same fact:
+/// the failure being guarded is evidence leaving the machine for a series
+/// whose answer we could not read.
+fn readable_kept_local(store: &MeetingStore) -> Option<KeptLocal> {
+    KeptLocal::read(store)
+        .inspect_err(|error| {
             log::warn!(
-                "Keeping {session_id:?} out of the context pack: its remote-intelligence preference could not be read: {error:?}"
+                "Keeping every meeting out of the context pack: the series kept on this Mac could not be read: {error:?}"
             );
-            true
-        }
-    }
+        })
+        .ok()
 }
 
 /// Render the pack for rows that have already been found.

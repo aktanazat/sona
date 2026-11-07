@@ -1,12 +1,10 @@
 //! `sona --plans`: the plans to meet heard in recorded meetings.
 
 use super::external::ExternalError;
-use super::pack::series_opted_out_of_remote;
-use super::{meeting_link, QueryError, QUERY_SCHEMA_VERSION};
+use super::{meeting_link, KeptLocal, QueryError, QUERY_SCHEMA_VERSION};
 use crate::meeting::heard_plan_types::{HeardPlan, HeardPlanStatus};
 use crate::meeting::store::MeetingStore;
 use serde::Serialize;
-use std::collections::HashMap;
 use uuid::Uuid;
 
 /// One plan to meet, kept whatever became of it.
@@ -47,16 +45,12 @@ pub(crate) fn plans_page(
     store: &MeetingStore,
     limit: usize,
 ) -> Result<ExternalPlansPage, ExternalError> {
-    let mut kept_local = HashMap::new();
+    let kept_local = KeptLocal::read(store).map_err(QueryError::from)?;
     let mut plans = store
         .all_heard_plans()
         .map_err(QueryError::from)?
         .into_iter()
-        .filter(|plan| {
-            !*kept_local
-                .entry(plan.session_id)
-                .or_insert_with(|| series_opted_out_of_remote(store, plan.session_id))
-        });
+        .filter(|plan| !kept_local.hides(plan.session_id));
     let entries = plans.by_ref().take(limit).map(row).collect();
     Ok(ExternalPlansPage {
         schema_version: QUERY_SCHEMA_VERSION,
