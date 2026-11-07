@@ -169,6 +169,16 @@ pub fn deliver(
     }
 }
 
+/// Begins copying the clipboard aside while the words are still spoken, for
+/// a route that may paste through it, so the paste finds every type a slow
+/// app renders already read instead of waiting for them.
+#[cfg(target_os = "macos")]
+pub fn copy_clipboard_aside(settings: &DeliveryPlan) {
+    if is_clipboard_family(settings.paste_method) {
+        clipboard::PasteboardSnapshot::copy_general_aside();
+    }
+}
+
 fn dispatch(app: &AppHandle, text: &str, settings: &DeliveryPlan) -> DeliveryReceipt {
     let primary = primary_method(settings);
     #[cfg(target_os = "macos")]

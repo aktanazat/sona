@@ -217,6 +217,8 @@ struct FinishGuard {
 }
 impl Drop for FinishGuard {
     fn drop(&mut self) {
+        #[cfg(target_os = "macos")]
+        crate::clipboard::PasteboardSnapshot::forget_copy_aside();
         if let Some(c) = self.app.try_state::<TranscriptionCoordinator>() {
             c.notify_processing_finished(self.run_id);
         }
@@ -1992,6 +1994,8 @@ impl TranscribeAction {
                 // from here on.
                 set_tray_state(app, TrayIconState::Recording);
                 app.state::<HeldDictation>().take();
+                #[cfg(target_os = "macos")]
+                delivery::copy_clipboard_aside(self.run.delivery());
                 if let Some(warm_up) = rewrite_warm_up(&self.run) {
                     tauri::async_runtime::spawn(warm_up);
                 }
@@ -2132,6 +2136,8 @@ impl TranscribeAction {
         );
         let cancel_generation = rm.cancel_generation();
         let stopped_at = delivery::KeyboardFocus::now();
+        #[cfg(target_os = "macos")]
+        delivery::copy_clipboard_aside(self.run.delivery());
 
         tauri::async_runtime::spawn(async move {
             let finish = Arc::new(FinishGuard {
