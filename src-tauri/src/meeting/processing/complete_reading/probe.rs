@@ -716,8 +716,13 @@ fn counted(notes: &GeneratedMeetingArtifacts) -> String {
         || format!("no ledger ({:?})", notes.ledger_failure),
         |ledger| {
             format!(
-                "a ledger of {} threads, {} commitments, {} open questions and {} caveats",
+                "a ledger of {} threads ({} say who said it), {} commitments, {} open questions and {} caveats",
                 ledger.threads.len(),
+                ledger
+                    .threads
+                    .iter()
+                    .filter(|thread| thread.receipt.speaker.is_some())
+                    .count(),
                 ledger.commitments.len(),
                 ledger.open_loops.len(),
                 ledger.caveats.len()
@@ -771,10 +776,11 @@ fn print_notes(notes: &GeneratedMeetingArtifacts) {
         println!("ledger: {}", ledger.headline);
         for thread in &ledger.threads {
             println!(
-                "thread: {} [{:?}] owner {}",
+                "thread: {} [{:?}] owner {} said by {}",
                 thread.topic,
                 thread.state,
-                thread.owner.as_deref().unwrap_or("-")
+                thread.owner.as_deref().unwrap_or("-"),
+                thread.receipt.speaker.as_deref().unwrap_or("-")
             );
         }
         for commitment in &ledger.commitments {

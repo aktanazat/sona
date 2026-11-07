@@ -2849,6 +2849,13 @@ impl MeetingProcessingService {
                 }
             },
         }
+        complete_reading::confirm_decisions(
+            generator.as_ref(),
+            &evidence,
+            &speakers,
+            &mut content,
+            checkpoint,
+        )?;
         checkpoint()?;
         let artifact = store
             .store_artifact_revision(ArtifactRevisionInput {
@@ -4864,7 +4871,7 @@ struct RawArtifactOutput {
     summary: Vec<RawCitedText>,
     outline: Vec<RawOutlineTopic>,
     #[schemars(
-        description = "Settled choices and final outcomes. Choosing an option is a decision, not an action item. Include each supported decision."
+        description = "Choices the meeting settled. Choosing an option is a decision, not an action item; a status update or a confirmation that something is unchanged is not a decision. Include each supported decision."
     )]
     decisions: Vec<RawCitedText>,
     #[schemars(
@@ -5009,7 +5016,7 @@ fn artifact_system_prompt(
         ""
     };
     let mut prompt = format!(
-        "{MEETING_PROMPT}\n\nReturn only JSON with this exact schema. `cited` means the object {{\"text\":string,\"citations\":[segment_uuid]}} and never a bare string: the segment UUIDs belong in the `citations` array, never written inside `text`. Schema: {{\"summary\":[cited],\"outline\":[{{\"title\":cited,\"detail\":cited_or_null}}],\"decisions\":[cited],\"action_items\":[{{\"text\":{{\"text\":string,\"citations\":[segment_uuid]}},\"owner_text\":string_or_null,\"due_text\":string_or_null}}],\"key_questions\":[cited],\"risks\":[cited],\"follow_up_draft\":cited}}. An action item's `text` is a whole `cited` object, written out above because the nesting is easy to misread: its citations go inside that object and never beside it, and an action item carries no `citations` key of its own. Only `cited` objects carry `citations`: an outline topic cites inside its `title` and `detail` objects. Use only the keys named in this schema. Every `cited` object must carry one or more segment UUID citations from transcript evidence. Each cited text is nonblank and at most 8,000 UTF-8 bytes after trimming; the joined summary is also at most 8,000 UTF-8 bytes. `outline` has at most 32 entries. `decisions`, `action_items`, `key_questions` and `risks` each have at most 64 entries. Non-null `owner_text` and `due_text` are nonblank and at most 512 UTF-8 bytes. `owner_text` names the person explicitly assigned the action or the speaker making a first-person singular commitment. A speaker saying 'we' has not identified an individual owner. Use `null` for unknown owners or due dates, never an empty string. The summary is a list of at least one and at most {MAX_SUMMARY_LINES} standalone lines in reading order, and each line cites the segments that line came from: a reader presses a line to hear that moment, so a citation that belongs to a different line is worse than none. `outline`, `decisions`, `action_items`, `key_questions` and `risks` are each `[]` when the evidence does not support them, but `summary` is never empty: if the meeting is thin, write the one line the material does support. `follow_up_draft` must be cited and nonblank too; if no follow-up was agreed, state that without inventing a task. Do not cite manual notes or the user's profile. Do not add facts, owners, or dates absent from evidence. Leave out greetings, small talk, jokes, farewells and asides. Write what the meeting established, never a narration of who said, asked, mentioned or confirmed something. A decision says what was chosen and, when the transcript says so, who made the call or owns it; a task someone takes on is an action item, not a decision. A question the meeting answered is not a key question. {steering}{notes_rule}"
+        "{MEETING_PROMPT}\n\nReturn only JSON with this exact schema. `cited` means the object {{\"text\":string,\"citations\":[segment_uuid]}} and never a bare string: the segment UUIDs belong in the `citations` array, never written inside `text`. Schema: {{\"summary\":[cited],\"outline\":[{{\"title\":cited,\"detail\":cited_or_null}}],\"decisions\":[cited],\"action_items\":[{{\"text\":{{\"text\":string,\"citations\":[segment_uuid]}},\"owner_text\":string_or_null,\"due_text\":string_or_null}}],\"key_questions\":[cited],\"risks\":[cited],\"follow_up_draft\":cited}}. An action item's `text` is a whole `cited` object, written out above because the nesting is easy to misread: its citations go inside that object and never beside it, and an action item carries no `citations` key of its own. Only `cited` objects carry `citations`: an outline topic cites inside its `title` and `detail` objects. Use only the keys named in this schema. Every `cited` object must carry one or more segment UUID citations from transcript evidence. Each cited text is nonblank and at most 8,000 UTF-8 bytes after trimming; the joined summary is also at most 8,000 UTF-8 bytes. `outline` has at most 32 entries. `decisions`, `action_items`, `key_questions` and `risks` each have at most 64 entries. Non-null `owner_text` and `due_text` are nonblank and at most 512 UTF-8 bytes. `owner_text` names the person explicitly assigned the action or the speaker making a first-person singular commitment. A speaker saying 'we' has not identified an individual owner. Use `null` for unknown owners or due dates, never an empty string. The summary is a list of at least one and at most {MAX_SUMMARY_LINES} standalone lines in reading order, and each line cites the segments that line came from: a reader presses a line to hear that moment, so a citation that belongs to a different line is worse than none. `outline`, `decisions`, `action_items`, `key_questions` and `risks` are each `[]` when the evidence does not support them, but `summary` is never empty: if the meeting is thin, write the one line the material does support. `follow_up_draft` must be cited and nonblank too; if no follow-up was agreed, state that without inventing a task. Do not cite manual notes or the user's profile. Do not add facts, owners, or dates absent from evidence. Leave out greetings, small talk, jokes, farewells and asides. Write what the meeting established, never a narration of who said, asked, mentioned or confirmed something. A decision says what was chosen and, when the transcript says so, who made the call or owns it; a task someone takes on is an action item, not a decision, and a status update or a confirmation that something is unchanged is not a decision either. A question the meeting answered is not a key question. {steering}{notes_rule}"
     );
     if let NotesTemplate::Custom(template) = template {
         prompt.push_str("\n\nThe user's custom template arranges only the outline. The summary, decisions, action items, key questions, risks and follow-up draft retain the schema and all citation, text and list limits above. Use these outline sections in the order given, at most once each, with each title spelled exactly as given. Write each section's detail from the transcript following that section's instructions. Omit sections not covered by the transcript; an empty outline is valid. Each title and non-null detail still needs at least one transcript citation. Section instructions guide emphasis, never supply facts or override this schema.");
@@ -5877,7 +5884,7 @@ pub(crate) struct RawLedgerOutput {
 const LEDGER_WIRE_SCHEMA: &str = r#"Return only valid JSON matching this exact schema: {"headline":string,"threads":[{"topic":string,"state":"decided"|"agreed"|"action"|"closed"|"open"|"partial"|"ambiguous"|"unanswered"|"dropped","substantive":bool,"receipt":{"quote":string,"speaker":string_or_null,"citations":[segment_uuid]},"owner":string_or_null}],"open_loops":[{"question":string,"instead":string,"citations":[segment_uuid]}],"commitments":[{"who":string,"what":string,"firmness":"firm"|"soft","receipt":{"quote":string,"speaker":string_or_null,"citations":[segment_uuid]}}],"stances":[{"from":string,"to":string_or_null,"what":string,"note":string_or_null,"citations":[segment_uuid]}],"caveats":[string]}."#;
 const LEDGER_OPEN_LOOPS_RULE: &str = "Registers: add exactly one open_loops row for each unanswered, dropped or ambiguous thread and none for a thread that was answered or landed. For an unanswered row, question is the exact question and instead is what happened in its place — another reply or topic switch. For a dropped row, question is a concise name containing the identifying noun and instead says what buried it.";
 
-const LEDGER_STATE_RULES: &str = r#"States: decided means a choice was made; agreed means one person's position was taken up by another; action means a named person owns a next step; closed means a social or administrative thread ran its course; open means explicitly unresolved, held or pending; partial means direction exists but specifics do not; ambiguous means the evidence cannot choose a firmer non-question state. A direct question with no later answer is unanswered, never open, partial, ambiguous or dropped, even if another subject is discussed afterward. A non-question subject abandoned on a topic switch is dropped. A question later answered stays one thread with that answer. Use only the state the evidence supports."#;
+const LEDGER_STATE_RULES: &str = r#"States: decided means a choice was made, never a status update or a confirmation that something is unchanged, such as a date that still holds or a problem that persists; agreed means one person's position was taken up by another; action means a named person owns a next step; closed means a social or administrative thread ran its course; open means explicitly unresolved, held or pending; partial means direction exists but specifics do not; ambiguous means the evidence cannot choose a firmer non-question state. A direct question with no later answer is unanswered, never open, partial, ambiguous or dropped, even if another subject is discussed afterward. A non-question subject abandoned on a topic switch is dropped. A question later answered stays one thread with that answer. Use only the state the evidence supports."#;
 const LEDGER_RECEIPT_RULES: &str = r#"Receipts and names: use short verbatim excerpts, at most 240 characters per receipt. Copy the selected words character for character, including any false starts inside that excerpt; do not quote an entire repeated turn. Join exact excerpts with ... when both moments are needed. Every citation is the segment_uuid field of the turn you are citing, copied literally; no other value in the input is a citation. Use the minimum citations that prove the row. A returning row needs both cited moments. "#;
 const LEDGER_NAMING_RULES: &str = r#"Each turn's speaker field names who spoke it: use that name for from and receipt speaker unless the transcript itself supports a real name for that same speaker, which wins over a placeholder such as Unknown speaker or Local speaker. An owner is only a person explicitly given responsibility, never somebody merely speaking. A commitment's who is the person explicitly assigned the work or the speaker making a first-person singular promise. A speaker saying we has not identified an individual owner. Confirming another person's responsibility does not transfer it. Never write Person 1, Person 2 or a Speaker label. Commitments require a named who; omit unsupported commitments. firmness is firm for language such as I'll do X and soft for language such as we should probably."#;
 const LEDGER_STANCE_RULES: &str = r#"A stance records an explicit position the turn's speaker took, adopted, reaffirmed or changed. Choosing a course of action is a position even when nobody disagrees: a speaker saying we have decided to do something or we will keep a choice has explicitly adopted that position. Record that adoption in stances as well as its decided or agreed thread; the thread is not a substitute. No disagreement, named counterpart or change of mind is required. from is the actual cited speaker; to is null unless a counterpart is supported; what names the adopted position, not merely the fact that people agreed. Reporting someone else's position or assignment does not make that person the speaker or transfer their responsibility. Do not use a bare Agreed as the stance evidence. Use empty arrays when the transcript supports no commitments, stances or caveats."#;
@@ -5996,6 +6003,32 @@ const fn refuses_structured_reading(cause: EngineFailureCause) -> bool {
     )
 }
 
+/// Each receipt names the person who spoke every line it cites, read from
+/// the transcript and never from the model, which leaves a placeholder name
+/// out when its rules say to. A receipt citing more than one voice, or a
+/// line nobody was assigned to, names nobody.
+fn attribute_receipts(
+    ledger: &mut MeetingLedger,
+    segment_speakers: &HashMap<TranscriptSegmentId, SpeakerId>,
+    speaker_names: &HashMap<SpeakerId, String>,
+) {
+    let speaker = |receipt: &LedgerReceipt| {
+        let mut names = receipt.citations.iter().map(|citation| {
+            segment_speakers
+                .get(&citation.segment_id)
+                .and_then(|speaker_id| speaker_names.get(speaker_id))
+        });
+        let first = names.next()??;
+        names.all(|name| name == Some(first)).then(|| first.clone())
+    };
+    for thread in &mut ledger.threads {
+        thread.receipt.speaker = speaker(&thread.receipt);
+    }
+    for commitment in &mut ledger.commitments {
+        commitment.receipt.speaker = speaker(&commitment.receipt);
+    }
+}
+
 /// Read the conversation as a ledger, refuse to ship a receipt that is not in
 /// the transcript, and say on the ledger what the structural checks found.
 ///
@@ -6026,6 +6059,7 @@ pub(crate) fn generate_ledger(
     let mut ledger =
         complete_reading::ledger(generator, evidence, &turn_speakers, &haystack, checkpoint)
             .map_err(reading_error_cause)?;
+    attribute_receipts(&mut ledger, &segment_speakers, speaker_names);
     // The page this ledger would render as, built the way the exporter builds
     // it so the checks read the measured numbers a reader would. Title, kind
     // and date are presentation and take no part in them; the axis runs to
@@ -7761,7 +7795,8 @@ pub(crate) mod tests {
 
     /// An engine that writes the fixture notes and ledger about the first
     /// turn of whatever transcript it is shown, so a whole run writes notes
-    /// without its test knowing the segments in advance.
+    /// without its test knowing the segments in advance, and confirms every
+    /// decision it is asked to check.
     pub(crate) struct EchoingGenerator;
 
     impl MeetingTextGenerator for EchoingGenerator {
@@ -7788,6 +7823,9 @@ pub(crate) mod tests {
             _max_tokens: i32,
             _shape: ReplyShape,
         ) -> Result<String, MeetingTextGenerationError> {
+            if evidence.starts_with("Decision: ") {
+                return Ok(r#"{"settled": true}"#.to_owned());
+            }
             let pack: serde_json::Value =
                 serde_json::from_str(evidence).expect("a JSON evidence pack");
             let turn = &pack["transcript"][0];
@@ -9779,6 +9817,163 @@ pub(crate) mod tests {
             first_json_value(&value.to_string()).expect("the other four registers parse empty");
         validate_ledger_output(&raw, &evidence)
             .expect("and validate empty: only threads carries a floor");
+    }
+
+    /// A receipt names the speaker of the lines it cites, from the transcript
+    /// and never from the model's own words, and nobody when the lines are
+    /// two voices or nobody's.
+    #[test]
+    fn a_ledger_receipt_names_the_voice_every_cited_line_shares() {
+        let reference = include_str!("fixtures/ledger_evals/messy_two_party.ledger.json");
+        let raw: RawLedgerOutput = first_json_value(reference).expect("the reference ledger");
+        let mut ledger = validate_ledger_output(&raw, &ledger_reference_evidence())
+            .expect("the reference validates");
+        let line = |index: u64| ArtifactCitation {
+            segment_id: TranscriptSegmentId::from_uuid(uuid::Uuid::from_u128(index.into())),
+            start_offset_ns: index * 60_000_000_000,
+            end_offset_ns: index * 60_000_000_000 + 1_000_000_000,
+        };
+        let (ana, ben) = (SpeakerId::new(), SpeakerId::new());
+        let names = HashMap::from([(ana, "Ana".to_owned()), (ben, "Ben".to_owned())]);
+        let segment_speakers = HashMap::from([
+            (line(1).segment_id, ana),
+            (line(2).segment_id, ana),
+            (line(3).segment_id, ben),
+        ]);
+        ledger.threads.truncate(3);
+        assert_eq!(ledger.threads.len(), 3, "the reference has three threads");
+        for (thread, cited) in ledger.threads.iter_mut().zip([[1, 2], [1, 3], [2, 4]]) {
+            thread.receipt.speaker = Some("Speaker 1".to_owned());
+            thread.receipt.citations = cited.into_iter().map(line).collect();
+        }
+
+        attribute_receipts(&mut ledger, &segment_speakers, &names);
+
+        let speakers = ledger
+            .threads
+            .iter()
+            .map(|thread| thread.receipt.speaker.as_deref())
+            .collect::<Vec<_>>();
+        assert_eq!(speakers, [Some("Ana"), None, None]);
+    }
+
+    /// An engine that files the second line as a decision in the notes and
+    /// on two threads of one subject in the ledger, and the fifth line, a
+    /// question, as a decision in both. Asked to check a decision, it says no
+    /// only to the question.
+    struct StatusAsDecisionGenerator;
+
+    impl MeetingTextGenerator for StatusAsDecisionGenerator {
+        fn is_available(&self) -> bool {
+            true
+        }
+
+        fn model_id(&self) -> &'static str {
+            "status-as-decision"
+        }
+
+        fn model_version(&self) -> Cow<'static, str> {
+            Cow::Borrowed("1")
+        }
+
+        fn max_input_bytes(&self) -> usize {
+            usize::MAX
+        }
+
+        fn generate(
+            &self,
+            _system_prompt: &str,
+            evidence: &str,
+            _max_tokens: i32,
+            shape: ReplyShape,
+        ) -> Result<String, MeetingTextGenerationError> {
+            if evidence.starts_with("Decision: ") {
+                let settled = !evidence.contains(MARKED_MEETING[4]);
+                return Ok(serde_json::json!({ "settled": settled }).to_string());
+            }
+            let pack: serde_json::Value =
+                serde_json::from_str(evidence).expect("a JSON evidence pack");
+            let line = |index: usize| {
+                let turn = &pack["transcript"][index];
+                turn["segment_uuid"]
+                    .as_str()
+                    .or_else(|| turn["entity_id"].as_str())
+                    .expect("the turn's citation")
+                    .to_owned()
+            };
+            let thread = |topic: &str, index: usize| {
+                serde_json::json!({
+                    "topic": topic,
+                    "state": "decided",
+                    "substantive": true,
+                    "receipt": {
+                        "quote": MARKED_MEETING[index],
+                        "speaker": null,
+                        "citations": [line(index)]
+                    },
+                    "owner": null
+                })
+            };
+            Ok(match shape {
+                ReplyShape::MeetingLedger => serde_json::json!({
+                    "headline": "Pricing stays through March.",
+                    "threads": [thread("Pricing", 1), thread("pricing", 3), thread("Support", 4)],
+                    "open_loops": [],
+                    "commitments": [],
+                    "stances": [],
+                    "caveats": []
+                }),
+                _ => serde_json::json!({
+                    "summary": [{"text": "The team went over pricing.", "citations": [line(0)]}],
+                    "outline": [],
+                    "decisions": [
+                        {"text": "Keep the current price through March.", "citations": [line(1)]},
+                        {"text": "Support is included in the price.", "citations": [line(4)]}
+                    ],
+                    "action_items": [],
+                    "key_questions": [],
+                    "risks": [],
+                    "follow_up_draft": {"text": "Thanks for joining.", "citations": [line(0)]}
+                }),
+            }
+            .to_string())
+        }
+    }
+
+    /// A decision the transcript shows being made stays one, a question filed
+    /// as one leaves the notes' decisions and closes its ledger thread, and
+    /// two threads of one subject in a one-part ledger show as one, named
+    /// for the speaker of its lines.
+    #[test]
+    fn only_decisions_the_lines_settle_stay_decisions() {
+        let meeting = MarkedMeeting::new();
+        let content = meeting.notes(Arc::new(StatusAsDecisionGenerator));
+        assert_eq!(
+            content.decisions,
+            [CitedArtifactText {
+                text: "Keep the current price through March.".to_string(),
+                citations: vec![meeting.citation(1)],
+            }]
+        );
+        let ledger = content.ledger.expect("a ledger");
+        let threads = ledger
+            .threads
+            .iter()
+            .map(|thread| {
+                (
+                    thread.topic.as_str(),
+                    thread.state,
+                    thread.receipt.speaker.as_deref(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            threads,
+            [
+                ("Pricing", LedgerThreadState::Decided, Some("Speaker 1")),
+                ("Support", LedgerThreadState::Closed, Some("Speaker 1")),
+            ]
+        );
     }
 }
 
