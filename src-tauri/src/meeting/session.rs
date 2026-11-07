@@ -65,8 +65,15 @@ const DEFAULT_SOURCE_DESCRIPTOR_CAPACITY: u32 = 128;
 /// How much audio a source lane holds before its writer must have drained it.
 /// The ring is a time budget, not a sample count: 96,000 f32 is two seconds of
 /// 48 kHz mono and one second of stereo, so a fixed count silently gave the
-/// stereo lane half the slack.
-const SOURCE_LANE_TARGET_SECONDS: u32 = 4;
+/// stereo lane half the slack. The writer shares the meeting database and the
+/// disk with the rest of the app, and a busy Mac held it up for longer than
+/// the lane could hold: a half-hour call lost eight seconds of audio that way.
+/// A minute is 11 MB of 48 kHz mono and 23 MB of stereo.
+const SOURCE_LANE_TARGET_SECONDS: u32 = 60;
+/// The smallest packet a lane plans its descriptors for. Each packet takes
+/// one, so 128 descriptors held 1.3 seconds of 480-frame microphone packets
+/// whatever the samples could hold.
+const SMALLEST_PLANNED_PACKET_FRAMES: u64 = 128;
 const RETENTION_SWEEP_INTERVAL: Duration = Duration::from_secs(15 * 60);
 const RETENTION_OPERATION_NAMESPACE: Uuid =
     Uuid::from_u128(0x5192_4d08_51d9_4f31_a369_1f2d_a7de_c9d4);
@@ -134,6 +141,17 @@ fn lane_sample_capacity(floor: u32, format: Option<AudioFormat>) -> u64 {
                 .checked_mul(u64::from(SOURCE_LANE_TARGET_SECONDS))
         })
         .unwrap_or(0)
+        .max(u64::from(floor))
+}
+
+/// Enough descriptors for the lane's seconds at the smallest planned packet,
+/// with the plan's count as the floor.
+fn lane_descriptor_capacity(floor: u32, format: Option<AudioFormat>) -> u64 {
+    format
+        .and_then(|format| {
+            u64::from(format.sample_rate_hz).checked_mul(u64::from(SOURCE_LANE_TARGET_SECONDS))
+        })
+        .map_or(0, |frames| frames / SMALLEST_PLANNED_PACKET_FRAMES)
         .max(u64::from(floor))
 }
 
@@ -1964,8 +1982,11 @@ impl MeetingSessionManager {
                     probe.negotiated_format,
                 ))
                 .map_err(|_| MeetingCommandError::InvalidRequest)?,
-                usize::try_from(plan.storage.source_lane_descriptor_capacity)
-                    .map_err(|_| MeetingCommandError::InvalidRequest)?,
+                usize::try_from(lane_descriptor_capacity(
+                    plan.storage.source_lane_descriptor_capacity,
+                    probe.negotiated_format,
+                ))
+                .map_err(|_| MeetingCommandError::InvalidRequest)?,
             );
             prepared.push((*source_kind, track_id, source, sink, lane_reader));
         }
@@ -4709,6 +4730,7 @@ fn run_track_worker(
     mut meter: TrackMeter,
     stop: Arc<AtomicBool>,
 ) -> Result<(), StoreError> {
+    super::capture::run_at_capture_priority();
     let mut bridges = HashMap::new();
     bridges.insert(
         (report.epoch.get(), report.format_epoch),
@@ -8831,13 +8853,91 @@ pub(crate) mod tests {
             lane_sample_capacity(
                 96_000,
                 Some(AudioFormat {
-                    sample_rate_hz: 8_000,
+                    sample_rate_hz: 1_000,
                     channels: 1,
                 })
             ),
             96_000,
             "the plan's count is a floor, not a target"
         );
+    }
+
+    /// A writer held up for ten seconds, by the database or a busy Mac, loses
+    /// none of what the device delivered meanwhile: the lane holds it and the
+    /// writer catches up. A lane of four seconds and 128 packets dropped all
+    /// but the first 1.3 seconds of it.
+    #[test]
+    fn a_writer_held_up_for_ten_seconds_loses_no_audio() {
+        const PACKETS: u64 = 1_000;
+        const FRAMES: u32 = 480;
+        let (_directory, manager, session_id, lane) =
+            capturing_meeting(Arc::new(ReadyEngine), no_engine());
+        let store = tauri::async_runtime::block_on(manager.store()).unwrap();
+        let track_id = store.session_snapshot(session_id).unwrap().sources[0]
+            .track_id
+            .expect("a started microphone track");
+        let (held, holding) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let holder = thread::spawn({
+            let store = Arc::clone(&store);
+            move || {
+                store.with_planning_snapshot(|_| {
+                    held.send(()).unwrap();
+                    released.recv().unwrap();
+                    Ok(())
+                })
+            }
+        });
+        holding.recv().unwrap();
+        let samples = vec![0.4_f32; FRAMES as usize];
+        let refused = {
+            let mut guard = lane.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let lane = guard.as_mut().expect("the source was handed a lane");
+            (0..PACKETS)
+                .filter(|&sequence| {
+                    let offset_ns = sequence * 10_000_000;
+                    lane.try_push_interleaved(
+                        CapturedPacket {
+                            track_id,
+                            source_epoch: SourceEpoch::new(0),
+                            format_epoch: 0,
+                            sequence,
+                            native_timestamp_value: Some(i64::try_from(offset_ns).unwrap()),
+                            native_timestamp_timescale: Some(1_000_000_000),
+                            host_monotonic_anchor_ns: Some(offset_ns),
+                            sample_rate_hz: 48_000,
+                            channels: 1,
+                            frame_count: FRAMES,
+                            discontinuity_flags: PacketDiscontinuityFlags::default(),
+                        },
+                        &samples,
+                    ) != PacketPushResult::Accepted
+                })
+                .count()
+        };
+        release.send(()).unwrap();
+        holder.join().unwrap().unwrap();
+        tauri::async_runtime::block_on(manager.stop(
+            MeetingMutationRequest {
+                operation_id: MeetingOperationId::new(),
+                session_id,
+                expected_revision: store.session_snapshot(session_id).unwrap().revision,
+            },
+            MeetingStopCause::Operator(MeetingStopSurface::MeetingLive),
+        ))
+        .unwrap();
+        let review = tauri::async_runtime::block_on(manager.get(session_id)).unwrap();
+
+        assert_eq!(refused, 0, "the lane refused audio while its writer waited");
+        assert!(
+            review.gaps.iter().all(|gap| !matches!(
+                gap.reason,
+                SourceGapReason::PacketDropped | SourceGapReason::WriterPressure
+            )),
+            "audio was dropped: {:?}",
+            review.gaps
+        );
+        assert_eq!(review.tracks[0].durable_record_count, PACKETS);
     }
 
     /// What a recording holds (the Mac kept awake, processing parked behind

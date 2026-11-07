@@ -219,6 +219,22 @@ impl PacketLaneReader {
     }
 }
 
+/// Runs the calling thread in the class macOS keeps for work a person is
+/// waiting on, so default and background work, such as a local model writing
+/// notes, cannot starve the threads that empty a lane.
+pub(crate) fn run_at_capture_priority() {
+    #[cfg(target_os = "macos")]
+    {
+        // SAFETY: changes only the calling thread's scheduling class.
+        let result = unsafe {
+            libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE, 0)
+        };
+        if result != 0 {
+            log::warn!("A capture thread kept its default priority: error {result}");
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct SessionClock {
     anchor: SessionClockAnchor,
