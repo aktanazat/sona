@@ -143,9 +143,10 @@ enum FilingTarget: Decodable, Equatable {
     case project(projectId: String, title: String)
     case kind(ConversationKind)
     case place(ConversationPlace)
+    case meeting(title: String, people: [FilingPerson], place: String?, location: ConversationPlace?)
 
     private enum CodingKeys: String, CodingKey {
-        case kind, title, startUtcMs, endUtcMs, personId, name, projectId, conversationKind, location
+        case kind, title, startUtcMs, endUtcMs, personId, name, projectId, conversationKind, location, people, place
     }
 
     init(from decoder: Decoder) throws {
@@ -168,6 +169,12 @@ enum FilingTarget: Decodable, Equatable {
             self = .kind(try container.decode(ConversationKind.self, forKey: .conversationKind))
         case "place":
             self = .place(try container.decode(ConversationPlace.self, forKey: .location))
+        case "meeting":
+            self = .meeting(
+                title: try container.decode(String.self, forKey: .title),
+                people: try container.decode([FilingPerson].self, forKey: .people),
+                place: try container.decodeIfPresent(String.self, forKey: .place),
+                location: try container.decodeIfPresent(ConversationPlace.self, forKey: .location))
         case let kind:
             throw DecodingError.dataCorruptedError(
                 forKey: .kind, in: container, debugDescription: "unknown filing target \(kind)")
@@ -198,20 +205,32 @@ extension FilingTarget {
             "Maybe a conversation"
         case let .place(place):
             "Maybe at \(place.name)"
+        case let .meeting(title, _, place, _):
+            "Maybe \(title)" + (place.map { ", \($0)" } ?? "")
         }
     }
 }
 
+/// One of a maybe meeting's people Sona knows.
+struct FilingPerson: Decodable, Equatable, Identifiable {
+    let personId: String
+    let name: String
+
+    var id: String { personId }
+}
+
 enum FilingReason: Decodable, Equatable {
     case onCalendar(overlaps: Bool)
-    case voiceMatches(name: String)
+    case voiceMatches(name: String, startOffsetNs: Int64?)
     case said(phrase: String, count: Int, segmentId: TranscriptSegmentId)
     case onlyMicrophone
     case appAudio(bundleId: String)
     case inInvite
+    case planned(sessionId: MeetingSessionId, saidAtUtcMs: Int64, quote: String?, citation: ArtifactCitation?)
 
     private enum CodingKeys: String, CodingKey {
-        case kind, overlaps, name, phrase, count, segmentId, bundleId
+        case kind, overlaps, name, phrase, count, segmentId, bundleId, startOffsetNs, sessionId, saidAtUtcMs, quote,
+             citation
     }
 
     init(from decoder: Decoder) throws {
@@ -220,7 +239,9 @@ enum FilingReason: Decodable, Equatable {
         case "on_calendar":
             self = .onCalendar(overlaps: try container.decode(Bool.self, forKey: .overlaps))
         case "voice_matches":
-            self = .voiceMatches(name: try container.decode(String.self, forKey: .name))
+            self = .voiceMatches(
+                name: try container.decode(String.self, forKey: .name),
+                startOffsetNs: try container.decodeIfPresent(Int64.self, forKey: .startOffsetNs))
         case "said":
             self = .said(
                 phrase: try container.decode(String.self, forKey: .phrase),
@@ -232,6 +253,12 @@ enum FilingReason: Decodable, Equatable {
             self = .appAudio(bundleId: try container.decode(String.self, forKey: .bundleId))
         case "in_invite":
             self = .inInvite
+        case "planned":
+            self = .planned(
+                sessionId: try container.decode(MeetingSessionId.self, forKey: .sessionId),
+                saidAtUtcMs: try container.decode(Int64.self, forKey: .saidAtUtcMs),
+                quote: try container.decodeIfPresent(String.self, forKey: .quote),
+                citation: try container.decodeIfPresent(ArtifactCitation.self, forKey: .citation))
         case let kind:
             throw DecodingError.dataCorruptedError(
                 forKey: .kind, in: container, debugDescription: "unknown filing reason \(kind)")
