@@ -97,6 +97,7 @@ struct HeardPlansCard: View {
             ForEach(plans) { plan in row(plan) }
             if let failure { Text(failure).metaText(Theme.live) }
         }
+        .padding(.bottom, plans.isEmpty ? 0 : 16)
         .task(id: "\(sessionId):\(revision):\(store.heardPlansRevision)") { await load() }
         .sheet(item: $editing) { plan in
             HeardPlanEditor(plan: plan) { request in
