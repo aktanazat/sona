@@ -9,6 +9,7 @@ use crate::meeting::clock::host_monotonic_now_ns;
 use crate::meeting::detection::calendar::CalendarAccess;
 use crate::meeting::detection::DetectionRuntime;
 use crate::meeting::local_generator::{MeetingLocalEngineStatus, MeetingTextEngineChoice};
+use crate::meeting::lone_tail::{self, MeetingRecordingTail};
 use crate::meeting::series_types::{
     MeetingSeriesAlwaysRecordSetRequest, MeetingSeriesDigestSetRequest,
     MeetingSeriesMutationResult, MeetingSeriesPreferences, MeetingSeriesRemoteOptOutSetRequest,
@@ -20,9 +21,9 @@ use crate::meeting::session::{
     MeetingMutationResult, MeetingNoteCreateRequest, MeetingNoteDeleteRequest,
     MeetingNoteUpdateRequest, MeetingPreflightCreateRequest, MeetingPreflightRefreshRequest,
     MeetingReenhanceRequest, MeetingRemovalResult, MeetingSegmentEditRequest,
-    MeetingSessionManager, MeetingSpeakerMergeRequest, MeetingSpeakerRenameRequest,
-    MeetingStartRequest, MeetingStopCause, MeetingStopSurface, MeetingTitleSetRequest,
-    MeetingUserNotesSaveRequest,
+    MeetingSegmentsRemovedRequest, MeetingSessionManager, MeetingSpeakerMergeRequest,
+    MeetingSpeakerRenameRequest, MeetingStartRequest, MeetingStopCause, MeetingStopSurface,
+    MeetingTitleSetRequest, MeetingUserNotesSaveRequest,
 };
 use crate::meeting::store::today::{
     HomeToday, TodayCount, TodayMeetings, TodayPerson, TodayStoreCounts,
@@ -577,6 +578,29 @@ pub async fn meeting_segment_edit(
     request: MeetingSegmentEditRequest,
 ) -> Result<MeetingMutationResult, MeetingCommandError> {
     manager.segment_edit(request).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn meeting_segments_set_removed(
+    manager: State<'_, Arc<MeetingSessionManager>>,
+    request: MeetingSegmentsRemovedRequest,
+) -> Result<MeetingMutationResult, MeetingCommandError> {
+    manager.segments_set_removed(request).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn meeting_recording_tail(
+    manager: State<'_, Arc<MeetingSessionManager>>,
+    session_id: MeetingSessionId,
+) -> Result<Option<MeetingRecordingTail>, MeetingCommandError> {
+    let snapshot = manager
+        .store()
+        .await?
+        .review_snapshot(session_id)
+        .map_err(map_store_error)?;
+    Ok(lone_tail::recording_tail(&snapshot))
 }
 
 #[tauri::command]

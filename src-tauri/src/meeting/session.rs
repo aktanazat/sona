@@ -339,6 +339,17 @@ pub struct MeetingSegmentEditRequest {
     pub removed: bool,
 }
 
+/// Several lines out of the transcript, or back in, as one edit: the tail of
+/// a recording the person cut, or put back.
+#[derive(Clone, Debug, Deserialize, Serialize, Type)]
+pub struct MeetingSegmentsRemovedRequest {
+    pub operation_id: MeetingOperationId,
+    pub session_id: MeetingSessionId,
+    pub expected_revision: u64,
+    pub segment_ids: Vec<TranscriptSegmentId>,
+    pub removed: bool,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, Type)]
 pub struct MeetingNoteCreateRequest {
     pub operation_id: MeetingOperationId,
@@ -3608,6 +3619,40 @@ impl MeetingSessionManager {
                 replacement_text: request.replacement_text,
                 removed: request.removed,
             })
+            .map_err(map_store_error)?;
+        self.emit_transcript_correction_changes(
+            store
+                .transcript_correction_projection_changes(before)
+                .map_err(map_store_error)?
+                .into_iter()
+                .filter(|session| session.session_id != request.session_id),
+        );
+        let result = self.result_for_receipt(store, receipt, request.session_id)?;
+        self.emit_session_changed(&result.snapshot);
+        Ok(result)
+    }
+
+    pub async fn segments_set_removed(
+        &self,
+        request: MeetingSegmentsRemovedRequest,
+    ) -> Result<MeetingMutationResult, MeetingCommandError> {
+        let store = self.store().await?;
+        let before = store
+            .transcript_correction_source_snapshot(request.session_id)
+            .map_err(map_store_error)?;
+        let receipt = store
+            .set_segments_removed(
+                StoreMutation {
+                    operation_id: request.operation_id,
+                    actor: OperationActor::User,
+                    requested_at_utc_ms: utc_now_ms(),
+                    session_id: request.session_id,
+                    expected_revision: request.expected_revision,
+                    command: MeetingCommandKind::SegmentEdit,
+                },
+                &request.segment_ids,
+                request.removed,
+            )
             .map_err(map_store_error)?;
         self.emit_transcript_correction_changes(
             store

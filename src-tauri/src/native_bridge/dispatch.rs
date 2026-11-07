@@ -2890,6 +2890,18 @@ pub(super) async fn call(
             let request = args.take("request")?;
             reply(crate::commands::meeting::meeting_segment_edit(app.state(), request).await)
         }
+        "meeting_segments_set_removed" => {
+            let mut args = Args::parse(params)?;
+            let request = args.take("request")?;
+            reply(
+                crate::commands::meeting::meeting_segments_set_removed(app.state(), request).await,
+            )
+        }
+        "meeting_recording_tail" => {
+            let mut args = Args::parse(params)?;
+            let session_id = args.take("sessionId")?;
+            reply(crate::commands::meeting::meeting_recording_tail(app.state(), session_id).await)
+        }
         "meeting_note_create" => {
             let mut args = Args::parse(params)?;
             let request = args.take("request")?;

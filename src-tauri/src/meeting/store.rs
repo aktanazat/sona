@@ -5194,6 +5194,38 @@ impl MeetingStore {
         })
     }
 
+    /// Takes several lines out of the transcript, or puts them back, as one
+    /// edit. Each line keeps the words it reads now.
+    pub(crate) fn set_segments_removed(
+        &self,
+        mutation: StoreMutation,
+        segment_ids: &[TranscriptSegmentId],
+        removed: bool,
+    ) -> Result<OperationReceipt, StoreError> {
+        if segment_ids.is_empty() {
+            return Err(StoreError::Invalid);
+        }
+        let session_id = mutation.session_id;
+        self.edit_session(mutation, "segment_edited", |transaction| {
+            for &segment_id in segment_ids {
+                let text: String = transaction
+                    .query_row(
+                        "SELECT COALESCE((SELECT e.replacement_text FROM meeting_segment_edits e
+                                           WHERE e.segment_id = s.segment_id
+                                           ORDER BY e.edit_sequence DESC LIMIT 1), s.base_text)
+                         FROM meeting_transcript_segments s WHERE s.segment_id = ?1",
+                        params![id(segment_id)],
+                        |row| row.get(0),
+                    )
+                    .optional()?
+                    .ok_or(StoreError::NotFound)?;
+                insert_segment_edit_in(transaction, session_id, segment_id, &text, removed)?;
+            }
+            mark_artifacts_out_of_date(transaction, session_id)?;
+            rebuild_search_documents_in(transaction, session_id)
+        })
+    }
+
     pub fn forget_question(
         &self,
         operation_id: MeetingOperationId,

@@ -27,6 +27,7 @@ pub mod ledger;
 #[cfg(test)]
 mod ledger_evals;
 pub(crate) mod local_generator;
+pub mod lone_tail;
 pub mod loop_types;
 pub mod mail_context;
 pub mod people_types;
