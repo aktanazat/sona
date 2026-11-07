@@ -7,6 +7,9 @@
 //! SONA_PROBE_ENGINE names in the form the settings keep it, such as
 //! `{"kind":"local_endpoint","base_url":"http://127.0.0.1:11434/v1","model":"sona-notes","context_window_tokens":16384}`.
 //! SONA_PROBE_PRINT_NOTES=1 also prints the pipeline's notes, words and all.
+//! A Sona export carries no bookmarks; a `bookmarks` list added beside its
+//! `review`, each `{"kind":"question","at_offset_ns":15500000000}`, presses
+//! them on the meeting before its notes are written.
 //!
 //! SONA_PROBE_MEETING=<export.json> <test binary> --ignored --exact \
 //!     meeting::processing::complete_reading::probe::notes_probe \
@@ -22,6 +25,14 @@ use std::time::Instant;
 #[derive(Deserialize)]
 struct Export {
     review: Review,
+    #[serde(default)]
+    bookmarks: Vec<Bookmark>,
+}
+
+#[derive(Deserialize)]
+struct Bookmark {
+    kind: crate::meeting::conversation_review::ConversationBookmarkKind,
+    at_offset_ns: u64,
 }
 
 #[derive(Deserialize)]
@@ -445,6 +456,12 @@ fn notes_probe() {
     let (_directory, store) = workflow_core_tests::store();
     let session_id = seed(&store, &export.review)
         .unwrap_or_else(|_| panic!("the scratch store would not take the transcript"));
+    for bookmark in &export.bookmarks {
+        workflow_core_tests::bookmark(&store, session_id, bookmark.at_offset_ns, bookmark.kind);
+    }
+    if !export.bookmarks.is_empty() {
+        println!("bookmarks: {} pressed", export.bookmarks.len());
+    }
     let choice = settings
         .as_ref()
         .map(|settings| NotesTemplateChoice {
