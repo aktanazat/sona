@@ -3,6 +3,7 @@ use super::{
     decode_json, encode_json, from_i64, id, parse_uuid, session_row, to_i64, utc_now_ms,
     MeetingStore, StoreError,
 };
+use crate::meeting::detection::machine::CalendarEventSummary;
 use crate::meeting::heard_plan_types::{
     HeardPlan, HeardPlanDraft, HeardPlanEdit, HeardPlanStatus, HeardPlanWindow,
 };
@@ -287,6 +288,86 @@ impl MeetingStore {
             return Err(StoreError::Conflict);
         }
         plan_in(&connection, plan_id)
+    }
+
+    /// The plan heard before `event` that the event keeps: one whose time
+    /// overlaps the event's, that has not happened yet, and that names
+    /// someone invited or carries the event's title. The plan nearest the
+    /// event's start wins.
+    pub(crate) fn heard_plan_for_event(
+        &self,
+        event: &CalendarEventSummary,
+    ) -> Result<Option<HeardPlan>, StoreError> {
+        let invited = event
+            .attendees
+            .iter()
+            .filter(|attendee| !attendee.is_self)
+            .collect::<Vec<_>>();
+        let emails = invited
+            .iter()
+            .filter_map(|attendee| attendee.email.clone())
+            .collect::<Vec<_>>();
+        let known = self.person_ids_for_calendar_emails(&emails)?;
+        let connection = self.connection()?;
+        let mut people = Vec::with_capacity(known.len());
+        for person_id in known.into_values().collect::<HashSet<_>>() {
+            people.push(person_by_id_in(&connection, person_id)?);
+        }
+        let invites = |name: &String| {
+            let said = normalized(name);
+            people.iter().any(|person| answers_to(person, name))
+                || invited.iter().any(|attendee| {
+                    !said.is_empty()
+                        && (normalized(&attendee.name) == said
+                            || attendee
+                                .name
+                                .split_whitespace()
+                                .next()
+                                .is_some_and(|first| normalized(first) == said))
+                })
+        };
+        let title = folded(&event.title);
+        let plans = plans_in(
+            &connection,
+            "source.phase != 'deleting'
+               AND COALESCE(source.started_at_utc_ms, source.created_at_utc_ms) < ?1
+               AND p.start_utc_ms < ?2 AND p.end_utc_ms > ?1",
+            params![event.start_utc_ms, event.end_utc_ms],
+            utc_now_ms(),
+            &HashSet::new(),
+        )?;
+        Ok(plans
+            .into_iter()
+            .filter(|plan| plan.happened_session_id.is_none())
+            .filter(|plan| folded(&plan.title) == title || plan.people.iter().any(&invites))
+            .min_by_key(|plan| {
+                plan.window.map_or(i64::MAX, |window| {
+                    (window.start_utc_ms - event.start_utc_ms).abs()
+                })
+            }))
+    }
+
+    /// The plans heard with a set time that starts after `after_utc_ms` and
+    /// no later than `until_utc_ms`, not turned down and not happened yet:
+    /// the meetings a heard plan predicts, due for their prep.
+    pub(crate) fn heard_plans_starting(
+        &self,
+        after_utc_ms: i64,
+        until_utc_ms: i64,
+    ) -> Result<Vec<HeardPlan>, StoreError> {
+        let connection = self.connection()?;
+        let plans = plans_in(
+            &connection,
+            "source.phase != 'deleting' AND p.all_day = 0 AND p.declined_at_utc_ms IS NULL
+               AND p.start_utc_ms > ?1 AND p.start_utc_ms <= ?2",
+            params![after_utc_ms, until_utc_ms],
+            utc_now_ms(),
+            &HashSet::new(),
+        )?;
+        Ok(plans
+            .into_iter()
+            .filter(|plan| plan.happened_session_id.is_none())
+            .collect())
     }
 }
 

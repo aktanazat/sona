@@ -2,6 +2,9 @@ use super::workflow_core_tests::{
     link, meeting, person, reviewable_meeting, store, transcript_segments,
 };
 use super::{MeetingStore, StoreError};
+use crate::meeting::detection::machine::{
+    CalendarAttendee, CalendarEventSummary, ParticipationStatus,
+};
 use crate::meeting::heard_plan_types::{
     HeardPlan, HeardPlanEdit, HeardPlanStatus, HeardPlanWindow,
 };
@@ -512,4 +515,94 @@ where_the_plan_happened! {
         local(2026, 11, 5, 14, 5), "Dana Lee", "confirmed" => false;
     a_recording_after_its_hour_is_not_it:
         local(2026, 11, 5, 16, 0), "Nolan Reyes", "confirmed" => false;
+}
+
+/// An invited event on Thursday, with `invited` and the user.
+fn invited_event(title: &str, start_utc_ms: i64, invited: &str) -> CalendarEventSummary {
+    let attendee = |name: &str, is_self: bool| CalendarAttendee {
+        name: name.into(),
+        status: ParticipationStatus::Accepted,
+        email: None,
+        is_self,
+    };
+    CalendarEventSummary {
+        event_key: format!("series-1#{start_utc_ms}"),
+        series_key: "series-1".into(),
+        title: title.into(),
+        attendee_count: 2,
+        start_utc_ms,
+        end_utc_ms: start_utc_ms + 3_600_000,
+        attendees: vec![attendee("Aktan Azat", true), attendee(invited, false)],
+        notes: None,
+        calendar_name: None,
+        url: None,
+        location: None,
+        place: None,
+    }
+}
+
+/// An invited event keeps the plan heard for its time when it carries the
+/// plan's title or invites someone the plan names, and its prep carries
+/// the words that made the plan and where they were said.
+macro_rules! an_event_keeps_the_plan_heard_for_it {
+    ($($name:ident: $title:expr, $start:expr, $invited:expr => $keeps:expr;)*) => { $(
+        #[test]
+        fn $name() {
+            let (_directory, store) = store();
+            let sync = weekly_sync(&store);
+            let plans = read_with(&store, sync, &[PRICING_REVIEW]).unwrap();
+
+            let kept = store
+                .heard_plan_for_event(&invited_event($title, $start, $invited))
+                .unwrap();
+
+            assert_eq!(
+                kept.map(|plan| (plan.plan_id, plan.quote, plan.citation.is_some())),
+                $keeps.then(|| (plans[0].plan_id, Some(SAID[1].to_string()), true))
+            );
+        }
+    )* };
+}
+
+an_event_keeps_the_plan_heard_for_it! {
+    an_invite_to_someone_the_plan_names_keeps_it:
+        "Catch-up", local(2026, 11, 5, 14, 0), "Nolan Reyes" => true;
+    an_event_with_the_plans_title_keeps_it:
+        "Pricing Review", local(2026, 11, 5, 14, 0), "Morgan Lee" => true;
+    an_event_with_neither_keeps_nothing:
+        "Catch-up", local(2026, 11, 5, 14, 0), "Morgan Lee" => false;
+    an_invite_at_another_time_keeps_nothing:
+        "Catch-up", local(2026, 11, 6, 14, 0), "Nolan Reyes" => false;
+}
+
+/// A plan with a time and no event still gets its prep: it comes due once
+/// its start is within the lead, not after it has started, and not once
+/// he has turned it down.
+#[test]
+fn a_planned_time_comes_due_for_its_prep_until_turned_down() {
+    let (_directory, store) = store();
+    let sync = weekly_sync(&store);
+    let plan_id = read_with(&store, sync, &[PRICING_REVIEW]).unwrap()[0].plan_id;
+    let due = |after_utc_ms, until_utc_ms| {
+        store
+            .heard_plans_starting(after_utc_ms, until_utc_ms)
+            .unwrap()
+            .into_iter()
+            .map(|plan| plan.plan_id)
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(
+        due(local(2026, 11, 5, 13, 59), local(2026, 11, 5, 14, 0)),
+        [plan_id]
+    );
+    assert_eq!(
+        due(local(2026, 11, 5, 14, 0), local(2026, 11, 5, 14, 1)),
+        []
+    );
+    store.heard_plan_not_now(plan_id).unwrap();
+    assert_eq!(
+        due(local(2026, 11, 5, 13, 59), local(2026, 11, 5, 14, 0)),
+        []
+    );
 }

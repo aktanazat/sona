@@ -50,11 +50,13 @@ use tauri_specta::Event as _;
 use uuid::Uuid;
 
 use crate::meeting::consent_panel::ConsentPanelLayout;
+use crate::meeting::heard_plan_types::HeardPlan;
 use crate::meeting::people_types::{PersonBriefingRow, PersonId};
 use crate::meeting::session::{MeetingSessionManager, MeetingTitleSetRequest};
 use crate::meeting::types::{
-    MeetingArtifactState, MeetingNavigationDestination, MeetingOperationId, MeetingPhase,
-    MeetingSessionId, MeetingSessionSnapshot, OperationReceipt, OperationResult, SourceKind,
+    ArtifactCitation, HeardPlanId, MeetingArtifactState, MeetingNavigationDestination,
+    MeetingOperationId, MeetingPhase, MeetingSessionId, MeetingSessionSnapshot, OperationReceipt,
+    OperationResult, SourceKind,
 };
 use crate::meeting::workflow_types::WorkflowEventKind;
 use crate::settings::AppSettings;
@@ -152,6 +154,70 @@ pub struct MeetingPrepCard {
     pub waiting_on_count: u64,
     pub participants: Vec<MeetingPrepParticipant>,
     pub can_record_when_starts: bool,
+    /// False for a meeting only a heard plan predicts: there is no event to
+    /// brief or arm.
+    pub on_calendar: bool,
+    /// Where it is: the place the invite pins, else the plan's place as said.
+    pub place: Option<String>,
+    /// The plan heard for this meeting, with the words that made it.
+    pub plan: Option<MeetingPrepPlan>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct MeetingPrepPlan {
+    pub plan_id: HeardPlanId,
+    pub session_id: MeetingSessionId,
+    pub title: String,
+    pub quote: Option<String>,
+    pub citation: Option<ArtifactCitation>,
+}
+
+impl From<HeardPlan> for MeetingPrepPlan {
+    fn from(plan: HeardPlan) -> Self {
+        Self {
+            plan_id: plan.plan_id,
+            session_id: plan.session_id,
+            title: plan.title,
+            quote: plan.quote,
+            citation: plan.citation,
+        }
+    }
+}
+
+impl MeetingPrepCard {
+    /// The prep for a meeting a heard plan predicts and no calendar event
+    /// holds. `None` for a plan with no set time.
+    fn for_plan(plan: HeardPlan) -> Option<Self> {
+        let window = plan.window.filter(|window| !window.all_day)?;
+        Some(Self {
+            event_key: format!("plan:{}", plan.plan_id.uuid()),
+            series_key: String::new(),
+            title: plan.title.clone(),
+            start_utc_ms: window.start_utc_ms,
+            last_meeting_id: Some(plan.session_id),
+            headline: String::new(),
+            mine_open_loops: Vec::new(),
+            mine_open_loop_count: 0,
+            waiting_on_count: 0,
+            participants: Vec::new(),
+            can_record_when_starts: false,
+            on_calendar: false,
+            place: plan.place.clone(),
+            plan: Some(plan.into()),
+        })
+    }
+}
+
+/// Where a meeting is, for its prep: the place the invite pins, else the
+/// place its plan named. Typed location text is often a call link, so it
+/// is left to the brief.
+fn prep_place(event: &CalendarEventSummary, plan: Option<&HeardPlan>) -> Option<String> {
+    event
+        .place
+        .as_ref()
+        .map(|place| place.name.clone())
+        .or_else(|| plan.and_then(|plan| plan.place.clone()))
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
@@ -1001,6 +1067,7 @@ impl DetectionRuntime {
     /// owns the monitor for exactly as long as the loop runs.
     pub fn spawn_loop(self: &Arc<Self>, level: Arc<InputDeviceLevel>) {
         self.spawn_preparation_loop();
+        self.spawn_plan_prep_loop();
         self.enabled.store(
             crate::settings::get_settings(&self.app).detection_enabled,
             Ordering::Release,
@@ -1671,6 +1738,7 @@ impl DetectionRuntime {
             .ok()
             .flatten()
             .is_some();
+        let plan = store.heard_plan_for_event(event).ok().flatten();
         Some(MeetingPrepCard {
             event_key: event.event_key.clone(),
             series_key: event.series_key.clone(),
@@ -1687,13 +1755,19 @@ impl DetectionRuntime {
             waiting_on_count,
             participants,
             can_record_when_starts,
+            on_calendar: true,
+            place: prep_place(event, plan.as_ref()),
+            plan: plan.map(MeetingPrepPlan::from),
         })
     }
 
     async fn present_prep(self: &Arc<Self>, event: CalendarEventSummary, now_utc_ms: i64) {
-        let Some(card) = self.prep_card(&event, now_utc_ms).await else {
-            return;
-        };
+        if let Some(card) = self.prep_card(&event, now_utc_ms).await {
+            self.present_prep_card(card, now_utc_ms).await;
+        }
+    }
+
+    async fn present_prep_card(self: &Arc<Self>, card: MeetingPrepCard, now_utc_ms: i64) {
         if self.active_capture().await.is_some() {
             return;
         }
@@ -1715,7 +1789,7 @@ impl DetectionRuntime {
         if self.active_capture().await.is_some() {
             return;
         }
-        let minutes = event
+        let minutes = card
             .start_utc_ms
             .saturating_sub(now_utc_ms)
             .saturating_add(59_999)
@@ -1727,7 +1801,7 @@ impl DetectionRuntime {
             format!("in {minutes} minutes")
         };
         let pending = PendingPanel::Ritual(PendingRitual {
-            notification_title: format!("{} — {when}", event.title),
+            notification_title: format!("{} — {when}", card.title),
             ritual: MeetingRitual::Prep(card),
             idle_generation: 0,
         });
@@ -2223,13 +2297,19 @@ impl DetectionRuntime {
             (MeetingRitual::Prep(card), MeetingRitualAction::PrepRecord) => {
                 // The card carries only the key. A meeting moved or cancelled
                 // since it appeared has nothing left to record.
-                let calendar = Arc::clone(&self.calendar);
-                let event_key = card.event_key.clone();
-                let Ok(Some(event)) =
-                    tauri::async_runtime::spawn_blocking(move || calendar.event_by_key(&event_key))
-                        .await
-                else {
-                    return false;
+                let event = if card.on_calendar {
+                    let calendar = Arc::clone(&self.calendar);
+                    let event_key = card.event_key.clone();
+                    let Ok(Some(event)) = tauri::async_runtime::spawn_blocking(move || {
+                        calendar.event_by_key(&event_key)
+                    })
+                    .await
+                    else {
+                        return false;
+                    };
+                    Some(event)
+                } else {
+                    None
                 };
                 if let Some(session_id) = card.last_meeting_id {
                     if !self
@@ -2246,12 +2326,25 @@ impl DetectionRuntime {
                     }
                 }
                 self.finish_ritual(ritual_id);
-                let prompt = PromptKind::CalendarEvent {
-                    event_key: event.event_key.clone(),
-                    event_title: event.title.clone(),
-                };
-                self.open_capture(&prompt, Some(event.end_utc_ms), utc_now_ms(), Some(event))
-                    .await;
+                match event {
+                    Some(event) => {
+                        let prompt = PromptKind::CalendarEvent {
+                            event_key: event.event_key.clone(),
+                            event_title: event.title.clone(),
+                        };
+                        self.open_capture(
+                            &prompt,
+                            Some(event.end_utc_ms),
+                            utc_now_ms(),
+                            Some(event),
+                        )
+                        .await;
+                    }
+                    None => {
+                        self.open_capture(&PromptKind::UnknownMicSource, None, utc_now_ms(), None)
+                            .await;
+                    }
+                }
                 true
             }
             (MeetingRitual::Prep(card), MeetingRitualAction::PrepOpenBrief) => {
@@ -3197,6 +3290,8 @@ impl PromptResponder for RuntimeResponder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::meeting::context::ConversationLocation;
+    use crate::meeting::heard_plan_types::{HeardPlanStatus, HeardPlanWindow};
 
     const NOW: i64 = 1_700_000_000_000;
 
@@ -3482,6 +3577,9 @@ mod tests {
                 person_id: None,
             }],
             can_record_when_starts: true,
+            on_calendar: true,
+            place: None,
+            plan: None,
         }
     }
 
@@ -3499,6 +3597,105 @@ mod tests {
 
         let payload = serde_json::to_value(card).expect("wrap card serializes");
         assert_eq!(payload["unresolvedSpeakerCount"], serde_json::Value::Null);
+    }
+
+    fn heard_plan(window: HeardPlanWindow, place: Option<&str>) -> HeardPlan {
+        HeardPlan {
+            plan_id: HeardPlanId::from_uuid(Uuid::nil()),
+            session_id: MeetingSessionId::from_uuid(Uuid::nil()),
+            title: "Pricing review".to_string(),
+            people: vec!["Nolan".to_string()],
+            when_text: "Thursday at 2".to_string(),
+            window: Some(window),
+            place: place.map(str::to_string),
+            quote: Some("Pricing review Thursday at 2 with Nolan.".to_string()),
+            citation: None,
+            status: HeardPlanStatus::Heard,
+            on_calendar: false,
+            declined: false,
+            edited: false,
+            happened_session_id: None,
+            created_at_utc_ms: 0,
+            updated_at_utc_ms: 0,
+        }
+    }
+
+    const THURSDAY_AT_TWO: HeardPlanWindow = HeardPlanWindow {
+        start_utc_ms: 1_000_000,
+        end_utc_ms: 4_600_000,
+        all_day: false,
+    };
+
+    /// "At:" names the place the invite pins, else the place the plan
+    /// named, and nothing when neither says one.
+    #[test]
+    fn prep_says_where_from_the_invite_pin_else_the_plan() {
+        let mut event = CalendarEventSummary {
+            event_key: "series-1#1000000".to_string(),
+            series_key: "series-1".to_string(),
+            title: "Pricing review".to_string(),
+            attendee_count: 2,
+            start_utc_ms: THURSDAY_AT_TWO.start_utc_ms,
+            end_utc_ms: THURSDAY_AT_TWO.end_utc_ms,
+            attendees: Vec::new(),
+            notes: None,
+            calendar_name: None,
+            url: None,
+            location: Some("https://zoom.us/j/1".to_string()),
+            place: None,
+        };
+        let plan = heard_plan(THURSDAY_AT_TWO, Some("the office"));
+
+        assert_eq!(prep_place(&event, None), None);
+        assert_eq!(
+            prep_place(&event, Some(&plan)).as_deref(),
+            Some("the office")
+        );
+        event.place = Some(ConversationLocation {
+            name: "Hyatt lobby".to_string(),
+            latitude: 38.54,
+            longitude: -121.74,
+        });
+        assert_eq!(
+            prep_place(&event, Some(&plan)).as_deref(),
+            Some("Hyatt lobby")
+        );
+    }
+
+    /// A plan with a time and no event gets a card of its own at that time,
+    /// one that offers no brief, since there is no event to brief; a day
+    /// said with no time gets none.
+    #[test]
+    fn a_planned_time_with_no_event_gets_a_card_without_a_brief() {
+        let card = MeetingPrepCard::for_plan(heard_plan(THURSDAY_AT_TWO, Some("the office")))
+            .expect("a timed plan gets a card");
+
+        assert_eq!(
+            (
+                card.event_key.as_str(),
+                card.start_utc_ms,
+                card.on_calendar,
+                card.place.as_deref(),
+                card.plan.and_then(|plan| plan.quote).as_deref()
+            ),
+            (
+                "plan:00000000-0000-0000-0000-000000000000",
+                THURSDAY_AT_TWO.start_utc_ms,
+                false,
+                Some("the office"),
+                Some("Pricing review Thursday at 2 with Nolan.")
+            )
+        );
+        assert_eq!(
+            MeetingPrepCard::for_plan(heard_plan(
+                HeardPlanWindow {
+                    all_day: true,
+                    ..THURSDAY_AT_TWO
+                },
+                None
+            )),
+            None
+        );
     }
 
     #[test]
