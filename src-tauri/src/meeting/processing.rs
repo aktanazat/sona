@@ -5848,15 +5848,7 @@ fn validate_artifact_output(
             })
         })
         .collect::<Result<Vec<_>, Rejection>>()?;
-    let decisions = decisions
-        .into_iter()
-        .filter(|decision| {
-            !action_items
-                .iter()
-                .any(|item| restates_task(decision, item))
-        })
-        .collect();
-    Ok(GeneratedMeetingArtifacts {
+    let mut artifacts = GeneratedMeetingArtifacts {
         summary,
         summary_trace,
         outline,
@@ -5872,7 +5864,9 @@ fn validate_artifact_output(
         plain_because: None,
         plain: false,
         left_out: Vec::new(),
-    })
+    };
+    drop_restated_items(&mut artifacts);
+    Ok(artifacts)
 }
 
 fn validate_cited_text(
@@ -6558,33 +6552,106 @@ fn says_words(text: &[String], phrase: &[String]) -> bool {
     !phrase.is_empty() && text.windows(phrase.len()).any(|words| words == phrase)
 }
 
-/// Whether `decision` only restates `item`'s task: the two cite a line in
-/// common, the decision says at least two thirds of the task's words, at
-/// least half of its own words are the task's, and it names no number or
-/// negation the task does not. A local model filed most tasks it heard
-/// twice, once as a decision; a decision that also carries a task, such as
-/// a launch date beside the email due before it, says more than the task and
-/// stays, and so does a decision calling the task off.
-fn restates_task(decision: &CitedArtifactText, item: &MeetingActionItem) -> bool {
-    let shares_a_line = decision.citations.iter().any(|citation| {
-        item.text
+/// Whether `text` only restates `earlier`: they cite a line in common,
+/// `text` says at least two thirds of `earlier`'s words, at least half of
+/// its own words are `earlier`'s, and it names no number or negation
+/// `earlier` does not. A decision that also carries a task, such as a launch
+/// date beside the email due before it, says more than the task and stays,
+/// and so does a decision calling the task off.
+fn restates(text: &CitedArtifactText, earlier: &CitedArtifactText) -> bool {
+    let shares_a_line = text.citations.iter().any(|citation| {
+        earlier
             .citations
             .iter()
             .any(|other| other.segment_id == citation.segment_id)
     });
-    let said: HashSet<String> = normalized_words(&decision.text).into_iter().collect();
-    let task: HashSet<String> = normalized_words(&item.text.text).into_iter().collect();
-    let shared = task.intersection(&said).count();
+    let said: HashSet<String> = normalized_words(&text.text).into_iter().collect();
+    let before: HashSet<String> = normalized_words(&earlier.text).into_iter().collect();
+    let shared = before.intersection(&said).count();
     let adds_a_number_or_negation = said.iter().any(|word| {
         (word.bytes().all(|byte| byte.is_ascii_digit())
             || matches!(word.as_str(), "not" | "no" | "t" | "never" | "won"))
-            && !task.contains(word)
+            && !before.contains(word)
     });
     shares_a_line
-        && !task.is_empty()
+        && !before.is_empty()
         && !adds_a_number_or_negation
-        && 3 * shared >= 2 * task.len()
+        && 3 * shared >= 2 * before.len()
         && 2 * shared >= said.len()
+}
+
+/// The notes without an item that only restates one in a list read first:
+/// to-dos, which carry an owner and a date, then decisions, questions and
+/// risks. A local model filed most tasks it heard twice, once as a decision,
+/// and a risk or question that only repeats a decision word for word tells
+/// the reader nothing new.
+fn drop_restated_items(content: &mut GeneratedMeetingArtifacts) {
+    let GeneratedMeetingArtifacts {
+        action_items,
+        decisions,
+        key_questions,
+        risks,
+        ..
+    } = content;
+    let a_task =
+        |text: &CitedArtifactText| action_items.iter().any(|item| restates(text, &item.text));
+    decisions.retain(|text| !a_task(text));
+    key_questions
+        .retain(|text| !a_task(text) && !decisions.iter().any(|kept| restates(text, kept)));
+    risks.retain(|text| {
+        !a_task(text)
+            && !decisions
+                .iter()
+                .chain(key_questions.iter())
+                .any(|kept| restates(text, kept))
+    });
+}
+
+/// Each list of notes joined from parts without an item that only restates
+/// one kept before it: parts that share lines write the same item, and on a
+/// 30-minute meeting the joined notes held ten decisions twice, eight of
+/// them word for word. Of two to-dos saying one thing, the one naming more
+/// of its owner and date keeps the first one's place.
+fn drop_repeated_items(content: &mut GeneratedMeetingArtifacts) {
+    let GeneratedMeetingArtifacts {
+        action_items,
+        decisions,
+        key_questions,
+        risks,
+        ..
+    } = content;
+    let named = |item: &MeetingActionItem| {
+        usize::from(item.owner_text.is_some()) + usize::from(item.due_text.is_some())
+    };
+    let mut index = 0;
+    while index < action_items.len() {
+        let item = &action_items[index].text;
+        match action_items[..index]
+            .iter()
+            .position(|kept| restates(item, &kept.text))
+        {
+            Some(kept) => {
+                if named(&action_items[index]) > named(&action_items[kept]) {
+                    action_items.swap(kept, index);
+                }
+                action_items.remove(index);
+            }
+            None => index += 1,
+        }
+    }
+    for list in [decisions, key_questions, risks] {
+        let mut index = 0;
+        while index < list.len() {
+            if list[..index]
+                .iter()
+                .any(|kept| restates(&list[index], kept))
+            {
+                list.remove(index);
+            } else {
+                index += 1;
+            }
+        }
+    }
 }
 
 const SPELLED_UNITS: [[&str; 2]; 20] = [
@@ -9695,7 +9762,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_decision_that_only_restates_a_task_is_left_to_the_task() {
+    fn an_item_that_only_restates_a_task_or_decision_is_left_to_it() {
         let session_id = MeetingSessionId::new();
         let evidence = vec![
             segment_line(session_id, 1, "Dev, the SSO redirect bug gets fixed this week."),
@@ -9714,7 +9781,7 @@ pub(crate) mod tests {
         let launch = "The new onboarding launches on Monday the twenty-fourth, with Tom drafting the launch email by Monday the seventeenth.";
         let checklist = "We chose the checklist over the tour because users got lost, and Lena delivers mockups by Thursday the thirteenth.";
         let held = "We will not ship the beta on Friday.";
-        let raw = notes(
+        let mut raw = notes(
             &evidence[1],
             vec![
                 cited(
@@ -9747,6 +9814,11 @@ pub(crate) mod tests {
                 task(&evidence[3], "Ship the beta on Friday.", None, None),
             ],
         );
+        raw.key_questions.push(cited(
+            &evidence[0],
+            "The SSO redirect bug will be fixed this week.",
+        ));
+        raw.risks.push(cited(&evidence[3], held));
         let artifacts = validate_artifact_output(
             &raw,
             &evidence,
@@ -9761,6 +9833,8 @@ pub(crate) mod tests {
             .collect();
         assert_eq!(decisions, [launch, checklist, held]);
         assert_eq!(artifacts.action_items.len(), 4);
+        assert!(artifacts.key_questions.is_empty());
+        assert!(artifacts.risks.is_empty());
     }
 
     #[test]
