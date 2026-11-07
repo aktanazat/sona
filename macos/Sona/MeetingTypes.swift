@@ -2292,6 +2292,14 @@ enum MeetingRequest {
         return wrap(request)
     }
 
+    static func segmentsRemoved(_ sessionId: MeetingSessionId, revision: Int,
+                                segmentIds: [TranscriptSegmentId], removed: Bool) -> [String: JSONValue] {
+        var request = mutation(sessionId, revision: revision)
+        request["segment_ids"] = .array(segmentIds.map(JSONValue.string))
+        request["removed"] = .bool(removed)
+        return wrap(request)
+    }
+
     static func noteCreate(_ sessionId: MeetingSessionId, revision: Int,
                            startOffsetNs: Int64?, body: String) -> [String: JSONValue] {
         var request = mutation(sessionId, revision: revision)

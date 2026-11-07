@@ -1812,6 +1812,8 @@ pub fn run(cli_args: CliArgs) {
             commands::call_names::meeting_call_name_dismiss,
             commands::meeting::meeting_speaker_merge,
             commands::meeting::meeting_segment_edit,
+            commands::meeting::meeting_segments_set_removed,
+            commands::meeting::meeting_recording_tail,
             commands::meeting::meeting_note_create,
             commands::meeting::meeting_note_update,
             commands::meeting::meeting_note_delete,

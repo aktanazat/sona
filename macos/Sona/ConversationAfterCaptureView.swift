@@ -21,6 +21,7 @@ struct ConversationAfterCaptureView: View {
         VStack(alignment: .leading, spacing: 24) {
             if !store.transcriptDeleted {
                 MeetingVoiceIdentitySection(sessionId: snapshot.session.sessionId)
+                RecordingTailSection(store: store, snapshot: snapshot, core: core)
                 if !uncertain.isEmpty {
                     PageSection("Check words") {
                         VStack(alignment: .leading, spacing: 12) {

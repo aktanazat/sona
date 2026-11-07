@@ -1458,6 +1458,15 @@ final class MeetingsStore {
         }
     }
 
+    /// Takes several lines out of the transcript, or puts them back, as one
+    /// edit.
+    func setLinesRemoved(_ segmentIds: [TranscriptSegmentId], removed: Bool) {
+        mutate(removed ? "Cutting the end" : "Putting the lines back", "meeting_segments_set_removed") { session in
+            MeetingRequest.segmentsRemoved(
+                session.sessionId, revision: session.revision, segmentIds: segmentIds, removed: removed)
+        }
+    }
+
     func setNewNote(_ text: String) {
         newNote = text
     }
