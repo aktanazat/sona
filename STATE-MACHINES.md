@@ -28,7 +28,7 @@ Result: 86 candidates. 55 confirmed, 19 rejected, 5 unreachable in the shipped a
 | B5 | Transcription | Heard speech that decodes to nothing ends with no feedback | confirmed for "VAD forwarded speech, the model produced nothing" | fixed: speech that decodes to nothing is a failed capture kept for retry, with a message |
 | B6 | Transcription | Starting a dictation or retry during another decode reloads the same model | confirmed | fixed: one engine slot records its build; a second load of the same model is skipped |
 | B9 | Transcription | Clipboard restore keeps only plain text or one image | confirmed | fixed: the paste restores every clipboard item and type, including the concealed marker |
-| B10 | Transcription | Paste and auto-submit go to whatever app is in front at delivery time | confirmed | fixed: delivery is refused if the target window changed; text kept in the Library |
+| B10 | Transcription | Paste and auto-submit go to whatever app is in front at delivery time | confirmed | fixed: delivery is held if the target window changed; text kept in the Library and offered as "Paste here" on the pill, never submitted |
 | B13 | Transcription | Switching models mid-recording reloads the old model at stop | confirmed (low cost: slower paste, two wasted loads) | fixed: a lease keeps the in-use model; switching models waits for it |
 | B14 | Transcription | An accelerator change is honored only by dictation and retry | confirmed (moderate) | fixed: the engine build includes the accelerator, so imports, meetings and chat voice follow it |
 | B15 | Transcription | Deleting the model an in-flight recording uses fails that dictation | confirmed, but only through a narrower path that goes through B13 | fixed with B13 |
@@ -688,20 +688,21 @@ The map's first unchecked invariant ("whisper saw the whole `vocabulary_initial_
 #### M9. Dictation stop and outcome
 | outcome | what happens | path |
 |---|---|---|
-| Transcribed, text | delivered on the main thread, after the focus check | A:2237, A:2385-2390 |
+| Transcribed, text | delivered on the main thread, after the focus check | A:2447-2475, A:1354-1393 |
 | Transcribed, emptied by cleanup | row saved as not dispatched, no notice (filler-only or "scratch that", by design) | A:2237 |
 | DecodedNothing (Detected, the model wrote nothing) | `transcription-error`, failed row with the WAV, not-dispatched receipt | A:2272-2280, A:471-490 |
 | NoSpeech (Undetected or Unknown, the model wrote nothing) | no-speech receipt and a `recording-error` notice | A:2244-2271 |
 | Err | `transcription-error`, failed row with the WAV | A:2444, A:471-490 |
-| text ready, focus moved since stop | `DefinitelyNotDispatched`, `paste-error`, text in the Library, no submit | D:152-155, A:2396-2406 |
+| text ready, focus moved since stop | `DefinitelyNotDispatched`, `paste-error` with `focus_moved`, text in the Library and held for "Paste here", no submit | D:151-166, A:1366-1376 |
+| held, "Paste here" clicked | the held words go to the control focused now, never submitted; a new dictation or another refusal drops them | A:1397-1403, A:1338-1349, A:1996 |
 
 #### M10. Delivery and the reliable paste transaction
-Route: focus check (D:152-155), then accessibility insertion, then the clipboard (C:899-958).
+Route: focus check (D:151-160), then accessibility insertion, then the clipboard (C:901-960).
 
 | from | event | guard | to | path |
 |---|---|---|---|---|
-| text ready | dispatch | the method inserts at the focus, and the pid or element read at stop and now differ | DefinitelyNotDispatched; nothing inserted or submitted | D:152-155, D:211-218, D:105-111 |
-| text ready | dispatch | same focus, a part unreadable, or method None or ExternalScript | accessibility insertion, then the clipboard, as before | D:156 onward |
+| text ready | dispatch | the method inserts at the focus, and the pid or element read at stop and now differ | DefinitelyNotDispatched; nothing inserted or submitted; the words go back to the caller | D:151-166, D:239-245, D:118-124 |
+| text ready | dispatch | same focus, a part unreadable, or method None or ExternalScript | accessibility insertion, then the clipboard, as before | D:182 onward |
 
 Transaction states (P), changed steps:
 1. Snapshot: every item, every type, its bytes (P:269, C:974-994).

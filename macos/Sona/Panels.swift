@@ -96,13 +96,18 @@ struct HUDPill: View {
 
     @ViewBuilder private var activeContent: some View {
         if let feedback = presentation.feedback {
-            HStack(spacing: 8) {
-                Image(systemName: feedback.symbol)
-                    .font(.system(size: 13, weight: .semibold))
-                Text(feedback.label)
-                    .font(.system(size: 12, weight: .medium))
+            if feedback == .held {
+                Button(action: model.pasteHeldDictation) {
+                    feedbackLabel(feedback)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .accessibilityHint("Pastes the words into the window in front.")
+            } else {
+                feedbackLabel(feedback)
+                    .accessibilityElement(children: .combine)
             }
-            .accessibilityElement(children: .combine)
         } else {
             HStack(spacing: 6) {
                 control("Cancel", symbol: "xmark") { model.cancelCapture() }
@@ -135,6 +140,15 @@ struct HUDPill: View {
             }
             .padding(.horizontal, 6)
             .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func feedbackLabel(_ feedback: PillFeedback) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: feedback.symbol)
+                .font(.system(size: 13, weight: .semibold))
+            Text(feedback.label)
+                .font(.system(size: 12, weight: .medium))
         }
     }
 

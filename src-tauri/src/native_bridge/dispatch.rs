@@ -1842,6 +1842,14 @@ pub(super) async fn call(
             })
             .await?
         }
+        "paste_held_dictation" => {
+            let handle = app.clone();
+            on_main_thread(app, move || {
+                crate::commands::paste_held_dictation(handle.clone());
+                encode_plain(())
+            })
+            .await?
+        }
         "is_portable" => {
             on_main_thread(app, move || encode_plain(crate::commands::is_portable())).await?
         }
