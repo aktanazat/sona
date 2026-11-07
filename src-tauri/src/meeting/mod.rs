@@ -15,6 +15,7 @@ pub mod detection;
 pub mod diarization;
 pub mod digest;
 pub mod document_types;
+pub mod evening;
 pub mod export;
 pub mod folder_types;
 pub mod folders;

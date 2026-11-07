@@ -26,6 +26,7 @@
 //! the same constraint `PromptKind::notification_title` documents.
 
 use super::detection::notify::{DigestOpener, PromptPresenter};
+use super::evening::EveningError;
 use super::learning::{no_inputs, AppLearningInputs};
 use super::session::MeetingSessionManager;
 use super::store::digest::MeetingDigestCounts;
@@ -182,23 +183,50 @@ impl MeetingSessionManager {
             // next tick of the same day tries again, and what the store
             // already holds for that day is not run twice.
             let mut last_raised = None::<String>;
+            // The evening pass's own memory. A pass stopped by a recording
+            // leaves it empty so the next tick tries again; one that failed
+            // otherwise waits for tomorrow rather than asking the model every
+            // minute.
+            let mut last_evening = None::<String>;
             loop {
                 thread::sleep(TICK);
                 let settings = crate::settings::get_settings(&app);
-                let Some(day) = due_digest_day(
-                    Local::now(),
+                let now = Local::now();
+                if let Some(day) = due_digest_day(
+                    now,
                     settings.meeting_digest_enabled,
                     settings.meeting_digest_minute_of_day,
                     last_raised.as_deref(),
-                ) else {
-                    continue;
-                };
-                match manager.raise_digest(&app, prompts.as_ref(), &day) {
-                    Ok(outcome) => {
-                        log::info!("Evening digest for {}: {outcome:?}", day.local_day.as_str());
-                        last_raised = Some(day.local_day);
+                ) {
+                    match manager.raise_digest(&app, prompts.as_ref(), &day) {
+                        Ok(outcome) => {
+                            log::info!(
+                                "Evening digest for {}: {outcome:?}",
+                                day.local_day.as_str()
+                            );
+                            last_raised = Some(day.local_day);
+                        }
+                        Err(error) => log::warn!("Evening digest could not run: {error:?}"),
                     }
-                    Err(error) => log::warn!("Evening digest could not run: {error:?}"),
+                }
+                if let Some(day) = due_digest_day(
+                    now,
+                    settings.meeting_digest_enabled,
+                    settings.meeting_digest_minute_of_day,
+                    last_evening.as_deref(),
+                ) {
+                    match manager.evening_scheduled(
+                        &app,
+                        &day,
+                        settings.meeting_digest_minute_of_day,
+                    ) {
+                        Ok(()) => last_evening = Some(day.local_day),
+                        Err(EveningError::Busy) => {}
+                        Err(EveningError::Failed(error)) => {
+                            log::warn!("Evening lines could not be written: {error}");
+                            last_evening = Some(day.local_day);
+                        }
+                    }
                 }
             }
         });

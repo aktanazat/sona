@@ -755,6 +755,7 @@ private struct MeetingDigestRows: View {
         ToggleRow(
             title: "Evening digest",
             detail: "One notification at the end of a day that had meetings or closed loops. "
+                + "Home also sums up the day and suggests where untitled recordings belong. "
                 + "Everything stays on this Mac.",
             isOn: Binding(
                 get: { store.settings.digestEnabled },
