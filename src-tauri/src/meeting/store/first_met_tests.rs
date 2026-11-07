@@ -111,7 +111,7 @@ fn an_introduction_is_offered_as_the_speaker_who_made_it() {
         )
     );
     assert!(!store
-        .context_suggestions(lobby, NOW)
+        .context_suggestions(lobby, &[], None, NOW)
         .unwrap()
         .iter()
         .any(|suggestion| matches!(suggestion.target, FilingTarget::Introducer { .. })));

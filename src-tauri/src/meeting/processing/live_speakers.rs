@@ -2,7 +2,9 @@ use crate::meeting::analytics::MeetingProvisionalSpeaker;
 use crate::meeting::diarization::{
     DiarizationError, DiarizedWindow, MeetingDiarizationSession, MeetingDiarizer, SAMPLE_RATE_HZ,
 };
+use crate::meeting::store::meeting_maybe::HeardVoice;
 use crate::meeting::types::SpeakerAssignmentKind;
+use std::collections::BTreeMap;
 use std::ops::Range;
 use std::path::Path;
 
@@ -14,6 +16,8 @@ const LIVE_SPEAKER_WINDOW_SAMPLES: usize = 3 * SAMPLE_RATE_HZ;
 pub(super) struct LiveSpeakers {
     session: Option<LiveSpeakerSession>,
     spans: Vec<LiveSpeakerSpan>,
+    /// When each cluster was first heard.
+    first_heard: BTreeMap<u32, u64>,
 }
 
 enum LiveSpeakerSession {
@@ -61,7 +65,31 @@ impl LiveSpeakers {
                 LiveSpeakerSession::Replay(session) => session.diarize(audio, start, end),
             },
         );
+        for span in &self.spans {
+            if let MeetingProvisionalSpeaker::Cluster { index } = span.speaker {
+                self.first_heard
+                    .entry(index)
+                    .or_insert_with(|| sample_offset_ns(start_offset_ns, span.samples.start));
+            }
+        }
         &self.spans
+    }
+
+    /// Each voice this track's pass has grouped so far, with when it was
+    /// first heard.
+    pub(super) fn voices(&self) -> Vec<HeardVoice> {
+        let Some(LiveSpeakerSession::Local(session)) = &self.session else {
+            return Vec::new();
+        };
+        self.first_heard
+            .iter()
+            .filter_map(|(cluster, first_heard_ns)| {
+                Some(HeardVoice {
+                    voice: session.cluster_voice(*cluster)?.clone(),
+                    first_heard_ns: *first_heard_ns,
+                })
+            })
+            .collect()
     }
 }
 
@@ -370,7 +398,7 @@ mod tests {
         let diarizer = MeetingDiarizer::without_download();
         let mut speakers = LiveSpeakers {
             session: Some(LiveSpeakerSession::Replay(ReplayDiarizer::default())),
-            spans: Vec::new(),
+            ..LiveSpeakers::default()
         };
         let short_audio = vec![0.3; 2 * SAMPLE_RATE_HZ];
         let short = speakers.spans(&short_audio, 0);

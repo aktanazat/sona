@@ -41,6 +41,8 @@ pub async fn filing_decide(
     suggestion_id: String,
     accept: bool,
 ) -> Result<HomeEvening, String> {
-    manager.decide_filing(&app, &suggestion_id, accept).await?;
+    manager
+        .decide_filing(&app, &suggestion_id, accept, None)
+        .await?;
     manager.home_evening(&history).await
 }

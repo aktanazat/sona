@@ -5,8 +5,9 @@
 //! made up itself. Each stray is reviewed once, in `filing_reviews`; what the
 //! review found waits in `filing_suggestions` until the user files it or
 //! turns it down. Nothing about a stray changes until he does. The same table
-//! holds the maybes a recording gets from its start, its kind and its place;
-//! a kind or a place describes a recording but files it nowhere.
+//! holds the maybes a recording gets from its start, its kind, its place and
+//! the meeting it may be; a kind or a place describes a recording but files
+//! it nowhere.
 
 use super::loops::loops_in;
 use super::people::{
@@ -585,7 +586,7 @@ pub(super) fn filed_event_keys_in(connection: &Connection) -> Result<HashSet<Str
     Ok(keys)
 }
 
-fn confirmed_people_in(
+pub(super) fn confirmed_people_in(
     connection: &Connection,
     session_id: MeetingSessionId,
 ) -> Result<HashSet<PersonId>, StoreError> {
@@ -600,7 +601,7 @@ fn confirmed_people_in(
     Ok(ids)
 }
 
-fn target_identity(target: &FilingTarget) -> Result<(&'static str, String), StoreError> {
+pub(super) fn target_identity(target: &FilingTarget) -> Result<(&'static str, String), StoreError> {
     Ok(match target {
         FilingTarget::Event { event_key, .. } => ("event", event_key.clone()),
         FilingTarget::Person { person_id, .. } => ("person", person_id.uuid().to_string()),
@@ -611,6 +612,7 @@ fn target_identity(target: &FilingTarget) -> Result<(&'static str, String), Stor
             format!("{:.6},{:.6}", location.latitude, location.longitude),
         ),
         FilingTarget::Introducer { person_id, .. } => ("introducer", person_id.uuid().to_string()),
+        FilingTarget::Meeting { plan_id, .. } => ("meeting", plan_id.uuid().to_string()),
     })
 }
 
@@ -704,6 +706,7 @@ fn stray_suggestions(
             },
             vec![FilingReason::VoiceMatches {
                 name: voice.display_name.clone(),
+                start_offset_ns: None,
             }],
         ));
     }

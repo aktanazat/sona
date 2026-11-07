@@ -6,6 +6,7 @@
 
 use super::context::application_bundle_ids;
 use super::loops::{ledger_loop_seeds, readable_ledger_in, states_in};
+use super::meeting_maybe::kept_meeting_words_in;
 use super::people::confirmed_person_ids_in;
 use super::said::{matched_lines_in, MatchedLine, SessionVoices};
 use super::{id, search_projection, MeetingStore, StoreError};
@@ -175,11 +176,15 @@ pub(crate) struct RecallMemory {
     /// The past lines each chosen term found, by phrase.
     said: HashMap<String, Vec<MatchedLine>>,
     meetings: HashMap<MeetingSessionId, PastMeeting>,
+    /// The kept meeting maybes a check has already started from.
+    seeded: HashSet<String>,
 }
 
 impl MeetingStore {
     /// The past lines outside `session_id` that its `recent` live words were
-    /// already said in, at most three and one per meeting.
+    /// already said in, at most three and one per meeting. The first check
+    /// after a meeting maybe is kept also starts from its title, its place
+    /// and the words that made its plan.
     ///
     /// Ranked: open promises and questions involving someone confirmed in
     /// this meeting first, then other open ones, then decisions, then plain
@@ -195,7 +200,8 @@ impl MeetingStore {
         memory: &mut RecallMemory,
         user_name: Option<&str>,
     ) -> Result<Vec<MeetingRecallMatch>, StoreError> {
-        let candidates = candidate_terms(recent);
+        let kept = kept_meeting_words_in(&*self.connection()?, session_id, &memory.seeded)?;
+        let candidates = candidate_terms(kept.iter().flat_map(|(_, words)| words).chain(recent));
         if candidates.is_empty() {
             return Ok(Vec::new());
         }
@@ -273,12 +279,16 @@ impl MeetingStore {
             )
         });
         let mut recalled = HashSet::new();
-        Ok(found
+        let found = found
             .into_iter()
             .filter(|found| recalled.insert(found.recall.session_id))
             .take(MATCHES_MAX)
             .map(|found| found.recall)
-            .collect())
+            .collect();
+        memory
+            .seeded
+            .extend(kept.into_iter().map(|(suggestion_id, _)| suggestion_id));
+        Ok(found)
     }
 
     /// The few candidates past meetings said but do not say all the time:
@@ -484,13 +494,13 @@ struct Word {
     marked: bool,
 }
 
-/// Every word in `recent` that can name a topic, and every two of them said
+/// Every word in `lines` that can name a topic, and every two of them said
 /// together, once each: names and numbers first, then pairs, then longer
 /// words, cut at what one read counts.
-fn candidate_terms(recent: &[String]) -> Vec<Term> {
+fn candidate_terms<'a>(lines: impl IntoIterator<Item = &'a String>) -> Vec<Term> {
     let mut terms = Vec::<Term>::new();
     let mut index = HashMap::<String, usize>::new();
-    for line in recent {
+    for line in lines {
         let words = heard_words(line);
         for (position, word) in words.iter().enumerate() {
             let Some(word) = word else { continue };

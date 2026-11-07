@@ -109,9 +109,14 @@ fn two_voices_only_the_microphone_heard_are_offered_as_in_person() {
     let memo = recording(&store, &[], &["microphone"]).unwrap();
     let session_id = recording(&store, &[], &["microphone", "microphone"]).unwrap();
 
-    assert!(store.context_suggestions(memo, NOW).unwrap().is_empty());
+    assert!(store
+        .context_suggestions(memo, &[], None, NOW)
+        .unwrap()
+        .is_empty());
 
-    let offered = store.context_suggestions(session_id, NOW).unwrap();
+    let offered = store
+        .context_suggestions(session_id, &[], None, NOW)
+        .unwrap();
 
     assert_eq!(
         offers(&offered),
@@ -136,7 +141,7 @@ fn two_voices_only_the_microphone_heard_are_offered_as_in_person() {
         ConversationKind::InPerson
     );
     assert!(store
-        .context_suggestions(session_id, NOW)
+        .context_suggestions(session_id, &[], None, NOW)
         .unwrap()
         .is_empty());
 }
@@ -151,7 +156,7 @@ fn voices_through_a_recorded_call_app_are_offered_as_an_online_call() {
     let quiet_call = recording(&store, &[ZOOM], &["microphone", "microphone"]).unwrap();
 
     assert_eq!(
-        offers(&store.context_suggestions(call, NOW).unwrap()),
+        offers(&store.context_suggestions(call, &[], None, NOW).unwrap()),
         [(
             FilingTarget::Kind {
                 conversation_kind: ConversationKind::OnlineCall
@@ -162,7 +167,7 @@ fn voices_through_a_recorded_call_app_are_offered_as_an_online_call() {
         )]
     );
     assert!(store
-        .context_suggestions(quiet_call, NOW)
+        .context_suggestions(quiet_call, &[], None, NOW)
         .unwrap()
         .is_empty());
 }
@@ -199,7 +204,9 @@ fn an_invite_pin_is_offered_as_the_place() {
         )
         .unwrap();
 
-    let offered = store.context_suggestions(session_id, NOW).unwrap();
+    let offered = store
+        .context_suggestions(session_id, &[], None, NOW)
+        .unwrap();
 
     assert_eq!(
         offers(&offered),
@@ -224,7 +231,7 @@ fn an_invite_pin_is_offered_as_the_place() {
         Some(cafe)
     );
     assert!(store
-        .context_suggestions(session_id, NOW)
+        .context_suggestions(session_id, &[], None, NOW)
         .unwrap()
         .is_empty());
 }

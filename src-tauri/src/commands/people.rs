@@ -49,7 +49,9 @@ pub async fn person_first_met_decide(
     suggestion_id: String,
     accept: bool,
 ) -> Result<Option<PersonFirstMet>, String> {
-    manager.decide_filing(&app, &suggestion_id, accept).await?;
+    manager
+        .decide_filing(&app, &suggestion_id, accept, None)
+        .await?;
     first_met(&manager, person_id).await
 }
 

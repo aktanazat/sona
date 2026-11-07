@@ -38,13 +38,13 @@ const SAID: [&str; 11] = [
 
 /// One plan as the engine names it in its reply.
 #[derive(Serialize)]
-struct Named {
-    what: &'static str,
-    when: &'static str,
-    people: &'static [&'static str],
-    place: &'static str,
-    quote: &'static str,
-    lines: &'static [&'static str],
+pub(super) struct Named {
+    pub(super) what: &'static str,
+    pub(super) when: &'static str,
+    pub(super) people: &'static [&'static str],
+    pub(super) place: &'static str,
+    pub(super) quote: &'static str,
+    pub(super) lines: &'static [&'static str],
 }
 
 /// The pricing review proposed in L2 and agreed in L3.
@@ -59,13 +59,13 @@ const PRICING_REVIEW: Named = Named {
 
 /// An engine on this Mac that gives every request the same answer, or
 /// cannot be reached, and counts the requests.
-struct Scripted {
+pub(super) struct Scripted {
     answer: Option<String>,
     asked: AtomicUsize,
 }
 
 impl Scripted {
-    fn answering(plans: &[Named]) -> Arc<Self> {
+    pub(super) fn answering(plans: &[Named]) -> Arc<Self> {
         Arc::new(Self {
             answer: Some(json!({ "plans": plans }).to_string()),
             asked: AtomicUsize::new(0),
@@ -119,14 +119,14 @@ impl MeetingTextGenerator for Scripted {
     }
 }
 
-fn engine(generator: &Arc<Scripted>) -> MeetingProcessingService {
+pub(super) fn engine(generator: &Arc<Scripted>) -> MeetingProcessingService {
     let service = MeetingProcessingService::new(None);
     let generator: Arc<dyn MeetingTextGenerator> = generator.clone();
     service.set_text_generators(Arc::clone(&generator), generator);
     service
 }
 
-fn local(year: i32, month: u32, day: u32, hour: u32, minute: u32) -> i64 {
+pub(super) fn local(year: i32, month: u32, day: u32, hour: u32, minute: u32) -> i64 {
     Local
         .with_ymd_and_hms(year, month, day, hour, minute, 0)
         .single()
