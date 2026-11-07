@@ -1132,6 +1132,20 @@ final class MeetingsStore {
         return name
     }
 
+    /// Everyone who spoke the lines a receipt cites, in the order they spoke,
+    /// for a receipt that quotes more than one person.
+    func citedSpeakers(_ citations: [ArtifactCitation]) -> String? {
+        guard let transcript = snapshot?.transcript else { return nil }
+        var names: [String] = []
+        for citation in citations {
+            guard let segment = transcript.first(where: { $0.base.segmentId == citation.segmentId }),
+                  let name = speakerNames[segment.assignedSpeakerId], !names.contains(name)
+            else { continue }
+            names.append(name)
+        }
+        return names.isEmpty ? nil : ListFormatter.localizedString(byJoining: names)
+    }
+
     /// The words, filtered by whatever is in the search box: a hit from the
     /// core counts, and so does a plain match on the text a person can see.
     var turns: [TranscriptTurn] {

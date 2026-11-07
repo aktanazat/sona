@@ -428,7 +428,7 @@ mod scoped {
     #[serde(deny_unknown_fields)]
     struct NativeSettledChoiceWire {
         #[schemars(
-            description = "The actual settled choice, not an individual promise, an implementation assignment or a confirmation of somebody's task or deadline."
+            description = "The actual settled choice, not an individual promise, an implementation assignment, a confirmation of somebody's task or deadline, a status update or a confirmation that something is unchanged."
         )]
         choice: String,
         receipt: NativeQuotedReceipt,

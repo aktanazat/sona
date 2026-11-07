@@ -1785,7 +1785,7 @@ struct LedgerThreadRow: View {
     }
 
     private var attribution: String {
-        let who = thread.receipt.speaker ?? "Unattributed"
+        let who = thread.receipt.speaker ?? store.citedSpeakers(thread.receipt.citations) ?? "Unattributed"
         let citations = thread.receipt.citations.count
         return citations > 1 ? "\(who) · \(citations) citations" : who
     }

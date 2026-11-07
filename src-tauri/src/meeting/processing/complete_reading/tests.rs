@@ -38,6 +38,9 @@ mod tests {
             max_tokens: i32,
             _: ReplyShape,
         ) -> Result<String, MeetingTextGenerationError> {
+            if pack.starts_with("Decision: ") {
+                return Ok(r#"{"settled": true}"#.to_owned());
+            }
             assert!(pack.len() <= evidence_budget(self, prompt, max_tokens));
             self.calls.fetch_add(1, Ordering::SeqCst);
             let input: Value = serde_json::from_str(pack).expect("generation input JSON");
