@@ -118,6 +118,7 @@ private func callTree(_ root: AXUIElement) -> [CallNode]? {
 
 private func callProvider(_ bundle: String, url: String?) -> String? {
     if bundle == "us.zoom.xos" { return "zoom" }
+    if bundle == "com.tinyspeck.slackmacgap" { return "slack" }
     if bundle == "com.microsoft.teams2" || bundle == "com.microsoft.teams" { return "teams" }
     guard callBrowsers.contains(bundle), let url, let address = URL(string: url), address.scheme == "https" else { return nil }
     switch address.host?.lowercased() {
@@ -144,6 +145,7 @@ private func callJoined(_ nodes: [CallNode], provider: String) -> Bool {
         }
         return buttons.contains("hang up") || (buttons.contains("leave") && hasMeetingPeople)
     case "meet": return buttons.contains("leave call")
+    case "slack": return buttons.contains("leave huddle")
     default: return false
     }
 }
@@ -158,7 +160,55 @@ private func rosterHeading(_ text: String, provider: String) -> Bool {
     }
 }
 
+/// Slack's client labels each huddle tile "View <name>'s profile" and nothing
+/// else that way. A tile also stands for someone only invited; its text then
+/// reads "Invited", "Joining soon" or "Invite Declined". Only the user's own
+/// tile holds a "video is …, audio is …" button. No tile says who is talking.
+private func slackRoster(_ held: HeldCall, nodes: [CallNode]) -> CallRead {
+    let prefix = "View ", suffix = "'s profile"
+    var tiles: [Int: String] = [:]
+    for (index, node) in nodes.enumerated() where node.label.hasPrefix(prefix) && node.label.hasSuffix(suffix) {
+        let name = node.label.dropFirst(prefix.count).dropLast(suffix.count).trimmingCharacters(in: .whitespaces)
+        if !name.isEmpty, name.utf8.count <= 256 { tiles[index] = name }
+    }
+    guard !tiles.isEmpty, tiles.count <= 128 else {
+        return CallRead(state: "unavailable", detail: "Open the huddle in its own window. Its people are not readable here.")
+    }
+    var ids: [Int: String] = [:]
+    for index in tiles.keys {
+        guard let id = held.identity(nodes[index].element) else {
+            return CallRead(state: "unavailable", detail: "The call changed too many participant identities. Choose the call again.")
+        }
+        ids[index] = id
+    }
+    func tile(holding index: Int) -> String? {
+        var parent = nodes[index].parent
+        while let position = parent {
+            if let id = ids[position] { return id }
+            parent = nodes[position].parent
+        }
+        return nil
+    }
+    var invited = Set<String>(), local = Set<String>()
+    for (index, node) in nodes.enumerated() {
+        let invite = node.role == kAXStaticTextRole as String && ["Invited", "Joining soon", "Invite Declined"].contains(node.label)
+        let own = node.role == kAXButtonRole as String && node.label.hasPrefix("video is ")
+        guard invite || own, let id = tile(holding: index) else { continue }
+        if invite { invited.insert(id) } else { local.insert(id) }
+    }
+    var participants: [String: CallParticipant] = [:]
+    for (index, name) in tiles {
+        guard let id = ids[index], !invited.contains(id) else { continue }
+        participants[id] = CallParticipant(id: id, name: name, is_local: local.contains(id))
+    }
+    guard !participants.isEmpty else { return CallRead(state: "unavailable", detail: "No participant names are exposed by this call.") }
+    return CallRead(
+        state: "roster_only", detail: "Names are available to pick later. No speaking indicator is exposed.",
+        participants: participants.values.sorted { $0.id < $1.id })
+}
+
 private func callRoster(_ held: HeldCall, nodes: [CallNode]) -> CallRead {
+    if held.target.provider == "slack" { return slackRoster(held, nodes: nodes) }
     var children: [Int: [Int]] = [:]
     for (index, node) in nodes.enumerated() {
         if let parent = node.parent { children[parent, default: []].append(index) }
@@ -259,7 +309,7 @@ private func callTargets() -> CallTargets {
             }
         }
     }
-    return CallTargets(state: targets.isEmpty ? "unavailable" : "available", detail: targets.isEmpty ? "No joined Zoom, Teams or Google Meet call is readable. Open its people panel, then refresh." : "Choose the call this recording is capturing.", targets: targets)
+    return CallTargets(state: targets.isEmpty ? "unavailable" : "available", detail: targets.isEmpty ? "No joined Zoom, Teams, Google Meet or Slack call is readable. Open its people panel, or the huddle in its own window, then refresh." : "Choose the call this recording is capturing.", targets: targets)
 }
 
 private func callSample(_ id: String) -> CallRead {
