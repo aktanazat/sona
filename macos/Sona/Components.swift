@@ -39,7 +39,8 @@ struct Card<Content: View>: View {
         let shape = RoundedRectangle(cornerRadius: Theme.radiusCard)
         if material == .glass {
             cardContent
-                .background(.regularMaterial, in: shape)
+                .background(.regularMaterial)
+                .clipShape(shape)
                 .overlay(shape.strokeBorder(Theme.border, lineWidth: 1))
         } else {
             cardContent
