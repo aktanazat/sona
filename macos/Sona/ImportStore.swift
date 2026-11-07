@@ -252,7 +252,7 @@ final class DocumentStore {
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
-        panel.message = "Text documents"
+        panel.message = "Text documents and PDFs"
         panel.allowedContentTypes = DocumentMedia.extensions.compactMap {
             UTType(filenameExtension: $0)
         }
@@ -268,7 +268,8 @@ final class DocumentStore {
             error = nil
             await load(personId: personId)
         } catch {
-            self.error = error.localizedDescription
+            self.error = (error as? CoreError)?.remote(as: MeetingCommandError.self)?.label
+                ?? error.localizedDescription
         }
     }
 

@@ -907,7 +907,7 @@ struct DocumentMutationResult: Decodable {
 
 /// The file types `doc_ingest` reads.
 enum DocumentMedia {
-    static let extensions = ["txt", "md", "markdown"]
+    static let extensions = ["txt", "md", "markdown", "pdf"]
 }
 
 // MARK: - The query plane
