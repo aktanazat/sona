@@ -354,6 +354,18 @@ pub struct PersonContextResult {
     pub rows: Vec<PersonBriefingRow>,
 }
 
+/// Someone the call lists whom Sona knows, and what the user owes them out
+/// of the meetings they were both in.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+pub struct CallPrepPerson {
+    pub person_id: PersonId,
+    pub name: String,
+    /// The user's open loops, newest meeting first.
+    pub open_loops: Vec<PersonOpenLoop>,
+    /// The user's open commitments, newest meeting first.
+    pub commitments: Vec<PersonCommitment>,
+}
+
 /// One person on a meeting's "previously together" band. Everything here is
 /// relative to that meeting: the count, the last meeting, and the loop all
 /// come from meetings that happened before it, never after.

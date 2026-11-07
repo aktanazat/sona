@@ -1,9 +1,12 @@
 //! What a recording with nothing on its calendar may be: a plan heard in an
 //! earlier recording whose time it starts in, with the people the plan names
 //! and the place an earlier recording saved under the plan's words; or, with
-//! no such plan, someone whose voice the capture hears. These wait beside the
-//! start's other maybes and change nothing until the user keeps one.
+//! no such plan, someone whose voice the capture hears or whose name its call
+//! lists. These wait beside the start's other maybes and change nothing until
+//! the user keeps one. Who of the call's names Sona knows also comes with
+//! what the user owes each of them, to read before the call gets going.
 
+use super::call_speakers::call_roster_in;
 use super::context::{context_in, save_context_in};
 use super::conversation_review::{distance_meters, SAME_PLACE_METERS};
 use super::evening::{
@@ -11,8 +14,11 @@ use super::evening::{
     FILING_EVENT_SLACK_MS,
 };
 use super::heard_plans::{answers_to, plan_in, plans_in};
-use super::people::{all_people_in, bump_people_revision_in, upsert_link_in};
+use super::people::{
+    all_people_in, bump_people_revision_in, owed_to_in, person_by_id_in, upsert_link_in,
+};
 use super::voice_identity::{known_voices_in, names_user};
+use super::workflows::calendar_facts_in;
 use super::{decode_json, encode_json, id, session_row, MeetingStore, StoreError};
 use crate::meeting::context::{
     ConversationContext, ConversationContextUpdate, ConversationLocation,
@@ -20,11 +26,14 @@ use crate::meeting::context::{
 use crate::meeting::diarization::SpeakerEmbedding;
 use crate::meeting::evening::{FilingPerson, FilingReason, FilingSuggestion, FilingTarget};
 use crate::meeting::heard_plan_types::HeardPlan;
-use crate::meeting::people_types::{Person, PersonId, PersonLinkConfidence, PersonLinkSource};
+use crate::meeting::people_types::{
+    CallPrepPerson, Person, PersonId, PersonLinkConfidence, PersonLinkSource,
+};
 use crate::meeting::types::{MeetingOperationId, MeetingOrigin, MeetingSessionId};
 use crate::query::tools::STOPWORDS;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use std::collections::HashSet;
+use std::slice;
 
 /// A recording is offered at most this many plans.
 const MAX_MEETING_MAYBES: usize = 2;
@@ -133,11 +142,45 @@ impl MeetingStore {
         transaction.commit()?;
         Ok(revision)
     }
+
+    /// The people Sona knows among the names a recording's call lists, each
+    /// with what the user owes them, when nothing on the calendar says who
+    /// the recording is with. A name picks the one person it answers to, or
+    /// the one a voice in `heard` picks out of several; no one is made up.
+    pub(crate) fn call_prep(
+        &self,
+        session_id: MeetingSessionId,
+        heard: &[HeardVoice],
+    ) -> Result<Vec<CallPrepPerson>, StoreError> {
+        let user_name = self.user_name();
+        let user_name = user_name.as_deref();
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        let roster = call_roster_in(&transaction, session_id)?;
+        if roster.is_empty() || calendar_facts_in(&transaction, session_id)?.is_some() {
+            return Ok(Vec::new());
+        }
+        let heard = heard_people_in(&transaction, session_id, heard, user_name)?;
+        let people = all_people_in(&transaction)?;
+        let mut prep = Vec::new();
+        for (_, known) in listed_people(&roster, &people, &heard, user_name) {
+            let person = person_by_id_in(&transaction, known.person_id)?;
+            let (open_loops, commitments) = owed_to_in(&transaction, &person, user_name)?;
+            prep.push(CallPrepPerson {
+                person_id: known.person_id,
+                name: known.name,
+                open_loops,
+                commitments,
+            });
+        }
+        transaction.commit()?;
+        Ok(prep)
+    }
 }
 
 /// Offers what a recording with nothing on its calendar may be: the plans
-/// its start falls in, best first, and each person whose voice it hears that
-/// none of them names.
+/// its start falls in, best first, and each person whose voice it hears or
+/// whose name its call lists that none of them names.
 pub(super) fn offer_meeting_maybes_in(
     connection: &Connection,
     context: &ConversationContext,
@@ -154,7 +197,8 @@ pub(super) fn offer_meeting_maybes_in(
     };
     let heard = heard_people_in(connection, session_id, heard, user_name)?;
     let plans = plans_near_in(connection, session_id, started_utc_ms, now_utc_ms)?;
-    let people = if plans.is_empty() {
+    let roster = call_roster_in(connection, session_id)?;
+    let people = if plans.is_empty() && roster.is_empty() {
         Vec::new()
     } else {
         all_people_in(connection)?
@@ -228,6 +272,7 @@ pub(super) fn offer_meeting_maybes_in(
         )?;
     }
     let linked = confirmed_people_in(connection, session_id)?;
+    let listed = listed_people(&roster, &people, &heard, user_name);
     for person in heard {
         if planned.contains(&person.person_id) || linked.contains(&person.person_id) {
             continue;
@@ -243,6 +288,21 @@ pub(super) fn offer_meeting_maybes_in(
                 name: person.name,
                 start_offset_ns: Some(person.first_heard_ns),
             }],
+            now_utc_ms,
+        )?;
+    }
+    for (name, person) in listed {
+        if planned.contains(&person.person_id) || linked.contains(&person.person_id) {
+            continue;
+        }
+        offer_in(
+            connection,
+            session_id,
+            FilingTarget::Person {
+                person_id: person.person_id,
+                name: person.name,
+            },
+            vec![FilingReason::CallLists { name }],
             now_utc_ms,
         )?;
     }
@@ -420,6 +480,30 @@ fn plan_people(
         }
     }
     known
+}
+
+/// The people Sona knows among the names a call lists, each with the name
+/// that picked them, by the rule a plan's names follow.
+fn listed_people(
+    roster: &[String],
+    people: &[Person],
+    heard: &[HeardPerson],
+    user_name: Option<&str>,
+) -> Vec<(String, FilingPerson)> {
+    let mut listed: Vec<(String, FilingPerson)> = Vec::new();
+    for name in roster {
+        let Some(person) = plan_people(slice::from_ref(name), people, heard, user_name).pop()
+        else {
+            continue;
+        };
+        if !listed
+            .iter()
+            .any(|(_, known)| known.person_id == person.person_id)
+        {
+            listed.push((name.clone(), person));
+        }
+    }
+    listed
 }
 
 /// The place another recording saved under every word of `place` that says

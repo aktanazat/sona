@@ -2944,6 +2944,11 @@ pub(super) async fn call(
                 .await,
             )
         }
+        "meeting_call_prep" => {
+            let mut args = Args::parse(params)?;
+            let session_id = args.take("sessionId")?;
+            reply(crate::commands::call_names::meeting_call_prep(app.state(), session_id).await)
+        }
         "meeting_speaker_merge" => {
             let mut args = Args::parse(params)?;
             let request = args.take("request")?;

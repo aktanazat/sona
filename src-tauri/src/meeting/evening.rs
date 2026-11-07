@@ -185,6 +185,8 @@ pub enum FilingReason {
         name: String,
         start_offset_ns: Option<u64>,
     },
+    /// The call the recording was made on lists this name.
+    CallLists { name: String },
     /// The transcript says the phrase, first at `segment_id`.
     Said {
         phrase: String,

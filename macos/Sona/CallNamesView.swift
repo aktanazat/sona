@@ -31,6 +31,19 @@ private struct CallNameStatus: Decodable {
     let suggestions: [CallNameSuggestion]
 }
 
+/// Someone the call lists whom Sona knows, with what the user owes them.
+private struct CallPrepPerson: Decodable, Identifiable {
+    let personId: String
+    let name: String
+    let openLoops: [PersonOpenLoop]
+    let commitments: [PersonCommitment]
+
+    var id: String { personId }
+    var owed: [PersonLedgerRow] {
+        (openLoops.map(PersonLedgerRow.init) + commitments.map(PersonLedgerRow.init)).sorted { $0.at > $1.at }
+    }
+}
+
 private struct CallNamesSetParams: Encodable {
     let sessionId: String
     let targetId: String?
@@ -41,17 +54,59 @@ private struct CallNamesSetParams: Encodable {
 /// front. Listing calls is itself an explicit action; appearing never reads AX.
 struct CallNamesLiveControl: View {
     let sessionId: String
+    /// While the recording is made, owed rows show without ▶, so the live
+    /// screen never closes from here.
+    let recording: Bool
     @Environment(AppModel.self) private var model
     @State private var status: CallNameStatus?
     @State private var choices: CallNameTargets?
     @State private var selected = ""
     @State private var busy = false
     @State private var error: String?
+    @State private var prep: [CallPrepPerson] = []
+    @State private var prepError: String?
 
     var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            ErrorNote(prepError)
+            if !prep.isEmpty { prepCard }
+            names
+        }
+        .task(id: status?.roster) { await loadPrep() }
+    }
+
+    /// For a recording nothing on the calendar explains: who of the call's
+    /// names Sona knows, and the newest of what the user owes each.
+    private var prepCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("On this call: \(prep.map(\.name).joined(separator: ", ")).").bodyText(13)
+            ForEach(prep) { person in
+                let owed = person.owed
+                if !owed.isEmpty {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("You owe \(person.name) (\(owed.count))").metaText()
+                        ForEach(owed.prefix(2)) { row in
+                            if recording {
+                                Text(row.text).bodyText(13, Theme.inkSecondary).lineLimit(2)
+                            } else {
+                                Button {
+                                    model.openPast(row.meetingId, segmentId: nil)
+                                } label: {
+                                    Text("\(row.text) ▶").bodyText(13, Theme.inkSecondary).lineLimit(2)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private var names: some View {
         DisclosureGroup("Names from this call") {
             VStack(alignment: .leading, spacing: 10) {
-                Text("Read visible participant names from one Zoom, Teams or Google Meet call. Sona does not open panels or change the call.")
+                Text("Read visible participant names from one Zoom, Teams, Google Meet or Slack call. Sona does not open panels or change the call.")
                     .bodyText(13, Theme.inkSecondary)
                 ErrorNote(error)
                 if let status {
@@ -119,6 +174,23 @@ struct CallNamesLiveControl: View {
         } catch {
             guard !Task.isCancelled else { return }
             self.error = "Could not read the call-name setting. \(error.localizedDescription)"
+        }
+    }
+
+    private func loadPrep() async {
+        guard let roster = status?.roster, !roster.isEmpty else {
+            prep = []
+            prepError = nil
+            return
+        }
+        do {
+            let result: [CallPrepPerson] = try await model.core.request("meeting_call_prep", ["sessionId": sessionId])
+            guard !Task.isCancelled else { return }
+            prep = result
+            prepError = nil
+        } catch {
+            guard !Task.isCancelled else { return }
+            prepError = "Could not read who is on the call. \(error.localizedDescription)"
         }
     }
 

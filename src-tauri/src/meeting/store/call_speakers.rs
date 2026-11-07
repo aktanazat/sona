@@ -148,13 +148,7 @@ impl MeetingStore {
         self.require_retained_transcript(session_id)?;
         let connection = self.connection()?;
         let mut status = call_status_in(&connection, session_id)?;
-        status.roster = call_participants_in(&connection, session_id)?
-            .into_iter()
-            .filter(|person| !person.is_local)
-            .map(|person| person.name)
-            .collect();
-        status.roster.sort();
-        status.roster.dedup();
+        status.roster = call_roster_in(&connection, session_id)?;
         let mut statement = connection.prepare(
             "SELECT n.speaker_id, n.display_name, n.overlap_ns, n.speech_ns, s.display_name, s.revision,
                     EXISTS (SELECT 1 FROM voice_speaker_matches v WHERE v.speaker_id = s.speaker_id)
@@ -380,6 +374,22 @@ fn call_status_in(
         roster: Vec::new(),
         suggestions: Vec::new(),
     })
+}
+
+/// The names the recording's call has listed for everyone but the user,
+/// sorted, each once.
+pub(super) fn call_roster_in(
+    connection: &Connection,
+    session_id: MeetingSessionId,
+) -> Result<Vec<String>, StoreError> {
+    let mut roster = call_participants_in(connection, session_id)?
+        .into_iter()
+        .filter(|person| !person.is_local)
+        .map(|person| person.name)
+        .collect::<Vec<_>>();
+    roster.sort();
+    roster.dedup();
+    Ok(roster)
 }
 
 fn call_participants_in(

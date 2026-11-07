@@ -222,6 +222,7 @@ struct FilingPerson: Decodable, Equatable, Identifiable {
 enum FilingReason: Decodable, Equatable {
     case onCalendar(overlaps: Bool)
     case voiceMatches(name: String, startOffsetNs: Int64?)
+    case callLists(name: String)
     case said(phrase: String, count: Int, segmentId: TranscriptSegmentId)
     case onlyMicrophone
     case appAudio(bundleId: String)
@@ -242,6 +243,8 @@ enum FilingReason: Decodable, Equatable {
             self = .voiceMatches(
                 name: try container.decode(String.self, forKey: .name),
                 startOffsetNs: try container.decodeIfPresent(Int64.self, forKey: .startOffsetNs))
+        case "call_lists":
+            self = .callLists(name: try container.decode(String.self, forKey: .name))
         case "said":
             self = .said(
                 phrase: try container.decode(String.self, forKey: .phrase),
