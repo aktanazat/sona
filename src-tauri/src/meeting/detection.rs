@@ -3296,6 +3296,7 @@ mod tests {
                 calendar_name: None,
                 location: None,
                 url: None,
+                place: None,
             },
             seconds_to_start: 48,
             briefing: if briefed {

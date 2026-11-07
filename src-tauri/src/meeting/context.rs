@@ -21,6 +21,10 @@ pub struct ConversationLocation {
     pub longitude: f64,
 }
 
+/// Coordinates are always finite: JSON has no NaN, and a pin from the
+/// calendar is kept only once `is_valid` passes.
+impl Eq for ConversationLocation {}
+
 impl ConversationLocation {
     pub(crate) fn is_valid(&self) -> bool {
         !self.name.trim().is_empty()

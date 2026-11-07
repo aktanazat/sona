@@ -1107,6 +1107,7 @@ fn series_event(start_utc_ms: i64) -> CalendarEventSummary {
         calendar_name: None,
         location: None,
         url: None,
+        place: None,
     }
 }
 

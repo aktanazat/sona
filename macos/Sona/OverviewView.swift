@@ -701,7 +701,9 @@ private struct OverviewUpcomingRowView: View {
                         }
                     }
                     Text(row.meta).metaText()
-                    if let location = row.location {
+                    if let place = row.place {
+                        Text("at \(place.name)").metaText().lineLimit(1)
+                    } else if let location = row.location {
                         Text(location).metaText().lineLimit(1)
                     }
                 }

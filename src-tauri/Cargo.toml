@@ -253,7 +253,10 @@ objc2-event-kit = { version = "0.3", default-features = false, features = [
   # as the operator's existing reminders instead of nowhere.
   "EKReminder",
   "EKSource",
+  # An invite's map pin: the place title and its coordinate.
+  "EKStructuredLocation",
   "EKTypes",
+  "objc2-core-location",
 ] }
 objc2-user-notifications = { version = "0.3.2", default-features = false, features = [
   "std",

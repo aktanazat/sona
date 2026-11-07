@@ -8,6 +8,7 @@
 //! preference read per row to know whether to draw a switch on.
 
 use super::analytics::MeetingNotesTemplate;
+use super::context::ConversationLocation;
 use super::detection::calendar::CalendarAccess;
 use super::detection::machine::ParticipationStatus;
 use super::people_types::PersonId;
@@ -70,6 +71,8 @@ pub struct MeetingUpcomingRow {
     /// Where the event says it happens — a room, an address, a dial-in line
     /// — as the calendar wrote it, or `None` when it names no place.
     pub location: Option<String>,
+    /// The place the event's map pin names, or `None` without a pin.
+    pub place: Option<ConversationLocation>,
     /// `Some` exactly when the event repeats. Carries the series' decisions.
     pub series: Option<MeetingUpcomingSeries>,
 }

@@ -252,6 +252,7 @@ fn chosen_and_found(
         calendar_name: None,
         location: None,
         url: None,
+        place: None,
     };
     let chosen = reviewable_meeting(store, "Roadmap review", 100);
     let found = reviewable_meeting(store, "Roadmap review", 100);

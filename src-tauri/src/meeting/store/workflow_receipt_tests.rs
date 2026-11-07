@@ -417,6 +417,7 @@ fn calendar_briefing_requires_its_successful_enabled_receipt() {
         calendar_name: None,
         location: None,
         url: None,
+        place: None,
     };
     let dispatch = store
         .record_workflow_event(event(
