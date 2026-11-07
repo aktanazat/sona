@@ -94,7 +94,10 @@ final class SonaAppDelegate: NSObject, NSApplicationDelegate {
                 model.restoreSheetAfterCancelledQuit()
                 return
             }
-            if dictation { model.stopCapture() }
+            if dictation {
+                model.stopCapture()
+                await model.waitForDictationToFinish()
+            }
             repeat {
                 guard await model.live.flushLiveNotes() else {
                     cancelTermination(
@@ -118,9 +121,6 @@ final class SonaAppDelegate: NSObject, NSApplicationDelegate {
             }
             if screen {
                 await model.recorder.stopAndSave().value
-            }
-            if dictation {
-                await model.waitForDictationToFinish()
             }
             sender.reply(toApplicationShouldTerminate: true)
         }
