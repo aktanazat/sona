@@ -155,6 +155,8 @@ struct FilingReasonsLine: View {
             } else {
                 Text("a voice matches \(name)").metaText()
             }
+        case let .callLists(name):
+            Text("the call lists \(name)").metaText()
         case let .said(phrase, count, segmentId):
             Button {
                 model.meetings.open(sessionId, segmentId: segmentId)

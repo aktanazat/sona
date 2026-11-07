@@ -1815,6 +1815,7 @@ pub fn run(cli_args: CliArgs) {
             commands::call_names::meeting_call_name_status,
             commands::call_names::meeting_call_names_set,
             commands::call_names::meeting_call_name_dismiss,
+            commands::call_names::meeting_call_prep,
             commands::meeting::meeting_speaker_merge,
             commands::meeting::meeting_segment_edit,
             commands::meeting::meeting_segments_set_removed,

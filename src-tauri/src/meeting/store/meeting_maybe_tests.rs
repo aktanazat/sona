@@ -1,13 +1,15 @@
 use super::evening::confirmed_people_in;
 use super::heard_plans_tests::{engine, local, Named, Scripted};
+use super::loops_tests::{file_ledger, series_event};
 use super::meeting_maybe::HeardVoice;
 use super::people::people_revision_in;
 use super::recall::RecallMemory;
 use super::voice_identity::{
     MeetingSpeakerIdentifyDisposition, MeetingSpeakerIdentifyRequest, MeetingSpeakerIdentifyTarget,
 };
-use super::workflow_core_tests::{person, reviewable_meeting, store, transcript_segments};
+use super::workflow_core_tests::{link, person, reviewable_meeting, store, transcript_segments};
 use super::{id, MeetingStore, StoreError};
+use crate::meeting::call_speakers::{CallObservation, CallParticipant};
 use crate::meeting::context::{ConversationContextUpdate, ConversationKind, ConversationLocation};
 use crate::meeting::diarization::{
     wespeaker_embedding_model_key, SpeakerEmbedding, SPEAKER_EMBEDDING_DIMENSIONS,
@@ -15,12 +17,17 @@ use crate::meeting::diarization::{
 use crate::meeting::evening::{FilingPerson, FilingReason, FilingSuggestion, FilingTarget};
 use crate::meeting::heard_plan_types::{HeardPlan, HeardPlanStatus};
 use crate::meeting::heard_plans::read;
+use crate::meeting::ledger::{
+    LedgerCommitment, LedgerFirmness, LedgerOpenLoop, LedgerReceipt, LedgerReceiptState,
+    LedgerThread, LedgerThreadState, MeetingLedger,
+};
 use crate::meeting::people_types::PersonId;
 use crate::meeting::types::{
     MeetingOperationId, MeetingSessionId, SpeakerId, MANUAL_DEFAULT_TITLE,
 };
 use rusqlite::params;
 use std::collections::HashSet;
+use uuid::Uuid;
 
 /// What was said on a call, a second apart from 18:00 on Wednesday
 /// 4 November 2026.
@@ -143,6 +150,123 @@ fn capturing(store: &MeetingStore, started_utc_ms: i64) -> Result<MeetingSession
         params![id(session_id), MANUAL_DEFAULT_TITLE, started_utc_ms],
     )?;
     Ok(session_id)
+}
+
+/// The call `session_id` is capturing, chosen to read names from, as its
+/// roster reads: the user's own tile first, then everyone else's.
+fn call_lists(
+    store: &MeetingStore,
+    session_id: MeetingSessionId,
+    names: &[&str],
+) -> Result<(), StoreError> {
+    let plan = Uuid::new_v4().to_string();
+    let connection = store.connection()?;
+    connection.execute(
+        "INSERT INTO meeting_run_plans (
+            plan_id, session_id, attempt_number, schema_version, consent_id,
+            canonical_plan_json, created_at_utc_ms
+         ) VALUES (?1, ?2, 1, 1, ?3, '{}', 1)",
+        params![plan, id(session_id), Uuid::new_v4().to_string()],
+    )?;
+    connection.execute(
+        "INSERT INTO meeting_call_name_runs (
+            session_id, plan_id, target_json, enabled, state, detail
+         ) VALUES (?1, ?2, ?3, 1, 'reading', 'Waiting for the selected call.')",
+        params![
+            id(session_id),
+            plan,
+            serde_json::json!({
+                "id": "huddle",
+                "label": "Slack — Huddle",
+                "bundle_id": "com.tinyspeck.slackmacgap",
+                "provider": "slack",
+            })
+            .to_string()
+        ],
+    )?;
+    drop(connection);
+    let participants = names
+        .iter()
+        .enumerate()
+        .map(|(index, name)| CallParticipant {
+            id: format!("tile-{index}"),
+            name: (*name).to_string(),
+            is_local: index == 0,
+        })
+        .collect();
+    store.record_call_observation(
+        session_id,
+        1_000_000_000,
+        &CallObservation {
+            state: "roster_only".to_string(),
+            detail: "Names are available to pick later.".to_string(),
+            participants,
+            active_ids: Vec::new(),
+        },
+        false,
+        false,
+    )?;
+    Ok(())
+}
+
+/// A churn review with Nolan two weeks before, recorded at this Mac: the
+/// user left renewal pricing open and promised the churn sheet, and Nolan
+/// promised the renewal list.
+fn churn_review(store: &MeetingStore, nolan: PersonId) -> Result<(), StoreError> {
+    let review = reviewable_meeting(store, "Churn review", local(2026, 10, 22, 15, 0));
+    store.connection()?.execute(
+        "INSERT INTO meeting_speakers (
+            speaker_id, session_id, source_kind, display_name, revision
+         ) VALUES (?1, ?2, 'microphone', 'Aktan Azat', 0)",
+        params![SpeakerId::new().0.to_string(), id(review)],
+    )?;
+    let receipt = |quote: &str, t_ms| LedgerReceipt {
+        quote: quote.to_string(),
+        speaker: None,
+        t_ms,
+        citations: Vec::new(),
+    };
+    let promise = |who: &str, what: &str, t_ms| LedgerCommitment {
+        who: who.to_string(),
+        what: what.to_string(),
+        firmness: LedgerFirmness::Firm,
+        receipt: receipt(what, t_ms),
+    };
+    file_ledger(
+        store,
+        review,
+        MeetingLedger {
+            headline: "Churn is up and renewal pricing stayed open.".to_string(),
+            threads: vec![LedgerThread {
+                topic: "Renewal pricing".to_string(),
+                state: LedgerThreadState::Unanswered,
+                substantive: true,
+                receipt: receipt("what do we charge at renewal", 12_000),
+                owner: Some("Aktan Azat".to_string()),
+            }],
+            open_loops: vec![LedgerOpenLoop {
+                question: "Renewal pricing".to_string(),
+                instead: "The call moved on to churn.".to_string(),
+                at_ms: 12_000,
+                citations: Vec::new(),
+            }],
+            commitments: vec![
+                promise("Aktan Azat", "Send the churn sheet", 30_000),
+                promise("Nolan Smith", "Share the renewal list", 40_000),
+            ],
+            stances: Vec::new(),
+            caveats: Vec::new(),
+            receipts: LedgerReceiptState::Verified,
+        },
+    );
+    link(store, review, nolan, "manual", "confirmed");
+    Ok(())
+}
+
+fn people_count(store: &MeetingStore) -> Result<i64, StoreError> {
+    Ok(store
+        .connection()?
+        .query_row("SELECT COUNT(*) FROM persons", [], |row| row.get(0))?)
 }
 
 fn offers(suggestions: &[FilingSuggestion]) -> Vec<(FilingTarget, Vec<FilingReason>)> {
@@ -436,4 +560,100 @@ fn keeping_the_maybe_recalls_where_the_plan_was_made_once() {
         [call]
     );
     assert_eq!(again, Vec::new());
+}
+
+/* A recording with nothing on its calendar, on a call that lists names, is
+ * offered the one person a name answers to. A name that answers to two
+ * people, or to nobody, is offered nothing and makes no one. */
+#[test]
+fn a_name_the_call_lists_is_offered_only_for_someone_sona_knows() {
+    let (_directory, store) = store();
+    let nolan = person(&store, "Nolan Smith", &[], &[]);
+    person(&store, "Dana Reyes", &[], &[]);
+    person(&store, "Dana Kim", &[], &[]);
+    let huddle = capturing(&store, local(2026, 11, 5, 14, 0)).unwrap();
+    call_lists(
+        &store,
+        huddle,
+        &["Aktan Azat", "Nolan Smith", "Dana", "Priya Patel"],
+    )
+    .unwrap();
+
+    let offered = store
+        .context_suggestions(huddle, &[], None, local(2026, 11, 5, 14, 1))
+        .unwrap();
+
+    assert_eq!(
+        offers(&offered),
+        [(
+            FilingTarget::Person {
+                person_id: nolan,
+                name: "Nolan Smith".to_string(),
+            },
+            vec![FilingReason::CallLists {
+                name: "Nolan Smith".to_string(),
+            }],
+        )]
+    );
+    assert_eq!(people_count(&store).unwrap(), 3);
+    assert_eq!(confirmed(&store, huddle).unwrap(), HashSet::new());
+}
+
+/* Before anyone speaks, a call with nothing on its calendar shows who of its
+ * names Sona knows and what the user still owes each of them out of the
+ * meetings they were both in. A name Sona does not know shows nothing. Once
+ * the calendar says who the recording is with, the calendar's prep does. */
+#[test]
+fn the_prep_shows_who_the_call_lists_and_what_the_user_owes_them() {
+    let (_directory, store) = store();
+    let nolan = person(&store, "Nolan Smith", &[], &[]);
+    let stephen = person(&store, "Stephen Lee", &[], &[]);
+    churn_review(&store, nolan).unwrap();
+    let huddle = capturing(&store, local(2026, 11, 5, 14, 0)).unwrap();
+    call_lists(
+        &store,
+        huddle,
+        &["Aktan Azat", "Stephen Lee", "Nolan Smith", "Priya Patel"],
+    )
+    .unwrap();
+
+    let prep = store.call_prep(huddle, &[]).unwrap();
+
+    let owed = prep
+        .iter()
+        .map(|person| {
+            (
+                person.person_id,
+                person.name.as_str(),
+                person
+                    .open_loops
+                    .iter()
+                    .map(|open| open.text.as_str())
+                    .collect::<Vec<_>>(),
+                person
+                    .commitments
+                    .iter()
+                    .map(|commitment| commitment.text.as_str())
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        owed,
+        [
+            (
+                nolan,
+                "Nolan Smith",
+                vec!["Renewal pricing"],
+                vec!["Send the churn sheet"]
+            ),
+            (stephen, "Stephen Lee", Vec::new(), Vec::new()),
+        ]
+    );
+    assert_eq!(people_count(&store).unwrap(), 2);
+
+    store
+        .remember_calendar_facts(huddle, &series_event(local(2026, 11, 5, 14, 0)))
+        .unwrap();
+    assert_eq!(store.call_prep(huddle, &[]).unwrap(), Vec::new());
 }

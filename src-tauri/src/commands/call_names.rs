@@ -1,4 +1,5 @@
 use crate::meeting::call_speakers::{CallNameStatus, CallNameTargets};
+use crate::meeting::people_types::CallPrepPerson;
 use crate::meeting::session::MeetingSessionManager;
 use crate::meeting::types::{MeetingCommandError, MeetingSessionId, SpeakerId};
 use std::sync::Arc;
@@ -43,4 +44,21 @@ pub async fn meeting_call_name_dismiss(
     speaker_id: SpeakerId,
 ) -> Result<CallNameStatus, MeetingCommandError> {
     manager.call_name_dismiss(session_id, speaker_id).await
+}
+
+/// Who Sona knows among the names this recording's call lists, and what the
+/// user owes each. Empty when the calendar says who the recording is with.
+#[tauri::command]
+#[specta::specta]
+pub async fn meeting_call_prep(
+    manager: State<'_, Arc<MeetingSessionManager>>,
+    session_id: MeetingSessionId,
+) -> Result<Vec<CallPrepPerson>, String> {
+    const UNREADABLE: &str = "Who is on the call could not be read.";
+    let store = manager.store().await.map_err(|_| UNREADABLE.to_string())?;
+    let heard = manager.heard_voices(session_id);
+    tauri::async_runtime::spawn_blocking(move || store.call_prep(session_id, &heard))
+        .await
+        .map_err(|_| UNREADABLE.to_string())?
+        .map_err(|_| UNREADABLE.to_string())
 }

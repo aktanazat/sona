@@ -14,9 +14,9 @@ use crate::meeting::loop_types::MeetingLoopDirection;
 use crate::meeting::people_types::{
     organization_slug, CompaniesListResult, CompanySummary, MeetingPeopleContextResult,
     MeetingPersonContextRow, OpenLoopsInboxResult, OrganizationDetail, OrganizationDetailResult,
-    PeopleListResult, PersonBriefingLastMeeting, PersonBriefingRow, PersonContextResult,
-    PersonDetail, PersonDetailResult, PersonId, PersonLinkConfidence, PersonLinkSource,
-    PersonListEntry, PersonListLastMeeting, PersonMeetingLink,
+    PeopleListResult, Person, PersonBriefingLastMeeting, PersonBriefingRow, PersonCommitment,
+    PersonContextResult, PersonDetail, PersonDetailResult, PersonId, PersonLinkConfidence,
+    PersonLinkSource, PersonListEntry, PersonListLastMeeting, PersonMeetingLink, PersonOpenLoop,
 };
 use crate::meeting::store::heard_plans::plans_without_record_in;
 use crate::meeting::store::workflows::{
@@ -807,6 +807,24 @@ fn gate_continuity_facts_in(
         }
     }
     Ok(())
+}
+
+/// What the user owes `person` out of the meetings they were both in: the
+/// open loops and the open commitments on the user's side, newest first.
+pub(in crate::meeting::store) fn owed_to_in(
+    connection: &Connection,
+    person: &Person,
+    user_name: Option<&str>,
+) -> Result<(Vec<PersonOpenLoop>, Vec<PersonCommitment>), StoreError> {
+    let mut facts = facts_for_person_in(connection, person, user_name)?;
+    gate_continuity_facts_in(connection, &mut facts)?;
+    facts
+        .open_loops
+        .retain(|open| open.direction == MeetingLoopDirection::Mine);
+    facts.commitments.retain(|commitment| {
+        commitment.direction == MeetingLoopDirection::Mine && commitment.status.is_open()
+    });
+    Ok((facts.open_loops, facts.commitments))
 }
 
 fn links_for_person_in(

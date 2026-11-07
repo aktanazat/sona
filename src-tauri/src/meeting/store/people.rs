@@ -11,7 +11,9 @@ pub(super) use mutations::{
     link_document_mentions_in, person_for_named_speaker_in, recompute_organizations_in,
     upsert_link_in,
 };
-pub(super) use queries::{calendar_context_in, confirmed_person_ids_in, continuity_summary_in};
+pub(super) use queries::{
+    calendar_context_in, confirmed_person_ids_in, continuity_summary_in, owed_to_in,
+};
 pub(super) use vocabulary::vocabulary_candidates_in;
 
 use super::{MeetingStore, StoreError};
