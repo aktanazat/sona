@@ -192,6 +192,12 @@ fn flush_pending(app_handle: &AppHandle, enigo: &mut enigo::Enigo) {
     }
 }
 
+/// Whether a paste transaction is still open, its promise maybe still on
+/// the clipboard. A read of that promise would count as the target's read.
+pub(crate) fn holds_clipboard() -> bool {
+    PENDING.lock().map_or(true, |slot| slot.is_some())
+}
+
 fn spawn_waiter(pending: Arc<Mutex<MacPending>>, app_handle: AppHandle) {
     thread::spawn(move || {
         let outcome = loop {

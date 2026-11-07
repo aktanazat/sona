@@ -89,6 +89,8 @@ pub fn cancel_current_operation(app: &AppHandle) {
             crate::actions::keep_cancelled_capture(&app, spool)
         });
     }
+    #[cfg(target_os = "macos")]
+    crate::clipboard::PasteboardSnapshot::forget_copy_aside();
 
     // Abandon any live streaming transcription
     let tm = app.state::<Arc<TranscriptionManager>>();

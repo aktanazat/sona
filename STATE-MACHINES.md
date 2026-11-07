@@ -27,7 +27,7 @@ Result: 86 candidates. 55 confirmed, 19 rejected, 5 unreachable in the shipped a
 | B4 | Transcription | The room-noise recovery never runs with VAD off, or on a quiet capture that VAD called silent | case A confirmed, corrected; case B is B5; case C rejected | case A fixed: the room-noise recovery runs with VAD off |
 | B5 | Transcription | Heard speech that decodes to nothing ends with no feedback | confirmed for "VAD forwarded speech, the model produced nothing" | fixed: speech that decodes to nothing is a failed capture kept for retry, with a message |
 | B6 | Transcription | Starting a dictation or retry during another decode reloads the same model | confirmed | fixed: one engine slot records its build; a second load of the same model is skipped |
-| B9 | Transcription | Clipboard restore keeps only plain text or one image | confirmed | fixed: the paste restores every clipboard item and type, including the concealed marker |
+| B9 | Transcription | Clipboard restore keeps only plain text or one image | confirmed | fixed: the paste restores every clipboard item and type, including the concealed marker; the copy is taken while the words are spoken, so an app that renders its types slowly keeps them too |
 | B10 | Transcription | Paste and auto-submit go to whatever app is in front at delivery time | confirmed | fixed: delivery is held if the target window changed; text kept in the Library and offered as "Paste here" on the pill, never submitted |
 | B13 | Transcription | Switching models mid-recording reloads the old model at stop | confirmed (low cost: slower paste, two wasted loads) | fixed: a lease keeps the in-use model; switching models waits for it |
 | B14 | Transcription | An accelerator change is honored only by dictation and retry | confirmed (moderate) | fixed: the engine build includes the accelerator, so imports, meetings and chat voice follow it |
@@ -705,9 +705,9 @@ Route: focus check (D:151-160), then accessibility insertion, then the clipboard
 | text ready | dispatch | same focus, a part unreadable, or method None or ExternalScript | accessibility insertion, then the clipboard, as before | D:182 onward |
 
 Transaction states (P), changed steps:
-1. Snapshot: every item, every type, its bytes (P:269, C:974-994).
-5. Settle: the owed Enter after a read; restore the whole snapshot when `changeCount` still matches (P:174, C:997-1016).
-Legacy path: snapshot at C:1051, restored at C:1093 when the clipboard is still ours.
+1. Snapshot: every item, every type, its bytes. The copy begins on a thread of its own when a dictation that may paste through the clipboard starts, and again at stop, unless a paste still waits for its target to read (D:172-180, C:1005-1038, A:1998, A:2140). The paste takes that copy when `changeCount` has not moved since it began; otherwise it reads the clipboard now. Either way it waits at most 300 ms, then keeps the first item's text or image (P:275, C:1042-1081). The end of the dictation or a cancel drops a copy the paste never used (A:221, utils.rs:93).
+5. Settle: the owed Enter after a read; restore the whole snapshot when `changeCount` still matches (P:174, C:1135-1154).
+Legacy path: snapshot at C:1189, restored at C:1231 when the clipboard is still ours.
 
 #### M11. Model commands
 | from | event | guard | to | path |

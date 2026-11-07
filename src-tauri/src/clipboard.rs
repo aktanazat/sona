@@ -10,13 +10,15 @@ use objc2::{rc::Retained, runtime::ProtocolObject};
 #[cfg(target_os = "macos")]
 use objc2_app_kit::{NSPasteboard, NSPasteboardItem, NSPasteboardWriting};
 #[cfg(target_os = "macos")]
-use objc2_foundation::{NSArray, NSData, NSString};
+use objc2_foundation::{NSArray, NSData, NSInteger, NSString};
 use std::fs;
 use std::io::Write;
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
 #[cfg(target_os = "linux")]
 use std::sync::OnceLock;
+#[cfg(target_os = "macos")]
+use std::sync::{mpsc::Receiver, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager};
 use tauri_plugin_clipboard_manager::ClipboardExt;
@@ -975,30 +977,104 @@ pub(crate) struct PasteboardSnapshot {
 #[cfg(target_os = "macos")]
 const SNAPSHOT_DEADLINE: Duration = Duration::from_millis(300);
 
+/// A copy of a pasteboard begun before a paste needs it: which pasteboard,
+/// its `changeCount` when the copy began, and the copy once it is read.
+#[cfg(target_os = "macos")]
+struct CopyAside {
+    pasteboard: String,
+    change_count: NSInteger,
+    snapshot: Receiver<PasteboardSnapshot>,
+}
+
+/// The copy begun for the dictation under way. Its paste takes it, and the
+/// end of the dictation drops one the paste never used.
+#[cfg(target_os = "macos")]
+static COPY_ASIDE: Mutex<Option<CopyAside>> = Mutex::new(None);
+
 #[cfg(target_os = "macos")]
 impl PasteboardSnapshot {
     /// The general pasteboard, whole if it copies aside within the deadline,
     /// otherwise its first item's text or image.
     pub(crate) fn capture_general() -> Self {
-        let original = NSPasteboard::generalPasteboard().changeCount();
+        Self::capture_named(&NSPasteboard::generalPasteboard().name().to_string())
+    }
+
+    /// Begins copying the general pasteboard aside while the words are still
+    /// spoken. An app that copied lazily renders each type only when asked,
+    /// so a copy begun at the paste either holds the paste or loses types.
+    pub(crate) fn copy_general_aside() {
+        // Reading Sona's own promise would count as the target app's read.
+        if crate::paste_tx::holds_clipboard() {
+            return;
+        }
+        Self::copy_aside(&NSPasteboard::generalPasteboard().name().to_string());
+    }
+
+    /// Drops the copy begun for a dictation that is over.
+    pub(crate) fn forget_copy_aside() {
+        COPY_ASIDE
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+    }
+
+    /// Begins copying `name` aside, unless a copy of what it holds now is
+    /// already under way.
+    fn copy_aside(name: &str) {
+        let change_count =
+            NSPasteboard::pasteboardWithName(&NSString::from_str(name)).changeCount();
+        let mut slot = COPY_ASIDE.lock().unwrap_or_else(PoisonError::into_inner);
+        if slot
+            .as_ref()
+            .is_some_and(|copy| copy.pasteboard == name && copy.change_count == change_count)
+        {
+            return;
+        }
+        *slot = Some(CopyAside {
+            pasteboard: name.to_owned(),
+            change_count,
+            snapshot: Self::read_aside(name, change_count),
+        });
+    }
+
+    /// `name` as it is now: from a copy begun earlier when the pasteboard has
+    /// not changed since, otherwise read now.
+    fn capture_named(name: &str) -> Self {
+        let pasteboard = NSPasteboard::pasteboardWithName(&NSString::from_str(name));
+        let change_count = pasteboard.changeCount();
+        let early = COPY_ASIDE
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+            .filter(|copy| copy.pasteboard == name && copy.change_count == change_count);
+        early
+            .map_or_else(
+                || Self::read_aside(name, change_count),
+                |copy| copy.snapshot,
+            )
+            .recv_timeout(SNAPSHOT_DEADLINE)
+            .unwrap_or_else(|_| {
+                log::warn!("The clipboard was slow to copy aside; keeping its text or image only");
+                Self::capture_text_or_image(&pasteboard)
+            })
+    }
+
+    /// Reads every item and type of `name` on a thread of its own, unless the
+    /// pasteboard changed since `change_count`: reading Sona's own promise
+    /// would tell its paste that the target app took the text.
+    fn read_aside(name: &str, change_count: NSInteger) -> Receiver<Self> {
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let name = name.to_owned();
         std::thread::spawn(move || {
             let snapshot = objc2::rc::autoreleasepool(|_| {
-                let pasteboard = NSPasteboard::generalPasteboard();
-                // Reading Sona's own promise would tell its paste that the
-                // target app took the text.
-                (pasteboard.changeCount() == original).then(|| Self::capture(&pasteboard))
+                let pasteboard = NSPasteboard::pasteboardWithName(&NSString::from_str(&name));
+                (pasteboard.changeCount() == change_count).then(|| Self::capture(&pasteboard))
             });
             if let Some(snapshot) = snapshot {
                 let _ = sender.send(snapshot);
             }
         });
         receiver
-            .recv_timeout(SNAPSHOT_DEADLINE)
-            .unwrap_or_else(|_| {
-                log::warn!("The clipboard was slow to copy aside; keeping its text or image only");
-                Self::capture_text_or_image(&NSPasteboard::generalPasteboard())
-            })
     }
 
     /// The first item's text, or its image when it has no text, with the
@@ -1336,6 +1412,121 @@ e.g. 28:1 28:0 means pressing on the Enter button on a standard US keyboard.
                 assert_eq!(back.as_deref(), Some(*data), "{data_type}");
             }
         }
+        // SAFETY: the pasteboard is this test's own and nothing reads it after this.
+        let _: () = unsafe { msg_send![&*pasteboard, releaseGlobally] };
+    }
+
+    /// A pasteboard owner that renders each promised type only when asked, a
+    /// fifth of a second later, as a spreadsheet or design app does.
+    #[cfg(target_os = "macos")]
+    mod slow_owner {
+        use objc2::rc::Retained;
+        use objc2::{define_class, msg_send, AnyThread, DefinedClass};
+        use objc2_app_kit::NSPasteboard;
+        use objc2_foundation::{NSArray, NSData, NSInteger, NSObject, NSString};
+        use std::sync::mpsc::{self, Receiver, Sender};
+        use std::time::Duration;
+
+        pub(super) struct Ivars {
+            rendered: Sender<String>,
+        }
+
+        define_class!(
+            // SAFETY: NSObject has no subclassing requirements and the only
+            // ivar is a channel sender.
+            #[unsafe(super(NSObject))]
+            #[name = "SonaTestSlowPasteboardOwner"]
+            #[ivars = Ivars]
+            pub(super) struct SlowOwner;
+
+            impl SlowOwner {
+                #[unsafe(method(pasteboard:provideDataForType:))]
+                fn provide(&self, pasteboard: &NSPasteboard, data_type: &NSString) {
+                    std::thread::sleep(Duration::from_millis(200));
+                    let name = data_type.to_string();
+                    pasteboard.setData_forType(Some(&NSData::with_bytes(name.as_bytes())), data_type);
+                    let _ = self.ivars().rendered.send(name);
+                }
+            }
+        );
+
+        /// Puts `text` on `pasteboard` and promises each of `lazy`, rendered
+        /// as its own name. The receiver hears each type once it is rendered.
+        pub(super) fn copy(
+            pasteboard: &NSPasteboard,
+            text: &str,
+            lazy: &[&str],
+        ) -> (Retained<SlowOwner>, Receiver<String>) {
+            let (sender, rendered) = mpsc::channel();
+            let owner = SlowOwner::alloc().set_ivars(Ivars { rendered: sender });
+            // SAFETY: `owner` is a freshly allocated SlowOwner with its ivars set.
+            let owner: Retained<SlowOwner> = unsafe { msg_send![super(owner), init] };
+            let types: Vec<Retained<NSString>> = std::iter::once("public.utf8-plain-text")
+                .chain(lazy.iter().copied())
+                .map(NSString::from_str)
+                .collect();
+            let types = NSArray::from_retained_slice(&types);
+            // SAFETY: the caller keeps `owner` retained while it owns the promise.
+            let _: NSInteger =
+                unsafe { msg_send![pasteboard, declareTypes: &*types, owner: &*owner] };
+            pasteboard.setString_forType(
+                &NSString::from_str(text),
+                &NSString::from_str("public.utf8-plain-text"),
+            );
+            (owner, rendered)
+        }
+    }
+
+    /// The clipboard copied aside while the words are spoken keeps every type
+    /// a slow app renders, where a copy begun at the paste keeps only text.
+    /// A clipboard changed since its copy began is read again instead, so the
+    /// old copy never goes back over the new one.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_clipboard_copied_aside_early_keeps_every_type_until_it_changes() {
+        use objc2::msg_send;
+
+        let text = |value: &str| {
+            (
+                "public.utf8-plain-text".to_string(),
+                value.as_bytes().to_vec(),
+            )
+        };
+        let rendered_as_its_name = |name: &str| (name.to_string(), name.as_bytes().to_vec());
+        let pasteboard = NSPasteboard::pasteboardWithUniqueName();
+        let name = pasteboard.name().to_string();
+
+        let lazy = ["com.sona.test.image", "com.sona.test.rich"];
+        let (_owner, rendered) = slow_owner::copy(&pasteboard, "copied", &lazy);
+        PasteboardSnapshot::copy_aside(&name);
+        // The words are spoken while the copy reads.
+        for _ in lazy {
+            let _ = rendered.recv_timeout(Duration::from_secs(2));
+        }
+        let mut kept = PasteboardSnapshot::capture_named(&name).items;
+        kept.iter_mut().for_each(|types| types.sort());
+        assert_eq!(
+            kept,
+            [vec![
+                rendered_as_its_name(lazy[0]),
+                rendered_as_its_name(lazy[1]),
+                text("copied"),
+            ]]
+        );
+
+        let (_owner, rendered) = slow_owner::copy(&pasteboard, "first", &lazy[..1]);
+        PasteboardSnapshot::copy_aside(&name);
+        let _ = rendered.recv_timeout(Duration::from_secs(2));
+        pasteboard.clearContents();
+        pasteboard.setString_forType(
+            &NSString::from_str("second"),
+            &NSString::from_str("public.utf8-plain-text"),
+        );
+        assert_eq!(
+            PasteboardSnapshot::capture_named(&name).items,
+            [vec![text("second")]]
+        );
+
         // SAFETY: the pasteboard is this test's own and nothing reads it after this.
         let _: () = unsafe { msg_send![&*pasteboard, releaseGlobally] };
     }
