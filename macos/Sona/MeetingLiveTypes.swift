@@ -904,6 +904,19 @@ struct RitualPrepCard: Decodable {
     let waitingOnCount: Int
     let participants: [RitualParticipant]
     let canRecordWhenStarts: Bool
+    /// False for a meeting only a heard plan predicts: no brief to open.
+    let onCalendar: Bool
+    let place: String?
+    let plan: RitualPrepPlan?
+}
+
+/// `MeetingPrepPlan`: the plan heard for a meeting, with the words that made it.
+struct RitualPrepPlan: Decodable {
+    let planId: String
+    let sessionId: MeetingSessionId
+    let title: String
+    let quote: String?
+    let citation: ArtifactCitation?
 }
 
 /// `MeetingWrapCard`: the meeting that just saved, and what it left behind.
