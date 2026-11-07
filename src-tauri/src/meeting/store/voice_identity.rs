@@ -581,14 +581,19 @@ impl MeetingStore {
         transaction.commit()?;
         Ok(revision)
     }
+    /// The meeting's speakers still waiting for a name: no person or
+    /// "unknown" answer covers them, no enrolled voice matched them, and the
+    /// name they carry is not the user's, which is how the user answers for
+    /// their own voice.
     pub(crate) fn unresolved_active_voice_speaker_ids(
         &self,
         session_id: MeetingSessionId,
+        user_name: Option<&str>,
     ) -> Result<Vec<SpeakerId>, StoreError> {
         let connection = self.connection()?;
         let model = wespeaker_embedding_model_key();
         let mut statement = connection.prepare(
-            "SELECT speaker.speaker_id FROM meeting_speakers speaker
+            "SELECT speaker.speaker_id, speaker.display_name FROM meeting_speakers speaker
               WHERE speaker.session_id = ?1
                 AND speaker.merged_into_speaker_id IS NULL
                 AND NOT EXISTS (
@@ -627,13 +632,16 @@ impl MeetingStore {
                 model.feature_pipeline_revision,
                 model.normalization,
             ],
-            |row| row.get::<_, String>(0),
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
         )?;
-        rows.map(|row| {
-            row.map_err(Into::into)
-                .and_then(|speaker_id| Ok(SpeakerId::from_uuid(parse_uuid(&speaker_id)?)))
-        })
-        .collect()
+        let mut unresolved = Vec::new();
+        for row in rows {
+            let (speaker_id, display_name) = row?;
+            if !names_user(&display_name, user_name) {
+                unresolved.push(SpeakerId::from_uuid(parse_uuid(&speaker_id)?));
+            }
+        }
+        Ok(unresolved)
     }
 
     /// Remember this run's voice for each diarized speaker, replacing what an
@@ -704,7 +712,7 @@ impl MeetingStore {
         session_id: MeetingSessionId,
         user_name: Option<&str>,
     ) -> Result<Vec<VoiceSpeakerSuggestion>, StoreError> {
-        let unresolved = self.unresolved_active_voice_speaker_ids(session_id)?;
+        let unresolved = self.unresolved_active_voice_speaker_ids(session_id, user_name)?;
         if unresolved.is_empty() {
             return Ok(Vec::new());
         }

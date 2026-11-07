@@ -350,7 +350,7 @@ fn unresolved_voice_speaker_ids_are_ordered_and_exclude_current_resolutions(
     let mut expected = vec![unresolved, stale];
     expected.sort_by_key(|speaker_id| id(*speaker_id));
     assert_eq!(
-        store.unresolved_active_voice_speaker_ids(session_id)?,
+        store.unresolved_active_voice_speaker_ids(session_id, None)?,
         expected
     );
     Ok(())
@@ -395,7 +395,7 @@ fn label_and_correction_return_the_resolved_person_ids() {
         .expect("correct speaker");
     assert_eq!(corrected.resolved_person_id, Some(corrected_person_id));
     assert!(store
-        .unresolved_active_voice_speaker_ids(session_id)
+        .unresolved_active_voice_speaker_ids(session_id, None)
         .expect("list manually resolved speakers")
         .is_empty());
 }
@@ -524,7 +524,7 @@ fn manual_voice_resolutions_remain_resolved_after_the_encrypted_store_reopens() 
     )
     .expect("reopen encrypted store");
     assert!(reopened
-        .unresolved_active_voice_speaker_ids(session_id)
+        .unresolved_active_voice_speaker_ids(session_id, None)
         .expect("list after reopen")
         .is_empty());
 }
@@ -1108,7 +1108,7 @@ fn successful_match_names_a_generated_speaker_and_keeps_a_typed_name() -> Result
         assert_eq!(name, expected, "{label:?}");
         assert!(
             !store
-                .unresolved_active_voice_speaker_ids(session_id)?
+                .unresolved_active_voice_speaker_ids(session_id, None)?
                 .contains(&speaker_id),
             "{label:?} stayed in the to-label queue"
         );
@@ -1521,7 +1521,7 @@ fn a_voice_named_in_one_meeting_is_suggested_in_the_next_and_applied_only_on_con
     );
     let second_revision = meeting_revision(&store, second)?;
     assert!(store
-        .unresolved_active_voice_speaker_ids(second)?
+        .unresolved_active_voice_speaker_ids(second, None)?
         .contains(&same_voice));
     let (display_name, links): (String, i64) = store.connection()?.query_row(
         "SELECT speaker.display_name,
@@ -1815,7 +1815,7 @@ fn naming_a_speaker_remembers_the_voice_for_a_suggestion_in_the_next_meeting(
     assert_eq!(maya.len(), 1);
     assert_eq!(kept_voice(&store, speaker_two)?, Some(0));
     assert!(!store
-        .unresolved_active_voice_speaker_ids(first)?
+        .unresolved_active_voice_speaker_ids(first, None)?
         .contains(&speaker_two));
 
     let second = meeting(&store, "Second", 3);
@@ -1839,7 +1839,7 @@ fn naming_a_speaker_remembers_the_voice_for_a_suggestion_in_the_next_meeting(
     )?;
     assert_eq!((display_name.as_str(), links), ("Speaker 1", 0));
     assert!(store
-        .unresolved_active_voice_speaker_ids(second)?
+        .unresolved_active_voice_speaker_ids(second, None)?
         .contains(&same_voice));
     Ok(())
 }
@@ -1857,7 +1857,7 @@ fn renaming_a_speaker_back_to_its_label_takes_the_voice_off_the_person() -> Resu
     rename(&store, first, speaker, "Speaker 2", None)?;
 
     assert!(store
-        .unresolved_active_voice_speaker_ids(first)?
+        .unresolved_active_voice_speaker_ids(first, None)?
         .contains(&speaker));
     let second = meeting(&store, "Second", 3);
     let same_voice = store.diarization_speaker(second, 0)?;
@@ -1879,7 +1879,7 @@ fn naming_the_users_own_microphone_voice_creates_no_person() -> Result<(), Store
 
     assert!(people_named(&store, "Aktan")?.is_empty());
     assert!(store
-        .unresolved_active_voice_speaker_ids(first)?
+        .unresolved_active_voice_speaker_ids(first, None)?
         .contains(&local));
     Ok(())
 }
@@ -1912,8 +1912,9 @@ fn a_first_name_names_the_one_person_known_by_it() -> Result<(), StoreError> {
 }
 
 /// The user's name from About me, in full or by first name, is the user's
-/// voice on any lane: naming a speaker after them creates no person and takes
-/// the voice off whoever it was given to, until it is named again.
+/// voice on any lane: naming a speaker after them creates no person, takes
+/// the voice off whoever it was given to, and answers who is speaking, so
+/// the speaker no longer waits for a name.
 #[test]
 fn naming_a_speaker_after_the_user_creates_no_person() -> Result<(), StoreError> {
     let (_directory, store) = store();
@@ -1925,8 +1926,8 @@ fn naming_a_speaker_after_the_user_creates_no_person() -> Result<(), StoreError>
 
     rename(&store, first, speaker, "Maya", user)?;
     rename(&store, first, speaker, "Aktan", user)?;
-    assert!(store
-        .unresolved_active_voice_speaker_ids(first)?
+    assert!(!store
+        .unresolved_active_voice_speaker_ids(first, user)?
         .contains(&speaker));
     rename(&store, first, speaker, "Aktan Azat", user)?;
     let people: i64 = store
@@ -1936,7 +1937,7 @@ fn naming_a_speaker_after_the_user_creates_no_person() -> Result<(), StoreError>
 
     rename(&store, first, speaker, "Maya", user)?;
     assert!(!store
-        .unresolved_active_voice_speaker_ids(first)?
+        .unresolved_active_voice_speaker_ids(first, user)?
         .contains(&speaker));
     Ok(())
 }

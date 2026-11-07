@@ -1752,7 +1752,10 @@ impl DetectionRuntime {
             .map(str::trim)
             .filter(|headline| !headline.is_empty())?
             .to_string();
-        let unresolved_speaker_count = match store.unresolved_active_voice_speaker_ids(session_id) {
+        let user_name = self.meetings.user_name();
+        let unresolved =
+            store.unresolved_active_voice_speaker_ids(session_id, user_name.as_deref());
+        let unresolved_speaker_count = match unresolved {
             Ok(speaker_ids) => u64::try_from(speaker_ids.len()).ok(),
             Err(error) => {
                 log::warn!(

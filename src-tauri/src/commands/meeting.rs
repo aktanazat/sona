@@ -74,7 +74,10 @@ pub async fn home_today(
         crate::planning::untracked::tally(&history, &manager).await,
     );
     let counts = match manager.store().await {
-        Ok(store) => store.today_counts(chrono::Local::now().date_naive()),
+        Ok(store) => store.today_counts(
+            chrono::Local::now().date_naive(),
+            manager.user_name().as_deref(),
+        ),
         Err(error) => {
             log::warn!("home_today: meeting store unavailable: {error:?}");
             TodayStoreCounts::UNAVAILABLE

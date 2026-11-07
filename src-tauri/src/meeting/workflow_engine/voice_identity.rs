@@ -28,9 +28,10 @@ impl MeetingSessionManager {
         &self,
         session_id: MeetingSessionId,
     ) -> Result<Vec<SpeakerId>, MeetingCommandError> {
+        let user_name = self.user_name();
         self.store()
             .await?
-            .unresolved_active_voice_speaker_ids(session_id)
+            .unresolved_active_voice_speaker_ids(session_id, user_name.as_deref())
             .map_err(map_store_error)
     }
 
