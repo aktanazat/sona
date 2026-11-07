@@ -443,33 +443,55 @@ fn is_blank_transcription(transcription: &str) -> bool {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CaptureVerdict {
     Transcribed,
+    /// Voice detection forwarded speech and the model wrote nothing for it.
+    DecodedNothing,
     NoSpeech,
 }
 
-/// Settle whether a capture had speech, given what VAD forwarded and whether
-/// the model produced any text for it.
+/// Settle whether a capture had speech, given what voice detection said and
+/// whether the model produced any text for it.
 ///
-/// VAD is an optimizer, not a gatekeeper. When it forwards speech its answer is
-/// already confirmed by the audio the engine received. When it forwards nothing
-/// the capture layer hands the model the raw clip anyway (short captures only),
-/// so an empty decode — not VAD's silence — is what makes no-speech a fact.
+/// VAD is an optimizer, not a gatekeeper. When it forwards speech the engine
+/// received real audio, so a decode with no text is a failed decode the user
+/// is told about, never a silent microphone. When it forwards nothing, or is
+/// off, the model reads the raw clip, so an empty decode — not VAD's silence —
+/// is what makes no-speech a fact.
 ///
 /// The second argument is what the *model* produced, not what survived Sona's
 /// post-processing, because two post-processing stages empty a non-empty
 /// transcript by design: `apply_spoken_edits`, where deleting the only clause
 /// is the correct answer to "scratch that", and `remove_filler_words`, which is
 /// on by default and empties a capture whose whole output is one hesitation
-/// token. Either coinciding with `vad_forwarded_speech == false` would mislabel
-/// a heard capture as no-speech, and the two correlate: a clip too quiet for VAD
-/// is also the clip most likely to decode to a bare "Um.". Such a capture is
-/// `Transcribed` with an empty delivery — the same outcome the filters already
-/// produce when VAD did forward speech, so the two stay consistent.
-fn capture_verdict(vad_forwarded_speech: bool, model_produced_text: bool) -> CaptureVerdict {
-    if vad_forwarded_speech || model_produced_text {
-        CaptureVerdict::Transcribed
-    } else {
-        CaptureVerdict::NoSpeech
+/// token. Reading the cleaned text would mislabel such a heard capture, and a
+/// clip too quiet for VAD is also the clip most likely to decode to a bare
+/// "Um.". Such a capture is `Transcribed` with an empty delivery, whatever VAD
+/// said.
+fn capture_verdict(speech: SpeechEvidence, model_produced_text: bool) -> CaptureVerdict {
+    match (speech, model_produced_text) {
+        (_, true) => CaptureVerdict::Transcribed,
+        (SpeechEvidence::Detected, false) => CaptureVerdict::DecodedNothing,
+        (SpeechEvidence::Undetected | SpeechEvidence::Unknown, false) => CaptureVerdict::NoSpeech,
     }
+}
+
+/// The end of a capture whose decode failed, or produced nothing for speech
+/// VAD forwarded: the user is told the transcription failed, and the
+/// recording is kept as a failed row to transcribe again.
+fn keep_failed_capture(
+    app: &AppHandle,
+    history: &HistoryManager,
+    run: &RunPlan,
+    unclaimed: UnclaimedRecording,
+    failed: PendingHistoryEntry,
+) {
+    let _ = app.emit("transcription-error", TRANSCRIPTION_FAILURE_EVENT_MESSAGE);
+    let history_id = unclaimed.claimed_by(failed.save(history));
+    persist_delivery_attempt(
+        history,
+        history_id,
+        run.run_id,
+        DeliveryReceipt::not_dispatched(),
+    );
 }
 
 fn share_completed_pcm(samples: Vec<f32>) -> Arc<Vec<f32>> {
@@ -2127,10 +2149,10 @@ impl TranscribeAction {
                         // running, finalize it and use its text (all audio was already
                         // fed to the stream); otherwise batch-transcribe the samples.
                         let transcription_time = Instant::now();
-                        let speech = if vad_forwarded_speech && run.asr().vad_enabled {
-                            SpeechEvidence::Detected
-                        } else {
-                            SpeechEvidence::Unknown
+                        let speech = match (run.asr().vad_enabled, vad_forwarded_speech) {
+                            (true, true) => SpeechEvidence::Detected,
+                            (true, false) => SpeechEvidence::Undetected,
+                            (false, _) => SpeechEvidence::Unknown,
                         };
                         let transcription_result =
                             transcribe_frozen_run(&tm, &run, completed_pcm.as_slice(), speech);
@@ -2206,38 +2228,61 @@ impl TranscribeAction {
                                     transcription_time.elapsed()
                                 );
 
-                                // VAD rejected every frame of this capture, so
-                                // the model was handed the raw clip to settle
-                                // it. Only now, with the model having produced
-                                // nothing either, is "no speech" a fact rather
-                                // than a guess. The WAV above is this capture's
-                                // one recording; the receipt reuses it.
-                                if capture_verdict(vad_forwarded_speech, model_produced_text)
-                                    == CaptureVerdict::NoSpeech
-                                {
-                                    debug!("Model confirmed the VAD-silent capture had no speech");
-                                    unclaimed.release();
-                                    let persistence = persist_no_speech_receipt(
-                                        &hm,
-                                        &rm,
-                                        cancel_generation,
-                                        &run,
-                                        SavedNoSpeechCapture {
-                                            file_name,
-                                            wav_path: wav_path_for_verify,
-                                            duration_ms,
-                                            wav_saved,
-                                            level,
-                                        },
-                                    )
-                                    .await;
-                                    if let Some(error_type) = persistence.recording_error_type() {
-                                        let _ = ah.emit(
-                                            "recording-error",
-                                            RecordingErrorEvent::typed(error_type),
-                                        );
+                                match capture_verdict(speech, model_produced_text) {
+                                    CaptureVerdict::Transcribed => {}
+                                    // VAD rejected every frame of this capture, or
+                                    // was off, so the model was handed the raw clip
+                                    // to settle it. Only now, with the model having
+                                    // produced nothing either, is "no speech" a fact
+                                    // rather than a guess. The WAV above is this
+                                    // capture's one recording; the receipt reuses it.
+                                    CaptureVerdict::NoSpeech => {
+                                        debug!("Model confirmed the capture had no speech");
+                                        unclaimed.release();
+                                        let persistence = persist_no_speech_receipt(
+                                            &hm,
+                                            &rm,
+                                            cancel_generation,
+                                            &run,
+                                            SavedNoSpeechCapture {
+                                                file_name,
+                                                wav_path: wav_path_for_verify,
+                                                duration_ms,
+                                                wav_saved,
+                                                level,
+                                            },
+                                        )
+                                        .await;
+                                        if let Some(error_type) = persistence.recording_error_type()
+                                        {
+                                            let _ = ah.emit(
+                                                "recording-error",
+                                                RecordingErrorEvent::typed(error_type),
+                                            );
+                                        }
+                                        return;
                                     }
-                                    return;
+                                    CaptureVerdict::DecodedNothing => {
+                                        error!("The model produced no text for speech VAD forwarded; no text was delivered");
+                                        keep_failed_capture(
+                                            &ah,
+                                            &hm,
+                                            &run,
+                                            unclaimed,
+                                            PendingHistoryEntry::failed(
+                                                file_name,
+                                                post_process,
+                                                &run,
+                                                CompletedCapture {
+                                                    duration_ms,
+                                                    has_audio: wav_saved,
+                                                    level,
+                                                },
+                                            ),
+                                        );
+                                        return;
+                                    }
+
                                 }
                                 if post_process {
                                     if use_streaming_overlay {
@@ -2377,11 +2422,11 @@ impl TranscribeAction {
                                 }
 
                                 error!("{TRANSCRIPTION_FAILURE_LOG_MESSAGE}");
-                                let _ = ah.emit(
-                                    "transcription-error",
-                                    TRANSCRIPTION_FAILURE_EVENT_MESSAGE,
-                                );
-                                let history_id = unclaimed.claimed_by(
+                                keep_failed_capture(
+                                    &ah,
+                                    &hm,
+                                    &run,
+                                    unclaimed,
                                     PendingHistoryEntry::failed(
                                         file_name,
                                         post_process,
@@ -2391,15 +2436,9 @@ impl TranscribeAction {
                                             has_audio: wav_saved,
                                             level,
                                         },
-                                    )
-                                    .save(&hm),
+                                    ),
                                 );
-                                persist_delivery_attempt(
-                                    &hm,
-                                    history_id,
-                                    run.run_id,
-                                    DeliveryReceipt::not_dispatched(),
-                                );
+
                             }
                         }
                     }
@@ -2488,7 +2527,7 @@ mod tests {
         capture_verdict, complete_unless_cancelled, is_blank_transcription,
         select_final_transcription, share_completed_pcm, should_use_streaming_overlay,
         strip_think_block, BatchDecode, CaptureVerdict, CloudRunError, CompletedCapture,
-        InputLevel, PendingHistoryEntry,
+        InputLevel, PendingHistoryEntry, SpeechEvidence,
     };
     #[cfg(feature = "cloud-realtime")]
     use super::{ensure_cloud_fallback_is_installed, resolve_cloud_finalization, FrozenTranscript};
@@ -2512,25 +2551,37 @@ mod tests {
         assert!(!is_blank_transcription("  hello  "));
     }
 
-    /// The whole point of the change this locks in: a capture VAD called silent
-    /// is not silent until the model agrees. Only the bottom row may ever
-    /// produce a no-speech receipt.
+    /// A capture VAD called silent, or that no VAD judged, is not silent until
+    /// the model agrees; speech VAD forwarded that decodes to nothing is a
+    /// failure the user hears about. Only the last two rows may ever produce
+    /// a no-speech receipt.
     #[test]
-    fn a_vad_silent_capture_is_only_no_speech_once_the_model_returns_nothing() {
-        for (vad_forwarded_speech, model_produced_text, expected) in [
-            // VAD found nothing, but the model read the raw clip: real speech.
-            (false, true, CaptureVerdict::Transcribed),
+    fn a_capture_is_only_no_speech_once_the_model_returns_nothing() {
+        for (speech, model_produced_text, expected) in [
+            // VAD found nothing, or was off, but the model read the raw clip:
+            // real speech.
+            (
+                SpeechEvidence::Undetected,
+                true,
+                CaptureVerdict::Transcribed,
+            ),
+            (SpeechEvidence::Unknown, true, CaptureVerdict::Transcribed),
             // VAD forwarded speech: the engine already received real audio, so
             // an empty transcript is a failed decode, never a silent capture.
-            (true, true, CaptureVerdict::Transcribed),
-            (true, false, CaptureVerdict::Transcribed),
-            // Nothing heard by either: the only no-speech receipt.
-            (false, false, CaptureVerdict::NoSpeech),
+            (SpeechEvidence::Detected, true, CaptureVerdict::Transcribed),
+            (
+                SpeechEvidence::Detected,
+                false,
+                CaptureVerdict::DecodedNothing,
+            ),
+            // Nothing heard by either: the only no-speech receipts.
+            (SpeechEvidence::Undetected, false, CaptureVerdict::NoSpeech),
+            (SpeechEvidence::Unknown, false, CaptureVerdict::NoSpeech),
         ] {
             assert_eq!(
-                capture_verdict(vad_forwarded_speech, model_produced_text),
+                capture_verdict(speech, model_produced_text),
                 expected,
-                "vad_forwarded_speech={vad_forwarded_speech} model_produced_text={model_produced_text}"
+                "speech={speech:?} model_produced_text={model_produced_text}"
             );
         }
     }
