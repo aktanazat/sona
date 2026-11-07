@@ -49,6 +49,8 @@ final class AboutStore {
     private(set) var preferenceError: String?
     /// The last thing the core could not do, shown until the next success.
     private(set) var error: String?
+    /// Reduce Transparency or Increase Contrast is on in System Settings.
+    private(set) var opaqueRequested = AboutStore.systemRequestsOpaque
 
     @ObservationIgnored private let core: Core
 
@@ -57,6 +59,11 @@ final class AboutStore {
         version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
         core.observe(CoreEvent.aboutSettingsChanged) { [weak self] _ in self?.reloadSettings() }
         core.observe(CoreEvent.aboutThemeChanged) { [weak self] _ in self?.reloadSettings() }
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil, queue: nil
+        ) { [weak self] _ in
+            Task { await self?.readDisplayOptions() }
+        }
     }
 
     /// The first load: settings, both directories, and whether this is a
@@ -196,7 +203,20 @@ final class AboutStore {
     }
 
     var theme: AppearanceTheme { settings?.theme ?? .system }
-    var material: AppearanceMaterial { settings?.appearanceMaterial ?? .solid }
+    /// The material picked on the About page.
+    var materialChoice: AppearanceMaterial { settings?.appearanceMaterial ?? .solid }
+    /// The material Sona's surfaces are drawn in: the choice, unless the
+    /// system asks for opaque surfaces.
+    var material: AppearanceMaterial { opaqueRequested ? .solid : materialChoice }
+
+    private static var systemRequestsOpaque: Bool {
+        NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
+            || NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast
+    }
+
+    private func readDisplayOptions() {
+        opaqueRequested = Self.systemRequestsOpaque
+    }
 
     func setLanguage(_ code: String) {
         call { try await self.core.request("change_app_language_setting", ["language": code]) }
