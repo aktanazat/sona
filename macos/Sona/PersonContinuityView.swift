@@ -22,6 +22,8 @@ struct PersonContinuityView<Profile: View>: View {
     let work: PersonWorkStore?
     /// What is still open between you, from the person's ledger.
     let openLoops: [PersonOpenLoop]
+    /// Plans that named this person whose time passed with no recording.
+    let plansWithoutRecord: [HeardPlan]
     @Binding var tab: PersonPageTab
     let openMeeting: (String) -> Void
     let openContribution: ((String, UInt64) -> Void)?
@@ -166,14 +168,37 @@ struct PersonContinuityView<Profile: View>: View {
     private func catchUp(_ snapshot: PersonMemorySnapshot) -> some View {
         let catchUp = snapshot.catchUp
         let stillOpen = openLoops.filter(\.status.outstanding)
+        let yours = stillOpen.filter { $0.direction == .mine }
+        let theirs = stillOpen.filter { $0.direction != .mine }
         return VStack(alignment: .leading, spacing: 0) {
-            PageSection("Still open") {
-                Card {
-                    if stillOpen.isEmpty {
-                        CardLine("Nothing is still open.")
-                    } else {
-                        ForEach(stillOpen) { loop in
+            if stillOpen.isEmpty {
+                PageSection("Still open") {
+                    Card { CardLine("Nothing is still open.") }
+                }
+            }
+            if !yours.isEmpty {
+                PageSection("You owe") {
+                    Card {
+                        ForEach(yours) { loop in
                             PersonLoopRow(loop: loop, openMeeting: openMeeting)
+                        }
+                    }
+                }
+            }
+            if !theirs.isEmpty {
+                PageSection("They owe you") {
+                    Card {
+                        ForEach(theirs) { loop in
+                            PersonLoopRow(loop: loop, openMeeting: openMeeting)
+                        }
+                    }
+                }
+            }
+            if !plansWithoutRecord.isEmpty {
+                PageSection("Planned, not yet") {
+                    Card {
+                        ForEach(plansWithoutRecord) { plan in
+                            PersonPlanRow(plan: plan, openMeeting: openMeeting)
                         }
                     }
                 }
@@ -462,6 +487,32 @@ private struct PersonFilterChip: View {
         .animation(.easeOut(duration: 0.12), value: hovering)
         .accessibilityLabel("\(title), \(count)")
         .accessibilityAddTraits(on ? .isSelected : [])
+    }
+}
+
+/// A plan that named this person, its time gone with no recording of it.
+struct PersonPlanRow: View {
+    let plan: HeardPlan
+    let openMeeting: (String) -> Void
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        CardRow(action: { openMeeting(plan.sessionId) }) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("“\(plan.quote ?? plan.title)”").bodyText(14).lineLimit(3)
+                Text("\(plan.details) · No record of it since.").metaText()
+            }
+        } trailing: {
+            if let segmentId = plan.citation?.segmentId {
+                Button {
+                    model.meetings.playContribution(sessionId: plan.sessionId, segmentId: segmentId)
+                } label: {
+                    Image(systemName: "play.fill")
+                }
+                .buttonStyle(QuietButton(color: Theme.accent, compact: true))
+                .accessibilityLabel("Play where this was said")
+            }
+        }
     }
 }
 

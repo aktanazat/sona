@@ -194,7 +194,8 @@ pub struct CliArgs {
     pub person_changes: Option<String>,
 
     /// Read the numbers a person's page leads with: meetings, time together,
-    /// last met, talk share, ledger outcomes, open loops and a 52-week strip.
+    /// last met, talk share, ledger outcomes, open loops both ways and how
+    /// many were carried over, plans with no record since, and a 52-week strip.
     #[arg(long, value_name = "PERSON_ID")]
     pub person_stats: Option<String>,
 

@@ -321,6 +321,7 @@ struct PeopleInboxSection: View {
 struct PersonLoopRow: View {
     let loop: PersonOpenLoop
     var openMeeting: (String) -> Void = { _ in }
+    @Environment(AppModel.self) private var model
 
     var body: some View {
         CardRow(action: loop.meetingId.isEmpty ? nil : { openMeeting(loop.meetingId) }) {
@@ -333,7 +334,43 @@ struct PersonLoopRow: View {
                         Text("Overdue").metaText(Theme.live)
                     }
                 }
+                if let carried {
+                    Text(carried).metaText(Theme.inkSecondary)
+                }
             }
+        } trailing: {
+            if carried != nil {
+                receipts
+            }
+        }
+    }
+
+    private var carried: String? {
+        switch loop.raisedInMeetings {
+        case ..<2: nil
+        case 2: "Carried over, asked twice"
+        case let count: "Carried over, asked \(count) times"
+        }
+    }
+
+    private var receiptsKey: String { "loop:\(loop.loopId)" }
+
+    @ViewBuilder
+    private var receipts: some View {
+        let audio = model.meetings.audio
+        if audio.reelKey == receiptsKey {
+            Button("Stop") { audio.stop() }
+                .buttonStyle(QuietButton(color: Theme.accent))
+        } else {
+            Button {
+                audio.playReel(reading: "conversation_reel_for_loop", ["loopId": .string(loop.loopId)], key: receiptsKey)
+            } label: {
+                Image(systemName: "play.fill")
+            }
+            .buttonStyle(QuietButton(color: Theme.accent, compact: true))
+            .disabled(audio.heldForRecording)
+            .help(audio.heldForRecording ? ConversationAudioPlayback.heldNotice : "")
+            .accessibilityLabel("Play each time it came up")
         }
     }
 }
@@ -596,6 +633,7 @@ struct PersonSections: View {
                         memory: memory,
                         work: work,
                         openLoops: detail.openLoops,
+                        plansWithoutRecord: detail.plansWithoutRecord,
                         tab: $tab,
                         openMeeting: openMeeting,
                         openContribution: openContribution

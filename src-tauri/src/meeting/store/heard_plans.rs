@@ -433,6 +433,28 @@ pub(super) fn answers_to(person: &Person, name: &str) -> bool {
         })
 }
 
+/// The plans that name `person` whose time has passed with no recording of
+/// them, newest first: the same rule that would have marked one happened.
+pub(super) fn plans_without_record_in(
+    connection: &Connection,
+    person: &Person,
+    hidden: &HashSet<MeetingSessionId>,
+) -> Result<Vec<HeardPlan>, StoreError> {
+    let now_utc_ms = utc_now_ms();
+    let mut plans = plans_in(
+        connection,
+        "source.phase != 'deleting' AND p.end_utc_ms <= ?1",
+        params![now_utc_ms],
+        now_utc_ms,
+        hidden,
+    )?;
+    plans.retain(|plan| {
+        plan.status == HeardPlanStatus::NoRecord
+            && plan.people.iter().any(|name| answers_to(person, name))
+    });
+    Ok(plans)
+}
+
 pub(super) fn plan_in(
     connection: &Connection,
     plan_id: HeardPlanId,

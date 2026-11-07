@@ -1,10 +1,14 @@
 use crate::meeting::analytics::MeetingAnalytics;
 use crate::meeting::ledger::LedgerOutcomeCounts;
-use crate::meeting::loop_types::{waiting_on_is_stale, MeetingLoopId, MeetingLoopKind};
+use crate::meeting::loop_types::{
+    waiting_on_is_stale, MeetingLoopId, MeetingLoopKind, MeetingLoopRow,
+};
 use crate::meeting::people_types::{
     Person, PersonCommitment, PersonId, PersonMeetingHeadline, PersonMeetingSummary, PersonOpenLoop,
 };
-use crate::meeting::store::loops::{ledger_loop_seeds, ledger_rows_in, rows_from_seeds_in};
+use crate::meeting::store::loops::{
+    carry_chain_in, ledger_loop_seeds, ledger_rows_in, rows_from_seeds_in,
+};
 use crate::meeting::store::people::{all_people_in, loop_concerns_person, owner_matches};
 use crate::meeting::store::{
     listed_outcomes, utc_now_ms, ReceiptSpeakers, StoreError, READABLE_ARTIFACT_CONTENT,
@@ -136,6 +140,7 @@ pub(super) fn facts_for_person_in(
                     if !row.is_open() {
                         continue;
                     }
+                    let raised_in_meetings = raised_in_meetings_in(connection, &row)?;
                     open_loops.push(PersonOpenLoop {
                         loop_id: row.loop_id,
                         meeting_id,
@@ -151,6 +156,7 @@ pub(super) fn facts_for_person_in(
                             .carried_into_loop_id
                             .as_ref()
                             .and_then(MeetingLoopId::session_id),
+                        raised_in_meetings,
                     });
                 }
                 // A commitment stays on the page once it is kept: the point of
@@ -207,6 +213,7 @@ pub(super) fn all_open_loops_in(
                 row.outstanding_since(meeting.at_utc_ms),
                 now_utc_ms,
             );
+            let raised_in_meetings = raised_in_meetings_in(connection, &row)?;
             loops.push(PersonOpenLoop {
                 loop_id: row.loop_id,
                 meeting_id: meeting.session_id,
@@ -219,10 +226,21 @@ pub(super) fn all_open_loops_in(
                 waiting_on_stale,
                 carried_since_at_utc_ms: row.carried_since_at_utc_ms,
                 carried_into_meeting_id: None,
+                raised_in_meetings,
             });
         }
     }
     Ok(loops)
+}
+
+/// One meeting, or every meeting of the series the carry chain took this
+/// loop through.
+fn raised_in_meetings_in(connection: &Connection, row: &MeetingLoopRow) -> Result<u32, StoreError> {
+    if row.carried_since_at_utc_ms.is_none() {
+        return Ok(1);
+    }
+    let chain = carry_chain_in(connection, &row.loop_id)?;
+    u32::try_from(chain.len()).map_err(|_| StoreError::Corrupt)
 }
 
 pub(super) fn talk_share_average_in(
