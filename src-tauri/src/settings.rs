@@ -2351,11 +2351,36 @@ impl LegacySettings<'_> {
 
 struct SerializedSettings(serde_json::Value);
 
-/// Present when this run found the settings file unreadable. The file was
-/// kept under another name and the settings in force are defaults, so nothing
-/// may act on them as the person's choice, such as deleting history over the
-/// default limit.
-pub(crate) struct UnreadableSettings;
+/// Saved in the settings file beside the settings when a launch found the
+/// file unreadable. The file was kept under another name and the settings in
+/// force are defaults, so nothing may act on them as the person's choice,
+/// such as deleting history over the default limit, until the person sets
+/// the history limits again.
+const HISTORY_CLEANUP_HELD: &str = "history_cleanup_held";
+
+/// Whether history cleanup waits for the person to set the limits again.
+pub(crate) fn history_cleanup_held<R: tauri::Runtime>(app: &AppHandle<R>) -> bool {
+    let _settings_lock = lock_settings_store();
+    SettingsFile::open(app)
+        .ok()
+        .and_then(|file| file.store.get(HISTORY_CLEANUP_HELD))
+        .and_then(|held| held.as_bool())
+        .unwrap_or(false)
+}
+
+/// The person set a history limit, so the limits in force are theirs.
+pub(crate) fn release_history_cleanup<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> Result<(), SettingsPersistError> {
+    let _settings_lock = lock_settings_store();
+    let file = SettingsFile::open(app).unwrap_or_else(|error| {
+        panic!("Settings store must be available after its plugin is registered: {error}")
+    });
+    if file.store.delete(HISTORY_CLEANUP_HELD) {
+        file.save().map_err(SettingsPersistError::Save)?;
+    }
+    Ok(())
+}
 
 /// Present once the settings file was moved out of Sona's folder. Writing it
 /// again would make the next launch take Sona for a copy already in use.
@@ -2381,14 +2406,15 @@ impl<R: tauri::Runtime> SettingsFile<R> {
     }
 
     fn open_at(app: &AppHandle<R>, path: std::path::PathBuf) -> tauri_plugin_store::Result<Self> {
-        if app.get_store(&path).is_none() && set_aside_unreadable_settings(&path) {
-            app.manage(UnreadableSettings);
-        }
+        let unreadable = app.get_store(&path).is_none() && set_aside_unreadable_settings(&path);
         let store = app
             .store_builder(&path)
             .disable_auto_save()
             .serialize(|_| Err("the settings file is saved by SettingsFile::save".into()))
             .build()?;
+        if unreadable {
+            store.set(HISTORY_CLEANUP_HELD, true);
+        }
         Ok(Self {
             store,
             path,
@@ -4637,9 +4663,10 @@ mod tests {
     /// A settings file cut short, as an in-place save killed part way left
     /// it, loaded as an empty store and was overwritten with defaults, and
     /// retention then deleted history over the default limit. The bytes must
-    /// stay on disk, and the run must know its settings are not the person's.
+    /// stay on disk, and every launch until the person sets the limits again
+    /// must know its settings are not the person's.
     #[test]
-    fn an_unreadable_settings_file_is_kept_and_the_run_knows_it() {
+    fn an_unreadable_settings_file_holds_cleanup_across_launches() {
         let directory = tempfile::tempdir().expect("temporary settings directory");
         let path = directory.path().join(SETTINGS_STORE_PATH);
         let mut raw = serde_json::Value::Object(default_settings_document().0);
@@ -4667,7 +4694,15 @@ mod tests {
                 unreadable,
                 "the kept copy holds exactly the unreadable bytes"
             );
-            assert!(app.try_state::<UnreadableSettings>().is_some());
+            drop(file);
+            drop(app);
+            let (_next_launch, next) = temporary_settings_store(&path);
+            read_settings_from_store(&next);
+            assert_eq!(
+                next.store.get(HISTORY_CLEANUP_HELD),
+                Some(serde_json::Value::Bool(true)),
+                "the next launch still holds history cleanup"
+            );
             std::fs::remove_file(&kept[0]).expect("clear the kept copy");
         }
     }
