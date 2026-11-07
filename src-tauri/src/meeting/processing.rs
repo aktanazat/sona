@@ -6194,32 +6194,6 @@ const fn refuses_structured_reading(cause: EngineFailureCause) -> bool {
     )
 }
 
-/// Each receipt names the person who spoke every line it cites, read from
-/// the transcript and never from the model, which leaves a placeholder name
-/// out when its rules say to. A receipt citing more than one voice, or a
-/// line nobody was assigned to, names nobody.
-fn attribute_receipts(
-    ledger: &mut MeetingLedger,
-    segment_speakers: &HashMap<TranscriptSegmentId, SpeakerId>,
-    speaker_names: &HashMap<SpeakerId, String>,
-) {
-    let speaker = |receipt: &LedgerReceipt| {
-        let mut names = receipt.citations.iter().map(|citation| {
-            segment_speakers
-                .get(&citation.segment_id)
-                .and_then(|speaker_id| speaker_names.get(speaker_id))
-        });
-        let first = names.next()??;
-        names.all(|name| name == Some(first)).then(|| first.clone())
-    };
-    for thread in &mut ledger.threads {
-        thread.receipt.speaker = speaker(&thread.receipt);
-    }
-    for commitment in &mut ledger.commitments {
-        commitment.receipt.speaker = speaker(&commitment.receipt);
-    }
-}
-
 /// Read the conversation as a ledger, refuse to ship a receipt that is not in
 /// the transcript, and say on the ledger what the structural checks found.
 ///
@@ -6250,7 +6224,7 @@ pub(crate) fn generate_ledger(
     let mut ledger =
         complete_reading::ledger(generator, evidence, &turn_speakers, &haystack, checkpoint)
             .map_err(reading_error_cause)?;
-    attribute_receipts(&mut ledger, &segment_speakers, speaker_names);
+    ledger::attribute_receipts(&mut ledger, &segment_speakers, speaker_names);
     // The page this ledger would render as, built the way the exporter builds
     // it so the checks read the measured numbers a reader would. Title, kind
     // and date are presentation and take no part in them; the axis runs to
@@ -10111,7 +10085,7 @@ pub(crate) mod tests {
             thread.receipt.citations = cited.into_iter().map(line).collect();
         }
 
-        attribute_receipts(&mut ledger, &segment_speakers, &names);
+        ledger::attribute_receipts(&mut ledger, &segment_speakers, &names);
 
         let speakers = ledger
             .threads
