@@ -456,6 +456,55 @@ pub(crate) fn spaced_transcript_segments(
         .unwrap();
 }
 
+/// A microphone track and a system-audio track for a meeting recorded on
+/// this Mac, under a plan of their own, that a review snapshot can read back.
+pub(crate) fn recording_tracks(
+    store: &MeetingStore,
+    meeting_id: MeetingSessionId,
+) -> (SourceTrackId, SourceTrackId) {
+    let plan_id = Uuid::new_v4();
+    // PANIC: a fixture that cannot write its rows is a broken test.
+    let connection = store.connection().unwrap();
+    // PANIC: as above, for the plan row.
+    connection
+        .execute(
+            "INSERT INTO meeting_run_plans (
+                plan_id, session_id, attempt_number, schema_version, consent_id,
+                canonical_plan_json, created_at_utc_ms
+             ) VALUES (?1, ?2, 1, 1, ?3, '{}', 1)",
+            params![
+                plan_id.to_string(),
+                meeting_id.uuid().to_string(),
+                Uuid::new_v4().to_string()
+            ],
+        )
+        .unwrap();
+    // PANIC: as above; each track row is the fixture's own.
+    let track = |source_kind: SourceKind| {
+        let track_id = Uuid::new_v4();
+        // PANIC: as above.
+        connection
+            .execute(
+                "INSERT INTO meeting_source_tracks (
+                    track_id, session_id, plan_id, source_kind, required, requested,
+                    descriptor_json, timestamp_bridge_json, health
+                 ) VALUES (?1, ?2, ?3, ?4, 1, 1, '{}', '{}', '\"healthy\"')",
+                params![
+                    track_id.to_string(),
+                    meeting_id.uuid().to_string(),
+                    plan_id.to_string(),
+                    source_kind.as_str()
+                ],
+            )
+            .unwrap();
+        SourceTrackId::from_uuid(track_id)
+    };
+    (
+        track(SourceKind::Microphone),
+        track(SourceKind::SystemAudio),
+    )
+}
+
 /// A bookmark of `kind` pressed `at_offset_ns` into the recording.
 pub(crate) fn bookmark(
     store: &MeetingStore,
