@@ -158,6 +158,19 @@ impl RunProgress {
         self.run_paused = self.run_paused.saturating_add(waited);
     }
 
+    /// The update while the run waits for a recording to finish. It shows no
+    /// time left, and the finish time shown before is let go: the wait moves
+    /// it by however long the recording runs.
+    pub(super) fn waiting(&mut self, now: Instant) -> ProcessingProgress {
+        self.last_update = now;
+        self.finish_at = None;
+        self.moved_later = false;
+        ProcessingProgress {
+            waiting_for_capture: true,
+            ..self.progress(None)
+        }
+    }
+
     /// End the run. A run that did not complete keeps the stages it finished
     /// and measures neither the stage it stopped in nor the run as a whole.
     pub(super) fn finish(mut self, completed: bool, now: Instant) -> FinishedRun {
@@ -201,12 +214,18 @@ impl RunProgress {
 
     fn update(&mut self, now: Instant) -> ProcessingProgress {
         self.last_update = now;
+        let eta_ms = self.shown_left(now);
+        self.progress(eta_ms)
+    }
+
+    fn progress(&self, eta_ms: Option<u64>) -> ProcessingProgress {
         ProcessingProgress {
             stage: self.stage,
             stage_fraction_permille: self.done_permille,
             audio_ns_total: self.work.audio_ns,
             started_at_utc_ms: self.started_at_utc_ms,
-            eta_ms: self.shown_left(now),
+            eta_ms,
+            waiting_for_capture: false,
         }
     }
 

@@ -1542,6 +1542,7 @@ impl MeetingProcessingService {
                         session_id,
                         &refresh.engine,
                         &worker_cancelled,
+                        None,
                     );
                 }));
                 service.retire_job(session_id, &worker_cancelled);
@@ -1761,7 +1762,13 @@ impl MeetingProcessingService {
                     self.notes_written(session_id, &cancelled);
                     self.enter_stage(session_id, &mut progress, ProcessingStage::People);
                     let refreshed = catch_unwind(AssertUnwindSafe(|| {
-                        self.refresh_relationship_summaries(&store, session_id, &engine, &cancelled)
+                        self.refresh_relationship_summaries(
+                            &store,
+                            session_id,
+                            &engine,
+                            &cancelled,
+                            Some(&mut progress),
+                        )
                     }));
                     if refreshed.unwrap_or(false) {
                         progress.stage_did_work();
@@ -1918,6 +1925,7 @@ impl MeetingProcessingService {
             return Err(ProcessingFailure::Cancelled.into());
         }
         self.enter_stage(session_id, progress, ProcessingStage::Notes);
+        self.hold_for_recording(session_id, progress, cancelled)?;
         let input_revision = store.session_snapshot(session_id)?.revision;
         // Metrics come from the transcript, not from the generated notes, so
         // they are derived before generation and survive a model that is
@@ -2056,7 +2064,7 @@ impl MeetingProcessingService {
                         before_ns = span.end_ns();
                     }
                 }
-                progress.paused(self.wait_for_capture(cancelled)?);
+                self.hold_for_recording(session_id, progress, cancelled)?;
                 store
                     .complete_transcript_revision(session_id, transcript_revision_id)
                     .map_err(RunFailure::from)?;
@@ -2113,7 +2121,7 @@ impl MeetingProcessingService {
         let mut refused = None;
         let visited = store.visit_durable_track_records(session_id, track_id, None, |record| {
             let mut pass = || -> Result<(), RunFailure> {
-                progress.paused(self.wait_for_capture(cancelled)?);
+                self.hold_for_recording(session_id, progress, cancelled)?;
                 if frames.starts_new_span(&record) {
                     if let Some(chunk) = chunker.finish(false) {
                         self.transcribe_chunk(
@@ -2371,10 +2379,8 @@ impl MeetingProcessingService {
         let span = TrackSpan::of(track, 0);
         let mut result =
             store.visit_durable_track_records(session_id, track.track_id, None, |record| {
-                progress.paused(
-                    self.wait_for_capture(cancelled)
-                        .map_err(store_error_from_processing)?,
-                );
+                self.hold_for_recording(session_id, progress, cancelled)
+                    .map_err(store_error_from_processing)?;
                 // This loop discards the pending window where `process_track`
                 // flushes its pending chunk: a window cut by a gap holds two
                 // pieces of audio that are not adjacent, so scoring it would
@@ -2996,6 +3002,7 @@ impl MeetingProcessingService {
         session_id: MeetingSessionId,
         engine: &ChosenEngine,
         cancelled: &AtomicBool,
+        mut progress: Option<&mut RunProgress>,
     ) -> bool {
         let person_ids = match store.person_ids_for_meeting(session_id) {
             Ok(person_ids) => person_ids,
@@ -3009,7 +3016,11 @@ impl MeetingProcessingService {
             .into_iter()
             .take(MAX_RELATIONSHIP_SUMMARIES_PER_ARTIFACT)
         {
-            if cancelled.load(Ordering::Acquire)
+            let held = match progress.as_deref_mut() {
+                Some(progress) => self.hold_for_recording(session_id, progress, cancelled),
+                None => self.wait_for_capture(cancelled).map(drop),
+            };
+            if held.is_err()
                 || !self.route_still_allowed(store, session_id, engine.route)
                 || store.require_retained_transcript(session_id).is_err()
             {
@@ -3486,11 +3497,11 @@ impl MeetingProcessingService {
         Ok(())
     }
 
-    /// Hold the run while a capture is under way, and say for how long: that
-    /// time is the capture's, not processing's.
+    /// Hold the run while anything records, and say for how long: that time
+    /// is the recording's, not processing's.
     fn wait_for_capture(&self, cancelled: &AtomicBool) -> Result<Duration, ProcessingFailure> {
         let started = Instant::now();
-        while self.capture_active.load(Ordering::Acquire) {
+        while self.recording_live() {
             if cancelled.load(Ordering::Acquire) {
                 return Err(ProcessingFailure::Cancelled);
             }
@@ -3500,6 +3511,31 @@ impl MeetingProcessingService {
             return Err(ProcessingFailure::Cancelled);
         }
         Ok(started.elapsed())
+    }
+
+    /// A meeting, a dictation or a screen recording under way. Their audio is
+    /// written as it arrives, and a run beside them competes with that writer
+    /// for the disk, the database and the processor.
+    fn recording_live(&self) -> bool {
+        self.capture_active.load(Ordering::Acquire)
+            || self.app.as_ref().is_some_and(crate::utils::capture_running)
+    }
+
+    /// `wait_for_capture` for a run on screen: while it waits, its progress
+    /// says so instead of counting down.
+    fn hold_for_recording(
+        &self,
+        session_id: MeetingSessionId,
+        progress: &mut RunProgress,
+        cancelled: &AtomicBool,
+    ) -> Result<(), ProcessingFailure> {
+        if !self.recording_live() {
+            return self.wait_for_capture(cancelled).map(drop);
+        }
+        self.publish_progress(session_id, Some(progress.waiting(Instant::now())));
+        progress.paused(self.wait_for_capture(cancelled)?);
+        self.publish_progress(session_id, Some(progress.current(Instant::now())));
+        Ok(())
     }
 
     fn emit_current(&self, store: &MeetingStore, event: &str, session_id: MeetingSessionId) {

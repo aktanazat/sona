@@ -112,6 +112,8 @@ struct MeetingProcessingProgress: Decodable, Equatable {
     /// Nil until this Mac has finished the step once: no guess stands in
     /// for a measurement.
     let etaMs: UInt64?
+    /// Held until a recording under way finishes.
+    let waitingForCapture: Bool
 
     var stageFraction: Double { Double(min(max(stageFractionPermille, 0), 1000)) / 1000 }
 }
@@ -131,8 +133,10 @@ struct MeetingProcessingUpdate: Equatable {
     let receivedAt: Date
 
     /// "Transcribing · 2:10 left", or the step alone when there is no time
-    /// to show or the time shown has run out.
+    /// to show or the time shown has run out. A run held behind a recording
+    /// says that instead.
     func line(at now: Date) -> String {
+        if progress.waitingForCapture { return "Waiting for the recording to finish" }
         guard let left = left(at: now) else { return progress.stage.label }
         return "\(progress.stage.label) · \(left.clock) left"
     }

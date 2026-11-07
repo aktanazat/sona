@@ -9360,6 +9360,50 @@ pub(crate) mod tests {
             );
         }
 
+        /// Notes wait for the recording as transcription does. A transcript
+        /// import has no audio to transcribe, so nothing held its run and its
+        /// notes were written beside the live recording. Now the run says it
+        /// is waiting, and writes the notes once the recording stops.
+        #[test]
+        fn notes_wait_for_the_recording_and_are_written_after_it() {
+            let (files, manager, _starts, _aborts) = manager();
+            manager
+                .processing
+                .set_text_generators(Arc::new(NotesAndAnswers), no_engine());
+            let path = files.path().join("otter_export.txt");
+            std::fs::write(&path, include_str!("fixtures/otter_export.txt")).unwrap();
+            let live = recording(&manager);
+
+            let (ran_beside_the_recording, stopped, imported) =
+                beside_the_recording(&manager, live, || block_on(manager.import_transcript(path)));
+
+            assert!(
+                !ran_beside_the_recording,
+                "the notes were written beside the recording"
+            );
+            stopped.unwrap();
+            let imported = imported.expect("the transcript imports once the recording stops");
+            let review = block_on(manager.get(imported.session_id)).unwrap();
+            assert!(
+                review
+                    .artifacts
+                    .iter()
+                    .any(|artifact| artifact.state == MeetingArtifactState::Current),
+                "the notes are written once the recording stops"
+            );
+            assert!(
+                manager
+                    .processing
+                    .published_progress()
+                    .iter()
+                    .filter(|payload| payload.session_id == imported.session_id)
+                    .filter_map(|payload| payload.progress.as_ref())
+                    .any(|progress| progress.waiting_for_capture
+                        && progress.stage == ProcessingStage::Notes),
+                "the run never said it was waiting for the recording"
+            );
+        }
+
         /// A synced meeting deleted while another records still queues the
         /// removal of its cloud copy. The delete used to skip it whenever any
         /// capture ran, and nothing queues it later, so the copy stayed in the
