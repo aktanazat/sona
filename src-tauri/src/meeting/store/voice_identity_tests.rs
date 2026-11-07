@@ -1969,3 +1969,28 @@ fn a_voice_named_after_the_user_is_suggested_as_theirs() -> Result<(), StoreErro
     assert!(store.voice_speaker_suggestions(second, user)?.is_empty());
     Ok(())
 }
+
+/// A name is the user's by Unicode case, which SQLite's `lower` does not
+/// fold: "Émile" names "Émile Zola" all the same.
+#[test]
+fn a_voice_named_after_the_user_in_any_script_is_suggested_as_theirs() -> Result<(), StoreError> {
+    let (_directory, store) = store();
+    let user = Some("Émile Zola");
+    let first = meeting(&store, "First", 1);
+    let mine = store.diarization_speaker(first, 1)?;
+    keep_voices(&store, first, &[(mine, 0)])?;
+    rename(&store, first, mine, "Émile", user)?;
+
+    let second = meeting(&store, "Second", 3);
+    let same_voice = store.diarization_speaker(second, 0)?;
+    keep_voices(&store, second, &[(same_voice, 0)])?;
+    assert_eq!(
+        store.voice_speaker_suggestions(second, user)?,
+        [VoiceSpeakerSuggestion {
+            speaker_id: same_voice,
+            person_id: None,
+            display_name: "Émile Zola".to_owned(),
+        }]
+    );
+    Ok(())
+}
