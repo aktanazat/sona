@@ -145,12 +145,14 @@ pub(super) async fn call(
         "import_legacy_app" => {
             let mut args = Args::parse(params)?;
             let selection = args.take("selection")?;
+            let removals_allowed = args.take("removalsAllowed")?;
             reply(
                 crate::upstream_import::import_legacy_app(
                     app.clone(),
                     app.state(),
                     app.state(),
                     selection,
+                    removals_allowed,
                 )
                 .await,
             )

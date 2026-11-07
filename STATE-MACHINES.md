@@ -63,7 +63,7 @@ Result: 86 candidates. 55 confirmed, 19 rejected, 5 unreachable in the shipped a
 | E1 | Settings and migrations | A torn or empty settings file silently becomes a fresh install, and the startup cleanup then trims history | confirmed | fixed: saves are atomic; an unreadable file is kept aside and that run deletes no history |
 | E2 | Settings and migrations | Re-importing Handy history after Handy was used again imports every entry and recording a second time | confirmed (same root cause as E3) | fixed: re-import matches by entry, not by the legacy app's identity, so nothing doubles |
 | E3 | Settings and migrations | The same identity change orphans the settings-import undo and re-arms the settings import over later edits | confirmed (same root cause as E2) | fixed with E2: the settings-import undo survives |
-| E5 | Settings and migrations | Importing from Handy deletes Sona history at the next dictation, with no warning | confirmed for sequence B; sequence A is a design choice | fixed: an import that would push out older dictations is refused before it adds anything |
+| E5 | Settings and migrations | Importing from Handy deletes Sona history at the next dictation, with no warning | confirmed for sequence B; sequence A is a design choice | fixed: an import that would push out older dictations says how many first and runs only after "Import anyway" |
 | E9 | Settings and migrations | A failed first entry blocks every later "Move data" | confirmed (rare trigger, but once hit it never recovers) | fixed: a failed move can run its plan again |
 | E12 | Settings and migrations | Bookkeeping writes advance the settings generation and break agent-panel changes | confirmed (common for users with cloud cleanup) | fixed: the verified-key stamp no longer moves the settings revision |
 | E13 | Settings and migrations | Import and revert write the receipt before the settings are saved | confirmed (low severity; needs a crash in a short window, or a save failure that lasts through quit) | fixed: the receipt is written only after the settings are saved |
@@ -1692,16 +1692,16 @@ Format as in MapSettings.md. Paths are under `src-tauri/src` unless named.
 #### M7. Legacy settings and history import (replaces the map's M7)
 
 **How imported history is identified:**
-- The identity hashes the label, the canonical root and the creation time of the legacy `history.db`; not its length (upstream_import.rs:719-738).
-- A row counts as imported when (source id, identity) or (source id, row hash) matches (managers/history.rs:1290-1311), backed by the index `upstream_import_history_source_row` (managers/history.rs:269-274). The lookup runs before any recording is copied (upstream_import.rs:630-661).
+- The identity hashes the label, the canonical root and the creation time of the legacy `history.db`; not its length (upstream_import.rs:733-752).
+- A row counts as imported when (source id, identity) or (source id, row hash) matches (managers/history.rs:1290-1311), backed by the index `upstream_import_history_source_row` (managers/history.rs:269-274). The lookup runs before any recording is copied (upstream_import.rs:640-675).
 
 | From | Event | Guard | To | Code |
 |---|---|---|---|---|
 | any | import with Settings ticked | `settings_imported` is false | backup written; merge; receipt says imported inside the settings write, before the save (kept on purpose: a crash leaves Undo restoring the same settings) | upstream_import.rs:212-273 (backup 257, receipt 263-266) |
-| any | import with History ticked | legacy app closed; held unsaved rows + new unsaved rows ≤ limit in force | history imported; matches by identity or row hash count as existing | 340-416, 475-, 630-661 |
-| any | import with History ticked | held + new unsaved rows > limit | refused `history_limit_too_low`; nothing inserted (settings may already be imported) | 652-658 |
-| any imported | import after the legacy app was used | same `history.db` | same identity; only new rows | 719-738 |
-| any imported | import after `history.db` was replaced | identity differs | history counts reset; settings part, backup and Undo kept | 134-144, 354-357 |
+| any | import with History ticked | legacy app closed; held unsaved rows + new unsaved rows − limit in force ≤ removals the person agreed to (0 unless they chose "Import anyway") | history imported; matches by identity or row hash count as existing | 340-419, 478-, 640-675 |
+| any | import with History ticked | held + new unsaved rows − limit > agreed removals | asks with `history_would_remove_older { removals }`; nothing inserted (settings may already be imported); "Import anyway" runs the import again agreeing to that count, and a count that grew since asks again | 664-673 |
+| any imported | import after the legacy app was used | same `history.db` | same identity; only new rows | 733-752 |
+| any imported | import after `history.db` was replaced | identity differs | history counts reset; settings part, backup and Undo kept | 134-144, 355-358 |
 | settings imported | "Undo the settings import" | backup readable | memory = backup; shortcuts and modes follow; save ok → receipt "not imported", then backup removed; save failed → receipt and backup unchanged, error returned | 284-297, 307-336 |
 
 #### M8. Identity adoption (replaces the map's M8)

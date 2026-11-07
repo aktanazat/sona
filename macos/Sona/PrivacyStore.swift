@@ -47,6 +47,9 @@ final class PrivacyStore {
     private(set) var upstreamProgress: UpstreamImportProgress?
     private(set) var upstreamResult: UpstreamImportResult?
     private(set) var upstreamFailure: String?
+    /// How many older dictations the import would delete, while the person
+    /// chooses between importing anyway and cancelling.
+    private(set) var upstreamRemovalsToConfirm: Int?
     /// Seeded once from the first status read, then only ever narrowed, so a
     /// refresh cannot silently tick a box the reader cleared.
     var upstreamSelection = UpstreamImportSelection()
@@ -277,7 +280,10 @@ final class PrivacyStore {
         upstream?.available == true && upstream?.appState == .closed
     }
 
-    func startUpstreamImport() async {
+    /// `removalsAllowed` is how many older dictations the person agreed the
+    /// import may push out of Dictations to keep; the core asks again when
+    /// the import would need more.
+    func startUpstreamImport(removalsAllowed: Int = 0) async {
         guard !upstreamImporting, let status = upstream, status.appState == .closed else { return }
         guard upstreamSelectionValid else {
             upstreamFailure = UpstreamImportFailure.invalidSelection.sentence
@@ -287,20 +293,37 @@ final class PrivacyStore {
         upstreamFailure = nil
         upstreamProgress = nil
         upstreamResult = nil
+        upstreamRemovalsToConfirm = nil
         defer { upstreamImporting = false }
         do {
             let result: UpstreamImportResult = try await core.request(
-                "import_legacy_app", ["selection": try JSONValue(upstreamSelection)])
+                "import_legacy_app",
+                [
+                    "selection": try JSONValue(upstreamSelection),
+                    "removalsAllowed": .number(Double(removalsAllowed)),
+                ])
             upstreamResult = result
             error = nil
             await loadSettings()
             await refreshUpstream()
         } catch let failure as CoreError {
+            if let ask = failure.remote(as: UpstreamHistoryRemovals.self) {
+                upstreamProgress = nil
+                // The settings part may have landed before the history asked.
+                await loadSettings()
+                await refreshUpstream()
+                upstreamRemovalsToConfirm = ask.historyWouldRemoveOlder.removals
+                return
+            }
             upstreamFailure = failure.remote(as: UpstreamImportFailure.self)?.sentence
                 ?? UpstreamImportFailure.internalFailure.sentence
         } catch {
             upstreamFailure = UpstreamImportFailure.internalFailure.sentence
         }
+    }
+
+    func declineUpstreamRemovals() {
+        upstreamRemovalsToConfirm = nil
     }
 
     /// Put the settings this Mac had before the import back, from the backup
