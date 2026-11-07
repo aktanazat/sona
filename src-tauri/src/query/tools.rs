@@ -1797,6 +1797,7 @@ mod tests {
                     calendar_name: None,
                     location: None,
                     url: None,
+                    place: None,
                 },
             )
             .unwrap();
@@ -2475,6 +2476,7 @@ mod tests {
                 calendar_name: Some("Work".to_string()),
                 location: None,
                 url: None,
+                place: None,
             },
             is_recurring: !series_key.is_empty(),
         };
@@ -2527,6 +2529,7 @@ mod tests {
                     calendar_name: None,
                     location: Some("Room 4B".to_string()),
                     url: None,
+                    place: None,
                 },
                 is_recurring: false,
             }],

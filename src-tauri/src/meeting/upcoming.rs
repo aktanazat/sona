@@ -107,6 +107,7 @@ pub fn upcoming_rows(
                 calendar_name: summary.calendar_name,
                 join_url: summary.url,
                 location: summary.location,
+                place: summary.place,
                 series,
             }
         })
@@ -222,6 +223,7 @@ mod tests {
                 calendar_name: Some("Work".to_string()),
                 location: None,
                 url: Some("https://meet.example.com/abc".to_string()),
+                place: None,
             },
             is_recurring,
         }
@@ -367,23 +369,26 @@ mod tests {
     }
 
     /* Home and `sona_upcoming` say where the next meeting is only if the row
-     * keeps the place the calendar gave. */
+     * keeps the place the calendar gave: the location text and, when the
+     * invite has one, its map pin. */
     #[test]
     fn a_row_keeps_where_the_event_happens() {
         let mut in_a_room = occurrence("Pricing", "pricing", 1_000, false, Vec::new());
         in_a_room.summary.location = Some("Room 4B, 2nd floor".to_string());
+        let tartine = crate::meeting::context::ConversationLocation {
+            name: "Tartine".to_string(),
+            latitude: 37.7614,
+            longitude: -122.4241,
+        };
+        let mut at_a_cafe = occurrence("Lunch", "lunch", 2_000, false, Vec::new());
+        at_a_cafe.summary.place = Some(tartine.clone());
 
-        let rows = upcoming_rows(
-            vec![
-                in_a_room,
-                occurrence("Lunch", "lunch", 2_000, false, Vec::new()),
-            ],
-            &HashMap::new(),
-            &HashMap::new(),
-        );
+        let rows = upcoming_rows(vec![in_a_room, at_a_cafe], &HashMap::new(), &HashMap::new());
 
         assert_eq!(rows[0].location.as_deref(), Some("Room 4B, 2nd floor"));
+        assert_eq!(rows[0].place, None);
         assert_eq!(rows[1].location, None);
+        assert_eq!(rows[1].place, Some(tartine));
     }
 
     /* Rows come out in the order the calendar gave them. The source sorts by

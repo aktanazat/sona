@@ -393,6 +393,7 @@ impl DeviceCalendarEvent {
             calendar_name: None,
             url: None,
             location: event_text(self.location),
+            place: None,
         })
     }
 }
@@ -5225,6 +5226,7 @@ mod tests {
                 calendar_name: None,
                 url: None,
                 location: Some("Room 4".to_owned()),
+                place: None,
             })
         );
         assert_eq!(

@@ -31,6 +31,7 @@ fn series_event(at_utc_ms: i64, title: &str) -> CalendarEventSummary {
         calendar_name: None,
         location: None,
         url: None,
+        place: None,
     }
 }
 

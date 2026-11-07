@@ -19,6 +19,7 @@
 //!    meeting capture both raise it. Reading that as a meeting would make every
 //!    push-to-talk run prompt "meeting detected".
 
+use crate::meeting::context::ConversationLocation;
 use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
 use specta::Type;
@@ -110,6 +111,10 @@ pub struct CalendarEventSummary {
     pub url: Option<String>,
     #[serde(default)]
     pub location: Option<String>,
+    /// The place the invite's map pin names. `None` when the event's
+    /// location is only text.
+    #[serde(default)]
+    pub place: Option<ConversationLocation>,
 }
 
 /// Where the nearest calendar event sits relative to now.
@@ -1096,6 +1101,7 @@ mod tests {
             calendar_name: None,
             location: None,
             url: None,
+            place: None,
         }
     }
 

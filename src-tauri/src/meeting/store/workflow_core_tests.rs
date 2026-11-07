@@ -211,6 +211,7 @@ fn calendar_link(
                 calendar_name: None,
                 location: None,
                 url: None,
+                place: None,
             },
         )
         .unwrap();

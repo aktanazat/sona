@@ -41,6 +41,7 @@ pub(super) fn calendar_facts(
                 calendar_name: None,
                 location: None,
                 url: None,
+                place: None,
             },
         )
         .unwrap();

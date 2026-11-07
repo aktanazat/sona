@@ -20,6 +20,7 @@
 use super::machine::{
     CalendarAttendee, CalendarEventSummary, CalendarSignal, ParticipationStatus, ATTENDEE_FLOOR,
 };
+use crate::meeting::context::ConversationLocation;
 
 /// How far ahead to look for the next event. Wide enough that a tick can never
 /// step over an event's start, narrow enough that the query stays trivial.
@@ -328,13 +329,35 @@ pub fn event_text(value: Option<String>) -> Option<String> {
     }
 }
 
+/// The place an invite's map pin names: the first line of its title, which is
+/// the place's own name above any address, at the pin. `None` without a name
+/// or with a pin off the globe.
+pub fn calendar_place(
+    title: Option<String>,
+    latitude: f64,
+    longitude: f64,
+) -> Option<ConversationLocation> {
+    let title = event_text(title)?;
+    let name = title
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())?
+        .to_string();
+    let place = ConversationLocation {
+        name,
+        latitude,
+        longitude,
+    };
+    place.is_valid().then_some(place)
+}
+
 #[cfg(target_os = "macos")]
 pub use macos::EventKitCalendar;
 
 #[cfg(target_os = "macos")]
 mod macos {
     use super::{
-        event_text, named_attendee_with_email, occurrence_key, occurrence_start,
+        calendar_place, event_text, named_attendee_with_email, occurrence_key, occurrence_start,
         participation_status, select_event, CalendarAccess, CalendarEventSummary,
         CalendarOccurrence, CalendarSource, EventCandidate, ParticipationStatus,
     };
@@ -647,6 +670,7 @@ mod macos {
             calendar_name: None,
             url: None,
             location: None,
+            place: None,
         })
     }
 
@@ -728,10 +752,84 @@ mod macos {
                 .map(|absolute| absolute.to_string()),
         );
         summary.location = event_text(location.map(|location| location.to_string()));
+        // SAFETY: plain property reads on a live event, its structured
+        // location and that location's pin.
+        summary.place = unsafe {
+            event.structuredLocation().and_then(|place| {
+                let coordinate = place.geoLocation()?.coordinate();
+                calendar_place(
+                    place.title().map(|title| title.to_string()),
+                    coordinate.latitude,
+                    coordinate.longitude,
+                )
+            })
+        };
     }
 
     fn instant_ms(date: &NSDate) -> i64 {
         (date.timeIntervalSince1970() * 1_000.0) as i64
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::meeting::context::ConversationLocation;
+        use objc2::msg_send;
+        use objc2::rc::Allocated;
+        use objc2::runtime::{AnyClass, AnyObject};
+        use objc2_event_kit::EKStructuredLocation;
+        use objc2_foundation::NSString;
+
+        fn place_of(event: &EKEvent) -> Option<ConversationLocation> {
+            let mut summary = CalendarEventSummary {
+                event_key: String::new(),
+                series_key: String::new(),
+                title: String::new(),
+                attendee_count: 0,
+                start_utc_ms: 0,
+                end_utc_ms: 0,
+                attendees: Vec::new(),
+                notes: None,
+                calendar_name: None,
+                location: None,
+                url: None,
+                place: None,
+            };
+            enrich_participants(event, &mut summary);
+            summary.place
+        }
+
+        /* A place picked from Maps in Calendar keeps a pin, its name on the
+         * title's first line and the address under it. A typed location has
+         * no pin and gives no place. */
+        #[test]
+        fn an_invite_pin_is_read_as_a_named_place() {
+            // SAFETY: an in-memory event and pin; no calendar is read or saved.
+            unsafe {
+                let store = EKEventStore::new();
+                let event = EKEvent::eventWithEventStore(&store);
+                let place = EKStructuredLocation::locationWithTitle(&NSString::from_str(
+                    "Blue Bottle Coffee\n315 Linden St, San Francisco, CA  94102, United States",
+                ));
+                event.setStructuredLocation(Some(&place));
+                assert_eq!(place_of(&event), None);
+
+                let class = AnyClass::get(c"CLLocation").expect("EventKit loads CoreLocation");
+                let allocated: Allocated<AnyObject> = msg_send![class, alloc];
+                let pin: Retained<AnyObject> =
+                    msg_send![allocated, initWithLatitude: 37.7764_f64, longitude: -122.4236_f64];
+                let _: () = msg_send![&*place, setGeoLocation: &*pin];
+                event.setStructuredLocation(Some(&place));
+                assert_eq!(
+                    place_of(&event),
+                    Some(ConversationLocation {
+                        name: "Blue Bottle Coffee".to_string(),
+                        latitude: 37.7764,
+                        longitude: -122.4236,
+                    })
+                );
+            }
+        }
     }
 }
 
@@ -754,6 +852,7 @@ mod tests {
             calendar_name: None,
             location: None,
             url: None,
+            place: None,
         }
     }
 

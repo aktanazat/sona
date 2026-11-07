@@ -361,6 +361,7 @@ mod tests {
             calendar_name: None,
             join_url: None,
             location: None,
+            place: None,
             series: None,
         }
     }
@@ -381,6 +382,7 @@ mod tests {
                     calendar_name: None,
                     location: None,
                     url: None,
+                    place: None,
                 },
             )
             .unwrap();

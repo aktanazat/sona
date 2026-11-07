@@ -720,6 +720,8 @@ struct OverviewUpcomingRow: Decodable, Identifiable {
     let joinUrl: String?
     /// Where the event says it happens, as the calendar wrote it.
     let location: String?
+    /// The place the event's map pin names.
+    let place: ConversationPlace?
     /// Present exactly when the event repeats: a one-off has no series to
     /// remember anything, so it offers no standing decisions.
     var series: OverviewSeries?

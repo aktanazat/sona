@@ -6107,6 +6107,7 @@ pub(crate) mod tests {
             calendar_name: None,
             location: None,
             url: None,
+            place: None,
         };
         let context = MeetingDetectionStartContext {
             prompt_id: "failed-panel-prompt".to_string(),
@@ -6349,6 +6350,7 @@ pub(crate) mod tests {
             calendar_name: Some("Work".to_string()),
             location: None,
             url: Some("https://meet.example/roadmap".to_string()),
+            place: None,
         };
         let request = MeetingPreflightCreateRequest {
             operation_id: MeetingOperationId::new(),
@@ -6397,6 +6399,7 @@ pub(crate) mod tests {
             calendar_name: Some("Work".to_string()),
             location: None,
             url: None,
+            place: None,
         };
         let untitled = CalendarEventSummary {
             title: "  ".to_string(),
@@ -7535,6 +7538,7 @@ pub(crate) mod tests {
                     calendar_name: None,
                     location: None,
                     url: None,
+                    place: None,
                 },
             )
             .unwrap();
