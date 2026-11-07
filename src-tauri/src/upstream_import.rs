@@ -94,7 +94,7 @@ pub enum UpstreamImportError {
     SecretStoreUnavailable,
     SecretConflict,
     HistoryUnreadable,
-    HistoryLimitTooLow,
+    HistoryWouldRemoveOlder { removals: u64 },
     RecordingCopyFailed,
     ReceiptWriteFailed,
     Internal,
@@ -342,6 +342,7 @@ pub async fn import_legacy_app(
     history: State<'_, Arc<HistoryManager>>,
     secrets: State<'_, Arc<SecretManager>>,
     selection: UpstreamImportSelection,
+    removals_allowed: Option<u64>,
 ) -> Result<UpstreamImportResult, UpstreamImportError> {
     let _activity = crate::planning::quiet::foreground_activity();
     validate_selection(&selection)?;
@@ -375,6 +376,7 @@ pub async fn import_legacy_app(
         let destination_recordings = paths.destination_recordings.clone();
         let progress_app = app.clone();
         let activity = crate::planning::quiet::foreground_activity();
+        let removals_allowed = removals_allowed.unwrap_or(0);
         tokio::task::spawn_blocking(move || {
             let _activity = activity;
             import_history(
@@ -385,6 +387,7 @@ pub async fn import_legacy_app(
                 &source_recordings,
                 &destination_recordings,
                 &selection_copy,
+                removals_allowed,
             )
         })
         .await
@@ -480,6 +483,7 @@ fn import_history(
     source_recordings: &Path,
     destination_recordings: &Path,
     selection: &UpstreamImportSelection,
+    removals_allowed: u64,
 ) -> Result<HistoryImportSummary, UpstreamImportError> {
     if !selection.history || !source_db.is_file() {
         emit_progress(app, UpstreamImportPhase::History, 0, 0);
@@ -556,7 +560,13 @@ fn import_history(
     let imported = history
         .with_connection(|conn| {
             let entries = rows.iter().map(|(entry, _)| entry);
-            Ok(plan_history_import(conn, source_identity, entries, limit))
+            Ok(plan_history_import(
+                conn,
+                source_identity,
+                entries,
+                limit,
+                removals_allowed,
+            ))
         })
         .map_err(|_| UpstreamImportError::HistoryUnreadable)??;
 
@@ -629,14 +639,16 @@ fn import_history(
 
 /// Decides an import before it copies or inserts anything: for each row,
 /// whether an earlier import made it and whether that row has its recording.
-/// Refuses when the new unsaved rows would take "Dictations to keep" past
-/// `limit`, because the next sweep deletes the oldest unsaved rows, the
-/// person's own among them.
+/// Asks first when the new unsaved rows would take "Dictations to keep" past
+/// `limit` by more rows than the person agreed to remove, because the next
+/// sweep deletes that many of the oldest unsaved rows, the person's own among
+/// them.
 fn plan_history_import<'a>(
     conn: &Connection,
     source_identity: &str,
     entries: impl IntoIterator<Item = &'a UpstreamHistoryImportEntry>,
     limit: usize,
+    removals_allowed: u64,
 ) -> Result<Vec<Option<bool>>, UpstreamImportError> {
     let mut imported = Vec::new();
     let mut unsaved = 0_usize;
@@ -653,8 +665,10 @@ fn plan_history_import<'a>(
         let counted = HistoryManager::counted_entries_with_connection(conn)
             .map_err(|_| UpstreamImportError::HistoryUnreadable)?
             .len();
-        if counted.saturating_add(unsaved) > limit {
-            return Err(UpstreamImportError::HistoryLimitTooLow);
+        let removals = counted.saturating_add(unsaved).saturating_sub(limit);
+        let removals = u64::try_from(removals).unwrap_or(u64::MAX);
+        if removals > removals_allowed {
+            return Err(UpstreamImportError::HistoryWouldRemoveOlder { removals });
         }
     }
     Ok(imported)
@@ -1191,9 +1205,11 @@ mod tests {
 
     /// "Dictations to keep" trims the oldest unsaved rows at the next
     /// dictation. An import that took the count past it lost the person's
-    /// own older dictations right after reporting success.
+    /// own older dictations right after reporting success; refusing it left
+    /// no way to import at the limit they chose.
     #[test]
-    fn an_import_past_the_dictation_limit_is_refused() -> Result<(), Box<dyn Error>> {
+    fn an_import_past_the_dictation_limit_waits_for_its_removals_to_be_agreed(
+    ) -> Result<(), Box<dyn Error>> {
         let mut sona = sona_history()?;
         sona.execute(
             "INSERT INTO transcription_history (file_name, timestamp, saved, title, transcription_text)
@@ -1204,11 +1220,15 @@ mod tests {
         let entries = [legacy_entry(1, 200), legacy_entry(2, 300)];
 
         assert!(matches!(
-            plan_history_import(&sona, &identity, &entries, 2),
-            Err(UpstreamImportError::HistoryLimitTooLow)
+            plan_history_import(&sona, &identity, &entries, 1, 1),
+            Err(UpstreamImportError::HistoryWouldRemoveOlder { removals: 2 })
         ));
         assert_eq!(
-            plan_history_import(&sona, &identity, &entries, 3)?,
+            plan_history_import(&sona, &identity, &entries, 1, 2)?,
+            [None, None]
+        );
+        assert_eq!(
+            plan_history_import(&sona, &identity, &entries, 3, 0)?,
             [None, None]
         );
 
@@ -1222,7 +1242,7 @@ mod tests {
             )?;
         }
         assert_eq!(
-            plan_history_import(&sona, &identity, &entries, 3)?,
+            plan_history_import(&sona, &identity, &entries, 3, 0)?,
             [Some(true), Some(true)],
             "imported rows are found before their recordings are copied again"
         );

@@ -461,7 +461,6 @@ enum UpstreamImportFailure: String, Decodable {
     case secretStoreUnavailable = "secret_store_unavailable"
     case secretConflict = "secret_conflict"
     case historyUnreadable = "history_unreadable"
-    case historyLimitTooLow = "history_limit_too_low"
     case recordingCopyFailed = "recording_copy_failed"
     case receiptWriteFailed = "receipt_write_failed"
     case internalFailure = "internal"
@@ -479,11 +478,21 @@ enum UpstreamImportFailure: String, Decodable {
         case .secretStoreUnavailable: "The system credential store is unavailable, so settings with provider keys were not imported."
         case .secretConflict: "A provider key already exists in the system credential store. Resolve it before importing settings."
         case .historyUnreadable: "The legacy history database could not be read."
-        case .historyLimitTooLow: "This import would go over Dictations to keep, and Sona would delete the oldest dictations to make room. Raise Dictations to keep in Library, then import again."
         case .recordingCopyFailed: "A recording could not be copied and verified."
         case .receiptWriteFailed: "Sona couldn't save the import details."
         case .internalFailure: "The import did not finish."
         }
+    }
+}
+
+/// The import's one question: the history it brings would take Dictations to
+/// keep past its limit, so the next cleanup deletes `removals` of the oldest
+/// unsaved dictations. Nothing is imported until the person agrees.
+struct UpstreamHistoryRemovals: Decodable {
+    let historyWouldRemoveOlder: Count
+
+    struct Count: Decodable {
+        let removals: Int
     }
 }
 

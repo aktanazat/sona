@@ -61,6 +61,20 @@ struct PrivacyView: View {
         } message: { receipt in
             Text(receipt.sentence)
         }
+        .alert(
+            "Delete older dictations to import?",
+            isPresented: Binding(
+                get: { store.upstreamRemovalsToConfirm != nil },
+                set: { if !$0 { store.declineUpstreamRemovals() } }),
+            presenting: store.upstreamRemovalsToConfirm
+        ) { removals in
+            Button("Import anyway", role: .destructive) {
+                Task { await store.startUpstreamImport(removalsAllowed: removals) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: { removals in
+            Text(removalsSentence(removals))
+        }
     }
 
     // MARK: - Context capture
@@ -348,6 +362,14 @@ struct PrivacyView: View {
             return "Puts back the settings this Mac had before the import."
         }
         return "Puts back the settings saved \(saved.relativeDay) at \(saved.time)."
+    }
+
+    private func removalsSentence(_ removals: Int) -> String {
+        let oldest = removals == 1
+            ? "the oldest dictation that isn't saved"
+            : "the \(removals) oldest dictations that aren't saved"
+        return "This import goes over Dictations to keep, so Sona will delete \(oldest). "
+            + "To keep everything, cancel and raise Dictations to keep in Library first."
     }
 
     // MARK: - Identity adoption
