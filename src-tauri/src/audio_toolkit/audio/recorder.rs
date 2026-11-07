@@ -1718,6 +1718,7 @@ fn run_consumer(inputs: ConsumerInputs) {
         meeting_control,
         ready_on,
     } = inputs;
+    crate::meeting::capture::run_at_capture_priority();
     let mut frame_resampler = FrameResampler::new(
         sample_rate_to_usize(in_sample_rate),
         sample_rate_to_usize(constants::WHISPER_SAMPLE_RATE),
