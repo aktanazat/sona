@@ -147,6 +147,9 @@ final class MeetingPrepStore {
     /// The minute the menu bar label was last worked out for.
     private(set) var now = Date()
     private var briefRequest = UUID()
+    /// The write the next one waits for, so writes land in the order they were
+    /// asked for and each About me write builds on what the last one saved.
+    @ObservationIgnored private var lastWrite: Task<Bool, Never>?
 
     init(core: Core) { self.core = core }
 
@@ -166,22 +169,50 @@ final class MeetingPrepStore {
         guard !saving else { return }
         saving = true
         savedNotice = nil
-        settingsError = nil
         defer { saving = false }
-        do {
-            // The core's preferences are snake_case and refuse unknown keys.
-            let encoder = JSONEncoder()
-            encoder.keyEncodingStrategy = .convertToSnakeCase
-            let payload = try JSONDecoder().decode(JSONValue.self, from: encoder.encode(value))
-            preferences = try await core.request("meeting_prep_preferences_set", ["preferences": payload])
-            // Invalidate the visible brief too when an email/profile choice changes.
-            invalidateBrief()
-            mailStatus = nil
+        if await write({ _ in value }) {
             savedNotice = "Saved. Your next notes and drafts will use this context."
-            await loadMenu()
-        } catch {
-            settingsError = error.localizedDescription
         }
+    }
+
+    /// Saves the About me fields as soon as one is left, over the preferences
+    /// last saved; the rest of the form still waits for its Save button.
+    func saveAboutMe(_ aboutMe: MeetingAboutMe) async {
+        _ = await write { saved in
+            guard var next = saved, next.aboutMe != aboutMe else { return nil }
+            next.aboutMe = aboutMe
+            return next
+        }
+    }
+
+    /// Writes what `change` makes of the saved preferences, once every write
+    /// asked for earlier has landed. `change` answers nil when there is
+    /// nothing to write. Answers whether this write landed.
+    private func write(_ change: @escaping @MainActor (MeetingPrepPreferences?) -> MeetingPrepPreferences?) async -> Bool {
+        let previous = lastWrite
+        let current = Task { @MainActor in
+            _ = await previous?.value
+            guard let value = change(preferences) else { return false }
+            settingsError = nil
+            do {
+                // The core's preferences are snake_case and refuse unknown keys.
+                let encoder = JSONEncoder()
+                encoder.keyEncodingStrategy = .convertToSnakeCase
+                let payload = try JSONDecoder().decode(JSONValue.self, from: encoder.encode(value))
+                preferences = try await core.request("meeting_prep_preferences_set", ["preferences": payload])
+                // Invalidate the visible brief too when an email/profile choice changes.
+                invalidateBrief()
+                mailStatus = nil
+                return true
+            } catch {
+                settingsError = error.localizedDescription
+                return false
+            }
+        }
+        lastWrite = current
+        guard await current.value else { return false }
+        await loadMenu()
+        return true
     }
 
     func checkMail() async {
