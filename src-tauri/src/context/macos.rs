@@ -47,9 +47,12 @@ const PAGE_CONTAINER_ROLES: [&str; 4] = ["AXSplitGroup", "AXTabGroup", "AXGroup"
 const MAX_PAGE_DEPTH: usize = 8;
 const MAX_PAGE_ELEMENTS: usize = 64;
 /// What a browser adds to a private window's title. Safari's ", Private
-/// Browsing" was read on macOS 26; Chrome's and Edge's are their documented
-/// names for the mode.
-const PRIVATE_WINDOW_MARKERS: [&str; 3] = ["Private Browsing", "Incognito", "InPrivate"];
+/// Browsing" was read on macOS 26; "Incognito" and the "Private" in Edge's
+/// "InPrivate" and other browsers' private windows are the English names for
+/// the mode, not read off those browsers. Every app's title is checked, so a
+/// browser the meeting detector does not know is covered, and a document
+/// whose title says "Private" is skipped too.
+const PRIVATE_WINDOW_MARKERS: [&str; 2] = ["Private", "Incognito"];
 
 enum AccessibilityAttributeValue {
     Text(CFRetained<CFString>),
@@ -389,17 +392,14 @@ fn application_window(
         .ok()
         .flatten()
         .and_then(window_text);
+    if title.as_deref().is_some_and(is_private_window_title) {
+        return FrontWindowRead::PrivateWindow;
+    }
     let browser = bundle_id
         .as_deref()
         .is_some_and(crate::meeting::detection::apps::is_browser_bundle_id);
-    if browser {
-        match title.as_deref() {
-            None => return FrontWindowRead::Nothing,
-            Some(title) if is_private_window_title(title) => {
-                return FrontWindowRead::PrivateWindow;
-            }
-            Some(_) => {}
-        }
+    if browser && title.is_none() {
+        return FrontWindowRead::Nothing;
     }
     let document_path = attribute_string(&window, AX_DOCUMENT, deadline)
         .ok()
