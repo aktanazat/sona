@@ -484,7 +484,7 @@ private struct PersonFilterChip: View {
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
-        .animation(.easeOut(duration: 0.12), value: hovering)
+        .hoverFade(hovering)
         .accessibilityLabel("\(title), \(count)")
         .accessibilityAddTraits(on ? .isSelected : [])
     }

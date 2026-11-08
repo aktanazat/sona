@@ -67,7 +67,7 @@ enum ConversationBookmarkKind: String, Codable, CaseIterable, Identifiable {
         switch self {
         case .mark: Theme.inkSecondary
         case .decision: Theme.accent
-        case .question: Theme.tileHome
+        case .question: Theme.markQuestion
         case .todo: Theme.markTodo
         }
     }
@@ -251,12 +251,12 @@ struct ConversationBookmarksView: View {
         let end = max(spoken, bookmarks.map { Int64(clamping: $0.startOffsetNs) }.max() ?? 0)
         if end > 0 {
             Canvas { context, size in
-                context.fill(Path(roundedRect: CGRect(x: 0, y: size.height / 2 - 1, width: size.width, height: 2),
-                                  cornerRadius: 1), with: .color(Theme.border))
+                context.fill(Capsule().path(in: CGRect(x: 0, y: size.height / 2 - 1, width: size.width, height: 2)),
+                             with: .color(Theme.border))
                 for bookmark in shown {
                     let x = size.width * CGFloat(Int64(clamping: bookmark.startOffsetNs)) / CGFloat(end)
                     let tick = CGRect(x: min(max(x - 1.5, 0), size.width - 3), y: 0, width: 3, height: size.height)
-                    context.fill(Path(roundedRect: tick, cornerRadius: 1.5), with: .color(bookmark.kind.color))
+                    context.fill(Capsule().path(in: tick), with: .color(bookmark.kind.color))
                 }
             }
             .frame(height: 12)

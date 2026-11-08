@@ -151,8 +151,8 @@ struct MeetingsTrendBars: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .bottom, spacing: 3) {
                 ForEach(points) { point in
-                    RoundedRectangle(cornerRadius: 2)
-                        .fill(point.meetings > 0 ? Theme.inkSecondary : Theme.selection)
+                    RoundedRectangle(cornerRadius: Theme.radiusMark)
+                        .fill(point.meetings > 0 ? Theme.inkSecondary : Theme.track)
                         .frame(height: max(2, 56 * fraction(point)))
                         .help("\(point.localDate): \(label(point))")
                 }
@@ -787,11 +787,11 @@ struct MeetingsSkeleton: View {
             ForEach(0..<4, id: \.self) { _ in
                 Card {
                     VStack(alignment: .leading, spacing: 8) {
-                        RoundedRectangle(cornerRadius: 4)
-                            .fill(Theme.selection)
+                        RoundedRectangle(cornerRadius: Theme.radiusKey)
+                            .fill(Theme.track)
                             .frame(width: 220, height: 14)
-                        RoundedRectangle(cornerRadius: 4)
-                            .fill(Theme.selection.opacity(0.6))
+                        RoundedRectangle(cornerRadius: Theme.radiusKey)
+                            .fill(Theme.track.opacity(0.6))
                             .frame(width: 320, height: 11)
                     }
                     .padding(.horizontal, 16)

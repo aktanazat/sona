@@ -212,9 +212,9 @@ private struct TodayCounterView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
-        .background(Theme.wash.opacity(hovering ? 1 : 0), in: RoundedRectangle(cornerRadius: 10))
+        .background(Theme.wash.opacity(hovering ? 1 : 0), in: RoundedRectangle(cornerRadius: Theme.radiusControl))
         .contentShape(Rectangle())
-        .animation(.easeOut(duration: 0.12), value: hovering)
+        .hoverFade(hovering)
     }
 }
 
@@ -1072,8 +1072,8 @@ struct ActivityBars: View {
             HStack(alignment: .bottom, spacing: 0) {
                 ForEach(0..<ActivityChart.slots, id: \.self) { index in
                     let value = index < values.count ? max(0, values[index]) : 0
-                    RoundedRectangle(cornerRadius: 3, style: .continuous)
-                        .fill(value == 0 ? Theme.selection : Theme.accent)
+                    RoundedRectangle(cornerRadius: Theme.radiusMark, style: .continuous)
+                        .fill(value == 0 ? Theme.track : Theme.accent)
                         .frame(width: ActivityChart.barWidth, height: ActivityBars.height(value, peak))
                         .frame(maxWidth: .infinity)
                 }
@@ -1132,7 +1132,7 @@ struct ActivityWeekDots: View {
                 ForEach(0..<ActivityChart.slots, id: \.self) { index in
                     let point = index < points.count ? points[index] : nil
                     Circle()
-                        .fill((point?.recordings ?? 0) > 0 ? Theme.accent : Theme.selection)
+                        .fill((point?.recordings ?? 0) > 0 ? Theme.accent : Theme.track)
                         .frame(width: 10, height: 10)
                         .overlay {
                             if ActivityDates.isToday(point?.localDate) {

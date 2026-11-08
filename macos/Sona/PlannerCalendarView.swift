@@ -50,8 +50,9 @@ struct PlannerCalendarView: View {
                     Spacer(minLength: 16)
                     calendarControls
                 }
+                .frame(minHeight: Theme.headerHeight)
                 VStack(alignment: .leading, spacing: 10) {
-                    calendarTitle
+                    calendarTitle.frame(minHeight: Theme.headerHeight)
                     HStack(spacing: 10) { calendarControls }
                 }
             }

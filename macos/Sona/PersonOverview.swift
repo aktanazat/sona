@@ -320,7 +320,7 @@ private struct TilePress: ButtonStyle {
             .overlay(shape.fill(Theme.wash).opacity(configuration.isPressed || hovering ? 1 : 0))
             .contentShape(shape)
             .onHover { hovering = $0 }
-            .animation(.easeOut(duration: 0.12), value: hovering)
+            .hoverFade(hovering)
     }
 }
 
@@ -338,8 +338,8 @@ struct PersonMonthChart: View {
                     x: .value("Month", month.start.formatted(.iso8601.year().month())),
                     y: .value("Meetings", month.count > 0 ? Double(month.count) : Double(max(peak, 1)) * 0.04),
                     width: .ratio(0.62))
-                    .foregroundStyle(month.count > 0 ? Theme.accent : Theme.selection)
-                    .cornerRadius(2)
+                    .foregroundStyle(month.count > 0 ? Theme.accent : Theme.track)
+                    .cornerRadius(Theme.radiusMark)
             }
             .chartXAxis(.hidden)
             .chartYAxis(.hidden)
@@ -369,8 +369,8 @@ struct PersonRecentDays: View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 3) {
                 ForEach(days.indices, id: \.self) { index in
-                    RoundedRectangle(cornerRadius: 2, style: .continuous)
-                        .fill(days[index] ? Theme.accent : Theme.selection)
+                    RoundedRectangle(cornerRadius: Theme.radiusMark, style: .continuous)
+                        .fill(days[index] ? Theme.accent : Theme.track)
                         .frame(height: 12)
                 }
             }

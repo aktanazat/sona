@@ -355,7 +355,7 @@ private struct TimeLinkStyle: ButtonStyle {
             .foregroundStyle(lit ? Theme.ink : Theme.inkSecondary)
             .padding(.horizontal, 6)
             .frame(height: 20)
-            .background(configuration.isPressed ? Theme.selection : lit ? Theme.control : Theme.wash, in: shape)
+            .background(configuration.isPressed ? Theme.controlPressed : lit ? Theme.control : Theme.wash, in: shape)
             .contentShape(shape)
             .onHover { hovering = $0 }
             .opacity(isEnabled ? 1 : 0.5)

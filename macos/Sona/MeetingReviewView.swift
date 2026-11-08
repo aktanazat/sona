@@ -866,24 +866,11 @@ struct TranscriptTurnRow: View {
 /// speakers, so a name keeps one color from line to line. A line no voice is
 /// sure of stays gray.
 enum SpeakerInk {
-    private static let palette: [Color] = [
-        NSColor.systemBlue, .systemOrange, .systemGreen, .systemPink, .systemTeal, .systemYellow,
-    ].map { hue in
-        Color(nsColor: NSColor(name: nil) { appearance in
-            guard appearance.bestMatch(from: [.aqua, .darkAqua]) != .darkAqua else { return hue }
-            // The system hues fall under 2:1 contrast on the light page; at
-            // half brightness every one clears 4.5:1.
-            var shade = hue
-            appearance.performAsCurrentDrawingAppearance {
-                shade = hue.blended(withFraction: 0.5, of: .black) ?? hue
-            }
-            return shade
-        })
-    }
+    private static let hues: [Double] = [276, 55, 145, 350, 205, 85]
 
     static func color(at index: Int?) -> Color {
         guard let index else { return Theme.inkSecondary }
-        return palette[index % palette.count]
+        return Theme.label(hue: hues[index % hues.count])
     }
 }
 
@@ -1305,11 +1292,11 @@ private struct TalkTimeline: View {
                 for mark in ribbon.marks {
                     let rect = Self.bar(mark.lane, from: mark.startNs, to: mark.endNs, scale: scale,
                                         narrowest: Self.narrowestBar)
-                    context.fill(Path(roundedRect: rect, cornerRadius: min(2, rect.width / 2)),
+                    context.fill(Path(roundedRect: rect, cornerRadius: min(Theme.radiusMark, rect.width / 2)),
                                  with: .color(inks[mark.lane]))
                 }
                 if let longest {
-                    context.stroke(Path(roundedRect: longest.insetBy(dx: -2, dy: -2), cornerRadius: 3.5),
+                    context.stroke(Path(roundedRect: longest.insetBy(dx: -2, dy: -2), cornerRadius: Theme.radiusKey),
                                    with: .color(Theme.inkSecondary), lineWidth: 1)
                 }
                 var rule = Path()
