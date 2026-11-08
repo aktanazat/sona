@@ -37,7 +37,7 @@ enum ContextPolicy: String, Codable, CaseIterable, Hashable {
     /// What the selected level actually reads, as the ceiling row says it.
     var sentence: String {
         switch self {
-        case .none: "Reads nothing from your other apps."
+        case .none: "Reads nothing from your other apps while you dictate."
         case .target: "Reads the frontmost app identity."
         case .targetAndSelection: "Reads the frontmost app identity and selected text when available."
         case .full: "May also read a permitted browser URL and recently changed clipboard text when available."

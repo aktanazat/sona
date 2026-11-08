@@ -1600,6 +1600,12 @@ final class MeetingsStore {
         }
     }
 
+    /// A document was added to the open meeting from somewhere other than
+    /// `addDocument`, so its lists read again.
+    func documentsChanged() {
+        documentsRevision += 1
+    }
+
     func deleteOpenMeeting() {
         guard let sessionId = openSessionId else { return }
         delete(sessionId)
