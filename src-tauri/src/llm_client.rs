@@ -77,8 +77,15 @@ pub(crate) enum LoopbackReply {
     Json,
     /// One JSON object the server holds to this named schema while it writes.
     /// The schema stays raw JSON so its properties keep their declared
-    /// order, which is the order the model writes them in.
-    Schema(&'static str, &'static serde_json::value::RawValue),
+    /// order, which is the order the model writes them in. With `abandon` the
+    /// reply is read as it is written, and one `abandon` reads as gone wrong
+    /// is cut there and comes back as written so far, finished by
+    /// "abandoned", instead of running on to its allowance.
+    Schema {
+        name: &'static str,
+        schema: &'static serde_json::value::RawValue,
+        abandon: Option<fn(&str) -> bool>,
+    },
 }
 
 #[derive(Debug, Serialize, Clone, Default, PartialEq)]
@@ -200,11 +207,18 @@ struct ChatCompletionRequest {
     messages: Vec<ChatMessage>,
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    stream_options: Option<StreamOptions>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     response_format: Option<ChatResponseFormat>,
     #[serde(flatten)]
     reasoning: ReasoningParams,
+}
+
+#[derive(Debug, Serialize)]
+struct StreamOptions {
+    include_usage: bool,
 }
 pub(crate) struct ChatCompletionInput<'a> {
     pub provider: &'a PostProcessProvider,
@@ -239,6 +253,23 @@ struct ChatMessageResponse {
 struct ChatUsage {
     prompt_tokens: Option<u64>,
     completion_tokens: Option<u64>,
+}
+
+/// One event of a streamed chat completion.
+#[derive(Debug, Deserialize)]
+struct ChatCompletionChunk {
+    #[serde(default)]
+    choices: Vec<ChatChunkChoice>,
+    #[serde(default)]
+    usage: Option<ChatUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatChunkChoice {
+    #[serde(default)]
+    delta: Option<ChatMessageResponse>,
+    #[serde(default)]
+    finish_reason: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -537,6 +568,10 @@ fn loopback_request_error(error: &reqwest::Error) -> LoopbackChatCompletionError
     }
 }
 
+/// How much more of a streamed reply arrives between two looks at it for a
+/// runaway: about sixty tokens, a few seconds of a local model's writing.
+const ABANDON_CHECK_BYTES: usize = 256;
+
 pub(crate) async fn send_loopback_chat_completion(
     endpoint: &PostProcessEndpoint,
     model: &str,
@@ -563,50 +598,57 @@ pub(crate) async fn send_loopback_chat_completion(
             content: evidence.to_string(),
         },
     ];
-    let completion = execute_openai_chat_completion(
-        &client,
-        &endpoint.request_url("chat/completions"),
-        model,
-        messages,
-        OpenAiChatCompletionOptions {
-            max_tokens: Some(max_tokens),
-            response_format: match reply {
-                LoopbackReply::Text => None,
-                LoopbackReply::Json => {
-                    Some(ChatResponseFormat::JsonObject(LoopbackResponseFormat {
-                        format_type: "json_object",
-                    }))
-                }
-                LoopbackReply::Schema(name, schema) => {
-                    Some(ChatResponseFormat::LoopbackSchema(LoopbackSchemaFormat {
-                        format_type: "json_schema",
-                        json_schema: LoopbackJsonSchema {
-                            name,
-                            strict: true,
-                            schema,
-                        },
-                    }))
-                }
-            },
-            reasoning: ReasoningParams {
-                reasoning_effort: Some("none".to_string()),
-                ..Default::default()
-            },
-            retry_reasoning: false,
-            rejection_key: None,
-            max_response_bytes: Some(MAX_COMPLETION_RESPONSE_BYTES),
-            response_log_context: "Loopback chat completion",
+    let url = endpoint.request_url("chat/completions");
+    let (response_format, abandon) = match reply {
+        LoopbackReply::Text => (None, None),
+        LoopbackReply::Json => (
+            Some(ChatResponseFormat::JsonObject(LoopbackResponseFormat {
+                format_type: "json_object",
+            })),
+            None,
+        ),
+        LoopbackReply::Schema {
+            name,
+            schema,
+            abandon,
+        } => (
+            Some(ChatResponseFormat::LoopbackSchema(LoopbackSchemaFormat {
+                format_type: "json_schema",
+                json_schema: LoopbackJsonSchema {
+                    name,
+                    strict: true,
+                    schema,
+                },
+            })),
+            abandon,
+        ),
+    };
+    let options = OpenAiChatCompletionOptions {
+        max_tokens: Some(max_tokens),
+        response_format,
+        reasoning: ReasoningParams {
+            reasoning_effort: Some("none".to_string()),
+            ..Default::default()
         },
-    )
-    .await
-    .map_err(|error| match error {
-        OpenAiChatCompletionError::Request(error)
-        | OpenAiChatCompletionError::RetryRequest(error)
-        | OpenAiChatCompletionError::Body(error) => loopback_request_error(&error),
-        OpenAiChatCompletionError::Status(_)
-        | OpenAiChatCompletionError::TooLarge
-        | OpenAiChatCompletionError::Decode(_) => LoopbackChatCompletionError::Failed,
-    })?;
+        retry_reasoning: false,
+        rejection_key: None,
+        max_response_bytes: Some(MAX_COMPLETION_RESPONSE_BYTES),
+        response_log_context: "Loopback chat completion",
+    };
+    if let Some(abandon) = abandon {
+        return stream_loopback_chat_completion(&client, &url, model, &messages, &options, abandon)
+            .await;
+    }
+    let completion = execute_openai_chat_completion(&client, &url, model, messages, options)
+        .await
+        .map_err(|error| match error {
+            OpenAiChatCompletionError::Request(error)
+            | OpenAiChatCompletionError::RetryRequest(error)
+            | OpenAiChatCompletionError::Body(error) => loopback_request_error(&error),
+            OpenAiChatCompletionError::Status(_)
+            | OpenAiChatCompletionError::TooLarge
+            | OpenAiChatCompletionError::Decode(_) => LoopbackChatCompletionError::Failed,
+        })?;
     let choice = completion.choices.first();
     Ok(LoopbackChatCompletion {
         content: choice.and_then(|choice| choice.message.content.clone()),
@@ -620,6 +662,97 @@ pub(crate) async fn send_loopback_chat_completion(
             .and_then(|usage| usage.completion_tokens),
         finish_reason: choice.and_then(|choice| choice.finish_reason.clone()),
     })
+}
+
+async fn stream_loopback_chat_completion(
+    client: &reqwest::Client,
+    url: &str,
+    model: &str,
+    messages: &[ChatMessage],
+    options: &OpenAiChatCompletionOptions,
+    abandon: fn(&str) -> bool,
+) -> Result<LoopbackChatCompletion, LoopbackChatCompletionError> {
+    let mut request = openai_request(model, messages, options);
+    request.stream = true;
+    request.stream_options = Some(StreamOptions {
+        include_usage: true,
+    });
+    let response = client
+        .post(url)
+        .json(&request)
+        .send()
+        .await
+        .map_err(|error| loopback_request_error(&error))?;
+    if !response.status().is_success() {
+        return Err(LoopbackChatCompletionError::Failed);
+    }
+    let mut completion = LoopbackChatCompletion {
+        content: None,
+        prompt_tokens: None,
+        completion_tokens: None,
+        finish_reason: None,
+    };
+    let mut content = String::new();
+    let mut line = Vec::new();
+    let mut checked = 0;
+    let mut stream = response.bytes_stream();
+    'read: while let Some(bytes) = stream.next().await {
+        let bytes = bytes.map_err(|error| loopback_request_error(&error))?;
+        let mut rest = &bytes[..];
+        while let Some(end) = rest.iter().position(|&byte| byte == b'\n') {
+            line.extend_from_slice(&rest[..end]);
+            rest = &rest[end + 1..];
+            let done = read_stream_line(&line, &mut content, &mut completion)?;
+            line.clear();
+            if done {
+                break 'read;
+            }
+            if content.len() >= checked + ABANDON_CHECK_BYTES {
+                checked = content.len();
+                if abandon(&content) {
+                    completion.finish_reason = Some("abandoned".to_string());
+                    break 'read;
+                }
+            }
+        }
+        line.extend_from_slice(rest);
+        if line.len().saturating_add(content.len()) > MAX_COMPLETION_RESPONSE_BYTES {
+            return Err(LoopbackChatCompletionError::Failed);
+        }
+    }
+    completion.content = (!content.is_empty()).then_some(content);
+    Ok(completion)
+}
+
+/// Reads one line of a streamed completion into `content` and `completion`,
+/// and says whether it ended the stream.
+fn read_stream_line(
+    line: &[u8],
+    content: &mut String,
+    completion: &mut LoopbackChatCompletion,
+) -> Result<bool, LoopbackChatCompletionError> {
+    let Some(data) = line.strip_prefix(b"data:") else {
+        return Ok(false);
+    };
+    let data = data.trim_ascii();
+    if data == b"[DONE]" {
+        return Ok(true);
+    }
+    let chunk: ChatCompletionChunk =
+        serde_json::from_slice(data).map_err(|_| LoopbackChatCompletionError::Failed)?;
+    if let Some(usage) = chunk.usage {
+        completion.prompt_tokens = usage.prompt_tokens;
+        completion.completion_tokens = usage.completion_tokens;
+    }
+    if let Some(choice) = chunk.choices.into_iter().next() {
+        if let Some(text) = choice.delta.and_then(|delta| delta.content) {
+            content.push_str(&text);
+        }
+        if choice.finish_reason.is_some() {
+            completion.finish_reason = choice.finish_reason;
+        }
+    }
+    Ok(false)
 }
 
 /// How long a warm-up waits for a local model to load and read its prompt.
@@ -828,6 +961,7 @@ fn openai_request(
         model: model.to_string(),
         messages: messages.to_vec(),
         stream: false,
+        stream_options: None,
         max_tokens: options.max_tokens,
         response_format: options.response_format.clone(),
         reasoning: options.reasoning.clone(),
@@ -1490,6 +1624,7 @@ mod tests {
                 content: "hi".to_string(),
             }],
             stream: false,
+            stream_options: None,
             max_tokens: None,
             response_format: None,
             reasoning,
