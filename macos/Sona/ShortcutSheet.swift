@@ -1,0 +1,119 @@
+import SwiftUI
+
+/// ?: every key the task screens answer to.
+struct ShortcutSheet: View {
+    @Environment(AppModel.self) private var model
+
+    private struct Entry: Identifiable {
+        let title: String
+        let keys: [String]
+        var id: String { title }
+    }
+
+    private static let columns: [[(title: String, entries: [Entry])]] = [
+        [
+            ("Go to", [
+                Entry(title: "Home", keys: ["g h"]),
+                Entry(title: "Meetings", keys: ["g m"]),
+                Entry(title: "Tasks", keys: ["g t"]),
+                Entry(title: "Triage", keys: ["g i"]),
+                Entry(title: "People", keys: ["g p"]),
+                Entry(title: "Projects", keys: ["g j"]),
+            ]),
+            ("View", [
+                Entry(title: "New task", keys: ["c"]),
+                Entry(title: "Filter", keys: ["f"]),
+                Entry(title: "Display options", keys: ["shift+v"]),
+                Entry(title: "List or board", keys: ["cmd+b"]),
+                Entry(title: "Command menu", keys: ["cmd+k"]),
+                Entry(title: "Shortcuts", keys: ["?"]),
+            ]),
+        ],
+        [
+            ("List", [
+                Entry(title: "Next and previous", keys: ["j", "k"]),
+                Entry(title: "Move the highlight", keys: ["down", "up"]),
+                Entry(title: "Select", keys: ["x"]),
+                Entry(title: "Select a range", keys: ["shift+down", "shift+click"]),
+                Entry(title: "Select all", keys: ["cmd+a"]),
+                Entry(title: "Peek", keys: ["space"]),
+                Entry(title: "Open", keys: ["return"]),
+                Entry(title: "Back, clear", keys: ["esc"]),
+            ]),
+            ("Triage", [
+                Entry(title: "Accept", keys: ["1"]),
+                Entry(title: "Decline", keys: ["2"]),
+                Entry(title: "Duplicate", keys: ["3"]),
+                Entry(title: "Snooze", keys: ["h"]),
+            ]),
+        ],
+        [
+            ("Change", [
+                Entry(title: "Status", keys: ["s"]),
+                Entry(title: "Priority", keys: ["p"]),
+                Entry(title: "Assign", keys: ["a"]),
+                Entry(title: "Assign to me", keys: ["i"]),
+                Entry(title: "Due date", keys: ["d"]),
+                Entry(title: "Labels", keys: ["l"]),
+                Entry(title: "Project", keys: ["shift+p"]),
+                Entry(title: "Rename", keys: ["e"]),
+                Entry(title: "Archive", keys: ["cmd+backspace"]),
+                Entry(title: "Undo", keys: ["cmd+z"]),
+            ]),
+        ],
+    ]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text("Keyboard shortcuts")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(Theme.ink)
+                Spacer(minLength: 0)
+                Button("Done") { model.workFocus.shortcutsShown = false }
+                    .buttonStyle(.quiet)
+                    .keyboardShortcut(.cancelAction)
+            }
+            .padding(.horizontal, 20)
+            .frame(height: 52)
+            Hairline()
+            HStack(alignment: .top, spacing: 32) {
+                ForEach(Array(Self.columns.enumerated()), id: \.offset) { _, column in
+                    VStack(alignment: .leading, spacing: 20) {
+                        ForEach(column, id: \.title) { group in
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(group.title)
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .foregroundStyle(Theme.inkTertiary)
+                                    .accessibilityAddTraits(.isHeader)
+                                    .padding(.bottom, 4)
+                                ForEach(group.entries) { entry in
+                                    line(entry)
+                                }
+                            }
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                }
+            }
+            .padding(20)
+        }
+        .frame(width: 840)
+        .background(Theme.elevated)
+    }
+
+    private func line(_ entry: Entry) -> some View {
+        HStack(spacing: 8) {
+            Text(entry.title)
+                .font(TypeScale.body(13))
+                .foregroundStyle(Theme.inkSecondary)
+            Spacer(minLength: 8)
+            ForEach(entry.keys, id: \.self) { keys in
+                Shortcut(keys)
+            }
+        }
+        .frame(height: 28)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(entry.title), \(entry.keys.joined(separator: " or "))")
+    }
+}

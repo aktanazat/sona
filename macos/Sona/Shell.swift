@@ -156,6 +156,10 @@ struct Shell: View {
                     openProject: model.openProject,
                     openMeeting: model.openMeeting,
                     showProjects: { model.go(.projects) })
+            case .tasks:
+                TasksScreen()
+            case .triage:
+                TriageScreen()
             }
         }
     }
@@ -465,6 +469,11 @@ struct Sidebar: View {
         case .people:
             SidebarCount(value: Int(model.people.entries?.reduce(0) { $0 + $1.suggestedCount } ?? 0),
                          meaning: "to confirm")
+        case .triage:
+            SidebarCount(value: model.work.counts?.triage ?? 0, meaning: "to triage")
+        case .tasks:
+            SidebarCount(value: model.work.counts.map { $0.mineOverdue + $0.mineDueToday } ?? 0,
+                         meaning: "due today or late")
         case .capture, .library, .meetings, .scratchpad, .calendar:
             nil
         }
