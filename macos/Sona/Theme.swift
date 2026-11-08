@@ -19,6 +19,8 @@ enum Theme {
     static var controlPressed: Color { color(.controlPressed) }
     static var selection: Color { color(.selection) }
     static var wash: Color { color(.wash) }
+    /// A selected row on glass or on any surface: twice the hover wash.
+    static var washSelected: Color { color(.washSelected) }
     /// Empty bars, progress tracks and loading placeholders.
     static var track: Color { color(.track) }
     /// Dims the window behind the command palette.
@@ -118,7 +120,7 @@ enum Theme {
 
 enum ThemeRole: Int, CaseIterable {
     case rail, page, inset, surface, elevated
-    case control, controlHover, controlPressed, selection, wash, track, scrim
+    case control, controlHover, controlPressed, selection, wash, washSelected, track, scrim
     case border, hairline
     case ink, inkSecondary, inkTertiary, inkDisabled
     case accent, accentFill, accentSoft, onAccent
@@ -220,7 +222,9 @@ private struct Variants<Value> {
 
 /// Linear's three theme inputs. Its own dark theme is base (4.8, 0.7, 272)
 /// at contrast 33, and the steps below were measured from the colors it
-/// ships at that contrast.
+/// ships at that contrast. Dark controls are the exception: Linear's sit on
+/// its page, Sona's mostly sit on cards, where Linear's step left a button
+/// 1.5 lightness above the card.
 struct ThemeSeed {
     let base: LCH
     let accent: LCH
@@ -243,12 +247,13 @@ struct ThemeSeed {
         case .inset: neutral(isDark ? 2 : 4.4, chroma: 0.2)
         case .surface: neutral(isDark ? 4.4 : 0, chroma: 0.2)
         case .elevated: neutral(isDark ? 6.4 : 0, chroma: 0.4)
-        case .control: neutral(isDark ? 5.6 : 7, chroma: isDark ? 1.5 : 0.6)
-        case .controlHover: neutral(9, chroma: isDark ? 1.4 : 0.8)
-        case .controlPressed: neutral(isDark ? 11.4 : 11, chroma: isDark ? 2 : 1)
+        case .control: neutral(isDark ? 8 : 7, chroma: isDark ? 1.5 : 0.6)
+        case .controlHover: neutral(isDark ? 10.5 : 9, chroma: isDark ? 1.4 : 0.8)
+        case .controlPressed: neutral(isDark ? 13 : 11, chroma: isDark ? 2 : 1)
         case .selection: tinted(7, chroma: isDark ? 18 : 10)
         case .wash: LCH(l: isDark ? 100 : 0, c: 0, h: 0, alpha: 0.035 * reach)
-        case .track: value(.controlPressed)
+        case .washSelected: LCH(l: isDark ? 100 : 0, c: 0, h: 0, alpha: 0.07 * reach)
+        case .track: neutral(isDark ? 11.4 : 11, chroma: isDark ? 2 : 1)
         case .scrim: LCH(l: 0, c: 0, h: 0, alpha: 0.18)
         case .border: neutral(isDark ? 9.8 : 10.5, chroma: isDark ? 3 : 0.8)
         case .hairline: neutral(isDark ? 8 : 8.5, chroma: isDark ? 2.3 : 0.5)
