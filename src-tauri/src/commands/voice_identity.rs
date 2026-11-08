@@ -3,7 +3,7 @@ use crate::meeting::people_types::PersonId;
 use crate::meeting::session::MeetingSessionManager;
 use crate::meeting::store::voice_identity::{
     MeetingSpeakerIdentifyDisposition, MeetingSpeakerIdentifyRequest, MeetingSpeakerIdentifyTarget,
-    UserVoiceprint, VoiceProfileStatus, VoiceSpeakerSuggestion,
+    SameVoice, SameVoiceSpeaker, UserVoiceprint, VoiceProfileStatus, VoiceSpeakerSuggestion,
 };
 use crate::meeting::types::{
     MeetingCommandError, MeetingOperationId, MeetingSessionId, OperationReceipt, SpeakerId,
@@ -24,8 +24,13 @@ pub enum VoiceIdentityTarget {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum VoiceSpeakerIdentityAction {
-    Label { target: VoiceIdentityTarget },
-    CorrectTo { target: VoiceIdentityTarget },
+    Label {
+        target: VoiceIdentityTarget,
+        same_voice: Vec<SameVoiceSpeaker>,
+    },
+    CorrectTo {
+        target: VoiceIdentityTarget,
+    },
     MarkUnknown,
 }
 
@@ -61,6 +66,7 @@ pub struct VoiceProfileRemovalRequest {
 pub struct VoiceIdentityStatus {
     pub unresolved_active_speaker_ids: Vec<SpeakerId>,
     pub suggestions: Vec<VoiceSpeakerSuggestion>,
+    pub same_voice: Vec<SameVoice>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
@@ -91,6 +97,7 @@ pub async fn voice_identity_status(
             .unresolved_active_voice_speaker_ids(session_id)
             .await?,
         suggestions: manager.voice_speaker_suggestions(session_id).await?,
+        same_voice: manager.same_voice_meetings(session_id).await?,
     })
 }
 
@@ -182,9 +189,12 @@ pub async fn voice_user_forget(
 
 fn identity_disposition(action: VoiceSpeakerIdentityAction) -> MeetingSpeakerIdentifyDisposition {
     match action {
-        VoiceSpeakerIdentityAction::Label { target } => MeetingSpeakerIdentifyDisposition::Label {
-            target: identity_target(target),
-        },
+        VoiceSpeakerIdentityAction::Label { target, same_voice } => {
+            MeetingSpeakerIdentifyDisposition::Label {
+                target: identity_target(target),
+                same_voice,
+            }
+        }
         VoiceSpeakerIdentityAction::CorrectTo { target } => {
             MeetingSpeakerIdentifyDisposition::CorrectTo {
                 target: identity_target(target),

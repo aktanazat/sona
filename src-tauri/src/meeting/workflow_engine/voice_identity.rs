@@ -3,9 +3,9 @@ use crate::managers::history::HistoryManager;
 use crate::meeting::people_types::PersonId;
 use crate::meeting::session::MeetingSessionManager;
 use crate::meeting::store::voice_identity::{
-    ExplicitVoiceConsent, MeetingSpeakerIdentifyRequest, UserVoiceprint, UserVoiceprintRequest,
-    VoiceProfileEnrollmentRequest, VoiceProfileStatus, VoiceSpeakerIdentityResult,
-    VoiceSpeakerSuggestion,
+    ExplicitVoiceConsent, MeetingSpeakerIdentifyDisposition, MeetingSpeakerIdentifyRequest,
+    SameVoice, UserVoiceprint, UserVoiceprintRequest, VoiceProfileEnrollmentRequest,
+    VoiceProfileStatus, VoiceSpeakerIdentityResult, VoiceSpeakerSuggestion,
 };
 use crate::meeting::transcript_correction_types::TranscriptCorrectionChangedSession;
 use crate::meeting::types::{
@@ -49,22 +49,50 @@ impl MeetingSessionManager {
             .map_err(map_store_error)
     }
 
+    pub(crate) async fn same_voice_meetings(
+        &self,
+        session_id: MeetingSessionId,
+    ) -> Result<Vec<SameVoice>, MeetingCommandError> {
+        let user_name = self.user_name();
+        self.store()
+            .await?
+            .same_voice_meetings(session_id, user_name.as_deref())
+            .map_err(map_store_error)
+    }
+
     pub(crate) async fn identify_voice_speaker(
         &self,
         request: MeetingSpeakerIdentifyRequest,
     ) -> Result<VoiceSpeakerIdentityResult, MeetingCommandError> {
         let store = self.store().await?;
-        let before = store
-            .transcript_correction_identity_snapshot(request.session_id, &[request.speaker_id])
+        let mut speakers = vec![(request.session_id, request.speaker_id)];
+        if let MeetingSpeakerIdentifyDisposition::Label { same_voice, .. } = &request.disposition {
+            speakers.extend(
+                same_voice
+                    .iter()
+                    .map(|speaker| (speaker.session_id, speaker.speaker_id)),
+            );
+        }
+        let before = speakers
+            .into_iter()
+            .map(|(session_id, speaker_id)| {
+                store.transcript_correction_identity_snapshot(session_id, &[speaker_id])
+            })
+            .collect::<Result<Vec<_>, _>>()
             .map_err(map_store_error)?;
         let result = store.identify_speaker(request).map_err(map_store_error)?;
-        self.emit_transcript_correction_changes(
-            store
-                .transcript_correction_projection_changes(before)
-                .map_err(map_store_error)?,
-        );
+        for before in before {
+            self.emit_transcript_correction_changes(
+                store
+                    .transcript_correction_projection_changes(before)
+                    .map_err(map_store_error)?,
+            );
+        }
         if let Some(revision) = result.receipt.new_revision {
             self.emit_artifact_changed(result.receipt.session_id.clone(), revision);
+        }
+        for &(session_id, revision) in &result.same_voice_revisions {
+            self.emit_artifact_changed(Some(session_id), revision);
         }
         Ok(result)
     }

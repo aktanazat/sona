@@ -37,6 +37,13 @@ const SPEAKER_MATCH_THRESHOLD: f32 = 0.72;
 const OVERLAP_MARGIN: f32 = 0.04;
 const PROFILE_MATCH_THRESHOLD: f32 = 0.80;
 const PROFILE_MATCH_MARGIN: f32 = 0.08;
+/// Raw cosine at which an unnamed voice in one meeting is offered as the same
+/// person as an unnamed voice in another. `voice_identity::probe` set it on
+/// LibriSpeech voices mixed into meetings, clean and through room, call and
+/// headset channels: the lowest bar at which no voice was paired with
+/// somebody else's. The closest two people scored 0.73, in a cluster where
+/// diarization had merged them.
+const SAME_VOICE_THRESHOLD: f32 = 0.74;
 const WESPEAKER_FEATURE_PIPELINE_REVISION: &str =
     "kaldi-fbank-80-pcm16-hamming-400-hop-160-fft-512-per-bin-cmn-v2";
 const WESPEAKER_NORMALIZATION: &str = "l2-v1";
@@ -1289,6 +1296,30 @@ pub(crate) fn match_speaker_profile<'a, Id>(
         return None;
     }
     Some(id)
+}
+
+/// Which voices of one meeting, `here`, are the same as which voices of
+/// another, `there`. A pair is each other's closest voice and scores at least
+/// `SAME_VOICE_THRESHOLD`, so a voice pairs with at most one from each side.
+pub(crate) fn pair_same_voices<Here: Copy, There: Copy>(
+    here: &[(Here, &SpeakerEmbedding)],
+    there: &[(There, &SpeakerEmbedding)],
+) -> Vec<(Here, There)> {
+    here.iter()
+        .enumerate()
+        .filter_map(|(index, &(here_id, voice))| {
+            let (there_id, closest, score) = there
+                .iter()
+                .map(|&(there_id, other)| (there_id, other, cosine_similarity(voice, other)))
+                .max_by(|left, right| left.2.total_cmp(&right.2))?;
+            let back = here
+                .iter()
+                .map(|&(_, other)| cosine_similarity(closest, other))
+                .enumerate()
+                .max_by(|left, right| left.1.total_cmp(&right.1))?;
+            (back.0 == index && score >= SAME_VOICE_THRESHOLD).then_some((here_id, there_id))
+        })
+        .collect()
 }
 
 fn normalize(values: &mut [f32]) -> Option<()> {

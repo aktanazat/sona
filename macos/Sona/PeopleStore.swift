@@ -601,6 +601,9 @@ final class VoiceIdentityStore {
     /// Waiting speakers whose voice matches someone you named in another
     /// meeting. Only a confirm writes; one is gone once its speaker has a name.
     private(set) var suggestions: [VoiceSpeakerSuggestion] = []
+    /// Waiting speakers whose voice other meetings heard and nobody named
+    /// there either. Naming the speaker names the meetings kept with it.
+    private(set) var sameVoice: [SameVoice] = []
     /// Who a label can point at. Nil until the read answers.
     private(set) var people: [PersonListEntry]?
     private(set) var peopleFailed = false
@@ -644,6 +647,7 @@ final class VoiceIdentityStore {
             speakers = []
             unresolved = []
             suggestions = []
+            sameVoice = []
         }
         self.sessionId = sessionId
         do {
@@ -668,10 +672,12 @@ final class VoiceIdentityStore {
             unresolved = meeting.speakers.filter { waiting.contains($0.speakerId) }
             let askable = Set(unresolved.map(\.speakerId))
             suggestions = status.suggestions.filter { askable.contains($0.speakerId) }
+            sameVoice = status.sameVoice.filter { askable.contains($0.speakerId) }
         } catch {
             speakers = []
             unresolved = []
             suggestions = []
+            sameVoice = []
             throw error
         }
     }
@@ -736,21 +742,27 @@ final class VoiceIdentityStore {
         speakers.first { $0.speakerId == speakerId }
     }
 
-    /// Names the speaker, and remembers the voice when asked to.
+    /// Names the speaker, and the same voice in the `sameVoice` meetings, and
+    /// remembers the voice when asked to.
     ///
     /// The label commits first and moves the meeting on, so a failure in the
     /// enrollment half must not skip the re-read: the sheet would sit on a
     /// speaker that is already named, and the next save would carry a revision
     /// the store has left behind.
-    func save(_ target: VoiceIdentityTarget, remember: Bool) {
+    func save(_ target: VoiceIdentityTarget, remember: Bool, sameVoice meetings: [SameVoiceMeeting]) {
         guard let question, let sessionId else { return }
+        let others = meetings.map {
+            SameVoiceSpeaker(
+                sessionId: $0.sessionId, speakerId: $0.speakerId,
+                expectedSpeakerRevision: $0.speakerRevision)
+        }
         busy = true
         act { [self] in
             defer { busy = false }
             let resolved = try await identify(
                 sessionId: sessionId,
                 speakerId: question.speakerId,
-                action: question.isCorrection ? .correctTo(target) : .label(target))
+                action: question.isCorrection ? .correctTo(target) : .label(target, sameVoice: others))
             var failure: Error?
             if remember, let personId = resolved {
                 do {
@@ -792,7 +804,7 @@ final class VoiceIdentityStore {
                 _ = try await identify(
                     sessionId: sessionId,
                     speakerId: suggestion.speakerId,
-                    action: .label(.existing(personId: personId)))
+                    action: .label(.existing(personId: personId), sameVoice: []))
             } else {
                 let meeting: VoiceIdentityMeeting = try await core.request(
                     "meeting_get", ["sessionId": sessionId])

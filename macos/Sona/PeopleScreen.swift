@@ -1584,10 +1584,15 @@ struct MeetingVoiceIdentitySection: View {
 /// question three times, and the name is what tells them apart.
 struct VoiceIdentitySheet: View {
     let store: VoiceIdentityStore
+    @Environment(AppModel.self) private var model
     /// Empty means a person this answer creates.
     @State private var target: String = ""
     @State private var name: String = ""
     @State private var remember = false
+    /// Other meetings with the same voice the user says are someone else.
+    @State private var notSame: Set<String> = []
+    /// The meeting whose clip this sheet started.
+    @State private var playing: String?
 
     var body: some View {
         PeopleSheet(title: title, dismiss: { store.ask(nil) }) {
@@ -1612,10 +1617,16 @@ struct VoiceIdentitySheet: View {
         } footer: {
             footer
         }
+        .onDisappear {
+            if let playing, audio.sessionId == playing { audio.stop() }
+        }
     }
 
     @ViewBuilder
     private func form(_ people: [PersonListEntry]) -> some View {
+        if let sameVoice {
+            heardBefore(sameVoice)
+        }
         VStack(alignment: .leading, spacing: 6) {
             Text("Choose a person").metaText(Theme.inkSecondary)
             Picker("", selection: $target) {
@@ -1652,10 +1663,78 @@ struct VoiceIdentitySheet: View {
                 Text("Name this voice automatically in later meetings").bodyText(14)
             }
             .toggleStyle(.checkbox)
-            Text("Sona keeps a fingerprint of each voice on this Mac to suggest names. It is deleted with the meeting.")
+            Text("Sona keeps a fingerprint of each voice on this Mac to suggest names. It is deleted with the meeting, or after 90 days if nobody names it.")
                 .metaText(Theme.inkSecondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
+    }
+
+    private func heardBefore(_ sameVoice: SameVoice) -> some View {
+        var seen = Set<String>()
+        let days = sameVoice.meetings.map { PlanningFormat.day($0.startedAtUtcMs) }
+            .filter { seen.insert($0).inserted }
+        return VStack(alignment: .leading, spacing: 6) {
+            Text("This voice was also in \(days.formatted(.list(type: .and))). Same person?")
+                .bodyText(14)
+                .fixedSize(horizontal: false, vertical: true)
+            ForEach(sameVoice.meetings) { meeting in
+                HStack(spacing: 8) {
+                    Toggle(isOn: same(meeting)) {
+                        HStack(spacing: 6) {
+                            Text(PlanningFormat.day(meeting.startedAtUtcMs)).bodyText(14)
+                            Text(meeting.title).metaText(Theme.inkSecondary).lineLimit(1)
+                        }
+                    }
+                    .toggleStyle(.checkbox)
+                    Spacer(minLength: 8)
+                    listen(meeting)
+                }
+            }
+            if playing != nil, let message = audio.error {
+                Text(message).metaText(Theme.live)
+            }
+        }
+    }
+
+    private func same(_ meeting: SameVoiceMeeting) -> Binding<Bool> {
+        Binding(
+            get: { !notSame.contains(meeting.sessionId) },
+            set: { same in
+                if same { notSame.remove(meeting.sessionId) } else { notSame.insert(meeting.sessionId) }
+            })
+    }
+
+    private func listen(_ meeting: SameVoiceMeeting) -> some View {
+        let active = playing == meeting.sessionId && audio.sessionId == meeting.sessionId
+            && (audio.playing || audio.loading)
+        let recording = audio.heldForRecording || model.capture != .idle
+        return Button {
+            if active {
+                audio.stop()
+                playing = nil
+            } else if let clip = meeting.clip {
+                playing = meeting.sessionId
+                audio.play(sessionId: meeting.sessionId, startOffsetNs: clip.startOffsetNs,
+                           endOffsetNs: clip.endOffsetNs)
+            }
+        } label: {
+            Image(systemName: active ? "stop.fill" : "play.fill")
+                .font(.system(size: 11, weight: .semibold))
+                .frame(width: 22, height: 22)
+        }
+        .buttonStyle(.quiet)
+        .disabled(meeting.clip == nil || recording)
+        .help(meeting.clip == nil ? "No recording of this voice."
+            : (recording ? ConversationAudioPlayback.heldNotice : "Hear this voice"))
+        .accessibilityLabel(active ? "Stop" : "Hear this voice in \(meeting.title)")
+    }
+
+    private var audio: ConversationAudioPlayback { model.meetings.audio }
+
+    /// The other meetings the same voice waits in, for a speaker being labelled.
+    private var sameVoice: SameVoice? {
+        guard let question = store.question, !question.isCorrection else { return nil }
+        return store.sameVoice.first { $0.speakerId == question.speakerId }
     }
 
     @ViewBuilder
@@ -1698,9 +1777,13 @@ struct VoiceIdentitySheet: View {
         let voiceTarget: VoiceIdentityTarget = target.isEmpty
             ? .create(displayName: name.trimmingCharacters(in: .whitespacesAndNewlines))
             : .existing(personId: target)
-        store.save(voiceTarget, remember: remember)
+        let kept = sameVoice?.meetings.filter { !notSame.contains($0.sessionId) } ?? []
+        store.save(voiceTarget, remember: remember, sameVoice: kept)
+        if let playing, audio.sessionId == playing { audio.stop() }
         target = ""
         name = ""
         remember = false
+        notSame = []
+        playing = nil
     }
 }

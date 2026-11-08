@@ -667,6 +667,9 @@ fn fallback_window_is_eligible(
 }
 
 #[cfg(test)]
+mod probe;
+
+#[cfg(test)]
 mod tests {
     use super::super::diarization::match_speaker_profile;
     use super::*;
