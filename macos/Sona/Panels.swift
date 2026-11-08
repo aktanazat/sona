@@ -881,6 +881,9 @@ private enum PaletteRow: Identifiable {
     case hit(QueryRow)
     /// A line someone said: return plays it, ⌘return opens its meeting there.
     case heard(SaidMoment)
+    /// A meeting picture whose words match: it opens its meeting at the line
+    /// said when it went up.
+    case screen(ScreenTextMoment)
     /// Every heard line with its audio kept, oldest first, one after another.
     case playAll
     /// The next page of the same question, when the plane said there is one.
@@ -895,6 +898,7 @@ private enum PaletteRow: Identifiable {
         case let .action(action): "action:\(action.id)"
         case let .hit(hit): "hit:\(hit.link)"
         case let .heard(moment): "heard:\(moment.id)"
+        case let .screen(moment): "screen:\(moment.id)"
         case .playAll: "play-all"
         case .more: "more"
         case .ask: "ask"
@@ -944,11 +948,12 @@ private enum Lookup {
 }
 
 /// ⌘K. A floating panel: one field, the places and verbs that match, the
-/// lines said in meetings that match, then the meetings, people, dictations
-/// and loops the query plane found, and the ask row when the agent is allowed
-/// to hear the question. The corpus rows are never filtered by the letters
-/// typed: the plane matched them, sometimes by meaning, and a title need not
-/// share one letter with the question.
+/// lines said in meetings that match, the meeting pictures whose words match,
+/// then the meetings, people, dictations and loops the query plane found, and
+/// the ask row when the agent is allowed to hear the question. The corpus
+/// rows are never filtered by the letters typed: the plane matched them,
+/// sometimes by meaning, and a title need not share one letter with the
+/// question.
 struct CommandPalette: View {
     @Environment(AppModel.self) private var model
     @State private var query = ""
@@ -958,6 +963,8 @@ struct CommandPalette: View {
     /// The lines said that match the settled question; empty when none did
     /// or the search for them failed.
     @State private var heard: [SaidMoment] = []
+    /// The meeting pictures whose words match the settled question.
+    @State private var onScreen: [ScreenTextMoment] = []
     /// The line this palette last asked to hear: its failure shows on that
     /// row, and closing the palette stops only that playback.
     @State private var hearing: TranscriptSegmentId?
@@ -1104,8 +1111,9 @@ struct CommandPalette: View {
     }
 
     /// The sections in the order the list shows them: places, verbs, the lines
-    /// said that match, then the plane's rows by kind, then the one ask row. A
-    /// section is live when its rows answer the question in the field now.
+    /// said that match, the pictures whose words match, then the plane's rows
+    /// by kind, then the one ask row. A section is live when its rows answer
+    /// the question in the field now.
     private var sections: [(label: String, rows: [PaletteRow], live: Bool)] {
         var sections: [(label: String, rows: [PaletteRow], live: Bool)] = []
         let navigation = actions.filter { $0.group == .navigation }.map(PaletteRow.action)
@@ -1118,6 +1126,9 @@ struct CommandPalette: View {
             let playable = heard.filter(\.audioRetained).count
             let lines = heard.map(PaletteRow.heard)
             sections.append(("Heard", playable > 1 ? lines + [.playAll] : lines, live))
+        }
+        if !onScreen.isEmpty {
+            sections.append(("On screen", onScreen.map(PaletteRow.screen), live))
         }
         for (kind, label) in Self.kinds {
             let rows = hits.filter { $0.kind == kind }.map(PaletteRow.hit)
@@ -1231,6 +1242,7 @@ struct CommandPalette: View {
         case let .action(action): action.run()
         case let .hit(hit): model.open(link: hit.link)
         case let .heard(moment): model.open(link: moment.link)
+        case let .screen(moment): model.open(link: moment.link)
         case let .ask(question): model.ask(question)
         case .more, .playAll: break
         }
@@ -1294,15 +1306,17 @@ struct CommandPalette: View {
     }
 
     /// Long enough to swallow a typed word, short enough to feel like the list
-    /// is keeping up: 150 ms after the last keystroke, one page from the plane
-    /// and the few lines said that match, asked together. `now` skips the
-    /// pause for a retry the reader asked for by hand.
+    /// is keeping up: 150 ms after the last keystroke, one page from the plane,
+    /// the few lines said that match and the few pictures whose words match,
+    /// asked together. `now` skips the pause for a retry the reader asked for
+    /// by hand.
     private func schedule(_ text: String, now: Bool = false) {
         search?.cancel()
         let query = text.trimmingCharacters(in: .whitespaces)
         guard query.count >= Self.minimumQuery else {
             lookup = .none
             heard = []
+            onScreen = []
             return
         }
         lookup = .pending(earlier: lookup.earlier)
@@ -1314,16 +1328,21 @@ struct CommandPalette: View {
             }
             guard !Task.isCancelled else { return }
             async let said: [SaidMoment] = core.request("meeting_said_search", request)
+            async let shown: [ScreenTextMoment] = core.request("meeting_snapshot_text_search", request)
             do {
                 let page = try await ask(query, after: nil)
                 let moments = (try? await said) ?? []
+                let pictures = (try? await shown) ?? []
                 guard !Task.isCancelled else { return }
                 heard = moments
+                onScreen = pictures
                 lookup = .answered(.init(rows: page.entries, next: page.nextCursor, reason: page.reason))
             } catch {
                 let moments = (try? await said) ?? []
+                let pictures = (try? await shown) ?? []
                 guard !Task.isCancelled else { return }
                 heard = moments
+                onScreen = pictures
                 lookup = .failed(Self.sentence(for: error))
             }
         }
@@ -1416,6 +1435,11 @@ private struct PaletteRowView: View {
                     VStack(alignment: .leading, spacing: 3) {
                         Text(quote(moment.text)).bodyText().lineLimit(2)
                         progress
+                        Text(meta(moment)).metaText().lineLimit(1)
+                    }
+                case let .screen(moment):
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(marked(moment.excerpt.replacingOccurrences(of: "\n", with: " · "))).bodyText().lineLimit(2)
                         Text(meta(moment)).metaText().lineLimit(1)
                     }
                 case .playAll:
@@ -1554,7 +1578,11 @@ private struct PaletteRowView: View {
     /// transcript marks a search: the line matched by word prefix, ignoring
     /// case and accents.
     private func quote(_ text: String) -> AttributedString {
-        var line = AttributedString("“\(text)”")
+        marked("“\(text)”")
+    }
+
+    private func marked(_ text: String) -> AttributedString {
+        var line = AttributedString(text)
         for mark in marks {
             var cursor = line.startIndex
             while cursor < line.endIndex,
@@ -1573,6 +1601,15 @@ private struct PaletteRowView: View {
     private func meta(_ moment: SaidMoment) -> String {
         [moment.speaker, moment.meetingTitle, moment.meetingStarted.relativeDay]
             .compactMap { $0 }
+            .filter { !$0.isEmpty }
+            .joined(separator: " · ")
+    }
+
+    /// The picture's title, unless the words shown already start with it,
+    /// then its meeting and day.
+    private func meta(_ moment: ScreenTextMoment) -> String {
+        let title = moment.excerpt.hasPrefix(moment.title) ? "" : moment.title
+        return [title, moment.meetingTitle, moment.meetingStarted.relativeDay]
             .filter { !$0.isEmpty }
             .joined(separator: " · ")
     }
@@ -1625,6 +1662,7 @@ private struct PaletteRowView: View {
             case .receipt: "doc.text"
             }
         case .heard: "waveform"
+        case .screen: "photo"
         case .playAll: "play.circle"
         case .more: "ellipsis"
         case .ask: "bubble.left"

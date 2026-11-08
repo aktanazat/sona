@@ -84,7 +84,7 @@ Local runs keep captured audio on the device. Cloud transcription sends audio on
 
 - dictation adds cleanup levels, quiet-speech capture, language choices, usage statistics, a movable bar, and answers in chat. the plain-text scratchpad saves drafts and keeps version history.
 - meetings add live notes and cited help, custom notes templates, preparation briefs, and follow-up tools. email context is opt-in and stays with local generation. public web research needs a brave search key.
-- folders organize meetings and limit chat to their contents. csv export covers the retained library. screen snapshots stay local. recording and transcript retention preserves notes and starts with a seven-day cooldown.
+- folders organize meetings and limit chat to their contents. csv export covers the retained library. screen snapshots stay local; sona reads their words on this mac for search, and turning that off forgets them. recording and transcript retention preserves notes and starts with a seven-day cooldown.
 - notes can be copied as formatted text or markdown. encrypted browser links require the companion service. named-viewer access, comments, and collaborative editing are not built. external destinations require their own setup and consent.
 - the iphone app adds keyboard recording sessions, shortcuts, language choices, saved meeting notes, and playback. sync requires a paired companion service. optional recorded outgoing calls require a configured calling service; ordinary iphone call audio is not accessible.
 - Optional dictation cleanup has a deadline on both desktop and iPhone and stops when a recording is cancelled. The iPhone saves a recoverable draft before optional history work, so slow history cannot hold the text or its audio hostage.

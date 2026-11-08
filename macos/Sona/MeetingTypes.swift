@@ -1470,6 +1470,41 @@ struct SaidPerson: Decodable, Equatable {
     let displayName: String
 }
 
+/// `MeetingSnapshotTextMoment`: a meeting picture whose words
+/// `meeting_snapshot_text_search` matched, with the first line said while it
+/// was up, when there is one.
+struct ScreenTextMoment: Decodable, Identifiable {
+    let sessionId: MeetingSessionId
+    let snapshotId: String
+    let meetingTitle: String
+    let meetingStartedAtUtcMs: Int64
+    let offsetNs: UInt64
+    let title: String
+    let excerpt: String
+    let segmentId: TranscriptSegmentId?
+    let segmentStartOffsetNs: UInt64?
+
+    var id: String { snapshotId }
+    var meetingStarted: Date { meetingStartedAtUtcMs.meetingDate }
+    /// The meeting opened at the line said when the picture went up, else
+    /// the meeting.
+    var link: String {
+        guard let segmentId, let segmentStartOffsetNs else { return "sona://meeting/\(sessionId)" }
+        return "sona://meeting/\(sessionId)?atMs=\(segmentStartOffsetNs / 1_000_000)&segmentId=\(segmentId)"
+    }
+}
+
+/// `MeetingSnapshotTextMark`: "On screen" and a picture's title, on the
+/// first line said while the picture was up.
+struct ScreenTextMark: Decodable, Identifiable {
+    let snapshotId: String
+    let offsetNs: Int64
+    let segmentId: TranscriptSegmentId
+    let title: String
+
+    var id: String { snapshotId }
+}
+
 /// `ReelMomentKind`.
 enum ReelMomentKind: String, Decodable {
     case promise, decision, question, line
