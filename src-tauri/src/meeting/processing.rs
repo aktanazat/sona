@@ -6350,13 +6350,14 @@ fn read_ledger_pack(
 }
 
 /// What a reading of a ledger part kept: its checked threads first, then its
-/// open loops, commitments and stances. Of two readings the first stays unless
-/// the second kept more, so a tie on threads does not throw away the first
-/// reading's open questions and promises.
-fn kept_rows(ledger: &MeetingLedger) -> (usize, usize) {
+/// open loops and commitments, then its stances. Of two readings the first
+/// stays unless the second kept more, so a tie on threads does not throw away
+/// the first reading's open questions and promises for a few more stances.
+fn kept_rows(ledger: &MeetingLedger) -> (usize, usize, usize) {
     (
         ledger.threads.len(),
-        ledger.open_loops.len() + ledger.commitments.len() + ledger.stances.len(),
+        ledger.open_loops.len() + ledger.commitments.len(),
+        ledger.stances.len(),
     )
 }
 
