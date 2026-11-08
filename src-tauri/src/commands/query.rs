@@ -1,8 +1,10 @@
 use crate::managers::history::HistoryManager;
 use crate::meeting::detection::calendar::CalendarSource;
+use crate::meeting::people_types::PersonId;
 use crate::meeting::session::MeetingSessionManager;
 use crate::meeting::types::MeetingFolderId;
 use crate::query::pack::QueryPack;
+use crate::query::system::{PersonPromises, SystemIndex};
 use crate::query::{
     QueryAudience, QueryCursor, QueryError, QueryEventsPage, QueryScope, QuerySearchPage,
 };
@@ -89,4 +91,27 @@ pub async fn sona_query_pack(
 #[specta::specta]
 pub fn sona_open_link(app: AppHandle, link: String) -> bool {
     crate::dispatch_deep_link(&app, &link)
+}
+
+/// The people and meetings Siri, Spotlight and Shortcuts may list, without
+/// the series kept on this Mac.
+#[tauri::command]
+#[specta::specta]
+pub async fn sona_query_system_index(
+    meetings: State<'_, Arc<MeetingSessionManager>>,
+) -> Result<SystemIndex, QueryError> {
+    let store = meetings.store().await?;
+    crate::query::system::system_index(&store)
+}
+
+/// What one person promised, for Siri and Shortcuts: null when no person has
+/// this id.
+#[tauri::command]
+#[specta::specta]
+pub async fn sona_query_person_promises(
+    meetings: State<'_, Arc<MeetingSessionManager>>,
+    person_id: PersonId,
+) -> Result<Option<PersonPromises>, QueryError> {
+    let store = meetings.store().await?;
+    crate::query::system::person_promises(&store, person_id)
 }

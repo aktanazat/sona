@@ -9,6 +9,8 @@
 use super::{MeetingStore, StoreError};
 use crate::meeting::types::{MeetingSessionId, OperationReceipt};
 use rusqlite::{params, params_from_iter, OptionalExtension};
+use serde::Serialize;
+use specta::Type;
 
 /// One meeting as the query plane reports it. `snippet` is the text that
 /// matched, not a summary of the meeting: the plane's job is to show the reader
@@ -18,6 +20,14 @@ pub(crate) struct MeetingQueryCandidate {
     pub title: String,
     pub when_utc_ms: i64,
     pub snippet: String,
+}
+
+/// One retained meeting by name, the way Siri, Shortcuts and Spotlight list it.
+#[derive(Debug, Serialize, Type)]
+pub struct SystemMeeting {
+    pub id: MeetingSessionId,
+    pub title: String,
+    pub created_at_utc_ms: i64,
 }
 
 /// One stored chunk vector, without its text.
@@ -166,6 +176,28 @@ impl MeetingStore {
                 ),
                 when_utc_ms: row.get(2)?,
                 embedding: row.get(3)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Every retained meeting, newest first, in one read: the meetings page's
+    /// cursor is a timestamp, which skips ties at a page boundary.
+    pub(crate) fn system_meetings(&self) -> Result<Vec<SystemMeeting>, StoreError> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT id, title, created_at_utc_ms
+               FROM meeting_sessions
+              WHERE phase != 'deleting'
+              ORDER BY created_at_utc_ms DESC, id DESC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(SystemMeeting {
+                id: MeetingSessionId::from_uuid(
+                    super::parse_uuid(&row.get::<_, String>(0)?).map_err(super::to_sql_error)?,
+                ),
+                title: row.get(1)?,
+                created_at_utc_ms: row.get(2)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)

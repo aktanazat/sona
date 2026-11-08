@@ -4132,6 +4132,14 @@ pub(super) async fn call(
             })
             .await?
         }
+        "sona_query_system_index" => {
+            reply(crate::commands::query::sona_query_system_index(app.state()).await)
+        }
+        "sona_query_person_promises" => {
+            let mut args = Args::parse(params)?;
+            let person_id = args.take("personId")?;
+            reply(crate::commands::query::sona_query_person_promises(app.state(), person_id).await)
+        }
         "meeting_series_automations_get" => {
             let mut args = Args::parse(params)?;
             let series_key = args.take("seriesKey")?;
