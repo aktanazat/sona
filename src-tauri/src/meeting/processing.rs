@@ -6303,24 +6303,39 @@ fn read_ledger_pack(
     let mut kept: Option<MeetingLedger> = None;
     for _ in 0..=LEDGER_RECEIPT_RETRIES {
         check().map_err(complete_reading::ReadingError::Stopped)?;
-        let output = complete_reading::generate_part(
-            generator,
-            prompt,
-            input,
-            reply_tokens,
-            ReplyShape::MeetingLedger,
-            check,
-        )?;
-        let mut raw: RawLedgerOutput =
-            first_json_value(&output).map_err(|()| EngineFailureCause::ReplyNotStructured)?;
-        scope.restore_ledger(&mut raw)?;
-        let mut ledger = validate_ledger_output(&raw, &evidence.transcript)?;
-        let written = ledger.threads.len();
+        let read = || -> Result<(MeetingLedger, usize), complete_reading::ReadingError> {
+            let output = complete_reading::generate_part(
+                generator,
+                prompt,
+                input,
+                reply_tokens,
+                ReplyShape::MeetingLedger,
+                check,
+            )?;
+            let mut raw: RawLedgerOutput =
+                first_json_value(&output).map_err(|()| EngineFailureCause::ReplyNotStructured)?;
+            scope.restore_ledger(&mut raw)?;
+            let ledger = validate_ledger_output(&raw, &evidence.transcript)?;
+            let written = ledger.threads.len();
+            Ok((ledger, written))
+        };
+        let (mut ledger, written) = match read() {
+            Ok(reading) => reading,
+            // A second reading that fails leaves the first one standing.
+            Err(error)
+                if kept.is_some()
+                    && !matches!(error, complete_reading::ReadingError::Stopped(_)) =>
+            {
+                log::warn!("Ledger part read again failed, keeping its first reading: {error:?}");
+                break;
+            }
+            Err(error) => return Err(error),
+        };
         ledger::degrade_unverified(&mut ledger, haystack);
         let lost_half = ledger.threads.len() * 2 <= written;
         if kept
             .as_ref()
-            .is_none_or(|first| ledger.threads.len() >= first.threads.len())
+            .is_none_or(|first| kept_rows(&ledger) > kept_rows(first))
         {
             kept = Some(ledger);
         }
@@ -6332,6 +6347,17 @@ fn read_ledger_pack(
     // no ledger: the model answered and nothing it said checked out.
     kept.filter(|ledger| !ledger.threads.is_empty())
         .ok_or_else(|| ReplyRule::UnverifiedQuote.on("threads.receipt").into())
+}
+
+/// What a reading of a ledger part kept: its checked threads first, then its
+/// open loops, commitments and stances. Of two readings the first stays unless
+/// the second kept more, so a tie on threads does not throw away the first
+/// reading's open questions and promises.
+fn kept_rows(ledger: &MeetingLedger) -> (usize, usize) {
+    (
+        ledger.threads.len(),
+        ledger.open_loops.len() + ledger.commitments.len() + ledger.stances.len(),
+    )
 }
 
 pub(crate) fn validate_ledger_output(
@@ -9688,6 +9714,7 @@ pub(crate) mod tests {
                 2,
                 "After this meeting we're gonna be sent a questionnaire.",
             ),
+            segment_line(session_id, 3, "I'm gonna need the deck by Friday."),
         ];
         let speakers: HashMap<String, &str> = evidence
             .iter()
@@ -9709,6 +9736,7 @@ pub(crate) mod tests {
                     Some("Local speaker"),
                     None,
                 ),
+                task(&evidence[2], "Send the deck.", Some("Local speaker"), None),
             ],
         );
         let artifacts = validate_artifact_output(
@@ -9723,7 +9751,7 @@ pub(crate) mod tests {
             .iter()
             .map(|item| item.owner_text.as_deref())
             .collect();
-        assert_eq!(owners, [Some("Local speaker"), None]);
+        assert_eq!(owners, [Some("Local speaker"), None, None]);
     }
 
     #[test]

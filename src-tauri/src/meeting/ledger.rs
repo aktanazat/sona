@@ -501,9 +501,10 @@ pub(crate) fn degrade_unverified(ledger: &mut MeetingLedger, folded_haystack: &s
 
 /// How many threads in a row under one topic make a ledger reply being written
 /// a copy of its transcript. The local model has written one thread per line
-/// of a part, 27 in a row under its opening topic, until its answer ran out;
-/// no finished reply has given even two threads in a row one topic.
-const RUNAWAY_TOPIC_RUN: usize = 3;
+/// of a part, 27 in a row under its opening topic, until its answer ran out.
+/// A finished reply can give one subject a question, a decision and an action
+/// under one topic, so the run that stops a reply is well past that.
+const RUNAWAY_TOPIC_RUN: usize = 8;
 
 /// Whether a ledger reply still being written has turned into a copy of its
 /// transcript, so the rest of it is time spent on an answer that will be cut
