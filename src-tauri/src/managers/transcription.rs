@@ -2521,8 +2521,10 @@ impl TranscriptionManager {
                         let initial_prompt = initial_prompt.map(|prompt| prompt.text);
                         let no_speech = if model_is_whisper && switches.without_no_speech_check {
                             NoSpeechCheck::Off
-                        } else {
+                        } else if asr.log_probability_skip {
                             NoSpeechCheck::for_model(&session.model())
+                        } else {
+                            NoSpeechCheck::Published
                         };
                         let seed =
                             (model_is_whisper && diagnosis.is_some()).then_some(SAMPLING_SEED);
