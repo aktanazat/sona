@@ -44,6 +44,8 @@ struct MeetingSettingsView: View {
 
             MeetingSnapshotSettingsSection()
 
+            MeetingOpenWindowsSettingsSection()
+
             PageSection("Retention") {
                 Card {
                     MeetingRetentionRows(store: store)

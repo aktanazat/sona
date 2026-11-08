@@ -107,7 +107,7 @@ struct OnboardingView: View {
                             separated: store.permissions.microphone != .granted,
                             icon: "accessibility",
                             title: "Accessibility access",
-                            detail: "Required to type transcribed text into your applications.",
+                            detail: "Required to type transcribed text into your applications. Meetings also use it to note which windows were open.",
                             state: store.permissions.accessibility,
                             grant: "Grant permission",
                             onGrant: { store.permissions.grantAccessibility() },

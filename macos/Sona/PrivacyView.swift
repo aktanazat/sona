@@ -93,7 +93,7 @@ struct PrivacyView: View {
                 .disabled(store.ceilingBusy)
                 ToggleRow(
                     title: "Include browser URLs",
-                    detail: "Allow a frontmost browser page URL to be captured when a mode and the ceiling allow it.",
+                    detail: "Allow a frontmost browser page URL to be captured when a mode and the ceiling allow it. A meeting's list of open windows also keeps full page addresses.",
                     isOn: Binding(
                         get: { store.urlCaptureEnabled },
                         set: { enabled in Task { await store.setUrlCapture(enabled) } }))

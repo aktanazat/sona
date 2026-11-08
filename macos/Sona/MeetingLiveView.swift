@@ -692,13 +692,13 @@ struct MeetingConsentPanelView: View {
 
 /// The panel's surface: its width, its inset, and a corner concentric with
 /// the corner of a button inside that inset.
-private enum PanelSurface {
+enum PanelSurface {
     static let width: CGFloat = 320
     static let inset: CGFloat = 12
     static let radius = Theme.radiusControl + inset
 }
 
-private extension View {
+extension View {
     /// The panel's fill, hairline and shadow. Docked, the right side runs
     /// flush into the screen's edge: only the left corners round, and the
     /// hairline runs on past the edge.

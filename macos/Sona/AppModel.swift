@@ -318,6 +318,7 @@ final class AppModel {
     @ObservationIgnored let core = Core()
     @ObservationIgnored private lazy var pill = FloatingPanel(HUDPill().environment(self))
     @ObservationIgnored private lazy var consent = FloatingPanel(consentPanel(), arrival: .slide)
+    @ObservationIgnored private let windowAttached: WindowAttachedCard
     @ObservationIgnored private lazy var quietReviewScheduler = QuietReviewScheduler(store: projects) { [weak self] in
         guard let self, ready, !coreStopped, !coreRestarting, onboarding.step == .done,
               capture == .idle, !live.starting, live.pending == nil, live.live == nil, live.active == nil,
@@ -373,6 +374,7 @@ final class AppModel {
         recorder = RecorderStore(core: core)
         about = AboutStore(core: core)
         debug = DebugStore(core: core)
+        windowAttached = WindowAttachedCard(core: core)
 
         for name in [
             CoreEvent.activity, CoreEvent.streamText, CoreEvent.streamPhase, CoreEvent.micLevel,

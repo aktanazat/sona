@@ -34,6 +34,7 @@ struct MeetingReviewView: View {
                     HeardPlansCard(core: model.core, store: store,
                         sessionId: snapshot.session.sessionId, revision: snapshot.session.revision)
                     MeetingDocumentsCard(core: model.core, store: store, session: snapshot.session)
+                    MeetingOpenWindowsCard(core: model.core, store: store, session: snapshot.session)
                     pane(snapshot)
                 } else {
                     if let failure = store.reviewFailure {
