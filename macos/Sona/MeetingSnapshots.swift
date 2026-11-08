@@ -7,8 +7,6 @@ private struct MeetingScreenSnapshot: Decodable, Identifiable {
     let snapshotId: String
     let sessionId: MeetingSessionId
     let offsetNs: Int64
-    let width: Int
-    let height: Int
     var id: String { snapshotId }
 }
 
@@ -51,6 +49,7 @@ private struct SnapshotSettingParams: Encodable {
 
 private struct SnapshotSettings: Decodable {
     let meetingScreenSnapshotsEnabled: Bool?
+    let meetingScreenTextEnabled: Bool?
 }
 
 private enum SnapshotProblem: String, Decodable {
@@ -102,13 +101,18 @@ private final class MeetingSnapshotStore {
 
     @ObservationIgnored private let core: Core
     @ObservationIgnored private var reloadAgain: Set<MeetingSessionId> = []
+    @ObservationIgnored private var marksLoading: Set<MeetingSessionId> = []
+    @ObservationIgnored private var marksAgain: Set<MeetingSessionId> = []
     var lists: [MeetingSessionId: [MeetingScreenSnapshot]] = [:]
     var statuses: [MeetingSessionId: MeetingScreenSnapshotStatus] = [:]
     var errors: [MeetingSessionId: String] = [:]
     var loading: Set<MeetingSessionId> = []
     var taking: Set<MeetingSessionId> = []
     var changing: Set<MeetingSessionId> = []
+    /// The "On screen" marks of each meeting whose transcript has shown.
+    var marks: [MeetingSessionId: [ScreenTextMark]] = [:]
     var enabled = false
+    var textEnabled = true
     var settingsLoaded = false
     var settingsSaving = false
     var settingsError: String?
@@ -118,8 +122,12 @@ private final class MeetingSnapshotStore {
         core.observe("meeting:snapshot-changed") { [weak self] data in
             guard let self,
                   let event = try? Core.payload(data) as MeetingEventPayload,
-                  let sessionId = event.sessionId,
-                  self.lists[sessionId] != nil || self.statuses[sessionId] != nil || self.loading.contains(sessionId)
+                  let sessionId = event.sessionId
+            else { return }
+            if self.marks[sessionId] != nil {
+                Task { await self.loadMarks(sessionId) }
+            }
+            guard self.lists[sessionId] != nil || self.statuses[sessionId] != nil || self.loading.contains(sessionId)
             else { return }
             Task { await self.reload(sessionId) }
         }
@@ -135,6 +143,7 @@ private final class MeetingSnapshotStore {
             self.lists.removeValue(forKey: sessionId)
             self.statuses.removeValue(forKey: sessionId)
             self.errors.removeValue(forKey: sessionId)
+            self.marks.removeValue(forKey: sessionId)
         }
     }
 
@@ -156,6 +165,21 @@ private final class MeetingSnapshotStore {
                 errors[sessionId] = snapshotError(error)
             }
         } while reloadAgain.contains(sessionId)
+    }
+
+    func loadMarks(_ sessionId: MeetingSessionId) async {
+        guard marksLoading.insert(sessionId).inserted else {
+            marksAgain.insert(sessionId)
+            return
+        }
+        defer { marksLoading.remove(sessionId) }
+        repeat {
+            marksAgain.remove(sessionId)
+            let loaded: [ScreenTextMark]? = try? await core.request(
+                "meeting_snapshot_text_marks", SnapshotSessionParams(sessionId: sessionId)
+            )
+            if let loaded, textEnabled { marks[sessionId] = loaded }
+        } while marksAgain.contains(sessionId)
     }
 
     func take(_ sessionId: MeetingSessionId) async {
@@ -207,6 +231,8 @@ private final class MeetingSnapshotStore {
         do {
             let settings: SnapshotSettings = try await core.request("get_app_settings")
             enabled = settings.meetingScreenSnapshotsEnabled ?? false
+            textEnabled = settings.meetingScreenTextEnabled ?? true
+            if !textEnabled { marks = marks.mapValues { _ in [] } }
             settingsLoaded = true
             settingsError = nil
         } catch { settingsError = snapshotError(error) }
@@ -222,6 +248,20 @@ private final class MeetingSnapshotStore {
         do {
             try await core.request("change_meeting_screen_snapshots_enabled_setting", SnapshotSettingParams(enabled: value))
             enabled = value
+            settingsError = nil
+        } catch { settingsError = snapshotError(error) }
+    }
+
+    func setTextEnabled(_ value: Bool) async {
+        guard !settingsSaving else { return }
+        settingsSaving = true
+        defer { settingsSaving = false }
+        do {
+            try await core.request("meeting_snapshot_text_set", SnapshotSettingParams(enabled: value))
+            textEnabled = value
+            // Loaded meetings stay listed, so their marks fill in again as
+            // the words are read once more.
+            if !value { marks = marks.mapValues { _ in [] } }
             settingsError = nil
         } catch { settingsError = snapshotError(error) }
     }
@@ -297,8 +337,9 @@ struct MeetingSnapshotStrip: View {
     }
 }
 
-/// Pictures are beside the notes, with the time each was taken. They are not
-/// an input to the notes: the current note engines only read text.
+/// Pictures are beside the notes, with the time each was taken. Neither they
+/// nor the words Sona reads in them are an input to the notes: the words
+/// serve search and the transcript's "On screen" marks.
 struct MeetingSnapshotsSection: View {
     @Environment(AppModel.self) private var model
     let sessionId: MeetingSessionId
@@ -461,6 +502,12 @@ struct MeetingSnapshotSettingsSection: View {
                     isOn: Binding(get: { store.enabled }, set: { value in Task { await store.setEnabled(value) } })
                 )
                 .disabled(!store.settingsLoaded || store.settingsSaving)
+                ToggleRow(
+                    title: "Read text in snapshots",
+                    detail: "Sona reads each snapshot's text on this Mac for search and the transcript. Notes and chat never use it. Turning this off deletes the text.",
+                    isOn: Binding(get: { store.textEnabled }, set: { value in Task { await store.setTextEnabled(value) } })
+                )
+                .disabled(!store.settingsLoaded || store.settingsSaving)
             }
             if !store.settingsLoaded && store.settingsError == nil {
                 ProgressView("Loading snapshot settings…").controlSize(.small)
@@ -474,5 +521,55 @@ struct MeetingSnapshotSettingsSection: View {
             }
         }
         .task { await store.loadSettings() }
+    }
+}
+
+/// "On screen" over the line said when a picture went up: the picture's
+/// title, which opens the picture.
+struct ScreenTextMarks: View {
+    @Environment(AppModel.self) private var model
+    let sessionId: MeetingSessionId
+    let segmentId: TranscriptSegmentId
+    @State private var selected: MeetingScreenSnapshot?
+
+    var body: some View {
+        let marks = MeetingSnapshotStore.shared(model.core).marks[sessionId]?.filter { $0.segmentId == segmentId } ?? []
+        if !marks.isEmpty {
+            VStack(alignment: .leading, spacing: 2) {
+                ForEach(marks) { mark in
+                    Button {
+                        selected = MeetingScreenSnapshot(snapshotId: mark.snapshotId, sessionId: sessionId, offsetNs: mark.offsetNs)
+                    } label: {
+                        Label("On screen: \(mark.title)", systemImage: "photo")
+                            .font(TypeScale.body(12))
+                            .foregroundStyle(Theme.inkSecondary)
+                            .lineLimit(1)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityHint("Open the snapshot")
+                }
+            }
+            .sheet(item: $selected) { snapshot in SnapshotViewer(snapshot: snapshot) }
+        }
+    }
+}
+
+extension View {
+    /// Keeps a meeting's "On screen" marks loaded while this view shows, and
+    /// loads them again for a new transcript.
+    func screenTextMarks(_ sessionId: MeetingSessionId, transcript: TranscriptRevisionId?) -> some View {
+        modifier(ScreenTextMarksLoader(sessionId: sessionId, transcript: transcript))
+    }
+}
+
+private struct ScreenTextMarksLoader: ViewModifier {
+    @Environment(AppModel.self) private var model
+    let sessionId: MeetingSessionId
+    let transcript: TranscriptRevisionId?
+
+    func body(content: Content) -> some View {
+        content.task(id: "\(sessionId):\(transcript ?? "")") {
+            await MeetingSnapshotStore.shared(model.core).loadMarks(sessionId)
+        }
     }
 }

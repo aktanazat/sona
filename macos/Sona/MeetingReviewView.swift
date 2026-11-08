@@ -651,6 +651,7 @@ struct TranscriptPane: View {
             }
             Button("Cancel", role: .cancel) { renaming = nil }
         }
+        .screenTextMarks(snapshot.session.sessionId, transcript: snapshot.transcript.first?.base.transcriptRevisionId)
     }
 
     /// What the search found outside the words: the title, a note.
@@ -816,6 +817,9 @@ struct TranscriptTurnRow: View {
 
     @ViewBuilder
     private func line(_ segment: TranscriptEffectiveSegment) -> some View {
+        if let sessionId = store.openSessionId {
+            ScreenTextMarks(sessionId: sessionId, segmentId: segment.base.segmentId)
+        }
         if editing == segment.base.segmentId {
             SegmentEditor(store: store, segment: segment) { editing = nil }
                 .id(segment.base.segmentId)
