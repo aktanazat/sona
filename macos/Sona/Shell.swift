@@ -7,6 +7,7 @@ struct Shell: View {
     @Environment(AppModel.self) private var model
     @State private var sharedNote: ScratchNote?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.fullScreen) private var fullScreen
 
     var body: some View {
         ZStack {
@@ -24,6 +25,7 @@ struct Shell: View {
                         content
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
+                    .padding(.top, fullScreen ? sidebarInset : 0)
                 }
                 if model.paletteShown {
                     CommandPalette()
@@ -362,6 +364,7 @@ struct MeetingsPlace: View {
 
 struct Sidebar: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.fullScreen) private var fullScreen
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -447,9 +450,10 @@ struct Sidebar: View {
             .scrollIndicators(.never)
         }
         .padding(.horizontal, Space.m)
+        .padding(.top, fullScreen ? sidebarInset : 0)
         .frame(width: Theme.sidebarWidth)
         .frame(maxHeight: .infinity, alignment: .top)
-        .sidebarSurface(model.about.material)
+        .sidebarSurface(model.about.material, fullScreen: fullScreen)
     }
 
     /// The small live number beside a row: open tasks in active projects,
@@ -471,21 +475,27 @@ struct Sidebar: View {
     }
 }
 
+/// How far the floating sidebar sits inside the window's edges. Full screen
+/// moves the content down by the same amount, so the first row clears the
+/// pane's top edge there.
+private let sidebarInset: CGFloat = 6
+
 private extension View {
     /// The sidebar is navigation, the layer Liquid Glass is for: with the
     /// glass material on macOS 26 it floats as a glass pane inset from the
     /// window's edges, its corners concentric with the window's, the way the
     /// system's own split views draw theirs. Otherwise it keeps the opaque
-    /// rail.
+    /// rail. In a window the pane runs up under the toolbar's strip; in full
+    /// screen that strip is above the screen, so the pane starts below it.
     @ViewBuilder
-    func sidebarSurface(_ material: AppearanceMaterial) -> some View {
+    func sidebarSurface(_ material: AppearanceMaterial, fullScreen: Bool) -> some View {
         if material == .glass, #available(macOS 26.0, *) {
             background {
                 Color.clear
                     .glassEffect(.regular, in: ConcentricRectangle(
                         corners: .concentric(minimum: .fixed(Theme.radiusCard)), isUniform: true))
-                    .padding(6)
-                    .ignoresSafeArea()
+                    .padding(sidebarInset)
+                    .ignoresSafeArea(edges: fullScreen ? [] : .all)
             }
         } else {
             background(Theme.rail.ignoresSafeArea())
