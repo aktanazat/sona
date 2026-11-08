@@ -1,0 +1,35 @@
+id: design-swift-no-raw-radius
+language: swift
+severity: error
+message: A corner radius is a bare number here instead of a Theme radius.
+note: Use Theme.radiusMark, radiusKey, radiusRow, radiusControl, radiusCard or radiusDialog, Capsule() for pills, or a radius computed from one of them. A square corner (0) is allowed.
+ignores:
+  - "**/Theme.swift"
+utils:
+  nonzero-number:
+    all:
+      - any:
+          - kind: integer_literal
+          - kind: real_literal
+      - not:
+          regex: ^0+(\.0+)?$
+rule:
+  kind: value_argument
+  any:
+    - has:
+        field: name
+        regex: ^(cornerRadius|topLeadingRadius|topTrailingRadius|bottomLeadingRadius|bottomTrailingRadius|xRadius|yRadius)$
+    - inside:
+        kind: value_arguments
+        inside:
+          kind: call_suffix
+          inside:
+            kind: call_expression
+            has:
+              kind: navigation_expression
+              has:
+                field: suffix
+                regex: ^\.cornerRadius$
+  has:
+    field: value
+    matches: nonzero-number
