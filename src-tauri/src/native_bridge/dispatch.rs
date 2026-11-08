@@ -3347,6 +3347,38 @@ pub(super) async fn call(
                 .await,
             )
         }
+        "meeting_snapshot_text_set" => {
+            let mut args = Args::parse(params)?;
+            let enabled = args.take("enabled")?;
+            reply(
+                crate::commands::meeting_snapshots::meeting_snapshot_text_set(app.state(), enabled)
+                    .await,
+            )
+        }
+        "meeting_snapshot_text_marks" => {
+            let mut args = Args::parse(params)?;
+            let session_id = args.take("sessionId")?;
+            reply(
+                crate::commands::meeting_snapshots::meeting_snapshot_text_marks(
+                    app.state(),
+                    session_id,
+                )
+                .await,
+            )
+        }
+        "meeting_snapshot_text_search" => {
+            let mut args = Args::parse(params)?;
+            let query = args.take("query")?;
+            let limit = args.take("limit")?;
+            reply(
+                crate::commands::meeting_snapshots::meeting_snapshot_text_search(
+                    app.state(),
+                    query,
+                    limit,
+                )
+                .await,
+            )
+        }
         "meeting_upcoming_events" => {
             let mut args = Args::parse(params)?;
             let days = args.take("days")?;

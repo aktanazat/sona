@@ -8,8 +8,14 @@
 //! per meeting. Pictures are stored encrypted with the meeting and go where
 //! the meeting goes: review, export, the trash. They are never sent to a
 //! model: no engine that writes meeting notes reads images.
+//!
+//! Sona reads the words in each picture on this Mac, with Vision, so search
+//! finds a slide and the transcript says what was on screen. The words are
+//! kept in the encrypted library and deleted with their picture. No model
+//! reads them, and neither do chat or the command line. Reading is on until
+//! the person turns it off in Settings, which forgets every word read.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
@@ -23,9 +29,10 @@ use specta::Type;
 use tauri::{AppHandle, Emitter, Listener};
 use uuid::Uuid;
 
+use super::screen_text::{self, ScreenText, ScreenTextError};
 use super::session::{MeetingSessionManager, MEETING_EVENT_SCHEMA_VERSION};
 use super::store::{MeetingStore, StoreError};
-use super::types::{MeetingEventPayload, MeetingPhase, MeetingSessionId};
+use super::types::{MeetingEventPayload, MeetingPhase, MeetingSessionId, TranscriptSegmentId};
 
 /// Pictures Sona takes on its own in one meeting.
 pub const AUTOMATIC_SNAPSHOT_LIMIT: u32 = 60;
@@ -106,6 +113,35 @@ pub struct MeetingSnapshotImage {
     pub snapshot_id: MeetingSnapshotId,
     pub size: MeetingSnapshotSize,
     pub png_base64: String,
+}
+
+/// A picture whose words match a search, with the first transcript line said
+/// while it was up, when there is one.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+pub struct MeetingSnapshotTextMoment {
+    pub session_id: MeetingSessionId,
+    pub snapshot_id: MeetingSnapshotId,
+    pub meeting_title: String,
+    pub meeting_started_at_utc_ms: i64,
+    /// When the picture was taken, on the transcript's clock.
+    pub offset_ns: u64,
+    /// The picture's tallest line, such as a slide's title.
+    pub title: String,
+    /// The picture's words around the match.
+    pub excerpt: String,
+    pub segment_id: Option<TranscriptSegmentId>,
+    pub segment_start_offset_ns: Option<u64>,
+}
+
+/// "On screen": a picture's title, on the first transcript line said while
+/// the picture was up.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+pub struct MeetingSnapshotTextMark {
+    pub snapshot_id: MeetingSnapshotId,
+    /// When the picture was taken, on the transcript's clock.
+    pub offset_ns: u64,
+    pub segment_id: TranscriptSegmentId,
+    pub title: String,
 }
 
 /// What the automatic mode is doing for one meeting right now.
@@ -303,6 +339,14 @@ struct SessionWatch {
     detector: ChangeDetector,
 }
 
+/// Whether the thread reading pictures' words runs, and whether it was asked
+/// to look again while it ran.
+#[derive(Default)]
+struct TextReader {
+    running: bool,
+    again: bool,
+}
+
 fn is_recording(store: &MeetingStore, session_id: MeetingSessionId) -> bool {
     matches!(
         store.session_snapshot(session_id),
@@ -383,6 +427,9 @@ pub struct MeetingSnapshotService {
     app: AppHandle,
     manager: Arc<MeetingSessionManager>,
     sessions: Mutex<HashMap<MeetingSessionId, SessionWatch>>,
+    /// Held while words are stored or forgotten, so a reading in flight
+    /// never lands after the switch turned off.
+    text_reader: Mutex<TextReader>,
 }
 
 impl MeetingSnapshotService {
@@ -394,6 +441,7 @@ impl MeetingSnapshotService {
             app: app.clone(),
             manager,
             sessions: Mutex::new(HashMap::new()),
+            text_reader: Mutex::new(TextReader::default()),
         });
         let listener = Arc::clone(&service);
         app.listen("meeting:session-changed", move |event| {
@@ -405,6 +453,14 @@ impl MeetingSnapshotService {
             };
             let service = Arc::clone(&listener);
             tauri::async_runtime::spawn(async move { service.session_changed(session_id).await });
+        });
+        let reader = Arc::clone(&service);
+        tauri::async_runtime::spawn(async move {
+            if let Ok(store) = reader.store().await {
+                if let Err(error) = reader.apply_text_setting(&store) {
+                    log::warn!("Words read in meeting pictures were not forgotten: {error:?}");
+                }
+            }
         });
         service
     }
@@ -439,6 +495,8 @@ impl MeetingSnapshotService {
             return;
         };
         if !is_recording(&store, session_id) {
+            // A meeting back from the trash brings pictures nobody has read.
+            self.read_screen_text(&store);
             return;
         }
         let Ok(automatic_count) =
@@ -511,8 +569,8 @@ impl MeetingSnapshotService {
     }
 
     fn look(
-        &self,
-        store: &MeetingStore,
+        self: &Arc<Self>,
+        store: &Arc<MeetingStore>,
         session_id: MeetingSessionId,
         targets: &mut Vec<String>,
     ) -> MeetingSnapshotWatch {
@@ -647,8 +705,8 @@ impl MeetingSnapshotService {
     }
 
     fn capture_and_store(
-        &self,
-        store: &MeetingStore,
+        self: &Arc<Self>,
+        store: &Arc<MeetingStore>,
         session_id: MeetingSessionId,
         trigger: MeetingSnapshotTrigger,
         targets: &[String],
@@ -720,6 +778,7 @@ impl MeetingSnapshotService {
                 );
         }
         self.emit(session_id);
+        self.read_screen_text(store);
         Ok(summary)
     }
 
@@ -832,6 +891,137 @@ impl MeetingSnapshotService {
         self.sessions().entry(session_id).or_default().turned_off = !enabled;
         self.emit(session_id);
         self.status(session_id).await
+    }
+
+    fn reads_text(&self) -> bool {
+        crate::settings::get_settings(&self.app).meeting_screen_text_enabled
+    }
+
+    fn text_reader(&self) -> MutexGuard<'_, TextReader> {
+        self.text_reader
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Brings the stored words in line with the Settings switch: on, every
+    /// picture not read yet is read; off, every word read is forgotten.
+    fn apply_text_setting(self: &Arc<Self>, store: &Arc<MeetingStore>) -> Result<(), StoreError> {
+        if self.reads_text() {
+            self.read_screen_text(store);
+            return Ok(());
+        }
+        let _reader = self.text_reader();
+        store.delete_snapshot_texts()
+    }
+
+    /// Reads the words in every picture not read yet, newest first, on one
+    /// thread at a time. Asked while it runs, it looks once more at the end.
+    fn read_screen_text(self: &Arc<Self>, store: &Arc<MeetingStore>) {
+        if !self.reads_text()
+            || !matches!(store.snapshot_awaiting_text(&HashSet::new()), Ok(Some(_)))
+        {
+            return;
+        }
+        {
+            let mut reader = self.text_reader();
+            if reader.running {
+                reader.again = true;
+                return;
+            }
+            reader.running = true;
+        }
+        let service = Arc::clone(self);
+        let store = Arc::clone(store);
+        let spawned = std::thread::Builder::new()
+            .name("sona-screen-text".to_owned())
+            .spawn(move || service.read_unread(&store));
+        if spawned.is_err() {
+            self.text_reader().running = false;
+        }
+    }
+
+    fn read_unread(&self, store: &MeetingStore) {
+        let mut skipped = HashSet::new();
+        loop {
+            while self.read_next(store, &mut skipped) {}
+            let mut reader = self.text_reader();
+            if !reader.again {
+                reader.running = false;
+                return;
+            }
+            reader.again = false;
+        }
+    }
+
+    /// Reads the newest picture not read yet. False once none is left, or the
+    /// switch is off. A picture that fails is skipped until the next pass.
+    fn read_next(&self, store: &MeetingStore, skipped: &mut HashSet<MeetingSnapshotId>) -> bool {
+        if !self.reads_text() {
+            return false;
+        }
+        let Ok(Some((session_id, snapshot_id))) = store.snapshot_awaiting_text(skipped) else {
+            return false;
+        };
+        let reading = match store
+            .meeting_snapshot_png(session_id, snapshot_id, MeetingSnapshotSize::Full)
+            .map(|png| screen_text::read(&png))
+        {
+            Ok(Ok(reading)) => reading,
+            Ok(Err(ScreenTextError::Unreadable)) => ScreenText::default(),
+            Ok(Err(ScreenTextError::Failed)) | Err(_) => {
+                skipped.insert(snapshot_id);
+                return true;
+            }
+        };
+        {
+            let _reader = self.text_reader();
+            if !self.reads_text() {
+                return false;
+            }
+            if store.insert_snapshot_text(snapshot_id, &reading).is_err() {
+                skipped.insert(snapshot_id);
+                return true;
+            }
+        }
+        self.emit(session_id);
+        true
+    }
+
+    /// Turns reading pictures' words on or off. Off forgets every word read
+    /// so far; on reads every picture kept so far.
+    pub async fn set_text_reading(
+        self: &Arc<Self>,
+        enabled: bool,
+    ) -> Result<(), MeetingSnapshotError> {
+        crate::settings::update_settings(&self.app, |settings| {
+            settings.meeting_screen_text_enabled = enabled;
+        })
+        .map_err(|_| MeetingSnapshotError::StorageUnavailable)?;
+        let store = self.store().await?;
+        Ok(self.apply_text_setting(&store)?)
+    }
+
+    pub async fn text_marks(
+        &self,
+        session_id: MeetingSessionId,
+    ) -> Result<Vec<MeetingSnapshotTextMark>, MeetingSnapshotError> {
+        let store = self.store().await?;
+        tauri::async_runtime::spawn_blocking(move || store.snapshot_text_marks(session_id))
+            .await
+            .map_err(|_| MeetingSnapshotError::StorageUnavailable)?
+            .map_err(Into::into)
+    }
+
+    pub async fn text_search(
+        &self,
+        query: String,
+        limit: usize,
+    ) -> Result<Vec<MeetingSnapshotTextMoment>, MeetingSnapshotError> {
+        let store = self.store().await?;
+        tauri::async_runtime::spawn_blocking(move || store.snapshot_text_search(&query, limit))
+            .await
+            .map_err(|_| MeetingSnapshotError::StorageUnavailable)?
+            .map_err(Into::into)
     }
 }
 
