@@ -174,6 +174,7 @@ bun scripts/cargo-target-dir.ts cargo check --manifest-path src-tauri/Cargo.toml
 bun run test:backend
 bun scripts/cargo-target-dir.ts cargo test --manifest-path src-tauri/Cargo.toml --bin sona-agent-hook
 ast-grep scan -c tools/ast-grep/anti-slop/sgconfig.yml
+ast-grep scan -c tools/ast-grep/design/sgconfig.yml macos/Sona
 ```
 
 For the companion service, run its checks from `cloudflare/sona-companion/`:
