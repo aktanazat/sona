@@ -248,6 +248,10 @@ final class AppModel: NSObject, ObservableObject {
 
     /// The calendar event the running recording was started from.
     private var recordingEvent: DeviceRecordingManifest.CalendarEvent?
+    /// Where the phone was as the running recording started, once read.
+    private var recordingPlace: DeviceRecordingManifest.PlaceReading?
+    private var placeRead: Task<Void, Never>?
+    private let location = LocationOnce()
 
     func startRecording(during event: DeviceRecordingManifest.CalendarEvent? = nil) {
         guard consentAccepted, !startingRecording, !recorder.isRecording else { return }
@@ -271,10 +275,27 @@ final class AppModel: NSObject, ObservableObject {
             do {
                 try recorder.start()
                 recordingEvent = event
+                readPlace(unless: event)
                 AppModel.tap()
             } catch {
                 recorder.notice = .microphoneUnavailable
             }
+        }
+    }
+
+    /// Reads where the phone is while Sona is open on screen, unless the
+    /// invite already pins the place. A reading that comes after the stop is
+    /// dropped.
+    private func readPlace(unless event: DeviceRecordingManifest.CalendarEvent?) {
+        placeRead?.cancel()
+        recordingPlace = nil
+        guard event?.place == nil, UIApplication.shared.applicationState == .active else {
+            placeRead = nil
+            return
+        }
+        placeRead = Task { [weak self] in
+            guard let reading = await self?.location.read(), !Task.isCancelled else { return }
+            self?.recordingPlace = DeviceRecordingManifest.PlaceReading(reading)
         }
     }
 
@@ -305,6 +326,10 @@ final class AppModel: NSObject, ObservableObject {
         let chosenTitle = meetingTitle.trimmingCharacters(in: .whitespacesAndNewlines)
         let event = recordingEvent
         recordingEvent = nil
+        let place = recordingPlace
+        recordingPlace = nil
+        placeRead?.cancel()
+        placeRead = nil
         guard let finished = recorder.stop() else {
             /* Stopping with nothing to keep is the one outcome that must never pass in
              * silence: the operator watched a clock run and has to be told it is gone. */
@@ -324,7 +349,8 @@ final class AppModel: NSObject, ObservableObject {
                 ) : chosenTitle,
                 notes: notes,
                 calendarEvent: event,
-                bookmarkOffsetsMs: finished.bookmarkOffsetsMs
+                bookmarkOffsetsMs: finished.bookmarkOffsetsMs,
+                placeReading: place
             )
             if kept && !recorder.isRecording && meetingNotes == notes && meetingTitle.trimmingCharacters(in: .whitespacesAndNewlines) == chosenTitle {
                 meetingTitle = ""
@@ -340,14 +366,16 @@ final class AppModel: NSObject, ObservableObject {
         title: String,
         notes: String = "",
         calendarEvent: DeviceRecordingManifest.CalendarEvent? = nil,
-        bookmarkOffsetsMs: [Int64] = []
+        bookmarkOffsetsMs: [Int64] = [],
+        placeReading: DeviceRecordingManifest.PlaceReading? = nil
     ) async -> Bool {
         do {
             try library.keep(kind: .meeting, title: title, text: notes,
                              date: Date(timeIntervalSince1970: Double(recordedAtUtcMs) / 1000), audio: audio)
             _ = try await queue.enqueue(
                 audio: audio, recordedAtUtcMs: recordedAtUtcMs, title: title, notes: notes,
-                calendarEvent: calendarEvent, bookmarkOffsetsMs: bookmarkOffsetsMs
+                calendarEvent: calendarEvent, bookmarkOffsetsMs: bookmarkOffsetsMs,
+                placeReading: placeReading
             )
             await drain()
             return true

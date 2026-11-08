@@ -49,7 +49,14 @@ extension DeviceRecordingManifest.CalendarEvent {
                     url: participant.url.absoluteString
                 )
             },
-            location: event.location
+            location: event.location,
+            place: event.structuredLocation?.geoLocation.map { pin in
+                Place(
+                    title: event.structuredLocation?.title,
+                    latitude: pin.coordinate.latitude,
+                    longitude: pin.coordinate.longitude
+                )
+            }
         )
     }
 }
