@@ -163,6 +163,11 @@ pub struct PersonCommitment {
     /// See [`PersonOpenLoop::waiting_on_stale`].
     pub waiting_on_stale: bool,
     pub resolved_at_utc_ms: Option<i64>,
+    /// The transcript quote the commitment was read from.
+    pub quote: Option<String>,
+    /// Offset into the meeting the commitment was read at, for the transcript
+    /// jump.
+    pub at_ms: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]

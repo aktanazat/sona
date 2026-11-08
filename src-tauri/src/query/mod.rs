@@ -38,6 +38,7 @@ pub mod external;
 pub mod pack;
 pub mod plans_page;
 pub mod semantic;
+pub mod system;
 #[cfg(test)]
 mod tests;
 pub mod tools;

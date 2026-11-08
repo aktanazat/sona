@@ -15,7 +15,7 @@
 //! `done` row got there through the same `resolve_loop` the review screen
 //! calls, rather than a hand-written state row claiming to be the result.
 
-use super::workflow_core_tests::{event, inputs, person, store};
+use super::workflow_core_tests::{event, inputs, link, person, store};
 use super::MeetingStore;
 use crate::cli::CliArgs;
 use crate::meeting::context::{ConversationContextUpdate, ConversationKind, ConversationLocation};
@@ -40,6 +40,7 @@ use crate::query::external::{
     EXTERNAL_ACCESS_SETTING_PATH, EXTERNAL_MUTATIONS_SETTING_PATH,
 };
 use crate::query::plans_page::plans_page;
+use crate::query::system::{person_promises, system_index};
 use crate::query::{
     assemble, events, QueryAudience, QueryEventsPage, QueryPageReason, QueryScope, QuerySearchPage,
     SearchRequest, QUERY_SCHEMA_VERSION,
@@ -314,6 +315,10 @@ fn artifact(store: &MeetingStore, session_id: MeetingSessionId) {
             "receipts": {"status": "verified"}
         }
     });
+    write_artifact(store, session_id, &content);
+}
+
+fn write_artifact(store: &MeetingStore, session_id: MeetingSessionId, content: &serde_json::Value) {
     let artifact_id = Uuid::new_v4();
     let connection = store.connection().unwrap();
     let transcript_revision_id: String = connection
@@ -353,7 +358,7 @@ fn finalize(store: &MeetingStore, session_id: MeetingSessionId) {
                     "session_id": session_id.uuid().to_string(),
                     "known_vocabulary": []
                 }),
-                "external-plane-finalized",
+                &format!("external-plane-finalized-{}", session_id.uuid()),
             ),
             &inputs(),
         )
@@ -1201,18 +1206,7 @@ fn a_series_kept_on_this_mac_never_reaches_an_external_reader() {
         .store
         .remember_calendar_facts(corpus.session_id, &series_event(NOW))
         .unwrap();
-    corpus
-        .store
-        .set_series_remote_opt_out(
-            &MeetingSeriesRemoteOptOutSetRequest {
-                operation_id: MeetingOperationId::new(),
-                series_key: "weekly-pricing".to_string(),
-                remote_intelligence_opt_out: true,
-                expected_revision: 0,
-            },
-            NOW,
-        )
-        .unwrap();
+    keep_pricing_series(&corpus.store);
     let connection = corpus.store.connection().unwrap();
     for session_id in [corpus.session_id, corpus.older_id] {
         connection
@@ -1260,6 +1254,17 @@ fn a_series_kept_on_this_mac_never_reaches_an_external_reader() {
         let page = page.to_string();
         kept.iter().any(|id| page.contains(id))
     };
+
+    let listed = value(&system_index(&corpus.store).unwrap());
+    assert_eq!(
+        listed["meetings"],
+        json!([{
+            "id": corpus.older_id.uuid(),
+            "title": OLDER_TITLE,
+            "created_at_utc_ms": EARLIER
+        }]),
+        "Siri, Shortcuts and Spotlight list no kept meeting: {listed}"
+    );
 
     let page = meetings_page(&corpus.store, None, None, 1).unwrap();
     assert_eq!(
@@ -1452,4 +1457,155 @@ fn a_series_kept_on_this_mac_never_reaches_an_external_reader() {
     ] {
         assert_eq!(refused.error, ExternalErrorCode::NotFound);
     }
+}
+
+fn keep_pricing_series(store: &MeetingStore) {
+    store
+        .set_series_remote_opt_out(
+            &MeetingSeriesRemoteOptOutSetRequest {
+                operation_id: MeetingOperationId::new(),
+                series_key: "weekly-pricing".to_string(),
+                remote_intelligence_opt_out: true,
+                expected_revision: 0,
+            },
+            NOW,
+        )
+        .unwrap();
+}
+
+const HOUR: i64 = 60 * 60 * 1_000;
+const DECK_QUOTE: &str = "I'll share the board deck";
+const CHURN_QUOTE: &str = "I'll send you the churn sheet by Friday";
+
+/// A meeting where Dana promised one thing, `t_ms` into it.
+fn promise(
+    store: &MeetingStore,
+    title: &str,
+    at_utc_ms: i64,
+    what: &str,
+    quote: &str,
+    t_ms: u64,
+) -> MeetingSessionId {
+    let session_id = meeting(store, title, at_utc_ms);
+    transcript(store, session_id, quote);
+    write_artifact(
+        store,
+        session_id,
+        &json!({
+            "summary": {"text": SUMMARY, "citations": []},
+            "outline": [],
+            "decisions": [],
+            "action_items": [],
+            "key_questions": [],
+            "risks": [],
+            "follow_up_draft": {"text": "", "citations": []},
+            "ledger": {
+                "headline": HEADLINE,
+                "threads": [],
+                "open_loops": [],
+                "commitments": [{
+                    "who": "Dana Reyes",
+                    "what": what,
+                    "firmness": "firm",
+                    "receipt": {
+                        "quote": quote,
+                        "speaker": "Dana Reyes",
+                        "t_ms": t_ms,
+                        "citations": []
+                    }
+                }],
+                "stances": [],
+                "caveats": [],
+                "receipts": {"status": "verified"}
+            }
+        }),
+    );
+    finalize(store, session_id);
+    session_id
+}
+
+/// Dana's promises in two meetings an hour apart, the later one in the
+/// weekly pricing series, and the corpus meeting, where the promise is the
+/// user's to her.
+fn promised() -> Corpus {
+    let corpus = corpus();
+    let churn = promise(
+        &corpus.store,
+        "Churn sync",
+        NOW - 2 * HOUR,
+        "Send the churn sheet",
+        CHURN_QUOTE,
+        20_000,
+    );
+    let deck = promise(
+        &corpus.store,
+        TITLE,
+        NOW - HOUR,
+        "Share the board deck",
+        DECK_QUOTE,
+        5_000,
+    );
+    for session_id in [corpus.session_id, churn, deck] {
+        link(
+            &corpus.store,
+            session_id,
+            corpus.person_id,
+            "calendar",
+            "confirmed",
+        );
+    }
+    corpus
+        .store
+        .remember_calendar_facts(deck, &series_event(NOW - HOUR))
+        .unwrap();
+    corpus
+}
+
+/// What Siri answers to "what did Dana promise me": her side of her person
+/// page, newest meeting first, each in the words she said and at the moment
+/// she said them. The tier comparison the user owes her is not hers.
+#[test]
+fn a_persons_promises_are_hers_newest_first_in_her_own_words() {
+    let corpus = promised();
+
+    let answer = person_promises(&corpus.store, corpus.person_id)
+        .unwrap()
+        .expect("Dana is a person");
+
+    assert_eq!(
+        answer
+            .promises
+            .iter()
+            .map(|promise| (
+                promise.title.as_str(),
+                promise.quote.as_deref(),
+                promise.at_ms
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (TITLE, Some(DECK_QUOTE), 5_000),
+            ("Churn sync", Some(CHURN_QUOTE), 20_000)
+        ]
+    );
+}
+
+/// D14 for Siri and Shortcuts: once the pricing series is kept on this Mac,
+/// the board deck Dana promised in it is no answer; the churn sheet still is.
+#[test]
+fn a_promise_made_in_a_series_kept_on_this_mac_is_no_answer() {
+    let corpus = promised();
+    keep_pricing_series(&corpus.store);
+
+    let answer = person_promises(&corpus.store, corpus.person_id)
+        .unwrap()
+        .expect("Dana is a person");
+
+    assert_eq!(
+        answer
+            .promises
+            .iter()
+            .map(|promise| promise.quote.as_deref())
+            .collect::<Vec<_>>(),
+        vec![Some(CHURN_QUOTE)]
+    );
 }

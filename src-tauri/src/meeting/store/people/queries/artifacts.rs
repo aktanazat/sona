@@ -171,6 +171,8 @@ pub(super) fn facts_for_person_in(
                     direction: row.direction,
                     waiting_on_stale,
                     resolved_at_utc_ms: row.resolved_at_utc_ms,
+                    quote: row.quote,
+                    at_ms: row.at_ms,
                 }),
             }
         }
