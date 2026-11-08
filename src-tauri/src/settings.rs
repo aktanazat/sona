@@ -1570,6 +1570,10 @@ pub struct AppSettings {
     /// Save stills of the meeting window as it changes. Off until opted in.
     #[serde(default)]
     pub meeting_screen_snapshots_enabled: bool,
+    /// Read the words in meeting pictures on this Mac, for search and the
+    /// transcript's "On screen" marks. Turning it off forgets every word read.
+    #[serde(default = "default_meeting_screen_text_enabled")]
+    pub meeting_screen_text_enabled: bool,
     /// Minutes past local midnight the digest is due. 1080 is 18:00, which is
     /// evening for the working day this summarizes. Stored as a number rather
     /// than "18:00" so there is no clock format to parse, and no invalid state
@@ -1635,6 +1639,10 @@ fn default_count_words_per_app() -> bool {
 }
 
 fn default_meeting_open_windows_enabled() -> bool {
+    true
+}
+
+fn default_meeting_screen_text_enabled() -> bool {
     true
 }
 
@@ -2277,6 +2285,7 @@ pub fn get_default_settings() -> AppSettings {
         meeting_disclosure_message: default_meeting_disclosure_message(),
         meeting_digest_enabled: false,
         meeting_screen_snapshots_enabled: false,
+        meeting_screen_text_enabled: default_meeting_screen_text_enabled(),
         meeting_digest_minute_of_day: default_meeting_digest_minute_of_day(),
         meeting_transcription_language: default_selected_language(),
         meeting_local_engine: default_meeting_local_engine(),

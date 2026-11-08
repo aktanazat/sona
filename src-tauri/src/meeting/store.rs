@@ -71,6 +71,7 @@ mod search_projection;
 pub(crate) mod series;
 #[cfg(test)]
 mod series_tests;
+mod snapshot_texts;
 mod snapshots;
 #[cfg(test)]
 mod title_tests;
@@ -1589,6 +1590,7 @@ static MIGRATIONS: &[M] = &[
     M::up(include_str!("store/meeting_maybe.sql")),
     M::up(include_str!("store/meeting_documents.sql")),
     M::up(include_str!("store/open_windows.sql")),
+    M::up(include_str!("store/snapshot_texts.sql")),
 ];
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StoreError {

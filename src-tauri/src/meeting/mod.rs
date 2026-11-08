@@ -47,6 +47,7 @@ pub mod prompt_types;
 pub mod prompts;
 pub mod relay_generator;
 pub(crate) mod said_and_written;
+pub(crate) mod screen_text;
 pub mod series;
 pub mod series_types;
 pub mod session;
