@@ -706,6 +706,7 @@ fn notes_probe() {
     let speakers = turn_speakers(&segments, &speaker_names);
     let budget = part_budget(&witness, &prompt, ARTIFACT_MAX_TOKENS);
     let mut reply_tokens = budget.reply_tokens;
+    let mut longest = usize::MAX;
     let mut input =
         notes_packs(&evidence, &scope, &speakers, budget.evidence_bytes).expect("notes parts");
     let mut instructions = prompt.clone();
@@ -729,6 +730,7 @@ fn notes_probe() {
                 &short,
                 pack,
                 splits_joining(joining),
+                longest,
                 reply_tokens,
                 &scope,
                 &evidence,
@@ -782,6 +784,7 @@ fn notes_probe() {
         short = format!("{SHORT_NOTES_PROMPT}{NOTES_RECONCILIATION}");
         let budget = part_budget(&witness, &instructions, ARTIFACT_MAX_TOKENS);
         reply_tokens = budget.reply_tokens;
+        longest = join_room(&witness, reply_tokens);
         let next = packs(
             facts.rows(&scope).expect("section fact rows"),
             "{\"section_facts\":[",
@@ -790,6 +793,12 @@ fn notes_probe() {
             Fill::Even,
         )
         .expect("join parts");
+        if splits_joining(sections.len()) == 0
+            && (next.len() > 1 || next.iter().any(|pack| pack.as_ref().len() > longest))
+        {
+            println!("notes stopped: the facts of round {round} take more than one reply holds");
+            break;
+        }
         if round > 1 && packed_bytes(&next) >= packed_bytes(&input) {
             println!("notes stopped: round {round} did not make the notes shorter");
             break;
