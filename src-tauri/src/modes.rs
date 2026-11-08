@@ -1287,6 +1287,12 @@ pub struct AsrPlan {
     /// not: across their silences a prompted decoder writes the prompt back as
     /// speech, so a meeting chunk made only of vocabulary words is discarded.
     pub prompt_vocabulary: bool,
+    /// Whether a whisper model whose no-speech score never fires (turbo)
+    /// skips a pass on its log probability alone. Meetings and file imports
+    /// keep whisper's published skip: the rule was measured on short dictation
+    /// clips, not on long recordings, where a far or quiet speaker could be
+    /// dropped.
+    pub log_probability_skip: bool,
     pub emoji_replacements: Vec<EmojiReplacement>,
     pub emoji_replacements_enabled: bool,
     pub snippets: Vec<Snippet>,
@@ -1324,6 +1330,7 @@ impl AsrPlan {
             translate_to_english: mode.translate_to_english,
             custom_words: effective_vocabulary(&settings.custom_words, &mode.custom_words),
             prompt_vocabulary: true,
+            log_probability_skip: true,
             emoji_replacements: settings.emoji_replacements.clone(),
             emoji_replacements_enabled: settings.emoji_replacements_enabled,
             snippets: settings.snippets.clone(),
@@ -1352,6 +1359,7 @@ impl AsrPlan {
             translate_to_english: settings.translate_to_english,
             custom_words: settings.custom_words.clone(),
             prompt_vocabulary: true,
+            log_probability_skip: true,
             emoji_replacements: settings.emoji_replacements.clone(),
             emoji_replacements_enabled: settings.emoji_replacements_enabled,
             snippets: settings.snippets.clone(),
@@ -1395,6 +1403,7 @@ impl AsrPlan {
         plan.language_candidates.clear();
         plan.translate_to_english = false;
         plan.prompt_vocabulary = false;
+        plan.log_probability_skip = false;
         plan
     }
 }
@@ -1864,13 +1873,15 @@ impl RunPlan {
         let requested_policy = mode.context_policy;
         let ceiling = settings.context_policy_ceiling;
         let effective_policy = requested_policy.clamp_to(ceiling);
+        let mut asr = AsrPlan::from_mode(settings, &mode.asr);
+        asr.log_probability_skip = false;
 
         Ok(Self {
             run_id: NEXT_RUN_ID.fetch_add(1, Ordering::Relaxed),
             run_started_at_ms: run_now_ms(),
             settings_revision: settings.modes_revision,
             mode_id: mode.id.clone(),
-            asr: AsrPlan::from_mode(settings, &mode.asr),
+            asr,
             prompt: PromptPlan {
                 tone: mode.tone,
                 preset: mode.prompt.preset,
