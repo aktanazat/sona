@@ -9675,6 +9675,58 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_task_its_speaker_says_they_are_gonna_do_is_theirs() {
+        let session_id = MeetingSessionId::new();
+        let evidence = vec![
+            segment_line(
+                session_id,
+                1,
+                "And I'm gonna type up the minutes for this one as well.",
+            ),
+            segment_line(
+                session_id,
+                2,
+                "After this meeting we're gonna be sent a questionnaire.",
+            ),
+        ];
+        let speakers: HashMap<String, &str> = evidence
+            .iter()
+            .map(|line| (line.citation.entity_id.clone(), "Local speaker"))
+            .collect();
+        let raw = notes(
+            &evidence[0],
+            Vec::new(),
+            vec![
+                task(
+                    &evidence[0],
+                    "Type up the minutes.",
+                    Some("Local speaker"),
+                    None,
+                ),
+                task(
+                    &evidence[1],
+                    "Reply to the questionnaire.",
+                    Some("Local speaker"),
+                    None,
+                ),
+            ],
+        );
+        let artifacts = validate_artifact_output(
+            &raw,
+            &evidence,
+            &speakers,
+            &MeetingNotesTemplate::General.into(),
+        )
+        .expect("cited notes");
+        let owners: Vec<_> = artifacts
+            .action_items
+            .iter()
+            .map(|item| item.owner_text.as_deref())
+            .collect();
+        assert_eq!(owners, [Some("Local speaker"), None]);
+    }
+
+    #[test]
     fn an_item_that_only_restates_a_task_or_decision_is_left_to_it() {
         let session_id = MeetingSessionId::new();
         let evidence = vec![

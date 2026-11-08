@@ -80,15 +80,15 @@ fn written_number(word: &str) -> Option<String> {
     digits.parse::<u64>().ok().map(|number| number.to_string())
 }
 
-/// "I'll", "I will", "I can", "I'm going to", "let me": words that promise
-/// the speaker's own work, unless a negation follows.
+/// "I'll", "I will", "I can", "I'm going to", "I'm gonna", "let me": words
+/// that promise the speaker's own work, unless a negation follows.
 pub(crate) fn commits(words: &[String]) -> bool {
     words.windows(2).enumerate().any(|(index, pair)| {
         let next = words.get(index + 2).map(String::as_str);
         let negated = matches!(next, Some("t" | "not" | "never"));
         match (pair[0].as_str(), pair[1].as_str()) {
             ("i", "ll" | "will" | "can" | "shall") => !negated,
-            ("i", "m" | "am") => next == Some("going"),
+            ("i", "m" | "am") => matches!(next, Some("going" | "gonna")),
             ("let", "me") => true,
             _ => false,
         }
