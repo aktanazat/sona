@@ -1,12 +1,5 @@
 import SwiftUI
 
-/// How lists and charts settle when what they show changes.
-enum Motion {
-    static func settle(reduced: Bool) -> Animation? {
-        reduced ? nil : .spring(duration: 0.35, bounce: 0.1)
-    }
-}
-
 /// A number that leads, with one short label under it: "3 overdue".
 struct NumberTile: View {
     let value: String
@@ -140,7 +133,7 @@ struct WidgetTile<Visual: View>: View {
         .overlay(shape.fill(Theme.wash).opacity(hovering ? 1 : 0))
         .overlay(shape.strokeBorder(Theme.border, lineWidth: 1))
         .contentShape(shape)
-        .animation(.easeOut(duration: 0.12), value: hovering)
+        .hoverFade(hovering)
     }
 }
 
@@ -368,8 +361,8 @@ struct DayBars: View {
         VStack(spacing: 3) {
             HStack(alignment: .bottom, spacing: 5) {
                 ForEach(days) { day in
-                    RoundedRectangle(cornerRadius: 2, style: .continuous)
-                        .fill(day.value > 0 ? Theme.accent : Theme.selection)
+                    RoundedRectangle(cornerRadius: Theme.radiusMark, style: .continuous)
+                        .fill(day.value > 0 ? Theme.accent : Theme.track)
                         .frame(height: day.value > 0 && peak > 0 ? max(3, height * day.value / peak) : 2)
                         .frame(maxWidth: .infinity)
                 }
@@ -467,9 +460,9 @@ struct DayStrip: View {
                 ZStack(alignment: .leading) {
                     Capsule().fill(Theme.inset).frame(height: 10)
                     ForEach(blocks) { block in
-                        RoundedRectangle(cornerRadius: 2.5, style: .continuous)
+                        RoundedRectangle(cornerRadius: Theme.radiusMark, style: .continuous)
                             .fill(block.recorded ? Theme.accent : Theme.accentSoft)
-                            .overlay(RoundedRectangle(cornerRadius: 2.5, style: .continuous)
+                            .overlay(RoundedRectangle(cornerRadius: Theme.radiusMark, style: .continuous)
                                 .strokeBorder(Theme.accent, lineWidth: block.recorded ? 0 : 1))
                             .frame(width: max(4, x(block.end) - x(block.start)), height: 10)
                             .offset(x: min(x(block.start), width - 4))
@@ -640,7 +633,7 @@ struct BurnUpChart: View {
     private func legend(done: Bool, _ title: String, _ value: Int) -> some View {
         HStack(spacing: 6) {
             if done {
-                RoundedRectangle(cornerRadius: 1).fill(Theme.accent).frame(width: 10, height: 3)
+                Capsule().fill(Theme.accent).frame(width: 10, height: 3)
             } else {
                 Path { path in
                     path.move(to: CGPoint(x: 0, y: 1.5))
@@ -727,7 +720,7 @@ struct MilestoneTimeline: View {
                     inset + CGFloat(min(max(date.timeIntervalSince(first) / span, 0), 1)) * width
                 }
                 ZStack(alignment: .topLeading) {
-                    Capsule().fill(Theme.selection)
+                    Capsule().fill(Theme.track)
                         .frame(width: width, height: 2)
                         .position(x: inset + width / 2, y: 24)
                     Capsule().fill(Theme.ink)
@@ -791,7 +784,7 @@ struct Avatar: View {
         case .me:
             Image(systemName: "person.fill")
                 .font(.system(size: size * 0.5))
-                .foregroundStyle(.white)
+                .foregroundStyle(Theme.onAccent)
                 .frame(width: size, height: size)
                 .background { MonogramFill(color: Theme.accentFill) }
                 .clipShape(Circle())
@@ -880,9 +873,9 @@ struct SegmentedSwitch<ID: Hashable>: View {
                     .frame(height: 24)
                     .background {
                         if on {
-                            RoundedRectangle(cornerRadius: 6)
+                            RoundedRectangle(cornerRadius: Theme.radiusRow)
                                 .fill(Theme.surface)
-                                .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Theme.border, lineWidth: 1))
+                                .overlay(RoundedRectangle(cornerRadius: Theme.radiusRow).strokeBorder(Theme.border, lineWidth: 1))
                                 .matchedGeometryEffect(id: "on", in: namespace)
                         }
                     }
@@ -895,7 +888,7 @@ struct SegmentedSwitch<ID: Hashable>: View {
             }
         }
         .padding(2)
-        .background(Theme.control, in: RoundedRectangle(cornerRadius: 8))
+        .background(Theme.inset, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
         .animation(Motion.settle(reduced: reduceMotion), value: selection)
     }
 }
@@ -966,11 +959,12 @@ private struct ChoicePickerRow<Icon: View>: View {
             }
             .padding(.horizontal, 8)
             .frame(height: 26)
-            .background(hovering ? Theme.wash : .clear, in: RoundedRectangle(cornerRadius: 6))
+            .background(hovering ? Theme.wash : .clear, in: RoundedRectangle(cornerRadius: Theme.radiusRow))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
+        .hoverFade(hovering)
         .accessibilityAddTraits(selected ? .isSelected : [])
     }
 }

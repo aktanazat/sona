@@ -32,6 +32,7 @@ struct AboutView: View {
                             set: { store.setTheme($0) }
                         )
                     )
+                    ContrastRow()
                     ChoiceRow(
                         title: "Material",
                         detail: store.material == store.materialChoice
@@ -152,6 +153,35 @@ private struct AboutVersionRow: View {
                     .buttonStyle(.compact)
                     .disabled(store.checking)
             }
+        }
+    }
+}
+
+/// The contrast every color is generated at. While Increase Contrast is on,
+/// the system's highest setting wins and the slider has nothing to move.
+private struct ContrastRow: View {
+    @Bindable private var theme = ThemeStore.shared
+    @Environment(\.colorSchemeContrast) private var schemeContrast
+
+    var body: some View {
+        let increased = schemeContrast == .increased
+        CardRow {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Contrast").bodyText()
+                if increased {
+                    Text("Highest while Increase Contrast is on.").metaText()
+                } else {
+                    Text("\(Int(theme.contrast.rounded()))")
+                        .font(TypeScale.mono(12))
+                        .foregroundStyle(Theme.inkTertiary)
+                }
+            }
+        } trailing: {
+            Slider(value: $theme.contrast, in: ThemeStore.contrastRange, step: 1)
+                .frame(width: 128)
+                .tint(Theme.accent)
+                .disabled(increased)
+                .accessibilityLabel("Contrast")
         }
     }
 }

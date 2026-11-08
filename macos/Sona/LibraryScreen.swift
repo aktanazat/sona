@@ -230,8 +230,8 @@ private struct TrendBars: View {
             HStack(alignment: .bottom, spacing: points.count > 60 ? 1 : 3) {
                 ForEach(points) { point in
                     let fraction = Double(point.recordings) / Double(peak)
-                    RoundedRectangle(cornerRadius: 2)
-                        .fill(point.recordings == 0 ? Theme.selection : Theme.accent)
+                    RoundedRectangle(cornerRadius: Theme.radiusMark)
+                        .fill(point.recordings == 0 ? Theme.track : Theme.accent)
                         .frame(height: max(2, fraction * 64))
                         .frame(maxWidth: .infinity)
                         .help("\(TrendAxis.day(point.localDate)): \(LibraryCount.recordings(point.recordings))")
@@ -419,8 +419,8 @@ private struct HistoryPlaceholder: View {
             ForEach(0..<5, id: \.self) { _ in
                 Card {
                     HStack(spacing: 16) {
-                        RoundedRectangle(cornerRadius: 3).fill(Theme.selection).frame(height: 12)
-                        RoundedRectangle(cornerRadius: 3).fill(Theme.selection).frame(width: 48, height: 10)
+                        RoundedRectangle(cornerRadius: Theme.radiusKey).fill(Theme.track).frame(height: 12)
+                        RoundedRectangle(cornerRadius: Theme.radiusKey).fill(Theme.track).frame(width: 48, height: 10)
                     }
                     .padding(16)
                 }
@@ -786,7 +786,7 @@ private struct PlaybackBar: View {
         .padding(.vertical, 6)
         .background(Theme.inset, in: Capsule())
         .overlay(Capsule().strokeBorder(Theme.border, lineWidth: 1))
-        .shadow(color: .black.opacity(0.12), radius: 8, y: 2)
+        .elevation(.medium)
         .frame(maxWidth: 420, alignment: .leading)
     }
 }

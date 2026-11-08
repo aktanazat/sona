@@ -1,0 +1,27 @@
+id: design-swift-no-raw-color
+language: swift
+severity: error
+message: A color is built from raw components or hex here instead of coming from the theme.
+note: Use a Theme role (Theme.ink, Theme.surface, Theme.accent, ...), Theme.label(hue:) or Theme.monogram(hue:chroma:). New colors are generated in Theme.swift so they follow light, dark and the contrast slider.
+ignores:
+  - "**/Theme.swift"
+rule:
+  any:
+    - kind: call_expression
+      all:
+        - has:
+            kind: simple_identifier
+            regex: ^(Color|NSColor|CGColor)$
+        - has:
+            kind: call_suffix
+            has:
+              kind: value_arguments
+              has:
+                kind: value_argument
+                has:
+                  field: name
+                  regex: ^(red|green|blue|white|gray|hue|srgbRed|calibratedRed|deviceRed|displayP3Red|calibratedWhite|deviceWhite|genericGrayGamma2_2Gray|calibratedHue|deviceHue|colorSpace)$
+    - kind: hex_literal
+      regex: ^0[xX]([0-9a-fA-F]{6}|[0-9a-fA-F]{8})$
+    - kind: line_string_literal
+      regex: ^"#([0-9a-fA-F]{6}|[0-9a-fA-F]{8})"$

@@ -663,13 +663,13 @@ private struct HoldingTileStyle: ButtonStyle {
         configuration.label
             .padding(14)
             .background(
-                configuration.isPressed ? Theme.selection : hovering ? Theme.inset : Theme.surface,
+                configuration.isPressed ? Theme.controlPressed : hovering ? Theme.inset : Theme.surface,
                 in: RoundedRectangle(cornerRadius: Theme.radiusCard))
             .overlay(RoundedRectangle(cornerRadius: Theme.radiusCard).strokeBorder(Theme.border, lineWidth: 1))
             .contentShape(RoundedRectangle(cornerRadius: Theme.radiusCard))
             .onHover { hovering = $0 }
-            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
-            .animation(.easeOut(duration: 0.12), value: hovering)
+            .animation(Motion.quick, value: configuration.isPressed)
+            .hoverFade(hovering)
     }
 }
 

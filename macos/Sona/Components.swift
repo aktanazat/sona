@@ -11,15 +11,20 @@ extension View {
         } else {
             background(material == .glass ? AnyShapeStyle(.regularMaterial) : AnyShapeStyle(Theme.surface), in: Capsule())
                 .overlay(Capsule().strokeBorder(Theme.border, lineWidth: 1))
-                .shadow(color: .black.opacity(0.12), radius: 16, y: 6)
+                .elevation(.high)
         }
     }
 }
 
-/// One pixel of divider.
+/// One device pixel of divider, across or, with `.vertical`, down.
 struct Hairline: View {
+    var axis: Axis = .horizontal
+    @Environment(\.displayScale) private var displayScale
+
     var body: some View {
-        Rectangle().fill(Theme.hairline).frame(height: 1)
+        let pixel = 1 / displayScale
+        Rectangle().fill(Theme.hairline)
+            .frame(width: axis == .vertical ? pixel : nil, height: axis == .horizontal ? pixel : nil)
     }
 }
 
@@ -106,6 +111,7 @@ struct CardRow<Leading: View, Trailing: View>: View {
         .padding(.vertical, 12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(action != nil && hovering ? Theme.wash : .clear)
+        .hoverFade(hovering)
         .overlay(alignment: .bottom) { Hairline().padding(.horizontal, 16) }
         .overlay {
             RoundedRectangle(cornerRadius: Theme.radiusControl)
@@ -167,13 +173,14 @@ struct PrimaryButton: ButtonStyle {
             .frame(height: compact ? 26 : 30)
             .background(Theme.accentFill.opacity(configuration.isPressed ? 0.8 : 1), in: RoundedRectangle(cornerRadius: Theme.radiusControl))
             .opacity(isEnabled ? 1 : 0.45)
-            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+            .animation(Motion.quick, value: configuration.isPressed)
     }
 }
 
 struct SecondaryButton: ButtonStyle {
     var compact = false
     @Environment(\.isEnabled) private var isEnabled
+    @State private var hovering = false
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
@@ -181,9 +188,13 @@ struct SecondaryButton: ButtonStyle {
             .foregroundStyle(Theme.ink)
             .padding(.horizontal, compact ? 10 : 14)
             .frame(height: compact ? 26 : 30)
-            .background(configuration.isPressed ? Theme.selection : Theme.control, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
+            .background(
+                configuration.isPressed ? Theme.controlPressed : hovering && isEnabled ? Theme.controlHover : Theme.control,
+                in: RoundedRectangle(cornerRadius: Theme.radiusControl))
+            .onHover { hovering = $0 }
             .opacity(isEnabled ? 1 : 0.45)
-            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+            .hoverFade(hovering)
+            .animation(Motion.quick, value: configuration.isPressed)
     }
 }
 
@@ -200,7 +211,7 @@ struct QuietButton: ButtonStyle {
             .foregroundStyle(configuration.isPressed ? Theme.ink : color)
             .opacity(isEnabled ? 1 : 0.45)
             .contentShape(Rectangle())
-            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+            .animation(Motion.quick, value: configuration.isPressed)
     }
 }
 
@@ -228,13 +239,15 @@ struct CircleButton: ButtonStyle {
             .font(.system(size: 12, weight: .semibold))
             .foregroundStyle(Theme.ink)
             .frame(width: size, height: size)
-            .background(configuration.isPressed || hovering ? Theme.selection : Theme.surface, in: Circle())
+            .background(
+                configuration.isPressed ? Theme.controlPressed : hovering ? Theme.controlHover : Theme.surface,
+                in: Circle())
             .overlay(Circle().strokeBorder(Theme.border, lineWidth: 1))
             .contentShape(Circle())
             .onHover { hovering = $0 }
             .opacity(isEnabled ? 1 : 0.45)
-            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
-            .animation(.easeOut(duration: 0.12), value: hovering)
+            .hoverFade(hovering)
+            .animation(Motion.quick, value: configuration.isPressed)
     }
 }
 
@@ -349,7 +362,7 @@ struct Meter: View {
     var body: some View {
         GeometryReader { proxy in
             ZStack(alignment: .leading) {
-                Capsule().fill(Theme.selection)
+                Capsule().fill(Theme.track)
                 Capsule().fill(Theme.accent).frame(width: proxy.size.width * fraction)
             }
         }
@@ -410,9 +423,9 @@ struct PageTitle<Action: View>: View {
                     Spacer(minLength: 12)
                     action.fixedSize(horizontal: true, vertical: false)
                 }
-                .frame(minHeight: 30)
+                .frame(minHeight: Theme.headerHeight)
                 VStack(alignment: .leading, spacing: 12) {
-                    heading.frame(minHeight: 30)
+                    heading.frame(minHeight: Theme.headerHeight)
                     action
                 }
             }
@@ -525,7 +538,7 @@ struct Page<Content: View, Actions: View, Pinned: View>: View {
             }
             .frame(maxWidth: Theme.contentMax, alignment: .leading)
             .padding(.horizontal, Theme.margin)
-            .padding(.top, 12)
+            .padding(.top, back == nil ? 0 : Space.m)
             .padding(.bottom, 40)
             .frame(maxWidth: .infinity)
             .coordinateSpace(.named(PageHeadlineKey.space))
@@ -574,7 +587,7 @@ struct Page<Content: View, Actions: View, Pinned: View>: View {
         .frame(maxWidth: Theme.contentMax, alignment: .leading)
         .padding(.horizontal, Theme.margin)
         .frame(maxWidth: .infinity)
-        .frame(height: 44)
+        .frame(height: Theme.headerHeight)
     }
 }
 

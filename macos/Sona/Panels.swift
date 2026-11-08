@@ -62,15 +62,15 @@ struct HUDPill: View {
                     .foregroundStyle(Theme.hudInk)
                     .padding(.horizontal, 10)
                     .frame(height: 24)
-                    .background(.white.opacity(0.12), in: Capsule())
+                    .background(Theme.hudControl, in: Capsule())
                     .contentShape(Capsule())
             }
             .buttonStyle(.plain)
         }
         .frame(width: 212, alignment: .leading)
         .padding(12)
-        .background(Theme.hud, in: RoundedRectangle(cornerRadius: 20))
-        .overlay(RoundedRectangle(cornerRadius: 20).strokeBorder(.white.opacity(0.12), lineWidth: 1))
+        .background(Theme.hud, in: RoundedRectangle(cornerRadius: Theme.radiusDialog))
+        .overlay(RoundedRectangle(cornerRadius: Theme.radiusDialog).strokeBorder(Theme.hudBorder, lineWidth: 1))
         .environment(\.colorScheme, .dark)
     }
 
@@ -87,7 +87,7 @@ struct HUDPill: View {
                 .frame(width: 176, height: 36)
                 .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: phase)
                 .background(Theme.hud, in: Capsule())
-                .overlay(Capsule().strokeBorder(.white.opacity(0.12), lineWidth: 1))
+                .overlay(Capsule().strokeBorder(Theme.hudBorder, lineWidth: 1))
             }
         }
         .foregroundStyle(Theme.hudInk)
@@ -176,7 +176,7 @@ struct HUDPill: View {
             }
         }
         .background(Theme.hud, in: Capsule())
-        .overlay(Capsule().strokeBorder(.white.opacity(0.12), lineWidth: 1))
+        .overlay(Capsule().strokeBorder(Theme.hudBorder, lineWidth: 1))
         .contentShape(Capsule())
         .accessibilityElement(children: .ignore)
         .accessibilityAddTraits(.isButton)
@@ -217,8 +217,8 @@ struct HUDPill: View {
             .truncationMode(.head)
             .frame(width: 212, height: 36, alignment: .leading)
             .padding(12)
-            .background(Theme.hud, in: RoundedRectangle(cornerRadius: 20))
-            .overlay(RoundedRectangle(cornerRadius: 20).strokeBorder(.white.opacity(0.12), lineWidth: 1))
+            .background(Theme.hud, in: RoundedRectangle(cornerRadius: Theme.radiusDialog))
+            .overlay(RoundedRectangle(cornerRadius: Theme.radiusDialog).strokeBorder(Theme.hudBorder, lineWidth: 1))
     }
 
     @ViewBuilder private var status: some View {
@@ -985,7 +985,7 @@ struct CommandPalette: View {
     var body: some View {
         let panelShape = RoundedRectangle(cornerRadius: Theme.radiusDialog)
         ZStack(alignment: .top) {
-            Color.black.opacity(0.18)
+            Theme.scrim
                 .ignoresSafeArea()
                 .onTapGesture { model.paletteShown = false }
             VStack(spacing: 0) {
@@ -1061,9 +1061,9 @@ struct CommandPalette: View {
             .background {
                 if model.about.material == .solid {
                     panelShape
-                        .fill(Theme.surface)
+                        .fill(Theme.elevated)
                         .overlay(panelShape.strokeBorder(Theme.border, lineWidth: 1))
-                        .shadow(color: .black.opacity(0.22), radius: 28, y: 14)
+                        .elevation(.high)
                 } else if #available(macOS 26.0, *) {
                     Color.clear
                         .glassEffect(.regular, in: panelShape)
@@ -1071,7 +1071,7 @@ struct CommandPalette: View {
                     panelShape
                         .fill(.regularMaterial)
                         .overlay(panelShape.strokeBorder(Theme.border, lineWidth: 1))
-                        .shadow(color: .black.opacity(0.22), radius: 28, y: 14)
+                        .elevation(.high)
                 }
             }
             .padding(.top, 96)
@@ -1632,7 +1632,7 @@ private struct PaletteRowView: View {
     }
 
     private var fill: Color {
-        if selected { return Theme.selection }
+        if selected { return Theme.controlHover }
         return hovering ? Theme.wash : .clear
     }
 

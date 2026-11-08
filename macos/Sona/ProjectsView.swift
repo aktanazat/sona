@@ -134,8 +134,9 @@ struct ProjectsView: View {
                 Spacer(minLength: 16)
                 headerControls
             }
+            .frame(minHeight: Theme.headerHeight)
             VStack(alignment: .leading, spacing: 10) {
-                headerTitle
+                headerTitle.frame(minHeight: Theme.headerHeight)
                 HStack(spacing: 10) { headerControls }
             }
         }
@@ -1049,7 +1050,7 @@ private struct BoardColumn<Cards: View>: View {
                 Text("Drop a project here")
                     .metaText()
                     .frame(maxWidth: .infinity, minHeight: 56)
-                    .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Theme.border, style: StrokeStyle(lineWidth: 1, dash: [4, 4])))
+                    .overlay(RoundedRectangle(cornerRadius: Theme.radiusControl).strokeBorder(Theme.border, style: StrokeStyle(lineWidth: 1, dash: [4, 4])))
             }
         }
         .padding(8)
@@ -1101,10 +1102,11 @@ private struct BoardCard: View {
             }
         }
         .padding(12)
-        .background(hovering ? Theme.wash : Theme.surface, in: RoundedRectangle(cornerRadius: 10))
-        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Theme.border, lineWidth: 1))
-        .contentShape(RoundedRectangle(cornerRadius: 10))
+        .background(hovering ? Theme.wash : Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
+        .overlay(RoundedRectangle(cornerRadius: Theme.radiusControl).strokeBorder(Theme.border, lineWidth: 1))
+        .contentShape(RoundedRectangle(cornerRadius: Theme.radiusControl))
         .onHover { hovering = $0 }
+        .hoverFade(hovering)
         .onTapGesture(perform: open)
         .draggable(summary.id) {
             Text(summary.project.title)
@@ -1112,7 +1114,7 @@ private struct BoardCard: View {
                 .foregroundStyle(Theme.ink)
                 .padding(.horizontal, 12)
                 .frame(height: 30)
-                .background(Theme.surface, in: RoundedRectangle(cornerRadius: 8))
+                .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
         }
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.isButton)
@@ -1659,8 +1661,8 @@ struct PlannerLoadingRows: View {
             Card {
                 ForEach(0..<3) { _ in
                     VStack(alignment: .leading, spacing: 8) {
-                        RoundedRectangle(cornerRadius: 3).fill(Theme.control).frame(width: 180, height: 14)
-                        RoundedRectangle(cornerRadius: 3).fill(Theme.control).frame(width: 120, height: 12)
+                        RoundedRectangle(cornerRadius: Theme.radiusKey).fill(Theme.track).frame(width: 180, height: 14)
+                        RoundedRectangle(cornerRadius: Theme.radiusKey).fill(Theme.track).frame(width: 120, height: 12)
                     }
                     .padding(16)
                     .accessibilityHidden(true)
