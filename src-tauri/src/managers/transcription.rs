@@ -2519,12 +2519,14 @@ impl TranscriptionManager {
                             .flatten();
                         vocabulary_prompt.clone_from(&initial_prompt);
                         let initial_prompt = initial_prompt.map(|prompt| prompt.text);
-                        let checks_no_speech =
-                            !(model_is_whisper && switches.without_no_speech_check);
+                        let no_speech = if model_is_whisper && switches.without_no_speech_check {
+                            NoSpeechCheck::Off
+                        } else {
+                            NoSpeechCheck::for_model(&session.model())
+                        };
                         let seed =
                             (model_is_whisper && diagnosis.is_some()).then_some(SAMPLING_SEED);
-                        let family =
-                            whisper_check_extension(initial_prompt, checks_no_speech, seed);
+                        let family = whisper_run_extension(initial_prompt, no_speech, seed);
                         let run_plan = transcribe_cpp_run_plan(
                             asr.translate_to_english,
                             &validated_language,
@@ -2543,10 +2545,11 @@ impl TranscriptionManager {
                         };
 
                         debug!(
-                            "transcribe-cpp run: task={:?}, language={:?}, initial_prompt={}",
+                            "transcribe-cpp run: task={:?}, language={:?}, initial_prompt={}, no_speech={:?}",
                             run_options.task,
                             run_options.language,
-                            run_options.family.is_some()
+                            vocabulary_prompt.is_some(),
+                            no_speech
                         );
 
                         let max_samples = transcribe_cpp_window_samples(session, audio.len())?;
@@ -2556,7 +2559,7 @@ impl TranscriptionManager {
                                     .keeps(TextFilter::PromptEcho)
                                     .then(|| prompt.text.clone()),
                                 &run_options,
-                                checks_no_speech,
+                                no_speech,
                                 seed,
                                 speech,
                             )
@@ -2580,15 +2583,15 @@ impl TranscriptionManager {
                             diagnosis.sampling_seed = seed;
                             diagnosis.no_speech_check = if !model_is_whisper {
                                 FilterOutcome::NotApplied("this engine has none")
-                            } else if !checks_no_speech {
+                            } else if no_speech == NoSpeechCheck::Off {
                                 FilterOutcome::SwitchedOff
                             } else {
                                 let unchecked_options = RunOptions {
-                                    family: whisper_check_extension(
+                                    family: whisper_run_extension(
                                         vocabulary_prompt
                                             .as_ref()
                                             .map(|prompt| prompt.text.clone()),
-                                        false,
+                                        NoSpeechCheck::Off,
                                         seed,
                                     ),
                                     ..run_options.clone()
@@ -2999,14 +3002,14 @@ impl SpanRecovery {
     fn new(
         echo_prompt: Option<String>,
         options: &RunOptions,
-        checks_no_speech: bool,
+        no_speech: NoSpeechCheck,
         seed: Option<u32>,
         speech: SpeechEvidence,
     ) -> Self {
         Self {
             echo_prompt,
             unprompted: RunOptions {
-                family: whisper_check_extension(None, checks_no_speech, seed),
+                family: whisper_run_extension(None, no_speech, seed),
                 ..options.clone()
             },
             speech,
@@ -3700,68 +3703,77 @@ fn with_model_detected_language(
     }
 }
 
-/// Build the whisper run extension for one decode: the vocabulary prompt, and
-/// nothing else.
+/// Which of whisper's no-speech skips a decode runs. Whisper drops a 30 s
+/// pass, at whichever temperature it reached, when its no-speech score is
+/// above the threshold and its average log probability is below -1.0
+/// (transcribe-cpp-sys 0.2.2 `src/arch/whisper/model.cpp:2370-2387`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NoSpeechCheck {
+    /// Whisper's published threshold, 0.6.
+    Published,
+    /// A threshold below every score, so the log probability decides alone.
+    LogProbabilityOnly,
+    /// No skip: the headless `--without-no-speech-check`, and the decode
+    /// `--diagnose` measures the check against.
+    Off,
+}
+
+impl NoSpeechCheck {
+    /// The skip the app runs with `model`. large-v3-turbo scores no speech at
+    /// 0.001 or less for every input, digital silence included, at F16, Q8_0
+    /// and Q4_K_M, so the published skip never fires on it; small, medium and
+    /// large-v3 score non-speech up to 0.96 and more. On the N8 clips
+    /// (`STATE-MACHINES.md`), the log probability alone cut turbo's made-up
+    /// text over 124 non-speech clips from 108 to 52, and from 106 to 43 with
+    /// a vocabulary, and lost no word of 96 spoken clips at clean, +6 dB,
+    /// 0 dB, quiet or far. Applied after the fact on small, the same rule
+    /// cost words at 0 dB. The model is named by the variant transcribe-cpp
+    /// reads from the file: the converter's `stt.variant` in a GGUF, the
+    /// layer counts of a ggml `.bin`.
+    fn for_model(model: &Model) -> Self {
+        if model.arch() == "whisper" && model.variant() == "whisper-large-v3-turbo" {
+            Self::LogProbabilityOnly
+        } else {
+            Self::Published
+        }
+    }
+}
+
+/// Build the whisper run extension for one decode: the vocabulary prompt,
+/// the no-speech threshold `no_speech` names, and a fixed fallback sampling
+/// seed for a headless check.
 ///
-/// `None` — no extension at all — when there is no prompt to carry, which is
-/// also the whole answer for non-whisper archs, since the caller only resolves
-/// a prompt for whisper-family sessions.
+/// `None` — no extension at all — when there is nothing to carry, which is
+/// also the whole answer for non-whisper archs: the caller resolves a prompt,
+/// a seed and a check other than [`NoSpeechCheck::Published`] only for
+/// whisper-family sessions.
 ///
-/// The five hallucination-suppression knobs `WhisperRunOptions` also exposes
-/// (`no_speech_thold`, `logprob_thold`, `compression_ratio_thold`,
-/// `temperature`, `temperature_inc`) are deliberately left unset, which reads
-/// like an oversight and is not:
-///
-/// 1. Setting them to Whisper's published values would change nothing.
-///    `transcribe_whisper_run_ext_init()` (transcribe-cpp-sys 0.2.2,
-///    `src/arch/whisper/public.cpp:58-75`) already initializes them to exactly
-///    0.6 / -1.0 / 2.4 / 0.0 / 0.2, `materialize()` applies only `Some` fields
-///    over that init, and the native run uses the same init when no extension
-///    is attached (`src/arch/whisper/model.cpp:1492-1496`). Measured: 27
-///    fixture decodes across whisper-tiny.en, small.en and large-v3-turbo were
-///    byte-identical with the values pinned explicitly and left unset.
-/// 2. Tuning them cannot suppress silence hallucination, which is what the
-///    knobs get nominated for. The gate is a conjunction —
-///    `no_speech_prob > no_speech_thold && avg_logprob < logprob_thold`
-///    (`model.cpp:2370`) — and `logprob_thold` is simultaneously the
-///    tier-acceptance dial (`model.cpp:2363`). Measured on real captures with
-///    whisper-small.en: true silence scores no_speech_prob 0.92 but avg_logprob
-///    only -0.83, so the second conjunct is false and the gate never fires;
-///    raising `logprob_thold` far enough to fire it also drops real quiet
-///    speech (-0.30) into the temperature ladder. On large-v3-turbo the first
-///    conjunct is dead outright: no_speech_prob reads 0.001 for every input
-///    including digital silence, at both Q4_K_M and Q8_0.
-///
-/// So a phantom "Thank you." on a silent capture is a real defect, but not one
-/// these five fields can fix. A clip voice detection heard no speech in is
-/// decoded without the vocabulary prompt instead, and a decode of only such a
-/// phrase is read as nothing said ([`is_whisper_silence_phrase`]).
-fn whisper_run_extension(initial_prompt: Option<String>) -> Option<RunExtension> {
-    initial_prompt.map(|initial_prompt| {
+/// Every other knob stays at whisper's published recipe, which
+/// `transcribe_whisper_run_ext_init()` (transcribe-cpp-sys 0.2.2,
+/// `src/arch/whisper/public.cpp:58-75`) already sets: 27 fixture decodes
+/// across whisper-tiny.en, small.en and large-v3-turbo were byte-identical
+/// with those values pinned and left unset. `logprob_thold` is also the bar a
+/// temperature must clear (`model.cpp:2363`): on whisper-small.en, raising it
+/// far enough to skip true silence (-0.83) sends real quiet speech (-0.30)
+/// down the temperature ladder.
+fn whisper_run_extension(
+    initial_prompt: Option<String>,
+    no_speech: NoSpeechCheck,
+    seed: Option<u32>,
+) -> Option<RunExtension> {
+    let no_speech_thold = match no_speech {
+        NoSpeechCheck::Published => None,
+        NoSpeechCheck::LogProbabilityOnly => Some(f32::NEG_INFINITY),
+        NoSpeechCheck::Off => Some(f32::INFINITY),
+    };
+    (initial_prompt.is_some() || no_speech_thold.is_some() || seed.is_some()).then(|| {
         RunExtension::Whisper(WhisperRunOptions {
-            initial_prompt: Some(initial_prompt),
+            initial_prompt,
+            no_speech_thold,
+            seed,
             ..Default::default()
         })
     })
-}
-
-/// [`whisper_run_extension`] as a headless check runs it: optionally without
-/// whisper's native no-speech skip, and with a fixed fallback sampling seed.
-/// With the check on and no seed it is exactly the app's extension.
-fn whisper_check_extension(
-    initial_prompt: Option<String>,
-    checks_no_speech: bool,
-    seed: Option<u32>,
-) -> Option<RunExtension> {
-    if checks_no_speech && seed.is_none() {
-        return whisper_run_extension(initial_prompt);
-    }
-    Some(RunExtension::Whisper(WhisperRunOptions {
-        initial_prompt,
-        no_speech_thold: (!checks_no_speech).then_some(f32::INFINITY),
-        seed,
-        ..Default::default()
-    }))
 }
 
 fn prompt_words(text: &str) -> impl Iterator<Item = &str> + Clone {
@@ -5774,7 +5786,7 @@ mod tests {
         let recovery = SpanRecovery::new(
             Some("Sona".to_owned()),
             &RunOptions::default(),
-            true,
+            NoSpeechCheck::Published,
             None,
             SpeechEvidence::Detected,
         );
@@ -5858,7 +5870,7 @@ mod tests {
             let recovery = SpanRecovery::new(
                 Some("Sona".to_owned()),
                 &RunOptions::default(),
-                true,
+                NoSpeechCheck::Published,
                 None,
                 speech,
             );
@@ -6019,7 +6031,11 @@ mod tests {
         .expect("a one-entry prompt fits")
         .text;
         let options = RunOptions {
-            family: whisper_check_extension(Some(prompt.clone()), true, Some(SAMPLING_SEED)),
+            family: whisper_run_extension(
+                Some(prompt.clone()),
+                NoSpeechCheck::for_model(&model),
+                Some(SAMPLING_SEED),
+            ),
             ..Default::default()
         };
         // Dictation with voice detection on, and every decode without it:
@@ -6028,7 +6044,7 @@ mod tests {
             let recovery = SpanRecovery::new(
                 Some(prompt.clone()),
                 &options,
-                true,
+                NoSpeechCheck::for_model(&model),
                 Some(SAMPLING_SEED),
                 speech,
             );
@@ -6059,9 +6075,14 @@ mod tests {
     #[test]
     #[ignore = "decodes silence with the whisper model SONA_WHISPER_MODEL names"]
     fn whisper_writes_only_silence_phrases_over_a_clip_without_speech() {
-        let mut session = test_whisper_model().session().expect("a whisper session");
+        let model = test_whisper_model();
+        let mut session = model.session().expect("a whisper session");
         let options = RunOptions {
-            family: whisper_check_extension(None, true, Some(SAMPLING_SEED)),
+            family: whisper_run_extension(
+                None,
+                NoSpeechCheck::for_model(&model),
+                Some(SAMPLING_SEED),
+            ),
             ..Default::default()
         };
         let noise = pink_noise(10 * 16_000);
@@ -6099,7 +6120,11 @@ mod tests {
         .expect("a one-entry prompt fits")
         .text;
         let options = RunOptions {
-            family: whisper_check_extension(Some(prompt.clone()), true, Some(SAMPLING_SEED)),
+            family: whisper_run_extension(
+                Some(prompt.clone()),
+                NoSpeechCheck::for_model(&model),
+                Some(SAMPLING_SEED),
+            ),
             ..Default::default()
         };
         let noise = pink_noise(10 * 16_000);
@@ -6108,7 +6133,7 @@ mod tests {
         let recovery = SpanRecovery::new(
             Some(prompt.clone()),
             &options,
-            true,
+            NoSpeechCheck::for_model(&model),
             Some(SAMPLING_SEED),
             SpeechEvidence::Detected,
         );
@@ -6259,18 +6284,24 @@ mod tests {
         }
     }
 
-    /// Sona sets exactly one whisper decode field — the vocabulary prompt — and
-    /// defers every threshold to transcribe-cpp's own recipe. See
-    /// `whisper_run_extension` for the measurements behind that; this pins the
-    /// decision so a future edit has to argue with the evidence rather than
-    /// quietly re-tune the decoder.
+    /// Sona sets two whisper decode fields, the vocabulary prompt and the
+    /// no-speech threshold its model needs, and defers every other threshold
+    /// to transcribe-cpp's own recipe. See `whisper_run_extension` and
+    /// `NoSpeechCheck::for_model` for the measurements behind that; this pins
+    /// the decision so a future edit has to argue with the evidence rather
+    /// than quietly re-tune the decoder.
     #[test]
-    fn the_whisper_extension_carries_only_the_vocabulary_prompt() {
-        assert_eq!(whisper_run_extension(None), None);
+    fn the_whisper_extension_carries_the_prompt_and_the_no_speech_check() {
+        assert_eq!(
+            whisper_run_extension(None, NoSpeechCheck::Published, None),
+            None
+        );
 
-        let Some(RunExtension::Whisper(options)) =
-            whisper_run_extension(Some("Sona, Tauri.".to_string()))
-        else {
+        let Some(RunExtension::Whisper(options)) = whisper_run_extension(
+            Some("Sona, Tauri.".to_string()),
+            NoSpeechCheck::Published,
+            None,
+        ) else {
             panic!("a prompt must produce a whisper run extension");
         };
         assert_eq!(options.initial_prompt.as_deref(), Some("Sona, Tauri."));
@@ -6279,6 +6310,27 @@ mod tests {
         assert_eq!(options.compression_ratio_thold, None);
         assert_eq!(options.temperature, None);
         assert_eq!(options.temperature_inc, None);
+
+        let threshold = |no_speech: NoSpeechCheck| {
+            let Some(RunExtension::Whisper(options)) = whisper_run_extension(None, no_speech, None)
+            else {
+                panic!("{no_speech:?} must produce a whisper run extension");
+            };
+            assert_eq!(options.initial_prompt, None);
+            assert_eq!(options.logprob_thold, None);
+            assert_eq!(options.compression_ratio_thold, None);
+            assert_eq!(options.temperature, None);
+            assert_eq!(options.temperature_inc, None);
+            options.no_speech_thold
+        };
+        assert!(
+            threshold(NoSpeechCheck::LogProbabilityOnly).is_some_and(|value| value < 0.0),
+            "large-v3-turbo scores no speech at 0.000, so the check must sit below it"
+        );
+        assert!(
+            threshold(NoSpeechCheck::Off).is_some_and(|value| value > 1.0),
+            "the check left off must sit above every score"
+        );
     }
 
     #[test]
