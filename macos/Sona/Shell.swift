@@ -407,7 +407,7 @@ struct Sidebar: View {
                 .accessibilityValue(model.agents.pending.isEmpty ? "" : "\(model.agents.pending.count) waiting")
             }
             .padding(.horizontal, 4)
-            .padding(.top, 8)
+            .padding(.top, 4)
             .padding(.bottom, 16)
 
             ScrollView {
@@ -448,7 +448,7 @@ struct Sidebar: View {
             }
             .scrollIndicators(.never)
         }
-        .padding(.horizontal, 8)
+        .padding(.horizontal, 10)
         .frame(width: Theme.sidebarWidth)
         .frame(maxHeight: .infinity, alignment: .top)
         .sidebarSurface(model.about.material)
