@@ -314,6 +314,7 @@ final class AppModel {
     let recorder: RecorderStore
     let about: AboutStore
     let debug: DebugStore
+    let spotlight: SpotlightStore
 
     @ObservationIgnored let core = Core()
     @ObservationIgnored private lazy var pill = FloatingPanel(HUDPill().environment(self))
@@ -375,6 +376,7 @@ final class AppModel {
         about = AboutStore(core: core)
         debug = DebugStore(core: core)
         windowAttached = WindowAttachedCard(core: core)
+        spotlight = SpotlightStore(core: core)
 
         for name in [
             CoreEvent.activity, CoreEvent.streamText, CoreEvent.streamPhase, CoreEvent.micLevel,
@@ -391,6 +393,7 @@ final class AppModel {
             core.observe(name) { [weak self] line in self?.handle(name, line) }
         }
         library.recovered = { [weak self] ids in self?.announceRecovered(ids) }
+        meetingSettings.keptLocalChanged = { [weak self] in self?.spotlight.refresh() }
         query.onLink = { [weak self] target in self?.open(target) }
         imports.jobCompleted = { [weak self] _ in
             Task { await self?.library.start() }
@@ -928,6 +931,7 @@ final class AppModel {
         Task { await query.start() }
         Task { await about.start() }
         Task { await debug.start() }
+        Task { await spotlight.start() }
         Task { await self.loadModels() }
         Task { await library.coreStarted() }
         call { try await self.loadPill() }

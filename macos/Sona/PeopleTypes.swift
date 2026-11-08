@@ -217,6 +217,8 @@ struct PersonCommitment: Decodable, Identifiable {
     let direction: PersonLoopDirection
     let waitingOnStale: Bool
     let resolvedAtUtcMs: Int64?
+    let quote: String?
+    let atMs: Int64
 
     var id: String { loopId }
     var at: Date { PeopleFormat.date(atUtcMs) }
