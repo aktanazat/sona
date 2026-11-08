@@ -166,8 +166,8 @@ struct Shell: View {
             .frame(maxWidth: Theme.contentMax, alignment: .leading)
             .padding(.horizontal, Theme.margin)
             .frame(maxWidth: .infinity)
-            .padding(.top, 14)
-            .padding(.bottom, 4)
+            .frame(height: Theme.headerHeight)
+            .padding(.bottom, Space.m)
     }
 }
 
@@ -369,16 +369,18 @@ struct Sidebar: View {
                 Button {
                     model.paletteShown = true
                 } label: {
-                    HStack(spacing: 6) {
+                    HStack(spacing: Space.s) {
                         Image(systemName: "magnifyingglass")
                             .font(.system(size: 12, weight: .semibold))
+                            .frame(width: 16)
                         Text("Search")
                         Spacer(minLength: 4)
                         Text("⌘K").font(TypeScale.body(12))
                     }
-                    .font(TypeScale.body(13))
+                    .font(TypeScale.list)
                     .foregroundStyle(Theme.inkTertiary)
-                    .padding(.horizontal, 10)
+                    .padding(.leading, Space.s)
+                    .padding(.trailing, 10)
                     .frame(height: 28)
                     .background(Theme.wash, in: Capsule())
                     .contentShape(Capsule())
@@ -406,16 +408,14 @@ struct Sidebar: View {
                 .accessibilityLabel("Chat")
                 .accessibilityValue(model.agents.pending.isEmpty ? "" : "\(model.agents.pending.count) waiting")
             }
-            .padding(.horizontal, 4)
-            .padding(.top, 4)
-            .padding(.bottom, 16)
+            .frame(height: Theme.headerHeight)
+            .padding(.bottom, Space.xs)
 
             ScrollView {
-                VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: Space.xxs) {
                     ForEach(Place.sidebar) { place in
                         SidebarItem(
                             icon: place.icon,
-                            tile: place == .capture ? Theme.tileHome : Theme.tilePlace,
                             title: place.title,
                             selected: model.place.parent == place && !model.showingSettings,
                             count: count(place),
@@ -427,8 +427,7 @@ struct Sidebar: View {
                     }
                     gap
                     SidebarItem(
-                        icon: "gearshape.fill",
-                        tile: Theme.tileSetting,
+                        icon: "gearshape",
                         title: "Settings",
                         selected: false
                     ) {
@@ -443,12 +442,11 @@ struct Sidebar: View {
                         }
                     }
                 }
-                .padding(.horizontal, 4)
-                .padding(.bottom, 12)
+                .padding(.bottom, Space.m)
             }
             .scrollIndicators(.never)
         }
-        .padding(.horizontal, 10)
+        .padding(.horizontal, Space.m)
         .frame(width: Theme.sidebarWidth)
         .frame(maxHeight: .infinity, alignment: .top)
         .sidebarSurface(model.about.material)
@@ -469,28 +467,30 @@ struct Sidebar: View {
     }
 
     private var gap: some View {
-        Spacer().frame(height: 14)
+        Spacer().frame(height: Space.l)
     }
 }
 
 private extension View {
     /// The sidebar is navigation, the layer Liquid Glass is for: with the
     /// glass material on macOS 26 it floats as a glass pane inset from the
-    /// window's edges, the way the system's own split views draw theirs.
-    /// Otherwise it keeps the opaque rail.
+    /// window's edges, its corners concentric with the window's, the way the
+    /// system's own split views draw theirs. Otherwise it keeps the opaque
+    /// rail.
     @ViewBuilder
     func sidebarSurface(_ material: AppearanceMaterial) -> some View {
         if material == .glass, #available(macOS 26.0, *) {
             background {
                 Color.clear
-                    .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .glassEffect(.regular, in: ConcentricRectangle(
+                        corners: .concentric(minimum: .fixed(Theme.radiusCard)), isUniform: true))
                     .padding(6)
                     .ignoresSafeArea()
             }
         } else {
             background(Theme.rail.ignoresSafeArea())
                 .overlay(alignment: .trailing) {
-                    Rectangle().fill(Theme.border).frame(width: 1).ignoresSafeArea()
+                    Hairline(axis: .vertical).ignoresSafeArea()
                 }
         }
     }
@@ -501,9 +501,10 @@ private struct SidebarCount {
     let meaning: String
 }
 
+/// One place in the sidebar: a monochrome glyph lined up under the window's
+/// close button, the name, and a count when there is one.
 private struct SidebarItem: View {
     let icon: String
-    let tile: Color
     let title: String
     let selected: Bool
     var count: SidebarCount?
@@ -513,20 +514,16 @@ private struct SidebarItem: View {
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 10) {
+            HStack(spacing: Space.s) {
                 Image(systemName: icon)
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .frame(width: 22, height: 22)
-                    .background(tile, in: RoundedRectangle(cornerRadius: 6))
+                    .font(.system(size: 13))
+                    .frame(width: 16)
                 Text(title)
-                    .font(TypeScale.body(14))
-                    .foregroundStyle(Theme.ink)
+                    .font(TypeScale.list)
                 Spacer(minLength: 4)
                 if let count, count.value > 0 {
                     Text("\(count.value)")
-                        .font(TypeScale.label(12))
-                        .monospacedDigit()
+                        .font(TypeScale.meta)
                         .foregroundStyle(Theme.inkTertiary)
                         .contentTransition(.numericText(value: Double(count.value)))
                 }
@@ -534,12 +531,14 @@ private struct SidebarItem: View {
                     Circle().fill(Theme.live).frame(width: 7, height: 7)
                 }
             }
-            .padding(.horizontal, 8)
-            .frame(height: 34)
+            .foregroundStyle(selected ? Theme.ink : Theme.inkSecondary)
+            .padding(.horizontal, Space.s)
+            .frame(height: Theme.sidebarRow)
             .background(
-                selected ? Theme.selection : (hovering ? Theme.wash : .clear),
-                in: RoundedRectangle(cornerRadius: 10)
+                selected ? Theme.controlHover : (hovering ? Theme.wash : .clear),
+                in: RoundedRectangle(cornerRadius: Theme.radiusRow)
             )
+            .hoverFade(hovering)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -560,14 +559,15 @@ private struct SidebarSubItem: View {
     var body: some View {
         Button(action: action) {
             Text(title)
-                .font(TypeScale.body(13))
+                .font(TypeScale.list)
                 .foregroundStyle(selected ? Theme.ink : Theme.inkSecondary)
-                .padding(.leading, 40)
-                .frame(maxWidth: .infinity, minHeight: 28, alignment: .leading)
+                .padding(.leading, Space.s + 16 + Space.s)
+                .frame(maxWidth: .infinity, minHeight: Theme.sidebarRow, alignment: .leading)
                 .background(
-                    selected ? Theme.selection : (hovering ? Theme.wash : .clear),
-                    in: RoundedRectangle(cornerRadius: 8)
+                    selected ? Theme.controlHover : (hovering ? Theme.wash : .clear),
+                    in: RoundedRectangle(cornerRadius: Theme.radiusRow)
                 )
+                .hoverFade(hovering)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)

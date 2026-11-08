@@ -37,11 +37,11 @@ struct PersonPortrait: View {
             } else if initials.isEmpty {
                 Image(systemName: "person.fill")
                     .font(.system(size: size * 0.5))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(Theme.onAccent)
             } else {
                 Text(initials)
                     .font(.system(size: size * 0.4, weight: .semibold))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(Theme.onAccent)
                     .lineLimit(1)
                     .minimumScaleFactor(0.6)
                     .padding(.horizontal, size * 0.08)
@@ -97,15 +97,8 @@ struct PersonPortrait: View {
 /// above 4.5:1 in either appearance.
 enum PersonInk {
     private static let palette: [Color] = [
-        0x1D5FC0, 0xA84A0A, 0x1C7139, 0xB3265A, 0x136A78, 0x7A3E8F, 0xA8382B, 0x565E6B,
-    ].map { (hex: UInt32) in
-        Color(
-            .sRGB,
-            red: Double((hex >> 16) & 0xFF) / 255,
-            green: Double((hex >> 8) & 0xFF) / 255,
-            blue: Double(hex & 0xFF) / 255
-        )
-    }
+        (278, 58), (54, 63), (147, 43), (6, 58), (216, 26), (317, 50), (37, 57), (264, 9),
+    ].map { (hue: Double, chroma: Double) in Theme.monogram(hue: hue, chroma: chroma) }
 
     static func color(for personId: String) -> Color {
         var hash: UInt64 = 0xCBF2_9CE4_8422_2325

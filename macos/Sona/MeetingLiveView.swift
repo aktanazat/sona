@@ -48,9 +48,7 @@ struct MeetingLiveView: View {
                                 .scrollIndicators(.never)
                                 .padding(.horizontal, -8)
                                 .frame(maxWidth: .infinity)
-                                Rectangle()
-                                    .fill(Theme.hairline)
-                                    .frame(width: 1)
+                                Hairline(axis: .vertical)
                                 ScrollView {
                                     VStack(alignment: .leading, spacing: 0) {
                                         ownNotes
@@ -80,6 +78,7 @@ struct MeetingLiveView: View {
                     Page {
                         Text("This meeting is no longer recording.")
                             .bodyText(14, Theme.inkSecondary)
+                            .frame(minHeight: Theme.headerHeight)
                     }
                 }
             }
@@ -169,7 +168,7 @@ struct MeetingLiveView: View {
             }
             menu(session)
         }
-        .frame(minHeight: 30)
+        .frame(minHeight: Theme.headerHeight)
         .padding(.bottom, 20)
     }
 
@@ -712,7 +711,7 @@ extension View {
             style: .continuous)
         return background(Theme.surface, in: shape)
             .overlay(shape.strokeBorder(Theme.border, lineWidth: 1).padding(.trailing, docked ? -1 : 0))
-            .shadow(color: .black.opacity(0.12), radius: 6, y: 2)
+            .elevation(.medium)
             .contentShape(shape)
     }
 }

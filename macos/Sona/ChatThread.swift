@@ -181,7 +181,7 @@ private struct ChatRevealRenderer: TextRenderer {
         let afterwards = elapsed - typing
         let lit = afterwards < 0 || (afterwards >= ChatReveal.blink / 2 && afterwards < ChatReveal.blink)
         guard lit, let caret else { return }
-        context.fill(Path(roundedRect: caret, cornerRadius: 1), with: .foreground)
+        context.fill(Capsule().path(in: caret), with: .foreground)
     }
 }
 
@@ -323,7 +323,7 @@ private struct ChatSuggestionPill: View {
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
-        .animation(.easeOut(duration: 0.12), value: hovering)
+        .hoverFade(hovering)
         .help(title)
     }
 }

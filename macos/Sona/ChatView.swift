@@ -359,7 +359,7 @@ private struct ChatRequestsRow: View {
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
-        .animation(.easeOut(duration: 0.12), value: hovering)
+        .hoverFade(hovering)
     }
 }
 
@@ -716,7 +716,7 @@ private struct ChatComposer: View {
         .overlay(
             RoundedRectangle(cornerRadius: Theme.radiusCard)
                 .strokeBorder(fieldFocused ? Theme.inkDisabled : Theme.border, lineWidth: 1)
-                .animation(.easeOut(duration: 0.12), value: fieldFocused)
+                .animation(Motion.quick, value: fieldFocused)
                 .allowsHitTesting(false))
     }
 
@@ -890,11 +890,11 @@ private struct ChatGlyphButton: ButtonStyle {
             .foregroundStyle(isEnabled ? (isOn || hovering ? Theme.ink : Theme.inkSecondary) : Theme.inkDisabled)
             .frame(width: 28, height: 28)
             .background(
-                configuration.isPressed ? Theme.selection : (isEnabled && hovering ? Theme.wash : Color.clear),
-                in: RoundedRectangle(cornerRadius: 6))
-            .contentShape(RoundedRectangle(cornerRadius: 6))
+                configuration.isPressed ? Theme.controlPressed : (isEnabled && hovering ? Theme.wash : Color.clear),
+                in: RoundedRectangle(cornerRadius: Theme.radiusRow))
+            .contentShape(RoundedRectangle(cornerRadius: Theme.radiusRow))
             .onHover { hovering = $0 }
-            .animation(.easeOut(duration: 0.12), value: hovering)
+            .hoverFade(hovering)
     }
 }
 
@@ -909,10 +909,10 @@ private struct ChatMenuGlyph: ViewModifier {
         content
             .tint(lit ? Theme.ink : Theme.inkSecondary)
             .foregroundStyle(lit ? Theme.ink : Theme.inkSecondary)
-            .background(lit ? Theme.wash : Color.clear, in: RoundedRectangle(cornerRadius: 6))
-            .contentShape(RoundedRectangle(cornerRadius: 6))
+            .background(lit ? Theme.wash : Color.clear, in: RoundedRectangle(cornerRadius: Theme.radiusRow))
+            .contentShape(RoundedRectangle(cornerRadius: Theme.radiusRow))
             .onHover { hovering = $0 }
-            .animation(.easeOut(duration: 0.12), value: lit)
+            .hoverFade(lit)
     }
 }
 

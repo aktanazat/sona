@@ -33,11 +33,12 @@ struct ChatModelPicker: View {
             }
             .padding(.horizontal, 8)
             .frame(height: 28)
-            .background(hovering ? Theme.wash : Color.clear, in: RoundedRectangle(cornerRadius: 6))
-            .contentShape(RoundedRectangle(cornerRadius: 6))
+            .background(hovering ? Theme.wash : Color.clear, in: RoundedRectangle(cornerRadius: Theme.radiusRow))
+            .contentShape(RoundedRectangle(cornerRadius: Theme.radiusRow))
         }
         .buttonStyle(.quiet)
         .onHover { hovering = $0 }
+        .hoverFade(hovering)
         .disabled(store.modelPickerDisabled)
         .help("Choose a model and thinking effort")
         .accessibilityLabel("Model: \(store.selectedModel?.name ?? "Server default"). \(effortCaption)")
@@ -121,7 +122,7 @@ struct ChatModelPicker: View {
                         .frame(height: 28)
                         .background(selected ? Theme.surface : Color.clear, in: RoundedRectangle(cornerRadius: Theme.radiusKey))
                         .contentShape(RoundedRectangle(cornerRadius: Theme.radiusKey))
-                        .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: selected)
+                        .animation(reduceMotion ? nil : Motion.quick, value: selected)
                     }
                     .buttonStyle(.quiet)
                     .accessibilityLabel("\(model.providerName) provider")

@@ -341,7 +341,7 @@ private struct PortraitChooserView: View {
             if state.preview != nil {
                 Text("Saving keeps the original photo and its metadata.").metaText()
             }
-            if let error = state.error { Text(error).font(.system(size: 12)).foregroundStyle(.red).textSelection(.enabled) }
+            if let error = state.error { Text(error).font(.system(size: 12)).foregroundStyle(Theme.live).textSelection(.enabled) }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }

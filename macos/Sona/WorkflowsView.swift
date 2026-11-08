@@ -211,8 +211,8 @@ struct WorkflowWeek: View {
             Spacer(minLength: 16)
             HStack(alignment: .bottom, spacing: 5) {
                 ForEach(trend.points, id: \.localDate) { point in
-                    RoundedRectangle(cornerRadius: 2)
-                        .fill(point.localDate == trend.points.last?.localDate ? Theme.accent : Theme.selection)
+                    RoundedRectangle(cornerRadius: Theme.radiusMark)
+                        .fill(point.localDate == trend.points.last?.localDate ? Theme.accent : Theme.track)
                         .frame(width: 10, height: height(point.runs))
                         .accessibilityLabel("\(point.localDate): \(promptCounted(point.runs, "run", "runs"))")
                 }
