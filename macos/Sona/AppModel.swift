@@ -6,9 +6,9 @@ import SwiftUI
 /// The places a window shows. Library opens from Home and Calendar from
 /// Projects, so the sidebar lists only the rest.
 enum Place: Int, CaseIterable, Identifiable {
-    case capture, library, meetings, people, scratchpad, projects, calendar
+    case capture, library, meetings, people, scratchpad, projects, calendar, tasks, triage
 
-    static let sidebar: [Place] = [.capture, .meetings, .people, .scratchpad, .projects]
+    static let sidebar: [Place] = [.capture, .tasks, .triage, .meetings, .people, .scratchpad, .projects]
 
     var id: Int { rawValue }
 
@@ -17,7 +17,7 @@ enum Place: Int, CaseIterable, Identifiable {
         switch self {
         case .library: .capture
         case .calendar: .projects
-        case .capture, .meetings, .people, .scratchpad, .projects: self
+        case .capture, .meetings, .people, .scratchpad, .projects, .tasks, .triage: self
         }
     }
 
@@ -30,18 +30,22 @@ enum Place: Int, CaseIterable, Identifiable {
         case .scratchpad: "Notes"
         case .projects: "Projects"
         case .calendar: "Calendar"
+        case .tasks: "Tasks"
+        case .triage: "Triage"
         }
     }
 
     var icon: String {
         switch self {
-        case .capture: "house.fill"
-        case .library: "books.vertical.fill"
-        case .meetings: "video.fill"
-        case .people: "person.2.fill"
+        case .capture: "house"
+        case .library: "books.vertical"
+        case .meetings: "video"
+        case .people: "person.2"
         case .scratchpad: "square.and.pencil"
         case .projects: "folder"
         case .calendar: "calendar"
+        case .tasks: "checklist"
+        case .triage: "tray"
         }
     }
 }
@@ -224,7 +228,9 @@ final class AppModel {
     var place: Place = .capture
     var settingsPlace: SettingsPlace = .essentials
     var showingSettings = false
-    var paletteShown = false
+    var paletteShown = false {
+        didSet { if !paletteShown { workFocus.picker = nil } }
+    }
     /// The question a `sona://search` link carried, held until the palette
     /// opens and reads it.
     private var paletteSeed = ""
@@ -315,8 +321,11 @@ final class AppModel {
     let about: AboutStore
     let debug: DebugStore
     let spotlight: SpotlightStore
+    let work: WorkStore
+    let workFocus = WorkFocus()
 
     @ObservationIgnored let core = Core()
+    @ObservationIgnored let workKeys = WorkKeys()
     @ObservationIgnored private lazy var pill = FloatingPanel(HUDPill().environment(self))
     @ObservationIgnored private lazy var consent = FloatingPanel(consentPanel(), arrival: .slide)
     @ObservationIgnored private let windowAttached: WindowAttachedCard
@@ -377,6 +386,7 @@ final class AppModel {
         debug = DebugStore(core: core)
         windowAttached = WindowAttachedCard(core: core)
         spotlight = SpotlightStore(core: core)
+        work = WorkStore(core: core)
 
         for name in [
             CoreEvent.activity, CoreEvent.streamText, CoreEvent.streamPhase, CoreEvent.micLevel,
@@ -399,6 +409,7 @@ final class AppModel {
             Task { await self?.library.start() }
         }
         core.onClose { [weak self] in self?.coreClosed() }
+        workKeys.install(self)
         Task { await start() }
     }
 
@@ -409,7 +420,8 @@ final class AppModel {
 
     /// The places and verbs the palette offers before the plane is asked.
     var paletteActions: [PaletteAction] {
-        var actions = Place.allCases.map { place in
+        var actions = workPaletteActions
+        actions += Place.allCases.map { place in
             PaletteAction(id: "go-\(place.rawValue)", group: .navigation, title: place.title) { [weak self] in
                 self?.go(place)
             }
@@ -427,6 +439,8 @@ final class AppModel {
                 self?.toggleCapture()
             })
         }
+        actions.append(PaletteAction(id: "new-task", group: .actions, title: "New task",
+                                     run: { [weak self] in self?.newTask() }, icon: "plus"))
         actions.append(PaletteAction(id: "record-meeting", group: .actions, title: "Record a meeting") { [weak self] in
             self?.recordMeeting()
         })
@@ -932,6 +946,7 @@ final class AppModel {
         Task { await about.start() }
         Task { await debug.start() }
         Task { await spotlight.start() }
+        Task { await work.start() }
         Task { await self.loadModels() }
         Task { await library.coreStarted() }
         call { try await self.loadPill() }

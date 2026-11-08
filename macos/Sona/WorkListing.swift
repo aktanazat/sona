@@ -1,0 +1,319 @@
+import Foundation
+
+/// A task's priority as the screens name and order it. The wire value is the
+/// raw number: 0 none, 1 urgent through 4 low.
+enum TaskPriority: Int, CaseIterable, Identifiable {
+    case none, urgent, high, medium, low
+
+    init(_ value: Int) {
+        self = TaskPriority(rawValue: value) ?? .none
+    }
+
+    var id: Int { rawValue }
+
+    var label: String {
+        switch self {
+        case .none: "No priority"
+        case .urgent: "Urgent"
+        case .high: "High"
+        case .medium: "Medium"
+        case .low: "Low"
+        }
+    }
+
+    /// Urgent first and no priority last, when a list orders by priority.
+    var rank: Int { self == .none ? 5 : rawValue }
+
+    static let menuOrder: [TaskPriority] = [.none, .urgent, .high, .medium, .low]
+}
+
+/// What a row may show besides its status and title. The raw values are what
+/// a saved view stores.
+enum TaskProperty: String, CaseIterable, Identifiable {
+    case number = "id"
+    case priority, labels, project, owner, due, meeting, updated
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .number: "ID"
+        case .priority: "Priority"
+        case .labels: "Labels"
+        case .project: "Project"
+        case .owner: "Owner"
+        case .due: "Due date"
+        case .meeting: "Meeting"
+        case .updated: "Updated"
+        }
+    }
+
+    static let standard: [String] = [number, priority, labels, project, owner, due].map(\.rawValue)
+}
+
+/// Where a task falls in My work, in the order the list shows them.
+enum TaskBucket: Int, CaseIterable {
+    case overdue, today, blocked, thisWeek, later, noDate
+
+    var title: String {
+        switch self {
+        case .overdue: "Overdue"
+        case .today: "Today"
+        case .blocked: "Blocked"
+        case .thisWeek: "This week"
+        case .later: "Later"
+        case .noDate: "No date"
+        }
+    }
+
+    /// `blocked` only in My work: a task waiting on another comes before
+    /// the week ahead unless its own date already presses.
+    static func of(_ row: WorkItemRow, now: Int64, blocking: Bool) -> TaskBucket {
+        guard let due = row.dueAtMs else {
+            return blocking && row.blockedByOpenCount > 0 ? .blocked : .noDate
+        }
+        let days = PlanningFormat.days(from: now, to: due)
+        if days < 0 { return .overdue }
+        if days == 0 { return .today }
+        if blocking && row.blockedByOpenCount > 0 { return .blocked }
+        return days < 7 ? .thisWeek : .later
+    }
+}
+
+/// The mark a group's header draws before its title.
+enum TaskGroupMark: Equatable {
+    case status(WorkStatus)
+    case priority(TaskPriority)
+    case owner(AvatarFace)
+    case project
+    case meeting
+    case bucket(TaskBucket)
+    case none
+}
+
+struct TaskGroup: Identifiable, Equatable {
+    let id: String
+    let title: String
+    let mark: TaskGroupMark
+    var rows: [WorkItemRow]
+    /// What a task dropped on this group, or added from its header, takes.
+    var patch: WorkPatch?
+}
+
+/// Filtering, ordering and grouping, on the rows the store already holds, so
+/// a filter or a regrouping lands in the same frame as the key that asked.
+enum TaskListing {
+    /// The statuses in the order a list groups them.
+    static let statusOrder: [WorkStatus] = [.triage, .inProgress, .notStarted, .backlog, .done, .canceled, .duplicate]
+
+    static func matches(_ row: WorkItemRow, _ query: WorkQuery, now: Int64) -> Bool {
+        if !query.includeArchived, row.archivedAtMs != nil { return false }
+        if !query.includeSnoozed, let wake = row.snoozedUntilMs, wake > now { return false }
+        if let statuses = query.statuses, !statuses.contains(row.status) { return false }
+        if let direction = query.direction, row.direction != direction { return false }
+        if let owners = query.ownerPersonIds, !owners.contains(row.ownerPersonId ?? "") { return false }
+        if let projects = query.projectIds, !projects.contains(row.projectId ?? "none") { return false }
+        if let labels = query.labelIds, !labels.contains(where: row.labelIds.contains) { return false }
+        if let priorities = query.priorities, !priorities.contains(row.priority) { return false }
+        if let before = query.dueBeforeMs {
+            guard let due = row.dueAtMs, due < before else { return false }
+        }
+        if let meeting = query.sourceMeetingId, row.sourceMeetingId != meeting { return false }
+        if let search = query.search?.trimmingCharacters(in: .whitespaces), !search.isEmpty {
+            let number = search.hasPrefix("#") ? String(search.dropFirst()) : search
+            guard row.title.localizedCaseInsensitiveContains(search)
+                || (row.details ?? "").localizedCaseInsensitiveContains(search)
+                || "\(row.number)" == number
+            else { return false }
+        }
+        return true
+    }
+
+    static func ordered(_ rows: [WorkItemRow], by order: WorkOrderBy) -> [WorkItemRow] {
+        rows.sorted { left, right in
+            switch order {
+            case .priority:
+                let (a, b) = (TaskPriority(left.priority).rank, TaskPriority(right.priority).rank)
+                if a != b { return a < b }
+                return earlierDue(left, right) ?? (left.number > right.number)
+            case .due:
+                if let due = earlierDue(left, right) { return due }
+                let (a, b) = (TaskPriority(left.priority).rank, TaskPriority(right.priority).rank)
+                return a != b ? a < b : left.number > right.number
+            case .updated:
+                return left.updatedAtMs != right.updatedAtMs ? left.updatedAtMs > right.updatedAtMs : left.number > right.number
+            case .created:
+                return left.createdAtMs != right.createdAtMs ? left.createdAtMs > right.createdAtMs : left.number > right.number
+            case .manual:
+                return left.sortOrder != right.sortOrder ? left.sortOrder < right.sortOrder : left.number < right.number
+            }
+        }
+    }
+
+    /// Dated work before undated, sooner first; nil when both dates tie.
+    private static func earlierDue(_ left: WorkItemRow, _ right: WorkItemRow) -> Bool? {
+        switch (left.dueAtMs, right.dueAtMs) {
+        case let (a?, b?) where a != b: a < b
+        case (.some, nil): true
+        case (nil, .some): false
+        default: nil
+        }
+    }
+
+    static func groups(
+        _ rows: [WorkItemRow], display: WorkDisplay, now: Int64,
+        projects: [WorkProjectChoice], people: [WorkPersonChoice]
+    ) -> [TaskGroup] {
+        let rows = ordered(rows, by: display.orderBy)
+        switch display.groupBy {
+        case .none:
+            return [TaskGroup(id: "all", title: "All", mark: .none, rows: rows)]
+        case .status:
+            let present = Set(rows.map(\.status))
+            return statusOrder
+                .filter { present.contains($0) || (display.showEmptyGroups && $0 != .triage && $0 != .duplicate) }
+                .map { status in
+                    TaskGroup(id: "status:\(status.rawValue)", title: status.label, mark: .status(status),
+                              rows: rows.filter { $0.status == status }, patch: WorkPatch(status: status))
+                }
+        case .priority:
+            let present = Set(rows.map(\.priority))
+            return [TaskPriority.urgent, .high, .medium, .low, .none]
+                .filter { present.contains($0.rawValue) || display.showEmptyGroups }
+                .map { priority in
+                    TaskGroup(id: "priority:\(priority.rawValue)", title: priority.label, mark: .priority(priority),
+                              rows: rows.filter { $0.priority == priority.rawValue },
+                              patch: WorkPatch(priority: priority.rawValue))
+                }
+        case .due:
+            let buckets: [TaskBucket] = [.overdue, .today, .thisWeek, .later, .noDate]
+            let keyed = Dictionary(grouping: rows) { TaskBucket.of($0, now: now, blocking: false) }
+            return buckets
+                .filter { keyed[$0] != nil || display.showEmptyGroups }
+                .map { bucket in
+                    TaskGroup(id: "due:\(bucket.rawValue)", title: bucket.title, mark: .bucket(bucket),
+                              rows: keyed[bucket] ?? [], patch: bucket == .noDate ? WorkPatch(dueAtMs: .clear) : nil)
+                }
+        case .owner:
+            var groups: [TaskGroup] = []
+            let mine = rows.filter(\.ownerIsSelf)
+            if !mine.isEmpty || display.showEmptyGroups {
+                groups.append(TaskGroup(id: "owner:self", title: "Me", mark: .owner(AvatarFace(kind: .me, name: "Me")),
+                                        rows: mine, patch: WorkPatch(owner: .myself)))
+            }
+            let named = Dictionary(grouping: rows.filter { !$0.ownerIsSelf && $0.ownerPersonId != nil }) { $0.ownerPersonId ?? "" }
+            let ids = display.showEmptyGroups ? people.map(\.id) : Array(named.keys)
+            let names = ids.map { id in (id, people.first { $0.id == id }?.name ?? named[id]?.first?.ownerName ?? "Someone") }
+            for (id, name) in names.sorted(by: { $0.1.localizedStandardCompare($1.1) == .orderedAscending }) {
+                groups.append(TaskGroup(id: "owner:\(id)", title: name,
+                                        mark: .owner(AvatarFace(kind: .person(id), name: name)),
+                                        rows: named[id] ?? [], patch: WorkPatch(owner: .person(id))))
+            }
+            let nobody = rows.filter { !$0.ownerIsSelf && $0.ownerPersonId == nil }
+            if !nobody.isEmpty || display.showEmptyGroups {
+                groups.append(TaskGroup(id: "owner:nobody", title: "No owner",
+                                        mark: .owner(AvatarFace(kind: .unassigned, name: "No owner")),
+                                        rows: nobody, patch: WorkPatch(owner: .nobody)))
+            }
+            return groups
+        case .project:
+            let keyed = Dictionary(grouping: rows) { $0.projectId ?? "" }
+            let listed = display.showEmptyGroups
+                ? projects.filter { $0.status != .completed }.map(\.id)
+                : keyed.keys.filter { !$0.isEmpty }
+            var groups = listed
+                .map { id in (id, projects.first { $0.id == id }?.title ?? keyed[id]?.first?.projectTitle ?? "Project") }
+                .sorted { $0.1.localizedStandardCompare($1.1) == .orderedAscending }
+                .map { id, title in
+                    TaskGroup(id: "project:\(id)", title: title, mark: .project, rows: keyed[id] ?? [],
+                              patch: WorkPatch(projectId: .set(id)))
+                }
+            if keyed[""] != nil || display.showEmptyGroups {
+                groups.append(TaskGroup(id: "project:none", title: "No project", mark: .project, rows: keyed[""] ?? [],
+                                        patch: WorkPatch(projectId: .clear)))
+            }
+            return groups
+        case .meeting:
+            let keyed = Dictionary(grouping: rows) { $0.sourceMeetingId ?? "" }
+            var groups = keyed.keys.filter { !$0.isEmpty }
+                .sorted { (keyed[$0]?.first?.createdAtMs ?? 0) > (keyed[$1]?.first?.createdAtMs ?? 0) }
+                .map { id in
+                    TaskGroup(id: "meeting:\(id)", title: keyed[id]?.first?.sourceMeetingTitle ?? "Meeting",
+                              mark: .meeting, rows: keyed[id] ?? [])
+                }
+            if let loose = keyed[""] {
+                groups.append(TaskGroup(id: "meeting:none", title: "Not from a meeting", mark: .meeting, rows: loose))
+            }
+            return groups
+        }
+    }
+
+    /// My work: open tasks one way, by what presses first.
+    static func myWork(_ rows: [WorkItemRow], direction: WorkDirection, now: Int64) -> [TaskGroup] {
+        let open = rows.filter {
+            $0.direction == direction && $0.status.isOpen && matches($0, WorkQuery(), now: now)
+        }
+        let keyed = Dictionary(grouping: ordered(open, by: .due)) { TaskBucket.of($0, now: now, blocking: true) }
+        return TaskBucket.allCases.compactMap { bucket in
+            guard let rows = keyed[bucket] else { return nil }
+            return TaskGroup(id: "bucket:\(bucket.rawValue)", title: bucket.title, mark: .bucket(bucket), rows: rows)
+        }
+    }
+}
+
+/// Dates a person can pick or type for a due date or a snooze.
+enum TaskDates {
+    static func now() -> Int64 { milliseconds(.now) }
+
+    static func milliseconds(_ date: Date) -> Int64 { Int64((date.timeIntervalSince1970 * 1000).rounded()) }
+
+    /// The start of the day `offset` days from today, plus `hour`.
+    static func day(_ offset: Int, hour: Int = 17, from date: Date = .now) -> Int64 {
+        let calendar = Calendar.current
+        let start = calendar.startOfDay(for: date)
+        let day = calendar.date(byAdding: .day, value: offset, to: start) ?? start
+        let moment = calendar.date(bySettingHour: hour, minute: 0, second: 0, of: day) ?? day
+        return milliseconds(moment)
+    }
+
+    /// The next given weekday (1 Sunday … 7 Saturday) after today.
+    static func next(weekday: Int, hour: Int = 17) -> Int64 {
+        let calendar = Calendar.current
+        let today = calendar.component(.weekday, from: .now)
+        let ahead = (weekday - today + 7) % 7
+        return day(ahead == 0 ? 7 : ahead, hour: hour)
+    }
+
+    /// A date written in words, "fri", "nov 20", "in 3 days", when the system
+    /// reads one; 5 pm that day, like the dates the pickers offer.
+    static func parse(_ text: String) -> Int64? {
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        guard trimmed.count >= 2,
+              let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.date.rawValue),
+              let match = detector.firstMatch(in: trimmed, range: NSRange(trimmed.startIndex..., in: trimmed)),
+              let date = match.date
+        else { return nil }
+        return day(0, hour: 17, from: date)
+    }
+
+    static func label(_ milliseconds: Int64, now: Int64) -> String {
+        let days = PlanningFormat.days(from: now, to: milliseconds)
+        return switch days {
+        case -1: "Yesterday"
+        case 0: "Today"
+        case 1: "Tomorrow"
+        case 2...6: PlanningFormat.moment(milliseconds).formatted(.dateTime.weekday(.wide))
+        default: PlanningFormat.day(milliseconds)
+        }
+    }
+
+    /// "2h", "3d", "Nov 3": how long ago, as tight as a row's meta column.
+    static func ago(_ milliseconds: Int64, now: Int64) -> String {
+        let minutes = max(0, (now - milliseconds) / 60_000)
+        if minutes < 1 { return "now" }
+        if minutes < 60 { return "\(minutes)m" }
+        if minutes < 24 * 60 { return "\(minutes / 60)h" }
+        if minutes < 7 * 24 * 60 { return "\(minutes / (24 * 60))d" }
+        return PlanningFormat.day(milliseconds)
+    }
+}

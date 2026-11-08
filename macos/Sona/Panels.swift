@@ -866,13 +866,16 @@ final class FloatingPanel {
 /// One row of the palette that does something: a place to go or a verb.
 struct PaletteAction: Identifiable {
     enum Group {
-        case navigation, actions
+        case navigation, actions, work
     }
 
     let id: String
     let group: Group
     let title: String
     let run: @MainActor () -> Void
+    var icon: String? = nil
+    /// The key that does the same outside the palette, drawn as key caps.
+    var shortcut: String? = nil
 }
 
 /// What a keystroke in the field can land on, in the order the list shows them.
@@ -988,67 +991,12 @@ struct CommandPalette: View {
             Theme.scrim
                 .ignoresSafeArea()
                 .onTapGesture { model.paletteShown = false }
-            VStack(spacing: 0) {
-                HStack(spacing: 10) {
-                    Image(systemName: "magnifyingglass")
-                        .font(.system(size: 15, weight: .regular))
-                        .foregroundStyle(Theme.inkTertiary)
-                    TextField("", text: $query, prompt: Text("Search or ask").foregroundStyle(Theme.inkTertiary))
-                        .textFieldStyle(.plain)
-                        .font(TypeScale.body(17))
-                        .foregroundStyle(Theme.ink)
-                        .focused($focused)
-                        .onSubmit { runSelected() }
-                        .onKeyPress(.upArrow) { move(-1); return .handled }
-                        .onKeyPress(.downArrow) { move(1); return .handled }
-                        .onKeyPress(.return, phases: .down) { press in
-                            press.modifiers.contains(.command) ? openSelected() : .ignored
-                        }
-                    if case .pending = lookup {
-                        ProgressView().controlSize(.small)
-                    }
+            Group {
+                if let picker = model.workFocus.picker {
+                    WorkPickerList(picker: picker) { model.paletteShown = false }
+                } else {
+                    list
                 }
-                .padding(.horizontal, 20)
-                .frame(height: 56)
-                Hairline()
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 2) {
-                            ForEach(sections, id: \.label) { section in
-                                Text(section.label)
-                                    .font(.system(size: 12, weight: .semibold))
-                                    .foregroundStyle(Theme.inkTertiary)
-                                    .accessibilityAddTraits(.isHeader)
-                                    .padding(.horizontal, 20)
-                                    .padding(.top, 12)
-                                    .padding(.bottom, 4)
-                                ForEach(section.rows) { row in
-                                    let index = section.live ? rows.firstIndex { $0.id == row.id } ?? 0 : -1
-                                    PaletteRowView(row: row, selected: index == selection, marks: marks, asked: hearing) {
-                                        selection = index
-                                        run(row)
-                                    } open: {
-                                        open(row)
-                                    }
-                                    .id(row.id)
-                                    .opacity(section.live ? 1 : 0.4)
-                                    .allowsHitTesting(section.live)
-                                }
-                            }
-                            footnote
-                        }
-                        .padding(.bottom, 8)
-                    }
-                    .scrollIndicators(.never)
-                    .frame(maxHeight: 420)
-                    .onChange(of: selection) { _, index in
-                        if rows.indices.contains(index) {
-                            proxy.scrollTo(rows[index].id)
-                        }
-                    }
-                }
-                Hairline()
-                keys
             }
             .frame(width: 600)
             .background {
@@ -1096,6 +1044,76 @@ struct CommandPalette: View {
         }
     }
 
+    private var list: some View {
+        VStack(spacing: 0) {
+            if let context = model.paletteContext {
+                WorkContextChip(text: context)
+                    .padding(.horizontal, 20)
+                    .padding(.top, 14)
+            }
+            HStack(spacing: 10) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 15, weight: .regular))
+                    .foregroundStyle(Theme.inkTertiary)
+                TextField("", text: $query, prompt: Text("Search or ask").foregroundStyle(Theme.inkTertiary))
+                    .textFieldStyle(.plain)
+                    .font(TypeScale.body(17))
+                    .foregroundStyle(Theme.ink)
+                    .focused($focused)
+                    .onSubmit { runSelected() }
+                    .onKeyPress(.upArrow) { move(-1); return .handled }
+                    .onKeyPress(.downArrow) { move(1); return .handled }
+                    .onKeyPress(.return, phases: .down) { press in
+                        press.modifiers.contains(.command) ? openSelected() : .ignored
+                    }
+                if case .pending = lookup {
+                    ProgressView().controlSize(.small)
+                }
+            }
+            .padding(.horizontal, 20)
+            .frame(height: 56)
+            Hairline()
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 2) {
+                        ForEach(sections, id: \.label) { section in
+                            Text(section.label)
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(Theme.inkTertiary)
+                                .accessibilityAddTraits(.isHeader)
+                                .padding(.horizontal, 20)
+                                .padding(.top, 12)
+                                .padding(.bottom, 4)
+                            ForEach(section.rows) { row in
+                                let index = section.live ? rows.firstIndex { $0.id == row.id } ?? 0 : -1
+                                PaletteRowView(row: row, selected: index == selection, marks: marks, asked: hearing) {
+                                    selection = index
+                                    run(row)
+                                } open: {
+                                    open(row)
+                                }
+                                .id(row.id)
+                                .opacity(section.live ? 1 : 0.4)
+                                .allowsHitTesting(section.live)
+                            }
+                        }
+                        footnote
+                    }
+                    .padding(.bottom, 8)
+                }
+                .scrollIndicators(.never)
+                .frame(maxHeight: 420)
+                .onChange(of: selection) { _, index in
+                    if rows.indices.contains(index) {
+                        proxy.scrollTo(rows[index].id)
+                    }
+                }
+            }
+            Hairline()
+            keys
+        }
+    }
+
     private var trimmed: String { query.trimmingCharacters(in: .whitespaces) }
 
     /// The words of the query as the spoken-line search splits them, for
@@ -1116,8 +1134,10 @@ struct CommandPalette: View {
     /// the question in the field now.
     private var sections: [(label: String, rows: [PaletteRow], live: Bool)] {
         var sections: [(label: String, rows: [PaletteRow], live: Bool)] = []
+        let task = actions.filter { $0.group == .work }.map(PaletteRow.action)
         let navigation = actions.filter { $0.group == .navigation }.map(PaletteRow.action)
         let verbs = actions.filter { $0.group == .actions }.map(PaletteRow.action)
+        if !task.isEmpty { sections.append((model.workTargets.count > 1 ? "Tasks" : "Task", task, true)) }
         if !navigation.isEmpty { sections.append(("Navigation", navigation, true)) }
         if !verbs.isEmpty { sections.append(("Actions", verbs, true)) }
         let hits = lookup.earlier
@@ -1463,6 +1483,8 @@ private struct PaletteRowView: View {
                             .lineLimit(2)
                             .frame(maxWidth: 180, alignment: .trailing)
                     }
+                } else if case let .action(action) = row, let shortcut = action.shortcut {
+                    Shortcut(shortcut)
                 }
             }
             .padding(.horizontal, 12)
@@ -1649,7 +1671,7 @@ private struct PaletteRowView: View {
             case "record-screen": "rectangle.dashed.badge.record"
             case "open-chat": "bubble.left"
             case "import-audio": "square.and.arrow.down"
-            default: Place.allCases.first { "go-\($0.rawValue)" == action.id }?.icon ?? "arrow.right"
+            default: action.icon ?? Place.allCases.first { "go-\($0.rawValue)" == action.id }?.icon ?? "arrow.right"
             }
         case let .hit(hit):
             switch hit.kind {
