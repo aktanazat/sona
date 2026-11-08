@@ -888,7 +888,7 @@ struct SegmentedSwitch<ID: Hashable>: View {
             }
         }
         .padding(2)
-        .background(Theme.control, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
+        .background(Theme.inset, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
         .animation(Motion.settle(reduced: reduceMotion), value: selection)
     }
 }

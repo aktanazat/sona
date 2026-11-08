@@ -545,7 +545,7 @@ private struct SidebarItem: View {
             .padding(.horizontal, Space.s)
             .frame(height: Theme.sidebarRow)
             .background(
-                selected ? Theme.controlHover : (hovering ? Theme.wash : .clear),
+                selected ? Theme.washSelected : (hovering ? Theme.wash : .clear),
                 in: RoundedRectangle(cornerRadius: Theme.radiusRow)
             )
             .hoverFade(hovering)
@@ -574,7 +574,7 @@ private struct SidebarSubItem: View {
                 .padding(.leading, Space.s + 16 + Space.s)
                 .frame(maxWidth: .infinity, minHeight: Theme.sidebarRow, alignment: .leading)
                 .background(
-                    selected ? Theme.controlHover : (hovering ? Theme.wash : .clear),
+                    selected ? Theme.washSelected : (hovering ? Theme.wash : .clear),
                     in: RoundedRectangle(cornerRadius: Theme.radiusRow)
                 )
                 .hoverFade(hovering)
