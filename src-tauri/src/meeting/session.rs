@@ -8,6 +8,7 @@ use super::capture::{
     PacketLaneReader, PacketSink,
 };
 use super::clock::host_monotonic_now_ns;
+use super::context::PlaceReading;
 use super::detection::calendar::CalendarAtStart;
 use super::detection::machine::CalendarEventSummary;
 use super::export;
@@ -553,6 +554,10 @@ pub struct MeetingSessionManager {
     /// wrote — and different in the next one, which is what lets a meeting
     /// that failed today be tried again tomorrow.
     recovery_launch: Uuid,
+    /// Where each phone recording imported since launch was started, until
+    /// its place card takes the reading. Memory only, never the store: the
+    /// reading is an offer, and a place is saved only once he picks one.
+    place_readings: Mutex<HashMap<MeetingSessionId, PlaceReading>>,
     processing: Arc<MeetingProcessingService>,
     capture_active: Arc<AtomicBool>,
     actor: Mutex<ActorState>,
@@ -673,6 +678,7 @@ impl MeetingSessionManager {
             recovered_at_mount: Mutex::new(Vec::new()),
             recovers_on_mount: true,
             recovery_launch: Uuid::new_v4(),
+            place_readings: Mutex::new(HashMap::new()),
             processing,
             capture_active: Arc::new(AtomicBool::new(false)),
             actor: Mutex::new(ActorState {
@@ -2507,7 +2513,8 @@ impl MeetingSessionManager {
         &self,
         request: ImportRecordingRequest,
     ) -> Result<MeetingSessionSnapshot, MeetingCommandError> {
-        self.import_recording_with(request, None, None, &[]).await
+        self.import_recording_with(request, None, None, &[], None)
+            .await
     }
 
     /// Install what the phone knew about a recording before any processing
@@ -2516,13 +2523,15 @@ impl MeetingSessionManager {
     /// from the start of its audio. The event is remembered the way a Mac
     /// preflight remembers one, and followed by the start a live meeting
     /// records, so its attendees are linked to people the way a Mac
-    /// recording's are.
+    /// recording's are. Where the phone was waits here, outside the store,
+    /// for the meeting's place card.
     pub(crate) async fn import_recording_with(
         &self,
         request: ImportRecordingRequest,
         notes: Option<&str>,
         calendar_event: Option<&CalendarEventSummary>,
         bookmark_offsets_ns: &[u64],
+        place_reading: Option<PlaceReading>,
     ) -> Result<MeetingSessionSnapshot, MeetingCommandError> {
         let _activity = crate::planning::quiet::foreground_activity();
         let media = validate_media_path(&request.path).map_err(|error| {
@@ -2580,6 +2589,9 @@ impl MeetingSessionManager {
                     return Err(self
                         .abandon_import(session_id, map_store_error(error))
                         .await);
+                }
+                if let Some(reading) = place_reading {
+                    self.place_readings_lock().insert(session_id, reading);
                 }
                 self.processing
                     .submit(store, session_id, ProcessingOrigin::Stop);
@@ -4709,6 +4721,19 @@ impl MeetingSessionManager {
         self.recovered_at_mount
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn place_readings_lock(
+        &self,
+    ) -> std::sync::MutexGuard<'_, HashMap<MeetingSessionId, PlaceReading>> {
+        self.place_readings
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// The reading a phone recording arrived with, handed over once.
+    pub(crate) fn take_place_reading(&self, session_id: MeetingSessionId) -> Option<PlaceReading> {
+        self.place_readings_lock().remove(&session_id)
     }
 
     pub(super) fn app_handle(&self) -> Option<&AppHandle> {

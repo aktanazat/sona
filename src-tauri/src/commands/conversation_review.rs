@@ -1,3 +1,4 @@
+use crate::meeting::context::PlaceReading;
 use crate::meeting::conversation_review::{
     ConversationAudioClip, ConversationBookmark, ConversationBookmarkRequest,
     ConversationPlaceReview, ConversationReel,
@@ -112,6 +113,17 @@ pub async fn conversation_place_review(
         .await?
         .conversation_place_review(session_id)
         .map_err(map_store_error)
+}
+
+/// The reading a phone recording arrived with, handed over once. The place
+/// card offers the places near it and keeps none of it.
+#[tauri::command]
+#[specta::specta]
+pub fn conversation_place_reading_take(
+    manager: State<'_, Arc<MeetingSessionManager>>,
+    session_id: MeetingSessionId,
+) -> Option<PlaceReading> {
+    manager.take_place_reading(session_id)
 }
 
 #[tauri::command]

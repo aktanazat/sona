@@ -3563,6 +3563,20 @@ pub(super) async fn call(
                 .await,
             )
         }
+        "conversation_place_reading_take" => {
+            let mut args = Args::parse(params)?;
+            let session_id = args.take("sessionId")?;
+            let handle = app.clone();
+            on_main_thread(app, move || {
+                encode_plain(
+                    crate::commands::conversation_review::conversation_place_reading_take(
+                        handle.state(),
+                        session_id,
+                    ),
+                )
+            })
+            .await?
+        }
         "conversation_bookmarks" => {
             let mut args = Args::parse(params)?;
             let session_id = args.take("sessionId")?;
