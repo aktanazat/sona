@@ -518,15 +518,7 @@ fn evening_meeting(
     not_filed: bool,
     user_name: Option<&str>,
 ) -> Result<EveningMeeting, StoreError> {
-    let mut statement = connection.prepare_cached(
-        "SELECT p.display_name FROM meeting_person_links l
-           JOIN persons p ON p.id = l.person_id
-          WHERE l.meeting_id = ?1 AND l.confidence = 'confirmed'
-          ORDER BY p.display_name COLLATE NOCASE, p.id",
-    )?;
-    let people = statement
-        .query_map([id(session_id)], |row| row.get::<_, String>(0))?
-        .collect::<Result<Vec<_>, _>>()?;
+    let people = confirmed_names_in(connection, session_id)?;
     let loops = loops_in(connection, session_id, user_name)?.rows;
     let due = |row: &MeetingLoopRow| {
         artifacts.as_ref().and_then(|artifacts| {
@@ -602,6 +594,23 @@ pub(super) fn confirmed_people_in(
         .map(|person| Ok(PersonId::from_uuid(parse_uuid(&person?)?)))
         .collect::<Result<HashSet<_>, StoreError>>()?;
     Ok(ids)
+}
+
+/// The names of the people confirmed in a meeting, alphabetical.
+pub(super) fn confirmed_names_in(
+    connection: &Connection,
+    session_id: MeetingSessionId,
+) -> Result<Vec<String>, StoreError> {
+    let mut statement = connection.prepare_cached(
+        "SELECT p.display_name FROM meeting_person_links l
+           JOIN persons p ON p.id = l.person_id
+          WHERE l.meeting_id = ?1 AND l.confidence = 'confirmed'
+          ORDER BY p.display_name COLLATE NOCASE, p.id",
+    )?;
+    let names = statement
+        .query_map([id(session_id)], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(names)
 }
 
 pub(super) fn target_identity(target: &FilingTarget) -> Result<(&'static str, String), StoreError> {
