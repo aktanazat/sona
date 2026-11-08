@@ -148,6 +148,25 @@ fn splits_joining(sections: usize) -> u32 {
     }
 }
 
+/// Bytes of facts a joining reply restates for each token it may write. On
+/// three 30-minute meetings a 14B local model's joins wrote 0.94 to 1.01
+/// bytes for each byte of facts, at 3.6 to 4.3 bytes a token, and every
+/// join of 21 KB or more ran out of room after five to ten minutes.
+const JOIN_BYTES_PER_TOKEN: usize = 4;
+
+/// The most facts a joining part may hold and still be read whole: what its
+/// reply restates. An engine with one window gives a part twice its reply's
+/// share of it (`part_budget`), so a join can hold more than that. A relayed
+/// engine's parts are sized by its wire, and its model is not measured here.
+fn join_room(generator: &dyn MeetingTextGenerator, reply_tokens: i32) -> usize {
+    match generator.context_window_bytes() {
+        Some(_) => usize::try_from(reply_tokens)
+            .unwrap_or(0)
+            .saturating_mul(JOIN_BYTES_PER_TOKEN),
+        None => usize::MAX,
+    }
+}
+
 /// One part's reading: what each piece gave, and the pieces that failed on
 /// every try.
 pub(super) struct Part<T> {
@@ -157,27 +176,39 @@ pub(super) struct Part<T> {
 
 /// A part read whole or, when its reply came back unusable, rejected or out
 /// of time, in halves, each half halved again while `splits` are left. A
-/// piece that still fails is left out, unless its failure ends the whole
-/// reading.
+/// part longer than `longest` is halved without being read whole. A piece
+/// that still fails is left out, unless its failure ends the whole reading.
 fn read_part<T>(
     pack: &Pack,
     splits: u32,
+    longest: usize,
     read: &impl Fn(&str) -> Result<T, ReadingError>,
 ) -> Result<Part<T>, ReadingError> {
     let mut part = Part {
         sections: Vec::new(),
         left_out: Vec::new(),
     };
-    read_in_halves(pack, splits, read, &mut part)?;
+    read_in_halves(pack, splits, longest, read, &mut part)?;
     Ok(part)
 }
 
 fn read_in_halves<T>(
     pack: &Pack,
     splits: u32,
+    longest: usize,
     read: &impl Fn(&str) -> Result<T, ReadingError>,
     part: &mut Part<T>,
 ) -> Result<(), ReadingError> {
+    if splits > 0 && pack.as_ref().len() > longest {
+        if let Some([first, second]) = pack.halves() {
+            log::info!(
+                "A meeting part of {} bytes is read in halves: its reply holds {longest}",
+                pack.as_ref().len()
+            );
+            read_in_halves(&first, splits - 1, longest, read, part)?;
+            return read_in_halves(&second, splits - 1, longest, read, part);
+        }
+    }
     let error = match read(pack.as_ref()) {
         Ok(section) => {
             part.sections.push(section);
@@ -196,8 +227,8 @@ fn read_in_halves<T>(
                 "A meeting part of {} lines is read again in halves: {error:?}",
                 pack.rows.len()
             );
-            read_in_halves(&first, splits - 1, read, part)?;
-            return read_in_halves(&second, splits - 1, read, part);
+            read_in_halves(&first, splits - 1, longest, read, part)?;
+            return read_in_halves(&second, splits - 1, longest, read, part);
         }
     }
     if error.ends_reading() {
@@ -771,15 +802,16 @@ pub(super) struct LeftOut {
 }
 
 /// One part's notes, read in halves when a reply came back unusable or
-/// rejected. A piece the full instructions could not get past the safety
-/// filter is read under the short ones, and a piece that fails after that is
-/// left out.
+/// rejected, or when the part is longer than `longest`. A piece the full
+/// instructions could not get past the safety filter is read under the short
+/// ones, and a piece that fails after that is left out.
 fn read_notes_part(
     generator: &dyn MeetingTextGenerator,
     instructions: &str,
     short: &str,
     pack: &Pack,
     splits: u32,
+    longest: usize,
     reply_tokens: i32,
     scope: &SourceScope<'_>,
     evidence: &ArtifactEvidence,
@@ -796,7 +828,7 @@ fn read_notes_part(
             check,
         )
     };
-    read_part(pack, splits, &|text| {
+    read_part(pack, splits, longest, &|text| {
         check().map_err(ReadingError::Stopped)?;
         let output = match generate(instructions, text) {
             Err(ReadingError::Engine(
@@ -1080,9 +1112,11 @@ fn keep_marked_moments(content: &mut GeneratedMeetingArtifacts, evidence: &Artif
 /// A part of the transcript that failed on every try is left out and named
 /// on the notes; a first round in which no part could be read fails them.
 /// Sections that a joining round cannot fold into fewer, shorter ones are
-/// kept as written and put together without the model. On a 46-minute
-/// meeting a join restated its input, and the plain notes written in place
-/// of every structured section lost the meeting's decisions and actions.
+/// kept as written and put together without the model, and so are two
+/// sections whose facts are longer than one reply holds or need two parts.
+/// On a 46-minute meeting a join restated its input, and the plain notes
+/// written in place of every structured section lost the meeting's
+/// decisions and actions.
 pub(super) fn notes(
     generator: &dyn MeetingTextGenerator,
     evidence: &ArtifactEvidence,
@@ -1094,6 +1128,7 @@ pub(super) fn notes(
         SourceScope::new(&evidence.transcript).map_err(|()| EngineFailureCause::EvidencePack)?;
     let budget = part_budget(generator, prompt, ARTIFACT_MAX_TOKENS);
     let mut reply_tokens = budget.reply_tokens;
+    let mut longest = usize::MAX;
     let mut input = notes_packs(evidence, &source_scope, speakers, budget.evidence_bytes)?;
     let mut instructions = Cow::Borrowed(prompt);
     let mut short = Cow::Borrowed(SHORT_NOTES_PROMPT);
@@ -1111,6 +1146,7 @@ pub(super) fn notes(
                 &short,
                 pack,
                 splits_joining(previous.len()),
+                longest,
                 reply_tokens,
                 &source_scope,
                 evidence,
@@ -1165,6 +1201,7 @@ pub(super) fn notes(
         short = Cow::Owned(format!("{SHORT_NOTES_PROMPT}{NOTES_RECONCILIATION}"));
         let budget = part_budget(generator, &instructions, ARTIFACT_MAX_TOKENS);
         reply_tokens = budget.reply_tokens;
+        longest = join_room(generator, reply_tokens);
         let mut facts = NoteFacts::default();
         let next = sections
             .iter()
@@ -1180,6 +1217,19 @@ pub(super) fn notes(
                 )
             });
         input = match next {
+            Ok(next)
+                if splits_joining(sections.len()) == 0
+                    && (next.len() > 1
+                        || next.iter().any(|pack| pack.as_ref().len() > longest)) =>
+            {
+                log::warn!(
+                    "Meeting notes kept the {} sections of round {} as written: their facts take {} bytes, more than one reply holds",
+                    sections.len(),
+                    round + 1,
+                    packed_bytes(&next)
+                );
+                return joined_as_written(sections, left_out, evidence).and_then(joined);
+            }
             Ok(next) if round == 0 || packed_bytes(&next) < packed_bytes(&input) => next,
             Ok(next) => {
                 log::warn!(
@@ -2144,7 +2194,7 @@ fn read_ledger_part(
     scope: &SourceScope<'_>,
     check: &dyn Fn() -> Result<(), RunFailure>,
 ) -> Result<Part<MeetingLedger>, ReadingError> {
-    read_part(pack, MAX_SPLITS, &|text| {
+    read_part(pack, MAX_SPLITS, usize::MAX, &|text| {
         read_ledger_pack(
             generator,
             evidence,

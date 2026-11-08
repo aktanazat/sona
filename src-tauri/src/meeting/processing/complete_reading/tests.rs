@@ -818,7 +818,7 @@ mod tests {
             if let Some(reply) = no_topic_groups(pack) {
                 return Ok(reply);
             }
-            if !self.condense && self.calls.fetch_add(1, Ordering::SeqCst) >= 4 {
+            if !self.condense && self.calls.fetch_add(1, Ordering::SeqCst) >= 6 {
                 return Err(MeetingTextGenerationError::TimedOut);
             }
             let input: Value = serde_json::from_str(pack).expect("bounded input");
@@ -879,9 +879,9 @@ mod tests {
         }
     }
 
-    fn gradual_evidence() -> ArtifactEvidence {
+    fn gradual_evidence(turns: usize) -> ArtifactEvidence {
         let mut evidence = evidence();
-        evidence.transcript.truncate(2);
+        evidence.transcript.truncate(turns);
         for (index, item) in evidence.transcript.iter_mut().enumerate() {
             item.text = format!(
                 "Topic {index}: {}",
@@ -893,7 +893,7 @@ mod tests {
 
     #[test]
     fn shrinking_notes_can_finish_when_consecutive_rounds_have_the_same_pack_count() {
-        let evidence = gradual_evidence();
+        let evidence = gradual_evidence(3);
         let generator = GradualReduction {
             condense: true,
             calls: AtomicUsize::new(0),
@@ -923,7 +923,7 @@ mod tests {
 
     #[test]
     fn nonshrinking_notes_stand_as_written_before_another_model_round() {
-        let evidence = gradual_evidence();
+        let evidence = gradual_evidence(3);
         let generator = GradualReduction {
             condense: false,
             calls: AtomicUsize::new(0),
@@ -936,7 +936,7 @@ mod tests {
             || Ok(()),
         )
         .expect("sections no join could shorten stand as structured notes");
-        assert_eq!(generator.calls.load(Ordering::SeqCst), 4);
+        assert_eq!(generator.calls.load(Ordering::SeqCst), 6);
         let ids = |citations: &[ArtifactCitation]| {
             citations
                 .iter()
@@ -1002,7 +1002,7 @@ mod tests {
 
     #[test]
     fn two_sections_whose_join_runs_out_stand_as_written_after_one_try() {
-        let evidence = gradual_evidence();
+        let evidence = gradual_evidence(2);
         let generator = JoinRunsOut(AtomicUsize::new(0));
         let content = notes(
             &generator,
@@ -1018,6 +1018,152 @@ mod tests {
             "the join is tried once and not again in halves"
         );
         assert_eq!(cited_ids(&content), source_ids(&evidence));
+    }
+
+    /// A local model as measured on three 30-minute meetings: it notes every
+    /// decision it reads, joins sections by restating their facts, and
+    /// writes about four bytes a token, so a reply longer than its budget
+    /// stops part-way through. Counts the joins it is asked and the replies
+    /// cut off.
+    struct RestatesFacts {
+        joins: AtomicUsize,
+        cut: AtomicUsize,
+    }
+
+    impl MeetingTextGenerator for RestatesFacts {
+        fn is_available(&self) -> bool {
+            true
+        }
+        fn model_id(&self) -> &'static str {
+            "restates-facts"
+        }
+        fn model_version(&self) -> Cow<'static, str> {
+            Cow::Borrowed("1")
+        }
+        fn max_input_bytes(&self) -> usize {
+            usize::MAX
+        }
+        fn context_window_bytes(&self) -> Option<usize> {
+            Some(8_192 * 3)
+        }
+        fn generate(
+            &self,
+            _: &str,
+            pack: &str,
+            max_tokens: i32,
+            _: ReplyShape,
+        ) -> Result<String, MeetingTextGenerationError> {
+            if let Some(reply) = no_topic_groups(pack) {
+                return Ok(reply);
+            }
+            let input: Value = serde_json::from_str(pack).expect("bounded input");
+            let decisions: Vec<Value> = match input["transcript"].as_array() {
+                Some(turns) => turns
+                    .iter()
+                    .map(|turn| {
+                        let text = turn["text"].as_str().expect("turn text");
+                        let decision = text.split_inclusive('.').next().unwrap_or(text);
+                        json!({"text": decision, "citations": [turn["entity_id"]]})
+                    })
+                    .collect(),
+                None => {
+                    self.joins.fetch_add(1, Ordering::SeqCst);
+                    input["section_facts"]
+                        .as_array()
+                        .expect("section facts")
+                        .iter()
+                        .filter(|fact| fact["kind"] == "decision")
+                        .map(|fact| fact["value"].clone())
+                        .collect()
+                }
+            };
+            let mut reply: Value = serde_json::from_str(&reply_citing(pack)).expect("notes reply");
+            reply["decisions"] = decisions.into();
+            let reply = reply.to_string();
+            if reply.len() / 4 > usize::try_from(max_tokens).expect("positive reply budget") {
+                self.cut.fetch_add(1, Ordering::SeqCst);
+                return Ok("{\"summary\":[".to_string());
+            }
+            Ok(reply)
+        }
+    }
+
+    /// A meeting of `turns` turns, each settling one item with `follow_ups`
+    /// clauses before talking it through, and the decisions it settles,
+    /// sorted.
+    fn decisive_meeting(turns: usize, follow_ups: usize) -> (ArtifactEvidence, Vec<String>) {
+        let mut evidence = evidence();
+        evidence.transcript.truncate(turns);
+        let mut decisions = Vec::with_capacity(turns);
+        for (index, item) in evidence.transcript.iter_mut().enumerate() {
+            let decision = format!(
+                "Decision {index}: the team keeps the plan for item {index}{}.",
+                " and its follow-up".repeat(follow_ups)
+            );
+            item.text = format!("{decision}{}", " The team talks it through.".repeat(22));
+            decisions.push(decision);
+        }
+        decisions.sort();
+        (evidence, decisions)
+    }
+
+    fn sorted_decisions(content: &GeneratedMeetingArtifacts) -> Vec<String> {
+        let mut decisions: Vec<String> = content
+            .decisions
+            .iter()
+            .map(|decision| decision.text.clone())
+            .collect();
+        decisions.sort();
+        decisions
+    }
+
+    #[test]
+    fn a_join_longer_than_its_reply_is_read_in_halves_without_asking_it_whole() {
+        let (evidence, settled) = decisive_meeting(30, 20);
+        let generator = RestatesFacts {
+            joins: AtomicUsize::new(0),
+            cut: AtomicUsize::new(0),
+        };
+        let content = notes(
+            &generator,
+            &evidence,
+            &HashMap::new(),
+            "Read the meeting.",
+            || Ok(()),
+        )
+        .expect("notes joined in halves");
+        assert_eq!(generator.cut.load(Ordering::SeqCst), 0, "no reply runs out");
+        assert_eq!(generator.joins.load(Ordering::SeqCst), 2, "one join a half");
+        assert_eq!(sorted_decisions(&content), settled);
+        assert_eq!(cited_ids(&content), source_ids(&evidence));
+    }
+
+    #[test]
+    fn two_sections_longer_than_one_reply_stand_as_written_without_a_join() {
+        // Two sections whose facts fit one join part, and two whose facts
+        // fill two parts that would come back as two sections again.
+        for (turns, follow_ups) in [(26, 20), (24, 30)] {
+            let (evidence, settled) = decisive_meeting(turns, follow_ups);
+            let generator = RestatesFacts {
+                joins: AtomicUsize::new(0),
+                cut: AtomicUsize::new(0),
+            };
+            let content = notes(
+                &generator,
+                &evidence,
+                &HashMap::new(),
+                "Read the meeting.",
+                || Ok(()),
+            )
+            .expect("two sections stand as written");
+            assert_eq!(
+                generator.joins.load(Ordering::SeqCst),
+                0,
+                "no join is asked for {turns} turns"
+            );
+            assert_eq!(sorted_decisions(&content), settled);
+            assert_eq!(cited_ids(&content), source_ids(&evidence));
+        }
     }
 
     /// A notes reply citing every source its pack holds.
@@ -1750,7 +1896,7 @@ mod tests {
 
     #[test]
     fn a_part_the_safety_filter_keeps_stopping_is_read_under_short_instructions() {
-        let evidence = gradual_evidence();
+        let evidence = gradual_evidence(2);
         let result = notes(
             &StoppedUnlessShort,
             &evidence,

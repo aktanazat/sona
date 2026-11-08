@@ -1582,11 +1582,12 @@ Rounds:
 - Round 0 reads the transcript parts. Later rounds join what earlier rounds wrote.
 - One section left means done. A piece left out in a join round keeps the sections of the round before it.
 - A join round whose facts are not smaller than its input, or cannot be packed, keeps its own sections. After 16 rounds the last round's sections are kept.
+- A join part longer than its reply can restate (`join_room`: four bytes a token, engines with one window only) is never sent whole: with more than two sections it is read in halves, and two sections are kept as written. Two sections whose facts need more than one join part are kept as written too, since reading the parts would give back two sections. On a 16k local model each such join ran 5 to 10 minutes and came back cut off.
 - Kept sections are put together without the model (`joined_as_written`): an even share of every section's summary lines and list items, and outline topics with one title merged. The notes stay structured.
 
 Rules:
-- Halving applies to an unstructured reply, a timeout or a rejection, at most twice (`MAX_SPLITS`, 125). A half that times out is not halved again (162-166). Stopped and Unreachable end the reading (213-218).
-- A refusal (safety block or decline) is retried once under the short prompt (719-760).
+- Halving applies to an unstructured reply, a timeout, a rejection or a join part longer than its reply holds, at most twice (`MAX_SPLITS`, 136). A half that times out is not halved again (219-224). Stopped and Unreachable end the reading (234-236).
+- A refusal (safety block or decline) is retried once under the short prompt (831-844).
 - A part's answer gets a third of the model window's room, between 1,024 and 8,192 tokens, and its evidence the rest (`part_budget`, processing.rs). Apple Intelligence and relay keep their own answer sizes.
 - Local calls time out at 240 s plus one second for every 8 answer tokens asked for (`meeting_request_timeout`, local_generator.rs). At a 16k window that is about 870 s.
 
