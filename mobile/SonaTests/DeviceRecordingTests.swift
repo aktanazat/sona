@@ -113,6 +113,80 @@ final class DeviceRecordingTests: XCTestCase {
         )
     }
 
+    /// `calendar_event.place` is byte for byte `runtime.rs`'s `PHONE_PINNED_CALENDAR_EVENT`.
+    func testCalendarPinIsTheAgreedJson() throws {
+        let event = DeviceRecordingManifest.CalendarEvent(
+            identifier: "event-0002",
+            title: "Coffee with Dana",
+            start_utc_ms: 1_788_304_800_000,
+            end_utc_ms: 1_788_308_400_000,
+            attendees: [],
+            place: .init(
+                title: "Hyatt Regency San Francisco\n5 Embarcadero Center",
+                latitude: 37.79425,
+                longitude: -122.39556
+            )
+        )
+        let manifest = DeviceRecordingObject.manifest(
+            deviceId: "phone_device_0001",
+            recordedAtUtcMs: 1_700_000_000_000,
+            durationMs: 1500,
+            title: "Phone recording",
+            audioByteLength: 48000,
+            audioSha256: "T8pUgTxKXVmy0A-asLSzM7bdweWhqToLZWeaGTYG3_8",
+            calendarEvent: event
+        )
+        let encoded = try DeviceRecordingObject.encodeManifest(manifest)
+        // As sent: JSONSerialization would print 37.79425 as 37.794249999999998.
+        XCTAssertEqual(
+            encoded,
+            Data("""
+            {"audio":{"byte_length":48000,"channels":1,"codec":"pcm_s16le",\
+            "sample_rate_hz":16000,"sha256":"T8pUgTxKXVmy0A-asLSzM7bdweWhqToLZWeaGTYG3_8"},\
+            "calendar_event":{"attendees":[],\
+            "end_utc_ms":1788308400000,"identifier":"event-0002",\
+            "place":{"latitude":37.79425,"longitude":-122.39556,\
+            "title":"Hyatt Regency San Francisco\\n5 Embarcadero Center"},\
+            "start_utc_ms":1788304800000,"title":"Coffee with Dana"},\
+            "device_id":"phone_device_0001","duration_ms":1500,"format_version":1,\
+            "kind":"device_recording","recorded_at_utc_ms":1700000000000,\
+            "title":"Phone recording"}
+            """.utf8)
+        )
+        XCTAssertEqual(
+            try JSONDecoder().decode(DeviceRecordingManifest.self, from: encoded), manifest
+        )
+    }
+
+    /// `place_reading` is byte for byte `runtime.rs`'s `PHONE_PLACE_READING`.
+    func testPlaceReadingIsTheAgreedJson() throws {
+        let manifest = DeviceRecordingObject.manifest(
+            deviceId: "phone_device_0001",
+            recordedAtUtcMs: 1_700_000_000_000,
+            durationMs: 1500,
+            title: "Phone recording",
+            audioByteLength: 48000,
+            audioSha256: "T8pUgTxKXVmy0A-asLSzM7bdweWhqToLZWeaGTYG3_8",
+            placeReading: .init(latitude: 37.79425, longitude: -122.39556, accuracy_meters: 35)
+        )
+        let encoded = try DeviceRecordingObject.encodeManifest(manifest)
+        // As sent: JSONSerialization would print 37.79425 as 37.794249999999998.
+        XCTAssertEqual(
+            encoded,
+            Data("""
+            {"audio":{"byte_length":48000,"channels":1,"codec":"pcm_s16le",\
+            "sample_rate_hz":16000,"sha256":"T8pUgTxKXVmy0A-asLSzM7bdweWhqToLZWeaGTYG3_8"},\
+            "device_id":"phone_device_0001","duration_ms":1500,"format_version":1,\
+            "kind":"device_recording",\
+            "place_reading":{"accuracy_meters":35,"latitude":37.79425,"longitude":-122.39556},\
+            "recorded_at_utc_ms":1700000000000,"title":"Phone recording"}
+            """.utf8)
+        )
+        XCTAssertEqual(
+            try JSONDecoder().decode(DeviceRecordingManifest.self, from: encoded), manifest
+        )
+    }
+
     /// Every chunk but the last must encrypt to exactly the Worker's 4 MiB ceiling, or
     /// `parseChunks` rejects the plan.
     func testChunkingFillsEveryChunkButTheLast() {

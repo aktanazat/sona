@@ -24,12 +24,27 @@ struct DeviceRecordingManifest: Codable, Equatable {
             var url: String
         }
 
+        /// The invite's map pin: EventKit's structured location, unreduced.
+        struct Place: Codable, Equatable {
+            var title: String?
+            var latitude: Double
+            var longitude: Double
+        }
+
         var identifier: String
         var title: String
         var start_utc_ms: Int64
         var end_utc_ms: Int64
         var attendees: [Attendee]
         var location: String?
+        var place: Place?
+    }
+
+    /// Where the phone was as the recording started, read once while Sona was open.
+    struct PlaceReading: Codable, Equatable {
+        var latitude: Double
+        var longitude: Double
+        var accuracy_meters: Double
     }
 
     var format_version: Int
@@ -43,6 +58,7 @@ struct DeviceRecordingManifest: Codable, Equatable {
     var calendar_event: CalendarEvent?
     /// Moments bookmarked while recording, in milliseconds from the start of the audio.
     var bookmark_offsets_ms: [Int64]?
+    var place_reading: PlaceReading?
 }
 
 /// Recording capture format. The phone resamples to this before anything is written,
@@ -79,7 +95,8 @@ enum DeviceRecordingObject {
         audioSha256: String,
         notes: String? = nil,
         calendarEvent: DeviceRecordingManifest.CalendarEvent? = nil,
-        bookmarkOffsetsMs: [Int64] = []
+        bookmarkOffsetsMs: [Int64] = [],
+        placeReading: DeviceRecordingManifest.PlaceReading? = nil
     ) -> DeviceRecordingManifest {
         DeviceRecordingManifest(
             format_version: 1,
@@ -97,7 +114,8 @@ enum DeviceRecordingObject {
             ),
             personal_notes: notes?.isEmpty == false ? notes : nil,
             calendar_event: calendarEvent,
-            bookmark_offsets_ms: bookmarkOffsetsMs.isEmpty ? nil : bookmarkOffsetsMs
+            bookmark_offsets_ms: bookmarkOffsetsMs.isEmpty ? nil : bookmarkOffsetsMs,
+            place_reading: placeReading
         )
     }
 
