@@ -1601,7 +1601,7 @@ Owner: processing.rs ~2600-2625; complete_reading.rs:955-1035.
 #### M7. Ledger
 Owner: complete_reading.rs:1203-1500; processing.rs:5769-5860; ledger.rs:335-395, 793-822.
 
-- Each part goes through halving around `read_ledger_pack`. Unverified rows are degraded at once; a part is read a second time only when its reading lost at least half its threads, and the reading that kept more threads stays (the second on a tie).
+- Each part goes through halving around `read_ledger_pack`. Unverified rows are degraded at once; a part is read a second time only when its reading lost at least half its threads, and the reading that kept more threads stays, then the one that kept more open loops, commitments and stances, and the first on a full tie; a second reading that fails leaves the first standing.
 - Section count:
   - 0 is an error
   - 1 is used as is

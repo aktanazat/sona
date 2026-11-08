@@ -81,14 +81,25 @@ fn written_number(word: &str) -> Option<String> {
 }
 
 /// "I'll", "I will", "I can", "I'm going to", "I'm gonna", "let me": words
-/// that promise the speaker's own work, unless a negation follows.
+/// that promise the speaker's own work, unless a negation follows. "I'm
+/// gonna need", "say" or "guess" asks or remarks instead of taking a task on.
 pub(crate) fn commits(words: &[String]) -> bool {
     words.windows(2).enumerate().any(|(index, pair)| {
         let next = words.get(index + 2).map(String::as_str);
         let negated = matches!(next, Some("t" | "not" | "never"));
         match (pair[0].as_str(), pair[1].as_str()) {
             ("i", "ll" | "will" | "can" | "shall") => !negated,
-            ("i", "m" | "am") => matches!(next, Some("going" | "gonna")),
+            ("i", "m" | "am") => {
+                let verb = match next {
+                    Some("gonna") => words.get(index + 3),
+                    Some("going") if words.get(index + 3).map(String::as_str) == Some("to") => {
+                        words.get(index + 4)
+                    }
+                    Some("going") => None,
+                    _ => return false,
+                };
+                !matches!(verb.map(String::as_str), Some("need" | "say" | "guess"))
+            }
             ("let", "me") => true,
             _ => false,
         }
