@@ -144,6 +144,12 @@ impl MeetingTextGenerator for Witness {
             ReplyShape::Json if prompt == DECISION_CHECK => "decision check",
             ReplyShape::Json | ReplyShape::Prose | ReplyShape::MemoryNote => "other",
         };
+        let counts = match (&result, shape) {
+            (Ok(reply), ReplyShape::MeetingNotes) => owners_named(input, reply),
+            (Ok(reply), ReplyShape::MeetingLedger) => questions_written(reply),
+            (Ok(reply), ReplyShape::LedgerMerge) => questions_answered(input, reply),
+            _ => String::new(),
+        };
         let seconds = started.elapsed().as_secs_f64();
         self.requests
             .lock()
@@ -151,13 +157,79 @@ impl MeetingTextGenerator for Witness {
             .push(Request {
                 pass,
                 line: format!(
-                    "{pass} {} bytes{short}: {ended}, {seconds:.0} s",
+                    "{pass} {} bytes{short}: {ended}{counts}, {seconds:.0} s",
                     input.len()
                 ),
                 seconds,
             });
         result
     }
+}
+
+/// How many action items a notes reply holds and how many name an owner, and
+/// for a join how many its section facts held, so the model naming owners,
+/// the parts' checks keeping them and the join keeping them show apart.
+fn owners_named(input: &str, reply: &str) -> String {
+    fn actions<'a>(items: impl Iterator<Item = &'a serde_json::Value>) -> String {
+        let (count, owned) = items.fold((0, 0), |(count, owned), item| {
+            (
+                count + 1,
+                owned + usize::from(item["owner_text"].is_string()),
+            )
+        });
+        format!("{count} actions, {owned} with an owner")
+    }
+    let Ok(reply) = first_json_value::<serde_json::Value>(reply) else {
+        return String::new();
+    };
+    let written = actions(reply["action_items"].as_array().into_iter().flatten());
+    let Ok(input) = first_json_value::<serde_json::Value>(input) else {
+        return format!(", {written}");
+    };
+    match input["section_facts"].as_array() {
+        Some(facts) => {
+            let given = actions(
+                facts
+                    .iter()
+                    .filter(|fact| fact["kind"] == "action_item")
+                    .map(|fact| &fact["value"]),
+            );
+            format!(", {written} from {given}")
+        }
+        None => format!(", {written}"),
+    }
+}
+
+/// How many threads and open questions one ledger reading wrote, before its
+/// receipts are checked, so a reading that leaves out its part's questions
+/// shows.
+fn questions_written(reply: &str) -> String {
+    let Ok(reply) = first_json_value::<serde_json::Value>(reply) else {
+        return String::new();
+    };
+    let rows = |register: &str| reply[register].as_array().map_or(0, Vec::len);
+    format!(
+        ", {} threads, {} open questions",
+        rows("threads"),
+        rows("open_loops")
+    )
+}
+
+/// How many of the open questions handed to the ledger join it says a later
+/// thread answered.
+fn questions_answered(input: &str, reply: &str) -> String {
+    let (Ok(input), Ok(reply)) = (
+        first_json_value::<serde_json::Value>(input),
+        first_json_value::<serde_json::Value>(reply),
+    ) else {
+        return String::new();
+    };
+    let rows = |value: &serde_json::Value| value.as_array().map_or(0, Vec::len);
+    format!(
+        ", {} of {} open questions answered",
+        rows(&reply["answered"]),
+        rows(&input["open_questions"])
+    )
 }
 
 impl Witness {
