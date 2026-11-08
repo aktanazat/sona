@@ -3,6 +3,8 @@ use super::types::{
     PlanningCalendarItem, PlanningCalendarKind, PlanningTask, Project, ProjectDetail,
     ProjectOwnerCount, ProjectPulse, ProjectStatus, ProjectSummary, TaskStatus,
 };
+use super::work::items::{self as work_items, NewItem};
+use super::work::types::{WorkActor, WorkOwner, WorkStatus};
 use anyhow::Result;
 use chrono::{Local, TimeZone};
 use rusqlite::{
@@ -178,7 +180,7 @@ fn read_task(row: &Row<'_>) -> rusqlite::Result<PlanningTask> {
         owner_person_id: row.get(6)?,
         owner_is_self: row.get(7)?,
         owner_available: true,
-        status: row.get(8)?,
+        status: row.get::<_, WorkStatus>(8)?.legacy(),
         revision: row.get(9)?,
         created_at_ms: row.get(10)?,
         updated_at_ms: row.get(11)?,
@@ -211,7 +213,7 @@ pub(crate) fn project(conn: &Connection, id: &str) -> Result<Project> {
     .ok_or_else(|| Refusal::NotFound.into())
 }
 
-fn milestone(conn: &Connection, id: &str) -> Result<Milestone> {
+pub(crate) fn milestone(conn: &Connection, id: &str) -> Result<Milestone> {
     conn.query_row(
         &format!("SELECT {MILESTONE_COLUMNS} FROM planning_milestones WHERE id = ?1"),
         [id],
@@ -221,9 +223,13 @@ fn milestone(conn: &Connection, id: &str) -> Result<Milestone> {
     .ok_or_else(|| Refusal::NotFound.into())
 }
 
-fn task(conn: &Connection, id: &str) -> Result<PlanningTask> {
+/// A task as the project screens read it; tracker items outside any project
+/// are not tasks there.
+pub(crate) fn task(conn: &Connection, id: &str) -> Result<PlanningTask> {
     conn.query_row(
-        &format!("SELECT {TASK_COLUMNS} FROM planning_tasks WHERE id = ?1"),
+        &format!(
+            "SELECT {TASK_COLUMNS} FROM planning_tasks WHERE id = ?1 AND project_id IS NOT NULL"
+        ),
         [id],
         read_task,
     )
@@ -234,10 +240,13 @@ fn task(conn: &Connection, id: &str) -> Result<PlanningTask> {
 pub(crate) fn projects(conn: &Connection) -> Result<Vec<ProjectSummary>> {
     let mut statement = conn.prepare(
         "SELECT p.id, p.title, p.description, p.status, p.revision, p.created_at_ms, p.updated_at_ms,
-            (SELECT count(*) FROM planning_tasks t WHERE t.project_id = p.id AND t.status IN ('not_started', 'in_progress')),
-            (SELECT count(*) FROM planning_tasks t WHERE t.project_id = p.id AND t.status = 'done'),
+            (SELECT count(*) FROM planning_tasks t WHERE t.project_id = p.id AND t.archived_at_ms IS NULL
+                AND t.status IN ('triage', 'backlog', 'not_started', 'in_progress')),
+            (SELECT count(*) FROM planning_tasks t WHERE t.project_id = p.id AND t.archived_at_ms IS NULL
+                AND t.status = 'done'),
             (SELECT min(due_at_ms) FROM (
-                SELECT due_at_ms FROM planning_tasks WHERE project_id = p.id AND status IN ('not_started', 'in_progress')
+                SELECT due_at_ms FROM planning_tasks WHERE project_id = p.id AND archived_at_ms IS NULL
+                    AND status IN ('triage', 'backlog', 'not_started', 'in_progress')
                 UNION ALL
                 SELECT due_at_ms FROM planning_milestones WHERE project_id = p.id AND status IN ('not_started', 'in_progress')
             ))
@@ -291,7 +300,7 @@ pub(crate) fn records(conn: &Connection, id: &str) -> Result<ProjectRecords> {
         .query_map([id], read_milestone)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let mut statement = conn.prepare(&format!(
-        "SELECT {TASK_COLUMNS} FROM planning_tasks WHERE project_id = ?1
+        "SELECT {TASK_COLUMNS} FROM planning_tasks WHERE project_id = ?1 AND archived_at_ms IS NULL
          ORDER BY due_at_ms IS NULL, due_at_ms, created_at_ms, id"
     ))?;
     let tasks = statement
@@ -301,7 +310,8 @@ pub(crate) fn records(conn: &Connection, id: &str) -> Result<ProjectRecords> {
         "SELECT {EVIDENCE_COLUMNS} FROM planning_evidence_links WHERE
             (target_kind = 'project' AND target_id = ?1) OR
             (target_kind = 'milestone' AND target_id IN (SELECT id FROM planning_milestones WHERE project_id = ?1)) OR
-            (target_kind = 'task' AND target_id IN (SELECT id FROM planning_tasks WHERE project_id = ?1))
+            (target_kind = 'task' AND target_id IN
+                (SELECT id FROM planning_tasks WHERE project_id = ?1 AND archived_at_ms IS NULL))
          ORDER BY created_at_ms, id"
     ))?;
     let evidence = statement
@@ -313,6 +323,19 @@ pub(crate) fn records(conn: &Connection, id: &str) -> Result<ProjectRecords> {
         tasks,
         evidence,
     })
+}
+
+/// The sources linked to one task, oldest first.
+pub(crate) fn task_evidence(conn: &Connection, task_id: &str) -> Result<Vec<EvidenceLink>> {
+    let mut statement = conn.prepare_cached(&format!(
+        "SELECT {EVIDENCE_COLUMNS} FROM planning_evidence_links
+         WHERE target_kind = 'task' AND target_id = ?1
+         ORDER BY created_at_ms, id"
+    ))?;
+    let evidence = statement
+        .query_map([task_id], read_evidence)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(evidence)
 }
 
 /// The page for one project: rows the caller has resolved, and their pulse as
@@ -567,40 +590,34 @@ pub(super) fn insert_task(
     now_ms: i64,
     validate_owner: impl FnOnce(&str) -> Result<String>,
 ) -> Result<PlanningTask> {
-    let project_id = uuid(draft.project_id)?;
-    project(conn, &project_id)?;
-    let milestone_id = draft.milestone_id.map(uuid).transpose()?;
-    if let Some(id) = &milestone_id {
-        if milestone(conn, id)?.project_id != project_id {
-            return Err(Refusal::InvalidMembership.into());
-        }
-    }
     if draft.owner_is_self && draft.owner_person_id.is_some() {
         return Err(Refusal::Invalid.into());
     }
-    let owner_person_id = draft
-        .owner_person_id
-        .map(|id| validate_owner(&uuid(id)?))
-        .transpose()?;
-    let title = title(draft.title)?;
-    let id = Uuid::new_v4().to_string();
-    conn.execute(
-        "INSERT INTO planning_tasks (id, project_id, milestone_id, title, details, due_at_ms,
-            owner_person_id, owner_is_self, status, revision, created_at_ms, updated_at_ms)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'not_started', 1, ?9, ?9)",
-        params![
-            id,
-            project_id,
-            milestone_id,
-            title,
-            draft.details,
-            draft.due_at_ms,
-            owner_person_id,
-            draft.owner_is_self,
-            now_ms
-        ],
+    let owner = match draft.owner_person_id {
+        Some(id) => WorkOwner::Person {
+            person_id: validate_owner(&uuid(id)?)?,
+        },
+        None if draft.owner_is_self => WorkOwner::Myself,
+        None => WorkOwner::Nobody,
+    };
+    let item = work_items::insert(
+        conn,
+        &NewItem {
+            title: draft.title,
+            details: draft.details,
+            status: WorkStatus::NotStarted,
+            priority: 0,
+            project_id: Some(draft.project_id),
+            milestone_id: draft.milestone_id,
+            owner: &owner,
+            due_at_ms: draft.due_at_ms,
+            label_ids: &[],
+            source_loop_id: None,
+        },
+        WorkActor::Me,
+        now_ms,
     )?;
-    task(conn, &id)
+    task(conn, &item.id)
 }
 
 pub(crate) fn update_project(
@@ -674,48 +691,6 @@ pub(crate) fn update_milestone(
                 ],
             )?;
             milestone(tx, &id)
-        },
-    )
-}
-
-pub(crate) fn update_task(
-    conn: &mut Connection,
-    id: &str,
-    expected_revision: i64,
-    status: TaskStatus,
-    owner_is_self: Option<bool>,
-    operation_id: &str,
-    now_ms: i64,
-) -> Result<PlanningTask> {
-    mutate(
-        conn,
-        operation_id,
-        "update_task",
-        &(id, expected_revision, status, owner_is_self),
-        now_ms,
-        |tx| {
-            let id = uuid(id)?;
-            let next_revision = revision(expected_revision)?;
-            let current = task(tx, &id)?;
-            project(tx, &current.project_id)?;
-            if let Some(milestone_id) = &current.milestone_id {
-                if milestone(tx, milestone_id)?.project_id != current.project_id {
-                    return Err(Refusal::InvalidMembership.into());
-                }
-            }
-            if current.revision != expected_revision {
-                return Err(Refusal::StaleRevision.into());
-            }
-            let owner_is_self = owner_is_self.unwrap_or(current.owner_is_self);
-            if owner_is_self && current.owner_person_id.is_some() {
-                return Err(Refusal::Invalid.into());
-            }
-            tx.execute(
-            "UPDATE planning_tasks SET status = ?2, owner_is_self = ?3, revision = ?4, updated_at_ms = ?5
-             WHERE id = ?1 AND revision = ?6",
-            params![id, status.as_str(), owner_is_self, next_revision, now_ms, expected_revision],
-        )?;
-            task(tx, &id)
         },
     )
 }
@@ -830,7 +805,8 @@ pub(crate) fn calendar(
     }
     let mut statement = conn.prepare(
         "SELECT id, 'task', title, project_id, due_at_ms FROM planning_tasks
-            WHERE due_at_ms >= ?1 AND due_at_ms < ?2 AND status IN ('not_started', 'in_progress')
+            WHERE due_at_ms >= ?1 AND due_at_ms < ?2 AND archived_at_ms IS NULL
+              AND status IN ('triage', 'backlog', 'not_started', 'in_progress')
          UNION ALL
          SELECT id, 'milestone', title, project_id, due_at_ms FROM planning_milestones
             WHERE due_at_ms >= ?1 AND due_at_ms < ?2 AND status IN ('not_started', 'in_progress')
@@ -846,7 +822,7 @@ pub(crate) fn calendar(
                 PlanningCalendarKind::Milestone
             },
             title: row.get(2)?,
-            project_id: Some(row.get(3)?),
+            project_id: row.get(3)?,
             due_at_ms: row.get(4)?,
             meeting_id: None,
         })
@@ -861,13 +837,7 @@ mod tests {
     #[test]
     fn pulse_counts_work_due_today_as_open_not_overdue() -> Result<()> {
         let conn = Connection::open_in_memory()?;
-        for migration in [
-            super::super::schema::MIGRATION,
-            super::super::schema::QUIET_REVIEW_MIGRATION,
-            super::super::schema::MEETING_NOTE_LINK_MIGRATION,
-        ] {
-            conn.execute_batch(migration)?;
-        }
+        super::super::schema::apply_all(&conn)?;
         let now = Local::now();
         let today_ms = crate::analytics::local_days_start_utc_ms(now, 1)?;
         let project = insert_project(&conn, "Launch", None, today_ms)?;

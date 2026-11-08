@@ -2985,6 +2985,7 @@ impl MeetingProcessingService {
         if let Err(error) = store.carry_loops_forward(session_id) {
             log::warn!("Could not carry loops forward into {session_id:?}: {error:?}");
         }
+        crate::planning::work::take_in(self.app.as_ref(), store, session_id);
         // Third pass over the same landed revision: the summary and transcript
         // a reader will search for are final now, so this is where the meeting
         // half of the semantic index is built. Best effort and inline — it is

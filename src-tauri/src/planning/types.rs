@@ -63,6 +63,7 @@ macro_rules! sql_enum {
         }
     };
 }
+pub(super) use sql_enum;
 
 sql_enum!(ProjectStatus {
     Active => "active",

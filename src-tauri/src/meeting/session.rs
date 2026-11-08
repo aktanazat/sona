@@ -22,7 +22,7 @@ use super::keep_awake::MeetingKeepAwake;
 use super::ledger;
 use super::local_generator::{MeetingLocalEngineStatus, MeetingTextEngineChoice};
 use super::loop_types::{
-    MeetingLoopAssignRequest, MeetingLoopMutationResult, MeetingLoopReopenRequest,
+    MeetingLoopAssignRequest, MeetingLoopId, MeetingLoopMutationResult, MeetingLoopReopenRequest,
     MeetingLoopResolveRequest, MeetingLoopsResult,
 };
 use super::people_types::{
@@ -3486,12 +3486,13 @@ impl MeetingSessionManager {
         request: MeetingLoopResolveRequest,
     ) -> Result<MeetingLoopMutationResult, MeetingCommandError> {
         let session_id = request.loop_id.session_id();
-        let result = self
-            .store()
-            .await?
+        let loop_id = request.loop_id.clone();
+        let store = self.store().await?;
+        let result = store
             .resolve_loop(request, actor, utc_now_ms())
             .map_err(map_store_error)?;
         self.emit_artifact_changed(session_id, result.loops.revision);
+        self.follow_tracker(&store, &loop_id, &result.receipt);
         Ok(result)
     }
 
@@ -3500,13 +3501,52 @@ impl MeetingSessionManager {
         request: MeetingLoopReopenRequest,
     ) -> Result<MeetingLoopMutationResult, MeetingCommandError> {
         let session_id = request.loop_id.session_id();
-        let result = self
-            .store()
-            .await?
+        let loop_id = request.loop_id.clone();
+        let store = self.store().await?;
+        let result = store
             .reopen_loop(request, utc_now_ms())
             .map_err(map_store_error)?;
         self.emit_artifact_changed(session_id, result.loops.revision);
+        self.follow_tracker(&store, &loop_id, &result.receipt);
         Ok(result)
+    }
+
+    /// Moves the tracker item behind a loop the person just closed or
+    /// reopened, and refreshes every other meeting whose loop moved with it.
+    fn follow_tracker(
+        &self,
+        store: &MeetingStore,
+        loop_id: &MeetingLoopId,
+        receipt: &OperationReceipt,
+    ) {
+        let Some(app) = &self.app else { return };
+        if receipt.result != OperationResult::Committed {
+            return;
+        }
+        let moved = crate::planning::work::follow_loop(app, store, loop_id);
+        self.announce_loops_moved_in(store, &moved);
+    }
+
+    /// Tells the meeting pages whose loops the tracker moved.
+    pub(crate) async fn loops_moved(&self, loops: &[MeetingLoopId]) {
+        match self.store().await {
+            Ok(store) => self.announce_loops_moved_in(&store, loops),
+            Err(error) => log::warn!("Moved meeting loops could not be announced: {error:?}"),
+        }
+    }
+
+    fn announce_loops_moved_in(&self, store: &MeetingStore, loops: &[MeetingLoopId]) {
+        let mut sessions = Vec::new();
+        for session_id in loops.iter().filter_map(MeetingLoopId::session_id) {
+            if sessions.contains(&session_id) {
+                continue;
+            }
+            sessions.push(session_id);
+            match store.meeting_loops(session_id) {
+                Ok(read) => self.emit_artifact_changed(Some(session_id), read.revision),
+                Err(error) => log::warn!("Moved meeting loops could not be read: {error:?}"),
+            }
+        }
     }
 
     pub async fn loop_assign(

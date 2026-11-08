@@ -228,7 +228,8 @@ fn target(history: &Connection, kind: EvidenceTargetKind, id: &str) -> Result<Ta
             "SELECT id, project_id, revision, title, NULL FROM planning_milestones WHERE id = ?1"
         }
         EvidenceTargetKind::Task => {
-            "SELECT id, project_id, revision, title, details FROM planning_tasks WHERE id = ?1"
+            "SELECT id, project_id, revision, title, details FROM planning_tasks
+             WHERE id = ?1 AND project_id IS NOT NULL"
         }
     };
     let value = history
@@ -260,7 +261,8 @@ pub(super) fn targets(history: &Connection, project_id: &str) -> Result<Vec<Targ
             WHERE project_id = ?1 AND status IN ('not_started', 'in_progress')
          UNION ALL
          SELECT 'task', id, project_id, revision, title, details FROM planning_tasks
-            WHERE project_id = ?1 AND status IN ('not_started', 'in_progress')
+            WHERE project_id = ?1 AND archived_at_ms IS NULL
+              AND status IN ('triage', 'backlog', 'not_started', 'in_progress')
          ORDER BY 1, 2",
     )?;
     let rows = statement.query_map([project_id], |row| {

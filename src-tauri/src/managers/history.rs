@@ -272,6 +272,7 @@ pub(crate) static MIGRATIONS: &[M] = &[
         "CREATE INDEX upstream_import_history_source_row
             ON upstream_import_history(source_history_id, source_row_sha256);",
     ),
+    M::up(crate::planning::WORK_MIGRATION),
 ];
 
 const MAX_HISTORY_PAGE_SIZE: usize = 100;

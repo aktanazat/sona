@@ -703,6 +703,7 @@ fn initialize_core_logic(app_handle: &AppHandle, runtime: StartupRuntime) -> any
     // Recovery runs asynchronously after the managers have been registered.
     let recovery_meetings = Arc::clone(&meeting_manager);
     let recovery_cloud = Arc::clone(&cloud_runtime);
+    let recovery_app = app_handle.clone();
     tauri::async_runtime::spawn(async move {
         let recovered = {
             let _span = launch_trace::span("recovery_sweep");
@@ -717,6 +718,7 @@ fn initialize_core_logic(app_handle: &AppHandle, runtime: StartupRuntime) -> any
         recovery_cloud.start();
         recovery_meetings.start_retention_sweeper();
         recovery_meetings.start_recovery_reprocess(recovered);
+        planning::work::settle_at_startup(&recovery_app, &recovery_meetings).await;
     });
     match agent_bridge::AgentBridgeManager::new(app_handle) {
         Ok(manager) => {
@@ -2043,6 +2045,25 @@ pub fn run(cli_args: CliArgs) {
             planning::quiet::planning_quiet_review_grants,
             planning::quiet::planning_quiet_review_run,
             planning::quiet::planning_quiet_review_cancel,
+            planning::work::work_list,
+            planning::work::work_item,
+            planning::work::work_create,
+            planning::work::work_update,
+            planning::work::work_bulk_update,
+            planning::work::work_archive,
+            planning::work::work_restore,
+            planning::work::work_triage_accept,
+            planning::work::work_triage_decline,
+            planning::work::work_mark_duplicate,
+            planning::work::work_relation_add,
+            planning::work::work_relation_remove,
+            planning::work::work_labels,
+            planning::work::work_label_save,
+            planning::work::work_label_delete,
+            planning::work::work_views,
+            planning::work::work_view_save,
+            planning::work::work_view_delete,
+            planning::work::work_counts,
         ])
         .events(collect_events![
             chat_voice::ChatVoiceEvent,
@@ -2088,6 +2109,7 @@ pub fn run(cli_args: CliArgs) {
             query::QueryLinkRequestedEvent,
             scratchpad::ScratchpadChangedEvent,
             planning::PlanningChangedEvent,
+            planning::work::WorkChanged,
         ]);
 
     let invoke_handler = specta_builder.invoke_handler();

@@ -4,6 +4,7 @@ use super::sources;
 use super::types::{
     EvidenceLink, EvidenceSourceKind, EvidenceTargetKind, PlanningTask, ProjectStatus, TaskStatus,
 };
+use super::work::types::WorkStatus;
 use crate::managers::history::HistoryManager;
 use crate::meeting::loop_types::MeetingLoopId;
 use crate::meeting::session::MeetingSessionManager;
@@ -145,7 +146,7 @@ fn selected_tasks(
          FROM planning_tasks t
          JOIN planning_projects p ON p.id = t.project_id
          LEFT JOIN planning_milestones m ON m.id = t.milestone_id AND m.project_id = t.project_id
-         WHERE t.owner_person_id = ?1 AND t.owner_is_self = 0",
+         WHERE t.owner_person_id = ?1 AND t.owner_is_self = 0 AND t.archived_at_ms IS NULL",
     )?;
     let mut tasks = Vec::new();
     for identity in identities {
@@ -189,7 +190,7 @@ fn read_task(row: &Row<'_>, person_id: &str) -> rusqlite::Result<PersonWorkTask>
             owner_person_id: Some(person_id.to_owned()),
             owner_is_self: row.get(7)?,
             owner_available: true,
-            status: row.get(8)?,
+            status: row.get::<_, WorkStatus>(8)?.legacy(),
             revision: row.get(9)?,
             created_at_ms: row.get(10)?,
             updated_at_ms: row.get(11)?,
@@ -441,15 +442,7 @@ mod tests {
             .expect("save the retained meeting commitment");
 
         let mut history = Connection::open_in_memory().expect("history");
-        history
-            .execute_batch(super::super::schema::MIGRATION)
-            .expect("projects migration");
-        history
-            .execute_batch(super::super::schema::QUIET_REVIEW_MIGRATION)
-            .expect("nighttime review migration");
-        history
-            .execute_batch(super::super::schema::MEETING_NOTE_LINK_MIGRATION)
-            .expect("meeting-note identity migration");
+        super::super::schema::apply_all(&history).expect("planning migrations");
         let loop_id =
             MeetingLoopId::derive(session_id, MeetingLoopKind::Commitment, commitment_text);
         meetings
