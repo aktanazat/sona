@@ -10,6 +10,7 @@ enum RecorderNotice {
     case microphoneOff
     case microphoneUnavailable
     case interrupted
+    case activityClosed
     case notSaved
 
     var key: LocalizedStringKey {
@@ -17,10 +18,14 @@ enum RecorderNotice {
         case .microphoneOff: return "status.microphoneOff"
         case .microphoneUnavailable: return "status.microphoneUnavailable"
         case .interrupted: return "status.interrupted"
+        case .activityClosed: return "status.activityClosed"
         case .notSaved: return "status.notSaved"
         }
     }
 }
+
+/// The system refused the Live Activity a recording started from a press needs.
+struct LiveActivityRefused: Error {}
 
 /// Recent input loudness, newest last, read from buffers the capture taps already hold.
 @MainActor
@@ -110,59 +115,102 @@ final class PhoneRecorder: ObservableObject {
         AVAudioApplication.shared.recordPermission == .granted
     }
 
-    func start() throws {
+    /// A recording started by a press outside the app runs only while a Live Activity
+    /// shows it, so that start fails when the system refuses one.
+    func start(requiringActivity: Bool = false) throws {
         guard !isRecording else { return }
-        let session = AVAudioSession.sharedInstance()
-        try session.setCategory(.record, mode: .default)
-        try session.setActive(true, options: [])
-        let input = engine.inputNode
-        let format = input.inputFormat(forBus: 0)
-        let url = FileManager.default.temporaryDirectory
-            .appending(path: "capture-\(UUID().uuidString).pcm")
-        let resampler = try PCMResampler(url: url, inputFormat: format)
-        self.resampler = resampler
-        /* The tap runs on a render thread and is the only writer until `stop()` removes
-         * it, which is also what drains the last callback before `finish()` reads. */
-        let meter = self.meter
-        input.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buffer, _ in
-            try? resampler.append(buffer)
-            let level = InputLevelMeter.level(of: buffer)
-            Task { @MainActor in
-                guard self?.isRecording == true else { return }
-                meter.push(level)
-            }
-        }
-        engine.prepare()
-        try engine.start()
         let startedAt = Date()
+        let activity = try? Activity.request(
+            attributes: RecordingActivityAttributes(startedAt: startedAt),
+            content: activityContent(bookmarks: 0)
+        )
+        if requiringActivity && activity == nil { throw LiveActivityRefused() }
+        do {
+            let session = AVAudioSession.sharedInstance()
+            try session.setCategory(.record, mode: .default)
+            try session.setActive(true, options: [])
+            let input = engine.inputNode
+            let format = input.inputFormat(forBus: 0)
+            let url = FileManager.default.temporaryDirectory
+                .appending(path: "capture-\(UUID().uuidString).pcm")
+            let resampler = try PCMResampler(url: url, inputFormat: format)
+            self.resampler = resampler
+            /* The tap runs on a render thread and is the only writer until `stop()` removes
+             * it, which is also what drains the last callback before `finish()` reads. */
+            let meter = self.meter
+            input.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buffer, _ in
+                try? resampler.append(buffer)
+                let level = InputLevelMeter.level(of: buffer)
+                Task { @MainActor in
+                    guard self?.isRecording == true else { return }
+                    meter.push(level)
+                }
+            }
+            engine.prepare()
+            try engine.start()
+        } catch {
+            if let activity { Task { await activity.end(nil, dismissalPolicy: .immediate) } }
+            throw error
+        }
         self.startedAt = startedAt
         elapsed = 0
         bookmarks = []
         isRecording = true
         notice = nil
+        self.activity = activity
+        if requiringActivity, let activity { stopWhenClosed(activity) }
         ticker = Task { [weak self] in
+            var renewedAt = startedAt
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 200_000_000)
                 guard let self, let startedAt = self.startedAt else { return }
-                self.elapsed = Date().timeIntervalSince(startedAt)
+                let now = Date()
+                self.elapsed = now.timeIntervalSince(startedAt)
+                if now.timeIntervalSince(renewedAt) >= Self.activityRenewal {
+                    renewedAt = now
+                    self.updateActivity()
+                }
             }
         }
-        activity = try? Activity.request(
-            attributes: RecordingActivityAttributes(startedAt: startedAt),
-            content: ActivityContent(state: .init(bookmarks: 0), staleDate: nil)
-        )
         RecordingControlState.set(true)
+    }
+
+    /* A Live Activity outlives the process that started it, so it goes stale shortly
+     * after the recording stops renewing it, as it does when Sona crashes or is killed.
+     * The system draws it stale about two minutes after the last update whatever the
+     * stale date says (measured on the simulator), so a shorter lease buys nothing. */
+    private static let activityLease: TimeInterval = 60
+    private static let activityRenewal: TimeInterval = 30
+
+    private func activityContent(bookmarks: Int) -> ActivityContent<RecordingActivityAttributes.ContentState> {
+        ActivityContent(
+            state: RecordingActivityAttributes.ContentState(bookmarks: bookmarks),
+            staleDate: Date().addingTimeInterval(Self.activityLease)
+        )
+    }
+
+    private func updateActivity() {
+        guard let activity else { return }
+        let content = activityContent(bookmarks: bookmarks.count)
+        Task { await activity.update(content) }
+    }
+
+    private func stopWhenClosed(_ activity: Activity<RecordingActivityAttributes>) {
+        Task { [weak self] in
+            for await state in activity.activityStateUpdates where state == .dismissed || state == .ended {
+                guard let self, self.isRecording, self.activity?.id == activity.id else { return }
+                self.notice = .activityClosed
+                self.onInterrupted?()
+                return
+            }
+        }
     }
 
     /// Bookmark this moment of the running recording.
     func bookmark() {
         guard isRecording, let startedAt else { return }
         bookmarks.append(Int64(max(0, Date().timeIntervalSince(startedAt)) * 1000))
-        let content = ActivityContent(
-            state: RecordingActivityAttributes.ContentState(bookmarks: bookmarks.count),
-            staleDate: nil
-        )
-        Task { [activity] in await activity?.update(content) }
+        updateActivity()
     }
 
     /// Stop and hand over the finished bytes with the wall-clock start of the capture and

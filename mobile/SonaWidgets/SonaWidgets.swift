@@ -41,47 +41,66 @@ struct RecordingLiveActivity: Widget {
         ActivityConfiguration(for: RecordingActivityAttributes.self) { context in
             HStack(spacing: 12) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Label("status.recording", systemImage: "waveform")
+                    Status(isStale: context.isStale)
                         .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(Theme.recording)
-                    Clock(startedAt: context.attributes.startedAt)
-                        .font(.title.weight(.semibold))
+                    if !context.isStale {
+                        Clock(startedAt: context.attributes.startedAt)
+                            .font(.title.weight(.semibold))
+                    }
                     Bookmarked(count: context.state.bookmarks)
                 }
                 Spacer()
-                BookmarkButton()
+                if !context.isStale { BookmarkButton() }
             }
             .padding()
         } dynamicIsland: { context in
             DynamicIsland {
                 DynamicIslandExpandedRegion(.leading) {
-                    Label("status.recording", systemImage: "waveform")
+                    Status(isStale: context.isStale)
                         .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(Theme.recording)
                 }
                 DynamicIslandExpandedRegion(.trailing) {
-                    Clock(startedAt: context.attributes.startedAt)
-                        .font(.subheadline.weight(.semibold))
-                        .multilineTextAlignment(.trailing)
+                    if !context.isStale {
+                        Clock(startedAt: context.attributes.startedAt)
+                            .font(.subheadline.weight(.semibold))
+                            .multilineTextAlignment(.trailing)
+                    }
                 }
                 DynamicIslandExpandedRegion(.bottom) {
                     HStack {
                         Bookmarked(count: context.state.bookmarks)
                         Spacer()
-                        BookmarkButton()
+                        if !context.isStale { BookmarkButton() }
                     }
                 }
             } compactLeading: {
-                Image(systemName: "waveform")
-                    .foregroundStyle(Theme.recording)
+                Image(systemName: context.isStale ? "stop.circle" : "waveform")
+                    .foregroundStyle(context.isStale ? Color.secondary : Theme.recording)
             } compactTrailing: {
-                Clock(startedAt: context.attributes.startedAt)
-                    .frame(maxWidth: 52)
+                if !context.isStale {
+                    Clock(startedAt: context.attributes.startedAt)
+                        .frame(maxWidth: 52)
+                }
             } minimal: {
                 Image(systemName: "waveform")
                     .foregroundStyle(Theme.recording)
             }
             .keylineTint(Theme.recording)
+        }
+    }
+}
+
+/// A stale activity means the recording stopped renewing it, so it no longer runs.
+private struct Status: View {
+    let isStale: Bool
+
+    var body: some View {
+        if isStale {
+            Label("status.stopped", systemImage: "stop.circle")
+                .foregroundStyle(.secondary)
+        } else {
+            Label("status.recording", systemImage: "waveform")
+                .foregroundStyle(Theme.recording)
         }
     }
 }

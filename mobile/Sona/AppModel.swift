@@ -293,21 +293,29 @@ final class AppModel: NSObject, ObservableObject {
         }
     }
 
+    var isRecording: Bool { startingRecording || recorder.isRecording }
+
     /// A press outside the app records without bringing it up only when nothing has to
     /// be asked first. The system ends a recording started that way unless a Live
     /// Activity shows it, so Live Activities have to be on too.
     func recordWithoutAsking() -> Bool {
-        if startingRecording || recorder.isRecording { return true }
+        if isRecording { return true }
         guard consentAccepted, PhoneRecorder.hasPermission,
               ActivityAuthorizationInfo().areActivitiesEnabled
         else { return false }
         takeMicrophoneFromDictation()
-        beginRecording(during: nil)
-        if recorder.isRecording { page = .recording }
-        return recorder.isRecording
+        guard beginRecording(during: nil, requiringActivity: true) else { return false }
+        page = .recording
+        return true
     }
 
+    /// The system ends Sona when a recording intent leaves the microphone on without a
+    /// Live Activity, so with Live Activities off a press only opens the record screen.
     func openRecording() {
+        guard ActivityAuthorizationInfo().areActivitiesEnabled else {
+            page = .recording
+            return
+        }
         handle(DictationLink.meetingURL)
     }
 
@@ -324,14 +332,22 @@ final class AppModel: NSObject, ObservableObject {
         keyboardReturn = false
     }
 
-    private func beginRecording(during event: DeviceRecordingManifest.CalendarEvent?) {
+    @discardableResult
+    private func beginRecording(
+        during event: DeviceRecordingManifest.CalendarEvent?,
+        requiringActivity: Bool = false
+    ) -> Bool {
         do {
-            try recorder.start()
+            try recorder.start(requiringActivity: requiringActivity)
             recordingEvent = event
             readPlace(unless: event)
             AppModel.tap()
+            return true
+        } catch is LiveActivityRefused {
+            return false
         } catch {
             recorder.notice = .microphoneUnavailable
+            return false
         }
     }
 
@@ -369,6 +385,9 @@ final class AppModel: NSObject, ObservableObject {
             return
         }
         AppModel.tap()
+        /* A stop pressed with the phone locked has turned the audio session off, so
+         * nothing else keeps Sona running until the recording is queued. */
+        let saving = UIApplication.shared.beginBackgroundTask(withName: "Save recording")
         Task {
             let kept = await enqueue(
                 audio: finished.audio,
@@ -384,6 +403,8 @@ final class AppModel: NSObject, ObservableObject {
                 bookmarkOffsetsMs: finished.bookmarkOffsetsMs,
                 placeReading: place
             )
+            if saving != .invalid { UIApplication.shared.endBackgroundTask(saving) }
+            await drain()
             if kept && !recorder.isRecording && meetingNotes == notes && meetingTitle.trimmingCharacters(in: .whitespacesAndNewlines) == chosenTitle {
                 meetingTitle = ""
                 meetingNotes = ""
@@ -409,7 +430,6 @@ final class AppModel: NSObject, ObservableObject {
                 calendarEvent: calendarEvent, bookmarkOffsetsMs: bookmarkOffsetsMs,
                 placeReading: placeReading
             )
-            await drain()
             return true
         } catch { library.error = error.localizedDescription; return false }
     }
@@ -423,8 +443,10 @@ final class AppModel: NSObject, ObservableObject {
             let audio = try await Task.detached {
                 try transcodeToCaptureFormat(source: url, destination: destination)
             }.value
-            return await enqueue(audio: audio, recordedAtUtcMs: Int64(recordedAt.timeIntervalSince1970 * 1000),
-                                 title: title ?? url.deletingPathExtension().lastPathComponent)
+            let kept = await enqueue(audio: audio, recordedAtUtcMs: Int64(recordedAt.timeIntervalSince1970 * 1000),
+                                     title: title ?? url.deletingPathExtension().lastPathComponent)
+            await drain()
+            return kept
         } catch { library.error = error.localizedDescription; return false }
     }
 
