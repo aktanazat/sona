@@ -1,3 +1,4 @@
+use super::ledger;
 use super::processing::{MeetingTextGenerationError, MeetingTextGenerator, ReplyShape};
 use crate::llm_client::{
     probe_loopback_model_info, send_loopback_chat_completion, LoopbackChatCompletionError,
@@ -320,7 +321,12 @@ impl MeetingTextGenerator for LocalEndpointGenerator {
         }
         .unwrap_or_else(|| evidence.to_string());
         let reply = match shape.wire_schema() {
-            Some((name, schema)) => LoopbackReply::Schema(name, schema),
+            Some((name, schema)) => LoopbackReply::Schema {
+                name,
+                schema,
+                abandon: matches!(shape, ReplyShape::MeetingLedger)
+                    .then_some(ledger::runs_away as fn(&str) -> bool),
+            },
             None if shape.is_json() => LoopbackReply::Json,
             None => LoopbackReply::Text,
         };
@@ -583,6 +589,7 @@ mod tests {
         model: String,
         max_tokens: i32,
         reasoning_effort: String,
+        stream: bool,
         response_format: Option<ResponseFormat>,
         messages: Vec<RequestMessage>,
     }
@@ -613,22 +620,31 @@ mod tests {
 
     #[test]
     fn sends_required_json_request_and_strips_fences() {
-        for (shape, kind, schema) in [
-            (ReplyShape::Json, "json_object", None),
+        let whole = r#"{"choices":[{"message":{"content":"```json\n{\"headline\":\"done\"}\n```"},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":4}}"#;
+        let streamed = concat!(
+            "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"```json\\n{\\\"headline\\\":\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"\\\"done\\\"}\\n```\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":4}}\n\n",
+            "data: [DONE]\n\n",
+        );
+        for (shape, kind, schema, reply, stream) in [
+            (ReplyShape::Json, "json_object", None, whole, false),
             (
                 ReplyShape::MeetingNotes,
                 "json_schema",
                 Some("meeting_notes"),
+                whole,
+                false,
             ),
             (
                 ReplyShape::MeetingLedger,
                 "json_schema",
                 Some("meeting_ledger"),
+                streamed,
+                true,
             ),
         ] {
-            let fixture = fixture_server(vec![
-                r#"{"choices":[{"message":{"content":"```json\n{\"headline\":\"done\"}\n```"},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":4}}"#.to_string(),
-            ]);
+            let fixture = fixture_server(vec![reply.to_string()]);
             let generator =
                 LocalEndpointGenerator::new(&fixture.base_url, "fixture-model").expect("generator");
             let answer = generator
@@ -639,6 +655,7 @@ mod tests {
             assert_eq!(body.model, "fixture-model");
             assert_eq!(body.max_tokens, 42);
             assert_eq!(body.reasoning_effort, "none");
+            assert_eq!(body.stream, stream);
             let format = body.response_format.expect("a response format");
             assert_eq!(format.kind, kind);
             assert_eq!(
@@ -667,6 +684,43 @@ mod tests {
             }
             assert_eq!(body.messages[0].role, "system");
             assert_eq!(body.messages[1].content, "evidence");
+            fixture.handle.join().expect("fixture thread");
+        }
+    }
+
+    #[test]
+    fn a_ledger_reply_repeating_one_topic_is_cut_short() {
+        let reply = |topics: &[&str]| {
+            let threads: Vec<String> = topics
+                .iter()
+                .map(|topic| format!(r#"{{"topic":"{topic}","state":"discussed","substantive":true,"owner":null,"receipt":{{"quote":"We said so.","speaker":null,"citations":[]}}}}"#))
+                .collect();
+            format!(r#"{{"threads":[{}],"commitments":[]}}"#, threads.join(","))
+        };
+        let streamed = |content: &str| {
+            let mut body: String = content
+                .as_bytes()
+                .chunks(32)
+                .map(|piece| {
+                    let piece = std::str::from_utf8(piece).expect("ascii reply");
+                    let delta = serde_json::json!({"choices": [{"delta": {"content": piece}}]});
+                    format!("data: {delta}\n\n")
+                })
+                .collect();
+            body.push_str("data: [DONE]\n\n");
+            body
+        };
+        let copying = reply(&["Budget"; 30]);
+        let changing = reply(&["Budget", "Hiring"].repeat(15));
+        for (whole, cut) in [(copying, true), (changing, false)] {
+            let fixture = fixture_server(vec![streamed(&whole)]);
+            let generator =
+                LocalEndpointGenerator::new(&fixture.base_url, "fixture-model").expect("generator");
+            let answer = generator
+                .generate("system", "evidence", 4096, ReplyShape::MeetingLedger)
+                .expect("generation");
+            assert!(whole.starts_with(&answer));
+            assert_eq!(answer.len() < whole.len(), cut);
             fixture.handle.join().expect("fixture thread");
         }
     }

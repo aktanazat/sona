@@ -499,6 +499,47 @@ pub(crate) fn degrade_unverified(ledger: &mut MeetingLedger, folded_haystack: &s
     };
 }
 
+/// How many threads in a row under one topic make a ledger reply being written
+/// a copy of its transcript. The local model has written one thread per line
+/// of a part, 27 in a row under its opening topic, until its answer ran out;
+/// no finished reply has given even two threads in a row one topic.
+const RUNAWAY_TOPIC_RUN: usize = 3;
+
+/// Whether a ledger reply still being written has turned into a copy of its
+/// transcript, so the rest of it is time spent on an answer that will be cut
+/// at its allowance and read again in halves.
+pub(crate) fn runs_away(reply: &str) -> bool {
+    let mut previous = None;
+    let mut run = 0;
+    for topic in reply.split("\"topic\"").skip(1).filter_map(string_value) {
+        run = if previous == Some(topic) { run + 1 } else { 1 };
+        if run == RUNAWAY_TOPIC_RUN {
+            return true;
+        }
+        previous = Some(topic);
+    }
+    false
+}
+
+/// The JSON string after a key's colon, as written, or `None` while it is
+/// still being written.
+fn string_value(after_key: &str) -> Option<&str> {
+    let value = after_key
+        .trim_start()
+        .strip_prefix(':')?
+        .trim_start()
+        .strip_prefix('"')?;
+    let mut escaped = false;
+    for (index, character) in value.char_indices() {
+        match character {
+            '"' if !escaped => return Some(&value[..index]),
+            '\\' => escaped = !escaped,
+            _ => escaped = false,
+        }
+    }
+    None
+}
+
 // ── the page ────────────────────────────────────────────────────────────────
 //
 // Upstream's field names, because the template's reader is upstream's and
