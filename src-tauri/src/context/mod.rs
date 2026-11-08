@@ -166,6 +166,47 @@ pub(crate) fn capture_frontmost_website_host() -> WebsiteHostCapture {
     }
 }
 
+/// The window in front, as a meeting's list of open windows keeps it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct FrontWindow {
+    pub(crate) app_name: Option<String>,
+    pub(crate) bundle_id: Option<String>,
+    pub(crate) title: Option<String>,
+    /// The file the window shows, as a path.
+    pub(crate) document_path: Option<String>,
+    /// The page's full address, read only when full addresses are allowed.
+    pub(crate) url: Option<String>,
+    pub(crate) host: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum FrontWindowRead {
+    Window(FrontWindow),
+    /// A password field has focus. The window is named only so its earlier
+    /// sightings can be forgotten.
+    PasswordField(FrontWindow),
+    PrivateWindow,
+    /// Sona's own window, a window with nothing to name it by, or one whose
+    /// focused control could not be read.
+    Nothing,
+    AccessibilityDenied,
+}
+
+/// Reads the window in front and what it shows. Sona's own windows are
+/// never read.
+pub(crate) fn read_front_window(keep_full_url: bool) -> FrontWindowRead {
+    #[cfg(target_os = "macos")]
+    {
+        macos::front_window(keep_full_url)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = keep_full_url;
+        FrontWindowRead::Nothing
+    }
+}
+
 /// The outcome of an explicit one-shot selection read.
 ///
 /// This is deliberately not a [`ContextPolicy`] source: ambient context is what

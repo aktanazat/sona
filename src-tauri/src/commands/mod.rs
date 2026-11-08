@@ -17,6 +17,7 @@ pub mod local_cleanup;
 pub mod loops;
 pub mod media_import;
 pub mod meeting;
+pub mod meeting_open_windows;
 pub mod meeting_snapshots;
 pub mod models;
 pub mod onboarding;

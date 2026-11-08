@@ -53,7 +53,9 @@ impl MeetingEvidenceFlags {
 
 /// Content-free normalized detector output. The detector may inspect transient
 /// platform metadata while normalizing a signal, but no title, URL, attendee,
-/// calendar, or transcript data enters this type.
+/// calendar, or transcript data enters this type. The windows in front while a
+/// meeting records are a separate record, kept behind their own setting
+/// (`meeting::open_windows`), and never feed detection.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
 pub struct MeetingSuggestionSignal {
     pub provider: MeetingProvider,

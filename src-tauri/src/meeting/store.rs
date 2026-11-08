@@ -51,6 +51,9 @@ pub(crate) mod memory_index;
 pub(crate) mod note_evidence;
 #[cfg(test)]
 mod note_evidence_tests;
+mod open_windows;
+#[cfg(test)]
+mod open_windows_tests;
 mod people;
 mod prep;
 pub(crate) mod privacy_inventory;
@@ -1585,6 +1588,7 @@ static MIGRATIONS: &[M] = &[
     M::up(include_str!("store/first_met.sql")),
     M::up(include_str!("store/meeting_maybe.sql")),
     M::up(include_str!("store/meeting_documents.sql")),
+    M::up(include_str!("store/open_windows.sql")),
 ];
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StoreError {
