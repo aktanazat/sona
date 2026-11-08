@@ -32,7 +32,7 @@ enum ConversationKind: String, Codable, CaseIterable, Identifiable {
     }
 }
 
-private struct ConversationLocation: Codable, Equatable {
+struct ConversationLocation: Codable, Equatable {
     let name: String
     let latitude: Double
     let longitude: Double
@@ -383,6 +383,14 @@ private struct ConversationContextEditor: View {
 private func placeFromMail(core: Core, sessionId: String, openMail: Bool) async throws -> MailHotelLookup {
     try await core.request(
         "conversation_place_from_mail", ["sessionId": JSONValue.string(sessionId), "openMail": .bool(openMail)])
+}
+
+/// Saves `place` as where the recording happened and keeps the kind it has.
+func saveConversationPlace(core: Core, sessionId: String, place: ConversationLocation) async throws {
+    let context: ConversationContext = try await core.request("conversation_context", ["sessionId": sessionId])
+    let request = ContextUpdate(
+        sessionId: sessionId, expectedRevision: context.revision, kind: context.kind, location: place)
+    try await core.request("conversation_context_update", ["request": try JSONValue(request)])
 }
 
 private struct ContextUpdate: Encodable {

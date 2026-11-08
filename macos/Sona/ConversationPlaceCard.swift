@@ -13,6 +13,7 @@ struct ConversationPlaceSession: Decodable, Identifiable {
     let title: String
     let startedAtUtcMs: Int64?
     let location: ConversationPlace
+    let people: [String]
     var id: String { sessionId }
 }
 

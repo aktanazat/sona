@@ -26,6 +26,8 @@ struct MeetingReviewView: View {
                     if store.editable {
                         ContextSuggestionsView(
                             sessionId: snapshot.session.sessionId, revision: snapshot.session.revision)
+                        ReviewPlaceOffer(places: model.live.places,
+                            sessionId: snapshot.session.sessionId, revision: snapshot.session.revision)
                     }
                     ConversationPlaceCard(core: model.core, store: store,
                         sessionId: snapshot.session.sessionId, revision: snapshot.session.revision)

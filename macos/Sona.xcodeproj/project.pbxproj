@@ -343,6 +343,8 @@
 				INFOPLIST_KEY_NSCalendarsUsageDescription = "Read upcoming events and create calendar events you approve.";
 				INFOPLIST_KEY_NSAppleEventsUsageDescription = "Read recent email only when you enable it, and open Mail drafts you approve. Sona never sends mail.";
 				INFOPLIST_KEY_NSCameraUsageDescription = "Sona Camera passes your chosen camera to your call app with an optional recording label.";
+				INFOPLIST_KEY_NSLocationUsageDescription = "Sona reads where you are once when a recording starts, to suggest the place. Only a place you choose is saved.";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Sona reads where you are once when a recording starts, to suggest the place. Only a place you choose is saved.";
 				INFOPLIST_KEY_NSSystemExtensionUsageDescription = "Make Sona Camera available in your call app.";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -379,6 +381,8 @@
 				INFOPLIST_KEY_NSCalendarsUsageDescription = "Read upcoming events and create calendar events you approve.";
 				INFOPLIST_KEY_NSAppleEventsUsageDescription = "Read recent email only when you enable it, and open Mail drafts you approve. Sona never sends mail.";
 				INFOPLIST_KEY_NSCameraUsageDescription = "Sona Camera passes your chosen camera to your call app with an optional recording label.";
+				INFOPLIST_KEY_NSLocationUsageDescription = "Sona reads where you are once when a recording starts, to suggest the place. Only a place you choose is saved.";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Sona reads where you are once when a recording starts, to suggest the place. Only a place you choose is saved.";
 				INFOPLIST_KEY_NSSystemExtensionUsageDescription = "Make Sona Camera available in your call app.";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
