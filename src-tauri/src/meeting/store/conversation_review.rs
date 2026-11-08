@@ -325,11 +325,13 @@ impl MeetingStore {
             if !candidate.is_valid() || distance_meters(&location, &candidate) > SAME_PLACE_METERS {
                 continue;
             }
+            let nearby = MeetingSessionId::from_uuid(parse_uuid(&row.get::<_, String>(0)?)?);
             sessions.push(ConversationPlaceSession {
-                session_id: MeetingSessionId::from_uuid(parse_uuid(&row.get::<_, String>(0)?)?),
+                session_id: nearby,
                 title: row.get(1)?,
                 started_at_utc_ms: row.get(2)?,
                 location: candidate,
+                people: super::evening::confirmed_names_in(&connection, nearby)?,
             });
         }
         Ok(ConversationPlaceReview {

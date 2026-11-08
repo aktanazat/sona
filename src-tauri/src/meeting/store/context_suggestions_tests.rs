@@ -1,6 +1,6 @@
-use super::workflow_core_tests::store;
+use super::workflow_core_tests::{link, person, store};
 use super::{CalendarEventSource, MeetingStore, StoreError};
-use crate::meeting::context::{ConversationKind, ConversationLocation};
+use crate::meeting::context::{ConversationContextUpdate, ConversationKind, ConversationLocation};
 use crate::meeting::detection::machine::CalendarEventSummary;
 use crate::meeting::evening::{FilingReason, FilingSuggestion, FilingTarget};
 use crate::meeting::types::MeetingSessionId;
@@ -234,4 +234,47 @@ fn an_invite_pin_is_offered_as_the_place() {
         .context_suggestions(session_id, &[], None, NOW)
         .unwrap()
         .is_empty());
+}
+
+/* An earlier meeting within 100 m of the place he says he is at was here
+ * before, named by the people confirmed in it; a maybe names no one. One
+ * 150 m off was somewhere else. */
+#[test]
+fn here_before_is_a_meeting_within_100_m_named_by_its_people() {
+    let (_directory, store) = store();
+    let at = |session_id, meters_north: f64| {
+        let current = store.conversation_context(session_id).unwrap();
+        store
+            .update_conversation_context(ConversationContextUpdate {
+                session_id,
+                expected_revision: current.revision,
+                kind: current.kind,
+                location: Some(ConversationLocation {
+                    name: "Hyatt Regency San Francisco".to_string(),
+                    latitude: 37.79425 + meters_north / 111_195.0,
+                    longitude: -122.39556,
+                }),
+            })
+            .unwrap();
+    };
+    let lobby = recording(&store, &[], &[]).unwrap();
+    let before = recording(&store, &[], &[]).unwrap();
+    let across_the_street = recording(&store, &[], &[]).unwrap();
+    at(lobby, 0.0);
+    at(before, 90.0);
+    at(across_the_street, 150.0);
+    let dana = person(&store, "Dana Reyes", &[], &[]);
+    let ana = person(&store, "Ana Ito", &[], &[]);
+    link(&store, before, dana, "speaker", "confirmed");
+    link(&store, before, ana, "calendar", "suggested");
+
+    let here_before = store.conversation_place_review(lobby).unwrap().sessions;
+
+    assert_eq!(
+        here_before
+            .iter()
+            .map(|session| (session.session_id, session.people.clone()))
+            .collect::<Vec<_>>(),
+        [(before, vec!["Dana Reyes".to_string()])]
+    );
 }

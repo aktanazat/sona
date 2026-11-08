@@ -53,6 +53,8 @@ pub struct ConversationPlaceSession {
     pub title: String,
     pub started_at_utc_ms: Option<i64>,
     pub location: ConversationLocation,
+    /// The people confirmed there, by name.
+    pub people: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, Type)]
