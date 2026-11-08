@@ -70,7 +70,7 @@ fn failure(error: anyhow::Error) -> String {
     .to_string()
 }
 
-fn history<T>(
+pub(crate) fn history<T>(
     history: &HistoryManager,
     work: impl FnOnce(&mut Connection) -> StorageResult<T>,
 ) -> Result<T, String> {

@@ -372,7 +372,7 @@ fn restore(
                 effects.changed(&changed);
                 effects
                     .loops
-                    .extend(sync::settle(tx, meetings, &item.id, now_ms)?);
+                    .extend(sync::settle(tx, meetings, &item.id, WorkActor::Me, now_ms)?);
             }
             Ok(Done { value: (), effects })
         },

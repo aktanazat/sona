@@ -4898,16 +4898,7 @@ pub(super) async fn call(
             let mut args = Args::parse(params)?;
             let operation_id = args.take("operationId")?;
             let input = args.take("input")?;
-            reply(
-                crate::planning::work::work_create(
-                    app.clone(),
-                    app.state(),
-                    app.state(),
-                    operation_id,
-                    input,
-                )
-                .await,
-            )
+            reply(crate::planning::work::work_create(app.clone(), operation_id, input).await)
         }
         "work_update" => {
             let mut args = Args::parse(params)?;
@@ -4918,8 +4909,6 @@ pub(super) async fn call(
             reply(
                 crate::planning::work::work_update(
                     app.clone(),
-                    app.state(),
-                    app.state(),
                     operation_id,
                     id,
                     expected_revision,
@@ -4934,15 +4923,8 @@ pub(super) async fn call(
             let ids = args.take("ids")?;
             let patch = args.take("patch")?;
             reply(
-                crate::planning::work::work_bulk_update(
-                    app.clone(),
-                    app.state(),
-                    app.state(),
-                    operation_id,
-                    ids,
-                    patch,
-                )
-                .await,
+                crate::planning::work::work_bulk_update(app.clone(), operation_id, ids, patch)
+                    .await,
             )
         }
         "work_archive" => {
@@ -4953,7 +4935,6 @@ pub(super) async fn call(
             off_main_thread(move || {
                 reply(crate::planning::work::work_archive(
                     handle.clone(),
-                    handle.state(),
                     operation_id,
                     ids,
                 ))
@@ -4968,7 +4949,6 @@ pub(super) async fn call(
             off_main_thread(move || {
                 reply(crate::planning::work::work_restore(
                     handle.clone(),
-                    handle.state(),
                     operation_id,
                     ids,
                 ))
@@ -4983,8 +4963,6 @@ pub(super) async fn call(
             reply(
                 crate::planning::work::work_triage_accept(
                     app.clone(),
-                    app.state(),
-                    app.state(),
                     operation_id,
                     ids,
                     apply_suggestions,
@@ -4996,16 +4974,7 @@ pub(super) async fn call(
             let mut args = Args::parse(params)?;
             let operation_id = args.take("operationId")?;
             let ids = args.take("ids")?;
-            reply(
-                crate::planning::work::work_triage_decline(
-                    app.clone(),
-                    app.state(),
-                    app.state(),
-                    operation_id,
-                    ids,
-                )
-                .await,
-            )
+            reply(crate::planning::work::work_triage_decline(app.clone(), operation_id, ids).await)
         }
         "work_mark_duplicate" => {
             let mut args = Args::parse(params)?;
@@ -5013,15 +4982,8 @@ pub(super) async fn call(
             let id = args.take("id")?;
             let of_id = args.take("ofId")?;
             reply(
-                crate::planning::work::work_mark_duplicate(
-                    app.clone(),
-                    app.state(),
-                    app.state(),
-                    operation_id,
-                    id,
-                    of_id,
-                )
-                .await,
+                crate::planning::work::work_mark_duplicate(app.clone(), operation_id, id, of_id)
+                    .await,
             )
         }
         "work_relation_add" => {
@@ -5034,7 +4996,6 @@ pub(super) async fn call(
             off_main_thread(move || {
                 reply(crate::planning::work::work_relation_add(
                     handle.clone(),
-                    handle.state(),
                     operation_id,
                     from_id,
                     to_id,
@@ -5051,7 +5012,6 @@ pub(super) async fn call(
             off_main_thread(move || {
                 reply(crate::planning::work::work_relation_remove(
                     handle.clone(),
-                    handle.state(),
                     operation_id,
                     id,
                 ))
@@ -5073,7 +5033,6 @@ pub(super) async fn call(
             off_main_thread(move || {
                 reply(crate::planning::work::work_label_save(
                     handle.clone(),
-                    handle.state(),
                     operation_id,
                     id,
                     name,
@@ -5090,7 +5049,6 @@ pub(super) async fn call(
             off_main_thread(move || {
                 reply(crate::planning::work::work_label_delete(
                     handle.clone(),
-                    handle.state(),
                     operation_id,
                     id,
                 ))
@@ -5113,7 +5071,6 @@ pub(super) async fn call(
             off_main_thread(move || {
                 reply(crate::planning::work::work_view_save(
                     handle.clone(),
-                    handle.state(),
                     operation_id,
                     id,
                     name,
@@ -5131,7 +5088,6 @@ pub(super) async fn call(
             off_main_thread(move || {
                 reply(crate::planning::work::work_view_delete(
                     handle.clone(),
-                    handle.state(),
                     operation_id,
                     id,
                 ))
