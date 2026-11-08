@@ -24,6 +24,7 @@
     "check:onboarding": "bash scripts/check-onboarding.sh",
     "check:library": "bash scripts/check-library.sh",
     "check:recorder": "bash scripts/check-recorder.sh",
+    "check:theme": "bash scripts/check-theme.sh",
     "check:identity": "bun scripts/ci/check-identity.ts"
   },
   "dependencies": {

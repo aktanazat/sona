@@ -50,3 +50,5 @@ jobs:
         run: bash scripts/check-library.sh
       - name: Run native recorder checks
         run: bash scripts/check-recorder.sh
+      - name: Run native theme checks
+        run: bash scripts/check-theme.sh
