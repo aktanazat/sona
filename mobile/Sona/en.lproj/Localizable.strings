@@ -9,6 +9,8 @@
 "status.microphoneOff" = "Microphone off in Settings";
 "status.microphoneUnavailable" = "Microphone did not start";
 "status.interrupted" = "Another app took the microphone";
+"status.activityClosed" = "Recording stopped when its Live Activity closed";
+"status.stopped" = "Recording stopped";
 
 "pairing.line.notPaired" = "Not paired";
 "pairing.line.paired" = "Paired";
