@@ -36,6 +36,31 @@ impl ConversationLocation {
     }
 }
 
+/// Where a phone was when it started a recording, read once while Sona was
+/// open on it. Held in memory until the meeting's place card takes it to
+/// offer the places nearby: only a place he picks from those is saved.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Type)]
+pub struct PlaceReading {
+    latitude: f64,
+    longitude: f64,
+    accuracy_meters: f64,
+}
+
+impl PlaceReading {
+    /// `None` for a reading off the globe, or with an accuracy no fix has.
+    pub(crate) fn new(latitude: f64, longitude: f64, accuracy_meters: f64) -> Option<Self> {
+        ((-90.0..=90.0).contains(&latitude)
+            && (-180.0..=180.0).contains(&longitude)
+            && accuracy_meters.is_finite()
+            && accuracy_meters >= 0.0)
+            .then_some(Self {
+                latitude,
+                longitude,
+                accuracy_meters,
+            })
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize, Type)]
 pub struct ConversationContext {
     pub session_id: MeetingSessionId,

@@ -19,8 +19,9 @@ use zeroize::Zeroize;
 use crate::{
     meeting::{
         cloud_bundle::CloudMeetingBundleV1,
+        context::PlaceReading,
         detection::{
-            calendar::{event_text, named_attendee_with_email, occurrence_key},
+            calendar::{calendar_place, event_text, named_attendee_with_email, occurrence_key},
             machine::CalendarEventSummary,
         },
         session::{ImportRecordingRequest, MeetingSessionManager, RecordingOrigin},
@@ -327,6 +328,18 @@ struct DeviceRecordingManifest {
     /// milliseconds from the start of the audio.
     #[serde(default)]
     bookmark_offsets_ms: Vec<u64>,
+    /// Where the device was when the recording started, read once while
+    /// Sona was open on it.
+    #[serde(default)]
+    place_reading: Option<DevicePlaceReading>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DevicePlaceReading {
+    latitude: f64,
+    longitude: f64,
+    accuracy_meters: f64,
 }
 
 #[derive(Deserialize)]
@@ -354,6 +367,18 @@ struct DeviceCalendarEvent {
     attendees: Vec<DeviceCalendarAttendee>,
     #[serde(default)]
     location: Option<String>,
+    /// The invite's map pin: its structured location's title and coordinate.
+    #[serde(default)]
+    place: Option<DeviceCalendarPlace>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeviceCalendarPlace {
+    #[serde(default)]
+    title: Option<String>,
+    latitude: f64,
+    longitude: f64,
 }
 
 #[derive(Deserialize)]
@@ -397,7 +422,9 @@ impl DeviceCalendarEvent {
             calendar_name: None,
             url: None,
             location: event_text(self.location),
-            place: None,
+            place: self
+                .place
+                .and_then(|place| calendar_place(place.title, place.latitude, place.longitude)),
         })
     }
 }
@@ -432,12 +459,13 @@ struct DeviceRecordingImport {
     personal_notes: Option<String>,
     calendar_event: Option<CalendarEventSummary>,
     bookmark_offsets_ns: Vec<u64>,
+    place_reading: Option<PlaceReading>,
 }
 
 impl DeviceRecordingImport {
     /// The staged audio and what its manifest says about it. An event the
     /// device named that this Mac cannot summarize is dropped, not the
-    /// recording.
+    /// recording, and so is a place reading off the globe.
     fn new(audio: ScratchAudioFile, manifest: DeviceRecordingManifest, object_id: &str) -> Self {
         let calendar_event = manifest.calendar_event.and_then(|event| {
             let summary = event.summary();
@@ -447,6 +475,14 @@ impl DeviceRecordingImport {
                 );
             }
             summary
+        });
+        let place_reading = manifest.place_reading.and_then(|reading| {
+            let place =
+                PlaceReading::new(reading.latitude, reading.longitude, reading.accuracy_meters);
+            if place.is_none() {
+                log::warn!("Cloud recording {object_id} names a place reading off the globe");
+            }
+            place
         });
         Self {
             audio,
@@ -460,6 +496,7 @@ impl DeviceRecordingImport {
                 .iter()
                 .map(|offset_ms| offset_ms.saturating_mul(1_000_000))
                 .collect(),
+            place_reading,
         }
     }
 
@@ -3475,6 +3512,7 @@ impl CloudSyncRuntime {
                 recording.personal_notes.as_deref(),
                 recording.calendar_event.as_ref(),
                 &recording.bookmark_offsets_ns,
+                recording.place_reading,
             )
             .await
             .map_err(|error| {
@@ -4986,17 +5024,18 @@ mod tests {
     }
 
     fn phone_object(audio: Vec<u8>, declared_sha256: &str, writer_device_id: &str) -> PhoneObject {
-        phone_object_with(audio, declared_sha256, writer_device_id, None, None)
+        phone_object_with(audio, declared_sha256, writer_device_id, None, None, None)
     }
 
-    /// `calendar_event` and `bookmark_offsets_ms` are JSON exactly as the
-    /// device encodes them.
+    /// `calendar_event`, `bookmark_offsets_ms` and `place_reading` are JSON
+    /// exactly as the device encodes them.
     fn phone_object_with(
         audio: Vec<u8>,
         declared_sha256: &str,
         writer_device_id: &str,
         calendar_event: Option<&str>,
         bookmark_offsets_ms: Option<&str>,
+        place_reading: Option<&str>,
     ) -> PhoneObject {
         let chunks: Vec<Vec<u8>> = audio
             .chunks(MAX_PLAINTEXT_CHUNK_BYTES)
@@ -5011,7 +5050,7 @@ mod tests {
              \"codec\":\"pcm_s16le\",\"sample_rate_hz\":16000,\
              \"sha256\":\"{declared_sha256}\"}},{bookmark_offsets_ms}{calendar_event}\
              \"device_id\":\"{writer_device_id}\",\"duration_ms\":{duration_ms},\
-             \"format_version\":1,\"kind\":\"device_recording\",\
+             \"format_version\":1,\"kind\":\"device_recording\",{place_reading}\
              \"recorded_at_utc_ms\":1788305031276,\"title\":\"Phone recording\"}}",
             byte_length = audio.len(),
             bookmark_offsets_ms = bookmark_offsets_ms
@@ -5019,6 +5058,9 @@ mod tests {
                 .unwrap_or_default(),
             calendar_event = calendar_event
                 .map(|event| format!("\"calendar_event\":{event},"))
+                .unwrap_or_default(),
+            place_reading = place_reading
+                .map(|reading| format!("\"place_reading\":{reading},"))
                 .unwrap_or_default(),
             // 16 kHz mono s16le is 32 bytes a millisecond.
             duration_ms = audio.len() / 32,
@@ -5131,6 +5173,7 @@ mod tests {
             Some("Confirm the launch date."),
             None,
             &[],
+            None,
         ))
         .expect("the pulled recording imports");
         let review = tauri::async_runtime::block_on(manager.get(snapshot.session_id))
@@ -5185,6 +5228,7 @@ mod tests {
                     &sha256_base64url(&audio),
                     TEST_DEVICE_ID,
                     calendar_event,
+                    None,
                     None,
                 ),
             )
@@ -5248,6 +5292,122 @@ mod tests {
         );
     }
 
+    /// The pinned event `DeviceRecordingTests.testCalendarPinIsTheAgreedJson`
+    /// pins the phone to, byte for byte.
+    const PHONE_PINNED_CALENDAR_EVENT: &str = "{\"attendees\":[],\
+        \"end_utc_ms\":1788308400000,\"identifier\":\"event-0002\",\
+        \"place\":{\"latitude\":37.79425,\"longitude\":-122.39556,\
+        \"title\":\"Hyatt Regency San Francisco\\n5 Embarcadero Center\"},\
+        \"start_utc_ms\":1788304800000,\"title\":\"Coffee with Dana\"}";
+
+    /// An invite's map pin on the phone is offered as the meeting's place the
+    /// way a pin this Mac read is: named for the pin's first line, and saved
+    /// only once he takes it.
+    #[test]
+    fn a_phone_recordings_invite_pin_is_offered_as_its_place() {
+        use crate::meeting::context::ConversationLocation;
+        use crate::meeting::evening::FilingTarget;
+
+        let (_files, manager) = crate::meeting::session::tests::importing_manager();
+        let store = tauri::async_runtime::block_on(manager.store()).expect("the store mounts");
+        let audio = vec![1_u8; 32_000];
+        let pinned = import_phone_object(
+            &manager,
+            &store,
+            &phone_object_with(
+                audio.clone(),
+                &sha256_base64url(&audio),
+                TEST_DEVICE_ID,
+                Some(PHONE_PINNED_CALENDAR_EVENT),
+                None,
+                None,
+            ),
+        );
+
+        let pin = ConversationLocation {
+            name: "Hyatt Regency San Francisco".to_owned(),
+            latitude: 37.79425,
+            longitude: -122.39556,
+        };
+        assert_eq!(
+            store
+                .context_suggestions(pinned, &[], None, 1_788_308_400_000)
+                .expect("the meeting's suggestions are readable")
+                .into_iter()
+                .map(|suggestion| suggestion.target)
+                .collect::<Vec<_>>(),
+            [FilingTarget::Place { location: pin }]
+        );
+        assert_eq!(
+            store
+                .conversation_context(pinned)
+                .expect("the meeting's context is readable")
+                .location,
+            None
+        );
+    }
+
+    /// What `DeviceRecordingTests.testPlaceReadingIsTheAgreedJson` pins the
+    /// phone to, byte for byte.
+    const PHONE_PLACE_READING: &str =
+        "{\"accuracy_meters\":35,\"latitude\":37.79425,\"longitude\":-122.39556}";
+
+    /// Where the phone was when it started recording waits in memory for the
+    /// meeting's place card, which takes it once. None of it reaches the
+    /// store: the meeting has no place until he picks one, and the place he
+    /// picks keeps its own coordinate.
+    #[test]
+    fn a_phone_recordings_place_reading_waits_for_its_place_card() {
+        use crate::meeting::context::{ConversationContextUpdate, ConversationLocation};
+
+        let (_files, manager) = crate::meeting::session::tests::importing_manager();
+        let store = tauri::async_runtime::block_on(manager.store()).expect("the store mounts");
+        let audio = vec![1_u8; 32_000];
+        let read = import_phone_object(
+            &manager,
+            &store,
+            &phone_object_with(
+                audio.clone(),
+                &sha256_base64url(&audio),
+                TEST_DEVICE_ID,
+                None,
+                None,
+                Some(PHONE_PLACE_READING),
+            ),
+        );
+
+        let context = store
+            .conversation_context(read)
+            .expect("the meeting's context is readable");
+        assert_eq!(context.location, None);
+        assert_eq!(
+            manager.take_place_reading(read),
+            PlaceReading::new(37.79425, -122.39556, 35.0)
+        );
+        assert_eq!(manager.take_place_reading(read), None);
+
+        let lobby = ConversationLocation {
+            name: "Hyatt Regency San Francisco".to_owned(),
+            latitude: 37.79411,
+            longitude: -122.39583,
+        };
+        store
+            .update_conversation_context(ConversationContextUpdate {
+                session_id: read,
+                expected_revision: context.revision,
+                kind: context.kind,
+                location: Some(lobby.clone()),
+            })
+            .expect("the picked place saves");
+        assert_eq!(
+            store
+                .conversation_context(read)
+                .expect("the meeting's context is readable")
+                .location,
+            Some(lobby)
+        );
+    }
+
     /// What a pulled phone object hands the importer: its manifest opened,
     /// its audio staged, and what the manifest said beside the audio.
     fn import_phone_object(
@@ -5281,6 +5441,7 @@ mod tests {
             recording.personal_notes.as_deref(),
             recording.calendar_event.as_ref(),
             &recording.bookmark_offsets_ns,
+            recording.place_reading,
         ))
         .expect("the recording imports")
         .session_id
@@ -5312,6 +5473,7 @@ mod tests {
                     TEST_DEVICE_ID,
                     None,
                     bookmark_offsets_ms,
+                    None,
                 ),
             )
         };
@@ -5386,6 +5548,7 @@ mod tests {
             personal_notes: None,
             calendar_event: None,
             bookmark_offsets_ns: Vec::new(),
+            place_reading: None,
         };
 
         let snapshot =

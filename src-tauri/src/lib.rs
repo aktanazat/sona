@@ -1904,6 +1904,7 @@ pub fn run(cli_args: CliArgs) {
             commands::conversation_review::conversation_reel_for_person,
             commands::conversation_review::conversation_reel_for_loop,
             commands::conversation_review::conversation_place_review,
+            commands::conversation_review::conversation_place_reading_take,
             commands::conversation_review::conversation_bookmarks,
             commands::conversation_review::conversation_bookmark_create,
             commands::heard_plans::meeting_heard_plans,
