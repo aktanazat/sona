@@ -91,7 +91,7 @@ fn ledger_meeting(store: &MeetingStore, at_utc_ms: i64) -> MeetingSessionId {
 
 /// Stores `ledger` as the meeting's current artifact revision, read off a
 /// transcript revision of its own.
-pub(super) fn file_ledger(
+pub(crate) fn file_ledger(
     store: &MeetingStore,
     session_id: MeetingSessionId,
     ledger: MeetingLedger,

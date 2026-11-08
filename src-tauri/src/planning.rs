@@ -10,10 +10,12 @@ pub(crate) mod store;
 pub(crate) mod suggestions;
 mod types;
 pub(crate) mod untracked;
+pub(crate) mod work;
 
 pub use proposal::{PlanningDraft, PlanningSourceRef};
 pub use schema::{
     DISMISSED_LOOP_MIGRATION, MEETING_NOTE_LINK_MIGRATION, MIGRATION, QUIET_REVIEW_MIGRATION,
+    WORK_MIGRATION,
 };
 pub use types::{
     EvidenceLink, EvidenceSourceKind, EvidenceTargetKind, Milestone, PlanningCalendarPage,
@@ -256,6 +258,7 @@ pub async fn planning_create_task(
         .await?
     };
     changed(&app, task.project_id.clone());
+    work::tasks_changed(&app, vec![task.id.clone()]);
     Ok(task)
 }
 
@@ -312,25 +315,31 @@ pub fn planning_update_milestone(
 pub async fn planning_update_task(
     app: AppHandle,
     history_state: State<'_, Arc<HistoryManager>>,
+    meetings: State<'_, Arc<MeetingSessionManager>>,
     id: String,
     expected_revision: i64,
     status: TaskStatus,
     owner_is_self: Option<bool>,
     operation_id: String,
 ) -> Result<PlanningTask, String> {
-    let task = history(&history_state, |conn| {
-        store::update_task(
-            conn,
-            &id,
-            expected_revision,
-            status,
-            owner_is_self,
+    let update = work::TaskUpdate {
+        id: &id,
+        expected_revision,
+        status,
+        owner_is_self,
+    };
+    let done = work::with_both(&history_state, &meetings, |history_conn, meeting_conn| {
+        work::update_task(
+            history_conn,
+            meeting_conn,
+            &update,
             &operation_id,
             chrono::Utc::now().timestamp_millis(),
         )
-    })?;
-    changed(&app, task.project_id.clone());
-    Ok(task)
+    })
+    .await?;
+    work::announce(&app, &meetings, &done.effects).await;
+    Ok(done.value)
 }
 
 #[tauri::command]
@@ -385,6 +394,9 @@ pub async fn planning_link_source(
         .await?
     };
     changed(&app, project_id);
+    if target_kind == EvidenceTargetKind::Task {
+        work::tasks_changed(&app, vec![target_id]);
+    }
     Ok(link)
 }
 
@@ -547,5 +559,9 @@ pub async fn planning_accept(
         .await?
     };
     changed(&app, detail.project.id.clone());
+    work::tasks_changed(
+        &app,
+        detail.tasks.iter().map(|task| task.id.clone()).collect(),
+    );
     Ok(detail)
 }

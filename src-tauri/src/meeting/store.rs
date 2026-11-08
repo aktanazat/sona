@@ -43,7 +43,7 @@ pub(crate) mod learning;
 mod learning_tests;
 pub(crate) mod loops;
 #[cfg(test)]
-mod loops_tests;
+pub(crate) mod loops_tests;
 pub(crate) mod meeting_maybe;
 #[cfg(test)]
 mod meeting_maybe_tests;
@@ -8200,11 +8200,11 @@ fn rejected_receipt(
 }
 
 fn insert_operation_receipt(
-    transaction: &Transaction<'_>,
+    connection: &Connection,
     receipt: &OperationReceipt,
     created_at_utc_ms: i64,
 ) -> Result<(), StoreError> {
-    transaction.execute(
+    connection.execute(
         "INSERT INTO meeting_operation_receipts (operation_id, session_id, receipt_json, created_at_utc_ms)
          VALUES (?1, ?2, ?3, ?4)",
         params![

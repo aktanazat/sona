@@ -943,15 +943,7 @@ mod tests {
         }
 
         let mut history = Connection::open_in_memory().expect("history");
-        history
-            .execute_batch(super::super::schema::MIGRATION)
-            .expect("projects migration");
-        history
-            .execute_batch(super::super::schema::QUIET_REVIEW_MIGRATION)
-            .expect("nighttime review migration");
-        history
-            .execute_batch(super::super::schema::MEETING_NOTE_LINK_MIGRATION)
-            .expect("meeting-note identity migration");
+        super::super::schema::apply_all(&history).expect("planning migrations");
         let source = PlanningSourceRef {
             kind: EvidenceSourceKind::Meeting,
             id: session_id.uuid().to_string(),

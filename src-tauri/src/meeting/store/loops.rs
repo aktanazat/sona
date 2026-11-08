@@ -35,7 +35,7 @@ use crate::meeting::types::{
     OperationActor, OperationReceipt,
 };
 use crate::meeting::workflow_types::WorkflowId;
-use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use std::collections::HashMap;
 use uuid::Uuid;
 
@@ -376,6 +376,75 @@ impl MeetingStore {
     }
 }
 
+/// Moves one loop to `status` because the tracker task that cites it moved
+/// first, inside the caller's transaction, with the receipt a hand-made
+/// change leaves. The task's revision fenced the change, so the loop's is
+/// not asked for. A carried loop is left alone, since its live occurrence is
+/// later in the chain. False when there was nothing to write.
+pub(crate) fn follow_tracker_in(
+    connection: &Connection,
+    loop_id: &MeetingLoopId,
+    status: MeetingLoopStatus,
+    now_utc_ms: i64,
+) -> Result<bool, StoreError> {
+    let session_id = loop_id.session_id().ok_or(StoreError::Invalid)?;
+    let session = match session_row(connection, session_id) {
+        Ok(session) => session,
+        Err(StoreError::NotFound) => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    if session.phase == MeetingPhase::Deleting {
+        return Ok(false);
+    }
+    let Some(seed) = seeds_in(connection, session_id)?
+        .into_iter()
+        .find(|seed| seed.loop_id == *loop_id)
+    else {
+        return Ok(false);
+    };
+    let state = state_in(connection, loop_id)?.unwrap_or_default();
+    if state.status == status || state.status == MeetingLoopStatus::Carried {
+        return Ok(false);
+    }
+    let (change, command) = match status {
+        MeetingLoopStatus::Open => (LoopChange::Reopen, MeetingCommandKind::LoopReopen),
+        MeetingLoopStatus::Done | MeetingLoopStatus::Dropped => {
+            (LoopChange::Resolve(status), MeetingCommandKind::LoopResolve)
+        }
+        MeetingLoopStatus::Carried => return Err(StoreError::Invalid),
+    };
+    let operation_id = MeetingOperationId::new();
+    let next_revision = state.revision.checked_add(1).ok_or(StoreError::Corrupt)?;
+    write_state_in(
+        connection,
+        session_id,
+        &seed,
+        &state,
+        change,
+        None,
+        operation_id,
+        next_revision,
+        now_utc_ms,
+    )?;
+    let receipt = committed_receipt(
+        StoreMutation {
+            operation_id,
+            actor: OperationActor::User,
+            requested_at_utc_ms: now_utc_ms,
+            session_id,
+            expected_revision: state.revision,
+            command,
+        },
+        session.phase,
+        session.phase,
+        now_utc_ms,
+        next_revision,
+        vec![loop_id.0.clone()],
+    );
+    insert_operation_receipt(connection, &receipt, now_utc_ms)?;
+    Ok(true)
+}
+
 /// One meeting's actionable rows, with the meeting facts every corpus-wide
 /// reader needs beside them.
 pub(crate) struct MeetingLedgerRows {
@@ -408,15 +477,55 @@ pub(crate) fn ledger_rows_in(
     connection: &Connection,
     user_name: Option<&str>,
 ) -> Result<Vec<MeetingLedgerRows>, StoreError> {
+    ledger_rows_where(connection, None, user_name)
+}
+
+/// One meeting's actionable rows with its facts; none when the meeting has
+/// no readable ledger.
+pub(crate) fn meeting_ledger_rows_in(
+    connection: &Connection,
+    session_id: MeetingSessionId,
+    user_name: Option<&str>,
+) -> Result<Option<MeetingLedgerRows>, StoreError> {
+    Ok(ledger_rows_where(connection, Some(session_id), user_name)?.pop())
+}
+
+/// A loop's stored status and when it last moved. An untouched loop is open
+/// and has never moved.
+pub(crate) fn status_in(
+    connection: &Connection,
+    loop_id: &MeetingLoopId,
+) -> Result<(MeetingLoopStatus, Option<i64>), StoreError> {
+    let row: Option<(String, i64)> = connection
+        .query_row(
+            "SELECT status, updated_at_utc_ms FROM meeting_loop_states WHERE loop_id = ?1",
+            params![loop_id.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    match row {
+        None => Ok((MeetingLoopStatus::Open, None)),
+        Some((status, updated_at_utc_ms)) => Ok((
+            MeetingLoopStatus::from_str(&status).ok_or(StoreError::Corrupt)?,
+            Some(updated_at_utc_ms),
+        )),
+    }
+}
+
+fn ledger_rows_where(
+    connection: &Connection,
+    only: Option<MeetingSessionId>,
+    user_name: Option<&str>,
+) -> Result<Vec<MeetingLedgerRows>, StoreError> {
     let mut statement = connection.prepare(&format!(
         "SELECT m.id, m.title, COALESCE(m.started_at_utc_ms, m.created_at_utc_ms),
                 ({READABLE_ARTIFACT_CONTENT})
            FROM meeting_sessions m
-          WHERE m.phase != 'deleting'
+          WHERE m.phase != 'deleting' AND (?1 IS NULL OR m.id = ?1)
           ORDER BY COALESCE(m.started_at_utc_ms, m.created_at_utc_ms) DESC, m.id DESC"
     ))?;
     let meetings = statement
-        .query_map([], |row| {
+        .query_map(params![only.map(id)], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -767,7 +876,7 @@ pub(crate) fn states_in(
 }
 
 fn state_in(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     loop_id: &MeetingLoopId,
 ) -> Result<Option<LoopState>, StoreError> {
     let columns = transaction
@@ -977,7 +1086,7 @@ fn previous_series_session_in(
 
 #[allow(clippy::too_many_arguments)]
 fn write_state_in(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     session_id: MeetingSessionId,
     seed: &LoopSeed,
     state: &LoopState,

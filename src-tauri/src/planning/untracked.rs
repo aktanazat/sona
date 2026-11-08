@@ -1,5 +1,7 @@
 //! Meeting commitments nobody has put in the planner yet, and the two answers
-//! a person gives one: track it as a task, or say it is not work.
+//! a person gives one on the meeting page: track it in a project, or say it
+//! is not work. Every open commitment also waits in the tracker's triage;
+//! these answers accept or decline that triage item.
 //!
 //! Tracking copies the commitment's words into the task title. That copy is
 //! the person's own task once they pick a project, so it stays when the
@@ -8,8 +10,13 @@
 use super::sources;
 use super::store::{self, Refusal};
 use super::types::{EvidenceSourceKind, EvidenceTargetKind, PlanningTask, Project};
+use super::work::sync::{self, MeetingReader};
+use super::work::types::{WorkActivityKind, WorkActor, WorkPatch, WorkStatus};
+use super::work::{self, items, Done, Effects};
 use crate::managers::history::HistoryManager;
-use crate::meeting::loop_types::{MeetingLoopKind, MeetingLoopRow, MeetingLoopStatus};
+use crate::meeting::loop_types::{
+    MeetingLoopId, MeetingLoopKind, MeetingLoopRow, MeetingLoopStatus,
+};
 use crate::meeting::session::MeetingSessionManager;
 use crate::meeting::store::today::{finished_meeting_ids, TodayTally};
 use crate::meeting::store::{loops, StoreError};
@@ -24,7 +31,7 @@ use tauri::{AppHandle, State};
 /// Live planner work cites the loop: a task or milestone that was not
 /// canceled, or a project. An accepted plan links a commitment it found to a
 /// project or milestone instead of copying it into a task, so those count.
-const TRACKED: &str = "SELECT EXISTS(
+pub(super) const TRACKED: &str = "SELECT EXISTS(
     SELECT 1 FROM planning_evidence_links l
     WHERE l.source_kind = 'loop' AND l.source_id = ?1 AND CASE l.target_kind
         WHEN 'task' THEN EXISTS(
@@ -35,7 +42,8 @@ const TRACKED: &str = "SELECT EXISTS(
     END
 )";
 
-const DISMISSED: &str = "SELECT EXISTS(SELECT 1 FROM planning_dismissed_loops WHERE loop_id = ?1)";
+pub(super) const DISMISSED: &str =
+    "SELECT EXISTS(SELECT 1 FROM planning_dismissed_loops WHERE loop_id = ?1)";
 
 /// One meeting's open commitments that no live planner work cites and the
 /// person has not set aside, with the projects still taking work, the one
@@ -61,9 +69,9 @@ pub async fn meeting_untracked_actions(
     .await
 }
 
-/// Makes a task in the chosen project for a meeting commitment, owned by the
-/// person using Sona and citing the commitment, unless planner work already
-/// tracks it.
+/// Accepts a meeting commitment's triage item into the chosen project,
+/// with the owner and due day the meeting suggests, unless planner work
+/// already tracks it.
 #[tauri::command]
 #[specta::specta]
 pub async fn planning_track_action(
@@ -74,10 +82,12 @@ pub async fn planning_track_action(
     project_id: String,
     operation_id: String,
 ) -> Result<PlanningTask, String> {
-    let task = super::with_sources(&history_state, &meetings, |history, meetings| {
+    let user_name = meetings.user_name();
+    let done = work::with_both(&history_state, &meetings, |history, meeting_conn| {
         track(
             history,
-            meetings,
+            meeting_conn,
+            user_name.as_deref(),
             &loop_id,
             &project_id,
             &operation_id,
@@ -85,45 +95,59 @@ pub async fn planning_track_action(
         )
     })
     .await?;
-    super::changed(&app, task.project_id.clone());
-    Ok(task)
+    work::announce(&app, &meetings, &done.effects).await;
+    Ok(done.value)
 }
 
 /// Remembers that a meeting commitment is not work, so it stops asking to be
-/// tracked. The meeting's own record of the commitment stays as it was.
-#[tauri::command(async)]
+/// tracked: its triage item is declined and the commitment dropped in its
+/// meeting.
+#[tauri::command]
 #[specta::specta]
-pub fn planning_dismiss_action(
+pub async fn planning_dismiss_action(
+    app: AppHandle,
     history_state: State<'_, Arc<HistoryManager>>,
+    meetings: State<'_, Arc<MeetingSessionManager>>,
     loop_id: String,
     operation_id: String,
 ) -> Result<(), String> {
-    super::history(&history_state, |conn| {
+    let done = work::with_both(&history_state, &meetings, |history, meeting_conn| {
         dismiss(
-            conn,
+            history,
+            meeting_conn,
             &loop_id,
             &operation_id,
             chrono::Utc::now().timestamp_millis(),
         )
     })
+    .await?;
+    work::announce(&app, &meetings, &done.effects).await;
+    Ok(done.value)
 }
 
-/// Asks about a commitment again after it was set aside as not work.
-#[tauri::command(async)]
+/// Asks about a commitment again after it was set aside as not work: its
+/// declined item goes back to triage and the commitment reopens.
+#[tauri::command]
 #[specta::specta]
-pub fn planning_restore_action(
+pub async fn planning_restore_action(
+    app: AppHandle,
     history_state: State<'_, Arc<HistoryManager>>,
+    meetings: State<'_, Arc<MeetingSessionManager>>,
     loop_id: String,
     operation_id: String,
 ) -> Result<(), String> {
-    super::history(&history_state, |conn| {
+    let done = work::with_both(&history_state, &meetings, |history, meeting_conn| {
         restore(
-            conn,
+            history,
+            meeting_conn,
             &loop_id,
             &operation_id,
             chrono::Utc::now().timestamp_millis(),
         )
     })
+    .await?;
+    work::announce(&app, &meetings, &done.effects).await;
+    Ok(done.value)
 }
 
 /// Home's "not tracked" count: the commitments across finished meetings that
@@ -186,7 +210,11 @@ fn untracked_in(
             continue;
         }
         let lineage = lineage(meetings, row.loop_id.as_str())?;
-        if any(history, TRACKED, &lineage)? || any(history, DISMISSED, &lineage)? {
+        if any(history, TRACKED, &lineage)?
+            || any(history, DISMISSED, &lineage)?
+            || sync::tracker_of(history, &lineage)?
+                .is_some_and(|item| item.status != WorkStatus::Triage)
+        {
             continue;
         }
         if sources::loop_words(history, meetings, row.loop_id.as_str())?.is_some() {
@@ -205,11 +233,12 @@ struct TrackRequest<'a> {
 fn track(
     history: &mut Connection,
     meetings: &Connection,
+    user_name: Option<&str>,
     loop_id: &str,
     project_id: &str,
     operation_id: &str,
     now_ms: i64,
-) -> StorageResult<PlanningTask> {
+) -> StorageResult<Done<PlanningTask>> {
     let loop_id = sources::canonical_source_id(EvidenceSourceKind::Loop, loop_id)?;
     let project_id = store::uuid(project_id)?;
     let request = TrackRequest {
@@ -226,26 +255,35 @@ fn track(
             if any(tx, TRACKED, &lineage(meetings, &loop_id)?)? {
                 return Err(Refusal::AlreadyTracked.into());
             }
-            let title = sources::require_loop(tx, meetings, &loop_id)?;
-            let task = store::insert_task(
-                tx,
-                &store::TaskDraft {
-                    project_id: &project_id,
-                    milestone_id: None,
-                    title: &title,
-                    details: None,
-                    due_at_ms: None,
-                    owner_person_id: None,
-                    owner_is_self: true,
-                },
-                now_ms,
-                |_| Err(Refusal::OwnerUnavailable.into()),
-            )?;
+            store::project(tx, &project_id)?;
+            let item = match items::by_source_loop(tx, &loop_id)? {
+                Some(item) => item,
+                None => {
+                    let session_id = MeetingLoopId(loop_id.clone())
+                        .session_id()
+                        .ok_or(Refusal::Invalid)?;
+                    let meeting = sync::meeting_rows(meetings, session_id, user_name)?
+                        .ok_or(Refusal::SourceUnavailable)?;
+                    let row = meeting
+                        .rows
+                        .iter()
+                        .find(|row| row.loop_id.as_str() == loop_id)
+                        .ok_or(Refusal::SourceUnavailable)?;
+                    sync::take_in_row(tx, meetings, &meeting, row, now_ms)?
+                        .ok_or(Refusal::SourceUnavailable)?
+                }
+            };
+            if item.status != WorkStatus::Triage {
+                return Err(Refusal::AlreadyTracked.into());
+            }
+            let mut reader = MeetingReader::new(meetings, user_name);
+            let patch = sync::acceptance(tx, &mut reader, &item, true, Some(&project_id))?;
+            let (after, moved) = sync::accept(tx, meetings, &item, &patch, WorkActor::Me, now_ms)?;
             store::insert_link(
                 tx,
                 &store::SourceLinkDraft {
                     target_kind: EvidenceTargetKind::Task,
-                    target_id: &task.id,
+                    target_id: &after.id,
                     source_kind: EvidenceSourceKind::Loop,
                     source_id: &loop_id,
                     at_ms: None,
@@ -253,17 +291,25 @@ fn track(
                 },
                 now_ms,
             )?;
-            Ok(task)
+            let mut effects = Effects::default();
+            effects.item(&item);
+            effects.item(&after);
+            effects.loops.extend(moved);
+            Ok(Done {
+                value: store::task(tx, &after.id)?,
+                effects,
+            })
         },
     )
 }
 
 fn dismiss(
     history: &mut Connection,
+    meetings: &Connection,
     loop_id: &str,
     operation_id: &str,
     now_ms: i64,
-) -> StorageResult<()> {
+) -> StorageResult<Done<()>> {
     let loop_id = sources::canonical_source_id(EvidenceSourceKind::Loop, loop_id)?;
     store::mutate(
         history,
@@ -276,17 +322,26 @@ fn dismiss(
                 "INSERT INTO planning_dismissed_loops (loop_id, dismissed_at_ms) VALUES (?1, ?2) ON CONFLICT DO NOTHING",
                 params![loop_id, now_ms],
             )?;
-            Ok(())
+            let mut effects = Effects::default();
+            if let Some(item) = sync::tracking_item(tx, meetings, &loop_id)?
+                .filter(|item| item.status == WorkStatus::Triage)
+            {
+                let (after, moved) = sync::decline(tx, meetings, &item, WorkActor::Me, now_ms)?;
+                effects.item(&after);
+                effects.loops.extend(moved);
+            }
+            Ok(Done { value: (), effects })
         },
     )
 }
 
 fn restore(
     history: &mut Connection,
+    meetings: &Connection,
     loop_id: &str,
     operation_id: &str,
     now_ms: i64,
-) -> StorageResult<()> {
+) -> StorageResult<Done<()>> {
     let loop_id = sources::canonical_source_id(EvidenceSourceKind::Loop, loop_id)?;
     store::mutate(
         history,
@@ -299,14 +354,34 @@ fn restore(
                 "DELETE FROM planning_dismissed_loops WHERE loop_id = ?1",
                 [&loop_id],
             )?;
-            Ok(())
+            let mut effects = Effects::default();
+            if let Some(item) = sync::tracking_item(tx, meetings, &loop_id)?
+                .filter(|item| item.status == WorkStatus::Canceled)
+            {
+                let changed = items::apply(
+                    tx,
+                    &item.id,
+                    &WorkPatch {
+                        status: Some(WorkStatus::Triage),
+                        ..WorkPatch::default()
+                    },
+                    WorkActivityKind::Status,
+                    WorkActor::Me,
+                    now_ms,
+                )?;
+                effects.changed(&changed);
+                effects
+                    .loops
+                    .extend(sync::settle(tx, meetings, &item.id, now_ms)?);
+            }
+            Ok(Done { value: (), effects })
         },
     )
 }
 
 /// A loop and every earlier occurrence carried forward into it, so a
 /// commitment tracked or set aside in one meeting stays answered in the next.
-fn lineage(meetings: &Connection, loop_id: &str) -> StorageResult<Vec<String>> {
+pub(super) fn lineage(meetings: &Connection, loop_id: &str) -> StorageResult<Vec<String>> {
     let mut statement = meetings.prepare_cached(
         "WITH RECURSIVE lineage(loop_id) AS (
              SELECT ?1
@@ -320,7 +395,7 @@ fn lineage(meetings: &Connection, loop_id: &str) -> StorageResult<Vec<String>> {
     Ok(ids.collect::<rusqlite::Result<_>>()?)
 }
 
-fn any(history: &Connection, query: &str, lineage: &[String]) -> StorageResult<bool> {
+pub(super) fn any(history: &Connection, query: &str, lineage: &[String]) -> StorageResult<bool> {
     let mut statement = history.prepare_cached(query)?;
     for id in lineage {
         if statement.query_row([id], |row| row.get(0))? {
@@ -340,9 +415,7 @@ mod tests {
     use crate::meeting::types::{
         ArtifactCitation, CitedArtifactText, GeneratedMeetingArtifacts, TranscriptSegmentId,
     };
-    use crate::planning::{
-        DISMISSED_LOOP_MIGRATION, MEETING_NOTE_LINK_MIGRATION, MIGRATION, QUIET_REVIEW_MIGRATION,
-    };
+    use crate::planning::TaskStatus;
     use uuid::Uuid;
 
     const AT: i64 = 1_700_000_000_000;
@@ -447,16 +520,7 @@ mod tests {
             .expect("save a ledger with two cited promises");
 
         let mut history = Connection::open_in_memory().expect("history");
-        for migration in [
-            MIGRATION,
-            QUIET_REVIEW_MIGRATION,
-            MEETING_NOTE_LINK_MIGRATION,
-            DISMISSED_LOOP_MIGRATION,
-        ] {
-            history
-                .execute_batch(migration)
-                .expect("planning migration");
-        }
+        super::super::schema::apply_all(&history).expect("planning migrations");
         let project = store::insert_project(&history, "Launch", None, AT).expect("project");
 
         meetings
@@ -470,14 +534,16 @@ mod tests {
                 let task = track(
                     &mut history,
                     connection,
+                    None,
                     outline,
                     &project.id,
                     &Uuid::new_v4().to_string(),
                     AT,
                 )
-                .expect("track the outline");
+                .expect("track the outline")
+                .value;
                 assert_eq!(task.title, "Send the outline");
-                assert!(task.owner_is_self);
+                assert_eq!(task.status, TaskStatus::NotStarted);
                 let saved = store::records(&history, &project.id).expect("saved records");
                 assert!(saved.evidence.iter().any(|link| link.target_id == task.id
                     && link.source_kind == EvidenceSourceKind::Loop
@@ -490,12 +556,14 @@ mod tests {
                 let twice = track(
                     &mut history,
                     connection,
+                    None,
                     outline,
                     &project.id,
                     &Uuid::new_v4().to_string(),
                     AT,
                 )
-                .expect_err("a second task for the same promise");
+                .err()
+                .expect("a second task for the same promise");
                 assert_eq!(
                     twice.downcast_ref::<Refusal>(),
                     Some(&Refusal::AlreadyTracked)
@@ -508,15 +576,27 @@ mod tests {
                     1
                 );
 
-                dismiss(&mut history, venue, &Uuid::new_v4().to_string(), AT)
-                    .expect("set the venue aside");
+                dismiss(
+                    &mut history,
+                    connection,
+                    venue,
+                    &Uuid::new_v4().to_string(),
+                    AT,
+                )
+                .expect("set the venue aside");
                 assert!(read(&history, connection, session_id, None)
                     .expect("third read")
                     .actions
                     .is_empty());
 
-                restore(&mut history, venue, &Uuid::new_v4().to_string(), AT)
-                    .expect("ask about the venue again");
+                restore(
+                    &mut history,
+                    connection,
+                    venue,
+                    &Uuid::new_v4().to_string(),
+                    AT,
+                )
+                .expect("ask about the venue again");
                 assert_eq!(
                     texts(&read(&history, connection, session_id, None).expect("fourth read")),
                     ["Book the venue"]
