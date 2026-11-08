@@ -261,6 +261,8 @@ private struct MeetingSettingsSessionParam: Encodable {
     private(set) var remoteRosterRead = false
     private(set) var remoteRowSaving: String?
     private(set) var remoteRowFailed = false
+    /// The core announces no event when a series is kept on this Mac.
+    @ObservationIgnored var keptLocalChanged: () -> Void = {}
 
     init(core: Core) {
         self.core = core
@@ -1076,6 +1078,7 @@ private struct MeetingSettingsSessionParam: Encodable {
             // another pane fenced out leaves the row showing what is actually
             // stored and the reader can press again.
             remoteRowFailed = mutation.receipt.result != .committed
+            if !remoteRowFailed { keptLocalChanged() }
             await loadRemoteRoster()
         } catch {
             remoteRowFailed = true

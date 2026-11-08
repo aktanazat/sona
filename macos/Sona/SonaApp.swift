@@ -1,3 +1,4 @@
+import AppIntents
 import AppKit
 import SwiftUI
 
@@ -67,6 +68,8 @@ final class SonaAppDelegate: NSObject, NSApplicationDelegate {
         NSAppleEventManager.shared().setEventHandler(
             self, andSelector: #selector(quitEvent(_:reply:)),
             forEventClass: AEEventClass(kCoreEventClass), andEventID: AEEventID(kAEQuitApplication))
+        let model = model
+        AppDependencyManager.shared.add(dependency: model)
     }
 
     @objc private func quitEvent(_ event: NSAppleEventDescriptor, reply: NSAppleEventDescriptor) {
