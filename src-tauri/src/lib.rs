@@ -695,6 +695,10 @@ fn initialize_core_logic(app_handle: &AppHandle, runtime: StartupRuntime) -> any
         Arc::clone(&meeting_manager),
     );
     app_handle.manage(snapshot_service);
+    app_handle.manage(meeting::open_windows::MeetingOpenWindowsService::start(
+        app_handle.clone(),
+        Arc::clone(&meeting_manager),
+    ));
     app_handle.manage(Arc::clone(&cloud_runtime));
     // Recovery runs asynchronously after the managers have been registered.
     let recovery_meetings = Arc::clone(&meeting_manager);
@@ -1863,6 +1867,11 @@ pub fn run(cli_args: CliArgs) {
             commands::meeting_snapshots::meeting_snapshot_delete,
             commands::meeting_snapshots::meeting_snapshot_status,
             commands::meeting_snapshots::meeting_snapshot_automatic_set,
+            commands::meeting_open_windows::meeting_open_windows,
+            commands::meeting_open_windows::meeting_open_window_attach,
+            commands::meeting_open_windows::meeting_open_window_remove,
+            commands::meeting_open_windows::meeting_open_windows_dismiss,
+            commands::meeting_open_windows::change_meeting_open_windows_enabled_setting,
             commands::upcoming::meeting_upcoming_events,
             commands::people::people_list,
             commands::people::person_detail,
@@ -2060,6 +2069,7 @@ pub fn run(cli_args: CliArgs) {
             meeting::types::MeetingNavigationRequestedEvent,
             meeting::types::MeetingProcessingProgressEvent,
             meeting::snapshots::MeetingSnapshotChangedEvent,
+            meeting::open_windows::MeetingWindowAttachedEvent,
             meeting::detection::DetectionPromptEvent,
             meeting::detection::DetectionPromptRetractedEvent,
             meeting::detection::MeetingRitualEvent,

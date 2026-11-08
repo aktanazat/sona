@@ -11,15 +11,16 @@ pub(crate) mod corrections;
 
 use super::deadline::{CaptureDeadline, ReadBudget};
 use super::{
-    clipboard_recency, website_host_from_url, AccessibilityAccess, ApplicationCapture,
-    CaptureOptions, ContextPolicy, ContextSourceStatus, SelectionCapture, SourceOutcome,
-    StartCapture, WebsiteHostCapture,
+    clipboard_recency, truncate_on_boundary, website_host_from_url, AccessibilityAccess,
+    ApplicationCapture, CaptureOptions, ContextPolicy, ContextSourceStatus, FrontWindow,
+    FrontWindowRead, SelectionCapture, SourceOutcome, StartCapture, WebsiteHostCapture,
+    MAX_SOURCE_BYTES,
 };
 use crate::delivery::KeyboardFocus;
 use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString, NSWorkspace};
 use objc2_application_services::{AXError, AXIsProcessTrusted, AXUIElement, AXValue, AXValueType};
 use objc2_core_foundation::{
-    CFGetTypeID, CFHash, CFRange, CFRetained, CFString, CFType, ConcreteType, CFURL,
+    CFArray, CFGetTypeID, CFHash, CFRange, CFRetained, CFString, CFType, ConcreteType, Type, CFURL,
 };
 use std::ptr::{self, NonNull};
 use std::time::Duration;
@@ -36,12 +37,25 @@ const AX_VALUE: &str = "AXValue";
 const AX_SELECTED_TEXT: &str = "AXSelectedText";
 const AX_URL: &str = "AXURL";
 const AX_SECURE_TEXT_FIELD: &str = "AXSecureTextField";
+const AX_CHILDREN: &str = "AXChildren";
+const AX_DOCUMENT: &str = "AXDocument";
+const AX_WEB_AREA: &str = "AXWebArea";
 const MAX_ANCESTORS: usize = 8;
+/// The containers between a browser window and its page, as Safari nests
+/// them: split group, tab group, browser view, scroll area.
+const PAGE_CONTAINER_ROLES: [&str; 4] = ["AXSplitGroup", "AXTabGroup", "AXGroup", "AXScrollArea"];
+const MAX_PAGE_DEPTH: usize = 8;
+const MAX_PAGE_ELEMENTS: usize = 64;
+/// What a browser adds to a private window's title. Safari's ", Private
+/// Browsing" was read on macOS 26; Chrome's and Edge's are their documented
+/// names for the mode.
+const PRIVATE_WINDOW_MARKERS: [&str; 3] = ["Private Browsing", "Incognito", "InPrivate"];
 
 enum AccessibilityAttributeValue {
     Text(CFRetained<CFString>),
     Url(CFRetained<CFURL>),
     Element(CFRetained<AXUIElement>),
+    Array(CFRetained<CFArray>),
     Range(CFRange),
     Other,
 }
@@ -63,6 +77,11 @@ impl AccessibilityAttributeValue {
             // SAFETY: CFGetTypeID proved that this retained Core Foundation value is exactly an AXUIElement.
             let element: CFRetained<AXUIElement> = unsafe { CFRetained::cast_unchecked(value) };
             return Self::Element(element);
+        }
+        if type_id == CFArray::type_id() {
+            // SAFETY: CFGetTypeID proved that this retained Core Foundation value is exactly a CFArray.
+            let array: CFRetained<CFArray> = unsafe { CFRetained::cast_unchecked(value) };
+            return Self::Array(array);
         }
         if type_id == AXValue::type_id() {
             // SAFETY: the type ID above proves this is an AXValue.
@@ -317,6 +336,200 @@ fn frontmost_application() -> (Option<String>, Option<String>) {
     (name, identifier)
 }
 
+/// Reads the window in front for a meeting's list of open windows. A browser
+/// window is read only when its title shows it is not private, and its
+/// page's full address only when `keep_full_url`.
+pub(crate) fn front_window(keep_full_url: bool) -> FrontWindowRead {
+    if accessibility_access() != AccessibilityAccess::Granted {
+        return FrontWindowRead::AccessibilityDenied;
+    }
+    // A meeting's watcher thread has no autorelease pool of its own.
+    let front = objc2::rc::autoreleasepool(|_| {
+        let application = NSWorkspace::sharedWorkspace().frontmostApplication()?;
+        Some((
+            application.processIdentifier(),
+            application.localizedName().map(|name| name.to_string()),
+            application
+                .bundleIdentifier()
+                .map(|identifier| identifier.to_string()),
+        ))
+    });
+    let Some((pid, app_name, bundle_id)) = front else {
+        return FrontWindowRead::Nothing;
+    };
+    if is_sona_process(pid) {
+        return FrontWindowRead::Nothing;
+    }
+    application_window(pid, app_name, bundle_id, keep_full_url)
+}
+
+/// The core runs as a helper of the native shell, so the shell's windows
+/// belong to its parent process.
+fn is_sona_process(pid: libc::pid_t) -> bool {
+    u32::try_from(pid)
+        .is_ok_and(|pid| pid == std::process::id() || pid == std::os::unix::process::parent_id())
+}
+
+fn application_window(
+    pid: libc::pid_t,
+    app_name: Option<String>,
+    bundle_id: Option<String>,
+    keep_full_url: bool,
+) -> FrontWindowRead {
+    let deadline = CaptureDeadline::starting_now();
+    // SAFETY: AXUIElementCreateApplication takes a plain process id.
+    let application = unsafe { AXUIElement::new_application(pid) };
+    let Some(password_field) = password_field_focused(&application, deadline) else {
+        return FrontWindowRead::Nothing;
+    };
+    let Ok(window) = attribute_element(&application, AX_FOCUSED_WINDOW, deadline) else {
+        return FrontWindowRead::Nothing;
+    };
+    let title = attribute_string(&window, AX_TITLE, deadline)
+        .ok()
+        .flatten()
+        .and_then(window_text);
+    let browser = bundle_id
+        .as_deref()
+        .is_some_and(crate::meeting::detection::apps::is_browser_bundle_id);
+    if browser {
+        match title.as_deref() {
+            None => return FrontWindowRead::Nothing,
+            Some(title) if is_private_window_title(title) => {
+                return FrontWindowRead::PrivateWindow;
+            }
+            Some(_) => {}
+        }
+    }
+    let document_path = attribute_string(&window, AX_DOCUMENT, deadline)
+        .ok()
+        .flatten()
+        .and_then(|document| document_path(&document));
+    let page = browser
+        .then(|| page_url(&window, deadline))
+        .flatten()
+        .filter(|url| url.len() <= MAX_SOURCE_BYTES);
+    let host = page.as_deref().and_then(website_host_from_url);
+    let url = page.filter(|_| keep_full_url && host.is_some());
+    if title.is_none() && document_path.is_none() && host.is_none() {
+        return FrontWindowRead::Nothing;
+    }
+    let window = FrontWindow {
+        app_name: app_name.and_then(window_text),
+        bundle_id: bundle_id.and_then(window_text),
+        title,
+        document_path,
+        url,
+        host,
+    };
+    if password_field {
+        FrontWindowRead::PasswordField(window)
+    } else {
+        FrontWindowRead::Window(window)
+    }
+}
+
+fn window_text(value: String) -> Option<String> {
+    let value = truncate_on_boundary(value.trim().to_string());
+    (!value.is_empty()).then_some(value)
+}
+
+fn is_private_window_title(title: &str) -> bool {
+    PRIVATE_WINDOW_MARKERS
+        .iter()
+        .any(|marker| title.contains(marker))
+}
+
+/// Whether the focused control is a password field, or `None` when that
+/// could not be read. A control that is there but would not say its role
+/// could be one.
+fn password_field_focused(application: &AXUIElement, deadline: CaptureDeadline) -> Option<bool> {
+    let focused = match attribute_element(application, AX_FOCUSED_UI_ELEMENT, deadline) {
+        Ok(focused) => focused,
+        Err(ContextSourceStatus::Empty | ContextSourceStatus::Unsupported) => return Some(false),
+        Err(_) => return None,
+    };
+    let mut secure = false;
+    for attribute in [AX_ROLE, AX_SUBROLE] {
+        match attribute_string(&focused, attribute, deadline) {
+            Ok(value) => secure |= value.as_deref() == Some(AX_SECURE_TEXT_FIELD),
+            Err(ContextSourceStatus::Empty | ContextSourceStatus::Unsupported) => {}
+            Err(_) => return None,
+        }
+    }
+    Some(secure)
+}
+
+/// `AXDocument` is a file URL in AppKit apps and a plain path in a few
+/// others; anything else names no file.
+fn document_path(document: &str) -> Option<String> {
+    if document.len() > MAX_SOURCE_BYTES {
+        return None;
+    }
+    if document.starts_with('/') {
+        return Some(document.to_string());
+    }
+    let url = url::Url::parse(document).ok()?;
+    if url.scheme() != "file" {
+        return None;
+    }
+    url.to_file_path().ok()?.to_str().map(str::to_string)
+}
+
+/// The address of the page a browser window shows: the URL of the first
+/// web area under the window, reached through the containers browsers put
+/// around it and nothing else, so a window full of tabs and toolbars costs
+/// a bounded number of reads.
+fn page_url(window: &AXUIElement, deadline: CaptureDeadline) -> Option<String> {
+    let mut pending = vec![(window.retain(), 0_usize)];
+    let mut visited = 0_usize;
+    while let Some((element, depth)) = pending.pop() {
+        let mut containers = Vec::new();
+        for child in children(&element, deadline) {
+            visited += 1;
+            if visited > MAX_PAGE_ELEMENTS {
+                return None;
+            }
+            match attribute_string(&child, AX_ROLE, deadline)
+                .ok()
+                .flatten()
+                .as_deref()
+            {
+                Some(AX_WEB_AREA) => {
+                    return attribute_string(&child, AX_URL, deadline).ok().flatten()
+                }
+                Some(role)
+                    if depth + 1 < MAX_PAGE_DEPTH && PAGE_CONTAINER_ROLES.contains(&role) =>
+                {
+                    containers.push((child, depth + 1));
+                }
+                _ => {}
+            }
+        }
+        pending.extend(containers.into_iter().rev());
+    }
+    None
+}
+
+fn children(element: &AXUIElement, deadline: CaptureDeadline) -> Vec<CFRetained<AXUIElement>> {
+    let Ok(Some(AccessibilityAttributeValue::Array(array))) =
+        attribute_value(element, AX_CHILDREN, deadline)
+    else {
+        return Vec::new();
+    };
+    // SAFETY: every CFArray element is a CFType; each one is checked below
+    // before it is treated as an AXUIElement.
+    let items = unsafe { array.cast_unchecked::<CFType>() }.to_vec();
+    items
+        .into_iter()
+        .filter(|item| CFGetTypeID(Some(item.as_ref())) == AXUIElement::type_id())
+        .map(|item| {
+            // SAFETY: CFGetTypeID proved that this retained Core Foundation value is exactly an AXUIElement.
+            unsafe { CFRetained::cast_unchecked::<AXUIElement>(item) }
+        })
+        .collect()
+}
+
 /// Reads clipboard text only when its last change is provably inside the
 /// caller's pre-roll window. `preroll_ms` is the run's frozen setting, so a
 /// mid-run edit cannot widen what this run may read.
@@ -439,6 +652,7 @@ fn attribute_string(
         Some(AccessibilityAttributeValue::Text(text)) => Ok(Some(text.to_string())),
         Some(AccessibilityAttributeValue::Url(url)) => Ok(Some(url.string().to_string())),
         Some(AccessibilityAttributeValue::Element(_))
+        | Some(AccessibilityAttributeValue::Array(_))
         | Some(AccessibilityAttributeValue::Range(_))
         | Some(AccessibilityAttributeValue::Other)
         | None => Ok(None),

@@ -1622,9 +1622,19 @@ pub struct AppSettings {
     /// off state.
     #[serde(default = "default_count_words_per_app")]
     pub count_words_per_app: bool,
+    /// Whether a recording meeting keeps the list of windows that were in
+    /// front, for review to offer as links and documents. On by default:
+    /// the list stays on this Mac and what is not attached is deleted after
+    /// seven days. Turning it off deletes what was not attached.
+    #[serde(default = "default_meeting_open_windows_enabled")]
+    pub meeting_open_windows_enabled: bool,
 }
 
 fn default_count_words_per_app() -> bool {
+    true
+}
+
+fn default_meeting_open_windows_enabled() -> bool {
     true
 }
 
@@ -2136,6 +2146,17 @@ pub fn get_default_settings() -> AppSettings {
             current_binding: default_command_shortcut.to_string(),
         },
     );
+    #[cfg(target_os = "macos")]
+    bindings.insert(
+        crate::meeting::open_windows::ATTACH_WINDOW_BINDING_ID.to_string(),
+        ShortcutBinding {
+            id: crate::meeting::open_windows::ATTACH_WINDOW_BINDING_ID.to_string(),
+            name: "Attach window shortcut".to_string(),
+            description: "Attaches the window in front to the meeting being recorded.".to_string(),
+            default_binding: "ctrl+option+w".to_string(),
+            current_binding: "ctrl+option+w".to_string(),
+        },
+    );
 
     let mut settings = AppSettings {
         settings_schema_version: default_settings_schema_version(),
@@ -2263,6 +2284,7 @@ pub fn get_default_settings() -> AppSettings {
         external_query_enabled: false,
         external_mutations_enabled: false,
         count_words_per_app: default_count_words_per_app(),
+        meeting_open_windows_enabled: default_meeting_open_windows_enabled(),
     };
     settings.modes = default_modes(&settings);
     ensure_mode_settings(&mut settings);

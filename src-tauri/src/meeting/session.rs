@@ -991,7 +991,8 @@ impl MeetingSessionManager {
     }
 
     /// The retention sweep: meetings past their keep-for, deleted meetings past
-    /// their undo, and voices nobody named past theirs.
+    /// their undo, voices nobody named past theirs, and open windows offered and
+    /// never attached.
     ///
     /// Every horizon is swept here because each is "this app forgetting
     /// something on a clock", and a second timer would be a second place a
@@ -1012,6 +1013,11 @@ impl MeetingSessionManager {
                 log::info!("Meeting retention sweep forgot {forgotten} unnamed voices")
             }
             Err(error) => log::warn!("Unnamed voices could not be forgotten: {error:?}"),
+        }
+        match store.purge_stale_open_windows(now_utc_ms) {
+            Ok(0) => {}
+            Ok(purged) => log::info!("Meeting retention sweep purged {purged} offered windows"),
+            Err(error) => log::warn!("Offered windows could not be purged: {error:?}"),
         }
         let due_sessions = store
             .due_retention_sessions(now_utc_ms)

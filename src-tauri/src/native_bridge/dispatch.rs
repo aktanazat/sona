@@ -11,7 +11,7 @@ use tauri_specta::Event as _;
 use super::{encode_plain, off_main_thread, on_main_thread, reply, Args, Fault};
 
 /// Every typed event the core emits, by the name the bindings export.
-pub(super) const TYPED_EVENTS: [&str; 42] = [
+pub(super) const TYPED_EVENTS: [&str; 43] = [
     crate::chat_voice::ChatVoiceEvent::NAME,
     crate::upstream_import::UpstreamImportProgressEvent::NAME,
     crate::agent_bridge::AgentBridgeUpdateEvent::NAME,
@@ -42,6 +42,7 @@ pub(super) const TYPED_EVENTS: [&str; 42] = [
     crate::meeting::types::MeetingNavigationRequestedEvent::NAME,
     crate::meeting::types::MeetingProcessingProgressEvent::NAME,
     crate::meeting::snapshots::MeetingSnapshotChangedEvent::NAME,
+    crate::meeting::open_windows::MeetingWindowAttachedEvent::NAME,
     crate::meeting::detection::DetectionPromptEvent::NAME,
     crate::meeting::detection::DetectionPromptRetractedEvent::NAME,
     crate::meeting::detection::MeetingRitualEvent::NAME,
@@ -3282,6 +3283,65 @@ pub(super) async fn call(
                 crate::commands::meeting_snapshots::meeting_snapshot_automatic_set(
                     app.state(),
                     session_id,
+                    enabled,
+                )
+                .await,
+            )
+        }
+        "meeting_open_windows" => {
+            let mut args = Args::parse(params)?;
+            let session_id = args.take("sessionId")?;
+            reply(
+                crate::commands::meeting_open_windows::meeting_open_windows(
+                    app.state(),
+                    session_id,
+                )
+                .await,
+            )
+        }
+        "meeting_open_window_attach" => {
+            let mut args = Args::parse(params)?;
+            let session_id = args.take("sessionId")?;
+            let item_id = args.take("itemId")?;
+            reply(
+                crate::commands::meeting_open_windows::meeting_open_window_attach(
+                    app.state(),
+                    session_id,
+                    item_id,
+                )
+                .await,
+            )
+        }
+        "meeting_open_window_remove" => {
+            let mut args = Args::parse(params)?;
+            let session_id = args.take("sessionId")?;
+            let item_id = args.take("itemId")?;
+            reply(
+                crate::commands::meeting_open_windows::meeting_open_window_remove(
+                    app.state(),
+                    session_id,
+                    item_id,
+                )
+                .await,
+            )
+        }
+        "meeting_open_windows_dismiss" => {
+            let mut args = Args::parse(params)?;
+            let session_id = args.take("sessionId")?;
+            reply(
+                crate::commands::meeting_open_windows::meeting_open_windows_dismiss(
+                    app.state(),
+                    session_id,
+                )
+                .await,
+            )
+        }
+        "change_meeting_open_windows_enabled_setting" => {
+            let mut args = Args::parse(params)?;
+            let enabled = args.take("enabled")?;
+            reply(
+                crate::commands::meeting_open_windows::change_meeting_open_windows_enabled_setting(
+                    app.state(),
                     enabled,
                 )
                 .await,

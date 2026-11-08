@@ -5,6 +5,7 @@ use std::sync::Arc;
 use tauri::{AppHandle, Manager};
 
 use crate::managers::audio::AudioRecordingManager;
+use crate::meeting::open_windows::{MeetingOpenWindowsService, ATTACH_WINDOW_BINDING_ID};
 use crate::modes::{parse_mode_shortcut_id, ModeShortcutKind, TranscriptionIntent};
 use crate::settings::get_settings;
 use crate::TranscriptionCoordinator;
@@ -16,6 +17,7 @@ pub(super) enum ShortcutIntent {
     StartStop(TranscriptionIntent),
     Cancel,
     SwitchMode(String),
+    AttachWindow,
 }
 
 pub(super) fn shortcut_intent(binding_id: &str) -> Option<ShortcutIntent> {
@@ -24,6 +26,9 @@ pub(super) fn shortcut_intent(binding_id: &str) -> Option<ShortcutIntent> {
     // struck mid-hold is still cancel. Every one of them means cancel.
     if binding_id == "cancel" || binding_id.starts_with("cancel#") {
         return Some(ShortcutIntent::Cancel);
+    }
+    if binding_id == ATTACH_WINDOW_BINDING_ID {
+        return Some(ShortcutIntent::AttachWindow);
     }
     if let Some((mode_id, ModeShortcutKind::Switch)) = parse_mode_shortcut_id(binding_id) {
         return Some(ShortcutIntent::SwitchMode(mode_id));
@@ -68,6 +73,16 @@ pub(super) fn handle_shortcut_event(
             let audio_manager = app.state::<Arc<AudioRecordingManager>>();
             if is_pressed && audio_manager.is_recording() {
                 crate::utils::cancel_current_operation(app);
+            }
+        }
+        ShortcutIntent::AttachWindow => {
+            if is_pressed {
+                if let Some(service) = app.try_state::<Arc<MeetingOpenWindowsService>>() {
+                    let service = Arc::clone(service.inner());
+                    tauri::async_runtime::spawn(async move { service.attach_front_window().await });
+                } else {
+                    warn!("MeetingOpenWindowsService is not initialized");
+                }
             }
         }
     }
@@ -120,6 +135,10 @@ mod tests {
         assert_eq!(
             shortcut_intent("cancel#option+shift"),
             Some(ShortcutIntent::Cancel)
+        );
+        assert_eq!(
+            shortcut_intent(ATTACH_WINDOW_BINDING_ID),
+            Some(ShortcutIntent::AttachWindow)
         );
         assert_eq!(shortcut_intent("test"), None);
     }
