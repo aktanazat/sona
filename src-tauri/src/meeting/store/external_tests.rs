@@ -1470,7 +1470,7 @@ fn keep_pricing_series(store: &MeetingStore) {
             },
             NOW,
         )
-        .unwrap();
+        .expect("pricing series kept on this Mac");
 }
 
 const HOUR: i64 = 60 * 60 * 1_000;
@@ -1557,7 +1557,7 @@ fn promised() -> Corpus {
     corpus
         .store
         .remember_calendar_facts(deck, &series_event(NOW - HOUR))
-        .unwrap();
+        .expect("deck calendar facts");
     corpus
 }
 
