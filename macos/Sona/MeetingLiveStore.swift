@@ -340,12 +340,15 @@ final class MeetingLiveStore {
     private(set) var notice: String?
 
     private let core: Core
+    /// The places near where each recording started, until he picks one.
+    let places: PlaceReadings
     @ObservationIgnored private var suggestionTask: Task<Void, Never>?
     @ObservationIgnored private var liveTask: Task<Void, Never>?
     @ObservationIgnored private var expiryTask: Task<Void, Never>?
 
     init(core: Core) {
         self.core = core
+        places = PlaceReadings(core: core)
         CameraWatermarkController.shared.attach(core: core)
 
         core.observe(CoreEvent.meetingSuggestionChanged) { [weak self] _ in
@@ -1694,6 +1697,7 @@ final class MeetingLiveStore {
             .compactMap { $0 }
             .first { $0.phase == .capturingRecording }
         watchSilence(recording?.sessionId)
+        if let recording { places.recordingStarted(recording.sessionId) }
         let capturingNow = [live?.session, active?.snapshot].contains { $0?.phase.isActive == true }
         if capturingNow != capturing { capturing = capturingNow }
     }

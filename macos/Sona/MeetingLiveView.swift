@@ -115,6 +115,7 @@ struct MeetingLiveView: View {
         ContextSuggestionsView(
             sessionId: session.sessionId, revision: session.revision, heard: store.provisional.count,
             showLive: { jump(to: $0, using: proxy) })
+        LivePlaceLine(places: store.places, sessionId: session.sessionId, revision: session.revision)
         MeetingSnapshotStrip(sessionId: session.sessionId)
         CallNamesLiveControl(sessionId: session.sessionId, recording: session.phase.isActive)
         if let state = store.active, state.snapshot.sessionId == session.sessionId {
