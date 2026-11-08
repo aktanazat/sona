@@ -16,7 +16,7 @@ use crate::meeting::loop_types::{
 };
 use crate::meeting::store::loops::{self, MeetingLedgerRows};
 use crate::meeting::store::StoreError;
-use crate::meeting::types::MeetingSessionId;
+use crate::meeting::types::{MeetingSessionId, OperationActor};
 use anyhow::Result;
 use chrono::{Local, NaiveDate, TimeZone};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -169,6 +169,15 @@ const fn loop_status_for(status: WorkStatus) -> MeetingLoopStatus {
     }
 }
 
+/// How the meeting side files a change this actor made.
+const fn operation_actor(actor: WorkActor) -> OperationActor {
+    match actor {
+        WorkActor::Me => OperationActor::User,
+        WorkActor::Sona => OperationActor::System,
+        WorkActor::Agent => OperationActor::External,
+    }
+}
+
 /// The item every duplicate in an item's family follows.
 fn root(history: &Connection, item: WorkItem) -> Result<WorkItem> {
     match &item.duplicate_of_id {
@@ -178,12 +187,13 @@ fn root(history: &Connection, item: WorkItem) -> Result<WorkItem> {
 }
 
 /// Moves the commitments behind an item's family to match the item they
-/// all follow, and forgets "not work" for any family that is open again.
-/// Returns the loops it moved.
+/// all follow, filed under `actor`, and forgets "not work" for any family
+/// that is open again. Returns the loops it moved.
 pub(crate) fn settle(
     history: &Connection,
     meetings: &Connection,
     item_id: &str,
+    actor: WorkActor,
     now_ms: i64,
 ) -> Result<Vec<MeetingLoopId>> {
     let root = root(history, items::item(history, item_id)?)?;
@@ -200,7 +210,9 @@ pub(crate) fn settle(
             )?;
         }
         let loop_id = MeetingLoopId(loop_id);
-        if loops::follow_tracker_in(meetings, &loop_id, status, now_ms).map_err(meeting_error)? {
+        if loops::follow_tracker_in(meetings, &loop_id, status, operation_actor(actor), now_ms)
+            .map_err(meeting_error)?
+        {
             moved.push(loop_id);
         }
     }
@@ -252,7 +264,7 @@ pub(crate) fn follow_loop_in(
     };
     let changed = items::follow(history, &root.id, status, now_ms)?;
     Ok(Followed {
-        loops: settle(history, meetings, &root.id, now_ms)?,
+        loops: settle(history, meetings, &root.id, WorkActor::Sona, now_ms)?,
         items: vec![changed.after],
     })
 }
@@ -280,9 +292,13 @@ pub(crate) fn reconcile(
             followed.items.extend(more.items);
             followed.loops.extend(more.loops);
         } else {
-            followed
-                .loops
-                .extend(settle(history, meetings, &root.id, now_ms)?);
+            followed.loops.extend(settle(
+                history,
+                meetings,
+                &root.id,
+                WorkActor::Sona,
+                now_ms,
+            )?);
         }
     }
     Ok(followed)
@@ -343,7 +359,7 @@ pub(crate) fn take_in_row(
             params![item.id, loop_id, now_ms],
         )?;
         link_meeting(history, &item.id, &meeting_id, at_ms, now_ms)?;
-        settle(history, meetings, &item.id, now_ms)?;
+        settle(history, meetings, &item.id, WorkActor::Sona, now_ms)?;
         return Ok(Some(items::item(history, &item.id)?));
     }
     if any(history, TRACKED, &lineage)? || any(history, DISMISSED, &lineage)? {
@@ -706,7 +722,7 @@ pub(crate) fn accept(
         actor,
         now_ms,
     )?;
-    let moved = settle(history, meetings, &item.id, now_ms)?;
+    let moved = settle(history, meetings, &item.id, actor, now_ms)?;
     Ok((changed.after, moved))
 }
 
@@ -733,7 +749,7 @@ pub(crate) fn decline(
         actor,
         now_ms,
     )?;
-    let moved = settle(history, meetings, &item.id, now_ms)?;
+    let moved = settle(history, meetings, &item.id, actor, now_ms)?;
     if let Some(loop_id) = &item.source_loop_id {
         history.execute(
             "INSERT INTO planning_dismissed_loops (loop_id, dismissed_at_ms) VALUES (?1, ?2)

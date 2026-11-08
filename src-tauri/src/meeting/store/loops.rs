@@ -377,14 +377,15 @@ impl MeetingStore {
 }
 
 /// Moves one loop to `status` because the tracker task that cites it moved
-/// first, inside the caller's transaction, with the receipt a hand-made
-/// change leaves. The task's revision fenced the change, so the loop's is
-/// not asked for. A carried loop is left alone, since its live occurrence is
+/// first, inside the caller's transaction, with a receipt filed under
+/// `actor`. The task's revision fenced the change, so the loop's is not
+/// asked for. A carried loop is left alone, since its live occurrence is
 /// later in the chain. False when there was nothing to write.
 pub(crate) fn follow_tracker_in(
     connection: &Connection,
     loop_id: &MeetingLoopId,
     status: MeetingLoopStatus,
+    actor: OperationActor,
     now_utc_ms: i64,
 ) -> Result<bool, StoreError> {
     let session_id = loop_id.session_id().ok_or(StoreError::Invalid)?;
@@ -429,7 +430,7 @@ pub(crate) fn follow_tracker_in(
     let receipt = committed_receipt(
         StoreMutation {
             operation_id,
-            actor: OperationActor::User,
+            actor,
             requested_at_utc_ms: now_utc_ms,
             session_id,
             expected_revision: state.revision,

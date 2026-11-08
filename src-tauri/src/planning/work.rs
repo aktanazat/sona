@@ -69,6 +69,24 @@ pub(super) struct Done<T> {
     pub(super) effects: Effects,
 }
 
+/// Who made a change, under which operation id, and when.
+#[derive(Clone, Copy)]
+struct Change<'a> {
+    operation_id: &'a str,
+    actor: WorkActor,
+    at_ms: i64,
+}
+
+impl<'a> Change<'a> {
+    fn now(operation_id: &'a str, actor: WorkActor) -> Self {
+        Self {
+            operation_id,
+            actor,
+            at_ms: now_ms(),
+        }
+    }
+}
+
 fn tell(app: &AppHandle, effects: &Effects) {
     let event = WorkChanged {
         ids: effects.items.clone(),
@@ -154,6 +172,28 @@ fn in_both<T>(
             .take()
             .unwrap_or_else(|| anyhow::anyhow!("conversations could not be read: {error:?}"))
     })
+}
+
+/// Runs a change that touches both databases, then tells every window.
+async fn run_both<T: Send>(
+    app: &AppHandle,
+    work: impl FnOnce(&mut Connection, &Connection) -> StorageResult<Done<T>> + Send,
+) -> Result<T, String> {
+    let history = app.state::<Arc<HistoryManager>>();
+    let meetings = app.state::<Arc<MeetingSessionManager>>();
+    let done = with_both(&history, &meetings, work).await?;
+    announce(app, &meetings, &done.effects).await;
+    Ok(done.value)
+}
+
+/// Runs a change that touches only the tracker, then tells every window.
+fn run_history<T>(
+    app: &AppHandle,
+    work: impl FnOnce(&mut Connection) -> StorageResult<Done<T>>,
+) -> Result<T, String> {
+    let done = super::history(&app.state::<Arc<HistoryManager>>(), work)?;
+    tell(app, &done.effects);
+    Ok(done.value)
 }
 
 /// Brings a just-processed meeting's open commitments into triage.
@@ -486,15 +526,15 @@ fn checked_owner(meetings: Option<&Connection>, owner: &WorkOwner) -> StorageRes
     }
 }
 
-/// Applies one person's edit to one item, then moves the commitments its
-/// family tracks to match.
+/// Applies one edit to one item, then moves the commitments its family
+/// tracks to match.
 fn edit(
     history: &Connection,
     meetings: &Connection,
+    change: Change<'_>,
     id: &str,
     patch: &WorkPatch,
     effects: &mut Effects,
-    now_ms: i64,
 ) -> StorageResult<WorkItem> {
     let patch = WorkPatch {
         owner: patch
@@ -509,14 +549,18 @@ fn edit(
         id,
         &patch,
         WorkActivityKind::Status,
-        WorkActor::Me,
-        now_ms,
+        change.actor,
+        change.at_ms,
     )?;
     effects.changed(&changed);
     if changed.before.status != changed.after.status {
-        effects
-            .loops
-            .extend(sync::settle(history, meetings, id, now_ms)?);
+        effects.loops.extend(sync::settle(
+            history,
+            meetings,
+            id,
+            change.actor,
+            change.at_ms,
+        )?);
     }
     Ok(changed.after)
 }
@@ -553,231 +597,264 @@ pub async fn work_item(
 fn create(
     history: &mut Connection,
     meetings: Option<&Connection>,
+    change: Change<'_>,
+    input: &WorkItemInput,
+) -> StorageResult<Done<WorkItem>> {
+    store::mutate(
+        history,
+        change.operation_id,
+        "work_create",
+        input,
+        change.at_ms,
+        |tx| {
+            let owner =
+                checked_owner(meetings, input.owner.as_ref().unwrap_or(&WorkOwner::Nobody))?;
+            let item = items::insert(
+                tx,
+                &NewItem {
+                    title: &input.title,
+                    details: input.details.as_deref(),
+                    status: input.status.unwrap_or(WorkStatus::NotStarted),
+                    priority: input.priority.unwrap_or(0),
+                    project_id: input.project_id.as_deref(),
+                    milestone_id: input.milestone_id.as_deref(),
+                    owner: &owner,
+                    due_at_ms: input.due_at_ms,
+                    label_ids: input.label_ids.as_deref().unwrap_or_default(),
+                    source_loop_id: None,
+                },
+                change.actor,
+                change.at_ms,
+            )?;
+            let mut effects = Effects::default();
+            effects.item(&item);
+            Ok(Done {
+                value: item,
+                effects,
+            })
+        },
+    )
+}
+
+/// [`work_create`] made by `actor`. Only an item given a person as its
+/// owner waits for the conversations to unlock.
+pub(crate) async fn create_as(
+    app: &AppHandle,
+    actor: WorkActor,
     operation_id: &str,
     input: &WorkItemInput,
-    now_ms: i64,
-) -> StorageResult<Done<WorkItem>> {
-    store::mutate(history, operation_id, "work_create", input, now_ms, |tx| {
-        let owner = checked_owner(meetings, input.owner.as_ref().unwrap_or(&WorkOwner::Nobody))?;
-        let item = items::insert(
-            tx,
-            &NewItem {
-                title: &input.title,
-                details: input.details.as_deref(),
-                status: input.status.unwrap_or(WorkStatus::NotStarted),
-                priority: input.priority.unwrap_or(0),
-                project_id: input.project_id.as_deref(),
-                milestone_id: input.milestone_id.as_deref(),
-                owner: &owner,
-                due_at_ms: input.due_at_ms,
-                label_ids: input.label_ids.as_deref().unwrap_or_default(),
-                source_loop_id: None,
-            },
-            WorkActor::Me,
-            now_ms,
-        )?;
-        let mut effects = Effects::default();
-        effects.item(&item);
-        Ok(Done {
-            value: item,
-            effects,
+) -> Result<WorkItem, String> {
+    let change = Change::now(operation_id, actor);
+    if matches!(input.owner, Some(WorkOwner::Person { .. })) {
+        run_both(app, |history, meetings| {
+            create(history, Some(meetings), change, input)
         })
-    })
+        .await
+    } else {
+        run_history(app, |history| create(history, None, change, input))
+    }
 }
 
 #[tauri::command]
 #[specta::specta]
 pub async fn work_create(
     app: AppHandle,
-    history_state: State<'_, Arc<HistoryManager>>,
-    meetings: State<'_, Arc<MeetingSessionManager>>,
     operation_id: String,
     input: WorkItemInput,
 ) -> Result<WorkItem, String> {
-    let now = now_ms();
-    let done = if matches!(input.owner, Some(WorkOwner::Person { .. })) {
-        with_both(&history_state, &meetings, |history, meeting_conn| {
-            create(history, Some(meeting_conn), &operation_id, &input, now)
-        })
-        .await?
-    } else {
-        super::history(&history_state, |history| {
-            create(history, None, &operation_id, &input, now)
-        })?
-    };
-    tell(&app, &done.effects);
-    Ok(done.value)
+    create_as(&app, WorkActor::Me, &operation_id, &input).await
 }
 
 fn update(
     history: &mut Connection,
     meetings: &Connection,
-    operation_id: &str,
+    change: Change<'_>,
     id: &str,
     expected_revision: i64,
     patch: &WorkPatch,
-    now_ms: i64,
 ) -> StorageResult<Done<WorkItem>> {
     store::mutate(
         history,
-        operation_id,
+        change.operation_id,
         "work_update",
         &(id, expected_revision, patch),
-        now_ms,
+        change.at_ms,
         |tx| {
             let id = store::uuid(id)?;
             if items::item(tx, &id)?.revision != expected_revision {
                 return Err(Refusal::StaleRevision.into());
             }
             let mut effects = Effects::default();
-            let value = edit(tx, meetings, &id, patch, &mut effects, now_ms)?;
+            let value = edit(tx, meetings, change, &id, patch, &mut effects)?;
             Ok(Done { value, effects })
         },
     )
+}
+
+/// [`work_update`] made by `actor`.
+pub(crate) async fn update_as(
+    app: &AppHandle,
+    actor: WorkActor,
+    operation_id: &str,
+    id: &str,
+    expected_revision: i64,
+    patch: &WorkPatch,
+) -> Result<WorkItem, String> {
+    let change = Change::now(operation_id, actor);
+    run_both(app, |history, meetings| {
+        update(history, meetings, change, id, expected_revision, patch)
+    })
+    .await
 }
 
 #[tauri::command]
 #[specta::specta]
 pub async fn work_update(
     app: AppHandle,
-    history_state: State<'_, Arc<HistoryManager>>,
-    meetings: State<'_, Arc<MeetingSessionManager>>,
     operation_id: String,
     id: String,
     expected_revision: i64,
     patch: WorkPatch,
 ) -> Result<WorkItem, String> {
-    let now = now_ms();
-    let done = with_both(&history_state, &meetings, |history, meeting_conn| {
-        update(
-            history,
-            meeting_conn,
-            &operation_id,
-            &id,
-            expected_revision,
-            &patch,
-            now,
-        )
-    })
-    .await?;
-    announce(&app, &meetings, &done.effects).await;
-    Ok(done.value)
+    update_as(
+        &app,
+        WorkActor::Me,
+        &operation_id,
+        &id,
+        expected_revision,
+        &patch,
+    )
+    .await
 }
 
 /// One patch to many items: every item takes it, or none does.
 fn bulk_update(
     history: &mut Connection,
     meetings: &Connection,
-    operation_id: &str,
+    change: Change<'_>,
     ids: &[String],
     patch: &WorkPatch,
-    now_ms: i64,
 ) -> StorageResult<Done<Vec<WorkItem>>> {
     store::mutate(
         history,
-        operation_id,
+        change.operation_id,
         "work_bulk_update",
         &(ids, patch),
-        now_ms,
+        change.at_ms,
         |tx| {
             let mut effects = Effects::default();
             let mut value = Vec::new();
             for id in unique(ids)? {
-                value.push(edit(tx, meetings, &id, patch, &mut effects, now_ms)?);
+                value.push(edit(tx, meetings, change, &id, patch, &mut effects)?);
             }
             Ok(Done { value, effects })
         },
     )
 }
 
+/// [`work_bulk_update`] made by `actor`.
+pub(crate) async fn bulk_update_as(
+    app: &AppHandle,
+    actor: WorkActor,
+    operation_id: &str,
+    ids: &[String],
+    patch: &WorkPatch,
+) -> Result<Vec<WorkItem>, String> {
+    let change = Change::now(operation_id, actor);
+    run_both(app, |history, meetings| {
+        bulk_update(history, meetings, change, ids, patch)
+    })
+    .await
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn work_bulk_update(
     app: AppHandle,
-    history_state: State<'_, Arc<HistoryManager>>,
-    meetings: State<'_, Arc<MeetingSessionManager>>,
     operation_id: String,
     ids: Vec<String>,
     patch: WorkPatch,
 ) -> Result<Vec<WorkItem>, String> {
-    let now = now_ms();
-    let done = with_both(&history_state, &meetings, |history, meeting_conn| {
-        bulk_update(history, meeting_conn, &operation_id, &ids, &patch, now)
-    })
-    .await?;
-    announce(&app, &meetings, &done.effects).await;
-    Ok(done.value)
+    bulk_update_as(&app, WorkActor::Me, &operation_id, &ids, &patch).await
 }
 
 fn set_archived(
     history: &mut Connection,
-    operation_id: &str,
+    change: Change<'_>,
     ids: &[String],
     archived: bool,
-    now_ms: i64,
 ) -> StorageResult<Done<Vec<WorkItem>>> {
     let command = if archived {
         "work_archive"
     } else {
         "work_restore"
     };
-    store::mutate(history, operation_id, command, &ids, now_ms, |tx| {
-        let mut effects = Effects::default();
-        let mut value = Vec::new();
-        for id in unique(ids)? {
-            let changed = items::set_archived(tx, &id, archived, WorkActor::Me, now_ms)?;
-            effects.changed(&changed);
-            value.push(changed.after);
-        }
-        Ok(Done { value, effects })
-    })
+    store::mutate(
+        history,
+        change.operation_id,
+        command,
+        &ids,
+        change.at_ms,
+        |tx| {
+            let mut effects = Effects::default();
+            let mut value = Vec::new();
+            for id in unique(ids)? {
+                let changed = items::set_archived(tx, &id, archived, change.actor, change.at_ms)?;
+                effects.changed(&changed);
+                value.push(changed.after);
+            }
+            Ok(Done { value, effects })
+        },
+    )
+}
+
+/// [`work_archive`], or [`work_restore`] when `archived` is false, made by
+/// `actor`.
+pub(crate) fn set_archived_as(
+    app: &AppHandle,
+    actor: WorkActor,
+    operation_id: &str,
+    ids: &[String],
+    archived: bool,
+) -> Result<Vec<WorkItem>, String> {
+    let change = Change::now(operation_id, actor);
+    run_history(app, |history| set_archived(history, change, ids, archived))
 }
 
 #[tauri::command(async)]
 #[specta::specta]
 pub fn work_archive(
     app: AppHandle,
-    history_state: State<'_, Arc<HistoryManager>>,
     operation_id: String,
     ids: Vec<String>,
 ) -> Result<Vec<WorkItem>, String> {
-    let done = super::history(&history_state, |history| {
-        set_archived(history, &operation_id, &ids, true, now_ms())
-    })?;
-    tell(&app, &done.effects);
-    Ok(done.value)
+    set_archived_as(&app, WorkActor::Me, &operation_id, &ids, true)
 }
 
 #[tauri::command(async)]
 #[specta::specta]
 pub fn work_restore(
     app: AppHandle,
-    history_state: State<'_, Arc<HistoryManager>>,
     operation_id: String,
     ids: Vec<String>,
 ) -> Result<Vec<WorkItem>, String> {
-    let done = super::history(&history_state, |history| {
-        set_archived(history, &operation_id, &ids, false, now_ms())
-    })?;
-    tell(&app, &done.effects);
-    Ok(done.value)
+    set_archived_as(&app, WorkActor::Me, &operation_id, &ids, false)
 }
 
 fn accept(
     history: &mut Connection,
     meetings: &Connection,
     user_name: Option<&str>,
-    operation_id: &str,
+    change: Change<'_>,
     ids: &[String],
     apply_suggestions: bool,
-    now_ms: i64,
 ) -> StorageResult<Done<Vec<WorkItem>>> {
     store::mutate(
         history,
-        operation_id,
+        change.operation_id,
         "work_triage_accept",
         &(ids, apply_suggestions),
-        now_ms,
+        change.at_ms,
         |tx| {
             let mut reader = MeetingReader::new(meetings, user_name);
             let mut effects = Effects::default();
@@ -786,7 +863,7 @@ fn accept(
                 let item = items::item(tx, &id)?;
                 let patch = sync::acceptance(tx, &mut reader, &item, apply_suggestions, None)?;
                 let (after, moved) =
-                    sync::accept(tx, meetings, &item, &patch, WorkActor::Me, now_ms)?;
+                    sync::accept(tx, meetings, &item, &patch, change.actor, change.at_ms)?;
                 effects.item(&item);
                 effects.item(&after);
                 effects.loops.extend(moved);
@@ -797,53 +874,59 @@ fn accept(
     )
 }
 
+/// [`work_triage_accept`] made by `actor`.
+pub(crate) async fn triage_accept_as(
+    app: &AppHandle,
+    actor: WorkActor,
+    operation_id: &str,
+    ids: &[String],
+    apply_suggestions: bool,
+) -> Result<Vec<WorkItem>, String> {
+    let change = Change::now(operation_id, actor);
+    let user_name = app.state::<Arc<MeetingSessionManager>>().user_name();
+    run_both(app, |history, meetings| {
+        accept(
+            history,
+            meetings,
+            user_name.as_deref(),
+            change,
+            ids,
+            apply_suggestions,
+        )
+    })
+    .await
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn work_triage_accept(
     app: AppHandle,
-    history_state: State<'_, Arc<HistoryManager>>,
-    meetings: State<'_, Arc<MeetingSessionManager>>,
     operation_id: String,
     ids: Vec<String>,
     apply_suggestions: bool,
 ) -> Result<Vec<WorkItem>, String> {
-    let user_name = meetings.user_name();
-    let now = now_ms();
-    let done = with_both(&history_state, &meetings, |history, meeting_conn| {
-        accept(
-            history,
-            meeting_conn,
-            user_name.as_deref(),
-            &operation_id,
-            &ids,
-            apply_suggestions,
-            now,
-        )
-    })
-    .await?;
-    announce(&app, &meetings, &done.effects).await;
-    Ok(done.value)
+    triage_accept_as(&app, WorkActor::Me, &operation_id, &ids, apply_suggestions).await
 }
 
 fn decline(
     history: &mut Connection,
     meetings: &Connection,
-    operation_id: &str,
+    change: Change<'_>,
     ids: &[String],
-    now_ms: i64,
 ) -> StorageResult<Done<Vec<WorkItem>>> {
     store::mutate(
         history,
-        operation_id,
+        change.operation_id,
         "work_triage_decline",
         &ids,
-        now_ms,
+        change.at_ms,
         |tx| {
             let mut effects = Effects::default();
             let mut value = Vec::new();
             for id in unique(ids)? {
                 let item = items::item(tx, &id)?;
-                let (after, moved) = sync::decline(tx, meetings, &item, WorkActor::Me, now_ms)?;
+                let (after, moved) =
+                    sync::decline(tx, meetings, &item, change.actor, change.at_ms)?;
                 effects.item(&after);
                 effects.loops.extend(moved);
                 value.push(after);
@@ -853,51 +936,60 @@ fn decline(
     )
 }
 
+/// [`work_triage_decline`] made by `actor`.
+pub(crate) async fn triage_decline_as(
+    app: &AppHandle,
+    actor: WorkActor,
+    operation_id: &str,
+    ids: &[String],
+) -> Result<Vec<WorkItem>, String> {
+    let change = Change::now(operation_id, actor);
+    run_both(app, |history, meetings| {
+        decline(history, meetings, change, ids)
+    })
+    .await
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn work_triage_decline(
     app: AppHandle,
-    history_state: State<'_, Arc<HistoryManager>>,
-    meetings: State<'_, Arc<MeetingSessionManager>>,
     operation_id: String,
     ids: Vec<String>,
 ) -> Result<Vec<WorkItem>, String> {
-    let now = now_ms();
-    let done = with_both(&history_state, &meetings, |history, meeting_conn| {
-        decline(history, meeting_conn, &operation_id, &ids, now)
-    })
-    .await?;
-    announce(&app, &meetings, &done.effects).await;
-    Ok(done.value)
+    triage_decline_as(&app, WorkActor::Me, &operation_id, &ids).await
 }
 
 /// Folds `id` into `of_id`: its sources move to the item it repeats.
 fn mark_duplicate(
     history: &mut Connection,
     meetings: &Connection,
-    operation_id: &str,
+    change: Change<'_>,
     id: &str,
     of_id: &str,
-    now_ms: i64,
 ) -> StorageResult<Done<WorkItem>> {
     store::mutate(
         history,
-        operation_id,
+        change.operation_id,
         "work_mark_duplicate",
         &(id, of_id),
-        now_ms,
+        change.at_ms,
         |tx| {
             let id = store::uuid(id)?;
             let (root, changed) =
-                items::mark_duplicate(tx, &id, &store::uuid(of_id)?, WorkActor::Me, now_ms)?;
+                items::mark_duplicate(tx, &id, &store::uuid(of_id)?, change.actor, change.at_ms)?;
             let mut effects = Effects::default();
             for changed in &changed {
                 effects.changed(changed);
             }
             effects.item(&items::item(tx, &root)?);
-            effects
-                .loops
-                .extend(sync::settle(tx, meetings, &root, now_ms)?);
+            effects.loops.extend(sync::settle(
+                tx,
+                meetings,
+                &root,
+                change.actor,
+                change.at_ms,
+            )?);
             Ok(Done {
                 value: items::item(tx, &id)?,
                 effects,
@@ -906,45 +998,52 @@ fn mark_duplicate(
     )
 }
 
+/// [`work_mark_duplicate`] made by `actor`.
+pub(crate) async fn mark_duplicate_as(
+    app: &AppHandle,
+    actor: WorkActor,
+    operation_id: &str,
+    id: &str,
+    of_id: &str,
+) -> Result<WorkItem, String> {
+    let change = Change::now(operation_id, actor);
+    run_both(app, |history, meetings| {
+        mark_duplicate(history, meetings, change, id, of_id)
+    })
+    .await
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn work_mark_duplicate(
     app: AppHandle,
-    history_state: State<'_, Arc<HistoryManager>>,
-    meetings: State<'_, Arc<MeetingSessionManager>>,
     operation_id: String,
     id: String,
     of_id: String,
 ) -> Result<WorkItem, String> {
-    let now = now_ms();
-    let done = with_both(&history_state, &meetings, |history, meeting_conn| {
-        mark_duplicate(history, meeting_conn, &operation_id, &id, &of_id, now)
-    })
-    .await?;
-    announce(&app, &meetings, &done.effects).await;
-    Ok(done.value)
+    mark_duplicate_as(&app, WorkActor::Me, &operation_id, &id, &of_id).await
 }
 
-#[tauri::command(async)]
-#[specta::specta]
-pub fn work_relation_add(
-    app: AppHandle,
-    history_state: State<'_, Arc<HistoryManager>>,
-    operation_id: String,
-    from_id: String,
-    to_id: String,
+/// [`work_relation_add`] made by `actor`.
+pub(crate) fn relation_add_as(
+    app: &AppHandle,
+    actor: WorkActor,
+    operation_id: &str,
+    from_id: &str,
+    to_id: &str,
     kind: WorkRelationKind,
 ) -> Result<WorkRelation, String> {
-    let now = now_ms();
-    let done = super::history(&history_state, |history| {
+    let change = Change::now(operation_id, actor);
+    run_history(app, |history| {
         store::mutate(
             history,
-            &operation_id,
+            change.operation_id,
             "work_relation_add",
-            &(&from_id, &to_id, kind),
-            now,
+            &(from_id, to_id, kind),
+            change.at_ms,
             |tx| {
-                let relation = items::add_relation(tx, &from_id, &to_id, kind, WorkActor::Me, now)?;
+                let relation =
+                    items::add_relation(tx, from_id, to_id, kind, change.actor, change.at_ms)?;
                 Ok(Done {
                     effects: Effects {
                         items: vec![relation.from_id.clone(), relation.to_id.clone()],
@@ -954,29 +1053,38 @@ pub fn work_relation_add(
                 })
             },
         )
-    })?;
-    tell(&app, &done.effects);
-    Ok(done.value)
+    })
 }
 
 #[tauri::command(async)]
 #[specta::specta]
-pub fn work_relation_remove(
+pub fn work_relation_add(
     app: AppHandle,
-    history_state: State<'_, Arc<HistoryManager>>,
     operation_id: String,
-    id: String,
+    from_id: String,
+    to_id: String,
+    kind: WorkRelationKind,
+) -> Result<WorkRelation, String> {
+    relation_add_as(&app, WorkActor::Me, &operation_id, &from_id, &to_id, kind)
+}
+
+/// [`work_relation_remove`] made by `actor`.
+pub(crate) fn relation_remove_as(
+    app: &AppHandle,
+    actor: WorkActor,
+    operation_id: &str,
+    id: &str,
 ) -> Result<(), String> {
-    let now = now_ms();
-    let done = super::history(&history_state, |history| {
+    let change = Change::now(operation_id, actor);
+    run_history(app, |history| {
         store::mutate(
             history,
-            &operation_id,
+            change.operation_id,
             "work_relation_remove",
             &id,
-            now,
+            change.at_ms,
             |tx| {
-                let relation = items::remove_relation(tx, &id, WorkActor::Me, now)?;
+                let relation = items::remove_relation(tx, id, change.actor, change.at_ms)?;
                 Ok(Done {
                     value: (),
                     effects: Effects {
@@ -986,9 +1094,17 @@ pub fn work_relation_remove(
                 })
             },
         )
-    })?;
-    tell(&app, &done.effects);
-    Ok(done.value)
+    })
+}
+
+#[tauri::command(async)]
+#[specta::specta]
+pub fn work_relation_remove(
+    app: AppHandle,
+    operation_id: String,
+    id: String,
+) -> Result<(), String> {
+    relation_remove_as(&app, WorkActor::Me, &operation_id, &id)
 }
 
 #[tauri::command(async)]
@@ -1003,14 +1119,13 @@ pub fn work_labels(
 #[specta::specta]
 pub fn work_label_save(
     app: AppHandle,
-    history_state: State<'_, Arc<HistoryManager>>,
     operation_id: String,
     id: Option<String>,
     name: String,
     hue: f64,
 ) -> Result<WorkLabel, String> {
     let now = now_ms();
-    let done = super::history(&history_state, |history| {
+    run_history(&app, |history| {
         store::mutate(
             history,
             &operation_id,
@@ -1024,21 +1139,14 @@ pub fn work_label_save(
                 })
             },
         )
-    })?;
-    tell(&app, &done.effects);
-    Ok(done.value)
+    })
 }
 
 #[tauri::command(async)]
 #[specta::specta]
-pub fn work_label_delete(
-    app: AppHandle,
-    history_state: State<'_, Arc<HistoryManager>>,
-    operation_id: String,
-    id: String,
-) -> Result<(), String> {
+pub fn work_label_delete(app: AppHandle, operation_id: String, id: String) -> Result<(), String> {
     let now = now_ms();
-    let done = super::history(&history_state, |history| {
+    run_history(&app, |history| {
         store::mutate(
             history,
             &operation_id,
@@ -1055,9 +1163,7 @@ pub fn work_label_delete(
                 })
             },
         )
-    })?;
-    tell(&app, &done.effects);
-    Ok(done.value)
+    })
 }
 
 #[tauri::command(async)]
@@ -1070,7 +1176,6 @@ pub fn work_views(history_state: State<'_, Arc<HistoryManager>>) -> Result<Vec<W
 #[specta::specta]
 pub fn work_view_save(
     app: AppHandle,
-    history_state: State<'_, Arc<HistoryManager>>,
     operation_id: String,
     id: Option<String>,
     name: String,
@@ -1078,7 +1183,7 @@ pub fn work_view_save(
     display: WorkDisplay,
 ) -> Result<WorkView, String> {
     let now = now_ms();
-    let done = super::history(&history_state, |history| {
+    run_history(&app, |history| {
         store::mutate(
             history,
             &operation_id,
@@ -1092,21 +1197,14 @@ pub fn work_view_save(
                 })
             },
         )
-    })?;
-    tell(&app, &done.effects);
-    Ok(done.value)
+    })
 }
 
 #[tauri::command(async)]
 #[specta::specta]
-pub fn work_view_delete(
-    app: AppHandle,
-    history_state: State<'_, Arc<HistoryManager>>,
-    operation_id: String,
-    id: String,
-) -> Result<(), String> {
+pub fn work_view_delete(app: AppHandle, operation_id: String, id: String) -> Result<(), String> {
     let now = now_ms();
-    let done = super::history(&history_state, |history| {
+    run_history(&app, |history| {
         store::mutate(history, &operation_id, "work_view_delete", &id, now, |tx| {
             items::delete_view(tx, &id)?;
             Ok(Done {
@@ -1114,9 +1212,7 @@ pub fn work_view_delete(
                 effects: Effects::default(),
             })
         })
-    })?;
-    tell(&app, &done.effects);
-    Ok(done.value)
+    })
 }
 
 #[tauri::command(async)]
@@ -1185,7 +1281,12 @@ pub(super) fn update_task(
                 ..WorkPatch::default()
             };
             let mut effects = Effects::default();
-            edit(tx, meetings, &id, &patch, &mut effects, now_ms)?;
+            let change = Change {
+                operation_id,
+                actor: WorkActor::Me,
+                at_ms: now_ms,
+            };
+            edit(tx, meetings, change, &id, &patch, &mut effects)?;
             Ok(Done {
                 value: store::task(tx, &id)?,
                 effects,

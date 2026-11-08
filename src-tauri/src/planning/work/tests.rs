@@ -6,8 +6,10 @@ use super::super::schema;
 use super::super::store as planning_store;
 use super::items::{self, NewItem};
 use super::sync;
-use super::types::{WorkActivityKind, WorkItem, WorkItemInput, WorkOwner, WorkPatch, WorkStatus};
-use super::{accept, bulk_update, create, mark_duplicate, set_archived, update};
+use super::types::{
+    WorkActivityKind, WorkActor, WorkItem, WorkItemInput, WorkOwner, WorkPatch, WorkStatus,
+};
+use super::{accept, bulk_update, create, mark_duplicate, set_archived, update, Change};
 use crate::meeting::ledger::{
     LedgerCommitment, LedgerFirmness, LedgerReceipt, LedgerReceiptState, MeetingLedger,
 };
@@ -29,6 +31,14 @@ const AT: i64 = 1_700_000_000_000;
 
 fn operation() -> String {
     Uuid::new_v4().to_string()
+}
+
+fn by_me(operation_id: &str, at_ms: i64) -> Change<'_> {
+    Change {
+        operation_id,
+        actor: WorkActor::Me,
+        at_ms,
+    }
 }
 
 fn status(status: WorkStatus) -> WorkPatch {
@@ -260,10 +270,9 @@ impl Desk {
                     history,
                     meetings,
                     None,
-                    &operation(),
+                    by_me(&operation(), at),
                     &[triaged.id],
                     false,
-                    at,
                 )
             })
             .expect("the triage item accepted")
@@ -437,11 +446,10 @@ fn a_commitment_and_its_item_move_together_without_echo() {
             update(
                 history,
                 meetings,
-                &operation(),
+                by_me(&operation(), at),
                 &item.id,
                 item.revision,
                 &status(WorkStatus::Done),
-                at,
             )
         })
         .expect("done in the tracker")
@@ -469,9 +477,8 @@ fn a_bulk_change_lands_on_every_item_or_on_none() {
     let banners = create(
         &mut desk.history,
         None,
-        &operation(),
+        by_me(&operation(), at),
         &typed("Order the banners"),
-        at,
     )
     .expect("a typed item")
     .value;
@@ -487,10 +494,9 @@ fn a_bulk_change_lands_on_every_item_or_on_none() {
         bulk_update(
             history,
             meetings,
-            &operation(),
+            by_me(&operation(), at),
             &[tracked.id.clone(), banners.id.clone(), missing],
             &finish,
-            at,
         )
     });
     assert!(refused.is_err());
@@ -504,10 +510,9 @@ fn a_bulk_change_lands_on_every_item_or_on_none() {
             bulk_update(
                 history,
                 meetings,
-                &operation(),
+                by_me(&operation(), at),
                 &[tracked.id.clone(), banners.id.clone()],
                 &finish,
-                at,
             )
         })
         .expect("the bulk change")
@@ -525,10 +530,9 @@ fn archiving_hides_an_item_and_restoring_brings_it_back_as_it_was() {
     let at = desk.tick();
     let archived = set_archived(
         &mut desk.history,
-        &operation(),
+        by_me(&operation(), at),
         std::slice::from_ref(&item.id),
         true,
-        at,
     )
     .expect("archived")
     .value
@@ -543,10 +547,9 @@ fn archiving_hides_an_item_and_restoring_brings_it_back_as_it_was() {
     let at = desk.tick();
     let restored = set_archived(
         &mut desk.history,
-        &operation(),
+        by_me(&operation(), at),
         std::slice::from_ref(&item.id),
         false,
-        at,
     )
     .expect("restored")
     .value
@@ -578,9 +581,8 @@ fn a_duplicate_hands_its_meeting_to_the_original_and_follows_it() {
     let original = create(
         &mut desk.history,
         None,
-        &operation(),
+        by_me(&operation(), at),
         &typed("Send the launch outline"),
-        at,
     )
     .expect("a typed item")
     .value;
@@ -595,10 +597,9 @@ fn a_duplicate_hands_its_meeting_to_the_original_and_follows_it() {
             mark_duplicate(
                 history,
                 meetings,
-                &operation(),
+                by_me(&operation(), at),
                 &repeat.id,
                 &original.id,
-                at,
             )
         })
         .expect("marked a duplicate")
@@ -618,13 +619,46 @@ fn a_duplicate_hands_its_meeting_to_the_original_and_follows_it() {
         update(
             history,
             meetings,
-            &operation(),
+            by_me(&operation(), at),
             &original.id,
             original.revision,
             &status(WorkStatus::Done),
-            at,
         )
     })
     .expect("the original done");
     assert_eq!(desk.page_status(&loop_id), MeetingLoopStatus::Done);
+}
+
+#[test]
+fn an_agent_change_is_filed_under_the_agent_on_both_sides() {
+    let mut desk = desk(&["Send the outline"]);
+    let (item, loop_id) = desk.accepted();
+
+    let at = desk.tick();
+    desk.both(|history, meetings| {
+        update(
+            history,
+            meetings,
+            Change {
+                operation_id: &operation(),
+                actor: WorkActor::Agent,
+                at_ms: at,
+            },
+            &item.id,
+            item.revision,
+            &status(WorkStatus::Done),
+        )
+    })
+    .expect("done by an agent");
+
+    let filed = items::activity(&desk.history, &item.id)
+        .expect("the item's history")
+        .into_iter()
+        .filter(|entry| entry.at_ms == at)
+        .map(|entry| entry.actor)
+        .collect::<Vec<_>>();
+    assert_eq!(filed, [WorkActor::Agent]);
+    let row = desk.page_row(&loop_id);
+    assert_eq!(row.status, MeetingLoopStatus::Done);
+    assert_eq!(row.resolved_by, Some(OperationActor::External));
 }
