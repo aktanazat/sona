@@ -401,6 +401,34 @@ struct VoiceIdentityStatus: Decodable {
     let unresolvedActiveSpeakerIds: [String]
     /// At most one per speaker, and only for speakers still waiting.
     let suggestions: [VoiceSpeakerSuggestion]
+    /// Speakers still waiting whose voice other meetings heard, unnamed there too.
+    let sameVoice: [SameVoice]
+}
+
+/// One waiting speaker and the other meetings where the same voice waits for a
+/// name, oldest first. Naming the speaker names the ones kept with it too.
+struct SameVoice: Decodable, Identifiable {
+    let speakerId: String
+    let meetings: [SameVoiceMeeting]
+
+    var id: String { speakerId }
+}
+
+struct SameVoiceMeeting: Decodable, Identifiable {
+    let sessionId: String
+    let speakerId: String
+    let speakerRevision: UInt64
+    let title: String
+    let startedAtUtcMs: Int64
+    /// Where only this voice talks; nil once the recording is gone.
+    let clip: VoiceClip?
+
+    var id: String { sessionId }
+}
+
+struct VoiceClip: Decodable {
+    let startOffsetNs: UInt64
+    let endOffsetNs: UInt64
 }
 
 /// A speaker whose voice matches the one you named as this person in other
@@ -648,29 +676,45 @@ enum VoiceIdentityTarget: Encodable {
 }
 
 /// What to do with one speaker: name them, correct the name, or take the name
-/// off and forget the voice.
+/// off and forget the voice. A label also names the same voice in `sameVoice`.
 enum VoiceIdentityAction: Encodable {
-    case label(VoiceIdentityTarget)
+    case label(VoiceIdentityTarget, sameVoice: [SameVoiceSpeaker])
     case correctTo(VoiceIdentityTarget)
     case markUnknown
 
     private enum CodingKeys: String, CodingKey {
         case kind
         case target
+        case sameVoice = "same_voice"
     }
 
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         switch self {
-        case let .label(target):
+        case let .label(target, sameVoice):
             try container.encode("label", forKey: .kind)
             try container.encode(target, forKey: .target)
+            try container.encode(sameVoice, forKey: .sameVoice)
         case let .correctTo(target):
             try container.encode("correct_to", forKey: .kind)
             try container.encode(target, forKey: .target)
         case .markUnknown:
             try container.encode("mark_unknown", forKey: .kind)
         }
+    }
+}
+
+/// A speaker of another meeting a label names too, at the revision the sheet
+/// showed.
+struct SameVoiceSpeaker: Encodable {
+    let sessionId: String
+    let speakerId: String
+    let expectedSpeakerRevision: UInt64
+
+    enum CodingKeys: String, CodingKey {
+        case sessionId = "session_id"
+        case speakerId = "speaker_id"
+        case expectedSpeakerRevision = "expected_speaker_revision"
     }
 }
 

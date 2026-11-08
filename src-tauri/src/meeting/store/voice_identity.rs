@@ -4,11 +4,11 @@ use super::people::{
 };
 use super::{
     append_event, committed_receipt, decode_json, id, insert_operation_receipt,
-    mark_artifacts_out_of_date, operation_receipt_in, session_row, to_i64, utc_now_ms,
-    DurableTrackRecord, MeetingStore, StoreError, StoreMutation,
+    mark_artifacts_out_of_date, operation_receipt_in, phase_from_db, session_row, to_i64,
+    utc_now_ms, DurableTrackRecord, MeetingStore, SessionRow, StoreError, StoreMutation,
 };
 use crate::meeting::diarization::{
-    match_speaker_profile, wespeaker_embedding_model_key, SpeakerEmbedding,
+    match_speaker_profile, pair_same_voices, wespeaker_embedding_model_key, SpeakerEmbedding,
     SpeakerEmbeddingModelKey, SPEAKER_EMBEDDING_DIMENSIONS,
 };
 use crate::meeting::people_types::{
@@ -31,6 +31,8 @@ const EMBEDDING_BYTES: usize = SPEAKER_EMBEDDING_DIMENSIONS * size_of::<f32>();
 const _: () = assert!(SPEAKER_EMBEDDING_DIMENSIONS == 256 && EMBEDDING_BYTES == 1024);
 const MIN_ENROLLMENT_EVIDENCE_DURATION_NS: u64 = 4_000_000_000;
 const MAX_ENROLLMENT_EVIDENCE_DURATION_NS: u64 = 12_000_000_000;
+/// How long a voice nobody named is kept after the run that heard it.
+const UNNAMED_VOICE_RETENTION_MS: i64 = 90 * 24 * 60 * 60 * 1000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum DiarizationEvidenceKind {
@@ -198,6 +200,8 @@ pub(crate) enum MeetingSpeakerIdentifyTarget {
 pub(crate) enum MeetingSpeakerIdentifyDisposition {
     Label {
         target: MeetingSpeakerIdentifyTarget,
+        /// Speakers of other meetings with the same voice, named too.
+        same_voice: Vec<SameVoiceSpeaker>,
     },
     CorrectTo {
         target: MeetingSpeakerIdentifyTarget,
@@ -220,6 +224,9 @@ pub(crate) struct MeetingSpeakerIdentifyRequest {
 pub(crate) struct VoiceSpeakerIdentityResult {
     pub receipt: OperationReceipt,
     pub resolved_person_id: Option<PersonId>,
+    /// Each other meeting the label named the same voice in, at its new
+    /// revision.
+    pub same_voice_revisions: Vec<(MeetingSessionId, u64)>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
@@ -228,6 +235,41 @@ pub struct VoiceSpeakerSuggestion {
     /// None when the voice is the user's own, named `display_name` in About me.
     pub person_id: Option<PersonId>,
     pub display_name: String,
+}
+
+/// A speaker of another meeting that a label names too, at the revision the
+/// user saw.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+pub struct SameVoiceSpeaker {
+    pub session_id: MeetingSessionId,
+    pub speaker_id: SpeakerId,
+    pub expected_speaker_revision: u64,
+}
+
+/// A speaker still waiting for a name, and the other meetings where the same
+/// voice was heard and nobody named it either, oldest first.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+pub struct SameVoice {
+    pub speaker_id: SpeakerId,
+    pub meetings: Vec<SameVoiceMeeting>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+pub struct SameVoiceMeeting {
+    pub session_id: MeetingSessionId,
+    pub speaker_id: SpeakerId,
+    pub speaker_revision: u64,
+    pub title: String,
+    pub started_at_utc_ms: i64,
+    /// Where only this voice talks, to hear it by; none once the recording
+    /// is gone or when no stretch is long enough.
+    pub clip: Option<VoiceClip>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+pub struct VoiceClip {
+    pub start_offset_ns: u64,
+    pub end_offset_ns: u64,
 }
 
 /// The user's own voice as Sona learned it from their dictations.
@@ -799,7 +841,7 @@ impl MeetingStore {
             return Ok(Vec::new());
         }
         let connection = self.connection()?;
-        let known = known_voices_in(&connection, session_id, user_name, &unresolved)?;
+        let known = known_voices_in(&connection, Some(session_id), user_name, &unresolved)?;
         Ok(known
             .waiting
             .iter()
@@ -812,6 +854,90 @@ impl MeetingStore {
                 })
             })
             .collect())
+    }
+
+    /// For each speaker of this meeting still waiting for a name, the other
+    /// meetings where `pair_same_voices` hears its voice, waiting there too.
+    /// A voice that matches somebody already known is left to
+    /// `voice_speaker_suggestions`. Nothing is written: a label names the
+    /// others only when the user keeps them in it.
+    pub(crate) fn same_voice_meetings(
+        &self,
+        session_id: MeetingSessionId,
+        user_name: Option<&str>,
+    ) -> Result<Vec<SameVoice>, StoreError> {
+        let groups = same_voices_in(&*self.connection()?, session_id, user_name)?;
+        groups
+            .into_iter()
+            .map(|(speaker_id, mut voices)| {
+                voices.sort_by_key(|voice| voice.started_at_utc_ms);
+                let meetings = voices
+                    .into_iter()
+                    .map(|voice| {
+                        let clip = if voice.audio_kept {
+                            match self
+                                .local_voice_enrollment_evidence(voice.session_id, voice.speaker_id)
+                            {
+                                Ok(evidence) => Some(VoiceClip {
+                                    start_offset_ns: evidence.start_offset_ns(),
+                                    end_offset_ns: evidence.end_offset_ns(),
+                                }),
+                                Err(
+                                    StoreError::InsufficientEnrollmentEvidence
+                                    | StoreError::TranscriptDeleted,
+                                ) => None,
+                                Err(error) => return Err(error),
+                            }
+                        } else {
+                            None
+                        };
+                        Ok(SameVoiceMeeting {
+                            session_id: voice.session_id,
+                            speaker_id: voice.speaker_id,
+                            speaker_revision: voice.speaker_revision,
+                            title: voice.title,
+                            started_at_utc_ms: voice.started_at_utc_ms,
+                            clip,
+                        })
+                    })
+                    .collect::<Result<_, StoreError>>()?;
+                Ok(SameVoice {
+                    speaker_id,
+                    meetings,
+                })
+            })
+            .collect()
+    }
+
+    /// Forgets every voice still waiting for a name that a run heard more than
+    /// `UNNAMED_VOICE_RETENTION_MS` before `now_utc_ms`, unless it matches
+    /// somebody known. Returns how many it forgot.
+    pub(crate) fn expire_unnamed_voiceprints(&self, now_utc_ms: i64) -> Result<usize, StoreError> {
+        let user_name = self.user_name();
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let expired = unnamed_voices_in(
+            &transaction,
+            now_utc_ms.saturating_sub(UNNAMED_VOICE_RETENTION_MS),
+        )?;
+        if expired.is_empty() {
+            return Ok(0);
+        }
+        let known = known_voices_in(&transaction, None, user_name.as_deref(), &[])?;
+        let mut forgotten = 0;
+        for voice in expired {
+            if voice
+                .voice
+                .as_ref()
+                .is_some_and(|voice| known.owner(voice).is_some())
+            {
+                continue;
+            }
+            forget_speaker_voiceprint_in(&transaction, voice.speaker_id)?;
+            forgotten += 1;
+        }
+        transaction.commit()?;
+        Ok(forgotten)
     }
 
     /// Match entirely inside SQLCipher and return only a revision-fenced target.
@@ -970,10 +1096,21 @@ impl MeetingStore {
     }
 
     /// A human identification is deliberately separate from automatic matching.
+    /// A label names the same voice in other meetings too when the request
+    /// lists them, each only while it still waits for a name at the revision
+    /// the user saw and still sounds like this speaker.
     pub(crate) fn identify_speaker(
         &self,
         request: MeetingSpeakerIdentifyRequest,
     ) -> Result<VoiceSpeakerIdentityResult, StoreError> {
+        let user_name = match &request.disposition {
+            MeetingSpeakerIdentifyDisposition::Label { same_voice, .. }
+                if !same_voice.is_empty() =>
+            {
+                self.user_name()
+            }
+            _ => None,
+        };
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         if let Some(receipt) = operation_receipt_in(&transaction, request.operation_id)? {
@@ -983,20 +1120,14 @@ impl MeetingStore {
             return Ok(VoiceSpeakerIdentityResult {
                 receipt,
                 resolved_person_id,
+                same_voice_revisions: Vec::new(),
             });
         }
         let session = session_row(&transaction, request.session_id)?;
         if session.revision != request.expected_meeting_revision {
             return Err(StoreError::StaleRevision);
         }
-        if !matches!(
-            session.phase,
-            MeetingPhase::CapturingRecording
-                | MeetingPhase::CapturingPaused
-                | MeetingPhase::Processing
-                | MeetingPhase::ReviewReady
-                | MeetingPhase::RecoveryRequired
-        ) {
+        if !identifiable(session.phase) {
             return Err(StoreError::Conflict);
         }
         require_voice_people_revision_in(&transaction, request.expected_people_revision)?;
@@ -1005,12 +1136,23 @@ impl MeetingStore {
         // Label and CorrectTo resolve and link a target identically; they differ
         // only in whether the speaker's existing samples survive. MarkUnknown is
         // the same shape with no target.
-        let (target, remove_samples) = match request.disposition {
-            MeetingSpeakerIdentifyDisposition::Label { target } => (Some(target), false),
-            MeetingSpeakerIdentifyDisposition::CorrectTo { target } => (Some(target), true),
-            MeetingSpeakerIdentifyDisposition::MarkUnknown => (None, true),
+        let (target, remove_samples, same_voice) = match request.disposition {
+            MeetingSpeakerIdentifyDisposition::Label { target, same_voice } => {
+                (Some(target), false, same_voice)
+            }
+            MeetingSpeakerIdentifyDisposition::CorrectTo { target } => {
+                (Some(target), true, Vec::new())
+            }
+            MeetingSpeakerIdentifyDisposition::MarkUnknown => (None, true, Vec::new()),
         };
-        let (display_name, person_changed, link_changed, manual_resolution) = match target {
+        require_same_voice_in(
+            &transaction,
+            request.session_id,
+            request.speaker_id,
+            &same_voice,
+            user_name.as_deref(),
+        )?;
+        let (display_name, person_changed, mut link_changed, manual_resolution) = match target {
             Some(target) => {
                 let (person_id, display_name, created) = resolve_identification_target_in(
                     &transaction,
@@ -1046,30 +1188,38 @@ impl MeetingStore {
         } else {
             false
         };
-        transaction.execute(
-            "UPDATE meeting_speakers
-                SET display_name = ?1, revision = revision + 1
-              WHERE speaker_id = ?2 AND session_id = ?3 AND merged_into_speaker_id IS NULL",
-            params![display_name, id(request.speaker_id), id(request.session_id)],
-        )?;
-        mark_artifacts_out_of_date(&transaction, request.session_id)?;
-        let next_revision = session
-            .revision
-            .checked_add(1)
-            .ok_or(StoreError::VoiceInvariant)?;
-        transaction.execute(
-            "UPDATE meeting_sessions SET revision = ?1 WHERE id = ?2",
-            params![to_i64(next_revision)?, id(request.session_id)],
-        )?;
-        append_event(
+        let next_revision = name_speaker_in(
             &transaction,
             request.session_id,
-            next_revision,
-            session.phase,
-            session.phase,
-            "speaker_identified",
-            None,
+            &session,
+            request.speaker_id,
+            &display_name,
+            request.operation_id,
+            manual_resolution,
         )?;
+        let mut same_voice_revisions = Vec::with_capacity(same_voice.len());
+        if let ManualVoiceSpeakerResolution::Identified(person_id) = manual_resolution {
+            for speaker in same_voice {
+                link_changed |= upsert_link_in(
+                    &transaction,
+                    speaker.session_id,
+                    person_id,
+                    PersonLinkSource::Speaker,
+                    PersonLinkConfidence::Confirmed,
+                    request.requested_at_utc_ms,
+                )?;
+                let revision = name_speaker_in(
+                    &transaction,
+                    speaker.session_id,
+                    &session_row(&transaction, speaker.session_id)?,
+                    speaker.speaker_id,
+                    &display_name,
+                    MeetingOperationId::new(),
+                    manual_resolution,
+                )?;
+                same_voice_revisions.push((speaker.session_id, revision));
+            }
+        }
         if person_changed || link_changed || profiles_changed {
             bump_people_revision_in(&transaction)?;
         }
@@ -1090,18 +1240,263 @@ impl MeetingStore {
             Vec::new(),
         );
         insert_operation_receipt(&transaction, &receipt, request.requested_at_utc_ms)?;
-        persist_manual_voice_speaker_resolution_in(
-            &transaction,
-            request.operation_id,
-            request.speaker_id,
-            manual_resolution,
-        )?;
         transaction.commit()?;
         Ok(VoiceSpeakerIdentityResult {
             receipt,
             resolved_person_id,
+            same_voice_revisions,
         })
     }
+}
+
+/// The phases in which a person can still answer for a meeting's speakers.
+fn identifiable(phase: MeetingPhase) -> bool {
+    matches!(
+        phase,
+        MeetingPhase::CapturingRecording
+            | MeetingPhase::CapturingPaused
+            | MeetingPhase::Processing
+            | MeetingPhase::ReviewReady
+            | MeetingPhase::RecoveryRequired
+    )
+}
+
+/// Writes one person's answer for one speaker: the name it now carries, its
+/// meeting's next revision and the answer, kept under `operation_id`.
+/// Returns that revision.
+fn name_speaker_in(
+    transaction: &Transaction<'_>,
+    session_id: MeetingSessionId,
+    session: &SessionRow,
+    speaker_id: SpeakerId,
+    display_name: &str,
+    operation_id: MeetingOperationId,
+    resolution: ManualVoiceSpeakerResolution,
+) -> Result<u64, StoreError> {
+    transaction.execute(
+        "UPDATE meeting_speakers
+            SET display_name = ?1, revision = revision + 1
+          WHERE speaker_id = ?2 AND session_id = ?3 AND merged_into_speaker_id IS NULL",
+        params![display_name, id(speaker_id), id(session_id)],
+    )?;
+    mark_artifacts_out_of_date(transaction, session_id)?;
+    let next_revision = session
+        .revision
+        .checked_add(1)
+        .ok_or(StoreError::VoiceInvariant)?;
+    transaction.execute(
+        "UPDATE meeting_sessions SET revision = ?1 WHERE id = ?2",
+        params![to_i64(next_revision)?, id(session_id)],
+    )?;
+    append_event(
+        transaction,
+        session_id,
+        next_revision,
+        session.phase,
+        session.phase,
+        "speaker_identified",
+        None,
+    )?;
+    persist_manual_voice_speaker_resolution_in(transaction, operation_id, speaker_id, resolution)?;
+    Ok(next_revision)
+}
+
+/// A kept voice nobody has named: its speaker still carries the label
+/// diarization gave it, and no answer or voice match covers it. `voice` is
+/// none for a print another model made, which matches nobody.
+struct UnnamedVoice {
+    session_id: MeetingSessionId,
+    speaker_id: SpeakerId,
+    speaker_revision: u64,
+    phase: MeetingPhase,
+    title: String,
+    started_at_utc_ms: i64,
+    audio_kept: bool,
+    voice: Option<SpeakerEmbedding>,
+}
+
+/// Every unnamed voice a run kept before `kept_before_utc_ms`, grouped by
+/// meeting.
+fn unnamed_voices_in(
+    connection: &Connection,
+    kept_before_utc_ms: i64,
+) -> Result<Vec<UnnamedVoice>, StoreError> {
+    let model = wespeaker_embedding_model_key();
+    let mut statement = connection.prepare(
+        "SELECT voiceprint.session_id, voiceprint.speaker_id, speaker.revision,
+                speaker.display_name, session.phase, session.title,
+                COALESCE(session.started_at_utc_ms, session.created_at_utc_ms),
+                session.audio_purged_at_utc_ms IS NULL,
+                voiceprint.model_id = ?1 AND voiceprint.model_revision = ?2
+                    AND voiceprint.model_sha256 = ?3 AND voiceprint.embedding_dimensions = ?4
+                    AND voiceprint.sample_rate_hz = ?5 AND voiceprint.feature_bins = ?6
+                    AND voiceprint.feature_pipeline_revision = ?7
+                    AND voiceprint.normalization = ?8,
+                voiceprint.embedding
+           FROM meeting_speaker_voiceprints voiceprint
+           JOIN meeting_speakers speaker
+             ON speaker.speaker_id = voiceprint.speaker_id
+            AND speaker.merged_into_speaker_id IS NULL
+           JOIN meeting_sessions session ON session.id = voiceprint.session_id
+          WHERE voiceprint.created_at_utc_ms < ?9
+            AND NOT EXISTS (
+                SELECT 1 FROM meeting_voice_speaker_resolutions resolution
+                 WHERE resolution.speaker_id = speaker.speaker_id AND resolution.is_current = 1
+            )
+            AND NOT EXISTS (
+                SELECT 1 FROM voice_speaker_matches matched
+                 WHERE matched.speaker_id = speaker.speaker_id
+            )
+          ORDER BY voiceprint.session_id, voiceprint.speaker_id",
+    )?;
+    let rows = statement.query_map(
+        params![
+            model.model_id,
+            model.model_revision,
+            model.model_sha256,
+            i64::try_from(model.embedding_dimensions).map_err(|_| StoreError::VoiceInvariant)?,
+            i64::from(model.sample_rate_hz),
+            i64::try_from(model.feature_bins).map_err(|_| StoreError::VoiceInvariant)?,
+            model.feature_pipeline_revision,
+            model.normalization,
+            kept_before_utc_ms,
+        ],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, i64>(6)?,
+                row.get::<_, bool>(7)?,
+                row.get::<_, bool>(8)?,
+                row.get::<_, Vec<u8>>(9)?,
+            ))
+        },
+    )?;
+    let mut voices = Vec::new();
+    for row in rows {
+        let (
+            session_id,
+            speaker_id,
+            revision,
+            name,
+            phase,
+            title,
+            started,
+            audio_kept,
+            current,
+            embedding,
+        ) = row?;
+        if !is_generated_speaker_label(&name) {
+            continue;
+        }
+        voices.push(UnnamedVoice {
+            session_id: MeetingSessionId::from_uuid(parse_uuid(&session_id)?),
+            speaker_id: SpeakerId::from_uuid(parse_uuid(&speaker_id)?),
+            speaker_revision: from_i64(revision)?,
+            phase: phase_from_db(&phase)?,
+            title,
+            started_at_utc_ms: started,
+            audio_kept,
+            voice: current
+                .then(|| embedding_from_blob(&embedding))
+                .transpose()?,
+        });
+    }
+    Ok(voices)
+}
+
+/// Each unnamed speaker of `session_id` with the unnamed voices of other
+/// meetings that `pair_same_voices` takes for its own, at most one from each
+/// meeting. A voice that matches somebody known stays out on both sides, and
+/// the other meetings are ones a label can still name in.
+fn same_voices_in(
+    connection: &Connection,
+    session_id: MeetingSessionId,
+    user_name: Option<&str>,
+) -> Result<Vec<(SpeakerId, Vec<UnnamedVoice>)>, StoreError> {
+    let known = known_voices_in(connection, None, user_name, &[])?;
+    let (here, there): (Vec<_>, Vec<_>) = unnamed_voices_in(connection, i64::MAX)?
+        .into_iter()
+        .filter(|voice| {
+            identifiable(voice.phase)
+                && voice
+                    .voice
+                    .as_ref()
+                    .is_some_and(|voice| known.owner(voice).is_none())
+        })
+        .partition(|voice| voice.session_id == session_id);
+    let here_voices = here
+        .iter()
+        .enumerate()
+        .filter_map(|(index, voice)| Some((index, voice.voice.as_ref()?)))
+        .collect::<Vec<_>>();
+    let mut groups = here
+        .iter()
+        .map(|voice| (voice.speaker_id, Vec::new()))
+        .collect::<Vec<_>>();
+    let mut there = there.into_iter().peekable();
+    while let Some(first) = there.next() {
+        let other_session = first.session_id;
+        let mut meeting = vec![first];
+        while let Some(voice) = there.next_if(|voice| voice.session_id == other_session) {
+            meeting.push(voice);
+        }
+        let there_voices = meeting
+            .iter()
+            .enumerate()
+            .filter_map(|(index, voice)| Some((index, voice.voice.as_ref()?)))
+            .collect::<Vec<_>>();
+        let pairs = pair_same_voices(&here_voices, &there_voices);
+        for (index, voice) in meeting.into_iter().enumerate() {
+            if let Some(&(here_index, _)) = pairs.iter().find(|&&(_, paired)| paired == index) {
+                groups[here_index].1.push(voice);
+            }
+        }
+    }
+    groups.retain(|(_, voices)| !voices.is_empty());
+    Ok(groups)
+}
+
+/// Refuses a label that would also name a speaker of another meeting unless
+/// each one still groups with this speaker's voice at the revision the user
+/// saw, one speaker per meeting.
+fn require_same_voice_in(
+    connection: &Connection,
+    session_id: MeetingSessionId,
+    speaker_id: SpeakerId,
+    same_voice: &[SameVoiceSpeaker],
+    user_name: Option<&str>,
+) -> Result<(), StoreError> {
+    if same_voice.is_empty() {
+        return Ok(());
+    }
+    let meetings = same_voice
+        .iter()
+        .map(|speaker| speaker.session_id)
+        .collect::<HashSet<_>>();
+    if meetings.len() != same_voice.len() {
+        return Err(StoreError::Invalid);
+    }
+    let grouped = same_voices_in(connection, session_id, user_name)?
+        .into_iter()
+        .find(|(waiting, _)| *waiting == speaker_id)
+        .map(|(_, voices)| voices)
+        .unwrap_or_default();
+    same_voice
+        .iter()
+        .all(|speaker| {
+            grouped.iter().any(|voice| {
+                voice.session_id == speaker.session_id
+                    && voice.speaker_id == speaker.speaker_id
+                    && voice.speaker_revision == speaker.expected_speaker_revision
+            })
+        })
+        .then_some(())
+        .ok_or(StoreError::StaleRevision)
 }
 
 /// The voices Sona knows, and the voices of one meeting's speakers still
@@ -1135,7 +1530,7 @@ impl KnownVoices {
 /// `waiting`, speakers of `session_id` with no name.
 pub(super) fn known_voices_in(
     connection: &Connection,
-    session_id: MeetingSessionId,
+    session_id: Option<MeetingSessionId>,
     user_name: Option<&str>,
     waiting: &[SpeakerId],
 ) -> Result<KnownVoices, StoreError> {
@@ -1164,7 +1559,7 @@ pub(super) fn known_voices_in(
     )?;
     let rows = statement.query_map(
         params![
-            id(session_id),
+            session_id.map(id),
             model.model_id,
             model.model_revision,
             model.model_sha256,

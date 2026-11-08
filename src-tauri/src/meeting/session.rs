@@ -990,12 +990,12 @@ impl MeetingSessionManager {
         ))
     }
 
-    /// The retention sweep: meetings past their keep-for, then deleted meetings
-    /// past their undo.
+    /// The retention sweep: meetings past their keep-for, deleted meetings past
+    /// their undo, and voices nobody named past theirs.
     ///
-    /// Both horizons are swept here because both are "this app forgetting
-    /// something on a clock", and a second timer for the bin would be a second
-    /// place a forgetting can fail to happen.
+    /// Every horizon is swept here because each is "this app forgetting
+    /// something on a clock", and a second timer would be a second place a
+    /// forgetting can fail to happen.
     pub(crate) async fn sweep_retention_at(
         &self,
         now_utc_ms: i64,
@@ -1005,6 +1005,13 @@ impl MeetingSessionManager {
             Ok(0) => {}
             Ok(purged) => log::info!("Meeting retention sweep purged {purged} deleted meetings"),
             Err(error) => log::warn!("Meeting trash could not be purged: {error:?}"),
+        }
+        match store.expire_unnamed_voiceprints(now_utc_ms) {
+            Ok(0) => {}
+            Ok(forgotten) => {
+                log::info!("Meeting retention sweep forgot {forgotten} unnamed voices")
+            }
+            Err(error) => log::warn!("Unnamed voices could not be forgotten: {error:?}"),
         }
         let due_sessions = store
             .due_retention_sessions(now_utc_ms)

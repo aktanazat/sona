@@ -424,7 +424,7 @@ fn heard_people_in(
     if heard.is_empty() {
         return Ok(Vec::new());
     }
-    let known = known_voices_in(connection, session_id, user_name, &[])?;
+    let known = known_voices_in(connection, Some(session_id), user_name, &[])?;
     let mut people: Vec<HeardPerson> = Vec::new();
     for voice in heard {
         let Some((Some(person_id), name)) = known.owner(&voice.voice) else {

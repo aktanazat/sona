@@ -131,6 +131,7 @@ fn named_voice(store: &MeetingStore, person_id: PersonId, axis: usize) -> Result
         speaker_id,
         disposition: MeetingSpeakerIdentifyDisposition::Label {
             target: MeetingSpeakerIdentifyTarget::Existing(person_id),
+            same_voice: Vec::new(),
         },
     })?;
     Ok(())

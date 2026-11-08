@@ -1,8 +1,9 @@
 use super::encode_json;
 use super::voice_identity::{
     ExplicitVoiceConsent, MeetingSpeakerIdentifyDisposition, MeetingSpeakerIdentifyRequest,
-    MeetingSpeakerIdentifyTarget, UserVoiceprint, UserVoiceprintRequest, VoiceEnrollmentEvidence,
-    VoiceProfileEnrollmentRequest, VoiceProfileStatus, VoiceSpeakerSuggestion,
+    MeetingSpeakerIdentifyTarget, SameVoice, SameVoiceSpeaker, UserVoiceprint,
+    UserVoiceprintRequest, VoiceEnrollmentEvidence, VoiceProfileEnrollmentRequest,
+    VoiceProfileStatus, VoiceSpeakerSuggestion,
 };
 use super::workflow_core_tests::{meeting, person, reviewable_meeting, store};
 use super::*;
@@ -258,6 +259,7 @@ fn label_existing(
         speaker_id,
         disposition: MeetingSpeakerIdentifyDisposition::Label {
             target: MeetingSpeakerIdentifyTarget::Existing(person_id),
+            same_voice: Vec::new(),
         },
     })
 }
@@ -380,6 +382,7 @@ fn label_and_correction_return_the_resolved_person_ids() {
             speaker_id,
             disposition: MeetingSpeakerIdentifyDisposition::Label {
                 target: MeetingSpeakerIdentifyTarget::Existing(labeled_person_id),
+                same_voice: Vec::new(),
             },
         })
         .expect("label speaker");
@@ -422,6 +425,7 @@ fn create_identity_replays_the_same_created_person_id() {
             target: MeetingSpeakerIdentifyTarget::Create {
                 display_name: "Katherine Johnson".to_owned(),
             },
+            same_voice: Vec::new(),
         },
     };
 
@@ -488,6 +492,7 @@ fn manual_voice_resolutions_remain_resolved_after_the_encrypted_store_reopens() 
             speaker_id: labeled_speaker_id,
             disposition: MeetingSpeakerIdentifyDisposition::Label {
                 target: MeetingSpeakerIdentifyTarget::Existing(labeled_person_id),
+                same_voice: Vec::new(),
             },
         })
         .expect("label speaker");
@@ -2260,5 +2265,182 @@ fn a_learned_voice_is_suggested_as_the_users_until_forgotten() -> Result<(), Sto
     store.forget_user_voiceprint()?;
     assert_eq!(store.user_voiceprint()?, None);
     assert!(store.voice_speaker_suggestions(session, user)?.is_empty());
+    Ok(())
+}
+
+/// Every meeting the sheet showed with the voice, as a label names them.
+fn every_meeting_of(voice: &SameVoice) -> Vec<SameVoiceSpeaker> {
+    voice
+        .meetings
+        .iter()
+        .map(|meeting| SameVoiceSpeaker {
+            session_id: meeting.session_id,
+            speaker_id: meeting.speaker_id,
+            expected_speaker_revision: meeting.speaker_revision,
+        })
+        .collect()
+}
+
+/// What the review page calls each speaker.
+fn speaker_names(
+    store: &MeetingStore,
+    speakers: &[(MeetingSessionId, SpeakerId)],
+) -> Result<Vec<String>, StoreError> {
+    speakers
+        .iter()
+        .map(|&(session_id, speaker_id)| {
+            store
+                .review_snapshot(session_id)?
+                .speakers
+                .into_iter()
+                .find(|speaker| speaker.speaker_id == speaker_id)
+                .map(|speaker| speaker.display_name)
+                .ok_or(StoreError::NotFound)
+        })
+        .collect()
+}
+
+/// Labelling a voice with the other meetings it was heard in names it in each
+/// of them as the same person, and leaves every other voice alone.
+#[test]
+fn a_label_names_the_same_voice_in_every_meeting_kept_with_it() -> Result<(), StoreError> {
+    let (_directory, store) = store();
+    let first = reviewable_meeting(&store, "Kickoff", 1);
+    let second = reviewable_meeting(&store, "Design review", 2);
+    let third = reviewable_meeting(&store, "Retro", 3);
+    let earlier = store.diarization_speaker(first, 0)?;
+    let somebody_else = store.diarization_speaker(first, 1)?;
+    let again = store.diarization_speaker(second, 0)?;
+    let here = store.diarization_speaker(third, 0)?;
+    keep_voices(&store, first, &[(earlier, 0), (somebody_else, 1)])?;
+    keep_voices(&store, second, &[(again, 0)])?;
+    keep_voices(&store, third, &[(here, 0)])?;
+
+    let grouped = store.same_voice_meetings(third, None)?;
+    let shown = grouped
+        .iter()
+        .map(|voice| {
+            let meetings = voice
+                .meetings
+                .iter()
+                .map(|meeting| (meeting.session_id, meeting.speaker_id))
+                .collect::<Vec<_>>();
+            (voice.speaker_id, meetings)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(shown, [(here, vec![(first, earlier), (second, again)])]);
+
+    let labelled = store.identify_speaker(MeetingSpeakerIdentifyRequest {
+        operation_id: MeetingOperationId::new(),
+        requested_at_utc_ms: 4,
+        session_id: third,
+        expected_meeting_revision: meeting_revision(&store, third)?,
+        expected_people_revision: people_revision(&store),
+        speaker_id: here,
+        disposition: MeetingSpeakerIdentifyDisposition::Label {
+            target: MeetingSpeakerIdentifyTarget::Create {
+                display_name: "Ada Lovelace".to_owned(),
+            },
+            same_voice: every_meeting_of(&grouped[0]),
+        },
+    })?;
+
+    assert_eq!(
+        speaker_names(
+            &store,
+            &[
+                (third, here),
+                (first, earlier),
+                (second, again),
+                (first, somebody_else)
+            ]
+        )?,
+        ["Ada Lovelace", "Ada Lovelace", "Ada Lovelace", "Speaker 2"]
+    );
+    for session_id in [first, second] {
+        let people = store
+            .meeting_people_context(session_id)?
+            .rows
+            .into_iter()
+            .map(|row| row.person_id)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            people,
+            [labelled.resolved_person_id.expect("a label names somebody")]
+        );
+    }
+    Ok(())
+}
+
+/// A voice named in another meeting after the sheet opened keeps that name:
+/// the label that would rename it there is refused and names nobody.
+#[test]
+fn a_label_leaves_a_same_voice_speaker_named_since_the_sheet_opened() -> Result<(), StoreError> {
+    let (_directory, store) = store();
+    let first = reviewable_meeting(&store, "Kickoff", 1);
+    let second = reviewable_meeting(&store, "Retro", 2);
+    let earlier = store.diarization_speaker(first, 0)?;
+    let here = store.diarization_speaker(second, 0)?;
+    keep_voices(&store, first, &[(earlier, 0)])?;
+    keep_voices(&store, second, &[(here, 0)])?;
+    let grouped = store.same_voice_meetings(second, None)?;
+    rename(&store, first, earlier, "Grace Hopper", None)?;
+
+    let refused = store.identify_speaker(MeetingSpeakerIdentifyRequest {
+        operation_id: MeetingOperationId::new(),
+        requested_at_utc_ms: 3,
+        session_id: second,
+        expected_meeting_revision: meeting_revision(&store, second)?,
+        expected_people_revision: people_revision(&store),
+        speaker_id: here,
+        disposition: MeetingSpeakerIdentifyDisposition::Label {
+            target: MeetingSpeakerIdentifyTarget::Create {
+                display_name: "Ada Lovelace".to_owned(),
+            },
+            same_voice: every_meeting_of(&grouped[0]),
+        },
+    });
+
+    assert!(matches!(refused, Err(StoreError::StaleRevision)));
+    assert_eq!(
+        speaker_names(&store, &[(first, earlier), (second, here)])?,
+        ["Grace Hopper", "Speaker 1"]
+    );
+    assert!(people_named(&store, "Ada Lovelace")?.is_empty());
+    Ok(())
+}
+
+/// A voice nobody named is forgotten ninety days after the run that kept it;
+/// a named voice, a voice that sounds like somebody known and a newer voice
+/// stay.
+#[test]
+fn an_unnamed_voice_is_forgotten_after_ninety_days() -> Result<(), StoreError> {
+    let (_directory, store) = store();
+    let ada = person(&store, "Ada Lovelace", &[], &[]);
+    let first = meeting(&store, "Kickoff", 1);
+    let unnamed = store.diarization_speaker(first, 0)?;
+    let named = store.diarization_speaker(first, 1)?;
+    keep_voices(&store, first, &[(unnamed, 0), (named, 1)])?;
+    label_existing(&store, first, named, ada, meeting_revision(&store, first)?)?;
+    let second = meeting(&store, "Standup", 1);
+    let sounds_known = store.diarization_speaker(second, 0)?;
+    keep_voices(&store, second, &[(sounds_known, 1)])?;
+    let day = 24 * 60 * 60 * 1000;
+    let now = 1 + 90 * day + 1;
+    let third = meeting(&store, "Retro", now - day);
+    let newer = store.diarization_speaker(third, 0)?;
+    store.store_speaker_voiceprints(
+        third,
+        wespeaker_embedding_model_key(),
+        &[(newer, voice(2)?)],
+        now - day,
+    )?;
+
+    store.expire_unnamed_voiceprints(now)?;
+
+    assert_eq!(kept_voice(&store, unnamed)?, None);
+    assert_eq!(kept_voice(&store, named)?, Some(1));
+    assert_eq!(kept_voice(&store, sounds_known)?, Some(1));
+    assert_eq!(kept_voice(&store, newer)?, Some(2));
     Ok(())
 }

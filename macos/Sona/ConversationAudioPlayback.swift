@@ -73,6 +73,14 @@ final class ConversationAudioPlayback {
         load(sessionId: sessionId, segmentId: segmentId, offset: startOffsetNs)
     }
 
+    /// Plays one stretch of a meeting once, with no line behind it.
+    func play(sessionId: String, startOffsetNs: UInt64, endOffsetNs: UInt64) {
+        stop()
+        error = nil
+        self.sessionId = sessionId
+        load(sessionId: sessionId, segmentId: nil, offset: startOffsetNs, end: endOffsetNs)
+    }
+
     func playBookmark(sessionId: String, offset: UInt64) {
         stop()
         error = nil
