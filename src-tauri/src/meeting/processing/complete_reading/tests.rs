@@ -1263,6 +1263,118 @@ mod tests {
         assert_eq!(ledger.caveats, [PARTS_NOT_JOINED]);
     }
 
+    /// Answers each reading of a ledger part, in turn, with threads quoting
+    /// the part's first lines and threads quoting words nobody said, counting
+    /// the readings; readings past the list repeat its last.
+    struct ReadsLedger {
+        /// Threads said and threads invented, one pair per reading.
+        readings: Vec<(usize, usize)>,
+        read: AtomicUsize,
+    }
+
+    impl ReadsLedger {
+        fn new(readings: Vec<(usize, usize)>) -> Self {
+            Self {
+                readings,
+                read: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl MeetingTextGenerator for ReadsLedger {
+        fn is_available(&self) -> bool {
+            true
+        }
+        fn model_id(&self) -> &'static str {
+            "reads-ledger"
+        }
+        fn model_version(&self) -> Cow<'static, str> {
+            Cow::Borrowed("1")
+        }
+        fn max_input_bytes(&self) -> usize {
+            6_000
+        }
+        fn generate(
+            &self,
+            _: &str,
+            pack: &str,
+            _: i32,
+            _: ReplyShape,
+        ) -> Result<String, MeetingTextGenerationError> {
+            let reading = self.read.fetch_add(1, Ordering::SeqCst);
+            let (said, invented) = self.readings[reading.min(self.readings.len() - 1)];
+            let input: Value = serde_json::from_str(pack).expect("bounded input");
+            let turns = input["transcript"].as_array().expect("transcript");
+            let thread = |topic: String, quote: &str, turn: &Value| {
+                json!({"topic": topic, "state": "closed", "substantive": true, "owner": null,
+                    "receipt": {"quote": quote, "speaker": null,
+                    "citations": [turn["segment_uuid"]]}})
+            };
+            let threads: Vec<Value> = turns
+                .iter()
+                .take(said)
+                .enumerate()
+                .map(|(index, turn)| {
+                    let text = turn["text"].as_str().expect("turn text");
+                    let quote = text.split_inclusive('.').next().unwrap_or(text);
+                    thread(format!("Said {index}"), quote, turn)
+                })
+                .chain((0..invented).map(|index| {
+                    thread(
+                        format!("Invented {index}"),
+                        "We doubled the budget.",
+                        &turns[0],
+                    )
+                }))
+                .collect();
+            Ok(
+                json!({"headline": "The meeting was read.", "threads": threads,
+                "open_loops": [], "commitments": [], "stances": [], "caveats": []})
+                .to_string(),
+            )
+        }
+    }
+
+    fn read_four_lines(generator: &ReadsLedger) -> MeetingLedger {
+        let mut evidence = evidence();
+        evidence.transcript.truncate(4);
+        let haystack =
+            ledger::fold_haystack(evidence.transcript.iter().map(|turn| turn.text.as_str()));
+        ledger(generator, &evidence, &HashMap::new(), &haystack, || Ok(()))
+            .unwrap_or_else(|error| panic!("{error:?}"))
+    }
+
+    fn topics(ledger: &MeetingLedger) -> Vec<&str> {
+        ledger
+            .threads
+            .iter()
+            .map(|thread| thread.topic.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn a_ledger_part_with_one_invented_receipt_is_read_once() {
+        let generator = ReadsLedger::new(vec![(2, 1)]);
+        let ledger = read_four_lines(&generator);
+        assert_eq!(generator.read.load(Ordering::SeqCst), 1);
+        assert_eq!(topics(&ledger), ["Said 0", "Said 1"]);
+        assert_eq!(
+            ledger.receipts,
+            LedgerReceiptState::Degraded {
+                dropped_threads: 1,
+                dropped_commitments: 0
+            }
+        );
+    }
+
+    #[test]
+    fn a_ledger_part_that_lost_half_its_threads_keeps_its_better_reading() {
+        let generator = ReadsLedger::new(vec![(2, 2), (1, 0)]);
+        let ledger = read_four_lines(&generator);
+        assert_eq!(generator.read.load(Ordering::SeqCst), 2);
+        assert_eq!(topics(&ledger), ["Said 0", "Said 1"]);
+    }
+
     fn cited_at(seconds: u64) -> ArtifactCitation {
         ArtifactCitation {
             segment_id: TranscriptSegmentId::new(),

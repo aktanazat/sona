@@ -221,8 +221,8 @@ pub struct LedgerStance {
 }
 
 /// Whether every receipt in this ledger was found in the transcript. A ledger
-/// only reaches `Degraded` after a regeneration also failed the check, and it
-/// then carries the counts of what was removed rather than a softer word for
+/// whose model quoted words the transcript does not hold reaches `Degraded`
+/// and carries the counts of what was removed rather than a softer word for
 /// it.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
 #[serde(tag = "status", rename_all = "snake_case")]
@@ -456,7 +456,8 @@ pub(crate) fn quote_is_verbatim(quote: &str, folded_haystack: &str) -> bool {
 }
 
 /// How many receipts in this ledger are not in the transcript. Zero is the only
-/// number a ledger ships with; anything else is regenerated once, then degraded.
+/// number a ledger ships with; anything else is degraded.
+#[cfg(test)]
 pub(crate) fn unverified_receipts(ledger: &MeetingLedger, folded_haystack: &str) -> usize {
     let threads = ledger
         .threads
@@ -490,7 +491,7 @@ pub(crate) fn degrade_unverified(ledger: &mut MeetingLedger, folded_haystack: &s
         return;
     }
     ledger.caveats.push(format!(
-        "Receipts not found in this transcript, removed after one regeneration — threads {dropped_threads}, commitments {dropped_commitments}."
+        "Receipts not found in this transcript, removed — threads {dropped_threads}, commitments {dropped_commitments}."
     ));
     ledger.receipts = LedgerReceiptState::Degraded {
         dropped_threads,
