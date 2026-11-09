@@ -263,7 +263,7 @@ struct ItemRow: View {
                         Color.clear
                     }
                 }
-                .frame(width: 64, alignment: .trailing)
+                .frame(width: 72, alignment: .trailing)
             }
             if shows.contains(TaskProperty.updated.rawValue) {
                 Text(TaskDates.ago(row.updatedAtMs, now: now))
@@ -287,15 +287,25 @@ struct ItemRow: View {
     }
 
     private func meta(_ text: String, icon: String) -> some View {
+        TaskPlace(title: text, icon: icon)
+            .frame(maxWidth: 150, alignment: .trailing)
+            .fixedSize(horizontal: true, vertical: false)
+            .layoutPriority(-1)
+    }
+}
+
+/// Where a task belongs: its project, or the meeting it came from.
+struct TaskPlace: View {
+    let title: String
+    let icon: String
+
+    var body: some View {
         HStack(spacing: 4) {
             Image(systemName: icon).font(.system(size: 10))
-            Text(text).lineLimit(1)
+            Text(title).lineLimit(1)
         }
         .font(TypeScale.label(12))
         .foregroundStyle(Theme.inkTertiary)
-        .frame(maxWidth: 150, alignment: .trailing)
-        .fixedSize(horizontal: true, vertical: false)
-        .layoutPriority(-1)
     }
 }
 
@@ -323,6 +333,8 @@ struct TaskTitleField: View {
     }
 }
 
+/// A group's band. Its chevron, mark and title stand in the columns of the
+/// rows' checkbox, priority and number, so the list reads as one grid.
 struct TaskGroupHeader: View {
     let group: TaskGroup
     let collapsed: Bool
@@ -334,21 +346,25 @@ struct TaskGroupHeader: View {
     var body: some View {
         HStack(spacing: 8) {
             Button(action: toggle) {
-                HStack(spacing: 8) {
+                HStack(spacing: 10) {
                     Image(systemName: "chevron.right")
                         .font(.system(size: 9, weight: .bold))
                         .foregroundStyle(Theme.inkTertiary)
                         .rotationEffect(.degrees(collapsed ? 0 : 90))
-                        .frame(width: 12)
+                        .frame(width: 22)
+                        .padding(.trailing, -4)
                     TaskGroupMarkView(mark: group.mark, revision: revision)
-                    Text(group.title)
-                        .font(TypeScale.listTitle)
-                        .foregroundStyle(Theme.ink)
-                        .lineLimit(1)
-                    Text("\(group.rows.count)")
-                        .font(TypeScale.label(12))
-                        .monospacedDigit()
-                        .foregroundStyle(Theme.inkTertiary)
+                        .frame(width: 16)
+                    HStack(spacing: 6) {
+                        Text(group.title)
+                            .font(TypeScale.listTitle)
+                            .foregroundStyle(Theme.ink)
+                            .lineLimit(1)
+                        Text("\(group.rows.count)")
+                            .font(TypeScale.label(12))
+                            .monospacedDigit()
+                            .foregroundStyle(Theme.inkTertiary)
+                    }
                 }
                 .contentShape(Rectangle())
             }
@@ -371,15 +387,10 @@ struct TaskGroupHeader: View {
                 .accessibilityLabel("New task in \(group.title)")
             }
         }
-        .padding(.leading, 12)
-        .padding(.trailing, 16)
+        .padding(.leading, 14)
+        .padding(.trailing, 22)
         .frame(height: Theme.listRow)
-        .background {
-            ZStack {
-                Theme.page
-                Theme.wash
-            }
-        }
+        .background(Theme.inset)
         .onHover { hovering = $0 }
     }
 }
@@ -466,12 +477,24 @@ struct TaskKeyButton: View {
             }
             .padding(.leading, 10)
             .padding(.trailing, 4)
-            .frame(height: 30)
-            .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
-            .overlay(RoundedRectangle(cornerRadius: Theme.radiusControl).strokeBorder(Theme.border, lineWidth: 1))
-            .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(KeyButtonStyle())
+    }
+}
+
+private struct KeyButtonStyle: ButtonStyle {
+    @State private var hovering = false
+
+    func makeBody(configuration: Configuration) -> some View {
+        let shape = RoundedRectangle(cornerRadius: Theme.radiusControl, style: .continuous)
+        configuration.label
+            .frame(height: 30)
+            .background(configuration.isPressed ? Theme.controlPressed : hovering ? Theme.controlHover : Theme.surface, in: shape)
+            .overlay(shape.strokeBorder(Theme.border, lineWidth: 1))
+            .contentShape(shape)
+            .onHover { hovering = $0 }
+            .hoverFade(hovering)
+            .animation(Motion.quick, value: configuration.isPressed)
     }
 }
 
