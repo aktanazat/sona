@@ -221,6 +221,48 @@ struct WorkItemInput: Encodable, Equatable {
     var labelIds: [String]?
 }
 
+/// A due window that moves with the calendar, on this Mac's clock. Weeks
+/// start on Monday.
+enum WorkDue: Codable, Hashable {
+    /// Accepted, unfinished work due before today.
+    case overdue
+    case today
+    /// Due from today through Sunday.
+    case thisWeek
+    /// Due from today through the given number of days after it.
+    case nextDays(UInt16)
+    case noDate
+
+    private enum Key: String, CodingKey { case kind, days }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: Key.self)
+        let kind = try container.decode(String.self, forKey: .kind)
+        switch kind {
+        case "overdue": self = .overdue
+        case "today": self = .today
+        case "this_week": self = .thisWeek
+        case "next_days": self = .nextDays(try container.decode(UInt16.self, forKey: .days))
+        case "no_date": self = .noDate
+        default:
+            throw DecodingError.dataCorruptedError(forKey: .kind, in: container, debugDescription: "Unknown due window \(kind)")
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: Key.self)
+        switch self {
+        case .overdue: try container.encode("overdue", forKey: .kind)
+        case .today: try container.encode("today", forKey: .kind)
+        case .thisWeek: try container.encode("this_week", forKey: .kind)
+        case let .nextDays(days):
+            try container.encode("next_days", forKey: .kind)
+            try container.encode(days, forKey: .days)
+        case .noDate: try container.encode("no_date", forKey: .kind)
+        }
+    }
+}
+
 struct WorkQuery: Codable, Equatable, Hashable {
     var statuses: [WorkStatus]?
     var direction: WorkDirection?
@@ -230,6 +272,8 @@ struct WorkQuery: Codable, Equatable, Hashable {
     var labelIds: [String]?
     var priorities: [Int]?
     var dueBeforeMs: Int64?
+    /// Any of these windows; with `dueBeforeMs`, both must hold.
+    var due: [WorkDue]?
     var sourceMeetingId: String?
     var search: String?
     var includeArchived = false
@@ -238,7 +282,7 @@ struct WorkQuery: Codable, Equatable, Hashable {
     init(
         statuses: [WorkStatus]? = nil, direction: WorkDirection? = nil, ownerPersonIds: [String]? = nil,
         projectIds: [String]? = nil, labelIds: [String]? = nil, priorities: [Int]? = nil,
-        dueBeforeMs: Int64? = nil, sourceMeetingId: String? = nil, search: String? = nil,
+        dueBeforeMs: Int64? = nil, due: [WorkDue]? = nil, sourceMeetingId: String? = nil, search: String? = nil,
         includeArchived: Bool = false, includeSnoozed: Bool = false
     ) {
         self.statuses = statuses
@@ -248,6 +292,7 @@ struct WorkQuery: Codable, Equatable, Hashable {
         self.labelIds = labelIds
         self.priorities = priorities
         self.dueBeforeMs = dueBeforeMs
+        self.due = due
         self.sourceMeetingId = sourceMeetingId
         self.search = search
         self.includeArchived = includeArchived

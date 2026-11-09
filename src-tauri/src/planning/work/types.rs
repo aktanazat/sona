@@ -298,6 +298,23 @@ pub struct WorkPatch {
     pub snoozed_until_ms: Option<Option<i64>>,
 }
 
+/// A due window that moves with the calendar, on this Mac's clock. Weeks
+/// start on Monday.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize, Type)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WorkDue {
+    /// Accepted, unfinished work due before today.
+    Overdue,
+    Today,
+    /// Due from today through Sunday.
+    ThisWeek,
+    /// Due from today through the `days`th day after it.
+    NextDays {
+        days: u16,
+    },
+    NoDate,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize, Type)]
 #[serde(default, rename_all = "camelCase")]
 pub struct WorkQuery {
@@ -309,6 +326,8 @@ pub struct WorkQuery {
     pub label_ids: Option<Vec<String>>,
     pub priorities: Option<Vec<u8>>,
     pub due_before_ms: Option<i64>,
+    /// Any of these windows; with `due_before_ms`, both must hold.
+    pub due: Option<Vec<WorkDue>>,
     pub source_meeting_id: Option<String>,
     pub search: Option<String>,
     pub include_archived: bool,
