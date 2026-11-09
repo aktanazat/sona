@@ -118,7 +118,10 @@ private struct TriageList: View {
             let title = meeting.isEmpty ? "Not from a meeting" : rows.first?.sourceMeetingTitle ?? "A meeting"
             return TaskGroup(id: "triage:\(meeting)", title: title, mark: .meeting, rows: ordered)
         }
-        .sorted { ($0.rows.map(\.createdAtMs).max() ?? 0) > ($1.rows.map(\.createdAtMs).max() ?? 0) }
+        .sorted { left, right in
+            let (a, b) = (left.rows.map(\.createdAtMs).max() ?? 0, right.rows.map(\.createdAtMs).max() ?? 0)
+            return a != b ? a > b : left.id < right.id
+        }
     }
 }
 

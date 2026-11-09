@@ -268,8 +268,8 @@ enum TaskListing {
             }
             let named = Dictionary(grouping: rows.filter { !$0.ownerIsSelf && $0.ownerPersonId != nil }) { $0.ownerPersonId ?? "" }
             let ids = display.showEmptyGroups ? people.map(\.id) : Array(named.keys)
-            let names = ids.map { id in (id, people.first { $0.id == id }?.name ?? named[id]?.first?.ownerName ?? "Someone") }
-            for (id, name) in names.sorted(by: { $0.1.localizedStandardCompare($1.1) == .orderedAscending }) {
+            let names = ids.map { id in (id: id, name: people.first { $0.id == id }?.name ?? named[id]?.first?.ownerName ?? "Someone") }
+            for (id, name) in names.sorted(by: byName) {
                 groups.append(TaskGroup(id: "owner:\(id)", title: name,
                                         mark: .owner(AvatarFace(kind: .person(id), name: name)),
                                         rows: named[id] ?? [], patch: WorkPatch(owner: .person(id))))
@@ -287,8 +287,8 @@ enum TaskListing {
                 ? projects.filter { $0.status != .completed }.map(\.id)
                 : keyed.keys.filter { !$0.isEmpty }
             var groups = listed
-                .map { id in (id, projects.first { $0.id == id }?.title ?? keyed[id]?.first?.projectTitle ?? "Project") }
-                .sorted { $0.1.localizedStandardCompare($1.1) == .orderedAscending }
+                .map { id in (id: id, name: projects.first { $0.id == id }?.title ?? keyed[id]?.first?.projectTitle ?? "Project") }
+                .sorted(by: byName)
                 .map { id, title in
                     TaskGroup(id: "project:\(id)", title: title, mark: .project, rows: keyed[id] ?? [],
                               patch: WorkPatch(projectId: .set(id)))
@@ -301,7 +301,10 @@ enum TaskListing {
         case .meeting:
             let keyed = Dictionary(grouping: rows) { $0.sourceMeetingId ?? "" }
             var groups = keyed.keys.filter { !$0.isEmpty }
-                .sorted { (keyed[$0]?.first?.createdAtMs ?? 0) > (keyed[$1]?.first?.createdAtMs ?? 0) }
+                .sorted { left, right in
+                    let (a, b) = (keyed[left]?.first?.createdAtMs ?? 0, keyed[right]?.first?.createdAtMs ?? 0)
+                    return a != b ? a > b : left < right
+                }
                 .map { id in
                     TaskGroup(id: "meeting:\(id)", title: keyed[id]?.first?.sourceMeetingTitle ?? "Meeting",
                               mark: .meeting, rows: keyed[id] ?? [])
@@ -310,6 +313,16 @@ enum TaskListing {
                 groups.append(TaskGroup(id: "meeting:none", title: "Not from a meeting", mark: .meeting, rows: loose))
             }
             return groups
+        }
+    }
+
+    /// Names in Finder order; one name shared by two falls back to the id, so
+    /// groups keep one order from launch to launch.
+    private static func byName(_ left: (id: String, name: String), _ right: (id: String, name: String)) -> Bool {
+        switch left.name.localizedStandardCompare(right.name) {
+        case .orderedAscending: true
+        case .orderedDescending: false
+        case .orderedSame: left.id < right.id
         }
     }
 
