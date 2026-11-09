@@ -331,6 +331,7 @@ final class AppModel {
     let work: WorkStore
     let workFocus = WorkFocus()
     let rituals: RitualStore
+    let heard: LiveCardStore
 
     @ObservationIgnored let core = Core()
     @ObservationIgnored let workKeys = WorkKeys()
@@ -397,6 +398,7 @@ final class AppModel {
         spotlight = SpotlightStore(core: core)
         work = WorkStore(core: core)
         rituals = RitualStore(core: core)
+        heard = LiveCardStore(core: core)
 
         for name in [
             CoreEvent.activity, CoreEvent.streamText, CoreEvent.streamPhase, CoreEvent.micLevel,

@@ -422,6 +422,9 @@ final class WorkKeys {
         if model.place == .today || model.place == .capture {
             return RitualKeys.handle(event, key: key, flags: flags, model)
         }
+        if model.place == .meetings {
+            return LiveCardKeys.handle(event, key: key, flags: flags, model)
+        }
         guard model.showsTasks else { return false }
         return work(event, key: key, flags: flags, model)
     }

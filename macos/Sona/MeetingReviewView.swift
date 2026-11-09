@@ -33,6 +33,7 @@ struct MeetingReviewView: View {
                         sessionId: snapshot.session.sessionId, revision: snapshot.session.revision)
                     ConversationBookmarksView(core: model.core, store: store,
                         sessionId: snapshot.session.sessionId, revision: snapshot.session.revision)
+                    HeardPromisesCard(sessionId: snapshot.session.sessionId)
                     HeardPlansCard(core: model.core, store: store,
                         sessionId: snapshot.session.sessionId, revision: snapshot.session.revision)
                     MeetingDocumentsCard(core: model.core, store: store, session: snapshot.session)
