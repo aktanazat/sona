@@ -2,10 +2,12 @@ import SwiftUI
 
 /// The main window: the sidebar on the left, one page on the right. Before
 /// the core answers, a wait; on a first run, the onboarding flow instead of
-/// the pages.
+/// the pages. Each page puts its title and actions in the window's toolbar,
+/// on the line of the close, minimize and zoom buttons.
 struct Shell: View {
     @Environment(AppModel.self) private var model
     @State private var sharedNote: ScratchNote?
+    @State private var paneWidth: CGFloat = 0
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
@@ -28,6 +30,8 @@ struct Shell: View {
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
                     .background(Theme.page.ignoresSafeArea())
+                    .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { paneWidth = $0 }
+                    .environment(\.paneWidth, paneWidth)
                     .toolbar(removing: .title)
                 }
                 if model.paletteShown {
@@ -105,21 +109,16 @@ struct Shell: View {
             SettingsScreen()
         } else {
             switch model.place {
-            case .capture, .library:
-                VStack(spacing: 0) {
-                    homeTabs
-                    if model.place == .library {
-                        LibraryScreen(
-                            store: model.library,
-                            importAudio: { model.showSettings(.importing) },
-                            addCorrection: { left, right in
-                                model.vocabulary.add(kind: .vocabulary, left: left, right: right)
-                            })
-                    } else {
-                        CaptureScreen()
-                            .overlay(alignment: .bottomLeading) { UndoToast() }
-                    }
-                }
+            case .capture:
+                CaptureScreen()
+                    .overlay(alignment: .bottomLeading) { UndoToast() }
+            case .library:
+                LibraryScreen(
+                    store: model.library,
+                    importAudio: { model.showSettings(.importing) },
+                    addCorrection: { left, right in
+                        model.vocabulary.add(kind: .vocabulary, left: left, right: right)
+                    })
             case .meetings:
                 MeetingsPlace()
             case .people:
@@ -173,17 +172,17 @@ struct Shell: View {
             }
         }
     }
+}
 
-    /// Home's two faces: the overview and every dictation.
-    private var homeTabs: some View {
+/// Home's two faces, the overview and every dictation, as the start of
+/// Home's bar.
+struct HomeTabs: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
         SegmentedSwitch(items: [SwitchItem(id: Place.capture, title: "Overview", icon: "house"),
                                 SwitchItem(id: Place.library, title: "Library", icon: "books.vertical")],
                         selection: model.place) { model.go($0) }
-            .frame(maxWidth: Theme.contentMax, alignment: .leading)
-            .padding(.horizontal, Theme.margin)
-            .frame(maxWidth: .infinity)
-            .frame(height: Theme.headerHeight)
-            .padding(.bottom, Space.m)
     }
 }
 

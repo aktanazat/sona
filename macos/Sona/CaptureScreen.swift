@@ -73,6 +73,11 @@ struct CaptureScreen: View {
                     }
                 })
         }
+        .pageBar {
+            HomeTabs()
+        } trailing: {
+            EmptyView()
+        }
     }
 
     private func hidePermissionNoticeIfReady() {

@@ -44,19 +44,6 @@ struct PlannerCalendarView: View {
 
     var body: some View {
         Page {
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: 10) {
-                    calendarTitle
-                    Spacer(minLength: 16)
-                    calendarControls
-                }
-                .frame(minHeight: Theme.headerHeight)
-                VStack(alignment: .leading, spacing: 10) {
-                    calendarTitle.frame(minHeight: Theme.headerHeight)
-                    HStack(spacing: 10) { calendarControls }
-                }
-            }
-            .padding(.bottom, 18)
             if let error = store.calendarError {
                 PlannerFailure(message: error) {
                     if let range = visibleInterval { Task { await store.loadCalendar(range) } }
@@ -74,6 +61,11 @@ struct PlannerCalendarView: View {
                 }
             }
         }
+        .pageBar {
+            PageHeading(title: "Calendar")
+        } trailing: {
+            HStack(spacing: 10) { calendarControls }
+        }
         .task(id: visibleInterval) {
             if let range = visibleInterval { await store.loadCalendar(range) }
         }
@@ -83,16 +75,12 @@ struct PlannerCalendarView: View {
         }
     }
 
-    private var calendarTitle: some View {
-        Text("Calendar").titleText().accessibilityAddTraits(.isHeader)
-    }
-
     @ViewBuilder
     private var calendarControls: some View {
         Button {
             if let range = visibleInterval { Task { await store.loadCalendar(range) } }
         } label: { Image(systemName: "arrow.clockwise") }
-            .buttonStyle(.quiet)
+            .buttonStyle(.icon)
             .accessibilityLabel("Refresh calendar")
             .help("Refresh calendar")
             .disabled(store.calendarLoading)
@@ -101,7 +89,7 @@ struct PlannerCalendarView: View {
             selectedDate = today
             displayedMonth = today
         }
-        .buttonStyle(.compact)
+        .buttonStyle(.secondary)
         SegmentedSwitch(items: ProjectsViewChoice.items, selection: .calendar, iconOnly: true) { choice in
             switch choice {
             case .list:

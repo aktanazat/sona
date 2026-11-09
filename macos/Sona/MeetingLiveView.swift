@@ -122,54 +122,54 @@ struct MeetingLiveView: View {
         }
     }
 
-    @ViewBuilder
+    /// The meeting's name, its clock and what can be done to it, in the
+    /// window's toolbar over the column.
     private func header(_ session: MeetingSessionSnapshot) -> some View {
-        HStack(alignment: .center, spacing: 12) {
-            Text(session.title)
-                .titleText()
-                .lineLimit(1)
-                .accessibilityAddTraits(.isHeader)
-            Spacer(minLength: 16)
-            // The clock is the state while a capture is running, so the phase
-            // word only appears when the state is not what the clock implies:
-            // paused, stopping, or already processing.
-            if session.phase != .capturingRecording {
-                Text(session.phase.label).metaText(Theme.inkSecondary)
-            }
-            // The store keeps the capture's clock; this counts on from it
-            // every second while the capture runs, and stands still while
-            // it is paused.
-            HStack(spacing: 8) {
-                LiveDot(state: dot(session))
-                if let clock = store.clocks[session.sessionId] {
-                    MeetingClockText(clock: clock, size: 13, color: Theme.ink)
+        Color.clear.frame(height: 0)
+            .task(id: session.sessionId) { await store.loadBookmarkCounts(session.sessionId) }
+            .pageBar {
+                PageHeading(title: session.title)
+            } trailing: {
+                HStack(spacing: 12) {
+                    // The clock is the state while a capture is running, so
+                    // the phase word only appears when the state is not what
+                    // the clock implies: paused, stopping, or already
+                    // processing.
+                    if session.phase != .capturingRecording {
+                        Text(session.phase.label).metaText(Theme.inkSecondary)
+                    }
+                    // The store keeps the capture's clock; this counts on from
+                    // it every second while the capture runs, and stands still
+                    // while it is paused.
+                    HStack(spacing: 8) {
+                        LiveDot(state: dot(session))
+                        if let clock = store.clocks[session.sessionId] {
+                            MeetingClockText(clock: clock, size: 13, color: Theme.ink)
+                        }
+                    }
+                    ConversationBookmarkButton(
+                        isRecording: session.phase == .capturingRecording
+                            && store.pending == nil && store.clocks[session.sessionId] != nil,
+                        saved: false,
+                        action: { store.bookmark() })
+                    ConversationTypedBookmarks(
+                        isRecording: session.phase == .capturingRecording
+                            && store.pending == nil && store.clocks[session.sessionId] != nil,
+                        counts: store.bookmarkCounts?.sessionId == session.sessionId
+                            ? store.bookmarkCounts?.counts : nil,
+                        action: { store.bookmark($0) })
+                    if session.phase.isActive {
+                        Button("Stop") { store.stop() }
+                            .buttonStyle(.primary)
+                            .disabled(!session.allows(.stop) || store.pending != nil)
+                    } else {
+                        Button("Read meeting") { store.readStoppedMeeting() }
+                            .buttonStyle(.primary)
+                            .disabled(store.pending != nil)
+                    }
+                    menu(session)
                 }
             }
-            ConversationBookmarkButton(
-                isRecording: session.phase == .capturingRecording
-                    && store.pending == nil && store.clocks[session.sessionId] != nil,
-                saved: false,
-                action: { store.bookmark() })
-            ConversationTypedBookmarks(
-                isRecording: session.phase == .capturingRecording
-                    && store.pending == nil && store.clocks[session.sessionId] != nil,
-                counts: store.bookmarkCounts?.sessionId == session.sessionId
-                    ? store.bookmarkCounts?.counts : nil,
-                action: { store.bookmark($0) })
-            .task(id: session.sessionId) { await store.loadBookmarkCounts(session.sessionId) }
-            if session.phase.isActive {
-                Button("Stop") { store.stop() }
-                    .buttonStyle(.primary)
-                    .disabled(!session.allows(.stop) || store.pending != nil)
-            } else {
-                Button("Read meeting") { store.readStoppedMeeting() }
-                    .buttonStyle(.primary)
-                    .disabled(store.pending != nil)
-            }
-            menu(session)
-        }
-        .frame(minHeight: Theme.headerHeight)
-        .padding(.bottom, 20)
     }
 
     /// Red while recording, a ring while paused, ink while the core is

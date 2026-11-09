@@ -97,7 +97,9 @@ private struct LibraryHeader: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            PageTitle("Library", subtitle: subtitle) {
+            PageTitle(subtitle: subtitle) {
+                HomeTabs()
+            } action: {
                 HStack(spacing: 8) {
                     SearchField(prompt: "Search transcripts", text: $query)
                         .frame(width: 216)

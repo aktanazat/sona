@@ -621,21 +621,14 @@ struct TaskFailure: View {
 }
 
 /// The bar across the top of a task screen: what it shows on the left, its
-/// actions on the right.
+/// actions on the right, in the window's toolbar across the whole pane. The
+/// rule under it stays at the top of the list.
 struct WorkBar<Leading: View, Trailing: View>: View {
     @ViewBuilder let leading: () -> Leading
     @ViewBuilder let trailing: () -> Trailing
 
     var body: some View {
-        HStack(spacing: 10) {
-            leading()
-            Spacer(minLength: 12)
-            trailing()
-        }
-        .padding(.leading, 16)
-        .padding(.trailing, 24)
-        .frame(height: Theme.headerHeight)
-        .overlay(alignment: .bottom) { Hairline() }
+        Hairline().pageBar(.full, leading: leading, trailing: trailing)
     }
 }
 
