@@ -12,7 +12,12 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runSona, SonaCliError } from "../src/cli.ts";
-import { SonaInputError, TOOLS } from "../src/tools.ts";
+import {
+  SonaInputError,
+  TOOLS,
+  type ToolDefinition,
+  type ToolInput,
+} from "../src/tools.ts";
 import { createServer } from "../src/index.ts";
 
 const directories: string[] = [];
@@ -169,15 +174,95 @@ describe("running sona", () => {
   });
 });
 
-async function connected(): Promise<Client> {
+async function connected(selection?: string): Promise<Client> {
   const [clientEnd, serverEnd] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "sona-mcp-test", version: "0.1.0" });
   await Promise.all([
-    createServer().connect(serverEnd),
+    createServer(selection).connect(serverEnd),
     client.connect(clientEnd),
   ]);
   return client;
 }
+
+async function published(selection?: string) {
+  const client = await connected(selection);
+  try {
+    return (await client.listTools()).tools;
+  } finally {
+    await client.close();
+  }
+}
+
+/** The verbs and flags with which `sona` changes something. */
+const SONA_WRITES = {
+  "--loop-resolve": true,
+  create: true,
+  update: true,
+  claim: true,
+  done: true,
+  accept: true,
+  decline: true,
+  duplicate: true,
+  archive: true,
+  restore: true,
+  relate: true,
+  unrelate: true,
+  "label-save": true,
+  "label-delete": true,
+  "view-save": true,
+  "view-delete": true,
+};
+
+/** Each required argument at its first enum value or a placeholder. */
+function smallest(tool: ToolDefinition): ToolInput {
+  const input: ToolInput = {};
+  for (const name of tool.inputSchema.required ?? []) {
+    const property = tool.inputSchema.properties[name];
+    input[name] =
+      property?.enum?.[0] ??
+      (property?.type === "integer" ? 1 : property?.type === "boolean" ? true : "S-1");
+  }
+  return input;
+}
+
+describe("published tools", () => {
+  test("opt-in tools are published only when SONA_MCP_TOOLS names them", async () => {
+    const names = async (selection?: string) =>
+      (await published(selection)).map((tool) => tool.name).sort();
+
+    const core = await names();
+
+    expect(core).toContain("sona_work_update");
+    expect(core).not.toContain("sona_work_archive");
+    expect(await names("sona_work_archive")).toEqual(
+      [...core, "sona_work_archive"].sort(),
+    );
+    expect(await names("all")).toHaveLength(TOOLS.length);
+  });
+
+  test("a SONA_MCP_TOOLS name that matches no tool stops the server", () => {
+    expect(() => createServer("sona_work_lables")).toThrow(
+      "SONA_MCP_TOOLS names no tool sona_work_lables",
+    );
+  });
+
+  /* Clients skip the approval prompt for a tool published as read-only, so a
+   * write tool missing `mutates` would change the user's tasks unasked. */
+  test("every tool that runs a sona write is published as one", async () => {
+    const listed = await published("all");
+
+    const mislabelled = TOOLS.filter((tool) => {
+      const argv = tool.argv(smallest(tool));
+      const verb = (argv[0] === "work" ? argv[1] : argv[0]) ?? "";
+      const writes = verb in SONA_WRITES;
+      const readOnly = listed.find((candidate) => candidate.name === tool.name)
+        ?.annotations?.readOnlyHint;
+      return readOnly !== !writes;
+    }).map((tool) => tool.name);
+
+    expect(mislabelled).toEqual([]);
+  });
+});
 
 /** What the SDK itself lets a caller hand to `tools/call` — the owner type,
  * so a deliberately malformed shape in these tests still speaks the wire's

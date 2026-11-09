@@ -1,6 +1,6 @@
-/* Tool schemas map directly to Sona's CLI flags.
- * Sona owns validation, corpus reads and consent. This server holds no corpus
- * state and provides no alternate write path. */
+/* Tool schemas map directly to Sona's CLI flags and `sona work` verbs.
+ * Sona owns validation, corpus reads, tracker writes and consent. This server
+ * holds no corpus state and provides no alternate write path. */
 
 import { z } from "zod";
 
@@ -31,11 +31,11 @@ export const TOOL_INPUT = z.record(
 
 export type ToolInput = z.infer<typeof TOOL_INPUT>;
 
-/** One JSON-schema property as this server publishes it: a flat string or
- * integer field, optionally enumerated and bounded. Typed so readers get the
- * enum without re-parsing the schema. */
+/** One JSON-schema property as this server publishes it: a flat string,
+ * integer or boolean field, optionally enumerated and bounded. Typed so
+ * readers get the enum without re-parsing the schema. */
 export interface ToolProperty {
-  readonly type: "string" | "integer";
+  readonly type: "string" | "integer" | "boolean";
   readonly description: string;
   readonly enum?: readonly string[];
   readonly minimum?: number;
@@ -47,6 +47,8 @@ export interface ToolDefinition {
   readonly title: string;
   readonly description: string;
   readonly mutates?: true;
+  /** Published only when `SONA_MCP_TOOLS` asks for it. */
+  readonly optIn?: true;
   readonly inputSchema: {
     readonly type: "object";
     readonly properties: Record<string, ToolProperty>;
@@ -90,6 +92,42 @@ function optional(flag: string, value: string | null): string[] {
   return value === null ? [] : [flag, value];
 }
 
+/* `sona work` flags are passed as `--flag=value`, so a title, name or search
+ * that starts with a dash stays a value instead of becoming a flag. */
+function assigned(flag: string, value: string | null): string[] {
+  return value === null ? [] : [`${flag}=${value}`];
+}
+
+/** A string where empty is an answer: it clears the field. */
+function cleared(flag: string, input: ToolInput, key: string): string[] {
+  const value = input[key];
+  if (value === undefined || value === null) return [];
+  const parsed = z.string().safeParse(value);
+  if (!parsed.success) {
+    throw new SonaInputError(`${key} must be a string.`);
+  }
+  return [`${flag}=${parsed.data}`];
+}
+
+function flag(input: ToolInput, key: string): boolean {
+  const value = input[key];
+  if (value === undefined || value === null) return false;
+  const parsed = z.boolean().safeParse(value);
+  if (!parsed.success) {
+    throw new SonaInputError(`${key} must be true or false.`);
+  }
+  return parsed.data;
+}
+
+/** Task handles or ids, comma- or space-separated, one argument each. */
+function tasks(input: ToolInput, key: string): string[] {
+  const found = text(input, key, true)
+    .split(/[\s,]+/)
+    .filter((task) => task !== "");
+  if (found.length === 0) throw new SonaInputError(`${key} is required.`);
+  return found;
+}
+
 const LIMIT = {
   type: "integer",
   minimum: 1,
@@ -121,6 +159,171 @@ const SINCE_UTC_MS = {
   description:
     "Comparison boundary in UTC milliseconds since the Unix epoch. Changes require retained evidence on both sides; missing earlier evidence is not proof nothing changed.",
 } as const;
+
+const WRITES =
+  "This changes the user's Sona tasks. It needs Settings > Agents > External access and External mutations; with either off Sona refuses with consent_required and names the setting.";
+
+const TASK = {
+  type: "string",
+  description: "A task: its handle (S-12), its number, or its id.",
+} as const;
+
+const TASKS = {
+  type: "string",
+  description: "Tasks, comma-separated: handles (S-12), numbers or ids.",
+} as const;
+
+const OPERATION_ID = {
+  type: "string",
+  description:
+    "A UUID naming this change so a retry cannot apply it twice. Left out, Sona derives one from the request and the revisions it read, so repeating the same call is already safe.",
+} as const;
+
+const DRY_RUN = {
+  type: "boolean",
+  description: "Return what would change, field by field, and write nothing.",
+} as const;
+
+const WORK_SIDE = {
+  type: "string",
+  enum: ["mine", "waiting", "unowned"],
+  description:
+    "Whose work: 'mine' is what the user owes, 'waiting' is what others owe the user, 'unowned' is work nobody owns.",
+} as const;
+
+/* The fields a task is created with or changed to. An empty details or
+ * labels clears it; every other field takes none to clear. */
+const FIELDS = {
+  details: {
+    type: "string",
+    description: "Plain-text details. An empty string clears them.",
+  },
+  status: {
+    type: "string",
+    enum: ["triage", "backlog", "todo", "in_progress", "done", "canceled"],
+    description: "Where the task stands.",
+  },
+  priority: {
+    type: "string",
+    enum: ["none", "urgent", "high", "medium", "low"],
+    description: "How urgent it is.",
+  },
+  owner: {
+    type: "string",
+    description:
+      "me, nobody, or a person's name or id. Look people up with sona_people; Sona refuses a name that matches several.",
+  },
+  due: {
+    type: "string",
+    description: "The local day it is due: YYYY-MM-DD, today, tomorrow, or none.",
+  },
+  project: {
+    type: "string",
+    description: "A project's name or id from sona_projects, or none.",
+  },
+  milestone: {
+    type: "string",
+    description: "A milestone id in the task's project from sona_project, or none.",
+  },
+  labels: {
+    type: "string",
+    description:
+      "Every label the task should have, by name or id, comma-separated; an empty string removes them all. Unknown labels are refused, not created.",
+  },
+} as const;
+
+function fieldFlags(input: ToolInput): string[] {
+  return [
+    ...cleared("--details", input, "details"),
+    ...assigned("--status", text(input, "status")),
+    ...assigned("--priority", text(input, "priority")),
+    ...assigned("--owner", text(input, "owner")),
+    ...assigned("--due", text(input, "due")),
+    ...assigned("--project", text(input, "project")),
+    ...assigned("--milestone", text(input, "milestone")),
+    ...cleared("--labels", input, "labels"),
+  ];
+}
+
+function scopeFlags(input: ToolInput): string[] {
+  const side = text(input, "side");
+  if (side !== null && !["mine", "waiting", "unowned"].includes(side)) {
+    throw new SonaInputError("side must be mine, waiting or unowned.");
+  }
+  return [
+    ...(side === null ? [] : [`--${side}`]),
+    ...assigned("--owner", text(input, "owner")),
+    ...assigned("--project", text(input, "project")),
+    ...assigned("--label", text(input, "label")),
+    ...assigned("--priority", text(input, "priority")),
+    ...assigned("--due-by", text(input, "due_by")),
+    ...assigned("--meeting", text(input, "meeting_id")),
+    ...assigned("--search", text(input, "search")),
+  ];
+}
+
+/** `archive` and `restore`: the same arguments, opposite directions. */
+function archiving(verb: "archive" | "restore", title: string, what: string): ToolDefinition {
+  return {
+    name: `sona_work_${verb}`,
+    title,
+    description: `${what} Tasks already that way are listed under skipped. dry_run:true shows the change without writing. ${WRITES}`,
+    mutates: true,
+    optIn: true,
+    inputSchema: {
+      type: "object",
+      properties: { tasks: TASKS, dry_run: DRY_RUN, operation_id: OPERATION_ID },
+      required: ["tasks"],
+      additionalProperties: false,
+    },
+    argv: (input) => [
+      "work",
+      verb,
+      ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+      ...assigned("--operation-id", text(input, "operation_id")),
+      "--json",
+      "--",
+      ...tasks(input, "tasks"),
+    ],
+  };
+}
+
+/** `relate` and `unrelate`: one link between two tasks. */
+function linking(verb: "relate" | "unrelate", title: string, what: string): ToolDefinition {
+  return {
+    name: `sona_work_${verb}`,
+    title,
+    description: `${what} task blocks other, task blocked_by other, or task related other. ${WRITES}`,
+    mutates: true,
+    optIn: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        task: TASK,
+        link: {
+          type: "string",
+          enum: ["blocks", "blocked_by", "related"],
+          description: "How task stands to other.",
+        },
+        other: TASK,
+        operation_id: OPERATION_ID,
+      },
+      required: ["task", "link", "other"],
+      additionalProperties: false,
+    },
+    argv: (input) => [
+      "work",
+      verb,
+      ...assigned("--operation-id", text(input, "operation_id")),
+      "--json",
+      "--",
+      text(input, "task", true),
+      text(input, "link", true),
+      text(input, "other", true),
+    ],
+  };
+}
+
 export const TOOLS: readonly ToolDefinition[] = [
   {
     name: "sona_search",
@@ -592,4 +795,496 @@ export const TOOLS: readonly ToolDefinition[] = [
     },
     argv: (input) => ["--loop-resolve", text(input, "loop_id", true)],
   },
+  {
+    name: "sona_work_list",
+    title: "List Sona tasks",
+    description:
+      "List tasks in Sona's tracker, most urgent first: priority, then due day. Without status it lists triage and open work that is neither archived nor snoozed. ready:true lists only Todo tasks that nothing open blocks and that are not snoozed, the work to pick up next, and takes only the side, owner, project, label, priority, due_by, meeting_id, search and limit filters. Each task has a handle (S-12) that works wherever a task is asked for, its id, status, priority, owner, due_date, project, labels, revision and, for work raised in a meeting, the quote and a sona://loop link. Work from meetings kept on this Mac is left out. Read total and has_more before treating the list as complete.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ready: {
+          type: "boolean",
+          description:
+            "List only the Todo tasks that are ready to start: unblocked and not snoozed.",
+        },
+        status: {
+          type: "string",
+          description:
+            "Comma-separated: triage, backlog, todo, in_progress, done, canceled, duplicate, open, closed or all.",
+        },
+        side: WORK_SIDE,
+        owner: {
+          type: "string",
+          description:
+            "People by name or id, comma-separated. me or nobody work too, on their own and without side.",
+        },
+        project: {
+          type: "string",
+          description:
+            "Projects by name or id, comma-separated; none for work in no project.",
+        },
+        label: {
+          type: "string",
+          description: "Labels by name or id, comma-separated: work with any of them.",
+        },
+        priority: {
+          type: "string",
+          description: "Comma-separated: urgent, high, medium, low or none.",
+        },
+        due_by: {
+          type: "string",
+          description: "Due on or before this local day: YYYY-MM-DD, today or tomorrow.",
+        },
+        meeting_id: {
+          ...MEETING_ID,
+          description: "Only work raised in this meeting. " + MEETING_ID.description,
+        },
+        search: {
+          type: "string",
+          description: "Words in the title or details, or a task handle such as S-12.",
+        },
+        view: {
+          type: "string",
+          description:
+            "Start from a saved view's filters, by name or id; the other filters narrow it.",
+        },
+        archived: { type: "boolean", description: "Include archived work." },
+        snoozed: { type: "boolean", description: "Include snoozed work." },
+        limit: LIMIT,
+      },
+      additionalProperties: false,
+    },
+    argv: (input) => [
+      "work",
+      flag(input, "ready") ? "ready" : "list",
+      ...scopeFlags(input),
+      ...assigned("--status", text(input, "status")),
+      ...assigned("--view", text(input, "view")),
+      ...(flag(input, "archived") ? ["--archived"] : []),
+      ...(flag(input, "snoozed") ? ["--snoozed"] : []),
+      ...assigned("--limit", count(input, "limit")),
+      "--json",
+    ],
+  },
+  {
+    name: "sona_work_get",
+    title: "Read a Sona task",
+    description:
+      "Read one task: every field, the meeting quote it came from with its speaker and a sona://loop link, the tasks it blocks, is blocked by or relates to, its evidence links, what Sona suggests for it while it waits in triage (owner, due day, project, duplicate) with the reason and quote, and its history, each entry marked as made by the user (me), Sona or an agent.",
+    inputSchema: {
+      type: "object",
+      properties: { task: TASK },
+      required: ["task"],
+      additionalProperties: false,
+    },
+    argv: (input) => ["work", "show", "--json", "--", text(input, "task", true)],
+  },
+  {
+    name: "sona_work_counts",
+    title: "Read my work in Sona",
+    description:
+      "Read the tracker's counts (triage waiting, your open work, overdue, due today, waiting on others and how many of those have been quiet a week), then the open tasks the user owes and the open tasks others owe the user, most urgent first.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        limit: {
+          ...LIMIT,
+          description: "How many tasks to return per list. Sona defaults to 25 and caps at 100.",
+        },
+      },
+      additionalProperties: false,
+    },
+    argv: (input) => [
+      "work",
+      "mine",
+      ...assigned("--limit", count(input, "limit")),
+      "--json",
+    ],
+  },
+  {
+    name: "sona_work_create",
+    title: "Create a Sona task",
+    description: `Create a task: Todo, no priority and no owner unless told otherwise. ${WRITES} Calling again with the same arguments on the same day returns the first task with replayed:true instead of a second one; pass a new operation_id to create a twin on purpose.`,
+    mutates: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        title: { type: "string", description: "The task's title." },
+        ...FIELDS,
+        operation_id: OPERATION_ID,
+      },
+      required: ["title"],
+      additionalProperties: false,
+    },
+    argv: (input) => [
+      "work",
+      "create",
+      ...fieldFlags(input),
+      ...assigned("--operation-id", text(input, "operation_id")),
+      "--json",
+      "--",
+      text(input, "title", true),
+    ],
+  },
+  {
+    name: "sona_work_update",
+    title: "Change Sona tasks",
+    description: `Change one task or several. Several tasks take the same change together or not at all; add_labels and remove_labels go task by task. Fields left out stay as they are, and tasks already as asked are reported under skipped. dry_run:true returns each field's from and to, and whether a meeting commitment would close or reopen, without writing. ${WRITES}`,
+    mutates: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        tasks: TASKS,
+        title: { type: "string", description: "A new title." },
+        ...FIELDS,
+        add_labels: {
+          type: "string",
+          description: "Labels to add, by name or id, comma-separated.",
+        },
+        remove_labels: {
+          type: "string",
+          description: "Labels to remove, by name or id, comma-separated.",
+        },
+        snooze_until: {
+          type: "string",
+          description:
+            "Hide the task until this local day: YYYY-MM-DD, today, tomorrow, or none to wake it.",
+        },
+        expected_revision: {
+          type: "integer",
+          description:
+            "Refuse unless the one task named is still at this revision, from a read made before deciding the change.",
+        },
+        dry_run: DRY_RUN,
+        operation_id: OPERATION_ID,
+      },
+      required: ["tasks"],
+      additionalProperties: false,
+    },
+    argv: (input) => [
+      "work",
+      "update",
+      ...assigned("--title", text(input, "title")),
+      ...fieldFlags(input),
+      ...assigned("--add-label", text(input, "add_labels")),
+      ...assigned("--remove-label", text(input, "remove_labels")),
+      ...assigned("--snooze-until", text(input, "snooze_until")),
+      ...assigned("--expected-revision", count(input, "expected_revision")),
+      ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+      ...assigned("--operation-id", text(input, "operation_id")),
+      "--json",
+      "--",
+      ...tasks(input, "tasks"),
+    ],
+  },
+  {
+    name: "sona_work_claim",
+    title: "Start a Sona task",
+    description: `Start a Todo or Backlog task before working on it: it moves to In progress, the history records an agent started it, and its owner stays who it was. Refused when the task is already in progress, still in triage, archived or closed, so two agents cannot both start it. ${WRITES}`,
+    mutates: true,
+    inputSchema: {
+      type: "object",
+      properties: { task: TASK, operation_id: OPERATION_ID },
+      required: ["task"],
+      additionalProperties: false,
+    },
+    argv: (input) => [
+      "work",
+      "claim",
+      ...assigned("--operation-id", text(input, "operation_id")),
+      "--json",
+      "--",
+      text(input, "task", true),
+    ],
+  },
+  {
+    name: "sona_work_done",
+    title: "Finish Sona tasks",
+    description: `Mark tasks done. The meeting commitment a task came from closes with it. evidence adds one line to the task's details, such as a pull request link. dry_run:true shows the change without writing. ${WRITES}`,
+    mutates: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        tasks: TASKS,
+        evidence: {
+          type: "string",
+          description:
+            "One line showing the work is done, usually a link. One task only.",
+        },
+        dry_run: DRY_RUN,
+        operation_id: OPERATION_ID,
+      },
+      required: ["tasks"],
+      additionalProperties: false,
+    },
+    argv: (input) => [
+      "work",
+      "done",
+      ...assigned("--evidence", text(input, "evidence")),
+      ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+      ...assigned("--operation-id", text(input, "operation_id")),
+      "--json",
+      "--",
+      ...tasks(input, "tasks"),
+    ],
+  },
+  {
+    name: "sona_work_triage",
+    title: "Triage Sona tasks",
+    description: `Decide on work Sona pulled out of meetings. accept moves triage items to Todo with Sona's suggested owner, due day and project unless ignore_suggestions is true. decline cancels them and sets their meeting commitments aside. duplicate marks one task a duplicate of another (of), moving its quotes and links there. Items not in triage are left alone and listed under skipped. dry_run:true previews accept and decline. ${WRITES}`,
+    mutates: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        tasks: {
+          ...TASKS,
+          description: `${TASKS.description} duplicate takes one.`,
+        },
+        decision: {
+          type: "string",
+          enum: ["accept", "decline", "duplicate"],
+          description: "What to do with them.",
+        },
+        of: {
+          ...TASK,
+          description: `For duplicate: the task they repeat. ${TASK.description}`,
+        },
+        ignore_suggestions: {
+          type: "boolean",
+          description: "For accept: leave owner, due day and project as they are.",
+        },
+        dry_run: DRY_RUN,
+        operation_id: OPERATION_ID,
+      },
+      required: ["tasks", "decision"],
+      additionalProperties: false,
+    },
+    argv: (input) => {
+      const decision = text(input, "decision", true);
+      const common = [
+        ...assigned("--operation-id", text(input, "operation_id")),
+        "--json",
+      ];
+      switch (decision) {
+        case "accept":
+          return [
+            "work",
+            "accept",
+            ...(flag(input, "ignore_suggestions") ? ["--ignore-suggestions"] : []),
+            ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+            ...common,
+            "--",
+            ...tasks(input, "tasks"),
+          ];
+        case "decline":
+          return [
+            "work",
+            "decline",
+            ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+            ...common,
+            "--",
+            ...tasks(input, "tasks"),
+          ];
+        case "duplicate":
+          return [
+            "work",
+            "duplicate",
+            `--of=${text(input, "of", true)}`,
+            ...common,
+            "--",
+            ...tasks(input, "tasks"),
+          ];
+        default:
+          throw new SonaInputError("decision must be accept, decline or duplicate.");
+      }
+    },
+  },
+  archiving("archive", "Archive Sona tasks", "Hide tasks from every list without changing their status."),
+  archiving("restore", "Restore Sona tasks", "Bring archived tasks back into their lists."),
+  linking("relate", "Link Sona tasks", "Link two tasks. Linking them again returns the link already there."),
+  linking("unrelate", "Unlink Sona tasks", "Remove a link between two tasks."),
+  {
+    name: "sona_work_labels",
+    title: "List Sona labels",
+    description: "List the tracker's labels with their ids, colors (hue in degrees) and revisions.",
+    optIn: true,
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    argv: () => ["work", "labels", "--json"],
+  },
+  {
+    name: "sona_work_label_save",
+    title: "Save a Sona label",
+    description: `Create a label, or rename or recolor one. Saving a name that exists changes that label; label renames another label to name. ${WRITES}`,
+    mutates: true,
+    optIn: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "The label's name." },
+        label: {
+          type: "string",
+          description: "The label to rename to name, by name or id.",
+        },
+        hue: {
+          type: "integer",
+          minimum: 0,
+          maximum: 360,
+          description: "Its color as degrees on the color wheel. Chosen from the name when left out.",
+        },
+        operation_id: OPERATION_ID,
+      },
+      required: ["name"],
+      additionalProperties: false,
+    },
+    argv: (input) => [
+      "work",
+      "label-save",
+      ...assigned("--label", text(input, "label")),
+      ...assigned("--hue", count(input, "hue")),
+      ...assigned("--operation-id", text(input, "operation_id")),
+      "--json",
+      "--",
+      text(input, "name", true),
+    ],
+  },
+  {
+    name: "sona_work_label_delete",
+    title: "Delete a Sona label",
+    description: `Delete a label. Its tasks lose only that label. ${WRITES}`,
+    mutates: true,
+    optIn: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        label: { type: "string", description: "The label's name or id." },
+        operation_id: OPERATION_ID,
+      },
+      required: ["label"],
+      additionalProperties: false,
+    },
+    argv: (input) => [
+      "work",
+      "label-delete",
+      ...assigned("--operation-id", text(input, "operation_id")),
+      "--json",
+      "--",
+      text(input, "label", true),
+    ],
+  },
+  {
+    name: "sona_work_views",
+    title: "List saved Sona views",
+    description: "List saved task views with their filters, layout, grouping and order.",
+    optIn: true,
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    argv: () => ["work", "views", "--json"],
+  },
+  {
+    name: "sona_work_view_save",
+    title: "Save a Sona view",
+    description: `Save named task filters the app shows as a view and sona_work_list reads with view. Saving a name that exists changes that view; filters given replace the ones it had. ${WRITES}`,
+    mutates: true,
+    optIn: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "The view's name." },
+        view: {
+          type: "string",
+          description: "The view to rename to name, by name or id.",
+        },
+        status: {
+          type: "string",
+          description:
+            "Comma-separated: triage, backlog, todo, in_progress, done, canceled, duplicate, open, closed or all.",
+        },
+        side: WORK_SIDE,
+        owner: {
+          type: "string",
+          description:
+            "People by name or id, comma-separated. me or nobody work too, on their own and without side.",
+        },
+        project: { type: "string", description: "Projects by name or id, comma-separated." },
+        label: { type: "string", description: "Labels by name or id, comma-separated." },
+        priority: {
+          type: "string",
+          description: "Comma-separated: urgent, high, medium, low or none.",
+        },
+        search: { type: "string", description: "Words in the title or details." },
+        layout: { type: "string", enum: ["list", "board"], description: "How the app shows it." },
+        group_by: {
+          type: "string",
+          enum: ["status", "owner", "project", "meeting", "due", "priority", "none"],
+          description: "How the app groups it.",
+        },
+        order_by: {
+          type: "string",
+          enum: ["priority", "due", "updated", "created", "manual"],
+          description: "How the app orders it.",
+        },
+        operation_id: OPERATION_ID,
+      },
+      required: ["name"],
+      additionalProperties: false,
+    },
+    argv: (input) => [
+      "work",
+      "view-save",
+      ...assigned("--view", text(input, "view")),
+      ...assigned("--status", text(input, "status")),
+      ...scopeFlags(input),
+      ...assigned("--layout", text(input, "layout")),
+      ...assigned("--group-by", text(input, "group_by")),
+      ...assigned("--order-by", text(input, "order_by")),
+      ...assigned("--operation-id", text(input, "operation_id")),
+      "--json",
+      "--",
+      text(input, "name", true),
+    ],
+  },
+  {
+    name: "sona_work_view_delete",
+    title: "Delete a saved Sona view",
+    description: `Delete a saved view. No task changes. ${WRITES}`,
+    mutates: true,
+    optIn: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        view: { type: "string", description: "The view's name or id." },
+        operation_id: OPERATION_ID,
+      },
+      required: ["view"],
+      additionalProperties: false,
+    },
+    argv: (input) => [
+      "work",
+      "view-delete",
+      ...assigned("--operation-id", text(input, "operation_id")),
+      "--json",
+      "--",
+      text(input, "view", true),
+    ],
+  },
 ];
+
+/** The tools a server publishes for one `SONA_MCP_TOOLS` value: unset or
+ * `core` for every tool not marked opt-in, `all` for every tool, or a
+ * comma-separated list of tool names to publish beside the core ones. */
+export function publishedTools(selection: string | undefined): readonly ToolDefinition[] {
+  const asked = (selection ?? "")
+    .split(",")
+    .map((name) => name.trim())
+    .filter((name) => name !== "" && name !== "core");
+  if (asked.includes("all")) return TOOLS;
+  const unknown = asked.filter((name) => !TOOLS.some((tool) => tool.name === name));
+  if (unknown.length > 0) {
+    throw new Error(
+      `SONA_MCP_TOOLS names no tool ${unknown.join(", ")}. Use core, all, or tool names: ${TOOLS.filter((tool) => tool.optIn === true)
+        .map((tool) => tool.name)
+        .join(", ")}.`,
+    );
+  }
+  return TOOLS.filter((tool) => tool.optIn !== true || asked.includes(tool.name));
+}

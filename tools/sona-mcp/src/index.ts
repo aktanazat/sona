@@ -16,7 +16,12 @@ import {
   McpError,
 } from "@modelcontextprotocol/sdk/types.js";
 import { runSona, SonaCliError } from "./cli.ts";
-import { SonaInputError, TOOL_INPUT, TOOLS } from "./tools.ts";
+import { publishedTools, SonaInputError, TOOL_INPUT } from "./tools.ts";
+
+/* Read by clients that show a server's instructions to their model: the
+ * order an agent works a task in, which no single tool description holds. */
+const INSTRUCTIONS =
+  "Sona holds the user's meetings, notes and tasks. For tasks: sona_work_counts or sona_work_list (ready:true for what to start next), sona_work_get for one task with its meeting quote and history, sona_work_claim before starting work, sona_work_done with evidence after. Handles like S-12 work wherever a task is asked for. Writes need the user's External mutations setting; preview a change with dry_run:true. Set SONA_MCP_TOOLS=all for labels, views, links and archiving.";
 
 /* JSON-RPC's vocabulary over Sona's. Only three of Sona's refusals are the
  * caller's to fix: two name an argument that matches nothing in the corpus,
@@ -45,15 +50,17 @@ function refusalCode(refusal: string): ErrorCode {
  * and `tools.ts` is the one thing no other check covers — `bun test`
  * transpiles without type-checking and the root lint never reaches this
  * directory — so a test that never constructs the server cannot tell a missing
- * export from a working one. */
-export function createServer(): Server {
+ * export from a working one. `selection` is `SONA_MCP_TOOLS`; an unknown tool
+ * name in it throws here, so a typo stops the server at start. */
+export function createServer(selection = process.env.SONA_MCP_TOOLS): Server {
+  const tools = publishedTools(selection);
   const server = new Server(
     { name: "sona-mcp", version: "0.1.0" },
-    { capabilities: { tools: {} } },
+    { capabilities: { tools: {} }, instructions: INSTRUCTIONS },
   );
 
   server.setRequestHandler(ListToolsRequestSchema, () => ({
-    tools: TOOLS.map((tool) => ({
+    tools: tools.map((tool) => ({
       name: tool.name,
       title: tool.title,
       description: tool.description,
@@ -63,7 +70,7 @@ export function createServer(): Server {
   }));
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
-    const tool = TOOLS.find(
+    const tool = tools.find(
       (candidate) => candidate.name === request.params.name,
     );
     if (tool === undefined) {

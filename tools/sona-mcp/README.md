@@ -1,14 +1,16 @@
 # sona-mcp
 
-An MCP server over Sona's local corpus. Each call spawns the installed Sona
-binary with its existing headless flags and returns the JSON. The server keeps
-no corpus state and does not send source material to a provider.
+An MCP server over Sona's local corpus and task tracker. Each call spawns the
+installed Sona binary with its existing headless flags and returns the JSON.
+The server keeps no corpus state and does not send source material to a
+provider.
 
 Everything it can reach is behind consent rows that are off on install.
-**Settings > Agents > External access** gates every request.
-`sona_loop_resolve` also needs **Settings > Agents > External mutations**.
-With either row off it returns `consent_required` naming the missing setting.
-Nothing else on this surface writes.
+**Settings > Agents > External access** gates every request. Every tool that
+changes something — `sona_loop_resolve` and the task writes below — also
+needs **Settings > Agents > External mutations**. With either row off it
+returns `consent_required` naming the missing setting. A `dry_run:true`
+preview needs only External access.
 
 ## Install
 
@@ -155,10 +157,57 @@ unavailable data is never zero. See
 These tools do not edit, restore, link or synthesize notes. Those remain native
 app actions and do not gain a route around external-write or source-transfer
 consent. For human CLI output, append `--format text`; MCP keeps default JSON.
-MCP publishes `readOnlyHint:true` for every read and `false` for loop resolution.
+MCP publishes `readOnlyHint:true` for every read and `false` for every tool
+that writes.
 The server passes private source data to its approved client. Neither Sona nor
 this server calls a model provider for these reads. External access is not
 permission for an agent to send those records to another provider.
+
+## Task tools
+
+These run `sona work <verb> --json`. A task is named by its handle (`S-12`),
+its number or its id. Eight are published by default:
+
+| Tool               | Arguments                                                        | Runs                                       |
+| ------------------ | ---------------------------------------------------------------- | ------------------------------------------ |
+| `sona_work_list`   | filters (`status?`, `side?`, `owner?`, `label?`, …), `ready?`    | `sona work list` or `sona work ready`      |
+| `sona_work_get`    | `task`                                                           | `sona work show`                           |
+| `sona_work_counts` | `limit?`                                                         | `sona work mine`                           |
+| `sona_work_create` | `title`, fields (`priority?`, `owner?`, `due?`, `labels?`, …)    | `sona work create` — **writes**            |
+| `sona_work_update` | `tasks`, fields, `add_labels?`, `remove_labels?`, `dry_run?`     | `sona work update` — **writes**            |
+| `sona_work_claim`  | `task`                                                           | `sona work claim` — **writes**             |
+| `sona_work_done`   | `tasks`, `evidence?`, `dry_run?`                                 | `sona work done` — **writes**              |
+| `sona_work_triage` | `tasks`, `decision` (`accept`, `decline`, `duplicate`), `of?`    | `sona work accept`/`decline`/`duplicate` — **writes** |
+
+Every write also takes `operation_id`. Left out, Sona derives one from the
+request and what it read, so a repeated call never changes anything twice: a
+create repeated the same day answers with the first task and `replayed:true`,
+and a change already made lists its tasks under `skipped`. Pass a new id to
+create a twin on purpose.
+
+`sona_work_list` with `ready:true` returns Todo tasks nothing open blocks.
+`sona_work_claim` moves one Todo or Backlog task to In progress; it refuses a
+task already in progress, so two agents cannot both start it. The task's owner
+stays who it was. `sona_work_done` closes the meeting commitment a task came
+from, and `evidence` (a pull request link, say) becomes a line in its details.
+
+Ten more are opt-in: `sona_work_archive`, `sona_work_restore`,
+`sona_work_relate`, `sona_work_unrelate`, `sona_work_labels`,
+`sona_work_label_save`, `sona_work_label_delete`, `sona_work_views`,
+`sona_work_view_save` and `sona_work_view_delete`. Publish them with
+`SONA_MCP_TOOLS`: `all` for every tool, or a comma-separated list of names
+beside the default ones. A name that matches no tool stops the server at
+start.
+
+```bash
+claude mcp add sona --env SONA_MCP_TOOLS=sona_work_archive,sona_work_restore \
+  -- bun /absolute/path/to/sona/tools/sona-mcp/src/index.ts
+```
+
+Work raised in a meeting kept on this Mac never appears. While the
+conversations can't be opened, all work from meetings is left out and the
+answer carries `conversations_available:false`; a write naming such a task
+answers `not_found`.
 
 ## What comes back
 
@@ -198,7 +247,7 @@ for a caller that reads structured error data:
 | `data.code`        | Means                                                                 |
 | ------------------ | --------------------------------------------------------------------- |
 | `consent_required` | External access is off. `data.settingsPath` names the row to turn on. |
-| `unavailable`      | The corpus is not open — usually a locked login keychain.             |
+| `unavailable`      | The corpus is not open — usually a locked login keychain — or a task write needs a person while conversations are closed. |
 | `invalid_request`  | A bad id, date or limit.                                              |
 | `not_found`        | The id parsed but names nothing in this corpus.                       |
 | `not_installed`    | No Sona binary where this server looked.                              |
@@ -208,7 +257,7 @@ for a caller that reads structured error data:
 ## Tests
 
 ```bash
-bun test          # input boundaries, CLI failures, and MCP error handling
+bun test          # input boundaries, CLI failures, MCP error handling, tool tiers
 bunx tsc --noEmit # type checking
 ```
 

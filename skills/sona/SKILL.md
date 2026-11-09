@@ -1,6 +1,6 @@
 ---
 name: sona
-description: Read Sona conversations, people catch-up, sourced evidence changes, raw and corrected words, relevant notes, saved note differences, corpus statistics and open loops through the local sona CLI or sona-mcp. Use when preparing to talk to someone, checking what changed, retrieving note context, finding what was said, or closing a loop.
+description: Read Sona conversations, people catch-up, sourced evidence changes, raw and corrected words, relevant notes, saved note differences, corpus statistics and open loops, and work Sona's task tracker, through the local sona CLI or sona-mcp. Use when preparing to talk to someone, checking what changed, retrieving note context, finding what was said, closing a loop, or picking up, starting and finishing tasks.
 ---
 
 # Sona
@@ -11,9 +11,10 @@ storage. CLI reads do not send source material to a provider.
 ## Consent and writes
 
 Every request requires **Settings > Agents > External access**, off on install.
-`--loop-resolve` also requires **Settings > Agents > External mutations**, a
-separate grant that is also off on install. A mutation grant alone does not
-permit reads.
+`--loop-resolve` and every `sona work` verb that changes something also
+require **Settings > Agents > External mutations**, a separate grant that is
+also off on install. A `--dry-run` preview needs only External access. A
+mutation grant alone does not permit reads.
 
 A denied request exits `1` and prints a JSON refusal on stderr:
 
@@ -33,7 +34,7 @@ Notes are readable by approved local CLI/MCP agents. They are not implicit
 context for the remote panel. Note edits, links, restores and synthesis remain
 native app actions; this CLI and MCP server expose no note-write tool. Do not
 route note synthesis through another command to bypass mutation or source-transfer
-consent. The one external write remains loop resolution.
+consent. The external writes are loop resolution and the task tracker's verbs.
 The approved MCP client receives private source data. These commands do not call
 a model provider. The external-access grant is not permission to send records
 to another provider, attach them to an unrelated remote request, or expand a
@@ -79,6 +80,45 @@ Exit codes: `0` answered, `2` bad input, `1` consent refusal, unavailable storag
 missing record, failed operation or rejected loop write. JSON success goes to
 stdout; JSON refusals go to stderr. A loop write rejected by its revision fence
 still returns its receipt on stdout and exits `1`.
+
+## Tasks
+
+`sona work <verb>` is Sona's task tracker. It prints text; add `--json` for one
+JSON value. Name a task by its handle (`S-12`), its number or its id. Run
+`sona work --help` for every verb and `sona work <verb> --help` for its flags.
+
+The loop for picking up work:
+
+```bash
+sona work ready --json                 # Todo tasks nothing open blocks
+sona work show S-12 --json             # its meeting quote, links and history
+sona work claim S-12                   # In progress, refused if already started
+sona work done S-12 --evidence https://github.com/org/repo/pull/7
+```
+
+Claim only work the user asked you to take. A claim keeps the task's owner;
+the history records that an agent started it, not which agent. A refused claim
+means someone already started the task: pick another, do not force it with
+`update --status in-progress`. `done` also closes the meeting commitment the
+task came from, and `--evidence` adds one line to the task's details.
+
+Triage holds work Sona heard in meetings. Read the quote with `show` before
+deciding: `accept` moves items to Todo with Sona's suggested owner, due day and
+project (`--ignore-suggestions` keeps none), `decline` cancels them and sets
+their commitments aside, `duplicate S-14 --of S-12` folds one into another.
+
+Every write takes `--operation-id`. Left out, Sona derives one from the request
+and what it read, so running a command again never changes anything twice: a
+create repeated the same day answers with the first task and `replayed:true`,
+and a change already made lists its tasks under `skipped`. Pass a new id to
+create a twin on purpose. Preview `update`, `done`, `accept`, `decline`,
+`archive` and `restore` with `--dry-run`. Writes are filed as an agent's, never
+as the user's own.
+
+Work raised in a meeting kept on this Mac never appears. While the
+conversations can't be opened, every answer leaves out all work from meetings
+and says `conversations_available:false`; choosing a person as owner then
+refuses with `unavailable`.
 
 ## Before talking to someone
 
@@ -347,13 +387,25 @@ claude mcp add sona -- bun /absolute/path/to/sona/tools/sona-mcp/src/index.ts
 | `sona_stats`                      | none                                                         |
 | `sona_events`                     | `after?`, `limit?`                                           |
 | `sona_loop_resolve`               | `loop_id` — writes                                           |
+| `sona_work_list`                  | filters, `ready?`, `limit?`                                  |
+| `sona_work_get`                   | `task`                                                       |
+| `sona_work_counts`                | `limit?`                                                     |
+| `sona_work_create`                | `title`, fields — writes                                     |
+| `sona_work_update`                | `tasks`, fields, `dry_run?` — writes                         |
+| `sona_work_claim`                 | `task` — writes                                              |
+| `sona_work_done`                  | `tasks`, `evidence?`, `dry_run?` — writes                    |
+| `sona_work_triage`                | `tasks`, `decision`, `of?`, `dry_run?` — writes              |
+
+Archiving, links, labels and views are opt-in tools: set `SONA_MCP_TOOLS=all`,
+or name the ones to add, when registering the server. Task export is CLI-only.
 
 The result is the CLI JSON in one text block. Refusal messages lead with Sona's
 code, and `data.code` preserves it. Consent failures also carry
 `data.settingsPath`. `consent_required` maps to MCP InvalidRequest;
 `invalid_request` and `not_found` to InvalidParams; unavailable storage and
 execution failures to InternalError.
-Tools also declare `readOnlyHint:true`, except loop resolution declares `false`.
+Tools also declare `readOnlyHint:true`, except loop resolution and the task
+writes declare `false`.
 The hints describe behavior; the CLI consent gate still makes the permission
 decision before any corpus read.
 
