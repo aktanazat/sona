@@ -307,6 +307,35 @@ CREATE TABLE planning_talking_points (
     done_at_ms INTEGER
 );
 CREATE INDEX planning_talking_points_person ON planning_talking_points(person_id, created_at_ms);";
+/// Who works a task besides its owner, the changes agents proposed for a
+/// task, and which agent made a history entry its actor calls `agent`.
+pub const AGENTS_MIGRATION: &str = "CREATE TABLE planning_task_doers (
+    task_id TEXT PRIMARY KEY NOT NULL,
+    agent TEXT NOT NULL CHECK(length(trim(agent)) > 0),
+    since_ms INTEGER NOT NULL
+);
+CREATE TABLE planning_task_proposals (
+    id TEXT PRIMARY KEY NOT NULL,
+    task_id TEXT NOT NULL,
+    agent TEXT NOT NULL CHECK(length(trim(agent)) > 0),
+    field TEXT NOT NULL CHECK(field IN ('title', 'details', 'status', 'priority', 'owner', 'due',
+        'project', 'milestone', 'labels', 'snoozed')),
+    from_value TEXT,
+    patch_json TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(state IN ('open', 'accepted', 'rejected')),
+    created_at_ms INTEGER NOT NULL,
+    decided_at_ms INTEGER,
+    CHECK((state = 'open') = (decided_at_ms IS NULL))
+);
+CREATE INDEX planning_task_proposals_task ON planning_task_proposals(task_id, state, created_at_ms);
+CREATE TABLE planning_activity_agents (
+    activity_id TEXT PRIMARY KEY NOT NULL,
+    agent TEXT NOT NULL CHECK(length(trim(agent)) > 0)
+);
+CREATE TRIGGER planning_task_agents_delete AFTER DELETE ON planning_tasks BEGIN
+    DELETE FROM planning_task_doers WHERE task_id = old.id;
+    DELETE FROM planning_task_proposals WHERE task_id = old.id;
+END;";
 
 /// Every planner migration in order, for tests that build the schema without
 /// the rest of the history database.
@@ -321,6 +350,7 @@ pub(crate) fn apply_all(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
         PROJECT_DELETE_KEEPS_TASKS_MIGRATION,
         DAY_PLAN_MIGRATION,
         FOLLOW_MIGRATION,
+        AGENTS_MIGRATION,
     ] {
         conn.execute_batch(migration)?;
     }

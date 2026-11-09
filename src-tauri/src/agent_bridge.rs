@@ -134,6 +134,10 @@ pub struct AgentBridgeObservedSession {
     /// agent Sona bridges continues a stopped turn the same way; this is the
     /// one fact that decides whether a session belongs in the reply picker.
     pub accepts_reply: bool,
+    /// The task the session works on, as it named it: `S-12` or the task's
+    /// id. Read from a prompt Sona wrote for it, a `sona work claim`
+    /// command, or Sona's claim tool.
+    pub task: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Type)]
@@ -226,6 +230,9 @@ pub struct AgentBridgeCore {
     /// See [`AgentBridgeStatus::revision`].
     revision: u64,
     next_id: u64,
+    /// Sessions a prompt started on a task since the worker last asked: the
+    /// agent, the session and the task the prompt named.
+    started: Vec<(AgentBridgeAgent, String, String)>,
 }
 
 impl AgentBridgeCore {
@@ -244,6 +251,7 @@ impl AgentBridgeCore {
             pending_messages: BTreeMap::new(),
             revision: 0,
             next_id: 0,
+            started: Vec::new(),
         })
     }
 
@@ -400,6 +408,11 @@ impl AgentBridgeCore {
 
     pub fn sessions(&self) -> Vec<AgentBridgeObservedSession> {
         self.observed_sessions.values().cloned().collect()
+    }
+
+    /// See [`AgentBridgeCore::started`].
+    pub fn take_started(&mut self) -> Vec<(AgentBridgeAgent, String, String)> {
+        std::mem::take(&mut self.started)
     }
 
     pub fn requests(&self) -> Vec<AgentBridgeObservedRequest> {
@@ -741,6 +754,7 @@ impl AgentBridgeCore {
                 policy_generation: request.binding.policy_generation,
                 last_seen_at_ms: now_ms,
                 accepts_reply: false,
+                task: None,
             });
         session.last_seen_at_ms = now_ms;
         // The handle fixes the agent and the project, so a re-observation can
@@ -753,6 +767,16 @@ impl AgentBridgeCore {
             AgentBridgeRequestKind::UserPromptSubmit => session.accepts_reply = true,
             AgentBridgeRequestKind::Stop => session.accepts_reply = false,
             _ => {}
+        }
+        let started = request.event.prompt.as_deref().and_then(prompt_task);
+        if let Some(task) = started
+            .clone()
+            .or_else(|| request.event.tool.as_ref().and_then(claimed_task))
+        {
+            session.task = Some(task);
+        }
+        if let Some(task) = started {
+            self.started.push((agent, session_id.clone(), task));
         }
         let binding = session_binding(session);
         // A reply held under an older generation would wait for a stop it can
@@ -1130,6 +1154,63 @@ fn tool_input_preview(input: &serde_json::Value) -> String {
     preview.trim().to_string()
 }
 
+/// The task a prompt Sona wrote names after its mark.
+fn prompt_task(prompt: &str) -> Option<String> {
+    let (_, rest) = prompt.split_once(crate::planning::work::agents::PROMPT_MARK)?;
+    rest.split(|character: char| character == ':' || character.is_whitespace())
+        .find(|token| !token.is_empty())
+        .and_then(task_ref)
+}
+
+/// The task a `sona work claim` command or Sona's claim tool claims.
+fn claimed_task(tool: &wire::CanonicalTool) -> Option<String> {
+    let input = tool.input.as_ref()?;
+    if tool.name.ends_with("sona_work_claim") {
+        return input.get("task")?.as_str().and_then(task_ref);
+    }
+    let command = input.get("command")?.as_str()?;
+    let (program, rest) = command.split_once(" work claim ")?;
+    if !program.trim_end_matches(['"', '\'']).ends_with("sona") {
+        return None;
+    }
+    let mut tokens = rest.split_whitespace();
+    while let Some(token) = tokens.next() {
+        if token == "--operation-id" {
+            tokens.next();
+        } else if let Some(task) = task_ref(token) {
+            return Some(task);
+        }
+    }
+    None
+}
+
+/// `S-12`, `#12` and `12` as `S-12`; an item id as itself.
+fn task_ref(token: &str) -> Option<String> {
+    let token = token.trim_matches(['"', '\'']);
+    let number = token
+        .strip_prefix("S-")
+        .or_else(|| token.strip_prefix("s-"))
+        .or_else(|| token.strip_prefix('#'))
+        .unwrap_or(token);
+    if !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit()) {
+        return number
+            .parse::<i64>()
+            .ok()
+            .map(|number| format!("S-{number}"));
+    }
+    uuid::Uuid::parse_str(token).ok().map(|id| id.to_string())
+}
+
+/// The name a bridged agent goes by on the tasks it works.
+fn doer_name(agent: AgentBridgeAgent) -> &'static str {
+    match agent {
+        AgentBridgeAgent::Claude => "Claude Code",
+        AgentBridgeAgent::Codex => "Codex",
+        AgentBridgeAgent::Grok => "Grok",
+        AgentBridgeAgent::Omp => "OMP",
+    }
+}
+
 fn request_kind(kind: CanonicalEventKind) -> AgentBridgeRequestKind {
     match kind {
         CanonicalEventKind::SessionStart => AgentBridgeRequestKind::SessionStart,
@@ -1317,15 +1398,28 @@ impl AgentBridgeManager {
                 if !settings.master_enabled {
                     break;
                 }
-                let (status, requests, wait) = {
+                let (status, requests, started, wait) = {
                     let mut core = lock_recover(&core);
                     let now = now_ms();
                     let wait = match core.tick(&settings, now) {
                         Ok(()) => core.idle_wait(now),
                         Err(_) => TICK_RETRY,
                     };
-                    (core.status(&settings), core.requests(), wait)
+                    (
+                        core.status(&settings),
+                        core.requests(),
+                        core.take_started(),
+                        wait,
+                    )
                 };
+                for (agent, session_id, task) in started {
+                    crate::planning::work::agents::follow_session(
+                        &app,
+                        doer_name(agent),
+                        &session_id,
+                        &task,
+                    );
+                }
                 let active_request_ids = requests
                     .iter()
                     .map(|request| request.id.clone())
@@ -2823,6 +2917,87 @@ mod tests {
             core.requests()[0].tool_input_preview.as_deref(),
             Some("cargo test --lib agent_bridge")
         );
+        core.stop();
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    /// "Delegate to…" hands an agent a prompt that names the task. The
+    /// session that runs it is tied to the task, and the task is started
+    /// once, however often the bridge looks again.
+    #[test]
+    fn a_prompt_sona_wrote_ties_its_session_to_the_task_once() -> Result<(), Box<dyn Error>> {
+        let root = test_root("delegated-prompt")?;
+        let paths = RuntimePaths::from_root(root.clone(), true)?;
+        let app_id = opaque_hash(&[b"app-delegated-prompt"]);
+        let binding = binding(&root)?;
+        let settings = enabled_settings(binding.project_hash.clone());
+        let mut core = AgentBridgeCore::new(paths.clone(), app_id.clone())?;
+        core.start(&settings, 1_000)?;
+        let mut prompt = event(CanonicalEventKind::UserPromptSubmit, &root, None);
+        prompt.prompt = Some(format!(
+            "{} S-12: Book the offsite venue\n\nReport back to Sona as you work.",
+            crate::planning::work::agents::PROMPT_MARK
+        ));
+        persist_event(&paths, &app_id, binding, prompt, b"delegated", 1_001)?;
+        core.tick(&settings, 1_002)?;
+        let session = core.sessions().pop().ok_or("the prompt's session")?;
+        assert_eq!(session.task.as_deref(), Some("S-12"));
+        assert_eq!(
+            core.take_started(),
+            [(AgentBridgeAgent::Claude, session.id, "S-12".to_owned())]
+        );
+        core.tick(&settings, 1_003)?;
+        assert!(core.take_started().is_empty());
+        core.stop();
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    /// An agent that claims a task itself, by command or with Sona's tool,
+    /// is followed on it. Its own claim started the task, so Sona does not
+    /// start it again; another program's `work claim` is not a claim.
+    #[test]
+    fn a_sessions_own_claim_ties_it_to_the_task_without_starting_it() -> Result<(), Box<dyn Error>>
+    {
+        let root = test_root("own-claim")?;
+        let paths = RuntimePaths::from_root(root.clone(), true)?;
+        let app_id = opaque_hash(&[b"app-own-claim"]);
+        let binding = binding(&root)?;
+        let settings = enabled_settings(binding.project_hash.clone());
+        let mut core = AgentBridgeCore::new(paths.clone(), app_id.clone())?;
+        core.start(&settings, 1_000)?;
+        let ran = |name: &str, field: &str, value: &str| {
+            event(
+                CanonicalEventKind::PostToolUse,
+                &root,
+                Some(CanonicalTool {
+                    name: name.to_string(),
+                    use_id: None,
+                    input: Some(json!({ field: value })),
+                }),
+            )
+        };
+        let steps = [
+            (ran("Bash", "command", "cargo work claim S-3"), None),
+            (
+                ran(
+                    "Bash",
+                    "command",
+                    "~/bin/sona work claim --operation-id 0b5c2d9e-4f7a-4c1e-9a3b-6d8e2f1a7c40 S-7 --agent \"Claude Code\"",
+                ),
+                Some("S-7"),
+            ),
+            (ran("mcp__sona__sona_work_claim", "task", "#9"), Some("S-9")),
+        ];
+        for (at, (step, task)) in (1_001..).step_by(2).zip(steps) {
+            let raw = format!("ran at {at}");
+            persist_event(&paths, &app_id, binding.clone(), step, raw.as_bytes(), at)?;
+            core.tick(&settings, at + 1)?;
+            let session = core.sessions().pop().ok_or("the session")?;
+            assert_eq!(session.task.as_deref(), task);
+        }
+        assert!(core.take_started().is_empty());
         core.stop();
         fs::remove_dir_all(root)?;
         Ok(())

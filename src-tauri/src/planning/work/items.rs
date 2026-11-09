@@ -628,8 +628,10 @@ pub(crate) fn status_before_close(conn: &Connection, id: &str) -> Result<WorkSta
 
 pub(crate) fn activity(conn: &Connection, task_id: &str) -> Result<Vec<WorkActivity>> {
     let mut statement = conn.prepare(
-        "SELECT id, task_id, at_ms, actor, kind, from_value, to_value FROM planning_task_activity
-         WHERE task_id = ?1 ORDER BY at_ms, rowid",
+        "SELECT a.id, a.task_id, a.at_ms, a.actor, a.kind, a.from_value, a.to_value, n.agent
+         FROM planning_task_activity a
+         LEFT JOIN planning_activity_agents n ON n.activity_id = a.id
+         WHERE a.task_id = ?1 ORDER BY a.at_ms, a.rowid",
     )?;
     let rows = statement.query_map([task_id], |row| {
         Ok(WorkActivity {
@@ -640,6 +642,7 @@ pub(crate) fn activity(conn: &Connection, task_id: &str) -> Result<Vec<WorkActiv
             kind: row.get(4)?,
             from: row.get(5)?,
             to: row.get(6)?,
+            agent: row.get(7)?,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)

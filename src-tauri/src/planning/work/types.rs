@@ -230,6 +230,8 @@ pub struct WorkItemRow {
     pub item: WorkItem,
     pub project_title: Option<String>,
     pub owner_name: Option<String>,
+    /// The agent working the item; none when the user is.
+    pub doer: Option<WorkDoer>,
     pub source_meeting_id: Option<String>,
     pub source_meeting_title: Option<String>,
     pub source_quote: Option<String>,
@@ -244,6 +246,66 @@ pub struct WorkItemRow {
     /// When to ask the person who owes this item about it; none for work
     /// nobody else owes.
     pub follow_up_at_ms: Option<i64>,
+}
+
+/// The agent working an item, by the name it goes by, since it took it.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkDoer {
+    pub agent: String,
+    pub since_ms: i64,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkProposalField {
+    Title,
+    Details,
+    Status,
+    Priority,
+    Owner,
+    Due,
+    Project,
+    Milestone,
+    Labels,
+    Snoozed,
+}
+
+sql_enum!(WorkProposalField {
+    Title => "title",
+    Details => "details",
+    Status => "status",
+    Priority => "priority",
+    Owner => "owner",
+    Due => "due",
+    Project => "project",
+    Milestone => "milestone",
+    Labels => "labels",
+    Snoozed => "snoozed",
+});
+
+/// One field an agent would change, waiting for the user. `from` is the
+/// value when it was proposed and `to` the value proposed, both in the form
+/// a history entry keeps; details carry their whole text.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkProposal {
+    pub id: String,
+    pub item_id: String,
+    pub agent: String,
+    pub field: WorkProposalField,
+    pub from: Option<String>,
+    pub to: Option<String>,
+    pub created_at_ms: i64,
+}
+
+/// What handing an item to an agent left: its doer, and the prompt to paste
+/// into that agent, absent when the user took the item back.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkDelegation {
+    pub doer: Option<WorkDoer>,
+    pub prompt: Option<String>,
 }
 
 /// A new item: left-out fields start in not started, at no priority, with
@@ -396,6 +458,8 @@ pub struct WorkActivity {
     pub kind: WorkActivityKind,
     pub from: Option<String>,
     pub to: Option<String>,
+    /// The agent behind an `agent` entry, when it gave its name.
+    pub agent: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
@@ -512,6 +576,8 @@ pub struct WorkList {
     pub people: Vec<WorkPersonChoice>,
     /// What Sona suggests for each listed item still in triage, by item id.
     pub suggestions: BTreeMap<String, Vec<WorkFieldSuggestion>>,
+    /// Changes agents proposed for listed items, by item id, oldest first.
+    pub proposals: BTreeMap<String, Vec<WorkProposal>>,
     /// False when the conversations could not be opened: every item is
     /// listed, but nothing read from its meeting, and no people.
     pub conversations_available: bool,
@@ -528,6 +594,7 @@ pub struct WorkItemDetail {
     /// False when the conversations could not be opened: the item's
     /// meeting, its meeting evidence and its people are not read.
     pub conversations_available: bool,
+    pub proposals: Vec<WorkProposal>,
 }
 
 /// Sent after every committed change to tracker items, with the items it

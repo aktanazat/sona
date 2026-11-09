@@ -92,15 +92,17 @@ The loop for picking up work:
 ```bash
 sona work ready --json                 # Todo tasks nothing open blocks
 sona work show S-12 --json             # its meeting quote, links and history
-sona work claim S-12                   # In progress, refused if already started
+sona work claim S-12 --agent "Claude Code"   # In progress, with you on it
 sona work done S-12 --evidence https://github.com/org/repo/pull/7
 ```
 
-Claim only work the user asked you to take. A claim keeps the task's owner;
-the history records that an agent started it, not which agent. A refused claim
-means someone already started the task: pick another, do not force it with
-`update --status in-progress`. `done` also closes the meeting commitment the
-task came from, and `--evidence` adds one line to the task's details.
+Claim only work the user asked you to take, and say who you are with
+`--agent` ("Claude Code", "Codex", or the name you go by). A claim keeps the
+task's owner and shows you as the one doing it; claiming a task you already
+work changes nothing. A refused claim means another agent or the user is on
+it: pick another, do not force it with `update --status in-progress`. `done`
+also closes the meeting commitment the task came from, and `--evidence` adds
+one line to the task's details.
 
 Triage holds work Sona heard in meetings. Read the quote with `show` before
 deciding: `accept` moves items to Todo with Sona's suggested owner, due day and
@@ -112,8 +114,16 @@ and what it read, so running a command again never changes anything twice: a
 create repeated the same day answers with the first task and `replayed:true`,
 and a change already made lists its tasks under `skipped`. Pass a new id to
 create a twin on purpose. Preview `update`, `done`, `accept`, `decline`,
-`archive` and `restore` with `--dry-run`. Writes are filed as an agent's, never
-as the user's own.
+`archive` and `restore` with `--dry-run`. Writes are filed as the agent
+`--agent` names ("Agent" when left out), never as the user's own.
+
+Unless the user sets **Settings > Agents > Agents' changes** to Apply, a
+change to a task's fields waits for them: `update` and `done` answer with the
+change under `proposed` (from, to, your name), and the user accepts or rejects
+it in Sona. Moving a task you work between Backlog, Todo and In progress
+applies at once. A task you create lands in Triage, and triage decisions,
+duplicates, archiving and label changes are refused. Links between tasks
+always apply.
 
 Work raised in a meeting kept on this Mac never appears. While the
 conversations can't be opened, every answer leaves out all work from meetings

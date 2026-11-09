@@ -1211,6 +1211,16 @@ pub enum EnglishSpelling {
     British,
 }
 
+/// Whether changes from a source land on tasks at once or wait for the user:
+/// Settings > Agents, once for agents and once for Sona's own suggestions.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkAutonomy {
+    #[default]
+    Suggest,
+    Apply,
+}
+
 /* still useful for composing the initial JSON in the store ------------- */
 /// The container-level `serde(default)` (backed by the `Default` impl below)
 /// guarantees every field — including ones added in the future — falls back to
@@ -1632,6 +1642,13 @@ pub struct AppSettings {
     /// seven days. Turning it off deletes what was not attached.
     #[serde(default = "default_meeting_open_windows_enabled")]
     pub meeting_open_windows_enabled: bool,
+    /// Whether an agent's edits to tasks apply at once or wait as proposals.
+    #[serde(default)]
+    pub work_agent_changes: WorkAutonomy,
+    /// Whether the owner, due day and project Sona reads off a meeting are
+    /// filled in as it adds the task, or wait in triage as suggestions.
+    #[serde(default)]
+    pub work_sona_changes: WorkAutonomy,
 }
 
 fn default_count_words_per_app() -> bool {
@@ -2294,6 +2311,8 @@ pub fn get_default_settings() -> AppSettings {
         external_mutations_enabled: false,
         count_words_per_app: default_count_words_per_app(),
         meeting_open_windows_enabled: default_meeting_open_windows_enabled(),
+        work_agent_changes: WorkAutonomy::Suggest,
+        work_sona_changes: WorkAutonomy::Suggest,
     };
     settings.modes = default_modes(&settings);
     ensure_mode_settings(&mut settings);
@@ -3337,6 +3356,30 @@ pub fn change_external_mutations_enabled_setting(
 ) -> Result<(), String> {
     update_settings(&app, |settings| {
         settings.external_mutations_enabled = enabled;
+    })?;
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn change_work_agent_changes_setting(
+    app: AppHandle,
+    autonomy: WorkAutonomy,
+) -> Result<(), String> {
+    update_settings(&app, |settings| {
+        settings.work_agent_changes = autonomy;
+    })?;
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn change_work_sona_changes_setting(
+    app: AppHandle,
+    autonomy: WorkAutonomy,
+) -> Result<(), String> {
+    update_settings(&app, |settings| {
+        settings.work_sona_changes = autonomy;
     })?;
     Ok(())
 }
