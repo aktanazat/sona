@@ -294,7 +294,8 @@ a repeated command never changes anything twice. Unless `Settings > Agents >
 Agents' changes` is Apply, an agent's field changes wait as proposals the user
 accepts or rejects in the app (`planning/work/agents.rs`). The verbs live in
 `query/external/tracker.rs` over `planning::work`; `sona work --help` lists
-them.
+them. `list` and `ready` take `--due overdue,today,this-week,next:N,none`;
+`create` and `update` take `--repeat "every monday"` (`none` stops it).
 
 | Verb                                   | Does                                                             |
 | -------------------------------------- | ---------------------------------------------------------------- |
@@ -302,9 +303,10 @@ them.
 | `show <TASK>`                          | One task with its quote, links, evidence and history             |
 | `create`, `update`                     | **Writes.** `update --dry-run` shows each field's from and to    |
 | `claim <TASK>`                         | **Writes.** Todo or Backlog to In progress with the agent on it  |
-| `done <TASK>... [--evidence URL]`      | **Writes.** Closes the meeting commitment behind the task too    |
+| `done <TASK>... [--evidence URL]`      | **Writes.** Closes its commitment; keeps a URL as evidence       |
 | `accept`, `decline`, `duplicate`       | **Writes.** Triage decisions                                     |
 | `archive`, `restore`                   | **Writes.** Hide tasks from every list, or bring them back       |
+| `snooze <TASK>... --until DAY`         | **Writes.** Off lists and `ready` until DAY; `none` wakes it     |
 | `relate`, `unrelate`                   | **Writes.** `S-1 blocks S-2`, `blocked-by` or `related`          |
 | `labels`, `label-save`, `label-delete` | Labels; the saves and deletes write                              |
 | `views`, `view-save`, `view-delete`    | Saved views; the saves and deletes write                         |

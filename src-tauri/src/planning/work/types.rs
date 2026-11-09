@@ -145,6 +145,7 @@ pub enum WorkActivityKind {
     Snoozed,
     Relation,
     Kept,
+    Recurrence,
 }
 
 sql_enum!(WorkActivityKind {
@@ -165,6 +166,7 @@ sql_enum!(WorkActivityKind {
     Snoozed => "snoozed",
     Relation => "relation",
     Kept => "kept",
+    Recurrence => "recurrence",
 });
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
@@ -269,6 +271,7 @@ pub enum WorkProposalField {
     Milestone,
     Labels,
     Snoozed,
+    Recurrence,
 }
 
 sql_enum!(WorkProposalField {
@@ -282,6 +285,7 @@ sql_enum!(WorkProposalField {
     Milestone => "milestone",
     Labels => "labels",
     Snoozed => "snoozed",
+    Recurrence => "recurrence",
 });
 
 /// One field an agent would change, waiting for the user. `from` is the
@@ -380,6 +384,14 @@ pub struct WorkPatch {
         skip_serializing_if = "Option::is_none"
     )]
     pub snoozed_until_ms: Option<Option<i64>>,
+    /// How often it comes back, in the words the parser reads as one
+    /// repeat, such as "every monday"; null stops it repeating.
+    #[serde(
+        default,
+        deserialize_with = "nullable",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub recurrence: Option<Option<String>>,
 }
 
 /// A due window that moves with the calendar, on this Mac's clock. Weeks

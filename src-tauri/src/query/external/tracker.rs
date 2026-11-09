@@ -28,19 +28,19 @@ use crate::meeting::types::MeetingSessionId;
 use crate::planning;
 use crate::planning::work::agents::{self, AgentChange};
 use crate::planning::work::types::{
-    WorkActivity, WorkActivityKind, WorkActor, WorkDirection, WorkDisplay, WorkFieldSuggestion,
-    WorkGroupBy, WorkItem, WorkItemDetail, WorkItemInput, WorkItemRow, WorkLabel, WorkLayout,
-    WorkList, WorkOrderBy, WorkOwner, WorkPatch, WorkPersonChoice, WorkProjectChoice, WorkProposal,
-    WorkProposalField, WorkQuery, WorkRelation, WorkRelationKind, WorkSource, WorkStatus,
-    WorkSuggestionField, WorkSuggestionValue, WorkView,
+    WorkActivity, WorkActivityKind, WorkActor, WorkDirection, WorkDisplay, WorkDue,
+    WorkFieldSuggestion, WorkGroupBy, WorkItem, WorkItemDetail, WorkItemInput, WorkItemRow,
+    WorkLabel, WorkLayout, WorkList, WorkOrderBy, WorkOwner, WorkPatch, WorkPersonChoice,
+    WorkProjectChoice, WorkProposal, WorkProposalField, WorkQuery, WorkRelation, WorkRelationKind,
+    WorkSource, WorkStatus, WorkSuggestionField, WorkSuggestionValue, WorkView,
 };
-use crate::planning::work::{self, items};
+use crate::planning::work::{self, items, parse};
 use crate::query::{loop_link, KeptLocal, QUERY_SCHEMA_VERSION};
 use crate::settings::WorkAutonomy;
 use chrono::{Local, NaiveDate};
 use clap::{Args, Subcommand, ValueEnum};
 use serde::Serialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::{self, Write as _};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -101,6 +101,8 @@ pub enum WorkVerb {
     Archive(TasksArgs),
     /// Bring archived tasks back.
     Restore(TasksArgs),
+    /// Hide tasks from lists and ready until a day; none wakes them.
+    Snooze(SnoozeArgs),
     /// Link two tasks: S-1 blocks S-2, S-1 blocked-by S-2, or S-1 related S-2.
     Relate(RelateArgs),
     /// Remove a link between two tasks.
@@ -217,7 +219,8 @@ pub struct DoneArgs {
     /// S-12, 12, or task ids.
     #[arg(required = true, value_parser = task_ref, value_name = "TASK")]
     pub tasks: Vec<TaskRef>,
-    /// A link or one line showing the work is done, added to the details.
+    /// A link kept with the task as evidence: http, https or file. Any
+    /// other line is added to the details.
     #[arg(long, value_name = "URL")]
     pub evidence: Option<String>,
     /// Print what would change and write nothing.
@@ -247,6 +250,21 @@ pub struct TasksArgs {
     /// S-12, 12, or task ids.
     #[arg(required = true, value_parser = task_ref, value_name = "TASK")]
     pub tasks: Vec<TaskRef>,
+    /// Print what would change and write nothing.
+    #[arg(long)]
+    pub dry_run: bool,
+    #[command(flatten)]
+    pub write: WriteArgs,
+}
+
+#[derive(Args, Clone, Debug, Eq, PartialEq)]
+pub struct SnoozeArgs {
+    /// S-12, 12, or task ids.
+    #[arg(required = true, value_parser = task_ref, value_name = "TASK")]
+    pub tasks: Vec<TaskRef>,
+    /// The day it comes back: YYYY-MM-DD, today, tomorrow, or none to wake it.
+    #[arg(long, value_parser = day_or_none, value_name = "DAY")]
+    pub until: DayArg,
     /// Print what would change and write nothing.
     #[arg(long)]
     pub dry_run: bool,
@@ -363,6 +381,15 @@ pub struct Scope {
     /// Due on or before this day: YYYY-MM-DD, today or tomorrow.
     #[arg(long, value_parser = day, value_name = "DAY")]
     pub due_by: Option<NaiveDate>,
+    /// Due windows, comma-separated: overdue, today, this-week, next:N for
+    /// the next N days, or none for no due day.
+    #[arg(
+        long,
+        value_delimiter = ',',
+        value_parser = due_window,
+        value_name = "WINDOW"
+    )]
+    pub due: Vec<WorkDue>,
     /// Work raised in this meeting, by its id.
     #[arg(long, value_name = "MEETING_ID")]
     pub meeting: Option<Uuid>,
@@ -404,6 +431,11 @@ pub struct Fields {
     /// YYYY-MM-DD, today, tomorrow, or none.
     #[arg(long, value_parser = day_or_none, value_name = "DAY")]
     pub due: Option<DayArg>,
+    /// How often it repeats: every monday, every 2 weeks, every weekday or
+    /// daily; none stops it. Without --due, a new task that repeats on named
+    /// days is due on the next one.
+    #[arg(long, value_parser = repeat, value_name = "WORDS")]
+    pub repeat: Option<RepeatArg>,
     /// A project's name or id, or none.
     #[arg(long)]
     pub project: Option<String>,
@@ -456,6 +488,33 @@ impl DayArg {
         match self {
             Self::Clear => Ok(None),
             Self::On(day) => midnight(day).map(Some),
+        }
+    }
+}
+
+/// How often a task repeats, in the parser's words, with when it next falls
+/// when the words name the days; or `none` to stop it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RepeatArg {
+    Clear,
+    Every {
+        every: String,
+        next_at_ms: Option<i64>,
+    },
+}
+
+impl RepeatArg {
+    fn every(&self) -> Option<String> {
+        match self {
+            Self::Clear => None,
+            Self::Every { every, .. } => Some(every.clone()),
+        }
+    }
+
+    const fn next_at_ms(&self) -> Option<i64> {
+        match self {
+            Self::Clear => None,
+            Self::Every { next_at_ms, .. } => *next_at_ms,
         }
     }
 }
@@ -669,6 +728,45 @@ fn day_or_none(value: &str) -> Result<DayArg, String> {
     }
 }
 
+fn repeat(value: &str) -> Result<RepeatArg, String> {
+    if value.trim().eq_ignore_ascii_case("none") {
+        return Ok(RepeatArg::Clear);
+    }
+    parse::repeat(value, &Local::now())
+        .map(|(every, next_at_ms)| RepeatArg::Every { every, next_at_ms })
+        .ok_or_else(|| {
+            "expected how often it repeats, such as every monday, every 2 weeks, every weekday or daily, or none".to_owned()
+        })
+}
+
+fn due_window(value: &str) -> Result<WorkDue, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "overdue" => Ok(WorkDue::Overdue),
+        "today" => Ok(WorkDue::Today),
+        "this-week" => Ok(WorkDue::ThisWeek),
+        "none" => Ok(WorkDue::NoDate),
+        other => other
+            .strip_prefix("next:")
+            .and_then(|days| days.parse::<u16>().ok())
+            .filter(|days| *days > 0)
+            .map(|days| WorkDue::NextDays { days })
+            .ok_or_else(|| {
+                "expected overdue, today, this-week, next:N for the next N days, or none".to_owned()
+            }),
+    }
+}
+
+/// A due window as --due takes it.
+fn due_flag(due: WorkDue) -> String {
+    match due {
+        WorkDue::Overdue => "overdue".to_owned(),
+        WorkDue::Today => "today".to_owned(),
+        WorkDue::ThisWeek => "this-week".to_owned(),
+        WorkDue::NextDays { days } => format!("next:{days}"),
+        WorkDue::NoDate => "none".to_owned(),
+    }
+}
+
 fn midnight(day: NaiveDate) -> Result<i64, ExternalError> {
     day_start_utc_ms(&day.format("%Y-%m-%d").to_string())
 }
@@ -690,7 +788,8 @@ impl WorkVerb {
             | Self::Accept(AcceptArgs { dry_run: true, .. })
             | Self::Decline(TasksArgs { dry_run: true, .. })
             | Self::Archive(TasksArgs { dry_run: true, .. })
-            | Self::Restore(TasksArgs { dry_run: true, .. }) => READ_SCOPES,
+            | Self::Restore(TasksArgs { dry_run: true, .. })
+            | Self::Snooze(SnoozeArgs { dry_run: true, .. }) => READ_SCOPES,
             Self::Create(_)
             | Self::Update(_)
             | Self::Claim(_)
@@ -700,6 +799,7 @@ impl WorkVerb {
             | Self::Duplicate(_)
             | Self::Archive(_)
             | Self::Restore(_)
+            | Self::Snooze(_)
             | Self::Relate(_)
             | Self::Unrelate(_)
             | Self::LabelSave(_)
@@ -726,7 +826,7 @@ impl WorkVerb {
                 "--expected-revision fences one task; name one."
             }
             Self::Update(args) if !args.changes_something() => {
-                "Name a change: --title, --details, --status, --priority, --owner, --due, --project, --milestone, --labels, --add-label, --remove-label or --snooze-until."
+                "Name a change: --title, --details, --status, --priority, --owner, --due, --repeat, --project, --milestone, --labels, --add-label, --remove-label or --snooze-until."
             }
             Self::Done(args) if args.evidence.is_some() && args.tasks.len() > 1 => {
                 "--evidence belongs to one task; name one."
@@ -755,6 +855,7 @@ impl UpdateArgs {
             || fields.priority.is_some()
             || fields.owner.is_some()
             || fields.due.is_some()
+            || fields.repeat.is_some()
             || fields.project.is_some()
             || fields.milestone.is_some()
             || fields.labels.is_some()
@@ -840,6 +941,11 @@ pub struct ExternalWorkItem {
     /// Open tasks that block this one.
     pub blocked_by_open: u32,
     pub snoozed_until_ms: Option<i64>,
+    /// When to ask the person who owes it about it; none for work nobody
+    /// else owes.
+    pub follow_up_at_ms: Option<i64>,
+    /// Picked as one of today's focus tasks.
+    pub focus: bool,
     pub archived_at_ms: Option<i64>,
     pub status_changed_at_ms: i64,
     pub created_at_ms: i64,
@@ -926,6 +1032,8 @@ pub struct ExternalWorkMine {
 pub struct ExternalWorkDetail {
     pub schema_version: u32,
     pub task: ExternalWorkItem,
+    /// How often the task repeats, in the parser's words: "every monday".
+    pub recurrence: Option<String>,
     pub relations: Vec<ExternalWorkLink>,
     pub evidence: Vec<ExternalPlanningEvidence>,
     /// What Sona suggests for a task still in triage.
@@ -999,6 +1107,7 @@ pub enum WorkAction {
     MarkedDuplicate,
     Archived,
     Restored,
+    Snoozed,
 }
 
 impl WorkAction {
@@ -1013,6 +1122,7 @@ impl WorkAction {
             Self::MarkedDuplicate => "duplicate",
             Self::Archived => "archive",
             Self::Restored => "restore",
+            Self::Snoozed => "snooze",
         }
     }
 
@@ -1027,6 +1137,7 @@ impl WorkAction {
             Self::MarkedDuplicate => "Marked duplicate",
             Self::Archived => "Archived",
             Self::Restored => "Restored",
+            Self::Snoozed => "Snoozed",
         }
     }
 }
@@ -1044,6 +1155,8 @@ pub struct ExternalWorkChange {
     /// True when this create answered from an earlier run of the same
     /// request rather than creating another task.
     pub replayed: bool,
+    /// The link kept with the task as evidence of the work, when one was.
+    pub evidence_url: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1169,6 +1282,8 @@ pub struct ExternalWorkFilters {
     pub label_ids: Option<Vec<String>>,
     pub priorities: Option<Vec<Priority>>,
     pub due_before_ms: Option<i64>,
+    /// Due windows, as --due takes them.
+    pub due: Option<Vec<String>>,
     pub meeting_id: Option<String>,
     pub search: Option<String>,
     pub include_archived: bool,
@@ -1235,6 +1350,7 @@ pub(super) async fn answer(
         WorkVerb::Duplicate(args) => tracker.duplicate(args).await,
         WorkVerb::Archive(args) => tracker.archive(args, true).await,
         WorkVerb::Restore(args) => tracker.archive(args, false).await,
+        WorkVerb::Snooze(args) => tracker.snooze(args).await,
         WorkVerb::Relate(args) => tracker.relate(args).await,
         WorkVerb::Unrelate(args) => tracker.unrelate(args).await,
         WorkVerb::Labels => tracker.labels(),
@@ -1266,6 +1382,10 @@ struct Board {
     projects: Vec<WorkProjectChoice>,
     people: Vec<WorkPersonChoice>,
     suggestions: BTreeMap<String, Vec<WorkFieldSuggestion>>,
+    /// Today's focus picks, by id.
+    focus: Vec<String>,
+    /// How often each repeating task repeats, by id.
+    repeats: HashMap<String, String>,
     fence: Fence,
 }
 
@@ -1282,12 +1402,19 @@ impl Tracker<'_> {
                 },
             )
             .await?;
+        let today = Local::now().date_naive().format("%Y-%m-%d").to_string();
+        let (focus, repeats) = planning::history(self.history, |conn| {
+            Ok((items::day(conn, &today)?.focus_ids, items::repeats(conn)?))
+        })
+        .map_err(|message| refusal(self.history, message))?;
         Ok(Board {
             rows: list.items,
             labels: list.labels,
             projects: list.projects,
             people: list.people,
             suggestions: list.suggestions,
+            focus,
+            repeats,
             fence,
         })
     }
@@ -1413,13 +1540,16 @@ impl Tracker<'_> {
                 .as_deref()
                 .map(|owner| board.owner(owner))
                 .transpose()?,
-            due_at_ms: fields.due.map(DayArg::ms).transpose()?.flatten(),
+            due_at_ms: match fields.due.map(DayArg::ms).transpose()? {
+                Some(due) => due,
+                None => fields.repeat.as_ref().and_then(RepeatArg::next_at_ms),
+            },
             label_ids: fields
                 .labels
                 .as_deref()
                 .map(|labels| board.label_ids(labels))
                 .transpose()?,
-            recurrence: None,
+            recurrence: fields.repeat.as_ref().and_then(RepeatArg::every),
         };
         let today = Local::now().date_naive().format("%Y-%m-%d").to_string();
         let operation_id = args.write.operation_id("create", &(&input, today))?;
@@ -1436,6 +1566,7 @@ impl Tracker<'_> {
             skipped: Vec::new(),
             proposed: Vec::new(),
             replayed,
+            evidence_url: None,
         }))
     }
 
@@ -1464,8 +1595,32 @@ impl Tracker<'_> {
             args.dry_run,
             &args.write,
             planned,
+            None,
         )
         .await
+    }
+
+    async fn snooze(&self, args: &SnoozeArgs) -> Result<WorkAnswer, ExternalError> {
+        let board = self.board().await?;
+        let until = args.until.ms()?;
+        let action = if until.is_some() {
+            WorkAction::Snoozed
+        } else {
+            WorkAction::Updated
+        };
+        let planned = board
+            .tasks(&args.tasks)?
+            .into_iter()
+            .map(|row| {
+                let patch = WorkPatch {
+                    snoozed_until_ms: Some(until),
+                    ..WorkPatch::default()
+                };
+                (row, patch)
+            })
+            .collect();
+        self.apply(&board, action, args.dry_run, &args.write, planned, None)
+            .await
     }
 
     async fn claim(&self, args: &ClaimArgs) -> Result<WorkAnswer, ExternalError> {
@@ -1504,10 +1659,11 @@ impl Tracker<'_> {
                 schema_version: QUERY_SCHEMA_VERSION,
                 action: WorkAction::Claimed,
                 operation_id: None,
-                tasks: vec![project_task(row, &board.labels)],
+                tasks: vec![project_task(row, &board)],
                 skipped: Vec::new(),
                 proposed: Vec::new(),
                 replayed: false,
+                evidence_url: None,
             })),
             WorkStatus::InProgress => Err(ExternalError::invalid(format!(
                 "{name} is already in progress. Find another with: sona work ready"
@@ -1541,6 +1697,7 @@ impl Tracker<'_> {
                     skipped: Vec::new(),
                     proposed: Vec::new(),
                     replayed: false,
+                    evidence_url: None,
                 }))
             }
         }
@@ -1548,27 +1705,34 @@ impl Tracker<'_> {
 
     async fn done(&self, args: &DoneArgs) -> Result<WorkAnswer, ExternalError> {
         let board = self.board().await?;
+        let link = args.evidence.as_deref().and_then(agents::evidence_link);
+        let note = args.evidence.as_deref().filter(|_| link.is_none());
         let planned = board
             .tasks(&args.tasks)?
             .into_iter()
             .map(|row| {
                 let patch = WorkPatch {
                     status: Some(WorkStatus::Done),
-                    details: args
-                        .evidence
-                        .as_deref()
-                        .and_then(|evidence| with_evidence(row.item.details.as_deref(), evidence)),
+                    details: note.and_then(|note| with_evidence(row.item.details.as_deref(), note)),
                     ..WorkPatch::default()
                 };
                 (row, patch)
             })
             .collect();
-        self.apply(&board, WorkAction::Done, args.dry_run, &args.write, planned)
-            .await
+        self.apply(
+            &board,
+            WorkAction::Done,
+            args.dry_run,
+            &args.write,
+            planned,
+            link.as_deref(),
+        )
+        .await
     }
 
     /// Writes one patch per task: fenced alone, all or none when the patches
     /// agree, and otherwise one task at a time, stopping at the first refusal.
+    /// `link` is kept with the one task as evidence of the work.
     async fn apply(
         &self,
         board: &Board,
@@ -1576,11 +1740,12 @@ impl Tracker<'_> {
         dry_run: bool,
         write: &WriteArgs,
         planned: Vec<(&WorkItemRow, WorkPatch)>,
+        link: Option<&str>,
     ) -> Result<WorkAnswer, ExternalError> {
         let mut changing = Vec::new();
         let mut skipped = Vec::new();
         for (row, patch) in planned {
-            if board.diff(row, &patch).is_empty() {
+            if board.diff(row, &patch).is_empty() && link.is_none() {
                 skipped.push(skip(row, unchanged_reason(row, &patch)));
             } else {
                 changing.push((row, patch));
@@ -1588,9 +1753,10 @@ impl Tracker<'_> {
         }
         let operation_id = match changing.as_slice() {
             [] => None,
-            [(row, patch)] => {
-                Some(write.operation_id(action.verb(), &(&row.item.id, row.item.revision, patch))?)
-            }
+            [(row, patch)] => Some(write.operation_id(
+                action.verb(),
+                &(&row.item.id, row.item.revision, patch, link),
+            )?),
             several => Some(
                 write.operation_id(
                     action.verb(),
@@ -1604,7 +1770,15 @@ impl Tracker<'_> {
         if dry_run {
             let mut changes: Vec<ExternalWorkPlanned> = changing
                 .iter()
-                .map(|(row, patch)| board.planned(row, patch, None))
+                .map(|(row, patch)| {
+                    let mut planned = board.planned(row, patch, None);
+                    planned.fields.extend(link.map(|link| ExternalFieldChange {
+                        field: "evidence",
+                        from: String::new(),
+                        to: link.to_owned(),
+                    }));
+                    planned
+                })
                 .collect();
             changes.extend(skipped.into_iter().map(|skip| ExternalWorkPlanned {
                 id: skip.id,
@@ -1631,9 +1805,12 @@ impl Tracker<'_> {
                 self.app,
                 &agent,
                 &operation_id,
-                &row.item.id,
-                row.item.revision,
-                patch,
+                agents::ItemChange {
+                    id: &row.item.id,
+                    expected_revision: row.item.revision,
+                    patch,
+                    link,
+                },
             )
             .await
             .map_err(|message| {
@@ -1649,7 +1826,10 @@ impl Tracker<'_> {
             }
             several => self.apply_each(&agent, &operation_id, several).await?,
         };
-        Ok(board.agent_changed(action, operation_id, changes, skipped))
+        Ok(WorkAnswer::Change(ExternalWorkChange {
+            evidence_url: link.map(str::to_owned),
+            ..board.agent_changed(action, operation_id, changes, skipped)
+        }))
     }
 
     async fn apply_each(
@@ -1668,9 +1848,12 @@ impl Tracker<'_> {
                 self.app,
                 agent,
                 &task_operation,
-                &row.item.id,
-                row.item.revision,
-                patch,
+                agents::ItemChange {
+                    id: &row.item.id,
+                    expected_revision: row.item.revision,
+                    patch,
+                    link: None,
+                },
             )
             .await
             {
@@ -2253,7 +2436,7 @@ impl Tracker<'_> {
         })?;
         let mut files = Vec::with_capacity(rows.len());
         for row in &rows {
-            let task = project_task(row, &board.labels);
+            let task = project_task(row, &board);
             let path = args.md.join(format!("{}.md", task.handle));
             std::fs::write(&path, markdown(&task)).map_err(|error| {
                 ExternalError::new(
@@ -2403,7 +2586,7 @@ fn page(mut rows: Vec<WorkItemRow>, limit: Option<usize>, board: &Board) -> Exte
         entries: rows
             .iter()
             .take(limit)
-            .map(|row| project_task(row, &board.labels))
+            .map(|row| project_task(row, board))
             .collect(),
         total,
         has_more: total > limit,
@@ -2425,6 +2608,7 @@ fn changed(
         skipped,
         proposed: Vec::new(),
         replayed: false,
+        evidence_url: None,
     })
 }
 
@@ -2707,7 +2891,7 @@ impl Board {
         let tasks = rows
             .into_iter()
             .take(limit)
-            .map(|row| project_task(row, &self.labels))
+            .map(|row| project_task(row, self))
             .collect();
         (tasks, more)
     }
@@ -2738,6 +2922,7 @@ impl Board {
                 .map(|owner| self.owner(owner))
                 .transpose()?,
             due_at_ms: fields.due.map(DayArg::ms).transpose()?,
+            recurrence: fields.repeat.as_ref().map(RepeatArg::every),
             label_ids: fields
                 .labels
                 .as_deref()
@@ -2820,6 +3005,15 @@ impl Board {
         }
         if let Some(due) = patch.due_at_ms {
             field("due", day_text(item.due_at_ms), day_text(due));
+        }
+        if let Some(repeat) = &patch.recurrence {
+            let every =
+                |every: Option<&String>| every.map_or_else(|| "none".to_owned(), Clone::clone);
+            field(
+                "repeats",
+                every(self.repeats.get(&item.id)),
+                every(repeat.as_ref()),
+            );
         }
         if let Some(project) = &patch.project_id {
             let name = |id: Option<&String>| {
@@ -2935,7 +3129,7 @@ impl Board {
             follow_up_at_ms: before.and_then(|row| row.follow_up_at_ms),
             item,
         };
-        project_task(&row, &self.labels)
+        project_task(&row, self)
     }
 
     fn detail(&self, detail: WorkItemDetail) -> ExternalWorkDetail {
@@ -2988,7 +3182,8 @@ impl Board {
         ExternalWorkDetail {
             schema_version: QUERY_SCHEMA_VERSION,
             conversations_available: self.fence.is_open(),
-            task: project_task(&detail.item, &self.labels),
+            task: project_task(&detail.item, self),
+            recurrence: detail.recurrence,
             relations,
             evidence,
             suggestions,
@@ -3074,7 +3269,8 @@ impl Board {
             | WorkActivityKind::Details
             | WorkActivityKind::Archived
             | WorkActivityKind::Restored
-            | WorkActivityKind::Kept => value.to_owned(),
+            | WorkActivityKind::Kept
+            | WorkActivityKind::Recurrence => value.to_owned(),
         }
     }
 
@@ -3104,6 +3300,7 @@ impl Board {
             WorkProposalField::Project => Some(WorkActivityKind::Project),
             WorkProposalField::Labels => Some(WorkActivityKind::Labels),
             WorkProposalField::Snoozed => Some(WorkActivityKind::Snoozed),
+            WorkProposalField::Recurrence => Some(WorkActivityKind::Recurrence),
             WorkProposalField::Milestone => None,
         };
         let read = |value: &Option<String>| match (value.as_deref(), kind) {
@@ -3133,7 +3330,7 @@ impl Board {
         operation_id: String,
         changes: Vec<AgentChange>,
         skipped: Vec<ExternalWorkSkip>,
-    ) -> WorkAnswer {
+    ) -> ExternalWorkChange {
         let mut tasks = Vec::new();
         let mut proposed = Vec::new();
         for change in changes {
@@ -3150,7 +3347,7 @@ impl Board {
                 tasks.push(self.project_item(change.item));
             }
         }
-        WorkAnswer::Change(ExternalWorkChange {
+        ExternalWorkChange {
             schema_version: QUERY_SCHEMA_VERSION,
             action,
             operation_id: Some(operation_id),
@@ -3158,7 +3355,8 @@ impl Board {
             skipped,
             proposed,
             replayed: false,
-        })
+            evidence_url: None,
+        }
     }
 }
 
@@ -3193,6 +3391,10 @@ fn project_view(view: &WorkView) -> ExternalWorkView {
                 .as_ref()
                 .map(|priorities| priorities.iter().copied().map(Priority::of).collect()),
             due_before_ms: query.due_before_ms,
+            due: query
+                .due
+                .as_ref()
+                .map(|due| due.iter().copied().map(due_flag).collect()),
             meeting_id: query.source_meeting_id.clone(),
             search: query.search.clone(),
             include_archived: query.include_archived,
@@ -3265,6 +3467,9 @@ impl Scope {
                 .succ_opt()
                 .ok_or_else(|| ExternalError::invalid("--due-by is past the calendar."))?;
             query.due_before_ms = Some(midnight(next)?);
+        }
+        if !self.due.is_empty() {
+            query.due = Some(self.due.clone());
         }
         if let Some(meeting) = self.meeting {
             match &board.fence {
@@ -3373,7 +3578,7 @@ fn project_label(label: WorkLabel) -> ExternalWorkLabel {
     }
 }
 
-fn project_task(row: &WorkItemRow, labels: &[WorkLabel]) -> ExternalWorkItem {
+fn project_task(row: &WorkItemRow, board: &Board) -> ExternalWorkItem {
     let item = &row.item;
     ExternalWorkItem {
         id: item.id.clone(),
@@ -3405,10 +3610,7 @@ fn project_task(row: &WorkItemRow, labels: &[WorkLabel]) -> ExternalWorkItem {
             .iter()
             .map(|id| ExternalWorkName {
                 id: id.clone(),
-                name: labels
-                    .iter()
-                    .find(|label| label.id == *id)
-                    .map_or_else(|| id.clone(), |label| label.name.clone()),
+                name: board.label_name(id),
             })
             .collect(),
         source: item
@@ -3426,6 +3628,8 @@ fn project_task(row: &WorkItemRow, labels: &[WorkLabel]) -> ExternalWorkItem {
         duplicate_of_id: item.duplicate_of_id.clone(),
         blocked_by_open: row.blocked_by_open_count,
         snoozed_until_ms: item.snoozed_until_ms,
+        follow_up_at_ms: row.follow_up_at_ms,
+        focus: board.focus.contains(&item.id),
         archived_at_ms: item.archived_at_ms,
         status_changed_at_ms: item.status_changed_at_ms,
         created_at_ms: item.created_at_ms,
@@ -3700,6 +3904,16 @@ fn task_line(text: &mut String, task: &ExternalWorkItem, today: &Today) {
             if late { " (overdue)" } else { "" }
         ));
     }
+    if let Some(follow_up) = task.follow_up_at_ms.filter(|_| task.status.is_open()) {
+        notes.push(if follow_up <= today.now_ms {
+            "follow up now".to_owned()
+        } else {
+            format!("follow up {}", short_day(&day_text(Some(follow_up))))
+        });
+    }
+    if task.focus {
+        notes.push("focus today".to_owned());
+    }
     if let Some(project) = &task.project {
         notes.push(project.name.clone());
     }
@@ -3775,6 +3989,9 @@ fn detail_text(text: &mut String, detail: &ExternalWorkDetail, today: &Today) {
             let _ = writeln!(text, "  {line}");
         }
     }
+    if let Some(every) = &detail.recurrence {
+        let _ = writeln!(text, "\nRepeats {every}");
+    }
     if let Some(source) = &task.source {
         let said = said_by(source).unwrap_or_else(|| "a meeting".to_owned());
         match &source.quote {
@@ -3807,13 +4024,21 @@ fn detail_text(text: &mut String, detail: &ExternalWorkDetail, today: &Today) {
     if !detail.evidence.is_empty() {
         text.push_str("\nEvidence\n");
         for evidence in &detail.evidence {
-            let title = evidence.title.as_deref().unwrap_or("unavailable source");
-            match &evidence.link {
+            let title = evidence.title.as_deref();
+            let named = match (evidence.source_kind, evidence.caption.as_deref()) {
+                (planning::EvidenceSourceKind::Dictation, Some(quote)) => title.map_or_else(
+                    || format!("\"{quote}\""),
+                    |title| format!("\"{quote}\" in {title}"),
+                ),
+                (planning::EvidenceSourceKind::Link, Some(caption)) => caption.to_owned(),
+                _ => title.unwrap_or("unavailable source").to_owned(),
+            };
+            match evidence.link.as_deref().filter(|link| *link != named) {
                 Some(link) => {
-                    let _ = writeln!(text, "  {title}  {link}");
+                    let _ = writeln!(text, "  {named}  {link}");
                 }
                 None => {
-                    let _ = writeln!(text, "  {title}");
+                    let _ = writeln!(text, "  {named}");
                 }
             }
         }
@@ -3865,7 +4090,11 @@ fn detail_text(text: &mut String, detail: &ExternalWorkDetail, today: &Today) {
 }
 
 fn change_text(text: &mut String, change: &ExternalWorkChange, today: &Today) {
-    if change.tasks.is_empty() && change.skipped.is_empty() && change.proposed.is_empty() {
+    if change.tasks.is_empty()
+        && change.skipped.is_empty()
+        && change.proposed.is_empty()
+        && change.evidence_url.is_none()
+    {
         text.push_str("Nothing to change.\n");
     }
     if !change.tasks.is_empty() {
@@ -3879,6 +4108,9 @@ fn change_text(text: &mut String, change: &ExternalWorkChange, today: &Today) {
         for task in &change.tasks {
             task_line(text, task, today);
         }
+    }
+    if let Some(link) = &change.evidence_url {
+        let _ = writeln!(text, "Kept as evidence: {link}");
     }
     if !change.proposed.is_empty() {
         text.push_str("Waiting for the user to accept in Sona:\n");
@@ -3925,7 +4157,11 @@ fn preview_text(text: &mut String, preview: &ExternalWorkPreview) {
             text.push_str("  nothing would change\n");
         }
         for field in &change.fields {
-            let _ = writeln!(text, "  {}: {} → {}", field.field, field.from, field.to);
+            if field.from.is_empty() {
+                let _ = writeln!(text, "  {}: {}", field.field, field.to);
+            } else {
+                let _ = writeln!(text, "  {}: {} → {}", field.field, field.from, field.to);
+            }
         }
         if let Some(effect) = change.commitment {
             let effect = match effect {
@@ -3973,6 +4209,9 @@ fn filters_text(filters: &ExternalWorkFilters) -> String {
     }
     if let Some(before) = filters.due_before_ms {
         parts.push(format!("due before {}", day_text(Some(before))));
+    }
+    if let Some(due) = &filters.due {
+        parts.push(format!("due {}", due.join(", ")));
     }
     if let Some(search) = &filters.search {
         parts.push(format!("matching {search:?}"));
