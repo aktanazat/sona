@@ -276,7 +276,7 @@ struct NudgeSheet: View {
             Button(action: close) {
                 Image(systemName: "xmark")
             }
-            .buttonStyle(.circle)
+            .buttonStyle(.icon)
             .help("Close")
             .accessibilityLabel("Close")
         }
@@ -506,7 +506,7 @@ struct WorkBriefSheet: View {
             Button(action: close) {
                 Image(systemName: "xmark")
             }
-            .buttonStyle(.circle)
+            .buttonStyle(.icon)
             .help("Close")
             .accessibilityLabel("Close")
         }

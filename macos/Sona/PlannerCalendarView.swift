@@ -121,7 +121,7 @@ struct PlannerCalendarView: View {
             PlannerNavigationSurface(material: material) {
                 HStack(spacing: 12) {
                     Button { moveMonth(-1) } label: { Image(systemName: "chevron.left") }
-                        .buttonStyle(.circle)
+                        .buttonStyle(.icon)
                         .accessibilityLabel("Previous month")
                     Spacer(minLength: 0)
                     Text(displayedMonth.formatted(.dateTime.month(.wide).year()))
@@ -129,7 +129,7 @@ struct PlannerCalendarView: View {
                         .accessibilityAddTraits(.isHeader)
                     Spacer(minLength: 0)
                     Button { moveMonth(1) } label: { Image(systemName: "chevron.right") }
-                        .buttonStyle(.circle)
+                        .buttonStyle(.icon)
                         .accessibilityLabel("Next month")
                 }
             }
@@ -192,7 +192,7 @@ struct PlannerCalendarView: View {
                 if store.calendarLoading { PlannerLoadingRows(label: "Loading calendar") }
                 else if store.calendarError == nil { Text("Calendar unavailable.").metaText() }
             } else {
-                Card(material: material) {
+                Card {
                     if dayItems.isEmpty {
                         CardLine(store.calendarError == nil ? "No due work or recorded meetings." : "No planned work due.")
                     }

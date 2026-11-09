@@ -265,6 +265,7 @@ struct PlannerAgentView: View {
                         }
                     }
                     .pickerStyle(.menu)
+                    .controlSize(.large)
                     .font(TypeScale.body(13))
                     if model.people.entries == nil || model.people.listFailed {
                         Text("People unavailable").metaText(Theme.inkSecondary)
@@ -520,6 +521,7 @@ struct PlannerAgentView: View {
             }
         }
         .pickerStyle(.menu)
+        .controlSize(.large)
         .font(TypeScale.body(13))
     }
 

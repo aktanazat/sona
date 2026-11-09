@@ -229,7 +229,7 @@ struct MeetingsFilterCard: View {
             }
         }
         .menuStyle(.button)
-        .buttonStyle(.compact)
+        .buttonStyle(.secondary)
         .menuIndicator(.hidden)
         .fixedSize()
         .accessibilityLabel(title)
@@ -278,7 +278,7 @@ struct MeetingsFolderBar: View {
                     renaming = nil
                     naming = true
                 }
-                .buttonStyle(.compact)
+                .buttonStyle(.secondary)
                 .disabled(store.foldersLoading || store.folderBusy)
             }
             if store.foldersLoading {
@@ -311,7 +311,7 @@ struct MeetingsFolderBar: View {
                                     Image(systemName: "ellipsis")
                                 }
                                 .menuStyle(.button)
-                                .buttonStyle(.circle)
+                                .buttonStyle(.icon)
                                 .menuIndicator(.hidden)
                                 .fixedSize()
                                 .help("Folder options")
@@ -353,10 +353,10 @@ struct MeetingsFolderBar: View {
                 .foregroundStyle(selected ? Theme.ink : Theme.inkSecondary)
                 .lineLimit(1)
                 .padding(.horizontal, 12)
-                .frame(height: 26)
-                .background(selected ? Theme.selection : Color.clear, in: Capsule())
-                .overlay(Capsule().strokeBorder(selected ? Color.clear : Theme.border, lineWidth: 1))
-                .contentShape(Capsule())
+                .frame(height: Theme.controlHeight)
+                .background(selected ? Theme.selection : Color.clear, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
+                .overlay(RoundedRectangle(cornerRadius: Theme.radiusControl).strokeBorder(selected ? Color.clear : Theme.border, lineWidth: 1))
+                .contentShape(RoundedRectangle(cornerRadius: Theme.radiusControl))
         }
         .buttonStyle(.plain)
         .accessibilityAddTraits(selected ? .isSelected : [])
@@ -642,7 +642,6 @@ struct MeetingsGroupHeading: View {
             .font(.system(size: 13, weight: .semibold))
             .foregroundStyle(Theme.inkSecondary)
             .accessibilityAddTraits(.isHeader)
-            .padding(.leading, 4)
     }
 }
 

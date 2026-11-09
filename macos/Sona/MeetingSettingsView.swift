@@ -551,6 +551,7 @@ private struct MeetingAutomationRow: View {
                     }
                     .labelsHidden()
                     .pickerStyle(.menu)
+                    .controlSize(.large)
                     .fixedSize()
                     .disabled(busy || store.prompts.isEmpty)
                 } else if let placeholder = kind.placeholder {
@@ -1009,15 +1010,16 @@ private struct MeetingSettingsDisclosure<Content: View>: View {
         CardRow(action: {
             open.toggle()
         }) {
+            Text(label).bodyText()
+        } trailing: {
             HStack(spacing: 8) {
-                Image(systemName: open ? "chevron.down" : "chevron.right")
+                if let fact {
+                    Text(fact).metaText(fact == "None" ? Theme.accent : Theme.inkTertiary)
+                }
+                Image(systemName: "chevron.right")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(Theme.inkTertiary)
-                Text(label).bodyText()
-            }
-        } trailing: {
-            if let fact {
-                Text(fact).metaText(fact == "None" ? Theme.accent : Theme.inkTertiary)
+                    .rotationEffect(.degrees(open ? 90 : 0))
             }
         }
         if open {

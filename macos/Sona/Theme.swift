@@ -92,6 +92,11 @@ enum Theme {
     static let margin: CGFloat = 28
     static let contentMax: CGFloat = 880
 
+    /// Buttons, fields, tabs and icon buttons in bars, forms and sheets.
+    static let controlHeight: CGFloat = 28
+    /// The smaller control a row or a card carries.
+    static let compactHeight: CGFloat = 26
+
     /// The one curve panels move on, in AppKit and SwiftUI alike: 0.25 s,
     /// quick off the screen's edge and settling without a bounce. With
     /// motion reduced, a panel fades in place for `fade` instead.

@@ -28,31 +28,22 @@ struct Hairline: View {
     }
 }
 
+/// A card is content, so it never takes Liquid Glass or a material: Apple
+/// keeps those for the controls floating over content, and one solid card
+/// reads the same on every page.
 struct Card<Content: View>: View {
-    let material: AppearanceMaterial
     let content: Content
 
-    init(material: AppearanceMaterial = .solid, @ViewBuilder content: () -> Content) {
-        self.material = material
+    init(@ViewBuilder content: () -> Content) {
         self.content = content()
     }
 
-    /// A card is content, so it never takes Liquid Glass, which Apple keeps
-    /// for the controls floating over content. The glass appearance gives a
-    /// card the standard translucent material instead.
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: Theme.radiusCard)
-        if material == .glass {
-            cardContent
-                .background(.regularMaterial)
-                .clipShape(shape)
-                .overlay(shape.strokeBorder(Theme.border, lineWidth: 1))
-        } else {
-            cardContent
-                .background(Theme.surface)
-                .clipShape(shape)
-                .overlay(shape.strokeBorder(Theme.border, lineWidth: 1))
-        }
+        cardContent
+            .background(Theme.surface)
+            .clipShape(shape)
+            .overlay(shape.strokeBorder(Theme.border, lineWidth: 1))
     }
 
     private var cardContent: some View {
@@ -170,7 +161,7 @@ struct PrimaryButton: ButtonStyle {
             .font(TypeScale.label(13))
             .foregroundStyle(Theme.onAccent)
             .padding(.horizontal, compact ? 10 : 14)
-            .frame(height: compact ? 26 : 30)
+            .frame(height: compact ? Theme.compactHeight : Theme.controlHeight)
             .background(Theme.accentFill.opacity(configuration.isPressed ? 0.8 : 1), in: RoundedRectangle(cornerRadius: Theme.radiusControl))
             .opacity(isEnabled ? 1 : 0.45)
             .animation(Motion.quick, value: configuration.isPressed)
@@ -187,7 +178,7 @@ struct SecondaryButton: ButtonStyle {
             .font(TypeScale.label(13))
             .foregroundStyle(Theme.ink)
             .padding(.horizontal, compact ? 10 : 14)
-            .frame(height: compact ? 26 : 30)
+            .frame(height: compact ? Theme.compactHeight : Theme.controlHeight)
             .background(
                 configuration.isPressed ? Theme.controlPressed : hovering && isEnabled ? Theme.controlHover : Theme.control,
                 in: RoundedRectangle(cornerRadius: Theme.radiusControl))
@@ -228,22 +219,25 @@ extension ButtonStyle where Self == QuietButton {
     static var quiet: QuietButton { QuietButton() }
 }
 
-/// A round icon button for a page's header: back, add, search, share, more.
-struct CircleButton: ButtonStyle {
-    var size: CGFloat = 28
+/// A square icon button: back, add, more, close. `on` keeps it filled while
+/// what it toggles is showing.
+struct IconButton: ButtonStyle {
+    var on = false
     @Environment(\.isEnabled) private var isEnabled
     @State private var hovering = false
 
     func makeBody(configuration: Configuration) -> some View {
+        let shape = RoundedRectangle(cornerRadius: Theme.radiusControl)
         configuration.label
-            .font(.system(size: 12, weight: .semibold))
-            .foregroundStyle(Theme.ink)
-            .frame(width: size, height: size)
+            .font(.system(size: 12, weight: .medium))
+            .foregroundStyle(on || hovering && isEnabled ? Theme.ink : Theme.inkSecondary)
+            .frame(width: Theme.controlHeight, height: Theme.controlHeight)
             .background(
-                configuration.isPressed ? Theme.controlPressed : hovering ? Theme.controlHover : Theme.surface,
-                in: Circle())
-            .overlay(Circle().strokeBorder(Theme.border, lineWidth: 1))
-            .contentShape(Circle())
+                configuration.isPressed ? Theme.controlPressed
+                    : on ? Theme.control
+                    : hovering && isEnabled ? Theme.controlHover : .clear,
+                in: shape)
+            .contentShape(shape)
             .onHover { hovering = $0 }
             .opacity(isEnabled ? 1 : 0.45)
             .hoverFade(hovering)
@@ -251,8 +245,8 @@ struct CircleButton: ButtonStyle {
     }
 }
 
-extension ButtonStyle where Self == CircleButton {
-    static var circle: CircleButton { CircleButton() }
+extension ButtonStyle where Self == IconButton {
+    static var icon: IconButton { IconButton() }
 }
 
 /// A key cap: "⌥", "Space".
@@ -331,9 +325,9 @@ struct SearchField: View {
                 .focused($focused)
         }
         .padding(.horizontal, 10)
-        .frame(height: 30)
-        .background(Theme.surface, in: Capsule())
-        .overlay(Capsule().strokeBorder(focused ? Theme.accent : Theme.border, lineWidth: 1))
+        .frame(height: Theme.controlHeight)
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
+        .overlay(RoundedRectangle(cornerRadius: Theme.radiusControl).strokeBorder(focused ? Theme.accent : Theme.border, lineWidth: 1))
     }
 }
 
@@ -350,7 +344,7 @@ struct InputField: View {
             .foregroundStyle(Theme.ink)
             .focused($focused)
             .padding(.horizontal, 12)
-            .frame(height: 32)
+            .frame(height: Theme.controlHeight)
             .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
             .overlay(RoundedRectangle(cornerRadius: Theme.radiusControl).strokeBorder(focused ? Theme.accent : Theme.border, lineWidth: 1))
     }
@@ -655,24 +649,32 @@ extension View {
     }
 }
 
-/// "‹ Library": the way back from a detail page.
+/// "‹ Library": the way back from a detail page. The chevron starts on the
+/// column's edge; the hover fill reaches past it into the margin.
 struct BackLink: View {
     let title: String
     let action: () -> Void
+    @State private var hovering = false
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 8) {
+            HStack(spacing: 6) {
                 Image(systemName: "chevron.left")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(Theme.ink)
-                    .frame(width: 28, height: 28)
-                    .background(Theme.surface, in: Circle())
-                    .overlay(Circle().strokeBorder(Theme.border, lineWidth: 1))
-                Text(title)
+                    .font(.system(size: 12, weight: .medium))
+                Text(title).font(TypeScale.label(13))
             }
+            .foregroundStyle(hovering ? Theme.ink : Theme.inkSecondary)
+            .frame(height: Theme.controlHeight)
+            .background {
+                RoundedRectangle(cornerRadius: Theme.radiusControl)
+                    .fill(hovering ? Theme.controlHover : .clear)
+                    .padding(.horizontal, -8)
+            }
+            .contentShape(Rectangle())
         }
-        .buttonStyle(.quiet)
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .hoverFade(hovering)
     }
 }
 
@@ -763,6 +765,7 @@ struct ChoiceRow<Choice: Hashable>: View {
             }
             .labelsHidden()
             .pickerStyle(.menu)
+            .controlSize(.large)
             .fixedSize()
         }
     }

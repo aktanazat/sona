@@ -121,6 +121,7 @@ struct MicrophoneRow: View {
                 }
                 .labelsHidden()
                 .pickerStyle(.menu)
+                .controlSize(.large)
                 .fixedSize()
                 .disabled(store.isBusy("selected_microphone"))
             }
@@ -172,9 +173,15 @@ struct LanguageRow: View {
                 query = ""
                 open = true
             } label: {
-                Text(selected.isEmpty ? "Auto detect" : selected.map(LanguageCatalog.name).joined(separator: ", "))
-                    .lineLimit(2)
-                    .frame(maxWidth: 240)
+                HStack(spacing: 6) {
+                    Text(selected.isEmpty ? "Auto detect" : selected.map(LanguageCatalog.name).joined(separator: ", "))
+                        .lineLimit(1)
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(Theme.inkSecondary)
+                }
+                .frame(maxWidth: 240)
+                .fixedSize(horizontal: true, vertical: false)
             }
             .buttonStyle(.secondary)
             .accessibilityLabel("Choose dictation languages")

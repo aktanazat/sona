@@ -479,7 +479,7 @@ struct SecretKeyField: View {
         .font(TypeScale.body())
         .foregroundStyle(Theme.ink)
         .padding(.horizontal, 12)
-        .frame(height: 32)
+        .frame(height: Theme.controlHeight)
         .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
         .overlay(RoundedRectangle(cornerRadius: Theme.radiusControl).strokeBorder(Theme.border, lineWidth: 1))
         .onSubmit(onCommit)

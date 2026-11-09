@@ -69,7 +69,7 @@ private struct ScratchNoteListPage: View {
                     } label: {
                         Image(systemName: "plus")
                     }
-                    .buttonStyle(.circle)
+                    .buttonStyle(.icon)
                     .help("New note")
                     .accessibilityLabel("New note")
                 }
@@ -223,7 +223,7 @@ private struct ScratchNoteEditorPage: View {
                 } label: {
                     Image(systemName: "link")
                 }
-                .buttonStyle(.circle)
+                .buttonStyle(.icon)
                 .help("Link a source")
                 .accessibilityLabel("Link a source")
                 .disabled(store.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
@@ -351,7 +351,7 @@ private struct ScratchNoteEditorPage: View {
                                     } label: {
                                         Image(systemName: "xmark")
                                     }
-                                    .buttonStyle(.circle)
+                                    .buttonStyle(.icon)
                                     .help("Remove link")
                                     .accessibilityLabel("Remove link to \(source.title)")
                                 }
@@ -421,27 +421,27 @@ struct ScratchNoteActions: View {
                 } label: {
                     Image(systemName: saved.pinned ? "pin.slash" : "pin")
                 }
-                .buttonStyle(.circle)
+                .buttonStyle(.icon)
                 .help(saved.pinned ? "Unpin" : "Pin")
                 .accessibilityLabel(saved.pinned ? "Unpin" : "Pin")
                 Button(action: showHistory) {
                     Image(systemName: "clock.arrow.circlepath")
                 }
-                .buttonStyle(.circle)
+                .buttonStyle(.icon)
                 .help("Version history")
                 .accessibilityLabel("Version history")
                 if let share {
                     Button(action: share) {
                         Image(systemName: "square.and.arrow.up")
                     }
-                    .buttonStyle(.circle)
+                    .buttonStyle(.icon)
                     .help("Share link…")
                     .accessibilityLabel("Share link…")
                 }
                 Button(action: confirmDelete) {
                     Image(systemName: "trash")
                 }
-                .buttonStyle(.circle)
+                .buttonStyle(.icon)
                 .help("Delete")
                 .accessibilityLabel("Delete")
             }
@@ -504,7 +504,7 @@ private struct ScratchVersionHistorySheet: View {
                 Button { dismiss() } label: {
                     Image(systemName: "xmark")
                 }
-                .buttonStyle(.circle)
+                .buttonStyle(.icon)
                 .help("Done")
                 .accessibilityLabel("Done")
             }

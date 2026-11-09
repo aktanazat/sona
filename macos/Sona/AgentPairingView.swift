@@ -225,7 +225,7 @@ private struct AgentPairingInput: View {
                 .disabled(!isEnabled)
                 .onSubmit(commit)
                 .padding(.horizontal, 12)
-                .frame(height: 32)
+                .frame(height: Theme.controlHeight)
                 .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
                 .overlay(
                     RoundedRectangle(cornerRadius: Theme.radiusControl)

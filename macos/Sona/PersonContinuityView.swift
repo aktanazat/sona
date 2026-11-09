@@ -516,9 +516,9 @@ private struct PersonFilterChip: View {
             }
             .font(.system(size: 12, weight: .medium))
             .padding(.horizontal, 10)
-            .frame(height: 26)
-            .background(on ? Theme.selection : hovering ? Theme.wash : .clear, in: Capsule())
-            .contentShape(Capsule())
+            .frame(height: Theme.controlHeight)
+            .background(on ? Theme.selection : hovering ? Theme.wash : .clear, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
+            .contentShape(RoundedRectangle(cornerRadius: Theme.radiusControl))
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }

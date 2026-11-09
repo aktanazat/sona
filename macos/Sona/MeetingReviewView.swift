@@ -326,7 +326,7 @@ struct MeetingReviewHeader: View {
                 Image(systemName: "ellipsis")
             }
             .menuStyle(.button)
-            .buttonStyle(.circle)
+            .buttonStyle(.icon)
             .menuIndicator(.hidden)
             .fixedSize()
             .disabled(store.busy)

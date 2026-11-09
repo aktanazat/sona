@@ -76,7 +76,7 @@ struct ModesList: View {
                 Button { store.createMode() } label: {
                     Image(systemName: "plus")
                 }
-                .buttonStyle(.circle)
+                .buttonStyle(.icon)
                 .help("New mode")
                 .accessibilityLabel("New mode")
                 .disabled(store.busy)
@@ -176,12 +176,9 @@ struct ModeRowMenu: View {
             }
         } label: {
             Image(systemName: "ellipsis")
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(Theme.inkTertiary)
-                .frame(width: 24, height: 24)
         }
-        .menuStyle(.borderlessButton)
-        .tint(Theme.inkSecondary)
+        .menuStyle(.button)
+        .buttonStyle(.icon)
         .menuIndicator(.hidden)
         .fixedSize()
         .accessibilityLabel("Actions for \(mode.name)")
@@ -504,6 +501,7 @@ struct ModeActivationSection: View {
                             }
                             .labelsHidden()
                             .pickerStyle(.menu)
+                            .controlSize(.large)
                             .fixedSize()
                             Button(store.busy ? "Capturing…" : "Capture current website") {
                                 store.captureWebsite(for: mode.id, match: scope)
@@ -1216,7 +1214,7 @@ struct ModeNumberField: View {
                 .foregroundStyle(Theme.ink)
                 .frame(width: 72)
                 .padding(.horizontal, 10)
-                .frame(height: 32)
+                .frame(height: Theme.controlHeight)
                 .background(Theme.inset, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
                 .overlay(RoundedRectangle(cornerRadius: Theme.radiusControl).strokeBorder(Theme.border, lineWidth: 1))
         }
