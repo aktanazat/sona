@@ -269,6 +269,9 @@ private struct DetailEvidence: View {
         if quoted || !others.isEmpty {
             VStack(alignment: .leading, spacing: 10) {
                 DetailHeading(title: "Evidence")
+                if row.raisedIn > 1 {
+                    Text("Raised in \(row.raisedIn) meetings").metaText()
+                }
                 if let quote = row.sourceQuote {
                     QuoteCard(quote: quote, speaker: row.sourceSpeaker, meetingTitle: row.sourceMeetingTitle,
                               meetingId: row.sourceMeetingId, atMs: row.sourceAtMs)
@@ -843,6 +846,8 @@ enum WorkActivityText {
             if let added = entry.to { return "marked it \(relation(added, model: model))" }
             if let removed = entry.from { return "unlinked it from \(task(relationTarget(removed), model: model))" }
             return "changed its relations"
+        case .kept:
+            return "confirmed it still stands"
         }
     }
 

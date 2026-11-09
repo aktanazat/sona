@@ -115,6 +115,17 @@ final class WorkStore {
         setArchived(ids, false, undo: remember(Self.counted("Restored", ids.count), .archive(ids)))
     }
 
+    /// Says each task still stands, which changes nothing but its last
+    /// touch, so there is nothing to take back.
+    func keep(_ ids: [String]) {
+        let ids = rows(ids).map(\.id)
+        guard !ids.isEmpty else { return }
+        let now = ProjectsStore.milliseconds(.now)
+        change(ids, undo: nil, { row in row.updatedAtMs = now }) { operationId, rows in
+            try await self.core.request("work_keep", IdsParams(operationId: operationId, ids: rows.map(\.id)))
+        }
+    }
+
     func accept(_ ids: [String], applySuggestions: Bool) {
         let before = rows(ids).filter { $0.status == .triage }
         guard !before.isEmpty else { return }
@@ -477,7 +488,7 @@ final class WorkStore {
             ownerName: personName(item.ownerPersonId), sourceMeetingId: old?.sourceMeetingId,
             sourceMeetingTitle: old?.sourceMeetingTitle, sourceQuote: old?.sourceQuote,
             sourceSpeaker: old?.sourceSpeaker, sourceAtMs: old?.sourceAtMs,
-            blockedByOpenCount: old?.blockedByOpenCount ?? 0)
+            blockedByOpenCount: old?.blockedByOpenCount ?? 0, raisedIn: old?.raisedIn ?? 0)
     }
 
     private func patched(_ row: inout WorkItemRow, _ patch: WorkPatch, at now: Int64) {

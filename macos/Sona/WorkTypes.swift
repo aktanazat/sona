@@ -190,6 +190,9 @@ struct WorkItemRow: Codable, Identifiable, Equatable {
     /// Offset into the source meeting where the commitment was said.
     var sourceAtMs: Int64?
     var blockedByOpenCount: Int
+    /// The meetings that raised the item or a duplicate of it, counted once
+    /// each.
+    var raisedIn: Int
 
     var item: WorkItem {
         WorkItem(
@@ -349,11 +352,19 @@ struct WorkCounts: Codable, Equatable {
     var waitingOnStale: Int
 }
 
+/// One local day's plan: the tasks picked to focus on, in the order they
+/// were picked, and when; a day never planned has no `plannedAtMs`.
+struct WorkDay: Codable, Equatable {
+    var day: String
+    var focusIds: [String]
+    var plannedAtMs: Int64?
+}
+
 enum WorkActor: String, Codable, Hashable { case me, sona, agent }
 
 enum WorkActivityKind: String, Codable, Hashable {
     case created, status, priority, owner, due, project, title, details, labels, archived, restored
-    case duplicate, accepted, declined, snoozed, relation
+    case duplicate, accepted, declined, snoozed, relation, kept
 }
 
 /// One change in an item's history. `from` and `to` hold raw values: a

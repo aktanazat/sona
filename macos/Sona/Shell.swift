@@ -110,6 +110,7 @@ struct Shell: View {
                             })
                     } else {
                         CaptureScreen()
+                            .overlay(alignment: .bottomLeading) { UndoToast() }
                     }
                 }
             case .meetings:
@@ -160,6 +161,8 @@ struct Shell: View {
                 TasksScreen()
             case .triage:
                 TriageScreen()
+            case .today:
+                MorningPlanView()
             }
         }
     }
@@ -474,7 +477,7 @@ struct Sidebar: View {
         case .tasks:
             SidebarCount(value: model.work.counts.map { $0.mineOverdue + $0.mineDueToday } ?? 0,
                          meaning: "due today or late")
-        case .capture, .library, .meetings, .scratchpad, .calendar:
+        case .capture, .library, .meetings, .scratchpad, .calendar, .today:
             nil
         }
     }

@@ -14,6 +14,7 @@ struct ShortcutSheet: View {
         [
             ("Go to", [
                 Entry(title: "Home", keys: ["g h"]),
+                Entry(title: "Today", keys: ["g d"]),
                 Entry(title: "Meetings", keys: ["g m"]),
                 Entry(title: "Tasks", keys: ["g t"]),
                 Entry(title: "Triage", keys: ["g i"]),
@@ -27,6 +28,11 @@ struct ShortcutSheet: View {
                 Entry(title: "List or board", keys: ["cmd+b"]),
                 Entry(title: "Command menu", keys: ["cmd+k"]),
                 Entry(title: "Shortcuts", keys: ["?"]),
+            ]),
+            ("Shutdown", [
+                Entry(title: "Tomorrow", keys: ["right"]),
+                Entry(title: "This week", keys: ["w"]),
+                Entry(title: "Drop", keys: ["x"]),
             ]),
         ],
         [
@@ -46,6 +52,12 @@ struct ShortcutSheet: View {
                 Entry(title: "Duplicate", keys: ["3"]),
                 Entry(title: "Snooze", keys: ["h"]),
             ]),
+            ("Today", [
+                Entry(title: "Pick a focus", keys: ["space"]),
+                Entry(title: "Start the day", keys: ["return"]),
+                Entry(title: "Still true: keep", keys: ["k"]),
+                Entry(title: "Still true: archive", keys: ["x"]),
+            ]),
         ],
         [
             ("Change", [
@@ -54,6 +66,7 @@ struct ShortcutSheet: View {
                 Entry(title: "Assign", keys: ["a"]),
                 Entry(title: "Assign to me", keys: ["i"]),
                 Entry(title: "Due date", keys: ["d"]),
+                Entry(title: "Reschedule overdue", keys: ["shift+d"]),
                 Entry(title: "Labels", keys: ["l"]),
                 Entry(title: "Project", keys: ["shift+p"]),
                 Entry(title: "Rename", keys: ["e"]),

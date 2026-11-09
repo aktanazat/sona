@@ -41,6 +41,25 @@ struct WorkSheets: ViewModifier {
     }
 }
 
+extension AppModel {
+    /// The groups of the task list showing; on I owe, today's focus first.
+    func taskGroups(_ draft: WorkViewDraft?, now: Int64) -> [TaskGroup] {
+        guard let items = work.items else { return [] }
+        switch workFocus.tab {
+        case .owe:
+            return TaskListing.myWork(items, direction: .mine, now: now, focus: rituals.focus)
+        case .waiting:
+            return TaskListing.myWork(items, direction: .waitingOn, now: now)
+        case .all, .view:
+            guard let draft else { return [] }
+            let triageAsked = draft.query.statuses?.contains(.triage) == true
+            let rows = items.filter { ($0.status != .triage || triageAsked) && TaskListing.matches($0, draft.query, now: now) }
+            return TaskListing.groups(rows, display: draft.display, now: now,
+                                      projects: work.projects, people: work.people)
+        }
+    }
+}
+
 private struct TasksList: View {
     @Environment(AppModel.self) private var model
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -50,7 +69,7 @@ private struct TasksList: View {
         let store = model.work
         let now = TaskDates.now()
         let draft = focus.listing(store.views)
-        let groups = groups(draft, now: now)
+        let groups = model.taskGroups(draft, now: now)
         VStack(spacing: 0) {
             WorkBar {
                 TaskTabs()
@@ -88,22 +107,6 @@ private struct TasksList: View {
         }
         .animation(Motion.regular, value: focus.peeking)
         .animation(Motion.regular, value: focus.selecting)
-    }
-
-    private func groups(_ draft: WorkViewDraft?, now: Int64) -> [TaskGroup] {
-        guard let items = model.work.items else { return [] }
-        switch model.workFocus.tab {
-        case .owe:
-            return TaskListing.myWork(items, direction: .mine, now: now)
-        case .waiting:
-            return TaskListing.myWork(items, direction: .waitingOn, now: now)
-        case .all, .view:
-            guard let draft else { return [] }
-            let triageAsked = draft.query.statuses?.contains(.triage) == true
-            let rows = items.filter { ($0.status != .triage || triageAsked) && TaskListing.matches($0, draft.query, now: now) }
-            return TaskListing.groups(rows, display: draft.display, now: now,
-                                      projects: model.work.projects, people: model.work.people)
-        }
     }
 
     @ViewBuilder
@@ -296,7 +299,9 @@ struct TaskListBody<Row: View>: View {
                                     group: group, collapsed: focus.collapsed.contains(group.id),
                                     revision: model.people.photoRevision,
                                     toggle: { toggle(group.id) },
-                                    add: group.patch == nil ? nil : add.map { add in { add(group) } })
+                                    add: group.patch == nil ? nil : add.map { add in { add(group) } },
+                                    reschedule: group.mark == .bucket(.overdue)
+                                        ? { model.perform(.due, on: group.rows.map(\.id)) } : nil)
                             }
                         }
                     }

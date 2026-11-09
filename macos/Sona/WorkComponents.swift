@@ -242,6 +242,18 @@ struct ItemRow: View {
                     .foregroundStyle(Theme.live)
                     .help(row.blockedByOpenCount == 1 ? "Blocked by 1 task" : "Blocked by \(row.blockedByOpenCount) tasks")
             }
+            if row.raisedIn > 1 {
+                HStack(spacing: 3) {
+                    Image(systemName: "waveform").font(.system(size: 9, weight: .medium))
+                    Text(verbatim: "\(row.raisedIn)")
+                }
+                .font(TypeScale.label(11))
+                .monospacedDigit()
+                .foregroundStyle(Theme.inkTertiary)
+                .help("Raised in \(row.raisedIn) meetings")
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Raised in \(row.raisedIn) meetings")
+            }
             Spacer(minLength: 12)
             if shows.contains(TaskProperty.labels.rawValue), !labels.isEmpty {
                 HStack(spacing: 4) {
@@ -341,6 +353,8 @@ struct TaskGroupHeader: View {
     let revision: UInt64
     let toggle: () -> Void
     var add: (() -> Void)?
+    /// Moves every task in the group to one date; the Overdue group has it.
+    var reschedule: (() -> Void)?
     @State private var hovering = false
 
     var body: some View {
@@ -372,6 +386,16 @@ struct TaskGroupHeader: View {
             .accessibilityLabel("\(group.title), \(group.rows.count)")
             .accessibilityHint(collapsed ? "Expand" : "Collapse")
             Spacer(minLength: 8)
+            if let reschedule {
+                Button(action: reschedule) {
+                    HStack(spacing: 6) {
+                        Text("Reschedule all")
+                        Shortcut("shift+d")
+                    }
+                }
+                .buttonStyle(QuietButton(compact: true))
+                .accessibilityLabel("Reschedule all overdue")
+            }
             if let add {
                 Button(action: add) {
                     Image(systemName: "plus")
@@ -406,6 +430,7 @@ struct TaskGroupMarkView: View {
         case let .owner(face): Avatar(face: face, size: 16, revision: revision)
         case .project: symbol("folder")
         case .meeting: symbol("waveform")
+        case .focus: symbol("scope")
         case let .bucket(bucket): symbol(bucket == .blocked ? "hand.raised" : "calendar")
         case .none: EmptyView()
         }
