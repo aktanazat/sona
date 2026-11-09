@@ -121,6 +121,9 @@ pub enum WorkVerb {
     ViewDelete(ViewDeleteArgs),
     /// Write matching tasks to a folder as Markdown, one file per task.
     Export(ExportArgs),
+    /// Who owes what from one meeting, by when, in their words: the
+    /// follow-up to send. Nothing is sent.
+    FollowUp(FollowUpArgs),
 }
 
 #[derive(Args, Clone, Debug, Eq, PartialEq)]
@@ -352,6 +355,13 @@ pub struct ExportArgs {
     pub md: PathBuf,
     #[command(flatten)]
     pub filters: Filters,
+}
+
+#[derive(Args, Clone, Debug, Eq, PartialEq)]
+pub struct FollowUpArgs {
+    /// The meeting's id.
+    #[arg(value_name = "MEETING_ID")]
+    pub meeting: Uuid,
 }
 
 /// Which tasks a list keeps, by who and what.
@@ -783,6 +793,7 @@ impl WorkVerb {
             | Self::Labels
             | Self::Views
             | Self::Export(_)
+            | Self::FollowUp(_)
             | Self::Update(UpdateArgs { dry_run: true, .. })
             | Self::Done(DoneArgs { dry_run: true, .. })
             | Self::Accept(AcceptArgs { dry_run: true, .. })
@@ -913,6 +924,7 @@ pub enum WorkAnswer {
     Views(ExternalWorkViews),
     View(Box<ExternalWorkViewChange>),
     Export(ExternalWorkExport),
+    FollowUp(ExternalWorkFollowUp),
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1308,6 +1320,24 @@ pub struct ExternalWorkExport {
     pub conversations_available: bool,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct ExternalWorkFollowUp {
+    pub schema_version: u32,
+    pub meeting_id: String,
+    /// The message, ready to paste or send. Empty when nobody owes anything.
+    pub text: String,
+    pub lines: Vec<ExternalWorkFollowUpLine>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ExternalWorkFollowUpLine {
+    pub id: String,
+    pub owner: String,
+    pub title: String,
+    pub due_at_ms: Option<i64>,
+    pub quote: Option<String>,
+}
+
 /// Answer one allowed `sona work` verb.
 pub(super) async fn answer(
     verb: &WorkVerb,
@@ -1360,6 +1390,7 @@ pub(super) async fn answer(
         WorkVerb::ViewSave(args) => tracker.view_save(args).await,
         WorkVerb::ViewDelete(args) => tracker.view_delete(args),
         WorkVerb::Export(args) => tracker.export(args).await,
+        WorkVerb::FollowUp(args) => tracker.follow_up(args).await,
     }
 }
 
@@ -1423,7 +1454,13 @@ impl Tracker<'_> {
         let mut list = work::work_list(self.app.state(), self.app.state(), query)
             .await
             .map_err(|message| refusal(self.history, message))?;
-        list.items.retain(|row| !fence.hides_item(&row.item));
+        list.items.retain(|row| {
+            !fence.hides_item(&row.item)
+                && !row
+                    .source_meeting_id
+                    .as_deref()
+                    .is_some_and(|meeting_id| fence.hides_meeting(meeting_id))
+        });
         list.suggestions
             .retain(|id, _| list.items.iter().any(|row| row.item.id == *id));
         for suggestions in list.suggestions.values_mut() {
@@ -2453,6 +2490,39 @@ impl Tracker<'_> {
             conversations_available: board.fence.is_open(),
         }))
     }
+
+    async fn follow_up(&self, args: &FollowUpArgs) -> Result<WorkAnswer, ExternalError> {
+        let meeting_id = args.meeting.to_string();
+        match Fence::read(self.meetings).await? {
+            Fence::Closed => return Err(conversations_closed()),
+            fence if fence.hides_meeting(&meeting_id) => {
+                return Err(ExternalError::new(
+                    ExternalErrorCode::NotFound,
+                    "No meeting has that id.",
+                ));
+            }
+            Fence::Open(_) => {}
+        }
+        let follow_up = work::live::work_follow_up(self.app.state(), self.app.state(), meeting_id)
+            .await
+            .map_err(|message| refusal(self.history, message))?;
+        Ok(WorkAnswer::FollowUp(ExternalWorkFollowUp {
+            schema_version: QUERY_SCHEMA_VERSION,
+            meeting_id: follow_up.meeting_id,
+            text: follow_up.text,
+            lines: follow_up
+                .lines
+                .into_iter()
+                .map(|line| ExternalWorkFollowUpLine {
+                    id: line.item_id,
+                    owner: line.owner_name,
+                    title: line.title,
+                    due_at_ms: line.due_at_ms,
+                    quote: line.quote,
+                })
+                .collect(),
+        }))
+    }
 }
 
 impl ExternalError {
@@ -2498,6 +2568,13 @@ impl Fence {
 
     const fn is_open(&self) -> bool {
         matches!(self, Self::Open(_))
+    }
+
+    fn hides_meeting(&self, meeting_id: &str) -> bool {
+        match self {
+            Self::Open(kept_local) => kept_local.hides_meeting(meeting_id),
+            Self::Closed => true,
+        }
     }
 
     fn hides_item(&self, item: &WorkItem) -> bool {
@@ -3845,6 +3922,10 @@ impl WorkAnswer {
                     export.directory
                 );
             }
+            Self::FollowUp(follow_up) if follow_up.text.is_empty() => {
+                text.push_str("Nobody owes anything from this meeting yet.\n");
+            }
+            Self::FollowUp(follow_up) => text.push_str(&follow_up.text),
         }
         if let Some(note) = left_out(self.conversations_available()) {
             let _ = writeln!(text, "{note}");
@@ -3867,7 +3948,8 @@ impl WorkAnswer {
             | Self::Labels(_)
             | Self::Label(_)
             | Self::Views(_)
-            | Self::View(_) => true,
+            | Self::View(_)
+            | Self::FollowUp(_) => true,
         }
     }
 }

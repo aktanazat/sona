@@ -904,6 +904,21 @@ export const TOOLS: readonly ToolDefinition[] = [
     argv: (input) => ["work", "show", "--json", "--", text(input, "task", true)],
   },
   {
+    name: "sona_work_follow_up",
+    title: "Draft a meeting's follow-up",
+    description:
+      "Read who owes what from one meeting, by when, with the words each promise was said in: the open and triage tasks the meeting raised, grouped by owner, and the follow-up message ready to send. Sona sends nothing.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        meeting: { type: "string", description: "The meeting's id." },
+      },
+      required: ["meeting"],
+      additionalProperties: false,
+    },
+    argv: (input) => ["work", "follow-up", "--json", "--", text(input, "meeting", true)],
+  },
+  {
     name: "sona_work_counts",
     title: "Read my work in Sona",
     description:
