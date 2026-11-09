@@ -44,8 +44,9 @@ use crate::query::{loop_link, KeptLocal, QueryAudience, QUERY_SCHEMA_VERSION};
 use crate::settings::WorkAutonomy;
 use chrono::{Local, NaiveDate};
 use clap::{Args, Subcommand, ValueEnum};
+use rusqlite::Connection;
 use serde::Serialize;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::{self, Write as _};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -1843,13 +1844,9 @@ impl Tracker<'_> {
         let mut list = work::work_list(self.app.state(), self.app.state(), query)
             .await
             .map_err(|message| refusal(self.history, message))?;
-        list.items.retain(|row| {
-            !fence.hides_item(&row.item)
-                && !row
-                    .source_meeting_id
-                    .as_deref()
-                    .is_some_and(|meeting_id| fence.hides_meeting(meeting_id))
-        });
+        let hidden = planning::history(self.history, |history| fence.hidden_tasks(history))
+            .map_err(|message| refusal(self.history, message))?;
+        list.items.retain(|row| !hidden.contains(&row.item.id));
         list.suggestions
             .retain(|id, _| list.items.iter().any(|row| row.item.id == *id));
         for suggestions in list.suggestions.values_mut() {
@@ -2999,16 +2996,24 @@ impl Fence {
         }
     }
 
-    fn hides_item(&self, item: &WorkItem) -> bool {
-        let Some(loop_id) = &item.source_loop_id else {
-            return false;
-        };
-        match self {
-            Self::Open(kept_local) => MeetingLoopId(loop_id.clone())
-                .session_id()
-                .is_some_and(|session_id| kept_local.hides(session_id)),
-            Self::Closed => true,
+    /// The tasks it leaves out, by id: each whose own commitment or evidence
+    /// names a meeting it hides, whatever the task's row shows of it.
+    fn hidden_tasks(&self, history: &Connection) -> anyhow::Result<HashSet<String>> {
+        let mut statement = history.prepare(
+            "SELECT id, 'loop', source_loop_id FROM planning_tasks WHERE source_loop_id IS NOT NULL
+             UNION ALL
+             SELECT target_id, source_kind, source_id FROM planning_evidence_links
+             WHERE target_kind = 'task' AND source_kind IN ('meeting', 'loop')",
+        )?;
+        let mut rows = statement.query([])?;
+        let mut hidden = HashSet::new();
+        while let Some(row) = rows.next()? {
+            let source_id: String = row.get(2)?;
+            if self.hides_source(row.get(1)?, &source_id) {
+                hidden.insert(row.get(0)?);
+            }
         }
+        Ok(hidden)
     }
 
     fn hides_suggestion(&self, suggestion: &WorkFieldSuggestion) -> bool {
@@ -3022,9 +3027,13 @@ impl Fence {
     }
 
     fn hides_evidence(&self, evidence: &planning::EvidenceLink) -> bool {
+        self.hides_source(evidence.source_kind, &evidence.source_id)
+    }
+
+    fn hides_source(&self, kind: planning::EvidenceSourceKind, source_id: &str) -> bool {
         match self {
-            Self::Open(kept_local) => evidence_kept_local(evidence, kept_local),
-            Self::Closed => match evidence.source_kind {
+            Self::Open(kept_local) => evidence_kept_local(kind, source_id, kept_local),
+            Self::Closed => match kind {
                 planning::EvidenceSourceKind::Meeting | planning::EvidenceSourceKind::Loop => true,
                 planning::EvidenceSourceKind::Note
                 | planning::EvidenceSourceKind::Dictation

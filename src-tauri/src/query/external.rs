@@ -1533,7 +1533,7 @@ pub async fn answer(
             let kept_local = kept_local(store(meetings).await?.as_ref())?;
             let detail =
                 planning::project_detail_without(history, meetings, id.to_string(), |evidence| {
-                    evidence_kept_local(evidence, &kept_local)
+                    evidence_kept_local(evidence.source_kind, &evidence.source_id, &kept_local)
                 })
                 .await
                 .map_err(|message| project_read_error(history, message))?;
@@ -2577,10 +2577,10 @@ fn project_detail(detail: planning::ProjectDetail) -> ExternalProjectDetail {
     }
 }
 
-fn evidence_kept_local(evidence: &planning::EvidenceLink, kept_local: &KeptLocal) -> bool {
-    match evidence.source_kind {
-        EvidenceSourceKind::Meeting => kept_local.hides_meeting(&evidence.source_id),
-        EvidenceSourceKind::Loop => MeetingLoopId(evidence.source_id.clone())
+fn evidence_kept_local(kind: EvidenceSourceKind, source_id: &str, kept_local: &KeptLocal) -> bool {
+    match kind {
+        EvidenceSourceKind::Meeting => kept_local.hides_meeting(source_id),
+        EvidenceSourceKind::Loop => MeetingLoopId(source_id.to_owned())
             .session_id()
             .is_some_and(|session_id| kept_local.hides(session_id)),
         EvidenceSourceKind::Note | EvidenceSourceKind::Dictation | EvidenceSourceKind::Link => {

@@ -1,11 +1,17 @@
 use super::{Board, Fence, ShowArgs, TaskRef, WorkCommand, WorkVerb};
 use crate::cli::{CliArgs, Command};
+use crate::meeting::processing::MeetingLivePromise;
 use crate::meeting::types::MeetingSessionId;
+use crate::planning::schema;
+use crate::planning::work::capture::{attach, WorkCaptureSource};
+use crate::planning::work::items::{self, NewItem};
+use crate::planning::work::live;
 use crate::planning::work::types::{
-    WorkDirection, WorkItem, WorkItemRow, WorkPatch, WorkSource, WorkStatus,
+    WorkActor, WorkDirection, WorkItem, WorkItemRow, WorkOwner, WorkPatch, WorkSource, WorkStatus,
 };
 use crate::query::KeptLocal;
 use clap::Parser;
+use rusqlite::Connection;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use uuid::Uuid;
 
@@ -90,7 +96,7 @@ fn a_due_window_reads_back_as_the_flag_it_came_from() {
     assert_eq!(not_refused, Vec::<&str>::new(), "these name no window");
 }
 
-fn task(source_meeting: Option<&str>) -> WorkItem {
+fn task() -> WorkItem {
     WorkItem {
         id: Uuid::new_v4().to_string(),
         number: 1,
@@ -105,7 +111,7 @@ fn task(source_meeting: Option<&str>) -> WorkItem {
         direction: WorkDirection::Mine,
         due_at_ms: None,
         label_ids: Vec::new(),
-        source_loop_id: source_meeting.map(|meeting| format!("{meeting}:loop:0123456789abcdef")),
+        source_loop_id: None,
         duplicate_of_id: None,
         snoozed_until_ms: None,
         archived_at_ms: None,
@@ -118,32 +124,130 @@ fn task(source_meeting: Option<&str>) -> WorkItem {
     }
 }
 
-/// Work raised in a meeting kept on this Mac never reaches an agent. While
+fn session(meeting: &str) -> MeetingSessionId {
+    MeetingSessionId::from_uuid(Uuid::parse_str(meeting).expect("a uuid"))
+}
+
+fn loop_in(meeting: &str) -> String {
+    format!("{meeting}:loop:0123456789abcdef")
+}
+
+/// A Triage task the way the tracker files one, tracking `source_loop_id`.
+fn filed(history: &Connection, title: &str, source_loop_id: Option<&str>) -> String {
+    items::insert(
+        history,
+        &NewItem {
+            title,
+            details: None,
+            status: WorkStatus::Triage,
+            priority: 0,
+            project_id: None,
+            milestone_id: None,
+            owner: &WorkOwner::Nobody,
+            due_at_ms: None,
+            label_ids: &[],
+            source_loop_id,
+            recurrence: None,
+        },
+        WorkActor::Me,
+        0,
+    )
+    .expect("a filed task")
+    .id
+}
+
+/// What the live card files at hang-up: a task tracking no commitment, with
+/// the moment and words it was heard in.
+fn heard_live(history: &Connection, meeting: &str, what: &str) -> String {
+    let promise = MeetingLivePromise {
+        id: Uuid::new_v4().to_string(),
+        what: what.to_owned(),
+        owner: WorkOwner::Nobody,
+        owner_name: None,
+        owner_set: false,
+        due_at_ms: None,
+        due_words: None,
+        quote: format!("I will {what}"),
+        start_offset_ns: 0,
+        end_offset_ns: 1_000_000_000,
+    };
+    // PANIC: a fixture that cannot open its database is a broken test.
+    let meetings = Connection::open_in_memory().expect("a meeting database");
+    live::file_promises(history, &meetings, session(meeting), &[promise], 0)
+        .expect("the heard promise filed")
+        .remove(0)
+        .id
+}
+
+/// Work raised in a meeting kept on this Mac never reaches an agent, however
+/// it was filed and whether or not the meeting still keeps its words. While
 /// the conversations are closed nothing says which meetings those are, so
 /// every task from a meeting stays out; typed tasks show either way.
 #[test]
-fn the_fence_leaves_out_work_from_kept_meetings_and_all_of_it_while_closed() {
-    let kept = MeetingSessionId::from_uuid(Uuid::parse_str(KEPT_MEETING).expect("a uuid"));
-    let open = Fence::Open(KeptLocal(HashSet::from([kept])));
-    let closed = Fence::Closed;
-    let typed = task(None);
-    let from_kept = task(Some(KEPT_MEETING));
-    let from_shared = task(Some(SHARED_MEETING));
+fn the_fence_leaves_out_work_any_kept_meeting_raised_and_all_of_it_while_closed() {
+    let history = Connection::open_in_memory().expect("a history database");
+    schema::apply_all(&history).expect("the planner schema");
+    let mut names = HashMap::new();
+    let mut name = |label: &'static str, id: String| names.insert(id, label);
+    name("typed", filed(&history, "Book the venue", None));
+    name(
+        "tracked, kept",
+        filed(&history, "Send the deck", Some(&loop_in(KEPT_MEETING))),
+    );
+    name(
+        "tracked, shared",
+        filed(&history, "Send the outline", Some(&loop_in(SHARED_MEETING))),
+    );
+    name(
+        "heard live, kept",
+        heard_live(&history, KEPT_MEETING, "send the budget"),
+    );
+    name(
+        "heard live, shared",
+        heard_live(&history, SHARED_MEETING, "print the badges"),
+    );
+    let taken = filed(&history, "Call the caterer", None);
+    attach(
+        &history,
+        &taken,
+        &WorkCaptureSource::Loop {
+            loop_id: loop_in(KEPT_MEETING),
+        },
+        0,
+    )
+    .expect("the loop line kept as evidence");
+    name("taken from a loop line, kept", taken);
 
     let hidden = |fence: &Fence| {
-        [
-            ("typed", &typed),
-            ("from kept", &from_kept),
-            ("from shared", &from_shared),
-        ]
-        .into_iter()
-        .filter(|(_, item)| fence.hides_item(item))
-        .map(|(name, _)| name)
-        .collect::<Vec<_>>()
+        let mut hidden: Vec<&str> = fence
+            .hidden_tasks(&history)
+            .expect("the fence read")
+            .iter()
+            .map(|id| names[id])
+            .collect();
+        hidden.sort_unstable();
+        hidden
     };
+    let open = Fence::Open(KeptLocal(HashSet::from([session(KEPT_MEETING)])));
 
-    assert_eq!(hidden(&open), ["from kept"]);
-    assert_eq!(hidden(&closed), ["from kept", "from shared"]);
+    assert_eq!(
+        hidden(&open),
+        [
+            "heard live, kept",
+            "taken from a loop line, kept",
+            "tracked, kept"
+        ]
+    );
+    assert_eq!(
+        hidden(&Fence::Closed),
+        [
+            "heard live, kept",
+            "heard live, shared",
+            "taken from a loop line, kept",
+            "tracked, kept",
+            "tracked, shared"
+        ]
+    );
 }
 
 /// `work update --cycle` moves a task to another cycle; naming the cycle it
@@ -153,7 +257,7 @@ fn moving_a_task_to_another_cycle_is_a_change() {
     let row = WorkItemRow {
         item: WorkItem {
             cycle: Some(4),
-            ..task(None)
+            ..task()
         },
         project_title: None,
         owner_name: None,
