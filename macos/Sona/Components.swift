@@ -530,6 +530,7 @@ private struct PageBar<Leading: View, Trailing: View>: ViewModifier {
                 Spacer(minLength: 12)
                 trailing
             }
+            .labelStyle(.titleAndIcon)
             .padding(.trailing, span == .full ? 8 : 0)
             .frame(width: width)
         }
