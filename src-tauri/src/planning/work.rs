@@ -3,9 +3,11 @@
 //! Project screens read the same rows through `store`.
 
 pub(crate) mod agents;
+pub(crate) mod capture;
 pub(crate) mod follow;
 mod hygiene;
 pub(crate) mod items;
+pub(crate) mod parse;
 pub(crate) mod sync;
 #[cfg(test)]
 mod tests;
@@ -581,6 +583,7 @@ fn detail(
     }
     Ok(WorkItemDetail {
         item: context.row(&mut reader, item)?,
+        recurrence: items::recurrence(history, &id)?,
         evidence,
         relations: items::relations(history, &id)?,
         activity: items::activity(history, &id)?,
@@ -685,6 +688,34 @@ pub async fn work_item(
     .await
 }
 
+/// Puts `input` in as a new item, its owner checked first.
+fn insert_input(
+    history: &Connection,
+    meetings: Option<&Connection>,
+    change: Change<'_>,
+    input: &WorkItemInput,
+) -> StorageResult<WorkItem> {
+    let owner = checked_owner(meetings, input.owner.as_ref().unwrap_or(&WorkOwner::Nobody))?;
+    items::insert(
+        history,
+        &NewItem {
+            title: &input.title,
+            details: input.details.as_deref(),
+            status: input.status.unwrap_or(WorkStatus::NotStarted),
+            priority: input.priority.unwrap_or(0),
+            project_id: input.project_id.as_deref(),
+            milestone_id: input.milestone_id.as_deref(),
+            owner: &owner,
+            due_at_ms: input.due_at_ms,
+            label_ids: input.label_ids.as_deref().unwrap_or_default(),
+            source_loop_id: None,
+            recurrence: input.recurrence.as_deref(),
+        },
+        change.actor,
+        change.at_ms,
+    )
+}
+
 fn create(
     history: &mut Connection,
     meetings: Option<&Connection>,
@@ -698,25 +729,7 @@ fn create(
         input,
         change.at_ms,
         |tx| {
-            let owner =
-                checked_owner(meetings, input.owner.as_ref().unwrap_or(&WorkOwner::Nobody))?;
-            let item = items::insert(
-                tx,
-                &NewItem {
-                    title: &input.title,
-                    details: input.details.as_deref(),
-                    status: input.status.unwrap_or(WorkStatus::NotStarted),
-                    priority: input.priority.unwrap_or(0),
-                    project_id: input.project_id.as_deref(),
-                    milestone_id: input.milestone_id.as_deref(),
-                    owner: &owner,
-                    due_at_ms: input.due_at_ms,
-                    label_ids: input.label_ids.as_deref().unwrap_or_default(),
-                    source_loop_id: None,
-                },
-                change.actor,
-                change.at_ms,
-            )?;
+            let item = insert_input(tx, meetings, change, input)?;
             let mut effects = Effects::default();
             effects.item(&item);
             Ok(Done {

@@ -1737,7 +1737,12 @@ mod tests {
         #[cfg(target_os = "macos")]
         assert_eq!(
             cancel_set,
-            vec!["escape", "option+escape", "option+shift+escape"],
+            vec![
+                "escape",
+                "ctrl+option+shift+escape",
+                "option+escape",
+                "option+shift+escape"
+            ],
             "the cancel set is the bare key plus the prefixes already in use"
         );
         #[cfg(target_os = "linux")]

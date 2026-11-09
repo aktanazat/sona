@@ -2182,6 +2182,31 @@ pub fn get_default_settings() -> AppSettings {
             current_binding: "ctrl+option+w".to_string(),
         },
     );
+    #[cfg(target_os = "macos")]
+    bindings.insert(
+        crate::planning::work::capture::QUICK_ENTRY_BINDING_ID.to_string(),
+        ShortcutBinding {
+            id: crate::planning::work::capture::QUICK_ENTRY_BINDING_ID.to_string(),
+            name: "New task shortcut".to_string(),
+            description:
+                "Opens a box to type a task from any app. The page or file in front is attached."
+                    .to_string(),
+            default_binding: "ctrl+option+t".to_string(),
+            current_binding: "ctrl+option+t".to_string(),
+        },
+    );
+    #[cfg(target_os = "macos")]
+    bindings.insert(
+        crate::planning::work::capture::RAMBLE_BINDING_ID.to_string(),
+        ShortcutBinding {
+            id: crate::planning::work::capture::RAMBLE_BINDING_ID.to_string(),
+            name: "Speak tasks shortcut".to_string(),
+            description: "Hold and say what needs doing. Each task goes to Triage with your words."
+                .to_string(),
+            default_binding: "ctrl+option+shift+t".to_string(),
+            current_binding: "ctrl+option+shift+t".to_string(),
+        },
+    );
 
     let mut settings = AppSettings {
         settings_schema_version: default_settings_schema_version(),

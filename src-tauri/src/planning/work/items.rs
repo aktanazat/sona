@@ -65,6 +65,15 @@ pub(crate) fn item(conn: &Connection, id: &str) -> Result<WorkItem> {
     .ok_or_else(|| Refusal::NotFound.into())
 }
 
+/// How often the item comes back, as it was said, when it was.
+pub(crate) fn recurrence(conn: &Connection, id: &str) -> Result<Option<String>> {
+    Ok(conn.query_row(
+        "SELECT recurrence FROM planning_tasks WHERE id = ?1",
+        [id],
+        |row| row.get(0),
+    )?)
+}
+
 /// Every item, oldest first, with archived ones only when asked.
 pub(crate) fn items(conn: &Connection, include_archived: bool) -> Result<Vec<WorkItem>> {
     let mut statement = conn.prepare(&format!(
@@ -203,6 +212,7 @@ pub(crate) struct NewItem<'a> {
     pub due_at_ms: Option<i64>,
     pub label_ids: &'a [String],
     pub source_loop_id: Option<&'a str>,
+    pub recurrence: Option<&'a str>,
 }
 
 pub(crate) fn insert(
@@ -235,8 +245,8 @@ pub(crate) fn insert(
     conn.execute(
         "INSERT INTO planning_tasks (id, number, project_id, milestone_id, title, details,
             due_at_ms, owner_person_id, owner_is_self, status, priority, source_loop_id,
-            status_changed_at_ms, sort_order, revision, created_at_ms, updated_at_ms)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13, 1, ?13, ?13)",
+            status_changed_at_ms, sort_order, revision, created_at_ms, updated_at_ms, recurrence)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13, 1, ?13, ?13, ?14)",
         params![
             id,
             number,
@@ -250,7 +260,10 @@ pub(crate) fn insert(
             new.status.as_str(),
             new.priority,
             new.source_loop_id,
-            now_ms
+            now_ms,
+            new.recurrence
+                .map(str::trim)
+                .filter(|every| !every.is_empty())
         ],
     )?;
     write_labels(conn, &id, &label_ids)?;

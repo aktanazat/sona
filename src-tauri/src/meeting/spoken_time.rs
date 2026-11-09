@@ -10,6 +10,7 @@
 //! one with no day at all.
 
 use chrono::{Datelike, Days, NaiveDate, NaiveDateTime, NaiveTime, TimeDelta, Weekday};
+use std::ops::Range;
 
 /// When a phrase says something happens.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -23,33 +24,62 @@ pub(crate) enum SpokenTime {
     },
 }
 
+/// Which shortened day names a reader takes. A meeting's phrases take all of
+/// them; a typed task leaves out "sat" and "sun", which are words of their
+/// own; speech says day names whole.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DayNames {
+    All,
+    Typed,
+    Spoken,
+}
+
 /// What `text` says happens, read as said at `said_at`, local time. A time
 /// with no day falls on the day it was said, or on the next day when that
 /// time had already passed.
 pub(crate) fn resolve(text: &str, said_at: NaiveDateTime) -> Option<SpokenTime> {
-    let normalized = normalized(text);
-    let tokens = tokens(&normalized);
-    let day = day_in(&tokens, said_at.date());
-    let Some((start, end)) = time_in(&tokens) else {
-        return day.map(SpokenTime::Day);
+    find(text, said_at, DayNames::All).map(|(when, _)| when)
+}
+
+/// [`resolve`], with the byte ranges of `text` that say it, in order.
+pub(crate) fn find(
+    text: &str,
+    said_at: NaiveDateTime,
+    names: DayNames,
+) -> Option<(SpokenTime, Vec<Range<usize>>)> {
+    let (normalized, origin) = normalized(text);
+    let (tokens, spans) = lexed(&normalized);
+    let in_text = |taken: Range<usize>| {
+        origin[spans[taken.start].start].start..origin[spans[taken.end - 1].end - 1].end
     };
+    let day = day_in(&tokens, said_at.date(), names);
+    let Some((start, end, said)) = time_in(&tokens) else {
+        let (day, taken) = day?;
+        return Some((SpokenTime::Day(day), vec![in_text(taken)]));
+    };
+    let mut ranges = vec![in_text(said)];
     let date = match day {
-        Some(day) => day,
+        Some((day, taken)) => {
+            ranges.push(in_text(taken));
+            day
+        }
         None if start < said_at.time() => said_at.date().succ_opt()?,
         None => said_at.date(),
     };
+    ranges.sort_by_key(|range| range.start);
     let start = date.and_time(start);
     let end = match end {
         Some(end) => date.and_time(end),
         None => start.checked_add_signed(TimeDelta::hours(1))?,
     };
-    Some(SpokenTime::At { start, end })
+    Some((SpokenTime::At { start, end }, ranges))
 }
 
 /// The day `text` names, read against `today`. A time of day in it is not
 /// read.
 pub(crate) fn day(text: &str, today: NaiveDate) -> Option<NaiveDate> {
-    day_in(&tokens(&normalized(text)), today)
+    let (normalized, _) = normalized(text);
+    day_in(&lexed(&normalized).0, today, DayNames::All).map(|(day, _)| day)
 }
 
 /// The first `weekday` strictly after `from`.
@@ -74,48 +104,85 @@ enum Token<'a> {
 
 /// `text` lowercased, with everything but letters, digits, ':' and '-' made
 /// a space. A dash of any width becomes '-', and a '.' between two digits
-/// becomes ':', so "2.30" reads as a clock time.
-fn normalized(text: &str) -> String {
+/// becomes ':', so "2.30" reads as a clock time. Beside it, for each byte,
+/// the bytes of `text` it came from.
+fn normalized(text: &str) -> (String, Vec<Range<usize>>) {
     let mut normalized = String::with_capacity(text.len());
-    let mut characters = text.chars().flat_map(char::to_lowercase).peekable();
+    let mut origin = Vec::with_capacity(text.len());
+    let mut characters = text
+        .char_indices()
+        .flat_map(|(at, character)| {
+            let from = at..at + character.len_utf8();
+            character
+                .to_lowercase()
+                .map(move |lower| (lower, from.clone()))
+        })
+        .peekable();
     let mut previous = ' ';
-    while let Some(character) = characters.next() {
-        normalized.push(match character {
+    while let Some((character, from)) = characters.next() {
+        let kept = match character {
             '-' | '\u{2013}' | '\u{2014}' => '-',
             ':' => ':',
             '.' if previous.is_ascii_digit()
-                && characters.peek().is_some_and(char::is_ascii_digit) =>
+                && characters
+                    .peek()
+                    .is_some_and(|(next, _)| next.is_ascii_digit()) =>
             {
                 ':'
             }
             character if character.is_alphanumeric() => character,
             _ => ' ',
-        });
+        };
+        normalized.push(kept);
+        origin.extend(std::iter::repeat(from).take(kept.len_utf8()));
         previous = character;
     }
-    normalized
+    (normalized, origin)
 }
 
-fn tokens(normalized: &str) -> Vec<Token<'_>> {
+/// The tokens of `normalized`, and beside each the bytes it was read from.
+fn lexed(normalized: &str) -> (Vec<Token<'_>>, Vec<Range<usize>>) {
     let mut tokens = Vec::new();
-    for piece in normalized.split_whitespace() {
-        if let Ok(date) = NaiveDate::parse_from_str(piece, "%Y-%m-%d") {
-            tokens.push(Token::Date(date));
+    let mut spans = Vec::new();
+    let mut at = 0;
+    for piece in normalized.split(' ') {
+        let start = at;
+        at += piece.len() + 1;
+        if piece.is_empty() {
             continue;
         }
+        if let Ok(date) = NaiveDate::parse_from_str(piece, "%Y-%m-%d") {
+            tokens.push(Token::Date(date));
+            spans.push(start..start + piece.len());
+            continue;
+        }
+        let mut part_at = start;
         for (index, part) in piece.split('-').enumerate() {
             if index > 0 {
                 tokens.push(Token::Dash);
+                spans.push(part_at - 1..part_at);
             }
-            push_part(&mut tokens, part.trim_matches(':'));
+            let lead = part.len() - part.trim_start_matches(':').len();
+            push_part(
+                &mut tokens,
+                &mut spans,
+                part.trim_matches(':'),
+                part_at + lead,
+            );
+            part_at += part.len() + 1;
         }
     }
-    tokens
+    (tokens, spans)
 }
 
-/// One dash-free part of a word: "4th" is an ordinal, "3pm" a number and a
-/// word, "2:30" a clock time.
-fn push_part<'a>(tokens: &mut Vec<Token<'a>>, part: &'a str) {
+/// One dash-free part of a word, starting at byte `at`: "4th" is an ordinal,
+/// "3pm" a number and a word, "2:30" a clock time.
+fn push_part<'a>(
+    tokens: &mut Vec<Token<'a>>,
+    spans: &mut Vec<Range<usize>>,
+    part: &'a str,
+    at: usize,
+) {
     let split = part
         .find(|character: char| !character.is_ascii_digit() && character != ':')
         .unwrap_or(part.len());
@@ -123,14 +190,20 @@ fn push_part<'a>(tokens: &mut Vec<Token<'a>>, part: &'a str) {
     match (numeral(digits), rest) {
         (Some(Token::Number(number)), "st" | "nd" | "rd" | "th") => {
             tokens.push(Token::Ordinal(number));
+            spans.push(at..at + part.len());
         }
         (Some(token), _) => {
             tokens.push(token);
+            spans.push(at..at + split);
             if !rest.is_empty() {
                 tokens.push(Token::Word(rest));
+                spans.push(at + split..at + part.len());
             }
         }
-        (None, _) if !part.is_empty() => tokens.push(Token::Word(part)),
+        (None, _) if !part.is_empty() => {
+            tokens.push(Token::Word(part));
+            spans.push(at..at + part.len());
+        }
         (None, _) => {}
     }
 }
@@ -157,51 +230,66 @@ fn word_before<'a>(tokens: &[Token<'a>], index: usize, distance: usize) -> Optio
     word_at(tokens, index.checked_sub(distance)?)
 }
 
-fn day_in(tokens: &[Token<'_>], today: NaiveDate) -> Option<NaiveDate> {
-    (0..tokens.len()).find_map(|index| day_at(tokens, index, today))
+/// The first day `tokens` name, and the tokens that name it.
+fn day_in(
+    tokens: &[Token<'_>],
+    today: NaiveDate,
+    names: DayNames,
+) -> Option<(NaiveDate, Range<usize>)> {
+    (0..tokens.len()).find_map(|index| day_at(tokens, index, today, names))
 }
 
-fn day_at(tokens: &[Token<'_>], index: usize, today: NaiveDate) -> Option<NaiveDate> {
+fn day_at(
+    tokens: &[Token<'_>],
+    index: usize,
+    today: NaiveDate,
+    names: DayNames,
+) -> Option<(NaiveDate, Range<usize>)> {
+    let one = index..index + 1;
     let word = match tokens[index] {
-        Token::Date(date) => return Some(date),
+        Token::Date(date) => return Some((date, one)),
         Token::Word(word) => word,
         _ => return None,
     };
     match word {
-        "today" | "tonight" => return Some(today),
-        "tomorrow" => return today.succ_opt(),
-        "yesterday" => return today.pred_opt(),
+        "today" | "tonight" => return Some((today, one)),
+        "tomorrow" => return Some((today.succ_opt()?, one)),
+        "tmrw" | "tmr" if names == DayNames::Typed => return Some((today.succ_opt()?, one)),
+        "yesterday" => return Some((today.pred_opt()?, one)),
         "day"
             if word_at(tokens, index + 1) == Some("after")
                 && word_at(tokens, index + 2) == Some("tomorrow") =>
         {
-            return today.checked_add_days(Days::new(2));
+            return Some((today.checked_add_days(Days::new(2))?, index..index + 3));
         }
         _ => {}
     }
-    if let Some(weekday) = weekday(word) {
-        return if matches!(
+    if let Some(weekday) = weekday(word, names) {
+        if matches!(
             word_before(tokens, index, 1),
             Some("last" | "past" | "previous")
         ) {
-            last_weekday(today, weekday)
-        } else if said_for_next_week(tokens, index) {
-            in_next_week(today, weekday)
-        } else {
-            next_weekday(today, weekday)
-        };
+            return Some((last_weekday(today, weekday)?, index - 1..index + 1));
+        }
+        if let Some(said) = said_for_next_week(tokens, index) {
+            return Some((in_next_week(today, weekday)?, said));
+        }
+        return Some((next_weekday(today, weekday)?, one));
     }
     month_day(tokens, index, month(word)?, today)
 }
 
-/// Whether the weekday at `index` is said as "next week Tuesday", "next week
-/// on Tuesday" or "Tuesday next week".
-fn said_for_next_week(tokens: &[Token<'_>], index: usize) -> bool {
+/// The tokens that say the weekday at `index` as "next week Tuesday", "next
+/// week on Tuesday" or "Tuesday next week".
+fn said_for_next_week(tokens: &[Token<'_>], index: usize) -> Option<Range<usize>> {
     let on = usize::from(word_before(tokens, index, 1) == Some("on"));
-    (word_before(tokens, index, on + 2) == Some("next")
-        && word_before(tokens, index, on + 1) == Some("week"))
-        || (word_at(tokens, index + 1) == Some("next")
-            && word_at(tokens, index + 2) == Some("week"))
+    if word_before(tokens, index, on + 2) == Some("next")
+        && word_before(tokens, index, on + 1) == Some("week")
+    {
+        return Some(index - on - 2..index + 1);
+    }
+    (word_at(tokens, index + 1) == Some("next") && word_at(tokens, index + 2) == Some("week"))
+        .then_some(index..index + 3)
 }
 
 /// `weekday` in the Monday-to-Sunday week after the one `from` falls in.
@@ -227,39 +315,58 @@ fn month_day(
     index: usize,
     month: u32,
     today: NaiveDate,
-) -> Option<NaiveDate> {
+) -> Option<(NaiveDate, Range<usize>)> {
     let day_number = |at: usize| match tokens.get(at) {
         Some(&(Token::Number(day) | Token::Ordinal(day))) if (1..=31).contains(&day) => Some(day),
         _ => None,
     };
-    let (day, year_at) = match day_number(index + 1) {
-        Some(day) => (day, index + 2),
+    let (day, year_at, from) = match day_number(index + 1) {
+        Some(day) => (day, index + 2, index),
         None => {
             let of = usize::from(word_before(tokens, index, 1) == Some("of"));
-            (day_number(index.checked_sub(of + 1)?)?, index + 1)
+            let at = index.checked_sub(of + 1)?;
+            (day_number(at)?, index + 1, at)
         }
     };
     match tokens.get(year_at) {
-        Some(&Token::Number(year)) if (1000..=9999).contains(&year) => {
-            NaiveDate::from_ymd_opt(i32::try_from(year).ok()?, month, day)
-        }
-        _ => NaiveDate::from_ymd_opt(today.year(), month, day)
-            .filter(|date| *date >= today)
-            .or_else(|| NaiveDate::from_ymd_opt(today.year() + 1, month, day)),
+        Some(&Token::Number(year)) if (1000..=9999).contains(&year) => Some((
+            NaiveDate::from_ymd_opt(i32::try_from(year).ok()?, month, day)?,
+            from..year_at + 1,
+        )),
+        _ => Some((
+            NaiveDate::from_ymd_opt(today.year(), month, day)
+                .filter(|date| *date >= today)
+                .or_else(|| NaiveDate::from_ymd_opt(today.year() + 1, month, day))?,
+            from..year_at,
+        )),
     }
 }
 
-fn weekday(word: &str) -> Option<Weekday> {
-    match word {
-        "monday" | "mon" => Some(Weekday::Mon),
-        "tuesday" | "tue" | "tues" => Some(Weekday::Tue),
-        "wednesday" | "wed" => Some(Weekday::Wed),
-        "thursday" | "thu" | "thurs" => Some(Weekday::Thu),
-        "friday" | "fri" => Some(Weekday::Fri),
-        "saturday" | "sat" => Some(Weekday::Sat),
-        "sunday" | "sun" => Some(Weekday::Sun),
-        _ => None,
-    }
+fn weekday(word: &str, names: DayNames) -> Option<Weekday> {
+    let (weekday, whole) = match word {
+        "monday" => (Weekday::Mon, true),
+        "mon" => (Weekday::Mon, false),
+        "tuesday" => (Weekday::Tue, true),
+        "tue" | "tues" => (Weekday::Tue, false),
+        "wednesday" => (Weekday::Wed, true),
+        "wed" => (Weekday::Wed, false),
+        "thursday" => (Weekday::Thu, true),
+        "thu" | "thurs" => (Weekday::Thu, false),
+        "friday" => (Weekday::Fri, true),
+        "fri" => (Weekday::Fri, false),
+        "saturday" => (Weekday::Sat, true),
+        "sat" => (Weekday::Sat, false),
+        "sunday" => (Weekday::Sun, true),
+        "sun" => (Weekday::Sun, false),
+        _ => return None,
+    };
+    let taken = whole
+        || match names {
+            DayNames::All => true,
+            DayNames::Typed => !matches!(word, "sat" | "sun"),
+            DayNames::Spoken => false,
+        };
+    taken.then_some(weekday)
 }
 
 fn month(word: &str) -> Option<u32> {
@@ -303,10 +410,10 @@ struct SaidHour {
     meridiem: Option<Meridiem>,
 }
 
-/// The first time of day `tokens` name, and when it ends if they say so. "In
-/// the morning", "afternoon", "evening" or "tonight" anywhere in the phrase
-/// settles a time said without "am" or "pm".
-fn time_in(tokens: &[Token<'_>]) -> Option<(NaiveTime, Option<NaiveTime>)> {
+/// The first time of day `tokens` name, when it ends if they say so, and the
+/// tokens that say it. "In the morning", "afternoon", "evening" or "tonight"
+/// anywhere in the phrase settles a time said without "am" or "pm".
+fn time_in(tokens: &[Token<'_>]) -> Option<(NaiveTime, Option<NaiveTime>, Range<usize>)> {
     let part_of_day = tokens.iter().find_map(|token| match token {
         Token::Word("morning") => Some(Meridiem::Am),
         Token::Word("afternoon" | "evening" | "tonight" | "night") => Some(Meridiem::Pm),
@@ -321,18 +428,20 @@ fn time_at(
     tokens: &[Token<'_>],
     index: usize,
     part_of_day: Option<Meridiem>,
-) -> Option<(NaiveTime, Option<NaiveTime>)> {
+) -> Option<(NaiveTime, Option<NaiveTime>, Range<usize>)> {
+    let introduced = word_before(tokens, index, 1);
+    let introducer = matches!(introduced, Some("at" | "around" | "from" | "between"));
+    let from = index - usize::from(introducer);
     if matches!(tokens[index], Token::Word("noon" | "midday")) {
-        return Some((NaiveTime::from_hms_opt(12, 0, 0)?, None));
+        return Some((NaiveTime::from_hms_opt(12, 0, 0)?, None, from..index + 1));
     }
     let (start, after) = hour_at(tokens, index)?;
     let o_clock = o_clock_at(tokens, after);
     let after = after + o_clock;
-    let introduced = word_before(tokens, index, 1);
     if o_clock == 0
         && start.meridiem.is_none()
         && !matches!(tokens[index], Token::Clock(..))
-        && !matches!(introduced, Some("at" | "around" | "from" | "between"))
+        && !introducer
     {
         return None;
     }
@@ -342,12 +451,11 @@ fn time_at(
         }
         Some(Token::Word("and")) if introduced == Some("between") => hour_at(tokens, after + 1),
         _ => None,
-    }
-    .map(|(end, _)| end);
+    };
     let start_meridiem = start
         .meridiem
         .or_else(|| {
-            let end = end?;
+            let (end, _) = end?;
             let meridiem = end.meridiem?;
             Some(if start.hour % 12 > end.hour % 12 {
                 meridiem.other()
@@ -357,7 +465,7 @@ fn time_at(
         })
         .or(part_of_day);
     let start_time = clock(start.hour, start.minute, start_meridiem)?;
-    let end_time = end.and_then(|end| {
+    let end_time = end.and_then(|(end, _)| {
         let time = clock(end.hour, end.minute, end.meridiem.or(part_of_day))?;
         if time > start_time {
             return Some(time);
@@ -367,7 +475,11 @@ fn time_at(
         }
         None
     });
-    Some((start_time, end_time))
+    let through = match (end_time, end) {
+        (Some(_), Some((_, next))) => next,
+        _ => after,
+    };
+    Some((start_time, end_time, from..through))
 }
 
 /// The hour said at `index`, as a numeral, a clock time or a word, with "am"
@@ -447,7 +559,7 @@ fn clock(hour: u32, minute: u32, meridiem: Option<Meridiem>) -> Option<NaiveTime
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve, SpokenTime};
+    use super::{find, resolve, DayNames, SpokenTime};
     use chrono::NaiveDate;
 
     fn on(year: i32, month: u32, day: u32) -> NaiveDate {
@@ -494,5 +606,28 @@ mod tests {
             "the churn sheet has 3 tabs" => None;
         another_language_names_nothing:
             "nächsten Freitag um 3" => None;
+    }
+
+    #[test]
+    fn found_ranges_are_the_bytes_of_the_text_that_say_it() {
+        let said = on(2026, 11, 2).and_hms_opt(10, 0, 0).expect("a real time");
+        let text = "“Launch” review Friday at 3pm";
+
+        let (when, ranges) = find(text, said, DayNames::Typed).expect("a time");
+
+        assert_eq!(Some(when), hours(on(2026, 11, 6), (15, 0), (16, 0)));
+        let words: Vec<&str> = ranges.iter().map(|range| &text[range.clone()]).collect();
+        assert_eq!(words, ["Friday", "at 3pm"]);
+    }
+
+    #[test]
+    fn typed_sat_and_sun_are_words_not_days() {
+        let said = on(2026, 11, 2).and_hms_opt(10, 0, 0).expect("a real time");
+
+        assert_eq!(find("Sat with the new hires", said, DayNames::Typed), None);
+        assert_eq!(
+            find("Sat with the new hires", said, DayNames::All).map(|(when, _)| when),
+            Some(SpokenTime::Day(on(2026, 11, 7)))
+        );
     }
 }

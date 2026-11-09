@@ -20,8 +20,7 @@ const PROJECT_COLUMNS: &str =
 const MILESTONE_COLUMNS: &str =
     "id, project_id, title, due_at_ms, status, revision, created_at_ms, updated_at_ms";
 const TASK_COLUMNS: &str = "id, project_id, milestone_id, title, details, due_at_ms, owner_person_id, owner_is_self, status, revision, created_at_ms, updated_at_ms";
-const EVIDENCE_COLUMNS: &str =
-    "id, target_kind, target_id, source_kind, source_id, at_ms, revision, created_at_ms, meeting_note_id";
+const EVIDENCE_COLUMNS: &str = "id, target_kind, target_id, source_kind, source_id, at_ms, revision, created_at_ms, meeting_note_id, end_ms, caption";
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) enum Refusal {
@@ -195,7 +194,9 @@ fn read_evidence(row: &Row<'_>) -> rusqlite::Result<EvidenceLink> {
         source_kind: row.get(3)?,
         source_id: row.get(4)?,
         at_ms: row.get(5)?,
+        end_ms: row.get(9)?,
         meeting_note_id: row.get(8)?,
+        caption: row.get(10)?,
         revision: row.get(6)?,
         created_at_ms: row.get(7)?,
         available: false,
@@ -613,6 +614,7 @@ pub(super) fn insert_task(
             due_at_ms: draft.due_at_ms,
             label_ids: &[],
             source_loop_id: None,
+            recurrence: None,
         },
         WorkActor::Me,
         now_ms,

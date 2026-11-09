@@ -262,7 +262,9 @@ fn confirmed_conversations(
             source_kind: row.get(12)?,
             source_id: row.get(3)?,
             at_ms: row.get(4)?,
+            end_ms: None,
             meeting_note_id: row.get(13)?,
+            caption: None,
             revision: row.get(5)?,
             created_at_ms: row.get(6)?,
             available: false,
@@ -277,7 +279,9 @@ fn confirmed_conversations(
                 };
                 (session_id.uuid().to_string(), Some((loop_id, session_id)))
             }
-            EvidenceSourceKind::Note => continue,
+            EvidenceSourceKind::Note | EvidenceSourceKind::Dictation | EvidenceSourceKind::Link => {
+                continue
+            }
         };
         let Some((started_at_ms, meeting_title)) = confirmed.get(&meeting_id) else {
             continue;

@@ -73,6 +73,9 @@ pub(super) fn resolve(
         super::sources::require_source(history, meetings, target.kind, &target.id, None)?;
     }
     let (title, revision, passages, commitments) = match target.kind {
+        EvidenceSourceKind::Dictation | EvidenceSourceKind::Link => {
+            return Err(Refusal::Invalid.into())
+        }
         EvidenceSourceKind::Note => {
             let note = crate::scratchpad::note_with_connection(history, &target.id)?
                 .ok_or(Refusal::SourceUnavailable)?;
@@ -94,7 +97,9 @@ pub(super) fn resolve(
                 EvidenceSourceKind::Loop => MeetingLoopId(target.id.clone())
                     .session_id()
                     .ok_or(Refusal::Invalid)?,
-                EvidenceSourceKind::Note => return Err(Refusal::Invalid.into()),
+                EvidenceSourceKind::Note
+                | EvidenceSourceKind::Dictation
+                | EvidenceSourceKind::Link => return Err(Refusal::Invalid.into()),
             };
             let id = meeting_id.uuid().to_string();
             let (title, revision): (String, i64) = meetings
@@ -239,6 +244,10 @@ pub(super) fn link_offset(
 ) -> Option<i64> {
     match kind {
         EvidenceSourceKind::Meeting if meeting_note_id(kind, passage_id).is_none() => at_ms,
-        EvidenceSourceKind::Meeting | EvidenceSourceKind::Note | EvidenceSourceKind::Loop => None,
+        EvidenceSourceKind::Meeting
+        | EvidenceSourceKind::Note
+        | EvidenceSourceKind::Loop
+        | EvidenceSourceKind::Dictation
+        | EvidenceSourceKind::Link => None,
     }
 }

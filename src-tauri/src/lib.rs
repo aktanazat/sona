@@ -2079,6 +2079,8 @@ pub fn run(cli_args: CliArgs) {
             planning::work::agents::work_delegate,
             planning::work::agents::work_proposals_accept,
             planning::work::agents::work_proposals_reject,
+            planning::work::parse::work_parse,
+            planning::work::capture::work_capture,
         ])
         .events(collect_events![
             chat_voice::ChatVoiceEvent,
@@ -2126,6 +2128,8 @@ pub fn run(cli_args: CliArgs) {
             planning::PlanningChangedEvent,
             planning::work::WorkChanged,
             planning::work::follow::WorkReminderOpened,
+            planning::work::capture::WorkQuickEntry,
+            planning::work::capture::WorkRambleFiled,
         ]);
 
     let invoke_handler = specta_builder.invoke_handler();

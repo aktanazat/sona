@@ -1179,6 +1179,7 @@ mod tests {
                 owner: Some(owner),
                 due_at_ms,
                 label_ids: None,
+                recurrence: None,
             };
             // PANIC: filing work for the fixture's own people cannot fail.
             self.meetings

@@ -451,6 +451,7 @@ pub(crate) fn take_in_row(
             due_at_ms: None,
             label_ids: &[],
             source_loop_id: Some(loop_id),
+            recurrence: None,
         },
         WorkActor::Sona,
         now_ms,

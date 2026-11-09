@@ -176,7 +176,42 @@ fn source_title(
             }
             Ok(Some(seed.text))
         }
+        EvidenceSourceKind::Dictation => {
+            let history_id = dictation_id(id)?;
+            if meeting_note_id.is_some() {
+                return Err(Refusal::Invalid.into());
+            }
+            Ok(history
+                .query_row(
+                    "SELECT title FROM transcription_history WHERE id = ?1",
+                    [history_id],
+                    |row| row.get(0),
+                )
+                .optional()?)
+        }
+        EvidenceSourceKind::Link => {
+            if at_ms.is_some() || meeting_note_id.is_some() {
+                return Err(Refusal::Invalid.into());
+            }
+            Ok(Some(link_url(id)?))
+        }
     }
+}
+
+fn dictation_id(id: &str) -> Result<i64> {
+    id.parse::<i64>()
+        .ok()
+        .filter(|history_id| *history_id > 0)
+        .ok_or_else(|| Refusal::Invalid.into())
+}
+
+/// An address a link may hold: a web page or a file, absolute.
+pub(crate) fn link_url(id: &str) -> Result<String> {
+    let url = url::Url::parse(id.trim()).map_err(|_| Refusal::Invalid)?;
+    if !matches!(url.scheme(), "http" | "https" | "file") {
+        return Err(Refusal::Invalid.into());
+    }
+    Ok(url.into())
 }
 
 pub(crate) fn require_source(
@@ -297,5 +332,7 @@ pub(crate) fn canonical_source_id(kind: EvidenceSourceKind, id: &str) -> Result<
             let (_, content) = id.split_once(':').ok_or(Refusal::Invalid)?;
             Ok(format!("{}:{content}", session_id.uuid()))
         }
+        EvidenceSourceKind::Dictation => Ok(dictation_id(id)?.to_string()),
+        EvidenceSourceKind::Link => link_url(id),
     }
 }

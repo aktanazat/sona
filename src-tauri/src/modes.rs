@@ -429,6 +429,9 @@ pub enum TranscriptionIntent {
     /// Start or stop a voice command run: the transcript is an instruction, and
     /// the text selected when the chord was pressed is what it edits.
     Command,
+    /// Start or stop a spoken task list: each task said goes to the
+    /// tracker's Triage, and nothing is pasted.
+    Tasks,
 }
 
 impl TranscriptionIntent {
@@ -438,6 +441,9 @@ impl TranscriptionIntent {
         }
         if binding_id == crate::command_mode::COMMAND_BINDING_ID {
             return Some(Self::Command);
+        }
+        if binding_id == crate::planning::work::capture::RAMBLE_BINDING_ID {
+            return Some(Self::Tasks);
         }
 
         match parse_mode_shortcut_id(binding_id) {
@@ -452,6 +458,7 @@ impl TranscriptionIntent {
             Self::ActiveModeWithPostProcess => "intent/active-mode/post-process".to_string(),
             Self::Mode { mode_id } => transcribe_binding_id(mode_id),
             Self::Command => crate::command_mode::COMMAND_BINDING_ID.to_string(),
+            Self::Tasks => crate::planning::work::capture::RAMBLE_BINDING_ID.to_string(),
         }
     }
 }
@@ -1725,6 +1732,9 @@ pub struct RunPlan {
     /// Present exactly for a voice command run, carrying the selection it
     /// rewrites. See [`CommandPlan`].
     command: Option<CommandPlan>,
+    /// Set exactly for a spoken task list, whose words are filed as tasks
+    /// instead of delivered.
+    tasks: bool,
 }
 
 fn matching_app_activation_mode<'a>(
@@ -1796,6 +1806,9 @@ impl RunPlan {
         if matches!(intent, TranscriptionIntent::Command) {
             return Self::for_command(settings);
         }
+        if matches!(intent, TranscriptionIntent::Tasks) {
+            return Self::for_tasks(settings);
+        }
         let frontmost_application_id = context::frontmost_application_identifier();
         let website_rules_enabled = matches!(
             intent,
@@ -1827,6 +1840,7 @@ impl RunPlan {
             // this function is reached, and the ordering rationale lives on
             // that early return.
             TranscriptionIntent::Command => return Self::for_command(settings),
+            TranscriptionIntent::Tasks => return Self::for_tasks(settings),
             TranscriptionIntent::Mode { mode_id } => (
                 settings.modes.iter().find(|mode| mode.id == *mode_id),
                 None,
@@ -1909,6 +1923,7 @@ impl RunPlan {
             mode_selection_source: ModeSelectionSource::ActiveMode,
             cloud: None,
             command: None,
+            tasks: false,
         })
     }
 
@@ -2102,6 +2117,7 @@ impl RunPlan {
             cloud,
             mode_selection_source,
             command: None,
+            tasks: false,
         })
     }
 
@@ -2183,6 +2199,25 @@ impl RunPlan {
         Ok(run)
     }
 
+    /// Freeze a spoken task list under the active mode. Its words become
+    /// tasks, so no rewrite runs and nothing is read from the screen.
+    fn for_tasks(settings: &AppSettings) -> Result<Self, RunPlanError> {
+        let mode = active_mode(settings)
+            .cloned()
+            .ok_or(RunPlanError::NoMatchingMode)?;
+        let mut run = Self::for_mode(
+            settings,
+            mode,
+            Some(false),
+            ModeSelectionSource::ActiveMode,
+            false,
+            None,
+        )?;
+        run.context.without_live_capture();
+        run.tasks = true;
+        Ok(run)
+    }
+
     /// Freeze a stored recording for reprocessing under an explicitly chosen
     /// mode. Unlike [`Self::for_retry`], which repeats the original run under
     /// whatever mode is active now, this exists to run the same audio through a
@@ -2259,6 +2294,11 @@ impl RunPlan {
     /// what makes every other run a dictation.
     pub fn command(&self) -> Option<&CommandPlan> {
         self.command.as_ref()
+    }
+
+    /// Whether this run's words are filed as tasks instead of delivered.
+    pub fn tasks(&self) -> bool {
+        self.tasks
     }
 
     pub fn mode_receipt(&self) -> ModeReceipt {

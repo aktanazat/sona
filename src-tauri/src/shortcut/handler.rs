@@ -7,6 +7,7 @@ use tauri::{AppHandle, Manager};
 use crate::managers::audio::AudioRecordingManager;
 use crate::meeting::open_windows::{MeetingOpenWindowsService, ATTACH_WINDOW_BINDING_ID};
 use crate::modes::{parse_mode_shortcut_id, ModeShortcutKind, TranscriptionIntent};
+use crate::planning::work::capture::{open_quick_entry, QUICK_ENTRY_BINDING_ID};
 use crate::settings::get_settings;
 use crate::TranscriptionCoordinator;
 
@@ -18,6 +19,7 @@ pub(super) enum ShortcutIntent {
     Cancel,
     SwitchMode(String),
     AttachWindow,
+    QuickEntry,
 }
 
 pub(super) fn shortcut_intent(binding_id: &str) -> Option<ShortcutIntent> {
@@ -29,6 +31,9 @@ pub(super) fn shortcut_intent(binding_id: &str) -> Option<ShortcutIntent> {
     }
     if binding_id == ATTACH_WINDOW_BINDING_ID {
         return Some(ShortcutIntent::AttachWindow);
+    }
+    if binding_id == QUICK_ENTRY_BINDING_ID {
+        return Some(ShortcutIntent::QuickEntry);
     }
     if let Some((mode_id, ModeShortcutKind::Switch)) = parse_mode_shortcut_id(binding_id) {
         return Some(ShortcutIntent::SwitchMode(mode_id));
@@ -85,6 +90,11 @@ pub(super) fn handle_shortcut_event(
                 }
             }
         }
+        ShortcutIntent::QuickEntry => {
+            if is_pressed {
+                tauri::async_runtime::spawn(open_quick_entry(app.clone()));
+            }
+        }
     }
 
     Some(intent)
@@ -117,6 +127,7 @@ mod tests {
                     mode_id: "notes".to_string(),
                 },
             ),
+            ("work_ramble", TranscriptionIntent::Tasks),
         ] {
             assert_eq!(
                 shortcut_intent(binding_id),
@@ -139,6 +150,10 @@ mod tests {
         assert_eq!(
             shortcut_intent(ATTACH_WINDOW_BINDING_ID),
             Some(ShortcutIntent::AttachWindow)
+        );
+        assert_eq!(
+            shortcut_intent(QUICK_ENTRY_BINDING_ID),
+            Some(ShortcutIntent::QuickEntry)
         );
         assert_eq!(shortcut_intent("test"), None);
     }

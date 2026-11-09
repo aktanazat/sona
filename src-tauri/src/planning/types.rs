@@ -33,6 +33,8 @@ pub enum EvidenceSourceKind {
     Meeting,
     Note,
     Loop,
+    Dictation,
+    Link,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
@@ -85,6 +87,8 @@ sql_enum!(EvidenceSourceKind {
     Meeting => "meeting",
     Note => "note",
     Loop => "loop",
+    Dictation => "dictation",
+    Link => "link",
 });
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
@@ -139,7 +143,9 @@ pub struct EvidenceLink {
     pub source_kind: EvidenceSourceKind,
     pub source_id: String,
     pub at_ms: Option<i64>,
+    pub end_ms: Option<i64>,
     pub meeting_note_id: Option<String>,
+    pub caption: Option<String>,
     pub revision: i64,
     pub created_at_ms: i64,
     pub available: bool,
