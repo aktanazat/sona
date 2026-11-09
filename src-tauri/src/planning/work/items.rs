@@ -21,8 +21,6 @@ const ITEM_COLUMNS: &str = "t.id, t.number, t.title, t.details, t.status, t.prio
     t.created_at_ms, t.updated_at_ms, t.revision, t.sort_order,
     (SELECT group_concat(label_id) FROM planning_task_labels WHERE task_id = t.id)";
 
-const WEEK_MS: i64 = 7 * 24 * 60 * 60 * 1000;
-
 fn read_item(row: &Row<'_>) -> rusqlite::Result<WorkItem> {
     let owner_person_id: Option<String> = row.get(8)?;
     let owner_is_self: bool = row.get(9)?;
@@ -1103,13 +1101,16 @@ pub(crate) fn snoozed(item: &WorkItem, now_ms: i64) -> bool {
     item.snoozed_until_ms.is_some_and(|until| until > now_ms)
 }
 
-/// The sidebar's numbers. Archived and snoozed items count nowhere; work is
-/// overdue once its due day has ended, and a wait is stale once its status
-/// has stood for a week.
-pub(crate) fn counts(items: &[WorkItem], now_ms: i64) -> Result<WorkCounts> {
+/// The sidebar's numbers, from each item and its follow-up moment. Archived
+/// and snoozed items count nowhere; work is overdue once its due day has
+/// ended, and a wait is stale once its follow-up moment has come.
+pub(crate) fn counts<'a>(
+    items: impl IntoIterator<Item = (&'a WorkItem, Option<i64>)>,
+    now_ms: i64,
+) -> Result<WorkCounts> {
     let (today_ms, tomorrow_ms) = today_bounds(now_ms)?;
     let mut counts = WorkCounts::default();
-    for item in items {
+    for (item, follow_up_at_ms) in items {
         if item.archived_at_ms.is_some() || snoozed(item, now_ms) {
             continue;
         }
@@ -1131,7 +1132,7 @@ pub(crate) fn counts(items: &[WorkItem], now_ms: i64) -> Result<WorkCounts> {
             }
             WorkOwner::Person { .. } => {
                 counts.waiting_on += 1;
-                if now_ms - item.status_changed_at_ms >= WEEK_MS {
+                if follow_up_at_ms.is_some_and(|at| at <= now_ms) {
                     counts.waiting_on_stale += 1;
                 }
             }

@@ -4616,6 +4616,11 @@ impl MeetingSessionManager {
         self.app.as_ref().and_then(super::prep::user_name)
     }
 
+    /// The conversation store when it is already open; never opens one.
+    pub(crate) fn open_store(&self) -> Option<Arc<MeetingStore>> {
+        self.store_lock().clone()
+    }
+
     fn build_preflight_snapshot(
         &self,
         session_id: MeetingSessionId,

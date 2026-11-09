@@ -212,6 +212,16 @@ impl WorkItem {
     }
 }
 
+/// Where an item came from, for triage's splits.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkSource {
+    Meeting,
+    Dictation,
+    Agent,
+    Person,
+}
+
 /// An item with the names a list row shows beside it.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
@@ -230,6 +240,10 @@ pub struct WorkItemRow {
     /// The meetings that raised the item or a duplicate of it, counted once
     /// each.
     pub raised_in: u32,
+    pub source: WorkSource,
+    /// When to ask the person who owes this item about it; none for work
+    /// nobody else owes.
+    pub follow_up_at_ms: Option<i64>,
 }
 
 /// A new item: left-out fields start in not started, at no priority, with
@@ -460,7 +474,7 @@ pub struct WorkCounts {
     pub mine_overdue: u32,
     pub mine_due_today: u32,
     pub waiting_on: u32,
-    /// Waiting-on work whose status has not moved in a week.
+    /// Waiting-on work whose follow-up moment has come.
     pub waiting_on_stale: u32,
 }
 

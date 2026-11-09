@@ -2,6 +2,7 @@
 //! or someone typed it, with triage, history, labels, links and saved views.
 //! Project screens read the same rows through `store`.
 
+pub(crate) mod follow;
 mod hygiene;
 pub(crate) mod items;
 pub(crate) mod sync;
@@ -9,13 +10,14 @@ pub(crate) mod sync;
 mod tests;
 pub mod types;
 
+use self::follow::FollowUps;
 use self::items::{Changed, DueSpan, NewItem};
 use self::sync::{MeetingReader, People};
 pub use self::types::WorkChanged;
 use self::types::{
     WorkActivityKind, WorkActor, WorkCounts, WorkDay, WorkDisplay, WorkItem, WorkItemDetail,
     WorkItemInput, WorkItemRow, WorkLabel, WorkList, WorkOwner, WorkPatch, WorkProjectChoice,
-    WorkQuery, WorkRelation, WorkRelationKind, WorkStatus, WorkView,
+    WorkQuery, WorkRelation, WorkRelationKind, WorkSource, WorkStatus, WorkView,
 };
 use super::sources;
 use super::store::{self, Refusal};
@@ -343,6 +345,8 @@ struct RowContext {
     project_titles: HashMap<String, String>,
     blockers: HashMap<String, u32>,
     raised: HashMap<String, u32>,
+    sources: HashMap<String, WorkSource>,
+    follow_ups: FollowUps,
 }
 
 impl RowContext {
@@ -359,6 +363,8 @@ impl RowContext {
                 .collect(),
             blockers: items::open_blockers(history)?,
             raised: items::meetings_raised(history)?,
+            sources: follow::item_sources(history)?,
+            follow_ups: FollowUps::read(history)?,
         })
     }
 
@@ -386,6 +392,12 @@ impl RowContext {
                 .get(item.duplicate_of_id.as_ref().unwrap_or(&item.id))
                 .copied()
                 .unwrap_or(0),
+            source: self
+                .sources
+                .get(&item.id)
+                .copied()
+                .unwrap_or(WorkSource::Person),
+            follow_up_at_ms: self.follow_ups.at(&item)?,
             item,
         };
         if let Some(source) = match &source_loop_id {
@@ -1278,7 +1290,13 @@ pub fn work_view_delete(app: AppHandle, operation_id: String, id: String) -> Res
 #[specta::specta]
 pub fn work_counts(history_state: State<'_, Arc<HistoryManager>>) -> Result<WorkCounts, String> {
     super::history(&history_state, |history| {
-        items::counts(&items::items(history, false)?, now_ms())
+        let items = items::items(history, false)?;
+        let follow_ups = FollowUps::read(history)?;
+        let moments = items
+            .iter()
+            .map(|item| follow_ups.at(item))
+            .collect::<StorageResult<Vec<_>>>()?;
+        items::counts(items.iter().zip(moments), now_ms())
     })
 }
 
