@@ -973,6 +973,10 @@ enum WorkActivityText {
             return "changed its relations"
         case .kept:
             return "confirmed it still stands"
+        case .recurrence:
+            guard let every = entry.to, !every.isEmpty else { return "stopped it repeating" }
+            let shown = Recurrence.display(every)
+            return "set it to repeat \(shown.prefix(1).lowercased() + shown.dropFirst())"
         }
     }
 

@@ -806,6 +806,7 @@ final class WorkStore {
         case .milestone: patch.milestoneId = clearable(to)
         case .labels: patch.labelIds = to?.split(separator: ",").map(String.init) ?? []
         case .snoozed: patch.snoozedUntilMs = clearable(to.flatMap { Int64($0) })
+        case .recurrence: patch.recurrence = clearable(to)
         }
     }
 
