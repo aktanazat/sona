@@ -2452,6 +2452,13 @@ impl TranscribeAction {
                                     ) {
                                         let _ = ah.emit("rewrite-skipped", event);
                                     }
+                                    if let Some(history_id) = history_id {
+                                        crate::planning::work::watch::after_dictation(
+                                            &ah,
+                                            history_id,
+                                            &processed.final_text,
+                                        );
+                                    }
                                     let ah_clone = ah.clone();
                                     let hm_for_main = Arc::clone(&hm);
                                     let hm_for_fallback = Arc::clone(&hm);

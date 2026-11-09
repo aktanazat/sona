@@ -67,6 +67,7 @@ mod reel_tests;
 #[cfg(test)]
 mod remote_intelligence_tests;
 mod said;
+pub(crate) use said::{SaidWords, Within};
 mod search_projection;
 pub(crate) mod series;
 #[cfg(test)]

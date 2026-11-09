@@ -11,7 +11,7 @@ use tauri_specta::Event as _;
 use super::{encode_plain, off_main_thread, on_main_thread, reply, Args, Fault};
 
 /// Every typed event the core emits, by the name the bindings export.
-pub(super) const TYPED_EVENTS: [&str; 48] = [
+pub(super) const TYPED_EVENTS: [&str; 51] = [
     crate::chat_voice::ChatVoiceEvent::NAME,
     crate::upstream_import::UpstreamImportProgressEvent::NAME,
     crate::agent_bridge::AgentBridgeUpdateEvent::NAME,
@@ -60,6 +60,9 @@ pub(super) const TYPED_EVENTS: [&str; 48] = [
     crate::planning::work::follow::WorkReminderOpened::NAME,
     crate::planning::work::capture::WorkQuickEntry::NAME,
     crate::planning::work::capture::WorkRambleFiled::NAME,
+    crate::planning::work::capture::WorkCommandHeard::NAME,
+    crate::planning::work::watch::WorkWatchOpened::NAME,
+    crate::planning::work::watch::WorkWatchesChanged::NAME,
 ];
 
 pub(super) async fn call(
@@ -5413,6 +5416,53 @@ pub(super) async fn call(
                 )
                 .await,
             )
+        }
+        "work_take_lines" => {
+            let mut args = Args::parse(params)?;
+            let operation_id = args.take("operationId")?;
+            let lines = args.take("lines")?;
+            reply(
+                crate::planning::work::capture::work_take_lines(app.clone(), operation_id, lines)
+                    .await,
+            )
+        }
+        "work_ask" => {
+            let mut args = Args::parse(params)?;
+            let question = args.take("question")?;
+            reply(crate::planning::work::ask::work_ask(app.clone(), question).await)
+        }
+        "work_command" => {
+            let mut args = Args::parse(params)?;
+            let text = args.take("text")?;
+            let selection = args.take("selection")?;
+            reply(
+                crate::planning::work::command::work_command(
+                    app.state(),
+                    app.state(),
+                    text,
+                    selection,
+                )
+                .await,
+            )
+        }
+        "work_watches" => reply(crate::planning::work::watch::work_watches(app.clone()).await),
+        "work_watch_save" => {
+            let mut args = Args::parse(params)?;
+            let phrase = args.take("phrase")?;
+            let person_id = args.take("personId")?;
+            reply(
+                crate::planning::work::watch::work_watch_save(app.clone(), phrase, person_id).await,
+            )
+        }
+        "work_watch_remove" => {
+            let mut args = Args::parse(params)?;
+            let id = args.take("id")?;
+            reply(crate::planning::work::watch::work_watch_remove(app.clone(), id).await)
+        }
+        "work_watch_task" => {
+            let mut args = Args::parse(params)?;
+            let hit_id = args.take("hitId")?;
+            reply(crate::planning::work::watch::work_watch_task(app.clone(), hit_id).await)
         }
         other => Err(Fault::unknown_method(other)),
     }

@@ -509,6 +509,39 @@ CREATE TRIGGER planning_task_agents_delete AFTER DELETE ON planning_tasks BEGIN
     DELETE FROM planning_task_proposals WHERE task_id = old.id;
 END;";
 
+/// Topics to listen for, each said once per meeting or dictation that
+/// raises it: the line that did, and the task made from it.
+pub const WATCH_MIGRATION: &str = "CREATE TABLE planning_watches (
+    id TEXT PRIMARY KEY NOT NULL,
+    phrase TEXT NOT NULL CHECK(length(trim(phrase)) > 0),
+    person_id TEXT,
+    created_at_ms INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX planning_watches_phrase ON planning_watches(lower(phrase), coalesce(person_id, ''));
+CREATE TABLE planning_watch_hits (
+    id TEXT PRIMARY KEY NOT NULL,
+    watch_id TEXT NOT NULL,
+    source_kind TEXT NOT NULL CHECK(source_kind IN ('meeting', 'dictation')),
+    source_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    quote TEXT NOT NULL CHECK(length(trim(quote)) > 0),
+    speaker TEXT,
+    person_id TEXT,
+    segment_id TEXT CHECK(segment_id IS NULL OR source_kind = 'meeting'),
+    at_ms INTEGER NOT NULL CHECK(at_ms >= 0),
+    end_ms INTEGER CHECK(end_ms IS NULL OR end_ms >= at_ms),
+    start_offset_ns INTEGER,
+    said_at_ms INTEGER NOT NULL,
+    link TEXT NOT NULL,
+    heard_at_ms INTEGER NOT NULL,
+    task_id TEXT,
+    UNIQUE(watch_id, source_kind, source_id)
+);
+CREATE INDEX planning_watch_hits_watch ON planning_watch_hits(watch_id, heard_at_ms);
+CREATE TRIGGER planning_watch_delete AFTER DELETE ON planning_watches BEGIN
+    DELETE FROM planning_watch_hits WHERE watch_id = old.id;
+END;";
+
 /// Every planner migration in order, for tests that build the schema without
 /// the rest of the history database.
 #[cfg(test)]
@@ -526,6 +559,7 @@ pub(crate) fn apply_all(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
         CAPTURE_MIGRATION,
         REPEAT_MIGRATION,
         CYCLES_MIGRATION,
+        WATCH_MIGRATION,
     ] {
         conn.execute_batch(migration)?;
     }

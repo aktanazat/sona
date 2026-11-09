@@ -13,6 +13,7 @@ use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 
 const SAID_MOMENTS_MAX: usize = 8;
+const SAID_MATCHING_MAX: usize = 40;
 
 pub(super) struct MatchedLine {
     pub(super) session_id: MeetingSessionId,
@@ -39,6 +40,40 @@ pub(super) struct SessionVoices {
     voices: HashMap<SpeakerId, Voice>,
 }
 
+/// Which meetings a transcript search reads.
+#[derive(Clone, Copy)]
+pub(crate) enum Within {
+    Everywhere,
+    Except(MeetingSessionId),
+    Only(MeetingSessionId),
+}
+
+/// What a transcript line must say.
+pub(crate) enum SaidWords<'a> {
+    /// Any of these words, each as the start of a word; the lines holding
+    /// the most of them come first.
+    Any(&'a [String]),
+    /// These words in this order, the last as the start of a word.
+    Phrase(&'a str),
+}
+
+impl SaidWords<'_> {
+    fn match_query(&self) -> Option<String> {
+        let quoted = |words: &str| {
+            let words: Vec<&str> = words
+                .split(|character: char| !character.is_alphanumeric() && character != '\'')
+                .filter(|word| word.chars().any(char::is_alphanumeric))
+                .collect();
+            (!words.is_empty()).then(|| format!("\"{}\"*", words.join(" ")))
+        };
+        let parts: Vec<String> = match self {
+            Self::Any(words) => words.iter().filter_map(|word| quoted(word)).collect(),
+            Self::Phrase(phrase) => quoted(phrase).into_iter().collect(),
+        };
+        (!parts.is_empty()).then(|| parts.join(" OR "))
+    }
+}
+
 impl MeetingStore {
     /// The transcript lines a search matches, best match first, each with
     /// who said it and whether its audio is still on this Mac.
@@ -60,14 +95,43 @@ impl MeetingStore {
         let Some(match_query) = meeting_fts_match_query(query) else {
             return Ok(Vec::new());
         };
+        self.said_lines(
+            &match_query,
+            Within::Everywhere,
+            limit.clamp(1, SAID_MOMENTS_MAX),
+            user_name,
+        )
+    }
+
+    /// [`Self::said_search`] for `words`, in the meetings `within` names.
+    pub(crate) fn said_matching(
+        &self,
+        words: &SaidWords<'_>,
+        within: Within,
+        limit: usize,
+        user_name: Option<&str>,
+    ) -> Result<Vec<SaidMoment>, StoreError> {
+        let Some(match_query) = words.match_query() else {
+            return Ok(Vec::new());
+        };
+        self.said_lines(
+            &match_query,
+            within,
+            limit.clamp(1, SAID_MATCHING_MAX),
+            user_name,
+        )
+    }
+
+    fn said_lines(
+        &self,
+        match_query: &str,
+        within: Within,
+        limit: usize,
+        user_name: Option<&str>,
+    ) -> Result<Vec<SaidMoment>, StoreError> {
         let mut connection = self.connection()?;
         search_projection::refresh_in(&mut connection)?;
-        let lines = matched_lines_in(
-            &connection,
-            &match_query,
-            limit.clamp(1, SAID_MOMENTS_MAX),
-            None,
-        )?;
+        let lines = matched_lines_in(&connection, match_query, limit, within)?;
         let mut sessions = HashMap::new();
         let mut moments = Vec::with_capacity(lines.len());
         for line in lines {
@@ -103,13 +167,13 @@ impl MeetingStore {
     }
 }
 
-/// The transcript lines `match_query` finds, best match first, outside the
-/// `except` meeting when one is named.
+/// The transcript lines `match_query` finds, best match first, in the
+/// meetings `within` names.
 pub(super) fn matched_lines_in(
     connection: &Connection,
     match_query: &str,
     limit: usize,
-    except: Option<MeetingSessionId>,
+    within: Within,
 ) -> Result<Vec<MatchedLine>, StoreError> {
     let mut statement = connection.prepare(
         "SELECT d.session_id, d.entity_id, snippet(meeting_search_fts, 0, '', '', '…', 24),
@@ -132,14 +196,21 @@ pub(super) fn matched_lines_in(
             AND d.entity_kind = 'segment'
             AND m.phase != 'deleting'
             AND (?3 IS NULL OR d.session_id != ?3)
+            AND (?4 IS NULL OR d.session_id = ?4)
           ORDER BY bm25(meeting_search_fts), m.created_at_utc_ms DESC
           LIMIT ?2",
     )?;
+    let (except, only) = match within {
+        Within::Everywhere => (None, None),
+        Within::Except(session_id) => (Some(session_id), None),
+        Within::Only(session_id) => (None, Some(session_id)),
+    };
     let rows = statement.query_map(
         params![
             match_query,
             i64::try_from(limit).map_err(|_| StoreError::Invalid)?,
-            except.map(id)
+            except.map(id),
+            only.map(id)
         ],
         |row| {
             Ok(MatchedLine {

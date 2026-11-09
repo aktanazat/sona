@@ -51,6 +51,23 @@ pub const CATEGORY_RITUAL: &str = "computer.sona.meeting.ritual";
 /// brief before a meeting. No actions; the body click opens the work.
 pub const CATEGORY_FOLLOW: &str = "computer.sona.work.follow";
 
+/// A watched topic came up. Two quiet actions that leave Sona in the
+/// background: play the line, or keep it as a task. The body click opens
+/// the line.
+pub const CATEGORY_WATCH: &str = "computer.sona.work.watch";
+pub const ACTION_WATCH_PLAY: &str = "computer.sona.work.watch.play";
+pub const ACTION_WATCH_TASK: &str = "computer.sona.work.watch.task";
+pub const WATCH_PLAY_TITLE: &str = "\u{25B6} Play";
+pub const WATCH_TASK_TITLE: &str = "Make task";
+
+/// What was done with a watch notification.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WatchGesture {
+    Open,
+    Play,
+    Task,
+}
+
 /// What the operator did with a prompt.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PromptResponse {
@@ -63,6 +80,9 @@ pub enum PromptResponse {
     /// A follow-through reminder's body was clicked; `id` is the request id
     /// it was posted under.
     FollowUpOpened { id: String },
+    /// A watch notification was answered; `id` is the request id it was
+    /// posted under.
+    Watched { id: String, gesture: WatchGesture },
 }
 
 /// Receives detection action clicks. Implemented by the detection runtime.
@@ -82,6 +102,11 @@ pub trait FollowUpOpener: Send + Sync {
     fn follow_up_opened(&self, id: &str);
 }
 
+/// Receives a gesture on a watch notification. Implemented by the tracker.
+pub trait WatchOpener: Send + Sync {
+    fn watch_answered(&self, id: &str, gesture: WatchGesture);
+}
+
 /// The delegate's one target, and the fork behind it.
 ///
 /// The notification centre holds a single delegate for the whole process, but
@@ -96,6 +121,7 @@ pub struct ResponderCell {
     inner: std::sync::OnceLock<Arc<dyn PromptResponder>>,
     digest: std::sync::OnceLock<Arc<dyn DigestOpener>>,
     follow_up: std::sync::OnceLock<Arc<dyn FollowUpOpener>>,
+    watch: std::sync::OnceLock<Arc<dyn WatchOpener>>,
 }
 
 impl ResponderCell {
@@ -109,6 +135,10 @@ impl ResponderCell {
 
     pub fn bind_follow_up(&self, opener: Arc<dyn FollowUpOpener>) {
         let _ = self.follow_up.set(opener);
+    }
+
+    pub fn bind_watch(&self, opener: Arc<dyn WatchOpener>) {
+        let _ = self.watch.set(opener);
     }
 }
 
@@ -130,6 +160,15 @@ impl PromptResponder for ResponderCell {
                 None => log::info!(
                     "Follow-through dropped a notification click that arrived before startup \
                      finished"
+                ),
+            }
+            return;
+        }
+        if let PromptResponse::Watched { id, gesture } = &response {
+            match self.watch.get() {
+                Some(opener) => opener.watch_answered(id, *gesture),
+                None => log::info!(
+                    "Watch dropped a notification click that arrived before startup finished"
                 ),
             }
             return;
@@ -178,6 +217,11 @@ pub trait PromptPresenter: Send + Sync {
     /// Posts a follow-through reminder under `id`, replacing any reminder
     /// already posted under the same id.
     fn present_follow_up(&self, _id: &str, _title: &str, _body: &str) -> bool {
+        false
+    }
+    /// Posts a watch notification under `id`, with play and make-task
+    /// actions.
+    fn present_watch(&self, _id: &str, _title: &str, _body: &str) -> bool {
         false
     }
 }
@@ -536,8 +580,9 @@ pub use macos::UserNotificationPrompts;
 mod macos {
     use super::{
         NotificationAccess, NotificationAccessFuture, PromptKind, PromptPresenter, PromptResponder,
-        PromptResponse, ACTION_DISMISS, ACTION_START, CATEGORY_DETECTION, CATEGORY_DIGEST,
-        CATEGORY_FOLLOW, CATEGORY_RITUAL, DISMISS_TITLE, START_TITLE,
+        PromptResponse, WatchGesture, ACTION_DISMISS, ACTION_START, ACTION_WATCH_PLAY,
+        ACTION_WATCH_TASK, CATEGORY_DETECTION, CATEGORY_DIGEST, CATEGORY_FOLLOW, CATEGORY_RITUAL,
+        CATEGORY_WATCH, DISMISS_TITLE, START_TITLE, WATCH_PLAY_TITLE, WATCH_TASK_TITLE,
     };
     use block2::RcBlock;
     use objc2::rc::Retained;
@@ -636,6 +681,22 @@ mod macos {
                 if category == CATEGORY_FOLLOW {
                     if action == DEFAULT_ACTION {
                         responder.prompt_answered(PromptResponse::FollowUpOpened { id: prompt_id });
+                    }
+                    completion.call(());
+                    return;
+                }
+                if category == CATEGORY_WATCH {
+                    let gesture = match action.as_str() {
+                        DEFAULT_ACTION => Some(WatchGesture::Open),
+                        ACTION_WATCH_PLAY => Some(WatchGesture::Play),
+                        ACTION_WATCH_TASK => Some(WatchGesture::Task),
+                        _ => None,
+                    };
+                    if let Some(gesture) = gesture {
+                        responder.prompt_answered(PromptResponse::Watched {
+                            id: prompt_id,
+                            gesture,
+                        });
                     }
                     completion.call(());
                     return;
@@ -835,7 +896,27 @@ mod macos {
                     &intents,
                     UNNotificationCategoryOptions::empty(),
                 );
-            let categories = NSSet::from_retained_slice(&[detection, digest, ritual, follow]);
+            // Both act in the background: playing needs no window, and a
+            // kept task shows up in Triage on its own.
+            let play = UNNotificationAction::actionWithIdentifier_title_options(
+                &NSString::from_str(ACTION_WATCH_PLAY),
+                &NSString::from_str(WATCH_PLAY_TITLE),
+                UNNotificationActionOptions::empty(),
+            );
+            let task = UNNotificationAction::actionWithIdentifier_title_options(
+                &NSString::from_str(ACTION_WATCH_TASK),
+                &NSString::from_str(WATCH_TASK_TITLE),
+                UNNotificationActionOptions::empty(),
+            );
+            let watch =
+                UNNotificationCategory::categoryWithIdentifier_actions_intentIdentifiers_options(
+                    &NSString::from_str(CATEGORY_WATCH),
+                    &NSArray::from_retained_slice(&[play, task]),
+                    &intents,
+                    UNNotificationCategoryOptions::empty(),
+                );
+            let categories =
+                NSSet::from_retained_slice(&[detection, digest, ritual, follow, watch]);
             center.setNotificationCategories(&categories);
         });
     }
@@ -965,6 +1046,26 @@ mod macos {
                 content.setTitle(&NSString::from_str(title));
                 content.setBody(&NSString::from_str(body));
                 content.setCategoryIdentifier(&NSString::from_str(CATEGORY_FOLLOW));
+                let request = UNNotificationRequest::requestWithIdentifier_content_trigger(
+                    &NSString::from_str(id),
+                    &content,
+                    None,
+                );
+                self.center()
+                    .addNotificationRequest_withCompletionHandler(&request, None);
+                true
+            })
+        }
+
+        fn present_watch(&self, id: &str, title: &str, body: &str) -> bool {
+            if self.access() != NotificationAccess::Authorized {
+                return false;
+            }
+            objc2::rc::autoreleasepool(|_| {
+                let content = UNMutableNotificationContent::new();
+                content.setTitle(&NSString::from_str(title));
+                content.setBody(&NSString::from_str(body));
+                content.setCategoryIdentifier(&NSString::from_str(CATEGORY_WATCH));
                 let request = UNNotificationRequest::requestWithIdentifier_content_trigger(
                     &NSString::from_str(id),
                     &content,
