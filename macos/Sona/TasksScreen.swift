@@ -134,7 +134,7 @@ private struct TasksList: View {
                     row: item, shows: shows, labels: item.labelIds.compactMap { labels[$0] },
                     highlighted: focus.highlighted == item.id, selected: focus.selection.contains(item.id),
                     selecting: focus.selecting, renaming: focus.renaming == item.id, now: now,
-                    revision: model.people.photoRevision
+                    revision: model.people.photoRevision, waiting: model.agents.waits(on: item)
                 ) {
                     focus.toggle(item.id)
                 } rename: { title in
@@ -381,7 +381,8 @@ struct WorkActionMenu: View {
 
     var body: some View {
         let rows = model.workRows(ids)
-        ForEach(WorkAction.allCases.filter { !omit.contains($0) && $0.applies(to: rows) }) { action in
+        let proposed = model.workProposed(rows)
+        ForEach(WorkAction.allCases.filter { !omit.contains($0) && $0.applies(to: rows, proposed: proposed) }) { action in
             Button {
                 model.perform(action, on: ids)
             } label: {
@@ -448,7 +449,7 @@ private struct TaskColumn: View {
                         TaskCard(
                             row: item, shows: shows, labels: item.labelIds.compactMap { labels[$0] },
                             highlighted: focus.highlighted == item.id, selected: focus.selection.contains(item.id),
-                            now: now, revision: model.people.photoRevision)
+                            now: now, revision: model.people.photoRevision, waiting: model.agents.waits(on: item))
                             .modifier(TaskRowInteractions(id: item.id))
                             .draggable(model.menuTargets(item.id).joined(separator: "\n"))
                             .transition(WorkMotion.insert(reduced: reduceMotion))
@@ -484,6 +485,7 @@ private struct TaskCard: View {
     let selected: Bool
     let now: Int64
     let revision: UInt64
+    var waiting = false
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: Theme.radiusControl, style: .continuous)
@@ -498,6 +500,9 @@ private struct TaskCard: View {
                     Spacer(minLength: 0)
                     if shows.contains(TaskProperty.updated.rawValue) {
                         Text(TaskDates.ago(row.updatedAtMs, now: now)).metaText()
+                    }
+                    if let doer = row.doer, row.status.isOpen {
+                        DoerChip(doer: doer, waiting: waiting)
                     }
                     if shows.contains(TaskProperty.owner.rawValue) {
                         Avatar(face: row.ownerFace, size: 18, revision: revision)
@@ -549,6 +554,7 @@ private struct TaskCard: View {
 
     private var hasTop: Bool {
         [TaskProperty.number, .updated, .owner].contains { shows.contains($0.rawValue) }
+            || (row.doer != nil && row.status.isOpen)
     }
 
     private var hasMeta: Bool {

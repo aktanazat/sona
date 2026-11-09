@@ -6,6 +6,7 @@ import SwiftUI
 struct WorkPicker: Equatable {
     enum Kind: Equatable {
         case status, priority, owner, due, labels, project, duplicate, snooze
+        case delegate
     }
 
     let kind: Kind
@@ -17,6 +18,7 @@ struct WorkPicker: Equatable {
 enum WorkAction: String, CaseIterable, Identifiable {
     case open, peek, status, priority, owner, assignToMe, due, labels, project, rename
     case accept, decline, duplicate, snooze, nudge, archive
+    case delegate, acceptProposal, acceptAllProposals, rejectProposal
 
     var id: String { rawValue }
 
@@ -38,6 +40,10 @@ enum WorkAction: String, CaseIterable, Identifiable {
         case .snooze: "Snooze…"
         case .nudge: "Nudge…"
         case .archive: "Archive"
+        case .delegate: "Delegate to…"
+        case .acceptProposal: "Accept proposed change"
+        case .acceptAllProposals: "Accept all proposed changes"
+        case .rejectProposal: "Reject proposed change"
         }
     }
 
@@ -60,6 +66,10 @@ enum WorkAction: String, CaseIterable, Identifiable {
         case .snooze: "h"
         case .nudge: "r"
         case .archive: "cmd+backspace"
+        case .delegate: "shift+cmd+;"
+        case .acceptProposal: "y"
+        case .acceptAllProposals: "shift+y"
+        case .rejectProposal: "n"
         }
     }
 
@@ -82,6 +92,10 @@ enum WorkAction: String, CaseIterable, Identifiable {
         case .snooze: KeyboardShortcut("h", modifiers: [])
         case .nudge: KeyboardShortcut("r", modifiers: [])
         case .archive: KeyboardShortcut(.delete, modifiers: .command)
+        case .delegate: KeyboardShortcut(";", modifiers: [.command, .shift])
+        case .acceptProposal: KeyboardShortcut("y", modifiers: [])
+        case .acceptAllProposals: KeyboardShortcut("y", modifiers: .shift)
+        case .rejectProposal: KeyboardShortcut("n", modifiers: [])
         }
     }
 
@@ -103,6 +117,10 @@ enum WorkAction: String, CaseIterable, Identifiable {
         case .snooze: "moon.zzz"
         case .nudge: "arrowshape.turn.up.right"
         case .archive: "archivebox"
+        case .delegate: "sparkle"
+        case .acceptProposal: "checkmark"
+        case .acceptAllProposals: "checklist.checked"
+        case .rejectProposal: "xmark"
         }
     }
 
@@ -117,12 +135,15 @@ enum WorkAction: String, CaseIterable, Identifiable {
         case .duplicate: .duplicate
         case .snooze: .snooze
         case .open, .peek, .assignToMe, .rename, .accept, .decline, .nudge, .archive: nil
+        case .delegate: .delegate
+        case .acceptProposal, .acceptAllProposals, .rejectProposal: nil
         }
     }
 
     /// Whether the verb means anything for these tasks; the palette and the
-    /// menus offer only the ones that do.
-    func applies(to rows: [WorkItemRow]) -> Bool {
+    /// menus offer only the ones that do. `proposed` holds the tasks with a
+    /// proposed change waiting.
+    func applies(to rows: [WorkItemRow], proposed: Set<String> = []) -> Bool {
         guard let first = rows.first else { return false }
         return switch self {
         case .open, .peek, .rename: rows.count == 1
@@ -133,6 +154,8 @@ enum WorkAction: String, CaseIterable, Identifiable {
         case .nudge: rows.count == 1 && first.status.isOpen && first.followUpAtMs != nil
         case .archive: rows.contains { $0.archivedAtMs == nil }
         case .status, .priority, .owner, .due, .labels, .project: true
+        case .delegate: true
+        case .acceptProposal, .acceptAllProposals, .rejectProposal: rows.contains { proposed.contains($0.id) }
         }
     }
 }
@@ -413,8 +436,14 @@ final class WorkKeys {
         let targets = focus.targets(in: place)
         let rows = model.workRows(targets)
         func run(_ action: WorkAction) -> Bool {
-            guard action.applies(to: rows) else { return false }
+            guard action.applies(to: rows, proposed: model.workProposed(rows)) else { return false }
             model.perform(action, on: targets)
+            return true
+        }
+        func answer(_ action: WorkAction) -> Bool {
+            guard place == .triage, opened == nil else { return run(action) }
+            guard let first = model.triageProposed.first else { return false }
+            model.perform(action, on: [first.id])
             return true
         }
         if event.keyCode == 53 { return focus.escape(in: place) }
@@ -456,9 +485,13 @@ final class WorkKeys {
                 return false
             }
         }
+        if flags == [.command, .shift], key == ";" || key == ":" {
+            return run(.delegate)
+        }
         if shift {
             switch key {
             case "p": return run(.project)
+            case "y": return answer(.acceptAllProposals)
             case "d":
                 guard place == .tasks, opened == nil else { return false }
                 return model.rescheduleOverdue()
@@ -509,6 +542,8 @@ final class WorkKeys {
         case "3" where place == .triage: return run(.duplicate)
         case "h": return run(.snooze)
         case "r": return run(.nudge)
+        case "y": return answer(.acceptProposal)
+        case "n": return answer(.rejectProposal)
         case "?":
             focus.shortcutsShown = true
             return true
@@ -541,6 +576,20 @@ extension AppModel {
         return ids.compactMap { byId[$0] }
     }
 
+    /// The tasks among these with a proposed change waiting.
+    func workProposed(_ rows: [WorkItemRow]) -> Set<String> {
+        Set(rows.map(\.id).filter { !work.proposals(for: $0).isEmpty })
+    }
+
+    /// The tasks Triage lists under proposed changes, the longest waiting
+    /// first. With no task open there, Y, ⇧Y and N answer the first.
+    var triageProposed: [WorkItemRow] {
+        let open = work.proposals
+        return workRows(open.keys.sorted {
+            (open[$0]?.first?.createdAtMs ?? 0, $0) < (open[$1]?.first?.createdAtMs ?? 0, $1)
+        })
+    }
+
     func perform(_ action: WorkAction, on ids: [String]) {
         guard let first = ids.first else { return }
         let focus = workFocus
@@ -569,7 +618,13 @@ extension AppModel {
             leave(ids) { work.archive(ids) }
         case .nudge:
             sheet = .nudge(first)
-        case .status, .priority, .owner, .due, .labels, .project, .duplicate, .snooze:
+        case .acceptProposal:
+            changeWork { work.acceptProposals(ids.compactMap { work.proposals(for: $0).first?.id }) }
+        case .acceptAllProposals:
+            changeWork { work.acceptProposals(ids.flatMap { work.proposals(for: $0).map(\.id) }) }
+        case .rejectProposal:
+            work.rejectProposals(ids.compactMap { work.proposals(for: $0).first?.id })
+        case .status, .priority, .owner, .due, .labels, .project, .duplicate, .snooze, .delegate:
             break
         }
     }
@@ -671,7 +726,8 @@ extension AppModel {
         let ids = workTargets
         let rows = workRows(ids)
         let triageKeys: Set<WorkAction> = [.accept, .decline, .duplicate]
-        let verbs = WorkAction.allCases.filter { $0.applies(to: rows) }.map { action in
+        let proposed = workProposed(rows)
+        let verbs = WorkAction.allCases.filter { $0.applies(to: rows, proposed: proposed) }.map { action in
             PaletteAction(
                 id: "work-\(action.rawValue)", group: .work, title: action.title,
                 run: { [weak self] in self?.perform(action, on: ids) },

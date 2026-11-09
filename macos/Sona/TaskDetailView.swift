@@ -117,6 +117,7 @@ private struct DetailMain: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             DetailTitle(row: row)
+            ProposalStrip(proposals: model.work.proposals(for: row.id))
             DetailNotes(row: row)
                 .padding(.top, 10)
             if row.status == .triage {
@@ -657,7 +658,7 @@ private struct ActorMark: View {
     }
 }
 
-private struct DetailHeading: View {
+struct DetailHeading: View {
     let title: String
 
     var body: some View {
@@ -694,6 +695,20 @@ struct TaskPropertyList: View {
                 WorkPickerButton(kind: .owner, ids: ids) {
                     PropertyValue(text: row.ownerFace.name, faint: !row.ownerIsSelf && row.ownerPersonId == nil) {
                         Avatar(face: row.ownerFace, size: 16, revision: model.people.photoRevision)
+                    }
+                }
+            }
+            PropertyLine(title: "Agent") {
+                WorkPickerButton(kind: .delegate, ids: ids) {
+                    if let doer = row.doer {
+                        DoerChip(doer: doer, waiting: model.agents.waits(on: row))
+                            .padding(.horizontal, 8)
+                            .frame(height: 28)
+                            .contentShape(Rectangle())
+                    } else {
+                        PropertyValue(text: "You", faint: true) {
+                            Image(systemName: "sparkle").font(.system(size: 12)).foregroundStyle(Theme.inkTertiary)
+                        }
                     }
                 }
             }
@@ -813,7 +828,7 @@ enum WorkActivityText {
         let actor = switch entry.actor {
         case .me: "You"
         case .sona: "Sona"
-        case .agent: "An agent"
+        case .agent: entry.agent ?? "An agent"
         }
         return "\(actor) \(verb(entry, model: model))"
     }

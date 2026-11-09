@@ -10,6 +10,7 @@ struct AgentBridgeView: View {
         VStack(alignment: .leading, spacing: 0) {
             ErrorNote(store.error)
             controls
+            taskChanges
             projects
             hook
             activity
@@ -34,6 +35,30 @@ struct AgentBridgeView: View {
                     }
                 }
             }
+        }
+    }
+
+    private var taskChanges: some View {
+        AgentBridgeSection("Changes to your tasks") {
+            Card {
+                ChoiceRow(
+                    title: "Agents' changes",
+                    detail: "Suggest: an agent's edits wait for you to accept them. Apply: they happen at once and show in the task's history.",
+                    choices: WorkAutonomy.allCases,
+                    label: \.label,
+                    selection: Binding(
+                        get: { store.agentChanges },
+                        set: { autonomy in Task { await store.setAgentChanges(autonomy) } }))
+                ChoiceRow(
+                    title: "Sona's suggestions",
+                    detail: "Suggest: owner, due date and project ideas wait in Triage. Apply: Sona fills them in when it adds a task.",
+                    choices: WorkAutonomy.allCases,
+                    label: \.label,
+                    selection: Binding(
+                        get: { store.sonaChanges },
+                        set: { autonomy in Task { await store.setSonaChanges(autonomy) } }))
+            }
+            .disabled(store.autonomyBusy)
         }
     }
 

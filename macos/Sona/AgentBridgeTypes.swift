@@ -84,6 +84,9 @@ struct AgentBridgeObservedSession: Decodable, Identifiable, Sendable {
     /// The core's own answer: a prompt was submitted and no stop has been
     /// seen since, so there is a turn end for a reply to continue.
     let acceptsReply: Bool
+    /// The task the session works on, as the agent named it: "S-12" or the
+    /// task's id.
+    let task: String?
 
     var lastSeen: Date { Date(timeIntervalSince1970: TimeInterval(lastSeenAtMs) / 1000) }
 }
@@ -259,9 +262,24 @@ struct AgentBridgeUpdate: Decodable, Sendable {
     let status: AgentBridgeStatus
 }
 
-/// The one field of `get_app_settings` this slice reads.
+/// Whether changes to tasks land at once or wait for the user: one setting
+/// for agents, one for Sona's own suggestions.
+enum WorkAutonomy: String, Codable, CaseIterable, Hashable, Sendable {
+    case suggest, apply
+
+    var label: String {
+        switch self {
+        case .suggest: "Suggest"
+        case .apply: "Apply"
+        }
+    }
+}
+
+/// The fields of `get_app_settings` this slice reads.
 struct AgentBridgeAppSettings: Decodable, Sendable {
     let agentBridge: AgentBridgeSettings?
+    let workAgentChanges: WorkAutonomy?
+    let workSonaChanges: WorkAutonomy?
 }
 
 /// How this slice draws what the bridge hands it.

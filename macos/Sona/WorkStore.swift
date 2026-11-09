@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Observation
 
@@ -14,6 +15,8 @@ final class WorkStore {
     private(set) var people: [WorkPersonChoice] = []
     /// What Sona suggests for each item in triage, by item id.
     private(set) var suggestions: [String: [WorkFieldSuggestion]] = [:]
+    /// Changes agents proposed for each item, by item id, oldest first.
+    private(set) var proposals: [String: [WorkProposal]] = [:]
     /// False while the conversations cannot be opened: the list holds every
     /// item, but no meeting details and no people to choose.
     private(set) var conversationsAvailable = true
@@ -231,6 +234,69 @@ final class WorkStore {
         }
     }
 
+    /// An item's open proposals, oldest first: the open task's own read when
+    /// it is that item, else the list's.
+    func proposals(for id: String) -> [WorkProposal] {
+        if let detail, detail.item.id == id { return detail.proposals }
+        return proposals[id] ?? []
+    }
+
+    /// Accepts agents' proposals: the fields change at once, the core writes
+    /// them in each agent's name, and undo sets them back.
+    func acceptProposals(_ ids: [String]) {
+        let taken = takeProposals(ids)
+        guard !taken.isEmpty else { return }
+        let patches = taken.reduce(into: [String: WorkPatch]()) { patches, proposal in
+            Self.apply(proposal, to: &patches[proposal.itemId, default: WorkPatch()])
+        }
+        let before = rows(Array(patches.keys))
+        let undoable = !before.contains { $0.status == .duplicate && patches[$0.id]?.status != nil }
+        let reversal = before.flatMap { row in
+            var touched = patches[row.id] ?? WorkPatch()
+            if touched.projectId != nil { touched.milestoneId = .clear }
+            return Self.reversal(of: touched, on: [row])
+        }
+        let undo = undoable ? remember(Self.accepted(taken), .patches(reversal)) : nil
+        let now = ProjectsStore.milliseconds(.now)
+        change(Array(patches.keys), undo: undo, { row in
+            if let patch = patches[row.id] { self.patched(&row, patch, at: now) }
+        }) { operationId, _ in
+            do {
+                return try await self.core.request(
+                    "work_proposals_accept", IdsParams(operationId: operationId, ids: taken.map(\.id)))
+            } catch {
+                self.returnProposals(taken)
+                throw error
+            }
+        }
+    }
+
+    /// Turns agents' proposals down; the tasks stay as they are.
+    func rejectProposals(_ ids: [String]) {
+        let taken = takeProposals(ids)
+        guard !taken.isEmpty else { return }
+        enqueue {
+            do {
+                try await self.core.request(
+                    "work_proposals_reject", IdsParams(operationId: Self.newId(), ids: taken.map(\.id)))
+            } catch {
+                self.returnProposals(taken)
+                self.mutationError = error.localizedDescription
+            }
+        }
+    }
+
+    /// Hands tasks to an agent, or takes them back with `nil`. The prompt the
+    /// core writes for each lands on the clipboard, to paste into that agent.
+    func delegate(_ ids: [String], to agent: String?) {
+        let before = rows(ids)
+        guard !before.isEmpty else { return }
+        let noun = before.count == 1 ? "1 task" : "\(before.count) tasks"
+        let title = agent.map { "Delegated \(noun) to \($0), prompt copied" } ?? "Took back \(noun)"
+        let undo = remember(title, .delegate(before.map { (id: $0.id, agent: $0.doer?.agent) }))
+        hand(before.map(\.id), to: agent, copying: true, undo: undo)
+    }
+
     /// Creates or changes a label; returns its id, which is in `labels` at once.
     @discardableResult
     func saveLabel(id: String?, name: String, hue: Double) -> String {
@@ -339,6 +405,10 @@ final class WorkStore {
             setArchived(ids, true, undo: nil)
         case let .restore(ids):
             setArchived(ids, false, undo: nil)
+        case let .delegate(doers):
+            for (agent, handed) in Dictionary(grouping: doers, by: { $0.agent }) {
+                hand(handed.map { $0.id }, to: agent, copying: false, undo: nil)
+            }
         }
     }
 
@@ -354,6 +424,7 @@ final class WorkStore {
         case patches([(ids: [String], patch: WorkPatch)])
         case archive([String])
         case restore([String])
+        case delegate([(id: String, agent: String?)])
     }
 
     private func load() async {
@@ -373,6 +444,7 @@ final class WorkStore {
                 projects = listed.projects
                 people = listed.people
                 suggestions = listed.suggestions
+                proposals = listed.proposals
                 conversationsAvailable = listed.conversationsAvailable
                 counts = counted
                 views = savedViews
@@ -402,6 +474,66 @@ final class WorkStore {
         change(ids, undo: undo, { row in row.archivedAtMs = archived ? now : nil }) { operationId, rows in
             try await self.core.request(
                 archived ? "work_archive" : "work_restore", IdsParams(operationId: operationId, ids: rows.map(\.id)))
+        }
+    }
+
+    /// Sends each hand-over in its turn and copies the prompts the core
+    /// wrote, a blank line apart.
+    private func hand(_ ids: [String], to agent: String?, copying: Bool, undo: Int?) {
+        let before = rows(ids)
+        let now = ProjectsStore.milliseconds(.now)
+        edit(Set(ids)) { row in row.doer = agent.map { WorkDoer(agent: $0, sinceMs: now) } }
+        enqueue {
+            var prompts: [String] = []
+            for (index, row) in before.enumerated() {
+                do {
+                    let handed: WorkDelegation = try await self.core.request(
+                        "work_delegate", DelegateParams(operationId: Self.newId(), id: row.id, agent: agent))
+                    self.edit([row.id]) { $0.doer = handed.doer }
+                    if let prompt = handed.prompt { prompts.append(prompt) }
+                } catch {
+                    self.putBack(Array(before[index...]))
+                    self.forget(undo)
+                    self.mutationError = error.localizedDescription
+                    break
+                }
+            }
+            if copying, !prompts.isEmpty {
+                let board = NSPasteboard.general
+                board.clearContents()
+                if !board.setString(prompts.joined(separator: "\n\n"), forType: .string) {
+                    self.mutationError = "The prompt could not be copied."
+                }
+            }
+            self.reloadWhenIdle = true
+        }
+    }
+
+    /// Takes proposals off the screen at once; returns them, oldest first.
+    private func takeProposals(_ ids: [String]) -> [WorkProposal] {
+        let wanted = Set(ids)
+        var taken: [String: WorkProposal] = [:]
+        for (item, open) in proposals where open.contains(where: { wanted.contains($0.id) }) {
+            for proposal in open where wanted.contains(proposal.id) { taken[proposal.id] = proposal }
+            let kept = open.filter { !wanted.contains($0.id) }
+            proposals[item] = kept.isEmpty ? nil : kept
+        }
+        if var shown = detail, shown.proposals.contains(where: { wanted.contains($0.id) }) {
+            for proposal in shown.proposals where wanted.contains(proposal.id) { taken[proposal.id] = proposal }
+            shown.proposals.removeAll { wanted.contains($0.id) }
+            detail = shown
+        }
+        return Self.oldestFirst(Array(taken.values))
+    }
+
+    /// Puts back proposals whose answer the core refused.
+    private func returnProposals(_ taken: [WorkProposal]) {
+        for (item, back) in Dictionary(grouping: taken, by: \.itemId) {
+            proposals[item] = Self.oldestFirst((proposals[item] ?? []) + back)
+            if var shown = detail, shown.item.id == item {
+                shown.proposals = Self.oldestFirst(shown.proposals + back)
+                detail = shown
+            }
         }
     }
 
@@ -525,7 +657,7 @@ final class WorkStore {
             duplicateOfId: item.duplicateOfId, snoozedUntilMs: item.snoozedUntilMs, archivedAtMs: item.archivedAtMs,
             statusChangedAtMs: item.statusChangedAtMs, createdAtMs: item.createdAtMs, updatedAtMs: item.updatedAtMs,
             revision: item.revision, sortOrder: item.sortOrder, projectTitle: projectTitle(item.projectId),
-            ownerName: personName(item.ownerPersonId), sourceMeetingId: old?.sourceMeetingId,
+            ownerName: personName(item.ownerPersonId), doer: old?.doer, sourceMeetingId: old?.sourceMeetingId,
             sourceMeetingTitle: old?.sourceMeetingTitle, sourceQuote: old?.sourceQuote,
             sourceSpeaker: old?.sourceSpeaker, sourceAtMs: old?.sourceAtMs,
             blockedByOpenCount: old?.blockedByOpenCount ?? 0, raisedIn: old?.raisedIn ?? 0,
@@ -628,6 +760,40 @@ final class WorkStore {
         count == 1 ? "\(verb) 1 task" : "\(verb) \(count) tasks"
     }
 
+    /// "Accepted Claude Code's change", or how many when there were more.
+    private static func accepted(_ taken: [WorkProposal]) -> String {
+        let changes = taken.count == 1 ? "change" : "\(taken.count) changes"
+        let agents = Set(taken.map(\.agent))
+        guard agents.count == 1, let agent = agents.first else { return "Accepted \(changes)" }
+        return "Accepted \(agent)'s \(changes)"
+    }
+
+    /// What accepting a proposal sets, read from the text history keeps.
+    private static func apply(_ proposal: WorkProposal, to patch: inout WorkPatch) {
+        let to = proposal.to.flatMap { $0.isEmpty ? nil : $0 }
+        switch proposal.field {
+        case .title: patch.title = to
+        case .details: patch.details = clearable(to)
+        case .status: patch.status = to.flatMap(WorkStatus.init(rawValue:))
+        case .priority: patch.priority = to.flatMap { Int($0) }
+        case .owner:
+            patch.owner = switch to {
+            case "self"?: .myself
+            case "nobody"?, nil: .nobody
+            case let id?: .person(id)
+            }
+        case .due: patch.dueAtMs = clearable(to.flatMap { Int64($0) })
+        case .project: patch.projectId = clearable(to)
+        case .milestone: patch.milestoneId = clearable(to)
+        case .labels: patch.labelIds = to?.split(separator: ",").map(String.init) ?? []
+        case .snoozed: patch.snoozedUntilMs = clearable(to.flatMap { Int64($0) })
+        }
+    }
+
+    private static func oldestFirst(_ proposals: [WorkProposal]) -> [WorkProposal] {
+        proposals.sorted { ($0.createdAtMs, $0.id) < ($1.createdAtMs, $1.id) }
+    }
+
     private static func describe(_ patch: WorkPatch, count: Int) -> String {
         let noun = count == 1 ? "1 task" : "\(count) tasks"
         if let status = patch.status { return "Moved \(noun) to \(status.label)" }
@@ -705,4 +871,9 @@ private struct ViewParams: Encodable {
     let name: String
     let query: WorkQuery
     let display: WorkDisplay
+}
+private struct DelegateParams: Encodable {
+    let operationId: String
+    let id: String
+    let agent: String?
 }

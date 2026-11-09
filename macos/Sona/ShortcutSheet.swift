@@ -75,6 +75,12 @@ struct ShortcutSheet: View {
                 Entry(title: "Archive", keys: ["cmd+backspace"]),
                 Entry(title: "Undo", keys: ["cmd+z"]),
             ]),
+            ("Agents", [
+                Entry(title: "Delegate", keys: ["shift+cmd+;"]),
+                Entry(title: "Accept change", keys: ["y"]),
+                Entry(title: "Accept all changes", keys: ["shift+y"]),
+                Entry(title: "Reject change", keys: ["n"]),
+            ]),
         ],
     ]
 

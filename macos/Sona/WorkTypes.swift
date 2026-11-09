@@ -188,6 +188,8 @@ struct WorkItemRow: Codable, Identifiable, Equatable {
     var sortOrder: Double
     var projectTitle: String?
     var ownerName: String?
+    /// The agent working the item; none when the user is.
+    var doer: WorkDoer?
     var sourceMeetingId: String?
     var sourceMeetingTitle: String?
     var sourceQuote: String?
@@ -216,6 +218,36 @@ struct WorkItemRow: Codable, Identifiable, Equatable {
         if ownerIsSelf { return .myself }
         return ownerPersonId.map { .person($0) } ?? .nobody
     }
+}
+
+/// The agent working an item, by the name it goes by, since it took it.
+struct WorkDoer: Codable, Equatable {
+    var agent: String
+    var sinceMs: Int64
+}
+
+enum WorkProposalField: String, Codable, Hashable {
+    case title, details, status, priority, owner, due, project, milestone, labels, snoozed
+}
+
+/// One field an agent would change, waiting for the user. `from` is the
+/// value when it was proposed and `to` the value proposed, both in the form
+/// a history entry keeps; details carry their whole text.
+struct WorkProposal: Codable, Identifiable, Equatable {
+    var id: String
+    var itemId: String
+    var agent: String
+    var field: WorkProposalField
+    var from: String?
+    var to: String?
+    var createdAtMs: Int64
+}
+
+/// What handing an item to an agent left: its doer, and the prompt to paste
+/// into that agent, absent when the user took the item back.
+struct WorkDelegation: Decodable {
+    var doer: WorkDoer?
+    var prompt: String?
 }
 
 /// A new item. Fields left `nil` start as not started, at no priority, with
@@ -387,6 +419,8 @@ struct WorkActivity: Codable, Identifiable, Equatable {
     var kind: WorkActivityKind
     var from: String?
     var to: String?
+    /// The agent behind an `agent` entry, when it gave its name.
+    var agent: String?
 }
 
 enum WorkRelationKind: String, Codable, Hashable { case blocks, related }
@@ -454,6 +488,8 @@ struct WorkList: Decodable, Equatable {
     var people: [WorkPersonChoice]
     /// What Sona suggests for each listed item still in triage, by item id.
     var suggestions: [String: [WorkFieldSuggestion]]
+    /// Changes agents proposed for listed items, by item id, oldest first.
+    var proposals: [String: [WorkProposal]]
     /// False when the conversations could not be opened: every item is
     /// listed, but nothing read from its meeting, and no people.
     var conversationsAvailable: Bool
@@ -468,6 +504,7 @@ struct WorkItemDetail: Decodable, Equatable {
     /// False when the conversations could not be opened: the item's
     /// meeting, its meeting evidence and its people are not read.
     var conversationsAvailable: Bool
+    var proposals: [WorkProposal]
 }
 
 /// The `work-changed` event: the items one committed change touched, or
