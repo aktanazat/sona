@@ -21,7 +21,7 @@ import { publishedTools, SonaInputError, TOOL_INPUT } from "./tools.ts";
 /* Read by clients that show a server's instructions to their model: the
  * order an agent works a task in, which no single tool description holds. */
 const INSTRUCTIONS =
-  "Sona holds the user's meetings, notes and tasks. For tasks: sona_work_counts or sona_work_list (ready:true for what to start next), sona_work_get for one task with its meeting quote and history, sona_work_claim before starting work, sona_work_done with evidence after. Handles like S-12 work wherever a task is asked for. Writes need the user's External mutations setting; preview a change with dry_run:true. Set SONA_MCP_TOOLS=all for labels, views, links and archiving.";
+  "Sona holds the user's meetings, notes and tasks. For tasks: sona_work_counts or sona_work_list (ready:true for what to start next), sona_work_get for one task with its meeting quote and history, sona_work_claim before starting work, sona_work_done with evidence after. Handles like S-12 work wherever a task is asked for. Writes need the user's External mutations setting; preview a change with dry_run:true. Unless the user lets agents' changes apply, a change to a task waits under proposed for the user to accept in Sona. Set SONA_MCP_TOOLS=all for labels, views, links and archiving.";
 
 /* JSON-RPC's vocabulary over Sona's. Only three of Sona's refusals are the
  * caller's to fix: two name an argument that matches nothing in the corpus,
@@ -90,7 +90,7 @@ export function createServer(selection = process.env.SONA_MCP_TOOLS): Server {
       );
     }
     try {
-      const argv = tool.argv(input.data);
+      const argv = tool.argv(input.data, server.getClientVersion()?.name);
       const answer = await runSona(argv);
       /* One text block holding the JSON Sona printed. No `structuredContent`:
        * this server declares no output schema, so a second copy of the same

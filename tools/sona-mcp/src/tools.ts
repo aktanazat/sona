@@ -55,8 +55,9 @@ export interface ToolDefinition {
     readonly required?: readonly string[];
     readonly additionalProperties: false;
   };
-  /** The `sona` command line this call becomes. */
-  argv(input: ToolInput): string[];
+  /** The `sona` command line this call becomes. `agent` is the client's
+   * name, which every task write passes on so Sona can say who changed it. */
+  argv(input: ToolInput, agent?: string): string[];
 }
 
 /** An argument this server could not turn into a command line. */
@@ -107,6 +108,14 @@ function cleared(flag: string, input: ToolInput, key: string): string[] {
     throw new SonaInputError(`${key} must be a string.`);
   }
   return [`${flag}=${parsed.data}`];
+}
+
+/** What every `sona work` write takes: the operation, and who makes it. */
+function writing(input: ToolInput, agent: string | undefined): string[] {
+  return [
+    ...assigned("--operation-id", text(input, "operation_id")),
+    ...assigned("--agent", agent ?? null),
+  ];
 }
 
 function flag(input: ToolInput, key: string): boolean {
@@ -161,7 +170,7 @@ const SINCE_UTC_MS = {
 } as const;
 
 const WRITES =
-  "This changes the user's Sona tasks. It needs Settings > Agents > External access and External mutations; with either off Sona refuses with consent_required and names the setting.";
+  "This changes the user's Sona tasks. It needs Settings > Agents > External access and External mutations; with either off Sona refuses with consent_required and names the setting. Unless the user lets agents' changes apply in Settings > Agents, changes to a task's fields come back under proposed and wait for the user to accept them in Sona, a new task lands in Triage, and triage, duplicates, archiving and label changes are refused.";
 
 const TASK = {
   type: "string",
@@ -276,11 +285,11 @@ function archiving(verb: "archive" | "restore", title: string, what: string): To
       required: ["tasks"],
       additionalProperties: false,
     },
-    argv: (input) => [
+    argv: (input, agent) => [
       "work",
       verb,
       ...(flag(input, "dry_run") ? ["--dry-run"] : []),
-      ...assigned("--operation-id", text(input, "operation_id")),
+      ...writing(input, agent),
       "--json",
       "--",
       ...tasks(input, "tasks"),
@@ -311,10 +320,10 @@ function linking(verb: "relate" | "unrelate", title: string, what: string): Tool
       required: ["task", "link", "other"],
       additionalProperties: false,
     },
-    argv: (input) => [
+    argv: (input, agent) => [
       "work",
       verb,
-      ...assigned("--operation-id", text(input, "operation_id")),
+      ...writing(input, agent),
       "--json",
       "--",
       text(input, "task", true),
@@ -917,11 +926,11 @@ export const TOOLS: readonly ToolDefinition[] = [
       required: ["title"],
       additionalProperties: false,
     },
-    argv: (input) => [
+    argv: (input, agent) => [
       "work",
       "create",
       ...fieldFlags(input),
-      ...assigned("--operation-id", text(input, "operation_id")),
+      ...writing(input, agent),
       "--json",
       "--",
       text(input, "title", true),
@@ -962,7 +971,7 @@ export const TOOLS: readonly ToolDefinition[] = [
       required: ["tasks"],
       additionalProperties: false,
     },
-    argv: (input) => [
+    argv: (input, agent) => [
       "work",
       "update",
       ...assigned("--title", text(input, "title")),
@@ -972,7 +981,7 @@ export const TOOLS: readonly ToolDefinition[] = [
       ...assigned("--snooze-until", text(input, "snooze_until")),
       ...assigned("--expected-revision", count(input, "expected_revision")),
       ...(flag(input, "dry_run") ? ["--dry-run"] : []),
-      ...assigned("--operation-id", text(input, "operation_id")),
+      ...writing(input, agent),
       "--json",
       "--",
       ...tasks(input, "tasks"),
@@ -981,7 +990,7 @@ export const TOOLS: readonly ToolDefinition[] = [
   {
     name: "sona_work_claim",
     title: "Start a Sona task",
-    description: `Start a Todo or Backlog task before working on it: it moves to In progress, the history records an agent started it, and its owner stays who it was. Refused when the task is already in progress, still in triage, archived or closed, so two agents cannot both start it. ${WRITES}`,
+    description: `Start a Todo or Backlog task before working on it: it moves to In progress with you shown working it, and its owner stays who it was. Claiming a task you already work changes nothing. Refused when another agent works it, or when it is in progress without you, still in triage, archived or closed, so two agents cannot both start it. ${WRITES}`,
     mutates: true,
     inputSchema: {
       type: "object",
@@ -989,10 +998,10 @@ export const TOOLS: readonly ToolDefinition[] = [
       required: ["task"],
       additionalProperties: false,
     },
-    argv: (input) => [
+    argv: (input, agent) => [
       "work",
       "claim",
-      ...assigned("--operation-id", text(input, "operation_id")),
+      ...writing(input, agent),
       "--json",
       "--",
       text(input, "task", true),
@@ -1018,12 +1027,12 @@ export const TOOLS: readonly ToolDefinition[] = [
       required: ["tasks"],
       additionalProperties: false,
     },
-    argv: (input) => [
+    argv: (input, agent) => [
       "work",
       "done",
       ...assigned("--evidence", text(input, "evidence")),
       ...(flag(input, "dry_run") ? ["--dry-run"] : []),
-      ...assigned("--operation-id", text(input, "operation_id")),
+      ...writing(input, agent),
       "--json",
       "--",
       ...tasks(input, "tasks"),
@@ -1060,10 +1069,10 @@ export const TOOLS: readonly ToolDefinition[] = [
       required: ["tasks", "decision"],
       additionalProperties: false,
     },
-    argv: (input) => {
+    argv: (input, agent) => {
       const decision = text(input, "decision", true);
       const common = [
-        ...assigned("--operation-id", text(input, "operation_id")),
+        ...writing(input, agent),
         "--json",
       ];
       switch (decision) {
@@ -1137,12 +1146,12 @@ export const TOOLS: readonly ToolDefinition[] = [
       required: ["name"],
       additionalProperties: false,
     },
-    argv: (input) => [
+    argv: (input, agent) => [
       "work",
       "label-save",
       ...assigned("--label", text(input, "label")),
       ...assigned("--hue", count(input, "hue")),
-      ...assigned("--operation-id", text(input, "operation_id")),
+      ...writing(input, agent),
       "--json",
       "--",
       text(input, "name", true),
@@ -1163,10 +1172,10 @@ export const TOOLS: readonly ToolDefinition[] = [
       required: ["label"],
       additionalProperties: false,
     },
-    argv: (input) => [
+    argv: (input, agent) => [
       "work",
       "label-delete",
-      ...assigned("--operation-id", text(input, "operation_id")),
+      ...writing(input, agent),
       "--json",
       "--",
       text(input, "label", true),
@@ -1228,7 +1237,7 @@ export const TOOLS: readonly ToolDefinition[] = [
       required: ["name"],
       additionalProperties: false,
     },
-    argv: (input) => [
+    argv: (input, agent) => [
       "work",
       "view-save",
       ...assigned("--view", text(input, "view")),
@@ -1237,7 +1246,7 @@ export const TOOLS: readonly ToolDefinition[] = [
       ...assigned("--layout", text(input, "layout")),
       ...assigned("--group-by", text(input, "group_by")),
       ...assigned("--order-by", text(input, "order_by")),
-      ...assigned("--operation-id", text(input, "operation_id")),
+      ...writing(input, agent),
       "--json",
       "--",
       text(input, "name", true),
@@ -1258,10 +1267,10 @@ export const TOOLS: readonly ToolDefinition[] = [
       required: ["view"],
       additionalProperties: false,
     },
-    argv: (input) => [
+    argv: (input, agent) => [
       "work",
       "view-delete",
-      ...assigned("--operation-id", text(input, "operation_id")),
+      ...writing(input, agent),
       "--json",
       "--",
       text(input, "view", true),
