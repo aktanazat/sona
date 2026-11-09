@@ -661,6 +661,7 @@ struct PersonSections: View {
                     }
                     PersonFirstMetSection(personId: personId, revision: store.detailRevision, openMeeting: openMeeting)
                     PersonReelSection(personId: personId, revision: store.detailRevision)
+                    PersonWatchSection(personId: personId, name: detail.person.displayName)
                     PersonContinuityView(
                         personId: personId,
                         memory: memory,

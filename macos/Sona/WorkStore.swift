@@ -30,6 +30,8 @@ final class WorkStore {
     private(set) var mutationError: String?
     private(set) var detail: WorkItemDetail?
     private(set) var detailError: String?
+    /// The words Sona listens for, oldest first.
+    private(set) var watches: [WorkWatch] = []
     /// What `undo` would take back.
     private(set) var undoTitle: String?
     /// The moment the lists are drawn at. It moves when work changes and on
@@ -59,10 +61,14 @@ final class WorkStore {
                 Task { await self.refresh() }
             }
         }
+        core.observe("work-watches-changed") { [weak self] _ in
+            Task { await self?.loadWatches() }
+        }
     }
 
     func start() async {
         await refresh()
+        await loadWatches()
     }
 
     /// Reads everything again. A call while a read runs asks that read to go
@@ -498,6 +504,120 @@ final class WorkStore {
                 self.mutationError = error.localizedDescription
             }
             self.reloadWhenIdle = true
+        }
+    }
+
+    // MARK: Ask, say, watch
+
+    /// The tasks a sentence would change and how, or nil when it is not a
+    /// change to tasks. Reads only, so it does not wait in the queue.
+    func command(_ text: String, selection: [String] = []) async -> WorkCommand? {
+        do {
+            let read: WorkCommand? = try await core.request(
+                "work_command", CommandParams(text: text, selection: selection))
+            return read
+        } catch {
+            return nil
+        }
+    }
+
+    /// One change to every task the command named, undone as one.
+    func apply(_ command: WorkCommand) {
+        let ids = command.items.map(\.id)
+        switch command.change {
+        case let .update(patch): update(ids, patch)
+        case .archive: archive(ids)
+        }
+    }
+
+    func ask(_ question: String) async throws -> WorkAnswer {
+        try await core.request("work_ask", QuestionParams(question: question))
+    }
+
+    /// Triage tasks from answer lines, each keeping its words and where they
+    /// were said. Waits for earlier changes, like `create`.
+    @discardableResult
+    func take(_ lines: [WorkAnswerLine]) async -> [WorkItem] {
+        guard !lines.isEmpty else { return [] }
+        await queue?.value
+        pending += 1
+        defer { settle() }
+        mutationError = nil
+        let taken = lines.map { WorkTakenLine(quote: $0.quote, source: $0.source, personId: $0.personId) }
+        do {
+            let made: [WorkItem] = try await core.request(
+                "work_take_lines", TakeParams(operationId: Self.newId(), lines: taken))
+            if var rows = items {
+                for item in made where !rows.contains(where: { $0.id == item.id }) {
+                    rows.append(row(for: item, beside: nil))
+                }
+                items = rows
+            }
+            return made
+        } catch {
+            mutationError = error.localizedDescription
+            return []
+        }
+    }
+
+    func loadWatches() async {
+        guard let read: [WorkWatch] = try? await core.request("work_watches") else { return }
+        watches = read
+    }
+
+    /// Shows at once; the core's answer replaces it, or it goes again.
+    func watch(_ phrase: String, personId: String? = nil, personName: String? = nil) {
+        let phrase = phrase.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !phrase.isEmpty else { return }
+        let already = watches.contains {
+            $0.phrase.caseInsensitiveCompare(phrase) == .orderedSame && $0.personId == personId
+        }
+        guard !already else { return }
+        let draft = WorkWatch(
+            id: Self.newId(), phrase: phrase, personId: personId, personName: personName,
+            createdAtMs: TaskDates.now(), hits: [])
+        watches.append(draft)
+        Task {
+            do {
+                let saved: WorkWatch = try await core.request(
+                    "work_watch_save", WatchParams(phrase: phrase, personId: personId))
+                if let index = watches.firstIndex(where: { $0.id == draft.id }) { watches[index] = saved }
+            } catch {
+                watches.removeAll { $0.id == draft.id }
+                mutationError = error.localizedDescription
+            }
+        }
+    }
+
+    func unwatch(_ id: String) {
+        guard let index = watches.firstIndex(where: { $0.id == id }) else { return }
+        let gone = watches.remove(at: index)
+        Task {
+            do {
+                try await core.request("work_watch_remove", IdParams(id: id))
+            } catch {
+                watches.insert(gone, at: min(index, watches.count))
+                mutationError = error.localizedDescription
+            }
+        }
+    }
+
+    /// A Triage task from the line a watch heard; the hit keeps it.
+    func task(from hit: WorkWatchHit) async -> WorkItem? {
+        await queue?.value
+        pending += 1
+        defer { settle() }
+        do {
+            let item: WorkItem = try await core.request("work_watch_task", HitParams(hitId: hit.id))
+            if var rows = items, !rows.contains(where: { $0.id == item.id }) {
+                rows.append(row(for: item, beside: nil))
+                items = rows
+            }
+            await loadWatches()
+            return item
+        } catch {
+            mutationError = error.localizedDescription
+            return nil
         }
     }
 
@@ -999,3 +1119,17 @@ private struct LinkSource: Encodable {
     let url: String
     let title: String?
 }
+private struct CommandParams: Encodable {
+    let text: String
+    let selection: [String]
+}
+private struct QuestionParams: Encodable { let question: String }
+private struct TakeParams: Encodable {
+    let operationId: String
+    let lines: [WorkTakenLine]
+}
+private struct WatchParams: Encodable {
+    let phrase: String
+    let personId: String?
+}
+private struct HitParams: Encodable { let hitId: String }
