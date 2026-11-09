@@ -655,10 +655,12 @@ struct Page<Content: View, Actions: View, Pinned: View>: View {
     }
 
     private var chrome: some View {
-        pinned
-            .frame(maxWidth: Theme.contentMax, alignment: .leading)
-            .padding(.horizontal, Theme.margin)
-            .frame(maxWidth: .infinity)
+        VStack(alignment: .leading, spacing: 0) {
+            pinned
+        }
+        .frame(maxWidth: Theme.contentMax, alignment: .leading)
+        .padding(.horizontal, Theme.margin)
+        .frame(maxWidth: .infinity)
     }
 
     /// "‹ People › Noah Sample": the way back, then the page's name once its
