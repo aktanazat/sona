@@ -53,7 +53,8 @@ extension AppModel {
         case .all, .view:
             guard let draft else { return [] }
             let triageAsked = draft.query.statuses?.contains(.triage) == true
-            let rows = items.filter { ($0.status != .triage || triageAsked) && TaskListing.matches($0, draft.query, now: now) }
+            let filter = TaskListing.Filter(draft.query, now: now)
+            let rows = items.filter { ($0.status != .triage || triageAsked) && filter.matches($0) }
             return TaskListing.groups(rows, display: draft.display, now: now,
                                       projects: work.projects, people: work.people)
         }
@@ -108,6 +109,7 @@ private struct TasksList: View {
         .animation(Motion.regular, value: focus.peeking)
         .animation(Motion.regular, value: focus.selecting)
     }
+
 
     @ViewBuilder
     private func content(_ groups: [TaskGroup], draft: WorkViewDraft?, now: Int64) -> some View {

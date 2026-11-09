@@ -104,7 +104,8 @@ private struct TriageList: View {
     }
 
     static func waiting(_ items: [WorkItemRow], now: Int64) -> [WorkItemRow] {
-        items.filter { $0.status == .triage && TaskListing.matches($0, WorkQuery(), now: now) }
+        let shown = TaskListing.Filter(WorkQuery(), now: now)
+        return items.filter { $0.status == .triage && shown.matches($0) }
     }
 
     /// One group per meeting, the latest meeting first; inside a meeting,

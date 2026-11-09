@@ -126,7 +126,8 @@ struct Shutdown {
 
 extension AppModel {
     func morningPlan(now: Int64) -> MorningPlan {
-        let live = (work.items ?? []).filter { TaskListing.matches($0, WorkQuery(), now: now) }
+        let shown = TaskListing.Filter(WorkQuery(), now: now)
+        let live = (work.items ?? []).filter { shown.matches($0) }
         let due = live.filter { row in
             row.direction == .mine && row.status.isOpen
                 && [.overdue, .today].contains(TaskBucket.of(row, now: now, blocking: false))
@@ -157,8 +158,9 @@ extension AppModel {
         let focus = Set(rituals.focus)
         let mine = items.filter { $0.direction == .mine && $0.archivedAtMs == nil }
         let kept = mine.filter { $0.status == .done && $0.statusChangedAtMs >= morning }
+        let shown = TaskListing.Filter(WorkQuery(), now: now)
         let slipped = mine.filter { row in
-            guard row.status.isOpen, TaskListing.matches(row, WorkQuery(), now: now) else { return false }
+            guard row.status.isOpen, shown.matches(row) else { return false }
             guard let due = row.dueAtMs else { return focus.contains(row.id) }
             return PlanningFormat.days(from: now, to: due) <= 0
         }

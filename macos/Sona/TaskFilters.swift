@@ -45,7 +45,14 @@ enum TaskFilters {
             chips.append(TaskFilterChip(id: "label", text: "Label is \(list(names))") { $0.labelIds = nil })
         }
         if let before = query.dueBeforeMs {
-            chips.append(TaskFilterChip(id: "due", text: "Due before \(PlanningFormat.day(before))") { $0.dueBeforeMs = nil })
+            chips.append(TaskFilterChip(id: "dueBefore", text: "Due before \(PlanningFormat.day(before))") { $0.dueBeforeMs = nil })
+        }
+        if let due = query.due {
+            let names = due.enumerated().map { index, window in
+                let name = title(window)
+                return index == 0 ? name : name.prefix(1).lowercased() + name.dropFirst()
+            }
+            chips.append(TaskFilterChip(id: "due", text: names.formatted(.list(type: .or))) { $0.due = nil })
         }
         if let meeting = query.sourceMeetingId {
             let title = store.items?.first { $0.sourceMeetingId == meeting }?.sourceMeetingTitle ?? "a meeting"
@@ -55,6 +62,21 @@ enum TaskFilters {
             chips.append(TaskFilterChip(id: "snoozed", text: "Snoozed shown") { $0.includeSnoozed = false })
         }
         return chips
+    }
+
+    /// The due windows the filter panel offers; each moves with the calendar.
+    static let dueWindows: [WorkDue] = [.overdue, .today, .thisWeek, .nextDays(14), .noDate]
+
+    static func title(_ window: WorkDue) -> String {
+        switch window {
+        case .overdue: "Overdue"
+        case .today: "Due today"
+        case .thisWeek: "Due this week"
+        case .nextDays(14): "Due within two weeks"
+        case .nextDays(1): "Due within a day"
+        case let .nextDays(days): "Due within \(days) days"
+        case .noDate: "No due date"
+        }
     }
 
     /// "Todo, In progress" or "Todo and 3 more".
@@ -181,13 +203,11 @@ private struct TaskFilterPanel: View {
                         }
                     }
                     section("Due") {
-                        let deadlines = dues
-                        ForEach(deadlines.indices, id: \.self) { index in
-                            let (title, before) = deadlines[index]
-                            option(title, on: query.dueBeforeMs == before) {
+                        ForEach(TaskFilters.dueWindows, id: \.self) { window in
+                            option(TaskFilters.title(window), on: query.due?.contains(window) == true) {
                                 symbol("calendar")
                             } toggle: {
-                                model.editListing { $0.query.dueBeforeMs = $0.query.dueBeforeMs == before ? nil : before }
+                                model.editListing { $0.query.due = TaskFilters.toggled($0.query.due, window) }
                             }
                         }
                     }
@@ -204,16 +224,6 @@ private struct TaskFilterPanel: View {
         }
         .frame(width: 300)
         .onAppear { searching = true }
-    }
-
-    /// Dates move with the clock, so each is worked out when the panel draws.
-    private var dues: [(title: String, before: Int64)] {
-        [
-            ("Overdue", TaskDates.day(0, hour: 0)),
-            ("Due by today", TaskDates.day(1, hour: 0)),
-            ("Due this week", TaskDates.next(weekday: 2, hour: 0)),
-            ("Due within two weeks", TaskDates.day(15, hour: 0)),
-        ]
     }
 
     /// Me and No owner stand alone; people combine with each other.
