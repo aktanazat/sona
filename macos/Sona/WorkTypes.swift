@@ -390,6 +390,9 @@ struct WorkList: Decodable, Equatable {
     var people: [WorkPersonChoice]
     /// What Sona suggests for each listed item still in triage, by item id.
     var suggestions: [String: [WorkFieldSuggestion]]
+    /// False when the conversations could not be opened: every item is
+    /// listed, but nothing read from its meeting, and no people.
+    var conversationsAvailable: Bool
 }
 
 struct WorkItemDetail: Decodable, Equatable {
@@ -398,6 +401,9 @@ struct WorkItemDetail: Decodable, Equatable {
     var relations: [WorkRelation]
     var activity: [WorkActivity]
     var suggestions: [WorkFieldSuggestion]
+    /// False when the conversations could not be opened: the item's
+    /// meeting, its meeting evidence and its people are not read.
+    var conversationsAvailable: Bool
 }
 
 /// The `work-changed` event: the items one committed change touched, or

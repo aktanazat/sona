@@ -276,9 +276,10 @@ fn track(
             if item.status != WorkStatus::Triage {
                 return Err(Refusal::AlreadyTracked.into());
             }
-            let mut reader = MeetingReader::new(meetings, user_name);
+            let mut reader = MeetingReader::new(Some(meetings), user_name);
             let patch = sync::acceptance(tx, &mut reader, &item, true, Some(&project_id))?;
-            let (after, moved) = sync::accept(tx, meetings, &item, &patch, WorkActor::Me, now_ms)?;
+            let (after, moved) =
+                sync::accept(tx, Some(meetings), &item, &patch, WorkActor::Me, now_ms)?;
             store::insert_link(
                 tx,
                 &store::SourceLinkDraft {
@@ -326,7 +327,8 @@ fn dismiss(
             if let Some(item) = sync::tracking_item(tx, meetings, &loop_id)?
                 .filter(|item| item.status == WorkStatus::Triage)
             {
-                let (after, moved) = sync::decline(tx, meetings, &item, WorkActor::Me, now_ms)?;
+                let (after, moved) =
+                    sync::decline(tx, Some(meetings), &item, WorkActor::Me, now_ms)?;
                 effects.item(&after);
                 effects.loops.extend(moved);
             }
@@ -370,9 +372,13 @@ fn restore(
                     now_ms,
                 )?;
                 effects.changed(&changed);
-                effects
-                    .loops
-                    .extend(sync::settle(tx, meetings, &item.id, WorkActor::Me, now_ms)?);
+                effects.loops.extend(sync::settle(
+                    tx,
+                    Some(meetings),
+                    &item.id,
+                    WorkActor::Me,
+                    now_ms,
+                )?);
             }
             Ok(Done { value: (), effects })
         },

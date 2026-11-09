@@ -2441,7 +2441,9 @@ fn note_read_error(history: &HistoryManager, message: String) -> ExternalError {
 fn project_read_error(history: &HistoryManager, message: String) -> ExternalError {
     let code = match message.as_str() {
         "This item no longer exists." => ExternalErrorCode::NotFound,
-        "Conversations are still unlocking." => ExternalErrorCode::Unavailable,
+        planning::CONVERSATIONS_CLOSED | planning::PORTABLE_NO_CONVERSATIONS => {
+            ExternalErrorCode::Unavailable
+        }
         _ if !history.storage_is_ready() => ExternalErrorCode::Unavailable,
         _ => ExternalErrorCode::Failed,
     };

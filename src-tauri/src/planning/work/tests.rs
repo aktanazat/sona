@@ -7,9 +7,10 @@ use super::super::store as planning_store;
 use super::items::{self, NewItem};
 use super::sync;
 use super::types::{
-    WorkActivityKind, WorkActor, WorkItem, WorkItemInput, WorkOwner, WorkPatch, WorkStatus,
+    WorkActivityKind, WorkActor, WorkItem, WorkItemInput, WorkOwner, WorkPatch, WorkQuery,
+    WorkStatus,
 };
-use super::{accept, bulk_update, create, mark_duplicate, set_archived, update, Change};
+use super::{accept, bulk_update, create, list, mark_duplicate, set_archived, update, Change};
 use crate::meeting::ledger::{
     LedgerCommitment, LedgerFirmness, LedgerReceipt, LedgerReceiptState, MeetingLedger,
 };
@@ -268,7 +269,7 @@ impl Desk {
             .both(|history, meetings| {
                 accept(
                     history,
-                    meetings,
+                    Some(meetings),
                     None,
                     by_me(&operation(), at),
                     &[triaged.id],
@@ -445,7 +446,7 @@ fn a_commitment_and_its_item_move_together_without_echo() {
         .both(|history, meetings| {
             update(
                 history,
-                meetings,
+                Some(meetings),
                 by_me(&operation(), at),
                 &item.id,
                 item.revision,
@@ -493,7 +494,7 @@ fn a_bulk_change_lands_on_every_item_or_on_none() {
     let refused = desk.both(|history, meetings| {
         bulk_update(
             history,
-            meetings,
+            Some(meetings),
             by_me(&operation(), at),
             &[tracked.id.clone(), banners.id.clone(), missing],
             &finish,
@@ -509,7 +510,7 @@ fn a_bulk_change_lands_on_every_item_or_on_none() {
         .both(|history, meetings| {
             bulk_update(
                 history,
-                meetings,
+                Some(meetings),
                 by_me(&operation(), at),
                 &[tracked.id.clone(), banners.id.clone()],
                 &finish,
@@ -596,7 +597,7 @@ fn a_duplicate_hands_its_meeting_to_the_original_and_follows_it() {
         .both(|history, meetings| {
             mark_duplicate(
                 history,
-                meetings,
+                Some(meetings),
                 by_me(&operation(), at),
                 &repeat.id,
                 &original.id,
@@ -618,7 +619,7 @@ fn a_duplicate_hands_its_meeting_to_the_original_and_follows_it() {
     desk.both(|history, meetings| {
         update(
             history,
-            meetings,
+            Some(meetings),
             by_me(&operation(), at),
             &original.id,
             original.revision,
@@ -638,7 +639,7 @@ fn an_agent_change_is_filed_under_the_agent_on_both_sides() {
     desk.both(|history, meetings| {
         update(
             history,
-            meetings,
+            Some(meetings),
             Change {
                 operation_id: &operation(),
                 actor: WorkActor::Agent,
@@ -661,4 +662,50 @@ fn an_agent_change_is_filed_under_the_agent_on_both_sides() {
     let row = desk.page_row(&loop_id);
     assert_eq!(row.status, MeetingLoopStatus::Done);
     assert_eq!(row.resolved_by, Some(OperationActor::External));
+}
+
+#[test]
+fn a_change_made_while_the_conversations_are_closed_reaches_its_commitment_when_they_open() {
+    let mut desk = desk(&["Send the outline"]);
+    let (item, loop_id) = desk.accepted();
+
+    let at = desk.tick();
+    let closed = list(&desk.history, None, None, &WorkQuery::default(), at)
+        .expect("the tracker while the conversations are closed");
+    assert!(!closed.conversations_available);
+    let listed = closed
+        .items
+        .iter()
+        .map(|row| (row.item.id.as_str(), row.item.source_loop_id.as_deref()))
+        .collect::<Vec<_>>();
+    assert_eq!(listed, [(item.id.as_str(), Some(loop_id.as_str()))]);
+
+    let done = update(
+        &mut desk.history,
+        None,
+        by_me(&operation(), at),
+        &item.id,
+        item.revision,
+        &status(WorkStatus::Done),
+    )
+    .expect("done while the conversations are closed")
+    .value;
+    assert_eq!(done.status, WorkStatus::Done);
+    assert_eq!(desk.page_status(&loop_id), MeetingLoopStatus::Open);
+
+    let at = desk.tick();
+    let caught_up = desk
+        .both(|history, meetings| {
+            let tx = history.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let followed = sync::reconcile(&tx, meetings, at)?;
+            tx.commit()?;
+            Ok(followed)
+        })
+        .expect("the catch-up as the conversations open");
+    assert_eq!(caught_up.loops, [loop_id.clone()]);
+    assert!(caught_up.items.is_empty());
+    let row = desk.page_row(&loop_id);
+    assert_eq!(row.status, MeetingLoopStatus::Done);
+    assert_eq!(row.resolved_by, Some(OperationActor::User));
+    assert_eq!(desk.item(&item.id), done);
 }

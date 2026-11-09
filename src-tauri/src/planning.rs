@@ -45,7 +45,41 @@ fn changed(app: &AppHandle, project_id: String) {
     }
 }
 
+/// What a planner command answers when the conversations, and the people in
+/// them, cannot be opened.
+pub(crate) const CONVERSATIONS_CLOSED: &str =
+    "Conversations and the people in them can't be opened right now.";
+/// [`CONVERSATIONS_CLOSED`] in portable mode, which keeps no conversations.
+pub(crate) const PORTABLE_NO_CONVERSATIONS: &str =
+    "Portable mode keeps no conversations or people.";
+
+/// Work that needs the conversations found them closed. Not a
+/// [`store::Refusal`]: it passes once they open, so it is never kept as an
+/// operation's answer.
+#[derive(Debug)]
+pub(crate) struct ConversationsClosed;
+
+impl std::fmt::Display for ConversationsClosed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the conversations are closed")
+    }
+}
+
+impl std::error::Error for ConversationsClosed {}
+
+fn conversations_closed() -> String {
+    if crate::portable::is_portable() {
+        PORTABLE_NO_CONVERSATIONS
+    } else {
+        CONVERSATIONS_CLOSED
+    }
+    .to_string()
+}
+
 fn failure(error: anyhow::Error) -> String {
+    if error.is::<ConversationsClosed>() {
+        return conversations_closed();
+    }
     match error.downcast_ref::<store::Refusal>() {
         Some(store::Refusal::Invalid) => "Check the title, date, and selected owner.",
         Some(store::Refusal::NotFound) => "This item no longer exists.",
@@ -82,10 +116,7 @@ async fn with_sources<T: Send>(
     meetings: &MeetingSessionManager,
     work: impl FnOnce(&mut Connection, &Connection) -> StorageResult<T> + Send,
 ) -> Result<T, String> {
-    let store = meetings
-        .store()
-        .await
-        .map_err(|_| "Conversations are still unlocking.".to_string())?;
+    let store = meetings.store().await.map_err(|_| conversations_closed())?;
     store
         .with_planning_snapshot(|meeting_conn| {
             Ok(history.with_connection(|history_conn| work(history_conn, meeting_conn)))
@@ -328,7 +359,7 @@ pub async fn planning_update_task(
         status,
         owner_is_self,
     };
-    let done = work::with_both(&history_state, &meetings, |history_conn, meeting_conn| {
+    let done = work::with_meetings(&history_state, &meetings, |history_conn, meeting_conn| {
         work::update_task(
             history_conn,
             meeting_conn,

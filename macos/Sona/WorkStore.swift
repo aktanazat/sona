@@ -14,6 +14,9 @@ final class WorkStore {
     private(set) var people: [WorkPersonChoice] = []
     /// What Sona suggests for each item in triage, by item id.
     private(set) var suggestions: [String: [WorkFieldSuggestion]] = [:]
+    /// False while the conversations cannot be opened: the list holds every
+    /// item, but no meeting details and no people to choose.
+    private(set) var conversationsAvailable = true
     private(set) var counts: WorkCounts?
     private(set) var views: [WorkView] = []
     private(set) var loading = false
@@ -337,6 +340,7 @@ final class WorkStore {
                 projects = listed.projects
                 people = listed.people
                 suggestions = listed.suggestions
+                conversationsAvailable = listed.conversationsAvailable
                 counts = counted
                 views = savedViews
                 listError = nil
