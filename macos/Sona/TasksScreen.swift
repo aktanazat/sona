@@ -416,7 +416,7 @@ private struct TaskColumn: View {
                     .foregroundStyle(Theme.inkTertiary)
                 Spacer(minLength: 0)
             }
-            .padding(.horizontal, 6)
+            .padding(.horizontal, 12)
             .frame(height: Theme.listRow)
             .accessibilityElement(children: .combine)
             .accessibilityAddTraits(.isHeader)
@@ -439,7 +439,7 @@ private struct TaskColumn: View {
         .padding(.horizontal, 6)
         .frame(width: 280)
         .frame(maxHeight: .infinity, alignment: .top)
-        .background(targeted ? Theme.selection : Theme.wash, in: RoundedRectangle(cornerRadius: Theme.radiusCard, style: .continuous))
+        .background(targeted ? Theme.selection : Theme.inset, in: RoundedRectangle(cornerRadius: Theme.radiusCard, style: .continuous))
         .animation(Motion.regular, value: model.work.items?.map(\.id))
         .dropDestination(for: String.self) { payloads, _ in
             guard let patch = group.patch else { return false }
@@ -466,15 +466,20 @@ private struct TaskCard: View {
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: Theme.radiusControl, style: .continuous)
         VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 6) {
-                if shows.contains(TaskProperty.number.rawValue) {
-                    Text(verbatim: "#\(row.number)")
-                        .font(TypeScale.mono(11))
-                        .foregroundStyle(Theme.inkTertiary)
-                }
-                Spacer(minLength: 0)
-                if shows.contains(TaskProperty.owner.rawValue) {
-                    Avatar(face: row.ownerFace, size: 18, revision: revision)
+            if hasTop {
+                HStack(spacing: 6) {
+                    if shows.contains(TaskProperty.number.rawValue) {
+                        Text(verbatim: "#\(row.number)")
+                            .font(TypeScale.mono(11))
+                            .foregroundStyle(Theme.inkTertiary)
+                    }
+                    Spacer(minLength: 0)
+                    if shows.contains(TaskProperty.updated.rawValue) {
+                        Text(TaskDates.ago(row.updatedAtMs, now: now)).metaText()
+                    }
+                    if shows.contains(TaskProperty.owner.rawValue) {
+                        Avatar(face: row.ownerFace, size: 18, revision: revision)
+                    }
                 }
             }
             HStack(alignment: .top, spacing: 8) {
@@ -498,16 +503,16 @@ private struct TaskCard: View {
                     }
                 }
             }
+            if shows.contains(TaskProperty.meeting.rawValue), let meeting = row.sourceMeetingTitle {
+                TaskPlace(title: meeting, icon: "waveform")
+            }
             if shows.contains(TaskProperty.project.rawValue), let project = row.projectTitle {
-                Label(project, systemImage: "folder")
-                    .font(TypeScale.label(12))
-                    .foregroundStyle(Theme.inkTertiary)
-                    .lineLimit(1)
+                TaskPlace(title: project, icon: "folder")
             }
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.surface, in: shape)
+        .background(selected ? Theme.selection : Theme.surface, in: shape)
         .overlay {
             shape
                 .fill(Theme.wash)
@@ -518,6 +523,10 @@ private struct TaskCard: View {
         .overlay(shape.strokeBorder(selected ? Theme.accent : Theme.border, lineWidth: 1))
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+
+    private var hasTop: Bool {
+        [TaskProperty.number, .updated, .owner].contains { shows.contains($0.rawValue) }
     }
 
     private var hasMeta: Bool {

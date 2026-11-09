@@ -20,7 +20,8 @@ struct TaskPeek: View {
                 TaskKeyButton(title: "Open", keys: "return") { model.perform(.open, on: [row.id]) }
                 WorkBarButton(icon: "xmark", help: "Close  Space") { focus.peeking = false }
             }
-            .padding(.horizontal, 16)
+            .padding(.leading, 20)
+            .padding(.trailing, 12)
             .frame(height: Theme.headerHeight)
             Hairline()
             ScrollView {
@@ -58,7 +59,7 @@ struct TaskPeek: View {
             Rectangle()
                 .fill(Theme.elevated)
                 .overlay(alignment: .leading) { Rectangle().fill(Theme.border).frame(width: 1) }
-                .elevation(.medium)
+                .elevation(.high)
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Peek at #\(row.number)")

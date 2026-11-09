@@ -251,8 +251,8 @@ struct ThemeSeed {
         case .controlHover: neutral(isDark ? 10.5 : 9, chroma: isDark ? 1.4 : 0.8)
         case .controlPressed: neutral(isDark ? 13 : 11, chroma: isDark ? 2 : 1)
         case .selection: tinted(7, chroma: isDark ? 18 : 10)
-        case .wash: LCH(l: isDark ? 100 : 0, c: 0, h: 0, alpha: 0.035 * reach)
-        case .washSelected: LCH(l: isDark ? 100 : 0, c: 0, h: 0, alpha: 0.07 * reach)
+        case .wash: LCH(l: isDark ? 100 : 0, c: 0, h: 0, alpha: washAlpha)
+        case .washSelected: LCH(l: isDark ? 100 : 0, c: 0, h: 0, alpha: 2 * washAlpha)
         case .track: neutral(isDark ? 11.4 : 11, chroma: isDark ? 2 : 1)
         case .scrim: LCH(l: 0, c: 0, h: 0, alpha: 0.18)
         case .border: neutral(isDark ? 9.8 : 10.5, chroma: isDark ? 3 : 0.8)
@@ -295,6 +295,11 @@ struct ThemeSeed {
 
     /// How far each step reaches: 1 at Linear's contrast 33, 3 at 100.
     private var reach: Double { contrast / 33 }
+
+    /// Linear's hover is 3% white on its dark page. Black over a light page
+    /// moves lightness less than white over a dark one, so light takes 0.045
+    /// for the same step: 4.7 lightness in either appearance at contrast 40.
+    private var washAlpha: Double { (isDark ? 0.035 : 0.045) * reach }
 
     /// How far text has moved from Linear's tiers toward black and white.
     private var textReach: Double { min(max((contrast - 33) / 67, 0), 1) }
