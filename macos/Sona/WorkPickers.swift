@@ -37,6 +37,7 @@ enum WorkChoices {
         case .project: "Move to project…"
         case .duplicate: "Duplicate of…"
         case .snooze: "Snooze until, or type a date…"
+        case .delegate: "Delegate to…"
         }
     }
 
@@ -92,6 +93,10 @@ enum WorkChoices {
         case .snooze:
             snoozes(text, pickDay: pickDay) { moment in
                 model.leave(ids) { work.update(ids, WorkPatch(snoozedUntilMs: .set(moment))) }
+            }
+        case .delegate:
+            delegates(rows) { agent in
+                model.changeWork { work.delegate(ids, to: agent) }
             }
         }
         return filtered(choices, by: text, kind: picker.kind)
@@ -226,6 +231,23 @@ enum WorkChoices {
         }
         if text.isEmpty || "pick a day".localizedCaseInsensitiveContains(text) {
             choices.append(WorkChoice(id: "day", title: "Pick a day…", mark: .symbol("calendar"), staysOpen: true, run: pickDay))
+        }
+        return choices
+    }
+
+    /// The agents a task can go to, and taking it back once one has it.
+    private static func delegates(_ rows: [WorkItemRow], pick: @escaping @MainActor (String?) -> Void) -> [WorkChoice] {
+        let agents = ["Claude Code", "Codex", "OMP", "Grok"]
+        var choices = agents.enumerated().map { index, agent in
+            WorkChoice(id: agent, title: agent, mark: .symbol("sparkle"),
+                       checked: !rows.isEmpty && rows.allSatisfy { $0.doer?.agent == agent }, key: "\(index + 1)") {
+                pick(agent)
+            }
+        }
+        if rows.contains(where: { $0.doer != nil }) {
+            choices.append(WorkChoice(id: "back", title: "Take it back", mark: .face(AvatarFace(kind: .me, name: "Me"))) {
+                pick(nil)
+            })
         }
         return choices
     }

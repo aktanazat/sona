@@ -55,6 +55,7 @@ private struct TriageList: View {
                 .padding(.horizontal, 16)
                 .frame(height: 32)
             }
+            TriageProposals()
             content(groups, split: focus.triageSplit, now: now)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }

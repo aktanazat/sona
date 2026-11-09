@@ -208,6 +208,7 @@ struct ItemRow: View {
     let renaming: Bool
     let now: Int64
     let revision: UInt64
+    var waiting = false
     let toggle: () -> Void
     let rename: (String?) -> Void
 
@@ -284,6 +285,9 @@ struct ItemRow: View {
                     .foregroundStyle(Theme.inkTertiary)
                     .frame(width: 40, alignment: .trailing)
             }
+            if let doer = row.doer, row.status.isOpen {
+                DoerChip(doer: doer, waiting: waiting)
+            }
             if shows.contains(TaskProperty.owner.rawValue) {
                 Avatar(face: row.ownerFace, size: 20, revision: revision)
             }
@@ -318,6 +322,34 @@ struct TaskPlace: View {
         }
         .font(TypeScale.label(12))
         .foregroundStyle(Theme.inkTertiary)
+    }
+}
+
+/// The agent working a task: its name, or, while its session waits on the
+/// user's approval, "Waiting for you" in red.
+struct DoerChip: View {
+    let doer: WorkDoer
+    var waiting = false
+
+    var body: some View {
+        let help = waiting ? "\(doer.agent) is waiting for your approval" : "\(doer.agent) is working on it"
+        HStack(spacing: 4) {
+            if waiting {
+                Circle().fill(Theme.live).frame(width: 6, height: 6)
+            } else {
+                Image(systemName: "sparkle").font(.system(size: 9, weight: .semibold))
+            }
+            Text(waiting ? "Waiting for you" : doer.agent).lineLimit(1)
+        }
+        .font(.system(size: 11, weight: .semibold))
+        .foregroundStyle(waiting ? Theme.live : Theme.inkSecondary)
+        .padding(.horizontal, 6)
+        .frame(height: 18)
+        .background(Theme.control, in: RoundedRectangle(cornerRadius: Theme.radiusKey))
+        .fixedSize()
+        .help(help)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(help)
     }
 }
 
@@ -488,20 +520,21 @@ struct TaskSkeleton: View {
     }
 }
 
-/// A button that names its key: "New task C".
+/// A button that names its key: "New task C". Without one, the same button
+/// for a choice no key makes.
 struct TaskKeyButton: View {
     let title: String
-    let keys: String
+    let keys: String?
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
             HStack(spacing: 8) {
                 Text(title).font(TypeScale.label(13)).foregroundStyle(Theme.ink)
-                Shortcut(keys)
+                if let keys { Shortcut(keys) }
             }
             .padding(.leading, 10)
-            .padding(.trailing, 4)
+            .padding(.trailing, keys == nil ? 10 : 4)
         }
         .buttonStyle(KeyButtonStyle())
     }

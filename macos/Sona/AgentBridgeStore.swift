@@ -26,6 +26,15 @@ final class AgentBridgeStore {
     private(set) var error: String?
     private(set) var loading = false
     private(set) var authorizing = false
+    /// Whether an agent's edits to tasks, and what Sona fills in from a
+    /// meeting, land at once or wait for the user.
+    private(set) var agentChanges = WorkAutonomy.suggest
+    private(set) var sonaChanges = WorkAutonomy.suggest
+    private(set) var autonomyBusy = false
+    /// The tasks a session waits on the user's approval for, by the name the
+    /// session gave each. Set only when it changes, so task lists redraw then
+    /// and not on every hook call.
+    private var waitingTasks: Set<String> = []
     /// The composer: which session a reply is for, and its words.
     var replySessionId = ""
     var replyText = ""
@@ -47,6 +56,12 @@ final class AgentBridgeStore {
 
     /// The sessions a reply can actually reach.
     var replySessions: [AgentBridgeObservedSession] { sessions.filter(\.acceptsReply) }
+
+    /// Whether an agent session working on this task waits on the user's
+    /// approval. Sessions name a task "S-12" or by its id.
+    func waits(on row: WorkItemRow) -> Bool {
+        waitingTasks.contains(row.id) || waitingTasks.contains("S-\(row.number)")
+    }
 
     var canCreatePreview: Bool {
         interactiveReady && !replySessionId.isEmpty
@@ -83,6 +98,7 @@ final class AgentBridgeStore {
             self.requests = try await requests
             self.pending = try await pending
             alignReplySession()
+            alignWaiting()
             error = nil
         } catch {
             self.error = "Couldn't load agent connection details: \(Self.reason(error))"
@@ -236,6 +252,31 @@ final class AgentBridgeStore {
         }
     }
 
+    func setAgentChanges(_ autonomy: WorkAutonomy) async {
+        await setAutonomy("change_work_agent_changes_setting", autonomy, keyPath: \.agentChanges)
+    }
+
+    func setSonaChanges(_ autonomy: WorkAutonomy) async {
+        await setAutonomy("change_work_sona_changes_setting", autonomy, keyPath: \.sonaChanges)
+    }
+
+    private func setAutonomy(
+        _ method: String, _ autonomy: WorkAutonomy, keyPath: ReferenceWritableKeyPath<AgentBridgeStore, WorkAutonomy>
+    ) async {
+        autonomyBusy = true
+        defer { autonomyBusy = false }
+        let previous = self[keyPath: keyPath]
+        self[keyPath: keyPath] = autonomy
+        do {
+            try await core.request(method, ["autonomy": autonomy])
+            error = nil
+            await loadSettings()
+        } catch {
+            self[keyPath: keyPath] = previous
+            self.error = "Couldn't save that setting: \(Self.reason(error))"
+        }
+    }
+
     /// The clipboard the webview reached through `navigator.clipboard`.
     func copyHookSnippet() {
         guard let snippet = hookSnippet else { return }
@@ -261,6 +302,8 @@ final class AgentBridgeStore {
             if let bridge = settings.agentBridge {
                 self.bridge = bridge
             }
+            agentChanges = settings.workAgentChanges ?? .suggest
+            sonaChanges = settings.workSonaChanges ?? .suggest
             error = nil
         } catch {
             self.error = "Couldn't load agent connection details: \(Self.reason(error))"
@@ -318,6 +361,14 @@ final class AgentBridgeStore {
         if !replySessions.contains(where: { $0.id == replySessionId }) {
             replySessionId = replySessions.first?.id ?? ""
         }
+    }
+
+    /// A task waits while a permission its session asked for still takes an
+    /// answer.
+    private func alignWaiting() {
+        let asking = Set(requests.filter { $0.isOpen && $0.awaitingResponse && $0.kind.isPermission }.map(\.sessionId))
+        let waiting = Set(sessions.filter { asking.contains($0.id) }.compactMap(\.task))
+        if waiting != waitingTasks { waitingTasks = waiting }
     }
 
     private static func failure(_ error: Error) -> String {
