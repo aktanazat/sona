@@ -166,7 +166,7 @@ permission for an agent to send those records to another provider.
 ## Task tools
 
 These run `sona work <verb> --json`. A task is named by its handle (`S-12`),
-its number or its id. Eight are published by default:
+its number or its id. Nine are published by default:
 
 | Tool               | Arguments                                                        | Runs                                       |
 | ------------------ | ---------------------------------------------------------------- | ------------------------------------------ |
@@ -178,6 +178,7 @@ its number or its id. Eight are published by default:
 | `sona_work_claim`  | `task`                                                           | `sona work claim` — **writes**             |
 | `sona_work_done`   | `tasks`, `evidence?`, `dry_run?`                                 | `sona work done` — **writes**              |
 | `sona_work_triage` | `tasks`, `decision` (`accept`, `decline`, `duplicate`), `of?`    | `sona work accept`/`decline`/`duplicate` — **writes** |
+| `sona_work_follow_up` | `meeting`                                                     | `sona work follow-up`                      |
 
 Every write also takes `operation_id`. Left out, Sona derives one from the
 request and what it read, so a repeated call never changes anything twice: a
@@ -196,6 +197,8 @@ in `evidence` (a pull request, say) is kept with the task as evidence, and any
 other line goes into its details. `repeat` keeps how often a task comes back
 (`every monday`, `every 2 weeks`, `none` to stop); finishing the task does not
 make the next one.
+`sona_work_follow_up` drafts one meeting's follow-up: who owes what, by
+when, quoting each promise. It sends nothing.
 
 Unless the user sets **Settings > Agents > Agents' changes** to Apply, a
 change to a task's fields waits for them: the answer lists it under
