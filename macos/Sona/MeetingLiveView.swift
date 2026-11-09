@@ -51,6 +51,7 @@ struct MeetingLiveView: View {
                                 Hairline(axis: .vertical)
                                 ScrollView {
                                     VStack(alignment: .leading, spacing: 0) {
+                                        LiveCardSection(sessionId: session.sessionId)
                                         ownNotes
                                         recalled
                                         help(proxy)
@@ -68,6 +69,7 @@ struct MeetingLiveView: View {
                     } else {
                         Page {
                             captureHeader(session, proxy)
+                            LiveCardSection(sessionId: session.sessionId)
                             ownNotes
                             recalled
                             help(proxy)
@@ -742,6 +744,13 @@ private struct PanelCard<Content: View>: View {
 private enum DockedRecording {
     case panel(MeetingConsentPanelSessionState)
     case ritual(RitualEvent, RitualRecordingCard)
+
+    var sessionId: MeetingSessionId {
+        switch self {
+        case let .panel(state): state.snapshot.sessionId
+        case let .ritual(_, card): card.sessionId
+        }
+    }
 }
 
 /// A recording, docked flush against the right edge of the screen. At rest
@@ -906,6 +915,7 @@ private struct MeetingRecordingDock: View {
             case let .ritual(event, card):
                 RitualRecordingView(store: store, event: event, card: card, collapse: shut)
             }
+            LiveCardStrip(sessionId: recording.sessionId)
         }
     }
 

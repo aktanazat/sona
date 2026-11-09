@@ -58,6 +58,10 @@ struct ShortcutSheet: View {
                 Entry(title: "Still true: keep", keys: ["k"]),
                 Entry(title: "Still true: archive", keys: ["x"]),
             ]),
+            ("Meeting", [
+                Entry(title: "What did we decide", keys: ["d"]),
+                Entry(title: "Send the follow-up", keys: ["cmd+return"]),
+            ]),
         ],
         [
             ("Change", [
