@@ -408,15 +408,21 @@ fn any_of<T: PartialEq>(wanted: Option<&Vec<T>>, value: &T) -> bool {
     wanted.is_none_or(|wanted| wanted.contains(value))
 }
 
-fn wanted(item: &WorkItem, query: &WorkQuery, due: Option<&[DueSpan]>, now_ms: i64) -> bool {
+fn wanted(
+    item: &WorkItem,
+    query: &WorkQuery,
+    owners: Option<&HashSet<&str>>,
+    due: Option<&[DueSpan]>,
+    now_ms: i64,
+) -> bool {
     any_of(query.statuses.as_ref(), &item.status)
         && query
             .direction
             .is_none_or(|direction| direction == item.direction)
-        && query.owner_person_ids.as_ref().is_none_or(|ids| {
+        && owners.is_none_or(|owners| {
             item.owner_person_id
-                .as_ref()
-                .is_some_and(|id| ids.contains(id))
+                .as_deref()
+                .is_some_and(|id| owners.contains(id))
         })
         && query
             .project_ids
@@ -470,6 +476,10 @@ fn list(
         .map(str::trim)
         .filter(|search| !search.is_empty())
         .map(str::to_lowercase);
+    let owners = query
+        .owner_person_ids
+        .as_deref()
+        .map(|ids| context.people.with_merged(ids));
     let due = query
         .due
         .as_deref()
@@ -479,7 +489,7 @@ fn list(
     let mut rows = Vec::new();
     let mut suggestions = BTreeMap::new();
     for item in &all {
-        if !wanted(item, query, due.as_deref(), now_ms)
+        if !wanted(item, query, owners.as_ref(), due.as_deref(), now_ms)
             || raised.as_ref().is_some_and(|ids| !ids.contains(&item.id))
             || search.as_deref().is_some_and(|search| !found(item, search))
         {
