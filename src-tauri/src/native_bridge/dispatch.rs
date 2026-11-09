@@ -1023,6 +1023,30 @@ pub(super) async fn call(
             })
             .await?
         }
+        "change_work_agent_changes_setting" => {
+            let mut args = Args::parse(params)?;
+            let autonomy = args.take("autonomy")?;
+            let handle = app.clone();
+            on_main_thread(app, move || {
+                reply(crate::settings::change_work_agent_changes_setting(
+                    handle.clone(),
+                    autonomy,
+                ))
+            })
+            .await?
+        }
+        "change_work_sona_changes_setting" => {
+            let mut args = Args::parse(params)?;
+            let autonomy = args.take("autonomy")?;
+            let handle = app.clone();
+            on_main_thread(app, move || {
+                reply(crate::settings::change_work_sona_changes_setting(
+                    handle.clone(),
+                    autonomy,
+                ))
+            })
+            .await?
+        }
         "change_count_words_per_app_setting" => {
             let mut args = Args::parse(params)?;
             let enabled = args.take("enabled")?;
@@ -5213,6 +5237,43 @@ pub(super) async fn call(
                 )
                 .await,
             )
+        }
+        "work_delegate" => {
+            let mut args = Args::parse(params)?;
+            let operation_id = args.take("operationId")?;
+            let id = args.take("id")?;
+            let agent = args.take("agent")?;
+            reply(
+                crate::planning::work::agents::work_delegate(app.clone(), operation_id, id, agent)
+                    .await,
+            )
+        }
+        "work_proposals_accept" => {
+            let mut args = Args::parse(params)?;
+            let operation_id = args.take("operationId")?;
+            let ids = args.take("ids")?;
+            reply(
+                crate::planning::work::agents::work_proposals_accept(
+                    app.clone(),
+                    operation_id,
+                    ids,
+                )
+                .await,
+            )
+        }
+        "work_proposals_reject" => {
+            let mut args = Args::parse(params)?;
+            let operation_id = args.take("operationId")?;
+            let ids = args.take("ids")?;
+            let handle = app.clone();
+            on_main_thread(app, move || {
+                reply(crate::planning::work::agents::work_proposals_reject(
+                    handle.clone(),
+                    operation_id,
+                    ids,
+                ))
+            })
+            .await?
         }
         other => Err(Fault::unknown_method(other)),
     }

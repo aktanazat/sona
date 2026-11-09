@@ -1600,6 +1600,8 @@ pub fn run(cli_args: CliArgs) {
             settings::change_dictation_project_root_setting,
             settings::change_external_query_enabled_setting,
             settings::change_external_mutations_enabled_setting,
+            settings::change_work_agent_changes_setting,
+            settings::change_work_sona_changes_setting,
             settings::change_count_words_per_app_setting,
             settings::change_meeting_local_engine_setting,
             settings::change_meeting_remote_intelligence_enabled_setting,
@@ -2074,6 +2076,9 @@ pub fn run(cli_args: CliArgs) {
             planning::work::follow::work_talking_point_done,
             planning::work::follow::work_nudged,
             planning::work::follow::work_nudge_mail,
+            planning::work::agents::work_delegate,
+            planning::work::agents::work_proposals_accept,
+            planning::work::agents::work_proposals_reject,
         ])
         .events(collect_events![
             chat_voice::ChatVoiceEvent,

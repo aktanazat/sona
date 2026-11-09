@@ -129,7 +129,7 @@ core=/Applications/Sona.app/Contents/Helpers/SonaCore.app/Contents/MacOS/sona-co
 "$core" --cancel
 ```
 
-The last three controls require the native Mac app to be running. External corpus reads require Settings > Agents > External access; closing a loop also requires External mutations. Both grants start off. The MCP server wraps these same commands. See `skills/sona/SKILL.md` for flags, responses, and consent refusals.
+The last three controls require the native Mac app to be running. External corpus reads require Settings > Agents > External access; closing a loop or changing a task also requires External mutations. Both grants start off. An agent's changes to a task wait for you to accept them in Sona unless Settings > Agents > Agents' changes is set to Apply. The MCP server wraps these same commands. See `skills/sona/SKILL.md` for flags, responses, and consent refusals.
 
 ## Data locations
 

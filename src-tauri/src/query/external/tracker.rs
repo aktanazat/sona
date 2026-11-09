@@ -26,15 +26,17 @@ use crate::meeting::loop_types::MeetingLoopId;
 use crate::meeting::session::MeetingSessionManager;
 use crate::meeting::types::MeetingSessionId;
 use crate::planning;
+use crate::planning::work::agents::{self, AgentChange};
 use crate::planning::work::types::{
     WorkActivity, WorkActivityKind, WorkActor, WorkDirection, WorkDisplay, WorkFieldSuggestion,
     WorkGroupBy, WorkItem, WorkItemDetail, WorkItemInput, WorkItemRow, WorkLabel, WorkLayout,
-    WorkList, WorkOrderBy, WorkOwner, WorkPatch, WorkPersonChoice, WorkProjectChoice, WorkQuery,
-    WorkRelation, WorkRelationKind, WorkSource, WorkStatus, WorkSuggestionField,
-    WorkSuggestionValue, WorkView,
+    WorkList, WorkOrderBy, WorkOwner, WorkPatch, WorkPersonChoice, WorkProjectChoice, WorkProposal,
+    WorkProposalField, WorkQuery, WorkRelation, WorkRelationKind, WorkSource, WorkStatus,
+    WorkSuggestionField, WorkSuggestionValue, WorkView,
 };
 use crate::planning::work::{self, items};
 use crate::query::{loop_link, KeptLocal, QUERY_SCHEMA_VERSION};
+use crate::settings::WorkAutonomy;
 use chrono::{Local, NaiveDate};
 use clap::{Args, Subcommand, ValueEnum};
 use serde::Serialize;
@@ -85,7 +87,7 @@ pub enum WorkVerb {
     Create(CreateArgs),
     /// Change tasks. Several tasks take the same change together or not at all.
     Update(UpdateArgs),
-    /// Start a Todo or Backlog task: it moves to In progress and keeps its owner.
+    /// Start a Todo or Backlog task: it moves to In progress with the agent on it, the owner unchanged.
     Claim(ClaimArgs),
     /// Mark tasks done. A meeting commitment behind one closes with it.
     Done(DoneArgs),
@@ -419,6 +421,11 @@ pub struct WriteArgs {
     /// from the request when left out.
     #[arg(long, value_name = "UUID")]
     pub operation_id: Option<Uuid>,
+    /// Who is making the change, as Sona shows it: "Claude Code", "Codex".
+    /// Unless the user lets agents' changes apply, changes to a task's
+    /// fields wait for them to accept in Sona.
+    #[arg(long, value_name = "NAME")]
+    pub agent: Option<String>,
 }
 
 /// A task as a caller names it: its number (`S-12`, `#12`, `12`) or its id.
@@ -758,8 +765,9 @@ impl UpdateArgs {
 }
 
 impl WriteArgs {
-    /// The caller's id, or one derived from the verb and what it read: the
-    /// same request against the same revisions derives the same id.
+    /// The caller's id, or one derived from the verb, what it read and the
+    /// agent named: the same request against the same revisions derives the
+    /// same id.
     fn operation_id(&self, verb: &str, request: &impl Serialize) -> Result<String, ExternalError> {
         if let Some(id) = self.operation_id {
             return Ok(id.to_string());
@@ -769,6 +777,10 @@ impl WriteArgs {
         serde_json::to_writer(&mut name, request).map_err(|_| {
             ExternalError::new(ExternalErrorCode::Failed, "The change could not be named.")
         })?;
+        if self.agent.is_some() {
+            name.push(0);
+            name.extend_from_slice(self.agent().as_bytes());
+        }
         Ok(Uuid::new_v5(&OPERATION_NAMESPACE, &name).to_string())
     }
 
@@ -776,6 +788,11 @@ impl WriteArgs {
     /// otherwise replay: a label or view made, deleted, and made again.
     fn fresh_operation_id(&self) -> String {
         self.operation_id.unwrap_or_else(Uuid::new_v4).to_string()
+    }
+
+    /// The agent making the change, by the name Sona shows.
+    fn agent(&self) -> String {
+        agents::agent_name(self.agent.as_deref())
     }
 }
 
@@ -808,6 +825,8 @@ pub struct ExternalWorkItem {
     pub status: WorkStatus,
     pub priority: Priority,
     pub owner: ExternalWorkOwner,
+    /// The agent working on it beside its owner, when one is.
+    pub doer: Option<String>,
     pub direction: WorkDirection,
     /// The local day it is due, YYYY-MM-DD.
     pub due_date: Option<String>,
@@ -912,6 +931,8 @@ pub struct ExternalWorkDetail {
     /// What Sona suggests for a task still in triage.
     pub suggestions: Vec<ExternalWorkSuggestion>,
     pub activity: Vec<ExternalWorkActivity>,
+    /// Changes agents proposed that wait for the user, oldest first.
+    pub proposals: Vec<ExternalWorkProposal>,
     /// False while the conversations can't be opened: meeting quotes and
     /// suggestions are left out.
     pub conversations_available: bool,
@@ -962,6 +983,8 @@ pub struct ExternalWorkActivity {
     pub kind: WorkActivityKind,
     pub from: Option<String>,
     pub to: Option<String>,
+    /// The agent behind an agent's change, when it gave its name.
+    pub agent: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -1016,6 +1039,8 @@ pub struct ExternalWorkChange {
     pub operation_id: Option<String>,
     pub tasks: Vec<ExternalWorkItem>,
     pub skipped: Vec<ExternalWorkSkip>,
+    /// Changes left waiting for the user to accept them in Sona.
+    pub proposed: Vec<ExternalWorkProposal>,
     /// True when this create answered from an earlier run of the same
     /// request rather than creating another task.
     pub replayed: bool,
@@ -1026,6 +1051,19 @@ pub struct ExternalWorkSkip {
     pub id: String,
     pub handle: String,
     pub reason: String,
+}
+
+/// A change an agent proposed, both values as a person reads them.
+#[derive(Clone, Debug, Serialize)]
+pub struct ExternalWorkProposal {
+    pub id: String,
+    pub task_id: String,
+    pub handle: String,
+    pub agent: String,
+    pub field: WorkProposalField,
+    pub from: String,
+    pub to: String,
+    pub created_at_ms: i64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1385,7 +1423,7 @@ impl Tracker<'_> {
         let today = Local::now().date_naive().format("%Y-%m-%d").to_string();
         let operation_id = args.write.operation_id("create", &(&input, today))?;
         let started_ms = now_ms();
-        let item = work::create_as(self.app, WorkActor::Agent, &operation_id, &input)
+        let item = agents::create_as(self.app, &args.write.agent(), &operation_id, &input)
             .await
             .map_err(|message| self.write_refusal(message, &operation_id, "The new task"))?;
         let replayed = item.created_at_ms < started_ms;
@@ -1395,6 +1433,7 @@ impl Tracker<'_> {
             operation_id: Some(operation_id),
             tasks: vec![board.project_item(item)],
             skipped: Vec::new(),
+            proposed: Vec::new(),
             replayed,
         }))
     }
@@ -1432,15 +1471,43 @@ impl Tracker<'_> {
         let board = self.board().await?;
         let row = board.task(&args.task)?;
         let name = handle(row.item.number);
+        let agent = args.write.agent();
         if row.item.archived_at_ms.is_some() {
             return Err(ExternalError::invalid(format!(
                 "{name} is archived. Restore it first: sona work restore {name}"
             )));
         }
+        let works_it = match &row.doer {
+            Some(doer) if !doer.agent.eq_ignore_ascii_case(&agent) => {
+                return Err(ExternalError::invalid(
+                    if row.item.status == WorkStatus::InProgress {
+                        format!(
+                            "{} is working on {name}. Find another with: sona work ready",
+                            doer.agent
+                        )
+                    } else {
+                        format!(
+                            "{name} is delegated to {}. Find another with: sona work ready",
+                            doer.agent
+                        )
+                    },
+                ));
+            }
+            doer => doer.is_some(),
+        };
         match row.item.status {
             WorkStatus::Triage => Err(ExternalError::invalid(format!(
                 "{name} is still in triage. Accept it first: sona work accept {name}"
             ))),
+            WorkStatus::InProgress if works_it => Ok(WorkAnswer::Change(ExternalWorkChange {
+                schema_version: QUERY_SCHEMA_VERSION,
+                action: WorkAction::Claimed,
+                operation_id: None,
+                tasks: vec![project_task(row, &board.labels)],
+                skipped: Vec::new(),
+                proposed: Vec::new(),
+                replayed: false,
+            })),
             WorkStatus::InProgress => Err(ExternalError::invalid(format!(
                 "{name} is already in progress. Find another with: sona work ready"
             ))),
@@ -1451,29 +1518,27 @@ impl Tracker<'_> {
                 )))
             }
             WorkStatus::Backlog | WorkStatus::NotStarted => {
-                let patch = WorkPatch {
-                    status: Some(WorkStatus::InProgress),
-                    ..WorkPatch::default()
-                };
                 let operation_id = args
                     .write
                     .operation_id("claim", &(&row.item.id, row.item.revision))?;
-                let item = work::update_as(
+                let item = agents::claim_as(
                     self.app,
-                    WorkActor::Agent,
+                    &agent,
                     &operation_id,
                     &row.item.id,
-                    row.item.revision,
-                    &patch,
+                    Some(row.item.revision),
                 )
                 .await
                 .map_err(|message| self.write_refusal(message, &operation_id, &name))?;
+                let mut task = board.project_item(item);
+                task.doer = Some(agent);
                 Ok(WorkAnswer::Change(ExternalWorkChange {
                     schema_version: QUERY_SCHEMA_VERSION,
                     action: WorkAction::Claimed,
                     operation_id: Some(operation_id),
-                    tasks: vec![board.project_item(item)],
+                    tasks: vec![task],
                     skipped: Vec::new(),
+                    proposed: Vec::new(),
                     replayed: false,
                 }))
             }
@@ -1559,60 +1624,48 @@ impl Tracker<'_> {
         let Some(operation_id) = operation_id else {
             return Ok(changed(action, None, Vec::new(), skipped));
         };
-        let tasks = match changing.as_slice() {
-            [(row, patch)] => {
-                let item = work::update_as(
-                    self.app,
-                    WorkActor::Agent,
-                    &operation_id,
-                    &row.item.id,
-                    row.item.revision,
-                    patch,
-                )
-                .await
-                .map_err(|message| {
-                    self.write_refusal(message, &operation_id, &handle(row.item.number))
-                })?;
-                vec![board.project_item(item)]
-            }
+        let agent = write.agent();
+        let changes = match changing.as_slice() {
+            [(row, patch)] => vec![agents::update_as(
+                self.app,
+                &agent,
+                &operation_id,
+                &row.item.id,
+                row.item.revision,
+                patch,
+            )
+            .await
+            .map_err(|message| {
+                self.write_refusal(message, &operation_id, &handle(row.item.number))
+            })?],
             several if several.iter().all(|(_, patch)| *patch == several[0].1) => {
                 let ids: Vec<String> = several.iter().map(|(row, _)| row.item.id.clone()).collect();
-                let items = work::bulk_update_as(
-                    self.app,
-                    WorkActor::Agent,
-                    &operation_id,
-                    &ids,
-                    &several[0].1,
-                )
-                .await
-                .map_err(|message| {
-                    self.write_refusal(message, &operation_id, "One of these tasks")
-                })?;
-                items
-                    .into_iter()
-                    .map(|item| board.project_item(item))
-                    .collect()
+                agents::bulk_update_as(self.app, &agent, &operation_id, &ids, &several[0].1)
+                    .await
+                    .map_err(|message| {
+                        self.write_refusal(message, &operation_id, "One of these tasks")
+                    })?
             }
-            several => self.apply_each(board, &operation_id, several).await?,
+            several => self.apply_each(&agent, &operation_id, several).await?,
         };
-        Ok(changed(action, Some(operation_id), tasks, skipped))
+        Ok(board.agent_changed(action, operation_id, changes, skipped))
     }
 
     async fn apply_each(
         &self,
-        board: &Board,
+        agent: &str,
         operation_id: &str,
         several: &[(&WorkItemRow, WorkPatch)],
-    ) -> Result<Vec<ExternalWorkItem>, ExternalError> {
+    ) -> Result<Vec<AgentChange>, ExternalError> {
         let base = Uuid::parse_str(operation_id).map_err(|_| {
             ExternalError::new(ExternalErrorCode::Failed, "The change could not be named.")
         })?;
-        let mut tasks = Vec::with_capacity(several.len());
+        let mut changes = Vec::with_capacity(several.len());
         for (row, patch) in several {
             let task_operation = Uuid::new_v5(&base, row.item.id.as_bytes()).to_string();
-            match work::update_as(
+            match agents::update_as(
                 self.app,
-                WorkActor::Agent,
+                agent,
                 &task_operation,
                 &row.item.id,
                 row.item.revision,
@@ -1620,11 +1673,14 @@ impl Tracker<'_> {
             )
             .await
             {
-                Ok(item) => tasks.push(board.project_item(item)),
+                Ok(change) => changes.push(change),
                 Err(message) => {
                     let refusal =
                         self.write_refusal(message, &task_operation, &handle(row.item.number));
-                    let done: Vec<&str> = tasks.iter().map(|task| task.handle.as_str()).collect();
+                    let done: Vec<String> = several[..changes.len()]
+                        .iter()
+                        .map(|(row, _)| handle(row.item.number))
+                        .collect();
                     let kept = if done.is_empty() {
                         "Nothing was changed.".to_owned()
                     } else {
@@ -1640,7 +1696,30 @@ impl Tracker<'_> {
                 }
             }
         }
-        Ok(tasks)
+        Ok(changes)
+    }
+
+    /// Refuses `what` while agents' changes wait for the user: it has no
+    /// field change to propose in its place.
+    fn applies(&self, what: &str) -> Result<(), ExternalError> {
+        match agents::autonomy(self.app) {
+            WorkAutonomy::Apply => Ok(()),
+            WorkAutonomy::Suggest => Err(ExternalError::invalid(format!(
+                "While agents' changes wait for the user, {what} is theirs to do in Sona. Propose a field change with: sona work update. The user can let agents' changes apply in Sona's Settings > Agents."
+            ))),
+        }
+    }
+
+    /// Files the history the tracker's own functions wrote for these tasks
+    /// since `since_ms` under the agent that asked.
+    fn credit(
+        &self,
+        write: &WriteArgs,
+        ids: &[String],
+        since_ms: i64,
+    ) -> Result<(), ExternalError> {
+        agents::credit_since(self.app, ids, since_ms, &write.agent())
+            .map_err(|message| refusal(self.history, message))
     }
 
     async fn triage(
@@ -1727,7 +1806,12 @@ impl Tracker<'_> {
         let Some(operation_id) = operation_id else {
             return Ok(changed(action, None, Vec::new(), skipped));
         };
+        self.applies(match decision {
+            Decision::Accept { .. } => "accepting triage",
+            Decision::Decline => "declining triage",
+        })?;
         let ids: Vec<String> = waiting.iter().map(|row| row.item.id.clone()).collect();
+        let started_ms = now_ms();
         let items = match decision {
             Decision::Accept { apply_suggestions } => {
                 work::triage_accept_as(
@@ -1744,6 +1828,7 @@ impl Tracker<'_> {
             }
         }
         .map_err(|message| self.write_refusal(message, &operation_id, "One of these items"))?;
+        self.credit(write, &ids, started_ms)?;
         let tasks = items
             .into_iter()
             .map(|item| board.project_item(item))
@@ -1765,9 +1850,11 @@ impl Tracker<'_> {
                 handle(row.item.number)
             )));
         }
+        self.applies("marking a duplicate")?;
         let operation_id = args
             .write
             .operation_id("duplicate", &(&row.item.id, row.item.revision, &of.item.id))?;
+        let started_ms = now_ms();
         let item = work::mark_duplicate_as(
             self.app,
             WorkActor::Agent,
@@ -1777,6 +1864,7 @@ impl Tracker<'_> {
         )
         .await
         .map_err(|message| self.write_refusal(message, &operation_id, &handle(row.item.number)))?;
+        self.credit(&args.write, std::slice::from_ref(&row.item.id), started_ms)?;
         Ok(changed(
             WorkAction::MarkedDuplicate,
             Some(operation_id),
@@ -1855,12 +1943,15 @@ impl Tracker<'_> {
         let Some(operation_id) = operation_id else {
             return Ok(changed(action, None, Vec::new(), skipped));
         };
+        self.applies(if archived { "archiving" } else { "restoring" })?;
         let ids: Vec<String> = changing.iter().map(|row| row.item.id.clone()).collect();
+        let started_ms = now_ms();
         let items =
             work::set_archived_as(self.app, WorkActor::Agent, &operation_id, &ids, archived)
                 .map_err(|message| {
                     self.write_refusal(message, &operation_id, "One of these tasks")
                 })?;
+        self.credit(&args.write, &ids, started_ms)?;
         let tasks = items
             .into_iter()
             .map(|item| board.project_item(item))
@@ -1872,6 +1963,7 @@ impl Tracker<'_> {
         let board = self.board().await?;
         let (from, to, kind) = board.link(args)?;
         let operation_id = args.write.fresh_operation_id();
+        let started_ms = now_ms();
         let relation = work::relation_add_as(
             self.app,
             WorkActor::Agent,
@@ -1881,6 +1973,11 @@ impl Tracker<'_> {
             kind,
         )
         .map_err(|message| self.write_refusal(message, &operation_id, "The link"))?;
+        self.credit(
+            &args.write,
+            &[from.item.id.clone(), to.item.id.clone()],
+            started_ms,
+        )?;
         Ok(WorkAnswer::Relation(ExternalWorkRelationChange {
             schema_version: QUERY_SCHEMA_VERSION,
             operation_id,
@@ -1915,8 +2012,14 @@ impl Tracker<'_> {
                 )
             })?;
         let operation_id = args.write.operation_id("unrelate", &found.id)?;
+        let started_ms = now_ms();
         work::relation_remove_as(self.app, WorkActor::Agent, &operation_id, &found.id)
             .map_err(|message| self.write_refusal(message, &operation_id, "The link"))?;
+        self.credit(
+            &args.write,
+            &[from.item.id.clone(), to.item.id.clone()],
+            started_ms,
+        )?;
         Ok(WorkAnswer::Relation(ExternalWorkRelationChange {
             schema_version: QUERY_SCHEMA_VERSION,
             operation_id,
@@ -1996,6 +2099,7 @@ impl Tracker<'_> {
                 args.write.fresh_operation_id(),
             ),
         };
+        self.applies("saving a label")?;
         let label = work::work_label_save(
             self.app.clone(),
             operation_id.clone(),
@@ -2023,6 +2127,7 @@ impl Tracker<'_> {
         )
         .map_err(|refusal| refusal.hint("List them with: sona work labels"))?
         .clone();
+        self.applies("deleting a label")?;
         let operation_id = args.write.operation_id("label-delete", &label.id)?;
         work::work_label_delete(self.app.clone(), operation_id.clone(), label.id.clone())
             .map_err(|message| self.write_refusal(message, &operation_id, "The label"))?;
@@ -2315,6 +2420,7 @@ fn changed(
         operation_id,
         tasks,
         skipped,
+        proposed: Vec::new(),
         replayed: false,
     })
 }
@@ -2820,6 +2926,7 @@ impl Board {
             source_speaker: before.and_then(|row| row.source_speaker.clone()),
             source_at_ms: before.and_then(|row| row.source_at_ms),
             blocked_by_open_count: before.map_or(0, |row| row.blocked_by_open_count),
+            doer: before.and_then(|row| row.doer.clone()),
             raised_in: before.map_or(0, |row| row.raised_in),
             source: before.map_or(WorkSource::Agent, |row| row.source),
             follow_up_at_ms: before.and_then(|row| row.follow_up_at_ms),
@@ -2883,6 +2990,11 @@ impl Board {
             evidence,
             suggestions,
             activity,
+            proposals: detail
+                .proposals
+                .iter()
+                .map(|proposal| self.proposal(proposal))
+                .collect(),
         }
     }
 
@@ -2916,60 +3028,134 @@ impl Board {
         }
     }
 
+    /// One stored history value read as a name or a day.
+    fn stored(&self, kind: WorkActivityKind, value: &str) -> String {
+        match kind {
+            WorkActivityKind::Status
+            | WorkActivityKind::Created
+            | WorkActivityKind::Accepted
+            | WorkActivityKind::Declined => status_named(value)
+                .map_or_else(|| value.to_owned(), |status| status_text(status).to_owned()),
+            WorkActivityKind::Duplicate => status_named(value).map_or_else(
+                || self.task_text(value),
+                |status| status_text(status).to_owned(),
+            ),
+            WorkActivityKind::Priority => value.parse::<u8>().map_or_else(
+                |_| value.to_owned(),
+                |priority| Priority::of(priority).text().to_owned(),
+            ),
+            WorkActivityKind::Owner => match value {
+                "self" => "you".to_owned(),
+                "nobody" => "nobody".to_owned(),
+                person_id => self.person_name(person_id),
+            },
+            WorkActivityKind::Due | WorkActivityKind::Snoozed => value
+                .parse::<i64>()
+                .map_or_else(|_| value.to_owned(), |ms| day_text(Some(ms))),
+            WorkActivityKind::Project => self.project_name(value),
+            WorkActivityKind::Labels => {
+                let ids: Vec<String> = value
+                    .split(',')
+                    .filter(|id| !id.is_empty())
+                    .map(str::to_owned)
+                    .collect();
+                self.labels_text(&ids)
+            }
+            WorkActivityKind::Relation => match value.split_once(':') {
+                Some((kind, id)) => {
+                    format!("{} {}", kind.replace('_', " "), self.task_text(id))
+                }
+                None => value.to_owned(),
+            },
+            WorkActivityKind::Title
+            | WorkActivityKind::Details
+            | WorkActivityKind::Archived
+            | WorkActivityKind::Restored
+            | WorkActivityKind::Kept => value.to_owned(),
+        }
+    }
+
     /// One history entry with ids and stored values read as names and days.
     fn activity(&self, entry: &WorkActivity) -> ExternalWorkActivity {
-        let read = |value: &Option<String>| {
-            value.as_deref().map(|value| match entry.kind {
-                WorkActivityKind::Status
-                | WorkActivityKind::Created
-                | WorkActivityKind::Accepted
-                | WorkActivityKind::Declined => status_named(value)
-                    .map_or_else(|| value.to_owned(), |status| status_text(status).to_owned()),
-                WorkActivityKind::Duplicate => status_named(value).map_or_else(
-                    || self.task_text(value),
-                    |status| status_text(status).to_owned(),
-                ),
-                WorkActivityKind::Priority => value.parse::<u8>().map_or_else(
-                    |_| value.to_owned(),
-                    |priority| Priority::of(priority).text().to_owned(),
-                ),
-                WorkActivityKind::Owner => match value {
-                    "self" => "you".to_owned(),
-                    "nobody" => "nobody".to_owned(),
-                    person_id => self.person_name(person_id),
-                },
-                WorkActivityKind::Due | WorkActivityKind::Snoozed => value
-                    .parse::<i64>()
-                    .map_or_else(|_| value.to_owned(), |ms| day_text(Some(ms))),
-                WorkActivityKind::Project => self.project_name(value),
-                WorkActivityKind::Labels => {
-                    let ids: Vec<String> = value
-                        .split(',')
-                        .filter(|id| !id.is_empty())
-                        .map(str::to_owned)
-                        .collect();
-                    self.labels_text(&ids)
-                }
-                WorkActivityKind::Relation => match value.split_once(':') {
-                    Some((kind, id)) => {
-                        format!("{} {}", kind.replace('_', " "), self.task_text(id))
-                    }
-                    None => value.to_owned(),
-                },
-                WorkActivityKind::Title
-                | WorkActivityKind::Details
-                | WorkActivityKind::Archived
-                | WorkActivityKind::Restored
-                | WorkActivityKind::Kept => value.to_owned(),
-            })
-        };
+        let read =
+            |value: &Option<String>| value.as_deref().map(|value| self.stored(entry.kind, value));
         ExternalWorkActivity {
             at_ms: entry.at_ms,
             actor: entry.actor,
             kind: entry.kind,
             from: read(&entry.from),
             to: read(&entry.to),
+            agent: entry.agent.clone(),
         }
+    }
+
+    /// A proposal with both values read as names and days.
+    fn proposal(&self, proposal: &WorkProposal) -> ExternalWorkProposal {
+        let kind = match proposal.field {
+            WorkProposalField::Title => Some(WorkActivityKind::Title),
+            WorkProposalField::Details => Some(WorkActivityKind::Details),
+            WorkProposalField::Status => Some(WorkActivityKind::Status),
+            WorkProposalField::Priority => Some(WorkActivityKind::Priority),
+            WorkProposalField::Owner => Some(WorkActivityKind::Owner),
+            WorkProposalField::Due => Some(WorkActivityKind::Due),
+            WorkProposalField::Project => Some(WorkActivityKind::Project),
+            WorkProposalField::Labels => Some(WorkActivityKind::Labels),
+            WorkProposalField::Snoozed => Some(WorkActivityKind::Snoozed),
+            WorkProposalField::Milestone => None,
+        };
+        let read = |value: &Option<String>| match (value.as_deref(), kind) {
+            (None, _) => "none".to_owned(),
+            (Some(value), Some(kind)) => self.stored(kind, value),
+            (Some(value), None) => value.to_owned(),
+        };
+        ExternalWorkProposal {
+            id: proposal.id.clone(),
+            task_id: proposal.item_id.clone(),
+            handle: self
+                .row(&proposal.item_id)
+                .map_or_else(|| proposal.item_id.clone(), |row| handle(row.item.number)),
+            agent: proposal.agent.clone(),
+            field: proposal.field,
+            from: read(&proposal.from),
+            to: read(&proposal.to),
+            created_at_ms: proposal.created_at_ms,
+        }
+    }
+
+    /// The answer to an agent's change: the tasks it changed, and the
+    /// changes left waiting for the user.
+    fn agent_changed(
+        &self,
+        action: WorkAction,
+        operation_id: String,
+        changes: Vec<AgentChange>,
+        skipped: Vec<ExternalWorkSkip>,
+    ) -> WorkAnswer {
+        let mut tasks = Vec::new();
+        let mut proposed = Vec::new();
+        for change in changes {
+            proposed.extend(
+                change
+                    .proposed
+                    .iter()
+                    .map(|proposal| self.proposal(proposal)),
+            );
+            if self
+                .row(&change.item.id)
+                .is_none_or(|row| row.item.revision != change.item.revision)
+            {
+                tasks.push(self.project_item(change.item));
+            }
+        }
+        WorkAnswer::Change(ExternalWorkChange {
+            schema_version: QUERY_SCHEMA_VERSION,
+            action,
+            operation_id: Some(operation_id),
+            tasks,
+            skipped,
+            proposed,
+            replayed: false,
+        })
     }
 }
 
@@ -3202,6 +3388,7 @@ fn project_task(row: &WorkItemRow, labels: &[WorkLabel]) -> ExternalWorkItem {
             },
             WorkOwner::Nobody => ExternalWorkOwner::Nobody,
         },
+        doer: row.doer.as_ref().map(|doer| doer.agent.clone()),
         direction: item.direction,
         due_date: item.due_at_ms.and_then(iso_day),
         due_at_ms: item.due_at_ms,
@@ -3495,6 +3682,13 @@ fn task_line(text: &mut String, task: &ExternalWorkItem, today: &Today) {
         }
         ExternalWorkOwner::Nobody => {}
     }
+    if let Some(doer) = &task.doer {
+        notes.push(if task.status.is_open() {
+            format!("{doer} on it")
+        } else {
+            format!("{doer} worked on it")
+        });
+    }
     if let Some(due) = &task.due_date {
         let late = task.status.is_open() && *due < today.day;
         notes.push(format!(
@@ -3637,13 +3831,19 @@ fn detail_text(text: &mut String, detail: &ExternalWorkDetail, today: &Today) {
             );
         }
     }
+    if !detail.proposals.is_empty() {
+        text.push_str("\nWaiting for the user to accept in Sona\n");
+        for proposal in &detail.proposals {
+            proposal_line(text, proposal);
+        }
+    }
     if !detail.activity.is_empty() {
         text.push_str("\nHistory\n");
         for entry in &detail.activity {
             let actor = match entry.actor {
                 WorkActor::Me => "you",
                 WorkActor::Sona => "Sona",
-                WorkActor::Agent => "agent",
+                WorkActor::Agent => entry.agent.as_deref().unwrap_or("agent"),
             };
             let kind = serde_json::to_value(entry.kind)
                 .ok()
@@ -3662,7 +3862,7 @@ fn detail_text(text: &mut String, detail: &ExternalWorkDetail, today: &Today) {
 }
 
 fn change_text(text: &mut String, change: &ExternalWorkChange, today: &Today) {
-    if change.tasks.is_empty() && change.skipped.is_empty() {
+    if change.tasks.is_empty() && change.skipped.is_empty() && change.proposed.is_empty() {
         text.push_str("Nothing to change.\n");
     }
     if !change.tasks.is_empty() {
@@ -3677,9 +3877,38 @@ fn change_text(text: &mut String, change: &ExternalWorkChange, today: &Today) {
             task_line(text, task, today);
         }
     }
+    if !change.proposed.is_empty() {
+        text.push_str("Waiting for the user to accept in Sona:\n");
+        for proposal in &change.proposed {
+            proposal_line(text, proposal);
+        }
+    }
     for skip in &change.skipped {
         let _ = writeln!(text, "Left {} alone: {}.", skip.handle, skip.reason);
     }
+}
+
+/// `S-12 priority: No priority → Urgent (Codex)`, a long value cut to its
+/// first line.
+fn proposal_line(text: &mut String, proposal: &ExternalWorkProposal) {
+    let first_line = |value: &str| {
+        let mut lines = value.lines();
+        let first = lines.next().unwrap_or_default();
+        if lines.next().is_some() {
+            format!("{first}…")
+        } else {
+            first.to_owned()
+        }
+    };
+    let _ = writeln!(
+        text,
+        "  {} {}: {} → {} ({})",
+        proposal.handle,
+        proposal.field.as_str(),
+        first_line(&proposal.from),
+        first_line(&proposal.to),
+        proposal.agent
+    );
 }
 
 fn preview_text(text: &mut String, preview: &ExternalWorkPreview) {

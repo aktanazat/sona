@@ -2,6 +2,7 @@
 //! or someone typed it, with triage, history, labels, links and saved views.
 //! Project screens read the same rows through `store`.
 
+pub(crate) mod agents;
 pub(crate) mod follow;
 mod hygiene;
 pub(crate) mod items;
@@ -15,9 +16,9 @@ use self::items::{Changed, DueSpan, NewItem};
 use self::sync::{MeetingReader, People};
 pub use self::types::WorkChanged;
 use self::types::{
-    WorkActivityKind, WorkActor, WorkCounts, WorkDay, WorkDisplay, WorkItem, WorkItemDetail,
-    WorkItemInput, WorkItemRow, WorkLabel, WorkList, WorkOwner, WorkPatch, WorkProjectChoice,
-    WorkQuery, WorkRelation, WorkRelationKind, WorkSource, WorkStatus, WorkView,
+    WorkActivityKind, WorkActor, WorkCounts, WorkDay, WorkDisplay, WorkDoer, WorkItem,
+    WorkItemDetail, WorkItemInput, WorkItemRow, WorkLabel, WorkList, WorkOwner, WorkPatch,
+    WorkProjectChoice, WorkQuery, WorkRelation, WorkRelationKind, WorkSource, WorkStatus, WorkView,
 };
 use super::sources;
 use super::store::{self, Refusal};
@@ -219,9 +220,12 @@ pub(crate) fn take_in(app: Option<&AppHandle>, store: &MeetingStore, session_id:
         return;
     };
     let user_name = store.user_name();
+    let sona = crate::settings::get_settings(app).work_sona_changes;
     let now = now_ms();
     let taken = in_both(store, &history, |history, meetings| {
-        sync::take_in_meeting(history, meetings, session_id, user_name.as_deref(), now)
+        let taken =
+            sync::take_in_meeting(history, meetings, session_id, user_name.as_deref(), now)?;
+        agents::fill_taken(history, meetings, user_name.as_deref(), taken, sona, now)
     });
     match taken {
         Ok(taken) if !taken.is_empty() => {
@@ -280,6 +284,7 @@ pub(crate) fn catch_up(app: AppHandle, store: Arc<MeetingStore>) {
             return;
         };
         let user_name = store.user_name();
+        let sona = crate::settings::get_settings(&app).work_sona_changes;
         let now = now_ms();
         let sessions = match in_both(&store, &history, |_, meetings| {
             sync::meetings_since(meetings, now - sync::BACKFILL_MS)
@@ -293,7 +298,14 @@ pub(crate) fn catch_up(app: AppHandle, store: Arc<MeetingStore>) {
         let mut effects = Effects::default();
         for session_id in sessions {
             let taken = in_both(&store, &history, |history, meetings| {
-                sync::take_in_meeting(history, meetings, session_id, user_name.as_deref(), now)
+                let taken = sync::take_in_meeting(
+                    history,
+                    meetings,
+                    session_id,
+                    user_name.as_deref(),
+                    now,
+                )?;
+                agents::fill_taken(history, meetings, user_name.as_deref(), taken, sona, now)
             });
             match taken {
                 Ok(taken) => taken.iter().for_each(|item| effects.item(item)),
@@ -347,6 +359,7 @@ struct RowContext {
     raised: HashMap<String, u32>,
     sources: HashMap<String, WorkSource>,
     follow_ups: FollowUps,
+    doers: HashMap<String, WorkDoer>,
 }
 
 impl RowContext {
@@ -365,6 +378,7 @@ impl RowContext {
             raised: items::meetings_raised(history)?,
             sources: follow::item_sources(history)?,
             follow_ups: FollowUps::read(history)?,
+            doers: agents::doers(history)?,
         })
     }
 
@@ -381,6 +395,7 @@ impl RowContext {
                 .as_deref()
                 .and_then(|id| self.people.name(id))
                 .map(str::to_owned),
+            doer: self.doers.get(&item.id).cloned(),
             source_meeting_id: None,
             source_meeting_title: None,
             source_quote: None,
@@ -527,12 +542,16 @@ fn list(
         }
         rows.push(context.row(&mut reader, item.clone())?);
     }
+    let listed: HashSet<&str> = rows.iter().map(|row| row.item.id.as_str()).collect();
+    let mut proposals = agents::open_proposals(history)?;
+    proposals.retain(|id, _| listed.contains(id.as_str()));
     Ok(WorkList {
         items: rows,
         labels: items::labels(history)?,
         projects,
         people: context.people.choices,
         suggestions,
+        proposals,
         conversations_available: meetings.is_some(),
     })
 }
@@ -567,6 +586,7 @@ fn detail(
         activity: items::activity(history, &id)?,
         suggestions,
         conversations_available: meetings.is_some(),
+        proposals: agents::item_proposals(history, &id)?,
     })
 }
 
