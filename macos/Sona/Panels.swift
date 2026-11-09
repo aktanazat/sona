@@ -489,6 +489,9 @@ final class FloatingPanel {
     private let panel: DockablePanel
     private let host: NSHostingView<AnyView>
     private let arrival: PanelArrival
+    /// Takes the keyboard while shown, for a panel that is typed in. Hiding
+    /// gives it back to the app in front.
+    private let keyed: Bool
     private var placement: PanelPlacement?
     /// The point the placement pins, fixed when the panel is placed: its
     /// top right corner, or the middle of the edge it stands on. A resize
@@ -541,8 +544,9 @@ final class FloatingPanel {
         }
     }
 
-    init(_ content: some View, arrival: PanelArrival = .fade) {
+    init(_ content: some View, arrival: PanelArrival = .fade, keyed: Bool = false) {
         self.arrival = arrival
+        self.keyed = keyed
         let panel = DockablePanel(
             contentRect: .zero,
             styleMask: [.borderless, .nonactivatingPanel],
@@ -568,6 +572,12 @@ final class FloatingPanel {
     /// panel already up at the same placement stays exactly where it is,
     /// unless `anew` asks for it to be floated again all the same.
     func show(at placement: PanelPlacement, anew: Bool = false) {
+        defer {
+            if keyed {
+                panel.takesKeys = true
+                panel.makeKey()
+            }
+        }
         let appearing = !panel.isVisible
         guard anew || !shown || placement != self.placement else { return }
         if drag != nil { cancelDrag() }
@@ -611,6 +621,11 @@ final class FloatingPanel {
         visibilityRevision += 1
         let revision = visibilityRevision
         panel.ignoresMouseEvents = true
+        if keyed {
+            panel.takesKeys = false
+            panel.orderOut(nil)
+            panel.orderFrontRegardless()
+        }
         switch arrival {
         case .fade:
             NSAnimationContext.runAnimationGroup { context in

@@ -369,11 +369,11 @@ final class WorkStore {
     }
 
     /// Waits for earlier changes, so a label made a moment ago exists when
-    /// the new item names it.
+    /// the new item names it. A link is kept as the page the task came from.
     func create(
         title: String, details: String? = nil, status: WorkStatus? = nil, priority: Int? = nil,
         projectId: String? = nil, milestoneId: String? = nil, owner: WorkOwner? = nil, dueAtMs: Int64? = nil,
-        labelIds: [String] = []
+        labelIds: [String] = [], recurrence: String? = nil, link: WorkLink? = nil
     ) async -> WorkItem? {
         await queue?.value
         pending += 1
@@ -381,9 +381,16 @@ final class WorkStore {
         mutationError = nil
         let input = WorkItemInput(
             title: title, details: details, status: status, priority: priority, projectId: projectId,
-            milestoneId: milestoneId, owner: owner, dueAtMs: dueAtMs, labelIds: labelIds.isEmpty ? nil : labelIds)
+            milestoneId: milestoneId, owner: owner, dueAtMs: dueAtMs, labelIds: labelIds.isEmpty ? nil : labelIds,
+            recurrence: recurrence)
         do {
-            let item: WorkItem = try await core.request("work_create", CreateParams(operationId: Self.newId(), input: input))
+            let item: WorkItem
+            if let link {
+                let source = LinkSource(url: link.url, title: link.title)
+                item = try await core.request("work_capture", CaptureParams(operationId: Self.newId(), input: input, source: source))
+            } else {
+                item = try await core.request("work_create", CreateParams(operationId: Self.newId(), input: input))
+            }
             if var rows = items, !rows.contains(where: { $0.id == item.id }) {
                 rows.append(row(for: item, beside: nil))
                 items = rows
@@ -393,6 +400,18 @@ final class WorkStore {
             mutationError = error.localizedDescription
             return nil
         }
+    }
+
+    /// Reads a typed title for its fields, leaving the `plain` words as
+    /// text. It changes nothing, so it does not wait in the queue.
+    func parse(_ text: String, plain: [String]) async -> WorkParse? {
+        try? await core.request("work_parse", ParseParams(text: text, plain: plain, spoken: false))
+    }
+
+    /// A new label in the next hue along; returns its id.
+    func makeLabel(named name: String) -> String {
+        let hues: [Double] = [25, 60, 145, 200, 250, 290, 330]
+        return saveLabel(id: nil, name: name, hue: hues[labels.count % hues.count])
     }
 
     func undo() {
@@ -876,4 +895,19 @@ private struct DelegateParams: Encodable {
     let operationId: String
     let id: String
     let agent: String?
+}
+private struct ParseParams: Encodable {
+    let text: String
+    let plain: [String]
+    let spoken: Bool
+}
+private struct CaptureParams: Encodable {
+    let operationId: String
+    let input: WorkItemInput
+    let source: LinkSource
+}
+private struct LinkSource: Encodable {
+    let kind = "link"
+    let url: String
+    let title: String?
 }

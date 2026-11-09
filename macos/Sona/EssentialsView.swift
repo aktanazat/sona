@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// The decisions a person makes once: the shortcut, the microphone, the
+/// The decisions a person makes once: the shortcuts, the microphone, the
 /// language, whether Sona makes a noise, and whether it starts with the Mac.
 ///
 /// One surface, no headings — the tab above already names the page, and a
@@ -28,6 +28,8 @@ struct EssentialsView<MeetingRows: View>: View {
                         set: { value in Task { await store.setPushToTalk(value) } }
                     )
                 )
+                ShortcutCaptureRow(store: store, id: "work_quick_entry")
+                ShortcutCaptureRow(store: store, id: "work_ramble")
                 MicrophoneRow(store: store)
                 /// The spoken language, beside the microphone that hears it.
                 /// The list narrows to what the loaded model can recognize,

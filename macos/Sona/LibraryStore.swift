@@ -117,6 +117,7 @@ final class LibraryStore {
     @ObservationIgnored private var copiedTask: Task<Void, Never>?
     @ObservationIgnored private var ticker: Task<Void, Never>?
     @ObservationIgnored private var player: AVAudioPlayer?
+    @ObservationIgnored private var stopAt: TimeInterval?
     @ObservationIgnored private var keptRequest = 0
     @ObservationIgnored private var recoveryPending = false
 
@@ -528,11 +529,33 @@ final class LibraryStore {
                 playing = false
                 ticker?.cancel()
             } else {
+                stopAt = nil
                 resume()
             }
             return
         }
         stopPlayback()
+        load(id)
+    }
+
+    /// Plays one span of a recording and stops at its end; with no end, it
+    /// plays on to the end of the recording.
+    func playSpan(_ id: Int64, fromMs: Int64, toMs: Int64?) {
+        guard !heldForRecording else { return }
+        let start = TimeInterval(max(0, fromMs)) / 1000
+        let end = toMs.map { TimeInterval($0) / 1000 }
+        if playingId == id, let player {
+            player.currentTime = start
+            position = start
+            stopAt = end
+            resume()
+            return
+        }
+        stopPlayback()
+        load(id, from: start, until: end)
+    }
+
+    private func load(_ id: Int64, from start: TimeInterval = 0, until end: TimeInterval? = nil) {
         loadingAudio = id
         Task { [self] in
             do {
@@ -545,10 +568,12 @@ final class LibraryStore {
                     throw LibraryFault.audioUnplayable(error.localizedDescription)
                 }
                 made.prepareToPlay()
+                made.currentTime = start
                 player = made
                 playingId = id
                 duration = made.duration
-                position = 0
+                position = start
+                stopAt = end
                 loadingAudio = nil
                 error = nil
                 resume()
@@ -565,6 +590,7 @@ final class LibraryStore {
         let time = min(max(fraction, 0), 1) * duration
         player.currentTime = time
         position = time
+        stopAt = nil
     }
 
     /// Holds playback while a meeting captures, stopping what is playing.
@@ -584,6 +610,7 @@ final class LibraryStore {
         playing = false
         position = 0
         duration = 0
+        stopAt = nil
     }
 
     private func resume() {
@@ -603,6 +630,13 @@ final class LibraryStore {
                     // it is moved, which is what the readout then states.
                     self.playing = false
                     self.position = self.duration
+                    return
+                }
+                if let stop = self.stopAt, player.currentTime >= stop {
+                    player.pause()
+                    self.stopAt = nil
+                    self.playing = false
+                    self.position = player.currentTime
                     return
                 }
                 self.position = player.currentTime

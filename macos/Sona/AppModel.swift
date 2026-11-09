@@ -337,6 +337,7 @@ final class AppModel {
     @ObservationIgnored private lazy var pill = FloatingPanel(HUDPill().environment(self))
     @ObservationIgnored private lazy var consent = FloatingPanel(consentPanel(), arrival: .slide)
     @ObservationIgnored private let windowAttached: WindowAttachedCard
+    @ObservationIgnored private lazy var quickEntry = QuickEntry(model: self)
     @ObservationIgnored private lazy var quietReviewScheduler = QuietReviewScheduler(store: projects) { [weak self] in
         guard let self, ready, !coreStopped, !coreRestarting, onboarding.step == .done,
               capture == .idle, !live.starting, live.pending == nil, live.live == nil, live.active == nil,
@@ -418,6 +419,8 @@ final class AppModel {
         imports.jobCompleted = { [weak self] _ in
             Task { await self?.library.start() }
         }
+        core.observe(QuickEntry.openEvent) { [weak self] line in self?.quickEntry.open(line) }
+        core.observe(QuickEntry.filedEvent) { [weak self] line in self?.quickEntry.file(line) }
         core.onClose { [weak self] in self?.coreClosed() }
         workKeys.install(self)
         NotificationCenter.default.addObserver(
@@ -640,6 +643,15 @@ final class AppModel {
             open(link: "sona://note/\(evidence.sourceId)")
         case .loop:
             open(link: "sona://loop/\(evidence.sourceId)")
+        case .dictation:
+            if let id = Int64(evidence.sourceId) { openDictation(id) }
+        case .link:
+            guard let url = URL(string: evidence.sourceId) else { return }
+            if url.isFileURL {
+                NSWorkspace.shared.activateFileViewerSelecting([url])
+            } else if let scheme = url.scheme?.lowercased(), scheme == "https" || scheme == "http" {
+                NSWorkspace.shared.open(url)
+            }
         }
     }
 

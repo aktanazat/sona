@@ -67,7 +67,7 @@ struct PlanningTask: Decodable, Identifiable, Equatable {
 }
 
 enum PlanningTargetKind: String, Codable, Hashable { case project, milestone, task }
-enum PlanningSourceKind: String, Codable, Hashable { case meeting, note, loop }
+enum PlanningSourceKind: String, Codable, Hashable { case meeting, note, loop, dictation, link }
 
 struct PlanningEvidenceLink: Decodable, Identifiable, Equatable {
     let id: String
@@ -81,6 +81,10 @@ struct PlanningEvidenceLink: Decodable, Identifiable, Equatable {
     let createdAtMs: Int64
     let available: Bool
     let title: String?
+    /// A dictation's span ends here; `atMs` is where it starts.
+    let endMs: Int64?
+    /// The words said, for a dictation; the page's title, for a link.
+    let caption: String?
 }
 
 struct PlanningProjectSummary: Decodable, Identifiable, Equatable {
@@ -320,7 +324,8 @@ struct PlanningSuggestion: Decodable, Identifiable, Equatable {
         return PlanningEvidenceLink(
             id: id, targetKind: targetKind, targetId: targetId,
             sourceKind: source.kind, sourceId: source.id, atMs: atMs, meetingNoteId: meetingNoteId,
-            revision: revision, createdAtMs: createdAtMs, available: true, title: evidence.title
+            revision: revision, createdAtMs: createdAtMs, available: true, title: evidence.title,
+            endMs: nil, caption: nil
         )
     }
 }
