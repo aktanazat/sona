@@ -311,6 +311,9 @@ them. `list` and `ready` take `--due overdue,today,this-week,next:N,none`;
 | `labels`, `label-save`, `label-delete` | Labels; the saves and deletes write                              |
 | `views`, `view-save`, `view-delete`    | Saved views; the saves and deletes write                         |
 | `export --md <DIR>`                    | One `S-<n>.md` file per matching task                            |
+| `ask <QUESTION> [--take N,...]`        | Cited lines answering it; `--take` writes them as Triage tasks   |
+| `say <WORDS>`                          | **Writes.** "push everything not urgent to monday"; `--dry-run`  |
+| `watches`, `watch`, `unwatch`          | Topics Sona notifies about; watch and unwatch write              |
 
 In a portable profile only the tracker's history side opens: work from
 meetings, people as owners and `--meeting` filters need the encrypted corpus.

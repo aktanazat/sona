@@ -211,6 +211,9 @@ const SONA_WRITES = {
   "label-delete": true,
   "view-save": true,
   "view-delete": true,
+  say: true,
+  watch: true,
+  unwatch: true,
 };
 
 /** Each required argument at its first enum value or a placeholder. */
@@ -254,7 +257,7 @@ describe("published tools", () => {
     const mislabelled = TOOLS.filter((tool) => {
       const argv = tool.argv(smallest(tool));
       const verb = (argv[0] === "work" ? argv[1] : argv[0]) ?? "";
-      const writes = verb in SONA_WRITES;
+      const writes = verb in SONA_WRITES || argv.some((arg) => arg.startsWith("--take="));
       const readOnly = listed.find((candidate) => candidate.name === tool.name)
         ?.annotations?.readOnlyHint;
       return readOnly !== !writes;

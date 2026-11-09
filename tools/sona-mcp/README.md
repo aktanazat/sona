@@ -205,10 +205,16 @@ change to a task's fields waits for them: the answer lists it under
 `proposed`, and the user accepts or rejects it in Sona. A created task lands
 in Triage, and triage, archiving and label changes are refused.
 
-Ten more are opt-in: `sona_work_archive`, `sona_work_restore`,
+`sona_work_ask` answers a question with the lines from meetings and
+dictations that say it, numbered; `sona_work_take` makes Triage tasks of
+chosen lines. `sona_work_say` changes tasks from plain words ("push
+everything not urgent to monday"); run it with `dry_run:true` first.
+
+Twelve more are opt-in: `sona_work_archive`, `sona_work_restore`,
 `sona_work_relate`, `sona_work_unrelate`, `sona_work_labels`,
 `sona_work_label_save`, `sona_work_label_delete`, `sona_work_views`,
-`sona_work_view_save` and `sona_work_view_delete`. Publish them with
+`sona_work_view_save`, `sona_work_view_delete`, `sona_work_watches` and
+`sona_work_watch`. Publish them with
 `SONA_MCP_TOOLS`: `all` for every tool, or a comma-separated list of names
 beside the default ones. A name that matches no tool stops the server at
 start.
