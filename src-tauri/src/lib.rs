@@ -399,11 +399,17 @@ fn start_meeting_detection(
 
     planning::work::follow::start(app_handle.clone(), Arc::clone(&native_prompts));
     planning::work::cycles::start(app_handle.clone());
+    app_handle.manage(planning::work::watch::WatchNotices(Arc::clone(
+        &native_prompts,
+    )));
     meetings.start_digest_scheduler(app_handle.clone(), native_prompts);
     responder.bind_digest(Arc::new(meeting::digest::CaptureOpener::new(
         app_handle.clone(),
     )));
     responder.bind_follow_up(Arc::new(planning::work::follow::ReminderOpener::new(
+        app_handle.clone(),
+    )));
+    responder.bind_watch(Arc::new(planning::work::watch::WatchAnswers::new(
         app_handle.clone(),
     )));
 
@@ -2091,6 +2097,13 @@ pub fn run(cli_args: CliArgs) {
             planning::work::agents::work_proposals_reject,
             planning::work::parse::work_parse,
             planning::work::capture::work_capture,
+            planning::work::capture::work_take_lines,
+            planning::work::ask::work_ask,
+            planning::work::command::work_command,
+            planning::work::watch::work_watches,
+            planning::work::watch::work_watch_save,
+            planning::work::watch::work_watch_remove,
+            planning::work::watch::work_watch_task,
         ])
         .events(collect_events![
             chat_voice::ChatVoiceEvent,
@@ -2141,6 +2154,9 @@ pub fn run(cli_args: CliArgs) {
             planning::work::follow::WorkReminderOpened,
             planning::work::capture::WorkQuickEntry,
             planning::work::capture::WorkRambleFiled,
+            planning::work::capture::WorkCommandHeard,
+            planning::work::watch::WorkWatchOpened,
+            planning::work::watch::WorkWatchesChanged,
         ]);
 
     let invoke_handler = specta_builder.invoke_handler();

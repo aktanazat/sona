@@ -8,7 +8,7 @@ use super::context::application_bundle_ids;
 use super::loops::{ledger_loop_seeds, readable_ledger_in, states_in};
 use super::meeting_maybe::kept_meeting_words_in;
 use super::people::confirmed_person_ids_in;
-use super::said::{matched_lines_in, MatchedLine, SessionVoices};
+use super::said::{matched_lines_in, MatchedLine, SessionVoices, Within};
 use super::{id, search_projection, MeetingStore, StoreError};
 use crate::meeting::ledger::LedgerThreadState;
 use crate::meeting::people_types::PersonId;
@@ -223,7 +223,7 @@ impl MeetingStore {
                     &*self.connection()?,
                     &term.query(),
                     LINES_PER_TERM,
-                    Some(session_id),
+                    Within::Except(session_id),
                 )?),
             };
             for (line_rank, line) in lines.iter().enumerate() {

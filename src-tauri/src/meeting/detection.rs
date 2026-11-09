@@ -3282,7 +3282,9 @@ impl PromptResponder for RuntimeResponder {
             // Sorted out by `ResponderCell` before it reaches the runtime; the
             // digest and follow-through are not detection's, and the arms
             // exist so that stays true by construction rather than by comment.
-            PromptResponse::DigestOpened | PromptResponse::FollowUpOpened { .. } => {}
+            PromptResponse::DigestOpened
+            | PromptResponse::FollowUpOpened { .. }
+            | PromptResponse::Watched { .. } => {}
         }
     }
 }

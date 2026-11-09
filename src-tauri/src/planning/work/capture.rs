@@ -3,7 +3,8 @@
 //! beside it, and the tasks one recording says, each kept with the stretch
 //! of the recording that said it.
 
-use super::parse::{spoken_tasks, Lexicon, SpokenTask, WorkField};
+use super::items;
+use super::parse::{parse, spoken_tasks, Lexicon, Said, SpokenTask, WorkField};
 use super::types::{WorkActor, WorkItem, WorkItemInput, WorkOwner, WorkStatus};
 use super::{insert_input, run_history, run_with_meetings, Change, Done, Effects};
 use crate::context::{read_front_window, FrontWindow, FrontWindowRead};
@@ -17,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use specta::Type;
 use std::ops::Range;
 use std::sync::Arc;
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 use tauri_specta::Event;
 use uuid::Uuid;
 
@@ -41,6 +42,27 @@ pub enum WorkCaptureSource {
         end_ms: i64,
         quote: String,
     },
+    /// A line of a meeting: where it starts in the meeting, in ms, and its
+    /// words.
+    #[serde(rename_all = "camelCase")]
+    Meeting {
+        session_id: String,
+        at_ms: i64,
+        quote: String,
+    },
+    /// Something a meeting left open: a promise, a question, a decision.
+    #[serde(rename_all = "camelCase")]
+    Loop { loop_id: String },
+}
+
+/// One cited line to keep as a Triage task.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkTakenLine {
+    pub quote: String,
+    pub source: WorkCaptureSource,
+    /// Who said it, when a person was confirmed for the voice.
+    pub person_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize, Type)]
@@ -66,6 +88,15 @@ pub struct WorkRambleFiled {
     pub history_id: Option<i64>,
     pub items: Vec<WorkItem>,
     pub error: Option<String>,
+}
+
+/// A held-shortcut recording said a command over the tracker rather than
+/// tasks; nothing was filed.
+#[derive(Clone, Debug, Deserialize, Serialize, Type, tauri_specta::Event)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkCommandHeard {
+    pub said: String,
+    pub history_id: Option<i64>,
 }
 
 /// [`super::work_create`] with where the task came from kept beside it.
@@ -149,6 +180,25 @@ pub(crate) fn attach(
                 caption(Some(quote)),
             )
         }
+        WorkCaptureSource::Meeting {
+            session_id,
+            at_ms,
+            quote,
+        } => {
+            if *at_ms < 0 {
+                return Err(Refusal::Invalid.into());
+            }
+            (
+                EvidenceSourceKind::Meeting,
+                store::uuid(session_id)?,
+                Some(*at_ms),
+                None,
+                caption(Some(quote)),
+            )
+        }
+        WorkCaptureSource::Loop { loop_id } => {
+            (EvidenceSourceKind::Loop, loop_id.clone(), None, None, None)
+        }
     };
     tx.execute(
         "INSERT INTO planning_evidence_links
@@ -167,6 +217,107 @@ pub(crate) fn attach(
         ],
     )?;
     Ok(())
+}
+
+/// Keeps each line as a Triage task with the line as its evidence, read for
+/// a date, a priority, an owner and a project the way speech is. A line
+/// whose loop the tracker already follows gives that loop's item instead.
+#[tauri::command]
+#[specta::specta]
+pub async fn work_take_lines(
+    app: AppHandle,
+    operation_id: String,
+    lines: Vec<WorkTakenLine>,
+) -> Result<Vec<WorkItem>, String> {
+    take_lines_as(&app, WorkActor::Me, &operation_id, &lines).await
+}
+
+pub(crate) async fn take_lines_as(
+    app: &AppHandle,
+    actor: WorkActor,
+    operation_id: &str,
+    lines: &[WorkTakenLine],
+) -> Result<Vec<WorkItem>, String> {
+    if lines.is_empty() || lines.iter().any(|line| line.quote.trim().is_empty()) {
+        return Err(crate::planning::failure(Refusal::Invalid.into()));
+    }
+    let change = Change::now(operation_id, actor);
+    run_with_meetings(app, |history, meetings| {
+        let lexicon = Lexicon::read(history, meetings)?;
+        let now = chrono::Local::now();
+        store::mutate(
+            history,
+            change.operation_id,
+            "work_take_lines",
+            &lines,
+            change.at_ms,
+            |tx| {
+                let mut effects = Effects::default();
+                let mut items = Vec::with_capacity(lines.len());
+                for line in lines {
+                    let followed = match &line.source {
+                        WorkCaptureSource::Loop { loop_id } => items::by_source_loop(tx, loop_id)?,
+                        _ => None,
+                    };
+                    let item = match followed {
+                        Some(item) => item,
+                        None => {
+                            let item = insert_input(
+                                tx,
+                                meetings,
+                                change,
+                                &line_input(line, &lexicon, &now),
+                            )?;
+                            attach(tx, &item.id, &line.source, change.at_ms)?;
+                            item
+                        }
+                    };
+                    effects.item(&item);
+                    items.push(item);
+                }
+                Ok(Done {
+                    value: items,
+                    effects,
+                })
+            },
+        )
+    })
+    .await
+}
+
+/// A cited line as a new Triage item: its words read as speech, owned by
+/// whoever they name, else by whoever said them.
+fn line_input<Tz: chrono::TimeZone>(
+    line: &WorkTakenLine,
+    lexicon: &Lexicon,
+    now: &chrono::DateTime<Tz>,
+) -> WorkItemInput {
+    let quote = line.quote.trim().trim_matches('…').trim();
+    let parsed = parse(quote, Said::Spoken, &[], lexicon, now);
+    let task = SpokenTask {
+        said: 0..quote.len(),
+        title: if parsed.title.is_empty() {
+            quote.to_owned()
+        } else {
+            parsed.title
+        },
+        fields: parsed.tokens.into_iter().map(|token| token.field).collect(),
+        someone_else: false,
+    };
+    let mut input = input(&task);
+    let named = task
+        .fields
+        .iter()
+        .any(|field| matches!(field, WorkField::Owner { .. }));
+    if !named {
+        input.owner = Some(match &line.person_id {
+            Some(person_id) => WorkOwner::Person {
+                person_id: person_id.clone(),
+            },
+            None => WorkOwner::Nobody,
+        });
+    }
+    input
 }
 
 /// Reads the window in front, then asks the app to open the new-task box
@@ -222,6 +373,8 @@ const PAD_MS: i64 = 150;
 
 /// Files the tasks `passage` says into Triage, each with the stretch of the
 /// recording `history_id` that said it, then tells the app what was filed.
+/// A passage that reads as a command over the tracker files nothing: the
+/// app is told what was heard so it can show what the command would do.
 pub(crate) fn file_spoken(
     app: AppHandle,
     history_id: Option<i64>,
@@ -229,6 +382,28 @@ pub(crate) fn file_spoken(
     samples: Arc<Vec<f32>>,
 ) {
     tauri::async_runtime::spawn(async move {
+        let commanded = {
+            let history = app.state::<Arc<crate::managers::history::HistoryManager>>();
+            let meetings = app.state::<Arc<crate::meeting::session::MeetingSessionManager>>();
+            super::with_meetings(&history, &meetings, |history, meetings| {
+                Ok(super::command::is_command(
+                    &passage,
+                    &Lexicon::read(history, meetings)?,
+                ))
+            })
+            .await
+            .unwrap_or(false)
+        };
+        if commanded {
+            let heard = WorkCommandHeard {
+                said: passage,
+                history_id,
+            };
+            if heard.emit(&app).is_err() {
+                log::warn!("A spoken command could not reach the window");
+            }
+            return;
+        }
         let duration_ms = i64::try_from(samples.len() * 1_000 / SAMPLE_RATE).unwrap_or(i64::MAX);
         let detector_app = app.clone();
         let voiced = tauri::async_runtime::spawn_blocking(move || {

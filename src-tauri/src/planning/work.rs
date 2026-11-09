@@ -3,8 +3,10 @@
 //! Project screens read the same rows through `store`.
 
 pub(crate) mod agents;
+pub(crate) mod ask;
 pub(crate) mod blocks;
 pub(crate) mod capture;
+pub(crate) mod command;
 pub(crate) mod cycles;
 pub(crate) mod follow;
 mod hygiene;
@@ -16,6 +18,7 @@ pub(crate) mod sync;
 #[cfg(test)]
 mod tests;
 pub mod types;
+pub(crate) mod watch;
 
 use self::follow::FollowUps;
 use self::items::{Changed, DueSpan, NewItem};
