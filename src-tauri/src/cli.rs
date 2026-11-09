@@ -1,7 +1,7 @@
 use crate::managers::transcription::TextFilter;
-use crate::query::external::{ExternalFormat, ExternalLoopStatus};
+use crate::query::external::{tracker::WorkCommand, ExternalFormat, ExternalLoopStatus};
 use crate::query::QueryScope;
-use clap::{ArgGroup, Parser};
+use clap::{ArgGroup, Parser, Subcommand};
 use std::path::PathBuf;
 
 /* The corpus flags below are one verb per invocation, so they live in a clap
@@ -14,9 +14,12 @@ use std::path::PathBuf;
  *
  * All but one of them read. `--loop-resolve` reads its loop revision before it
  * writes, so it needs both external access and external mutations. The group
- * keeps it out of a read invocation: one verb, one answer. */
+ * keeps it out of a read invocation: one verb, one answer. The task tracker is
+ * the `work` subcommand instead, because its verbs carry modifiers of their
+ * own; any flag above turns the subcommand off, so the two never mix. */
 #[derive(Parser, Debug, Clone, Default)]
 #[command(name = "sona", about = "Sona — speech to text")]
+#[command(args_conflicts_with_subcommands = true)]
 #[command(version = concat!(
     env!("CARGO_PKG_VERSION"),
     " (",
@@ -237,9 +240,9 @@ pub struct CliArgs {
     #[arg(long, value_name = "MEETING_ID")]
     pub place: Option<String>,
 
-    /// Mark one loop done and print the receipt as JSON. The one flag on this
-    /// surface that writes, so it needs its own consent row on top of the read
-    /// one: Settings > Agents > External mutations.
+    /// Mark one loop done and print the receipt as JSON. It writes, so it needs
+    /// its own consent row on top of the read one: Settings > Agents > External
+    /// mutations.
     #[arg(long, value_name = "LOOP_ID")]
     pub loop_resolve: Option<String>,
 
@@ -296,6 +299,16 @@ pub struct CliArgs {
     /// They enter the GUI import queue and never trigger direct delivery.
     #[arg(value_name = "AUDIO", num_args = 0..)]
     pub opened_audio_files: Vec<PathBuf>,
+
+    #[command(subcommand)]
+    pub command: Option<Command>,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum Command {
+    /// Read and change tasks in Sona's tracker. Reads need Settings > Agents >
+    /// External access; changes also need External mutations.
+    Work(WorkCommand),
 }
 
 #[cfg(test)]

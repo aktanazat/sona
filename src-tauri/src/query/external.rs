@@ -26,11 +26,13 @@
 //! pages carry, because these are the same nouns out of the same corpus, and a
 //! second version to bump in lockstep is a second thing to get wrong.
 //!
-//! # Reads and one fenced write
+//! # Reads and fenced writes
 //!
-//! Every verb except `--loop-resolve` reads. Resolving a loop first reads that
-//! row's revision, then writes against it, so it requires both external-consent
-//! rows and returns the store receipt verbatim.
+//! Every corpus verb except `--loop-resolve` reads. Resolving a loop first reads
+//! that row's revision, then writes against it, so it requires both
+//! external-consent rows and returns the store receipt verbatim. The task
+//! tracker's `sona work` verbs ([`tracker`]) follow the same rule: reads and dry
+//! runs need the read row, and every change needs both.
 
 use super::conversation_pages::{
     bookmarks_page, place, roster, ExternalBookmarksPage, ExternalPlace, ExternalRoster,
@@ -41,7 +43,7 @@ use super::{
     QueryPageReason, QueryScope, QuerySearchPage, QUERY_SCHEMA_VERSION,
 };
 use crate::analytics::{DashboardTrendRange, DashboardTrendRequest};
-use crate::cli::CliArgs;
+use crate::cli::{CliArgs, Command};
 use crate::managers::history::{HistoryManager, HistoryStats};
 use crate::meeting::detection::calendar::{CalendarAccess, CalendarSource};
 use crate::meeting::loop_types::{
@@ -74,6 +76,8 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 use uuid::Uuid;
 
+pub mod tracker;
+
 /// Where a person turns each scope on. Named in the refusal so an agent that is
 /// refused can say where to click; written once so the CLI, the MCP server and
 /// the settings rows cannot drift apart about what the rows are called.
@@ -96,9 +100,9 @@ const LOOP_SCAN_DEPTH: usize = 500;
 /// What a verb needs the operator to have allowed.
 ///
 /// Two scopes rather than one, and not a ladder: reading the corpus and
-/// changing it are different questions. `--loop-resolve` needs `Read` to
-/// inspect its fence before it needs `Mutate` to write; every other verb needs
-/// only `Read`. A mutation grant alone therefore cannot close a loop blindly.
+/// changing it are different questions. Every write reads what it changes
+/// before it writes, so it needs `Read` before it needs `Mutate`; every other
+/// verb needs only `Read`. A mutation grant alone therefore changes nothing.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExternalScope {
     Read,
@@ -106,7 +110,7 @@ pub enum ExternalScope {
 }
 
 const READ_SCOPES: &[ExternalScope] = &[ExternalScope::Read];
-const LOOP_RESOLVE_SCOPES: &[ExternalScope] = &[ExternalScope::Read, ExternalScope::Mutate];
+const WRITE_SCOPES: &[ExternalScope] = &[ExternalScope::Read, ExternalScope::Mutate];
 
 impl ExternalScope {
     /// The settings row that opens this scope.
@@ -360,14 +364,16 @@ pub enum ExternalRequest {
     LoopResolve {
         loop_id: MeetingLoopId,
     },
+    Work(tracker::WorkVerb),
 }
 
 impl ExternalRequest {
-    /// Which grants this verb needs. The loop write reads its row to fence the
-    /// write, so it needs both grants; a future verb must choose explicitly.
+    /// Which grants this verb needs. A write reads its row to fence the write,
+    /// so it needs both grants; a future verb must choose explicitly.
     pub const fn required_scopes(&self) -> &'static [ExternalScope] {
         match self {
-            Self::LoopResolve { .. } => LOOP_RESOLVE_SCOPES,
+            Self::LoopResolve { .. } => WRITE_SCOPES,
+            Self::Work(verb) => verb.required_scopes(),
             Self::Search { .. }
             | Self::Meetings { .. }
             | Self::Meeting { .. }
@@ -449,6 +455,7 @@ pub fn is_external_query(args: &CliArgs) -> bool {
         || args.note_versions.is_some()
         || args.note_diff.is_some()
         || args.stats
+        || args.command.is_some()
 }
 
 /// The modifier flag a command line named that its verb does not read, if
@@ -560,6 +567,10 @@ impl ExternalRequest {
     /// defeats `requires`, see [`foreign_modifier`] — that every modifier
     /// named belongs to the verb it was named beside.
     pub fn from_args(args: &CliArgs) -> Result<Self, ExternalError> {
+        if let Some(Command::Work(work)) = &args.command {
+            work.verb.check()?;
+            return Ok(Self::Work(work.verb.clone()));
+        }
         if let Some(refusal) = foreign_modifier(args) {
             return Err(ExternalError::invalid(refusal));
         }
@@ -725,7 +736,7 @@ impl ExternalRequest {
             });
         }
         Err(ExternalError::invalid(
-            "No verb was named. Pass --query, --meetings, --meeting, --transcript, --loops, --people, --person-catch-up, --person-changes, --person-stats, --events, --upcoming, --plans, --bookmarks, --roster, --place, --projects, --project, --notes, --note, --note-context, --note-versions, --note-diff, --stats or --loop-resolve.",
+            "No verb was named. Pass --query, --meetings, --meeting, --transcript, --loops, --people, --person-catch-up, --person-changes, --person-stats, --events, --upcoming, --plans, --bookmarks, --roster, --place, --projects, --project, --notes, --note, --note-context, --note-versions, --note-diff, --stats or --loop-resolve. For tasks, run sona work --help.",
         ))
     }
 }
@@ -1345,6 +1356,7 @@ pub enum ExternalResponse {
     NoteVersions(ExternalNoteVersions),
     NoteDiff(ExternalNoteDiff),
     Stats(ExternalCorpusStats),
+    Work(tracker::WorkAnswer),
 }
 
 impl ExternalResponse {
@@ -1397,6 +1409,7 @@ pub async fn answer(
             | ExternalRequest::Project { .. }
             | ExternalRequest::NoteDiff { .. }
             | ExternalRequest::Stats
+            | ExternalRequest::Work(_)
     ) {
         history.ensure_storage_unlocked().await;
     }
@@ -1621,6 +1634,9 @@ pub async fn answer(
         ExternalRequest::Stats => Ok(ExternalResponse::Stats(
             corpus_stats(meetings, history).await,
         )),
+        ExternalRequest::Work(verb) => tracker::answer(verb, app, meetings, history)
+            .await
+            .map(ExternalResponse::Work),
     }
 }
 
@@ -3777,6 +3793,7 @@ fn text_response(response: &ExternalResponse) -> String {
                 );
             }
         }
+        ExternalResponse::Work(answer) => text.push_str(&answer.text()),
     }
     text
 }
@@ -3873,7 +3890,11 @@ pub fn run_cli(app: &tauri::AppHandle, args: &CliArgs) -> i32 {
                 calendar.as_ref(),
             ))
         });
-    let format = args.format.unwrap_or_default();
+    let format = match &args.command {
+        Some(Command::Work(work)) if work.json => ExternalFormat::Json,
+        Some(Command::Work(_)) => ExternalFormat::Text,
+        None => args.format.unwrap_or_default(),
+    };
     match outcome {
         Ok(response) => {
             let output = match format {
@@ -4516,33 +4537,62 @@ mod tests {
         assert!(consent(false, true).allows(ExternalScope::Mutate));
     }
 
-    /// Which grants each verb asks for: every verb reads; loop resolution also writes.
+    /// Which grants each verb asks for: every verb reads; a verb that changes
+    /// something also writes, and a dry run of one changes nothing.
     #[test]
-    fn only_loop_resolve_needs_both_scopes() {
-        for argv in [
-            vec!["--query", "dana"],
-            vec!["--meetings"],
-            vec!["--meeting", MEETING],
-            vec!["--transcript", MEETING],
-            vec!["--loops"],
-            vec!["--people", "Dana"],
-            vec!["--events"],
-            vec!["--upcoming"],
-            vec!["--plans"],
-            vec!["--bookmarks"],
-            vec!["--roster", MEETING],
-            vec!["--place", MEETING],
-            vec!["--person-stats", PERSON],
-        ] {
-            assert_eq!(
-                request(&argv).required_scopes(),
-                &[ExternalScope::Read],
-                "{argv:?}",
-            );
-        }
-        assert_eq!(
-            request(&["--loop-resolve", LOOP]).required_scopes(),
-            &[ExternalScope::Read, ExternalScope::Mutate],
-        );
+    fn only_a_change_needs_both_scopes() {
+        let reads: &[ExternalScope] = &[ExternalScope::Read];
+        let writes: &[ExternalScope] = &[ExternalScope::Read, ExternalScope::Mutate];
+        let wrong: Vec<Vec<&str>> = [
+            (vec!["--query", "dana"], reads),
+            (vec!["--meetings"], reads),
+            (vec!["--meeting", MEETING], reads),
+            (vec!["--transcript", MEETING], reads),
+            (vec!["--loops"], reads),
+            (vec!["--people", "Dana"], reads),
+            (vec!["--events"], reads),
+            (vec!["--upcoming"], reads),
+            (vec!["--plans"], reads),
+            (vec!["--bookmarks"], reads),
+            (vec!["--roster", MEETING], reads),
+            (vec!["--place", MEETING], reads),
+            (vec!["--person-stats", PERSON], reads),
+            (vec!["--loop-resolve", LOOP], writes),
+            (vec!["work", "list"], reads),
+            (vec!["work", "ready"], reads),
+            (vec!["work", "mine"], reads),
+            (vec!["work", "counts"], reads),
+            (vec!["work", "show", "S-1"], reads),
+            (vec!["work", "labels"], reads),
+            (vec!["work", "views"], reads),
+            (vec!["work", "export", "--md", "/private/var/tmp/tasks"], reads),
+            (vec!["work", "update", "S-1", "--priority", "low", "--dry-run"], reads),
+            (vec!["work", "done", "S-1", "--dry-run"], reads),
+            (vec!["work", "accept", "S-1", "--dry-run"], reads),
+            (vec!["work", "decline", "S-1", "--dry-run"], reads),
+            (vec!["work", "archive", "S-1", "--dry-run"], reads),
+            (vec!["work", "restore", "S-1", "--dry-run"], reads),
+            (vec!["work", "create", "Send the deck"], writes),
+            (vec!["work", "update", "S-1", "--priority", "low"], writes),
+            (vec!["work", "claim", "S-1"], writes),
+            (vec!["work", "done", "S-1"], writes),
+            (vec!["work", "accept", "S-1"], writes),
+            (vec!["work", "decline", "S-1"], writes),
+            (vec!["work", "duplicate", "S-2", "--of", "S-1"], writes),
+            (vec!["work", "archive", "S-1"], writes),
+            (vec!["work", "restore", "S-1"], writes),
+            (vec!["work", "relate", "S-1", "blocks", "S-2"], writes),
+            (vec!["work", "unrelate", "S-1", "blocks", "S-2"], writes),
+            (vec!["work", "label-save", "Ops"], writes),
+            (vec!["work", "label-delete", "Ops"], writes),
+            (vec!["work", "view-save", "Mine", "--mine"], writes),
+            (vec!["work", "view-delete", "Mine"], writes),
+        ]
+        .into_iter()
+        .filter(|(argv, expected)| request(argv).required_scopes() != *expected)
+        .map(|(argv, _)| argv)
+        .collect();
+
+        assert_eq!(wrong, Vec::<Vec<&str>>::new(), "these ask for the wrong grants");
     }
 }

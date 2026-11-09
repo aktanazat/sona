@@ -284,6 +284,32 @@ Exit codes: 0 answered, 2 bad input (`invalid_request`), 1 everything else
 `query/external.rs`; `tools/sona-mcp/` is a thin MCP server over exactly these
 flags, and `skills/sona/SKILL.md` is the agent-facing reference for both.
 
+**Tracker verbs:** `sona work <verb>` reads and changes tasks, printing text,
+or one JSON value with `--json`. Tasks are named `S-12`, `12` or by id. Reads,
+`export` and every `--dry-run` need External access; every other verb also
+needs External mutations. Writes are filed as an agent's. Without
+`--operation-id` a write derives its id from the request and what it read, so
+a repeated command never changes anything twice. The verbs live in
+`query/external/tracker.rs` over `planning::work`; `sona work --help` lists
+them.
+
+| Verb                                   | Does                                                             |
+| -------------------------------------- | ---------------------------------------------------------------- |
+| `list`, `ready`, `mine`, `counts`      | Tasks most urgent first; unblocked Todo work; your work; numbers |
+| `show <TASK>`                          | One task with its quote, links, evidence and history             |
+| `create`, `update`                     | **Writes.** `update --dry-run` shows each field's from and to    |
+| `claim <TASK>`                         | **Writes.** Todo or Backlog to In progress; refuses a second     |
+| `done <TASK>... [--evidence URL]`      | **Writes.** Closes the meeting commitment behind the task too    |
+| `accept`, `decline`, `duplicate`       | **Writes.** Triage decisions                                     |
+| `archive`, `restore`                   | **Writes.** Hide tasks from every list, or bring them back       |
+| `relate`, `unrelate`                   | **Writes.** `S-1 blocks S-2`, `blocked-by` or `related`          |
+| `labels`, `label-save`, `label-delete` | Labels; the saves and deletes write                              |
+| `views`, `view-save`, `view-delete`    | Saved views; the saves and deletes write                         |
+| `export --md <DIR>`                    | One `S-<n>.md` file per matching task                            |
+
+In a portable profile only the tracker's history side opens: work from
+meetings, people as owners and `--meeting` filters need the encrypted corpus.
+
 **Key design decisions:**
 
 - CLI flags are runtime-only overrides — they do NOT modify persisted settings
