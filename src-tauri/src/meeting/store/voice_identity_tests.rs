@@ -2444,3 +2444,113 @@ fn an_unnamed_voice_is_forgotten_after_ninety_days() -> Result<(), StoreError> {
     assert_eq!(kept_voice(&store, newer)?, Some(2));
     Ok(())
 }
+
+#[test]
+fn speaker_analysis_says_how_each_speaker_got_its_name() -> Result<(), StoreError> {
+    use super::analysis_export::SpeakerResolution;
+
+    let (_directory, store) = store();
+    let session_id = meeting(&store, "Voice", 1);
+    let ada = person(&store, "Ada Lovelace", &[], &[]);
+    let model = wespeaker_embedding_model_key();
+    insert_compatible_profile(&store, ada, &voice(1)?)?;
+    let [labeled, corrected, unknown, matched, mine] = std::array::from_fn(|_| SpeakerId::new());
+    for (speaker_id, lane, name) in [
+        (labeled, "system_audio", "Speaker 1"),
+        (corrected, "system_audio", "Speaker 2"),
+        (unknown, "system_audio", "Speaker 3"),
+        (matched, "system_audio", "Speaker 4"),
+        (mine, "microphone", "Speaker 5"),
+    ] {
+        store.connection()?.execute(
+            "INSERT INTO meeting_speakers (
+                speaker_id, session_id, source_kind, display_name, revision, merged_into_speaker_id
+             ) VALUES (?1, ?2, ?3, ?4, 0, NULL)",
+            params![id(speaker_id), id(session_id), lane, name],
+        )?;
+    }
+    store.store_speaker_voiceprints(
+        session_id,
+        model,
+        &[(labeled, voice(2)?), (corrected, voice(3)?)],
+        1,
+    )?;
+    let profile = store
+        .match_local_voice_profile(&voice(1)?, model)?
+        .ok_or(StoreError::VoiceInvariant)?;
+    store.commit_successful_voice_match(session_id, matched, 0, profile, 2)?;
+    for (speaker_id, disposition) in [
+        (
+            labeled,
+            MeetingSpeakerIdentifyDisposition::Label {
+                target: MeetingSpeakerIdentifyTarget::Existing(ada),
+                same_voice: Vec::new(),
+            },
+        ),
+        (
+            corrected,
+            MeetingSpeakerIdentifyDisposition::CorrectTo {
+                target: MeetingSpeakerIdentifyTarget::Existing(ada),
+            },
+        ),
+        (unknown, MeetingSpeakerIdentifyDisposition::MarkUnknown),
+    ] {
+        store.identify_speaker(MeetingSpeakerIdentifyRequest {
+            operation_id: MeetingOperationId::new(),
+            requested_at_utc_ms: 3,
+            session_id,
+            expected_meeting_revision: meeting_revision(&store, session_id)?,
+            expected_people_revision: people_revision(&store),
+            speaker_id,
+            disposition,
+        })?;
+    }
+
+    let analysis = store.speaker_analysis(session_id)?;
+    let speaker = |speaker_id: SpeakerId| {
+        analysis
+            .speakers
+            .iter()
+            .find(|speaker| speaker.speaker_id == speaker_id.uuid().to_string())
+            .ok_or(StoreError::SpeakerNotFound)
+    };
+    let ada_id = ada.uuid().to_string();
+    assert!(matches!(
+        &speaker(labeled)?.resolution,
+        SpeakerResolution::Identified { person_id, voiceprint_kept: true, .. } if *person_id == ada_id
+    ));
+    assert_eq!(
+        speaker(labeled)?.voiceprint.as_deref(),
+        Some(voice(2)?.as_slice())
+    );
+    assert!(matches!(
+        &speaker(corrected)?.resolution,
+        SpeakerResolution::Identified { person_id, voiceprint_kept: false, .. } if *person_id == ada_id
+    ));
+    assert!(matches!(
+        speaker(unknown)?.resolution,
+        SpeakerResolution::Unknown
+    ));
+    assert!(matches!(
+        &speaker(matched)?.resolution,
+        SpeakerResolution::VoiceMatch { person_id, .. } if *person_id == ada_id
+    ));
+    assert!(matches!(speaker(mine)?.resolution, SpeakerResolution::None));
+    assert_eq!(
+        analysis
+            .speakers
+            .iter()
+            .filter(|speaker| speaker.counts_as_user)
+            .map(|speaker| speaker.speaker_id.clone())
+            .collect::<Vec<_>>(),
+        [mine.uuid().to_string()]
+    );
+    let profile = analysis
+        .people
+        .iter()
+        .find(|person| person.person_id == ada_id)
+        .and_then(|person| person.voice_profile.as_ref())
+        .ok_or(StoreError::PersonNotFound)?;
+    assert_eq!(profile.centroid, voice(1)?.as_slice());
+    Ok(())
+}

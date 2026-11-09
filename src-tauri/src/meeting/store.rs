@@ -1,3 +1,4 @@
+pub(crate) mod analysis_export;
 #[cfg(test)]
 mod artifact_trace_tests;
 mod audio_retention;
@@ -12822,6 +12823,82 @@ mod tests {
                 .ok()
                 .map(|duration_ns| { duration_ns * u64::from(TEST_PACKET_RATE) / 1_000_000_000 })
         );
+    }
+
+    #[test]
+    fn analysis_export_lays_lane_audio_on_the_meeting_clock() {
+        let (directory, store) = store();
+        let bridge = TimestampBridge {
+            native_anchor_value: 0,
+            native_timescale: 1_000_000_000,
+            host_monotonic_anchor_ns: 0,
+            session_offset_ns: 0,
+        };
+        let (session_id, track_id, storage) = microphone_track(&store, bridge);
+        let mut writer = store
+            .open_track_writer(session_id, track_id, storage)
+            .unwrap();
+        let samples = vec![0.25; usize::try_from(TEST_PACKET_FRAMES).unwrap()];
+        for (sequence, timestamp_ns) in [
+            (0, 0),
+            (1, test_packet_duration_ns()),
+            (2, test_packet_duration_ns() * 2),
+            (3, 1_000_000_000),
+        ] {
+            assert_eq!(
+                writer
+                    .accept(
+                        captured_packet(track_id, sequence, Some(timestamp_ns)),
+                        &samples
+                    )
+                    .unwrap(),
+                PacketPushResult::Accepted
+            );
+        }
+        assert_eq!(store.capturing_session().unwrap(), Some(session_id));
+        writer.seal().unwrap();
+
+        let exported = crate::meeting::analysis_export::export_meeting(
+            &store,
+            session_id,
+            &directory.path().join("export"),
+            NotesTemplateChoice::default(),
+        )
+        .unwrap();
+
+        let lane = &exported.lanes[0];
+        assert_eq!(lane.file, "microphone.wav");
+        assert_eq!(lane.records, 4);
+        let pcm: Vec<i16> = hound::WavReader::open(exported.directory.join(&lane.file))
+            .unwrap()
+            .into_samples()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        let per_packet = 512 * 16_000 / 48_000;
+        assert_eq!(pcm.len(), 16_000 + per_packet);
+        assert!(pcm[..per_packet * 3].iter().all(|sample| *sample == 8_191));
+        assert!(pcm[per_packet * 3..16_000]
+            .iter()
+            .all(|sample| *sample == 0));
+        assert!(pcm[16_000..].iter().all(|sample| *sample == 8_191));
+
+        let raw_file = lane.raw_file.as_deref().unwrap();
+        let raw: Vec<f32> = hound::WavReader::open(exported.directory.join(raw_file))
+            .unwrap()
+            .into_samples()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(raw.len(), 48_000 + 512);
+        assert!(raw[..512 * 3].iter().all(|sample| *sample == 0.25));
+        assert!(raw[512 * 3..48_000].iter().all(|sample| *sample == 0.0));
+        assert!(raw[48_000..].iter().all(|sample| *sample == 0.25));
+
+        for file in ["meeting.json", "speakers.json"] {
+            let json: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(exported.directory.join(file)).unwrap())
+                    .unwrap();
+            assert!(json.is_object(), "{file}");
+        }
     }
 
     #[test]
