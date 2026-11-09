@@ -4432,7 +4432,7 @@ impl MeetingSessionManager {
             .and_then(|active| active.audibility.call_silent_ns())
     }
 
-    fn default_notes_template(&self) -> NotesTemplateChoice {
+    pub(crate) fn default_notes_template(&self) -> NotesTemplateChoice {
         self.app
             .as_ref()
             .map(|app| {

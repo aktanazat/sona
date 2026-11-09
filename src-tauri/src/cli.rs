@@ -31,6 +31,7 @@ use std::path::PathBuf;
     "upcoming", "plans", "bookmarks", "roster", "place", "loop_resolve", "notes", "note",
     "note_versions", "note_diff", "stats",
     "person_catch_up", "person_changes", "person_stats", "note_context", "projects", "project",
+    "export_meetings",
 ])))]
 #[command(group(ArgGroup::new("loop_side").args(["mine", "waiting"])))]
 pub struct CliArgs {
@@ -290,6 +291,17 @@ pub struct CliArgs {
     /// Show statistics over retained meetings, dictations and notes.
     #[arg(long)]
     pub stats: bool,
+
+    /// Write readable copies of retained meetings into DIR, one folder per
+    /// meeting: each lane's audio as 16 kHz mono WAV, meeting.json and
+    /// speakers.json. Needs External access; refused while a meeting records.
+    #[arg(long, value_name = "DIR")]
+    pub export_meetings: Option<PathBuf>,
+
+    // Bound to --export-meetings by `query::external::foreign_modifier`.
+    /// One meeting for --export-meetings; repeat for more. Omit for all.
+    #[arg(long, value_name = "MEETING_ID", requires = "export_meetings")]
+    pub export_meeting: Vec<String>,
 
     /// Corpus output format. Defaults to json; text has no terminal color codes.
     #[arg(long, value_enum, requires = "read", conflicts_with = "json")]
