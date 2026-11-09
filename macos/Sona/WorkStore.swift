@@ -26,6 +26,10 @@ final class WorkStore {
     private(set) var detailError: String?
     /// What `undo` would take back.
     private(set) var undoTitle: String?
+    /// The moment the lists are drawn at. It moves when work changes and on
+    /// its own when a snooze ends, a wait comes due or the day turns, so
+    /// work comes back on time with nobody touching the window.
+    private(set) var now = TaskDates.now()
 
     @ObservationIgnored private let core: Core
     @ObservationIgnored private var refreshing = false
@@ -36,6 +40,7 @@ final class WorkStore {
     @ObservationIgnored private var reloadWhenIdle = false
     @ObservationIgnored private var undoStack: [Undo] = []
     @ObservationIgnored private var undoSerial = 0
+    @ObservationIgnored private var alarm: Task<Void, Never>?
 
     private static let changeEvents = ["work-changed", "planning-changed-event", CoreEvent.meetingRemoved]
     private static let everything = WorkQuery(includeArchived: true, includeSnoozed: true)
@@ -92,6 +97,22 @@ final class WorkStore {
     }
 
     // MARK: Changes
+
+    /// A wait was just asked about: it leaves Follow up at once, and the
+    /// read that follows says when it comes back.
+    func nudged(_ id: String) {
+        guard let before = rows([id]).first else { return }
+        let asked = TaskDates.now()
+        edit([id]) { $0.followUpAtMs = asked + 7 * 86_400_000 }
+        enqueue {
+            do {
+                try await self.core.request("work_nudged", IdParams(id: id))
+            } catch {
+                self.edit([id]) { $0.followUpAtMs = before.followUpAtMs }
+                self.mutationError = error.localizedDescription
+            }
+        }
+    }
 
     func update(_ ids: [String], _ patch: WorkPatch) {
         let before = rows(ids)
@@ -347,6 +368,7 @@ final class WorkStore {
                 reloadWhenIdle = true
             } else {
                 items = listed.items
+                keepTime()
                 labels = listed.labels
                 projects = listed.projects
                 people = listed.people
@@ -432,10 +454,28 @@ final class WorkStore {
         if var rows = items {
             for index in rows.indices where ids.contains(rows[index].id) { transform(&rows[index]) }
             items = rows
+            keepTime()
         }
         if var shown = detail, ids.contains(shown.item.id) {
             transform(&shown.item)
             detail = shown
+        }
+    }
+
+    /// Sets `now` and sleeps until the next moment a list changes by
+    /// itself: the earliest snooze ending or wait coming due, or midnight.
+    /// The counts are the core's, so they are read again then.
+    private func keepTime() {
+        let now = TaskDates.now()
+        self.now = now
+        let moments = (items ?? []).flatMap { [$0.snoozedUntilMs, $0.followUpAtMs] }.compactMap { $0 }
+        let wake = min(moments.filter { $0 > now }.min() ?? .max, TaskDates.day(1, hour: 0))
+        alarm?.cancel()
+        alarm = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(wake - now))
+            guard !Task.isCancelled, let self else { return }
+            keepTime()
+            Task { await self.load() }
         }
     }
 
@@ -488,7 +528,8 @@ final class WorkStore {
             ownerName: personName(item.ownerPersonId), sourceMeetingId: old?.sourceMeetingId,
             sourceMeetingTitle: old?.sourceMeetingTitle, sourceQuote: old?.sourceQuote,
             sourceSpeaker: old?.sourceSpeaker, sourceAtMs: old?.sourceAtMs,
-            blockedByOpenCount: old?.blockedByOpenCount ?? 0, raisedIn: old?.raisedIn ?? 0)
+            blockedByOpenCount: old?.blockedByOpenCount ?? 0, raisedIn: old?.raisedIn ?? 0,
+            source: old?.source ?? .person, followUpAtMs: old?.followUpAtMs)
     }
 
     private func patched(_ row: inout WorkItemRow, _ patch: WorkPatch, at now: Int64) {

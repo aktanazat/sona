@@ -16,7 +16,7 @@ struct WorkPicker: Equatable {
 /// row's menu or the bulk bar, with the one key each answers to.
 enum WorkAction: String, CaseIterable, Identifiable {
     case open, peek, status, priority, owner, assignToMe, due, labels, project, rename
-    case accept, decline, duplicate, snooze, archive
+    case accept, decline, duplicate, snooze, nudge, archive
 
     var id: String { rawValue }
 
@@ -36,6 +36,7 @@ enum WorkAction: String, CaseIterable, Identifiable {
         case .decline: "Decline"
         case .duplicate: "Mark as duplicate…"
         case .snooze: "Snooze…"
+        case .nudge: "Nudge…"
         case .archive: "Archive"
         }
     }
@@ -57,6 +58,7 @@ enum WorkAction: String, CaseIterable, Identifiable {
         case .decline: "2"
         case .duplicate: "3"
         case .snooze: "h"
+        case .nudge: "r"
         case .archive: "cmd+backspace"
         }
     }
@@ -78,6 +80,7 @@ enum WorkAction: String, CaseIterable, Identifiable {
         case .decline: KeyboardShortcut("2", modifiers: [])
         case .duplicate: KeyboardShortcut("3", modifiers: [])
         case .snooze: KeyboardShortcut("h", modifiers: [])
+        case .nudge: KeyboardShortcut("r", modifiers: [])
         case .archive: KeyboardShortcut(.delete, modifiers: .command)
         }
     }
@@ -98,6 +101,7 @@ enum WorkAction: String, CaseIterable, Identifiable {
         case .decline: "xmark.circle"
         case .duplicate: "square.on.square"
         case .snooze: "moon.zzz"
+        case .nudge: "arrowshape.turn.up.right"
         case .archive: "archivebox"
         }
     }
@@ -112,7 +116,7 @@ enum WorkAction: String, CaseIterable, Identifiable {
         case .project: .project
         case .duplicate: .duplicate
         case .snooze: .snooze
-        case .open, .peek, .assignToMe, .rename, .accept, .decline, .archive: nil
+        case .open, .peek, .assignToMe, .rename, .accept, .decline, .nudge, .archive: nil
         }
     }
 
@@ -124,7 +128,9 @@ enum WorkAction: String, CaseIterable, Identifiable {
         case .open, .peek, .rename: rows.count == 1
         case .duplicate: rows.count == 1 && first.status != .duplicate
         case .assignToMe: rows.contains { !$0.ownerIsSelf }
-        case .accept, .decline, .snooze: rows.allSatisfy { $0.status == .triage }
+        case .accept, .decline: rows.allSatisfy { $0.status == .triage }
+        case .snooze: rows.allSatisfy { $0.status == .triage || $0.status.isOpen }
+        case .nudge: rows.count == 1 && first.status.isOpen && first.followUpAtMs != nil
         case .archive: rows.contains { $0.archivedAtMs == nil }
         case .status, .priority, .owner, .due, .labels, .project: true
         }
@@ -165,6 +171,8 @@ final class WorkFocus {
     var filterShown = false
     var myProperties = TaskProperty.standard
     var viewDrafts: [String: WorkViewDraft] = [:]
+    /// Which source Triage shows; nil shows all of it.
+    var triageSplit: WorkSource?
     /// The change the undo toast offers to take back, and a count that
     /// restarts its timer when the same words come twice.
     var toast: String?
@@ -258,6 +266,21 @@ final class WorkFocus {
         clearSelection()
         peeking = false
         highlighted = nil
+    }
+
+    func split(_ source: WorkSource?) {
+        guard triageSplit != source else { return }
+        triageSplit = source
+        clearSelection()
+        peeking = false
+        highlighted = nil
+    }
+
+    /// ⇥ and ⇧⇥ on Triage: the next or previous split, round the end.
+    func cycleSplit(by delta: Int) {
+        let splits: [WorkSource?] = [nil] + WorkSource.allCases
+        let index = splits.firstIndex(of: triageSplit) ?? 0
+        split(splits[(index + delta + splits.count) % splits.count])
     }
 
     /// Esc: the innermost thing open closes first.
@@ -398,6 +421,10 @@ final class WorkKeys {
         case .delete?:
             guard command else { return false }
             return run(.archive)
+        case .tab?, .backTab?:
+            guard place == .triage, opened == nil, plain || shift else { return false }
+            focus.cycleSplit(by: event.specialKey == .backTab || shift ? -1 : 1)
+            return true
         default:
             break
         }
@@ -468,7 +495,8 @@ final class WorkKeys {
         case "1" where place == .triage: return run(.accept)
         case "2" where place == .triage: return run(.decline)
         case "3" where place == .triage: return run(.duplicate)
-        case "h" where place == .triage: return run(.snooze)
+        case "h": return run(.snooze)
+        case "r": return run(.nudge)
         case "?":
             focus.shortcutsShown = true
             return true
@@ -517,6 +545,8 @@ extension AppModel {
             leave(ids) { work.decline(ids) }
         case .archive:
             leave(ids) { work.archive(ids) }
+        case .nudge:
+            sheet = .nudge(first)
         case .status, .priority, .owner, .due, .labels, .project, .duplicate, .snooze:
             break
         }
@@ -618,7 +648,7 @@ extension AppModel {
     var workPaletteActions: [PaletteAction] {
         let ids = workTargets
         let rows = workRows(ids)
-        let triageKeys: Set<WorkAction> = [.accept, .decline, .duplicate, .snooze]
+        let triageKeys: Set<WorkAction> = [.accept, .decline, .duplicate]
         let verbs = WorkAction.allCases.filter { $0.applies(to: rows) }.map { action in
             PaletteAction(
                 id: "work-\(action.rawValue)", group: .work, title: action.title,

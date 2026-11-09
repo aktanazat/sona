@@ -346,18 +346,26 @@ struct PlayMoment: View {
                     .lineLimit(1)
             }
             Button {
-                if running {
-                    audio.stop()
-                } else {
-                    focus.playingMoment = key
-                    audio.playBookmark(sessionId: sessionId, offset: UInt64(max(0, atMs)) * 1_000_000)
-                }
+                Self.toggle(sessionId: sessionId, atMs: atMs, model: model)
             } label: {
                 Label(running ? "Stop" : "Play", systemImage: running ? "stop.fill" : "play.fill")
             }
             .buttonStyle(QuietButton(color: Theme.accent, compact: true))
             .disabled(audio.heldForRecording)
             .help(audio.heldForRecording ? ConversationAudioPlayback.heldNotice : "Play from \(atMs.meetingMsClock)")
+        }
+    }
+
+    /// Plays from the moment, or stops it when it is the one playing.
+    static func toggle(sessionId: String, atMs: Int64, model: AppModel) {
+        let audio = model.meetings.audio
+        let key = "\(sessionId):\(atMs)"
+        guard !audio.heldForRecording else { return }
+        if model.workFocus.playingMoment == key, audio.sessionId == sessionId, audio.playing || audio.loading {
+            audio.stop()
+        } else {
+            model.workFocus.playingMoment = key
+            audio.playBookmark(sessionId: sessionId, offset: UInt64(max(0, atMs)) * 1_000_000)
         }
     }
 }

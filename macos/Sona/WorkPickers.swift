@@ -17,6 +17,8 @@ struct WorkChoice: Identifiable {
     var checked = false
     /// The digit that picks it while the field is empty.
     var key: String?
+    /// Leaves the picker open: the choice swaps the list for its next step.
+    var staysOpen = false
     let run: @MainActor () -> Void
 }
 
@@ -42,7 +44,8 @@ enum WorkChoices {
     static func keepsOpen(_ kind: WorkPicker.Kind) -> Bool { kind == .labels }
 
     /// The choices for tasks that exist; picking one changes them all.
-    static func make(_ picker: WorkPicker, query: String, model: AppModel) -> [WorkChoice] {
+    /// `pickDay` swaps the snooze list for a calendar.
+    static func make(_ picker: WorkPicker, query: String, model: AppModel, pickDay: @escaping @MainActor () -> Void) -> [WorkChoice] {
         let ids = picker.ids
         let rows = model.workRows(ids)
         let text = query.trimmingCharacters(in: .whitespaces)
@@ -87,7 +90,7 @@ enum WorkChoices {
         case .duplicate:
             duplicates(of: ids, text: text, model: model)
         case .snooze:
-            snoozes(text) { moment in
+            snoozes(text, pickDay: pickDay) { moment in
                 model.leave(ids) { work.update(ids, WorkPatch(snoozedUntilMs: .set(moment))) }
             }
         }
@@ -198,11 +201,19 @@ enum WorkChoices {
         return choices
     }
 
-    static func snoozes(_ text: String, pick: @escaping @MainActor (Int64) -> Void) -> [WorkChoice] {
+    static func snoozes(
+        _ text: String, pickDay: @escaping @MainActor () -> Void, pick: @escaping @MainActor (Int64) -> Void
+    ) -> [WorkChoice] {
         var choices: [WorkChoice] = []
         if let typed = TaskDates.parse(text) {
             choices.append(WorkChoice(id: "typed", title: TaskDates.label(typed, now: TaskDates.now()),
                                       mark: .symbol("moon.zzz"), detail: long(typed)) { pick(typed) })
+        }
+        if let later = TaskDates.laterToday(), text.isEmpty || "later today".localizedCaseInsensitiveContains(text) {
+            choices.append(WorkChoice(id: "later", title: "Later today", mark: .symbol("moon.zzz"),
+                                      detail: PlanningFormat.moment(later).formatted(date: .omitted, time: .shortened)) {
+                pick(later)
+            })
         }
         let presets: [(String, Int64)] = [
             ("Tomorrow", TaskDates.day(1, hour: 9)), ("In 3 days", TaskDates.day(3, hour: 9)),
@@ -212,6 +223,9 @@ enum WorkChoices {
             choices.append(WorkChoice(id: title, title: title, mark: .symbol("moon.zzz"), detail: long(moment)) {
                 pick(moment)
             })
+        }
+        if text.isEmpty || "pick a day".localizedCaseInsensitiveContains(text) {
+            choices.append(WorkChoice(id: "day", title: "Pick a day…", mark: .symbol("calendar"), staysOpen: true, run: pickDay))
         }
         return choices
     }
@@ -258,7 +272,7 @@ enum WorkChoices {
     }
 
     /// "Fri, Nov 14".
-    private static func long(_ milliseconds: Int64) -> String {
+    static func long(_ milliseconds: Int64) -> String {
         PlanningFormat.moment(milliseconds).formatted(.dateTime.weekday(.abbreviated).month(.abbreviated).day())
     }
 }
@@ -286,17 +300,62 @@ struct WorkPickerList: View {
     let picker: WorkPicker
     var compact = false
     let close: () -> Void
+    @State private var pickingDay = false
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        ChoiceList(
-            prompt: WorkChoices.prompt(picker.kind),
-            context: compact ? nil : model.workContext(picker.ids),
-            keepsOpen: WorkChoices.keepsOpen(picker.kind),
-            compact: compact,
-            empty: picker.kind == .duplicate ? "No task matches." : "Nothing matches.",
-            make: { WorkChoices.make(picker, query: $0, model: model) },
-            close: close)
+        if pickingDay {
+            SnoozeDayPicker(ids: picker.ids, compact: compact, close: close)
+        } else {
+            ChoiceList(
+                prompt: WorkChoices.prompt(picker.kind),
+                context: compact ? nil : model.workContext(picker.ids),
+                keepsOpen: WorkChoices.keepsOpen(picker.kind),
+                compact: compact,
+                empty: picker.kind == .duplicate ? "No task matches." : "Nothing matches.",
+                make: { WorkChoices.make(picker, query: $0, model: model) { pickingDay = true } },
+                close: close)
+        }
+    }
+}
+
+/// Pick a day: a month from tomorrow on. ↩ snoozes until 9:00 that morning.
+struct SnoozeDayPicker: View {
+    let ids: [String]
+    var compact = false
+    let close: () -> Void
+    @Environment(AppModel.self) private var model
+    @State private var day = PlanningFormat.moment(TaskDates.day(1, hour: 9))
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        let moment = TaskDates.day(0, hour: 9, from: day)
+        VStack(spacing: 0) {
+            DatePicker("Snooze until", selection: $day, in: PlanningFormat.moment(TaskDates.day(1, hour: 0))...,
+                       displayedComponents: .date)
+                .datePickerStyle(.graphical)
+                .labelsHidden()
+                .focused($focused)
+                .frame(maxWidth: .infinity)
+                .padding(compact ? 12 : 20)
+            Hairline()
+            HStack(spacing: 8) {
+                Text("\(WorkChoices.long(moment)), \(PlanningFormat.moment(moment).formatted(date: .omitted, time: .shortened))")
+                    .metaText(Theme.inkSecondary)
+                Spacer(minLength: 8)
+                TaskKeyButton(title: "Snooze", keys: "return") { snooze(until: moment) }
+                    .keyboardShortcut(.defaultAction)
+            }
+            .padding(.horizontal, compact ? 12 : 16)
+            .frame(height: 48)
+        }
+        .frame(width: compact ? 280 : nil)
+        .onAppear { DispatchQueue.main.async { focused = true } }
+    }
+
+    private func snooze(until moment: Int64) {
+        model.leave(ids) { model.work.update(ids, WorkPatch(snoozedUntilMs: .set(moment))) }
+        close()
     }
 }
 
@@ -415,7 +474,7 @@ struct ChoiceList: View {
         let choice = choices[index]
         if keepsOpen || !choice.checked { choice.run() }
         if choice.id == WorkChoices.newLabel { query = "" }
-        if !keepsOpen { close() }
+        if !keepsOpen && !choice.staysOpen { close() }
     }
 }
 

@@ -51,9 +51,10 @@ enum TaskProperty: String, CaseIterable, Identifiable {
     static let standard: [String] = [number, priority, labels, project, owner, due].map(\.rawValue)
 }
 
-/// Where a task falls in My work, in the order the list shows them.
+/// Where a task falls in My work, in the order the list shows them, after
+/// Follow up: waits whose day to ask has come.
 enum TaskBucket: Int, CaseIterable {
-    case overdue, today, blocked, thisWeek, later, noDate
+    case overdue, today, blocked, thisWeek, later, noDate, followUp
 
     var title: String {
         switch self {
@@ -63,6 +64,15 @@ enum TaskBucket: Int, CaseIterable {
         case .thisWeek: "This week"
         case .later: "Later"
         case .noDate: "No date"
+        case .followUp: "Follow up"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .blocked: "hand.raised"
+        case .followUp: "arrowshape.turn.up.right"
+        case .overdue, .today, .thisWeek, .later, .noDate: "calendar"
         }
     }
 
@@ -250,7 +260,8 @@ enum TaskListing {
     }
 
     /// My work: open tasks one way, by what presses first, under the ones
-    /// today's plan picked, in the order they were picked.
+    /// today's plan picked, in the order they were picked. Waits whose day
+    /// to ask has come lead the rest, the longest waiting first.
     static func myWork(_ rows: [WorkItemRow], direction: WorkDirection, now: Int64, focus: [String] = []) -> [TaskGroup] {
         let open = rows.filter {
             $0.direction == direction && $0.status.isOpen && matches($0, WorkQuery(), now: now)
@@ -258,9 +269,16 @@ enum TaskListing {
         let byId = Dictionary(open.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         let focused = focus.compactMap { byId[$0] }
         let picked = Set(focused.map(\.id))
-        let rest = ordered(open.filter { !picked.contains($0.id) }, by: .due)
-        let keyed = Dictionary(grouping: rest) { TaskBucket.of($0, now: now, blocking: true) }
-        let buckets = TaskBucket.allCases.compactMap { bucket -> TaskGroup? in
+        let rest = open.filter { !picked.contains($0.id) }
+        let asks = { (row: WorkItemRow) in row.followUpAtMs.map { $0 <= now } == true }
+        let asking = rest.filter(asks)
+        let keyed = Dictionary(grouping: ordered(rest.filter { !asks($0) }, by: .due)) {
+            TaskBucket.of($0, now: now, blocking: true)
+        }
+        let follow = asking.isEmpty ? [] : [TaskGroup(
+            id: "bucket:\(TaskBucket.followUp.rawValue)", title: TaskBucket.followUp.title, mark: .bucket(.followUp),
+            rows: asking.sorted { ($0.followUpAtMs ?? 0, $0.number) < ($1.followUpAtMs ?? 0, $1.number) })]
+        let buckets = follow + TaskBucket.allCases.compactMap { bucket -> TaskGroup? in
             guard let rows = keyed[bucket] else { return nil }
             return TaskGroup(id: "bucket:\(bucket.rawValue)", title: bucket.title, mark: .bucket(bucket), rows: rows)
         }
@@ -290,6 +308,15 @@ enum TaskDates {
         let today = calendar.component(.weekday, from: .now)
         let ahead = (weekday - today + 7) % 7
         return day(ahead == 0 ? 7 : ahead, hour: hour)
+    }
+
+    /// Three hours from now on the hour, while that is still today.
+    static func laterToday() -> Int64? {
+        let calendar = Calendar.current
+        guard let hour = calendar.dateInterval(of: .hour, for: .now.addingTimeInterval(3 * 3600))?.end,
+              calendar.isDateInToday(hour)
+        else { return nil }
+        return milliseconds(hour)
     }
 
     /// A date written in words, "fri", "nov 20", "in 3 days", when the system

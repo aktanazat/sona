@@ -32,6 +32,11 @@ enum WorkDirection: String, Codable, Hashable {
     case unattributed
 }
 
+/// Where an item came from, which picks its triage split.
+enum WorkSource: String, Codable, CaseIterable, Hashable {
+    case meeting, dictation, agent, person
+}
+
 enum WorkOwner: Codable, Hashable {
     case myself
     case person(String)
@@ -193,6 +198,9 @@ struct WorkItemRow: Codable, Identifiable, Equatable {
     /// The meetings that raised the item or a duplicate of it, counted once
     /// each.
     var raisedIn: Int
+    var source: WorkSource
+    /// When to ask about waiting-on work; nil for anything else.
+    var followUpAtMs: Int64?
 
     var item: WorkItem {
         WorkItem(
@@ -348,7 +356,7 @@ struct WorkCounts: Codable, Equatable {
     var mineOverdue: Int
     var mineDueToday: Int
     var waitingOn: Int
-    /// Waiting-on work whose status has not moved in a week.
+    /// Waiting-on work whose follow-up moment has come.
     var waitingOnStale: Int
 }
 

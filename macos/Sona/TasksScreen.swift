@@ -67,7 +67,7 @@ private struct TasksList: View {
     var body: some View {
         let focus = model.workFocus
         let store = model.work
-        let now = TaskDates.now()
+        let now = store.now
         let draft = focus.listing(store.views)
         let groups = model.taskGroups(draft, now: now)
         VStack(spacing: 0) {
@@ -236,10 +236,30 @@ private struct TaskTabs: View {
     }
 
     private func tab(_ tab: TasksTab, title: String, count: Int?, edited: Bool = false) -> some View {
-        let on = model.workFocus.tab == tab
-        return Button {
+        WorkTab(title: title, count: count, edited: edited, on: model.workFocus.tab == tab) {
             model.workFocus.switchTab(tab)
-        } label: {
+        }
+    }
+
+    private func delete(_ view: WorkView) {
+        let focus = model.workFocus
+        if focus.tab == .view(view.id) { focus.switchTab(.all) }
+        focus.viewDrafts[view.id] = nil
+        model.work.deleteView(view.id)
+    }
+}
+
+/// A tab over a task list: its title, its count unless zero, and a dot
+/// while its view holds unsaved edits.
+struct WorkTab: View {
+    let title: String
+    var count: Int?
+    var edited = false
+    let on: Bool
+    let select: () -> Void
+
+    var body: some View {
+        Button(action: select) {
             HStack(spacing: 6) {
                 Text(title)
                 if let count, count > 0 {
@@ -259,13 +279,6 @@ private struct TaskTabs: View {
         .buttonStyle(.plain)
         .accessibilityLabel(edited ? "\(title), edited" : title)
         .accessibilityAddTraits(on ? .isSelected : [])
-    }
-
-    private func delete(_ view: WorkView) {
-        let focus = model.workFocus
-        if focus.tab == .view(view.id) { focus.switchTab(.all) }
-        focus.viewDrafts[view.id] = nil
-        model.work.deleteView(view.id)
     }
 }
 
