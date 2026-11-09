@@ -30,8 +30,7 @@ use crate::planning::work::types::{
     WorkActivity, WorkActivityKind, WorkActor, WorkDirection, WorkDisplay, WorkFieldSuggestion,
     WorkGroupBy, WorkItem, WorkItemDetail, WorkItemInput, WorkItemRow, WorkLabel, WorkLayout,
     WorkList, WorkOrderBy, WorkOwner, WorkPatch, WorkPersonChoice, WorkProjectChoice, WorkQuery,
-    WorkRelation, WorkRelationKind, WorkStatus, WorkSuggestionField, WorkSuggestionValue,
-    WorkView,
+    WorkRelation, WorkRelationKind, WorkStatus, WorkSuggestionField, WorkSuggestionValue, WorkView,
 };
 use crate::planning::work::{self, items};
 use crate::query::{loop_link, KeptLocal, QUERY_SCHEMA_VERSION};
@@ -173,10 +172,20 @@ pub struct UpdateArgs {
     #[command(flatten)]
     pub fields: Fields,
     /// Labels to add, by name or id, comma-separated.
-    #[arg(long, value_delimiter = ',', value_name = "LABEL", conflicts_with = "labels")]
+    #[arg(
+        long,
+        value_delimiter = ',',
+        value_name = "LABEL",
+        conflicts_with = "labels"
+    )]
     pub add_label: Vec<String>,
     /// Labels to remove, by name or id, comma-separated.
-    #[arg(long, value_delimiter = ',', value_name = "LABEL", conflicts_with = "labels")]
+    #[arg(
+        long,
+        value_delimiter = ',',
+        value_name = "LABEL",
+        conflicts_with = "labels"
+    )]
     pub remove_label: Vec<String>,
     /// Hide the task until this day: YYYY-MM-DD, today, tomorrow, or none.
     #[arg(long, value_parser = day_or_none, value_name = "DAY")]
@@ -501,7 +510,11 @@ impl StatusFilter {
                 WorkStatus::NotStarted,
                 WorkStatus::InProgress,
             ],
-            Self::Closed => &[WorkStatus::Done, WorkStatus::Canceled, WorkStatus::Duplicate],
+            Self::Closed => &[
+                WorkStatus::Done,
+                WorkStatus::Canceled,
+                WorkStatus::Duplicate,
+            ],
             Self::All => &[
                 WorkStatus::Triage,
                 WorkStatus::Backlog,
@@ -1404,8 +1417,14 @@ impl Tracker<'_> {
             .into_iter()
             .map(|row| (row, relabeled(&base, row, &add, &remove)))
             .collect();
-        self.apply(&board, WorkAction::Updated, args.dry_run, &args.write, planned)
-            .await
+        self.apply(
+            &board,
+            WorkAction::Updated,
+            args.dry_run,
+            &args.write,
+            planned,
+        )
+        .await
     }
 
     async fn claim(&self, args: &ClaimArgs) -> Result<WorkAnswer, ExternalError> {
@@ -1502,10 +1521,9 @@ impl Tracker<'_> {
         }
         let operation_id = match changing.as_slice() {
             [] => None,
-            [(row, patch)] => Some(write.operation_id(
-                action.verb(),
-                &(&row.item.id, row.item.revision, patch),
-            )?),
+            [(row, patch)] => {
+                Some(write.operation_id(action.verb(), &(&row.item.id, row.item.revision, patch))?)
+            }
             several => Some(
                 write.operation_id(
                     action.verb(),
@@ -1746,10 +1764,9 @@ impl Tracker<'_> {
                 handle(row.item.number)
             )));
         }
-        let operation_id = args.write.operation_id(
-            "duplicate",
-            &(&row.item.id, row.item.revision, &of.item.id),
-        )?;
+        let operation_id = args
+            .write
+            .operation_id("duplicate", &(&row.item.id, row.item.revision, &of.item.id))?;
         let item = work::mark_duplicate_as(
             self.app,
             WorkActor::Agent,
@@ -1798,7 +1815,11 @@ impl Tracker<'_> {
             Some(args.write.operation_id(action.verb(), &revisions)?)
         };
         if args.dry_run {
-            let (from, to) = if archived { ("no", "yes") } else { ("yes", "no") };
+            let (from, to) = if archived {
+                ("no", "yes")
+            } else {
+                ("yes", "no")
+            };
             let mut changes: Vec<ExternalWorkPlanned> = changing
                 .iter()
                 .map(|row| ExternalWorkPlanned {
@@ -1834,8 +1855,11 @@ impl Tracker<'_> {
             return Ok(changed(action, None, Vec::new(), skipped));
         };
         let ids: Vec<String> = changing.iter().map(|row| row.item.id.clone()).collect();
-        let items = work::set_archived_as(self.app, WorkActor::Agent, &operation_id, &ids, archived)
-            .map_err(|message| self.write_refusal(message, &operation_id, "One of these tasks"))?;
+        let items =
+            work::set_archived_as(self.app, WorkActor::Agent, &operation_id, &ids, archived)
+                .map_err(|message| {
+                    self.write_refusal(message, &operation_id, "One of these tasks")
+                })?;
         let tasks = items
             .into_iter()
             .map(|item| board.project_item(item))
@@ -1867,8 +1891,9 @@ impl Tracker<'_> {
     async fn unrelate(&self, args: &RelateArgs) -> Result<WorkAnswer, ExternalError> {
         let board = self.board().await?;
         let (from, to, kind) = board.link(args)?;
-        let relations = planning::history(self.history, |conn| items::relations(conn, &from.item.id))
-            .map_err(|message| refusal(self.history, message))?;
+        let relations =
+            planning::history(self.history, |conn| items::relations(conn, &from.item.id))
+                .map_err(|message| refusal(self.history, message))?;
         let found = relations
             .into_iter()
             .find(|relation| {
@@ -1926,8 +1951,14 @@ impl Tracker<'_> {
         let name = args.name.trim();
         let existing = match &args.label {
             Some(label) => Some(
-                pick("label", label, &labels, |label| &label.id, |label| &label.name)
-                    .map_err(|refusal| refusal.hint("List them with: sona work labels"))?,
+                pick(
+                    "label",
+                    label,
+                    &labels,
+                    |label| &label.id,
+                    |label| &label.name,
+                )
+                .map_err(|refusal| refusal.hint("List them with: sona work labels"))?,
             ),
             None => labels
                 .iter()
@@ -1982,9 +2013,13 @@ impl Tracker<'_> {
 
     fn label_delete(&self, args: &LabelDeleteArgs) -> Result<WorkAnswer, ExternalError> {
         let labels = self.all_labels()?;
-        let label = pick("label", &args.label, &labels, |label| &label.id, |label| {
-            &label.name
-        })
+        let label = pick(
+            "label",
+            &args.label,
+            &labels,
+            |label| &label.id,
+            |label| &label.name,
+        )
         .map_err(|refusal| refusal.hint("List them with: sona work labels"))?
         .clone();
         let operation_id = args.write.operation_id("label-delete", &label.id)?;
@@ -2407,7 +2442,8 @@ impl Board {
             TaskRef::Id(id) => self.row(id),
         };
         found.ok_or_else(|| {
-            let missing = ExternalError::new(ExternalErrorCode::NotFound, format!("No task {task}."));
+            let missing =
+                ExternalError::new(ExternalErrorCode::NotFound, format!("No task {task}."));
             match left_out(self.fence.is_open()) {
                 Some(note) => missing.hint(note),
                 None => missing,
@@ -2430,9 +2466,13 @@ impl Board {
         if !self.fence.is_open() {
             return Err(conversations_closed());
         }
-        pick("person", value, &self.people, |person| &person.id, |person| {
-            &person.name
-        })
+        pick(
+            "person",
+            value,
+            &self.people,
+            |person| &person.id,
+            |person| &person.name,
+        )
         .map_err(|refusal| refusal.hint("Look people up with: sona --people NAME"))
     }
 
@@ -2451,9 +2491,13 @@ impl Board {
         if value.trim().eq_ignore_ascii_case("none") {
             return Ok(None);
         }
-        pick("project", value, &self.projects, |project| &project.id, |project| {
-            &project.title
-        })
+        pick(
+            "project",
+            value,
+            &self.projects,
+            |project| &project.id,
+            |project| &project.title,
+        )
         .map(Some)
         .map_err(|refusal| refusal.hint("List them with: sona --projects"))
     }
@@ -2461,10 +2505,18 @@ impl Board {
     fn label_ids(&self, names: &[String]) -> Result<Vec<String>, ExternalError> {
         let mut ids = Vec::with_capacity(names.len());
         for name in names.iter().filter(|name| !name.trim().is_empty()) {
-            let label = pick("label", name, &self.labels, |label| &label.id, |label| &label.name)
-                .map_err(|refusal| {
-                    refusal.hint("List them with: sona work labels; make one with: sona work label-save NAME")
-                })?;
+            let label = pick(
+                "label",
+                name,
+                &self.labels,
+                |label| &label.id,
+                |label| &label.name,
+            )
+            .map_err(|refusal| {
+                refusal.hint(
+                    "List them with: sona work labels; make one with: sona work label-save NAME",
+                )
+            })?;
             if !ids.contains(&label.id) {
                 ids.push(label.id.clone());
             }
@@ -2627,7 +2679,11 @@ impl Board {
         if let Some(details) = &patch.details {
             field(
                 "details",
-                item.details.as_deref().unwrap_or_default().trim().to_owned(),
+                item.details
+                    .as_deref()
+                    .unwrap_or_default()
+                    .trim()
+                    .to_owned(),
                 details.as_deref().unwrap_or_default().trim().to_owned(),
             );
         }
@@ -2646,13 +2702,19 @@ impl Board {
             );
         }
         if let Some(owner) = &patch.owner {
-            field("owner", self.owner_text(&item.owner()), self.owner_text(owner));
+            field(
+                "owner",
+                self.owner_text(&item.owner()),
+                self.owner_text(owner),
+            );
         }
         if let Some(due) = patch.due_at_ms {
             field("due", day_text(item.due_at_ms), day_text(due));
         }
         if let Some(project) = &patch.project_id {
-            let name = |id: Option<&String>| id.map_or_else(|| "none".to_owned(), |id| self.project_name(id));
+            let name = |id: Option<&String>| {
+                id.map_or_else(|| "none".to_owned(), |id| self.project_name(id))
+            };
             field(
                 "project",
                 name(item.project_id.as_ref()),
@@ -2662,7 +2724,9 @@ impl Board {
         if let Some(milestone) = &patch.milestone_id {
             field(
                 "milestone",
-                item.milestone_id.clone().unwrap_or_else(|| "none".to_owned()),
+                item.milestone_id
+                    .clone()
+                    .unwrap_or_else(|| "none".to_owned()),
                 milestone.clone().unwrap_or_else(|| "none".to_owned()),
             );
         }
@@ -2744,10 +2808,7 @@ impl Board {
     fn project_item(&self, item: WorkItem) -> ExternalWorkItem {
         let before = self.row(&item.id);
         let row = WorkItemRow {
-            project_title: item
-                .project_id
-                .as_deref()
-                .map(|id| self.project_name(id)),
+            project_title: item.project_id.as_deref().map(|id| self.project_name(id)),
             owner_name: item
                 .owner_person_id
                 .as_deref()
@@ -2864,9 +2925,10 @@ impl Board {
                     || self.task_text(value),
                     |status| status_text(status).to_owned(),
                 ),
-                WorkActivityKind::Priority => value
-                    .parse::<u8>()
-                    .map_or_else(|_| value.to_owned(), |priority| Priority::of(priority).text().to_owned()),
+                WorkActivityKind::Priority => value.parse::<u8>().map_or_else(
+                    |_| value.to_owned(),
+                    |priority| Priority::of(priority).text().to_owned(),
+                ),
                 WorkActivityKind::Owner => match value {
                     "self" => "you".to_owned(),
                     "nobody" => "nobody".to_owned(),
@@ -2885,7 +2947,9 @@ impl Board {
                     self.labels_text(&ids)
                 }
                 WorkActivityKind::Relation => match value.split_once(':') {
-                    Some((kind, id)) => format!("{} {}", kind.replace('_', " "), self.task_text(id)),
+                    Some((kind, id)) => {
+                        format!("{} {}", kind.replace('_', " "), self.task_text(id))
+                    }
                     None => value.to_owned(),
                 },
                 WorkActivityKind::Title
@@ -2995,7 +3059,12 @@ impl Scope {
             query.label_ids = Some(board.label_ids(&self.label)?);
         }
         if !self.priority.is_empty() {
-            query.priorities = Some(self.priority.iter().map(|priority| priority.value()).collect());
+            query.priorities = Some(
+                self.priority
+                    .iter()
+                    .map(|priority| priority.value())
+                    .collect(),
+            );
         }
         if let Some(day) = self.due_by {
             let next = day
@@ -3006,7 +3075,9 @@ impl Scope {
         if let Some(meeting) = self.meeting {
             match &board.fence {
                 Fence::Closed => return Err(conversations_closed()),
-                Fence::Open(kept_local) if kept_local.hides(MeetingSessionId::from_uuid(meeting)) => {
+                Fence::Open(kept_local)
+                    if kept_local.hides(MeetingSessionId::from_uuid(meeting)) =>
+                {
                     return Err(ExternalError::new(
                         ExternalErrorCode::NotFound,
                         format!("No meeting {meeting}."),
@@ -3053,9 +3124,13 @@ fn commitment_effect(from: WorkStatus, to: WorkStatus) -> Option<CommitmentEffec
         (_, WorkStatus::Canceled) if from != WorkStatus::Canceled => {
             Some(CommitmentEffect::SetsAside)
         }
-        (true, WorkStatus::Triage | WorkStatus::Backlog | WorkStatus::NotStarted | WorkStatus::InProgress) => {
-            Some(CommitmentEffect::Reopens)
-        }
+        (
+            true,
+            WorkStatus::Triage
+            | WorkStatus::Backlog
+            | WorkStatus::NotStarted
+            | WorkStatus::InProgress,
+        ) => Some(CommitmentEffect::Reopens),
         _ => None,
     }
 }
@@ -3141,15 +3216,18 @@ fn project_task(row: &WorkItemRow, labels: &[WorkLabel]) -> ExternalWorkItem {
                     .map_or_else(|| id.clone(), |label| label.name.clone()),
             })
             .collect(),
-        source: item.source_loop_id.as_ref().map(|loop_id| ExternalWorkSource {
-            loop_id: loop_id.clone(),
-            link: loop_link(&MeetingLoopId(loop_id.clone())),
-            meeting_id: row.source_meeting_id.clone(),
-            meeting_title: row.source_meeting_title.clone(),
-            quote: row.source_quote.clone(),
-            speaker: row.source_speaker.clone(),
-            at_ms: row.source_at_ms,
-        }),
+        source: item
+            .source_loop_id
+            .as_ref()
+            .map(|loop_id| ExternalWorkSource {
+                loop_id: loop_id.clone(),
+                link: loop_link(&MeetingLoopId(loop_id.clone())),
+                meeting_id: row.source_meeting_id.clone(),
+                meeting_title: row.source_meeting_title.clone(),
+                quote: row.source_quote.clone(),
+                speaker: row.source_speaker.clone(),
+                at_ms: row.source_at_ms,
+            }),
         duplicate_of_id: item.duplicate_of_id.clone(),
         blocked_by_open: row.blocked_by_open_count,
         snoozed_until_ms: item.snoozed_until_ms,
@@ -3170,7 +3248,11 @@ fn markdown(task: &ExternalWorkItem) -> String {
     let _ = writeln!(text, "handle: {}", task.handle);
     let _ = writeln!(text, "title: {}", quoted(&task.title));
     let _ = writeln!(text, "status: {}", status_text(task.status).to_lowercase());
-    let _ = writeln!(text, "priority: {}", Priority::text(task.priority).to_lowercase());
+    let _ = writeln!(
+        text,
+        "priority: {}",
+        Priority::text(task.priority).to_lowercase()
+    );
     let owner = match &task.owner {
         ExternalWorkOwner::Myself => "me".to_owned(),
         ExternalWorkOwner::Person { name, person_id } => {
@@ -3185,7 +3267,11 @@ fn markdown(task: &ExternalWorkItem) -> String {
     if let Some(project) = &task.project {
         let _ = writeln!(text, "project: {}", quoted(&project.name));
     }
-    let labels: Vec<String> = task.labels.iter().map(|label| quoted(&label.name)).collect();
+    let labels: Vec<String> = task
+        .labels
+        .iter()
+        .map(|label| quoted(&label.name))
+        .collect();
     let _ = writeln!(text, "labels: [{}]", labels.join(", "));
     if let Some(source) = &task.source {
         let _ = writeln!(text, "source: {}", source.link);
@@ -3202,7 +3288,11 @@ fn markdown(task: &ExternalWorkItem) -> String {
     if let Some(details) = &task.details {
         let _ = writeln!(text, "\n{details}");
     }
-    if let Some(quote) = task.source.as_ref().and_then(|source| source.quote.as_deref()) {
+    if let Some(quote) = task
+        .source
+        .as_ref()
+        .and_then(|source| source.quote.as_deref())
+    {
         text.push('\n');
         for line in quote.lines() {
             let _ = writeln!(text, "> {line}");
@@ -3232,7 +3322,12 @@ fn said_by(source: &ExternalWorkSource) -> Option<String> {
 fn offset(at_ms: i64) -> String {
     let seconds = at_ms.max(0) / 1000;
     if seconds >= 3600 {
-        format!("{}:{:02}:{:02}", seconds / 3600, seconds / 60 % 60, seconds % 60)
+        format!(
+            "{}:{:02}:{:02}",
+            seconds / 3600,
+            seconds / 60 % 60,
+            seconds % 60
+        )
     } else {
         format!("{}:{:02}", seconds / 60, seconds % 60)
     }
@@ -3291,7 +3386,11 @@ impl WorkAnswer {
                 let _ = writeln!(
                     text,
                     "{} {} {link} {} {}.",
-                    if change.removed { "Unlinked:" } else { "Linked:" },
+                    if change.removed {
+                        "Unlinked:"
+                    } else {
+                        "Linked:"
+                    },
                     relation.from.handle,
                     relation.to.handle,
                     relation.to.title
@@ -3339,7 +3438,11 @@ impl WorkAnswer {
                     text,
                     "Wrote {} {} to {}.",
                     export.files.len(),
-                    if export.files.len() == 1 { "file" } else { "files" },
+                    if export.files.len() == 1 {
+                        "file"
+                    } else {
+                        "files"
+                    },
                     export.directory
                 );
             }
@@ -3399,7 +3502,11 @@ fn task_line(text: &mut String, task: &ExternalWorkItem, today: &Today) {
         notes.push(project.name.clone());
     }
     if !task.labels.is_empty() {
-        let names: Vec<&str> = task.labels.iter().map(|label| label.name.as_str()).collect();
+        let names: Vec<&str> = task
+            .labels
+            .iter()
+            .map(|label| label.name.as_str())
+            .collect();
         notes.push(format!("[{}]", names.join(", ")));
     }
     if task.blocked_by_open > 0 {
@@ -3428,8 +3535,10 @@ fn task_line(text: &mut String, task: &ExternalWorkItem, today: &Today) {
 }
 
 fn short_day(iso: &str) -> String {
-    NaiveDate::parse_from_str(iso, "%Y-%m-%d")
-        .map_or_else(|_| iso.to_owned(), |day| day.format("%a %-d %b").to_string())
+    NaiveDate::parse_from_str(iso, "%Y-%m-%d").map_or_else(
+        |_| iso.to_owned(),
+        |day| day.format("%a %-d %b").to_string(),
+    )
 }
 
 fn counts_line(text: &mut String, counts: &ExternalWorkCounts) {
