@@ -4204,7 +4204,7 @@ impl ContiguousAudioSpans {
     }
 }
 
-fn record_starts_new_span(
+pub(crate) fn record_starts_new_span(
     previous_end_offset_ns: Option<u64>,
     previous_epoch: Option<SourceEpoch>,
     previous_sequence: Option<u64>,
@@ -4573,7 +4573,7 @@ where
     Ok(())
 }
 
-fn downmix_and_resample(record: &DurableTrackRecord) -> Result<Vec<f32>, StoreError> {
+pub(crate) fn downmix_and_resample(record: &DurableTrackRecord) -> Result<Vec<f32>, StoreError> {
     let channels = usize::from(record.format.channels);
     if channels == 0
         || record.format.sample_rate_hz == 0

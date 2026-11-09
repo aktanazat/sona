@@ -18,5 +18,6 @@ pub use recorder::{
 };
 pub use resampler::FrameResampler;
 pub use spool::repair_spool;
+pub(crate) use utils::wav_sample_to_i16;
 pub use utils::{read_wav_samples, save_wav_file, verify_wav_file};
 pub use visualizer::AudioVisualiser;

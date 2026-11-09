@@ -2698,7 +2698,9 @@ fn embedding_blob(embedding: &SpeakerEmbedding) -> Vec<u8> {
     bytes
 }
 
-fn embedding_from_blob(bytes: &[u8]) -> Result<SpeakerEmbedding, StoreError> {
+pub(in crate::meeting::store) fn embedding_from_blob(
+    bytes: &[u8],
+) -> Result<SpeakerEmbedding, StoreError> {
     if bytes.len() != EMBEDDING_BYTES {
         return Err(StoreError::VoiceInvariant);
     }
