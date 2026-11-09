@@ -86,12 +86,13 @@ struct WorkPatch: Equatable {
     var dueAtMs: WorkPatchValue<Int64>?
     var labelIds: [String]?
     var snoozedUntilMs: WorkPatchValue<Int64>?
+    var recurrence: WorkPatchValue<String>?
 
     init(
         title: String? = nil, details: WorkPatchValue<String>? = nil, status: WorkStatus? = nil,
         priority: Int? = nil, projectId: WorkPatchValue<String>? = nil, milestoneId: WorkPatchValue<String>? = nil,
         owner: WorkOwner? = nil, dueAtMs: WorkPatchValue<Int64>? = nil, labelIds: [String]? = nil,
-        snoozedUntilMs: WorkPatchValue<Int64>? = nil
+        snoozedUntilMs: WorkPatchValue<Int64>? = nil, recurrence: WorkPatchValue<String>? = nil
     ) {
         self.title = title
         self.details = details
@@ -103,12 +104,14 @@ struct WorkPatch: Equatable {
         self.dueAtMs = dueAtMs
         self.labelIds = labelIds
         self.snoozedUntilMs = snoozedUntilMs
+        self.recurrence = recurrence
     }
 }
 
 extension WorkPatch: Encodable {
     private enum Key: String, CodingKey {
         case title, details, status, priority, projectId, milestoneId, owner, dueAtMs, labelIds, snoozedUntilMs
+        case recurrence
     }
 
     func encode(to encoder: Encoder) throws {
@@ -123,6 +126,7 @@ extension WorkPatch: Encodable {
         try Self.encode(dueAtMs, .dueAtMs, in: &container)
         try container.encodeIfPresent(labelIds, forKey: .labelIds)
         try Self.encode(snoozedUntilMs, .snoozedUntilMs, in: &container)
+        try Self.encode(recurrence, .recurrence, in: &container)
     }
 
     private static func encode<T: Encodable & Equatable>(
@@ -227,7 +231,7 @@ struct WorkDoer: Codable, Equatable {
 }
 
 enum WorkProposalField: String, Codable, Hashable {
-    case title, details, status, priority, owner, due, project, milestone, labels, snoozed
+    case title, details, status, priority, owner, due, project, milestone, labels, snoozed, recurrence
 }
 
 /// One field an agent would change, waiting for the user. `from` is the
@@ -405,7 +409,7 @@ enum WorkActor: String, Codable, Hashable { case me, sona, agent }
 
 enum WorkActivityKind: String, Codable, Hashable {
     case created, status, priority, owner, due, project, title, details, labels, archived, restored
-    case duplicate, accepted, declined, snoozed, relation, kept
+    case duplicate, accepted, declined, snoozed, relation, kept, recurrence
 }
 
 /// One change in an item's history. `from` and `to` hold raw values: a

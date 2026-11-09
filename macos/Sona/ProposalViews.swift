@@ -168,6 +168,7 @@ enum WorkProposalText {
         case .milestone: "Milestone"
         case .labels: "Labels"
         case .snoozed: "Snoozed until"
+        case .recurrence: "Repeats"
         }
     }
 
@@ -183,7 +184,7 @@ enum WorkProposalText {
         switch proposal.field {
         case .title, .details:
             return to
-        case .status, .priority, .owner, .due, .project, .milestone, .labels, .snoozed:
+        case .status, .priority, .owner, .due, .project, .milestone, .labels, .snoozed, .recurrence:
             return "\(value(proposal.field, proposal.from, model: model, now: now)) → \(to)"
         }
     }
@@ -221,6 +222,8 @@ enum WorkProposalText {
             return names.isEmpty ? "No labels" : names.joined(separator: ", ")
         case .snoozed:
             return text.flatMap { Int64($0) }.map { TaskDates.label($0, now: now) } ?? "Not snoozed"
+        case .recurrence:
+            return text.map(Recurrence.display) ?? "Doesn't repeat"
         }
     }
 }
