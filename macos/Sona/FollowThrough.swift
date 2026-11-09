@@ -315,7 +315,7 @@ struct NudgeSheet: View {
         HStack(spacing: 8) {
             if editing {
                 Spacer(minLength: 8)
-                TaskKeyButton(title: "Done editing", keys: "cmd+return", action: finishEditing)
+                TaskKeyButton(title: "Done editing", keys: "cmd+return", prominent: true, action: finishEditing)
                     .keyboardShortcut(.return, modifiers: .command)
             } else {
                 TaskKeyButton(title: "Snooze", keys: "h") { snoozing = true }
@@ -323,7 +323,7 @@ struct NudgeSheet: View {
                 Spacer(minLength: 8)
                 TaskKeyButton(title: "Edit", keys: "e") { edit(text) }
                 TaskKeyButton(title: copied ? "Copied" : "Copy", keys: "c") { copy(text) }
-                TaskKeyButton(title: "Mail", keys: "return") { mail(text, row: row) }
+                TaskKeyButton(title: "Mail", keys: "return", prominent: true) { mail(text, row: row) }
                     .disabled(mailing || row == nil)
             }
         }
@@ -470,7 +470,8 @@ struct WorkBriefSheet: View {
             Hairline()
             footer
         }
-        .frame(width: 660, height: 560)
+        .frame(width: 660)
+        .frame(minHeight: 320, maxHeight: 560)
         .background(Theme.page)
         .focusable()
         .focusEffectDisabled()
@@ -613,6 +614,7 @@ struct WorkBriefSheet: View {
                             .onTapGesture { pick(line) }
                     }
                 }
+                .padding(.horizontal, -10)
             }
         }
     }
@@ -626,6 +628,7 @@ struct WorkBriefSheet: View {
                 .padding(.bottom, 4)
             content()
         }
+        .padding(.horizontal, -10)
     }
 
     private var footer: some View {
@@ -638,7 +641,7 @@ struct WorkBriefSheet: View {
             Spacer(minLength: 0)
             hint("esc", "Close")
         }
-        .padding(.horizontal, 16)
+        .padding(.horizontal, 24)
         .frame(height: 40)
         .background(Theme.inset)
         .accessibilityElement(children: .combine)

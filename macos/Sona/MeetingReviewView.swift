@@ -236,7 +236,7 @@ struct MeetingReviewHeader: View {
                 InputField(prompt: "Meeting title", text: $draft)
                     .frame(maxWidth: 420)
                     .onSubmit(commit)
-                Button("Save", action: commit).buttonStyle(.compact)
+                Button("Save", action: commit).buttonStyle(.secondary)
                 Button("Cancel") { editing = false }.buttonStyle(.quiet)
             }
         } else {
@@ -271,12 +271,12 @@ struct MeetingReviewHeader: View {
             }
             if store.hasLedger {
                 Button("Wrap up") { store.openWrap() }
-                    .buttonStyle(.compact)
+                    .buttonStyle(.secondary)
             }
             if store.canExport {
                 MeetingSendToMenu(sessionId: snapshot.session.sessionId)
                     .menuStyle(.button)
-                    .buttonStyle(.compact)
+                    .buttonStyle(.secondary)
                     .fixedSize()
             }
             Menu {
@@ -601,9 +601,9 @@ private struct TranscriptSearchField: View {
             }
         }
         .padding(.horizontal, 10)
-        .frame(width: 216, height: 30)
-        .background(Theme.surface, in: Capsule())
-        .overlay(Capsule().strokeBorder(focused ? Theme.accent : Theme.border, lineWidth: 1))
+        .frame(width: 216, height: Theme.controlHeight)
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
+        .overlay(RoundedRectangle(cornerRadius: Theme.radiusControl).strokeBorder(focused ? Theme.accent : Theme.border, lineWidth: 1))
     }
 
     private var query: Binding<String> {
@@ -941,8 +941,9 @@ struct MeetingInsightsPane: View {
     var openMeetingSettings: () -> Void = {}
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 28) {
+        VStack(alignment: .leading, spacing: 0) {
             ArtifactPane(store: store, snapshot: snapshot, templates: settings.templates)
+                .padding(.bottom, 28)
             MeetingPeopleBand(store: store, openPerson: openPerson)
             DisclosureGroup("Call participant names") {
                 CallNamesReviewSection(store: store, snapshot: snapshot)
@@ -950,6 +951,7 @@ struct MeetingInsightsPane: View {
             }
             .font(TypeScale.body(14))
             .foregroundStyle(Theme.inkSecondary)
+            .padding(.bottom, 28)
             MeetingAnalyticsStrip(store: store)
             MeetingQuestionsCard(store: store, snapshot: snapshot)
             MeetingNotesCard(store: store, snapshot: snapshot)
@@ -1531,7 +1533,7 @@ struct MeetingUserNotesCard: View {
                 }
             }
         }
-        .padding(.bottom, 32)
+        .padding(.bottom, 28)
         .task { await templates.loadIfNeeded() }
     }
 

@@ -6,13 +6,16 @@ struct NumberTile: View {
     let label: String
     var unit: String?
     var tone: Color
+    /// Off inside a strip of numbers that draws one card around them all.
+    var framed: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    init(_ value: String, label: String, unit: String? = nil, tone: Color = Theme.ink) {
+    init(_ value: String, label: String, unit: String? = nil, tone: Color = Theme.ink, framed: Bool = true) {
         self.value = value
         self.label = label
         self.unit = unit
         self.tone = tone
+        self.framed = framed
     }
 
     var body: some View {
@@ -31,11 +34,15 @@ struct NumberTile: View {
             .animation(Motion.settle(reduced: reduceMotion), value: value)
             Text(label).metaText(Theme.inkSecondary).lineLimit(1)
         }
-        .padding(.horizontal, 14)
+        .padding(.horizontal, 16)
         .padding(.vertical, 12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusCard))
-        .overlay(RoundedRectangle(cornerRadius: Theme.radiusCard).strokeBorder(Theme.border, lineWidth: 1))
+        .background {
+            if framed {
+                RoundedRectangle(cornerRadius: Theme.radiusCard).fill(Theme.surface)
+                RoundedRectangle(cornerRadius: Theme.radiusCard).strokeBorder(Theme.border, lineWidth: 1)
+            }
+        }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel([value, unit, label].compactMap { $0 }.joined(separator: " "))
     }

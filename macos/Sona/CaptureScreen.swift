@@ -56,7 +56,7 @@ struct CaptureScreen: View {
                     }
                 }
             }
-            .padding(.bottom, 16)
+            .padding(.bottom, 28)
             OverviewView(
                 store: model.overview,
                 openMeeting: model.openMeeting,
