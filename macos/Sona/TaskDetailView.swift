@@ -651,7 +651,7 @@ private struct ActorMark: View {
                 .frame(width: 16, height: 16)
         case .agent:
             Image(systemName: "sparkle")
-                .font(.system(size: 10, weight: .semibold))
+                .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(Theme.inkSecondary)
                 .frame(width: 16, height: 16)
         }
@@ -700,15 +700,11 @@ struct TaskPropertyList: View {
             }
             PropertyLine(title: "Agent") {
                 WorkPickerButton(kind: .delegate, ids: ids) {
-                    if let doer = row.doer {
-                        DoerChip(doer: doer, waiting: model.agents.waits(on: row))
-                            .padding(.horizontal, 8)
-                            .frame(height: 28)
-                            .contentShape(Rectangle())
-                    } else {
-                        PropertyValue(text: "You", faint: true) {
-                            Image(systemName: "sparkle").font(.system(size: 12)).foregroundStyle(Theme.inkTertiary)
-                        }
+                    let waiting = row.doer != nil && model.agents.waits(on: row)
+                    PropertyValue(text: row.doer.map { waiting ? "\($0.agent), waiting for you" : $0.agent } ?? "No agent",
+                                  faint: row.doer == nil) {
+                        Image(systemName: "sparkle").font(.system(size: 12))
+                            .foregroundStyle(waiting ? Theme.live : Theme.inkSecondary)
                     }
                 }
             }

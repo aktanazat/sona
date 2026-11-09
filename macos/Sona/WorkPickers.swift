@@ -235,7 +235,7 @@ enum WorkChoices {
         return choices
     }
 
-    /// The agents a task can go to, and taking it back once one has it.
+    /// The agents a task can go to, and no agent once one has it.
     private static func delegates(_ rows: [WorkItemRow], pick: @escaping @MainActor (String?) -> Void) -> [WorkChoice] {
         let agents = ["Claude Code", "Codex", "OMP", "Grok"]
         var choices = agents.enumerated().map { index, agent in
@@ -245,7 +245,8 @@ enum WorkChoices {
             }
         }
         if rows.contains(where: { $0.doer != nil }) {
-            choices.append(WorkChoice(id: "back", title: "Take it back", mark: .face(AvatarFace(kind: .me, name: "Me"))) {
+            choices.append(WorkChoice(id: "none", title: "No agent", mark: .face(AvatarFace(kind: .unassigned, name: "No agent")),
+                                      key: "0") {
                 pick(nil)
             })
         }

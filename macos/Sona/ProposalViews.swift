@@ -1,144 +1,155 @@
 import SwiftUI
 
 /// The changes agents proposed for the open task, under its title. Y and N
-/// answer the oldest; ⇧Y accepts them all.
+/// answer the first; ⇧Y accepts them all.
 struct ProposalStrip: View {
     let proposals: [WorkProposal]
     @Environment(AppModel.self) private var model
 
     var body: some View {
         if !proposals.isEmpty {
-            VStack(alignment: .leading, spacing: 14) {
-                HStack(spacing: 8) {
+            let agent = WorkProposalText.agent(of: proposals)
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(spacing: Space.s) {
                     DetailHeading(title: "Proposed changes")
-                    Spacer(minLength: 8)
+                    if let agent { AgentName(name: agent) }
+                    Spacer(minLength: Space.s)
                     if proposals.count > 1 {
                         TaskKeyButton(title: "Accept all", keys: "shift+y") {
                             model.changeWork { model.work.acceptProposals(proposals.map(\.id)) }
                         }
+                        .fixedSize()
                     }
                 }
+                .frame(height: Theme.listRow)
                 ForEach(Array(proposals.enumerated()), id: \.element.id) { index, proposal in
-                    ProposalLine(proposal: proposal, keyed: index == 0)
+                    ProposalLine(proposal: proposal, keyed: index == 0, showsAgent: agent == nil)
                 }
             }
-            .padding(16)
             .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, Space.m)
+            .padding(.vertical, Space.s)
             .background(Theme.inset, in: RoundedRectangle(cornerRadius: Theme.radiusCard))
-            .padding(.vertical, 12)
+            .padding(.horizontal, -Space.m)
+            .padding(.vertical, Space.m)
         }
     }
 }
 
-/// Every task agents proposed changes to, the longest waiting first, above
-/// the triage list. The keys answer the first; a task's number and title
-/// open it.
+/// Every task agents proposed changes to, the longest waiting first: the
+/// first group in Triage. The keys answer the first; a title opens its task.
 struct TriageProposals: View {
+    static let group = "triage:proposals"
+    let rows: [WorkItemRow]
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        let open = model.work.proposals
-        let rows = model.triageProposed
-        if !rows.isEmpty {
-            ScrollView { list(rows, open) }
-                .scrollBounceBehavior(.basedOnSize)
-                .frame(maxHeight: 320)
-                .fixedSize(horizontal: false, vertical: true)
-                .background(Theme.inset, in: RoundedRectangle(cornerRadius: Theme.radiusCard))
-                .padding(.horizontal, 16)
-                .padding(.vertical, 12)
-        }
-    }
-
-    private func list(_ rows: [WorkItemRow], _ open: [String: [WorkProposal]]) -> some View {
-        VStack(alignment: .leading, spacing: 18) {
-            DetailHeading(title: "Proposed changes")
-            ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
-                ProposalTask(row: row, proposals: open[row.id] ?? [], keyed: index == 0)
+        let focus = model.workFocus
+        let collapsed = focus.collapsed.contains(Self.group)
+        Section {
+            if !collapsed {
+                ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
+                    ProposalTask(row: row, proposals: model.work.proposals(for: row.id), keyed: index == 0)
+                }
+            }
+        } header: {
+            TaskGroupHeader(
+                group: TaskGroup(id: Self.group, title: "Proposed changes", mark: .agent, rows: rows),
+                collapsed: collapsed, revision: model.people.photoRevision
+            ) {
+                if collapsed { focus.collapsed.remove(Self.group) } else { focus.collapsed.insert(Self.group) }
             }
         }
-        .padding(16)
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
+/// A task with changes waiting, in a triage row's columns: its status and
+/// title, which open it like a row, and under the title each change.
 private struct ProposalTask: View {
+    /// Where a triage row's title starts, past its checkbox and status.
+    private static let titleInset: CGFloat = 22 + 10 + 14 + 10
     let row: WorkItemRow
     let proposals: [WorkProposal]
     let keyed: Bool
     @Environment(AppModel.self) private var model
+    @State private var hovering = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
-                Button {
-                    model.workFocus.open(row.id, in: .triage)
-                } label: {
-                    HStack(spacing: 8) {
-                        Text(verbatim: "#\(row.number)")
-                            .font(TypeScale.mono(12))
-                            .foregroundStyle(Theme.inkTertiary)
-                        Text(row.title)
-                            .font(TypeScale.listTitle)
-                            .foregroundStyle(Theme.ink)
-                            .lineLimit(1)
-                    }
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .help("Open the task")
-                Spacer(minLength: 8)
+        let agent = WorkProposalText.agent(of: proposals)
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 10) {
+                Color.clear.frame(width: 22)
+                TaskStatusIcon(status: row.status)
+                Text(row.title)
+                    .font(TypeScale.listTitle)
+                    .foregroundStyle(Theme.ink)
+                    .lineLimit(1)
+                    .accessibilityAddTraits(.isButton)
+                    .accessibilityHint("Opens the task")
+                    .accessibilityAction { model.workFocus.open(row.id, in: .triage) }
+                if let agent { AgentName(name: agent) }
+                Spacer(minLength: Space.s)
                 if proposals.count > 1 {
-                    TaskKeyButton(title: "Accept all", keys: keyed ? "shift+y" : nil) {
+                    TaskKeyButton(title: "Accept all", keys: "shift+y", keysShown: keyed) {
                         model.changeWork { model.work.acceptProposals(proposals.map(\.id)) }
                     }
+                    .fixedSize()
                 }
             }
+            .padding(.leading, 6)
+            .padding(.trailing, 16)
+            .frame(height: Theme.listRow)
+            .taskHighlight(hovering, selected: false)
+            .contentShape(Rectangle())
+            .onHover { hovering = $0 }
+            .onTapGesture { model.workFocus.open(row.id, in: .triage) }
+            .help("Open the task")
             ForEach(Array(proposals.enumerated()), id: \.element.id) { index, proposal in
-                ProposalLine(proposal: proposal, keyed: keyed && index == 0)
+                ProposalLine(proposal: proposal, keyed: keyed && index == 0, showsAgent: agent == nil)
+                    .padding(.leading, 6 + Self.titleInset)
+                    .padding(.trailing, 16)
             }
         }
+        .padding(.horizontal, 8)
     }
 }
 
-/// One change an agent proposed: the field, what it would change from and
-/// to, and who proposed it, with its answers. `keyed` names Y and N where
-/// those keys answer this line.
+/// One change an agent proposed: the field, and what it would change from
+/// and to, with its answers. `keyed` shows Y and N on the line those keys
+/// answer; `showsAgent` names who proposed it where several agents did.
 struct ProposalLine: View {
     let proposal: WorkProposal
     var keyed = false
+    var showsAgent = false
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        HStack(alignment: .center, spacing: 10) {
-            Image(systemName: WorkProposalText.icon(proposal.field))
-                .font(.system(size: 12))
-                .foregroundStyle(Theme.inkSecondary)
-                .frame(width: 16, height: 18)
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 8) {
-                    Text(WorkProposalText.title(proposal.field)).metaText()
-                    Text(WorkProposalText.change(proposal, model: model, now: TaskDates.now()))
-                        .font(TypeScale.listTitle)
-                        .foregroundStyle(Theme.ink)
-                        .lineLimit(2)
-                }
-                HStack(spacing: 4) {
-                    Image(systemName: "sparkle").font(.system(size: 9, weight: .semibold))
-                    Text(proposal.agent)
-                }
-                .font(TypeScale.label(12))
-                .foregroundStyle(Theme.inkSecondary)
+        let change = WorkProposalText.change(proposal, model: model, now: TaskDates.now())
+        HStack(spacing: Space.s) {
+            HStack(spacing: Space.s) {
+                Text(WorkProposalText.title(proposal.field))
+                    .metaText()
+                    .frame(width: 80, alignment: .leading)
+                Text(change)
+                    .font(TypeScale.list)
+                    .foregroundStyle(Theme.ink)
+                    .lineLimit(1)
+                    .help(change)
             }
             .accessibilityElement(children: .combine)
-            Spacer(minLength: 8)
-            TaskKeyButton(title: "Accept", keys: keyed ? "y" : nil) {
-                model.changeWork { model.work.acceptProposals([proposal.id]) }
+            if showsAgent { AgentName(name: proposal.agent) }
+            Spacer(minLength: Space.s)
+            Group {
+                TaskKeyButton(title: "Accept", keys: "y", keysShown: keyed) {
+                    model.changeWork { model.work.acceptProposals([proposal.id]) }
+                }
+                TaskKeyButton(title: "Reject", keys: "n", keysShown: keyed) {
+                    model.work.rejectProposals([proposal.id])
+                }
             }
-            TaskKeyButton(title: "Reject", keys: keyed ? "n" : nil) {
-                model.work.rejectProposals([proposal.id])
-            }
+            .fixedSize()
         }
+        .frame(height: Theme.listRow)
     }
 }
 
@@ -160,19 +171,10 @@ enum WorkProposalText {
         }
     }
 
-    static func icon(_ field: WorkProposalField) -> String {
-        switch field {
-        case .title: "textformat"
-        case .details: "text.alignleft"
-        case .status: "circle.dashed"
-        case .priority: "chart.bar"
-        case .owner: "person.crop.circle"
-        case .due: "calendar"
-        case .project: "folder"
-        case .milestone: "flag"
-        case .labels: "tag"
-        case .snoozed: "moon.zzz"
-        }
+    /// The one agent behind every change listed, or nil when several are.
+    static func agent(of proposals: [WorkProposal]) -> String? {
+        guard let first = proposals.first?.agent, proposals.allSatisfy({ $0.agent == first }) else { return nil }
+        return first
     }
 
     /// "No due date → Tomorrow"; a title or details read as the new text.
