@@ -398,6 +398,7 @@ fn start_meeting_detection(
     ));
 
     planning::work::follow::start(app_handle.clone(), Arc::clone(&native_prompts));
+    planning::work::cycles::start(app_handle.clone());
     meetings.start_digest_scheduler(app_handle.clone(), native_prompts);
     responder.bind_digest(Arc::new(meeting::digest::CaptureOpener::new(
         app_handle.clone(),
@@ -2075,6 +2076,11 @@ pub fn run(cli_args: CliArgs) {
             planning::work::work_keep,
             planning::work::work_day,
             planning::work::work_day_plan,
+            planning::work::cycles::work_cycles,
+            planning::work::cycles::work_cycle,
+            planning::work::cycles::work_cycle_settings_save,
+            planning::work::blocks::work_time_block,
+            planning::work::blocks::work_time_block_remove,
             planning::work::follow::work_brief,
             planning::work::follow::work_talking_point_add,
             planning::work::follow::work_talking_point_done,

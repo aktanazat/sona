@@ -3,12 +3,15 @@
 //! Project screens read the same rows through `store`.
 
 pub(crate) mod agents;
+pub(crate) mod blocks;
 pub(crate) mod capture;
+pub(crate) mod cycles;
 pub(crate) mod follow;
 mod hygiene;
 pub(crate) mod items;
 pub(crate) mod live;
 pub(crate) mod parse;
+pub(crate) mod recur;
 pub(crate) mod sync;
 #[cfg(test)]
 mod tests;
@@ -21,7 +24,8 @@ pub use self::types::WorkChanged;
 use self::types::{
     WorkActivityKind, WorkActor, WorkCounts, WorkDay, WorkDisplay, WorkDoer, WorkItem,
     WorkItemDetail, WorkItemInput, WorkItemRow, WorkLabel, WorkList, WorkOwner, WorkPatch,
-    WorkProjectChoice, WorkQuery, WorkRelation, WorkRelationKind, WorkSource, WorkStatus, WorkView,
+    WorkProjectChoice, WorkQuery, WorkRelation, WorkRelationKind, WorkRepeat, WorkSource,
+    WorkStatus, WorkTimeBlock, WorkView,
 };
 use super::sources;
 use super::store::{self, Refusal};
@@ -364,6 +368,9 @@ struct RowContext {
     follow_ups: FollowUps,
     doers: HashMap<String, WorkDoer>,
     heard: HashMap<String, live::Heard>,
+    risks: std::collections::BTreeSet<String>,
+    blocks: HashMap<String, WorkTimeBlock>,
+    repeats: HashMap<String, WorkRepeat>,
 }
 
 impl RowContext {
@@ -384,6 +391,9 @@ impl RowContext {
             follow_ups: FollowUps::read(history)?,
             doers: agents::doers(history)?,
             heard: live::heard(history, meetings)?,
+            risks: blocks::risks(history)?,
+            blocks: blocks::booked(history)?,
+            repeats: recur::repeats(history, now_ms())?,
         })
     }
 
@@ -418,6 +428,9 @@ impl RowContext {
                 .copied()
                 .unwrap_or(WorkSource::Person),
             follow_up_at_ms: self.follow_ups.at(&item)?,
+            at_risk: self.risks.contains(&item.id),
+            time_block: self.blocks.get(&item.id).copied(),
+            repeat: self.repeats.get(&item.id).cloned(),
             item,
         };
         if let Some(source) = match &source_loop_id {
@@ -536,12 +549,17 @@ fn list(
         .as_deref()
         .map(|due| items::due_spans(due, now_ms))
         .transpose()?;
+    let cycle = query
+        .cycle
+        .map(|cycle| cycles::want(history, cycle, now_ms))
+        .transpose()?;
     let mut reader = MeetingReader::new(meetings, user_name);
     let mut rows = Vec::new();
     let mut suggestions = BTreeMap::new();
     for item in &all {
         if !wanted(item, query, owners.as_ref(), due.as_deref(), now_ms)
             || raised.as_ref().is_some_and(|ids| !ids.contains(&item.id))
+            || cycle.is_some_and(|cycle| !cycle.holds(item))
             || search.as_deref().is_some_and(|search| !found(item, search))
         {
             continue;
@@ -563,6 +581,7 @@ fn list(
         suggestions,
         proposals,
         conversations_available: meetings.is_some(),
+        cycles: cycles::all(history, now_ms)?,
     })
 }
 
@@ -655,6 +674,11 @@ fn edit(
         change.at_ms,
     )?;
     effects.changed(&changed);
+    if changed.after.status.is_closed() {
+        if let Some(next) = recur::next_of(history, id)? {
+            effects.item(&items::item(history, &next)?);
+        }
+    }
     if changed.before.status != changed.after.status {
         effects.loops.extend(sync::settle(
             history,

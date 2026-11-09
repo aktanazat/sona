@@ -146,6 +146,8 @@ pub enum WorkActivityKind {
     Relation,
     Kept,
     Recurrence,
+    Cycle,
+    Block,
 }
 
 sql_enum!(WorkActivityKind {
@@ -167,6 +169,8 @@ sql_enum!(WorkActivityKind {
     Relation => "relation",
     Kept => "kept",
     Recurrence => "recurrence",
+    Cycle => "cycle",
+    Block => "block",
 });
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
@@ -206,6 +210,8 @@ pub struct WorkItem {
     pub updated_at_ms: i64,
     pub revision: i64,
     pub sort_order: f64,
+    /// The number of the cycle the item is planned in.
+    pub cycle: Option<i64>,
 }
 
 impl WorkItem {
@@ -248,6 +254,30 @@ pub struct WorkItemRow {
     /// When to ask the person who owes this item about it; none for work
     /// nobody else owes.
     pub follow_up_at_ms: Option<i64>,
+    /// Mine, open, due within two days, nothing booked for it, and no free
+    /// hour left on its due day.
+    pub at_risk: bool,
+    /// The calendar time booked to do it.
+    pub time_block: Option<WorkTimeBlock>,
+    /// How it comes back and how often its instances were done in time.
+    pub repeat: Option<WorkRepeat>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkTimeBlock {
+    pub starts_at_ms: i64,
+    pub ends_at_ms: i64,
+}
+
+/// A repeating task's rule as said, and of the instances whose due day has
+/// come, `kept` were done by the end of it out of `of`.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkRepeat {
+    pub every: String,
+    pub kept: u32,
+    pub of: u32,
 }
 
 /// The agent working an item, by the name it goes by, since it took it.
@@ -272,6 +302,7 @@ pub enum WorkProposalField {
     Labels,
     Snoozed,
     Recurrence,
+    Cycle,
 }
 
 sql_enum!(WorkProposalField {
@@ -286,6 +317,7 @@ sql_enum!(WorkProposalField {
     Labels => "labels",
     Snoozed => "snoozed",
     Recurrence => "recurrence",
+    Cycle => "cycle",
 });
 
 /// One field an agent would change, waiting for the user. `from` is the
@@ -392,6 +424,23 @@ pub struct WorkPatch {
         skip_serializing_if = "Option::is_none"
     )]
     pub recurrence: Option<Option<String>>,
+    #[serde(
+        default,
+        deserialize_with = "nullable",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub cycle: Option<Option<i64>>,
+}
+
+/// A cycle a query or a change names: the one under way, the one after it,
+/// none, or one by number.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize, Type)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WorkCycleRef {
+    Current,
+    Next,
+    None,
+    Number { number: i64 },
 }
 
 /// A due window that moves with the calendar, on this Mac's clock. Weeks
@@ -430,6 +479,7 @@ pub struct WorkQuery {
     pub search: Option<String>,
     pub include_archived: bool,
     pub include_snoozed: bool,
+    pub cycle: Option<WorkCycleRef>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
@@ -596,6 +646,66 @@ pub struct WorkList {
     /// False when the conversations could not be opened: every item is
     /// listed, but nothing read from its meeting, and no people.
     pub conversations_available: bool,
+    /// Every cycle, oldest first, so a row's number reads as a cycle.
+    pub cycles: Vec<WorkCycle>,
+}
+
+/// How long a cycle runs and the weekday each starts on, 1 for Monday
+/// through 7 for Sunday.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkCycleSettings {
+    pub weeks: u8,
+    pub start_weekday: u8,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkCycleState {
+    Past,
+    Current,
+    Upcoming,
+}
+
+/// A cycle from the local midnight `start_day` begins to the one `end_day`
+/// begins; its scope is every task planned in it that was not dropped, and
+/// `done` the ones finished.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkCycle {
+    pub number: i64,
+    pub start_day: String,
+    pub end_day: String,
+    pub starts_at_ms: i64,
+    pub ends_at_ms: i64,
+    pub state: WorkCycleState,
+    pub scope: u32,
+    pub done: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkCycles {
+    pub settings: WorkCycleSettings,
+    pub cycles: Vec<WorkCycle>,
+}
+
+/// Scope and done as each day of a cycle ended, through today.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkCycleDay {
+    pub day: String,
+    pub scope: u32,
+    pub done: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkCycleProgress {
+    pub cycle: WorkCycle,
+    pub days: Vec<WorkCycleDay>,
+    /// Tasks moved in unfinished from earlier cycles.
+    pub carried_over: u32,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize, Type)]
