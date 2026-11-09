@@ -5,11 +5,12 @@
 
 use super::super::store::{self, Refusal};
 use super::types::{
-    WorkActivity, WorkActivityKind, WorkActor, WorkCounts, WorkDisplay, WorkItem, WorkLabel,
-    WorkOwner, WorkPatch, WorkQuery, WorkRelation, WorkRelationKind, WorkStatus, WorkView,
+    WorkActivity, WorkActivityKind, WorkActor, WorkCounts, WorkDisplay, WorkDue, WorkItem,
+    WorkLabel, WorkOwner, WorkPatch, WorkQuery, WorkRelation, WorkRelationKind, WorkStatus,
+    WorkView,
 };
 use anyhow::Result;
-use chrono::{Days, Local, NaiveDate, TimeZone};
+use chrono::{Datelike, Days, Local, NaiveDate, TimeZone};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -927,17 +928,69 @@ fn local_midnight_ms(day: NaiveDate) -> Result<i64> {
         .ok_or_else(|| anyhow::anyhow!("local midnight does not exist"))
 }
 
-/// Where today starts and ends on this Mac's clock, in epoch ms.
-pub(crate) fn today_bounds(now_ms: i64) -> Result<(i64, i64)> {
-    let today = Local
+fn local_today(now_ms: i64) -> Result<NaiveDate> {
+    Ok(Local
         .timestamp_millis_opt(now_ms)
         .single()
         .ok_or_else(|| anyhow::anyhow!("clock is outside the supported calendar"))?
-        .date_naive();
-    let tomorrow = today
-        .checked_add_days(Days::new(1))
-        .ok_or_else(|| anyhow::anyhow!("tomorrow is outside the calendar"))?;
-    Ok((local_midnight_ms(today)?, local_midnight_ms(tomorrow)?))
+        .date_naive())
+}
+
+/// Where the day `days` after `today` starts on this Mac's clock, in epoch ms.
+fn day_start_ms(today: NaiveDate, days: u64) -> Result<i64> {
+    let day = today
+        .checked_add_days(Days::new(days))
+        .ok_or_else(|| anyhow::anyhow!("that day is outside the calendar"))?;
+    local_midnight_ms(day)
+}
+
+/// Where today starts and ends on this Mac's clock, in epoch ms.
+pub(crate) fn today_bounds(now_ms: i64) -> Result<(i64, i64)> {
+    let today = local_today(now_ms)?;
+    Ok((day_start_ms(today, 0)?, day_start_ms(today, 1)?))
+}
+
+/// A [`WorkDue`] pinned to the day it was asked on.
+#[derive(Clone, Copy)]
+pub(crate) enum DueSpan {
+    /// Accepted, unfinished work due before this time.
+    Overdue(i64),
+    /// Due at or after the first time and before the second.
+    Between(i64, i64),
+    NoDate,
+}
+
+impl DueSpan {
+    pub(crate) fn holds(self, item: &WorkItem) -> bool {
+        match (self, item.due_at_ms) {
+            (Self::Overdue(before), Some(due)) => due < before && item.status.is_open(),
+            (Self::Between(from, until), Some(due)) => (from..until).contains(&due),
+            (Self::NoDate, None) => true,
+            (Self::Overdue(_) | Self::Between(..), None) | (Self::NoDate, Some(_)) => false,
+        }
+    }
+}
+
+/// Pins each window to the day `now_ms` falls on.
+pub(crate) fn due_spans(due: &[WorkDue], now_ms: i64) -> Result<Vec<DueSpan>> {
+    let today = local_today(now_ms)?;
+    let start = day_start_ms(today, 0)?;
+    due.iter()
+        .map(|due| {
+            Ok(match *due {
+                WorkDue::Overdue => DueSpan::Overdue(start),
+                WorkDue::Today => DueSpan::Between(start, day_start_ms(today, 1)?),
+                WorkDue::ThisWeek => {
+                    let monday = 7 - u64::from(today.weekday().num_days_from_monday());
+                    DueSpan::Between(start, day_start_ms(today, monday)?)
+                }
+                WorkDue::NextDays { days } => {
+                    DueSpan::Between(start, day_start_ms(today, u64::from(days) + 1)?)
+                }
+                WorkDue::NoDate => DueSpan::NoDate,
+            })
+        })
+        .collect()
 }
 
 /// Whether the item is out of sight until a later time.

@@ -23,6 +23,7 @@ use crate::meeting::types::{
     MeetingOperationId, MeetingSessionId, OperationActor, OperationResult,
 };
 use crate::planning::types::EvidenceSourceKind;
+use chrono::{Duration, Local, NaiveDate, TimeZone};
 use rusqlite::{Connection, TransactionBehavior};
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -761,4 +762,78 @@ fn deleting_a_project_keeps_its_items() {
     });
     assert_eq!(kept, [Some((None, None, 1)), Some((None, None, 1))]);
     assert!(planning_store::milestone(&desk.history, &milestone.id).is_err());
+}
+
+#[test]
+fn a_due_window_counts_days_from_the_day_the_list_is_read() {
+    let mut desk = desk(&["Send the outline"]);
+    // PANIC: noon on a November Wednesday exists on every clock.
+    let wednesday = NaiveDate::from_ymd_opt(2026, 11, 4).expect("a calendar day");
+    let noon = |days: i64| {
+        let noon = (wednesday + Duration::days(days))
+            .and_hms_opt(12, 0, 0)
+            .expect("noon");
+        Local
+            .from_local_datetime(&noon)
+            .single()
+            .expect("one noon on this clock")
+            .timestamp_millis()
+    };
+    let now = noon(0);
+    let made = [
+        ("Tuesday, open", Some(-1)),
+        ("Tuesday, done", Some(-1)),
+        ("Wednesday", Some(0)),
+        ("Sunday", Some(4)),
+        ("next Monday", Some(5)),
+        ("in 14 days", Some(14)),
+        ("in 15 days", Some(15)),
+        ("no date", None),
+    ]
+    .map(|(title, days)| {
+        create(
+            &mut desk.history,
+            None,
+            by_me(&operation(), now),
+            &WorkItemInput {
+                due_at_ms: days.map(noon),
+                ..typed(title)
+            },
+        )
+        .expect("a dated item")
+        .value
+    });
+    update(
+        &mut desk.history,
+        None,
+        by_me(&operation(), now),
+        &made[1].id,
+        made[1].revision,
+        &status(WorkStatus::Done),
+    )
+    .expect("Tuesday's item done");
+
+    let listed = |due: &str| {
+        // PANIC: each window is written the way the Mac app sends it.
+        let query = serde_json::from_str::<WorkQuery>(&format!(r#"{{"due":{due}}}"#))
+            .expect("a due filter");
+        list(&desk.history, None, None, &query, now)
+            .expect("the filtered list")
+            .items
+            .into_iter()
+            .map(|row| row.item.title)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(listed(r#"[{"kind":"overdue"}]"#), ["Tuesday, open"]);
+    assert_eq!(listed(r#"[{"kind":"today"}]"#), ["Wednesday"]);
+    assert_eq!(listed(r#"[{"kind":"this_week"}]"#), ["Wednesday", "Sunday"]);
+    assert_eq!(
+        listed(r#"[{"kind":"next_days","days":14}]"#),
+        ["Wednesday", "Sunday", "next Monday", "in 14 days"]
+    );
+    assert_eq!(listed(r#"[{"kind":"no_date"}]"#), ["no date"]);
+    assert_eq!(
+        listed(r#"[{"kind":"overdue"},{"kind":"today"}]"#),
+        ["Tuesday, open", "Wednesday"]
+    );
 }

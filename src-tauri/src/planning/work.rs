@@ -8,7 +8,7 @@ pub(crate) mod sync;
 mod tests;
 pub mod types;
 
-use self::items::{Changed, NewItem};
+use self::items::{Changed, DueSpan, NewItem};
 use self::sync::{MeetingReader, People};
 pub use self::types::WorkChanged;
 use self::types::{
@@ -408,7 +408,7 @@ fn any_of<T: PartialEq>(wanted: Option<&Vec<T>>, value: &T) -> bool {
     wanted.is_none_or(|wanted| wanted.contains(value))
 }
 
-fn wanted(item: &WorkItem, query: &WorkQuery, now_ms: i64) -> bool {
+fn wanted(item: &WorkItem, query: &WorkQuery, due: Option<&[DueSpan]>, now_ms: i64) -> bool {
     any_of(query.statuses.as_ref(), &item.status)
         && query
             .direction
@@ -433,6 +433,7 @@ fn wanted(item: &WorkItem, query: &WorkQuery, now_ms: i64) -> bool {
         && query
             .due_before_ms
             .is_none_or(|before| item.due_at_ms.is_some_and(|due| due < before))
+        && due.is_none_or(|spans| spans.iter().any(|span| span.holds(item)))
         && (query.include_snoozed || !items::snoozed(item, now_ms))
 }
 
@@ -469,11 +470,16 @@ fn list(
         .map(str::trim)
         .filter(|search| !search.is_empty())
         .map(str::to_lowercase);
+    let due = query
+        .due
+        .as_deref()
+        .map(|due| items::due_spans(due, now_ms))
+        .transpose()?;
     let mut reader = MeetingReader::new(meetings, user_name);
     let mut rows = Vec::new();
     let mut suggestions = BTreeMap::new();
     for item in &all {
-        if !wanted(item, query, now_ms)
+        if !wanted(item, query, due.as_deref(), now_ms)
             || raised.as_ref().is_some_and(|ids| !ids.contains(&item.id))
             || search.as_deref().is_some_and(|search| !found(item, search))
         {
