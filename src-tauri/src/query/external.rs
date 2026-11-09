@@ -45,6 +45,7 @@ use super::{
 use crate::analytics::{DashboardTrendRange, DashboardTrendRequest};
 use crate::cli::{CliArgs, Command};
 use crate::managers::history::{HistoryManager, HistoryStats};
+use crate::meeting::analysis_export::{export_meeting, AnalysisExportError, ExportedMeeting};
 use crate::meeting::detection::calendar::{CalendarAccess, CalendarSource};
 use crate::meeting::loop_types::{
     MeetingLoopDirection, MeetingLoopId, MeetingLoopKind, MeetingLoopResolution,
@@ -73,6 +74,7 @@ use chrono::{DateTime, Datelike, Days, Local, NaiveDate, TimeZone};
 use serde::Serialize;
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -361,6 +363,11 @@ pub enum ExternalRequest {
         to_version: Option<i64>,
     },
     Stats,
+    ExportMeetings {
+        directory: PathBuf,
+        /// Empty for every retained meeting.
+        session_ids: Vec<MeetingSessionId>,
+    },
     LoopResolve {
         loop_id: MeetingLoopId,
     },
@@ -395,7 +402,8 @@ impl ExternalRequest {
             | Self::NoteContext { .. }
             | Self::NoteVersions { .. }
             | Self::NoteDiff { .. }
-            | Self::Stats => READ_SCOPES,
+            | Self::Stats
+            | Self::ExportMeetings { .. } => READ_SCOPES,
         }
     }
 }
@@ -455,6 +463,7 @@ pub fn is_external_query(args: &CliArgs) -> bool {
         || args.note_versions.is_some()
         || args.note_diff.is_some()
         || args.stats
+        || args.export_meetings.is_some()
         || args.command.is_some()
 }
 
@@ -552,6 +561,11 @@ fn foreign_modifier(args: &CliArgs) -> Option<&'static str> {
             args.since_utc_ms.is_some(),
             args.person_catch_up.is_some() || args.person_changes.is_some(),
             "--since-utc-ms is only read by --person-catch-up or --person-changes.",
+        ),
+        (
+            !args.export_meeting.is_empty(),
+            args.export_meetings.is_some(),
+            "--export-meeting is only read by --export-meetings.",
         ),
     ]
     .into_iter()
@@ -727,6 +741,16 @@ impl ExternalRequest {
                 to_version: args.to_version,
             });
         }
+        if let Some(directory) = args.export_meetings.as_ref() {
+            return Ok(Self::ExportMeetings {
+                directory: directory.clone(),
+                session_ids: args
+                    .export_meeting
+                    .iter()
+                    .map(|id| session_id(id))
+                    .collect::<Result<_, _>>()?,
+            });
+        }
         if args.stats {
             return Ok(Self::Stats);
         }
@@ -736,7 +760,7 @@ impl ExternalRequest {
             });
         }
         Err(ExternalError::invalid(
-            "No verb was named. Pass --query, --meetings, --meeting, --transcript, --loops, --people, --person-catch-up, --person-changes, --person-stats, --events, --upcoming, --plans, --bookmarks, --roster, --place, --projects, --project, --notes, --note, --note-context, --note-versions, --note-diff, --stats or --loop-resolve. For tasks, run sona work --help.",
+            "No verb was named. Pass --query, --meetings, --meeting, --transcript, --loops, --people, --person-catch-up, --person-changes, --person-stats, --events, --upcoming, --plans, --bookmarks, --roster, --place, --projects, --project, --notes, --note, --note-context, --note-versions, --note-diff, --stats, --export-meetings or --loop-resolve. For tasks, run sona work --help.",
         ))
     }
 }
@@ -1360,6 +1384,7 @@ pub enum ExternalResponse {
     NoteVersions(ExternalNoteVersions),
     NoteDiff(ExternalNoteDiff),
     Stats(ExternalCorpusStats),
+    ExportMeetings(ExternalMeetingExport),
     Work(tracker::WorkAnswer),
 }
 
@@ -1378,6 +1403,7 @@ impl ExternalResponse {
                 OperationResult::Committed => 0,
                 _ => 1,
             },
+            Self::ExportMeetings(export) if !export.failed.is_empty() => 1,
             _ => 0,
         }
     }
@@ -1638,6 +1664,12 @@ pub async fn answer(
         ExternalRequest::Stats => Ok(ExternalResponse::Stats(
             corpus_stats(meetings, history).await,
         )),
+        ExternalRequest::ExportMeetings {
+            directory,
+            session_ids,
+        } => export_meetings(meetings, directory, session_ids)
+            .await
+            .map(ExternalResponse::ExportMeetings),
         ExternalRequest::Work(verb) => tracker::answer(verb, app, meetings, history)
             .await
             .map(ExternalResponse::Work),
@@ -1656,6 +1688,86 @@ async fn store(meetings: &Arc<MeetingSessionManager>) -> Result<Arc<MeetingStore
 /// D14, read once for the request that is about to use it. See [`KeptLocal`].
 fn kept_local(store: &MeetingStore) -> Result<KeptLocal, ExternalError> {
     KeptLocal::read(store).map_err(|error| QueryError::from(error).into())
+}
+
+/// What `--export-meetings` wrote, and which meetings it could not.
+#[derive(Clone, Debug, Serialize)]
+pub struct ExternalMeetingExport {
+    pub schema_version: u32,
+    pub directory: PathBuf,
+    pub meetings: Vec<ExportedMeeting>,
+    pub failed: Vec<ExternalExportFailure>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ExternalExportFailure {
+    pub meeting_id: Uuid,
+    pub message: String,
+}
+
+/// Readable copies of retained meetings, written by the app that holds the
+/// store's key. A meeting that fails is listed and the rest still export.
+async fn export_meetings(
+    meetings: &Arc<MeetingSessionManager>,
+    directory: &Path,
+    session_ids: &[MeetingSessionId],
+) -> Result<ExternalMeetingExport, ExternalError> {
+    let store = store(meetings).await?;
+    let capturing = store
+        .capturing_session()
+        .map_err(|error| ExternalError::from(QueryError::from(error)))?;
+    if let Some(session_id) = capturing {
+        return Err(ExternalError::new(
+            ExternalErrorCode::Failed,
+            format!(
+                "Meeting {} is still recording, or Sona quit while it was. Stop it or open Sona to recover it, then export again.",
+                session_id.uuid()
+            ),
+        ));
+    }
+    let kept_local = kept_local(&store)?;
+    let chosen = if session_ids.is_empty() {
+        store
+            .csv_meetings()
+            .map_err(|error| ExternalError::from(QueryError::from(error)))?
+            .into_iter()
+            .map(|meeting| meeting.session_id)
+            .filter(|session_id| !kept_local.hides(*session_id))
+            .collect()
+    } else if let Some(hidden) = session_ids.iter().find(|id| kept_local.hides(**id)) {
+        return Err(missing_meeting(*hidden));
+    } else {
+        session_ids.to_vec()
+    };
+    let notes_template = meetings.default_notes_template();
+    let root = directory.to_owned();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut export = ExternalMeetingExport {
+            schema_version: QUERY_SCHEMA_VERSION,
+            directory: root,
+            meetings: Vec::new(),
+            failed: Vec::new(),
+        };
+        for session_id in chosen {
+            match export_meeting(&store, session_id, &export.directory, notes_template) {
+                Ok(meeting) => export.meetings.push(meeting),
+                Err(error) => export.failed.push(ExternalExportFailure {
+                    meeting_id: session_id.uuid(),
+                    message: match error {
+                        AnalysisExportError::Store(error) => {
+                            meeting_refusal(session_id, error).message
+                        }
+                        AnalysisExportError::Write(path) => {
+                            format!("Could not write {}.", path.display())
+                        }
+                    },
+                }),
+            }
+        }
+        export
+    })
+    .await
+    .map_err(|_| ExternalError::new(ExternalErrorCode::Failed, "The export stopped early."))
 }
 
 /// The week ahead, as the Meetings home reads it, projected for an outside
@@ -3803,6 +3915,24 @@ fn text_response(response: &ExternalResponse) -> String {
                 );
             }
         }
+        ExternalResponse::ExportMeetings(export) => {
+            for meeting in &export.meetings {
+                let _ = writeln!(text, "{}  {}", meeting.title, meeting.directory.display());
+                if !meeting.audio_retained {
+                    let _ = writeln!(text, "  audio deleted by retention");
+                }
+                for lane in &meeting.lanes {
+                    let _ = writeln!(
+                        text,
+                        "  {}  {} ms, {} ms silence",
+                        lane.file, lane.duration_ms, lane.silence_ms
+                    );
+                }
+            }
+            for failure in &export.failed {
+                let _ = writeln!(text, "failed {}: {}", failure.meeting_id, failure.message);
+            }
+        }
         ExternalResponse::Work(answer) => text.push_str(&answer.text()),
     }
     text
@@ -4349,7 +4479,7 @@ mod tests {
         ];
         // One invocation per modifier, beside a verb that does not read it.
         // `--from` and `--to` require each other, so they share theirs.
-        let cases: [(&str, &[&str]); 12] = [
+        let cases: [(&str, &[&str]); 13] = [
             ("scope", &["--upcoming", "--scope", "people"]),
             ("limit", &["--meeting", MEETING, "--limit", "3"]),
             ("last", &["--upcoming", "--last", "3"]),
@@ -4371,6 +4501,10 @@ mod tests {
             ("after", &["--upcoming", "--after", "abc"]),
             ("from_version", &["--upcoming", "--from-version", "1"]),
             ("to_version", &["--upcoming", "--to-version", "2"]),
+            (
+                "export_meeting",
+                &["--upcoming", "--export-meeting", MEETING],
+            ),
         ];
 
         let command = CliArgs::command();

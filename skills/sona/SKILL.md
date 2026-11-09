@@ -70,6 +70,7 @@ explicit JSON. Existing `--json` uses remain supported.
 | `--note-versions <NOTE_ID>`                                          | Saved version ids, kinds, times and sizes, newest first                           |
 | `--note-diff <NOTE_ID> --from-version N [--to-version N]`            | Exact saved-body changes; destination defaults to newest saved version            |
 | `--stats`                                                            | Content-free statistics over retained records, with availability for each dataset |
+| `--export-meetings <DIR> [--export-meeting <ID>]...`                 | Readable copies on disk: lane audio WAVs, `meeting.json`, `speakers.json`; exits `1` if any meeting failed |
 | `--loop-resolve <LOOP_ID>`                                           | **Writes.** Mark one loop done and return its receipt                             |
 
 Paged reads default to 25 rows and cap at 100. `--meetings` also accepts `--last`
