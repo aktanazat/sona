@@ -796,7 +796,8 @@ struct TaskPropertyList: View {
                     }
                 }
             }
-            if let detail = work.detail, detail.item.id == row.id, let rule = detail.recurrence {
+            if let rule = row.repeat?.every
+                ?? work.detail.flatMap({ $0.item.id == row.id ? $0.recurrence : nil }) {
                 PropertyLine(title: "Repeats") {
                     HStack(spacing: 8) {
                         Image(systemName: "repeat")
@@ -804,9 +805,43 @@ struct TaskPropertyList: View {
                             .foregroundStyle(Theme.inkSecondary)
                             .frame(width: 16, height: 16)
                         Text(Recurrence.display(rule)).bodyText(13, Theme.ink).lineLimit(1)
+                        if let repeating = row.repeat, repeating.of > 0 {
+                            Text("kept \(repeating.kept) of \(repeating.of)").metaText()
+                        }
                     }
                     .padding(.horizontal, 8)
                     .frame(height: 28)
+                }
+            }
+            if row.status.isOpen || row.cycle != nil {
+                PropertyLine(title: "Cycle") {
+                    WorkPickerButton(kind: .cycle, ids: ids) {
+                        PropertyValue(text: row.cycle.map { "Cycle \($0)" } ?? "No cycle", faint: row.cycle == nil) {
+                            Image(systemName: "arrow.triangle.2.circlepath").font(.system(size: 12))
+                                .foregroundStyle(Theme.inkSecondary)
+                        }
+                    }
+                }
+            }
+            if row.status.isOpen {
+                PropertyLine(title: "Time") {
+                    if let block = row.timeBlock {
+                        PropertyValue(text: TaskBlockText.when(block)) {
+                            Image(systemName: "calendar.badge.checkmark").font(.system(size: 12))
+                                .foregroundStyle(Theme.inkSecondary)
+                        }
+                    } else {
+                        Button { work.book(row.id) } label: {
+                            PropertyValue(text: row.atRisk ? "At risk · Book time" : "Book time",
+                                          faint: !row.atRisk) {
+                                Image(systemName: row.atRisk ? "exclamationmark.circle.fill" : "calendar.badge.clock")
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(row.atRisk ? Theme.live : Theme.inkSecondary)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .help("Book the next free hour before it is due  B")
+                    }
                 }
             }
             PropertyLine(title: "Project") {
@@ -977,6 +1012,12 @@ enum WorkActivityText {
             guard let every = entry.to, !every.isEmpty else { return "stopped it repeating" }
             let shown = Recurrence.display(every)
             return "set it to repeat \(shown.prefix(1).lowercased() + shown.dropFirst())"
+        case .cycle:
+            if let to = entry.to { return entry.from == nil ? "planned it in cycle \(to)" : "moved it to cycle \(to)" }
+            return "took it out of its cycle"
+        case .block:
+            guard let start = entry.to.flatMap({ Int64($0) }) else { return "cleared its booked time" }
+            return "booked time \(PlanningFormat.day(start))"
         }
     }
 
@@ -1004,5 +1045,21 @@ enum WorkActivityText {
         } else {
             "as related to \(other)"
         }
+    }
+}
+
+enum TaskRepeatText {
+    /// "Every week · kept 3 of 4".
+    static func line(_ repeating: WorkRepeat) -> String {
+        let rule = Recurrence.display(repeating.every)
+        return repeating.of > 0 ? "\(rule) · kept \(repeating.kept) of \(repeating.of)" : rule
+    }
+}
+
+enum TaskBlockText {
+    static func when(_ block: WorkTimeBlock) -> String {
+        let start = PlanningFormat.moment(block.startsAtMs)
+        let end = PlanningFormat.moment(block.endsAtMs)
+        return (start..<end).formatted(.interval.weekday(.abbreviated).hour().minute())
     }
 }

@@ -38,6 +38,7 @@ enum WorkChoices {
         case .duplicate: "Duplicate of…"
         case .snooze: "Snooze until, or type a date…"
         case .delegate: "Delegate to…"
+        case .cycle: "Move to cycle…"
         }
     }
 
@@ -93,6 +94,11 @@ enum WorkChoices {
         case .delegate:
             delegates(rows) { agent in
                 model.changeWork { work.delegate(ids, to: agent) }
+            }
+        case .cycle:
+            cycles(work, checked: { number in rows.allSatisfy { $0.cycle == number } }) { number in
+                let value: WorkPatchValue<Int64> = number.map { .set($0) } ?? .clear
+                model.changeWork { work.update(ids, WorkPatch(cycle: value)) }
             }
         }
         return filtered(choices, by: text, kind: picker.kind)
@@ -228,6 +234,22 @@ enum WorkChoices {
         if text.isEmpty || "pick a day".localizedCaseInsensitiveContains(text) {
             choices.append(WorkChoice(id: "day", title: "Pick a day…", mark: .symbol("calendar"), staysOpen: true, run: pickDay))
         }
+        return choices
+    }
+
+    /// The current cycle, the next one, and none.
+    static func cycles(
+        _ work: WorkStore, checked: (Int64?) -> Bool, pick: @escaping @MainActor (Int64?) -> Void
+    ) -> [WorkChoice] {
+        var choices: [WorkChoice] = []
+        for (index, cycle) in [work.currentCycle, work.nextCycle].compactMap({ $0 }).enumerated() {
+            choices.append(WorkChoice(
+                id: "\(cycle.number)", title: cycle.state == .current ? "Current cycle" : "Next cycle",
+                mark: .symbol("arrow.triangle.2.circlepath"), detail: CycleFormat.title(cycle),
+                checked: checked(cycle.number), key: "\(index + 1)") { pick(cycle.number) })
+        }
+        choices.append(WorkChoice(id: "none", title: "No cycle", mark: .symbol("minus.circle"),
+                                  checked: checked(nil), key: "0") { pick(nil) })
         return choices
     }
 

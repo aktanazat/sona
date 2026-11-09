@@ -75,6 +75,8 @@ struct ShortcutSheet: View {
                 Entry(title: "Project", keys: ["shift+p"]),
                 Entry(title: "Rename", keys: ["e"]),
                 Entry(title: "Snooze", keys: ["h"]),
+                Entry(title: "Move to cycle", keys: ["shift+c"]),
+                Entry(title: "Book time", keys: ["b"]),
                 Entry(title: "Nudge", keys: ["r"]),
                 Entry(title: "Archive", keys: ["cmd+backspace"]),
                 Entry(title: "Undo", keys: ["cmd+z"]),

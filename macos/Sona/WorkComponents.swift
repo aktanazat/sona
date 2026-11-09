@@ -255,6 +255,36 @@ struct ItemRow: View {
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel("Raised in \(row.raisedIn) meetings")
             }
+            if let repeating = row.repeat {
+                HStack(spacing: 3) {
+                    Image(systemName: "repeat").font(.system(size: 9, weight: .medium))
+                    if repeating.of > 0 {
+                        Text(verbatim: "\(repeating.kept)/\(repeating.of)")
+                    }
+                }
+                .font(TypeScale.label(11))
+                .monospacedDigit()
+                .foregroundStyle(Theme.inkTertiary)
+                .help(TaskRepeatText.line(repeating))
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(TaskRepeatText.line(repeating))
+            }
+            if row.atRisk, row.status.isOpen {
+                HStack(spacing: 3) {
+                    Image(systemName: "exclamationmark.circle.fill").font(.system(size: 10))
+                    Text("At risk")
+                }
+                .font(TypeScale.label(11))
+                .foregroundStyle(Theme.live)
+                .help("No free hour left on the day it is due. Press B to book time before then.")
+                .accessibilityElement(children: .combine)
+            } else if let block = row.timeBlock, row.status.isOpen, block.endsAtMs > now {
+                Image(systemName: "calendar.badge.checkmark")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Theme.inkTertiary)
+                    .help("Time booked \(TaskBlockText.when(block))")
+                    .accessibilityLabel("Time booked \(TaskBlockText.when(block))")
+            }
             Spacer(minLength: 12)
             if shows.contains(TaskProperty.labels.rawValue), !labels.isEmpty {
                 HStack(spacing: 4) {

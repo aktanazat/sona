@@ -22,6 +22,9 @@ final class WorkStore {
     private(set) var conversationsAvailable = true
     private(set) var counts: WorkCounts?
     private(set) var views: [WorkView] = []
+    /// Every cycle, oldest first, and how long they run.
+    private(set) var cycles: [WorkCycle] = []
+    private(set) var cycleSettings: WorkCycleSettings?
     private(set) var loading = false
     private(set) var listError: String?
     private(set) var mutationError: String?
@@ -148,6 +151,56 @@ final class WorkStore {
         change(ids, undo: nil, { row in row.updatedAtMs = now }) { operationId, rows in
             try await self.core.request("work_keep", IdsParams(operationId: operationId, ids: rows.map(\.id)))
         }
+    }
+
+    /// Books the next free hour before the task is due in the Sona
+    /// calendar. The row stops reading at risk at once; the hour shows
+    /// when the calendar answers.
+    func book(_ id: String) {
+        guard let before = rows([id]).first, before.status.isOpen, before.timeBlock == nil else { return }
+        let undo = remember("Booked time for 1 task", .unbook(id))
+        edit([id]) { $0.atRisk = false }
+        enqueue {
+            do {
+                let block: WorkTimeBlock = try await self.core.request(
+                    "work_time_block", OperationIdParams(operationId: Self.newId(), id: id))
+                self.edit([id]) { $0.timeBlock = block }
+            } catch {
+                self.edit([id]) { $0.atRisk = before.atRisk }
+                self.forget(undo)
+                self.mutationError = error.localizedDescription
+            }
+        }
+    }
+
+    func saveCycleSettings(_ settings: WorkCycleSettings) {
+        guard let before = cycleSettings, before != settings else { return }
+        cycleSettings = settings
+        enqueue {
+            do {
+                let saved: WorkCycles = try await self.core.request(
+                    "work_cycle_settings_save", CycleSettingsParams(operationId: Self.newId(), settings: settings))
+                self.cycleSettings = saved.settings
+                self.cycles = saved.cycles
+            } catch {
+                self.cycleSettings = before
+                self.mutationError = error.localizedDescription
+            }
+            self.reloadWhenIdle = true
+        }
+    }
+
+    /// Scope and done as each day of a cycle ended, read from history.
+    func progress(of number: Int64) async throws -> WorkCycleProgress {
+        try await core.request("work_cycle", CycleParams(number: number))
+    }
+
+    var currentCycle: WorkCycle? { cycles.first { $0.state == .current } }
+
+    /// The cycle after the current one.
+    var nextCycle: WorkCycle? {
+        guard let current = currentCycle else { return nil }
+        return cycles.first { $0.startsAtMs == current.endsAtMs }
     }
 
     func accept(_ ids: [String], applySuggestions: Bool) {
@@ -428,6 +481,23 @@ final class WorkStore {
             for (agent, handed) in Dictionary(grouping: doers, by: { $0.agent }) {
                 hand(handed.map { $0.id }, to: agent, copying: false, undo: nil)
             }
+        case let .unbook(id):
+            unbook(id)
+        }
+    }
+
+    private func unbook(_ id: String) {
+        guard let before = rows([id]).first else { return }
+        edit([id]) { $0.timeBlock = nil }
+        enqueue {
+            do {
+                try await self.core.request(
+                    "work_time_block_remove", OperationIdParams(operationId: Self.newId(), id: id))
+            } catch {
+                self.edit([id]) { $0.timeBlock = before.timeBlock }
+                self.mutationError = error.localizedDescription
+            }
+            self.reloadWhenIdle = true
         }
     }
 
@@ -444,6 +514,7 @@ final class WorkStore {
         case archive([String])
         case restore([String])
         case delegate([(id: String, agent: String?)])
+        case unbook(String)
     }
 
     private func load() async {
@@ -453,7 +524,8 @@ final class WorkStore {
             async let list: WorkList = core.request("work_list", query)
             async let tally: WorkCounts = core.request("work_counts")
             async let saved: [WorkView] = core.request("work_views")
-            let (listed, counted, savedViews) = try await (list, tally, saved)
+            async let cycled: WorkCycles = core.request("work_cycles")
+            let (listed, counted, savedViews, cycleList) = try await (list, tally, saved, cycled)
             if pending > 0 {
                 reloadWhenIdle = true
             } else {
@@ -467,6 +539,8 @@ final class WorkStore {
                 conversationsAvailable = listed.conversationsAvailable
                 counts = counted
                 views = savedViews
+                cycles = cycleList.cycles
+                cycleSettings = cycleList.settings
                 listError = nil
             }
         } catch {
@@ -675,12 +749,14 @@ final class WorkStore {
             dueAtMs: item.dueAtMs, labelIds: item.labelIds, sourceLoopId: item.sourceLoopId,
             duplicateOfId: item.duplicateOfId, snoozedUntilMs: item.snoozedUntilMs, archivedAtMs: item.archivedAtMs,
             statusChangedAtMs: item.statusChangedAtMs, createdAtMs: item.createdAtMs, updatedAtMs: item.updatedAtMs,
-            revision: item.revision, sortOrder: item.sortOrder, projectTitle: projectTitle(item.projectId),
+            revision: item.revision, sortOrder: item.sortOrder, cycle: item.cycle,
+            projectTitle: projectTitle(item.projectId),
             ownerName: personName(item.ownerPersonId), doer: old?.doer, sourceMeetingId: old?.sourceMeetingId,
             sourceMeetingTitle: old?.sourceMeetingTitle, sourceQuote: old?.sourceQuote,
             sourceSpeaker: old?.sourceSpeaker, sourceAtMs: old?.sourceAtMs,
             blockedByOpenCount: old?.blockedByOpenCount ?? 0, raisedIn: old?.raisedIn ?? 0,
-            source: old?.source ?? .person, followUpAtMs: old?.followUpAtMs)
+            source: old?.source ?? .person, followUpAtMs: old?.followUpAtMs,
+            atRisk: item.status.isOpen && (old?.atRisk ?? false), timeBlock: old?.timeBlock, repeat: old?.repeat)
     }
 
     private func patched(_ row: inout WorkItemRow, _ patch: WorkPatch, at now: Int64) {
@@ -701,6 +777,7 @@ final class WorkStore {
         if let due = patch.dueAtMs { row.dueAtMs = due.value }
         if let labelIds = patch.labelIds { row.labelIds = labelIds }
         if let wake = patch.snoozedUntilMs { row.snoozedUntilMs = wake.value }
+        if let cycle = patch.cycle { row.cycle = cycle.value }
         row.updatedAtMs = now
     }
 
@@ -768,6 +845,7 @@ final class WorkStore {
         if patch.dueAtMs != nil { inverse.dueAtMs = clearable(row.dueAtMs) }
         if patch.labelIds != nil { inverse.labelIds = row.labelIds }
         if patch.snoozedUntilMs != nil { inverse.snoozedUntilMs = clearable(row.snoozedUntilMs) }
+        if patch.cycle != nil { inverse.cycle = clearable(row.cycle) }
         return inverse
     }
 
@@ -807,6 +885,7 @@ final class WorkStore {
         case .labels: patch.labelIds = to?.split(separator: ",").map(String.init) ?? []
         case .snoozed: patch.snoozedUntilMs = clearable(to.flatMap { Int64($0) })
         case .recurrence: patch.recurrence = clearable(to)
+        case .cycle: patch.cycle = clearable(to.flatMap { Int64($0) })
         }
     }
 
@@ -823,6 +902,9 @@ final class WorkStore {
         if patch.projectId != nil { return "Moved \(noun) to a project" }
         if patch.labelIds != nil { return "Changed labels of \(noun)" }
         if patch.snoozedUntilMs != nil { return "Snoozed \(noun)" }
+        if let cycle = patch.cycle {
+            return cycle.value.map { "Moved \(noun) to cycle \($0)" } ?? "Took \(noun) out of its cycle"
+        }
         if patch.title != nil { return "Renamed \(noun)" }
         return "Changed \(noun)"
     }
@@ -840,6 +922,11 @@ private extension WorkPatchValue {
 
 private struct QueryParams: Encodable { let query: WorkQuery }
 private struct IdParams: Encodable { let id: String }
+private struct CycleParams: Encodable { let number: Int64 }
+private struct CycleSettingsParams: Encodable {
+    let operationId: String
+    let settings: WorkCycleSettings
+}
 private struct CreateParams: Encodable {
     let operationId: String
     let input: WorkItemInput

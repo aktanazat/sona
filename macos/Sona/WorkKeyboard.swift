@@ -6,7 +6,7 @@ import SwiftUI
 struct WorkPicker: Equatable {
     enum Kind: Equatable {
         case status, priority, owner, due, labels, project, duplicate, snooze
-        case delegate
+        case delegate, cycle
     }
 
     let kind: Kind
@@ -19,6 +19,7 @@ enum WorkAction: String, CaseIterable, Identifiable {
     case open, peek, status, priority, owner, assignToMe, due, labels, project, rename
     case accept, decline, duplicate, snooze, nudge, archive
     case delegate, acceptProposal, acceptAllProposals, rejectProposal
+    case cycle, block
 
     var id: String { rawValue }
 
@@ -44,6 +45,8 @@ enum WorkAction: String, CaseIterable, Identifiable {
         case .acceptProposal: "Accept proposed change"
         case .acceptAllProposals: "Accept all proposed changes"
         case .rejectProposal: "Reject proposed change"
+        case .cycle: "Move to cycle…"
+        case .block: "Book time"
         }
     }
 
@@ -70,6 +73,8 @@ enum WorkAction: String, CaseIterable, Identifiable {
         case .acceptProposal: "y"
         case .acceptAllProposals: "shift+y"
         case .rejectProposal: "n"
+        case .cycle: "shift+c"
+        case .block: "b"
         }
     }
 
@@ -96,6 +101,8 @@ enum WorkAction: String, CaseIterable, Identifiable {
         case .acceptProposal: KeyboardShortcut("y", modifiers: [])
         case .acceptAllProposals: KeyboardShortcut("y", modifiers: .shift)
         case .rejectProposal: KeyboardShortcut("n", modifiers: [])
+        case .cycle: KeyboardShortcut("c", modifiers: .shift)
+        case .block: KeyboardShortcut("b", modifiers: [])
         }
     }
 
@@ -121,6 +128,8 @@ enum WorkAction: String, CaseIterable, Identifiable {
         case .acceptProposal: "checkmark"
         case .acceptAllProposals: "checklist.checked"
         case .rejectProposal: "xmark"
+        case .cycle: "arrow.triangle.2.circlepath"
+        case .block: "calendar.badge.clock"
         }
     }
 
@@ -134,8 +143,9 @@ enum WorkAction: String, CaseIterable, Identifiable {
         case .project: .project
         case .duplicate: .duplicate
         case .snooze: .snooze
-        case .open, .peek, .assignToMe, .rename, .accept, .decline, .nudge, .archive: nil
+        case .open, .peek, .assignToMe, .rename, .accept, .decline, .nudge, .archive, .block: nil
         case .delegate: .delegate
+        case .cycle: .cycle
         case .acceptProposal, .acceptAllProposals, .rejectProposal: nil
         }
     }
@@ -155,13 +165,15 @@ enum WorkAction: String, CaseIterable, Identifiable {
         case .archive: rows.contains { $0.archivedAtMs == nil }
         case .status, .priority, .owner, .due, .labels, .project: true
         case .delegate: true
+        case .cycle: rows.allSatisfy { $0.status.isOpen }
+        case .block: rows.count == 1 && first.status.isOpen && first.timeBlock == nil
         case .acceptProposal, .acceptAllProposals, .rejectProposal: rows.contains { proposed.contains($0.id) }
         }
     }
 }
 
 enum TasksTab: Hashable {
-    case owe, waiting, all
+    case owe, waiting, all, cycle
     case view(String)
 }
 
@@ -192,6 +204,8 @@ final class WorkFocus {
     var displayShown = false
     var collapsed: Set<String> = []
     var tab: TasksTab = .owe
+    /// I owe narrowed to the current cycle.
+    var oweThisCycle = false
     var allQuery = WorkQuery()
     var allDisplay = WorkDisplay(properties: TaskProperty.standard)
     var filterShown = false
@@ -347,7 +361,7 @@ final class WorkFocus {
 
     func listing(_ views: [WorkView]) -> WorkViewDraft? {
         switch tab {
-        case .owe, .waiting:
+        case .owe, .waiting, .cycle:
             return nil
         case .all:
             return WorkViewDraft(query: allQuery, display: allDisplay)
@@ -359,7 +373,7 @@ final class WorkFocus {
 
     func setListing(_ draft: WorkViewDraft, views: [WorkView]) {
         switch tab {
-        case .owe, .waiting:
+        case .owe, .waiting, .cycle:
             break
         case .all:
             allQuery = draft.query
@@ -494,6 +508,7 @@ final class WorkKeys {
         if shift {
             switch key {
             case "p": return run(.project)
+            case "c": return run(.cycle)
             case "y": return answer(.acceptAllProposals)
             case "d":
                 guard place == .tasks, opened == nil else { return false }
@@ -544,6 +559,7 @@ final class WorkKeys {
         case "2" where place == .triage: return run(.decline)
         case "3" where place == .triage: return run(.duplicate)
         case "h": return run(.snooze)
+        case "b": return run(.block)
         case "r": return run(.nudge)
         case "y": return answer(.acceptProposal)
         case "n": return answer(.rejectProposal)
@@ -629,7 +645,9 @@ extension AppModel {
             changeWork { work.acceptProposals(ids.flatMap { work.proposals(for: $0).map(\.id) }) }
         case .rejectProposal:
             work.rejectProposals(ids.compactMap { work.proposals(for: $0).first?.id })
-        case .status, .priority, .owner, .due, .labels, .project, .duplicate, .snooze, .delegate:
+        case .block:
+            work.book(first)
+        case .status, .priority, .owner, .due, .labels, .project, .duplicate, .snooze, .delegate, .cycle:
             break
         }
     }

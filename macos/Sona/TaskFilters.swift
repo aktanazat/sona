@@ -58,6 +58,9 @@ enum TaskFilters {
             let title = store.items?.first { $0.sourceMeetingId == meeting }?.sourceMeetingTitle ?? "a meeting"
             chips.append(TaskFilterChip(id: "meeting", text: "From \(title)") { $0.sourceMeetingId = nil })
         }
+        if let cycle = query.cycle {
+            chips.append(TaskFilterChip(id: "cycle", text: title(cycle)) { $0.cycle = nil })
+        }
         if query.includeSnoozed {
             chips.append(TaskFilterChip(id: "snoozed", text: "Snoozed shown") { $0.includeSnoozed = false })
         }
@@ -76,6 +79,19 @@ enum TaskFilters {
         case .nextDays(1): "Due within a day"
         case let .nextDays(days): "Due within \(days) days"
         case .noDate: "No due date"
+        }
+    }
+
+    /// The cycles the filter panel offers; current and next move as cycles
+    /// turn over.
+    static let cycleChoices: [WorkCycleRef] = [.current, .next, .noCycle]
+
+    static func title(_ cycle: WorkCycleRef) -> String {
+        switch cycle {
+        case .current: "Current cycle"
+        case .next: "Next cycle"
+        case .noCycle: "No cycle"
+        case let .number(number): "Cycle \(number)"
         }
     }
 
@@ -211,6 +227,15 @@ private struct TaskFilterPanel: View {
                             }
                         }
                     }
+                    section("Cycle") {
+                        ForEach(TaskFilters.cycleChoices, id: \.self) { cycle in
+                            option(TaskFilters.title(cycle), on: query.cycle == cycle) {
+                                symbol(cycle == .noCycle ? "minus.circle" : "arrow.triangle.2.circlepath")
+                            } toggle: {
+                                model.editListing { $0.query.cycle = $0.query.cycle == cycle ? nil : cycle }
+                            }
+                        }
+                    }
                     option("Show snoozed", on: query.includeSnoozed) {
                         symbol("moon.zzz")
                     } toggle: {
@@ -330,7 +355,7 @@ struct TaskFilterBar: View {
                     Button("Save") { save(id) }
                         .buttonStyle(.compact)
                 }
-            case .owe, .waiting:
+            case .owe, .waiting, .cycle:
                 EmptyView()
             }
         }
