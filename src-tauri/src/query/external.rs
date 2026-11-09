@@ -2579,7 +2579,9 @@ fn evidence_kept_local(evidence: &planning::EvidenceLink, kept_local: &KeptLocal
         EvidenceSourceKind::Loop => MeetingLoopId(evidence.source_id.clone())
             .session_id()
             .is_some_and(|session_id| kept_local.hides(session_id)),
-        EvidenceSourceKind::Note => false,
+        EvidenceSourceKind::Note | EvidenceSourceKind::Dictation | EvidenceSourceKind::Link => {
+            false
+        }
     }
 }
 
@@ -2589,6 +2591,8 @@ fn project_evidence(evidence: planning::EvidenceLink) -> ExternalPlanningEvidenc
             EvidenceSourceKind::Meeting => "meeting",
             EvidenceSourceKind::Note => "note",
             EvidenceSourceKind::Loop => "loop",
+            EvidenceSourceKind::Dictation => "dictation",
+            EvidenceSourceKind::Link => return evidence.source_id.clone(),
         };
         let mut link = format!("sona://{kind}/{}", evidence.source_id);
         if let (EvidenceSourceKind::Meeting, Some(at_ms)) = (evidence.source_kind, evidence.at_ms) {

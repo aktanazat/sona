@@ -175,6 +175,7 @@ mod tests {
     use super::{handle_registered_shortcut_event, Shortcut, ShortcutState};
     use crate::command_mode::COMMAND_BINDING_ID;
     use crate::modes::{ensure_mode_settings, TranscriptionIntent};
+    use crate::planning::work::capture::RAMBLE_BINDING_ID;
     use crate::settings::get_default_settings;
 
     #[test]
@@ -184,6 +185,7 @@ mod tests {
         let bindings = bindings_for_registration(&settings);
         let cases = [
             (COMMAND_BINDING_ID, TranscriptionIntent::Command),
+            (RAMBLE_BINDING_ID, TranscriptionIntent::Tasks),
             (
                 "mode/email/transcribe",
                 TranscriptionIntent::Mode {

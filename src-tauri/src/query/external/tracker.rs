@@ -1419,6 +1419,7 @@ impl Tracker<'_> {
                 .as_deref()
                 .map(|labels| board.label_ids(labels))
                 .transpose()?,
+            recurrence: None,
         };
         let today = Local::now().date_naive().format("%Y-%m-%d").to_string();
         let operation_id = args.write.operation_id("create", &(&input, today))?;
@@ -2343,7 +2344,9 @@ impl Fence {
             Self::Open(kept_local) => evidence_kept_local(evidence, kept_local),
             Self::Closed => match evidence.source_kind {
                 planning::EvidenceSourceKind::Meeting | planning::EvidenceSourceKind::Loop => true,
-                planning::EvidenceSourceKind::Note => false,
+                planning::EvidenceSourceKind::Note
+                | planning::EvidenceSourceKind::Dictation
+                | planning::EvidenceSourceKind::Link => false,
             },
         }
     }

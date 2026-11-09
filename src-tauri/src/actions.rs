@@ -2419,7 +2419,21 @@ impl TranscribeAction {
                                     },
                                 );
 
-                                if processed.final_text.is_empty() {
+                                if run.tasks() {
+                                    let history_id = unclaimed.claimed_by(history_entry.save(&hm));
+                                    persist_delivery_attempt(
+                                        &hm,
+                                        history_id,
+                                        run.run_id,
+                                        DeliveryReceipt::not_dispatched(),
+                                    );
+                                    crate::planning::work::capture::file_spoken(
+                                        ah.clone(),
+                                        history_id,
+                                        processed.final_text,
+                                        Arc::clone(&completed_pcm),
+                                    );
+                                } else if processed.final_text.is_empty() {
                                     let history_id = unclaimed.claimed_by(history_entry.save(&hm));
                                     persist_delivery_attempt(
                                         &hm,

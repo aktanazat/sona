@@ -1064,6 +1064,7 @@ mod tests {
             owner: None,
             due_at_ms: None,
             label_ids: None,
+            recurrence: None,
         };
         // PANIC: a fixture that cannot add its task is a broken test.
         super::super::create(history, None, by(WorkActor::Me, &operation(), AT), &input)

@@ -11,7 +11,7 @@ use tauri_specta::Event as _;
 use super::{encode_plain, off_main_thread, on_main_thread, reply, Args, Fault};
 
 /// Every typed event the core emits, by the name the bindings export.
-pub(super) const TYPED_EVENTS: [&str; 45] = [
+pub(super) const TYPED_EVENTS: [&str; 47] = [
     crate::chat_voice::ChatVoiceEvent::NAME,
     crate::upstream_import::UpstreamImportProgressEvent::NAME,
     crate::agent_bridge::AgentBridgeUpdateEvent::NAME,
@@ -57,6 +57,8 @@ pub(super) const TYPED_EVENTS: [&str; 45] = [
     crate::planning::PlanningChangedEvent::NAME,
     crate::planning::work::WorkChanged::NAME,
     crate::planning::work::follow::WorkReminderOpened::NAME,
+    crate::planning::work::capture::WorkQuickEntry::NAME,
+    crate::planning::work::capture::WorkRambleFiled::NAME,
 ];
 
 pub(super) async fn call(
@@ -5274,6 +5276,37 @@ pub(super) async fn call(
                 ))
             })
             .await?
+        }
+        "work_parse" => {
+            let mut args = Args::parse(params)?;
+            let text = args.take("text")?;
+            let plain = args.take("plain")?;
+            let spoken = args.take("spoken")?;
+            reply(
+                crate::planning::work::parse::work_parse(
+                    app.state(),
+                    app.state(),
+                    text,
+                    plain,
+                    spoken,
+                )
+                .await,
+            )
+        }
+        "work_capture" => {
+            let mut args = Args::parse(params)?;
+            let operation_id = args.take("operationId")?;
+            let input = args.take("input")?;
+            let source = args.take("source")?;
+            reply(
+                crate::planning::work::capture::work_capture(
+                    app.clone(),
+                    operation_id,
+                    input,
+                    source,
+                )
+                .await,
+            )
         }
         other => Err(Fault::unknown_method(other)),
     }

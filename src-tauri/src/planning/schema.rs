@@ -337,6 +337,54 @@ CREATE TRIGGER planning_task_agents_delete AFTER DELETE ON planning_tasks BEGIN
     DELETE FROM planning_task_proposals WHERE task_id = old.id;
 END;";
 
+/// Evidence learns two sources the tracker captures itself: a stretch of a
+/// dictation, kept as its history row and the milliseconds it covers, and a
+/// link. Widening a CHECK means rebuilding the table, and SQLite refuses the
+/// rebuild while triggers name it, so the three delete triggers are dropped
+/// and recreated. Deleting a project keeps its tasks.
+pub const CAPTURE_MIGRATION: &str = "DROP TRIGGER planning_project_delete;
+DROP TRIGGER planning_milestone_delete;
+DROP TRIGGER planning_task_delete;
+CREATE TABLE planning_evidence_links_next (
+    id TEXT PRIMARY KEY NOT NULL,
+    target_kind TEXT NOT NULL CHECK(target_kind IN ('project', 'milestone', 'task')),
+    target_id TEXT NOT NULL,
+    source_kind TEXT NOT NULL CHECK(source_kind IN ('meeting', 'note', 'loop', 'dictation', 'link')),
+    source_id TEXT NOT NULL,
+    at_ms INTEGER CHECK(at_ms IS NULL OR at_ms >= 0),
+    revision INTEGER NOT NULL CHECK(revision > 0),
+    created_at_ms INTEGER NOT NULL,
+    meeting_note_id TEXT CHECK(meeting_note_id IS NULL OR (source_kind = 'meeting' AND at_ms IS NULL)),
+    end_ms INTEGER CHECK(end_ms IS NULL OR (source_kind = 'dictation' AND at_ms IS NOT NULL AND end_ms >= at_ms)),
+    caption TEXT CHECK(caption IS NULL OR length(trim(caption)) > 0)
+);
+INSERT INTO planning_evidence_links_next
+    (id, target_kind, target_id, source_kind, source_id, at_ms, revision, created_at_ms, meeting_note_id)
+    SELECT id, target_kind, target_id, source_kind, source_id, at_ms, revision, created_at_ms, meeting_note_id
+    FROM planning_evidence_links;
+DROP TABLE planning_evidence_links;
+ALTER TABLE planning_evidence_links_next RENAME TO planning_evidence_links;
+CREATE UNIQUE INDEX planning_evidence_identity ON planning_evidence_links(
+    target_kind, target_id, source_kind, source_id, coalesce(at_ms, -1), coalesce(meeting_note_id, '')
+);
+CREATE INDEX planning_evidence_target ON planning_evidence_links(target_kind, target_id);
+CREATE INDEX planning_evidence_source ON planning_evidence_links(source_kind, source_id);
+CREATE TRIGGER planning_project_delete AFTER DELETE ON planning_projects BEGIN
+    UPDATE planning_tasks SET project_id = NULL, milestone_id = NULL, revision = revision + 1
+        WHERE project_id = old.id;
+    DELETE FROM planning_milestones WHERE project_id = old.id;
+    DELETE FROM planning_evidence_links WHERE target_kind = 'project' AND target_id = old.id;
+END;
+CREATE TRIGGER planning_milestone_delete AFTER DELETE ON planning_milestones BEGIN
+    UPDATE planning_tasks SET milestone_id = NULL, revision = revision + 1
+        WHERE milestone_id = old.id;
+    DELETE FROM planning_evidence_links WHERE target_kind = 'milestone' AND target_id = old.id;
+END;
+CREATE TRIGGER planning_task_delete AFTER DELETE ON planning_tasks BEGIN
+    DELETE FROM planning_evidence_links WHERE target_kind = 'task' AND target_id = old.id;
+END;
+ALTER TABLE planning_tasks ADD COLUMN recurrence TEXT CHECK(recurrence IS NULL OR length(trim(recurrence)) > 0);";
+
 /// Every planner migration in order, for tests that build the schema without
 /// the rest of the history database.
 #[cfg(test)]
@@ -351,6 +399,7 @@ pub(crate) fn apply_all(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
         DAY_PLAN_MIGRATION,
         FOLLOW_MIGRATION,
         AGENTS_MIGRATION,
+        CAPTURE_MIGRATION,
     ] {
         conn.execute_batch(migration)?;
     }

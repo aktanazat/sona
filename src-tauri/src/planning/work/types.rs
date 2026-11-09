@@ -322,6 +322,9 @@ pub struct WorkItemInput {
     pub owner: Option<WorkOwner>,
     pub due_at_ms: Option<i64>,
     pub label_ids: Option<Vec<String>>,
+    /// How often it comes back, as said: "every monday". Kept as words;
+    /// nothing makes the next one.
+    pub recurrence: Option<String>,
 }
 
 /// Reads a present `null` as `Some(None)`, so a patch can tell "clear this"
@@ -587,6 +590,7 @@ pub struct WorkList {
 #[serde(rename_all = "camelCase")]
 pub struct WorkItemDetail {
     pub item: WorkItemRow,
+    pub recurrence: Option<String>,
     pub evidence: Vec<EvidenceLink>,
     pub relations: Vec<WorkRelation>,
     pub activity: Vec<WorkActivity>,

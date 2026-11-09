@@ -65,6 +65,7 @@ fn typed(title: &str) -> WorkItemInput {
         owner: None,
         due_at_ms: None,
         label_ids: None,
+        recurrence: None,
     }
 }
 
@@ -332,6 +333,8 @@ fn the_tracker_migration_keeps_every_task_and_the_commitment_it_tracks() {
 
     conn.execute_batch(schema::WORK_MIGRATION)
         .expect("the tracker migration");
+    conn.execute_batch(schema::CAPTURE_MIGRATION)
+        .expect("the capture migration");
 
     let migrated = items::items(&conn, true).expect("the migrated items");
     let summary = migrated
@@ -399,6 +402,7 @@ fn the_tracker_migration_keeps_every_task_and_the_commitment_it_tracks() {
             due_at_ms: None,
             label_ids: &[],
             source_loop_id: None,
+            recurrence: None,
         },
         super::types::WorkActor::Me,
         AT,
