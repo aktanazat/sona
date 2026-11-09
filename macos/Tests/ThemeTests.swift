@@ -37,6 +37,48 @@ final class ThemeTests: XCTestCase {
         }
     }
 
+    /// The keyboard highlight once vanished into the task list's group
+    /// headers, which drew the same hover wash. The bands sit on `inset`,
+    /// which has to stay clearly the quieter of the two.
+    func testHighlightedRowsStepFurtherFromThePageThanGroupBands() {
+        for (appearance, seed) in appearances {
+            for contrast in contrasts {
+                let theme = seed(contrast)
+                let band = abs(theme.value(.inset).l - theme.value(.page).l)
+                XCTAssertGreaterThanOrEqual(hoverStep(in: theme), 1.5 * band, "\(appearance), contrast \(contrast)")
+            }
+        }
+    }
+
+    /// At one alpha the wash moved a light page 3.6 lightness and a dark one
+    /// 4.7, so hovered and highlighted rows read faint in light.
+    func testHoverWashStepsTheSameInLightAndDark() {
+        for contrast in contrasts {
+            let steps = appearances.map { hoverStep(in: $0.1(contrast)) }
+            XCTAssertEqual(steps[0], steps[1], accuracy: 1, "contrast \(contrast)")
+        }
+    }
+
+    private func hoverStep(in theme: ThemeSeed) -> Double {
+        let page = theme.value(.page)
+        return abs(lightness(of: theme.value(.wash), over: page) - page.l)
+    }
+
+    /// The window server blends gamma-encoded values, which is why black over
+    /// a light page moves lightness less than white over a dark one.
+    private func lightness(of overlay: LCH, over background: LCH) -> Double {
+        let blended = encoded(background.luminance) * (1 - overlay.alpha) + encoded(overlay.luminance) * overlay.alpha
+        return LCH.lightness(luminance: decoded(blended))
+    }
+
+    private func encoded(_ luminance: Double) -> Double {
+        luminance <= 0.0031308 ? 12.92 * luminance : 1.055 * pow(luminance, 1 / 2.4) - 0.055
+    }
+
+    private func decoded(_ value: Double) -> Double {
+        value <= 0.04045 ? value / 12.92 : pow((value + 0.055) / 1.055, 2.4)
+    }
+
     private func ratio(_ a: LCH, _ b: LCH) -> Double {
         let lighter = max(a.luminance, b.luminance)
         let darker = min(a.luminance, b.luminance)
