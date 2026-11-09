@@ -285,11 +285,13 @@ struct WorkTab: View {
     }
 }
 
-/// Grouped rows under headers that stay pinned while their rows scroll.
-struct TaskListBody<Row: View>: View {
+/// Grouped rows under headers that stay pinned while their rows scroll,
+/// after `lead`, a section the screen adds of its own.
+struct TaskListBody<Row: View, Lead: View>: View {
     let groups: [TaskGroup]
     var headers = true
     var add: ((TaskGroup) -> Void)?
+    @ViewBuilder let lead: () -> Lead
     @ViewBuilder let row: (WorkItemRow) -> Row
     @Environment(AppModel.self) private var model
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -300,6 +302,7 @@ struct TaskListBody<Row: View>: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0, pinnedViews: headers ? [.sectionHeaders] : []) {
+                    lead()
                     ForEach(groups) { group in
                         Section {
                             if !focus.collapsed.contains(group.id) {
@@ -337,6 +340,13 @@ struct TaskListBody<Row: View>: View {
     private func toggle(_ group: String) {
         let focus = model.workFocus
         if focus.collapsed.contains(group) { focus.collapsed.remove(group) } else { focus.collapsed.insert(group) }
+    }
+}
+
+extension TaskListBody where Lead == EmptyView {
+    init(groups: [TaskGroup], headers: Bool = true, add: ((TaskGroup) -> Void)? = nil,
+         @ViewBuilder row: @escaping (WorkItemRow) -> Row) {
+        self.init(groups: groups, headers: headers, add: add, lead: { EmptyView() }, row: row)
     }
 }
 
@@ -502,7 +512,7 @@ private struct TaskCard: View {
                         Text(TaskDates.ago(row.updatedAtMs, now: now)).metaText()
                     }
                     if let doer = row.doer, row.status.isOpen {
-                        DoerChip(doer: doer, waiting: waiting)
+                        TaskDoer(doer: doer, waiting: waiting)
                     }
                     if shows.contains(TaskProperty.owner.rawValue) {
                         Avatar(face: row.ownerFace, size: 18, revision: revision)

@@ -286,7 +286,7 @@ struct ItemRow: View {
                     .frame(width: 40, alignment: .trailing)
             }
             if let doer = row.doer, row.status.isOpen {
-                DoerChip(doer: doer, waiting: waiting)
+                TaskDoer(doer: doer, waiting: waiting)
             }
             if shows.contains(TaskProperty.owner.rawValue) {
                 Avatar(face: row.ownerFace, size: 20, revision: revision)
@@ -325,31 +325,35 @@ struct TaskPlace: View {
     }
 }
 
+/// An agent's name beside the mark every agent wears, in the quiet type of
+/// a row's other details.
+struct AgentName: View {
+    let name: String
+    var tint = Theme.inkTertiary
+
+    var body: some View {
+        HStack(spacing: Space.xs) {
+            Image(systemName: "sparkle").font(.system(size: 11, weight: .medium))
+            Text(name).lineLimit(1)
+        }
+        .font(TypeScale.label(12))
+        .foregroundStyle(tint)
+        .fixedSize()
+    }
+}
+
 /// The agent working a task: its name, or, while its session waits on the
 /// user's approval, "Waiting for you" in red.
-struct DoerChip: View {
+struct TaskDoer: View {
     let doer: WorkDoer
     var waiting = false
 
     var body: some View {
         let help = waiting ? "\(doer.agent) is waiting for your approval" : "\(doer.agent) is working on it"
-        HStack(spacing: 4) {
-            if waiting {
-                Circle().fill(Theme.live).frame(width: 6, height: 6)
-            } else {
-                Image(systemName: "sparkle").font(.system(size: 9, weight: .semibold))
-            }
-            Text(waiting ? "Waiting for you" : doer.agent).lineLimit(1)
-        }
-        .font(.system(size: 11, weight: .semibold))
-        .foregroundStyle(waiting ? Theme.live : Theme.inkSecondary)
-        .padding(.horizontal, 6)
-        .frame(height: 18)
-        .background(Theme.control, in: RoundedRectangle(cornerRadius: Theme.radiusKey))
-        .fixedSize()
-        .help(help)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(help)
+        AgentName(name: waiting ? "Waiting for you" : doer.agent, tint: waiting ? Theme.live : Theme.inkTertiary)
+            .help(help)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(help)
     }
 }
 
@@ -464,6 +468,7 @@ struct TaskGroupMarkView: View {
         case .meeting: symbol("waveform")
         case .focus: symbol("scope")
         case let .bucket(bucket): symbol(bucket.symbol)
+        case .agent: symbol("sparkle")
         case .none: EmptyView()
         }
     }
@@ -525,13 +530,18 @@ struct TaskSkeleton: View {
 struct TaskKeyButton: View {
     let title: String
     let keys: String?
+    /// False keeps the keys' room without showing them, so a column of
+    /// buttons where one answers to the keys stays one width.
+    var keysShown = true
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
             HStack(spacing: 8) {
                 Text(title).font(TypeScale.label(13)).foregroundStyle(Theme.ink)
-                if let keys { Shortcut(keys) }
+                if let keys {
+                    Shortcut(keys).opacity(keysShown ? 1 : 0).accessibilityHidden(!keysShown)
+                }
             }
             .padding(.leading, 10)
             .padding(.trailing, keys == nil ? 10 : 4)

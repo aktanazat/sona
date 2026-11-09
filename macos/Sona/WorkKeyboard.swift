@@ -442,7 +442,7 @@ final class WorkKeys {
         }
         func answer(_ action: WorkAction) -> Bool {
             guard place == .triage, opened == nil else { return run(action) }
-            guard let first = model.triageProposed.first else { return false }
+            guard !focus.collapsed.contains(TriageProposals.group), let first = model.triageProposed.first else { return false }
             model.perform(action, on: [first.id])
             return true
         }
@@ -581,9 +581,11 @@ extension AppModel {
         Set(rows.map(\.id).filter { !work.proposals(for: $0).isEmpty })
     }
 
-    /// The tasks Triage lists under proposed changes, the longest waiting
-    /// first. With no task open there, Y, ⇧Y and N answer the first.
+    /// The tasks Triage lists under proposed changes, on its first split,
+    /// the longest waiting first. With no task open there, Y, ⇧Y and N
+    /// answer the first.
     var triageProposed: [WorkItemRow] {
+        guard workFocus.triageSplit == nil else { return [] }
         let open = work.proposals
         return workRows(open.keys.sorted {
             (open[$0]?.first?.createdAtMs ?? 0, $0) < (open[$1]?.first?.createdAtMs ?? 0, $1)

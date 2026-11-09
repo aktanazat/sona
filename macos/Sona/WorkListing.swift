@@ -99,6 +99,7 @@ enum TaskGroupMark: Equatable {
     case meeting
     case bucket(TaskBucket)
     case focus
+    case agent
     case none
 }
 

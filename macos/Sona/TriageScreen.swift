@@ -55,7 +55,6 @@ private struct TriageList: View {
                 .padding(.horizontal, 16)
                 .frame(height: 32)
             }
-            TriageProposals()
             content(groups, split: focus.triageSplit, now: now)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
@@ -80,19 +79,22 @@ private struct TriageList: View {
     private func content(_ groups: [TaskGroup], split: WorkSource?, now: Int64) -> some View {
         let store = model.work
         let focus = model.workFocus
+        let proposed = model.triageProposed
         if store.items == nil {
             if let error = store.listError {
                 TaskFailure(message: error) { Task { await store.refresh() } }
             } else {
                 TaskSkeleton(rows: 6, twoLine: true)
             }
-        } else if groups.isEmpty {
+        } else if groups.isEmpty, proposed.isEmpty {
             TaskEmpty(line: split.map { "Nothing \($0.split.lowercased()) to triage." } ?? "Triage is clear.") {
                 TaskKeyButton(title: "Tasks", keys: "g t") { model.go(.tasks) }
             }
             .onAppear { focus.show([]) }
         } else {
-            TaskListBody(groups: groups, headers: split.map { $0 == .meeting } ?? true) { item in
+            TaskListBody(groups: groups, headers: split.map { $0 == .meeting } ?? true, lead: {
+                if !proposed.isEmpty { TriageProposals(rows: proposed) }
+            }) { item in
                 TriageRow(
                     row: item, suggestions: store.suggestions[item.id] ?? [],
                     highlighted: focus.highlighted == item.id, selected: focus.selection.contains(item.id),
