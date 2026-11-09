@@ -88,6 +88,7 @@ enum TaskGroupMark: Equatable {
     case project
     case meeting
     case bucket(TaskBucket)
+    case focus
     case none
 }
 
@@ -248,16 +249,23 @@ enum TaskListing {
         }
     }
 
-    /// My work: open tasks one way, by what presses first.
-    static func myWork(_ rows: [WorkItemRow], direction: WorkDirection, now: Int64) -> [TaskGroup] {
+    /// My work: open tasks one way, by what presses first, under the ones
+    /// today's plan picked, in the order they were picked.
+    static func myWork(_ rows: [WorkItemRow], direction: WorkDirection, now: Int64, focus: [String] = []) -> [TaskGroup] {
         let open = rows.filter {
             $0.direction == direction && $0.status.isOpen && matches($0, WorkQuery(), now: now)
         }
-        let keyed = Dictionary(grouping: ordered(open, by: .due)) { TaskBucket.of($0, now: now, blocking: true) }
-        return TaskBucket.allCases.compactMap { bucket in
+        let byId = Dictionary(open.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let focused = focus.compactMap { byId[$0] }
+        let picked = Set(focused.map(\.id))
+        let rest = ordered(open.filter { !picked.contains($0.id) }, by: .due)
+        let keyed = Dictionary(grouping: rest) { TaskBucket.of($0, now: now, blocking: true) }
+        let buckets = TaskBucket.allCases.compactMap { bucket -> TaskGroup? in
             guard let rows = keyed[bucket] else { return nil }
             return TaskGroup(id: "bucket:\(bucket.rawValue)", title: bucket.title, mark: .bucket(bucket), rows: rows)
         }
+        guard !focused.isEmpty else { return buckets }
+        return [TaskGroup(id: "focus", title: "Focus", mark: .focus, rows: focused)] + buckets
     }
 }
 

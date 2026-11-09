@@ -326,7 +326,7 @@ final class WorkKeys {
     private var monitor: Any?
     private var goPressedAt: TimeInterval?
     private static let destinations: [String: Place] = [
-        "h": .capture, "m": .meetings, "t": .tasks, "i": .triage, "p": .people, "j": .projects,
+        "h": .capture, "d": .today, "m": .meetings, "t": .tasks, "i": .triage, "p": .people, "j": .projects,
     ]
 
     func install(_ model: AppModel) {
@@ -360,7 +360,11 @@ final class WorkKeys {
             goPressedAt = event.timestamp
             return true
         }
-        guard !model.showingSettings, model.place == .tasks || model.place == .triage else { return false }
+        guard !model.showingSettings else { return false }
+        if model.place == .today || model.place == .capture {
+            return RitualKeys.handle(event, key: key, flags: flags, model)
+        }
+        guard model.place == .tasks || model.place == .triage else { return false }
         return work(event, key: key, flags: flags, model)
     }
 
@@ -416,6 +420,9 @@ final class WorkKeys {
         if shift {
             switch key {
             case "p": return run(.project)
+            case "d":
+                guard place == .tasks, opened == nil else { return false }
+                return model.rescheduleOverdue()
             case "v":
                 guard place == .tasks, opened == nil else { return false }
                 focus.displayShown.toggle()
@@ -612,13 +619,19 @@ extension AppModel {
         let ids = workTargets
         let rows = workRows(ids)
         let triageKeys: Set<WorkAction> = [.accept, .decline, .duplicate, .snooze]
-        return WorkAction.allCases.filter { $0.applies(to: rows) }.map { action in
+        let verbs = WorkAction.allCases.filter { $0.applies(to: rows) }.map { action in
             PaletteAction(
                 id: "work-\(action.rawValue)", group: .work, title: action.title,
                 run: { [weak self] in self?.perform(action, on: ids) },
                 icon: action.icon,
                 shortcut: place == .triage || !triageKeys.contains(action) ? action.keys : nil)
         }
+        let overdue = overdueTargets
+        guard !overdue.isEmpty else { return verbs }
+        return verbs + [PaletteAction(
+            id: "work-reschedule-overdue", group: .work, title: "Reschedule overdue",
+            run: { [weak self] in self?.perform(.due, on: overdue) },
+            icon: "calendar.badge.clock", shortcut: "shift+d")]
     }
 
     /// The tasks the palette acts on, for the chip over its field.

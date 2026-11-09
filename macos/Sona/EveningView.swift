@@ -1,39 +1,149 @@
 import SwiftUI
 
 /// Home's end of the day: today's lines once they are written, the button
-/// that writes them once the evening digest's time has passed, and the
-/// recordings Sona titled itself with where they may belong.
+/// that writes them once the evening digest's time has passed, the work I
+/// kept and let slip, and the recordings Sona titled itself with where they
+/// may belong.
 struct EveningView: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
         let store = model.evening
-        if let evening = store.evening {
-            VStack(alignment: .leading, spacing: 0) {
+        VStack(alignment: .leading, spacing: 0) {
+            if let evening = store.evening {
                 TimelineView(.everyMinute) { context in
                     EveningLinesSection(
                         store: store, evening: evening,
-                        due: due(context.date))
+                        due: model.eveningDue(context.date))
                 }
-                if !evening.unfiled.isEmpty {
-                    PageSection("Not filed") {
-                        Card {
-                            ForEach(evening.unfiled) { recording in
-                                UnfiledRows(store: store, recording: recording)
-                            }
+            }
+            TimelineView(.everyMinute) { context in
+                if let shutdown = model.shutdown(at: context.date) {
+                    ShutdownSection(shutdown: shutdown, now: TaskDates.milliseconds(context.date))
+                }
+            }
+            if let evening = store.evening, !evening.unfiled.isEmpty {
+                PageSection("Not filed") {
+                    Card {
+                        ForEach(evening.unfiled) { recording in
+                            UnfiledRows(store: store, recording: recording)
                         }
                     }
-                    .padding(.bottom, 20)
                 }
+                .padding(.bottom, 20)
             }
         }
     }
+}
 
-    /// Past the evening digest's time today.
-    private func due(_ now: Date) -> Bool {
-        let parts = Calendar.current.dateComponents([.hour, .minute], from: now)
-        let minute = (parts.hour ?? 0) * 60 + (parts.minute ?? 0)
-        return minute >= model.meetingSettings.settings.digestMinuteOfDay
+/// Kept, then slipped, each slipped task with where it goes next, then
+/// what I said I'd do tomorrow.
+private struct ShutdownSection: View {
+    @Environment(AppModel.self) private var model
+    let shutdown: Shutdown
+    let now: Int64
+
+    var body: some View {
+        PageSection("Shutdown") {
+            Card {
+                if !shutdown.kept.isEmpty {
+                    label("Kept", count: shutdown.kept.count)
+                    ForEach(shutdown.kept) { row in
+                        HStack(spacing: 10) {
+                            TaskStatusIcon(status: row.status)
+                            Text(row.title).bodyText(14, Theme.inkSecondary).lineLimit(1)
+                        }
+                        .padding(.horizontal, 16)
+                        .frame(maxWidth: .infinity, minHeight: Theme.listRow, alignment: .leading)
+                        .accessibilityElement(children: .combine)
+                    }
+                }
+                if !shutdown.slipped.isEmpty {
+                    label("Slipped", count: shutdown.slipped.count)
+                    ForEach(shutdown.slipped) { row in
+                        SlippedRow(row: row, highlighted: model.rituals.slipped == row.id, now: now)
+                    }
+                }
+                if !shutdown.tomorrow.isEmpty {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text("Tomorrow").font(TypeScale.label(13)).foregroundStyle(Theme.inkSecondary)
+                        Text(tomorrow).bodyText(14).lineLimit(1)
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .overlay(alignment: .top) { Hairline().padding(.horizontal, 16) }
+                }
+            }
+        }
+        .padding(.bottom, 20)
+    }
+
+    /// Three titles, then how many more.
+    private var tomorrow: String {
+        let titles = shutdown.tomorrow
+        let shown = titles.prefix(3).joined(separator: " · ")
+        return titles.count > 3 ? "\(shown) +\(titles.count - 3)" : shown
+    }
+
+    private func label(_ title: String, count: Int) -> some View {
+        HStack(spacing: 6) {
+            Text(title).foregroundStyle(Theme.inkSecondary)
+            Text(verbatim: "\(count)").monospacedDigit().foregroundStyle(Theme.inkTertiary)
+        }
+        .font(TypeScale.label(12))
+        .padding(.horizontal, 16)
+        .padding(.top, 12)
+        .padding(.bottom, 4)
+    }
+}
+
+/// A slipped task; pointed at, it offers its three moves with their keys.
+private struct SlippedRow: View {
+    @Environment(AppModel.self) private var model
+    let row: WorkItemRow
+    let highlighted: Bool
+    let now: Int64
+
+    var body: some View {
+        HStack(spacing: 10) {
+            TaskStatusIcon(status: row.status)
+            Text(row.title).bodyText(14).lineLimit(1)
+            Spacer(minLength: 12)
+            if highlighted {
+                HStack(spacing: 14) {
+                    move("Tomorrow", key: "right", SlipMove.tomorrow)
+                    move("This week", key: "w", SlipMove.thisWeek)
+                    move("Drop", key: "x", SlipMove.drop)
+                }
+                .transition(.opacity)
+            } else if let due = row.dueAtMs {
+                TaskDue(due: due, open: true, now: now)
+            }
+        }
+        .padding(.horizontal, 16)
+        .frame(maxWidth: .infinity, minHeight: Theme.listRow, alignment: .leading)
+        .background(highlighted ? Theme.wash : .clear)
+        .hoverFade(highlighted)
+        .contentShape(Rectangle())
+        .onHover { inside in
+            if inside { model.rituals.slipped = row.id }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(row.title)
+    }
+
+    private func move(_ title: String, key: String, _ patch: WorkPatch) -> some View {
+        Button {
+            model.moveSlipped(row.id, patch)
+        } label: {
+            HStack(spacing: 6) {
+                Text(title)
+                Shortcut(key)
+            }
+        }
+        .buttonStyle(QuietButton(compact: true))
+        .accessibilityLabel(title)
     }
 }
 

@@ -6,7 +6,7 @@ import SwiftUI
 /// The places a window shows. Library opens from Home and Calendar from
 /// Projects, so the sidebar lists only the rest.
 enum Place: Int, CaseIterable, Identifiable {
-    case capture, library, meetings, people, scratchpad, projects, calendar, tasks, triage
+    case capture, library, meetings, people, scratchpad, projects, calendar, tasks, triage, today
 
     static let sidebar: [Place] = [.capture, .tasks, .triage, .meetings, .people, .scratchpad, .projects]
 
@@ -17,6 +17,7 @@ enum Place: Int, CaseIterable, Identifiable {
         switch self {
         case .library: .capture
         case .calendar: .projects
+        case .today: .tasks
         case .capture, .meetings, .people, .scratchpad, .projects, .tasks, .triage: self
         }
     }
@@ -32,6 +33,7 @@ enum Place: Int, CaseIterable, Identifiable {
         case .calendar: "Calendar"
         case .tasks: "Tasks"
         case .triage: "Triage"
+        case .today: "Today"
         }
     }
 
@@ -46,6 +48,7 @@ enum Place: Int, CaseIterable, Identifiable {
         case .calendar: "calendar"
         case .tasks: "checklist"
         case .triage: "tray"
+        case .today: "sun.max"
         }
     }
 }
@@ -323,6 +326,7 @@ final class AppModel {
     let spotlight: SpotlightStore
     let work: WorkStore
     let workFocus = WorkFocus()
+    let rituals: RitualStore
 
     @ObservationIgnored let core = Core()
     @ObservationIgnored let workKeys = WorkKeys()
@@ -387,6 +391,7 @@ final class AppModel {
         windowAttached = WindowAttachedCard(core: core)
         spotlight = SpotlightStore(core: core)
         work = WorkStore(core: core)
+        rituals = RitualStore(core: core)
 
         for name in [
             CoreEvent.activity, CoreEvent.streamText, CoreEvent.streamPhase, CoreEvent.micLevel,
@@ -410,6 +415,11 @@ final class AppModel {
         }
         core.onClose { [weak self] in self?.coreClosed() }
         workKeys.install(self)
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification, object: nil, queue: nil
+        ) { [weak self] _ in
+            Task { await self?.morningCheck() }
+        }
         Task { await start() }
     }
 
@@ -924,7 +934,10 @@ final class AppModel {
     /// Every store reads the core: at the first start, and again after a
     /// restart, since the new core knows nothing of what the stores showed.
     private func load() {
-        Task { await onboarding.start() }
+        Task {
+            await onboarding.start()
+            self.openMorningPlanIfDue()
+        }
         Task { await settings.start() }
         Task { await secureInput.start() }
         Task { await overview.start() }
@@ -946,7 +959,14 @@ final class AppModel {
         Task { await about.start() }
         Task { await debug.start() }
         Task { await spotlight.start() }
-        Task { await work.start() }
+        Task {
+            await work.start()
+            self.openMorningPlanIfDue()
+        }
+        Task {
+            await rituals.start()
+            self.openMorningPlanIfDue()
+        }
         Task { await self.loadModels() }
         Task { await library.coreStarted() }
         call { try await self.loadPill() }
