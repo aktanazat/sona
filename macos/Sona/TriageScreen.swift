@@ -42,7 +42,7 @@ private struct TriageList: View {
             } trailing: {
                 let targets = model.workTargets
                 if !targets.isEmpty {
-                    TriageButtons(ids: targets)
+                    TriageBarActions(ids: targets)
                 }
             }
             if let error = store.listError, store.items != nil {
@@ -137,14 +137,18 @@ private struct TriageSplits: View {
     var body: some View {
         let focus = model.workFocus
         let counts = Dictionary(grouping: rows, by: \.source).mapValues(\.count)
-        HStack(spacing: 2) {
-            WorkTab(title: "Triage", count: rows.count, on: focus.triageSplit == nil) { focus.split(nil) }
-            ForEach(WorkSource.allCases, id: \.self) { source in
-                WorkTab(title: source.split, count: counts[source], on: focus.triageSplit == source) {
-                    focus.split(source)
+        ScrollView(.horizontal) {
+            HStack(spacing: 2) {
+                WorkTab(title: "Triage", count: rows.count, on: focus.triageSplit == nil) { focus.split(nil) }
+                ForEach(WorkSource.allCases, id: \.self) { source in
+                    WorkTab(title: source.tab, count: counts[source], on: focus.triageSplit == source) {
+                        focus.split(source)
+                    }
                 }
             }
         }
+        .scrollIndicators(.never)
+        .scrollBounceBehavior(.basedOnSize)
     }
 }
 
@@ -155,6 +159,17 @@ extension WorkSource {
         case .dictation: "From dictation"
         case .agent: "From agents"
         case .person: "From people"
+        }
+    }
+
+    /// The split's tab: short enough that every tab fits beside the bar's
+    /// actions in the narrowest window.
+    var tab: String {
+        switch self {
+        case .meeting: "Meetings"
+        case .dictation: "Dictation"
+        case .agent: "Agents"
+        case .person: "People"
         }
     }
 }
@@ -173,6 +188,46 @@ struct TriageButtons: View {
                     model.perform(action, on: ids)
                 }
             }
+        }
+    }
+}
+
+/// The bar's verbs: the first that applies as the one button, the rest in
+/// a menu. The menu leaves its keys off for the reason `WorkActionMenu`
+/// gives; 2, 3 and H still work from the list.
+private struct TriageBarActions: View {
+    let ids: [String]
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        let rows = model.workRows(ids)
+        let actions = [WorkAction.accept, .decline, .duplicate, .snooze].filter { $0.applies(to: rows) }
+        if let primary = actions.first {
+            Button(primary.title) {
+                model.perform(primary, on: ids)
+            }
+            .buttonStyle(.primary)
+            .fixedSize()
+            .help("\(primary.title)  \(Shortcut(primary.keys).keys.joined(separator: " "))")
+        }
+        if actions.count > 1 {
+            Menu {
+                ForEach(actions.dropFirst()) { action in
+                    Button {
+                        model.perform(action, on: ids)
+                    } label: {
+                        Label(action.title, systemImage: action.icon)
+                    }
+                }
+            } label: {
+                Image(systemName: "ellipsis")
+            }
+            .menuStyle(.button)
+            .buttonStyle(.icon)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help(actions.dropFirst().map { "\($0.title)  \(Shortcut($0.keys).keys.joined(separator: " "))" }.joined(separator: ", "))
+            .accessibilityLabel("More triage actions")
         }
     }
 }
