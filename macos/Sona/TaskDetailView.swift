@@ -743,7 +743,7 @@ private struct PropertyLine<Value: View>: View {
     @ViewBuilder let value: () -> Value
 
     var body: some View {
-        HStack(alignment: .center, spacing: 6) {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
             Text(title).metaText().frame(width: 72, alignment: .leading)
             value()
             Spacer(minLength: 0)
@@ -760,14 +760,16 @@ private struct PropertyValue<Mark: View>: View {
     @State private var hovering = false
 
     var body: some View {
-        HStack(spacing: 8) {
+        HStack(alignment: .top, spacing: 8) {
             mark().frame(width: 16, height: 16)
             Text(text)
                 .bodyText(13, faint ? Theme.inkTertiary : Theme.ink)
-                .lineLimit(1)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .padding(.horizontal, 8)
-        .frame(height: 28)
+        .padding(.vertical, 5)
+        .frame(minHeight: 28)
         .background(hovering ? Theme.controlHover : .clear, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
         .hoverFade(hovering)
         .contentShape(Rectangle())
