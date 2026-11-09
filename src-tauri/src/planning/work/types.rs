@@ -144,6 +144,7 @@ pub enum WorkActivityKind {
     Declined,
     Snoozed,
     Relation,
+    Kept,
 }
 
 sql_enum!(WorkActivityKind {
@@ -163,6 +164,7 @@ sql_enum!(WorkActivityKind {
     Declined => "declined",
     Snoozed => "snoozed",
     Relation => "relation",
+    Kept => "kept",
 });
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
@@ -225,6 +227,9 @@ pub struct WorkItemRow {
     /// Offset into the source meeting where the commitment was said.
     pub source_at_ms: Option<i64>,
     pub blocked_by_open_count: u32,
+    /// The meetings that raised the item or a duplicate of it, counted once
+    /// each.
+    pub raised_in: u32,
 }
 
 /// A new item: left-out fields start in not started, at no priority, with
@@ -457,6 +462,16 @@ pub struct WorkCounts {
     pub waiting_on: u32,
     /// Waiting-on work whose status has not moved in a week.
     pub waiting_on_stale: u32,
+}
+
+/// One local day's plan: the tasks picked to focus on, in the order they
+/// were picked, and when; a day never planned has no `planned_at_ms`.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkDay {
+    pub day: String,
+    pub focus_ids: Vec<String>,
+    pub planned_at_ms: Option<i64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]

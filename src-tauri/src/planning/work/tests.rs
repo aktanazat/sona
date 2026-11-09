@@ -81,43 +81,7 @@ struct Desk {
 fn desk(promises: &[&str]) -> Desk {
     let (directory, meetings) = workflow_core_tests::store();
     let meeting = workflow_core_tests::meeting(&meetings, "Launch sync", AT);
-    let said = promises
-        .iter()
-        .map(|what| format!("I will {}", what.to_lowercase()))
-        .collect::<Vec<_>>();
-    workflow_core_tests::transcript_segments(
-        &meetings,
-        meeting,
-        &said.iter().map(String::as_str).collect::<Vec<_>>(),
-    );
-    let commitments = (0_u64..)
-        .zip(&said)
-        .zip(promises)
-        .map(|((second, quote), what)| LedgerCommitment {
-            who: "Dana".to_owned(),
-            what: (*what).to_owned(),
-            firmness: LedgerFirmness::Firm,
-            receipt: LedgerReceipt {
-                quote: quote.clone(),
-                speaker: Some("Dana".to_owned()),
-                t_ms: second * 1_000,
-                citations: Vec::new(),
-            },
-        })
-        .collect();
-    loops_tests::file_ledger(
-        &meetings,
-        meeting,
-        MeetingLedger {
-            headline: "Dana took the launch errands.".to_owned(),
-            threads: Vec::new(),
-            open_loops: Vec::new(),
-            commitments,
-            stances: Vec::new(),
-            caveats: Vec::new(),
-            receipts: LedgerReceiptState::Verified,
-        },
-    );
+    hold(&meetings, meeting, promises);
     // PANIC: a fixture that cannot open its database is a broken test.
     let history = Connection::open_in_memory().expect("an in-memory history database");
     // PANIC: as above, for the planner schema.
@@ -128,6 +92,48 @@ fn desk(promises: &[&str]) -> Desk {
         history,
         meeting,
         now: AT,
+    }
+}
+
+/// Dana says each of `promises` in `meeting`, a second apart, and the
+/// meeting's notes record them.
+fn hold(meetings: &MeetingStore, meeting: MeetingSessionId, promises: &[&str]) {
+    let said = promises
+        .iter()
+        .map(|what| format!("I will {}", what.to_lowercase()))
+        .collect::<Vec<_>>();
+    workflow_core_tests::transcript_segments(
+        meetings,
+        meeting,
+        &said.iter().map(String::as_str).collect::<Vec<_>>(),
+    );
+    loops_tests::file_ledger(meetings, meeting, notes(promises));
+}
+
+/// Notes in which Dana promised each of `promises`, a second apart.
+fn notes(promises: &[&str]) -> MeetingLedger {
+    let commitments = (0_u64..)
+        .zip(promises)
+        .map(|(second, what)| LedgerCommitment {
+            who: "Dana".to_owned(),
+            what: (*what).to_owned(),
+            firmness: LedgerFirmness::Firm,
+            receipt: LedgerReceipt {
+                quote: format!("I will {}", what.to_lowercase()),
+                speaker: Some("Dana".to_owned()),
+                t_ms: second * 1_000,
+                citations: Vec::new(),
+            },
+        })
+        .collect();
+    MeetingLedger {
+        headline: "Dana took the launch errands.".to_owned(),
+        threads: Vec::new(),
+        open_loops: Vec::new(),
+        commitments,
+        stances: Vec::new(),
+        caveats: Vec::new(),
+        receipts: LedgerReceiptState::Verified,
     }
 }
 
@@ -893,4 +899,88 @@ fn work_waiting_on_a_merged_person_lists_under_either_of_their_ids() {
             .collect::<Vec<_>>()
     });
     assert_eq!(listed, [[waiting.id.clone()], [waiting.id]]);
+}
+
+#[test]
+fn a_promise_made_again_in_a_later_meeting_joins_the_item_from_the_first() {
+    let mut desk = desk(&["Send the outline"]);
+    let first = desk.take_in().remove(0);
+    let launch_sync = desk.meeting;
+    let launch_review =
+        workflow_core_tests::meeting(&desk.meetings, "Launch review", AT + 86_400_000);
+    hold(&desk.meetings, launch_review, &["Send the outline"]);
+    desk.meeting = launch_review;
+
+    let taken = desk.take_in();
+    assert_eq!(
+        taken
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect::<Vec<_>>(),
+        [first.id.as_str()]
+    );
+    let tracker = items::items(&desk.history, true).expect("the tracker");
+    let open = tracker
+        .iter()
+        .filter(|item| item.status != WorkStatus::Duplicate)
+        .map(|item| item.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(open, [first.id.as_str()]);
+    let mut heard = desk
+        .evidence(&first.id)
+        .into_iter()
+        .map(|(_, meeting)| meeting)
+        .collect::<Vec<_>>();
+    heard.sort();
+    let mut both = vec![
+        launch_sync.uuid().to_string(),
+        launch_review.uuid().to_string(),
+    ];
+    both.sort();
+    assert_eq!(heard, both);
+    let at = desk.tick();
+    let listed =
+        list(&desk.history, None, None, &WorkQuery::default(), at).expect("the tracker list");
+    let row = listed
+        .items
+        .iter()
+        .find(|row| row.item.id == first.id)
+        .expect("the first item listed");
+    assert_eq!(row.raised_in, 2);
+}
+
+#[test]
+fn notes_written_again_in_other_words_move_the_item_instead_of_adding_one() {
+    let mut desk = desk(&["Send the outline"]);
+    let item = desk.take_in().remove(0);
+    let meeting = desk.meeting.uuid().to_string();
+    desk.both(|_, meetings| {
+        meetings.execute(
+            "UPDATE meeting_artifact_revisions SET state = 'out_of_date' WHERE session_id = ?1",
+            [&meeting],
+        )?;
+        Ok(())
+    })
+    .expect("an edit putting the notes out of date");
+    loops_tests::file_ledger(
+        &desk.meetings,
+        desk.meeting,
+        notes(&["Send the launch outline"]),
+    );
+    let reworded = desk.commitments().remove(0).loop_id;
+
+    let taken = desk.take_in();
+    assert_eq!(
+        taken
+            .iter()
+            .map(|item| (item.id.as_str(), item.source_loop_id.as_deref()))
+            .collect::<Vec<_>>(),
+        [(item.id.as_str(), Some(reworded.as_str()))]
+    );
+    assert_eq!(
+        items::items(&desk.history, true)
+            .expect("the tracker")
+            .len(),
+        1
+    );
 }

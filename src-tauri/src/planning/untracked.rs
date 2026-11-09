@@ -269,7 +269,7 @@ fn track(
                         .iter()
                         .find(|row| row.loop_id.as_str() == loop_id)
                         .ok_or(Refusal::SourceUnavailable)?;
-                    sync::take_in_row(tx, meetings, &meeting, row, now_ms)?
+                    sync::take_in_row(tx, meetings, user_name, &meeting, row, now_ms)?
                         .ok_or(Refusal::SourceUnavailable)?
                 }
             };

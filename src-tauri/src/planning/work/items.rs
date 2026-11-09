@@ -1,11 +1,11 @@
 //! Tracker items in the history database: tasks read as work items, changes
-//! written with their history, and the labels, relations and saved views
-//! beside them. Nothing here reads the meeting database; callers check
-//! people against it before a change arrives.
+//! written with their history, and the labels, relations, saved views and
+//! day plans beside them. Nothing here reads the meeting database; callers
+//! check people against it before a change arrives.
 
 use super::super::store::{self, Refusal};
 use super::types::{
-    WorkActivity, WorkActivityKind, WorkActor, WorkCounts, WorkDisplay, WorkDue, WorkItem,
+    WorkActivity, WorkActivityKind, WorkActor, WorkCounts, WorkDay, WorkDisplay, WorkDue, WorkItem,
     WorkLabel, WorkOwner, WorkPatch, WorkQuery, WorkRelation, WorkRelationKind, WorkStatus,
     WorkView,
 };
@@ -494,6 +494,29 @@ pub(crate) fn set_archived(
     })
 }
 
+/// Says an item still stands without changing it: it counts as touched
+/// now, so the morning's question about month-old work leaves it alone.
+pub(crate) fn keep(conn: &Connection, id: &str, actor: WorkActor, now_ms: i64) -> Result<Changed> {
+    let before = item(conn, id)?;
+    conn.execute(
+        "UPDATE planning_tasks SET revision = revision + 1, updated_at_ms = ?2 WHERE id = ?1",
+        params![before.id, now_ms],
+    )?;
+    record(
+        conn,
+        &before.id,
+        now_ms,
+        actor,
+        WorkActivityKind::Kept,
+        None,
+        None,
+    )?;
+    Ok(Changed {
+        after: item(conn, &before.id)?,
+        before,
+    })
+}
+
 /// Marks `id` a duplicate of `of_id`'s original and hands its evidence and
 /// its own duplicates to that original, so every duplicate points at one
 /// item that is not one. Returns the original's id and every item changed.
@@ -650,6 +673,26 @@ pub(crate) fn open_blockers(conn: &Connection) -> Result<HashMap<String, u32>> {
          WHERE r.kind = 'blocks' AND b.status NOT IN ('done', 'canceled', 'duplicate')
            AND b.archived_at_ms IS NULL
          GROUP BY r.to_id",
+    )?;
+    let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    Ok(rows.collect::<rusqlite::Result<HashMap<_, _>>>()?)
+}
+
+/// How many meetings raised each item, by the id of the item its family
+/// follows: the meetings its commitments were said in and the meetings
+/// cited as its evidence, each counted once.
+pub(crate) fn meetings_raised(conn: &Connection) -> Result<HashMap<String, u32>> {
+    let mut statement = conn.prepare(
+        "SELECT root, count(DISTINCT meeting) FROM (
+             SELECT COALESCE(t.duplicate_of, t.id) AS root, substr(t.source_loop_id, 1, 36) AS meeting
+             FROM planning_tasks t WHERE instr(t.source_loop_id, ':') = 37
+             UNION ALL
+             SELECT COALESCE(t.duplicate_of, t.id), CASE e.source_kind
+                 WHEN 'meeting' THEN e.source_id ELSE substr(e.source_id, 1, 36) END
+             FROM planning_evidence_links e JOIN planning_tasks t ON t.id = e.target_id
+             WHERE e.target_kind = 'task' AND (e.source_kind = 'meeting'
+                 OR (e.source_kind = 'loop' AND instr(e.source_id, ':') = 37))
+         ) GROUP BY root",
     )?;
     let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
     Ok(rows.collect::<rusqlite::Result<HashMap<_, _>>>()?)
@@ -915,6 +958,68 @@ pub(crate) fn delete_view(conn: &Connection, id: &str) -> Result<()> {
         return Err(Refusal::NotFound.into());
     }
     Ok(())
+}
+
+/// The most items one day's plan focuses on.
+const FOCUS_LIMIT: usize = 3;
+
+/// A local calendar day as `YYYY-MM-DD`.
+fn clean_day(value: &str) -> Result<String> {
+    NaiveDate::parse_from_str(value, "%Y-%m-%d")
+        .map(|day| day.format("%Y-%m-%d").to_string())
+        .map_err(|_| Refusal::Invalid.into())
+}
+
+/// The plan made for a local day, empty when none was.
+pub(crate) fn day(conn: &Connection, day: &str) -> Result<WorkDay> {
+    let day = clean_day(day)?;
+    let saved: Option<(String, i64)> = conn
+        .query_row(
+            "SELECT focus_json, planned_at_ms FROM planning_days WHERE day = ?1",
+            [&day],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    Ok(match saved {
+        Some((focus, planned_at_ms)) => WorkDay {
+            day,
+            focus_ids: serde_json::from_str(&focus)?,
+            planned_at_ms: Some(planned_at_ms),
+        },
+        None => WorkDay {
+            day,
+            focus_ids: Vec::new(),
+            planned_at_ms: None,
+        },
+    })
+}
+
+/// Saves a day's plan over any earlier one. Each focus item exists, and
+/// is named once.
+pub(crate) fn plan_day(
+    conn: &Connection,
+    day: &str,
+    focus_ids: &[String],
+    now_ms: i64,
+) -> Result<WorkDay> {
+    if focus_ids.len() > FOCUS_LIMIT {
+        return Err(Refusal::Invalid.into());
+    }
+    let mut focus = Vec::with_capacity(focus_ids.len());
+    for id in focus_ids {
+        let id = item(conn, &store::uuid(id)?)?.id;
+        if focus.contains(&id) {
+            return Err(Refusal::Invalid.into());
+        }
+        focus.push(id);
+    }
+    conn.execute(
+        "INSERT INTO planning_days (day, focus_json, planned_at_ms) VALUES (?1, ?2, ?3)
+         ON CONFLICT(day) DO UPDATE SET focus_json = excluded.focus_json,
+             planned_at_ms = excluded.planned_at_ms",
+        params![clean_day(day)?, serde_json::to_string(&focus)?, now_ms],
+    )?;
+    self::day(conn, day)
 }
 
 fn local_midnight_ms(day: NaiveDate) -> Result<i64> {
