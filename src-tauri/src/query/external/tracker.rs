@@ -28,11 +28,12 @@ use crate::meeting::types::MeetingSessionId;
 use crate::planning;
 use crate::planning::work::agents::{self, AgentChange};
 use crate::planning::work::types::{
-    WorkActivity, WorkActivityKind, WorkActor, WorkDirection, WorkDisplay, WorkDue,
-    WorkFieldSuggestion, WorkGroupBy, WorkItem, WorkItemDetail, WorkItemInput, WorkItemRow,
-    WorkLabel, WorkLayout, WorkList, WorkOrderBy, WorkOwner, WorkPatch, WorkPersonChoice,
-    WorkProjectChoice, WorkProposal, WorkProposalField, WorkQuery, WorkRelation, WorkRelationKind,
-    WorkSource, WorkStatus, WorkSuggestionField, WorkSuggestionValue, WorkView,
+    WorkActivity, WorkActivityKind, WorkActor, WorkCycle, WorkCycleRef, WorkCycleState,
+    WorkDirection, WorkDisplay, WorkDue, WorkFieldSuggestion, WorkGroupBy, WorkItem,
+    WorkItemDetail, WorkItemInput, WorkItemRow, WorkLabel, WorkLayout, WorkList, WorkOrderBy,
+    WorkOwner, WorkPatch, WorkPersonChoice, WorkProjectChoice, WorkProposal, WorkProposalField,
+    WorkQuery, WorkRelation, WorkRelationKind, WorkRepeat, WorkSource, WorkStatus,
+    WorkSuggestionField, WorkSuggestionValue, WorkView,
 };
 use crate::planning::work::{self, items, parse};
 use crate::query::{loop_link, KeptLocal, QUERY_SCHEMA_VERSION};
@@ -81,6 +82,10 @@ pub enum WorkVerb {
     Mine(MineArgs),
     /// Triage, your open work, overdue, due today, and waiting on, as numbers.
     Counts,
+    /// Cycles: how long they run, and each one's scope and done.
+    Cycles,
+    /// One cycle's scope and done day by day: current, next, or its number.
+    Cycle(CycleArgs),
     /// One task with its quote, links, evidence, suggestions and history.
     Show(ShowArgs),
     /// Create a task: Todo, no priority and no owner unless told otherwise.
@@ -124,6 +129,13 @@ pub enum WorkVerb {
     /// Who owes what from one meeting, by when, in their words: the
     /// follow-up to send. Nothing is sent.
     FollowUp(FollowUpArgs),
+}
+
+#[derive(Args, Clone, Debug, Eq, PartialEq)]
+pub struct CycleArgs {
+    /// current, next, or a cycle's number.
+    #[arg(value_parser = cycle_ref, default_value = "current", value_name = "CYCLE")]
+    pub cycle: WorkCycleRef,
 }
 
 #[derive(Args, Clone, Debug, Eq, PartialEq)]
@@ -198,6 +210,9 @@ pub struct UpdateArgs {
     /// Hide the task until this day: YYYY-MM-DD, today, tomorrow, or none.
     #[arg(long, value_parser = day_or_none, value_name = "DAY")]
     pub snooze_until: Option<DayArg>,
+    /// Plan the task in a cycle: current, next, its number, or none.
+    #[arg(long, value_parser = cycle_ref, value_name = "CYCLE")]
+    pub cycle: Option<WorkCycleRef>,
     /// Refuse unless the task is still at this revision.
     #[arg(long)]
     pub expected_revision: Option<i64>,
@@ -406,6 +421,9 @@ pub struct Scope {
     /// Words in the title or details, or a task number.
     #[arg(long)]
     pub search: Option<String>,
+    /// Work planned in a cycle: current, next, its number, or none.
+    #[arg(long, value_parser = cycle_ref, value_name = "CYCLE")]
+    pub cycle: Option<WorkCycleRef>,
 }
 
 #[derive(Args, Clone, Debug, Eq, PartialEq)]
@@ -777,6 +795,20 @@ fn due_flag(due: WorkDue) -> String {
     }
 }
 
+fn cycle_ref(value: &str) -> Result<WorkCycleRef, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "current" => Ok(WorkCycleRef::Current),
+        "next" => Ok(WorkCycleRef::Next),
+        "none" => Ok(WorkCycleRef::None),
+        other => other
+            .parse::<i64>()
+            .ok()
+            .filter(|number| *number > 0)
+            .map(|number| WorkCycleRef::Number { number })
+            .ok_or_else(|| "expected a cycle: current, next, none, or its number".to_owned()),
+    }
+}
+
 fn midnight(day: NaiveDate) -> Result<i64, ExternalError> {
     day_start_utc_ms(&day.format("%Y-%m-%d").to_string())
 }
@@ -789,6 +821,8 @@ impl WorkVerb {
             | Self::Ready(_)
             | Self::Mine(_)
             | Self::Counts
+            | Self::Cycles
+            | Self::Cycle(_)
             | Self::Show(_)
             | Self::Labels
             | Self::Views
@@ -837,7 +871,7 @@ impl WorkVerb {
                 "--expected-revision fences one task; name one."
             }
             Self::Update(args) if !args.changes_something() => {
-                "Name a change: --title, --details, --status, --priority, --owner, --due, --repeat, --project, --milestone, --labels, --add-label, --remove-label or --snooze-until."
+                "Name a change: --title, --details, --status, --priority, --owner, --due, --repeat, --project, --milestone, --labels, --add-label, --remove-label, --snooze-until or --cycle."
             }
             Self::Done(args) if args.evidence.is_some() && args.tasks.len() > 1 => {
                 "--evidence belongs to one task; name one."
@@ -873,6 +907,7 @@ impl UpdateArgs {
             || !self.add_label.is_empty()
             || !self.remove_label.is_empty()
             || self.snooze_until.is_some()
+            || self.cycle.is_some()
     }
 }
 
@@ -925,6 +960,8 @@ pub enum WorkAnswer {
     View(Box<ExternalWorkViewChange>),
     Export(ExternalWorkExport),
     FollowUp(ExternalWorkFollowUp),
+    Cycles(ExternalWorkCycles),
+    Cycle(Box<ExternalWorkCycleProgress>),
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -963,6 +1000,22 @@ pub struct ExternalWorkItem {
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
     pub revision: i64,
+    /// The cycle it is planned in, by number.
+    pub cycle: Option<i64>,
+    /// Mine, due within two days, nothing booked for it, and no free hour
+    /// left on its due day.
+    pub at_risk: bool,
+    /// The calendar hour booked to do it.
+    pub time_block: Option<ExternalWorkBlock>,
+    /// How it repeats, and of its instances due so far how many were done
+    /// by the end of their day.
+    pub repeat: Option<WorkRepeat>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct ExternalWorkBlock {
+    pub starts_at_ms: i64,
+    pub ends_at_ms: i64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1300,6 +1353,7 @@ pub struct ExternalWorkFilters {
     pub search: Option<String>,
     pub include_archived: bool,
     pub include_snoozed: bool,
+    pub cycle: Option<WorkCycleRef>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1338,6 +1392,45 @@ pub struct ExternalWorkFollowUpLine {
     pub quote: Option<String>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct ExternalWorkCycles {
+    pub schema_version: u32,
+    /// How many weeks each cycle runs.
+    pub weeks: u8,
+    /// The weekday each starts on, 1 for Monday through 7 for Sunday.
+    pub start_weekday: u8,
+    pub cycles: Vec<ExternalWorkCycle>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ExternalWorkCycle {
+    pub number: i64,
+    pub state: WorkCycleState,
+    /// The local days it runs, YYYY-MM-DD, both included.
+    pub first_day: String,
+    pub last_day: String,
+    /// Tasks planned in it and not dropped.
+    pub scope: u32,
+    pub done: u32,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ExternalWorkCycleProgress {
+    pub schema_version: u32,
+    pub cycle: ExternalWorkCycle,
+    /// Tasks moved in unfinished from earlier cycles.
+    pub carried_over: u32,
+    /// Scope and done as each day ended, through today.
+    pub days: Vec<ExternalWorkCycleDay>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ExternalWorkCycleDay {
+    pub day: String,
+    pub scope: u32,
+    pub done: u32,
+}
+
 /// Answer one allowed `sona work` verb.
 pub(super) async fn answer(
     verb: &WorkVerb,
@@ -1355,6 +1448,8 @@ pub(super) async fn answer(
         WorkVerb::Ready(args) => tracker.ready(args).await,
         WorkVerb::Mine(args) => tracker.mine(args).await,
         WorkVerb::Counts => tracker.counts().await,
+        WorkVerb::Cycles => tracker.cycles(),
+        WorkVerb::Cycle(args) => tracker.cycle(args),
         WorkVerb::Show(args) => tracker.show(args).await,
         WorkVerb::Create(args) => tracker.create(args).await,
         WorkVerb::Update(args) => tracker.update(args).await,
@@ -1418,6 +1513,7 @@ struct Board {
     /// How often each repeating task repeats, by id.
     repeats: HashMap<String, String>,
     fence: Fence,
+    cycles: Vec<WorkCycle>,
 }
 
 impl Tracker<'_> {
@@ -1447,6 +1543,7 @@ impl Tracker<'_> {
             focus,
             repeats,
             fence,
+            cycles: list.cycles,
         })
     }
 
@@ -2257,6 +2354,39 @@ impl Tracker<'_> {
         work::work_views(self.app.state()).map_err(|message| refusal(self.history, message))
     }
 
+    fn cycles(&self) -> Result<WorkAnswer, ExternalError> {
+        let listing = work::cycles::work_cycles(self.app.clone())
+            .map_err(|message| refusal(self.history, message))?;
+        Ok(WorkAnswer::Cycles(ExternalWorkCycles {
+            schema_version: QUERY_SCHEMA_VERSION,
+            weeks: listing.settings.weeks,
+            start_weekday: listing.settings.start_weekday,
+            cycles: listing.cycles.iter().map(project_cycle).collect(),
+        }))
+    }
+
+    fn cycle(&self, args: &CycleArgs) -> Result<WorkAnswer, ExternalError> {
+        let listing = work::cycles::work_cycles(self.app.clone())
+            .map_err(|message| refusal(self.history, message))?;
+        let number = named_cycle(&listing.cycles, args.cycle)?;
+        let progress = work::cycles::work_cycle(self.app.clone(), number)
+            .map_err(|message| refusal(self.history, message))?;
+        Ok(WorkAnswer::Cycle(Box::new(ExternalWorkCycleProgress {
+            schema_version: QUERY_SCHEMA_VERSION,
+            cycle: project_cycle(&progress.cycle),
+            carried_over: progress.carried_over,
+            days: progress
+                .days
+                .into_iter()
+                .map(|day| ExternalWorkCycleDay {
+                    day: day.day,
+                    scope: day.scope,
+                    done: day.done,
+                })
+                .collect(),
+        })))
+    }
+
     fn view_named(&self, value: &str) -> Result<WorkView, ExternalError> {
         let views = self.all_views()?;
         pick("view", value, &views, |view| &view.id, |view| &view.name)
@@ -3006,6 +3136,23 @@ impl Board {
                 .map(|labels| self.label_ids(labels))
                 .transpose()?,
             snoozed_until_ms: args.snooze_until.map(DayArg::ms).transpose()?,
+            cycle: args
+                .cycle
+                .map(|cycle| match cycle {
+                    WorkCycleRef::None => Ok(None),
+                    named => {
+                        let number = named_cycle(&self.cycles, named)?;
+                        if self.cycles.iter().any(|cycle| {
+                            cycle.number == number && cycle.state == WorkCycleState::Past
+                        }) {
+                            return Err(ExternalError::invalid(format!(
+                                "Cycle {number} has ended. Plan work in the current cycle or a later one."
+                            )));
+                        }
+                        Ok(Some(number))
+                    }
+                })
+                .transpose()?,
         })
     }
 
@@ -3125,6 +3272,11 @@ impl Board {
                 day_text(snoozed),
             );
         }
+        if let Some(cycle) = patch.cycle {
+            let number =
+                |cycle: Option<i64>| cycle.map_or_else(|| "none".to_owned(), |n| n.to_string());
+            field("cycle", number(item.cycle), number(cycle));
+        }
         changes
     }
 
@@ -3204,6 +3356,9 @@ impl Board {
             raised_in: before.map_or(0, |row| row.raised_in),
             source: before.map_or(WorkSource::Agent, |row| row.source),
             follow_up_at_ms: before.and_then(|row| row.follow_up_at_ms),
+            at_risk: before.is_some_and(|row| row.at_risk),
+            time_block: before.and_then(|row| row.time_block),
+            repeat: before.and_then(|row| row.repeat.clone()),
             item,
         };
         project_task(&row, self)
@@ -3324,9 +3479,10 @@ impl Board {
                 "nobody" => "nobody".to_owned(),
                 person_id => self.person_name(person_id),
             },
-            WorkActivityKind::Due | WorkActivityKind::Snoozed => value
+            WorkActivityKind::Due | WorkActivityKind::Snoozed | WorkActivityKind::Block => value
                 .parse::<i64>()
                 .map_or_else(|_| value.to_owned(), |ms| day_text(Some(ms))),
+            WorkActivityKind::Cycle => format!("cycle {value}"),
             WorkActivityKind::Project => self.project_name(value),
             WorkActivityKind::Labels => {
                 let ids: Vec<String> = value
@@ -3378,6 +3534,7 @@ impl Board {
             WorkProposalField::Labels => Some(WorkActivityKind::Labels),
             WorkProposalField::Snoozed => Some(WorkActivityKind::Snoozed),
             WorkProposalField::Recurrence => Some(WorkActivityKind::Recurrence),
+            WorkProposalField::Cycle => Some(WorkActivityKind::Cycle),
             WorkProposalField::Milestone => None,
         };
         let read = |value: &Option<String>| match (value.as_deref(), kind) {
@@ -3476,6 +3633,7 @@ fn project_view(view: &WorkView) -> ExternalWorkView {
             search: query.search.clone(),
             include_archived: query.include_archived,
             include_snoozed: query.include_snoozed,
+            cycle: query.cycle,
         },
         layout: view.display.layout,
         group_by: view.display.group_by,
@@ -3569,7 +3727,51 @@ impl Scope {
                 _ => search.clone(),
             });
         }
+        if self.cycle.is_some() {
+            query.cycle = self.cycle;
+        }
         Ok(query)
+    }
+}
+
+/// The cycle a caller named, among the cycles there are.
+fn named_cycle(cycles: &[WorkCycle], named: WorkCycleRef) -> Result<i64, ExternalError> {
+    let current = cycles
+        .iter()
+        .find(|cycle| cycle.state == WorkCycleState::Current);
+    let found = match named {
+        WorkCycleRef::Current => current,
+        WorkCycleRef::Next => current.and_then(|current| {
+            cycles
+                .iter()
+                .find(|cycle| cycle.starts_at_ms == current.ends_at_ms)
+        }),
+        WorkCycleRef::Number { number } => cycles.iter().find(|cycle| cycle.number == number),
+        WorkCycleRef::None => None,
+    };
+    found.map(|cycle| cycle.number).ok_or_else(|| {
+        ExternalError::new(
+            ExternalErrorCode::NotFound,
+            "No such cycle. List them with: sona work cycles",
+        )
+    })
+}
+
+fn project_cycle(cycle: &WorkCycle) -> ExternalWorkCycle {
+    let last_day = NaiveDate::parse_from_str(&cycle.end_day, "%Y-%m-%d")
+        .ok()
+        .and_then(|end| end.pred_opt())
+        .map_or_else(
+            || cycle.end_day.clone(),
+            |last| last.format("%Y-%m-%d").to_string(),
+        );
+    ExternalWorkCycle {
+        number: cycle.number,
+        state: cycle.state,
+        first_day: cycle.start_day.clone(),
+        last_day,
+        scope: cycle.scope,
+        done: cycle.done,
     }
 }
 
@@ -3712,6 +3914,13 @@ fn project_task(row: &WorkItemRow, board: &Board) -> ExternalWorkItem {
         created_at_ms: item.created_at_ms,
         updated_at_ms: item.updated_at_ms,
         revision: item.revision,
+        cycle: item.cycle,
+        at_risk: row.at_risk,
+        time_block: row.time_block.map(|block| ExternalWorkBlock {
+            starts_at_ms: block.starts_at_ms,
+            ends_at_ms: block.ends_at_ms,
+        }),
+        repeat: row.repeat.clone(),
     }
 }
 
@@ -3926,6 +4135,33 @@ impl WorkAnswer {
                 text.push_str("Nobody owes anything from this meeting yet.\n");
             }
             Self::FollowUp(follow_up) => text.push_str(&follow_up.text),
+            Self::Cycles(listing) => {
+                let _ = writeln!(
+                    text,
+                    "Cycles run {} {} from {}.",
+                    listing.weeks,
+                    if listing.weeks == 1 { "week" } else { "weeks" },
+                    weekday_name(listing.start_weekday)
+                );
+                for cycle in &listing.cycles {
+                    cycle_line(&mut text, cycle);
+                }
+            }
+            Self::Cycle(progress) => {
+                cycle_line(&mut text, &progress.cycle);
+                if progress.carried_over > 0 {
+                    let _ = writeln!(text, "{} carried over unfinished.", progress.carried_over);
+                }
+                for day in &progress.days {
+                    let _ = writeln!(
+                        text,
+                        "{}  {} of {} done",
+                        short_day(&day.day),
+                        day.done,
+                        day.scope
+                    );
+                }
+            }
         }
         if let Some(note) = left_out(self.conversations_available()) {
             let _ = writeln!(text, "{note}");
@@ -3949,9 +4185,41 @@ impl WorkAnswer {
             | Self::Label(_)
             | Self::Views(_)
             | Self::View(_)
-            | Self::FollowUp(_) => true,
+            | Self::FollowUp(_)
+            | Self::Cycles(_)
+            | Self::Cycle(_) => true,
         }
     }
+}
+
+fn weekday_name(weekday: u8) -> &'static str {
+    match weekday {
+        1 => "Monday",
+        2 => "Tuesday",
+        3 => "Wednesday",
+        4 => "Thursday",
+        5 => "Friday",
+        6 => "Saturday",
+        _ => "Sunday",
+    }
+}
+
+fn cycle_line(text: &mut String, cycle: &ExternalWorkCycle) {
+    let state = match cycle.state {
+        WorkCycleState::Past => "ended",
+        WorkCycleState::Current => "current",
+        WorkCycleState::Upcoming => "next",
+    };
+    let _ = writeln!(
+        text,
+        "Cycle {:<4}{:<9}{} to {}  {} of {} done",
+        cycle.number,
+        state,
+        short_day(&cycle.first_day),
+        short_day(&cycle.last_day),
+        cycle.done,
+        cycle.scope
+    );
 }
 
 fn task_line(text: &mut String, task: &ExternalWorkItem, today: &Today) {
@@ -3995,6 +4263,19 @@ fn task_line(text: &mut String, task: &ExternalWorkItem, today: &Today) {
     }
     if task.focus {
         notes.push("focus today".to_owned());
+    }
+    if task.at_risk && task.status.is_open() {
+        notes.push("at risk".to_owned());
+    }
+    if let Some(cycle) = task.cycle {
+        notes.push(format!("cycle {cycle}"));
+    }
+    if let Some(repeat) = &task.repeat {
+        notes.push(if repeat.of > 0 {
+            format!("{} (kept {} of {})", repeat.every, repeat.kept, repeat.of)
+        } else {
+            repeat.every.clone()
+        });
     }
     if let Some(project) = &task.project {
         notes.push(project.name.clone());
