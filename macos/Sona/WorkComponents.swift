@@ -679,6 +679,37 @@ struct WorkBarButton: View {
     }
 }
 
+/// A titled on/off switch for a task screen's bar, as tall and as round as
+/// the bar's other controls; tinted while on.
+struct WorkBarToggle: View {
+    let title: String
+    let icon: String
+    let help: String
+    @Binding var isOn: Bool
+    @State private var hovering = false
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: Theme.radiusControl)
+        Button { isOn.toggle() } label: {
+            Label(title, systemImage: icon)
+                .labelStyle(.titleAndIcon)
+                .font(TypeScale.label(13))
+                .foregroundStyle(isOn ? Theme.accent : hovering ? Theme.ink : Theme.inkSecondary)
+                .padding(.horizontal, 10)
+                .frame(height: Theme.controlHeight)
+                .background(isOn ? Theme.accentSoft : hovering ? Theme.controlHover : Theme.control, in: shape)
+                .contentShape(shape)
+                .fixedSize()
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .help(help)
+        .accessibilityLabel(title)
+        .accessibilityValue(isOn ? "On" : "Off")
+        .accessibilityAddTraits(.isToggle)
+    }
+}
+
 /// "Moved 1 task to Done  Undo ⌘Z": after each change, for five seconds.
 struct UndoToast: View {
     @Environment(AppModel.self) private var model

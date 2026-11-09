@@ -208,10 +208,10 @@ private struct TasksList: View {
     private func trailing(_ draft: WorkViewDraft?) -> some View {
         let focus = model.workFocus
         if focus.tab == .owe, model.work.currentCycle != nil {
-            WorkTab(title: "This cycle", on: focus.oweThisCycle) {
-                focus.oweThisCycle.toggle()
-            }
-            .help("Show only work planned in the current cycle")
+            WorkBarToggle(
+                title: "This cycle", icon: "arrow.triangle.2.circlepath",
+                help: "Show only work planned in the current cycle",
+                isOn: Bindable(focus).oweThisCycle)
         }
         if focus.tab == .cycle {
             CycleSettingsMenu()
