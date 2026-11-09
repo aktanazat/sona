@@ -5,12 +5,12 @@
 use super::super::schema;
 use super::super::store as planning_store;
 use super::items::{self, NewItem};
-use super::sync;
 use super::types::{
     WorkActivityKind, WorkActor, WorkItem, WorkItemInput, WorkOwner, WorkPatch, WorkQuery,
     WorkStatus,
 };
 use super::{accept, bulk_update, create, list, mark_duplicate, set_archived, update, Change};
+use super::{live, sync};
 use crate::meeting::ledger::{
     LedgerCommitment, LedgerFirmness, LedgerReceipt, LedgerReceiptState, MeetingLedger,
 };
@@ -1236,4 +1236,132 @@ fn a_deleted_dictation_takes_its_words_out_of_the_tasks_evidence() {
 
     assert_eq!(before, [(true, Some("Send the deck to Dana".to_owned()))]);
     assert_eq!(evidence(&history), [(false, None)]);
+}
+
+#[test]
+fn the_follow_up_names_who_made_a_promise_still_in_triage() {
+    let (directory, meetings) = workflow_core_tests::store();
+    let meeting = workflow_core_tests::meeting(&meetings, "Launch sync", AT);
+    workflow_core_tests::transcript_segments(&meetings, meeting, &["I will send the deck"]);
+    // PANIC: a fixture that cannot identify its known local owner is broken.
+    let renamed = meetings
+        .with_planning_snapshot(|connection| {
+            Ok(connection.execute(
+                "UPDATE meeting_speakers SET display_name = 'Local speaker'
+                 WHERE session_id = ?1 AND source_kind = 'microphone'",
+                [meeting.uuid().to_string()],
+            )?)
+        })
+        .expect("the fixture's known local speaker");
+    assert_eq!(renamed, 1);
+    let mut ledger = notes(&["Send the deck"]);
+    ledger.commitments[0].who = "Local speaker".to_owned();
+    ledger.commitments[0].receipt.speaker = Some("Local speaker".to_owned());
+    loops_tests::file_ledger(&meetings, meeting, ledger);
+    // PANIC: a fixture that cannot open its database is a broken test.
+    let history = Connection::open_in_memory().expect("an in-memory history database");
+    // PANIC: as above, for the planner schema.
+    schema::apply_all(&history).expect("the planner schema");
+    let mut desk = Desk {
+        _directory: directory,
+        meetings,
+        history,
+        meeting,
+        now: AT,
+    };
+    let taken = desk.take_in();
+    let now = desk.now;
+    let meeting_id = meeting.uuid().to_string();
+    let follow_up = desk
+        .both(|history, meetings| {
+            let listed = list(
+                history,
+                Some(meetings),
+                Some("Dana"),
+                &WorkQuery {
+                    source_meeting_id: Some(meeting_id.clone()),
+                    include_snoozed: true,
+                    ..WorkQuery::default()
+                },
+                now,
+            )?;
+            Ok(live::follow_up(
+                meeting_id,
+                Some("Launch sync"),
+                Some("Dana"),
+                listed,
+            ))
+        })
+        .expect("the follow-up");
+
+    assert_eq!(statuses(&taken), [WorkStatus::Triage]);
+    let lines = follow_up
+        .lines
+        .iter()
+        .map(|line| line.owner_name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(lines, ["Dana"]);
+}
+
+#[test]
+fn unidentified_ownership_saved_keeps_manual_owners_after_new_notes() {
+    fn unknown_notes(desk: &mut Desk) {
+        let meeting = desk.meeting.uuid().to_string();
+        desk.both(|_, meetings| {
+            meetings.execute(
+                "UPDATE meeting_artifact_revisions SET state = 'out_of_date' WHERE session_id = ?1",
+                [&meeting],
+            )?;
+            Ok(())
+        })
+        .expect("the previous notes made stale");
+        let mut ledger = notes(&["Send the pricing deck"]);
+        ledger.commitments[0].who = "I".to_owned();
+        ledger.commitments[0].receipt.speaker = None;
+        loops_tests::file_ledger(&desk.meetings, desk.meeting, ledger);
+    }
+
+    let mut desk = desk(&["Send the pricing deck"]);
+    unknown_notes(&mut desk);
+    assert_eq!(
+        desk.commitments()[0].direction,
+        crate::meeting::loop_types::MeetingLoopDirection::Unattributed,
+    );
+    let (item, _) = desk.accepted();
+    let at = desk.tick();
+    let chosen = desk
+        .both(|history, meetings| {
+            update(
+                history,
+                Some(meetings),
+                by_me(&operation(), at),
+                &item.id,
+                item.revision,
+                &WorkPatch {
+                    owner: Some(WorkOwner::Myself),
+                    ..WorkPatch::default()
+                },
+            )
+        })
+        .expect("the user's explicit owner edit")
+        .value;
+    unknown_notes(&mut desk);
+    let retaken = desk.take_in();
+    let reread = desk.item(&chosen.id);
+    assert_eq!(reread.owner(), WorkOwner::Myself);
+    assert_eq!(reread, chosen);
+    assert!(retaken.is_empty());
+    let at = desk.tick();
+    let typed = create(
+        &mut desk.history,
+        None,
+        by_me(&operation(), at),
+        &WorkItemInput {
+            owner: Some(WorkOwner::Myself),
+            ..typed("A manually owned task")
+        },
+    )
+    .expect("a typed task without a speaker quote")
+    .value;
+    assert_eq!(typed.owner(), WorkOwner::Myself);
 }

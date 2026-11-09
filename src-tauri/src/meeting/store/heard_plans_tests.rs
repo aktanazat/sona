@@ -271,6 +271,132 @@ fn a_plan_is_kept_on_the_day_its_words_name_when_said() {
     );
 }
 
+#[test]
+fn a_time_refines_the_same_plan_only_in_the_same_exchange() -> Result<(), StoreError> {
+    for (overlapping, timed_first) in [(true, false), (true, true), (false, false), (false, true)] {
+        let (_directory, store) = store();
+        let sync = reviewable_meeting(&store, "Sync", local(2026, 11, 6, 19, 42));
+        let said = ["Let's sync tomorrow morning.", "We'll do the sync at 10."];
+        transcript_segments(&store, sync, &said);
+        let mut reply = [
+            Named {
+                what: "sync",
+                when: "tomorrow morning",
+                people: &[],
+                place: "",
+                quote: said[0],
+                lines: if overlapping { &["L1", "L2"] } else { &["L1"] },
+            },
+            Named {
+                what: "sync",
+                when: "at 10",
+                people: &[],
+                place: "",
+                quote: said[1],
+                lines: &["L2"],
+            },
+        ];
+        if timed_first {
+            reply.swap(0, 1);
+        }
+        read(
+            &store,
+            &engine(&Scripted::answering(&reply)),
+            sync,
+            local(2026, 11, 6, 20, 15),
+        )?;
+        let plans = store.heard_plans(sync)?;
+        assert_eq!(plans.len(), if overlapping { 1 } else { 2 }, "{plans:?}");
+        assert!(plans.iter().any(|plan| {
+            plan.when_text == "at 10"
+                && plan.window
+                    == Some(HeardPlanWindow {
+                        start_utc_ms: local(2026, 11, 7, 10, 0),
+                        end_utc_ms: local(2026, 11, 7, 11, 0),
+                        all_day: false,
+                    })
+                && plan.quote.as_deref() == Some(said[1])
+                && !plan.on_calendar
+        }));
+    }
+    Ok(())
+}
+
+#[test]
+fn an_overlapping_day_resolves_only_the_clock_the_quote_says() -> Result<(), StoreError> {
+    for (clock_quote, clock_said) in [
+        ("We'll do the morning sync at 10.", true),
+        ("We need 10 tickets for the sync.", false),
+        (
+            "We'll sync in the morning at 9 and bring 10 tickets.",
+            false,
+        ),
+    ] {
+        for (overlapping, timed_first) in
+            [(true, false), (true, true), (false, false), (false, true)]
+        {
+            let (_directory, store) = store();
+            let sync = reviewable_meeting(&store, "Sync", local(2026, 11, 6, 19, 42));
+            let said = ["Let's sync Saturday morning.", clock_quote];
+            transcript_segments(&store, sync, &said);
+            let mut reply = [
+                Named {
+                    what: "sync",
+                    when: "Saturday morning",
+                    people: &[],
+                    place: "",
+                    quote: said[0],
+                    lines: if overlapping { &["L1", "L2"] } else { &["L1"] },
+                },
+                Named {
+                    what: "sync",
+                    when: "10",
+                    people: &[],
+                    place: "",
+                    quote: said[1],
+                    lines: &["L2"],
+                },
+            ];
+            if timed_first {
+                reply.swap(0, 1);
+            }
+            let service = engine(&Scripted::answering(&reply));
+            let read_at = local(2026, 11, 9, 12, 0);
+            read(&store, &service, sync, read_at)?;
+            let plans = store.heard_plans(sync)?;
+            let refined = overlapping && clock_said;
+            assert_eq!(plans.len(), if refined { 1 } else { 2 }, "{plans:?}");
+            let clock = plans
+                .iter()
+                .find(|plan| plan.when_text == "10")
+                .expect("the clock wording");
+            assert_eq!(
+                clock.window,
+                refined.then(|| HeardPlanWindow {
+                    start_utc_ms: local(2026, 11, 7, 10, 0),
+                    end_utc_ms: local(2026, 11, 7, 11, 0),
+                    all_day: false,
+                }),
+            );
+            let segments = store.analytics_segments(sync)?;
+            let first = if refined { &segments[0] } else { &segments[1] };
+            assert_eq!(
+                clock.citation,
+                Some(ArtifactCitation {
+                    segment_id: first.segment_id,
+                    start_offset_ns: first.start_offset_ns,
+                    end_offset_ns: segments[1].end_offset_ns,
+                }),
+            );
+            assert_eq!(clock.quote.as_deref(), Some(clock_quote));
+            assert!(!clock.on_calendar);
+            assert!(!read(&store, &service, sync, read_at)?);
+            assert_eq!(plans, store.heard_plans(sync)?);
+        }
+    }
+    Ok(())
+}
+
 /// What the engine names is kept only as far as the lines it cites bear it
 /// out. Each case is one plan the engine named.
 macro_rules! kept_as_its_lines_bear_it_out {

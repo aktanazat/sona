@@ -233,7 +233,7 @@ fn plans_in(
         serde_json::to_string(&line(index)).map_or(usize::MAX, |line| line.len() + 1)
     };
     let budget = evidence_budget(generator, PROMPT, OUTPUT_TOKENS);
-    let mut found = Vec::new();
+    let mut found = Vec::<HeardPlanDraft>::new();
     let mut quoted = HashSet::new();
     let mut named = HashSet::new();
     for request in requests(windows, line_bytes, budget) {
@@ -259,18 +259,89 @@ fn plans_in(
             continue;
         };
         for heard in reply.plans.into_iter().take(MAX_PLANS) {
-            let Some(draft) = checked(heard, &request, segments, began_utc_ms) else {
+            let Some(mut draft) = checked(heard, &request, segments, began_utc_ms) else {
                 continue;
             };
             let window = draft
                 .window
                 .map(|window| (window.start_utc_ms, window.end_utc_ms));
             if quoted.insert(fold(&draft.quote)) && named.insert((fold(&draft.title), window)) {
-                found.push(draft);
+                let earlier = found.iter_mut().find_map(|kept| {
+                    if kept.title != draft.title
+                        || kept.people != draft.people
+                        || kept.place != draft.place
+                        || kept.citation.start_offset_ns >= draft.citation.end_offset_ns
+                        || draft.citation.start_offset_ns >= kept.citation.end_offset_ns
+                    {
+                        return None;
+                    }
+                    let (day, timed) = match (kept.window, draft.window) {
+                        (Some(day), _)
+                            if day.all_day && !draft.window.is_some_and(|w| w.all_day) =>
+                        {
+                            (day, &draft)
+                        }
+                        (_, Some(day))
+                            if day.all_day && !kept.window.is_some_and(|w| w.all_day) =>
+                        {
+                            (day, &*kept)
+                        }
+                        _ => return None,
+                    };
+                    let time = timed.window.or_else(|| clock_on_day(day, timed))?;
+                    if day.start_utc_ms > time.start_utc_ms || time.end_utc_ms > day.end_utc_ms {
+                        return None;
+                    }
+                    let citation = ArtifactCitation {
+                        segment_id: if kept.citation.start_offset_ns
+                            <= draft.citation.start_offset_ns
+                        {
+                            kept.citation.segment_id
+                        } else {
+                            draft.citation.segment_id
+                        },
+                        start_offset_ns: kept
+                            .citation
+                            .start_offset_ns
+                            .min(draft.citation.start_offset_ns),
+                        end_offset_ns: kept
+                            .citation
+                            .end_offset_ns
+                            .max(draft.citation.end_offset_ns),
+                    };
+                    Some((kept, time, citation))
+                });
+                match earlier {
+                    Some((earlier, time, citation))
+                        if draft.window.is_some_and(|window| window.all_day) =>
+                    {
+                        earlier.window = Some(time);
+                        earlier.citation = citation;
+                    }
+                    Some((earlier, time, citation)) => {
+                        draft.window = Some(time);
+                        draft.citation = citation;
+                        *earlier = draft;
+                    }
+                    None => found.push(draft),
+                }
             }
         }
     }
     Ok(found)
+}
+
+fn clock_on_day(day: HeardPlanWindow, timed: &HeardPlanDraft) -> Option<HeardPlanWindow> {
+    let context = Local
+        .timestamp_millis_opt(day.start_utc_ms)
+        .single()?
+        .naive_local();
+    if spoken_time::day(&timed.quote, context.date()).is_some() {
+        return None;
+    }
+    let (time, ranges) = spoken_time::find(&timed.quote, context, spoken_time::DayNames::All)?;
+    let said = &timed.quote[ranges.first()?.clone()];
+    quote_is_verbatim(&timed.when_text, &fold(said)).then(|| window(time))?
 }
 
 /// One plan the engine named, if the lines it cites bear it out: the lines

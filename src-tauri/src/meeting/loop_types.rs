@@ -194,11 +194,6 @@ fn normalized_loop_text(value: &str) -> String {
         .collect()
 }
 
-/// Ledger owner names that point back at whoever said the words rather than
-/// naming anybody. The model fills `who` from the labelled transcript and
-/// usually writes the speaker's label, but a first-person promise sometimes
-/// comes back in the first person, and then the speaker is the owner, or the
-/// user when the words carry no speaker, as before speakers were told apart.
 const FIRST_PERSON_OWNERS: [&str; 3] = ["i", "me", "myself"];
 
 /// How long a row somebody else owes may stay open before it is worth
@@ -208,9 +203,8 @@ pub const WAITING_ON_STALE_AFTER_MS: i64 = 7 * 24 * 60 * 60 * 1_000;
 
 /// Which way one ledger row points.
 ///
-/// Precedence runs strongest claim first: the person the user picked, then the
-/// owner name the ledger read, then the speaker who said it; a first-person
-/// owner name defers to that speaker and is the user's when there is none.
+/// An explicitly assigned person wins, then the ledger's owner name, then
+/// the speaker. First-person words alone do not identify the user.
 /// Names are matched against `my_speaker_labels`, the display names of the
 /// session's speakers that are the user, as
 /// `store::loops::user_speaker_labels_in` reads them.
@@ -239,13 +233,7 @@ pub fn loop_direction(
             MeetingLoopDirection::WaitingOn
         };
     }
-    let first_person = owner_text
-        .is_some_and(|name| FIRST_PERSON_OWNERS.contains(&normalized_loop_text(name).as_str()));
-    if first_person {
-        MeetingLoopDirection::Mine
-    } else {
-        MeetingLoopDirection::Unattributed
-    }
+    MeetingLoopDirection::Unattributed
 }
 
 /// Whether a row somebody else owes has been open long enough to say so.
@@ -432,7 +420,7 @@ mod tests {
             Option<&str>,
             Option<&str>,
             MeetingLoopDirection,
-        ); 11] = [
+        ); 16] = [
             // A picked person is always somebody else, even when the user
             // spoke the words and the ledger agreed they were the user's.
             (
@@ -458,8 +446,6 @@ mod tests {
                 None,
                 MeetingLoopDirection::Mine,
             ),
-            // A first-person owner is whoever said it, and the user when the
-            // words carry no speaker.
             (
                 None,
                 Some("I"),
@@ -467,7 +453,27 @@ mod tests {
                 MeetingLoopDirection::WaitingOn,
             ),
             (None, Some("me"), Some("Ada"), MeetingLoopDirection::Mine),
-            (None, Some("I"), None, MeetingLoopDirection::Mine),
+            (None, Some("I"), None, MeetingLoopDirection::Unattributed),
+            (None, Some("me"), None, MeetingLoopDirection::Unattributed),
+            (
+                None,
+                Some("myself"),
+                Some(" "),
+                MeetingLoopDirection::Unattributed,
+            ),
+            (
+                None,
+                Some("I"),
+                Some("Speaker 1"),
+                MeetingLoopDirection::WaitingOn,
+            ),
+            (
+                None,
+                Some("I"),
+                Some("Unknown speaker"),
+                MeetingLoopDirection::WaitingOn,
+            ),
+            (None, Some("I"), Some("1"), MeetingLoopDirection::WaitingOn),
             // No owner name: the voice that said it decides.
             (None, None, Some("Ada"), MeetingLoopDirection::Mine),
             (None, None, Some("Amir"), MeetingLoopDirection::WaitingOn),

@@ -2413,6 +2413,6 @@ pub(super) fn confirm_decisions(
 }
 
 #[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
-mod probe;
+pub(crate) mod probe;
 #[cfg(test)]
 mod tests;

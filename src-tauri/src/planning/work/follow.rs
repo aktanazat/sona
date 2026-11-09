@@ -832,6 +832,25 @@ fn upcoming_briefs(
     Ok(notices)
 }
 
+#[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
+pub(super) fn probe_inputs(
+    history: &Connection,
+    meetings: &Connection,
+    now_ms: i64,
+) -> Result<serde_json::Value> {
+    let (due, waits) = pending(history, &sent(history)?, now_ms)?;
+    let notice = due_notice(&due).map(|notice| (notice.title, notice.body));
+    let mut statement = meetings.prepare("SELECT id FROM persons")?;
+    let person_ids = statement
+        .query_map([], |row| row.get(0))?
+        .collect::<rusqlite::Result<Vec<String>>>()?;
+    Ok(serde_json::json!({
+        "morning_due": notice,
+        "waiting_follow_ups": waits.len(),
+        "brief": brief(history, meetings, None, &person_ids, now_ms)?,
+    }))
+}
+
 /// One minute's look: shows what is due to be said, then remembers what
 /// was shown. Nothing shown is remembered, so a reminder the notification
 /// centre refused is tried again on the next tick.

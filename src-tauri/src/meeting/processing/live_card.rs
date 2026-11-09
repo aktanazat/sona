@@ -43,7 +43,6 @@ const MAX_NAME_CHARS: usize = 80;
 const MAX_QUOTE_CHARS: usize = 400;
 /// `{"lines":[]}`, the request around the lines.
 const ENVELOPE_BYTES: usize = 12;
-const YOU: &str = "You";
 /// Due with no time of day: the end of the working day, as a typed task.
 const DAY_DUE_HOUR: u32 = 17;
 static RESPONSE_SCHEMA: LazyLock<RootSchema> = LazyLock::new(json_response_schema::<Reply>);
@@ -415,9 +414,6 @@ fn next_request(
     for (at, &index) in order.iter().enumerate() {
         position[index] = at;
     }
-    let call = segments
-        .iter()
-        .any(|segment| segment.source_kind == SourceKind::SystemAudio);
     let mut waiting = card.waiting.clone();
     waiting.sort_by_key(|&index| position[index]);
     let mut taken: Vec<usize> = Vec::new();
@@ -429,7 +425,7 @@ fn next_request(
         let added: Vec<usize> = window.filter(|at| !taken.contains(at)).collect();
         let bytes = added
             .iter()
-            .map(|&at| line_bytes(&segments[order[at]], call))
+            .map(|&at| line_bytes(&segments[order[at]]))
             .fold(0, usize::saturating_add);
         if used.saturating_add(bytes) > budget {
             if answers.is_empty() {
@@ -454,7 +450,7 @@ fn next_request(
             .map(|at| {
                 let segment = &segments[order[at]];
                 Copied {
-                    speaker: speaker(segment, call),
+                    speaker: speaker(segment),
                     text: segment.text.clone(),
                     start_offset_ns: segment.start_offset_ns,
                     end_offset_ns: segment.end_offset_ns,
@@ -465,28 +461,25 @@ fn next_request(
     })
 }
 
-fn line_bytes(segment: &LiveSegment, call: bool) -> usize {
+fn line_bytes(segment: &LiveSegment) -> usize {
     serde_json::to_string(&Line {
         line: String::from("L000"),
-        speaker: &speaker(segment, call),
+        speaker: &speaker(segment),
         text: &segment.text,
     })
     .map_or(usize::MAX, |line| line.len() + 1)
 }
 
-/// Who said a line, as the request names them. On a call the microphone is
-/// the user; in a room it carries everyone, so its voices are numbered.
-fn speaker(segment: &LiveSegment, call: bool) -> String {
+fn speaker(segment: &LiveSegment) -> String {
     let number = match segment.speaker {
         MeetingProvisionalSpeaker::Cluster { index } => Some(index + 1),
         _ => None,
     };
-    match (segment.source_kind, call, number) {
-        (SourceKind::Microphone, true, _) => YOU.to_string(),
-        (SourceKind::SystemAudio, _, Some(number)) => format!("Caller {number}"),
-        (SourceKind::SystemAudio, _, None) => "Caller".to_string(),
-        (SourceKind::Microphone, false, Some(number)) => format!("Speaker {number}"),
-        (SourceKind::Microphone, false, None) => "Speaker".to_string(),
+    match (segment.source_kind, number) {
+        (SourceKind::SystemAudio, Some(number)) => format!("Caller {number}"),
+        (SourceKind::SystemAudio, None) => "Caller".to_string(),
+        (SourceKind::Microphone, Some(number)) => format!("Speaker {number}"),
+        (SourceKind::Microphone, None) => "Speaker".to_string(),
     }
 }
 
@@ -579,11 +572,7 @@ fn owner(said: &str, lines: &[Copied], people: &[WorkPersonChoice]) -> (WorkOwne
         return (WorkOwner::Nobody, None);
     };
     if lines.iter().any(|line| line.speaker == name) {
-        return if name == YOU {
-            (WorkOwner::Myself, Some("Me".to_string()))
-        } else {
-            (WorkOwner::Nobody, None)
-        };
+        return (WorkOwner::Nobody, None);
     }
     let haystack = fold_haystack(lines.iter().map(|line| line.text.as_str()));
     if !quote_is_verbatim(&name, &haystack) {
