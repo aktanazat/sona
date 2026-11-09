@@ -7,6 +7,7 @@ pub(crate) mod capture;
 pub(crate) mod follow;
 mod hygiene;
 pub(crate) mod items;
+pub(crate) mod live;
 pub(crate) mod parse;
 pub(crate) mod sync;
 #[cfg(test)]
@@ -362,6 +363,7 @@ struct RowContext {
     sources: HashMap<String, WorkSource>,
     follow_ups: FollowUps,
     doers: HashMap<String, WorkDoer>,
+    heard: HashMap<String, live::Heard>,
 }
 
 impl RowContext {
@@ -381,6 +383,7 @@ impl RowContext {
             sources: follow::item_sources(history)?,
             follow_ups: FollowUps::read(history)?,
             doers: agents::doers(history)?,
+            heard: live::heard(history, meetings)?,
         })
     }
 
@@ -428,6 +431,11 @@ impl RowContext {
                 row.source_speaker.clone_from(&source.row.speaker);
                 row.source_at_ms = i64::try_from(source.row.at_ms).ok();
             }
+        } else if let Some(heard) = self.heard.get(&row.item.id) {
+            row.source_meeting_id = Some(heard.meeting_id.clone());
+            row.source_meeting_title.clone_from(&heard.meeting_title);
+            row.source_quote.clone_from(&heard.quote);
+            row.source_at_ms = heard.at_ms;
         }
         Ok(row)
     }

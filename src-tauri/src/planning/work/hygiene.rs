@@ -19,7 +19,7 @@ fn words(text: &str) -> HashSet<String> {
 }
 
 /// The share of all words in either wording that both use, in percent.
-fn shared_percent(left: &str, right: &str) -> usize {
+pub(super) fn shared_percent(left: &str, right: &str) -> usize {
     let (left, right) = (words(left), words(right));
     let all = left.union(&right).count();
     if all == 0 {

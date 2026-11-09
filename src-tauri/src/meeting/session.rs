@@ -29,9 +29,9 @@ use super::people_types::{
     PersonId, PersonLinkConfidence, PersonSummaryOutcome, PersonSummaryRegenerateResult,
 };
 use super::processing::{
-    write_relationship_summary, CaptureGate, FollowOns, LiveTranscript, LiveTranscriptWorker,
-    MeetingProcessingService, MeetingTextGenerationError, ProcessingOrigin, ReplyShape, RunFailure,
-    LIVE_HELP_QUESTION_MAX_CHARS, LIVE_RECALL_WINDOW_NS,
+    live_card_hang_up, write_relationship_summary, CaptureGate, FollowOns, LiveTranscript,
+    LiveTranscriptWorker, MeetingLiveCard, MeetingProcessingService, MeetingTextGenerationError,
+    ProcessingOrigin, ReplyShape, RunFailure, LIVE_HELP_QUESTION_MAX_CHARS, LIVE_RECALL_WINDOW_NS,
 };
 use super::store::meeting_maybe::HeardVoice;
 use super::store::voice_identity::names_user;
@@ -50,6 +50,8 @@ use crate::audio_toolkit::constants::WHISPER_SAMPLE_RATE;
 use crate::managers::media_import::{
     decode_media_into, validate_media_path, AudioImportError, DecodeFailure, ValidatedMediaPath,
 };
+use crate::planning::work::sync::People;
+use crate::planning::work::types::WorkOwner;
 use crate::secrets::{SecretManager, SecretResolveError};
 use serde::{Deserialize, Serialize};
 use specta::Type;
@@ -2480,11 +2482,18 @@ impl MeetingSessionManager {
         // The lock goes first: dropping this record ends the provisional pass,
         // and joining a pass that is mid-recognition must not hold every other
         // meeting command behind it.
+        let heard = active.live.transcript();
         drop(active);
         self.processing.submit(
             Arc::clone(&store),
             request.session_id,
             ProcessingOrigin::Stop,
+        );
+        live_card_hang_up(
+            Arc::clone(&self.processing),
+            Arc::clone(&store),
+            request.session_id,
+            heard,
         );
         let snapshot = store
             .session_snapshot(request.session_id)
@@ -4317,6 +4326,53 @@ impl MeetingSessionManager {
         self.live_transcript(session_id)
             .map(|live| live.heard_voices())
             .unwrap_or_default()
+    }
+
+    /// The promises the running capture has heard, when it is this
+    /// meeting's. A lock and a copy, like the provisional transcript.
+    pub fn live_card(&self, session_id: MeetingSessionId) -> Option<MeetingLiveCard> {
+        self.live_transcript(session_id)
+            .map(|live| live.live_card(session_id))
+    }
+
+    /// Who owes one promise on the running capture's card, picked by hand.
+    /// The recording is not touched.
+    pub async fn set_live_card_owner(
+        &self,
+        session_id: MeetingSessionId,
+        promise_id: String,
+        owner: WorkOwner,
+    ) -> Result<MeetingLiveCard, MeetingCommandError> {
+        let live = self
+            .live_transcript(session_id)
+            .ok_or(MeetingCommandError::NotFound)?;
+        let name = match &owner {
+            WorkOwner::Myself => Some("Me".to_string()),
+            WorkOwner::Nobody => None,
+            WorkOwner::Person { person_id } => {
+                let store = self.store().await?;
+                let person_id = person_id.clone();
+                let people = tauri::async_runtime::spawn_blocking(move || {
+                    store.with_planning_snapshot(|meetings| {
+                        People::read(meetings).map_err(|_| StoreError::Unavailable)
+                    })
+                })
+                .await
+                .map_err(|_| MeetingCommandError::StorageUnavailable)?
+                .map_err(|_| MeetingCommandError::StorageUnavailable)?;
+                Some(
+                    people
+                        .choices
+                        .into_iter()
+                        .find(|person| person.id == person_id)
+                        .ok_or(MeetingCommandError::NotFound)?
+                        .name,
+                )
+            }
+        };
+        live.set_live_owner(&promise_id, owner, name)
+            .ok_or(MeetingCommandError::NotFound)?;
+        Ok(live.live_card(session_id))
     }
 
     /// The past lines the running capture's last minute of words were
