@@ -277,14 +277,36 @@ pub(crate) fn resolve_link(
     Ok(())
 }
 
-pub(crate) fn require_note(history: &Connection, id: &str, at_ms: Option<i64>) -> Result<()> {
-    source_title(history, None, EvidenceSourceKind::Note, id, at_ms, None)?
+/// Whether evidence of this kind is read from the conversations, which
+/// may be locked, rather than from the history database beside the
+/// tracker.
+pub(crate) const fn in_conversations(kind: EvidenceSourceKind) -> bool {
+    match kind {
+        EvidenceSourceKind::Meeting | EvidenceSourceKind::Loop => true,
+        EvidenceSourceKind::Note | EvidenceSourceKind::Dictation | EvidenceSourceKind::Link => {
+            false
+        }
+    }
+}
+
+pub(crate) fn require_local(
+    history: &Connection,
+    kind: EvidenceSourceKind,
+    id: &str,
+    at_ms: Option<i64>,
+) -> Result<()> {
+    if in_conversations(kind) {
+        return Err(Refusal::Invalid.into());
+    }
+    source_title(history, None, kind, id, at_ms, None)?
         .map(|_| ())
         .ok_or_else(|| Refusal::SourceUnavailable.into())
 }
 
-pub(crate) fn resolve_note(history: &Connection, link: &mut EvidenceLink) -> Result<()> {
-    if link.source_kind != EvidenceSourceKind::Note {
+/// Evidence read without the conversations: a note, a dictation or a
+/// link.
+pub(crate) fn resolve_local(history: &Connection, link: &mut EvidenceLink) -> Result<()> {
+    if in_conversations(link.source_kind) {
         return Err(Refusal::Invalid.into());
     }
     link.title = source_title(
@@ -293,7 +315,7 @@ pub(crate) fn resolve_note(history: &Connection, link: &mut EvidenceLink) -> Res
         link.source_kind,
         &link.source_id,
         link.at_ms,
-        None,
+        link.meeting_note_id.as_deref(),
     )?;
     link.available = link.title.is_some();
     Ok(())

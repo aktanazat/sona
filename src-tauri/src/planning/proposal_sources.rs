@@ -67,7 +67,7 @@ pub(super) fn resolve(
         return Err(Refusal::Invalid.into());
     }
     if target.kind == EvidenceSourceKind::Note {
-        super::sources::require_note(history, &target.id, None)?;
+        super::sources::require_local(history, target.kind, &target.id, None)?;
     } else {
         let meetings = meetings.ok_or(Refusal::SourceUnavailable)?;
         super::sources::require_source(history, meetings, target.kind, &target.id, None)?;

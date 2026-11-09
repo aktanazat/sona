@@ -24,7 +24,7 @@ use self::types::{
 };
 use super::sources;
 use super::store::{self, Refusal};
-use super::types::{EvidenceSourceKind, PlanningTask, TaskStatus};
+use super::types::{PlanningTask, TaskStatus};
 use crate::managers::history::HistoryManager;
 use crate::meeting::loop_types::MeetingLoopId;
 use crate::meeting::session::MeetingSessionManager;
@@ -575,8 +575,8 @@ fn detail(
     for link in &mut evidence {
         match meetings {
             Some(meetings) => sources::resolve_link(history, meetings, link)?,
-            None if link.source_kind == EvidenceSourceKind::Note => {
-                sources::resolve_note(history, link)?;
+            None if !sources::in_conversations(link.source_kind) => {
+                sources::resolve_local(history, link)?;
             }
             None => {}
         }

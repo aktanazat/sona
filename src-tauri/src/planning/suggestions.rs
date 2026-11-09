@@ -304,7 +304,7 @@ fn require_source(
     at_ms: Option<i64>,
 ) -> Result<()> {
     if source.kind == EvidenceSourceKind::Note {
-        super::sources::require_note(history, &source.id, at_ms)
+        super::sources::require_local(history, source.kind, &source.id, at_ms)
     } else {
         let meetings = meetings.ok_or(Refusal::SourceUnavailable)?;
         super::sources::require_source(history, meetings, source.kind, &source.id, at_ms)
