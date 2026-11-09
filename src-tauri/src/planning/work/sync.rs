@@ -20,7 +20,7 @@ use crate::meeting::types::{MeetingSessionId, OperationActor};
 use anyhow::Result;
 use chrono::{Local, NaiveDate, TimeZone};
 use rusqlite::{params, Connection, OptionalExtension};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
@@ -132,6 +132,9 @@ impl<'a> MeetingReader<'a> {
 pub(crate) struct People {
     pub choices: Vec<WorkPersonChoice>,
     names: HashMap<String, String>,
+    /// Each merged person's old id and the id it was merged into. A merge
+    /// re-points earlier redirects, so none of them chain.
+    merged: Vec<(String, String)>,
 }
 
 impl People {
@@ -151,18 +154,49 @@ impl People {
             .map(|person| (person.id.clone(), person.name.clone()))
             .collect::<HashMap<_, _>>();
         let mut statement = meetings.prepare(
-            "SELECT r.source_person_id, p.display_name FROM person_merge_redirects r
-             JOIN persons p ON p.id = r.target_person_id",
+            "SELECT r.source_person_id, r.target_person_id, p.display_name
+             FROM person_merge_redirects r JOIN persons p ON p.id = r.target_person_id",
         )?;
-        for redirect in statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))? {
-            let (id, name): (String, String) = redirect?;
-            names.entry(id).or_insert(name);
+        let mut merged = Vec::new();
+        for redirect in
+            statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+        {
+            let (from, into, name): (String, String, String) = redirect?;
+            names.entry(from.clone()).or_insert(name);
+            merged.push((from, into));
         }
-        Ok(Self { choices, names })
+        Ok(Self {
+            choices,
+            names,
+            merged,
+        })
     }
 
     pub(crate) fn name(&self, id: &str) -> Option<&str> {
         self.names.get(id).map(String::as_str)
+    }
+
+    /// Every id the people `ids` name have gone by: each id, the person it
+    /// was merged into, and the old ids merged into either.
+    pub(crate) fn with_merged<'a>(&'a self, ids: &'a [String]) -> HashSet<&'a str> {
+        let named = ids
+            .iter()
+            .map(String::as_str)
+            .chain(
+                self.merged
+                    .iter()
+                    .filter(|(from, _)| ids.contains(from))
+                    .map(|(_, into)| into.as_str()),
+            )
+            .collect::<HashSet<_>>();
+        let mut everyone = named.clone();
+        everyone.extend(
+            self.merged
+                .iter()
+                .filter(|(_, into)| named.contains(into.as_str()))
+                .map(|(from, _)| from.as_str()),
+        );
+        everyone
     }
 }
 

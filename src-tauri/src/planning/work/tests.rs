@@ -837,3 +837,60 @@ fn a_due_window_counts_days_from_the_day_the_list_is_read() {
         ["Tuesday, open", "Wednesday"]
     );
 }
+
+#[test]
+fn work_waiting_on_a_merged_person_lists_under_either_of_their_ids() {
+    let mut desk = desk(&["Send the outline"]);
+    let old = workflow_core_tests::person(&desk.meetings, "D. Ruiz", &[], &[]);
+    let dana = workflow_core_tests::person(&desk.meetings, "Dana Ruiz", &[], &[]);
+    let at = desk.tick();
+    let waiting = desk
+        .both(|history, meetings| {
+            create(
+                history,
+                Some(meetings),
+                by_me(&operation(), at),
+                &WorkItemInput {
+                    owner: Some(WorkOwner::Person {
+                        person_id: old.uuid().to_string(),
+                    }),
+                    ..typed("Review the venue contract")
+                },
+            )
+        })
+        .expect("an item waiting on a person")
+        .value;
+    let revision = desk
+        .both(|_, meetings| {
+            Ok(meetings.query_row(
+                "SELECT revision FROM people_state WHERE singleton = 1",
+                [],
+                |row| row.get::<_, i64>(0),
+            )?)
+        })
+        .expect("the people revision");
+    let at = desk.tick();
+    desk.meetings
+        .merge_persons_with_voice_resolution(
+            old,
+            dana,
+            u64::try_from(revision).expect("a stored revision"),
+            None,
+            at,
+        )
+        .expect("the two people merged");
+
+    let listed = [dana, old].map(|person| {
+        let query = WorkQuery {
+            owner_person_ids: Some(vec![person.uuid().to_string()]),
+            ..WorkQuery::default()
+        };
+        desk.both(|history, meetings| list(history, Some(meetings), None, &query, at))
+            .expect("what waits on the person")
+            .items
+            .into_iter()
+            .map(|row| row.item.id)
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(listed, [[waiting.id.clone()], [waiting.id]]);
+}

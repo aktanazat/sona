@@ -320,6 +320,8 @@ pub enum WorkDue {
 pub struct WorkQuery {
     pub statuses: Option<Vec<WorkStatus>>,
     pub direction: Option<WorkDirection>,
+    /// People, each matched with the ids merged into them or that they were
+    /// merged into.
     pub owner_person_ids: Option<Vec<String>>,
     /// Project ids, where `"none"` stands for work in no project.
     pub project_ids: Option<Vec<String>>,
