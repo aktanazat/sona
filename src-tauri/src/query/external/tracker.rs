@@ -884,7 +884,6 @@ impl WorkVerb {
             | Self::Show(_)
             | Self::Labels
             | Self::Views
-            | Self::Export(_)
             | Self::FollowUp(_)
             | Self::Update(UpdateArgs { dry_run: true, .. })
             | Self::Done(DoneArgs { dry_run: true, .. })
@@ -896,7 +895,8 @@ impl WorkVerb {
             | Self::Say(SayArgs { dry_run: true, .. })
             | Self::Watches => READ_SCOPES,
             Self::Ask(AskArgs { take, .. }) if take.is_empty() => READ_SCOPES,
-            Self::Create(_)
+            Self::Export(_)
+            | Self::Create(_)
             | Self::Update(_)
             | Self::Claim(_)
             | Self::Done(_)

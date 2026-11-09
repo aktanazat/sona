@@ -285,10 +285,10 @@ Exit codes: 0 answered, 2 bad input (`invalid_request`), 1 everything else
 flags, and `skills/sona/SKILL.md` is the agent-facing reference for both.
 
 **Tracker verbs:** `sona work <verb>` reads and changes tasks, printing text,
-or one JSON value with `--json`. Tasks are named `S-12`, `12` or by id. Reads,
-`export` and every `--dry-run` need External access; every other verb also
-needs External mutations. Writes are filed as an agent's, named by
-`--agent NAME` (the MCP server passes its client's name). Without
+or one JSON value with `--json`. Tasks are named `S-12`, `12` or by id. Reads
+and every `--dry-run` need External access; every other verb, `export`
+included, also needs External mutations. Writes are filed as an agent's,
+named by `--agent NAME` (the MCP server passes its client's name). Without
 `--operation-id` a write derives its id from the request and what it read, so
 a repeated command never changes anything twice. Unless `Settings > Agents >
 Agents' changes` is Apply, an agent's field changes wait as proposals the user
@@ -310,7 +310,7 @@ them. `list` and `ready` take `--due overdue,today,this-week,next:N,none`;
 | `relate`, `unrelate`                   | **Writes.** `S-1 blocks S-2`, `blocked-by` or `related`          |
 | `labels`, `label-save`, `label-delete` | Labels; the saves and deletes write                              |
 | `views`, `view-save`, `view-delete`    | Saved views; the saves and deletes write                         |
-| `export --md <DIR>`                    | One `S-<n>.md` file per matching task                            |
+| `export --md <DIR>`                    | **Writes.** One `S-<n>.md` file per matching task                |
 | `ask <QUESTION> [--take N,...]`        | Cited lines answering it; `--take` writes them as Triage tasks   |
 | `say <WORDS>`                          | **Writes.** "push everything not urgent to monday"; `--dry-run`  |
 | `watches`, `watch`, `unwatch`          | Topics Sona notifies about; watch and unwatch write              |

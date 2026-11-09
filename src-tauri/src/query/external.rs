@@ -4577,7 +4577,7 @@ mod tests {
             (vec!["work", "views"], reads),
             (
                 vec!["work", "export", "--md", "/private/var/tmp/tasks"],
-                reads,
+                writes,
             ),
             (
                 vec!["work", "update", "S-1", "--priority", "low", "--dry-run"],
