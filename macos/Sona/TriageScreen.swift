@@ -89,6 +89,7 @@ private struct TriageList: View {
             TaskEmpty(line: split.map { "Nothing \($0.split.lowercased()) to triage." } ?? "Triage is clear.") {
                 TaskKeyButton(title: "Tasks", keys: "g t") { model.go(.tasks) }
             }
+            .onAppear { focus.show([]) }
         } else {
             TaskListBody(groups: groups, headers: split.map { $0 == .meeting } ?? true) { item in
                 TriageRow(

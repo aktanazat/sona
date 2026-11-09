@@ -122,6 +122,7 @@ private struct TasksList: View {
             }
         } else if groups.allSatisfy(\.rows.isEmpty) {
             empty(draft)
+                .onAppear { focus.show([]) }
         } else if draft?.display.layout == .board {
             TaskBoardBody(groups: groups, shows: shows, now: now)
         } else {

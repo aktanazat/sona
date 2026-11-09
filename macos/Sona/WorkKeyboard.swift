@@ -188,6 +188,8 @@ final class WorkFocus {
     /// Where the pointer was when keys last moved the highlight: rows that
     /// scroll under a still pointer must not take the highlight back.
     @ObservationIgnored private var pointerAtKeys: NSPoint?
+    /// A task just made, which takes the highlight once the list shows it.
+    @ObservationIgnored private var arriving: String?
 
     var selecting: Bool { !selection.isEmpty }
 
@@ -214,6 +216,13 @@ final class WorkFocus {
         visible = ids
         selection.formIntersection(ids)
         if let anchor, !ids.contains(anchor) { self.anchor = nil }
+        if let arriving, ids.contains(arriving) { highlighted = arriving }
+        arriving = nil
+        if let highlighted, !ids.contains(highlighted) { self.highlighted = nil }
+    }
+
+    func highlightWhenShown(_ id: String) {
+        arriving = id
     }
 
     func move(_ delta: Int, extend: Bool) {
