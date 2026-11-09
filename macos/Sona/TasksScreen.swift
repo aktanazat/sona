@@ -47,16 +47,29 @@ extension AppModel {
         guard let items = work.items else { return [] }
         switch workFocus.tab {
         case .owe:
-            return TaskListing.myWork(items, direction: .mine, now: now, focus: rituals.focus)
+            let current = workFocus.oweThisCycle ? work.currentCycle?.number : nil
+            let mine = current.map { number in items.filter { $0.cycle == number } } ?? items
+            return TaskListing.myWork(mine, direction: .mine, now: now, focus: rituals.focus)
         case .waiting:
             return TaskListing.myWork(items, direction: .waitingOn, now: now)
+        case .cycle:
+            return TaskListing.groups(cycleRows, display: WorkDisplay(groupBy: .status, orderBy: .priority), now: now,
+                                      projects: work.projects, people: work.people)
         case .all, .view:
             guard let draft else { return [] }
             let triageAsked = draft.query.statuses?.contains(.triage) == true
-            let filter = TaskListing.Filter(draft.query, now: now)
+            let filter = TaskListing.Filter(draft.query, now: now, cycles: work.cycles)
             let rows = items.filter { ($0.status != .triage || triageAsked) && filter.matches($0) }
             return TaskListing.groups(rows, display: draft.display, now: now,
                                       projects: work.projects, people: work.people)
+        }
+    }
+
+    /// The tasks planned in the current cycle, as the cycle tab lists them.
+    var cycleRows: [WorkItemRow] {
+        guard let number = work.currentCycle?.number else { return [] }
+        return (work.items ?? []).filter {
+            $0.cycle == number && $0.archivedAtMs == nil && $0.status != .triage && $0.status != .duplicate
         }
     }
 }
@@ -122,25 +135,40 @@ private struct TasksList: View {
             } else {
                 TaskSkeleton()
             }
+        } else if focus.tab == .cycle, let cycle = store.currentCycle {
+            TaskListBody(groups: groups, lead: {
+                CycleSummary(cycle: cycle, tally: CycleTally(model.cycleRows))
+                if groups.allSatisfy(\.rows.isEmpty) {
+                    Text("Nothing planned in this cycle. Press ⇧C on a task to add it.")
+                        .bodyText(13, Theme.inkSecondary)
+                        .frame(maxWidth: .infinity)
+                        .padding(.top, 48)
+                }
+            }, row: { itemRow($0, shows: shows, now: now) })
         } else if groups.allSatisfy(\.rows.isEmpty) {
             empty(draft)
                 .onAppear { focus.show([]) }
         } else if draft?.display.layout == .board {
             TaskBoardBody(groups: groups, shows: shows, now: now)
         } else {
-            let labels = model.workLabels
             TaskListBody(groups: groups, headers: draft?.display.groupBy != WorkGroupBy.none, add: add) { item in
-                ItemRow(
-                    row: item, shows: shows, labels: item.labelIds.compactMap { labels[$0] },
-                    highlighted: focus.highlighted == item.id, selected: focus.selection.contains(item.id),
-                    selecting: focus.selecting, renaming: focus.renaming == item.id, now: now,
-                    revision: model.people.photoRevision, waiting: model.agents.waits(on: item)
-                ) {
-                    focus.toggle(item.id)
-                } rename: { title in
-                    model.renameTask(item.id, to: title)
-                }
+                itemRow(item, shows: shows, now: now)
             }
+        }
+    }
+
+    private func itemRow(_ item: WorkItemRow, shows: Set<String>, now: Int64) -> some View {
+        let focus = model.workFocus
+        let labels = model.workLabels
+        return ItemRow(
+            row: item, shows: shows, labels: item.labelIds.compactMap { labels[$0] },
+            highlighted: focus.highlighted == item.id, selected: focus.selection.contains(item.id),
+            selecting: focus.selecting, renaming: focus.renaming == item.id, now: now,
+            revision: model.people.photoRevision, waiting: model.agents.waits(on: item)
+        ) {
+            focus.toggle(item.id)
+        } rename: { title in
+            model.renameTask(item.id, to: title)
         }
     }
 
@@ -148,11 +176,20 @@ private struct TasksList: View {
     private func empty(_ draft: WorkViewDraft?) -> some View {
         switch model.workFocus.tab {
         case .owe:
-            TaskEmpty(line: "Nothing you owe.") {
-                TaskKeyButton(title: "New task", keys: "c") { model.newTask() }
+            if model.workFocus.oweThisCycle {
+                TaskEmpty(line: "Nothing you owe in this cycle.") {
+                    Button("Show all my work") { model.workFocus.oweThisCycle = false }
+                        .buttonStyle(.compact)
+                }
+            } else {
+                TaskEmpty(line: "Nothing you owe.") {
+                    TaskKeyButton(title: "New task", keys: "c") { model.newTask() }
+                }
             }
         case .waiting:
             TaskEmpty(line: "Nobody owes you anything.")
+        case .cycle:
+            TaskEmpty(line: "No cycle is running.")
         case .all, .view:
             if let draft, !TaskFilters.chips(draft.query, model: model).isEmpty {
                 TaskEmpty(line: "No tasks match these filters.") {
@@ -170,6 +207,15 @@ private struct TasksList: View {
     @ViewBuilder
     private func trailing(_ draft: WorkViewDraft?) -> some View {
         let focus = model.workFocus
+        if focus.tab == .owe, model.work.currentCycle != nil {
+            WorkTab(title: "This cycle", on: focus.oweThisCycle) {
+                focus.oweThisCycle.toggle()
+            }
+            .help("Show only work planned in the current cycle")
+        }
+        if focus.tab == .cycle {
+            CycleSettingsMenu()
+        }
         if let draft {
             TaskFilterButton()
             SegmentedSwitch(
@@ -225,6 +271,9 @@ private struct TaskTabs: View {
             HStack(spacing: 2) {
                 tab(.owe, title: "I owe", count: counts?.mineOpen)
                 tab(.waiting, title: "Waiting on", count: counts?.waitingOn)
+                if let cycle = model.work.currentCycle {
+                    tab(.cycle, title: "Cycle \(cycle.number)", count: nil)
+                }
                 tab(.all, title: "All", count: nil)
                 ForEach(model.work.views) { view in
                     tab(.view(view.id), title: view.name, count: nil, edited: model.workFocus.viewDrafts[view.id] != nil)

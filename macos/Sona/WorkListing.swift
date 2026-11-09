@@ -124,11 +124,36 @@ enum TaskListing {
         let query: WorkQuery
         let now: Int64
         private let due: [DueSpan]?
+        private let cycle: CycleWant?
 
-        init(_ query: WorkQuery, now: Int64) {
+        private enum CycleWant {
+            case number(Int64), noCycle, nothing
+
+            func holds(_ row: WorkItemRow) -> Bool {
+                switch self {
+                case let .number(number): row.cycle == number
+                case .noCycle: row.cycle == nil
+                case .nothing: false
+                }
+            }
+        }
+
+        init(_ query: WorkQuery, now: Int64, cycles: [WorkCycle] = []) {
             self.query = query
             self.now = now
             due = query.due.map { DueSpan.pin($0, now: now) }
+            let current = cycles.first { $0.state == .current }
+            let named: WorkCycle? = switch query.cycle {
+            case .current?: current
+            case .next?: cycles.first { $0.startsAtMs == current?.endsAtMs }
+            case .noCycle?, .number?, nil: nil
+            }
+            cycle = switch query.cycle {
+            case nil: nil
+            case .noCycle?: .noCycle
+            case let .number(number)?: .number(number)
+            case .current?, .next?: named.map { .number($0.number) } ?? .nothing
+            }
         }
 
         func matches(_ row: WorkItemRow) -> Bool {
@@ -144,6 +169,7 @@ enum TaskListing {
                 guard let due = row.dueAtMs, due < before else { return false }
             }
             if let due, !due.contains(where: { $0.holds(row) }) { return false }
+            if let cycle, !cycle.holds(row) { return false }
             if let meeting = query.sourceMeetingId, row.sourceMeetingId != meeting { return false }
             if let search = query.search?.trimmingCharacters(in: .whitespaces), !search.isEmpty {
                 let number = search.hasPrefix("#") ? String(search.dropFirst()) : search

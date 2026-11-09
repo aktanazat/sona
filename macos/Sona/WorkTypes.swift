@@ -87,12 +87,14 @@ struct WorkPatch: Equatable {
     var labelIds: [String]?
     var snoozedUntilMs: WorkPatchValue<Int64>?
     var recurrence: WorkPatchValue<String>?
+    var cycle: WorkPatchValue<Int64>?
 
     init(
         title: String? = nil, details: WorkPatchValue<String>? = nil, status: WorkStatus? = nil,
         priority: Int? = nil, projectId: WorkPatchValue<String>? = nil, milestoneId: WorkPatchValue<String>? = nil,
         owner: WorkOwner? = nil, dueAtMs: WorkPatchValue<Int64>? = nil, labelIds: [String]? = nil,
-        snoozedUntilMs: WorkPatchValue<Int64>? = nil, recurrence: WorkPatchValue<String>? = nil
+        snoozedUntilMs: WorkPatchValue<Int64>? = nil, recurrence: WorkPatchValue<String>? = nil,
+        cycle: WorkPatchValue<Int64>? = nil
     ) {
         self.title = title
         self.details = details
@@ -105,13 +107,14 @@ struct WorkPatch: Equatable {
         self.labelIds = labelIds
         self.snoozedUntilMs = snoozedUntilMs
         self.recurrence = recurrence
+        self.cycle = cycle
     }
 }
 
 extension WorkPatch: Encodable {
     private enum Key: String, CodingKey {
         case title, details, status, priority, projectId, milestoneId, owner, dueAtMs, labelIds, snoozedUntilMs
-        case recurrence
+        case recurrence, cycle
     }
 
     func encode(to encoder: Encoder) throws {
@@ -127,6 +130,7 @@ extension WorkPatch: Encodable {
         try container.encodeIfPresent(labelIds, forKey: .labelIds)
         try Self.encode(snoozedUntilMs, .snoozedUntilMs, in: &container)
         try Self.encode(recurrence, .recurrence, in: &container)
+        try Self.encode(cycle, .cycle, in: &container)
     }
 
     private static func encode<T: Encodable & Equatable>(
@@ -163,6 +167,8 @@ struct WorkItem: Codable, Identifiable, Equatable {
     var updatedAtMs: Int64
     var revision: Int64
     var sortOrder: Double
+    /// The number of the cycle it is planned in.
+    var cycle: Int64?
 }
 
 /// An item with the names its row shows; the core sends the item's fields
@@ -190,6 +196,7 @@ struct WorkItemRow: Codable, Identifiable, Equatable {
     var updatedAtMs: Int64
     var revision: Int64
     var sortOrder: Double
+    var cycle: Int64?
     var projectTitle: String?
     var ownerName: String?
     /// The agent working the item; none when the user is.
@@ -207,6 +214,11 @@ struct WorkItemRow: Codable, Identifiable, Equatable {
     var source: WorkSource
     /// When to ask about waiting-on work; nil for anything else.
     var followUpAtMs: Int64?
+    /// Mine, open, due within two days, nothing booked for it, and no free
+    /// hour left on its due day.
+    var atRisk: Bool
+    var timeBlock: WorkTimeBlock?
+    var `repeat`: WorkRepeat?
 
     var item: WorkItem {
         WorkItem(
@@ -215,13 +227,98 @@ struct WorkItemRow: Codable, Identifiable, Equatable {
             direction: direction, dueAtMs: dueAtMs, labelIds: labelIds, sourceLoopId: sourceLoopId,
             duplicateOfId: duplicateOfId, snoozedUntilMs: snoozedUntilMs, archivedAtMs: archivedAtMs,
             statusChangedAtMs: statusChangedAtMs, createdAtMs: createdAtMs, updatedAtMs: updatedAtMs,
-            revision: revision, sortOrder: sortOrder)
+            revision: revision, sortOrder: sortOrder, cycle: cycle)
     }
 
     var owner: WorkOwner {
         if ownerIsSelf { return .myself }
         return ownerPersonId.map { .person($0) } ?? .nobody
     }
+}
+
+struct WorkTimeBlock: Codable, Equatable {
+    var startsAtMs: Int64
+    var endsAtMs: Int64
+}
+
+/// How a repeating item comes back; of the instances whose due day has
+/// come, `kept` were done by the end of it out of `of`.
+struct WorkRepeat: Codable, Equatable {
+    var every: String
+    var kept: Int
+    var of: Int
+}
+
+enum WorkCycleRef: Codable, Hashable {
+    case current, next, noCycle
+    case number(Int64)
+
+    private enum Key: String, CodingKey { case kind, number }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: Key.self)
+        switch try container.decode(String.self, forKey: .kind) {
+        case "current": self = .current
+        case "next": self = .next
+        case "none": self = .noCycle
+        default: self = .number(try container.decode(Int64.self, forKey: .number))
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: Key.self)
+        switch self {
+        case .current: try container.encode("current", forKey: .kind)
+        case .next: try container.encode("next", forKey: .kind)
+        case .noCycle: try container.encode("none", forKey: .kind)
+        case let .number(number):
+            try container.encode("number", forKey: .kind)
+            try container.encode(number, forKey: .number)
+        }
+    }
+}
+
+/// How long cycles run and the weekday they start, 1 for Monday through 7
+/// for Sunday.
+struct WorkCycleSettings: Codable, Equatable {
+    var weeks: Int
+    var startWeekday: Int
+}
+
+enum WorkCycleState: String, Codable, Hashable { case past, current, upcoming }
+
+/// One cycle; days are local `YYYY-MM-DD` and `endDay` is the first day
+/// after it.
+struct WorkCycle: Codable, Identifiable, Equatable {
+    var number: Int64
+    var startDay: String
+    var endDay: String
+    var startsAtMs: Int64
+    var endsAtMs: Int64
+    var state: WorkCycleState
+    var scope: Int
+    var done: Int
+
+    var id: Int64 { number }
+}
+
+struct WorkCycles: Codable, Equatable {
+    var settings: WorkCycleSettings
+    var cycles: [WorkCycle]
+}
+
+struct WorkCycleDay: Codable, Equatable, Identifiable {
+    var day: String
+    var scope: Int
+    var done: Int
+
+    var id: String { day }
+}
+
+struct WorkCycleProgress: Codable, Equatable {
+    var cycle: WorkCycle
+    var days: [WorkCycleDay]
+    var carriedOver: Int
 }
 
 /// The agent working an item, by the name it goes by, since it took it.
@@ -231,7 +328,7 @@ struct WorkDoer: Codable, Equatable {
 }
 
 enum WorkProposalField: String, Codable, Hashable {
-    case title, details, status, priority, owner, due, project, milestone, labels, snoozed, recurrence
+    case title, details, status, priority, owner, due, project, milestone, labels, snoozed, recurrence, cycle
 }
 
 /// One field an agent would change, waiting for the user. `from` is the
@@ -326,12 +423,13 @@ struct WorkQuery: Codable, Equatable, Hashable {
     var search: String?
     var includeArchived = false
     var includeSnoozed = false
+    var cycle: WorkCycleRef?
 
     init(
         statuses: [WorkStatus]? = nil, direction: WorkDirection? = nil, ownerPersonIds: [String]? = nil,
         projectIds: [String]? = nil, labelIds: [String]? = nil, priorities: [Int]? = nil,
         dueBeforeMs: Int64? = nil, due: [WorkDue]? = nil, sourceMeetingId: String? = nil, search: String? = nil,
-        includeArchived: Bool = false, includeSnoozed: Bool = false
+        includeArchived: Bool = false, includeSnoozed: Bool = false, cycle: WorkCycleRef? = nil
     ) {
         self.statuses = statuses
         self.direction = direction
@@ -345,6 +443,7 @@ struct WorkQuery: Codable, Equatable, Hashable {
         self.search = search
         self.includeArchived = includeArchived
         self.includeSnoozed = includeSnoozed
+        self.cycle = cycle
     }
 }
 
@@ -409,7 +508,7 @@ enum WorkActor: String, Codable, Hashable { case me, sona, agent }
 
 enum WorkActivityKind: String, Codable, Hashable {
     case created, status, priority, owner, due, project, title, details, labels, archived, restored
-    case duplicate, accepted, declined, snoozed, relation, kept, recurrence
+    case duplicate, accepted, declined, snoozed, relation, kept, recurrence, cycle, block
 }
 
 /// One change in an item's history. `from` and `to` hold raw values: a
