@@ -2,6 +2,7 @@
 //! or someone typed it, with triage, history, labels, links and saved views.
 //! Project screens read the same rows through `store`.
 
+mod hygiene;
 pub(crate) mod items;
 pub(crate) mod sync;
 #[cfg(test)]
@@ -12,9 +13,9 @@ use self::items::{Changed, DueSpan, NewItem};
 use self::sync::{MeetingReader, People};
 pub use self::types::WorkChanged;
 use self::types::{
-    WorkActivityKind, WorkActor, WorkCounts, WorkDisplay, WorkItem, WorkItemDetail, WorkItemInput,
-    WorkItemRow, WorkLabel, WorkList, WorkOwner, WorkPatch, WorkProjectChoice, WorkQuery,
-    WorkRelation, WorkRelationKind, WorkStatus, WorkView,
+    WorkActivityKind, WorkActor, WorkCounts, WorkDay, WorkDisplay, WorkItem, WorkItemDetail,
+    WorkItemInput, WorkItemRow, WorkLabel, WorkList, WorkOwner, WorkPatch, WorkProjectChoice,
+    WorkQuery, WorkRelation, WorkRelationKind, WorkStatus, WorkView,
 };
 use super::sources;
 use super::store::{self, Refusal};
@@ -298,6 +299,12 @@ pub(crate) fn catch_up(app: AppHandle, store: Arc<MeetingStore>) {
             }
         }
         match in_both(&store, &history, |history, meetings| {
+            hygiene::fold_repeats(history, meetings, user_name.as_deref(), now)
+        }) {
+            Ok(folded) => folded.iter().for_each(|item| effects.item(item)),
+            Err(error) => log::warn!("Tracker repeats could not be folded: {error:#}"),
+        }
+        match in_both(&store, &history, |history, meetings| {
             sync::reconcile(history, meetings, now)
         }) {
             Ok(followed) => {
@@ -335,6 +342,7 @@ struct RowContext {
     people: People,
     project_titles: HashMap<String, String>,
     blockers: HashMap<String, u32>,
+    raised: HashMap<String, u32>,
 }
 
 impl RowContext {
@@ -350,6 +358,7 @@ impl RowContext {
                 .map(|project| (project.id.clone(), project.title.clone()))
                 .collect(),
             blockers: items::open_blockers(history)?,
+            raised: items::meetings_raised(history)?,
         })
     }
 
@@ -372,6 +381,11 @@ impl RowContext {
             source_speaker: None,
             source_at_ms: None,
             blocked_by_open_count: self.blockers.get(&item.id).copied().unwrap_or(0),
+            raised_in: self
+                .raised
+                .get(item.duplicate_of_id.as_ref().unwrap_or(&item.id))
+                .copied()
+                .unwrap_or(0),
             item,
         };
         if let Some(source) = match &source_loop_id {
@@ -1265,6 +1279,58 @@ pub fn work_view_delete(app: AppHandle, operation_id: String, id: String) -> Res
 pub fn work_counts(history_state: State<'_, Arc<HistoryManager>>) -> Result<WorkCounts, String> {
     super::history(&history_state, |history| {
         items::counts(&items::items(history, false)?, now_ms())
+    })
+}
+
+#[tauri::command(async)]
+#[specta::specta]
+pub fn work_keep(
+    app: AppHandle,
+    operation_id: String,
+    ids: Vec<String>,
+) -> Result<Vec<WorkItem>, String> {
+    let now = now_ms();
+    run_history(&app, |history| {
+        store::mutate(history, &operation_id, "work_keep", &ids, now, |tx| {
+            let mut effects = Effects::default();
+            let mut value = Vec::new();
+            for id in unique(&ids)? {
+                let changed = items::keep(tx, &id, WorkActor::Me, now)?;
+                effects.changed(&changed);
+                value.push(changed.after);
+            }
+            Ok(Done { value, effects })
+        })
+    })
+}
+
+#[tauri::command(async)]
+#[specta::specta]
+pub fn work_day(
+    history_state: State<'_, Arc<HistoryManager>>,
+    day: String,
+) -> Result<WorkDay, String> {
+    super::history(&history_state, |history| items::day(history, &day))
+}
+
+#[tauri::command(async)]
+#[specta::specta]
+pub fn work_day_plan(
+    history_state: State<'_, Arc<HistoryManager>>,
+    operation_id: String,
+    day: String,
+    focus_ids: Vec<String>,
+) -> Result<WorkDay, String> {
+    let now = now_ms();
+    super::history(&history_state, |history| {
+        store::mutate(
+            history,
+            &operation_id,
+            "work_day_plan",
+            &(&day, &focus_ids),
+            now,
+            |tx| items::plan_day(tx, &day, &focus_ids, now),
+        )
     })
 }
 

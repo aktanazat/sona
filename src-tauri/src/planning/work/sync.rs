@@ -5,6 +5,7 @@
 
 use super::super::sources;
 use super::super::untracked::{any, lineage, DISMISSED, TRACKED};
+use super::hygiene;
 use super::items::{self, NewItem};
 use super::types::{
     WorkActivityKind, WorkActor, WorkFieldSuggestion, WorkItem, WorkOwner, WorkPatch,
@@ -388,12 +389,15 @@ fn link_meeting(
 
 /// Brings one open commitment into the tracker, unless it is already
 /// there, set aside as not work, or tracked by other planner work. A
-/// commitment carried forward from an earlier meeting moves the item that
-/// tracked the earlier occurrence instead of making a second one. Returns
-/// the item it made or moved.
+/// commitment carried forward from an earlier meeting, or reworded when its
+/// meeting's notes were written again, moves the item that tracked it
+/// instead of making a second one, and one that repeats an earlier
+/// meeting's promise folds into that promise's item. Returns the item it
+/// made or moved.
 pub(crate) fn take_in_row(
     history: &Connection,
     meetings: &Connection,
+    user_name: Option<&str>,
     meeting: &MeetingLedgerRows,
     row: &MeetingLoopRow,
     now_ms: i64,
@@ -417,7 +421,11 @@ pub(crate) fn take_in_row(
         .transpose()?
         .flatten();
     let lineage = lineage(meetings, loop_id)?;
-    if let Some(item) = tracker_of(history, &lineage)? {
+    let earlier = match tracker_of(history, &lineage)? {
+        Some(item) => Some(item),
+        None => hygiene::reworded(history, &meeting.rows, row)?,
+    };
+    if let Some(item) = earlier {
         history.execute(
             "UPDATE planning_tasks SET source_loop_id = ?2, revision = revision + 1, updated_at_ms = ?3
              WHERE id = ?1",
@@ -448,7 +456,12 @@ pub(crate) fn take_in_row(
         now_ms,
     )?;
     link_meeting(history, &item.id, &meeting_id, at_ms, now_ms)?;
-    Ok(Some(item))
+    Ok(Some(
+        match hygiene::repeat_of(history, meetings, user_name, row, &item)? {
+            Some(original) => hygiene::fold(history, meetings, &item, &original, now_ms)?,
+            None => item,
+        },
+    ))
 }
 
 /// Brings every open commitment of one meeting into the tracker; see
@@ -466,7 +479,9 @@ pub(crate) fn take_in_meeting(
     };
     let mut taken = Vec::new();
     for row in &meeting.rows {
-        taken.extend(take_in_row(history, meetings, &meeting, row, now_ms)?);
+        taken.extend(take_in_row(
+            history, meetings, user_name, &meeting, row, now_ms,
+        )?);
     }
     Ok(taken)
 }
@@ -622,7 +637,7 @@ fn project_suggestion(
 
 /// Words compared the way people repeat a task: case, spacing and closing
 /// punctuation do not count.
-fn same_words(title: &str) -> String {
+pub(super) fn same_words(title: &str) -> String {
     title
         .split_whitespace()
         .collect::<Vec<_>>()

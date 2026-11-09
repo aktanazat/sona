@@ -5099,6 +5099,43 @@ pub(super) async fn call(
             off_main_thread(move || reply(crate::planning::work::work_counts(handle.state())))
                 .await?
         }
+        "work_keep" => {
+            let mut args = Args::parse(params)?;
+            let operation_id = args.take("operationId")?;
+            let ids = args.take("ids")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::planning::work::work_keep(
+                    handle.clone(),
+                    operation_id,
+                    ids,
+                ))
+            })
+            .await?
+        }
+        "work_day" => {
+            let mut args = Args::parse(params)?;
+            let day = args.take("day")?;
+            let handle = app.clone();
+            off_main_thread(move || reply(crate::planning::work::work_day(handle.state(), day)))
+                .await?
+        }
+        "work_day_plan" => {
+            let mut args = Args::parse(params)?;
+            let operation_id = args.take("operationId")?;
+            let day = args.take("day")?;
+            let focus_ids = args.take("focusIds")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::planning::work::work_day_plan(
+                    handle.state(),
+                    operation_id,
+                    day,
+                    focus_ids,
+                ))
+            })
+            .await?
+        }
         other => Err(Fault::unknown_method(other)),
     }
 }

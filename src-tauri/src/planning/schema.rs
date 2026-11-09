@@ -262,6 +262,32 @@ CREATE TRIGGER planning_project_delete AFTER DELETE ON planning_projects BEGIN
     DELETE FROM planning_evidence_links WHERE target_kind = 'project' AND target_id = old.id;
 END;";
 
+/// The days a person planned, and "kept" among what an item's history can
+/// say. SQLite cannot widen a CHECK in place, so the history table is
+/// rebuilt with every entry and its rowid kept, since entries written in
+/// the same millisecond read back in rowid order.
+pub const DAY_PLAN_MIGRATION: &str = "CREATE TABLE planning_days (
+    day TEXT PRIMARY KEY NOT NULL CHECK(length(day) = 10),
+    focus_json TEXT NOT NULL,
+    planned_at_ms INTEGER NOT NULL
+);
+CREATE TABLE planning_task_activity_next (
+    id TEXT PRIMARY KEY NOT NULL,
+    task_id TEXT NOT NULL,
+    at_ms INTEGER NOT NULL,
+    actor TEXT NOT NULL CHECK(actor IN ('me', 'sona', 'agent')),
+    kind TEXT NOT NULL CHECK(kind IN ('created', 'status', 'priority', 'owner', 'due', 'project',
+        'title', 'details', 'labels', 'archived', 'restored', 'duplicate', 'accepted', 'declined',
+        'snoozed', 'relation', 'kept')),
+    from_value TEXT,
+    to_value TEXT
+);
+INSERT INTO planning_task_activity_next (rowid, id, task_id, at_ms, actor, kind, from_value, to_value)
+    SELECT rowid, id, task_id, at_ms, actor, kind, from_value, to_value FROM planning_task_activity;
+DROP TABLE planning_task_activity;
+ALTER TABLE planning_task_activity_next RENAME TO planning_task_activity;
+CREATE INDEX planning_task_activity_task ON planning_task_activity(task_id, at_ms, id);";
+
 /// Every planner migration in order, for tests that build the schema without
 /// the rest of the history database.
 #[cfg(test)]
@@ -273,6 +299,7 @@ pub(crate) fn apply_all(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
         DISMISSED_LOOP_MIGRATION,
         WORK_MIGRATION,
         PROJECT_DELETE_KEEPS_TASKS_MIGRATION,
+        DAY_PLAN_MIGRATION,
     ] {
         conn.execute_batch(migration)?;
     }

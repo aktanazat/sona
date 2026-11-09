@@ -2062,6 +2062,9 @@ pub fn run(cli_args: CliArgs) {
             planning::work::work_view_save,
             planning::work::work_view_delete,
             planning::work::work_counts,
+            planning::work::work_keep,
+            planning::work::work_day,
+            planning::work::work_day_plan,
         ])
         .events(collect_events![
             chat_voice::ChatVoiceEvent,
