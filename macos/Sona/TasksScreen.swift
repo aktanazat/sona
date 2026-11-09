@@ -362,6 +362,7 @@ struct TaskRowInteractions: ViewModifier {
             .onTapGesture { model.clickTask(id) }
             .contextMenu { WorkActionMenu(ids: model.menuTargets(id)) }
             .accessibilityAddTraits(.isButton)
+            .accessibilityAction { model.perform(.open, on: [id]) }
             .accessibilityAction(named: "Select") { model.workFocus.toggle(id) }
     }
 }
