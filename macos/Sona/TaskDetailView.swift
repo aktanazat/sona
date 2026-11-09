@@ -15,7 +15,7 @@ struct TaskDetailView: View {
         let detail = store.detail.flatMap { $0.item.id == id ? $0 : nil }
         VStack(spacing: 0) {
             WorkBar {
-                BackLink(title: place == .triage ? "Triage" : "Tasks") { close() }
+                BackLink(title: back) { close() }
                 if let row {
                     Text("#\(row.number)")
                         .font(TypeScale.mono(12))
@@ -62,7 +62,7 @@ struct TaskDetailView: View {
                 TaskSkeleton(rows: 4)
             } else {
                 TaskEmpty(line: "This task is gone.") {
-                    TaskKeyButton(title: place == .triage ? "Triage" : "Tasks", keys: "esc") { close() }
+                    TaskKeyButton(title: back, keys: "esc") { close() }
                 }
             }
         }
@@ -72,6 +72,16 @@ struct TaskDetailView: View {
 
     private func close() {
         model.workFocus.open(nil, in: place)
+    }
+
+    /// Where Esc and the back link return: the list, or the person whose
+    /// page the task was opened from.
+    private var back: String {
+        switch place {
+        case .triage: "Triage"
+        case .people: model.people.detail?.person.displayName ?? "People"
+        default: "Tasks"
+        }
     }
 }
 

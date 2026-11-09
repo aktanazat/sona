@@ -340,50 +340,13 @@ struct PersonContinuityView<Profile: View>: View {
                         }
                     }
                 case .available:
-                    selectedTasks(snapshot.tasks, refresh: work.refresh, loading: work.loading)
+                    PersonTasks(personId: personId, owned: work.tasks)
                     linkedWorkConversations(snapshot.conversations)
                 }
             }
         } else {
             PersonRowsPlaceholder(rows: 2)
         }
-    }
-
-    private func selectedTasks(_ rows: [PersonWorkTask], refresh: @escaping () -> Void, loading: Bool) -> some View {
-        PageSection("Tasks you selected") {
-            Card {
-                if rows.isEmpty {
-                    CardLine("No tasks selected for this person.")
-                } else {
-                    ForEach(rows) { row in
-                        CardRow(action: { model.openProject(row.project.id) }) {
-                            HStack(alignment: .firstTextBaseline, spacing: 10) {
-                                WorkStatusIcon(status: row.task.status, size: 12)
-                                    .alignmentGuide(.firstTextBaseline) { $0[.bottom] - 1 }
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text(row.task.title).bodyText(14)
-                                        .fixedSize(horizontal: false, vertical: true)
-                                    Text(taskFacts(row)).metaText().monospacedDigit().lineLimit(1)
-                                }
-                            }
-                        } trailing: {
-                            Image(systemName: "chevron.right")
-                                .font(.system(size: 11, weight: .semibold))
-                                .foregroundStyle(Theme.inkTertiary)
-                                .accessibilityHidden(true)
-                        }
-                        .accessibilityLabel("\(row.task.title), \(row.task.status.label), private task selected by you. Open project \(row.project.title)")
-                    }
-                }
-            }
-        }
-    }
-
-    /// "Launch · Beta milestone · In progress · Due 4 Nov".
-    private func taskFacts(_ row: PersonWorkTask) -> String {
-        [row.project.title, row.milestone?.title, row.task.status.label, row.task.dueAtMs.map { "Due \(PlanningFormat.date($0))" }]
-            .compactMap { $0 }
-            .joined(separator: " · ")
     }
 
     private func linkedWorkConversations(_ rows: [PersonWorkConversation]) -> some View {
@@ -459,6 +422,81 @@ struct PersonContinuityView<Profile: View>: View {
         case .notes: "No related notes."
         case .commitments: "No sourced commitments."
         }
+    }
+}
+
+/// Everything a person owns, triage and work in no project included, in the
+/// rows and groups of the task lists. The task keys work here as on Tasks:
+/// J and K move, Return opens the task's page and Space peeks at it.
+private struct PersonTasks: View {
+    let personId: String
+    let owned: [WorkItemRow]
+    @Environment(AppModel.self) private var model
+    @State private var collapsed: Set<String> = []
+
+    private static let shows = Set(TaskProperty.standard).subtracting([TaskProperty.owner.rawValue])
+
+    var body: some View {
+        let focus = model.workFocus
+        let now = TaskDates.now()
+        let groups = TaskListing.groups(rows(now: now), display: WorkDisplay(), now: now,
+                                        projects: model.work.projects, people: model.work.people)
+        let visible = groups.filter { !collapsed.contains($0.id) }.flatMap(\.rows).map(\.id)
+        let labels = model.workLabels
+        ScrollViewReader { proxy in
+            PageSection("Tasks") {
+                Card {
+                    if groups.isEmpty {
+                        CardLine("No tasks.")
+                    } else {
+                        ForEach(groups) { group in
+                            TaskGroupHeader(
+                                group: group, collapsed: collapsed.contains(group.id),
+                                revision: model.people.photoRevision, toggle: { toggle(group.id) })
+                            if !collapsed.contains(group.id) {
+                                ForEach(group.rows) { row in
+                                    ItemRow(
+                                        row: row, shows: Self.shows, labels: row.labelIds.compactMap { labels[$0] },
+                                        highlighted: focus.highlighted == row.id, selected: focus.selection.contains(row.id),
+                                        selecting: focus.selecting, renaming: focus.renaming == row.id, now: now,
+                                        revision: model.people.photoRevision
+                                    ) {
+                                        focus.toggle(row.id)
+                                    } rename: { title in
+                                        model.renameTask(row.id, to: title)
+                                    }
+                                    .modifier(TaskRowInteractions(id: row.id))
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            .onChange(of: focus.scrollTarget) { _, id in
+                guard let id, visible.contains(id) else { return }
+                proxy.scrollTo(id)
+            }
+        }
+        .onChange(of: visible, initial: true) { _, ids in focus.show(ids) }
+        .onAppear { focus.personList = personId }
+        .onDisappear {
+            if focus.personList == personId { focus.personList = nil }
+            focus.peeking = false
+            focus.renaming = nil
+            focus.clearSelection()
+        }
+    }
+
+    /// Their tasks as the tracker holds them this moment, so a change made
+    /// here shows at once, less the archived and snoozed ones lists hide.
+    private func rows(now: Int64) -> [WorkItemRow] {
+        let live = Dictionary((model.work.items ?? []).map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let shown = TaskListing.Filter(WorkQuery(), now: now)
+        return owned.map { live[$0.id] ?? $0 }.filter(shown.matches)
+    }
+
+    private func toggle(_ group: String) {
+        if collapsed.contains(group) { collapsed.remove(group) } else { collapsed.insert(group) }
     }
 }
 

@@ -17,23 +17,61 @@ struct PeopleScreen: View {
     /// Deletes an imported document, when the import surface is there to do
     /// it. Absent, the catalogue is a catalogue and nothing on it destroys.
     var deleteDocument: ((String) -> Void)?
+    @Environment(AppModel.self) private var model
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        switch store.route {
-        case .list:
-            Page {
-                PeopleListView(store: store, openMeeting: openMeeting)
+        Group {
+            switch store.route {
+            case .list:
+                Page {
+                    PeopleListView(store: store, openMeeting: openMeeting)
+                }
+            case .person:
+                person
+            case .organization:
+                OrganizationView(store: store, openMeeting: openMeeting)
             }
-        case .person:
+        }
+        .onChange(of: store.route, initial: true) { model.workFocus.open(nil, in: .people) }
+    }
+
+    /// A person's page, and over it a task opened from their list. The page
+    /// stays underneath, so Esc lands on the tab and the place it left.
+    private var person: some View {
+        let focus = model.workFocus
+        let opened = focus.opened(in: .people)
+        return ZStack(alignment: .bottomLeading) {
             PersonView(
                 store: store,
                 openMeeting: openMeeting,
                 openContribution: openContribution,
                 ingestDocument: ingestDocument,
                 deleteDocument: deleteDocument)
-        case .organization:
-            OrganizationView(store: store, openMeeting: openMeeting)
+            .opacity(opened == nil ? 1 : 0)
+            .allowsHitTesting(opened == nil)
+            .accessibilityHidden(opened != nil)
+            if let opened {
+                TaskDetailView(id: opened, place: .people)
+            }
+            UndoToast()
         }
+        .overlay(alignment: .trailing) {
+            if focus.peeking, opened == nil, let id = focus.highlighted, let row = model.workRows([id]).first {
+                TaskPeek(row: row, place: .people)
+                    .transition(reduceMotion ? .opacity : .move(edge: .trailing).combined(with: .opacity))
+            }
+        }
+        .overlay(alignment: .bottom) {
+            if focus.selecting, opened == nil {
+                BulkActionBar(place: .people)
+                    .padding(.bottom, 20)
+                    .transition(reduceMotion ? .opacity : .move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .animation(Motion.regular, value: focus.peeking)
+        .animation(Motion.regular, value: focus.selecting)
+        .modifier(WorkSheets())
     }
 }
 
