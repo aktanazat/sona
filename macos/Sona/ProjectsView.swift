@@ -867,6 +867,8 @@ struct ProjectsView: View {
         case .meeting: "Meeting"
         case .note: "Note"
         case .loop: "Commitment"
+        case .dictation: "Dictation"
+        case .link: "Link"
         }
     }
 
@@ -1231,6 +1233,8 @@ private struct PlanningLinkSourceSheet: View {
         case .meeting: "Selected meeting"
         case .note: "Selected note"
         case .loop: "Selected commitment"
+        case .dictation: "Selected dictation"
+        case .link: "Selected link"
         case nil: "Selected source"
         }
     }

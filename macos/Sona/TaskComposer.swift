@@ -16,6 +16,11 @@ struct TaskComposer: View {
     @State private var creating = false
     @State private var failure: String?
     @FocusState private var titleFocused: Bool
+    @State private var reading = TitleReading()
+    @State private var picked: Set<Choice> = []
+
+    /// Fields set in their pickers: the title's words no longer set them.
+    private enum Choice { case priority, owner, due, project }
 
     var body: some View {
         let work = model.work
@@ -32,8 +37,15 @@ struct TaskComposer: View {
                 .foregroundStyle(Theme.ink)
                 .focused($titleFocused)
                 .onSubmit(create)
+                .chipKeys(reading, text: title, work: work)
+                .task(id: title) { await reading.read(title, in: work) }
                 .padding(.horizontal, 20)
                 .padding(.top, 10)
+            if !reading.tokens.isEmpty {
+                ParsedChips(reading: reading, text: title)
+                    .padding(.horizontal, 20)
+                    .padding(.top, 8)
+            }
             TextField("", text: $details, prompt: Text("Details").foregroundStyle(Theme.inkDisabled), axis: .vertical)
                 .textFieldStyle(.plain)
                 .font(TypeScale.body(14))
@@ -48,41 +60,42 @@ struct TaskComposer: View {
                     WorkChoices.filtered(
                         WorkChoices.statuses { $0 == status } pick: { status = $0 }, by: text, kind: .status)
                 }
-                ComposerChip(title: priority == 0 ? "Priority" : TaskPriority(priority).label, prompt: "Priority…") {
-                    PriorityIcon(priority: TaskPriority(priority))
+                ComposerChip(title: chosenPriority == 0 ? "Priority" : TaskPriority(chosenPriority).label, prompt: "Priority…") {
+                    PriorityIcon(priority: TaskPriority(chosenPriority))
                 } make: { text in
                     WorkChoices.filtered(
-                        WorkChoices.priorities { $0 == priority } pick: { priority = $0 }, by: text, kind: .priority)
+                        WorkChoices.priorities { $0 == chosenPriority } pick: { priority = $0; picked.insert(.priority) },
+                        by: text, kind: .priority)
                 }
                 ComposerChip(title: ownerName(work.people), prompt: "Assign to…") {
                     Avatar(face: face(work.people), size: 16, revision: model.people.photoRevision)
                 } make: { text in
                     WorkChoices.filtered(
-                        WorkChoices.owners(work.people) { $0 == owner } pick: { owner = $0 }, by: text, kind: .owner)
+                        WorkChoices.owners(work.people) { $0 == chosenOwner } pick: { owner = $0; picked.insert(.owner) },
+                        by: text, kind: .owner)
                 }
-                ComposerChip(title: due.map { TaskDates.label($0, now: TaskDates.now()) } ?? "Due date", prompt: "Due date, or type one…") {
+                ComposerChip(title: chosenDue.map { TaskDates.label($0, now: TaskDates.now()) } ?? "Due date", prompt: "Due date, or type one…") {
                     Image(systemName: "calendar").font(.system(size: 11)).foregroundStyle(Theme.inkSecondary)
                 } make: { text in
-                    WorkChoices.dues(text, clearable: due != nil) { candidate in
-                        due.map { PlanningFormat.days(from: $0, to: candidate) == 0 } ?? false
-                    } pick: { due = $0 }
+                    WorkChoices.dues(text, clearable: chosenDue != nil) { candidate in
+                        chosenDue.map { PlanningFormat.days(from: $0, to: candidate) == 0 } ?? false
+                    } pick: { due = $0; picked.insert(.due) }
                 }
-                ComposerChip(title: work.projects.first { $0.id == project }?.title ?? "Project", prompt: "Project…") {
+                ComposerChip(title: work.projects.first { $0.id == chosenProject }?.title ?? "Project", prompt: "Project…") {
                     Image(systemName: "folder").font(.system(size: 11)).foregroundStyle(Theme.inkSecondary)
                 } make: { text in
                     WorkChoices.filtered(
-                        WorkChoices.projects(work.projects) { $0 == project } pick: { project = $0 }, by: text, kind: .project)
+                        WorkChoices.projects(work.projects) { $0 == chosenProject } pick: { project = $0; picked.insert(.project) },
+                        by: text, kind: .project)
                 }
                 ComposerChip(title: labelTitle(work.labels), prompt: "Labels…", keepsOpen: true) {
                     Image(systemName: "tag").font(.system(size: 11)).foregroundStyle(Theme.inkSecondary)
                 } make: { text in
                     WorkChoices.filtered(
-                        WorkChoices.labels(work.labels, text: text) { labels.contains($0) } toggle: { label in
-                            if let index = labels.firstIndex(of: label) { labels.remove(at: index) } else { labels.append(label) }
+                        WorkChoices.labels(work.labels, text: text) { labelChecked($0) } toggle: { label in
+                            toggleLabel(label)
                         } create: { name in
-                            let hues: [Double] = [25, 60, 145, 200, 250, 290, 330]
-                            work.saveLabel(id: nil, name: name, hue: hues[work.labels.count % hues.count])
-                            if let made = work.labels.first(where: { $0.name == name }) { labels.append(made.id) }
+                            labels.append(work.makeLabel(named: name))
                         }, by: text, kind: .labels)
                 }
             }
@@ -97,7 +110,7 @@ struct TaskComposer: View {
                 Spacer(minLength: 0)
                 Button("Cancel") { model.workFocus.composing = nil }
                     .buttonStyle(.quiet)
-                    .keyboardShortcut(.cancelAction)
+                    .keyboardShortcut(reading.selected == nil ? KeyboardShortcut.cancelAction : nil)
                 Button(action: create) {
                     HStack(spacing: 8) {
                         Text("Create task")
@@ -131,7 +144,7 @@ struct TaskComposer: View {
     }
 
     private func ownerName(_ people: [WorkPersonChoice]) -> String {
-        switch owner {
+        switch chosenOwner {
         case .myself: "Me"
         case let .person(id): people.first { $0.id == id }?.name ?? "Someone"
         case .nobody: "No owner"
@@ -139,7 +152,7 @@ struct TaskComposer: View {
     }
 
     private func face(_ people: [WorkPersonChoice]) -> AvatarFace {
-        switch owner {
+        switch chosenOwner {
         case .myself: AvatarFace(kind: .me, name: "Me")
         case let .person(id): AvatarFace(kind: .person(id), name: ownerName(people))
         case .nobody: AvatarFace(kind: .unassigned, name: "No owner")
@@ -147,11 +160,36 @@ struct TaskComposer: View {
     }
 
     private func labelTitle(_ all: [WorkLabel]) -> String {
-        let names = labels.compactMap { id in all.first { $0.id == id }?.name }
+        let words = self.words
+        let ids = labels + words.labelIds.filter { !labels.contains($0) }
+        let names = ids.compactMap { id in all.first { $0.id == id }?.name } + words.newLabels
         return switch names.count {
         case 0: "Labels"
         case 1, 2: names.joined(separator: ", ")
         default: "\(names.count) labels"
+        }
+    }
+
+    private var words: TitleFields { TitleFields(reading.parse) }
+    private var chosenPriority: Int { picked.contains(.priority) ? priority : words.priority ?? priority }
+    private var chosenOwner: WorkOwner { picked.contains(.owner) ? owner : words.owner ?? owner }
+    private var chosenDue: Int64? { picked.contains(.due) ? due : words.due ?? due }
+    private var chosenProject: String? { picked.contains(.project) ? project : words.project ?? project }
+
+    private func labelChecked(_ id: String) -> Bool {
+        labels.contains(id) || words.labelIds.contains(id)
+    }
+
+    /// A label the title named is unchecked by keeping its words as text.
+    private func toggleLabel(_ id: String) {
+        guard labelChecked(id) else {
+            labels.append(id)
+            return
+        }
+        labels.removeAll { $0 == id }
+        if let token = reading.labelToken(id) {
+            let text = title
+            Task { await reading.keepAsText(token, in: text, work: model.work) }
         }
     }
 
@@ -161,10 +199,15 @@ struct TaskComposer: View {
         creating = true
         failure = nil
         let text = details.trimmingCharacters(in: .whitespacesAndNewlines)
+        let typed = title
         Task {
-            let item = await model.work.create(
-                title: trimmed, details: text.isEmpty ? nil : text, status: status, priority: priority,
-                projectId: project, owner: owner, dueAtMs: due, labelIds: labels)
+            let work = model.work
+            let words = TitleFields(await reading.settled(typed, in: work))
+            let item = await work.create(
+                title: words.title ?? trimmed, details: text.isEmpty ? nil : text, status: status,
+                priority: chosenPriority, projectId: chosenProject, owner: chosenOwner, dueAtMs: chosenDue,
+                labelIds: labels + words.labels(making: work).filter { !labels.contains($0) },
+                recurrence: words.recurrence)
             creating = false
             guard let item else {
                 failure = model.work.mutationError ?? "The task wasn't created."

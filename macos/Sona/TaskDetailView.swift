@@ -381,7 +381,45 @@ struct PlayMoment: View {
     }
 }
 
-/// Another place the task came up: a meeting moment, a note, a loop.
+/// Plays the part of a dictation a task was heard in, and stops where it
+/// ends; the same button stops it sooner.
+private struct PlaySpan: View {
+    let historyId: Int64
+    let atMs: Int64
+    let endMs: Int64?
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        let library = model.library
+        let focus = model.workFocus
+        let key = "dictation:\(historyId):\(atMs)"
+        let loading = library.loadingAudio == historyId
+        let mine = focus.playingMoment == key && (library.playingId == historyId || loading)
+        let running = mine && (library.playing || loading)
+        let failed = focus.playingMoment == key && library.playingId != historyId && !loading
+        HStack(spacing: 6) {
+            if failed, let error = library.error {
+                Text(error).metaText(Theme.live).lineLimit(1)
+            }
+            Button {
+                if running {
+                    library.stopPlayback()
+                } else {
+                    focus.playingMoment = key
+                    library.playSpan(historyId, fromMs: atMs, toMs: endMs)
+                }
+            } label: {
+                Label(running ? "Stop" : "Play", systemImage: running ? "stop.fill" : "play.fill")
+            }
+            .buttonStyle(QuietButton(color: Theme.accent, compact: true))
+            .disabled(library.heldForRecording)
+            .help(library.heldForRecording ? ConversationAudioPlayback.heldNotice : "Play what was said")
+        }
+    }
+}
+
+/// Another place the task came up: a meeting moment, a note, a loop, a
+/// dictation, a page.
 private struct EvidenceLine: View {
     let link: PlanningEvidenceLink
     @Environment(AppModel.self) private var model
@@ -392,16 +430,20 @@ private struct EvidenceLine: View {
                 .font(.system(size: 12))
                 .foregroundStyle(Theme.inkSecondary)
                 .frame(width: 16)
-            Text(link.title ?? fallback)
+            Text(text)
                 .bodyText(13, link.available ? Theme.ink : Theme.inkTertiary)
                 .lineLimit(1)
-            if let at = link.atMs, link.sourceKind == .meeting {
-                Text(at.meetingMsClock).metaText().monospacedDigit()
+                .help(help ?? "")
+            if let meta {
+                Text(meta).metaText().monospacedDigit().lineLimit(1)
             }
             Spacer(minLength: 8)
             if link.available {
                 if link.sourceKind == .meeting, let at = link.atMs {
                     PlayMoment(sessionId: link.sourceId, atMs: at)
+                }
+                if link.sourceKind == .dictation, let id = Int64(link.sourceId), let at = link.atMs {
+                    PlaySpan(historyId: id, atMs: at, endMs: link.endMs)
                 }
                 Button {
                     model.openPlanningEvidence(link)
@@ -416,11 +458,47 @@ private struct EvidenceLine: View {
         .frame(minHeight: 30)
     }
 
+    private var text: String {
+        switch link.sourceKind {
+        case .dictation: link.caption.map { "“\($0)”" } ?? link.title ?? fallback
+        case .link: link.caption ?? host ?? fallback
+        case .meeting, .note, .loop: link.title ?? fallback
+        }
+    }
+
+    private var meta: String? {
+        switch link.sourceKind {
+        case .meeting: link.atMs?.meetingMsClock
+        case .dictation:
+            link.atMs.map { at in [at.meetingMsClock, link.endMs?.meetingMsClock].compactMap { $0 }.joined(separator: "–") }
+        case .link: link.caption == nil ? nil : host
+        case .note, .loop: nil
+        }
+    }
+
+    private var help: String? {
+        switch link.sourceKind {
+        case .dictation: link.title
+        case .link: link.sourceId
+        case .meeting, .note, .loop: nil
+        }
+    }
+
+    /// The site a link points into, or the file's name.
+    private var host: String? {
+        guard let url = URL(string: link.sourceId) else { return nil }
+        if url.isFileURL { return url.lastPathComponent }
+        guard let host = url.host() else { return nil }
+        return host.hasPrefix("www.") ? String(host.dropFirst(4)) : host
+    }
+
     private var icon: String {
         switch link.sourceKind {
         case .meeting: "waveform"
         case .note: "note.text"
         case .loop: "arrow.triangle.2.circlepath"
+        case .dictation: "mic"
+        case .link: URL(string: link.sourceId)?.isFileURL == true ? "doc" : "link"
         }
     }
 
@@ -429,6 +507,8 @@ private struct EvidenceLine: View {
         case .meeting: "A meeting"
         case .note: "A note"
         case .loop: "A commitment"
+        case .dictation: "A dictation"
+        case .link: "A link"
         }
     }
 }
@@ -713,6 +793,19 @@ struct TaskPropertyList: View {
                     PropertyValue(text: row.dueAtMs.map(PlanningFormat.day) ?? "No due date", faint: row.dueAtMs == nil) {
                         Image(systemName: "calendar").font(.system(size: 12)).foregroundStyle(Theme.inkSecondary)
                     }
+                }
+            }
+            if let detail = work.detail, detail.item.id == row.id, let rule = detail.recurrence {
+                PropertyLine(title: "Repeats") {
+                    HStack(spacing: 8) {
+                        Image(systemName: "repeat")
+                            .font(.system(size: 12))
+                            .foregroundStyle(Theme.inkSecondary)
+                            .frame(width: 16, height: 16)
+                        Text(Recurrence.display(rule)).bodyText(13, Theme.ink).lineLimit(1)
+                    }
+                    .padding(.horizontal, 8)
+                    .frame(height: 28)
                 }
             }
             PropertyLine(title: "Project") {

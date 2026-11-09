@@ -77,11 +77,7 @@ enum WorkChoices {
             } toggle: { label in
                 toggle(label, model.workRows(ids), model)
             } create: { name in
-                let hues: [Double] = [25, 60, 145, 200, 250, 290, 330]
-                work.saveLabel(id: nil, name: name, hue: hues[work.labels.count % hues.count])
-                if let made = work.labels.first(where: { $0.name == name }) {
-                    toggle(made.id, model.workRows(ids), model)
-                }
+                toggle(work.makeLabel(named: name), model.workRows(ids), model)
             }
         case .project:
             projects(work.projects) { project in rows.allSatisfy { $0.projectId == project } } pick: { project in

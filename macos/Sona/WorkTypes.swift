@@ -262,6 +262,7 @@ struct WorkItemInput: Encodable, Equatable {
     var owner: WorkOwner?
     var dueAtMs: Int64?
     var labelIds: [String]?
+    var recurrence: String?
 }
 
 /// A due window that moves with the calendar, on this Mac's clock. Weeks
@@ -497,6 +498,7 @@ struct WorkList: Decodable, Equatable {
 
 struct WorkItemDetail: Decodable, Equatable {
     var item: WorkItemRow
+    var recurrence: String?
     var evidence: [PlanningEvidenceLink]
     var relations: [WorkRelation]
     var activity: [WorkActivity]
@@ -511,4 +513,77 @@ struct WorkItemDetail: Decodable, Equatable {
 /// none when only labels or views changed.
 struct WorkChange: Decodable {
     var ids: [String]
+}
+
+/// `work_parse`: a typed title read for its fields. `title` is what is left
+/// once the tokens are taken out, empty when nothing is.
+struct WorkParse: Decodable, Equatable {
+    var title: String
+    var tokens: [WorkToken]
+}
+
+/// Words the core read as a field. `start` and `end` count UTF-16 code
+/// units, `end` exclusive; tokens come in order and never overlap.
+struct WorkToken: Decodable, Equatable, Identifiable {
+    var text: String
+    var start: Int
+    var end: Int
+    var field: WorkField
+
+    var id: Int { start }
+}
+
+/// What a token sets. A label without an id does not exist yet. A repeat
+/// carries the next time it falls due when no due date was said.
+enum WorkField: Equatable {
+    case due(at: Int64, timed: Bool)
+    case priority(Int)
+    case label(id: String?, name: String)
+    case owner(WorkOwner, name: String)
+    case project(id: String, title: String)
+    case recurrence(String, nextAt: Int64?)
+}
+
+extension WorkField: Decodable {
+    private enum Key: String, CodingKey { case kind, at, timed, level, id, name, owner, title, every, nextAt }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: Key.self)
+        let kind = try container.decode(String.self, forKey: .kind)
+        switch kind {
+        case "due":
+            self = .due(at: try container.decode(Int64.self, forKey: .at), timed: try container.decode(Bool.self, forKey: .timed))
+        case "priority": self = .priority(try container.decode(Int.self, forKey: .level))
+        case "label":
+            self = .label(id: try container.decodeIfPresent(String.self, forKey: .id), name: try container.decode(String.self, forKey: .name))
+        case "owner":
+            self = .owner(try container.decode(WorkOwner.self, forKey: .owner), name: try container.decode(String.self, forKey: .name))
+        case "project":
+            self = .project(id: try container.decode(String.self, forKey: .id), title: try container.decode(String.self, forKey: .title))
+        case "repeat":
+            self = .recurrence(try container.decode(String.self, forKey: .every), nextAt: try container.decodeIfPresent(Int64.self, forKey: .nextAt))
+        default:
+            throw DecodingError.dataCorruptedError(forKey: .kind, in: container, debugDescription: "Unknown field \(kind)")
+        }
+    }
+}
+
+/// The page in front when the quick-entry shortcut was pressed. A task
+/// made with it keeps the page as evidence.
+struct WorkLink: Decodable, Equatable {
+    var url: String
+    var title: String?
+}
+
+/// `work-quick-entry`: the shortcut was pressed.
+struct WorkQuickEntryEvent: Decodable {
+    var link: WorkLink?
+}
+
+/// `work-ramble-filed`: what a spoken ramble put in Triage. No items and no
+/// error means no task was heard.
+struct WorkRambleFiledEvent: Decodable {
+    var historyId: Int64?
+    var items: [WorkItem]
+    var error: String?
 }
