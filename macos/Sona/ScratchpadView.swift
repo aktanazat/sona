@@ -61,7 +61,7 @@ private struct ScratchNoteListPage: View {
                 HStack(spacing: 8) {
                     Button("Subjects", action: showSubjects).buttonStyle(.quiet)
                     Button("Review connections", action: showSynthesis)
-                        .buttonStyle(.compact)
+                        .buttonStyle(.secondary)
                     SearchField(prompt: "Search notes", text: $store.query)
                         .frame(width: 216)
                     Button {
@@ -100,7 +100,12 @@ private struct ScratchNoteListPage: View {
                     if searching {
                         CardLine("No notes match “\(store.activeQuery.trimmingCharacters(in: .whitespacesAndNewlines))”.")
                     } else {
-                        CardLine("No notes yet.")
+                        CardRow {
+                            Text("No notes yet.").bodyText(14, Theme.inkSecondary)
+                        } trailing: {
+                            Button("New note") { Task { await store.newNote() } }
+                                .buttonStyle(.compact)
+                        }
                     }
                 }
             } else {
@@ -217,7 +222,7 @@ private struct ScratchNoteEditorPage: View {
             HStack(spacing: 8) {
                 Button("Subjects", action: showSubjects).buttonStyle(.quiet)
                 Button("Review connections", action: showSynthesis)
-                    .buttonStyle(.compact)
+                    .buttonStyle(.secondary)
                 Button {
                     showingSources = true
                 } label: {

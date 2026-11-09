@@ -78,7 +78,7 @@ struct OverviewTodayStrip: View {
                 .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusCard))
                 .overlay(RoundedRectangle(cornerRadius: Theme.radiusCard).strokeBorder(Theme.border, lineWidth: 1))
                 .animation(Motion.settle(reduced: reduceMotion), value: counters.map(\.id))
-                .padding(.bottom, 12)
+                .padding(.bottom, 28)
             }
         }
     }
@@ -534,7 +534,7 @@ struct OverviewNeedsYou: View {
             // The suggestions and the update check answer on their own clock,
             // so an empty page is not yet the claim this sentence makes.
             if store.suggestions != nil, store.updateChecked {
-                Text("Nothing needs you.").metaText().padding(.bottom, 20)
+                Text("Nothing needs you.").metaText().padding(.bottom, 28)
             }
         } else {
             PageSection("Needs you") {

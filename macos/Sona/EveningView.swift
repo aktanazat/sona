@@ -30,7 +30,6 @@ struct EveningView: View {
                         }
                     }
                 }
-                .padding(.bottom, 20)
             }
         }
     }
@@ -76,7 +75,6 @@ private struct ShutdownSection: View {
                 }
             }
         }
-        .padding(.bottom, 20)
     }
 
     /// Three titles, then how many more.
@@ -167,7 +165,6 @@ private struct EveningLinesSection: View {
                 }
                 ErrorNote(store.error)
             }
-            .padding(.bottom, 20)
         } else if evening.hasActivity, due || store.writing {
             PageSection("End of day") {
                 Card {
@@ -180,7 +177,6 @@ private struct EveningLinesSection: View {
                 }
                 ErrorNote(store.error)
             }
-            .padding(.bottom, 20)
         }
     }
 

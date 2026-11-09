@@ -11,7 +11,7 @@ struct MorningPlanView: View {
         let rituals = model.rituals
         ZStack(alignment: .bottomLeading) {
             VStack(spacing: 0) {
-                WorkBar {
+                HStack(spacing: 10) {
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
                         Text("Today")
                             .font(TypeScale.listTitle)
@@ -20,9 +20,14 @@ struct MorningPlanView: View {
                             .font(TypeScale.label(12))
                             .foregroundStyle(Theme.inkTertiary)
                     }
-                } trailing: {
+                    Spacer(minLength: 12)
                     trailing
                 }
+                .frame(maxWidth: Theme.contentMax, alignment: .leading)
+                .padding(.horizontal, Theme.margin)
+                .frame(maxWidth: .infinity)
+                .frame(height: Theme.headerHeight)
+                .overlay(alignment: .bottom) { Hairline() }
                 if let error = rituals.error {
                     ErrorNote(error)
                         .frame(maxWidth: Theme.contentMax, alignment: .leading)
@@ -52,7 +57,7 @@ struct MorningPlanView: View {
                 .foregroundStyle(Theme.inkTertiary)
                 .accessibilityLabel("\(rituals.picked.count) of \(RitualStore.focusLimit) picked")
             Button("Start the day", action: model.startDay)
-                .buttonStyle(PrimaryButton(compact: true))
+                .buttonStyle(.primary)
                 .help("Start the day  ↩")
         case .stale:
             if let question = model.staleQuestion() {
@@ -189,18 +194,20 @@ private struct PickRow: View {
     }
 }
 
-/// The pick's number on the accent; unpicked, a ring on the row the keys
-/// point at and nothing elsewhere.
+/// The pick's number on the accent; unpicked, an empty box on the row the
+/// keys point at and nothing elsewhere. A box, so it never reads as the
+/// round status mark beside it.
 private struct PickMark: View {
     let number: Int?
     let pointed: Bool
 
     var body: some View {
+        let shape = RoundedRectangle(cornerRadius: Theme.radiusKey)
         ZStack {
-            Circle()
+            shape
                 .strokeBorder(Theme.inkTertiary, lineWidth: 1.5)
                 .opacity(number == nil && pointed ? 1 : 0)
-            Circle()
+            shape
                 .fill(Theme.accentFill)
                 .opacity(number == nil ? 0 : 1)
             if let number {

@@ -36,7 +36,7 @@ struct PersonHero: View {
                 Button(action: chooseContact) {
                     Label("Add contact", systemImage: "person.crop.circle.badge.plus")
                 }
-                .buttonStyle(.compact)
+                .buttonStyle(.secondary)
                 .disabled(store.busy)
             }
         }
@@ -187,14 +187,17 @@ struct PersonStats: View, Equatable {
                 talkShare
                 open
             }
-            HStack(spacing: 10) {
+            HStack(spacing: 0) {
                 together
-                landed
-                count(figures.notes, label: "Notes") { show(.history, .notes) }
-                count(figures.tasks, label: "Open tasks") { show(.work, nil) }
-                count(figures.words, label: "Their words") { show(.history, .contributions) }
-                count(figures.documents, label: "Documents") { show(.profile, nil) }
+                landed.ruled()
+                count(figures.notes, label: "Notes") { show(.history, .notes) }.ruled()
+                count(figures.tasks, label: "Open tasks") { show(.work, nil) }.ruled()
+                count(figures.words, label: "Their words") { show(.history, .contributions) }.ruled()
+                count(figures.documents, label: "Documents") { show(.profile, nil) }.ruled()
             }
+            .background(Theme.surface)
+            .clipShape(RoundedRectangle(cornerRadius: Theme.radiusCard))
+            .overlay(RoundedRectangle(cornerRadius: Theme.radiusCard).strokeBorder(Theme.border, lineWidth: 1))
         }
         .animation(reduceMotion ? nil : .easeOut(duration: 0.2), value: figures)
     }
@@ -266,7 +269,7 @@ struct PersonStats: View, Equatable {
         return Button { show(.history, .conversations) } label: {
             NumberTile(
                 time?.value ?? (figures.meetings == nil ? " " : "—"), label: "Together", unit: time?.unit,
-                tone: time == nil ? Theme.inkTertiary : Theme.ink)
+                tone: time == nil ? Theme.inkTertiary : Theme.ink, framed: false)
         }
         .buttonStyle(TilePress())
         .disabled(figures.meetings == nil)
@@ -282,7 +285,7 @@ struct PersonStats: View, Equatable {
         return NumberTile(
             outcomes.map { "\($0.landed)" } ?? (figures.meetings == nil ? " " : "—"),
             label: "Landed", unit: outcomes == nil ? nil : "of \(total)",
-            tone: outcomes == nil ? Theme.inkTertiary : Theme.ink)
+            tone: outcomes == nil ? Theme.inkTertiary : Theme.ink, framed: false)
     }
 
     /// "45 min", "2.5 h", "12 h".
@@ -296,9 +299,9 @@ struct PersonStats: View, Equatable {
     private func count(_ value: PersonFigures.Count, label: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             switch value {
-            case .unread: NumberTile(" ", label: label)
-            case .unknown: NumberTile("—", label: label, tone: Theme.inkTertiary)
-            case let .value(count): NumberTile("\(count)", label: label)
+            case .unread: NumberTile(" ", label: label, framed: false)
+            case .unknown: NumberTile("—", label: label, tone: Theme.inkTertiary, framed: false)
+            case let .value(count): NumberTile("\(count)", label: label, framed: false)
             }
         }
         .buttonStyle(TilePress())
@@ -307,18 +310,24 @@ struct PersonStats: View, Equatable {
     }
 }
 
-/// A tile that opens what it counts: a wash under the pointer and while
-/// pressed.
+/// A number in the strip that opens what it counts: a wash under the pointer
+/// and while pressed.
 private struct TilePress: ButtonStyle {
     @State private var hovering = false
 
     func makeBody(configuration: Configuration) -> some View {
-        let shape = RoundedRectangle(cornerRadius: Theme.radiusCard)
         configuration.label
-            .overlay(shape.fill(Theme.wash).opacity(configuration.isPressed || hovering ? 1 : 0))
-            .contentShape(shape)
+            .overlay(Theme.wash.opacity(configuration.isPressed || hovering ? 1 : 0))
+            .contentShape(Rectangle())
             .onHover { hovering = $0 }
             .hoverFade(hovering)
+    }
+}
+
+private extension View {
+    /// The line between two numbers of one strip.
+    func ruled() -> some View {
+        overlay(alignment: .leading) { Hairline(axis: .vertical).padding(.vertical, 12) }
     }
 }
 

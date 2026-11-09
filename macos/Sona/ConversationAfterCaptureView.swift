@@ -18,7 +18,7 @@ struct ConversationAfterCaptureView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 24) {
+        VStack(alignment: .leading, spacing: 0) {
             if !store.transcriptDeleted {
                 MeetingVoiceIdentitySection(sessionId: snapshot.session.sessionId)
                 RecordingTailSection(store: store, snapshot: snapshot, core: core)
