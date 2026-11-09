@@ -2819,6 +2819,7 @@ impl Board {
             source_speaker: before.and_then(|row| row.source_speaker.clone()),
             source_at_ms: before.and_then(|row| row.source_at_ms),
             blocked_by_open_count: before.map_or(0, |row| row.blocked_by_open_count),
+            raised_in: before.map_or(0, |row| row.raised_in),
             item,
         };
         project_task(&row, &self.labels)
@@ -2955,7 +2956,8 @@ impl Board {
                 WorkActivityKind::Title
                 | WorkActivityKind::Details
                 | WorkActivityKind::Archived
-                | WorkActivityKind::Restored => value.to_owned(),
+                | WorkActivityKind::Restored
+                | WorkActivityKind::Kept => value.to_owned(),
             })
         };
         ExternalWorkActivity {
