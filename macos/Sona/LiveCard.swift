@@ -454,12 +454,6 @@ struct HeardPromisesCard: View {
                         Card {
                             ForEach(rows) { row in pending(row, highlighted: heard.highlighted == row.id) }
                         }
-                        HStack(spacing: 12) {
-                            Shortcut("1")
-                            Text("Accept").metaText()
-                            Shortcut("2")
-                            Text("Decline").metaText()
-                        }
                     }
                     if let followUp, !followUp.text.isEmpty {
                         draft(followUp)
@@ -487,8 +481,8 @@ struct HeardPromisesCard: View {
         } trailing: {
             HStack(spacing: 8) {
                 Chip(PromiseLabel.text(owner: row.ownerIsSelf ? "Me" : row.ownerName, dueAtMs: row.dueAtMs))
-                Button("Accept") { model.perform(.accept, on: [row.id]) }.buttonStyle(.quiet)
-                Button("Decline") { model.perform(.decline, on: [row.id]) }.buttonStyle(.quiet)
+                Button("Accept") { model.perform(.accept, on: [row.id]) }.buttonStyle(.quiet).help("Accept  1")
+                Button("Decline") { model.perform(.decline, on: [row.id]) }.buttonStyle(.quiet).help("Decline  2")
             }
         }
         .background(highlighted ? Theme.wash : .clear)
