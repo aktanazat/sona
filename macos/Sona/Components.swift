@@ -444,6 +444,27 @@ extension PageTitle where Action == EmptyView {
     }
 }
 
+extension View {
+    /// Keeps the window's toolbar while a page shows no bar: without an item
+    /// the toolbar goes, and the close, minimize and zoom buttons jump to the
+    /// window's corner.
+    func keepsWindowToolbar() -> some View {
+        toolbar {
+            if #available(macOS 26.0, *) {
+                toolbarAnchor.sharedBackgroundVisibility(.hidden)
+            } else {
+                toolbarAnchor
+            }
+        }
+    }
+
+    private var toolbarAnchor: some ToolbarContent {
+        ToolbarItem(placement: .automatic) {
+            Color.clear.frame(width: 1, height: 1).accessibilityHidden(true)
+        }
+    }
+}
+
 struct PageSection<Content: View>: View {
     let label: String
     let content: Content
