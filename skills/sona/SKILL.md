@@ -115,6 +115,14 @@ deciding: `accept` moves items to Todo with Sona's suggested owner, due day and
 project (`--ignore-suggestions` keeps none), `decline` cancels them and sets
 their commitments aside, `duplicate S-14 --of S-12` folds one into another.
 
+`ask "what did Dana promise about pricing"` answers with the lines that say
+it, numbered, from meetings, what they left open and dictations; `--take 1,3`
+makes Triage tasks of those lines, each keeping its quote. `say` changes tasks
+from plain words: `say "push everything not urgent to monday" --dry-run`
+shows what would move, the same words without `--dry-run` move it. Without a
+who it means the user's own open work. `watch pricing` tells the user when a
+meeting or dictation says the word; `watches` lists them, `unwatch` stops one.
+
 Every write takes `--operation-id`. Left out, Sona derives one from the request
 and what it read, so running a command again never changes anything twice: a
 create repeated the same day answers with the first task and `replayed:true`,
@@ -411,9 +419,13 @@ claude mcp add sona -- bun /absolute/path/to/sona/tools/sona-mcp/src/index.ts
 | `sona_work_claim`                 | `task` — writes                                              |
 | `sona_work_done`                  | `tasks`, `evidence?`, `dry_run?` — writes                    |
 | `sona_work_triage`                | `tasks`, `decision`, `of?`, `dry_run?` — writes              |
+| `sona_work_ask`                   | `question`                                                   |
+| `sona_work_take`                  | `question`, `lines` — writes                                 |
+| `sona_work_say`                   | `words`, `dry_run?` — writes                                 |
 
-Archiving, links, labels and views are opt-in tools: set `SONA_MCP_TOOLS=all`,
-or name the ones to add, when registering the server. Task export is CLI-only.
+Archiving, links, labels, views and watches are opt-in tools: set
+`SONA_MCP_TOOLS=all`, or name the ones to add, when registering the server.
+Task export is CLI-only.
 
 The result is the CLI JSON in one text block. Refusal messages lead with Sona's
 code, and `data.code` preserves it. Consent failures also carry

@@ -27,6 +27,9 @@ use crate::meeting::session::MeetingSessionManager;
 use crate::meeting::types::MeetingSessionId;
 use crate::planning;
 use crate::planning::work::agents::{self, AgentChange};
+use crate::planning::work::ask::WorkAnswerLine;
+use crate::planning::work::capture::{WorkCaptureSource, WorkTakenLine};
+use crate::planning::work::command::WorkCommandChange;
 use crate::planning::work::types::{
     WorkActivity, WorkActivityKind, WorkActor, WorkCycle, WorkCycleRef, WorkCycleState,
     WorkDirection, WorkDisplay, WorkDue, WorkFieldSuggestion, WorkGroupBy, WorkItem,
@@ -35,8 +38,9 @@ use crate::planning::work::types::{
     WorkQuery, WorkRelation, WorkRelationKind, WorkRepeat, WorkSource, WorkStatus,
     WorkSuggestionField, WorkSuggestionValue, WorkView,
 };
+use crate::planning::work::watch::WorkWatch;
 use crate::planning::work::{self, items, parse};
-use crate::query::{loop_link, KeptLocal, QUERY_SCHEMA_VERSION};
+use crate::query::{loop_link, KeptLocal, QueryAudience, QUERY_SCHEMA_VERSION};
 use crate::settings::WorkAutonomy;
 use chrono::{Local, NaiveDate};
 use clap::{Args, Subcommand, ValueEnum};
@@ -129,6 +133,18 @@ pub enum WorkVerb {
     /// Who owes what from one meeting, by when, in their words: the
     /// follow-up to send. Nothing is sent.
     FollowUp(FollowUpArgs),
+    /// Ask every conversation a question; the lines that answer it, numbered.
+    /// --take makes Triage tasks of those lines, each with its quote and where it was said.
+    Ask(AskArgs),
+    /// Change tasks by saying it: "push everything not urgent to monday",
+    /// "move Dana's tasks to next week", "mark these done".
+    Say(SayArgs),
+    /// Watched topics, each with the last times it came up.
+    Watches,
+    /// Watch a topic: Sona notifies once when a processed meeting or a dictation says it.
+    Watch(WatchArgs),
+    /// Stop watching a topic.
+    Unwatch(UnwatchArgs),
 }
 
 #[derive(Args, Clone, Debug, Eq, PartialEq)]
@@ -377,6 +393,47 @@ pub struct FollowUpArgs {
     /// The meeting's id.
     #[arg(value_name = "MEETING_ID")]
     pub meeting: Uuid,
+}
+
+#[derive(Args, Clone, Debug, Eq, PartialEq)]
+pub struct AskArgs {
+    /// The question: "what did Dana promise about pricing".
+    #[arg(required = true, num_args = 1.., value_name = "QUESTION")]
+    pub question: Vec<String>,
+    /// Make Triage tasks of these answer lines, by number: --take 1,3.
+    #[arg(long, value_delimiter = ',', value_name = "N")]
+    pub take: Vec<usize>,
+    #[command(flatten)]
+    pub write: WriteArgs,
+}
+
+#[derive(Args, Clone, Debug, Eq, PartialEq)]
+pub struct SayArgs {
+    /// The change in words.
+    #[arg(required = true, num_args = 1.., value_name = "WORDS")]
+    pub words: Vec<String>,
+    /// Print what would change and write nothing.
+    #[arg(long)]
+    pub dry_run: bool,
+    #[command(flatten)]
+    pub write: WriteArgs,
+}
+
+#[derive(Args, Clone, Debug, Eq, PartialEq)]
+pub struct WatchArgs {
+    /// The word or phrase to listen for.
+    #[arg(required = true, num_args = 1.., value_name = "TOPIC")]
+    pub topic: Vec<String>,
+    /// Only when this person says it.
+    #[arg(long, value_name = "PERSON")]
+    pub person: Option<String>,
+}
+
+#[derive(Args, Clone, Debug, Eq, PartialEq)]
+pub struct UnwatchArgs {
+    /// The watched phrase, or its id.
+    #[arg(required = true, num_args = 1.., value_name = "TOPIC")]
+    pub topic: Vec<String>,
 }
 
 /// Which tasks a list keeps, by who and what.
@@ -834,7 +891,10 @@ impl WorkVerb {
             | Self::Decline(TasksArgs { dry_run: true, .. })
             | Self::Archive(TasksArgs { dry_run: true, .. })
             | Self::Restore(TasksArgs { dry_run: true, .. })
-            | Self::Snooze(SnoozeArgs { dry_run: true, .. }) => READ_SCOPES,
+            | Self::Snooze(SnoozeArgs { dry_run: true, .. })
+            | Self::Say(SayArgs { dry_run: true, .. })
+            | Self::Watches => READ_SCOPES,
+            Self::Ask(AskArgs { take, .. }) if take.is_empty() => READ_SCOPES,
             Self::Create(_)
             | Self::Update(_)
             | Self::Claim(_)
@@ -850,7 +910,11 @@ impl WorkVerb {
             | Self::LabelSave(_)
             | Self::LabelDelete(_)
             | Self::ViewSave(_)
-            | Self::ViewDelete(_) => WRITE_SCOPES,
+            | Self::ViewDelete(_)
+            | Self::Ask(_)
+            | Self::Say(_)
+            | Self::Watch(_)
+            | Self::Unwatch(_) => WRITE_SCOPES,
         }
     }
 
@@ -885,6 +949,10 @@ impl WorkVerb {
             }
             Self::LabelSave(args) if args.name.trim().is_empty() => "A label needs a name.",
             Self::ViewSave(args) if args.name.trim().is_empty() => "A view needs a name.",
+            Self::Ask(args) if args.take.contains(&0) => "Answer lines count from 1.",
+            Self::Watch(args) if args.topic.join(" ").trim().is_empty() => {
+                "Name a word or phrase to watch."
+            }
             _ => return Ok(()),
         };
         Err(ExternalError::invalid(refusal))
@@ -962,6 +1030,49 @@ pub enum WorkAnswer {
     FollowUp(ExternalWorkFollowUp),
     Cycles(ExternalWorkCycles),
     Cycle(Box<ExternalWorkCycleProgress>),
+    Lines(ExternalWorkLines),
+    Watches(ExternalWorkWatches),
+}
+
+/// What `ask` found: the lines that answer, numbered for --take.
+#[derive(Clone, Debug, Serialize)]
+pub struct ExternalWorkLines {
+    pub schema_version: u32,
+    pub question: String,
+    /// What the question was read as: the words, the person, the time.
+    pub read_as: Vec<String>,
+    pub lines: Vec<ExternalWorkLine>,
+    /// The tasks --take made.
+    pub taken: Vec<ExternalWorkItem>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ExternalWorkLine {
+    pub number: usize,
+    pub quote: String,
+    pub said_by: Option<String>,
+    /// The meeting or dictation it is from.
+    pub from: String,
+    /// The local day it was said, YYYY-MM-DD.
+    pub said_on: Option<String>,
+    pub link: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ExternalWorkWatches {
+    pub schema_version: u32,
+    pub watches: Vec<ExternalWorkWatch>,
+    /// True when this answer is the watch just removed.
+    pub removed: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ExternalWorkWatch {
+    pub id: String,
+    pub topic: String,
+    pub person: Option<String>,
+    /// The last times it came up, newest first.
+    pub heard: Vec<ExternalWorkLine>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1486,6 +1597,187 @@ pub(super) async fn answer(
         WorkVerb::ViewDelete(args) => tracker.view_delete(args),
         WorkVerb::Export(args) => tracker.export(args).await,
         WorkVerb::FollowUp(args) => tracker.follow_up(args).await,
+        WorkVerb::Ask(args) => tracker.ask(args).await,
+        WorkVerb::Say(args) => tracker.say(args).await,
+        WorkVerb::Watches => tracker.watches().await,
+        WorkVerb::Watch(args) => tracker.watch(args).await,
+        WorkVerb::Unwatch(args) => tracker.unwatch(args).await,
+    }
+}
+
+impl Tracker<'_> {
+    async fn ask(&self, args: &AskArgs) -> Result<WorkAnswer, ExternalError> {
+        let question = args.question.join(" ");
+        let answer = work::ask::answer(self.app, QueryAudience::External, &question)
+            .await
+            .map_err(|message| refusal(self.history, message))?;
+        let mut taken = Vec::new();
+        if !args.take.is_empty() {
+            let mut lines = Vec::with_capacity(args.take.len());
+            for number in &args.take {
+                let line = answer.lines.get(number - 1).ok_or_else(|| {
+                    ExternalError::invalid(format!(
+                        "There is no line {number}; the answer has {}.",
+                        answer.lines.len()
+                    ))
+                })?;
+                lines.push(WorkTakenLine {
+                    quote: line.quote.clone(),
+                    source: line.source.clone(),
+                    person_id: line.person_id.clone(),
+                });
+            }
+            let operation_id = args.write.operation_id("take", &(&question, &args.take))?;
+            let started_ms = now_ms();
+            let items =
+                work::capture::take_lines_as(self.app, WorkActor::Agent, &operation_id, &lines)
+                    .await
+                    .map_err(|message| self.write_refusal(message, &operation_id, "These lines"))?;
+            let ids: Vec<String> = items.iter().map(|item| item.id.clone()).collect();
+            self.credit(&args.write, &ids, started_ms)?;
+            let board = self.board().await?;
+            taken = items
+                .into_iter()
+                .map(|item| board.project_item(item))
+                .collect();
+        }
+        Ok(WorkAnswer::Lines(ExternalWorkLines {
+            schema_version: QUERY_SCHEMA_VERSION,
+            question,
+            read_as: answer.read_as,
+            lines: answer
+                .lines
+                .iter()
+                .enumerate()
+                .map(|(index, line)| external_line(index + 1, line))
+                .collect(),
+            taken,
+        }))
+    }
+
+    async fn say(&self, args: &SayArgs) -> Result<WorkAnswer, ExternalError> {
+        let words = args.words.join(" ");
+        let command = work::command::command_preview(self.history, self.meetings, &words, &[])
+            .await
+            .map_err(|message| refusal(self.history, message))?
+            .ok_or_else(|| {
+                ExternalError::invalid("That does not read as a change to tasks.").hint(
+                    "Say it like: push everything not urgent to monday, or move Dana's tasks to next week.",
+                )
+            })?;
+        let board = self.board().await?;
+        let rows: Vec<&WorkItemRow> = command
+            .items
+            .iter()
+            .filter_map(|row| board.row(&row.item.id))
+            .collect();
+        match command.change {
+            WorkCommandChange::Archive => {
+                let tasks = rows
+                    .iter()
+                    .map(|row| TaskRef::Id(row.item.id.clone()))
+                    .collect();
+                self.archive(
+                    &TasksArgs {
+                        tasks,
+                        dry_run: args.dry_run,
+                        write: args.write.clone(),
+                    },
+                    true,
+                )
+                .await
+            }
+            WorkCommandChange::Update { patch } => {
+                let planned = rows.into_iter().map(|row| (row, patch.clone())).collect();
+                self.apply(
+                    &board,
+                    WorkAction::Updated,
+                    args.dry_run,
+                    &args.write,
+                    planned,
+                    None,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn watches(&self) -> Result<WorkAnswer, ExternalError> {
+        let watches = work::watch::list(self.app)
+            .await
+            .map_err(|message| refusal(self.history, message))?;
+        self.watches_answer(watches, false).await
+    }
+
+    async fn watch(&self, args: &WatchArgs) -> Result<WorkAnswer, ExternalError> {
+        let person_id = match &args.person {
+            Some(name) => Some(self.board().await?.person(name)?.id.clone()),
+            None => None,
+        };
+        let watch = work::watch::save(self.app, &args.topic.join(" "), person_id)
+            .await
+            .map_err(|message| refusal(self.history, message))?;
+        self.watches_answer(vec![watch], false).await
+    }
+
+    async fn unwatch(&self, args: &UnwatchArgs) -> Result<WorkAnswer, ExternalError> {
+        let topic = args.topic.join(" ");
+        let topic = topic.trim();
+        let found = work::watch::list(self.app)
+            .await
+            .map_err(|message| refusal(self.history, message))?
+            .into_iter()
+            .find(|watch| watch.id == topic || watch.phrase.eq_ignore_ascii_case(topic))
+            .ok_or_else(|| {
+                ExternalError::new(
+                    ExternalErrorCode::NotFound,
+                    format!("Nothing watches \u{201C}{topic}\u{201D}."),
+                )
+                .hint("List them with: sona work watches")
+            })?;
+        work::watch::remove(self.app, &found.id)
+            .map_err(|message| refusal(self.history, message))?;
+        self.watches_answer(vec![found], true).await
+    }
+
+    /// Watches as an outside caller may see them: lines from meetings kept
+    /// on this Mac are left out.
+    async fn watches_answer(
+        &self,
+        watches: Vec<WorkWatch>,
+        removed: bool,
+    ) -> Result<WorkAnswer, ExternalError> {
+        let fence = Fence::read(self.meetings).await?;
+        Ok(WorkAnswer::Watches(ExternalWorkWatches {
+            schema_version: QUERY_SCHEMA_VERSION,
+            watches: watches
+                .into_iter()
+                .map(|watch| ExternalWorkWatch {
+                    heard: watch
+                        .hits
+                        .iter()
+                        .filter(|hit| !fence.hides_line(&hit.line))
+                        .enumerate()
+                        .map(|(index, hit)| external_line(index + 1, &hit.line))
+                        .collect(),
+                    id: watch.id,
+                    topic: watch.phrase,
+                    person: watch.person_name,
+                })
+                .collect(),
+            removed,
+        }))
+    }
+}
+
+fn external_line(number: usize, line: &WorkAnswerLine) -> ExternalWorkLine {
+    ExternalWorkLine {
+        number,
+        quote: line.quote.clone(),
+        said_by: line.speaker.clone(),
+        from: line.title.clone(),
+        said_on: iso_day(line.when_utc_ms),
+        link: line.link.clone(),
     }
 }
 
@@ -2738,6 +3030,16 @@ impl Fence {
                 | planning::EvidenceSourceKind::Dictation
                 | planning::EvidenceSourceKind::Link => false,
             },
+        }
+    }
+
+    fn hides_line(&self, line: &WorkAnswerLine) -> bool {
+        let WorkCaptureSource::Meeting { session_id, .. } = &line.source else {
+            return false;
+        };
+        match self {
+            Self::Open(kept_local) => kept_local.hides_meeting(session_id),
+            Self::Closed => true,
         }
     }
 }
@@ -4162,6 +4464,45 @@ impl WorkAnswer {
                     );
                 }
             }
+            Self::Lines(answer) => {
+                if answer.lines.is_empty() {
+                    text.push_str("Nothing said answers that.\n");
+                }
+                for line in &answer.lines {
+                    line_text(&mut text, line);
+                }
+                if !answer.taken.is_empty() {
+                    text.push_str("\nIn Triage:\n");
+                    for task in &answer.taken {
+                        task_line(&mut text, task, &today);
+                    }
+                }
+            }
+            Self::Watches(answer) => {
+                if answer.watches.is_empty() {
+                    text.push_str(
+                        "Nothing is watched. Watch a topic with: sona work watch WORDS\n",
+                    );
+                }
+                for watch in &answer.watches {
+                    let verb = if answer.removed {
+                        "Stopped watching"
+                    } else {
+                        "Watching"
+                    };
+                    let _ = write!(text, "{verb} \u{201C}{}\u{201D}", watch.topic);
+                    if let Some(person) = &watch.person {
+                        let _ = write!(text, " from {person}");
+                    }
+                    text.push('\n');
+                    if !answer.removed {
+                        for line in &watch.heard {
+                            text.push_str("  ");
+                            line_text(&mut text, line);
+                        }
+                    }
+                }
+            }
         }
         if let Some(note) = left_out(self.conversations_available()) {
             let _ = writeln!(text, "{note}");
@@ -4187,7 +4528,9 @@ impl WorkAnswer {
             | Self::View(_)
             | Self::FollowUp(_)
             | Self::Cycles(_)
-            | Self::Cycle(_) => true,
+            | Self::Cycle(_)
+            | Self::Lines(_)
+            | Self::Watches(_) => true,
         }
     }
 }
@@ -4318,6 +4661,18 @@ fn short_day(iso: &str) -> String {
         |_| iso.to_owned(),
         |day| day.format("%a %-d %b").to_string(),
     )
+}
+
+fn line_text(text: &mut String, line: &ExternalWorkLine) {
+    let _ = write!(text, "{:>2}. ", line.number);
+    if let Some(said_by) = &line.said_by {
+        let _ = write!(text, "{said_by}: ");
+    }
+    let _ = write!(text, "\u{201C}{}\u{201D}  · {}", line.quote, line.from);
+    if let Some(day) = &line.said_on {
+        let _ = write!(text, ", {}", short_day(day));
+    }
+    let _ = writeln!(text, "  {}", line.link);
 }
 
 fn counts_line(text: &mut String, counts: &ExternalWorkCounts) {

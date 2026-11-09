@@ -4608,6 +4608,16 @@ mod tests {
             (vec!["work", "label-delete", "Ops"], writes),
             (vec!["work", "view-save", "Mine", "--mine"], writes),
             (vec!["work", "view-delete", "Mine"], writes),
+            (vec!["work", "ask", "pricing"], reads),
+            (vec!["work", "ask", "pricing", "--take", "1"], writes),
+            (
+                vec!["work", "say", "push everything to monday", "--dry-run"],
+                reads,
+            ),
+            (vec!["work", "say", "push everything to monday"], writes),
+            (vec!["work", "watches"], reads),
+            (vec!["work", "watch", "pricing"], writes),
+            (vec!["work", "unwatch", "pricing"], writes),
         ]
         .into_iter()
         .filter(|(argv, expected)| request(argv).required_scopes() != *expected)

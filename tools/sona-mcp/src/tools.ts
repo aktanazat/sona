@@ -1340,6 +1340,117 @@ export const TOOLS: readonly ToolDefinition[] = [
       text(input, "view", true),
     ],
   },
+  {
+    name: "sona_work_ask",
+    title: "Ask Sona's conversations",
+    description:
+      "Ask a question over every retained meeting, what meetings left open, and dictations: \"what did Dana promise about pricing\", \"what did we decide on onboarding last week\". Returns the lines that answer it, numbered, each with who said it, where, when and a sona:// link, and read_as: the words, person and time the question was read as. Lines, not a written answer; meetings kept on this Mac are left out.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        question: { type: "string", description: "The question, in plain words." },
+      },
+      required: ["question"],
+      additionalProperties: false,
+    },
+    argv: (input) => ["work", "ask", "--json", "--", text(input, "question", true)],
+  },
+  {
+    name: "sona_work_take",
+    title: "Make tasks from Sona answer lines",
+    description: `Ask the same question as sona_work_ask and make Triage tasks of the lines numbered in lines. Each task keeps its quote and where it was said; a line about something a meeting left open returns the task already following it. ${WRITES}`,
+    mutates: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        question: {
+          type: "string",
+          description: "The question sona_work_ask answered, word for word.",
+        },
+        lines: {
+          type: "string",
+          description: "Line numbers from that answer, comma-separated: 1,3.",
+        },
+        operation_id: OPERATION_ID,
+      },
+      required: ["question", "lines"],
+      additionalProperties: false,
+    },
+    argv: (input, agent) => [
+      "work",
+      "ask",
+      `--take=${tasks(input, "lines").join(",")}`,
+      ...writing(input, agent),
+      "--json",
+      "--",
+      text(input, "question", true),
+    ],
+  },
+  {
+    name: "sona_work_say",
+    title: "Change Sona tasks in words",
+    description: `Change tasks by saying the change: "push everything not urgent to monday", "move Dana's tasks to next week", "mark everything in triage for launch done", "archive canceled tasks". Sona reads it with a fixed grammar, never a model, and refuses words it cannot read. Without a who, it means the user's own open work. dry_run:true returns each task's from and to without writing; run it first. ${WRITES}`,
+    mutates: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        words: { type: "string", description: "The change, in plain words." },
+        dry_run: DRY_RUN,
+        operation_id: OPERATION_ID,
+      },
+      required: ["words"],
+      additionalProperties: false,
+    },
+    argv: (input, agent) => [
+      "work",
+      "say",
+      ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+      ...writing(input, agent),
+      "--json",
+      "--",
+      text(input, "words", true),
+    ],
+  },
+  {
+    name: "sona_work_watches",
+    title: "List Sona watches",
+    description:
+      "List the topics Sona listens for, each with the last lines that said it in a meeting or dictation.",
+    optIn: true,
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    argv: () => ["work", "watches", "--json"],
+  },
+  {
+    name: "sona_work_watch",
+    title: "Watch a topic in Sona",
+    description: `Listen for a word or phrase: when a processed meeting or a dictation says it, Sona notifies the user once, with the line. person limits it to what one person says. stop:true stops watching it. ${WRITES}`,
+    mutates: true,
+    optIn: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        topic: { type: "string", description: "The word or phrase." },
+        person: {
+          type: "string",
+          description: "Only when this person says it: a name or id from sona_people.",
+        },
+        stop: { type: "boolean", description: "Stop watching topic." },
+      },
+      required: ["topic"],
+      additionalProperties: false,
+    },
+    argv: (input) =>
+      flag(input, "stop")
+        ? ["work", "unwatch", "--json", "--", text(input, "topic", true)]
+        : [
+            "work",
+            "watch",
+            ...assigned("--person", text(input, "person")),
+            "--json",
+            "--",
+            text(input, "topic", true),
+          ],
+  },
 ];
 
 /** The tools a server publishes for one `SONA_MCP_TOOLS` value: unset or
