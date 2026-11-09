@@ -531,6 +531,7 @@ private struct PageBar<Leading: View, Trailing: View>: ViewModifier {
                 trailing
             }
             .labelStyle(.titleAndIcon)
+            .accessibilityElement(children: .contain)
             .padding(.trailing, span == .full ? 8 : 0)
             .frame(width: width)
         }
