@@ -925,6 +925,14 @@ private enum PaletteRow: Identifiable {
     /// The next page of the same question, when the plane said there is one.
     case more
     case ask(String)
+    /// A sentence that changes tasks, with the tasks it changes.
+    case command(WorkCommand)
+    /// A line that answers the question: return plays or opens it, ⇧ with an
+    /// arrow marks it, ⌘return makes tasks of the marked lines.
+    case answer(WorkAnswerLine)
+    case watch(String)
+    case unwatch(WorkWatch)
+    case watching(WorkWatch)
 
     /// Which reel "Play all" is to the shared player.
     static let playAllKey = "palette"
@@ -938,6 +946,11 @@ private enum PaletteRow: Identifiable {
         case .playAll: "play-all"
         case .more: "more"
         case .ask: "ask"
+        case .command: "command"
+        case let .answer(line): "answer:\(line.id)"
+        case .watch: "watch"
+        case let .unwatch(watch): "unwatch:\(watch.id)"
+        case let .watching(watch): "watching:\(watch.id)"
         }
     }
 }
@@ -1004,6 +1017,14 @@ struct CommandPalette: View {
     /// The line this palette last asked to hear: its failure shows on that
     /// row, and closing the palette stops only that playback.
     @State private var hearing: TranscriptSegmentId?
+    /// The settled text read as a change to tasks.
+    @State private var command: WorkCommand?
+    /// The settled text read as a question, when it reads as one.
+    @State private var answer: WorkAnswer?
+    /// Answer lines marked for ⌘return, in the order they were marked.
+    @State private var picked: [WorkAnswerLine] = []
+    /// Answer lines already made into tasks from this palette.
+    @State private var taken: Set<String> = []
     @FocusState private var focused: Bool
 
     /// A single letter matches half the corpus, so it is not a query yet.
@@ -1094,8 +1115,8 @@ struct CommandPalette: View {
                     .foregroundStyle(Theme.ink)
                     .focused($focused)
                     .onSubmit { runSelected() }
-                    .onKeyPress(.upArrow) { move(-1); return .handled }
-                    .onKeyPress(.downArrow) { move(1); return .handled }
+                    .onKeyPress(.upArrow, phases: .down) { press in step(-1, marking: press.modifiers.contains(.shift)) }
+                    .onKeyPress(.downArrow, phases: .down) { press in step(1, marking: press.modifiers.contains(.shift)) }
                     .onKeyPress(.return, phases: .down) { press in
                         press.modifiers.contains(.command) ? openSelected() : .ignored
                     }
@@ -1119,7 +1140,11 @@ struct CommandPalette: View {
                                 .padding(.bottom, 4)
                             ForEach(section.rows) { row in
                                 let index = section.live ? rows.firstIndex { $0.id == row.id } ?? 0 : -1
-                                PaletteRowView(row: row, selected: index == selection, marks: marks, asked: hearing) {
+                                PaletteRowView(
+                                    row: row, selected: index == selection, marks: marks, asked: hearing,
+                                    picked: picked.contains { "answer:\($0.id)" == row.id },
+                                    taken: taken.contains { "answer:\($0)" == row.id }
+                                ) {
                                     selection = index
                                     run(row)
                                 } open: {
@@ -1150,9 +1175,9 @@ struct CommandPalette: View {
     private var trimmed: String { query.trimmingCharacters(in: .whitespaces) }
 
     /// The words of the query as the spoken-line search splits them, for
-    /// marking in the lines it found.
+    /// marking in the lines it found; for an answer, only the words it read.
     private var marks: [String] {
-        trimmed.split { !$0.isLetter && !$0.isNumber }.map(String.init)
+        (answer?.readAs.joined(separator: " ") ?? trimmed).split { !$0.isLetter && !$0.isNumber }.map(String.init)
     }
 
     private var actions: [PaletteAction] {
@@ -1171,11 +1196,19 @@ struct CommandPalette: View {
         let navigation = actions.filter { $0.group == .navigation }.map(PaletteRow.action)
         let verbs = actions.filter { $0.group == .actions }.map(PaletteRow.action)
         if !task.isEmpty { sections.append((model.workTargets.count > 1 ? "Tasks" : "Task", task, true)) }
+        let settled = if case .pending = lookup { false } else { true }
+        if let command, !command.items.isEmpty {
+            sections.append(("Change", [.command(command)], settled))
+        }
+        let watching = watchRows
+        if !watching.isEmpty { sections.append(("Watch", watching, true)) }
         if !navigation.isEmpty { sections.append(("Navigation", navigation, true)) }
         if !verbs.isEmpty { sections.append(("Actions", verbs, true)) }
         let hits = lookup.earlier
-        let live = if case .pending = lookup { false } else { true }
-        if !heard.isEmpty {
+        let live = settled
+        if let answer, !answer.lines.isEmpty {
+            sections.append(("Answer", answer.lines.map(PaletteRow.answer), live))
+        } else if !heard.isEmpty {
             let playable = heard.filter(\.audioRetained).count
             let lines = heard.map(PaletteRow.heard)
             sections.append(("Heard", playable > 1 ? lines + [.playAll] : lines, live))
@@ -1245,12 +1278,22 @@ struct CommandPalette: View {
             KeyCap("↑")
             KeyCap("↓")
             Text("Select").metaText(Theme.inkSecondary).padding(.trailing, 10)
+            if selectedLine != nil {
+                KeyCap("⇧")
+                KeyCap("↓")
+                Text("Mark").metaText(Theme.inkSecondary).padding(.trailing, 10)
+            }
             KeyCap("↩")
             Text(returnVerb).metaText(Theme.inkSecondary).padding(.trailing, 10)
             if selectedMoment?.audioRetained == true {
                 KeyCap("⌘")
                 KeyCap("↩")
                 Text("Open").metaText(Theme.inkSecondary).padding(.trailing, 10)
+            } else if selectedLine != nil {
+                KeyCap("⌘")
+                KeyCap("↩")
+                Text(picked.count > 1 ? "Make \(picked.count) tasks" : "Make task")
+                    .metaText(Theme.inkSecondary).padding(.trailing, 10)
             }
             KeyCap("esc")
             Text("Close").metaText(Theme.inkSecondary)
@@ -1264,6 +1307,91 @@ struct CommandPalette: View {
     private func move(_ delta: Int) {
         guard !rows.isEmpty else { return }
         selection = (selection + delta + rows.count) % rows.count
+    }
+
+    /// An arrow; with shift, the answer line under the selection is marked
+    /// or unmarked first.
+    private func step(_ delta: Int, marking: Bool) -> KeyPress.Result {
+        if marking, let line = selectedLine, !taken.contains(line.id) {
+            if let index = picked.firstIndex(of: line) {
+                picked.remove(at: index)
+            } else {
+                picked.append(line)
+            }
+        }
+        move(delta)
+        return .handled
+    }
+
+    /// The answer line under the selection, when that is where it is.
+    private var selectedLine: WorkAnswerLine? {
+        guard rows.indices.contains(selection), case let .answer(line) = rows[selection] else { return nil }
+        return line
+    }
+
+    /// "watch pricing" offers the watch; "unwatch pricing" or "stop watching
+    /// pricing" the ones it names; anything starting "watch" lists them.
+    private var watchRows: [PaletteRow] {
+        let lowered = trimmed.lowercased()
+        let watches = model.work.watches
+        for lead in ["unwatch ", "stop watching "] where lowered.hasPrefix(lead) {
+            let phrase = Self.phrase(after: lead, in: trimmed)
+            return watches.filter { phrase.isEmpty || $0.phrase.localizedCaseInsensitiveContains(phrase) }
+                .map(PaletteRow.unwatch)
+        }
+        guard lowered.hasPrefix("watch") else { return [] }
+        let phrase = lowered.hasPrefix("watch ") ? Self.phrase(after: "watch ", in: trimmed) : ""
+        let known = watches.first { $0.personId == nil && $0.phrase.caseInsensitiveCompare(phrase) == .orderedSame }
+        let offer: [PaletteRow] = phrase.isEmpty || known != nil ? [] : [.watch(phrase)]
+        let listed = watches.filter { phrase.isEmpty || $0.phrase.localizedCaseInsensitiveContains(phrase) }
+        return offer + listed.map(PaletteRow.watching)
+    }
+
+    private static func phrase(after lead: String, in text: String) -> String {
+        String(text.dropFirst(lead.count))
+            .trimmingCharacters(in: CharacterSet(charactersIn: " \"'“”‘’"))
+    }
+
+    /// Asked as a question: a question word first, or a question mark last.
+    private static func asks(_ text: String) -> Bool {
+        let first = text.split(separator: " ").first.map { $0.lowercased() } ?? ""
+        return text.hasSuffix("?") || questionWords.contains(first)
+    }
+
+    private static let questionWords: Set<String> = [
+        "what", "what's", "whats", "who", "who's", "when", "where", "why", "how", "which", "did", "does", "do",
+        "is", "are", "was", "were", "has", "have", "had", "can", "could", "should", "will", "would",
+    ]
+
+    /// ⌘return on answer lines: the marked ones, or the one under the
+    /// selection, become Triage tasks. They read as made at once; one the
+    /// core turns down comes back.
+    private func takeLines() -> KeyPress.Result {
+        guard let current = selectedLine else { return .ignored }
+        let lines = (picked.isEmpty ? [current] : picked).filter { !taken.contains($0.id) }
+        picked = []
+        guard !lines.isEmpty else { return .handled }
+        taken.formUnion(lines.map(\.id))
+        let work = model.work
+        Task {
+            let made = await work.take(lines)
+            if made.isEmpty { taken.subtract(lines.map(\.id)) }
+        }
+        return .handled
+    }
+
+    private func play(_ line: WorkAnswerLine) {
+        guard let play = line.play else {
+            open(.answer(line))
+            return
+        }
+        let audio = model.meetings.audio
+        if audio.segmentId == play.segmentId, audio.loading || audio.playing {
+            audio.stop()
+            return
+        }
+        hearing = play.segmentId
+        audio.play(sessionId: play.sessionId, segmentId: play.segmentId, startOffsetNs: play.startOffsetNs)
     }
 
     private func runSelected() {
@@ -1284,6 +1412,10 @@ struct CommandPalette: View {
             hear(moment)
             return
         }
+        if case let .answer(line) = row {
+            play(line)
+            return
+        }
         open(row)
     }
 
@@ -1297,12 +1429,19 @@ struct CommandPalette: View {
         case let .heard(moment): model.open(link: moment.link)
         case let .screen(moment): model.open(link: moment.link)
         case let .ask(question): model.ask(question)
+        case let .command(command): model.work.apply(command)
+        case let .answer(line): model.open(link: line.link)
+        case let .watch(phrase): model.work.watch(phrase)
+        case let .unwatch(watch): model.work.unwatch(watch.id)
+        case let .watching(watch):
+            if let latest = watch.hits.first { model.open(link: latest.line.link) }
         case .more, .playAll: break
         }
     }
 
     /// ⌘return on a heard line: its meeting, at the moment it was said.
     private func openSelected() -> KeyPress.Result {
+        if selectedLine != nil { return takeLines() }
         guard let selectedMoment else { return .ignored }
         open(.heard(selectedMoment))
         return .handled
@@ -1351,8 +1490,19 @@ struct CommandPalette: View {
     /// What return does to the selected row: a heard line with its audio kept
     /// plays or stops, as does "Play all"; every other row opens.
     private var returnVerb: String {
-        if rows.indices.contains(selection), case .playAll = rows[selection] {
-            return model.meetings.audio.reelKey == PaletteRow.playAllKey ? "Stop" : "Play"
+        if rows.indices.contains(selection) {
+            switch rows[selection] {
+            case .playAll:
+                return model.meetings.audio.reelKey == PaletteRow.playAllKey ? "Stop" : "Play"
+            case .command: return "Apply"
+            case .watch: return "Watch"
+            case .unwatch: return "Stop watching"
+            case let .answer(line):
+                guard let play = line.play else { return "Open" }
+                let audio = model.meetings.audio
+                return audio.segmentId == play.segmentId && (audio.loading || audio.playing) ? "Stop" : "Play"
+            default: break
+            }
         }
         guard let selectedMoment, selectedMoment.audioRetained else { return "Open" }
         return sounding(selectedMoment) ? "Stop" : "Play"
@@ -1370,10 +1520,14 @@ struct CommandPalette: View {
             lookup = .none
             heard = []
             onScreen = []
+            command = nil
+            answer = nil
+            picked = []
             return
         }
         lookup = .pending(earlier: lookup.earlier)
         let core = model.core
+        let work = model.work
         let request: [String: JSONValue] = ["query": .string(query), "limit": .number(Double(Self.heardLimit))]
         search = Task {
             if !now {
@@ -1382,23 +1536,39 @@ struct CommandPalette: View {
             guard !Task.isCancelled else { return }
             async let said: [SaidMoment] = core.request("meeting_said_search", request)
             async let shown: [ScreenTextMoment] = core.request("meeting_snapshot_text_search", request)
+            async let change = work.command(query)
+            async let answered: WorkAnswer? = Self.asks(query) ? try? work.ask(query) : nil
             do {
                 let page = try await ask(query, after: nil)
                 let moments = (try? await said) ?? []
                 let pictures = (try? await shown) ?? []
+                let read = await change
+                let lines = await answered
                 guard !Task.isCancelled else { return }
                 heard = moments
                 onScreen = pictures
+                settle(read, lines)
                 lookup = .answered(.init(rows: page.entries, next: page.nextCursor, reason: page.reason))
             } catch {
                 let moments = (try? await said) ?? []
                 let pictures = (try? await shown) ?? []
+                let read = await change
+                let lines = await answered
                 guard !Task.isCancelled else { return }
                 heard = moments
                 onScreen = pictures
+                settle(read, lines)
                 lookup = .failed(Self.sentence(for: error))
             }
         }
+    }
+
+    /// The change and the answer for the settled text. Marks on lines the
+    /// new answer still has stay.
+    private func settle(_ read: WorkCommand?, _ lines: WorkAnswer?) {
+        command = read
+        answer = lines
+        picked = picked.filter { line in lines?.lines.contains(line) ?? false }
     }
 
     /// The next page of the same question, appended under the rows already
@@ -1458,6 +1628,10 @@ private struct PaletteRowView: View {
     var marks: [String] = []
     /// The line the palette last asked to hear: a failure shows on that row.
     var asked: TranscriptSegmentId?
+    /// An answer line marked for ⌘return.
+    var picked = false
+    /// An answer line already made into a task.
+    var taken = false
     let action: () -> Void
     /// A heard line's meeting at that moment, for VoiceOver.
     var open: () -> Void = {}
@@ -1501,6 +1675,19 @@ private struct PaletteRowView: View {
                     Text("Show more results").bodyText(14, Theme.inkSecondary)
                 case let .ask(question):
                     Text("Ask Sona: \(question)").bodyText()
+                case let .command(command):
+                    PaletteCommandPreview(command: command)
+                case let .answer(line):
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(quote(line.quote)).bodyText().lineLimit(2)
+                        Text(PaletteCommandPreview.meta(line)).metaText().lineLimit(1)
+                    }
+                case let .watch(phrase):
+                    Text("Watch “\(phrase)”").bodyText()
+                case let .unwatch(watch):
+                    Text("Stop watching “\(watch.phrase)”").bodyText()
+                case let .watching(watch):
+                    PaletteWatchSummary(watch: watch)
                 }
                 Spacer(minLength: 0)
                 if case let .heard(moment) = row {
@@ -1518,6 +1705,12 @@ private struct PaletteRowView: View {
                     }
                 } else if case let .action(action) = row, let shortcut = action.shortcut {
                     Shortcut(shortcut)
+                } else if case let .answer(line) = row {
+                    if taken {
+                        Text("In Triage").metaText()
+                    } else if line.play != nil {
+                        glyph("play.fill")
+                    }
                 }
             }
             .padding(.horizontal, 12)
@@ -1559,7 +1752,13 @@ private struct PaletteRowView: View {
     /// confirmed as, and only that.
     @ViewBuilder
     private var leading: some View {
-        if case let .heard(moment) = row {
+        if case .answer = row {
+            Image(systemName: picked || taken ? "checkmark.circle.fill" : "circle")
+                .font(.system(size: 14, weight: .regular))
+                .foregroundStyle(picked || taken ? Theme.accent : Theme.inkTertiary)
+                .frame(width: 20)
+                .accessibilityHidden(true)
+        } else if case let .heard(moment) = row {
             if let person = moment.person {
                 PersonPortrait(
                     personId: person.personId, name: person.displayName, size: 28, revision: model.people.photoRevision)
@@ -1721,6 +1920,10 @@ private struct PaletteRowView: View {
         case .playAll: "play.circle"
         case .more: "ellipsis"
         case .ask: "bubble.left"
+        case .command: "arrow.right.circle"
+        case .answer: "text.quote"
+        case .watch, .watching: "eye"
+        case .unwatch: "eye.slash"
         }
     }
 }

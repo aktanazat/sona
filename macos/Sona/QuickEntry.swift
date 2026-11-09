@@ -8,6 +8,7 @@ import SwiftUI
 final class QuickEntry {
     static let openEvent = "work-quick-entry"
     static let filedEvent = "work-ramble-filed"
+    static let commandEvent = "work-command-heard"
 
     var title = ""
     private(set) var reading = TitleReading()
@@ -17,6 +18,8 @@ final class QuickEntry {
     /// keys each time.
     private(set) var summons = 0
     private(set) var filed: WorkRambleFiledEvent?
+    /// The words read as a change to tasks; return applies it.
+    private(set) var command: WorkCommand?
 
     private unowned let model: AppModel
     @ObservationIgnored private lazy var entryPanel: FloatingPanel = {
@@ -71,14 +74,52 @@ final class QuickEntry {
     }
 
     /// The panel goes at once; the task is saved behind it, and the panel
-    /// comes back with the words if the save fails.
+    /// comes back with the words if the save fails. Words that read as a
+    /// change to tasks apply it instead, undoable as one change.
     func submit() {
+        if let command, command.said == title.trimmingCharacters(in: .whitespacesAndNewlines) {
+            model.work.apply(command)
+            close()
+            return
+        }
+        submitAsTask()
+    }
+
+    /// The words as a new task, even when they read as a change to tasks.
+    func submitAsTask() {
         let text = title
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         let reading = self.reading
         let link = self.link
         close()
         Task { await save(text, reading: reading, link: link) }
+    }
+
+    /// Reads the words for a change to tasks, a beat after the last key.
+    func readCommand(_ text: String) async {
+        let said = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard said.split(separator: " ").count >= 2 else {
+            command = nil
+            return
+        }
+        try? await Task.sleep(for: .milliseconds(120))
+        guard !Task.isCancelled else { return }
+        let read = await model.work.command(said)
+        guard !Task.isCancelled else { return }
+        command = read.flatMap { $0.items.isEmpty ? nil : $0 }
+    }
+
+    /// A dictation that was a change to tasks: the panel, with its words and
+    /// what they would change, waiting for return.
+    func heard(_ line: Data) {
+        guard let event = try? Core.payload(line) as WorkCommandHeardEvent else { return }
+        title = event.said
+        reading = TitleReading()
+        link = nil
+        failure = nil
+        command = nil
+        kept = false
+        show()
     }
 
     private func save(_ text: String, reading: TitleReading, link: WorkLink?) async {
@@ -165,7 +206,17 @@ private struct QuickEntryPanel: View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: Space.m) {
                 HStack(spacing: Space.m) {
-                    TaskStatusIcon(status: .notStarted, size: 16)
+                    Group {
+                        if entry.command == nil {
+                            TaskStatusIcon(status: .notStarted, size: 16)
+                        } else {
+                            Image(systemName: "arrow.right.circle")
+                                .font(.system(size: 15))
+                                .foregroundStyle(Theme.accent)
+                        }
+                    }
+                    .frame(width: 16, height: 16)
+                    .accessibilityHidden(true)
                     TextField("", text: $entry.title, prompt: Text("New task").foregroundStyle(Theme.inkTertiary))
                         .textFieldStyle(.plain)
                         .font(TypeScale.body(17))
@@ -174,8 +225,17 @@ private struct QuickEntryPanel: View {
                         .onSubmit { entry.submit() }
                         .chipKeys(reading, order: order, text: entry.title, work: work)
                         .task(id: entry.title) { await reading.read(entry.title, in: work) }
+                        .task(id: entry.title) { await entry.readCommand(entry.title) }
+                        .onKeyPress(.return, phases: .down) { press in
+                            guard press.modifiers.contains(.option), entry.command != nil else { return .ignored }
+                            entry.submitAsTask()
+                            return .handled
+                        }
                 }
-                if !order.isEmpty || entry.link != nil || entry.failure != nil {
+                if let command = entry.command {
+                    PaletteCommandPreview(command: command, shown: 5)
+                        .padding(.leading, 16 + Space.m)
+                } else if !order.isEmpty || entry.link != nil || entry.failure != nil {
                     VStack(alignment: .leading, spacing: Space.s) {
                         if !order.isEmpty {
                             ParsedChips(reading: reading, text: entry.title)
@@ -216,7 +276,12 @@ private struct QuickEntryPanel: View {
         HStack(spacing: Space.m) {
             Spacer(minLength: 0)
             if reading.selected == nil {
-                hint("Add task", keys: "↩")
+                if entry.command != nil {
+                    hint("Apply", keys: "↩")
+                    hint("Add as task", keys: "⌥", "↩")
+                } else {
+                    hint("Add task", keys: "↩")
+                }
                 if !reading.tokens.isEmpty {
                     hint("Select", keys: "↓")
                 }

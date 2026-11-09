@@ -423,6 +423,8 @@ final class AppModel {
         }
         core.observe(QuickEntry.openEvent) { [weak self] line in self?.quickEntry.open(line) }
         core.observe(QuickEntry.filedEvent) { [weak self] line in self?.quickEntry.file(line) }
+        core.observe(QuickEntry.commandEvent) { [weak self] line in self?.quickEntry.heard(line) }
+        core.observe(Self.watchOpenedEvent) { [weak self] line in self?.watchOpened(line) }
         core.onClose { [weak self] in self?.coreClosed() }
         workKeys.install(self)
         NotificationCenter.default.addObserver(
