@@ -5,22 +5,19 @@ import SwiftUI
 @main
 struct SonaApp: App {
     @NSApplicationDelegateAdaptor(SonaAppDelegate.self) private var appDelegate
-    @State private var fullScreen = false
 
     private var model: AppModel { appDelegate.model }
 
     var body: some Scene {
         Window("Sona", id: "main") {
             Shell().environment(model)
-                .environment(\.fullScreen, fullScreen)
-                .background(WindowTitleBar(fullScreen: $fullScreen))
                 // In the Dock and the app switcher only while this window is
                 // open; the rest of the time Sona is its menu bar mark.
                 .onAppear { NSApp.setActivationPolicy(.regular) }
                 .onDisappear { NSApp.setActivationPolicy(.accessory) }
         }
         .windowStyle(.hiddenTitleBar)
-        .windowToolbarStyle(.unifiedCompact(showsTitle: false))
+        .windowToolbarStyle(.unified(showsTitle: false))
         .defaultSize(width: 1240, height: 820)
         // Sona lives in the menu bar: the window opens when something asks for
         // it, never at launch, and never because it was open at the last quit.
@@ -52,59 +49,6 @@ struct SonaApp: App {
             MenuBarMark(model: model)
         }
     }
-}
-
-/// A hidden title bar has no toolbar, so the close, minimize and zoom
-/// buttons sat 3 points from the sidebar's edge. An empty unified toolbar
-/// gives them the inset of the system's own sidebar windows. The scene's
-/// compact style still sets how far the content sits below them: without
-/// it the content moved down 30 points instead of 20. Full screen keeps a
-/// window's toolbar on screen, so the toolbar is hidden there and the bare
-/// title bar slides in on hover as before.
-private struct WindowTitleBar: NSViewRepresentable {
-    @Binding var fullScreen: Bool
-
-    func makeNSView(context: Context) -> NSView {
-        let view = Attach()
-        view.fullScreen = $fullScreen
-        return view
-    }
-    func updateNSView(_ view: NSView, context: Context) {}
-
-    private final class Attach: NSView {
-        var fullScreen: Binding<Bool>?
-        private var fullScreenObservers: [NSObjectProtocol] = []
-
-        override func viewDidMoveToWindow() {
-            super.viewDidMoveToWindow()
-            fullScreenObservers.forEach(NotificationCenter.default.removeObserver)
-            fullScreenObservers = []
-            guard let window else { return }
-            if window.toolbar == nil {
-                window.toolbar = NSToolbar(identifier: "main")
-                window.toolbarStyle = .unified
-                window.titleVisibility = .hidden
-            }
-            fullScreenObservers = [
-                (NSWindow.willEnterFullScreenNotification, false),
-                (NSWindow.didExitFullScreenNotification, true),
-            ].map { name, visible in
-                NotificationCenter.default.addObserver(forName: name, object: window, queue: .main) {
-                    [weak self, weak window] _ in
-                    MainActor.assumeIsolated {
-                        window?.toolbar?.isVisible = visible
-                        self?.fullScreen?.wrappedValue = !visible
-                    }
-                }
-            }
-        }
-    }
-}
-
-extension EnvironmentValues {
-    /// The main window is in full screen. Its toolbar is hidden there, and
-    /// the strip the toolbar held lies above the screen's top edge.
-    @Entry var fullScreen = false
 }
 
 /// The app's single lifetime owner. Ordinary quit waits for a capture that
