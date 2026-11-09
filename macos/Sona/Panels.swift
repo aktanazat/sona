@@ -311,6 +311,9 @@ enum PanelPlacement: Equatable {
     case topTrailing
     /// Flush against the right edge, centred top to bottom.
     case flushRight
+    /// Centred left to right, its top a quarter of the way down, where
+    /// Spotlight sits.
+    case upperCenter
 }
 
 /// How a floating panel comes and goes.
@@ -351,12 +354,19 @@ private final class DockablePanel: NSPanel {
     /// Sees every event first. `true` keeps it from the views.
     var intercept: (@MainActor (NSEvent) -> Bool)?
     var takesKeys = false
+    /// Hears the keyboard go to another window.
+    var resigned: (@MainActor () -> Void)?
 
     override var canBecomeKey: Bool { takesKeys }
 
     override func sendEvent(_ event: NSEvent) {
         if intercept?(event) == true { return }
         super.sendEvent(event)
+    }
+
+    override func resignKey() {
+        super.resignKey()
+        resigned?()
     }
 }
 
@@ -517,6 +527,8 @@ final class FloatingPanel {
     var onClick: (@MainActor () -> Void)?
     /// A drop on an edge, while `dockable`.
     var onDock: (@MainActor (HudPillEdge) -> Void)?
+    /// The keyboard went to another window while a keyed panel was up.
+    var onResignKey: (@MainActor () -> Void)?
     /// A press must travel this far to be a drag rather than a click.
     private static let dragSlop: CGFloat = 4
     private static let escape: UInt16 = 53
@@ -527,6 +539,7 @@ final class FloatingPanel {
         case let .edge(edge): return edge.alignment
         case .topTrailing: return .topTrailing
         case .flushRight: return .trailing
+        case .upperCenter: return .top
         }
     }
 
@@ -566,6 +579,10 @@ final class FloatingPanel {
         self.host = host
         host.rootView = AnyView(Surface(content: content, panel: self))
         panel.intercept = { [weak self] event in self?.intercept(event) ?? false }
+        panel.resigned = { [weak self] in
+            guard let self, self.keyed, self.shown else { return }
+            self.onResignKey?()
+        }
     }
 
     /// Floats the panel at `placement` on the screen the pointer is on. A
@@ -727,13 +744,14 @@ final class FloatingPanel {
         case .edge(.right): NSPoint(x: visible.maxX - 24, y: visible.midY)
         case .topTrailing: NSPoint(x: visible.maxX - 16, y: visible.maxY - 16)
         case .flushRight: NSPoint(x: visible.maxX, y: visible.midY)
+        case .upperCenter: NSPoint(x: visible.midX, y: visible.maxY - visible.height / 4)
         }
     }
 
     private func frame(_ size: CGSize, at placement: PanelPlacement) -> NSRect {
         let origin = switch placement {
         case .edge(.bottom): NSPoint(x: anchor.x - size.width / 2, y: anchor.y)
-        case .edge(.top): NSPoint(x: anchor.x - size.width / 2, y: anchor.y - size.height)
+        case .edge(.top), .upperCenter: NSPoint(x: anchor.x - size.width / 2, y: anchor.y - size.height)
         case .edge(.left): NSPoint(x: anchor.x, y: anchor.y - size.height / 2)
         case .edge(.right), .flushRight: NSPoint(x: anchor.x - size.width, y: anchor.y - size.height / 2)
         case .topTrailing: NSPoint(x: anchor.x - size.width, y: anchor.y - size.height)

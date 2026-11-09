@@ -25,63 +25,71 @@ struct TaskComposer: View {
     var body: some View {
         let work = model.work
         let ready = !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !creating
+        let chips = wordChips
         VStack(alignment: .leading, spacing: 0) {
             Text("New task")
                 .font(TypeScale.label(13))
                 .foregroundStyle(Theme.inkSecondary)
-                .padding(.horizontal, 20)
-                .padding(.top, 18)
+                .padding(.horizontal, Space.l)
+                .padding(.top, Space.l)
             TextField("", text: $title, prompt: Text("Title").foregroundStyle(Theme.inkDisabled))
                 .textFieldStyle(.plain)
                 .font(.system(size: 18, weight: .semibold))
                 .foregroundStyle(Theme.ink)
                 .focused($titleFocused)
                 .onSubmit(create)
-                .chipKeys(reading, text: title, work: work)
+                .chipKeys(reading, order: chips.order, text: title, work: work)
                 .task(id: title) { await reading.read(title, in: work) }
-                .padding(.horizontal, 20)
-                .padding(.top, 10)
-            if !reading.tokens.isEmpty {
-                ParsedChips(reading: reading, text: title)
-                    .padding(.horizontal, 20)
-                    .padding(.top, 8)
-            }
+                .padding(.horizontal, Space.l)
+                .padding(.top, Space.s)
             TextField("", text: $details, prompt: Text("Details").foregroundStyle(Theme.inkDisabled), axis: .vertical)
                 .textFieldStyle(.plain)
                 .font(TypeScale.body(14))
                 .foregroundStyle(Theme.ink)
                 .lineLimit(3...10)
-                .padding(.horizontal, 20)
-                .padding(.top, 10)
-            HStack(spacing: 6) {
+                .padding(.horizontal, Space.l)
+                .padding(.top, Space.s)
+            ChatFlowRow(spacing: Space.s) {
                 ComposerChip(title: status.label, prompt: "Status…") {
                     TaskStatusIcon(status: status)
                 } make: { text in
                     WorkChoices.filtered(
                         WorkChoices.statuses { $0 == status } pick: { status = $0 }, by: text, kind: .status)
                 }
-                ComposerChip(title: chosenPriority == 0 ? "Priority" : TaskPriority(chosenPriority).label, prompt: "Priority…") {
+                ComposerChip(
+                    title: chosenPriority == 0 ? "Priority" : TaskPriority(chosenPriority).label, prompt: "Priority…",
+                    words: chips.slots[.priority], selected: reading.selected, keep: keepAsText
+                ) {
                     PriorityIcon(priority: TaskPriority(chosenPriority))
                 } make: { text in
                     WorkChoices.filtered(
                         WorkChoices.priorities { $0 == chosenPriority } pick: { priority = $0; picked.insert(.priority) },
                         by: text, kind: .priority)
                 }
-                ComposerChip(title: ownerName(work.people), prompt: "Assign to…") {
+                ComposerChip(
+                    title: ownerName(work.people), prompt: "Assign to…",
+                    words: chips.slots[.owner], selected: reading.selected, keep: keepAsText
+                ) {
                     Avatar(face: face(work.people), size: 16, revision: model.people.photoRevision)
                 } make: { text in
                     WorkChoices.filtered(
                         WorkChoices.owners(work.people) { $0 == chosenOwner } pick: { owner = $0; picked.insert(.owner) },
                         by: text, kind: .owner)
                 }
-                ComposerChip(title: chosenDue.map { TaskDates.label($0, now: TaskDates.now()) } ?? "Due date", prompt: "Due date, or type one…") {
+                ComposerChip(
+                    title: chosenDue.map { TaskDates.label($0, now: TaskDates.now()) } ?? "Due date", prompt: "Due date, or type one…",
+                    words: chips.slots[.due], selected: reading.selected, keep: keepAsText
+                ) {
                     Image(systemName: "calendar").font(.system(size: 11)).foregroundStyle(Theme.inkSecondary)
                 } make: { text in
                     WorkChoices.dues(text, clearable: chosenDue != nil) { candidate in
                         chosenDue.map { PlanningFormat.days(from: $0, to: candidate) == 0 } ?? false
                     } pick: { due = $0; picked.insert(.due) }
                 }
-                ComposerChip(title: work.projects.first { $0.id == chosenProject }?.title ?? "Project", prompt: "Project…") {
+                ComposerChip(
+                    title: work.projects.first { $0.id == chosenProject }?.title ?? "Project", prompt: "Project…",
+                    words: chips.slots[.project], selected: reading.selected, keep: keepAsText
+                ) {
                     Image(systemName: "folder").font(.system(size: 11)).foregroundStyle(Theme.inkSecondary)
                 } make: { text in
                     WorkChoices.filtered(
@@ -98,12 +106,13 @@ struct TaskComposer: View {
                             labels.append(work.makeLabel(named: name))
                         }, by: text, kind: .labels)
                 }
+                ForEach(chips.rest) { token in
+                    WordChip(token: token, selected: reading.selected == token.id) { keepAsText(token) }
+                }
             }
-            .padding(.horizontal, 20)
-            .padding(.top, 16)
-            .padding(.bottom, 18)
+            .padding(Space.l)
             Hairline()
-            HStack(spacing: 12) {
+            HStack(spacing: Space.m) {
                 if let failure {
                     Text(failure).metaText(Theme.live).lineLimit(2)
                 }
@@ -112,7 +121,7 @@ struct TaskComposer: View {
                     .buttonStyle(.quiet)
                     .keyboardShortcut(reading.selected == nil ? KeyboardShortcut.cancelAction : nil)
                 Button(action: create) {
-                    HStack(spacing: 8) {
+                    HStack(spacing: Space.s) {
                         Text("Create task")
                         Text("⌘↩").foregroundStyle(Theme.onAccent.opacity(0.7))
                     }
@@ -121,7 +130,7 @@ struct TaskComposer: View {
                 .keyboardShortcut(.return, modifiers: .command)
                 .disabled(!ready)
             }
-            .padding(.horizontal, 20)
+            .padding(.horizontal, Space.l)
             .frame(height: 56)
         }
         .frame(width: 620)
@@ -130,6 +139,40 @@ struct TaskComposer: View {
             take(start)
             DispatchQueue.main.async { titleFocused = true }
         }
+    }
+
+    /// The title's words for the fields with their own chip, and the rest
+    /// of its words, each in the order its chip sits.
+    private struct WordChips {
+        var slots: [Choice: WorkToken] = [:]
+        var rest: [WorkToken] = []
+
+        var order: [WorkToken] {
+            [Choice.priority, .owner, .due, .project].compactMap { slots[$0] } + rest
+        }
+    }
+
+    private var wordChips: WordChips {
+        var chips = WordChips()
+        for token in reading.tokens {
+            let choice: Choice? = switch token.field {
+            case .priority: .priority
+            case .owner: .owner
+            case .due: .due
+            case .project: .project
+            case .label, .recurrence: nil
+            }
+            if let choice, !picked.contains(choice) { chips.slots[choice] = token }
+        }
+        let slotted = Set(chips.slots.values.map(\.id))
+        chips.rest = reading.tokens.filter { !slotted.contains($0.id) }.inChipOrder
+        return chips
+    }
+
+    private func keepAsText(_ token: WorkToken) {
+        reading.selected = nil
+        let text = title
+        Task { await reading.keepAsText(token, in: text, work: model.work) }
     }
 
     private func take(_ start: WorkPatch) {
@@ -160,9 +203,7 @@ struct TaskComposer: View {
     }
 
     private func labelTitle(_ all: [WorkLabel]) -> String {
-        let words = self.words
-        let ids = labels + words.labelIds.filter { !labels.contains($0) }
-        let names = ids.compactMap { id in all.first { $0.id == id }?.name } + words.newLabels
+        let names = labels.compactMap { id in all.first { $0.id == id }?.name }
         return switch names.count {
         case 0: "Labels"
         case 1, 2: names.joined(separator: ", ")
@@ -219,36 +260,53 @@ struct TaskComposer: View {
     }
 }
 
-/// One property of the new task: its value, and the list to change it.
+/// One property of the new task: its value, and the list to change it. A
+/// value the title's words set wears their tint and an × that keeps the
+/// words as text.
 private struct ComposerChip<Mark: View>: View {
     let title: String
     let prompt: String
     var keepsOpen = false
+    var words: WorkToken?
+    var selected: WorkToken.ID?
+    var keep: (WorkToken) -> Void = { _ in }
     @ViewBuilder let mark: () -> Mark
     let make: (String) -> [WorkChoice]
     @State private var shown = false
+    @State private var hovering = false
+    @State private var crossHovering = false
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        Button {
-            shown = true
-        } label: {
-            HStack(spacing: 6) {
-                mark().frame(width: 16, height: 16)
-                Text(title).lineLimit(1)
+        HStack(spacing: 0) {
+            Button {
+                shown = true
+            } label: {
+                HStack(spacing: Space.xs) {
+                    mark().frame(width: 16, height: 16)
+                    Text(title).lineLimit(1)
+                }
+                .padding(.leading, Space.s)
+                .padding(.trailing, words == nil ? Space.s : Space.xs)
+                .frame(maxHeight: .infinity)
+                .contentShape(Rectangle())
             }
-            .font(TypeScale.label(12))
-            .foregroundStyle(Theme.ink)
-            .padding(.leading, 6)
-            .padding(.trailing, 9)
-            .frame(height: 26)
-            .background(Theme.control, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
-            .contentShape(Rectangle())
+            .buttonStyle(.plain)
+            if let words {
+                Button { keep(words) } label: { ChipCross(hot: crossHovering) }
+                    .buttonStyle(.plain)
+                    .onHover { crossHovering = $0 }
+                    .padding(.trailing, Space.xs)
+                    .help("Keep “\(words.text)” as text")
+                    .accessibilityLabel("Keep “\(words.text)” as text")
+            }
         }
-        .buttonStyle(.plain)
+        .chipFace(words: words != nil, selected: words.map { $0.id == selected } ?? false, hovering: hovering)
+        .onHover { hovering = $0 }
+        .hoverFade(hovering)
         .popover(isPresented: $shown, arrowEdge: .bottom) {
             ChoiceList(prompt: prompt, keepsOpen: keepsOpen, compact: true, make: make) { shown = false }
-                .padding(.vertical, 4)
+                .padding(.vertical, Space.xs)
                 .environment(model)
         }
     }
