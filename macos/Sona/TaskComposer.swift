@@ -170,7 +170,7 @@ struct TaskComposer: View {
                 failure = model.work.mutationError ?? "The task wasn't created."
                 return
             }
-            model.workFocus.highlighted = item.id
+            model.workFocus.highlightWhenShown(item.id)
             model.workFocus.composing = nil
         }
     }
