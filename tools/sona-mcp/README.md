@@ -183,13 +183,20 @@ Every write also takes `operation_id`. Left out, Sona derives one from the
 request and what it read, so a repeated call never changes anything twice: a
 create repeated the same day answers with the first task and `replayed:true`,
 and a change already made lists its tasks under `skipped`. Pass a new id to
-create a twin on purpose.
+create a twin on purpose. Every write carries the client's name from the MCP
+handshake, so Sona shows which agent made it.
 
 `sona_work_list` with `ready:true` returns Todo tasks nothing open blocks.
-`sona_work_claim` moves one Todo or Backlog task to In progress; it refuses a
-task already in progress, so two agents cannot both start it. The task's owner
-stays who it was. `sona_work_done` closes the meeting commitment a task came
-from, and `evidence` (a pull request link, say) becomes a line in its details.
+`sona_work_claim` moves one Todo or Backlog task to In progress and shows the
+agent on it; it refuses a task another agent works or one already in
+progress, so two agents cannot both start it. The task's owner stays who it
+was. `sona_work_done` closes the meeting commitment a task came from, and
+`evidence` (a pull request link, say) becomes a line in its details.
+
+Unless the user sets **Settings > Agents > Agents' changes** to Apply, a
+change to a task's fields waits for them: the answer lists it under
+`proposed`, and the user accepts or rejects it in Sona. A created task lands
+in Triage, and triage, archiving and label changes are refused.
 
 Ten more are opt-in: `sona_work_archive`, `sona_work_restore`,
 `sona_work_relate`, `sona_work_unrelate`, `sona_work_labels`,
