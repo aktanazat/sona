@@ -1,10 +1,12 @@
-use super::{Fence, ShowArgs, TaskRef, WorkCommand, WorkVerb};
+use super::{Board, Fence, ShowArgs, TaskRef, WorkCommand, WorkVerb};
 use crate::cli::{CliArgs, Command};
 use crate::meeting::types::MeetingSessionId;
-use crate::planning::work::types::{WorkDirection, WorkItem, WorkStatus};
+use crate::planning::work::types::{
+    WorkDirection, WorkItem, WorkItemRow, WorkPatch, WorkSource, WorkStatus,
+};
 use crate::query::KeptLocal;
 use clap::Parser;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use uuid::Uuid;
 
 const KEPT_MEETING: &str = "1e1a5f0e-0000-4000-8000-000000000001";
@@ -112,6 +114,7 @@ fn task(source_meeting: Option<&str>) -> WorkItem {
         updated_at_ms: 0,
         revision: 1,
         sort_order: 0.0,
+        cycle: None,
     }
 }
 
@@ -141,4 +144,63 @@ fn the_fence_leaves_out_work_from_kept_meetings_and_all_of_it_while_closed() {
 
     assert_eq!(hidden(&open), ["from kept"]);
     assert_eq!(hidden(&closed), ["from kept", "from shared"]);
+}
+
+/// `work update --cycle` moves a task to another cycle; naming the cycle it
+/// is already in leaves it alone.
+#[test]
+fn moving_a_task_to_another_cycle_is_a_change() {
+    let row = WorkItemRow {
+        item: WorkItem {
+            cycle: Some(4),
+            ..task(None)
+        },
+        project_title: None,
+        owner_name: None,
+        doer: None,
+        source_meeting_id: None,
+        source_meeting_title: None,
+        source_quote: None,
+        source_speaker: None,
+        source_at_ms: None,
+        blocked_by_open_count: 0,
+        raised_in: 0,
+        source: WorkSource::Dictation,
+        follow_up_at_ms: None,
+        at_risk: false,
+        time_block: None,
+        repeat: None,
+    };
+    let board = Board {
+        rows: vec![row.clone()],
+        labels: Vec::new(),
+        projects: Vec::new(),
+        people: Vec::new(),
+        suggestions: BTreeMap::new(),
+        focus: Vec::new(),
+        repeats: HashMap::new(),
+        fence: Fence::Closed,
+        cycles: Vec::new(),
+    };
+    let changes = |cycle| {
+        let patch = WorkPatch {
+            cycle: Some(cycle),
+            ..WorkPatch::default()
+        };
+        board
+            .diff(&row, &patch)
+            .into_iter()
+            .map(|change| (change.field, change.from, change.to))
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(
+        changes(Some(5)),
+        [("cycle", "4".to_owned(), "5".to_owned())]
+    );
+    assert_eq!(
+        changes(None),
+        [("cycle", "4".to_owned(), "none".to_owned())]
+    );
+    assert_eq!(changes(Some(4)), []);
 }

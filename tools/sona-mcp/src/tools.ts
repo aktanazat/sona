@@ -281,6 +281,7 @@ function scopeFlags(input: ToolInput): string[] {
     ...assigned("--due", text(input, "due")),
     ...assigned("--meeting", text(input, "meeting_id")),
     ...assigned("--search", text(input, "search")),
+    ...assigned("--cycle", text(input, "cycle")),
   ];
 }
 
@@ -821,7 +822,7 @@ export const TOOLS: readonly ToolDefinition[] = [
     name: "sona_work_list",
     title: "List Sona tasks",
     description:
-      "List tasks in Sona's tracker, most urgent first: priority, then due day. Without status it lists triage and open work that is neither archived nor snoozed. ready:true lists only Todo tasks that nothing open blocks and that are not snoozed, the work to pick up next, and takes only the side, owner, project, label, priority, due_by, due, meeting_id, search and limit filters. Each task has a handle (S-12) that works wherever a task is asked for, its id, status, priority, owner, due_date, follow_up_at_ms for work someone else owes, focus when it is one of today's focus picks, project, labels, revision and, for work raised in a meeting, the quote and a sona://loop link. Work from meetings kept on this Mac is left out. Read total and has_more before treating the list as complete.",
+      "List tasks in Sona's tracker, most urgent first: priority, then due day. Without status it lists triage and open work that is neither archived nor snoozed. ready:true lists only Todo tasks that nothing open blocks and that are not snoozed, the work to pick up next, and takes only the side, owner, project, label, priority, due_by, due, meeting_id, search, cycle and limit filters. Each task has a handle (S-12) that works wherever a task is asked for, its id, status, priority, owner, due_date, follow_up_at_ms for work someone else owes, focus when it is one of today's focus picks, project, labels, cycle, revision and, for work raised in a meeting, the quote and a sona://loop link. at_risk marks the user's work due within two days with no free hour left on its due day; repeat says how a repeating task comes back and how many of its instances were done in time. Work from meetings kept on this Mac is left out. Read total and has_more before treating the list as complete.",
     inputSchema: {
       type: "object",
       properties: {
@@ -866,6 +867,10 @@ export const TOOLS: readonly ToolDefinition[] = [
         search: {
           type: "string",
           description: "Words in the title or details, or a task handle such as S-12.",
+        },
+        cycle: {
+          type: "string",
+          description: "Only work planned in this cycle: current, next, its number, or none.",
         },
         view: {
           type: "string",
@@ -989,6 +994,11 @@ export const TOOLS: readonly ToolDefinition[] = [
           description:
             "Hide the task until this local day: YYYY-MM-DD, today, tomorrow, or none to wake it.",
         },
+        cycle: {
+          type: "string",
+          description:
+            "Plan the tasks in a cycle: current, next, its number, or none to take them out.",
+        },
         expected_revision: {
           type: "integer",
           description:
@@ -1008,6 +1018,7 @@ export const TOOLS: readonly ToolDefinition[] = [
       ...assigned("--add-label", text(input, "add_labels")),
       ...assigned("--remove-label", text(input, "remove_labels")),
       ...assigned("--snooze-until", text(input, "snooze_until")),
+      ...assigned("--cycle", text(input, "cycle")),
       ...assigned("--expected-revision", count(input, "expected_revision")),
       ...(flag(input, "dry_run") ? ["--dry-run"] : []),
       ...writing(input, agent),
@@ -1142,6 +1153,29 @@ export const TOOLS: readonly ToolDefinition[] = [
   archiving("restore", "Restore Sona tasks", "Bring archived tasks back into their lists."),
   linking("relate", "Link Sona tasks", "Link two tasks. Linking them again returns the link already there."),
   linking("unrelate", "Unlink Sona tasks", "Remove a link between two tasks."),
+  {
+    name: "sona_work_cycles",
+    title: "Read Sona cycles",
+    description:
+      "Read the tracker's cycles: how many weeks each runs and the weekday it starts, then every cycle with its number, state (past, current or upcoming), first and last day, scope (tasks planned in it and not dropped) and done. With cycle, read that one cycle's scope and done as each of its days ended, and how many tasks were carried over unfinished from earlier cycles. Unfinished work moves to the new cycle by itself when one starts.",
+    optIn: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        cycle: {
+          type: "string",
+          description: "One cycle to read day by day: current, next, or its number.",
+        },
+      },
+      additionalProperties: false,
+    },
+    argv: (input) => {
+      const cycle = text(input, "cycle");
+      return cycle === null
+        ? ["work", "cycles", "--json"]
+        : ["work", "cycle", "--json", "--", cycle];
+    },
+  },
   {
     name: "sona_work_labels",
     title: "List Sona labels",
