@@ -1168,3 +1168,72 @@ fn a_weekly_task_whose_day_passed_comes_back_once_a_week_later() {
         vec![Some(on_the_clock(6, 17)), Some(on_the_clock(13, 17))]
     );
 }
+
+/// Evidence keeps the words it quoted only while its source still has them:
+/// a deleted dictation leaves its task a link that says it is gone, and
+/// nothing of what was said.
+#[test]
+fn a_deleted_dictation_takes_its_words_out_of_the_tasks_evidence() {
+    let mut history = Connection::open_in_memory().expect("a history database");
+    rusqlite_migration::Migrations::new(crate::managers::history::MIGRATIONS.to_vec())
+        .to_latest(&mut history)
+        .expect("the history schema");
+    history
+        .execute(
+            "INSERT INTO transcription_history (file_name, timestamp, saved, title, transcription_text)
+             VALUES ('sona-1.wav', 1, 0, 'Recording', 'Send the deck to Dana')",
+            [],
+        )
+        .expect("a dictation");
+    let recording = history.last_insert_rowid();
+    let task = items::insert(
+        &history,
+        &NewItem {
+            title: "Send the deck",
+            details: None,
+            status: WorkStatus::Triage,
+            priority: 0,
+            project_id: None,
+            milestone_id: None,
+            owner: &WorkOwner::Nobody,
+            due_at_ms: None,
+            label_ids: &[],
+            source_loop_id: None,
+            recurrence: None,
+        },
+        WorkActor::Me,
+        AT,
+    )
+    .expect("a task");
+    super::capture::attach(
+        &history,
+        &task.id,
+        &super::capture::WorkCaptureSource::Dictation {
+            history_id: recording,
+            start_ms: 0,
+            end_ms: 1_000,
+            quote: "Send the deck to Dana".to_owned(),
+        },
+        AT,
+    )
+    .expect("the dictation kept as evidence");
+    let evidence = |history: &Connection| {
+        super::detail(history, None, None, &task.id)
+            .expect("the task")
+            .evidence
+            .into_iter()
+            .map(|link| (link.available, link.caption))
+            .collect::<Vec<_>>()
+    };
+    let before = evidence(&history);
+
+    history
+        .execute(
+            "DELETE FROM transcription_history WHERE id = ?1",
+            [recording],
+        )
+        .expect("the dictation deleted");
+
+    assert_eq!(before, [(true, Some("Send the deck to Dana".to_owned()))]);
+    assert_eq!(evidence(&history), [(false, None)]);
+}

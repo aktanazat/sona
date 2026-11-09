@@ -265,7 +265,7 @@ pub(crate) fn resolve_link(
     meetings: &Connection,
     link: &mut EvidenceLink,
 ) -> Result<()> {
-    link.title = source_title(
+    let title = source_title(
         history,
         Some(meetings),
         link.source_kind,
@@ -273,8 +273,18 @@ pub(crate) fn resolve_link(
         link.at_ms,
         link.meeting_note_id.as_deref(),
     )?;
-    link.available = link.title.is_some();
+    resolved(link, title);
     Ok(())
+}
+
+/// What a link shows once its source is read: the words it kept go with a
+/// source that is gone.
+fn resolved(link: &mut EvidenceLink, title: Option<String>) {
+    link.available = title.is_some();
+    if !link.available {
+        link.caption = None;
+    }
+    link.title = title;
 }
 
 /// Whether evidence of this kind is read from the conversations, which
@@ -309,7 +319,7 @@ pub(crate) fn resolve_local(history: &Connection, link: &mut EvidenceLink) -> Re
     if in_conversations(link.source_kind) {
         return Err(Refusal::Invalid.into());
     }
-    link.title = source_title(
+    let title = source_title(
         history,
         None,
         link.source_kind,
@@ -317,7 +327,7 @@ pub(crate) fn resolve_local(history: &Connection, link: &mut EvidenceLink) -> Re
         link.at_ms,
         link.meeting_note_id.as_deref(),
     )?;
-    link.available = link.title.is_some();
+    resolved(link, title);
     Ok(())
 }
 
