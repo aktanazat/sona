@@ -84,11 +84,15 @@ enum SettingsPlace: Int, CaseIterable, Identifiable {
 }
 
 /// What floats over the main window. One at a time.
-enum Sheet: Identifiable {
+enum Sheet: Identifiable, Hashable {
     case chat
     case recorder
     case whatsNew
     case brief
+    /// The draft that asks someone about a task they owe, by item id.
+    case nudge(String)
+    /// What is open with the people of a meeting, or with one person.
+    case workBrief(WorkBriefSubject)
 
     var id: Self { self }
 }
@@ -407,6 +411,7 @@ final class AppModel {
         ] {
             core.observe(name) { [weak self] line in self?.handle(name, line) }
         }
+        observeReminders()
         library.recovered = { [weak self] ids in self?.announceRecovered(ids) }
         meetingSettings.keptLocalChanged = { [weak self] in self?.spotlight.refresh() }
         query.onLink = { [weak self] target in self?.open(target) }
@@ -430,7 +435,7 @@ final class AppModel {
 
     /// The places and verbs the palette offers before the plane is asked.
     var paletteActions: [PaletteAction] {
-        var actions = workPaletteActions
+        var actions = workPaletteActions + briefPaletteActions
         actions += Place.allCases.map { place in
             PaletteAction(id: "go-\(place.rawValue)", group: .navigation, title: place.title) { [weak self] in
                 self?.go(place)

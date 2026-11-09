@@ -431,7 +431,7 @@ struct TaskGroupMarkView: View {
         case .project: symbol("folder")
         case .meeting: symbol("waveform")
         case .focus: symbol("scope")
-        case let .bucket(bucket): symbol(bucket == .blocked ? "hand.raised" : "calendar")
+        case let .bucket(bucket): symbol(bucket.symbol)
         case .none: EmptyView()
         }
     }

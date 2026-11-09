@@ -70,6 +70,10 @@ struct Shell: View {
                     model.debug.whatsNew.dismiss()
                     model.sheet = nil
                 }
+            case let .nudge(id):
+                NudgeSheet(id: id).environment(model)
+            case let .workBrief(subject):
+                WorkBriefSheet(subject: subject).environment(model)
             }
         }
     }

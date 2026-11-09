@@ -31,20 +31,14 @@ private struct TriageList: View {
     var body: some View {
         let focus = model.workFocus
         let store = model.work
-        let now = TaskDates.now()
-        let groups = Self.groups(store.items ?? [], now: now)
-        let count = groups.reduce(0) { $0 + $1.rows.count }
+        let now = store.now
+        let waiting = Self.waiting(store.items ?? [], now: now)
+        let split = focus.triageSplit
+        let groups = Self.groups(waiting.filter { row in split.map { $0 == row.source } ?? true },
+                                 byMeeting: split.map { $0 == .meeting } ?? true)
         VStack(spacing: 0) {
             WorkBar {
-                HStack(spacing: 8) {
-                    Text("Triage")
-                        .font(TypeScale.listTitle)
-                        .foregroundStyle(Theme.ink)
-                    if count > 0 {
-                        Text("\(count)").font(TypeScale.label(12)).monospacedDigit().foregroundStyle(Theme.inkTertiary)
-                    }
-                }
-                .accessibilityElement(children: .combine)
+                TriageSplits(rows: waiting)
             } trailing: {
                 let targets = model.workTargets
                 if !targets.isEmpty {
@@ -61,7 +55,7 @@ private struct TriageList: View {
                 .padding(.horizontal, 16)
                 .frame(height: 32)
             }
-            content(groups, now: now)
+            content(groups, split: focus.triageSplit, now: now)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .overlay(alignment: .trailing) {
@@ -82,7 +76,7 @@ private struct TriageList: View {
     }
 
     @ViewBuilder
-    private func content(_ groups: [TaskGroup], now: Int64) -> some View {
+    private func content(_ groups: [TaskGroup], split: WorkSource?, now: Int64) -> some View {
         let store = model.work
         let focus = model.workFocus
         if store.items == nil {
@@ -92,11 +86,11 @@ private struct TriageList: View {
                 TaskSkeleton(rows: 6, twoLine: true)
             }
         } else if groups.isEmpty {
-            TaskEmpty(line: "Triage is clear.") {
+            TaskEmpty(line: split.map { "Nothing \($0.split.lowercased()) to triage." } ?? "Triage is clear.") {
                 TaskKeyButton(title: "Tasks", keys: "g t") { model.go(.tasks) }
             }
         } else {
-            TaskListBody(groups: groups) { item in
+            TaskListBody(groups: groups, headers: split.map { $0 == .meeting } ?? true) { item in
                 TriageRow(
                     row: item, suggestions: store.suggestions[item.id] ?? [],
                     highlighted: focus.highlighted == item.id, selected: focus.selection.contains(item.id),
@@ -108,17 +102,52 @@ private struct TriageList: View {
         }
     }
 
+    static func waiting(_ items: [WorkItemRow], now: Int64) -> [WorkItemRow] {
+        items.filter { $0.status == .triage && TaskListing.matches($0, WorkQuery(), now: now) }
+    }
+
     /// One group per meeting, the latest meeting first; inside a meeting,
-    /// the order things were said.
-    static func groups(_ items: [WorkItemRow], now: Int64) -> [TaskGroup] {
-        let waiting = items.filter { $0.status == .triage && TaskListing.matches($0, WorkQuery(), now: now) }
-        let meetings = Dictionary(grouping: waiting) { $0.sourceMeetingId ?? "" }
+    /// the order things were said. A split from anywhere else is one list.
+    static func groups(_ waiting: [WorkItemRow], byMeeting: Bool) -> [TaskGroup] {
+        let meetings = Dictionary(grouping: waiting) { byMeeting ? $0.sourceMeetingId ?? "" : "" }
         return meetings.map { meeting, rows in
-            let ordered = rows.sorted { ($0.sourceAtMs ?? $0.createdAtMs, $0.number) < ($1.sourceAtMs ?? $1.createdAtMs, $1.number) }
+            let at = { (row: WorkItemRow) in meeting.isEmpty ? row.createdAtMs : row.sourceAtMs ?? row.createdAtMs }
+            let ordered = rows.sorted { (at($0), $0.number) < (at($1), $1.number) }
             let title = meeting.isEmpty ? "Not from a meeting" : rows.first?.sourceMeetingTitle ?? "A meeting"
             return TaskGroup(id: "triage:\(meeting)", title: title, mark: .meeting, rows: ordered)
         }
         .sorted { ($0.rows.map(\.createdAtMs).max() ?? 0) > ($1.rows.map(\.createdAtMs).max() ?? 0) }
+    }
+}
+
+/// Triage, then each place its suggestions come from; ⇥ and ⇧⇥ step
+/// through them.
+private struct TriageSplits: View {
+    let rows: [WorkItemRow]
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        let focus = model.workFocus
+        let counts = Dictionary(grouping: rows, by: \.source).mapValues(\.count)
+        HStack(spacing: 2) {
+            WorkTab(title: "Triage", count: rows.count, on: focus.triageSplit == nil) { focus.split(nil) }
+            ForEach(WorkSource.allCases, id: \.self) { source in
+                WorkTab(title: source.split, count: counts[source], on: focus.triageSplit == source) {
+                    focus.split(source)
+                }
+            }
+        }
+    }
+}
+
+extension WorkSource {
+    var split: String {
+        switch self {
+        case .meeting: "From meetings"
+        case .dictation: "From dictation"
+        case .agent: "From agents"
+        case .person: "From people"
+        }
     }
 }
 

@@ -50,7 +50,7 @@ struct ShortcutSheet: View {
                 Entry(title: "Accept", keys: ["1"]),
                 Entry(title: "Decline", keys: ["2"]),
                 Entry(title: "Duplicate", keys: ["3"]),
-                Entry(title: "Snooze", keys: ["h"]),
+                Entry(title: "Next or previous source", keys: ["tab", "shift+tab"]),
             ]),
             ("Today", [
                 Entry(title: "Pick a focus", keys: ["space"]),
@@ -70,6 +70,8 @@ struct ShortcutSheet: View {
                 Entry(title: "Labels", keys: ["l"]),
                 Entry(title: "Project", keys: ["shift+p"]),
                 Entry(title: "Rename", keys: ["e"]),
+                Entry(title: "Snooze", keys: ["h"]),
+                Entry(title: "Nudge", keys: ["r"]),
                 Entry(title: "Archive", keys: ["cmd+backspace"]),
                 Entry(title: "Undo", keys: ["cmd+z"]),
             ]),
