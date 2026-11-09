@@ -117,27 +117,81 @@ enum TaskListing {
     /// The statuses in the order a list groups them.
     static let statusOrder: [WorkStatus] = [.triage, .inProgress, .notStarted, .backlog, .done, .canceled, .duplicate]
 
-    static func matches(_ row: WorkItemRow, _ query: WorkQuery, now: Int64) -> Bool {
-        if !query.includeArchived, row.archivedAtMs != nil { return false }
-        if !query.includeSnoozed, let wake = row.snoozedUntilMs, wake > now { return false }
-        if let statuses = query.statuses, !statuses.contains(row.status) { return false }
-        if let direction = query.direction, row.direction != direction { return false }
-        if let owners = query.ownerPersonIds, !owners.contains(row.ownerPersonId ?? "") { return false }
-        if let projects = query.projectIds, !projects.contains(row.projectId ?? "none") { return false }
-        if let labels = query.labelIds, !labels.contains(where: row.labelIds.contains) { return false }
-        if let priorities = query.priorities, !priorities.contains(row.priority) { return false }
-        if let before = query.dueBeforeMs {
-            guard let due = row.dueAtMs, due < before else { return false }
+    /// A query ready to test one list's rows: its due windows are worked out
+    /// once, for the day `now` falls on, not once per row.
+    struct Filter {
+        let query: WorkQuery
+        let now: Int64
+        private let due: [DueSpan]?
+
+        init(_ query: WorkQuery, now: Int64) {
+            self.query = query
+            self.now = now
+            due = query.due.map { DueSpan.pin($0, now: now) }
         }
-        if let meeting = query.sourceMeetingId, row.sourceMeetingId != meeting { return false }
-        if let search = query.search?.trimmingCharacters(in: .whitespaces), !search.isEmpty {
-            let number = search.hasPrefix("#") ? String(search.dropFirst()) : search
-            guard row.title.localizedCaseInsensitiveContains(search)
-                || (row.details ?? "").localizedCaseInsensitiveContains(search)
-                || "\(row.number)" == number
-            else { return false }
+
+        func matches(_ row: WorkItemRow) -> Bool {
+            if !query.includeArchived, row.archivedAtMs != nil { return false }
+            if !query.includeSnoozed, let wake = row.snoozedUntilMs, wake > now { return false }
+            if let statuses = query.statuses, !statuses.contains(row.status) { return false }
+            if let direction = query.direction, row.direction != direction { return false }
+            if let owners = query.ownerPersonIds, !owners.contains(row.ownerPersonId ?? "") { return false }
+            if let projects = query.projectIds, !projects.contains(row.projectId ?? "none") { return false }
+            if let labels = query.labelIds, !labels.contains(where: row.labelIds.contains) { return false }
+            if let priorities = query.priorities, !priorities.contains(row.priority) { return false }
+            if let before = query.dueBeforeMs {
+                guard let due = row.dueAtMs, due < before else { return false }
+            }
+            if let due, !due.contains(where: { $0.holds(row) }) { return false }
+            if let meeting = query.sourceMeetingId, row.sourceMeetingId != meeting { return false }
+            if let search = query.search?.trimmingCharacters(in: .whitespaces), !search.isEmpty {
+                let number = search.hasPrefix("#") ? String(search.dropFirst()) : search
+                guard row.title.localizedCaseInsensitiveContains(search)
+                    || (row.details ?? "").localizedCaseInsensitiveContains(search)
+                    || "\(row.number)" == number
+                else { return false }
+            }
+            return true
         }
-        return true
+    }
+
+    /// A due window pinned to one day on this Mac's clock, as the core pins it.
+    enum DueSpan {
+        /// Accepted, unfinished work due before this time.
+        case overdue(Int64)
+        /// Due at or after the first time and before the second.
+        case between(Int64, Int64)
+        case noDate
+
+        /// Each window as it stands on the day `now` falls on. Weeks start on
+        /// Monday.
+        static func pin(_ windows: [WorkDue], now: Int64) -> [DueSpan] {
+            let calendar = Calendar.current
+            let today = calendar.startOfDay(for: PlanningFormat.moment(now))
+            func start(_ days: Int) -> Int64 {
+                TaskDates.milliseconds(calendar.date(byAdding: .day, value: days, to: today) ?? today)
+            }
+            let first = start(0)
+            let sinceMonday = (calendar.component(.weekday, from: today) + 5) % 7
+            return windows.map { window in
+                switch window {
+                case .overdue: .overdue(first)
+                case .today: .between(first, start(1))
+                case .thisWeek: .between(first, start(7 - sinceMonday))
+                case let .nextDays(days): .between(first, start(Int(days) + 1))
+                case .noDate: .noDate
+                }
+            }
+        }
+
+        func holds(_ row: WorkItemRow) -> Bool {
+            switch (self, row.dueAtMs) {
+            case let (.overdue(before), due?): due < before && row.status.isOpen
+            case let (.between(from, until), due?): from <= due && due < until
+            case (.noDate, nil): true
+            case (.overdue, nil), (.between, nil), (.noDate, _?): false
+            }
+        }
     }
 
     static func ordered(_ rows: [WorkItemRow], by order: WorkOrderBy) -> [WorkItemRow] {
@@ -263,9 +317,8 @@ enum TaskListing {
     /// today's plan picked, in the order they were picked. Waits whose day
     /// to ask has come lead the rest, the longest waiting first.
     static func myWork(_ rows: [WorkItemRow], direction: WorkDirection, now: Int64, focus: [String] = []) -> [TaskGroup] {
-        let open = rows.filter {
-            $0.direction == direction && $0.status.isOpen && matches($0, WorkQuery(), now: now)
-        }
+        let shown = Filter(WorkQuery(), now: now)
+        let open = rows.filter { $0.direction == direction && $0.status.isOpen && shown.matches($0) }
         let byId = Dictionary(open.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         let focused = focus.compactMap { byId[$0] }
         let picked = Set(focused.map(\.id))
