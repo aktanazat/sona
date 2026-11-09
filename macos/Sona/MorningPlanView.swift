@@ -11,23 +11,17 @@ struct MorningPlanView: View {
         let rituals = model.rituals
         ZStack(alignment: .bottomLeading) {
             VStack(spacing: 0) {
-                HStack(spacing: 10) {
-                    HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        Text("Today")
-                            .font(TypeScale.listTitle)
-                            .foregroundStyle(Theme.ink)
-                        Text(Date.now.formatted(.dateTime.weekday(.wide).month(.wide).day()))
-                            .font(TypeScale.label(12))
-                            .foregroundStyle(Theme.inkTertiary)
+                Hairline()
+                    .pageBar {
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            PageHeading(title: "Today")
+                            Text(Date.now.formatted(.dateTime.weekday(.wide).month(.wide).day()))
+                                .font(TypeScale.label(12))
+                                .foregroundStyle(Theme.inkTertiary)
+                        }
+                    } trailing: {
+                        trailing
                     }
-                    Spacer(minLength: 12)
-                    trailing
-                }
-                .frame(maxWidth: Theme.contentMax, alignment: .leading)
-                .padding(.horizontal, Theme.margin)
-                .frame(maxWidth: .infinity)
-                .frame(height: Theme.headerHeight)
-                .overlay(alignment: .bottom) { Hairline() }
                 if let error = rituals.error {
                     ErrorNote(error)
                         .frame(maxWidth: Theme.contentMax, alignment: .leading)

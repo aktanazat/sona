@@ -97,8 +97,6 @@ struct ProjectsView: View {
 
     private var projectList: some View {
         VStack(alignment: .leading, spacing: 0) {
-            listHeader
-                .padding(.bottom, store.filter.isActive ? 10 : 18)
             if store.filter.isActive {
                 filterChips.padding(.bottom, 14)
             }
@@ -125,34 +123,28 @@ struct ProjectsView: View {
                 ScrollViewReader { proxy in list(proxy) }
             }
         }
-    }
-
-    private var listHeader: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: 10) {
-                headerTitle
-                Spacer(minLength: 16)
-                headerControls
-            }
-            .frame(minHeight: Theme.headerHeight)
-            VStack(alignment: .leading, spacing: 10) {
-                headerTitle.frame(minHeight: Theme.headerHeight)
-                HStack(spacing: 10) { headerControls }
+        .pageBar {
+            headerTitle
+        } trailing: {
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 10) { headerControls(compact: false) }
+                HStack(spacing: 10) { headerControls(compact: true) }
             }
         }
     }
 
     private var headerTitle: some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Text("Projects").titleText().accessibilityAddTraits(.isHeader)
+            PageHeading(title: "Projects")
             if let count = store.projects?.count, count > 0 {
                 Text("\(count)").metaText().monospacedDigit()
             }
         }
     }
 
+    /// A narrow window keeps "Plan with Sona" as its icon.
     @ViewBuilder
-    private var headerControls: some View {
+    private func headerControls(compact: Bool) -> some View {
         SearchField(prompt: "Search", text: $query)
             .frame(width: 160)
             .accessibilityLabel("Search projects")
@@ -165,8 +157,17 @@ struct ProjectsView: View {
             case .calendar: showCalendar()
             }
         }
-        Button("Plan with Sona", systemImage: "bubble.left") { planWithSona() }
-            .buttonStyle(.secondary)
+        if compact {
+            Button { planWithSona() } label: {
+                Image(systemName: "bubble.left")
+            }
+            .buttonStyle(.icon)
+            .help("Plan with Sona")
+            .accessibilityLabel("Plan with Sona")
+        } else {
+            Button("Plan with Sona", systemImage: "bubble.left") { planWithSona() }
+                .buttonStyle(.secondary)
+        }
         Button("New project", systemImage: "plus") { creation = .project }
             .buttonStyle(.primary)
             .help("New project (C)")

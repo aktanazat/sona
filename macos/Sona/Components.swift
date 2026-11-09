@@ -397,54 +397,88 @@ struct Chip: View {
     }
 }
 
-/// The head of every page: one title, one line of plain fact, one action.
-struct PageTitle<Action: View>: View {
-    let title: String
+/// The head of every page: its title and its one action in the window's
+/// toolbar, on the line of the close, minimize and zoom buttons, and one line
+/// of plain fact at the top of the column. A page with tabs leads with them
+/// instead of its title.
+struct PageTitle<Lead: View, Action: View>: View {
     let subtitle: String
+    let lead: Lead
     let action: Action
 
-    init(_ title: String, subtitle: String, @ViewBuilder action: () -> Action) {
-        self.title = title
+    init(subtitle: String, @ViewBuilder lead: () -> Lead, @ViewBuilder action: () -> Action) {
         self.subtitle = subtitle
+        self.lead = lead()
         self.action = action()
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            ViewThatFits(in: .horizontal) {
-                HStack(alignment: .center, spacing: 12) {
-                    heading.fixedSize(horizontal: true, vertical: false)
-                    Spacer(minLength: 12)
-                    action.fixedSize(horizontal: true, vertical: false)
-                }
-                .frame(minHeight: Theme.headerHeight)
-                VStack(alignment: .leading, spacing: 12) {
-                    heading.frame(minHeight: Theme.headerHeight)
-                    action
-                }
-            }
+        VStack(alignment: .leading, spacing: 0) {
             if !subtitle.isEmpty {
                 Text(subtitle).metaText(Theme.inkSecondary)
+                    .padding(.bottom, 20)
             }
         }
-        .padding(.bottom, 20)
-    }
-
-    private var heading: some View {
-        Text(title)
-            .titleText()
-            .lineLimit(2)
-            .accessibilityAddTraits(.isHeader)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .pageBar {
+            lead
+        } trailing: {
+            action
+        }
     }
 }
 
-extension PageTitle where Action == EmptyView {
+extension PageTitle where Lead == PageHeading {
+    init(_ title: String, subtitle: String, @ViewBuilder action: () -> Action) {
+        self.init(subtitle: subtitle, lead: { PageHeading(title: title) }, action: action)
+    }
+}
+
+extension PageTitle where Lead == PageHeading, Action == EmptyView {
     init(_ title: String, subtitle: String) {
         self.init(title, subtitle: subtitle) { EmptyView() }
     }
 }
 
+/// A page's name where its bar starts.
+struct PageHeading: View {
+    let title: String
+
+    var body: some View {
+        Text(title)
+            .titleText()
+            .lineLimit(1)
+            .accessibilityAddTraits(.isHeader)
+    }
+}
+
+/// How far a page's bar runs: over the page's column, or across the whole
+/// pane the way a list's bar does.
+enum PageBarSpan {
+    case column
+    case full
+}
+
+extension EnvironmentValues {
+    /// The width of the pane beside the sidebar. A page's bar sits in the
+    /// window's toolbar, outside the page, so it takes the pane's width from
+    /// here to line up with the column under it.
+    @Entry var paneWidth: CGFloat = 0
+}
+
 extension View {
+    /// A page's bar: what the page is on the left, its actions on the right,
+    /// in the window's toolbar on the line of the close, minimize and zoom
+    /// buttons. Below that line the window takes a click as the start of a
+    /// drag, and only the toolbar's own items answer one there.
+    func pageBar<Leading: View, Trailing: View>(
+        _ span: PageBarSpan = .column,
+        @ViewBuilder leading: () -> Leading,
+        @ViewBuilder trailing: () -> Trailing
+    ) -> some View {
+        modifier(PageBar(span: span, leading: leading(), trailing: trailing()))
+    }
+
     /// Keeps the window's toolbar while a page shows no bar: without an item
     /// the toolbar goes, and the close, minimize and zoom buttons jump to the
     /// window's corner.
@@ -461,6 +495,50 @@ extension View {
     private var toolbarAnchor: some ToolbarContent {
         ToolbarItem(placement: .automatic) {
             Color.clear.frame(width: 1, height: 1).accessibilityHidden(true)
+        }
+    }
+}
+
+/// The toolbar centers its middle item in the pane beside the sidebar, so an
+/// item as wide as the page's column lines up with the column. Across the
+/// whole pane it keeps a list's 16 points on the left and 24 on the right.
+/// The toolbar sizes an item once, when it adds it, so the item's identity
+/// carries its width: a resized pane brings a new item. A kept item stayed
+/// at its first width and went to the toolbar's overflow when the window
+/// narrowed, out of reach of a click.
+/// Its own glass is left off: the controls in it bring their own shapes.
+private struct PageBar<Leading: View, Trailing: View>: ViewModifier {
+    let span: PageBarSpan
+    let leading: Leading
+    let trailing: Trailing
+    @Environment(\.paneWidth) private var paneWidth
+
+    func body(content: Content) -> some View {
+        content.toolbar {
+            if #available(macOS 26.0, *) {
+                item.sharedBackgroundVisibility(.hidden)
+            } else {
+                item
+            }
+        }
+    }
+
+    private var item: some ToolbarContent {
+        ToolbarItem(id: "page-bar-\(Int(width))", placement: .principal) {
+            HStack(spacing: 10) {
+                leading
+                Spacer(minLength: 12)
+                trailing
+            }
+            .padding(.trailing, span == .full ? 8 : 0)
+            .frame(width: width)
+        }
+    }
+
+    private var width: CGFloat {
+        switch span {
+        case .column: max(0, min(Theme.contentMax, paneWidth - 2 * Theme.margin))
+        case .full: max(0, paneWidth - 32)
         }
     }
 }
@@ -497,12 +575,11 @@ struct PageBack {
 }
 
 /// The scrolling column every screen sits in. A detail page names where it
-/// goes back to, and its bar stays pinned below the window's title bar: in
-/// that strip the window takes a click as the start of a drag, so a back
-/// button that scrolled up into it stopped answering.
+/// goes back to; its way back, its name once the headline has scrolled away
+/// and its actions make its bar in the window's toolbar.
 ///
-/// `pinned` sits under that bar and never scrolls, so a page whose column
-/// changes under its own header and tabs keeps them where they are.
+/// `pinned` sits at the top of the pane and never scrolls, so a page whose
+/// column changes under its own tabs keeps them where they are.
 struct Page<Content: View, Actions: View, Pinned: View>: View {
     let back: PageBack?
     let title: String?
@@ -529,19 +606,26 @@ struct Page<Content: View, Actions: View, Pinned: View>: View {
     }
 
     var body: some View {
+        if let back {
+            pane.pageBar {
+                bar(back)
+            } trailing: {
+                actions
+            }
+        } else {
+            pane
+        }
+    }
+
+    @ViewBuilder
+    private var pane: some View {
         if #available(macOS 26.0, *) {
             column
                 .safeAreaBar(edge: .top, spacing: 0) { chrome }
                 .scrollEdgeEffectStyle(.hard, for: .top)
         } else {
             column.safeAreaInset(edge: .top, spacing: 0) {
-                chrome
-                    .background {
-                        if back != nil { Theme.page.ignoresSafeArea(edges: .top) }
-                    }
-                    .overlay(alignment: .bottom) {
-                        Hairline().opacity(back != nil && scroll.scrolled ? 1 : 0)
-                    }
+                chrome.background { Theme.page.ignoresSafeArea(edges: .top) }
             }
         }
     }
@@ -553,7 +637,7 @@ struct Page<Content: View, Actions: View, Pinned: View>: View {
             }
             .frame(maxWidth: Theme.contentMax, alignment: .leading)
             .padding(.horizontal, Theme.margin)
-            .padding(.top, back == nil ? 0 : Space.m)
+            .padding(.top, Space.m)
             .padding(.bottom, 40)
             .frame(maxWidth: .infinity)
             .coordinateSpace(.named(PageHeadlineKey.space))
@@ -571,17 +655,14 @@ struct Page<Content: View, Actions: View, Pinned: View>: View {
     }
 
     private var chrome: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            if let back { bar(back) }
-            pinned
-                .frame(maxWidth: Theme.contentMax, alignment: .leading)
-                .padding(.horizontal, Theme.margin)
-                .frame(maxWidth: .infinity)
-        }
+        pinned
+            .frame(maxWidth: Theme.contentMax, alignment: .leading)
+            .padding(.horizontal, Theme.margin)
+            .frame(maxWidth: .infinity)
     }
 
-    /// "‹ People › Noah Sample": the way back, the page's name once its own
-    /// headline has scrolled away, and the page's actions.
+    /// "‹ People › Noah Sample": the way back, then the page's name once its
+    /// own headline has scrolled away.
     private func bar(_ back: PageBack) -> some View {
         HStack(spacing: 10) {
             BackLink(title: back.title, action: back.action)
@@ -596,13 +677,7 @@ struct Page<Content: View, Actions: View, Pinned: View>: View {
                 }
                 .transition(.opacity)
             }
-            Spacer(minLength: 12)
-            actions
         }
-        .frame(maxWidth: Theme.contentMax, alignment: .leading)
-        .padding(.horizontal, Theme.margin)
-        .frame(maxWidth: .infinity)
-        .frame(height: Theme.headerHeight)
     }
 }
 
@@ -634,15 +709,14 @@ extension Page where Actions == EmptyView, Pinned == EmptyView {
     }
 }
 
-/// How far a detail page has scrolled, in the two steps its bar shows.
+/// Whether a detail page has scrolled past its own headline, the step its
+/// bar shows the page's name at.
 private struct PageScroll: Equatable {
-    var scrolled = false
     var pastHeadline = false
 
     init() {}
 
     init(offset: CGFloat, headlineBottom: CGFloat?) {
-        scrolled = offset > 0.5
         pastHeadline = headlineBottom.map { offset > $0 } ?? false
     }
 }
