@@ -423,7 +423,10 @@ pub(crate) fn take_in_row(
     let lineage = lineage(meetings, loop_id)?;
     let earlier = match tracker_of(history, &lineage)? {
         Some(item) => Some(item),
-        None => hygiene::reworded(history, &meeting.rows, row)?,
+        None => match hygiene::reworded(history, &meeting.rows, row)? {
+            Some(item) => Some(item),
+            None => super::live::heard_live(history, row)?,
+        },
     };
     if let Some(item) = earlier {
         history.execute(

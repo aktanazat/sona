@@ -4,7 +4,7 @@ pub(crate) mod person;
 mod proposal;
 mod proposal_sources;
 pub(crate) mod quiet;
-mod schema;
+pub(crate) mod schema;
 mod sources;
 pub(crate) mod store;
 pub(crate) mod suggestions;

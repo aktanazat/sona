@@ -592,7 +592,7 @@ fn only<T>(mut matches: impl Iterator<Item = T>) -> Option<T> {
 
 /// The one person `said` names: by whole name, by first name, or, when
 /// `prefix`, by the start of a name.
-fn person_named<'p>(
+pub(crate) fn person_named<'p>(
     people: &'p [WorkPersonChoice],
     said: &str,
     prefix: bool,

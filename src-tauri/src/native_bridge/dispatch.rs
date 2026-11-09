@@ -11,7 +11,7 @@ use tauri_specta::Event as _;
 use super::{encode_plain, off_main_thread, on_main_thread, reply, Args, Fault};
 
 /// Every typed event the core emits, by the name the bindings export.
-pub(super) const TYPED_EVENTS: [&str; 47] = [
+pub(super) const TYPED_EVENTS: [&str; 48] = [
     crate::chat_voice::ChatVoiceEvent::NAME,
     crate::upstream_import::UpstreamImportProgressEvent::NAME,
     crate::agent_bridge::AgentBridgeUpdateEvent::NAME,
@@ -38,6 +38,7 @@ pub(super) const TYPED_EVENTS: [&str; 47] = [
     crate::meeting::types::MeetingRemoteJobChangedEvent::NAME,
     crate::meeting::types::MeetingRemovedEvent::NAME,
     crate::meeting::types::MeetingHeardPlansChangedEvent::NAME,
+    crate::meeting::types::MeetingLiveCardChangedEvent::NAME,
     crate::cloud_sync::types::CloudSyncChangedEvent::NAME,
     crate::meeting::types::MeetingNavigationRequestedEvent::NAME,
     crate::meeting::types::MeetingProcessingProgressEvent::NAME,
@@ -3698,6 +3699,57 @@ pub(super) async fn call(
                     plan_id,
                 )
                 .await,
+            )
+        }
+        "meeting_live_card" => {
+            let mut args = Args::parse(params)?;
+            let session_id = args.take("sessionId")?;
+            let handle = app.clone();
+            on_main_thread(app, move || {
+                encode_plain(crate::commands::live_card::meeting_live_card(
+                    handle.state(),
+                    session_id,
+                ))
+            })
+            .await?
+        }
+        "meeting_live_card_owner" => {
+            let mut args = Args::parse(params)?;
+            let session_id = args.take("sessionId")?;
+            let promise_id = args.take("promiseId")?;
+            let owner = args.take("owner")?;
+            reply(
+                crate::commands::live_card::meeting_live_card_owner(
+                    app.state(),
+                    session_id,
+                    promise_id,
+                    owner,
+                )
+                .await,
+            )
+        }
+        "work_follow_up_post" => {
+            let mut args = Args::parse(params)?;
+            let connection_id = args.take("connectionId")?;
+            let operation_id = args.take("operationId")?;
+            let text = args.take("text")?;
+            reply(
+                crate::commands::live_card::work_follow_up_post(
+                    app.clone(),
+                    app.state(),
+                    connection_id,
+                    operation_id,
+                    text,
+                )
+                .await,
+            )
+        }
+        "work_follow_up" => {
+            let mut args = Args::parse(params)?;
+            let meeting_id = args.take("meetingId")?;
+            reply(
+                crate::planning::work::live::work_follow_up(app.state(), app.state(), meeting_id)
+                    .await,
             )
         }
         "meeting_wrap" => {

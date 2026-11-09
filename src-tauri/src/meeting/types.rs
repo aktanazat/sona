@@ -1559,6 +1559,7 @@ meeting_event!(MeetingArtifactChangedEvent, "meeting:artifact-changed");
 meeting_event!(MeetingRemoteJobChangedEvent, "meeting:remote-job-changed");
 meeting_event!(MeetingRemovedEvent, "meeting:removed");
 meeting_event!(MeetingHeardPlansChangedEvent, "meeting:heard-plans-changed");
+meeting_event!(MeetingLiveCardChangedEvent, "meeting:live-card-changed");
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
 pub struct MeetingEventPayload {

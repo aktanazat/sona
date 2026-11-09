@@ -3,6 +3,8 @@ mod apple_json;
 pub(crate) use apple_json::root_schema as json_response_schema;
 
 mod complete_reading;
+mod live_card;
+pub(crate) use live_card::{hang_up as live_card_hang_up, MeetingLiveCard, MeetingLivePromise};
 mod progress;
 
 use progress::{RunProgress, TrackSpan};
@@ -3750,6 +3752,8 @@ pub(crate) struct LiveTranscript {
     recall: Mutex<RecallMemory>,
     /// The voices the last pass had grouped, across tracks.
     voices: Mutex<Vec<HeardVoice>>,
+    /// The promises heard so far, and what is still to be read for them.
+    card: Mutex<live_card::Card>,
 }
 
 impl LiveTranscript {
@@ -3759,6 +3763,7 @@ impl LiveTranscript {
             cursors: Mutex::new(HashMap::new()),
             recall: Mutex::new(RecallMemory::default()),
             voices: Mutex::new(Vec::new()),
+            card: Mutex::new(live_card::Card::default()),
         }
     }
 
@@ -4024,12 +4029,19 @@ fn run_live_pass_worker(
                 return;
             }
         }
-        if let Err(error) = service.live_pass(&store, session_id, &live) {
-            if !reported {
-                reported = true;
-                log::warn!(
-                    "No provisional transcript for the running meeting {session_id:?}: {error:?}"
-                );
+        match service.live_pass(&store, session_id, &live) {
+            Ok(()) => {
+                if live_card::tick(&service, &store, session_id, &live, live_card::Moment::Pass) {
+                    service.emit_current(&store, "meeting:live-card-changed", session_id);
+                }
+            }
+            Err(error) => {
+                if !reported {
+                    reported = true;
+                    log::warn!(
+                        "No provisional transcript for the running meeting {session_id:?}: {error:?}"
+                    );
+                }
             }
         }
     }

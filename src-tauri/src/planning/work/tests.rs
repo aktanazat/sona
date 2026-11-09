@@ -1072,3 +1072,45 @@ fn notes_written_again_in_other_words_move_the_item_instead_of_adding_one() {
         1
     );
 }
+
+#[test]
+fn a_promise_heard_live_becomes_the_item_its_commitment_tracks() {
+    let mut desk = desk(&["Send the pricing deck"]);
+    let meeting = desk.meeting;
+    let heard = crate::meeting::processing::MeetingLivePromise {
+        id: operation(),
+        what: "Send Dana the pricing deck".to_owned(),
+        owner: WorkOwner::Nobody,
+        owner_name: None,
+        owner_set: false,
+        due_at_ms: None,
+        due_words: None,
+        quote: "I will send the pricing deck".to_owned(),
+        start_offset_ns: 0,
+        end_offset_ns: 1_000_000_000,
+    };
+    let at = desk.tick();
+    // PANIC: filing into the fixture's own meeting cannot fail.
+    let filed = desk
+        .both(|history, meetings| {
+            super::live::file_promises(history, meetings, meeting, &[heard], at)
+        })
+        .expect("the heard promise filed")
+        .remove(0);
+    let tracked = desk.commitments().remove(0).loop_id;
+
+    let taken = desk.take_in();
+    assert_eq!(
+        taken
+            .iter()
+            .map(|item| (item.id.as_str(), item.source_loop_id.as_deref()))
+            .collect::<Vec<_>>(),
+        [(filed.id.as_str(), Some(tracked.as_str()))]
+    );
+    assert_eq!(
+        items::items(&desk.history, true)
+            .expect("the tracker")
+            .len(),
+        1
+    );
+}
