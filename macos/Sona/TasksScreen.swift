@@ -272,6 +272,7 @@ struct WorkTab: View {
                     Circle().fill(Theme.accent).frame(width: 5, height: 5)
                 }
             }
+            .fixedSize()
             .font(on ? TypeScale.listTitle : TypeScale.list)
             .foregroundStyle(on ? Theme.ink : Theme.inkSecondary)
             .padding(.horizontal, 10)
