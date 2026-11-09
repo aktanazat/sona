@@ -186,12 +186,16 @@ and a change already made lists its tasks under `skipped`. Pass a new id to
 create a twin on purpose. Every write carries the client's name from the MCP
 handshake, so Sona shows which agent made it.
 
-`sona_work_list` with `ready:true` returns Todo tasks nothing open blocks.
+`sona_work_list` with `ready:true` returns Todo tasks nothing open blocks, and
+`due` narrows any list to due windows such as `overdue,today` or `next:14`.
 `sona_work_claim` moves one Todo or Backlog task to In progress and shows the
 agent on it; it refuses a task another agent works or one already in
 progress, so two agents cannot both start it. The task's owner stays who it
-was. `sona_work_done` closes the meeting commitment a task came from, and
-`evidence` (a pull request link, say) becomes a line in its details.
+was. `sona_work_done` closes the meeting commitment a task came from; a link
+in `evidence` (a pull request, say) is kept with the task as evidence, and any
+other line goes into its details. `repeat` keeps how often a task comes back
+(`every monday`, `every 2 weeks`, `none` to stop); finishing the task does not
+make the next one.
 
 Unless the user sets **Settings > Agents > Agents' changes** to Apply, a
 change to a task's fields waits for them: the answer lists it under

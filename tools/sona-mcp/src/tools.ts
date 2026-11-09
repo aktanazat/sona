@@ -200,6 +200,12 @@ const WORK_SIDE = {
     "Whose work: 'mine' is what the user owes, 'waiting' is what others owe the user, 'unowned' is work nobody owns.",
 } as const;
 
+const DUE_WINDOWS = {
+  type: "string",
+  description:
+    "Due windows, comma-separated: overdue, today, this-week, next:N for the next N days, or none for work with no due day.",
+} as const;
+
 /* The fields a task is created with or changed to. An empty details or
  * labels clears it; every other field takes none to clear. */
 const FIELDS = {
@@ -226,6 +232,11 @@ const FIELDS = {
     type: "string",
     description: "The local day it is due: YYYY-MM-DD, today, tomorrow, or none.",
   },
+  repeat: {
+    type: "string",
+    description:
+      "How often it repeats: every monday, every 2 weeks, every weekday or daily; none stops it. Without due, a new task that repeats on named days is due on the next one.",
+  },
   project: {
     type: "string",
     description: "A project's name or id from sona_projects, or none.",
@@ -248,6 +259,7 @@ function fieldFlags(input: ToolInput): string[] {
     ...assigned("--priority", text(input, "priority")),
     ...assigned("--owner", text(input, "owner")),
     ...assigned("--due", text(input, "due")),
+    ...assigned("--repeat", text(input, "repeat")),
     ...assigned("--project", text(input, "project")),
     ...assigned("--milestone", text(input, "milestone")),
     ...cleared("--labels", input, "labels"),
@@ -266,6 +278,7 @@ function scopeFlags(input: ToolInput): string[] {
     ...assigned("--label", text(input, "label")),
     ...assigned("--priority", text(input, "priority")),
     ...assigned("--due-by", text(input, "due_by")),
+    ...assigned("--due", text(input, "due")),
     ...assigned("--meeting", text(input, "meeting_id")),
     ...assigned("--search", text(input, "search")),
   ];
@@ -808,7 +821,7 @@ export const TOOLS: readonly ToolDefinition[] = [
     name: "sona_work_list",
     title: "List Sona tasks",
     description:
-      "List tasks in Sona's tracker, most urgent first: priority, then due day. Without status it lists triage and open work that is neither archived nor snoozed. ready:true lists only Todo tasks that nothing open blocks and that are not snoozed, the work to pick up next, and takes only the side, owner, project, label, priority, due_by, meeting_id, search and limit filters. Each task has a handle (S-12) that works wherever a task is asked for, its id, status, priority, owner, due_date, project, labels, revision and, for work raised in a meeting, the quote and a sona://loop link. Work from meetings kept on this Mac is left out. Read total and has_more before treating the list as complete.",
+      "List tasks in Sona's tracker, most urgent first: priority, then due day. Without status it lists triage and open work that is neither archived nor snoozed. ready:true lists only Todo tasks that nothing open blocks and that are not snoozed, the work to pick up next, and takes only the side, owner, project, label, priority, due_by, due, meeting_id, search and limit filters. Each task has a handle (S-12) that works wherever a task is asked for, its id, status, priority, owner, due_date, follow_up_at_ms for work someone else owes, focus when it is one of today's focus picks, project, labels, revision and, for work raised in a meeting, the quote and a sona://loop link. Work from meetings kept on this Mac is left out. Read total and has_more before treating the list as complete.",
     inputSchema: {
       type: "object",
       properties: {
@@ -845,6 +858,7 @@ export const TOOLS: readonly ToolDefinition[] = [
           type: "string",
           description: "Due on or before this local day: YYYY-MM-DD, today or tomorrow.",
         },
+        due: DUE_WINDOWS,
         meeting_id: {
           ...MEETING_ID,
           description: "Only work raised in this meeting. " + MEETING_ID.description,
@@ -880,7 +894,7 @@ export const TOOLS: readonly ToolDefinition[] = [
     name: "sona_work_get",
     title: "Read a Sona task",
     description:
-      "Read one task: every field, the meeting quote it came from with its speaker and a sona://loop link, the tasks it blocks, is blocked by or relates to, its evidence links, what Sona suggests for it while it waits in triage (owner, due day, project, duplicate) with the reason and quote, and its history, each entry marked as made by the user (me), Sona or an agent.",
+      "Read one task: every field, how often it repeats, the meeting quote it came from with its speaker and a sona://loop link, the tasks it blocks, is blocked by or relates to, its evidence (meetings, notes, dictation quotes and links), what Sona suggests for it while it waits in triage (owner, due day, project, duplicate) with the reason and quote, and its history, each entry marked as made by the user (me), Sona or an agent.",
     inputSchema: {
       type: "object",
       properties: { task: TASK },
@@ -1010,7 +1024,7 @@ export const TOOLS: readonly ToolDefinition[] = [
   {
     name: "sona_work_done",
     title: "Finish Sona tasks",
-    description: `Mark tasks done. The meeting commitment a task came from closes with it. evidence adds one line to the task's details, such as a pull request link. dry_run:true shows the change without writing. ${WRITES}`,
+    description: `Mark tasks done. The meeting commitment a task came from closes with it. evidence keeps a link, such as a pull request, with the task as evidence; any other line is added to its details. dry_run:true shows the change without writing. ${WRITES}`,
     mutates: true,
     inputSchema: {
       type: "object",
@@ -1019,7 +1033,7 @@ export const TOOLS: readonly ToolDefinition[] = [
         evidence: {
           type: "string",
           description:
-            "One line showing the work is done, usually a link. One task only.",
+            "A link (http, https or file) showing the work is done, kept with the task as evidence, or one line added to its details. One task only.",
         },
         dry_run: DRY_RUN,
         operation_id: OPERATION_ID,
@@ -1220,6 +1234,7 @@ export const TOOLS: readonly ToolDefinition[] = [
           type: "string",
           description: "Comma-separated: urgent, high, medium, low or none.",
         },
+        due: DUE_WINDOWS,
         search: { type: "string", description: "Words in the title or details." },
         layout: { type: "string", enum: ["list", "board"], description: "How the app shows it." },
         group_by: {
