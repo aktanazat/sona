@@ -14,8 +14,8 @@ pub(crate) mod work;
 
 pub use proposal::{PlanningDraft, PlanningSourceRef};
 pub use schema::{
-    DISMISSED_LOOP_MIGRATION, MEETING_NOTE_LINK_MIGRATION, MIGRATION, QUIET_REVIEW_MIGRATION,
-    WORK_MIGRATION,
+    DISMISSED_LOOP_MIGRATION, MEETING_NOTE_LINK_MIGRATION, MIGRATION,
+    PROJECT_DELETE_KEEPS_TASKS_MIGRATION, QUIET_REVIEW_MIGRATION, WORK_MIGRATION,
 };
 pub use types::{
     EvidenceLink, EvidenceSourceKind, EvidenceTargetKind, Milestone, PlanningCalendarPage,

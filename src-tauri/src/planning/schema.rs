@@ -251,6 +251,17 @@ CREATE TABLE planning_views (
     updated_at_ms INTEGER NOT NULL
 );";
 
+/// Deleting a project keeps its tasks: they leave the project and its
+/// milestones in one statement, since a task with a milestone must have a
+/// project.
+pub const PROJECT_DELETE_KEEPS_TASKS_MIGRATION: &str = "DROP TRIGGER planning_project_delete;
+CREATE TRIGGER planning_project_delete AFTER DELETE ON planning_projects BEGIN
+    UPDATE planning_tasks SET project_id = NULL, milestone_id = NULL, revision = revision + 1
+        WHERE project_id = old.id;
+    DELETE FROM planning_milestones WHERE project_id = old.id;
+    DELETE FROM planning_evidence_links WHERE target_kind = 'project' AND target_id = old.id;
+END;";
+
 /// Every planner migration in order, for tests that build the schema without
 /// the rest of the history database.
 #[cfg(test)]
@@ -261,6 +272,7 @@ pub(crate) fn apply_all(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
         MEETING_NOTE_LINK_MIGRATION,
         DISMISSED_LOOP_MIGRATION,
         WORK_MIGRATION,
+        PROJECT_DELETE_KEEPS_TASKS_MIGRATION,
     ] {
         conn.execute_batch(migration)?;
     }

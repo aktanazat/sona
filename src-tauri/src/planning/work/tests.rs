@@ -709,3 +709,56 @@ fn a_change_made_while_the_conversations_are_closed_reaches_its_commitment_when_
     assert_eq!(row.resolved_by, Some(OperationActor::User));
     assert_eq!(desk.item(&item.id), done);
 }
+
+#[test]
+fn deleting_a_project_keeps_its_items() {
+    let mut desk = desk(&["Send the outline"]);
+    let (tracked, _) = desk.accepted();
+    let at = desk.tick();
+    // PANIC: a project and milestone on the fixture's own database.
+    let project =
+        planning_store::insert_project(&desk.history, "Launch", None, at).expect("a project");
+    let milestone = planning_store::insert_milestone(&desk.history, &project.id, "Beta", None, at)
+        .expect("a milestone");
+    let planned = update(
+        &mut desk.history,
+        None,
+        by_me(&operation(), at),
+        &tracked.id,
+        tracked.revision,
+        &WorkPatch {
+            project_id: Some(Some(project.id.clone())),
+            milestone_id: Some(Some(milestone.id.clone())),
+            ..WorkPatch::default()
+        },
+    )
+    .expect("the commitment planned into the project")
+    .value;
+    let booked = create(
+        &mut desk.history,
+        None,
+        by_me(&operation(), at),
+        &WorkItemInput {
+            project_id: Some(project.id.clone()),
+            ..typed("Book the venue")
+        },
+    )
+    .expect("an item typed into the project")
+    .value;
+
+    desk.history
+        .execute("DELETE FROM planning_projects WHERE id = ?1", [&project.id])
+        .expect("the project deleted");
+
+    let kept = [&planned, &booked].map(|item| {
+        items::item(&desk.history, &item.id).ok().map(|kept| {
+            (
+                kept.project_id,
+                kept.milestone_id,
+                kept.revision - item.revision,
+            )
+        })
+    });
+    assert_eq!(kept, [Some((None, None, 1)), Some((None, None, 1))]);
+    assert!(planning_store::milestone(&desk.history, &milestone.id).is_err());
+}
