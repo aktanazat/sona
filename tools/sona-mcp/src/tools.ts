@@ -884,7 +884,7 @@ export const TOOLS: readonly ToolDefinition[] = [
     name: "sona_work_counts",
     title: "Read my work in Sona",
     description:
-      "Read the tracker's counts (triage waiting, your open work, overdue, due today, waiting on others and how many of those have been quiet a week), then the open tasks the user owes and the open tasks others owe the user, most urgent first.",
+      "Read the tracker's counts (triage waiting, your open work, overdue, due today, waiting on others and how many of those are due a follow-up), then the open tasks the user owes and the open tasks others owe the user, most urgent first.",
     inputSchema: {
       type: "object",
       properties: {

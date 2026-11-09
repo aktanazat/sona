@@ -397,8 +397,12 @@ fn start_meeting_detection(
         prompts,
     ));
 
+    planning::work::follow::start(app_handle.clone(), Arc::clone(&native_prompts));
     meetings.start_digest_scheduler(app_handle.clone(), native_prompts);
     responder.bind_digest(Arc::new(meeting::digest::CaptureOpener::new(
+        app_handle.clone(),
+    )));
+    responder.bind_follow_up(Arc::new(planning::work::follow::ReminderOpener::new(
         app_handle.clone(),
     )));
 
@@ -2065,6 +2069,11 @@ pub fn run(cli_args: CliArgs) {
             planning::work::work_keep,
             planning::work::work_day,
             planning::work::work_day_plan,
+            planning::work::follow::work_brief,
+            planning::work::follow::work_talking_point_add,
+            planning::work::follow::work_talking_point_done,
+            planning::work::follow::work_nudged,
+            planning::work::follow::work_nudge_mail,
         ])
         .events(collect_events![
             chat_voice::ChatVoiceEvent,
@@ -2111,6 +2120,7 @@ pub fn run(cli_args: CliArgs) {
             scratchpad::ScratchpadChangedEvent,
             planning::PlanningChangedEvent,
             planning::work::WorkChanged,
+            planning::work::follow::WorkReminderOpened,
         ]);
 
     let invoke_handler = specta_builder.invoke_handler();

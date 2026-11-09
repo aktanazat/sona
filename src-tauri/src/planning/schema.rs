@@ -288,6 +288,26 @@ DROP TABLE planning_task_activity;
 ALTER TABLE planning_task_activity_next RENAME TO planning_task_activity;
 CREATE INDEX planning_task_activity_task ON planning_task_activity(task_id, at_ms, id);";
 
+/// What follow-through remembers: each reminder already shown, when each
+/// waiting-on item was last nudged, and the points saved to raise with a
+/// person.
+pub const FOLLOW_MIGRATION: &str = "CREATE TABLE planning_reminders (
+    key TEXT PRIMARY KEY NOT NULL,
+    sent_at_ms INTEGER NOT NULL
+);
+CREATE TABLE planning_nudges (
+    task_id TEXT PRIMARY KEY NOT NULL,
+    nudged_at_ms INTEGER NOT NULL
+);
+CREATE TABLE planning_talking_points (
+    id TEXT PRIMARY KEY NOT NULL,
+    person_id TEXT NOT NULL,
+    text TEXT NOT NULL CHECK(length(trim(text)) > 0),
+    created_at_ms INTEGER NOT NULL,
+    done_at_ms INTEGER
+);
+CREATE INDEX planning_talking_points_person ON planning_talking_points(person_id, created_at_ms);";
+
 /// Every planner migration in order, for tests that build the schema without
 /// the rest of the history database.
 #[cfg(test)]
@@ -300,6 +320,7 @@ pub(crate) fn apply_all(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
         WORK_MIGRATION,
         PROJECT_DELETE_KEEPS_TASKS_MIGRATION,
         DAY_PLAN_MIGRATION,
+        FOLLOW_MIGRATION,
     ] {
         conn.execute_batch(migration)?;
     }

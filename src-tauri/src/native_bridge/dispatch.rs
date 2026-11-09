@@ -11,7 +11,7 @@ use tauri_specta::Event as _;
 use super::{encode_plain, off_main_thread, on_main_thread, reply, Args, Fault};
 
 /// Every typed event the core emits, by the name the bindings export.
-pub(super) const TYPED_EVENTS: [&str; 44] = [
+pub(super) const TYPED_EVENTS: [&str; 45] = [
     crate::chat_voice::ChatVoiceEvent::NAME,
     crate::upstream_import::UpstreamImportProgressEvent::NAME,
     crate::agent_bridge::AgentBridgeUpdateEvent::NAME,
@@ -56,6 +56,7 @@ pub(super) const TYPED_EVENTS: [&str; 44] = [
     crate::scratchpad::ScratchpadChangedEvent::NAME,
     crate::planning::PlanningChangedEvent::NAME,
     crate::planning::work::WorkChanged::NAME,
+    crate::planning::work::follow::WorkReminderOpened::NAME,
 ];
 
 pub(super) async fn call(
@@ -5135,6 +5136,83 @@ pub(super) async fn call(
                 ))
             })
             .await?
+        }
+        "work_brief" => {
+            let mut args = Args::parse(params)?;
+            let subject = args.take("subject")?;
+            reply(
+                crate::planning::work::follow::work_brief(
+                    app.state(),
+                    app.state(),
+                    app.state(),
+                    subject,
+                )
+                .await,
+            )
+        }
+        "work_talking_point_add" => {
+            let mut args = Args::parse(params)?;
+            let operation_id = args.take("operationId")?;
+            let person_id = args.take("personId")?;
+            let text = args.take("text")?;
+            reply(
+                crate::planning::work::follow::work_talking_point_add(
+                    app.clone(),
+                    app.state(),
+                    app.state(),
+                    operation_id,
+                    person_id,
+                    text,
+                )
+                .await,
+            )
+        }
+        "work_talking_point_done" => {
+            let mut args = Args::parse(params)?;
+            let operation_id = args.take("operationId")?;
+            let id = args.take("id")?;
+            let done = args.take("done")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::planning::work::follow::work_talking_point_done(
+                    handle.clone(),
+                    operation_id,
+                    id,
+                    done,
+                ))
+            })
+            .await?
+        }
+        "work_nudged" => {
+            let mut args = Args::parse(params)?;
+            let id = args.take("id")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::planning::work::follow::work_nudged(
+                    handle.clone(),
+                    id,
+                ))
+            })
+            .await?
+        }
+        "work_nudge_mail" => {
+            let mut args = Args::parse(params)?;
+            let id = args.take("id")?;
+            let subject = args.take("subject")?;
+            let body = args.take("body")?;
+            let over_bound_note = args.take("overBoundNote")?;
+            reply(
+                crate::planning::work::follow::work_nudge_mail(
+                    app.clone(),
+                    app.state(),
+                    app.state(),
+                    id,
+                    subject,
+                    body,
+                    over_bound_note,
+                )
+                .await,
+            )
         }
         other => Err(Fault::unknown_method(other)),
     }

@@ -47,6 +47,10 @@ pub const CATEGORY_DIGEST: &str = "computer.sona.digest.evening";
 /// PREP/WRAP fallback category. Title only, with no notification actions.
 pub const CATEGORY_RITUAL: &str = "computer.sona.meeting.ritual";
 
+/// Follow-through reminders: work due today, waits to ask about, and the
+/// brief before a meeting. No actions; the body click opens the work.
+pub const CATEGORY_FOLLOW: &str = "computer.sona.work.follow";
+
 /// What the operator did with a prompt.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PromptResponse {
@@ -56,6 +60,9 @@ pub enum PromptResponse {
     Dismiss { prompt_id: String },
     /// The evening digest's body was clicked.
     DigestOpened,
+    /// A follow-through reminder's body was clicked; `id` is the request id
+    /// it was posted under.
+    FollowUpOpened { id: String },
 }
 
 /// Receives detection action clicks. Implemented by the detection runtime.
@@ -67,6 +74,12 @@ pub trait PromptResponder: Send + Sync {
 /// where a digest click lands is the digest's decision and not detection's.
 pub trait DigestOpener: Send + Sync {
     fn digest_opened(&self);
+}
+
+/// Receives a click on a follow-through reminder. Implemented by the
+/// tracker, because where a reminder lands is the tracker's decision.
+pub trait FollowUpOpener: Send + Sync {
+    fn follow_up_opened(&self, id: &str);
 }
 
 /// The delegate's one target, and the fork behind it.
@@ -82,6 +95,7 @@ pub trait DigestOpener: Send + Sync {
 pub struct ResponderCell {
     inner: std::sync::OnceLock<Arc<dyn PromptResponder>>,
     digest: std::sync::OnceLock<Arc<dyn DigestOpener>>,
+    follow_up: std::sync::OnceLock<Arc<dyn FollowUpOpener>>,
 }
 
 impl ResponderCell {
@@ -92,6 +106,10 @@ impl ResponderCell {
     pub fn bind_digest(&self, opener: Arc<dyn DigestOpener>) {
         let _ = self.digest.set(opener);
     }
+
+    pub fn bind_follow_up(&self, opener: Arc<dyn FollowUpOpener>) {
+        let _ = self.follow_up.set(opener);
+    }
 }
 
 impl PromptResponder for ResponderCell {
@@ -101,6 +119,16 @@ impl PromptResponder for ResponderCell {
                 Some(opener) => opener.digest_opened(),
                 None => log::info!(
                     "The evening digest dropped a notification click that arrived before startup \
+                     finished"
+                ),
+            }
+            return;
+        }
+        if let PromptResponse::FollowUpOpened { id } = &response {
+            match self.follow_up.get() {
+                Some(opener) => opener.follow_up_opened(id),
+                None => log::info!(
+                    "Follow-through dropped a notification click that arrived before startup \
                      finished"
                 ),
             }
@@ -147,6 +175,11 @@ pub trait PromptPresenter: Send + Sync {
     fn present_digest(&self, title: &str, body: &str) -> bool;
     /// Posts a title-only PREP/WRAP fallback.
     fn present_ritual(&self, ritual_id: &str, title: &str) -> bool;
+    /// Posts a follow-through reminder under `id`, replacing any reminder
+    /// already posted under the same id.
+    fn present_follow_up(&self, _id: &str, _title: &str, _body: &str) -> bool {
+        false
+    }
 }
 
 /// Used when no notification center is reachable. Detection still runs and
@@ -504,7 +537,7 @@ mod macos {
     use super::{
         NotificationAccess, NotificationAccessFuture, PromptKind, PromptPresenter, PromptResponder,
         PromptResponse, ACTION_DISMISS, ACTION_START, CATEGORY_DETECTION, CATEGORY_DIGEST,
-        CATEGORY_RITUAL, DISMISS_TITLE, START_TITLE,
+        CATEGORY_FOLLOW, CATEGORY_RITUAL, DISMISS_TITLE, START_TITLE,
     };
     use block2::RcBlock;
     use objc2::rc::Retained;
@@ -596,6 +629,13 @@ mod macos {
                 if category == CATEGORY_DIGEST {
                     if action == DEFAULT_ACTION {
                         responder.prompt_answered(PromptResponse::DigestOpened);
+                    }
+                    completion.call(());
+                    return;
+                }
+                if category == CATEGORY_FOLLOW {
+                    if action == DEFAULT_ACTION {
+                        responder.prompt_answered(PromptResponse::FollowUpOpened { id: prompt_id });
                     }
                     completion.call(());
                     return;
@@ -788,7 +828,14 @@ mod macos {
                     &intents,
                     UNNotificationCategoryOptions::empty(),
                 );
-            let categories = NSSet::from_retained_slice(&[detection, digest, ritual]);
+            let follow =
+                UNNotificationCategory::categoryWithIdentifier_actions_intentIdentifiers_options(
+                    &NSString::from_str(CATEGORY_FOLLOW),
+                    &no_actions,
+                    &intents,
+                    UNNotificationCategoryOptions::empty(),
+                );
+            let categories = NSSet::from_retained_slice(&[detection, digest, ritual, follow]);
             center.setNotificationCategories(&categories);
         });
     }
@@ -900,6 +947,26 @@ mod macos {
                 content.setCategoryIdentifier(&NSString::from_str(CATEGORY_RITUAL));
                 let request = UNNotificationRequest::requestWithIdentifier_content_trigger(
                     &NSString::from_str(ritual_id),
+                    &content,
+                    None,
+                );
+                self.center()
+                    .addNotificationRequest_withCompletionHandler(&request, None);
+                true
+            })
+        }
+
+        fn present_follow_up(&self, id: &str, title: &str, body: &str) -> bool {
+            if self.access() != NotificationAccess::Authorized {
+                return false;
+            }
+            objc2::rc::autoreleasepool(|_| {
+                let content = UNMutableNotificationContent::new();
+                content.setTitle(&NSString::from_str(title));
+                content.setBody(&NSString::from_str(body));
+                content.setCategoryIdentifier(&NSString::from_str(CATEGORY_FOLLOW));
+                let request = UNNotificationRequest::requestWithIdentifier_content_trigger(
+                    &NSString::from_str(id),
                     &content,
                     None,
                 );

@@ -30,7 +30,8 @@ use crate::planning::work::types::{
     WorkActivity, WorkActivityKind, WorkActor, WorkDirection, WorkDisplay, WorkFieldSuggestion,
     WorkGroupBy, WorkItem, WorkItemDetail, WorkItemInput, WorkItemRow, WorkLabel, WorkLayout,
     WorkList, WorkOrderBy, WorkOwner, WorkPatch, WorkPersonChoice, WorkProjectChoice, WorkQuery,
-    WorkRelation, WorkRelationKind, WorkStatus, WorkSuggestionField, WorkSuggestionValue, WorkView,
+    WorkRelation, WorkRelationKind, WorkSource, WorkStatus, WorkSuggestionField,
+    WorkSuggestionValue, WorkView,
 };
 use crate::planning::work::{self, items};
 use crate::query::{loop_link, KeptLocal, QUERY_SCHEMA_VERSION};
@@ -876,7 +877,7 @@ pub struct ExternalWorkCounts {
     pub mine_overdue: u32,
     pub mine_due_today: u32,
     pub waiting_on: u32,
-    /// Waiting-on work whose status has not moved in a week.
+    /// Waiting-on work whose follow-up moment has come.
     pub waiting_on_stale: u32,
 }
 
@@ -2561,8 +2562,8 @@ impl Board {
     }
 
     fn counts(&self, now: i64) -> Result<ExternalWorkCounts, ExternalError> {
-        let items: Vec<WorkItem> = self.rows.iter().map(|row| row.item.clone()).collect();
-        let counts = items::counts(&items, now).map_err(|_| {
+        let rows = self.rows.iter().map(|row| (&row.item, row.follow_up_at_ms));
+        let counts = items::counts(rows, now).map_err(|_| {
             ExternalError::new(ExternalErrorCode::Failed, "The counts could not be read.")
         })?;
         Ok(ExternalWorkCounts {
@@ -2820,6 +2821,8 @@ impl Board {
             source_at_ms: before.and_then(|row| row.source_at_ms),
             blocked_by_open_count: before.map_or(0, |row| row.blocked_by_open_count),
             raised_in: before.map_or(0, |row| row.raised_in),
+            source: before.map_or(WorkSource::Agent, |row| row.source),
+            follow_up_at_ms: before.and_then(|row| row.follow_up_at_ms),
             item,
         };
         project_task(&row, &self.labels)
@@ -3546,7 +3549,7 @@ fn short_day(iso: &str) -> String {
 fn counts_line(text: &mut String, counts: &ExternalWorkCounts) {
     let _ = writeln!(
         text,
-        "Triage {} · yours open {} · overdue {} · due today {} · waiting on {} ({} quiet a week)",
+        "Triage {} · yours open {} · overdue {} · due today {} · waiting on {} ({} to follow up)",
         counts.triage,
         counts.mine_open,
         counts.mine_overdue,

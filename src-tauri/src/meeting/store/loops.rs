@@ -829,12 +829,12 @@ pub(crate) fn seeds_in(
     Ok(ledger_loop_seeds(session_id, &ledger))
 }
 
-/// The ledger of the revision [`READABLE_ARTIFACT_ID`] names, with the id of
-/// the template that wrote it.
-pub(crate) fn readable_ledger_in(
+/// The revision [`READABLE_ARTIFACT_ID`] names, with the id of the template
+/// that wrote it.
+pub(crate) fn readable_artifacts_in(
     connection: &Connection,
     session_id: MeetingSessionId,
-) -> Result<Option<(String, MeetingLedger)>, StoreError> {
+) -> Result<Option<(String, GeneratedMeetingArtifacts)>, StoreError> {
     let row: Option<(String, String)> = connection
         .query_row(
             &format!(
@@ -847,10 +847,19 @@ pub(crate) fn readable_ledger_in(
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
-    let Some((template_id, content_json)) = row else {
+    row.map(|(template_id, content_json)| Ok((template_id, decode_json(&content_json)?)))
+        .transpose()
+}
+
+/// The ledger of the revision [`READABLE_ARTIFACT_ID`] names, with the id of
+/// the template that wrote it.
+pub(crate) fn readable_ledger_in(
+    connection: &Connection,
+    session_id: MeetingSessionId,
+) -> Result<Option<(String, MeetingLedger)>, StoreError> {
+    let Some((template_id, content)) = readable_artifacts_in(connection, session_id)? else {
         return Ok(None);
     };
-    let content: GeneratedMeetingArtifacts = decode_json(&content_json)?;
     let Some(mut ledger) = content.ledger else {
         return Ok(None);
     };
