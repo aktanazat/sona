@@ -12,6 +12,7 @@ use crate::meeting::detection::notify::{PromptPresenter, WatchGesture, WatchOpen
 use crate::meeting::session::MeetingSessionManager;
 use crate::meeting::store::{MeetingStore, SaidWords, Within};
 use crate::meeting::types::MeetingSessionId;
+use crate::planning::sources;
 use crate::planning::store::Refusal;
 use anyhow::Result as StorageResult;
 use rusqlite::{params, Connection, OptionalExtension, Row};
@@ -148,8 +149,34 @@ fn hit_row(row: &Row<'_>) -> rusqlite::Result<WorkWatchHit> {
     })
 }
 
-fn hit(history: &Connection, hit_id: &str) -> StorageResult<Option<WorkWatchHit>> {
-    Ok(history
+/// Whether the words a hit kept may still be read: its meeting keeps its
+/// transcript, or its dictation is still saved. Without the conversations
+/// nothing says a meeting still keeps them.
+fn still_said(
+    history: &Connection,
+    meetings: Option<&Connection>,
+    hit: &WorkWatchHit,
+) -> StorageResult<bool> {
+    match &hit.line.source {
+        WorkCaptureSource::Meeting { session_id, .. } => match meetings {
+            Some(meetings) => sources::meeting_retained(meetings, session_id),
+            None => Ok(false),
+        },
+        WorkCaptureSource::Dictation { history_id, .. } => Ok(history.query_row(
+            "SELECT EXISTS(SELECT 1 FROM transcription_history WHERE id = ?1)",
+            [history_id],
+            |row| row.get(0),
+        )?),
+        WorkCaptureSource::Link { .. } | WorkCaptureSource::Loop { .. } => Ok(false),
+    }
+}
+
+fn hit(
+    history: &Connection,
+    meetings: Option<&Connection>,
+    hit_id: &str,
+) -> StorageResult<Option<WorkWatchHit>> {
+    let found = history
         .query_row(
             &format!(
                 "SELECT {HIT_COLUMNS} FROM planning_watch_hits h \
@@ -158,20 +185,41 @@ fn hit(history: &Connection, hit_id: &str) -> StorageResult<Option<WorkWatchHit>
             [hit_id],
             hit_row,
         )
-        .optional()?)
+        .optional()?;
+    match found {
+        Some(hit) if still_said(history, meetings, &hit)? => Ok(Some(hit)),
+        _ => Ok(None),
+    }
 }
 
-fn recent_hits(history: &Connection, watch_id: &str) -> StorageResult<Vec<WorkWatchHit>> {
+fn recent_hits(
+    history: &Connection,
+    meetings: Option<&Connection>,
+    watch_id: &str,
+) -> StorageResult<Vec<WorkWatchHit>> {
     let mut statement = history.prepare(&format!(
         "SELECT {HIT_COLUMNS} FROM planning_watch_hits h \
          JOIN planning_watches w ON w.id = h.watch_id WHERE h.watch_id = ?1 \
-         ORDER BY h.heard_at_ms DESC, h.id LIMIT ?2"
+         ORDER BY h.heard_at_ms DESC, h.id"
     ))?;
-    let rows = statement.query_map(params![watch_id, HITS_SHOWN as i64], hit_row)?;
-    Ok(rows.collect::<Result<_, _>>()?)
+    let mut hits = Vec::with_capacity(HITS_SHOWN);
+    for hit in statement.query_map([watch_id], hit_row)? {
+        let hit = hit?;
+        if still_said(history, meetings, &hit)? {
+            hits.push(hit);
+        }
+        if hits.len() == HITS_SHOWN {
+            break;
+        }
+    }
+    Ok(hits)
 }
 
-fn listed(history: &Connection, people: Option<&People>) -> StorageResult<Vec<WorkWatch>> {
+fn listed(
+    history: &Connection,
+    meetings: Option<&Connection>,
+    people: Option<&People>,
+) -> StorageResult<Vec<WorkWatch>> {
     let mut statement = history.prepare(
         "SELECT id, phrase, person_id, created_at_ms FROM planning_watches \
          ORDER BY created_at_ms DESC, id",
@@ -198,7 +246,7 @@ fn listed(history: &Connection, people: Option<&People>) -> StorageResult<Vec<Wo
                 })
             });
             Ok(WorkWatch {
-                hits: recent_hits(history, &id)?,
+                hits: recent_hits(history, meetings, &id)?,
                 id,
                 phrase,
                 person_id,
@@ -221,7 +269,7 @@ pub(crate) async fn list(app: &AppHandle) -> Result<Vec<WorkWatch>, String> {
     let meetings = app.state::<Arc<MeetingSessionManager>>();
     with_meetings(&history, &meetings, |history, meetings| {
         let people = meetings.map(People::read).transpose()?;
-        listed(history, people.as_ref())
+        listed(history, meetings, people.as_ref())
     })
     .await
 }
@@ -273,7 +321,7 @@ pub(crate) async fn save(
             params![phrase, person_id],
             |row| row.get(0),
         )?;
-        let watch = listed(history, people.as_ref())?
+        let watch = listed(history, meetings, people.as_ref())?
             .into_iter()
             .find(|watch| watch.id == id)
             .ok_or(Refusal::NotFound)?;
@@ -315,8 +363,12 @@ pub(crate) async fn task_from(
     hit_id: &str,
 ) -> Result<WorkItem, String> {
     let history = app.state::<Arc<HistoryManager>>();
-    let found = crate::planning::history(&history, |conn| hit(conn, hit_id))?
-        .ok_or_else(|| crate::planning::failure(Refusal::NotFound.into()))?;
+    let meetings = app.state::<Arc<MeetingSessionManager>>();
+    let found = with_meetings(&history, &meetings, |history, meetings| {
+        hit(history, meetings, hit_id)
+    })
+    .await?
+    .ok_or_else(|| crate::planning::failure(Refusal::NotFound.into()))?;
     let line = WorkTakenLine {
         quote: found.line.quote.clone(),
         source: found.line.source.clone(),
@@ -648,7 +700,12 @@ impl WatchOpener for WatchAnswers {
                 WatchGesture::Play => WorkWatchGesture::Play,
             };
             let history = app.state::<Arc<HistoryManager>>();
-            let hit = match crate::planning::history(&history, |conn| hit(conn, &hit_id)) {
+            let meetings = app.state::<Arc<MeetingSessionManager>>();
+            let found = with_meetings(&history, &meetings, |history, meetings| {
+                hit(history, meetings, &hit_id)
+            })
+            .await;
+            let hit = match found {
                 Ok(Some(hit)) => hit,
                 Ok(None) => return,
                 Err(error) => {
@@ -670,7 +727,96 @@ impl WatchOpener for WatchAnswers {
 mod tests {
     use super::*;
     use crate::managers::history::MIGRATIONS;
+    use crate::meeting::store::workflow_core_tests;
     use rusqlite_migration::Migrations;
+
+    fn dictation(history: &Connection, text: &str) -> i64 {
+        history
+            .execute(
+                "INSERT INTO transcription_history (file_name, timestamp, saved, title, transcription_text) \
+                 VALUES ('sona-1.wav', 1, 0, 'Recording', ?1)",
+                [text],
+            )
+            .expect("a dictation");
+        history.last_insert_rowid()
+    }
+
+    fn quotes(watches: Vec<WorkWatch>) -> Vec<String> {
+        let mut quotes: Vec<String> = watches
+            .into_iter()
+            .flat_map(|watch| watch.hits)
+            .map(|hit| hit.line.quote)
+            .collect();
+        quotes.sort_unstable();
+        quotes
+    }
+
+    /// A hit shows its words only while the meeting or dictation it quotes
+    /// still keeps them; without the conversations nothing says a meeting
+    /// does.
+    #[test]
+    fn a_watch_lists_only_hits_whose_words_are_still_kept() {
+        let mut history = Connection::open_in_memory().expect("history");
+        Migrations::new(MIGRATIONS.to_vec())
+            .to_latest(&mut history)
+            .expect("the history schema");
+        history
+            .execute(
+                "INSERT INTO planning_watches (id, phrase, person_id, created_at_ms) \
+                 VALUES ('mine', 'pricing', NULL, 1)",
+                [],
+            )
+            .expect("a watch");
+        let watches = vec![("mine".to_owned(), "pricing".to_owned(), None)];
+        let (_directory, store) = workflow_core_tests::store();
+        let meeting = workflow_core_tests::meeting(&store, "Pricing sync", 1_000);
+        workflow_core_tests::transcript(&store, meeting, "Check the pricing page.");
+        let mut heard = heard_in_meeting(&store, &watches, meeting, None);
+        let mut deleted = heard[0].line.clone();
+        deleted.quote = "The pricing deck is late.".to_owned();
+        if let WorkCaptureSource::Meeting { session_id, .. } = &mut deleted.source {
+            *session_id = Uuid::new_v4().to_string();
+        }
+        heard.push(Heard {
+            watch: "mine".to_owned(),
+            phrase: "pricing".to_owned(),
+            line: deleted,
+            segment_id: None,
+            start_offset_ns: None,
+        });
+        let saved = dictation(&history, "Send the pricing sheet.");
+        let erased = dictation(&history, "Pricing call notes.");
+        heard.extend(heard_in_dictation(
+            &watches,
+            saved,
+            4_000,
+            "Send the pricing sheet.",
+            2_000,
+        ));
+        heard.extend(heard_in_dictation(
+            &watches,
+            erased,
+            4_000,
+            "Pricing call notes.",
+            3_000,
+        ));
+        keep(&history, &heard, 4_000).expect("kept");
+        history
+            .execute("DELETE FROM transcription_history WHERE id = ?1", [erased])
+            .expect("the dictation deleted");
+
+        let open = store
+            .with_planning_snapshot(|meetings| Ok(listed(&history, Some(meetings), None)))
+            .expect("the conversations")
+            .expect("the watches");
+        let closed = listed(&history, None, None).expect("the watches");
+
+        assert_eq!(
+            quotes(open),
+            ["Check the pricing page.", "Send the pricing sheet."]
+        );
+        assert_eq!(quotes(closed), ["Send the pricing sheet."]);
+    }
 
     #[test]
     fn a_watch_hears_its_words_only_as_whole_words() {
