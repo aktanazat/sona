@@ -333,8 +333,18 @@ fn the_tracker_migration_keeps_every_task_and_the_commitment_it_tracks() {
 
     conn.execute_batch(schema::WORK_MIGRATION)
         .expect("the tracker migration");
-    conn.execute_batch(schema::CAPTURE_MIGRATION)
-        .expect("the capture migration");
+    for migration in [
+        schema::PROJECT_DELETE_KEEPS_TASKS_MIGRATION,
+        schema::DAY_PLAN_MIGRATION,
+        schema::FOLLOW_MIGRATION,
+        schema::AGENTS_MIGRATION,
+        schema::CAPTURE_MIGRATION,
+        schema::REPEAT_MIGRATION,
+        schema::CYCLES_MIGRATION,
+    ] {
+        conn.execute_batch(migration)
+            .expect("a later planner migration");
+    }
 
     let migrated = items::items(&conn, true).expect("the migrated items");
     let summary = migrated
@@ -429,47 +439,32 @@ fn the_repeat_migration_keeps_every_history_entry_and_waiting_change() {
         conn.execute_batch(migration)
             .expect("an earlier planner migration");
     }
-    let task = items::insert(
-        &conn,
-        &NewItem {
-            title: "Water the plants",
-            details: None,
-            status: WorkStatus::NotStarted,
-            priority: 0,
-            project_id: None,
-            milestone_id: None,
-            owner: &WorkOwner::Nobody,
-            due_at_ms: None,
-            label_ids: &[],
-            source_loop_id: None,
-            recurrence: None,
-        },
-        WorkActor::Me,
-        AT,
-    )
-    .expect("a task");
     conn.execute_batch(&format!(
-        "INSERT INTO planning_task_activity (id, task_id, at_ms, actor, kind, from_value, to_value) VALUES
+        "INSERT INTO planning_tasks (id, number, title, owner_is_self, status, priority,
+            status_changed_at_ms, sort_order, revision, created_at_ms, updated_at_ms)
+            VALUES ('plants', 1, 'Water the plants', 0, 'not_started', 0, {at}, {at}, 1, {at}, {at});
+         INSERT INTO planning_task_activity (id, task_id, at_ms, actor, kind, from_value, to_value) VALUES
             ('kept', '{id}', {kept}, 'me', 'kept', NULL, NULL),
             ('snoozed', '{id}', {snoozed}, 'agent', 'snoozed', NULL, '{snoozed}');
          INSERT INTO planning_activity_agents (activity_id, agent) VALUES ('snoozed', 'Claude Code');
          INSERT INTO planning_task_proposals (id, task_id, agent, field, from_value, patch_json,
             state, created_at_ms, decided_at_ms) VALUES
             ('waiting', '{id}', 'Claude Code', 'priority', 'none', '{{\"priority\":1}}', 'open', {kept}, NULL);",
-        id = task.id,
+        id = "plants",
+        at = AT,
         kept = AT + 1,
         snoozed = AT + 2,
     ))
     .expect("history and a waiting change");
     let history = |conn: &Connection| {
-        items::activity(conn, &task.id)
+        items::activity(conn, "plants")
             .expect("the task's history")
             .into_iter()
             .map(|entry| (entry.kind, entry.actor, entry.agent))
             .collect::<Vec<_>>()
     };
     let waiting = |conn: &Connection| {
-        super::agents::item_proposals(conn, &task.id)
+        super::agents::item_proposals(conn, "plants")
             .expect("waiting changes")
             .into_iter()
             .map(|proposal| (proposal.id, proposal.agent))
@@ -488,7 +483,7 @@ fn the_repeat_migration_keeps_every_history_entry_and_waiting_change() {
             state, created_at_ms, decided_at_ms) VALUES
             ('stop', '{id}', 'Claude Code', 'recurrence', 'every monday', '{{\"recurrence\":null}}', 'open', {at}, NULL);
          DELETE FROM planning_tasks WHERE id = '{id}';",
-        id = task.id,
+        id = "plants",
         at = AT + 3,
     ))
     .expect("a repeat in the history and a waiting change to it");
@@ -1112,5 +1107,64 @@ fn a_promise_heard_live_becomes_the_item_its_commitment_tracks() {
             .expect("the tracker")
             .len(),
         1
+    );
+}
+
+fn on_the_clock(day: u32, hour: u32) -> i64 {
+    Local
+        .with_ymd_and_hms(2026, 11, day, hour, 0, 0)
+        .single()
+        .expect("a November 2026 hour on this Mac's clock")
+        .timestamp_millis()
+}
+
+#[test]
+fn a_weekly_task_whose_day_passed_comes_back_once_a_week_later() {
+    // PANIC: a fixture that cannot open its database is a broken test.
+    let conn = Connection::open_in_memory().expect("an in-memory history database");
+    // PANIC: as above, for the planner schema.
+    schema::apply_all(&conn).expect("the planner schema");
+    // PANIC: a fixture that cannot add its task is a broken test.
+    let task = items::insert(
+        &conn,
+        &NewItem {
+            title: "Send the weekly update",
+            details: None,
+            status: WorkStatus::NotStarted,
+            priority: 0,
+            project_id: None,
+            milestone_id: None,
+            owner: &WorkOwner::Myself,
+            due_at_ms: Some(on_the_clock(6, 17)),
+            label_ids: &[],
+            source_loop_id: None,
+            recurrence: Some("every friday"),
+        },
+        WorkActor::Me,
+        on_the_clock(2, 9),
+    )
+    .expect("a task");
+
+    super::recur::catch_up(&conn, on_the_clock(8, 9)).expect("the late repeats");
+    super::recur::catch_up(&conn, on_the_clock(8, 10)).expect("the late repeats again");
+    items::apply(
+        &conn,
+        &task.id,
+        &status(WorkStatus::Done),
+        WorkActivityKind::Status,
+        WorkActor::Me,
+        on_the_clock(8, 11),
+    )
+    .expect("finished late");
+
+    let instances = items::items(&conn, false)
+        .expect("the tracker")
+        .into_iter()
+        .filter(|item| item.title == "Send the weekly update")
+        .map(|item| item.due_at_ms)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        instances,
+        vec![Some(on_the_clock(6, 17)), Some(on_the_clock(13, 17))]
     );
 }

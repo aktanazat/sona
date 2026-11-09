@@ -431,6 +431,84 @@ CREATE TRIGGER planning_task_agents_delete AFTER DELETE ON planning_tasks BEGIN
     DELETE FROM planning_task_proposals WHERE task_id = old.id;
 END;";
 
+/// Cycles, the series a repeating task's instances belong to, and the time
+/// booked for a task. "cycle" and "block" join what an item's history can
+/// say and "cycle" what an agent may propose, so both tables are rebuilt as
+/// `REPEAT_MIGRATION` did, every row and its rowid kept.
+pub const CYCLES_MIGRATION: &str = "CREATE TABLE planning_cycle_settings (
+    id INTEGER PRIMARY KEY CHECK(id = 1),
+    weeks INTEGER NOT NULL CHECK(weeks IN (1, 2)),
+    start_weekday INTEGER NOT NULL CHECK(start_weekday BETWEEN 1 AND 7)
+);
+INSERT INTO planning_cycle_settings (id, weeks, start_weekday) VALUES (1, 1, 1);
+CREATE TABLE planning_cycles (
+    number INTEGER PRIMARY KEY NOT NULL CHECK(number > 0),
+    start_day TEXT NOT NULL CHECK(length(start_day) = 10),
+    end_day TEXT NOT NULL CHECK(length(end_day) = 10 AND end_day > start_day),
+    created_at_ms INTEGER NOT NULL
+);
+ALTER TABLE planning_tasks ADD COLUMN cycle INTEGER CHECK(cycle IS NULL OR cycle > 0);
+ALTER TABLE planning_tasks ADD COLUMN series_id TEXT;
+ALTER TABLE planning_tasks ADD COLUMN next_id TEXT;
+CREATE INDEX planning_tasks_cycle ON planning_tasks(cycle);
+CREATE INDEX planning_tasks_series ON planning_tasks(series_id);
+CREATE TABLE planning_time_blocks (
+    task_id TEXT PRIMARY KEY NOT NULL,
+    event_id TEXT NOT NULL,
+    starts_at_ms INTEGER NOT NULL,
+    ends_at_ms INTEGER NOT NULL CHECK(ends_at_ms > starts_at_ms),
+    booked_at_ms INTEGER NOT NULL
+);
+CREATE TABLE planning_task_risks (
+    task_id TEXT PRIMARY KEY NOT NULL,
+    checked_at_ms INTEGER NOT NULL
+);
+CREATE TRIGGER planning_task_time_delete AFTER DELETE ON planning_tasks BEGIN
+    DELETE FROM planning_time_blocks WHERE task_id = old.id;
+    DELETE FROM planning_task_risks WHERE task_id = old.id;
+END;
+CREATE TABLE planning_task_activity_next (
+    id TEXT PRIMARY KEY NOT NULL,
+    task_id TEXT NOT NULL,
+    at_ms INTEGER NOT NULL,
+    actor TEXT NOT NULL CHECK(actor IN ('me', 'sona', 'agent')),
+    kind TEXT NOT NULL CHECK(kind IN ('created', 'status', 'priority', 'owner', 'due', 'project',
+        'title', 'details', 'labels', 'archived', 'restored', 'duplicate', 'accepted', 'declined',
+        'snoozed', 'relation', 'kept', 'recurrence', 'cycle', 'block')),
+    from_value TEXT,
+    to_value TEXT
+);
+INSERT INTO planning_task_activity_next (rowid, id, task_id, at_ms, actor, kind, from_value, to_value)
+    SELECT rowid, id, task_id, at_ms, actor, kind, from_value, to_value FROM planning_task_activity;
+DROP TABLE planning_task_activity;
+ALTER TABLE planning_task_activity_next RENAME TO planning_task_activity;
+CREATE INDEX planning_task_activity_task ON planning_task_activity(task_id, at_ms, id);
+DROP TRIGGER planning_task_agents_delete;
+CREATE TABLE planning_task_proposals_next (
+    id TEXT PRIMARY KEY NOT NULL,
+    task_id TEXT NOT NULL,
+    agent TEXT NOT NULL CHECK(length(trim(agent)) > 0),
+    field TEXT NOT NULL CHECK(field IN ('title', 'details', 'status', 'priority', 'owner', 'due',
+        'project', 'milestone', 'labels', 'snoozed', 'recurrence', 'cycle')),
+    from_value TEXT,
+    patch_json TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(state IN ('open', 'accepted', 'rejected')),
+    created_at_ms INTEGER NOT NULL,
+    decided_at_ms INTEGER,
+    CHECK((state = 'open') = (decided_at_ms IS NULL))
+);
+INSERT INTO planning_task_proposals_next (rowid, id, task_id, agent, field, from_value, patch_json,
+        state, created_at_ms, decided_at_ms)
+    SELECT rowid, id, task_id, agent, field, from_value, patch_json, state, created_at_ms,
+        decided_at_ms FROM planning_task_proposals;
+DROP TABLE planning_task_proposals;
+ALTER TABLE planning_task_proposals_next RENAME TO planning_task_proposals;
+CREATE INDEX planning_task_proposals_task ON planning_task_proposals(task_id, state, created_at_ms);
+CREATE TRIGGER planning_task_agents_delete AFTER DELETE ON planning_tasks BEGIN
+    DELETE FROM planning_task_doers WHERE task_id = old.id;
+    DELETE FROM planning_task_proposals WHERE task_id = old.id;
+END;";
+
 /// Every planner migration in order, for tests that build the schema without
 /// the rest of the history database.
 #[cfg(test)]
@@ -447,6 +525,7 @@ pub(crate) fn apply_all(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
         AGENTS_MIGRATION,
         CAPTURE_MIGRATION,
         REPEAT_MIGRATION,
+        CYCLES_MIGRATION,
     ] {
         conn.execute_batch(migration)?;
     }

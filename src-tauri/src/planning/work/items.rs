@@ -20,7 +20,7 @@ const ITEM_COLUMNS: &str = "t.id, t.number, t.title, t.details, t.status, t.prio
     t.milestone_id, t.owner_person_id, t.owner_is_self, t.due_at_ms, t.source_loop_id,
     t.duplicate_of, t.snoozed_until_ms, t.archived_at_ms, t.status_changed_at_ms,
     t.created_at_ms, t.updated_at_ms, t.revision, t.sort_order,
-    (SELECT group_concat(label_id) FROM planning_task_labels WHERE task_id = t.id)";
+    (SELECT group_concat(label_id) FROM planning_task_labels WHERE task_id = t.id), t.cycle";
 
 fn read_item(row: &Row<'_>) -> rusqlite::Result<WorkItem> {
     let owner_person_id: Option<String> = row.get(8)?;
@@ -53,6 +53,7 @@ fn read_item(row: &Row<'_>) -> rusqlite::Result<WorkItem> {
         updated_at_ms: row.get(17)?,
         revision: row.get(18)?,
         sort_order: row.get(19)?,
+        cycle: row.get(21)?,
     })
 }
 
@@ -292,11 +293,17 @@ pub(crate) fn insert(
     )?;
     let (owner_is_self, owner_person_id) = owner_columns(new.owner);
     let id = Uuid::new_v4().to_string();
+    let cycle = if new.status.is_open() {
+        super::cycles::fitting(conn, new.status, new.due_at_ms, now_ms)?
+    } else {
+        None
+    };
     conn.execute(
         "INSERT INTO planning_tasks (id, number, project_id, milestone_id, title, details,
             due_at_ms, owner_person_id, owner_is_self, status, priority, source_loop_id,
-            status_changed_at_ms, sort_order, revision, created_at_ms, updated_at_ms, recurrence)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13, 1, ?13, ?13, ?14)",
+            status_changed_at_ms, sort_order, revision, created_at_ms, updated_at_ms, recurrence,
+            cycle)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13, 1, ?13, ?13, ?14, ?15)",
         params![
             id,
             number,
@@ -311,7 +318,8 @@ pub(crate) fn insert(
             new.priority,
             new.source_loop_id,
             now_ms,
-            recurrence
+            recurrence,
+            cycle
         ],
     )?;
     write_labels(conn, &id, &label_ids)?;
@@ -324,6 +332,17 @@ pub(crate) fn insert(
         None,
         Some(new.status.as_str()),
     )?;
+    if let Some(cycle) = cycle {
+        record(
+            conn,
+            &id,
+            now_ms,
+            actor,
+            WorkActivityKind::Cycle,
+            None,
+            Some(&cycle.to_string()),
+        )?;
+    }
     item(conn, &id)
 }
 
@@ -408,6 +427,22 @@ pub(crate) fn apply(
         next.snoozed_until_ms = snoozed_until_ms;
     }
     let repeats = repeat_change(conn, id, patch, now_ms)?;
+    match patch.cycle {
+        Some(Some(cycle)) => next.cycle = Some(super::cycles::open(conn, cycle, now_ms)?),
+        Some(None) => next.cycle = None,
+        None if before.cycle.is_none() && next.status.is_open() => {
+            let started = next.status != before.status && next.status == WorkStatus::InProgress;
+            if started || next.due_at_ms != before.due_at_ms {
+                let status = if started {
+                    next.status
+                } else {
+                    WorkStatus::NotStarted
+                };
+                next.cycle = super::cycles::fitting(conn, status, next.due_at_ms, now_ms)?;
+            }
+        }
+        None => {}
+    }
     if next == before && repeats.is_none() {
         return Ok(Changed {
             after: before.clone(),
@@ -423,7 +458,7 @@ pub(crate) fn apply(
         "UPDATE planning_tasks SET title = ?2, details = ?3, status = ?4, priority = ?5,
             project_id = ?6, milestone_id = ?7, owner_person_id = ?8, owner_is_self = ?9,
             due_at_ms = ?10, duplicate_of = ?11, snoozed_until_ms = ?12,
-            status_changed_at_ms = ?13, revision = revision + 1, updated_at_ms = ?14
+            status_changed_at_ms = ?13, revision = revision + 1, updated_at_ms = ?14, cycle = ?15
          WHERE id = ?1",
         params![
             id,
@@ -439,7 +474,8 @@ pub(crate) fn apply(
             next.duplicate_of_id,
             next.snoozed_until_ms,
             status_changed_at_ms,
-            now_ms
+            now_ms,
+            next.cycle
         ],
     )?;
     if next.label_ids != before.label_ids {
@@ -524,10 +560,47 @@ pub(crate) fn apply(
     if let Some(repeat) = repeats {
         note(WorkActivityKind::Recurrence, repeat.from, repeat.to)?;
     }
+    if next.cycle != before.cycle {
+        note(
+            WorkActivityKind::Cycle,
+            before.cycle.map(|cycle| cycle.to_string()),
+            next.cycle.map(|cycle| cycle.to_string()),
+        )?;
+    }
+    if !before.status.is_closed() && matches!(next.status, WorkStatus::Done | WorkStatus::Canceled)
+    {
+        super::recur::follow(conn, id, actor, now_ms)?;
+    }
     Ok(Changed {
         before,
         after: item(conn, id)?,
     })
+}
+
+/// Moves an item between cycles with the history entry the cycle's chart
+/// reads.
+pub(crate) fn place_in_cycle(
+    conn: &Connection,
+    id: &str,
+    from: Option<i64>,
+    to: Option<i64>,
+    actor: WorkActor,
+    now_ms: i64,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE planning_tasks SET cycle = ?2, revision = revision + 1, updated_at_ms = ?3
+         WHERE id = ?1",
+        params![id, to, now_ms],
+    )?;
+    record(
+        conn,
+        id,
+        now_ms,
+        actor,
+        WorkActivityKind::Cycle,
+        from.map(|cycle| cycle.to_string()).as_deref(),
+        to.map(|cycle| cycle.to_string()).as_deref(),
+    )
 }
 
 /// Hides an item from every list, or brings it back. Its status, and the
@@ -1094,7 +1167,7 @@ pub(crate) fn plan_day(
     self::day(conn, day)
 }
 
-fn local_midnight_ms(day: NaiveDate) -> Result<i64> {
+pub(crate) fn local_midnight_ms(day: NaiveDate) -> Result<i64> {
     let midnight = day
         .and_hms_opt(0, 0, 0)
         .ok_or_else(|| anyhow::anyhow!("midnight is outside the calendar"))?;
@@ -1105,7 +1178,7 @@ fn local_midnight_ms(day: NaiveDate) -> Result<i64> {
         .ok_or_else(|| anyhow::anyhow!("local midnight does not exist"))
 }
 
-fn local_today(now_ms: i64) -> Result<NaiveDate> {
+pub(crate) fn local_today(now_ms: i64) -> Result<NaiveDate> {
     Ok(Local
         .timestamp_millis_opt(now_ms)
         .single()
@@ -1114,7 +1187,7 @@ fn local_today(now_ms: i64) -> Result<NaiveDate> {
 }
 
 /// Where the day `days` after `today` starts on this Mac's clock, in epoch ms.
-fn day_start_ms(today: NaiveDate, days: u64) -> Result<i64> {
+pub(crate) fn day_start_ms(today: NaiveDate, days: u64) -> Result<i64> {
     let day = today
         .checked_add_days(Days::new(days))
         .ok_or_else(|| anyhow::anyhow!("that day is outside the calendar"))?;

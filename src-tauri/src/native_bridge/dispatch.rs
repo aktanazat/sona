@@ -5215,6 +5215,60 @@ pub(super) async fn call(
             })
             .await?
         }
+        "work_cycles" => {
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::planning::work::cycles::work_cycles(handle.clone()))
+            })
+            .await?
+        }
+        "work_cycle" => {
+            let mut args = Args::parse(params)?;
+            let number = args.take("number")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::planning::work::cycles::work_cycle(
+                    handle.clone(),
+                    number,
+                ))
+            })
+            .await?
+        }
+        "work_cycle_settings_save" => {
+            let mut args = Args::parse(params)?;
+            let operation_id = args.take("operationId")?;
+            let settings = args.take("settings")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::planning::work::cycles::work_cycle_settings_save(
+                    handle.clone(),
+                    operation_id,
+                    settings,
+                ))
+            })
+            .await?
+        }
+        "work_time_block" => {
+            let mut args = Args::parse(params)?;
+            let operation_id = args.take("operationId")?;
+            let id = args.take("id")?;
+            reply(
+                crate::planning::work::blocks::work_time_block(app.clone(), operation_id, id).await,
+            )
+        }
+        "work_time_block_remove" => {
+            let mut args = Args::parse(params)?;
+            let operation_id = args.take("operationId")?;
+            let id = args.take("id")?;
+            reply(
+                crate::planning::work::blocks::work_time_block_remove(
+                    app.clone(),
+                    operation_id,
+                    id,
+                )
+                .await,
+            )
+        }
         "work_brief" => {
             let mut args = Args::parse(params)?;
             let subject = args.take("subject")?;

@@ -246,6 +246,7 @@ fn proposed(field: WorkProposalField, patch: &WorkPatch) -> Option<String> {
             .flatten()
             .map(|until| until.to_string()),
         WorkProposalField::Recurrence => patch.recurrence.clone().flatten(),
+        WorkProposalField::Cycle => patch.cycle.flatten().map(|cycle| cycle.to_string()),
     }
 }
 
@@ -393,6 +394,16 @@ fn field_changes(
             repeat.from,
             WorkPatch {
                 recurrence: Some(repeat.to),
+                ..WorkPatch::default()
+            },
+        );
+    }
+    if let Some(cycle) = patch.cycle {
+        add(
+            WorkProposalField::Cycle,
+            item.cycle.map(|cycle| cycle.to_string()),
+            WorkPatch {
+                cycle: Some(cycle),
                 ..WorkPatch::default()
             },
         );
@@ -1244,6 +1255,54 @@ mod tests {
         .expect("its own claim")
         .value;
         assert_eq!(started.status, WorkStatus::InProgress);
+    }
+
+    #[test]
+    fn an_agents_move_to_another_cycle_waits_for_the_user() {
+        let mut history = history();
+        let task = todo(&mut history, "Migrate the wiki");
+        crate::planning::work::cycles::advance(&history, AT).expect("this cycle and the next");
+        let next: i64 = history
+            .query_row("SELECT max(number) FROM planning_cycles", [], |row| {
+                row.get(0)
+            })
+            .expect("the next cycle");
+        let moved = WorkPatch {
+            cycle: Some(Some(next)),
+            ..WorkPatch::default()
+        };
+        let proposed = update(
+            &mut history,
+            None,
+            by(WorkActor::Agent, &operation(), AT + 1_000),
+            CLAUDE,
+            ItemChange {
+                id: &task.id,
+                expected_revision: task.revision,
+                patch: &moved,
+                link: None,
+            },
+        )
+        .expect("the agent's change")
+        .value
+        .proposed;
+        let [waiting] = proposed.as_slice() else {
+            panic!("one proposal, got {proposed:?}");
+        };
+        assert_eq!(waiting.field, WorkProposalField::Cycle);
+
+        let landed = accept(
+            &mut history,
+            None,
+            by(WorkActor::Agent, &operation(), AT + 2_000),
+            std::slice::from_ref(&waiting.id),
+        )
+        .expect("accepting it")
+        .value;
+        assert_eq!(
+            landed.iter().map(|item| item.cycle).collect::<Vec<_>>(),
+            [Some(next)]
+        );
     }
 
     #[test]
