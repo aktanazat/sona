@@ -164,10 +164,10 @@ pub(crate) async fn project_detail_without(
             && records
                 .evidence
                 .iter()
-                .all(|link| link.source_kind == EvidenceSourceKind::Note);
+                .all(|link| !sources::in_conversations(link.source_kind));
         if local_only {
             for link in &mut records.evidence {
-                sources::resolve_note(conn, link)?;
+                sources::resolve_local(conn, link)?;
             }
         }
         Ok((records, local_only))
@@ -397,16 +397,16 @@ pub async fn planning_link_source(
         at_ms,
         meeting_note_id: None,
     };
-    let (link, project_id) = if source_kind == EvidenceSourceKind::Note {
+    let (link, project_id) = if !sources::in_conversations(source_kind) {
         history(&history_state, |history_conn| {
             let mut link = store::link_source(
                 history_conn,
                 &draft,
                 &operation_id,
                 chrono::Utc::now().timestamp_millis(),
-                |conn| sources::require_note(conn, &source_id, at_ms),
+                |conn| sources::require_local(conn, source_kind, &source_id, at_ms),
             )?;
-            sources::resolve_note(history_conn, &mut link)?;
+            sources::resolve_local(history_conn, &mut link)?;
             let project_id = store::target_project(history_conn, target_kind, &target_id)?;
             Ok((link, project_id))
         })?

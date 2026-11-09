@@ -648,7 +648,7 @@ pub(super) fn accept(
                 let source = &source.review.source;
                 let at_ms = proposal_sources::link_offset(source.kind, &passage.id, passage.at_ms);
                 if source.kind == EvidenceSourceKind::Note {
-                    super::sources::require_note(tx, &source.id, at_ms)?;
+                    super::sources::require_local(tx, source.kind, &source.id, at_ms)?;
                 } else {
                     let meetings = meetings.ok_or(Refusal::SourceUnavailable)?;
                     if let Some(note_id) =
