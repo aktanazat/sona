@@ -4,6 +4,7 @@
 //! check people against it before a change arrives.
 
 use super::super::store::{self, Refusal};
+use super::parse;
 use super::types::{
     WorkActivity, WorkActivityKind, WorkActor, WorkCounts, WorkDay, WorkDisplay, WorkDue, WorkItem,
     WorkLabel, WorkOwner, WorkPatch, WorkQuery, WorkRelation, WorkRelationKind, WorkStatus,
@@ -72,6 +73,51 @@ pub(crate) fn recurrence(conn: &Connection, id: &str) -> Result<Option<String>> 
         [id],
         |row| row.get(0),
     )?)
+}
+
+/// How often each repeating item comes back, by id.
+pub(crate) fn repeats(conn: &Connection) -> Result<HashMap<String, String>> {
+    let mut statement =
+        conn.prepare("SELECT id, recurrence FROM planning_tasks WHERE recurrence IS NOT NULL")?;
+    let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// `words` as the one repeat they say, in the parser's words: "Every
+/// Monday" is kept as "every monday". Anything else is refused.
+fn every(words: &str, now_ms: i64) -> Result<String> {
+    Local
+        .timestamp_millis_opt(now_ms)
+        .single()
+        .and_then(|now| parse::repeat(words, &now))
+        .map(|(every, _)| every)
+        .ok_or_else(|| Refusal::Invalid.into())
+}
+
+/// A repeat a patch changes, from what it was to what it becomes, in the
+/// parser's words.
+pub(crate) struct RepeatChange {
+    pub from: Option<String>,
+    pub to: Option<String>,
+}
+
+/// The repeat `patch` gives the item, when that differs from the one it
+/// has.
+pub(crate) fn repeat_change(
+    conn: &Connection,
+    id: &str,
+    patch: &WorkPatch,
+    now_ms: i64,
+) -> Result<Option<RepeatChange>> {
+    let Some(words) = &patch.recurrence else {
+        return Ok(None);
+    };
+    let to = words
+        .as_deref()
+        .map(|words| every(words, now_ms))
+        .transpose()?;
+    let from = recurrence(conn, id)?;
+    Ok((from != to).then_some(RepeatChange { from, to }))
 }
 
 /// Every item, oldest first, with archived ones only when asked.
@@ -234,6 +280,10 @@ pub(crate) fn insert(
         .transpose()?;
     let label_ids = existing_labels(conn, new.label_ids)?;
     let title = clean_title(new.title)?;
+    let recurrence = new
+        .recurrence
+        .map(|words| every(words, now_ms))
+        .transpose()?;
     let number: i64 = conn.query_row(
         "UPDATE planning_work_counter SET next_number = next_number + 1 WHERE id = 1
          RETURNING next_number - 1",
@@ -261,9 +311,7 @@ pub(crate) fn insert(
             new.priority,
             new.source_loop_id,
             now_ms,
-            new.recurrence
-                .map(str::trim)
-                .filter(|every| !every.is_empty())
+            recurrence
         ],
     )?;
     write_labels(conn, &id, &label_ids)?;
@@ -359,7 +407,8 @@ pub(crate) fn apply(
     if let Some(snoozed_until_ms) = patch.snoozed_until_ms {
         next.snoozed_until_ms = snoozed_until_ms;
     }
-    if next == before {
+    let repeats = repeat_change(conn, id, patch, now_ms)?;
+    if next == before && repeats.is_none() {
         return Ok(Changed {
             after: before.clone(),
             before,
@@ -395,6 +444,12 @@ pub(crate) fn apply(
     )?;
     if next.label_ids != before.label_ids {
         write_labels(conn, id, &next.label_ids)?;
+    }
+    if let Some(repeat) = &repeats {
+        conn.execute(
+            "UPDATE planning_tasks SET recurrence = ?2 WHERE id = ?1",
+            params![id, repeat.to],
+        )?;
     }
     let note = |kind: WorkActivityKind, from: Option<String>, to: Option<String>| {
         record(
@@ -465,6 +520,9 @@ pub(crate) fn apply(
             ms(before.snoozed_until_ms),
             ms(next.snoozed_until_ms),
         )?;
+    }
+    if let Some(repeat) = repeats {
+        note(WorkActivityKind::Recurrence, repeat.from, repeat.to)?;
     }
     Ok(Changed {
         before,

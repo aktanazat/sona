@@ -412,6 +412,90 @@ fn the_tracker_migration_keeps_every_task_and_the_commitment_it_tracks() {
 }
 
 #[test]
+fn the_repeat_migration_keeps_every_history_entry_and_waiting_change() {
+    let conn = Connection::open_in_memory().expect("history");
+    for migration in [
+        schema::MIGRATION,
+        schema::QUIET_REVIEW_MIGRATION,
+        schema::MEETING_NOTE_LINK_MIGRATION,
+        schema::DISMISSED_LOOP_MIGRATION,
+        schema::WORK_MIGRATION,
+        schema::PROJECT_DELETE_KEEPS_TASKS_MIGRATION,
+        schema::DAY_PLAN_MIGRATION,
+        schema::FOLLOW_MIGRATION,
+        schema::AGENTS_MIGRATION,
+        schema::CAPTURE_MIGRATION,
+    ] {
+        conn.execute_batch(migration)
+            .expect("an earlier planner migration");
+    }
+    let task = items::insert(
+        &conn,
+        &NewItem {
+            title: "Water the plants",
+            details: None,
+            status: WorkStatus::NotStarted,
+            priority: 0,
+            project_id: None,
+            milestone_id: None,
+            owner: &WorkOwner::Nobody,
+            due_at_ms: None,
+            label_ids: &[],
+            source_loop_id: None,
+            recurrence: None,
+        },
+        WorkActor::Me,
+        AT,
+    )
+    .expect("a task");
+    conn.execute_batch(&format!(
+        "INSERT INTO planning_task_activity (id, task_id, at_ms, actor, kind, from_value, to_value) VALUES
+            ('kept', '{id}', {kept}, 'me', 'kept', NULL, NULL),
+            ('snoozed', '{id}', {snoozed}, 'agent', 'snoozed', NULL, '{snoozed}');
+         INSERT INTO planning_activity_agents (activity_id, agent) VALUES ('snoozed', 'Claude Code');
+         INSERT INTO planning_task_proposals (id, task_id, agent, field, from_value, patch_json,
+            state, created_at_ms, decided_at_ms) VALUES
+            ('waiting', '{id}', 'Claude Code', 'priority', 'none', '{{\"priority\":1}}', 'open', {kept}, NULL);",
+        id = task.id,
+        kept = AT + 1,
+        snoozed = AT + 2,
+    ))
+    .expect("history and a waiting change");
+    let history = |conn: &Connection| {
+        items::activity(conn, &task.id)
+            .expect("the task's history")
+            .into_iter()
+            .map(|entry| (entry.kind, entry.actor, entry.agent))
+            .collect::<Vec<_>>()
+    };
+    let waiting = |conn: &Connection| {
+        super::agents::item_proposals(conn, &task.id)
+            .expect("waiting changes")
+            .into_iter()
+            .map(|proposal| (proposal.id, proposal.agent))
+            .collect::<Vec<_>>()
+    };
+    let before = (history(&conn), waiting(&conn));
+
+    conn.execute_batch(schema::REPEAT_MIGRATION)
+        .expect("the repeat migration");
+
+    assert_eq!((history(&conn), waiting(&conn)), before);
+    conn.execute_batch(&format!(
+        "INSERT INTO planning_task_activity (id, task_id, at_ms, actor, kind, from_value, to_value)
+            VALUES ('repeat', '{id}', {at}, 'me', 'recurrence', NULL, 'every monday');
+         INSERT INTO planning_task_proposals (id, task_id, agent, field, from_value, patch_json,
+            state, created_at_ms, decided_at_ms) VALUES
+            ('stop', '{id}', 'Claude Code', 'recurrence', 'every monday', '{{\"recurrence\":null}}', 'open', {at}, NULL);
+         DELETE FROM planning_tasks WHERE id = '{id}';",
+        id = task.id,
+        at = AT + 3,
+    ))
+    .expect("a repeat in the history and a waiting change to it");
+    assert_eq!(waiting(&conn), Vec::new());
+}
+
+#[test]
 fn a_meeting_reaches_triage_once_per_open_commitment() {
     let mut desk = desk(&["Send the outline", "Book the venue", "Print the badges"]);
     let badges = desk

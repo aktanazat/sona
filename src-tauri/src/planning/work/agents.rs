@@ -2,6 +2,7 @@
 //! changes an agent proposes while Settings > Agents asks to review them,
 //! and the prompt that hands an item to an agent.
 
+use super::capture::{self, WorkCaptureSource};
 use super::items;
 use super::sync::{self, MeetingReader};
 use super::types::{
@@ -14,6 +15,7 @@ use super::{
 };
 use crate::managers::history::HistoryManager;
 use crate::meeting::session::MeetingSessionManager;
+use crate::planning::sources;
 use crate::planning::store::{self, Refusal};
 use crate::settings::WorkAutonomy;
 use anyhow::Result as StorageResult;
@@ -243,6 +245,7 @@ fn proposed(field: WorkProposalField, patch: &WorkPatch) -> Option<String> {
             .snoozed_until_ms
             .flatten()
             .map(|until| until.to_string()),
+        WorkProposalField::Recurrence => patch.recurrence.clone().flatten(),
     }
 }
 
@@ -265,10 +268,14 @@ fn sorted(ids: &[String]) -> Vec<String> {
     ids
 }
 
-/// The fields `patch` would change on `item`, one by one. A new project
-/// carries the patch's milestone with it, since moving the project clears
-/// the milestone.
-fn field_changes(item: &WorkItem, patch: &WorkPatch) -> Vec<FieldChange> {
+/// The fields `patch` would change on `item`, one by one, with the change
+/// it makes to the item's repeat. A new project carries the patch's
+/// milestone with it, since moving the project clears the milestone.
+fn field_changes(
+    item: &WorkItem,
+    repeat: Option<items::RepeatChange>,
+    patch: &WorkPatch,
+) -> Vec<FieldChange> {
     let mut changes = Vec::new();
     let mut add = |field, from: Option<String>, patch: WorkPatch| {
         if proposed(field, &patch) != from {
@@ -380,6 +387,16 @@ fn field_changes(item: &WorkItem, patch: &WorkPatch) -> Vec<FieldChange> {
             },
         );
     }
+    if let Some(repeat) = repeat {
+        add(
+            WorkProposalField::Recurrence,
+            repeat.from,
+            WorkPatch {
+                recurrence: Some(repeat.to),
+                ..WorkPatch::default()
+            },
+        );
+    }
     changes
 }
 
@@ -459,7 +476,8 @@ fn agent_edit(
             let works_it = doer(tx, id)?.is_some_and(|doer| same(&doer.agent, agent.name));
             let mut direct = WorkPatch::default();
             let mut waiting = Vec::new();
-            for field in field_changes(&before, patch) {
+            let repeat = items::repeat_change(tx, id, patch, change.at_ms)?;
+            for field in field_changes(&before, repeat, patch) {
                 match field.patch.status {
                     Some(status) if works_it && working(before.status) && working(status) => {
                         direct.status = Some(status);
@@ -487,28 +505,56 @@ fn agent_edit(
     Ok(AgentChange { item, proposed })
 }
 
+/// One agent's change to one item it read at `expected_revision`, and the
+/// page or file it keeps beside the item as evidence of the work.
+#[derive(Clone, Copy)]
+pub(crate) struct ItemChange<'a> {
+    pub id: &'a str,
+    pub expected_revision: i64,
+    pub patch: &'a WorkPatch,
+    pub link: Option<&'a str>,
+}
+
+/// The page or file `evidence` names, when it names one: an absolute
+/// http, https or file address.
+pub(crate) fn evidence_link(evidence: &str) -> Option<String> {
+    sources::link_url(evidence).ok()
+}
+
 fn update(
     history: &mut Connection,
     meetings: Option<&Connection>,
     change: Change<'_>,
     agent: Agent<'_>,
-    id: &str,
-    expected_revision: i64,
-    patch: &WorkPatch,
+    edit: ItemChange<'_>,
 ) -> StorageResult<Done<AgentChange>> {
     store::mutate(
         history,
         change.operation_id,
         "work_agent_update",
-        &(id, expected_revision, patch, agent.name),
+        &(
+            edit.id,
+            edit.expected_revision,
+            edit.patch,
+            edit.link,
+            agent.name,
+        ),
         change.at_ms,
         |tx| {
-            let id = store::uuid(id)?;
-            if items::item(tx, &id)?.revision != expected_revision {
+            let id = store::uuid(edit.id)?;
+            if items::item(tx, &id)?.revision != edit.expected_revision {
                 return Err(Refusal::StaleRevision.into());
             }
             let mut effects = Effects::default();
-            let value = agent_edit(tx, meetings, change, agent, &id, patch, &mut effects)?;
+            let value = agent_edit(tx, meetings, change, agent, &id, edit.patch, &mut effects)?;
+            if let Some(url) = edit.link {
+                let link = WorkCaptureSource::Link {
+                    url: url.to_owned(),
+                    title: None,
+                };
+                capture::attach(tx, &id, &link, change.at_ms)?;
+                effects.item(&value.item);
+            }
             Ok(Done { value, effects })
         },
     )
@@ -519,9 +565,7 @@ pub(crate) async fn update_as(
     app: &AppHandle,
     agent: &str,
     operation_id: &str,
-    id: &str,
-    expected_revision: i64,
-    patch: &WorkPatch,
+    edit: ItemChange<'_>,
 ) -> Result<AgentChange, String> {
     let agent = Agent {
         name: agent,
@@ -529,15 +573,7 @@ pub(crate) async fn update_as(
     };
     let change = Change::now(operation_id, WorkActor::Agent);
     run_with_meetings(app, |history, meetings| {
-        update(
-            history,
-            meetings,
-            change,
-            agent,
-            id,
-            expected_revision,
-            patch,
-        )
+        update(history, meetings, change, agent, edit)
     })
     .await
 }
@@ -1085,9 +1121,12 @@ mod tests {
             None,
             by(WorkActor::Agent, &operation(), AT + 1_000),
             CLAUDE,
-            &task.id,
-            task.revision,
-            &urgent,
+            ItemChange {
+                id: &task.id,
+                expected_revision: task.revision,
+                patch: &urgent,
+                link: None,
+            },
         )
         .expect("the agent's change")
         .value
@@ -1139,9 +1178,12 @@ mod tests {
             None,
             by(WorkActor::Agent, &operation(), AT + 1_000),
             CLAUDE,
-            &task.id,
-            task.revision,
-            &retitled,
+            ItemChange {
+                id: &task.id,
+                expected_revision: task.revision,
+                patch: &retitled,
+                link: None,
+            },
         )
         .expect("the agent's change")
         .value
@@ -1202,5 +1244,128 @@ mod tests {
         .expect("its own claim")
         .value;
         assert_eq!(started.status, WorkStatus::InProgress);
+    }
+
+    #[test]
+    fn a_repeat_is_kept_in_the_parsers_words_and_stopping_it_keeps_the_due_day() {
+        let mut history = history();
+        let task = todo(&mut history, "Water the plants");
+        let applies = Agent {
+            name: "Claude Code",
+            autonomy: WorkAutonomy::Apply,
+        };
+        let due = Some(AT + 86_400_000);
+        let set = |words: Option<&str>| WorkPatch {
+            recurrence: Some(words.map(str::to_owned)),
+            due_at_ms: Some(due),
+            ..WorkPatch::default()
+        };
+        let change = |history: &mut Connection, patch: &WorkPatch, at_ms: i64| {
+            let revision = items::item(history, &task.id).expect("the task").revision;
+            update(
+                history,
+                None,
+                by(WorkActor::Agent, &operation(), at_ms),
+                applies,
+                ItemChange {
+                    id: &task.id,
+                    expected_revision: revision,
+                    patch,
+                    link: None,
+                },
+            )
+            .map(|done| done.value.item)
+        };
+        let repeats = |history: &Connection| {
+            let newest = items::activity(history, &task.id)
+                .expect("the task's history")
+                .pop()
+                .expect("a history entry");
+            (
+                items::recurrence(history, &task.id).expect("its repeat"),
+                newest.kind,
+                newest.from,
+                newest.to,
+            )
+        };
+
+        change(&mut history, &set(Some("Every  Monday")), AT + 1_000).expect("a repeat");
+        assert_eq!(
+            repeats(&history),
+            (
+                Some("every monday".to_owned()),
+                WorkActivityKind::Recurrence,
+                None,
+                Some("every monday".to_owned())
+            )
+        );
+
+        assert!(change(&mut history, &set(Some("sometimes")), AT + 2_000).is_err());
+        let stopped = change(
+            &mut history,
+            &WorkPatch {
+                recurrence: Some(None),
+                ..WorkPatch::default()
+            },
+            AT + 3_000,
+        )
+        .expect("stopping it");
+        assert_eq!(stopped.due_at_ms, due);
+        assert_eq!(
+            repeats(&history),
+            (
+                None,
+                WorkActivityKind::Recurrence,
+                Some("every monday".to_owned()),
+                None
+            )
+        );
+    }
+
+    #[test]
+    fn a_link_given_when_work_is_done_is_kept_once_and_read_without_the_conversations() {
+        let mut history = history();
+        let task = todo(&mut history, "Ship the release notes");
+        let url = "https://github.com/aktan/sona/pull/9";
+        let done = WorkPatch {
+            status: Some(WorkStatus::Done),
+            ..WorkPatch::default()
+        };
+        for at_ms in [AT + 1_000, AT + 2_000] {
+            let revision = items::item(&history, &task.id).expect("the task").revision;
+            update(
+                &mut history,
+                None,
+                by(WorkActor::Agent, &operation(), at_ms),
+                CLAUDE,
+                ItemChange {
+                    id: &task.id,
+                    expected_revision: revision,
+                    patch: &done,
+                    link: evidence_link(url).as_deref(),
+                },
+            )
+            .expect("finishing it with a link");
+        }
+
+        let evidence = super::super::detail(&history, None, None, &task.id)
+            .expect("the task's page")
+            .evidence;
+        let kept: Vec<_> = evidence
+            .iter()
+            .map(|link| {
+                (
+                    link.source_kind,
+                    link.source_id.as_str(),
+                    link.available,
+                    link.title.is_some(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            kept,
+            [(crate::planning::EvidenceSourceKind::Link, url, true, true)]
+        );
+        assert_eq!(evidence_link("shipped in the morning build"), None);
     }
 }

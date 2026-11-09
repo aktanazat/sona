@@ -104,8 +104,8 @@ pub async fn work_capture(
     }
 }
 
-/// Keeps `source` as evidence for the task `task_id`.
-fn attach(
+/// Keeps `source` as evidence for the task `task_id`, once.
+pub(crate) fn attach(
     tx: &Connection,
     task_id: &str,
     source: &WorkCaptureSource,
@@ -153,7 +153,8 @@ fn attach(
     tx.execute(
         "INSERT INTO planning_evidence_links
             (id, target_kind, target_id, source_kind, source_id, at_ms, revision, created_at_ms, end_ms, caption)
-         VALUES (?1, 'task', ?2, ?3, ?4, ?5, 1, ?6, ?7, ?8)",
+         VALUES (?1, 'task', ?2, ?3, ?4, ?5, 1, ?6, ?7, ?8)
+         ON CONFLICT DO NOTHING",
         params![
             Uuid::new_v4().to_string(),
             task_id,

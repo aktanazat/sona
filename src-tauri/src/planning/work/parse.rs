@@ -138,6 +138,22 @@ pub(crate) fn parse<Tz: TimeZone>(
     line.finish(said)
 }
 
+/// `words` read as one repeat and nothing else: how often, as the parser
+/// says it, and when it next falls, when the words name the days.
+pub(crate) fn repeat<Tz: TimeZone>(
+    words: &str,
+    now: &DateTime<Tz>,
+) -> Option<(String, Option<i64>)> {
+    let parse = parse(words, Said::Typed, &[], &Lexicon::default(), now);
+    match parse.tokens.as_slice() {
+        [WorkToken {
+            field: WorkField::Repeat { every, next_at },
+            ..
+        }] if parse.title.is_empty() => Some((every.clone(), *next_at)),
+        _ => None,
+    }
+}
+
 /// One task a spoken passage says: the bytes of the passage that say it,
 /// and what they say.
 #[derive(Debug, PartialEq)]
@@ -1866,5 +1882,46 @@ mod tests {
             titles,
             ["Ping Sam and Dana about the offsite", "Call the bank"]
         );
+    }
+
+    /// A captured task keeps its repeat in the parser's words, and saving
+    /// one refuses words that are not one repeat; so every repeat the
+    /// parser writes has to read back as itself, or a capture saying it
+    /// would be refused.
+    #[test]
+    fn every_repeat_the_parser_writes_reads_back_as_itself() {
+        let said = [
+            "daily",
+            "weekly",
+            "biweekly",
+            "fortnightly",
+            "monthly",
+            "quarterly",
+            "annually",
+            "on mondays",
+            "every day",
+            "every weekday",
+            "every morning",
+            "every other week",
+            "every other friday",
+            "every two weeks",
+            "each 3 months",
+            "every tuesday and thursday",
+            "every friday evening",
+        ];
+        let changed: Vec<(&str, Option<String>, Option<String>)> = said
+            .into_iter()
+            .map(|words| {
+                let written = super::repeat(words, &monday()).map(|(every, _)| every);
+                let again = written
+                    .as_deref()
+                    .and_then(|every| super::repeat(every, &monday()))
+                    .map(|(every, _)| every);
+                (words, written, again)
+            })
+            .filter(|(_, written, again)| written.is_none() || written != again)
+            .collect();
+
+        assert_eq!(changed, Vec::new(), "these repeats do not read back");
     }
 }

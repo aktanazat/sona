@@ -64,6 +64,30 @@ fn a_task_is_named_by_handle_number_or_id() {
     );
 }
 
+/// A saved view shows its due windows as --due takes them, so an agent can
+/// copy one into a list; a window of no days is refused, not read as none.
+#[test]
+fn a_due_window_reads_back_as_the_flag_it_came_from() {
+    let read: Vec<(&str, Result<String, String>)> = [
+        ("overdue", "overdue"),
+        (" Today", "today"),
+        ("THIS-WEEK", "this-week"),
+        ("next:14", "next:14"),
+        ("none", "none"),
+    ]
+    .into_iter()
+    .map(|(typed, flag)| (flag, super::due_window(typed).map(super::due_flag)))
+    .filter(|(flag, read)| read.as_deref() != Ok(*flag))
+    .collect();
+    assert_eq!(read, Vec::new(), "these windows did not read back");
+
+    let not_refused: Vec<&str> = ["next:0", "next:", "next:-3", "next:two", "soon", ""]
+        .into_iter()
+        .filter(|typed| super::due_window(typed).is_ok())
+        .collect();
+    assert_eq!(not_refused, Vec::<&str>::new(), "these name no window");
+}
+
 fn task(source_meeting: Option<&str>) -> WorkItem {
     WorkItem {
         id: Uuid::new_v4().to_string(),

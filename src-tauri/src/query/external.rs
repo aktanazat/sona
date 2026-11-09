@@ -1128,6 +1128,10 @@ pub struct ExternalPlanningEvidence {
     pub source_kind: EvidenceSourceKind,
     pub source_id: String,
     pub at_ms: Option<i64>,
+    /// Where a recording's quoted words end, beside `at_ms`.
+    pub end_ms: Option<i64>,
+    /// The words a recording said, or what a page's window called it.
+    pub caption: Option<String>,
     pub revision: i64,
     pub created_at_ms: i64,
     pub available: bool,
@@ -2607,6 +2611,8 @@ fn project_evidence(evidence: planning::EvidenceLink) -> ExternalPlanningEvidenc
         source_kind: evidence.source_kind,
         source_id: evidence.source_id,
         at_ms: evidence.at_ms,
+        end_ms: evidence.end_ms,
+        caption: evidence.caption,
         revision: evidence.revision,
         created_at_ms: evidence.created_at_ms,
         available: evidence.available,
@@ -4582,6 +4588,10 @@ mod tests {
             (vec!["work", "decline", "S-1", "--dry-run"], reads),
             (vec!["work", "archive", "S-1", "--dry-run"], reads),
             (vec!["work", "restore", "S-1", "--dry-run"], reads),
+            (
+                vec!["work", "snooze", "S-1", "--until", "tomorrow", "--dry-run"],
+                reads,
+            ),
             (vec!["work", "create", "Send the deck"], writes),
             (vec!["work", "update", "S-1", "--priority", "low"], writes),
             (vec!["work", "claim", "S-1"], writes),
@@ -4591,6 +4601,7 @@ mod tests {
             (vec!["work", "duplicate", "S-2", "--of", "S-1"], writes),
             (vec!["work", "archive", "S-1"], writes),
             (vec!["work", "restore", "S-1"], writes),
+            (vec!["work", "snooze", "S-1", "--until", "tomorrow"], writes),
             (vec!["work", "relate", "S-1", "blocks", "S-2"], writes),
             (vec!["work", "unrelate", "S-1", "blocks", "S-2"], writes),
             (vec!["work", "label-save", "Ops"], writes),

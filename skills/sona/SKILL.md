@@ -101,8 +101,14 @@ Claim only work the user asked you to take, and say who you are with
 task's owner and shows you as the one doing it; claiming a task you already
 work changes nothing. A refused claim means another agent or the user is on
 it: pick another, do not force it with `update --status in-progress`. `done`
-also closes the meeting commitment the task came from, and `--evidence` adds
-one line to the task's details.
+also closes the meeting commitment the task came from. A link given to
+`--evidence` is kept with the task as evidence; any other line goes into its
+details. `--due overdue,today,next:14` narrows `list` and `ready` to due
+windows. `--repeat "every monday"` on `create` or `update` keeps how often a
+task comes back (`none` stops it); finishing it does not make the next one.
+`snooze S-12 --until 2026-12-01` keeps a task out of lists and `ready` until
+that day; `--until none` wakes it. List items carry `focus` (one of today's
+picks), `snoozed_until_ms` and `follow_up_at_ms` (when to ask whoever owes it).
 
 Triage holds work Sona heard in meetings. Read the quote with `show` before
 deciding: `accept` moves items to Todo with Sona's suggested owner, due day and
