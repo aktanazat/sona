@@ -492,15 +492,28 @@ struct Sidebar: View {
     }
 }
 
+/// How far the floating sidebar sits inside the window's edges.
+private let sidebarInset: CGFloat = 6
+
 private extension View {
     /// The sidebar is navigation, the layer Liquid Glass is for: with the
-    /// glass material on macOS 26 the split view floats it as the system's
-    /// own glass pane, the window's buttons inside it. Otherwise it keeps the
-    /// opaque rail.
+    /// glass material it floats as a glass pane inset from the window's
+    /// edges, its corners concentric with the window's, over the page's own
+    /// color. The split view's own sidebar is flat on macOS 27, so the pane
+    /// is drawn here. Otherwise it keeps the opaque rail.
     @ViewBuilder
     func sidebarSurface(_ material: AppearanceMaterial) -> some View {
         if material == .glass, #available(macOS 26.0, *) {
-            self
+            background {
+                ZStack {
+                    Theme.page
+                    Color.clear
+                        .glassEffect(.regular, in: ConcentricRectangle(
+                            corners: .concentric(minimum: .fixed(Theme.radiusCard)), isUniform: true))
+                        .padding(sidebarInset)
+                }
+                .ignoresSafeArea()
+            }
         } else {
             background(Theme.rail.ignoresSafeArea())
         }
