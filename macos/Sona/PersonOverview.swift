@@ -164,10 +164,8 @@ struct PersonFigures: Equatable {
             notes = .unknown
             words = .unknown
         }
-        if let snapshot = work?.snapshot {
-            tasks = snapshot.identityStatus == .available
-                ? .value(snapshot.tasks.filter { $0.task.status == .notStarted || $0.task.status == .inProgress }.count)
-                : .unknown
+        if let work, let snapshot = work.snapshot {
+            tasks = snapshot.identityStatus == .available ? .value(work.tasks.filter(\.status.isOpen).count) : .unknown
         } else if work?.error != nil {
             tasks = .unknown
         }

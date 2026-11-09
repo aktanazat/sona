@@ -12,25 +12,9 @@ struct PersonWorkProject: Decodable, Identifiable {
     let revision: Int64
 }
 
-struct PersonWorkMilestone: Decodable, Identifiable {
-    let id: String
-    let title: String
-    let status: PlanningWorkStatus
-    let revision: Int64
-}
-
 enum PersonWorkRelation: String, Decodable {
     case explicitSelection = "explicit_selection"
     case confirmedConversation = "confirmed_conversation"
-}
-
-struct PersonWorkTask: Decodable, Identifiable {
-    let task: PlanningTask
-    let selectedPersonId: String
-    let project: PersonWorkProject
-    let milestone: PersonWorkMilestone?
-    let relation: PersonWorkRelation
-    var id: String { task.id }
 }
 
 struct PersonWorkConversation: Decodable, Identifiable {
@@ -57,7 +41,6 @@ struct PersonWorkSnapshot: Decodable {
     let personId: String
     let canonicalPersonId: String?
     let identityStatus: PersonWorkIdentityStatus
-    let tasks: [PersonWorkTask]
     let conversations: [PersonWorkConversation]
 }
 
@@ -65,6 +48,9 @@ struct PersonWorkSnapshot: Decodable {
 @Observable
 final class PersonWorkStore {
     private(set) var snapshot: PersonWorkSnapshot?
+    /// Every task they own, in triage, in a project or in none, read the way
+    /// the task lists read them.
+    private(set) var tasks: [WorkItemRow] = []
     private(set) var loading = false
     private(set) var error: String?
 
@@ -76,7 +62,7 @@ final class PersonWorkStore {
 
     init(core: Core) {
         self.core = core
-        for event in ["planning-changed-event", CoreEvent.peopleArtifactChanged,
+        for event in ["work-changed", "planning-changed-event", CoreEvent.peopleArtifactChanged,
                       CoreEvent.peopleMeetingRemoved, CoreEvent.meetingTranscriptChanged,
                       CoreEvent.meetingSessionChanged, CoreEvent.meetingNoteChanged] {
             core.observe(event) { [weak self] _ in self?.refresh() }
@@ -90,6 +76,7 @@ final class PersonWorkStore {
         active = true
         if self.personId != personId {
             snapshot = nil
+            tasks = []
             error = nil
         }
         self.personId = personId
@@ -118,6 +105,7 @@ final class PersonWorkStore {
         refreshTask?.cancel()
         refreshTask = nil
         snapshot = nil
+        tasks = []
         error = nil
         loading = false
     }
@@ -125,10 +113,14 @@ final class PersonWorkStore {
     private func read(_ personId: String, stamp: UInt64) async {
         defer { if generation == stamp { loading = false } }
         do {
-            let result: PersonWorkSnapshot = try await core.request(
+            async let work: PersonWorkSnapshot = core.request(
                 "planning_person_work", PersonWorkParams(personId: personId))
+            async let owned: WorkList = core.request(
+                "work_list", PersonTasksParams(query: WorkQuery(ownerPersonIds: [personId])))
+            let (result, list) = try await (work, owned)
             guard active, generation == stamp, !Task.isCancelled else { return }
             snapshot = result
+            tasks = list.items
             error = nil
         } catch {
             guard active, generation == stamp, !Task.isCancelled else { return }
@@ -139,4 +131,8 @@ final class PersonWorkStore {
 
 private struct PersonWorkParams: Encodable {
     let personId: String
+}
+
+private struct PersonTasksParams: Encodable {
+    let query: WorkQuery
 }

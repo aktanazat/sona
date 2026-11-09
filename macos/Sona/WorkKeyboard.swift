@@ -158,6 +158,9 @@ final class WorkFocus {
     var peeking = false
     /// The task open on each place's page; Tasks and Triage keep their own.
     private(set) var openedIn: [Place: String] = [:]
+    /// The person whose page shows their tasks now; while it does, the task
+    /// keys work on People as they do on Tasks.
+    var personList: String?
     var picker: WorkPicker?
     var renaming: String?
     /// The new-task sheet, holding what the task starts with.
@@ -396,7 +399,7 @@ final class WorkKeys {
         if model.place == .today || model.place == .capture {
             return RitualKeys.handle(event, key: key, flags: flags, model)
         }
-        guard model.place == .tasks || model.place == .triage else { return false }
+        guard model.showsTasks else { return false }
         return work(event, key: key, flags: flags, model)
     }
 
@@ -491,7 +494,7 @@ final class WorkKeys {
             guard opened == nil, focus.highlighted != nil else { return false }
             focus.peeking.toggle()
             return true
-        case "c":
+        case "c" where place != .people:
             focus.composing = place == .triage ? WorkPatch() : model.workDraftDefaults
             return true
         case "s": return run(.status)
@@ -516,9 +519,19 @@ final class WorkKeys {
 }
 
 extension AppModel {
+    /// Whether tasks are in front: Tasks, Triage, or a person's tasks and the
+    /// task opened from them.
+    var showsTasks: Bool {
+        switch place {
+        case .tasks, .triage: true
+        case .people: workFocus.personList != nil || workFocus.opened(in: .people) != nil
+        default: false
+        }
+    }
+
     /// The tasks a verb acts on now, when a task screen is showing.
     var workTargets: [String] {
-        guard !showingSettings, place == .tasks || place == .triage else { return [] }
+        guard !showingSettings, showsTasks else { return [] }
         return workFocus.targets(in: place)
     }
 
