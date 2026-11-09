@@ -7,8 +7,8 @@ final class TitleReading {
     private(set) var parse: WorkParse?
     /// Words turned back into text; the core leaves them as they are.
     private(set) var plain: [String] = []
-    /// The chip the arrow keys are on.
-    var selected: Int?
+    /// The token whose chip the arrow keys are on.
+    var selected: WorkToken.ID?
     @ObservationIgnored private var text = ""
     @ObservationIgnored private var asked = 0
     @ObservationIgnored private var answered = 0
@@ -26,7 +26,7 @@ final class TitleReading {
         answered = mine
         self.text = text
         parse = answer
-        if let selected, selected >= tokens.count { self.selected = tokens.indices.last }
+        if let selected, !tokens.contains(where: { $0.id == selected }) { self.selected = nil }
     }
 
     /// The reading of exactly these words, asked again when the last answer
@@ -48,14 +48,16 @@ final class TitleReading {
         }
     }
 
-    /// ↓ steps from the title onto the chips, ← → move along them, ⌫ or
-    /// Space keeps the chip's words as text, ↑ or Esc goes back to the
-    /// title. Any other key goes back too, and on to the title.
-    func press(_ key: KeyPress, text: String, work: WorkStore) -> KeyPress.Result {
+    /// ↓ steps from the title onto the chips, ← → move along them in the
+    /// order they sit, ⌫ or Space keeps the chip's words as text, ↑ or Esc
+    /// goes back to the title. Any other key goes back too, and on to the
+    /// title.
+    func press(_ key: KeyPress, order: [WorkToken], text: String, work: WorkStore) -> KeyPress.Result {
         let modified = !key.modifiers.isDisjoint(with: [.command, .option, .control])
-        guard let index = selected else {
-            guard key.key == .downArrow, !modified, !key.modifiers.contains(.shift), !tokens.isEmpty else { return .ignored }
-            selected = 0
+        guard let index = order.firstIndex(where: { $0.id == selected }) else {
+            if selected != nil { selected = nil }
+            guard key.key == .downArrow, !modified, !key.modifiers.contains(.shift), let first = order.first else { return .ignored }
+            selected = first.id
             return .handled
         }
         if modified {
@@ -63,14 +65,14 @@ final class TitleReading {
             return .ignored
         }
         switch key.key {
-        case .leftArrow: selected = max(0, index - 1)
-        case .rightArrow: selected = min(tokens.count - 1, index + 1)
+        case .leftArrow: selected = order[max(0, index - 1)].id
+        case .rightArrow: selected = order[min(order.count - 1, index + 1)].id
         case .upArrow, .escape: selected = nil
         case .delete, .space:
-            if tokens.indices.contains(index) {
-                let token = tokens[index]
-                Task { await keepAsText(token, in: text, work: work) }
-            }
+            let token = order[index]
+            let next = order.indices.contains(index + 1) ? index + 1 : index - 1
+            selected = order.indices.contains(next) ? order[next].id : nil
+            Task { await keepAsText(token, in: text, work: work) }
         case .downArrow: break
         default:
             selected = nil
@@ -127,10 +129,57 @@ struct TitleFields {
     }
 }
 
+extension [WorkToken] {
+    /// In the order their chips sit, the order of the new-task sheet's
+    /// row: priority, owner, due date, project, labels, repeat.
+    var inChipOrder: [WorkToken] {
+        enumerated()
+            .sorted { (rank($0.element), $0.offset) < (rank($1.element), $1.offset) }
+            .map(\.element)
+    }
+
+    private func rank(_ token: WorkToken) -> Int {
+        switch token.field {
+        case .priority: 0
+        case .owner: 1
+        case .due: 2
+        case .project: 3
+        case .label: 4
+        case .recurrence: 5
+        }
+    }
+}
+
 extension View {
-    /// The title field's keys for the chips under it.
-    func chipKeys(_ reading: TitleReading, text: String, work: WorkStore) -> some View {
-        onKeyPress(phases: .down) { reading.press($0, text: text, work: work) }
+    /// The title field's keys for the chips `order` lays out.
+    func chipKeys(_ reading: TitleReading, order: [WorkToken], text: String, work: WorkStore) -> some View {
+        onKeyPress(phases: .down) { reading.press($0, order: order, text: text, work: work) }
+    }
+
+    /// The face every chip on a new task wears: one height, one shape. A
+    /// tint marks a value the title's words set, an outline the chip the
+    /// arrow keys are on.
+    func chipFace(words: Bool = false, selected: Bool = false, hovering: Bool = false) -> some View {
+        let shape = RoundedRectangle(cornerRadius: Theme.radiusControl)
+        return font(TypeScale.label(12))
+            .foregroundStyle(Theme.ink)
+            .frame(height: 26)
+            .background(words ? Theme.accentSoft : hovering ? Theme.controlHover : Theme.control, in: shape)
+            .overlay(shape.strokeBorder(selected ? Theme.accent : .clear, lineWidth: 1))
+            .contentShape(shape)
+    }
+}
+
+/// The × at the end of a chip whose value can go.
+struct ChipCross: View {
+    var hot = false
+
+    var body: some View {
+        Image(systemName: "xmark")
+            .font(.system(size: 9, weight: .semibold))
+            .foregroundStyle(hot ? Theme.ink : Theme.inkTertiary)
+            .frame(width: 16, height: 16)
+            .contentShape(Rectangle())
     }
 }
 
@@ -142,9 +191,9 @@ struct ParsedChips: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        ChatFlowRow(spacing: Space.xs) {
-            ForEach(Array(reading.tokens.enumerated()), id: \.element.id) { index, token in
-                ParsedChip(token: token, selected: reading.selected == index) {
+        ChatFlowRow(spacing: Space.s) {
+            ForEach(reading.tokens.inChipOrder) { token in
+                WordChip(token: token, selected: reading.selected == token.id) {
                     reading.selected = nil
                     Task { await reading.keepAsText(token, in: text, work: model.work) }
                 }
@@ -153,7 +202,8 @@ struct ParsedChips: View {
     }
 }
 
-private struct ParsedChip: View {
+/// A value the title's words set; a click keeps the words as text.
+struct WordChip: View {
     let token: WorkToken
     let selected: Bool
     let action: () -> Void
@@ -161,19 +211,15 @@ private struct ParsedChip: View {
     @State private var hovering = false
 
     var body: some View {
-        let shape = RoundedRectangle(cornerRadius: Theme.radiusKey)
         Button(action: action) {
             HStack(spacing: Space.xs) {
                 mark.frame(width: 16, height: 16)
                 Text(title).lineLimit(1)
+                ChipCross(hot: hovering)
             }
-            .font(TypeScale.label(12))
-            .foregroundStyle(Theme.ink)
-            .padding(.horizontal, Space.s)
-            .frame(height: 22)
-            .background(selected ? Theme.selection : hovering ? Theme.controlHover : Theme.control, in: shape)
-            .overlay(shape.strokeBorder(selected ? Theme.accent : .clear, lineWidth: 1))
-            .contentShape(Rectangle())
+            .padding(.leading, Space.s)
+            .padding(.trailing, Space.xs)
+            .chipFace(words: true, selected: selected)
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }

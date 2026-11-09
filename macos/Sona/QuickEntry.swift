@@ -19,21 +19,26 @@ final class QuickEntry {
     private(set) var filed: WorkRambleFiledEvent?
 
     private unowned let model: AppModel
-    @ObservationIgnored private lazy var entryPanel = FloatingPanel(
-        QuickEntryPanel(entry: self).environment(model), keyed: true)
+    @ObservationIgnored private lazy var entryPanel: FloatingPanel = {
+        let panel = FloatingPanel(QuickEntryPanel(entry: self).environment(model), keyed: true)
+        panel.onResignKey = { [weak self] in self?.putAway() }
+        return panel
+    }()
     @ObservationIgnored private lazy var filedPanel = FloatingPanel(RambleCard(entry: self).environment(model))
     @ObservationIgnored private var shown = false
+    /// Words put away by a click in another window, back with the shortcut.
+    @ObservationIgnored private var kept = false
     @ObservationIgnored private var dismissal: Task<Void, Never>?
 
     init(model: AppModel) {
         self.model = model
     }
 
-    /// The shortcut: a fresh panel, or the open one back in front with the
-    /// page it was pressed over.
+    /// The shortcut: a fresh panel, or the open or put-away one back in
+    /// front with the page it was pressed over.
     func open(_ line: Data) {
         guard let event = try? Core.payload(line) as WorkQuickEntryEvent else { return }
-        if shown {
+        if shown || kept {
             if let page = event.link { link = page }
         } else {
             title = ""
@@ -41,11 +46,23 @@ final class QuickEntry {
             link = event.link
             failure = nil
         }
+        kept = false
         show()
     }
 
+    /// Esc: the words go with the panel.
     func close() {
         shown = false
+        kept = false
+        entryPanel.hide()
+    }
+
+    /// A click in another window: the panel goes, and its words wait for
+    /// the shortcut.
+    private func putAway() {
+        guard shown else { return }
+        shown = false
+        kept = !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         entryPanel.hide()
     }
 
@@ -88,7 +105,7 @@ final class QuickEntry {
     private func show() {
         shown = true
         summons += 1
-        entryPanel.show(at: .edge(.top))
+        entryPanel.show(at: .upperCenter)
     }
 
     func file(_ line: Data) {
@@ -143,37 +160,37 @@ private struct QuickEntryPanel: View {
         @Bindable var entry = entry
         let reading = entry.reading
         let work = model.work
+        let order = reading.tokens.inChipOrder
         let shape = RoundedRectangle(cornerRadius: Theme.radiusDialog)
         VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: Space.m) {
-                TaskStatusIcon(status: .notStarted, size: 16)
-                TextField("", text: $entry.title, prompt: Text("New task").foregroundStyle(Theme.inkTertiary))
-                    .textFieldStyle(.plain)
-                    .font(TypeScale.body(17))
-                    .foregroundStyle(Theme.ink)
-                    .focused($focused)
-                    .onSubmit { entry.submit() }
-                    .chipKeys(reading, text: entry.title, work: work)
-                    .task(id: entry.title) { await reading.read(entry.title, in: work) }
-            }
-            .padding(.horizontal, 20)
-            .frame(height: 56)
-            if !reading.tokens.isEmpty || entry.link != nil || entry.failure != nil {
-                VStack(alignment: .leading, spacing: Space.s) {
-                    if !reading.tokens.isEmpty {
-                        ParsedChips(reading: reading, text: entry.title)
-                    }
-                    if let link = entry.link {
-                        LinkChip(link: link) { entry.dropLink() }
-                    }
-                    if let failure = entry.failure {
-                        Text(failure).metaText(Theme.live).lineLimit(2)
-                    }
+            VStack(alignment: .leading, spacing: Space.m) {
+                HStack(spacing: Space.m) {
+                    TaskStatusIcon(status: .notStarted, size: 16)
+                    TextField("", text: $entry.title, prompt: Text("New task").foregroundStyle(Theme.inkTertiary))
+                        .textFieldStyle(.plain)
+                        .font(TypeScale.body(17))
+                        .foregroundStyle(Theme.ink)
+                        .focused($focused)
+                        .onSubmit { entry.submit() }
+                        .chipKeys(reading, order: order, text: entry.title, work: work)
+                        .task(id: entry.title) { await reading.read(entry.title, in: work) }
                 }
-                .padding(.leading, 48)
-                .padding(.trailing, 20)
-                .padding(.bottom, Space.m)
+                if !order.isEmpty || entry.link != nil || entry.failure != nil {
+                    VStack(alignment: .leading, spacing: Space.s) {
+                        if !order.isEmpty {
+                            ParsedChips(reading: reading, text: entry.title)
+                        }
+                        if let link = entry.link {
+                            LinkChip(link: link) { entry.dropLink() }
+                        }
+                        if let failure = entry.failure {
+                            Text(failure).metaText(Theme.live).lineLimit(2)
+                        }
+                    }
+                    .padding(.leading, 16 + Space.m)
+                }
             }
+            .padding(Space.l)
             Hairline()
             keys(reading)
         }
@@ -196,36 +213,34 @@ private struct QuickEntryPanel: View {
     }
 
     private func keys(_ reading: TitleReading) -> some View {
-        HStack(spacing: 6) {
+        HStack(spacing: Space.m) {
             Spacer(minLength: 0)
             if reading.selected == nil {
-                KeyCap("↩")
-                Text("Add task").metaText(Theme.inkSecondary).padding(.trailing, 10)
+                hint("Add task", keys: "↩")
                 if !reading.tokens.isEmpty {
-                    KeyCap("↓")
-                    Text("Select").metaText(Theme.inkSecondary).padding(.trailing, 10)
+                    hint("Select", keys: "↓")
                 }
                 if entry.link != nil {
-                    KeyCap("⌘")
-                    KeyCap("⌫")
-                    Text("Remove link").metaText(Theme.inkSecondary).padding(.trailing, 10)
+                    hint("Remove link", keys: "⌘", "⌫")
                 }
-                KeyCap("esc")
-                Text("Close").metaText(Theme.inkSecondary)
+                hint("Close", keys: "esc")
             } else {
-                KeyCap("←")
-                KeyCap("→")
-                Text("Move").metaText(Theme.inkSecondary).padding(.trailing, 10)
-                KeyCap("⌫")
-                Text("Keep as text").metaText(Theme.inkSecondary).padding(.trailing, 10)
-                KeyCap("↑")
-                Text("Back").metaText(Theme.inkSecondary)
+                hint("Move", keys: "←", "→")
+                hint("Keep as text", keys: "⌫")
+                hint("Back", keys: "↑")
             }
         }
-        .padding(.horizontal, 16)
+        .padding(.horizontal, Space.l)
         .frame(height: 40)
         .background(Theme.inset)
         .accessibilityElement(children: .combine)
+    }
+
+    private func hint(_ action: String, keys: String...) -> some View {
+        HStack(spacing: Space.xs) {
+            ForEach(keys, id: \.self) { KeyCap($0) }
+            Text(action).metaText(Theme.inkSecondary)
+        }
     }
 }
 
@@ -233,6 +248,7 @@ private struct QuickEntryPanel: View {
 private struct LinkChip: View {
     let link: WorkLink
     let remove: () -> Void
+    @State private var crossHovering = false
 
     var body: some View {
         HStack(spacing: Space.xs) {
@@ -240,26 +256,17 @@ private struct LinkChip: View {
                 .font(.system(size: 11))
                 .foregroundStyle(Theme.inkSecondary)
                 .frame(width: 16, height: 16)
-            Text(name)
-                .font(TypeScale.label(12))
-                .foregroundStyle(Theme.ink)
-                .lineLimit(1)
-            Button(action: remove) {
-                Image(systemName: "xmark")
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(Theme.inkTertiary)
-                    .frame(width: 16, height: 16)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .keyboardShortcut(.delete, modifiers: .command)
-            .help("Remove link")
-            .accessibilityLabel("Remove link")
+            Text(name).lineLimit(1)
+            Button(action: remove) { ChipCross(hot: crossHovering) }
+                .buttonStyle(.plain)
+                .onHover { crossHovering = $0 }
+                .keyboardShortcut(.delete, modifiers: .command)
+                .help("Remove link")
+                .accessibilityLabel("Remove link")
         }
         .padding(.leading, Space.s)
         .padding(.trailing, Space.xs)
-        .frame(height: 22)
-        .background(Theme.control, in: RoundedRectangle(cornerRadius: Theme.radiusKey))
+        .chipFace()
         .help(address)
     }
 
@@ -295,15 +302,17 @@ private struct RambleCard: View {
                     Image(systemName: "arrow.up.right")
                         .font(.system(size: 11))
                         .foregroundStyle(Theme.inkTertiary)
+                        .frame(width: 16, height: 16)
                 }
                 ForEach(filed.items.prefix(4)) { item in
                     line(item, now: now)
                 }
                 if filed.items.count > 4 {
-                    Text("\(filed.items.count - 4) more").metaText().padding(.leading, 24)
+                    Text("\(filed.items.count - 4) more").metaText().padding(.leading, (16 + Space.s) * 2)
                 }
                 if let error = filed.error {
                     Text(error).metaText(Theme.live).lineLimit(3).fixedSize(horizontal: false, vertical: true)
+                        .padding(.leading, 16 + Space.s)
                 }
             }
             .padding(PanelSurface.inset)
@@ -314,7 +323,7 @@ private struct RambleCard: View {
             } press: {
                 entry.openFiled()
             }
-            .padding(8)
+            .padding(Space.s)
             .accessibilityElement(children: .combine)
             .accessibilityAddTraits(.isButton)
             .accessibilityAction { entry.openFiled() }
@@ -330,22 +339,25 @@ private struct RambleCard: View {
         }
     }
 
+    /// The Tasks list's row in small: priority and status lead, the due
+    /// date and owner close it, each in its own column.
     private func line(_ item: WorkItem, now: Int64) -> some View {
         HStack(spacing: Space.s) {
+            PriorityIcon(priority: TaskPriority(item.priority))
             TaskStatusIcon(status: item.status, size: 12)
                 .frame(width: 16, height: 16)
             Text(item.title).bodyText(13).lineLimit(1)
             Spacer(minLength: Space.s)
-            if item.priority > 0 {
-                PriorityIcon(priority: TaskPriority(item.priority))
-            }
             if let due = item.dueAtMs {
-                Text(TaskDates.label(due, now: now)).metaText().lineLimit(1)
+                TaskDue(due: due, open: item.status.isOpen, now: now)
             }
-            if let person = item.ownerPersonId {
-                let name = model.work.people.first { $0.id == person }?.name ?? "Someone"
-                Avatar(face: AvatarFace(kind: .person(person), name: name), size: 16, revision: model.people.photoRevision)
-            }
+            Avatar(face: face(item), size: 16, revision: model.people.photoRevision)
         }
+    }
+
+    private func face(_ item: WorkItem) -> AvatarFace {
+        if item.ownerIsSelf { return AvatarFace(kind: .me, name: "Me") }
+        guard let person = item.ownerPersonId else { return AvatarFace(kind: .unassigned, name: "No owner") }
+        return AvatarFace(kind: .person(person), name: model.work.people.first { $0.id == person }?.name ?? "Someone")
     }
 }
