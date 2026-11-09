@@ -24,8 +24,8 @@ use std::sync::{Mutex, PoisonError};
 use std::time::Instant;
 
 #[derive(Deserialize)]
-struct Export {
-    review: Review,
+pub(crate) struct Export {
+    pub(crate) review: Review,
     #[serde(default)]
     bookmarks: Vec<Bookmark>,
 }
@@ -37,7 +37,7 @@ struct Bookmark {
 }
 
 #[derive(Deserialize)]
-struct Review {
+pub(crate) struct Review {
     speakers: Vec<Speaker>,
     transcript: Vec<Line>,
 }
@@ -474,7 +474,7 @@ fn describe_spans(spans: &[LeftOutSpan]) -> String {
 /// every kept line under its speaker's name on its speaker's lane. A speaker
 /// the export gives no lane sits on system audio, where only its name can
 /// make it the user's.
-fn seed(store: &MeetingStore, review: &Review) -> Result<MeetingSessionId, StoreError> {
+pub(crate) fn seed(store: &MeetingStore, review: &Review) -> Result<MeetingSessionId, StoreError> {
     let speakers: HashMap<SpeakerId, (&str, SourceKind)> = review
         .speakers
         .iter()
@@ -896,7 +896,7 @@ fn notes_probe() {
 /// The notes the app's own pipeline writes from the meeting with the same
 /// engine: the import job's notes and ledger passes, its plain-notes
 /// fallback and the store, reported by count.
-fn pipeline(
+pub(crate) fn pipeline(
     engine: &MeetingLocalEngine,
     store: &Arc<MeetingStore>,
     session_id: MeetingSessionId,
@@ -927,6 +927,29 @@ fn pipeline(
     if std::env::var_os("SONA_PROBE_PRINT_NOTES").is_some() {
         print_notes(notes);
     }
+    Ok(())
+}
+
+pub(crate) fn plans(
+    engine: &MeetingLocalEngine,
+    store: &Arc<MeetingStore>,
+    session_id: MeetingSessionId,
+    now_ms: i64,
+) -> Result<(), StoreError> {
+    let witness = Arc::new(Witness::new(engine));
+    let service = MeetingProcessingService::new(None);
+    service.set_text_generators(witness.clone(), witness.clone());
+    let started = Instant::now();
+    crate::meeting::heard_plans::read(store, &service, session_id, now_ms)?;
+    report("conversational plans", started, &witness.outcome(None));
+    let found = store.heard_plans(session_id)?;
+    println!("saved conversational plans: {found:?}");
+    assert!(
+        !crate::meeting::heard_plans::read(store, &service, session_id, now_ms)?,
+        "a second read of the same transcript changes no plans",
+    );
+    assert_eq!(found, store.heard_plans(session_id)?);
+    println!("conversational plans reread: no changes");
     Ok(())
 }
 

@@ -157,7 +157,7 @@ fn ledger() -> MeetingLedger {
                 firmness: LedgerFirmness::Firm,
                 receipt: LedgerReceipt {
                     quote: "i'll send the tier comparison".to_string(),
-                    speaker: None,
+                    speaker: Some("Aktan".to_string()),
                     t_ms: 30_000,
                     citations: Vec::new(),
                 },
@@ -209,6 +209,10 @@ fn store_current_artifact(
     session_id: MeetingSessionId,
     content: &GeneratedMeetingArtifacts,
 ) {
+    store.set_user_name_source(|| Some("Aktan".to_string()));
+    assert!(store
+        .local_diarization_speaker(session_id, Some("Aktan"))
+        .is_ok());
     let revision_id = Uuid::new_v4();
     let artifact_id = Uuid::new_v4();
     let connection = store.connection().unwrap();

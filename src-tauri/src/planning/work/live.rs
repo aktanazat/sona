@@ -4,7 +4,10 @@
 
 use super::hygiene::shared_percent;
 use super::items::{self, NewItem};
-use super::types::{WorkActor, WorkItem, WorkItemRow, WorkOwner, WorkQuery, WorkStatus};
+use super::types::{
+    WorkActor, WorkItem, WorkList, WorkOwner, WorkQuery, WorkStatus, WorkSuggestionField,
+    WorkSuggestionValue,
+};
 use super::{in_both, list, now_ms, tell, with_meetings, Effects};
 use crate::managers::history::HistoryManager;
 use crate::meeting::loop_types::MeetingLoopRow;
@@ -297,44 +300,72 @@ pub async fn work_follow_up(
             include_snoozed: true,
             ..WorkQuery::default()
         };
-        let rows = list(history, meeting_conn, user_name.as_deref(), &query, now)?.items;
+        let listed = list(history, meeting_conn, user_name.as_deref(), &query, now)?;
         Ok(follow_up(
             meeting_id,
             title.as_deref(),
             user_name.as_deref(),
-            rows,
+            listed,
         ))
     })
     .await
 }
 
-/// The follow-up for `rows`: every promise still owed, grouped by who owes
-/// it, the user first and nobody last, soonest due first.
+/// The follow-up for `listed`: every promise still owed, grouped by who owes
+/// it, the user first and nobody last, soonest due first. A promise still in
+/// triage stands under the owner and day Sona suggests for it.
 pub(crate) fn follow_up(
     meeting_id: String,
     title: Option<&str>,
     user_name: Option<&str>,
-    rows: Vec<WorkItemRow>,
+    listed: WorkList,
 ) -> WorkFollowUp {
-    let mut lines: Vec<(u8, WorkFollowUpLine, i64)> = rows
+    let suggested = |item_id: &str, field: WorkSuggestionField| {
+        listed
+            .suggestions
+            .get(item_id)
+            .into_iter()
+            .flatten()
+            .find(|suggestion| suggestion.field == field)
+            .map(|suggestion| &suggestion.value)
+    };
+    let mut lines: Vec<(u8, WorkFollowUpLine, i64)> = listed
+        .items
         .into_iter()
         .filter(|row| row.item.status == WorkStatus::Triage || row.item.status.is_open())
         .filter(|row| row.item.archived_at_ms.is_none())
         .map(|row| {
             let (rank, owner_name) = if row.item.owner_is_self {
                 (0, user_name.unwrap_or("Me").to_string())
-            } else if let Some(name) = row.owner_name.clone() {
-                (1, name)
+            } else if let Some(name) = row.owner_name.as_deref() {
+                (1, name.to_string())
             } else {
-                (2, "Not yet assigned".to_string())
+                match suggested(&row.item.id, WorkSuggestionField::Owner) {
+                    Some(WorkSuggestionValue::Owner(WorkOwner::Myself)) => {
+                        (0, user_name.unwrap_or("Me").to_string())
+                    }
+                    Some(WorkSuggestionValue::Owner(WorkOwner::Person { person_id })) => {
+                        match listed.people.iter().find(|person| person.id == *person_id) {
+                            Some(person) => (1, person.name.clone()),
+                            None => (2, "Not yet assigned".to_string()),
+                        }
+                    }
+                    _ => (2, "Not yet assigned".to_string()),
+                }
             };
+            let due_at_ms = row.item.due_at_ms.or_else(|| {
+                match suggested(&row.item.id, WorkSuggestionField::Due) {
+                    Some(WorkSuggestionValue::Due(at_ms)) => Some(*at_ms),
+                    _ => None,
+                }
+            });
             (
                 rank,
                 WorkFollowUpLine {
                     item_id: row.item.id,
                     owner_name,
                     title: row.item.title,
-                    due_at_ms: row.item.due_at_ms,
+                    due_at_ms,
                     quote: row.source_quote,
                 },
                 row.item.number,

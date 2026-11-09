@@ -3,6 +3,8 @@ mod apple_json;
 pub(crate) use apple_json::root_schema as json_response_schema;
 
 mod complete_reading;
+#[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
+pub(crate) use complete_reading::probe as notes_probe;
 mod live_card;
 pub(crate) use live_card::{hang_up as live_card_hang_up, MeetingLiveCard, MeetingLivePromise};
 mod progress;

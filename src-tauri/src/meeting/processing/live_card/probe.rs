@@ -474,3 +474,148 @@ fn live_card_probe() {
         usize::try_from(tasks).unwrap_or(0) - titles.len()
     );
 }
+
+#[test]
+fn unidentified_ownership_live_stays_unowned_but_keeps_a_manual_choice() {
+    struct LabelOwner;
+
+    impl MeetingTextGenerator for LabelOwner {
+        fn is_available(&self) -> bool {
+            true
+        }
+
+        fn model_id(&self) -> &'static str {
+            "apple-intelligence"
+        }
+
+        fn model_version(&self) -> std::borrow::Cow<'static, str> {
+            std::borrow::Cow::Borrowed("label-owner")
+        }
+
+        fn max_input_bytes(&self) -> usize {
+            64 * 1024
+        }
+
+        fn generate(
+            &self,
+            _prompt: &str,
+            evidence: &str,
+            _max_tokens: i32,
+            _shape: super::super::ReplyShape,
+        ) -> Result<String, MeetingTextGenerationError> {
+            let input: serde_json::Value =
+                serde_json::from_str(evidence).expect("the production card request");
+            let promises: Vec<_> = input["lines"]
+                .as_array()
+                .expect("the request's lines")
+                .iter()
+                .filter(|line| {
+                    line["text"]
+                        .as_str()
+                        .is_some_and(|text| text.starts_with("I'll "))
+                })
+                .map(|line| {
+                    serde_json::json!({
+                        "what": line["text"],
+                        "owner": line["speaker"],
+                        "quote": line["text"],
+                        "lines": [line["line"]]
+                    })
+                })
+                .collect();
+            Ok(serde_json::json!({"promises": promises}).to_string())
+        }
+    }
+
+    let (_directory, store) = workflow_core_tests::store();
+    let at = Local::now().timestamp_millis();
+    let meeting = workflow_core_tests::reviewable_meeting(&store, "Shared microphone", at);
+    let (microphone, system) = workflow_core_tests::recording_tracks(&store, meeting);
+    let service = MeetingProcessingService::new(None);
+    let generator = Arc::new(LabelOwner);
+    service.set_text_generators(generator.clone(), generator);
+    let live = LiveTranscript::new();
+    for (second, track_id, source_kind, speaker, text) in [
+        (
+            0,
+            system,
+            SourceKind::SystemAudio,
+            MeetingProvisionalSpeaker::Unknown,
+            "Please send the draft.",
+        ),
+        (
+            1,
+            microphone,
+            SourceKind::Microphone,
+            MeetingProvisionalSpeaker::Cluster { index: 0 },
+            "I'll send the draft.",
+        ),
+        (
+            2,
+            microphone,
+            SourceKind::Microphone,
+            MeetingProvisionalSpeaker::Cluster { index: 1 },
+            "I'll send the invoice.",
+        ),
+        (
+            3,
+            microphone,
+            SourceKind::Microphone,
+            MeetingProvisionalSpeaker::Unknown,
+            "I'll send the report.",
+        ),
+    ] {
+        live.append(LiveSegment {
+            track_id,
+            source_kind,
+            speaker,
+            start_offset_ns: second * 1_000_000_000,
+            end_offset_ns: (second + 1) * 1_000_000_000,
+            text: text.to_owned(),
+        });
+    }
+    tick(&service, &store, meeting, &live, Moment::HangUp);
+    let promises = live.live_promises();
+    assert_eq!(promises.len(), 3);
+    let history = Connection::open_in_memory().expect("a scratch tracker");
+    schema::apply_all(&history).expect("the tracker schema");
+    let filed = store
+        .with_planning_snapshot(|meetings| {
+            file_promises(&history, meetings, meeting, &promises, at)
+                .map_err(|_| StoreError::Unavailable)
+        })
+        .expect("the promises filed through the stop API");
+    assert_eq!(filed.len(), 3);
+    assert!(promises
+        .iter()
+        .all(|promise| promise.owner == WorkOwner::Nobody));
+    assert!(filed.iter().all(|item| item.owner() == WorkOwner::Nobody));
+    live.set_live_owner(&promises[0].id, WorkOwner::Myself, Some("Me".to_owned()))
+        .expect("a manual owner choice");
+    live.append(LiveSegment {
+        track_id: microphone,
+        source_kind: SourceKind::Microphone,
+        speaker: MeetingProvisionalSpeaker::Unknown,
+        start_offset_ns: 65_000_000_000,
+        end_offset_ns: 66_000_000_000,
+        text: "I'll send the draft.".to_owned(),
+    });
+    tick(&service, &store, meeting, &live, Moment::HangUp);
+    let chosen = live
+        .live_promises()
+        .into_iter()
+        .find(|promise| promise.id == promises[0].id)
+        .expect("the manually owned promise after another reading");
+    assert_eq!(chosen.owner, WorkOwner::Myself);
+    assert!(chosen.owner_set);
+    let explicit = Connection::open_in_memory().expect("a fresh scratch tracker");
+    schema::apply_all(&explicit).expect("the tracker schema");
+    let filed = store
+        .with_planning_snapshot(|meetings| {
+            file_promises(&explicit, meetings, meeting, &[chosen], at)
+                .map_err(|_| StoreError::Unavailable)
+        })
+        .expect("the manually owned promise filed");
+    assert_eq!(filed.len(), 1);
+    assert_eq!(filed[0].owner(), WorkOwner::Myself);
+}
