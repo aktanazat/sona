@@ -85,7 +85,16 @@ struct PeopleListView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            PageTitle("People", subtitle: subtitle)
+            PageTitle(subtitle: subtitle) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    PageHeading(title: "People")
+                    if let count = store.entries?.count, count > 0 {
+                        Text("\(count)").metaText().monospacedDigit()
+                    }
+                }
+            } action: {
+                EmptyView()
+            }
             ErrorNote(store.error)
             if store.listFailed {
                 Card {
@@ -123,8 +132,8 @@ struct PeopleListView: View {
         }
     }
 
-    /// The tiles under the title count the people, so the line under it only
-    /// speaks while there is nothing to count.
+    /// The count sits beside the title, so the line under it only speaks
+    /// while there is nothing to count.
     private var subtitle: String {
         guard let entries = store.entries else { return "Reading the people Sona knows" }
         return entries.isEmpty ? "The people you meet, what you talked about, and what you owe each other" : ""
