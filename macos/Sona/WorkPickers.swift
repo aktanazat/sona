@@ -362,7 +362,7 @@ struct SnoozeDayPicker: View {
                 Text("\(WorkChoices.long(moment)), \(PlanningFormat.moment(moment).formatted(date: .omitted, time: .shortened))")
                     .metaText(Theme.inkSecondary)
                 Spacer(minLength: 8)
-                TaskKeyButton(title: "Snooze", keys: "return") { snooze(until: moment) }
+                TaskKeyButton(title: "Snooze", keys: "return", prominent: true) { snooze(until: moment) }
                     .keyboardShortcut(.defaultAction)
             }
             .padding(.horizontal, compact ? 12 : 16)

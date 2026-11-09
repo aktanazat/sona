@@ -116,7 +116,7 @@ struct ProjectsView: View {
             if store.projects == nil {
                 if store.listLoading { PlannerLoadingRows(label: "Loading projects") }
             } else if visibleProjects.isEmpty {
-                Card(material: material) {
+                Card {
                     CardLine(store.projects?.isEmpty == true ? "No projects yet." : "No matching projects.")
                 }
             } else if layout == .board {
@@ -166,9 +166,9 @@ struct ProjectsView: View {
             }
         }
         Button("Plan with Sona", systemImage: "bubble.left") { planWithSona() }
-            .buttonStyle(.compact)
+            .buttonStyle(.secondary)
         Button("New project", systemImage: "plus") { creation = .project }
-            .buttonStyle(PrimaryButton(compact: true))
+            .buttonStyle(.primary)
             .help("New project (C)")
     }
 
@@ -199,7 +199,7 @@ struct ProjectsView: View {
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
         .fixedSize()
-        .frame(width: 30, height: 28)
+        .frame(width: Theme.controlHeight, height: Theme.controlHeight)
         .background(store.filter.isActive ? Theme.accentSoft : Theme.control,
                     in: RoundedRectangle(cornerRadius: Theme.radiusControl))
         .help("Filter")
@@ -231,8 +231,8 @@ struct ProjectsView: View {
             .font(TypeScale.label(12))
             .foregroundStyle(Theme.ink)
             .padding(.horizontal, 10)
-            .frame(height: 24)
-            .background(Theme.control, in: Capsule())
+            .frame(height: Theme.compactHeight)
+            .background(Theme.control, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Remove filter: \(title)")
@@ -253,7 +253,7 @@ struct ProjectsView: View {
     private func list(_ proxy: ScrollViewProxy) -> some View {
         let rows = listRows
         let now = now
-        return Card(material: material) {
+        return Card {
             ForEach(rows) { row in
                 switch row {
                 case let .group(status, count):
@@ -404,14 +404,14 @@ struct ProjectsView: View {
         } actions: {
             if let detail {
                 Button("Review links", systemImage: "link") { reviewProject = detail.project }
-                    .buttonStyle(.compact)
+                    .buttonStyle(.secondary)
                     .disabled(store.mutating)
                 Button("Talk to Sona", systemImage: "bubble.left") { discussProject(detail.project) }
-                    .buttonStyle(.compact)
+                    .buttonStyle(.secondary)
                 Button {
                     Task { await store.loadDetail(id) }
                 } label: { Image(systemName: "arrow.clockwise") }
-                    .buttonStyle(.quiet)
+                    .buttonStyle(.icon)
                     .accessibilityLabel("Refresh project")
                     .help("Refresh project")
                     .disabled(store.detailLoading)
@@ -440,7 +440,7 @@ struct ProjectsView: View {
             if let series = detail.burnUp(until: .now) {
                 VStack(alignment: .leading, spacing: 10) {
                     Text("Progress").sectionLabel().accessibilityAddTraits(.isHeader)
-                    Card(material: material) {
+                    Card {
                         BurnUpChart(series: series).padding(16)
                     }
                 }
@@ -502,8 +502,8 @@ struct ProjectsView: View {
                                     .foregroundStyle(Theme.inkTertiary)
                             }
                             .padding(.horizontal, 10)
-                            .frame(height: 24)
-                            .background(Theme.control, in: Capsule())
+                            .frame(height: Theme.compactHeight)
+                            .background(Theme.control, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
                         }
                         Text("Started \(PlanningFormat.day(project.createdAtMs))").metaText()
                     }
@@ -587,10 +587,10 @@ struct ProjectsView: View {
         }
         .padding(.leading, 3)
         .padding(.trailing, 10)
-        .frame(height: 26)
-        .background(selected ? Theme.selection : Color.clear, in: Capsule())
-        .overlay(Capsule().strokeBorder(selected ? Color.clear : Theme.border, lineWidth: 1))
-        .contentShape(Capsule())
+        .frame(height: Theme.controlHeight)
+        .background(selected ? Theme.selection : Color.clear, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
+        .overlay(RoundedRectangle(cornerRadius: Theme.radiusControl).strokeBorder(selected ? Color.clear : Theme.border, lineWidth: 1))
+        .contentShape(RoundedRectangle(cornerRadius: Theme.radiusControl))
     }
 
     private func activeOwner(_ pulse: PlanningProjectPulse) -> PlanningPersonChoice? {
@@ -623,7 +623,7 @@ struct ProjectsView: View {
                     .buttonStyle(.quiet)
                     .disabled(store.mutating)
             }
-            Card(material: material) {
+            Card {
                 if detail.milestones.isEmpty {
                     CardLine("No milestones yet.")
                 } else {
@@ -703,7 +703,7 @@ struct ProjectsView: View {
             if let person {
                 Text("Showing \(person.name)'s open tasks.").metaText()
             }
-            Card(material: material) {
+            Card {
                 if detail.tasks.isEmpty { CardLine("No tasks yet.") }
                 ForEach(TaskListRow.rows(shown)) { row in
                     switch row {
@@ -831,7 +831,7 @@ struct ProjectsView: View {
                 .buttonStyle(.quiet)
                 .disabled(store.mutating || store.detailLoading)
             }
-            Card(material: material) {
+            Card {
                 if detail.evidence.isEmpty { CardLine("No linked sources.") }
                 ForEach(sourceGroups(detail)) { group in
                     let link = group.link

@@ -25,7 +25,7 @@ struct CloudNoteShareView: View {
                 Button { dismiss() } label: {
                     Image(systemName: "xmark")
                 }
-                .buttonStyle(.circle)
+                .buttonStyle(.icon)
                 .keyboardShortcut(.cancelAction)
                 .help("Done")
                 .accessibilityLabel("Done")
@@ -75,7 +75,7 @@ struct CloudNoteShareView: View {
                     .padding(.leading, 14)
                     .padding(.trailing, 6)
                     .frame(height: 38)
-                    .background(Theme.inset, in: Capsule())
+                    .background(Theme.inset, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
                     Text(link.trustDisclosure).metaText()
                 }
             }

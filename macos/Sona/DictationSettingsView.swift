@@ -264,6 +264,7 @@ struct HudPillRow: View {
                     }
                     .labelsHidden()
                     .pickerStyle(.menu)
+                    .controlSize(.large)
                     .fixedSize()
                     .disabled(store.isBusy("hud_pill_position"))
                 }
@@ -383,6 +384,7 @@ struct MicrophoneClamshellRow: View {
                 }
                 .labelsHidden()
                 .pickerStyle(.menu)
+                .controlSize(.large)
                 .fixedSize()
                 .disabled(store.isBusy("clamshell_microphone"))
             }
@@ -417,6 +419,7 @@ struct SoundThemeRow: View {
                 }
                 .labelsHidden()
                 .pickerStyle(.menu)
+                .controlSize(.large)
                 .fixedSize()
                 .disabled(store.isBusy("sound_theme"))
                 Button {

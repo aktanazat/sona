@@ -223,7 +223,7 @@ struct MeetingBriefView: View {
                     Button(action: onClose) {
                         Image(systemName: "xmark")
                     }
-                    .buttonStyle(.circle)
+                    .buttonStyle(.icon)
                     .help("Close")
                     .accessibilityLabel("Close")
                 }

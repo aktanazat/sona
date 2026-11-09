@@ -97,9 +97,9 @@ struct ChatModelPicker: View {
                 }
         }
         .padding(.horizontal, 10)
-        .frame(height: 30)
-        .background(Theme.inset, in: Capsule())
-        .overlay(Capsule().strokeBorder(searchFocused ? Theme.accent : Theme.border, lineWidth: 1))
+        .frame(height: Theme.controlHeight)
+        .background(Theme.inset, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
+        .overlay(RoundedRectangle(cornerRadius: Theme.radiusControl).strokeBorder(searchFocused ? Theme.accent : Theme.border, lineWidth: 1))
     }
 
     private var providerPicker: some View {

@@ -33,7 +33,8 @@ struct TaskDetailView: View {
                     } label: {
                         Image(systemName: "ellipsis")
                     }
-                    .menuStyle(.borderlessButton)
+                    .menuStyle(.button)
+                    .buttonStyle(.icon)
                     .menuIndicator(.hidden)
                     .fixedSize()
                     .help("More")

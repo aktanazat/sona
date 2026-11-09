@@ -104,7 +104,7 @@ private struct LibraryHeader: View {
                     Button(action: importAudio) {
                         Image(systemName: "square.and.arrow.down")
                     }
-                    .buttonStyle(.circle)
+                    .buttonStyle(.icon)
                     .help("Import")
                     .accessibilityLabel("Import")
                     LibraryMenu(store: store)
@@ -147,18 +147,11 @@ private struct LibraryMenu: View {
             Button("Open recordings folder") { store.openRecordingsFolder() }
         } label: {
             Image(systemName: "ellipsis")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(Theme.ink)
-                .frame(width: 28, height: 28)
-                .contentShape(Circle())
         }
-        .menuStyle(.borderlessButton)
-        .tint(Theme.inkSecondary)
+        .menuStyle(.button)
+        .buttonStyle(.icon)
         .menuIndicator(.hidden)
         .fixedSize()
-        .frame(width: 28, height: 28)
-        .background(Theme.surface, in: Circle())
-        .overlay(Circle().strokeBorder(Theme.border, lineWidth: 1))
         .help("More")
         .accessibilityLabel("More")
     }
@@ -194,6 +187,7 @@ private struct LibraryActivity: View {
                             }
                             .labelsHidden()
                             .pickerStyle(.menu)
+                            .controlSize(.large)
                             .fixedSize()
                         }
                         TrendBars(points: trend.points)
@@ -720,17 +714,11 @@ private struct HistoryRowDetail: View {
                     .disabled(busy)
             } label: {
                 Image(systemName: "ellipsis")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(Theme.ink)
-                    .frame(width: 26, height: 26)
-                    .contentShape(Rectangle())
             }
-            .menuStyle(.borderlessButton)
-            .tint(Theme.inkSecondary)
+            .menuStyle(.button)
+            .buttonStyle(.icon)
             .menuIndicator(.hidden)
             .fixedSize()
-            .frame(width: 26, height: 26)
-            .background(Theme.control, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
             .help("More")
             .accessibilityLabel("More")
             Spacer(minLength: 0)
@@ -1195,6 +1183,7 @@ struct ReprocessSheet: View {
                 }
                 .labelsHidden()
                 .pickerStyle(.menu)
+                .controlSize(.large)
                 .disabled(busy || modes.isEmpty)
             }
             if let failure {

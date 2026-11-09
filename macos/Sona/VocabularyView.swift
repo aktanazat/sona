@@ -234,6 +234,7 @@ struct VocabularyView: View {
                 }
                 .labelsHidden()
                 .pickerStyle(.menu)
+                .controlSize(.large)
                 .fixedSize()
                 .disabled(store.busy)
                 VocabularyInput(

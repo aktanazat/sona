@@ -448,7 +448,7 @@ struct TaskGroupHeader: View {
             }
         }
         .padding(.leading, 14)
-        .padding(.trailing, 22)
+        .padding(.trailing, 24)
         .frame(height: Theme.listRow)
         .background(Theme.inset)
         .onHover { hovering = $0 }
@@ -526,43 +526,63 @@ struct TaskSkeleton: View {
 }
 
 /// A button that names its key: "New task C". Without one, the same button
-/// for a choice no key makes.
+/// for a choice no key makes. `prominent` marks the action Return commits,
+/// drawn in the accent like any default button.
 struct TaskKeyButton: View {
     let title: String
     let keys: String?
     /// False keeps the keys' room without showing them, so a column of
     /// buttons where one answers to the keys stays one width.
     var keysShown = true
+    var prominent = false
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
             HStack(spacing: 8) {
-                Text(title).font(TypeScale.label(13)).foregroundStyle(Theme.ink)
+                Text(title).font(TypeScale.label(13)).foregroundStyle(prominent ? Theme.onAccent : Theme.ink)
                 if let keys {
-                    Shortcut(keys).opacity(keysShown ? 1 : 0).accessibilityHidden(!keysShown)
+                    Group {
+                        if prominent {
+                            Text(Shortcut(keys).keys.joined(separator: " "))
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(Theme.onAccent.opacity(0.75))
+                        } else {
+                            Shortcut(keys)
+                        }
+                    }
+                    .opacity(keysShown ? 1 : 0)
+                    .accessibilityHidden(!keysShown)
                 }
             }
             .padding(.leading, 10)
-            .padding(.trailing, keys == nil ? 10 : 4)
+            .padding(.trailing, keys == nil || prominent ? 10 : 4)
         }
-        .buttonStyle(KeyButtonStyle())
+        .buttonStyle(KeyButtonStyle(prominent: prominent))
     }
 }
 
 private struct KeyButtonStyle: ButtonStyle {
+    let prominent: Bool
+    @Environment(\.isEnabled) private var isEnabled
     @State private var hovering = false
 
     func makeBody(configuration: Configuration) -> some View {
         let shape = RoundedRectangle(cornerRadius: Theme.radiusControl, style: .continuous)
         configuration.label
-            .frame(height: 30)
-            .background(configuration.isPressed ? Theme.controlPressed : hovering ? Theme.controlHover : Theme.surface, in: shape)
-            .overlay(shape.strokeBorder(Theme.border, lineWidth: 1))
+            .frame(height: Theme.controlHeight)
+            .background(fill(pressed: configuration.isPressed), in: shape)
+            .overlay(shape.strokeBorder(prominent ? Color.clear : Theme.border, lineWidth: 1))
             .contentShape(shape)
             .onHover { hovering = $0 }
+            .opacity(isEnabled ? 1 : 0.45)
             .hoverFade(hovering)
             .animation(Motion.quick, value: configuration.isPressed)
+    }
+
+    private func fill(pressed: Bool) -> Color {
+        if prominent { return Theme.accentFill.opacity(pressed ? 0.8 : 1) }
+        return pressed ? Theme.controlPressed : hovering ? Theme.controlHover : Theme.surface
     }
 }
 
@@ -612,7 +632,8 @@ struct WorkBar<Leading: View, Trailing: View>: View {
             Spacer(minLength: 12)
             trailing()
         }
-        .padding(.horizontal, 16)
+        .padding(.leading, 16)
+        .padding(.trailing, 24)
         .frame(height: Theme.headerHeight)
         .overlay(alignment: .bottom) { Hairline() }
     }
@@ -624,21 +645,12 @@ struct WorkBarButton: View {
     let help: String
     var on = false
     let action: () -> Void
-    @State private var hovering = false
 
     var body: some View {
         Button(action: action) {
             Image(systemName: icon)
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(on || hovering ? Theme.ink : Theme.inkSecondary)
-                .frame(width: 28, height: 28)
-                .background(on ? Theme.control : hovering ? Theme.controlHover : .clear,
-                            in: RoundedRectangle(cornerRadius: Theme.radiusControl))
-                .hoverFade(hovering)
-                .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
-        .onHover { hovering = $0 }
+        .buttonStyle(IconButton(on: on))
         .help(help)
         .accessibilityLabel(help)
     }

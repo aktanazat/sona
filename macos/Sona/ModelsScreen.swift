@@ -9,7 +9,7 @@ struct ModelsTab: View {
             Button { model.rescanModels() } label: {
                 Image(systemName: "arrow.clockwise")
             }
-            .buttonStyle(.circle)
+            .buttonStyle(.icon)
             .help("Rescan disk")
             .accessibilityLabel("Rescan disk")
         }
@@ -107,7 +107,7 @@ private struct ModelRow: View {
                     Button { model.remove(entry) } label: {
                         Image(systemName: "trash")
                     }
-                    .buttonStyle(.circle)
+                    .buttonStyle(.icon)
                     .help("Remove")
                     .accessibilityLabel("Remove")
                 }
@@ -120,7 +120,7 @@ private struct ModelRow: View {
                 Button { model.download(entry) } label: {
                     Image(systemName: "arrow.down")
                 }
-                .buttonStyle(.circle)
+                .buttonStyle(.icon)
                 .help("Download")
                 .accessibilityLabel("Download")
             }

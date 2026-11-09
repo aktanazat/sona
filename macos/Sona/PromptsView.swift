@@ -155,6 +155,7 @@ struct PromptsView: View {
                     }
                     .labelsHidden()
                     .pickerStyle(.menu)
+                    .controlSize(.large)
                     .frame(maxWidth: 320)
                 }
                 if let note = store.runNote {
@@ -499,6 +500,7 @@ struct PromptEditorSheet: View {
             }
             .labelsHidden()
             .pickerStyle(.menu)
+            .controlSize(.large)
             .frame(maxWidth: 260, alignment: .leading)
         }
         if draft.schema != nil {
@@ -521,6 +523,7 @@ struct PromptEditorSheet: View {
             }
             .labelsHidden()
             .pickerStyle(.menu)
+            .controlSize(.large)
             .frame(maxWidth: 260, alignment: .leading)
         }
     }

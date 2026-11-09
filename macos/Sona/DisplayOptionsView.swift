@@ -31,6 +31,7 @@ struct DisplayOptionsView: View {
                         ForEach(WorkGroupBy.allCases, id: \.self) { Text(Self.title($0)).tag($0) }
                     }
                     .pickerStyle(.menu)
+                    .controlSize(.large)
                     .labelsHidden()
                     .fixedSize()
                 }
@@ -44,6 +45,7 @@ struct DisplayOptionsView: View {
                         }
                     }
                     .pickerStyle(.menu)
+                    .controlSize(.large)
                     .labelsHidden()
                     .fixedSize()
                 }

@@ -280,9 +280,10 @@ private struct LogViewerRow: View {
                     }
                     .labelsHidden()
                     .pickerStyle(.menu)
+                    .controlSize(.large)
                     .fixedSize()
                     Button(store.paused ? "Resume" : "Pause") { store.togglePaused() }
-                        .buttonStyle(.compact)
+                        .buttonStyle(.secondary)
                     Button(store.copied ? "Copied" : "Copy") { store.copyLines() }
                         .buttonStyle(.compact)
                         .disabled(store.visibleLines.isEmpty)

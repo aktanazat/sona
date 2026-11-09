@@ -305,8 +305,8 @@ struct TaskFilterBar: View {
                         .foregroundStyle(Theme.inkSecondary)
                         .padding(.leading, 8)
                         .padding(.trailing, 4)
-                        .frame(height: 24)
-                        .background(Theme.control, in: RoundedRectangle(cornerRadius: Theme.radiusKey))
+                        .frame(height: Theme.compactHeight)
+                        .background(Theme.control, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
                     }
                 }
             }
@@ -334,7 +334,8 @@ struct TaskFilterBar: View {
                 EmptyView()
             }
         }
-        .padding(.horizontal, 16)
+        .padding(.leading, 16)
+        .padding(.trailing, 24)
         .frame(height: 40)
         .overlay(alignment: .bottom) { Hairline() }
     }

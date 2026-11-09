@@ -266,7 +266,7 @@ struct MeetingsPlace: View {
                         Image(systemName: "ellipsis")
                     }
                     .menuStyle(.button)
-                    .buttonStyle(.circle)
+                    .buttonStyle(.icon)
                     .menuIndicator(.hidden)
                     .fixedSize()
                     .help("Meeting library options")
@@ -274,13 +274,13 @@ struct MeetingsPlace: View {
                     Button { meetings.openTrash() } label: {
                         Image(systemName: "trash")
                     }
-                    .buttonStyle(.circle)
+                    .buttonStyle(.icon)
                     .help("Deleted meetings")
                     .accessibilityLabel("Deleted")
                     Button { live.importMeeting() } label: {
                         Image(systemName: "square.and.arrow.down")
                     }
-                    .buttonStyle(.circle)
+                    .buttonStyle(.icon)
                     .help("Import recording")
                     .accessibilityLabel("Import recording")
                     .disabled(live.importing)
@@ -395,9 +395,9 @@ struct Sidebar: View {
                     .foregroundStyle(Theme.inkTertiary)
                     .padding(.leading, Space.s)
                     .padding(.trailing, 10)
-                    .frame(height: 28)
-                    .background(Theme.wash, in: Capsule())
-                    .contentShape(Capsule())
+                    .frame(height: Theme.sidebarRow)
+                    .background(Theme.wash, in: RoundedRectangle(cornerRadius: Theme.radiusRow))
+                    .contentShape(RoundedRectangle(cornerRadius: Theme.radiusRow))
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Search")
@@ -406,7 +406,7 @@ struct Sidebar: View {
                 } label: {
                     Image(systemName: "bubble.left")
                 }
-                .buttonStyle(.circle)
+                .buttonStyle(.icon)
                 .overlay(alignment: .topTrailing) {
                     if model.agents.pending.count > 0 {
                         Text("\(model.agents.pending.count)")

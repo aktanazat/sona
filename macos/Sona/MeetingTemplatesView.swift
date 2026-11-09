@@ -110,6 +110,7 @@ struct MeetingTemplateChoiceRow<BuiltIn: Hashable>: View {
             }
             .labelsHidden()
             .pickerStyle(.menu)
+            .controlSize(.large)
             .fixedSize()
         }
     }

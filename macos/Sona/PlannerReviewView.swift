@@ -369,7 +369,7 @@ struct PlannerReviewView: View {
     private func suggestionCards(_ suggestions: [PlanningSuggestion]) -> some View {
         VStack(spacing: 12) {
             ForEach(suggestions) { suggestion in
-                Card(material: material) {
+                Card {
                     VStack(alignment: .leading, spacing: 12) {
                         Text(suggestion.kind.label).sectionLabel()
                         if suggestion.canLink, let title = suggestion.targetTitle, let evidence = suggestion.evidence {

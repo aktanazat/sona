@@ -363,6 +363,7 @@ private struct RecorderDeviceRow: View {
                     }
                     .labelsHidden()
                     .pickerStyle(.menu)
+                    .controlSize(.large)
                     .fixedSize()
                 }
                 Toggle(title, isOn: $isOn)

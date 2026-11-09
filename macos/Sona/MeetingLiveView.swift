@@ -202,7 +202,7 @@ struct MeetingLiveView: View {
             Image(systemName: "ellipsis")
         }
         .menuStyle(.button)
-        .buttonStyle(.circle)
+        .buttonStyle(.icon)
         .menuIndicator(.hidden)
         .fixedSize()
         .help("More")
@@ -870,7 +870,7 @@ private struct MeetingRecordingDock: View {
                 Button(action: mark) {
                     Image(systemName: marked ? "bookmark.fill" : "bookmark")
                 }
-                .buttonStyle(.circle)
+                .buttonStyle(.icon)
                 .disabled(!canBookmark)
                 .help("Bookmark this moment")
                 .accessibilityLabel(marked ? "Bookmarked" : "Bookmark")

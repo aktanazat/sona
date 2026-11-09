@@ -318,6 +318,7 @@ private struct AgentBridgeComposer: View {
                     }
                     .labelsHidden()
                     .pickerStyle(.menu)
+                    .controlSize(.large)
                     .frame(maxWidth: 280)
                     .disabled(!store.interactiveReady)
                 }

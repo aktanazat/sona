@@ -123,10 +123,11 @@ struct PeopleListView: View {
         }
     }
 
+    /// The tiles under the title count the people, so the line under it only
+    /// speaks while there is nothing to count.
     private var subtitle: String {
         guard let entries = store.entries else { return "Reading the people Sona knows" }
-        if entries.isEmpty { return "The people you meet, what you talked about, and what you owe each other" }
-        return PeopleModel.people(entries.count)
+        return entries.isEmpty ? "The people you meet, what you talked about, and what you owe each other" : ""
     }
 }
 
@@ -567,17 +568,11 @@ struct PersonMenu: View {
             Button("Delete person") { prompt = .delete }
         } label: {
             Image(systemName: "ellipsis")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(Theme.ink)
         }
-        .menuStyle(.borderlessButton)
-        .tint(Theme.inkSecondary)
+        .menuStyle(.button)
+        .buttonStyle(.icon)
         .menuIndicator(.hidden)
         .fixedSize()
-        .frame(width: 28, height: 28)
-        .background(Theme.surface, in: Circle())
-        .overlay(Circle().strokeBorder(Theme.border, lineWidth: 1))
-        .contentShape(Circle())
         .disabled(store.busy)
         .help("Person options")
         .accessibilityLabel("Person options")
@@ -1029,6 +1024,7 @@ struct PersonMergeSheet: View {
                 }
                 .labelsHidden()
                 .pickerStyle(.menu)
+                .controlSize(.large)
             }
         } footer: {
             Button("Cancel", action: dismiss).buttonStyle(.secondary)
@@ -1113,6 +1109,7 @@ struct PersonSplitSheet: View {
             }
             .labelsHidden()
             .pickerStyle(.menu)
+            .controlSize(.large)
         }
     }
 
@@ -1689,6 +1686,7 @@ struct VoiceIdentitySheet: View {
             }
             .labelsHidden()
             .pickerStyle(.menu)
+            .controlSize(.large)
         }
         if target.isEmpty {
             VStack(alignment: .leading, spacing: 6) {

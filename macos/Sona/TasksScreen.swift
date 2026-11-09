@@ -198,7 +198,7 @@ private struct TasksList: View {
                 Text("New task")
             }
         }
-        .buttonStyle(PrimaryButton(compact: true))
+        .buttonStyle(.primary)
         .help("New task  C")
     }
 
