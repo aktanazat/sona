@@ -52,15 +52,16 @@ pub(crate) struct Source<'r> {
     pub retained: bool,
 }
 
-/// Each meeting's rows read once, for the length of one request.
+/// Each meeting's rows read once, for the length of one request, or none
+/// while the conversations are closed.
 pub(crate) struct MeetingReader<'a> {
-    conn: &'a Connection,
+    conn: Option<&'a Connection>,
     user_name: Option<&'a str>,
     meetings: HashMap<MeetingSessionId, Option<ReadMeeting>>,
 }
 
 impl<'a> MeetingReader<'a> {
-    pub(crate) fn new(conn: &'a Connection, user_name: Option<&'a str>) -> Self {
+    pub(crate) fn new(conn: Option<&'a Connection>, user_name: Option<&'a str>) -> Self {
         Self {
             conn,
             user_name,
@@ -68,15 +69,19 @@ impl<'a> MeetingReader<'a> {
         }
     }
 
-    pub(crate) const fn conn(&self) -> &'a Connection {
+    pub(crate) const fn conn(&self) -> Option<&'a Connection> {
         self.conn
     }
 
-    fn meeting(&mut self, session_id: MeetingSessionId) -> Result<Option<&ReadMeeting>> {
+    fn meeting(
+        &mut self,
+        conn: &Connection,
+        session_id: MeetingSessionId,
+    ) -> Result<Option<&ReadMeeting>> {
         if !self.meetings.contains_key(&session_id) {
-            let read = match meeting_rows(self.conn, session_id, self.user_name)? {
+            let read = match meeting_rows(conn, session_id, self.user_name)? {
                 Some(rows) => Some(ReadMeeting {
-                    retained: sources::meeting_retained(self.conn, &session_id.uuid().to_string())?,
+                    retained: sources::meeting_retained(conn, &session_id.uuid().to_string())?,
                     rows,
                 }),
                 None => None,
@@ -89,11 +94,13 @@ impl<'a> MeetingReader<'a> {
     /// The meeting a commitment was said in and its row, while the meeting's
     /// ledger still holds it.
     pub(crate) fn source(&mut self, loop_id: &str) -> Result<Option<Source<'_>>> {
+        let Some(conn) = self.conn else {
+            return Ok(None);
+        };
         let Some(session_id) = MeetingLoopId(loop_id.to_owned()).session_id() else {
             return Ok(None);
         };
-        let conn = self.conn;
-        let Some(meeting) = self.meeting(session_id)? else {
+        let Some(meeting) = self.meeting(conn, session_id)? else {
             return Ok(None);
         };
         let Some(row) = meeting
@@ -120,7 +127,8 @@ impl<'a> MeetingReader<'a> {
 }
 
 /// Everyone an item can wait on, and the name each id goes by, merged
-/// people's old ids included.
+/// people's old ids included. Nobody while the conversations are closed.
+#[derive(Default)]
 pub(crate) struct People {
     pub choices: Vec<WorkPersonChoice>,
     names: HashMap<String, String>,
@@ -188,10 +196,11 @@ fn root(history: &Connection, item: WorkItem) -> Result<WorkItem> {
 
 /// Moves the commitments behind an item's family to match the item they
 /// all follow, filed under `actor`, and forgets "not work" for any family
-/// that is open again. Returns the loops it moved.
+/// that is open again. Returns the loops it moved: none while the
+/// conversations are closed, when the catch-up moves them as they open.
 pub(crate) fn settle(
     history: &Connection,
-    meetings: &Connection,
+    meetings: Option<&Connection>,
     item_id: &str,
     actor: WorkActor,
     now_ms: i64,
@@ -209,6 +218,9 @@ pub(crate) fn settle(
                 [&loop_id],
             )?;
         }
+        let Some(meetings) = meetings else {
+            continue;
+        };
         let loop_id = MeetingLoopId(loop_id);
         if loops::follow_tracker_in(meetings, &loop_id, status, operation_actor(actor), now_ms)
             .map_err(meeting_error)?
@@ -264,13 +276,32 @@ pub(crate) fn follow_loop_in(
     };
     let changed = items::follow(history, &root.id, status, now_ms)?;
     Ok(Followed {
-        loops: settle(history, meetings, &root.id, WorkActor::Sona, now_ms)?,
+        loops: settle(history, Some(meetings), &root.id, WorkActor::Sona, now_ms)?,
         items: vec![changed.after],
     })
 }
 
-/// Puts every tracked item and its commitment back in step after a crash
-/// between the two databases' commits: whichever side moved last wins.
+/// Who last moved the status of an item's family: whom a commitment that
+/// never followed the move is filed under.
+fn last_mover(history: &Connection, root_id: &str) -> Result<WorkActor> {
+    Ok(history
+        .query_row(
+            "SELECT a.actor FROM planning_task_activity a
+             JOIN planning_tasks t ON t.id = a.task_id
+             WHERE (t.id = ?1 OR t.duplicate_of = ?1)
+               AND a.kind IN ('status', 'accepted', 'declined', 'duplicate')
+             ORDER BY a.at_ms DESC, a.rowid DESC LIMIT 1",
+            [root_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or(WorkActor::Sona))
+}
+
+/// Puts every tracked item and its commitment back in step after they
+/// parted: a crash between the two databases' commits, or a change made
+/// while the conversations were closed. Whichever side moved last wins, and
+/// a commitment that follows its item is filed under whoever moved it.
 pub(crate) fn reconcile(
     history: &Connection,
     meetings: &Connection,
@@ -294,9 +325,9 @@ pub(crate) fn reconcile(
         } else {
             followed.loops.extend(settle(
                 history,
-                meetings,
+                Some(meetings),
                 &root.id,
-                WorkActor::Sona,
+                last_mover(history, &root.id)?,
                 now_ms,
             )?);
         }
@@ -359,7 +390,7 @@ pub(crate) fn take_in_row(
             params![item.id, loop_id, now_ms],
         )?;
         link_meeting(history, &item.id, &meeting_id, at_ms, now_ms)?;
-        settle(history, meetings, &item.id, WorkActor::Sona, now_ms)?;
+        settle(history, Some(meetings), &item.id, WorkActor::Sona, now_ms)?;
         return Ok(Some(items::item(history, &item.id)?));
     }
     if any(history, TRACKED, &lineage)? || any(history, DISMISSED, &lineage)? {
@@ -614,7 +645,9 @@ pub(crate) fn fill_suggestions(
     let Some(loop_id) = item.source_loop_id.as_deref() else {
         return Ok(Vec::new());
     };
-    let meetings = reader.conn();
+    let Some(meetings) = reader.conn() else {
+        return Ok(Vec::new());
+    };
     let Some(Source {
         meeting,
         row,
@@ -705,7 +738,7 @@ pub(crate) fn acceptance(
 /// shown.
 pub(crate) fn accept(
     history: &Connection,
-    meetings: &Connection,
+    meetings: Option<&Connection>,
     item: &WorkItem,
     patch: &WorkPatch,
     actor: WorkActor,
@@ -730,7 +763,7 @@ pub(crate) fn accept(
 /// meeting and remembered as not work.
 pub(crate) fn decline(
     history: &Connection,
-    meetings: &Connection,
+    meetings: Option<&Connection>,
     item: &WorkItem,
     actor: WorkActor,
     now_ms: i64,

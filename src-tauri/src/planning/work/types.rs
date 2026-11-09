@@ -462,6 +462,9 @@ pub struct WorkList {
     pub people: Vec<WorkPersonChoice>,
     /// What Sona suggests for each listed item still in triage, by item id.
     pub suggestions: BTreeMap<String, Vec<WorkFieldSuggestion>>,
+    /// False when the conversations could not be opened: every item is
+    /// listed, but nothing read from its meeting, and no people.
+    pub conversations_available: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize, Type)]
@@ -472,6 +475,9 @@ pub struct WorkItemDetail {
     pub relations: Vec<WorkRelation>,
     pub activity: Vec<WorkActivity>,
     pub suggestions: Vec<WorkFieldSuggestion>,
+    /// False when the conversations could not be opened: the item's
+    /// meeting, its meeting evidence and its people are not read.
+    pub conversations_available: bool,
 }
 
 /// Sent after every committed change to tracker items, with the items it

@@ -544,9 +544,10 @@ pub struct MeetingSessionManager {
     /// What the mount's recovery sweep moved into recovery, held until
     /// startup takes it for the automatic reprocess pass.
     recovered_at_mount: Mutex<Vec<RecoveredMeeting>>,
-    /// Whether mounting the store sweeps what an earlier launch left. Only the
-    /// app that records may: a command-line read runs beside a live meeting,
-    /// and its sweep would take that meeting for an interrupted one.
+    /// Whether mounting the store sweeps what an earlier launch left and
+    /// catches the tracker up with it. Only the app that records may: a
+    /// command-line read runs beside a live meeting, and its sweep would take
+    /// that meeting for an interrupted one.
     recovers_on_mount: bool,
     /// UUID namespace for this launch's automatic recovery attempts. Drawn
     /// once per launch so an attempt's operation id is stable inside the
@@ -4602,6 +4603,11 @@ impl MeetingSessionManager {
             self.app.clone(),
         );
         self.finish_saved_runs(&store, &recovery.finished);
+        if self.recovers_on_mount {
+            if let Some(app) = self.app.clone() {
+                crate::planning::work::catch_up(app, Arc::clone(&store));
+            }
+        }
         Ok(store)
     }
 

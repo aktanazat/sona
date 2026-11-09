@@ -18,7 +18,7 @@ use self::types::{
 };
 use super::sources;
 use super::store::{self, Refusal};
-use super::types::{PlanningTask, TaskStatus};
+use super::types::{EvidenceSourceKind, PlanningTask, TaskStatus};
 use crate::managers::history::HistoryManager;
 use crate::meeting::loop_types::MeetingLoopId;
 use crate::meeting::session::MeetingSessionManager;
@@ -116,23 +116,24 @@ pub(super) fn tasks_changed(app: &AppHandle, ids: Vec<String>) {
     }
 }
 
-/// Runs `work` inside the meeting database's transaction, so a refusal or
-/// failure on either side leaves both as they were. The history side commits
-/// first; a crash between the two commits is put right by
-/// [`sync::reconcile`] at the next start.
-pub(super) async fn with_both<T: Send>(
+/// Runs `work` inside the meeting database's transaction when the
+/// conversations open, so a refusal or failure on either side leaves both as
+/// they were, and with no meeting database when they cannot: then only the
+/// tracker side changes, and [`catch_up`] moves the commitments once they
+/// open. The history side commits first; a crash between the two commits is
+/// put right by the same catch-up.
+pub(super) async fn with_meetings<T: Send>(
     history: &HistoryManager,
     meetings: &MeetingSessionManager,
-    work: impl FnOnce(&mut Connection, &Connection) -> StorageResult<T> + Send,
+    work: impl FnOnce(&mut Connection, Option<&Connection>) -> StorageResult<T> + Send,
 ) -> Result<T, String> {
-    let store = meetings
-        .store()
-        .await
-        .map_err(|_| "Conversations are still unlocking.".to_string())?;
+    let Ok(store) = meetings.store().await else {
+        return super::history(history, |conn| work(conn, None));
+    };
     let mut failed = None;
     let result = store.with_planning_snapshot(|meeting_conn| {
         history
-            .with_connection(|conn| work(conn, meeting_conn))
+            .with_connection(|conn| work(conn, Some(meeting_conn)))
             .map_err(|error| {
                 failed = Some(error);
                 StoreError::Unavailable
@@ -144,6 +145,18 @@ pub(super) async fn with_both<T: Send>(
             super::failure,
         )
     })
+}
+
+/// [`with_meetings`] for work that cannot be done without them.
+pub(super) async fn with_both<T: Send>(
+    history: &HistoryManager,
+    meetings: &MeetingSessionManager,
+    work: impl FnOnce(&mut Connection, &Connection) -> StorageResult<T> + Send,
+) -> Result<T, String> {
+    with_meetings(history, meetings, |history, meetings| {
+        work(history, meetings.ok_or(super::ConversationsClosed)?)
+    })
+    .await
 }
 
 /// [`with_both`] for callers already holding the meeting store, with the
@@ -174,14 +187,14 @@ fn in_both<T>(
     })
 }
 
-/// Runs a change that touches both databases, then tells every window.
-async fn run_both<T: Send>(
+/// Runs a tracker change through [`with_meetings`], then tells every window.
+async fn run_with_meetings<T: Send>(
     app: &AppHandle,
-    work: impl FnOnce(&mut Connection, &Connection) -> StorageResult<Done<T>> + Send,
+    work: impl FnOnce(&mut Connection, Option<&Connection>) -> StorageResult<Done<T>> + Send,
 ) -> Result<T, String> {
     let history = app.state::<Arc<HistoryManager>>();
     let meetings = app.state::<Arc<MeetingSessionManager>>();
-    let done = with_both(&history, &meetings, work).await?;
+    let done = with_meetings(&history, &meetings, work).await?;
     announce(app, &meetings, &done.effects).await;
     Ok(done.value)
 }
@@ -253,48 +266,53 @@ pub(crate) fn follow_loop(
 }
 
 /// Catches the tracker up with the last month of meetings and puts items
-/// and their commitments back in step, once the conversations unlock.
-pub(crate) async fn settle_at_startup(app: &AppHandle, meetings: &MeetingSessionManager) {
-    let Ok(store) = meetings.store().await else {
-        log::info!("Tracker catch-up skipped: conversations are locked");
-        return;
-    };
-    let Some(history) = app.try_state::<Arc<HistoryManager>>() else {
-        return;
-    };
-    let user_name = store.user_name();
-    let now = now_ms();
-    let sessions = match in_both(&store, &history, |_, meetings| {
-        sync::meetings_since(meetings, now - sync::BACKFILL_MS)
-    }) {
-        Ok(sessions) => sessions,
-        Err(error) => {
-            log::warn!("Tracker catch-up could not list meetings: {error:#}");
+/// and their commitments back in step, moves made while the conversations
+/// were closed included, then tells every window, which reads the meetings
+/// again. The meeting store starts it once per launch, as it opens: at
+/// launch, or when the conversations unlock later.
+pub(crate) fn catch_up(app: AppHandle, store: Arc<MeetingStore>) {
+    tauri::async_runtime::spawn(async move {
+        let Some(history) = app.try_state::<Arc<HistoryManager>>() else {
+            log::warn!("Tracker catch-up skipped: history is not ready");
             return;
+        };
+        let user_name = store.user_name();
+        let now = now_ms();
+        let sessions = match in_both(&store, &history, |_, meetings| {
+            sync::meetings_since(meetings, now - sync::BACKFILL_MS)
+        }) {
+            Ok(sessions) => sessions,
+            Err(error) => {
+                log::warn!("Tracker catch-up could not list meetings: {error:#}");
+                return;
+            }
+        };
+        let mut effects = Effects::default();
+        for session_id in sessions {
+            let taken = in_both(&store, &history, |history, meetings| {
+                sync::take_in_meeting(history, meetings, session_id, user_name.as_deref(), now)
+            });
+            match taken {
+                Ok(taken) => taken.iter().for_each(|item| effects.item(item)),
+                Err(error) => log::warn!("Tracker catch-up skipped a meeting: {error:#}"),
+            }
         }
-    };
-    let mut effects = Effects::default();
-    for session_id in sessions {
-        let taken = in_both(&store, &history, |history, meetings| {
-            sync::take_in_meeting(history, meetings, session_id, user_name.as_deref(), now)
-        });
-        match taken {
-            Ok(taken) => taken.iter().for_each(|item| effects.item(item)),
-            Err(error) => log::warn!("Tracker catch-up skipped a meeting: {error:#}"),
+        match in_both(&store, &history, |history, meetings| {
+            sync::reconcile(history, meetings, now)
+        }) {
+            Ok(followed) => {
+                followed.items.iter().for_each(|item| effects.item(item));
+                effects.loops = followed.loops;
+            }
+            Err(error) => {
+                log::warn!("Tracker items could not be matched to their loops: {error:#}");
+            }
         }
-    }
-    match in_both(&store, &history, |history, meetings| {
-        sync::reconcile(history, meetings, now)
-    }) {
-        Ok(followed) => {
-            followed.items.iter().for_each(|item| effects.item(item));
-            effects.loops = followed.loops;
+        match app.try_state::<Arc<MeetingSessionManager>>() {
+            Some(meetings) => announce(&app, &meetings, &effects).await,
+            None => tell(&app, &effects),
         }
-        Err(error) => log::warn!("Tracker items could not be matched to their loops: {error:#}"),
-    }
-    if !effects.items.is_empty() || !effects.loops.is_empty() {
-        announce(app, meetings, &effects).await;
-    }
+    });
 }
 
 fn project_choices(history: &Connection) -> StorageResult<Vec<WorkProjectChoice>> {
@@ -322,11 +340,11 @@ struct RowContext {
 impl RowContext {
     fn read(
         history: &Connection,
-        meetings: &Connection,
+        meetings: Option<&Connection>,
         projects: &[WorkProjectChoice],
     ) -> StorageResult<Self> {
         Ok(Self {
-            people: People::read(meetings)?,
+            people: meetings.map(People::read).transpose()?.unwrap_or_default(),
             project_titles: projects
                 .iter()
                 .map(|project| (project.id.clone(), project.title.clone()))
@@ -432,7 +450,7 @@ fn found(item: &WorkItem, search: &str) -> bool {
 
 fn list(
     history: &Connection,
-    meetings: &Connection,
+    meetings: Option<&Connection>,
     user_name: Option<&str>,
     query: &WorkQuery,
     now_ms: i64,
@@ -473,12 +491,13 @@ fn list(
         projects,
         people: context.people.choices,
         suggestions,
+        conversations_available: meetings.is_some(),
     })
 }
 
 fn detail(
     history: &Connection,
-    meetings: &Connection,
+    meetings: Option<&Connection>,
     user_name: Option<&str>,
     id: &str,
 ) -> StorageResult<WorkItemDetail> {
@@ -491,7 +510,13 @@ fn detail(
     let suggestions = sync::suggestions(history, &mut reader, &all, &item)?;
     let mut evidence = store::task_evidence(history, &id)?;
     for link in &mut evidence {
-        sources::resolve_link(history, meetings, link)?;
+        match meetings {
+            Some(meetings) => sources::resolve_link(history, meetings, link)?,
+            None if link.source_kind == EvidenceSourceKind::Note => {
+                sources::resolve_note(history, link)?;
+            }
+            None => {}
+        }
     }
     Ok(WorkItemDetail {
         item: context.row(&mut reader, item)?,
@@ -499,6 +524,7 @@ fn detail(
         relations: items::relations(history, &id)?,
         activity: items::activity(history, &id)?,
         suggestions,
+        conversations_available: meetings.is_some(),
     })
 }
 
@@ -514,10 +540,12 @@ fn unique(ids: &[String]) -> StorageResult<Vec<String>> {
     Ok(seen)
 }
 
+/// The owner a change names, a person checked against the conversations,
+/// which must be open to name one.
 fn checked_owner(meetings: Option<&Connection>, owner: &WorkOwner) -> StorageResult<WorkOwner> {
     match owner {
         WorkOwner::Person { person_id } => {
-            let meetings = meetings.ok_or(Refusal::OwnerUnavailable)?;
+            let meetings = meetings.ok_or(super::ConversationsClosed)?;
             Ok(WorkOwner::Person {
                 person_id: sources::require_person(meetings, &store::uuid(person_id)?)?,
             })
@@ -527,10 +555,11 @@ fn checked_owner(meetings: Option<&Connection>, owner: &WorkOwner) -> StorageRes
 }
 
 /// Applies one edit to one item, then moves the commitments its family
-/// tracks to match.
+/// tracks to match, or leaves them to [`catch_up`] while the conversations
+/// are closed.
 fn edit(
     history: &Connection,
-    meetings: &Connection,
+    meetings: Option<&Connection>,
     change: Change<'_>,
     id: &str,
     patch: &WorkPatch,
@@ -540,7 +569,7 @@ fn edit(
         owner: patch
             .owner
             .as_ref()
-            .map(|owner| checked_owner(Some(meetings), owner))
+            .map(|owner| checked_owner(meetings, owner))
             .transpose()?,
         ..patch.clone()
     };
@@ -574,7 +603,7 @@ pub async fn work_list(
 ) -> Result<WorkList, String> {
     let user_name = meetings.user_name();
     let now = now_ms();
-    super::with_sources(&history_state, &meetings, |history, meeting_conn| {
+    with_meetings(&history_state, &meetings, |history, meeting_conn| {
         list(history, meeting_conn, user_name.as_deref(), &query, now)
     })
     .await
@@ -588,7 +617,7 @@ pub async fn work_item(
     id: String,
 ) -> Result<WorkItemDetail, String> {
     let user_name = meetings.user_name();
-    super::with_sources(&history_state, &meetings, |history, meeting_conn| {
+    with_meetings(&history_state, &meetings, |history, meeting_conn| {
         detail(history, meeting_conn, user_name.as_deref(), &id)
     })
     .await
@@ -637,7 +666,7 @@ fn create(
 }
 
 /// [`work_create`] made by `actor`. Only an item given a person as its
-/// owner waits for the conversations to unlock.
+/// owner needs the conversations, where people live.
 pub(crate) async fn create_as(
     app: &AppHandle,
     actor: WorkActor,
@@ -646,8 +675,8 @@ pub(crate) async fn create_as(
 ) -> Result<WorkItem, String> {
     let change = Change::now(operation_id, actor);
     if matches!(input.owner, Some(WorkOwner::Person { .. })) {
-        run_both(app, |history, meetings| {
-            create(history, Some(meetings), change, input)
+        run_with_meetings(app, |history, meetings| {
+            create(history, meetings, change, input)
         })
         .await
     } else {
@@ -667,7 +696,7 @@ pub async fn work_create(
 
 fn update(
     history: &mut Connection,
-    meetings: &Connection,
+    meetings: Option<&Connection>,
     change: Change<'_>,
     id: &str,
     expected_revision: i64,
@@ -701,7 +730,7 @@ pub(crate) async fn update_as(
     patch: &WorkPatch,
 ) -> Result<WorkItem, String> {
     let change = Change::now(operation_id, actor);
-    run_both(app, |history, meetings| {
+    run_with_meetings(app, |history, meetings| {
         update(history, meetings, change, id, expected_revision, patch)
     })
     .await
@@ -730,7 +759,7 @@ pub async fn work_update(
 /// One patch to many items: every item takes it, or none does.
 fn bulk_update(
     history: &mut Connection,
-    meetings: &Connection,
+    meetings: Option<&Connection>,
     change: Change<'_>,
     ids: &[String],
     patch: &WorkPatch,
@@ -761,7 +790,7 @@ pub(crate) async fn bulk_update_as(
     patch: &WorkPatch,
 ) -> Result<Vec<WorkItem>, String> {
     let change = Change::now(operation_id, actor);
-    run_both(app, |history, meetings| {
+    run_with_meetings(app, |history, meetings| {
         bulk_update(history, meetings, change, ids, patch)
     })
     .await
@@ -843,7 +872,7 @@ pub fn work_restore(
 
 fn accept(
     history: &mut Connection,
-    meetings: &Connection,
+    meetings: Option<&Connection>,
     user_name: Option<&str>,
     change: Change<'_>,
     ids: &[String],
@@ -884,7 +913,7 @@ pub(crate) async fn triage_accept_as(
 ) -> Result<Vec<WorkItem>, String> {
     let change = Change::now(operation_id, actor);
     let user_name = app.state::<Arc<MeetingSessionManager>>().user_name();
-    run_both(app, |history, meetings| {
+    run_with_meetings(app, |history, meetings| {
         accept(
             history,
             meetings,
@@ -910,7 +939,7 @@ pub async fn work_triage_accept(
 
 fn decline(
     history: &mut Connection,
-    meetings: &Connection,
+    meetings: Option<&Connection>,
     change: Change<'_>,
     ids: &[String],
 ) -> StorageResult<Done<Vec<WorkItem>>> {
@@ -944,7 +973,7 @@ pub(crate) async fn triage_decline_as(
     ids: &[String],
 ) -> Result<Vec<WorkItem>, String> {
     let change = Change::now(operation_id, actor);
-    run_both(app, |history, meetings| {
+    run_with_meetings(app, |history, meetings| {
         decline(history, meetings, change, ids)
     })
     .await
@@ -963,7 +992,7 @@ pub async fn work_triage_decline(
 /// Folds `id` into `of_id`: its sources move to the item it repeats.
 fn mark_duplicate(
     history: &mut Connection,
-    meetings: &Connection,
+    meetings: Option<&Connection>,
     change: Change<'_>,
     id: &str,
     of_id: &str,
@@ -1007,7 +1036,7 @@ pub(crate) async fn mark_duplicate_as(
     of_id: &str,
 ) -> Result<WorkItem, String> {
     let change = Change::now(operation_id, actor);
-    run_both(app, |history, meetings| {
+    run_with_meetings(app, |history, meetings| {
         mark_duplicate(history, meetings, change, id, of_id)
     })
     .await
@@ -1236,7 +1265,7 @@ pub(super) struct TaskUpdate<'a> {
 /// tracker so the item's history and its commitment follow.
 pub(super) fn update_task(
     history: &mut Connection,
-    meetings: &Connection,
+    meetings: Option<&Connection>,
     update: &TaskUpdate<'_>,
     operation_id: &str,
     now_ms: i64,

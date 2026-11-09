@@ -703,7 +703,6 @@ fn initialize_core_logic(app_handle: &AppHandle, runtime: StartupRuntime) -> any
     // Recovery runs asynchronously after the managers have been registered.
     let recovery_meetings = Arc::clone(&meeting_manager);
     let recovery_cloud = Arc::clone(&cloud_runtime);
-    let recovery_app = app_handle.clone();
     tauri::async_runtime::spawn(async move {
         let recovered = {
             let _span = launch_trace::span("recovery_sweep");
@@ -718,7 +717,6 @@ fn initialize_core_logic(app_handle: &AppHandle, runtime: StartupRuntime) -> any
         recovery_cloud.start();
         recovery_meetings.start_retention_sweeper();
         recovery_meetings.start_recovery_reprocess(recovered);
-        planning::work::settle_at_startup(&recovery_app, &recovery_meetings).await;
     });
     match agent_bridge::AgentBridgeManager::new(app_handle) {
         Ok(manager) => {
