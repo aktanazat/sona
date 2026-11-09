@@ -37,7 +37,10 @@ fn a_task_is_named_by_handle_number_or_id() {
         ("#12", TaskRef::Number(12)),
         ("12", TaskRef::Number(12)),
         (id, TaskRef::Id(id.to_owned())),
-        ("5B0C6A8E-3D1F-4C2A-9E7B-0A1B2C3D4E5F", TaskRef::Id(id.to_owned())),
+        (
+            "5B0C6A8E-3D1F-4C2A-9E7B-0A1B2C3D4E5F",
+            TaskRef::Id(id.to_owned()),
+        ),
     ];
     let wrong: Vec<(&str, Result<TaskRef, String>, TaskRef)> = accepted
         .into_iter()
@@ -54,7 +57,11 @@ fn a_task_is_named_by_handle_number_or_id() {
                 .is_err_and(|error| error.contains("expected a task: S-12, 12, or a task id"))
         })
         .collect();
-    assert_eq!(not_refused, Vec::new(), "these name no task but were not refused as such");
+    assert_eq!(
+        not_refused,
+        Vec::new(),
+        "these name no task but were not refused as such"
+    );
 }
 
 fn task(source_meeting: Option<&str>) -> WorkItem {
@@ -97,11 +104,15 @@ fn the_fence_leaves_out_work_from_kept_meetings_and_all_of_it_while_closed() {
     let from_shared = task(Some(SHARED_MEETING));
 
     let hidden = |fence: &Fence| {
-        [("typed", &typed), ("from kept", &from_kept), ("from shared", &from_shared)]
-            .into_iter()
-            .filter(|(_, item)| fence.hides_item(item))
-            .map(|(name, _)| name)
-            .collect::<Vec<_>>()
+        [
+            ("typed", &typed),
+            ("from kept", &from_kept),
+            ("from shared", &from_shared),
+        ]
+        .into_iter()
+        .filter(|(_, item)| fence.hides_item(item))
+        .map(|(name, _)| name)
+        .collect::<Vec<_>>()
     };
 
     assert_eq!(hidden(&open), ["from kept"]);

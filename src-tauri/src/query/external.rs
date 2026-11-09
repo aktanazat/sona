@@ -4565,8 +4565,14 @@ mod tests {
             (vec!["work", "show", "S-1"], reads),
             (vec!["work", "labels"], reads),
             (vec!["work", "views"], reads),
-            (vec!["work", "export", "--md", "/private/var/tmp/tasks"], reads),
-            (vec!["work", "update", "S-1", "--priority", "low", "--dry-run"], reads),
+            (
+                vec!["work", "export", "--md", "/private/var/tmp/tasks"],
+                reads,
+            ),
+            (
+                vec!["work", "update", "S-1", "--priority", "low", "--dry-run"],
+                reads,
+            ),
             (vec!["work", "done", "S-1", "--dry-run"], reads),
             (vec!["work", "accept", "S-1", "--dry-run"], reads),
             (vec!["work", "decline", "S-1", "--dry-run"], reads),
@@ -4593,6 +4599,10 @@ mod tests {
         .map(|(argv, _)| argv)
         .collect();
 
-        assert_eq!(wrong, Vec::<Vec<&str>>::new(), "these ask for the wrong grants");
+        assert_eq!(
+            wrong,
+            Vec::<Vec<&str>>::new(),
+            "these ask for the wrong grants"
+        );
     }
 }
