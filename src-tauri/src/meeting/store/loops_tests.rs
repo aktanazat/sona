@@ -719,8 +719,7 @@ fn a_meeting_outside_a_series_carries_nothing() {
     assert!(store.carry_loops_forward(alone).unwrap().is_empty());
 }
 
-/// Give this session a microphone speaker with `name` on it, which is how the
-/// store knows which voice is the user's.
+/// Give this session a microphone speaker with `name` on it.
 fn microphone_speaker(store: &MeetingStore, session_id: MeetingSessionId, name: &str) -> SpeakerId {
     let speaker_id = SpeakerId(Uuid::new_v4());
     store
@@ -742,10 +741,11 @@ fn microphone_speaker(store: &MeetingStore, session_id: MeetingSessionId, name: 
 
 /// D27 through the real store. The fixture ledger attributes both rows to
 /// "Dana Reyes", so the same two rows read one way or the other depending on
-/// nothing but who was on the microphone.
+/// whether the microphone voice matches the explicitly supplied user name.
 #[test]
 fn the_microphone_speaker_decides_which_rows_the_user_owes() {
     let (_directory, store) = store();
+    store.set_user_name_source(|| Some("Dana Reyes".to_string()));
     let theirs = ledger_meeting(&store, NOW);
     microphone_speaker(&store, theirs, "Amir");
     let mine = ledger_meeting(&store, NOW);
@@ -847,11 +847,12 @@ fn a_name_a_voice_match_wrote_does_not_make_the_speaker_the_user() {
 }
 
 /// Assigning a person is the user saying "not me, them", and it has to win
-/// over the microphone. Persons never model the user, so an assignment can
-/// only ever mean somebody else.
+/// over identifying the speaker as the user. Persons never model the user,
+/// so an assignment can only ever mean somebody else.
 #[test]
 fn assigning_a_person_moves_a_row_the_user_said_off_the_users_own_list() {
     let (_directory, store, session_id) = review_ready_meeting_with_ledger();
+    store.set_user_name_source(|| Some("Dana Reyes".to_string()));
     microphone_speaker(&store, session_id, "Dana Reyes");
     let commitment = loop_id(
         session_id,
@@ -1065,6 +1066,7 @@ fn newer_notes_without_a_ledger_keep_the_loops_of_the_ledger_shown() {
 #[test]
 fn the_digest_counts_rows_others_have_owed_for_over_a_week() {
     let (_directory, store) = store();
+    store.set_user_name_source(|| Some("Dana Reyes".to_string()));
     let day_start = NOW - 86_400_000;
 
     // Nothing in the corpus yet.
@@ -1099,8 +1101,8 @@ fn the_digest_counts_rows_others_have_owed_for_over_a_week() {
         2
     );
 
-    // Closing one takes it out of the count; the user's own backlog was never
-    // in it, so putting the user on the microphone empties the count entirely.
+    // Closing one takes it out of the count; adding the user's own backlog
+    // does not increase it.
     store
         .resolve_loop(
             MeetingLoopResolveRequest {
@@ -1215,6 +1217,7 @@ fn continuity_ran(store: &MeetingStore, session_id: MeetingSessionId) {
 #[test]
 fn a_persons_page_reads_open_loops_both_ways_and_how_often_one_came_up() {
     let (_directory, store) = store();
+    store.set_user_name_source(|| Some("Sam Park".to_string()));
     let dana = person(&store, "Dana Reyes");
     let weekly = |at_utc_ms: i64, threads: Vec<LedgerThread>| {
         let session_id = meeting(&store, "Pricing review", at_utc_ms);

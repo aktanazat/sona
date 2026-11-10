@@ -33,7 +33,7 @@ const FFT_SIZE: usize = 512;
 const MEL_BINS: usize = 80;
 pub(crate) const SPEAKER_EMBEDDING_DIMENSIONS: usize = 256;
 const MIN_WINDOW_SAMPLES: usize = SAMPLE_RATE_HZ;
-const SPEAKER_MATCH_THRESHOLD: f32 = 0.72;
+pub(crate) const SPEAKER_MATCH_THRESHOLD: f32 = 0.72;
 const OVERLAP_MARGIN: f32 = 0.04;
 const PROFILE_MATCH_THRESHOLD: f32 = 0.80;
 const PROFILE_MATCH_MARGIN: f32 = 0.08;
@@ -1084,7 +1084,12 @@ fn resolve_window(
 
     let window_ns = end_offset_ns - start_offset_ns;
     let simultaneous_ns = simultaneous_span_ns(timeline, start_offset_ns, end_offset_ns);
-    if window_ns > 0 && (simultaneous_ns as f64) / (window_ns as f64) >= SORTFORMER_OVERLAP_SHARE {
+    if window_ns > 0
+        && simultaneous_ns
+            .to_f64()
+            .zip(window_ns.to_f64())
+            .is_some_and(|(simultaneous, window)| simultaneous / window >= SORTFORMER_OVERLAP_SHARE)
+    {
         return DiarizedWindow {
             start_offset_ns,
             end_offset_ns,
@@ -1204,6 +1209,21 @@ impl MeetingDiarizationSession {
         }
     }
 
+    pub(crate) fn resolve_span(
+        &self,
+        start_offset_ns: u64,
+        end_offset_ns: u64,
+    ) -> Option<DiarizedWindow> {
+        match self {
+            Self::Sortformer(session) if start_offset_ns < end_offset_ns => Some(resolve_window(
+                &session.timeline,
+                start_offset_ns,
+                end_offset_ns,
+            )),
+            _ => None,
+        }
+    }
+
     /// The mean voice of the windows a WeSpeaker session put in `cluster`.
     /// Sortformer keeps none.
     pub(crate) fn cluster_voice(&self, cluster: u32) -> Option<&SpeakerEmbedding> {
@@ -1252,7 +1272,7 @@ fn update_centroid(
     normalize(&mut cluster.centroid.values).ok_or(DiarizationError::InferenceFailed)
 }
 
-fn cosine_similarity(left: &SpeakerEmbedding, right: &SpeakerEmbedding) -> f32 {
+pub(crate) fn cosine_similarity(left: &SpeakerEmbedding, right: &SpeakerEmbedding) -> f32 {
     left.as_slice()
         .iter()
         .zip(right.as_slice())

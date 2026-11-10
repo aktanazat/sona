@@ -3,7 +3,8 @@ use crate::meeting::people_types::PersonId;
 use crate::meeting::session::MeetingSessionManager;
 use crate::meeting::store::voice_identity::{
     MeetingSpeakerIdentifyDisposition, MeetingSpeakerIdentifyRequest, MeetingSpeakerIdentifyTarget,
-    SameVoice, SameVoiceSpeaker, UserVoiceprint, VoiceProfileStatus, VoiceSpeakerSuggestion,
+    SameVoice, SameVoiceSpeaker, UserVoiceprint, VoiceNamedSpeaker, VoiceProfileStatus,
+    VoiceSpeakerSuggestion,
 };
 use crate::meeting::types::{
     MeetingCommandError, MeetingOperationId, MeetingSessionId, OperationReceipt, SpeakerId,
@@ -67,6 +68,7 @@ pub struct VoiceIdentityStatus {
     pub unresolved_active_speaker_ids: Vec<SpeakerId>,
     pub suggestions: Vec<VoiceSpeakerSuggestion>,
     pub same_voice: Vec<SameVoice>,
+    pub named_by_voice: Vec<VoiceNamedSpeaker>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
@@ -98,6 +100,7 @@ pub async fn voice_identity_status(
             .await?,
         suggestions: manager.voice_speaker_suggestions(session_id).await?,
         same_voice: manager.same_voice_meetings(session_id).await?,
+        named_by_voice: manager.voice_named_speakers(session_id).await?,
     })
 }
 

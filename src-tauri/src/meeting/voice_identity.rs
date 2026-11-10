@@ -261,8 +261,7 @@ impl VoiceIdentityCollector {
 pub(crate) struct PrimaryCollector {
     exclusive_spans: Vec<DiarizationSpeakerSpan>,
     next_span: usize,
-    current: Option<PrimaryCandidate>,
-    samples: Vec<f32>,
+    pending: BTreeMap<u32, Vec<f32>>,
     accumulators: BTreeMap<u32, EmbeddingAccumulator>,
     embedder: Box<dyn SpeakerEmbedder>,
     model_failed: bool,
@@ -273,8 +272,7 @@ impl PrimaryCollector {
         Self {
             exclusive_spans: exclusive_spans.to_vec(),
             next_span: 0,
-            current: None,
-            samples: Vec::with_capacity(PRIMARY_CANDIDATE_SAMPLES),
+            pending: BTreeMap::new(),
             accumulators: BTreeMap::new(),
             embedder,
             model_failed: false,
@@ -282,48 +280,43 @@ impl PrimaryCollector {
     }
 
     fn observe_frame(&mut self, voice: bool, frame: &[f32], start_offset_ns: u64) {
-        if self.model_failed || frame.len() != VAD_FRAME_SAMPLES {
+        if self.model_failed || !voice || frame.len() != VAD_FRAME_SAMPLES {
             return;
         }
         let end_offset_ns = start_offset_ns.saturating_add(VAD_FRAME_NS);
-        let Some((span_index, cluster)) = self.span_for_frame(start_offset_ns, end_offset_ns)
-        else {
-            self.discard_current();
+        let Some(cluster) = self.span_for_frame(start_offset_ns, end_offset_ns) else {
             return;
         };
-        if self.current.as_ref().is_some_and(|candidate| {
-            candidate.span_index != span_index || candidate.end_offset_ns != start_offset_ns
-        }) {
-            self.discard_current();
+        let Some(accumulator) = bounded_accumulator(&mut self.accumulators, cluster) else {
+            return;
+        };
+        if accumulator.accepted >= MAX_CANDIDATES_PER_SPEAKER {
+            return;
         }
-        if self.current.is_none() {
-            let Some(accumulator) = bounded_accumulator(&mut self.accumulators, cluster) else {
-                return;
-            };
-            if !accumulator.start_attempt() {
-                return;
+        let samples = self
+            .pending
+            .entry(cluster)
+            .or_insert_with(|| Vec::with_capacity(PRIMARY_CANDIDATE_SAMPLES));
+        samples.extend_from_slice(frame);
+        let voiced_frames = u32::try_from(samples.len() / VAD_FRAME_SAMPLES).unwrap_or(0);
+        if !primary_candidate_is_eligible(samples.len(), voiced_frames) {
+            return;
+        }
+        let embedding = self.embedder.embed_candidate(samples);
+        samples.clear();
+        match embedding {
+            Ok(embedding) => {
+                let _ = accumulator.accept(embedding, PRIMARY_CANDIDATE_NS);
             }
-            self.current = Some(PrimaryCandidate {
-                span_index,
-                cluster,
-                end_offset_ns: start_offset_ns,
-                voiced_frames: 0,
-            });
-        }
-        let Some(candidate) = self.current.as_mut() else {
-            return;
-        };
-        candidate.end_offset_ns = end_offset_ns;
-        if voice {
-            candidate.voiced_frames = candidate.voiced_frames.saturating_add(1);
-        }
-        self.samples.extend_from_slice(frame);
-        if self.samples.len() == PRIMARY_CANDIDATE_SAMPLES {
-            self.complete_current();
+            Err(_) => {
+                self.model_failed = true;
+                self.accumulators.clear();
+                self.pending.clear();
+            }
         }
     }
 
-    fn span_for_frame(&mut self, start_offset_ns: u64, end_offset_ns: u64) -> Option<(usize, u32)> {
+    fn span_for_frame(&mut self, start_offset_ns: u64, end_offset_ns: u64) -> Option<u32> {
         while let Some(span) = self.exclusive_spans.get(self.next_span) {
             if span.end_offset_ns <= start_offset_ns {
                 self.next_span += 1;
@@ -331,10 +324,6 @@ impl PrimaryCollector {
             }
             let guarded_start = span.start_offset_ns.checked_add(PRIMARY_GUARD_NS)?;
             let guarded_end = span.end_offset_ns.checked_sub(PRIMARY_GUARD_NS)?;
-            if guarded_end.saturating_sub(guarded_start) < PRIMARY_CANDIDATE_NS {
-                self.next_span += 1;
-                continue;
-            }
             if start_offset_ns >= guarded_end {
                 self.next_span += 1;
                 continue;
@@ -342,46 +331,13 @@ impl PrimaryCollector {
             if start_offset_ns < guarded_start || end_offset_ns > guarded_end {
                 return None;
             }
-            return Some((self.next_span, span.cluster));
+            return Some(span.cluster);
         }
         None
     }
 
-    fn complete_current(&mut self) {
-        let Some(candidate) = self.current.take() else {
-            return;
-        };
-        let embedding =
-            if primary_candidate_is_eligible(self.samples.len(), candidate.voiced_frames) {
-                match self.embedder.embed_candidate(&self.samples) {
-                    Ok(embedding) => Some(embedding),
-                    Err(_) => {
-                        self.model_failed = true;
-                        self.accumulators.clear();
-                        None
-                    }
-                }
-            } else {
-                None
-            };
-        if let Some(embedding) = embedding {
-            if let Some(accumulator) =
-                bounded_accumulator(&mut self.accumulators, candidate.cluster)
-            {
-                let _ = accumulator.accept(embedding, PRIMARY_CANDIDATE_NS);
-            }
-        }
-        self.samples.clear();
-    }
-
-    fn discard_current(&mut self) {
-        self.current = None;
-        self.samples.clear();
-    }
-
     fn reset(&mut self) {
-        self.discard_current();
-        self.accumulators.clear();
+        self.pending.clear();
     }
 
     fn into_candidates(self) -> Vec<VoiceMatchCandidate> {
@@ -394,13 +350,6 @@ impl PrimaryCollector {
             })
             .collect()
     }
-}
-
-struct PrimaryCandidate {
-    span_index: usize,
-    cluster: u32,
-    end_offset_ns: u64,
-    voiced_frames: u32,
 }
 
 #[derive(Default)]
@@ -472,7 +421,6 @@ impl FallbackCollector {
     }
 
     fn reset(&mut self) {
-        self.accumulators.clear();
         self.pending = None;
     }
 
@@ -508,9 +456,6 @@ fn bounded_accumulator(
 
 #[derive(Clone)]
 struct EmbeddingAccumulator {
-    /// Bounded by `PrimaryCollector` alone. `FallbackCollector` never opens an
-    /// attempt, so its accumulators are bounded by `accepted`.
-    attempts: u8,
     accepted: u8,
     duration_ns: u64,
     sum: [f32; SPEAKER_EMBEDDING_DIMENSIONS],
@@ -519,7 +464,6 @@ struct EmbeddingAccumulator {
 impl Default for EmbeddingAccumulator {
     fn default() -> Self {
         Self {
-            attempts: 0,
             accepted: 0,
             duration_ns: 0,
             sum: [0.0; SPEAKER_EMBEDDING_DIMENSIONS],
@@ -528,14 +472,6 @@ impl Default for EmbeddingAccumulator {
 }
 
 impl EmbeddingAccumulator {
-    fn start_attempt(&mut self) -> bool {
-        if self.attempts >= MAX_CANDIDATES_PER_SPEAKER {
-            return false;
-        }
-        self.attempts += 1;
-        true
-    }
-
     fn accept(&mut self, embedding: SpeakerEmbedding, duration_ns: u64) -> bool {
         if self.accepted >= MAX_CANDIDATES_PER_SPEAKER {
             return false;
@@ -792,7 +728,7 @@ mod tests {
     }
 
     #[test]
-    fn fallback_gap_reset_drops_pre_gap_embeddings() {
+    fn fallback_gap_reset_preserves_qualified_voice() {
         let mut collector = VoiceIdentityCollector::fallback();
         for index in 0..2 {
             let start_offset_ns = index * FALLBACK_WINDOW_NS;
@@ -817,7 +753,9 @@ mod tests {
             Some(embedding(1.0)),
         );
 
-        assert!(collector.into_candidates().is_empty());
+        let candidates = collector.into_candidates();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].cluster, 3);
     }
 
     #[test]
@@ -904,6 +842,101 @@ mod tests {
         let candidates = collector.into_candidates();
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].cluster, 5);
+    }
+
+    #[test]
+    fn short_exclusive_turns_accumulate_one_qualified_voice() {
+        let spans = (0..6)
+            .map(|index| {
+                let start = index * 2 * NS_PER_SECOND;
+                span(5, start, start + 1_600_000_000)
+            })
+            .collect::<Vec<_>>();
+        let sample_counts = Arc::new(Mutex::new(Vec::new()));
+        let mut collector = VoiceIdentityCollector::primary(
+            &spans,
+            Box::new(RecordingEmbedder {
+                sample_counts: Arc::clone(&sample_counts),
+            }),
+        );
+        let frame = [0.5; VAD_FRAME_SAMPLES];
+        for index in 0..400 {
+            collector.observe_primary_window(&frame, index * VAD_FRAME_NS, &[true]);
+        }
+
+        assert_eq!(
+            *sample_counts.lock().expect("sample counts"),
+            vec![PRIMARY_CANDIDATE_SAMPLES; 2],
+        );
+        let candidates = collector.into_candidates();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].cluster, 5);
+    }
+
+    #[test]
+    fn quiet_candidate_starts_do_not_prevent_later_voice_learning() {
+        let sample_counts = Arc::new(Mutex::new(Vec::new()));
+        let mut collector = VoiceIdentityCollector::primary(
+            &[
+                span(5, 0, 4 * NS_PER_SECOND),
+                span(5, 4 * NS_PER_SECOND, 8 * NS_PER_SECOND),
+                span(5, 8 * NS_PER_SECOND, 12 * NS_PER_SECOND),
+                span(5, 12 * NS_PER_SECOND, 19 * NS_PER_SECOND),
+            ],
+            Box::new(RecordingEmbedder {
+                sample_counts: Arc::clone(&sample_counts),
+            }),
+        );
+        let frame = [0.5; VAD_FRAME_SAMPLES];
+        for index in 0..634 {
+            let start = index * VAD_FRAME_NS;
+            collector.observe_primary_window(&frame, start, &[start >= 12 * NS_PER_SECOND]);
+        }
+
+        assert_eq!(
+            *sample_counts.lock().expect("sample counts"),
+            vec![PRIMARY_CANDIDATE_SAMPLES; 2],
+        );
+        assert_eq!(collector.into_candidates().len(), 1);
+    }
+
+    #[test]
+    fn capture_gap_discards_partial_audio_but_keeps_accepted_voice() {
+        struct LeadingSamples(Arc<Mutex<Vec<f32>>>);
+
+        impl SpeakerEmbedder for LeadingSamples {
+            fn embed_candidate(
+                &mut self,
+                samples: &[f32],
+            ) -> Result<SpeakerEmbedding, DiarizationError> {
+                self.0.lock().expect("leading samples").push(samples[0]);
+                Ok(embedding(1.0))
+            }
+        }
+
+        let leading = Arc::new(Mutex::new(Vec::new()));
+        let mut collector = VoiceIdentityCollector::primary(
+            &[
+                span(5, 0, 4 * NS_PER_SECOND),
+                span(5, 10 * NS_PER_SECOND, 14 * NS_PER_SECOND),
+            ],
+            Box::new(LeadingSamples(Arc::clone(&leading))),
+        );
+        let frame = [0.5; VAD_FRAME_SAMPLES];
+        for index in 0..134 {
+            collector.observe_primary_window(&frame, index * VAD_FRAME_NS, &[true]);
+        }
+        collector.reset();
+        for index in 334..468 {
+            collector.observe_primary_window(
+                &[0.75; VAD_FRAME_SAMPLES],
+                index * VAD_FRAME_NS,
+                &[true],
+            );
+        }
+
+        assert_eq!(*leading.lock().expect("leading samples"), vec![0.5, 0.75]);
+        assert_eq!(collector.into_candidates().len(), 1);
     }
 
     /// A print from dictations holding this many 3 s windows of speech each;

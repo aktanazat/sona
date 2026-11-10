@@ -4,8 +4,9 @@ use crate::meeting::people_types::PersonId;
 use crate::meeting::session::MeetingSessionManager;
 use crate::meeting::store::voice_identity::{
     ExplicitVoiceConsent, MeetingSpeakerIdentifyDisposition, MeetingSpeakerIdentifyRequest,
-    SameVoice, UserVoiceprint, UserVoiceprintRequest, VoiceProfileEnrollmentRequest,
-    VoiceProfileStatus, VoiceSpeakerIdentityResult, VoiceSpeakerSuggestion,
+    SameVoice, UserVoiceprint, UserVoiceprintRequest, VoiceNamedSpeaker,
+    VoiceProfileEnrollmentRequest, VoiceProfileStatus, VoiceSpeakerIdentityResult,
+    VoiceSpeakerSuggestion,
 };
 use crate::meeting::transcript_correction_types::TranscriptCorrectionChangedSession;
 use crate::meeting::types::{
@@ -46,6 +47,16 @@ impl MeetingSessionManager {
         self.store()
             .await?
             .voice_speaker_suggestions(session_id, user_name.as_deref())
+            .map_err(map_store_error)
+    }
+
+    pub(crate) async fn voice_named_speakers(
+        &self,
+        session_id: MeetingSessionId,
+    ) -> Result<Vec<VoiceNamedSpeaker>, MeetingCommandError> {
+        self.store()
+            .await?
+            .voice_named_speakers(session_id)
             .map_err(map_store_error)
     }
 

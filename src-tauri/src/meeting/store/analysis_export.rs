@@ -1,7 +1,7 @@
 use super::voice_identity::{embedding_from_blob, speaker_is_user};
 use super::{id, phase_from_db, source_kind_from_db, MeetingStore, StoreError};
 use crate::meeting::types::{MeetingOrigin, MeetingSessionId, SourceKind};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection};
 use serde::Serialize;
 
 /// Who every speaker of one meeting is, as the voice code sees it, with the
@@ -14,7 +14,6 @@ pub(crate) struct SpeakerAnalysis {
     pub user_name: Option<String>,
     pub speakers: Vec<AnalysisSpeaker>,
     pub people: Vec<AnalysisPerson>,
-    pub user_voiceprint: Option<AnalysisUserVoiceprint>,
 }
 
 #[derive(Debug, Serialize)]
@@ -42,15 +41,16 @@ pub(crate) enum SpeakerResolution {
         voiceprint_kept: bool,
     },
     Unknown,
+    NamedByVoice {
+        person_id: Option<String>,
+        person_name: Option<String>,
+        original_display_name: String,
+    },
+    VoiceNameUndone,
     VoiceMatch {
         person_id: String,
         person_name: Option<String>,
         profile_revision: u64,
-    },
-    /// A voice suggestion waiting for confirmation; no person means the user.
-    Suggestion {
-        person_id: Option<String>,
-        display_name: String,
     },
     None,
 }
@@ -59,20 +59,6 @@ pub(crate) enum SpeakerResolution {
 pub(crate) struct AnalysisPerson {
     pub person_id: String,
     pub display_name: String,
-    pub voice_profile: Option<AnalysisVoiceProfile>,
-}
-
-#[derive(Debug, Serialize)]
-pub(crate) struct AnalysisVoiceProfile {
-    pub sample_count: u64,
-    pub centroid: Vec<f32>,
-}
-
-#[derive(Debug, Serialize)]
-pub(crate) struct AnalysisUserVoiceprint {
-    pub dictation_count: u64,
-    pub speech_ms: u64,
-    pub embedding: Vec<f32>,
 }
 
 struct SpeakerRow {
@@ -89,6 +75,11 @@ struct SpeakerRow {
     match_person_name: Option<String>,
     match_profile_revision: Option<i64>,
     voiceprint: Option<Vec<u8>>,
+    automatic_kind: Option<String>,
+    automatic_person_id: Option<String>,
+    automatic_person_name: Option<String>,
+    original_display_name: Option<String>,
+    automatic_current: bool,
 }
 
 impl MeetingStore {
@@ -116,7 +107,6 @@ impl MeetingStore {
         session_id: MeetingSessionId,
     ) -> Result<SpeakerAnalysis, StoreError> {
         let user_name = self.user_name();
-        let suggestions = self.voice_speaker_suggestions(session_id, user_name.as_deref())?;
         let connection = self.connection()?;
         let imported: bool = connection.query_row(
             "SELECT origin_kind = ?2 FROM meeting_sessions WHERE id = ?1",
@@ -135,9 +125,6 @@ impl MeetingStore {
                         row.named_by_voice_match,
                         user_name.as_deref(),
                     );
-                let suggestion = suggestions
-                    .iter()
-                    .find(|suggestion| suggestion.speaker_id.uuid().to_string() == row.speaker_id);
                 let voiceprint = row
                     .voiceprint
                     .as_deref()
@@ -151,6 +138,21 @@ impl MeetingStore {
                     },
                     (Some("unknown"), _) => SpeakerResolution::Unknown,
                     (Some(_), _) => return Err(StoreError::Corrupt),
+                    (None, _)
+                        if row.automatic_current
+                            && row.automatic_kind.as_deref() == Some("named_by_voice") =>
+                    {
+                        SpeakerResolution::NamedByVoice {
+                            person_id: row.automatic_person_id,
+                            person_name: row.automatic_person_name,
+                            original_display_name: row
+                                .original_display_name
+                                .ok_or(StoreError::Corrupt)?,
+                        }
+                    }
+                    (None, _) if row.automatic_kind.is_some() && !row.automatic_current => {
+                        SpeakerResolution::VoiceNameUndone
+                    }
                     (None, _) => match (row.match_person_id, row.match_profile_revision) {
                         (Some(person_id), Some(profile_revision)) => {
                             SpeakerResolution::VoiceMatch {
@@ -159,14 +161,7 @@ impl MeetingStore {
                                 profile_revision: super::from_i64(profile_revision)?,
                             }
                         }
-                        _ => suggestion.map_or(SpeakerResolution::None, |suggestion| {
-                            SpeakerResolution::Suggestion {
-                                person_id: suggestion
-                                    .person_id
-                                    .map(|person| person.uuid().to_string()),
-                                display_name: suggestion.display_name.clone(),
-                            }
-                        }),
+                        _ => SpeakerResolution::None,
                     },
                 };
                 Ok(AnalysisSpeaker {
@@ -187,7 +182,6 @@ impl MeetingStore {
             user_name,
             speakers,
             people: people_in(&connection)?,
-            user_voiceprint: user_voiceprint_in(&connection)?,
         })
     }
 }
@@ -202,10 +196,20 @@ fn speaker_rows_in(
         "SELECT s.speaker_id, s.display_name, s.source_kind, s.revision, s.merged_into_speaker_id,
                 EXISTS (SELECT 1 FROM voice_speaker_matches v JOIN persons p ON p.id = v.person_id
                          WHERE v.speaker_id = s.speaker_id AND v.speaker_revision = s.revision
-                           AND p.display_name = s.display_name),
+                           AND p.display_name = s.display_name)
+                    OR EXISTS (SELECT 1 FROM meeting_voice_names named
+                                WHERE named.speaker_id = s.speaker_id
+                                  AND named.speaker_revision = s.revision
+                                  AND NOT EXISTS (
+                                      SELECT 1 FROM meeting_voice_speaker_resolutions confirmed
+                                      WHERE confirmed.speaker_id = s.speaker_id
+                                        AND confirmed.is_current = 1
+                                        AND confirmed.resolution_kind = 'identified')),
                 r.resolution_kind, r.resolved_person_id, rp.display_name,
                 m.person_id, mp.display_name, m.profile_revision,
-                vp.embedding
+                vp.embedding, named.resolution_kind, named.person_id, np.display_name,
+                named.original_display_name, COALESCE(named.is_current = 1
+                    AND named.speaker_revision = s.revision, 0)
            FROM meeting_speakers s
            LEFT JOIN meeting_voice_speaker_resolutions r
                   ON r.speaker_id = s.speaker_id AND r.is_current = 1
@@ -214,6 +218,8 @@ fn speaker_rows_in(
                   ON m.speaker_id = s.speaker_id AND m.speaker_revision = s.revision
            LEFT JOIN persons mp ON mp.id = m.person_id
            LEFT JOIN meeting_speaker_voiceprints vp ON vp.speaker_id = s.speaker_id
+           LEFT JOIN meeting_voice_names named ON named.speaker_id = s.speaker_id
+           LEFT JOIN persons np ON np.id = named.person_id
           WHERE s.session_id = ?1
           ORDER BY s.source_kind, s.display_name, s.speaker_id",
     )?;
@@ -232,65 +238,24 @@ fn speaker_rows_in(
             match_person_name: row.get(10)?,
             match_profile_revision: row.get(11)?,
             voiceprint: row.get(12)?,
+            automatic_kind: row.get(13)?,
+            automatic_person_id: row.get(14)?,
+            automatic_person_name: row.get(15)?,
+            original_display_name: row.get(16)?,
+            automatic_current: row.get(17)?,
         })
     })?;
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
 
 fn people_in(connection: &Connection) -> Result<Vec<AnalysisPerson>, StoreError> {
-    let mut statement = connection.prepare(
-        "SELECT p.id, p.display_name, v.sample_count, v.centroid
-           FROM persons p LEFT JOIN voice_profiles v ON v.person_id = p.id
-          ORDER BY p.display_name, p.id",
-    )?;
+    let mut statement =
+        connection.prepare("SELECT id, display_name FROM persons ORDER BY display_name, id")?;
     let rows = statement.query_map([], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, Option<i64>>(2)?,
-            row.get::<_, Option<Vec<u8>>>(3)?,
-        ))
-    })?;
-    rows.map(|row| {
-        let (person_id, display_name, sample_count, centroid) = row?;
-        let voice_profile = match (sample_count, centroid) {
-            (Some(sample_count), Some(centroid)) => Some(AnalysisVoiceProfile {
-                sample_count: super::from_i64(sample_count)?,
-                centroid: embedding_from_blob(&centroid)?.as_slice().to_vec(),
-            }),
-            _ => None,
-        };
         Ok(AnalysisPerson {
-            person_id,
-            display_name,
-            voice_profile,
+            person_id: row.get(0)?,
+            display_name: row.get(1)?,
         })
-    })
-    .collect()
-}
-
-fn user_voiceprint_in(
-    connection: &Connection,
-) -> Result<Option<AnalysisUserVoiceprint>, StoreError> {
-    let row = connection
-        .query_row(
-            "SELECT dictation_count, speech_ms, embedding FROM user_voiceprint",
-            [],
-            |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, Vec<u8>>(2)?,
-                ))
-            },
-        )
-        .optional()?;
-    row.map(|(dictation_count, speech_ms, embedding)| {
-        Ok(AnalysisUserVoiceprint {
-            dictation_count: super::from_i64(dictation_count)?,
-            speech_ms: super::from_i64(speech_ms)?,
-            embedding: embedding_from_blob(&embedding)?.as_slice().to_vec(),
-        })
-    })
-    .transpose()
+    })?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }

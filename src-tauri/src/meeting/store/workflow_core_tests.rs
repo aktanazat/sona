@@ -1143,12 +1143,10 @@ fn previously_together_reads_only_meetings_before_this_one() {
 ///
 /// Two places state the invariant. `loop_types::MeetingLoopDirection` says
 /// "Sona models no `Person` for its own user … a `PersonId` is always somebody
-/// else", and `store::loops::user_speaker_labels_in` is the whole answer to
-/// which voices are the user's: on a meeting recorded here, the microphone
-/// ones. So the speaker rows a rename must never derive a person from include
-/// the microphone one — and `Local speaker`, the display name the store writes
-/// for that row itself, clears the two-word bar the derivation uses to reject
-/// a bare first name.
+/// else", and `store::loops::user_speaker_labels_in` recognizes the local
+/// operator label or a speaker matching the explicitly supplied user name,
+/// never the microphone lane alone. `Local speaker` also clears the two-word
+/// bar the derivation uses to reject a bare first name.
 ///
 /// The consequence is not cosmetic. A person for the user gets a `PersonId`,
 /// and `loop_direction` treats an explicit `owner_person_id` as settling the
@@ -1168,7 +1166,7 @@ fn speaker_derivation_refuses_the_users_own_microphone_voice() {
     for (session, label) in [(placeholder, "Local speaker"), (renamed, "Aktan Azat")] {
         speaker(&connection, session, SourceKind::Microphone, label);
         assert_eq!(
-            derive_speaker_link_in(&connection, session, label, None, 10).unwrap(),
+            derive_speaker_link_in(&connection, session, label, Some("Aktan Azat"), 10).unwrap(),
             0,
             "{label:?} minted a person out of the user"
         );

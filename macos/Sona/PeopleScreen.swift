@@ -1519,11 +1519,23 @@ struct VoiceIdentitySection: View {
                     }
                     ForEach(store.speakers) { speaker in
                         CardRow {
-                            Text(speaker.displayName).bodyText(14)
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(speaker.displayName).bodyText(14)
+                                if store.voiceName(speaker.speakerId) != nil {
+                                    Text("Named by voice").metaText()
+                                }
+                            }
                         } trailing: {
-                            Button("Correct") { store.askCorrection(speaker.speakerId) }
-                                .buttonStyle(.quiet)
-                                .disabled(store.busy)
+                            HStack(spacing: 12) {
+                                if store.voiceName(speaker.speakerId) != nil {
+                                    Button("Undo") { store.undoVoiceName(speaker.speakerId) }
+                                        .buttonStyle(.quiet)
+                                        .accessibilityLabel("Undo voice name for \(speaker.displayName)")
+                                }
+                                Button("Correct") { store.askCorrection(speaker.speakerId) }
+                                    .buttonStyle(.quiet)
+                            }
+                            .disabled(store.busy)
                         }
                     }
                 }
@@ -1643,6 +1655,17 @@ struct VoiceIdentitySheet: View {
         PeopleSheet(title: title, dismiss: { store.ask(nil) }) {
             VStack(alignment: .leading, spacing: 16) {
                 ErrorNote(store.error)
+                if let question = store.question, !store.confirmingUnknown,
+                   store.voiceName(question.speakerId) != nil {
+                    HStack(spacing: 12) {
+                        Text("Named by voice").metaText()
+                        Spacer()
+                        Button("Undo") { store.undoVoiceName(question.speakerId) }
+                            .buttonStyle(.quiet)
+                            .disabled(store.busy)
+                            .accessibilityLabel("Undo voice name for \(speakerName)")
+                    }
+                }
                 if store.confirmingUnknown {
                     Text(
                         "This transcript stops naming \(speakerName), and Sona deletes the voice samples saved from this speaker. The transcript text and your notes stay."

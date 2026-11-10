@@ -4,12 +4,13 @@ use super::people::{
 };
 use super::{
     append_event, committed_receipt, decode_json, id, insert_operation_receipt,
-    mark_artifacts_out_of_date, operation_receipt_in, phase_from_db, session_row, to_i64,
-    utc_now_ms, DurableTrackRecord, MeetingStore, SessionRow, StoreError, StoreMutation,
+    mark_artifacts_out_of_date, operation_receipt_in, phase_from_db, rebuild_search_documents_in,
+    session_row, to_i64, utc_now_ms, DurableTrackRecord, MeetingStore, SessionRow, StoreError,
+    StoreMutation, LOCAL_SPEAKER_LABEL,
 };
 use crate::meeting::diarization::{
-    match_speaker_profile, pair_same_voices, wespeaker_embedding_model_key, SpeakerEmbedding,
-    SpeakerEmbeddingModelKey, SPEAKER_EMBEDDING_DIMENSIONS,
+    cosine_similarity, match_speaker_profile, pair_same_voices, wespeaker_embedding_model_key,
+    SpeakerEmbedding, SpeakerEmbeddingModelKey, SPEAKER_EMBEDDING_DIMENSIONS,
 };
 use crate::meeting::people_types::{
     PersonId, PersonLinkConfidence, PersonLinkSource, VoiceProfileMergeResolution,
@@ -33,6 +34,10 @@ const MIN_ENROLLMENT_EVIDENCE_DURATION_NS: u64 = 4_000_000_000;
 const MAX_ENROLLMENT_EVIDENCE_DURATION_NS: u64 = 12_000_000_000;
 /// How long a voice nobody named is kept after the run that heard it.
 const UNNAMED_VOICE_RETENTION_MS: i64 = 90 * 24 * 60 * 60 * 1000;
+/// A match must be at least 30% closer than a competing identity in each supporting meeting.
+const CONFIRMED_VOICE_DISTANCE_RATIO: f32 = 0.7;
+/// Reject unrelated voices even when no competing identity has a retained fingerprint.
+const MAX_CONFIRMED_VOICE_DISTANCE: f32 = 0.4;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum DiarizationEvidenceKind {
@@ -235,6 +240,20 @@ pub struct VoiceSpeakerSuggestion {
     /// None when the voice is the user's own, named `display_name` in About me.
     pub person_id: Option<PersonId>,
     pub display_name: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum VoiceNameResolution {
+    NamedByVoice,
+    VoiceMatch,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+pub struct VoiceNamedSpeaker {
+    pub speaker_id: SpeakerId,
+    pub original_display_name: String,
+    pub resolution_kind: VoiceNameResolution,
 }
 
 /// A speaker of another meeting that a label names too, at the revision the
@@ -641,10 +660,7 @@ impl MeetingStore {
         transaction.commit()?;
         Ok(revision)
     }
-    /// The meeting's speakers still waiting for a name: no person or
-    /// "unknown" answer covers them, no enrolled voice matched them, and the
-    /// name they carry is not the user's, which is how the user answers for
-    /// their own voice.
+    /// The meeting's speakers with no manual answer, automatic name or enrolled voice match.
     pub(crate) fn unresolved_active_voice_speaker_ids(
         &self,
         session_id: MeetingSessionId,
@@ -662,6 +678,11 @@ impl MeetingStore {
                      WHERE manual.speaker_id = speaker.speaker_id
                        AND manual.is_current = 1
                        AND manual.resolution_kind IN ('identified', 'unknown')
+                )
+                AND NOT EXISTS (
+                    SELECT 1 FROM meeting_voice_names named
+                     WHERE named.speaker_id = speaker.speaker_id
+                       AND named.is_current = 1
                 )
                 AND NOT EXISTS (
                     SELECT 1
@@ -762,8 +783,152 @@ impl MeetingStore {
         Ok(())
     }
 
-    /// Keep the user's voice, replacing any voice learned before. Only
-    /// `voice_speaker_suggestions` reads it, so it names nobody by itself.
+    pub(crate) fn local_user_voice(
+        &self,
+        user_name: Option<&str>,
+    ) -> Result<Option<SpeakerEmbedding>, StoreError> {
+        let known = known_voices_in(
+            &*self.connection()?,
+            None,
+            Some(user_name.unwrap_or("")),
+            &[],
+        )?;
+        Ok(known
+            .people
+            .into_iter()
+            .find_map(|(person, _, voice)| person.is_none().then_some(voice)))
+    }
+
+    pub(crate) fn voice_named_speakers(
+        &self,
+        session_id: MeetingSessionId,
+    ) -> Result<Vec<VoiceNamedSpeaker>, StoreError> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT named.speaker_id, named.original_display_name, named.resolution_kind
+               FROM meeting_voice_names named
+               JOIN meeting_speakers speaker ON speaker.speaker_id = named.speaker_id
+              WHERE named.session_id = ?1 AND speaker.session_id = ?1
+                AND named.is_current = 1 AND named.speaker_revision = speaker.revision
+                AND speaker.merged_into_speaker_id IS NULL
+              ORDER BY named.speaker_id",
+        )?;
+        let rows = statement.query_map(params![id(session_id)], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        rows.map(|row| {
+            let (speaker_id, original_display_name, kind) = row?;
+            Ok(VoiceNamedSpeaker {
+                speaker_id: SpeakerId::from_uuid(parse_uuid(&speaker_id)?),
+                original_display_name,
+                resolution_kind: match kind.as_str() {
+                    "named_by_voice" => VoiceNameResolution::NamedByVoice,
+                    "voice_match" => VoiceNameResolution::VoiceMatch,
+                    _ => return Err(StoreError::Corrupt),
+                },
+            })
+        })
+        .collect()
+    }
+
+    /// Names only generated speakers with independent confirmation in two earlier meetings.
+    pub(crate) fn apply_confirmed_voice_names(
+        &self,
+        session_id: MeetingSessionId,
+        user_name: Option<&str>,
+    ) -> Result<(), StoreError> {
+        let unresolved = self.unresolved_active_voice_speaker_ids(session_id, user_name)?;
+        if unresolved.is_empty() {
+            return Ok(());
+        }
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let people = confirmed_people_before_in(&transaction, session_id)?;
+        let known = known_voices_in(&transaction, Some(session_id), user_name, &unresolved)?;
+        let mut people_changed = false;
+        let mut names_changed = false;
+        for (speaker_id, voice) in &known.waiting {
+            let (original_name, revision): (String, i64) = transaction.query_row(
+                "SELECT display_name, revision FROM meeting_speakers
+                  WHERE speaker_id = ?1 AND session_id = ?2 AND merged_into_speaker_id IS NULL",
+                params![id(*speaker_id), id(session_id)],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            if revision != 0
+                || !is_generated_speaker_label(&original_name)
+                || automatic_name_blocked_in(&transaction, *speaker_id)?
+            {
+                continue;
+            }
+            let Some(person) = confirmed_voice_owner(voice, &people, &known, user_name) else {
+                continue;
+            };
+            let speaker_revision = from_i64(revision)?
+                .checked_add(1)
+                .ok_or(StoreError::VoiceInvariant)?;
+            transaction.execute(
+                "UPDATE meeting_speakers SET display_name = ?1, revision = ?2
+                  WHERE speaker_id = ?3 AND session_id = ?4",
+                params![
+                    person.display_name,
+                    to_i64(speaker_revision)?,
+                    id(*speaker_id),
+                    id(session_id)
+                ],
+            )?;
+            remember_voice_name_in(
+                &transaction,
+                session_id,
+                *speaker_id,
+                person.person_id,
+                &original_name,
+                speaker_revision,
+                "named_by_voice",
+            )?;
+            names_changed = true;
+            people_changed |= upsert_link_in(
+                &transaction,
+                session_id,
+                person.person_id,
+                PersonLinkSource::Speaker,
+                PersonLinkConfidence::Suggested,
+                utc_now_ms(),
+            )?;
+            mark_artifacts_out_of_date(&transaction, session_id)?;
+            let session = session_row(&transaction, session_id)?;
+            let next_revision = session
+                .revision
+                .checked_add(1)
+                .ok_or(StoreError::VoiceInvariant)?;
+            transaction.execute(
+                "UPDATE meeting_sessions SET revision = ?1 WHERE id = ?2",
+                params![to_i64(next_revision)?, id(session_id)],
+            )?;
+            append_event(
+                &transaction,
+                session_id,
+                next_revision,
+                session.phase,
+                session.phase,
+                "speaker_named_by_voice",
+                None,
+            )?;
+        }
+        if people_changed {
+            bump_people_revision_in(&transaction)?;
+        }
+        if names_changed {
+            rebuild_search_documents_in(&transaction, session_id)?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Keep the user's explicitly opted-in dictation voice for local voice comparisons.
     pub(crate) fn save_user_voiceprint(
         &self,
         request: UserVoiceprintRequest,
@@ -803,8 +968,36 @@ impl MeetingStore {
     }
 
     pub(crate) fn forget_user_voiceprint(&self) -> Result<(), StoreError> {
-        self.connection()?
-            .execute("DELETE FROM user_voiceprint", [])?;
+        let user_name = self.user_name();
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let user_speakers = user_named_speakers_in(&transaction, user_name.as_deref())?;
+        transaction.execute(
+            "DELETE FROM meeting_speaker_voiceprints
+              WHERE speaker_id IN (SELECT value FROM json_each(?1))",
+            params![user_speakers],
+        )?;
+        let people = {
+            let mut statement = transaction.prepare("SELECT id, display_name FROM persons")?;
+            let rows = statement.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        let mut profiles_changed = false;
+        for (person_id, name) in people {
+            if names_user(&name, user_name.as_deref()) {
+                let person_id = PersonId::from_uuid(parse_uuid(&person_id)?);
+                forget_person_voiceprints_in(&transaction, person_id)?;
+                profiles_changed |=
+                    remove_voice_person_evidence_in(&transaction, person_id)?.people_changed();
+            }
+        }
+        transaction.execute("DELETE FROM user_voiceprint", [])?;
+        if profiles_changed {
+            bump_people_revision_in(&transaction)?;
+        }
+        transaction.commit()?;
         Ok(())
     }
 
@@ -1022,7 +1215,10 @@ impl MeetingStore {
             params![id(speaker_id), id(session_id)],
             |row| row.get(0),
         )?;
-        if is_generated_speaker_label(&current_name) {
+        if automatic_name_blocked_in(&transaction, speaker_id)? {
+            return Err(StoreError::Conflict);
+        }
+        if is_generated_speaker_label(&current_name) && expected_speaker_revision == 0 {
             let person = person_by_id_in(&transaction, matched.person_id)?;
             speaker_revision = speaker_revision
                 .checked_add(1)
@@ -1036,6 +1232,15 @@ impl MeetingStore {
                     id(speaker_id),
                     id(session_id)
                 ],
+            )?;
+            remember_voice_name_in(
+                &transaction,
+                session_id,
+                speaker_id,
+                matched.person_id,
+                &current_name,
+                speaker_revision,
+                "voice_match",
             )?;
             let linked = upsert_link_in(
                 &transaction,
@@ -1182,6 +1387,7 @@ impl MeetingStore {
             ),
         };
         clear_automatic_match_for_speaker_in(&transaction, request.speaker_id)?;
+        link_changed |= withdraw_automatic_name_in(&transaction, request.speaker_id)?;
         let profiles_changed = if remove_samples {
             forget_speaker_voiceprint_in(&transaction, request.speaker_id)?;
             remove_profile_samples_for_speaker_in(&transaction, request.speaker_id)?
@@ -1524,10 +1730,237 @@ impl KnownVoices {
     }
 }
 
-/// Every person's voice from their confirmed speakers in any meeting; the
-/// user's from every speaker given `user_name`, every person who carries it
-/// and the voice they taught Sona from their dictations; and the voices of
-/// `waiting`, speakers of `session_id` with no name.
+struct ConfirmedPersonVoice {
+    person_id: PersonId,
+    display_name: String,
+    meetings: Vec<ConfirmedMeetingVoice>,
+}
+
+struct ConfirmedMeetingVoice {
+    voice: SpeakerEmbedding,
+    variation: f32,
+}
+
+fn confirmed_people_before_in(
+    connection: &Connection,
+    session_id: MeetingSessionId,
+) -> Result<Vec<ConfirmedPersonVoice>, StoreError> {
+    let model = wespeaker_embedding_model_key();
+    let mut statement = connection.prepare(
+        "SELECT person.id, person.display_name, source.id, voiceprint.embedding
+           FROM meeting_speaker_voiceprints voiceprint
+           JOIN meeting_speakers speaker ON speaker.speaker_id = voiceprint.speaker_id
+           JOIN meeting_sessions source ON source.id = speaker.session_id
+           JOIN meeting_voice_speaker_resolutions resolution
+             ON resolution.speaker_id = speaker.speaker_id AND resolution.is_current = 1
+            AND resolution.resolution_kind = 'identified'
+           JOIN persons person ON person.id = resolution.resolved_person_id
+           JOIN meeting_sessions target ON target.id = ?1
+          WHERE source.id != target.id
+            AND COALESCE(source.started_at_utc_ms, source.created_at_utc_ms)
+                < COALESCE(target.started_at_utc_ms, target.created_at_utc_ms)
+            AND source.phase != 'deleting' AND source.transcript_purged_at_utc_ms IS NULL
+            AND speaker.merged_into_speaker_id IS NULL
+            AND NOT EXISTS (SELECT 1 FROM voice_speaker_matches matched
+                             WHERE matched.speaker_id = speaker.speaker_id)
+            AND NOT EXISTS (SELECT 1 FROM meeting_voice_names named
+                             WHERE named.speaker_id = speaker.speaker_id AND named.is_current = 1)
+            AND voiceprint.model_id = ?2 AND voiceprint.model_revision = ?3
+            AND voiceprint.model_sha256 = ?4 AND voiceprint.embedding_dimensions = ?5
+            AND voiceprint.sample_rate_hz = ?6 AND voiceprint.feature_bins = ?7
+            AND voiceprint.feature_pipeline_revision = ?8 AND voiceprint.normalization = ?9
+          ORDER BY person.id, source.id, speaker.speaker_id",
+    )?;
+    let rows = statement.query_map(
+        params![
+            id(session_id),
+            model.model_id,
+            model.model_revision,
+            model.model_sha256,
+            i64::try_from(model.embedding_dimensions).map_err(|_| StoreError::VoiceInvariant)?,
+            i64::from(model.sample_rate_hz),
+            i64::try_from(model.feature_bins).map_err(|_| StoreError::VoiceInvariant)?,
+            model.feature_pipeline_revision,
+            model.normalization,
+        ],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Vec<u8>>(3)?,
+            ))
+        },
+    )?;
+    let mut grouped: Vec<(PersonId, String, Vec<(String, Vec<SpeakerEmbedding>)>)> = Vec::new();
+    for row in rows {
+        let (person_id, display_name, meeting, blob) = row?;
+        let person_id = PersonId::from_uuid(parse_uuid(&person_id)?);
+        let voice = embedding_from_blob(&blob)?;
+        if grouped.last().is_none_or(|(last, _, _)| *last != person_id) {
+            grouped.push((person_id, display_name, Vec::new()));
+        }
+        let Some((_, _, meetings)) = grouped.last_mut() else {
+            return Err(StoreError::VoiceInvariant);
+        };
+        match meetings.last_mut() {
+            Some((last, voices)) if *last == meeting => voices.push(voice),
+            _ => meetings.push((meeting, vec![voice])),
+        }
+    }
+    Ok(grouped
+        .into_iter()
+        .map(|(person_id, display_name, meetings)| {
+            let mut meetings: Vec<_> = meetings
+                .into_iter()
+                .filter_map(|(_, voices)| mean_embedding(&voices))
+                .map(|voice| ConfirmedMeetingVoice {
+                    voice,
+                    variation: 0.0,
+                })
+                .collect();
+            for index in 0..meetings.len() {
+                let variation = meetings
+                    .iter()
+                    .map(|other| voice_distance(&meetings[index].voice, &other.voice))
+                    .reduce(f32::max)
+                    .unwrap_or(0.0);
+                meetings[index].variation = variation;
+            }
+            ConfirmedPersonVoice {
+                person_id,
+                display_name,
+                meetings,
+            }
+        })
+        .collect())
+}
+
+fn voice_distance(left: &SpeakerEmbedding, right: &SpeakerEmbedding) -> f32 {
+    (1.0 - cosine_similarity(left, right)).max(0.0)
+}
+
+fn confirmed_voice_owner<'a>(
+    voice: &SpeakerEmbedding,
+    people: &'a [ConfirmedPersonVoice],
+    known: &KnownVoices,
+    user_name: Option<&str>,
+) -> Option<&'a ConfirmedPersonVoice> {
+    let mut winner = None;
+    for person in people {
+        if person.meetings.len() < 2 || names_user(&person.display_name, user_name) {
+            continue;
+        }
+        let rival_distance = people
+            .iter()
+            .filter(|other| other.person_id != person.person_id)
+            .flat_map(|other| other.meetings.iter().map(|meeting| &meeting.voice))
+            .chain(
+                known
+                    .people
+                    .iter()
+                    .filter(|(person_id, _, _)| person_id.is_none())
+                    .map(|(_, _, voice)| voice),
+            )
+            .map(|other| voice_distance(voice, other))
+            .reduce(f32::min);
+        let limit = rival_distance
+            .map(|distance| distance * CONFIRMED_VOICE_DISTANCE_RATIO)
+            .unwrap_or(MAX_CONFIRMED_VOICE_DISTANCE)
+            .min(MAX_CONFIRMED_VOICE_DISTANCE);
+        let support = person
+            .meetings
+            .iter()
+            .filter(|confirmed| {
+                let distance = voice_distance(voice, &confirmed.voice);
+                distance < limit && distance <= confirmed.variation
+            })
+            .take(2)
+            .count();
+        if support == 2 {
+            if winner.is_some() {
+                return None;
+            }
+            winner = Some(person);
+        }
+    }
+    winner
+}
+
+fn automatic_name_blocked_in(
+    connection: &Connection,
+    speaker_id: SpeakerId,
+) -> Result<bool, StoreError> {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM meeting_voice_names
+                        WHERE speaker_id = ?1 AND (blocked = 1 OR is_current = 1))
+             OR EXISTS(SELECT 1 FROM meeting_voice_speaker_resolutions
+                        WHERE speaker_id = ?1 AND is_current = 1)",
+            params![id(speaker_id)],
+            |row| row.get(0),
+        )
+        .map_err(Into::into)
+}
+
+fn remember_voice_name_in(
+    transaction: &Transaction<'_>,
+    session_id: MeetingSessionId,
+    speaker_id: SpeakerId,
+    person_id: PersonId,
+    original_display_name: &str,
+    speaker_revision: u64,
+    resolution_kind: &str,
+) -> Result<(), StoreError> {
+    transaction.execute(
+        "INSERT INTO meeting_voice_names (
+            speaker_id, session_id, person_id, original_display_name,
+            resolution_kind, speaker_revision, is_current, blocked
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, 0)",
+        params![
+            id(speaker_id),
+            id(session_id),
+            id(person_id),
+            original_display_name,
+            resolution_kind,
+            to_i64(speaker_revision)?
+        ],
+    )?;
+    Ok(())
+}
+
+fn withdraw_automatic_name_in(
+    transaction: &Transaction<'_>,
+    speaker_id: SpeakerId,
+) -> Result<bool, StoreError> {
+    transaction.execute(
+        "UPDATE meeting_voice_names SET is_current = 0, blocked = 1 WHERE speaker_id = ?1",
+        params![id(speaker_id)],
+    )?;
+    let removed = transaction.execute(
+        "DELETE FROM meeting_person_links
+          WHERE source = 'speaker' AND confidence = 'suggested'
+            AND (meeting_id, person_id) IN (
+                SELECT session_id, person_id FROM meeting_voice_names WHERE speaker_id = ?1
+            )
+            AND NOT EXISTS (
+                SELECT 1 FROM meeting_voice_names other
+                 WHERE other.session_id = meeting_id AND other.person_id = meeting_person_links.person_id
+                   AND other.is_current = 1
+            )
+            AND NOT EXISTS (
+                SELECT 1 FROM meeting_voice_speaker_resolutions resolution
+                JOIN meeting_speakers speaker ON speaker.speaker_id = resolution.speaker_id
+                 WHERE speaker.session_id = meeting_id AND resolution.is_current = 1
+                   AND resolution.resolution_kind = 'identified'
+                   AND resolution.resolved_person_id = meeting_person_links.person_id
+            )",
+        params![id(speaker_id)],
+    )?;
+    Ok(removed != 0)
+}
+
+/// Manually confirmed voices, excluding automatic names and, when scoped, later meetings.
 pub(super) fn known_voices_in(
     connection: &Connection,
     session_id: Option<MeetingSessionId>,
@@ -1539,7 +1972,8 @@ pub(super) fn known_voices_in(
     let user_voiceprint = user_voiceprint_in(connection, model)?;
     let mut statement = connection.prepare(
         "SELECT voiceprint.speaker_id, person.id, person.display_name, voiceprint.embedding,
-                speaker.display_name
+                speaker.display_name,
+                voiceprint.speaker_id IN (SELECT value FROM json_each(?10))
            FROM meeting_speaker_voiceprints voiceprint
            JOIN meeting_speakers speaker
              ON speaker.speaker_id = voiceprint.speaker_id
@@ -1549,10 +1983,23 @@ pub(super) fn known_voices_in(
             AND resolution.is_current = 1
             AND resolution.resolution_kind = 'identified'
            LEFT JOIN persons person ON person.id = resolution.resolved_person_id
+           JOIN meeting_sessions source_session ON source_session.id = voiceprint.session_id
           WHERE voiceprint.model_id = ?2 AND voiceprint.model_revision = ?3
             AND voiceprint.model_sha256 = ?4 AND voiceprint.embedding_dimensions = ?5
             AND voiceprint.sample_rate_hz = ?6 AND voiceprint.feature_bins = ?7
             AND voiceprint.feature_pipeline_revision = ?8 AND voiceprint.normalization = ?9
+            AND source_session.phase != 'deleting'
+            AND source_session.transcript_purged_at_utc_ms IS NULL
+            AND NOT EXISTS (SELECT 1 FROM voice_speaker_matches matched
+                             WHERE matched.speaker_id = speaker.speaker_id)
+            AND NOT EXISTS (SELECT 1 FROM meeting_voice_names named
+                             WHERE named.speaker_id = speaker.speaker_id AND named.is_current = 1)
+            AND ((person.id IS NULL AND voiceprint.speaker_id NOT IN (SELECT value FROM json_each(?10)))
+                 OR ?1 IS NULL
+                 OR (source_session.id != ?1
+                     AND COALESCE(source_session.started_at_utc_ms, source_session.created_at_utc_ms)
+                         < (SELECT COALESCE(started_at_utc_ms, created_at_utc_ms)
+                              FROM meeting_sessions WHERE id = ?1)))
             AND (person.id IS NOT NULL OR voiceprint.session_id = ?1
                  OR voiceprint.speaker_id IN (SELECT value FROM json_each(?10)))
           ORDER BY person.id, voiceprint.speaker_id",
@@ -1577,6 +2024,7 @@ pub(super) fn known_voices_in(
                 row.get::<_, Option<String>>(2)?,
                 row.get::<_, Vec<u8>>(3)?,
                 row.get::<_, String>(4)?,
+                row.get::<_, bool>(5)?,
             ))
         },
     )?;
@@ -1584,7 +2032,8 @@ pub(super) fn known_voices_in(
     let mut user_voices = Vec::new();
     let mut unnamed = Vec::new();
     for row in rows {
-        let (speaker_id, person_id, display_name, embedding, speaker_name) = row?;
+        let (speaker_id, person_id, display_name, embedding, speaker_name, confirmed_user_name) =
+            row?;
         let speaker_id = SpeakerId::from_uuid(parse_uuid(&speaker_id)?);
         let embedding = embedding_from_blob(&embedding)?;
         match person_id.zip(display_name) {
@@ -1600,7 +2049,9 @@ pub(super) fn known_voices_in(
                     _ => people.push((Some(person_id), display_name, vec![embedding])),
                 }
             }
-            None if names_user(&speaker_name, user_name) => user_voices.push(embedding),
+            None if confirmed_user_name && names_user(&speaker_name, user_name) => {
+                user_voices.push(embedding);
+            }
             None if waiting.contains(&speaker_id) => unnamed.push((speaker_id, embedding)),
             None => {}
         }
@@ -1646,13 +2097,8 @@ pub(crate) fn names_user(name: &str, user_name: Option<&str>) -> bool {
                 .is_some_and(|first| normalized(first) == name))
 }
 
-/// Whether one of a meeting's speakers is the user: the microphone of a
-/// meeting recorded on this Mac, or a speaker somebody named after them in
-/// About me. An imported file puts whoever it names on the microphone lane,
-/// so there only the name counts, and a name a voice match wrote is the
-/// matched person's, whoever else shares it. A call's other voices count
-/// only by the full name: a colleague who shares the user's first name is
-/// on the call, not on the microphone.
+/// A local label or a matching name identifies the user, never the microphone lane alone.
+/// Imports cannot use the local-label shortcut, and the system lane requires a full name.
 pub(crate) fn speaker_is_user(
     display_name: &str,
     lane: SourceKind,
@@ -1660,13 +2106,15 @@ pub(crate) fn speaker_is_user(
     named_by_voice_match: bool,
     user_name: Option<&str>,
 ) -> bool {
+    if named_by_voice_match || is_generated_speaker_label(display_name) {
+        return false;
+    }
     if lane == SourceKind::Microphone {
-        return !imported || (!named_by_voice_match && names_user(display_name, user_name));
+        return (!imported && display_name == LOCAL_SPEAKER_LABEL)
+            || names_user(display_name, user_name);
     }
     let name = normalized(display_name);
-    !named_by_voice_match
-        && !name.is_empty()
-        && user_name.is_some_and(|user_name| normalized(user_name) == name)
+    !name.is_empty() && user_name.is_some_and(|user_name| normalized(user_name) == name)
 }
 
 /// Every kept voice's speaker, from any meeting, that no person claims and
@@ -1683,15 +2131,23 @@ fn user_named_speakers_in(
         "SELECT speaker.speaker_id, speaker.display_name
            FROM meeting_speakers speaker
           WHERE speaker.merged_into_speaker_id IS NULL
+            AND speaker.revision > 0
             AND EXISTS (
                 SELECT 1 FROM meeting_speaker_voiceprints voiceprint
                  WHERE voiceprint.speaker_id = speaker.speaker_id
             )
             AND NOT EXISTS (
                 SELECT 1 FROM meeting_voice_speaker_resolutions resolution
-                 WHERE resolution.speaker_id = speaker.speaker_id
-                   AND resolution.is_current = 1
-                   AND resolution.resolution_kind = 'identified'
+                 WHERE resolution.speaker_id = speaker.speaker_id AND resolution.is_current = 1
+            )
+            AND NOT EXISTS (
+                SELECT 1 FROM voice_speaker_matches matched
+                 WHERE matched.speaker_id = speaker.speaker_id
+            )
+            AND NOT EXISTS (
+                SELECT 1 FROM meeting_voice_names named
+                 WHERE named.speaker_id = speaker.speaker_id
+                   AND (named.is_current = 1 OR named.speaker_revision = speaker.revision)
             )",
     )?;
     let mut speaker_ids = Vec::new();
@@ -1750,6 +2206,7 @@ pub(in crate::meeting::store) fn resolve_renamed_speaker_in(
     user_name: Option<&str>,
     now_utc_ms: i64,
 ) -> Result<bool, StoreError> {
+    let automatic_link_changed = withdraw_automatic_name_in(transaction, speaker_id)?;
     let current = identified_person_in(transaction, speaker_id)?;
     let named = if is_generated_speaker_label(display_name.trim()) {
         None
@@ -1763,7 +2220,7 @@ pub(in crate::meeting::store) fn resolve_renamed_speaker_in(
             now_utc_ms,
         )?
     };
-    let mut people_changed = false;
+    let mut people_changed = automatic_link_changed;
     if let Some((person_id, created)) = named {
         let linked = upsert_link_in(
             transaction,
@@ -1773,7 +2230,7 @@ pub(in crate::meeting::store) fn resolve_renamed_speaker_in(
             PersonLinkConfidence::Confirmed,
             now_utc_ms,
         )?;
-        people_changed = created || linked;
+        people_changed |= created || linked;
     }
     let target = named.map(|(person_id, _)| person_id);
     if target == current {
@@ -1926,6 +2383,8 @@ pub(in crate::meeting::store) fn forget_person_voiceprints_in(
                    AND resolved_person_id = ?1
                 UNION
                 SELECT speaker_id FROM voice_speaker_matches WHERE person_id = ?1
+                UNION
+                SELECT speaker_id FROM meeting_voice_names WHERE person_id = ?1
           )",
         params![id(person_id)],
     )?;
@@ -1980,6 +2439,10 @@ pub(in crate::meeting::store) fn remove_voice_person_evidence_in(
 ) -> Result<VoiceEvidenceChange, StoreError> {
     transaction.execute(
         "DELETE FROM voice_speaker_matches WHERE person_id = ?1",
+        params![id(person_id)],
+    )?;
+    transaction.execute(
+        "UPDATE meeting_voice_names SET is_current = 0, blocked = 1 WHERE person_id = ?1",
         params![id(person_id)],
     )?;
     let profiles_changed = transaction.execute(

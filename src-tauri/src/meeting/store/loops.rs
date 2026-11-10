@@ -765,6 +765,14 @@ pub(in crate::meeting::store) fn user_speaker_labels_in(
                 EXISTS (SELECT 1 FROM voice_speaker_matches v JOIN persons p ON p.id = v.person_id
                          WHERE v.speaker_id = s.speaker_id AND v.speaker_revision = s.revision
                            AND p.display_name = s.display_name)
+                    OR EXISTS (SELECT 1 FROM meeting_voice_names named
+                                WHERE named.speaker_id = s.speaker_id
+                                  AND named.speaker_revision = s.revision
+                                  AND NOT EXISTS (
+                                      SELECT 1 FROM meeting_voice_speaker_resolutions confirmed
+                                      WHERE confirmed.speaker_id = s.speaker_id
+                                        AND confirmed.is_current = 1
+                                        AND confirmed.resolution_kind = 'identified'))
            FROM meeting_speakers s JOIN meeting_sessions m ON m.id = s.session_id
           WHERE s.session_id = ?1 AND s.merged_into_speaker_id IS NULL",
     )?;

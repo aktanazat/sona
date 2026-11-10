@@ -5,7 +5,7 @@ use super::heard_plans_tests::{engine, local, Named, Scripted};
 use super::loops_tests::{file_ledger, series_event};
 use super::reel_tests::{confirm, talk};
 use super::workflow_core_tests::{link, person, store};
-use super::{encode_json, id, MeetingStore, StoreError};
+use super::{encode_json, id, MeetingStore, StoreError, LOCAL_SPEAKER_LABEL};
 use crate::meeting::context::{ConversationContextUpdate, ConversationKind, ConversationLocation};
 use crate::meeting::detection::machine::CalendarEventSummary;
 use crate::meeting::heard_plans::read;
@@ -52,10 +52,18 @@ fn pricing_review() -> Result<PricingReview, StoreError> {
         &store,
         began,
         &[
-            (me, "Speaker 1", "Thanks for making time, both of you."),
+            (
+                me,
+                LOCAL_SPEAKER_LABEL,
+                "Thanks for making time, both of you.",
+            ),
             (stephen_voice, "Speaker 2", PLAN_LINE),
             (nolan_voice, "Speaker 3", "Thursday at 2 works for me."),
-            (me, "Speaker 1", "I'll send the churn sheet before then."),
+            (
+                me,
+                LOCAL_SPEAKER_LABEL,
+                "I'll send the churn sheet before then.",
+            ),
             (
                 nolan_voice,
                 "Speaker 3",
@@ -70,6 +78,7 @@ fn pricing_review() -> Result<PricingReview, StoreError> {
         ],
         true,
     );
+    store.local_diarization_speaker(session_id, None)?;
     store.connection()?.execute(
         "UPDATE meeting_sessions SET origin_kind = '\"manual\"' WHERE id = ?1",
         params![id(session_id)],
@@ -117,7 +126,7 @@ fn pricing_review() -> Result<PricingReview, StoreError> {
                 promise(
                     "I",
                     "Send the churn sheet before Thursday",
-                    "Speaker 1",
+                    LOCAL_SPEAKER_LABEL,
                     &lines[3],
                     "I'll send the churn sheet before then.",
                 ),
@@ -298,8 +307,8 @@ fn an_imported_meeting_sorts_the_users_promises_by_name() {
     connection
         .execute(
             "UPDATE meeting_speakers SET display_name = 'Aktan Azat'
-              WHERE session_id = ?1 AND display_name = 'Speaker 1'",
-            params![id(meeting.session_id)],
+              WHERE session_id = ?1 AND display_name = ?2",
+            params![id(meeting.session_id), LOCAL_SPEAKER_LABEL],
         )
         .unwrap();
     drop(connection);
