@@ -267,8 +267,14 @@ struct PersonListRow: View {
     /// rather than cells of a table.
     private var facts: String {
         var parts: [String] = []
+        if let role = entry.person.role {
+            parts.append(role)
+        }
         if let organization = entry.person.organization {
             parts.append(organization)
+        }
+        if !entry.person.aliases.isEmpty {
+            parts.append("Also \(entry.person.aliases.joined(separator: ", "))")
         }
         if let last = entry.lastMeeting {
             parts.append("Last met \(PeopleFormat.elapsed(last.at))")

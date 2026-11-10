@@ -37,6 +37,11 @@ struct PlanningProject: Decodable, Identifiable, Equatable {
     let revision: Int64
     let createdAtMs: Int64
     let updatedAtMs: Int64
+    var leadPersonId: String? = nil
+    var memberPersonIds: [String]? = nil
+    var targetAtMs: Int64? = nil
+    var hue: Int? = nil
+    var archivedAtMs: Int64? = nil
 }
 
 struct PlanningMilestone: Decodable, Identifiable, Equatable {
@@ -137,7 +142,9 @@ struct PlanningListFilter: Equatable {
 extension PlanningProject {
     func with(status: PlanningProjectStatus, at now: Int64) -> PlanningProject {
         PlanningProject(id: id, title: title, description: description, status: status, revision: revision,
-                        createdAtMs: createdAtMs, updatedAtMs: now)
+                        createdAtMs: createdAtMs, updatedAtMs: now, leadPersonId: leadPersonId,
+                        memberPersonIds: memberPersonIds, targetAtMs: targetAtMs, hue: hue,
+                        archivedAtMs: archivedAtMs)
     }
 }
 
@@ -481,10 +488,11 @@ final class ProjectsStore {
                 guard let self else { return }
                 self.invalidateSuggestions()
                 if event != "planning-changed-event" { self.sourcesRevision += 1 }
-                let changed = event == "planning-changed-event" ? (try? Core.payload(line) as PlanningChange)?.projectId : nil
+                let changed = event == "planning-changed-event"
+                    ? (try? Core.payload(line) as PlanningChange)?.projectId : nil
                 Task {
                     await self.refresh()
-                    if let changed { await self.loadDetails([changed]) }
+                    if let changed, !changed.isEmpty { await self.loadDetails([changed]) }
                 }
             }
         }

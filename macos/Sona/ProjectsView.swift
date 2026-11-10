@@ -315,6 +315,13 @@ struct ProjectsView: View {
                 .foregroundStyle(Theme.ink)
                 .lineLimit(1)
             if total == 0 { Text("No tasks").metaText() }
+            if let lead = summary.project.leadPersonId.flatMap({ id in people.first { $0.id == id } }) {
+                Text("Lead \(lead.name)").metaText().lineLimit(1)
+            }
+            if let target = summary.project.targetAtMs {
+                Text("Target \(PlanningFormat.day(target))").metaText().lineLimit(1)
+                    .help(PlanningFormat.date(target))
+            }
             Spacer(minLength: 12)
             AvatarStack(faces: store.details[summary.id].map(owners) ?? [], size: 18, revision: photoRevision)
                 .frame(width: 62, alignment: .trailing)
