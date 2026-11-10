@@ -140,13 +140,16 @@ pub(crate) struct People {
 
 impl People {
     pub(crate) fn read(meetings: &Connection) -> Result<Self> {
-        let mut statement = meetings
-            .prepare("SELECT id, display_name FROM persons ORDER BY lower(display_name), id")?;
+        let mut statement = meetings.prepare(
+            "SELECT id, display_name, aliases_json FROM persons ORDER BY lower(display_name), id",
+        )?;
         let choices = statement
             .query_map([], |row| {
+                let aliases: String = row.get(2)?;
                 Ok(WorkPersonChoice {
                     id: row.get(0)?,
                     name: row.get(1)?,
+                    aliases: serde_json::from_str(&aliases).unwrap_or_default(),
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -523,7 +526,10 @@ fn local_noon_ms(day: NaiveDate) -> Result<i64> {
 
 fn person_named(meetings: &Connection, name: &str) -> Result<Option<(String, String)>> {
     let mut statement = meetings.prepare_cached(
-        "SELECT id, display_name FROM persons WHERE lower(display_name) = lower(?1) LIMIT 2",
+        "SELECT id, display_name FROM persons
+          WHERE lower(display_name) = lower(?1)
+             OR EXISTS (SELECT 1 FROM json_each(aliases_json) WHERE lower(value) = lower(?1))
+          LIMIT 2",
     )?;
     let matches = statement
         .query_map([name.trim()], |row| Ok((row.get(0)?, row.get(1)?)))?

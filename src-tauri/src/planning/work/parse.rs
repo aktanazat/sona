@@ -608,7 +608,10 @@ pub(crate) fn person_named<'p>(
             .next()
             .is_some_and(|first| key(first) == wanted)
     };
-    only(people.iter().filter(|person| key(&person.name) == wanted))
+    let called = |person: &&WorkPersonChoice| {
+        key(&person.name) == wanted || person.aliases.iter().any(|alias| key(alias) == wanted)
+    };
+    only(people.iter().filter(called))
         .or_else(|| only(people.iter().filter(first_name)))
         .or_else(|| {
             (prefix && wanted.len() >= 2)
@@ -1705,6 +1708,7 @@ mod tests {
                 .map(|name| WorkPersonChoice {
                     id: name.to_lowercase(),
                     name: (*name).to_owned(),
+                    aliases: Vec::new(),
                 })
                 .collect(),
         }

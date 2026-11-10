@@ -32,9 +32,10 @@ use self::types::{
     WorkProjectChoice, WorkQuery, WorkRelation, WorkRelationKind, WorkRepeat, WorkSource,
     WorkStatus, WorkTimeBlock, WorkView,
 };
+use super::catalog;
 use super::sources;
 use super::store::{self, Refusal};
-use super::types::{PlanningTask, TaskStatus};
+use super::types::{Milestone, PlanningTask, Project, TaskStatus};
 use crate::managers::history::HistoryManager;
 use crate::meeting::loop_types::MeetingLoopId;
 use crate::meeting::session::MeetingSessionManager;
@@ -1298,6 +1299,121 @@ pub fn work_label_delete(app: AppHandle, operation_id: String, id: String) -> Re
                 Ok(Done {
                     effects: Effects {
                         items: items::delete_label(tx, &id)?,
+                        ..Effects::default()
+                    },
+                    value: (),
+                })
+            },
+        )
+    })
+}
+
+pub(crate) fn catalog_project_save(
+    app: &AppHandle,
+    operation_id: &str,
+    id: Option<String>,
+    edit: &catalog::ProjectEdit,
+) -> Result<Project, String> {
+    let now = now_ms();
+    let project = run_history(app, |history| {
+        store::mutate(
+            history,
+            operation_id,
+            "catalog_project_save",
+            &(&id, edit),
+            now,
+            |tx| {
+                let project = catalog::save_project(tx, id.as_deref(), edit, now)?;
+                Ok(Done {
+                    effects: Effects {
+                        projects: vec![project.id.clone()],
+                        ..Effects::default()
+                    },
+                    value: project,
+                })
+            },
+        )
+    })?;
+    Ok(project)
+}
+
+pub(crate) fn catalog_milestone_save(
+    app: &AppHandle,
+    operation_id: &str,
+    project_id: &str,
+    id: Option<String>,
+    edit: &catalog::MilestoneEdit,
+) -> Result<Milestone, String> {
+    let now = now_ms();
+    run_history(app, |history| {
+        store::mutate(
+            history,
+            operation_id,
+            "catalog_milestone_save",
+            &(project_id, &id, edit),
+            now,
+            |tx| {
+                let milestone = catalog::save_milestone(tx, project_id, id.as_deref(), edit, now)?;
+                Ok(Done {
+                    effects: Effects {
+                        projects: vec![milestone.project_id.clone()],
+                        ..Effects::default()
+                    },
+                    value: milestone,
+                })
+            },
+        )
+    })
+}
+
+pub(crate) fn catalog_milestone_delete(
+    app: &AppHandle,
+    operation_id: &str,
+    id: &str,
+) -> Result<(), String> {
+    let now = now_ms();
+    run_history(app, |history| {
+        store::mutate(
+            history,
+            operation_id,
+            "catalog_milestone_delete",
+            &id,
+            now,
+            |tx| {
+                let milestone = store::milestone(tx, id)?;
+                let items = catalog::delete_milestone(tx, id, now)?;
+                Ok(Done {
+                    effects: Effects {
+                        items,
+                        projects: vec![milestone.project_id],
+                        ..Effects::default()
+                    },
+                    value: (),
+                })
+            },
+        )
+    })
+}
+
+pub(crate) fn catalog_person_repoint(
+    app: &AppHandle,
+    operation_id: &str,
+    from: &str,
+    to: &str,
+) -> Result<(), String> {
+    let now = now_ms();
+    run_history(app, |history| {
+        store::mutate(
+            history,
+            operation_id,
+            "catalog_person_repoint",
+            &(from, to),
+            now,
+            |tx| {
+                let items = catalog::repoint_person(tx, from, to, now)?;
+                Ok(Done {
+                    effects: Effects {
+                        items,
                         ..Effects::default()
                     },
                     value: (),

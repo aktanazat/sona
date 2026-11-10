@@ -101,6 +101,11 @@ pub struct Project {
     pub revision: i64,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
+    pub lead_person_id: Option<String>,
+    pub member_person_ids: Vec<String>,
+    pub target_at_ms: Option<i64>,
+    pub hue: Option<u16>,
+    pub archived_at_ms: Option<i64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
@@ -109,6 +114,7 @@ pub struct Milestone {
     pub id: String,
     pub project_id: String,
     pub title: String,
+    pub description: Option<String>,
     pub due_at_ms: Option<i64>,
     pub status: TaskStatus,
     pub revision: i64,

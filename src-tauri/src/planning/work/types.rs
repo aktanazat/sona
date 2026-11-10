@@ -630,6 +630,10 @@ pub struct WorkProjectChoice {
 pub struct WorkPersonChoice {
     pub id: String,
     pub name: String,
+    /// Other names the person goes by, such as a spelling the transcript
+    /// keeps getting wrong.
+    #[serde(default)]
+    pub aliases: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize, Type)]

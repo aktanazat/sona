@@ -15,10 +15,9 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use uuid::Uuid;
 
-const PROJECT_COLUMNS: &str =
-    "id, title, description, status, revision, created_at_ms, updated_at_ms";
+const PROJECT_COLUMNS: &str = "id, title, description, status, revision, created_at_ms, updated_at_ms, lead_person_id, target_at_ms, hue, archived_at_ms";
 const MILESTONE_COLUMNS: &str =
-    "id, project_id, title, due_at_ms, status, revision, created_at_ms, updated_at_ms";
+    "id, project_id, title, due_at_ms, status, revision, created_at_ms, updated_at_ms, description";
 const TASK_COLUMNS: &str = "id, project_id, milestone_id, title, details, due_at_ms, owner_person_id, owner_is_self, status, revision, created_at_ms, updated_at_ms";
 const EVIDENCE_COLUMNS: &str = "id, target_kind, target_id, source_kind, source_id, at_ms, revision, created_at_ms, meeting_note_id, end_ms, caption";
 
@@ -152,6 +151,11 @@ fn read_project(row: &Row<'_>) -> rusqlite::Result<Project> {
         revision: row.get(4)?,
         created_at_ms: row.get(5)?,
         updated_at_ms: row.get(6)?,
+        lead_person_id: row.get(7)?,
+        member_person_ids: Vec::new(),
+        target_at_ms: row.get(8)?,
+        hue: row.get(9)?,
+        archived_at_ms: row.get(10)?,
     })
 }
 
@@ -165,6 +169,7 @@ fn read_milestone(row: &Row<'_>) -> rusqlite::Result<Milestone> {
         revision: row.get(5)?,
         created_at_ms: row.get(6)?,
         updated_at_ms: row.get(7)?,
+        description: row.get(8)?,
     })
 }
 
@@ -204,14 +209,32 @@ fn read_evidence(row: &Row<'_>) -> rusqlite::Result<EvidenceLink> {
     })
 }
 
+fn attach_members(conn: &Connection, projects: &mut [&mut Project]) -> Result<()> {
+    let mut members = conn.prepare(
+        "SELECT project_id, person_id FROM planning_project_members ORDER BY project_id, person_id",
+    )?;
+    let mut by_project: HashMap<String, Vec<String>> = HashMap::new();
+    for row in members.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))? {
+        let (project_id, person_id) = row?;
+        by_project.entry(project_id).or_default().push(person_id);
+    }
+    for project in projects {
+        project.member_person_ids = by_project.remove(&project.id).unwrap_or_default();
+    }
+    Ok(())
+}
+
 pub(crate) fn project(conn: &Connection, id: &str) -> Result<Project> {
-    conn.query_row(
-        &format!("SELECT {PROJECT_COLUMNS} FROM planning_projects WHERE id = ?1"),
-        [id],
-        read_project,
-    )
-    .optional()?
-    .ok_or_else(|| Refusal::NotFound.into())
+    let mut project = conn
+        .query_row(
+            &format!("SELECT {PROJECT_COLUMNS} FROM planning_projects WHERE id = ?1"),
+            [id],
+            read_project,
+        )
+        .optional()?
+        .ok_or(Refusal::NotFound)?;
+    attach_members(conn, &mut [&mut project])?;
+    Ok(project)
 }
 
 pub(crate) fn milestone(conn: &Connection, id: &str) -> Result<Milestone> {
@@ -239,8 +262,8 @@ pub(crate) fn task(conn: &Connection, id: &str) -> Result<PlanningTask> {
 }
 
 pub(crate) fn projects(conn: &Connection) -> Result<Vec<ProjectSummary>> {
-    let mut statement = conn.prepare(
-        "SELECT p.id, p.title, p.description, p.status, p.revision, p.created_at_ms, p.updated_at_ms,
+    let mut statement = conn.prepare(&format!(
+        "SELECT {PROJECT_COLUMNS},
             (SELECT count(*) FROM planning_tasks t WHERE t.project_id = p.id AND t.archived_at_ms IS NULL
                 AND t.status IN ('triage', 'backlog', 'not_started', 'in_progress')),
             (SELECT count(*) FROM planning_tasks t WHERE t.project_id = p.id AND t.archived_at_ms IS NULL
@@ -251,17 +274,38 @@ pub(crate) fn projects(conn: &Connection) -> Result<Vec<ProjectSummary>> {
                 UNION ALL
                 SELECT due_at_ms FROM planning_milestones WHERE project_id = p.id AND status IN ('not_started', 'in_progress')
             ))
-         FROM planning_projects p ORDER BY p.updated_at_ms DESC, p.id",
-    )?;
+         FROM planning_projects p WHERE p.archived_at_ms IS NULL
+         ORDER BY p.updated_at_ms DESC, p.id"
+    ))?;
     let rows = statement.query_map([], |row| {
         Ok(ProjectSummary {
             project: read_project(row)?,
-            open_task_count: row.get(7)?,
-            completed_task_count: row.get(8)?,
-            next_due_at_ms: row.get(9)?,
+            open_task_count: row.get(11)?,
+            completed_task_count: row.get(12)?,
+            next_due_at_ms: row.get(13)?,
         })
     })?;
-    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    let mut summaries = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    attach_members(
+        conn,
+        &mut summaries
+            .iter_mut()
+            .map(|summary| &mut summary.project)
+            .collect::<Vec<_>>(),
+    )?;
+    Ok(summaries)
+}
+
+/// Every project, put away or not, for the command line.
+pub(crate) fn all_projects(conn: &Connection) -> Result<Vec<Project>> {
+    let mut statement = conn.prepare(&format!(
+        "SELECT {PROJECT_COLUMNS} FROM planning_projects ORDER BY lower(title), id"
+    ))?;
+    let mut projects = statement
+        .query_map([], read_project)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    attach_members(conn, &mut projects.iter_mut().collect::<Vec<_>>())?;
+    Ok(projects)
 }
 
 /// Projects still taking work, the one worked in most recently first: a task
@@ -269,7 +313,7 @@ pub(crate) fn projects(conn: &Connection) -> Result<Vec<ProjectSummary>> {
 pub(crate) fn projects_by_activity(conn: &Connection) -> Result<Vec<Project>> {
     let mut statement = conn.prepare(&format!(
         "SELECT {PROJECT_COLUMNS} FROM planning_projects p
-         WHERE p.status != 'completed'
+         WHERE p.status != 'completed' AND p.archived_at_ms IS NULL
          ORDER BY max(
              p.updated_at_ms,
              coalesce((SELECT max(t.updated_at_ms) FROM planning_tasks t WHERE t.project_id = p.id), 0),
@@ -277,7 +321,9 @@ pub(crate) fn projects_by_activity(conn: &Connection) -> Result<Vec<Project>> {
          ) DESC, p.id"
     ))?;
     let rows = statement.query_map([], read_project)?;
-    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    let mut projects = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    attach_members(conn, &mut projects.iter_mut().collect::<Vec<_>>())?;
+    Ok(projects)
 }
 
 /// A project's saved rows. Serializes exactly as `ProjectDetail` did before it

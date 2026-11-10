@@ -599,6 +599,7 @@ mod tests {
             .map(|name| WorkPersonChoice {
                 id: name.to_lowercase(),
                 name: (*name).to_owned(),
+                aliases: Vec::new(),
             })
             .collect()
     }

@@ -542,6 +542,20 @@ CREATE TRIGGER planning_watch_delete AFTER DELETE ON planning_watches BEGIN
     DELETE FROM planning_watch_hits WHERE watch_id = old.id;
 END;";
 
+/// What the project and people pages carry beyond a title: who leads, who is
+/// on it, its target day and color, and whether it is put away.
+pub const CATALOG_MIGRATION: &str = "ALTER TABLE planning_projects ADD COLUMN lead_person_id TEXT;
+ALTER TABLE planning_projects ADD COLUMN target_at_ms INTEGER;
+ALTER TABLE planning_projects ADD COLUMN hue INTEGER CHECK(hue IS NULL OR (hue >= 0 AND hue <= 360));
+ALTER TABLE planning_projects ADD COLUMN archived_at_ms INTEGER;
+ALTER TABLE planning_milestones ADD COLUMN description TEXT;
+CREATE TABLE planning_project_members (
+    project_id TEXT NOT NULL REFERENCES planning_projects(id) ON DELETE CASCADE,
+    person_id TEXT NOT NULL,
+    PRIMARY KEY (project_id, person_id)
+);
+CREATE INDEX planning_project_members_person ON planning_project_members(person_id);";
+
 /// Every planner migration in order, for tests that build the schema without
 /// the rest of the history database.
 #[cfg(test)]
@@ -560,6 +574,7 @@ pub(crate) fn apply_all(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
         REPEAT_MIGRATION,
         CYCLES_MIGRATION,
         WATCH_MIGRATION,
+        CATALOG_MIGRATION,
     ] {
         conn.execute_batch(migration)?;
     }

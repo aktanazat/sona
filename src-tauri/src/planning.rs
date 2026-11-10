@@ -1,5 +1,6 @@
 //! Owner-authored local plans and references to their original evidence.
 
+pub(crate) mod catalog;
 pub(crate) mod person;
 mod proposal;
 mod proposal_sources;
@@ -14,7 +15,7 @@ pub(crate) mod work;
 
 pub use proposal::{PlanningDraft, PlanningSourceRef};
 pub use schema::{
-    AGENTS_MIGRATION, CAPTURE_MIGRATION, CYCLES_MIGRATION, DAY_PLAN_MIGRATION,
+    AGENTS_MIGRATION, CAPTURE_MIGRATION, CATALOG_MIGRATION, CYCLES_MIGRATION, DAY_PLAN_MIGRATION,
     DISMISSED_LOOP_MIGRATION, FOLLOW_MIGRATION, MEETING_NOTE_LINK_MIGRATION, MIGRATION,
     PROJECT_DELETE_KEEPS_TASKS_MIGRATION, QUIET_REVIEW_MIGRATION, REPEAT_MIGRATION,
     WATCH_MIGRATION, WORK_MIGRATION,
@@ -38,6 +39,10 @@ use tauri_specta::Event;
 #[serde(rename_all = "camelCase")]
 pub struct PlanningChangedEvent {
     pub project_id: String,
+}
+
+pub(crate) fn changed_everywhere(app: &AppHandle) {
+    changed(app, String::new());
 }
 
 fn changed(app: &AppHandle, project_id: String) {
