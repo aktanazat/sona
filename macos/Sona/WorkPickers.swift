@@ -39,6 +39,9 @@ enum WorkChoices {
         case .snooze: "Snooze until, or type a date…"
         case .delegate: "Delegate to…"
         case .cycle: "Move to cycle…"
+        case .blockedBy: "Blocked by which task…"
+        case .blocks: "Blocks which task…"
+        case .related: "Related to which task…"
         }
     }
 
@@ -100,6 +103,8 @@ enum WorkChoices {
                 let value: WorkPatchValue<Int64> = number.map { .set($0) } ?? .clear
                 model.changeWork { work.update(ids, WorkPatch(cycle: value)) }
             }
+        case .blockedBy, .blocks, .related:
+            relations(picker.kind, of: ids, text: text, model: model)
         }
         return filtered(choices, by: text, kind: picker.kind)
     }
@@ -107,8 +112,12 @@ enum WorkChoices {
     /// Typed letters narrow a list of names; dates and tasks read the text
     /// themselves.
     static func filtered(_ choices: [WorkChoice], by text: String, kind: WorkPicker.Kind) -> [WorkChoice] {
-        guard !text.isEmpty, kind != .due, kind != .snooze, kind != .duplicate else { return choices }
+        guard !text.isEmpty, kind != .due, kind != .snooze, !picksTask(kind) else { return choices }
         return choices.filter { $0.id == newLabel || $0.title.localizedCaseInsensitiveContains(text) }
+    }
+
+    static func picksTask(_ kind: WorkPicker.Kind) -> Bool {
+        [.duplicate, .blockedBy, .blocks, .related].contains(kind)
     }
 
     static let newLabel = "new-label"
@@ -299,6 +308,30 @@ enum WorkChoices {
         }
     }
 
+    /// Tasks to link these to, newest first, without the ones already linked
+    /// to the open task. A blocker is the other task for Blocked by and these
+    /// for Blocks.
+    private static func relations(_ kind: WorkPicker.Kind, of ids: [String], text: String, model: AppModel) -> [WorkChoice] {
+        let work = model.work
+        let linked = work.detail.flatMap { detail in
+            ids == [detail.item.id] ? detail.relations.flatMap { [$0.fromId, $0.toId] } : nil
+        } ?? []
+        let taken = Set(ids + linked)
+        let number = text.hasPrefix("#") ? String(text.dropFirst()) : text
+        let pool = (work.items ?? []).filter { row in
+            !taken.contains(row.id) && row.archivedAtMs == nil
+                && (text.isEmpty || row.title.localizedCaseInsensitiveContains(text) || "\(row.number)" == number)
+        }
+        return pool.sorted { $0.updatedAtMs > $1.updatedAtMs }.prefix(30).map { other in
+            WorkChoice(id: other.id, title: other.title, mark: .status(other.status), detail: "#\(other.number)") {
+                for id in ids {
+                    let (from, to) = kind == .blockedBy ? (other.id, id) : (id, other.id)
+                    work.addRelation(from: from, to: to, kind: kind == .related ? .related : .blocks)
+                }
+            }
+        }
+    }
+
     /// On for every task when any lacks it, off for all when all have it.
     /// A patch sets the whole list, so tasks whose lists differ change apart.
     private static func toggle(_ label: String, _ rows: [WorkItemRow], _ model: AppModel) {
@@ -353,7 +386,7 @@ struct WorkPickerList: View {
                 context: compact ? nil : model.workContext(picker.ids),
                 keepsOpen: WorkChoices.keepsOpen(picker.kind),
                 compact: compact,
-                empty: picker.kind == .duplicate ? "No task matches." : "Nothing matches.",
+                empty: WorkChoices.picksTask(picker.kind) ? "No task matches." : "Nothing matches.",
                 make: { WorkChoices.make(picker, query: $0, model: model) { pickingDay = true } },
                 close: close)
         }

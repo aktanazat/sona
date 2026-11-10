@@ -52,6 +52,12 @@ struct ShortcutSheet: View {
                 Entry(title: "Duplicate", keys: ["3"]),
                 Entry(title: "Next or previous source", keys: ["tab", "shift+tab"]),
             ]),
+            ("Relations", [
+                Entry(title: "Blocked by", keys: ["m b"]),
+                Entry(title: "Blocks", keys: ["m x"]),
+                Entry(title: "Related to", keys: ["m r"]),
+                Entry(title: "Duplicate of", keys: ["m m"]),
+            ]),
             ("Today", [
                 Entry(title: "Pick a focus", keys: ["space"]),
                 Entry(title: "Start the day", keys: ["return"]),

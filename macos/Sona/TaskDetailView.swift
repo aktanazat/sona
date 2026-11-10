@@ -117,6 +117,10 @@ private struct DetailMain: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
+            if row.status == .duplicate {
+                DuplicateBanner(canonical: row.duplicateOfId, place: place)
+                    .padding(.bottom, 16)
+            }
             DetailTitle(row: row)
             ProposalStrip(proposals: model.work.proposals(for: row.id))
             DetailNotes(row: row)
@@ -130,6 +134,46 @@ private struct DetailMain: View {
             DetailActivity(row: row, activity: detail?.activity)
                 .padding(.top, 32)
         }
+    }
+}
+
+/// On a duplicate: the task it repeats, which opens on a click.
+private struct DuplicateBanner: View {
+    let canonical: String?
+    let place: Place
+    @Environment(AppModel.self) private var model
+    @State private var hovering = false
+
+    var body: some View {
+        let other = canonical.flatMap { model.workRows([$0]).first }
+        HStack(spacing: 10) {
+            Image(systemName: "square.on.square")
+                .font(.system(size: 12))
+                .foregroundStyle(Theme.statusDuplicate)
+            Text("Duplicate of").metaText()
+            if let other {
+                TaskStatusIcon(status: other.status)
+                Text("#\(other.number)").font(TypeScale.mono(12)).foregroundStyle(Theme.inkTertiary)
+                Text(other.title).bodyText(13).lineLimit(1)
+            } else {
+                Text("an archived task").bodyText(13, Theme.inkTertiary)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 12)
+        .frame(height: 36)
+        .background(hovering && other != nil ? Theme.wash : Theme.inset, in: RoundedRectangle(cornerRadius: Theme.radiusCard))
+        .hoverFade(hovering)
+        .contentShape(Rectangle())
+        .onHover { hovering = $0 }
+        .onTapGesture {
+            guard let other else { return }
+            model.workFocus.highlighted = other.id
+            model.workFocus.open(other.id, in: place)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(other == nil ? [] : .isButton)
+        .help(other == nil ? "" : "Open the original")
     }
 }
 
@@ -179,40 +223,256 @@ private struct DetailTitle: View {
     }
 }
 
-/// The details, kept when the field is left.
+/// The details as Markdown: lists, checklists, links and code. A click
+/// edits the text itself, kept when the editor is left; Esc puts it back.
 private struct DetailNotes: View {
     let row: WorkItemRow
     @Environment(AppModel.self) private var model
     @State private var text = ""
+    @State private var editing = false
     @FocusState private var focused: Bool
 
     var body: some View {
-        TextField("", text: $text, prompt: Text("Details").foregroundStyle(Theme.inkDisabled), axis: .vertical)
-            .textFieldStyle(.plain)
-            .font(TypeScale.body(14))
-            .lineSpacing(3)
-            .foregroundStyle(Theme.ink)
-            .focused($focused)
-            .onSubmit { focused = false }
-            .onExitCommand {
-                text = row.details ?? ""
-                focused = false
+        let details = row.details ?? ""
+        Group {
+            if editing || details.isEmpty {
+                editor
+            } else {
+                MarkdownBody(source: details) { line in
+                    toggle(line, in: details)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+                .onTapGesture { edit() }
+                .accessibilityElement(children: .contain)
+                .accessibilityLabel("Details")
+                .accessibilityAction(named: "Edit") { edit() }
+                .help("Click to edit")
             }
-            .onChange(of: focused) { _, now in
-                if !now { commit() }
+        }
+        .onChange(of: row.details, initial: true) { _, details in
+            if !focused { text = details ?? "" }
+        }
+    }
+
+    private var editor: some View {
+        ZStack(alignment: .topLeading) {
+            Text(text.isEmpty ? " " : text + "\n")
+                .font(TypeScale.body(14))
+                .lineSpacing(3)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .hidden()
+            if text.isEmpty {
+                Text("Details").font(TypeScale.body(14)).foregroundStyle(Theme.inkDisabled)
+                    .allowsHitTesting(false)
             }
-            .onChange(of: row.details, initial: true) { _, details in
-                if !focused { text = details ?? "" }
+            TextEditor(text: $text)
+                .font(TypeScale.body(14))
+                .lineSpacing(3)
+                .foregroundStyle(Theme.ink)
+                .textEditorStyle(.plain)
+                .scrollContentBackground(.hidden)
+                .scrollDisabled(true)
+                .padding(.horizontal, -5)
+                .focused($focused)
+                .onExitCommand {
+                    text = row.details ?? ""
+                    focused = false
+                }
+                .accessibilityLabel("Details")
+        }
+        .onChange(of: focused) { _, now in
+            if !now {
+                commit()
+                editing = false
             }
-            .accessibilityLabel("Details")
+        }
+    }
+
+    private func edit() {
+        editing = true
+        focused = true
     }
 
     private func commit() {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed != (row.details ?? "") else { return }
-        let value: WorkPatchValue<String> = trimmed.isEmpty ? .clear : .set(trimmed)
+        save(trimmed)
+    }
+
+    private func toggle(_ line: Int, in details: String) {
+        save(MarkdownBody.toggled(details, line: line))
+    }
+
+    private func save(_ details: String) {
+        let value: WorkPatchValue<String> = details.isEmpty ? .clear : .set(details)
         let id = row.id
         model.changeWork { model.work.update([id], WorkPatch(details: value)) }
+    }
+}
+
+/// Markdown read as blocks: headings, lists, checklists, quotes and code,
+/// with links, emphasis and inline code inside each. `toggle` checks or
+/// unchecks the checklist item on that line of the source.
+private struct MarkdownBody: View {
+    let source: String
+    let toggle: (Int) -> Void
+
+    private enum Block {
+        case paragraph(String)
+        case heading(Int, String)
+        case bullet(Int, String)
+        case numbered(Int, String, String)
+        case check(line: Int, indent: Int, done: Bool, text: String)
+        case quote(String)
+        case code(String)
+        case gap
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(Array(Self.blocks(source).enumerated()), id: \.offset) { _, block in
+                view(block)
+            }
+        }
+    }
+
+    @ViewBuilder private func view(_ block: Block) -> some View {
+        switch block {
+        case let .paragraph(text):
+            Self.inline(text).bodyText(14).fixedSize(horizontal: false, vertical: true)
+        case let .heading(level, text):
+            Self.inline(text)
+                .font(.system(size: level == 1 ? 18 : level == 2 ? 16 : 14, weight: .semibold))
+                .foregroundStyle(Theme.ink)
+                .padding(.top, 4)
+                .accessibilityAddTraits(.isHeader)
+        case let .bullet(indent, text):
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text("•").bodyText(14, Theme.inkTertiary).accessibilityHidden(true)
+                Self.inline(text).bodyText(14).fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.leading, CGFloat(indent) * 18)
+        case let .numbered(indent, number, text):
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(number).bodyText(14, Theme.inkTertiary).monospacedDigit()
+                Self.inline(text).bodyText(14).fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.leading, CGFloat(indent) * 18)
+        case let .check(line, indent, done, text):
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Button { toggle(line) } label: {
+                    Image(systemName: done ? "checkmark.square.fill" : "square")
+                        .font(.system(size: 13))
+                        .foregroundStyle(done ? Theme.accent : Theme.inkTertiary)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(String(Self.attributed(text).characters))
+                .accessibilityValue(done ? "Checked" : "Unchecked")
+                .accessibilityAddTraits(.isToggle)
+                Self.inline(text).bodyText(14, done ? Theme.inkSecondary : Theme.ink)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityHidden(true)
+            }
+            .padding(.leading, CGFloat(indent) * 18)
+        case let .quote(text):
+            HStack(spacing: 10) {
+                Rectangle().fill(Theme.hairline).frame(width: 2)
+                Self.inline(text).bodyText(14, Theme.inkSecondary).fixedSize(horizontal: false, vertical: true)
+            }
+            .fixedSize(horizontal: false, vertical: true)
+        case let .code(text):
+            Text(text)
+                .font(TypeScale.mono(12))
+                .foregroundStyle(Theme.ink)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Theme.inset, in: RoundedRectangle(cornerRadius: Theme.radiusRow))
+        case .gap:
+            Color.clear.frame(height: 2)
+        }
+    }
+
+    /// Emphasis, links and inline code, with bare web addresses made links.
+    private static func inline(_ text: String) -> Text {
+        Text(attributed(text))
+    }
+
+    private static func attributed(_ text: String) -> AttributedString {
+        var string = (try? AttributedString(
+            markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+        )) ?? AttributedString(text)
+        let plain = String(string.characters)
+        guard let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) else { return string }
+        for match in detector.matches(in: plain, range: NSRange(plain.startIndex..., in: plain)) {
+            guard let url = match.url, let range = Range(match.range, in: plain) else { continue }
+            let start = string.characters.index(string.startIndex, offsetBy: plain.distance(from: plain.startIndex, to: range.lowerBound))
+            let end = string.characters.index(start, offsetBy: plain.distance(from: range.lowerBound, to: range.upperBound))
+            if string[start..<end].link == nil { string[start..<end].link = url }
+        }
+        return string
+    }
+
+    private static func blocks(_ source: String) -> [Block] {
+        var blocks: [Block] = []
+        var paragraph: [String] = []
+        var code: [String]?
+        func flush() {
+            if !paragraph.isEmpty { blocks.append(.paragraph(paragraph.joined(separator: "\n"))) }
+            paragraph = []
+        }
+        for (index, raw) in source.components(separatedBy: "\n").enumerated() {
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            if let lines = code {
+                if line.hasPrefix("```") {
+                    blocks.append(.code(lines.joined(separator: "\n")))
+                    code = nil
+                } else {
+                    code = lines + [raw]
+                }
+                continue
+            }
+            let indent = raw.prefix { $0 == " " || $0 == "\t" }.reduce(0) { $0 + ($1 == "\t" ? 2 : 1) } / 2
+            if line.hasPrefix("```") {
+                flush()
+                code = []
+            } else if line.isEmpty {
+                flush()
+                if case .gap? = blocks.last {} else if !blocks.isEmpty { blocks.append(.gap) }
+            } else if let match = line.wholeMatch(of: /(#{1,3}) (.+)/) {
+                flush()
+                blocks.append(.heading(match.1.count, String(match.2)))
+            } else if let match = line.wholeMatch(of: /[-*+] \[([ xX])\](?: (.*))?/) {
+                flush()
+                blocks.append(.check(line: index, indent: indent, done: match.1 != " ", text: String(match.2 ?? "")))
+            } else if let match = line.wholeMatch(of: /[-*+] (.+)/) {
+                flush()
+                blocks.append(.bullet(indent, String(match.1)))
+            } else if let match = line.wholeMatch(of: /(\d+[.)]) (.+)/) {
+                flush()
+                blocks.append(.numbered(indent, String(match.1), String(match.2)))
+            } else if let match = line.wholeMatch(of: />\s?(.*)/) {
+                flush()
+                blocks.append(.quote(String(match.1)))
+            } else {
+                paragraph.append(raw)
+            }
+        }
+        flush()
+        if let code { blocks.append(.code(code.joined(separator: "\n"))) }
+        return blocks
+    }
+
+    /// The source with the checklist item on `line` checked or unchecked.
+    static func toggled(_ source: String, line: Int) -> String {
+        var lines = source.components(separatedBy: "\n")
+        guard lines.indices.contains(line), let open = lines[line].firstIndex(of: "[") else { return source }
+        let mark = lines[line].index(after: open)
+        guard mark < lines[line].endIndex else { return source }
+        lines[line].replaceSubrange(mark...mark, with: lines[line][mark] == " " ? "x" : " ")
+        return lines.joined(separator: "\n")
     }
 }
 
@@ -523,7 +783,9 @@ private struct DetailRelations: View {
     @State private var adding: RelationAdd?
 
     var body: some View {
-        let entries = RelationEntry.all(for: row.id, in: relations ?? [])
+        let entries = RelationEntry.all(for: row.id, in: relations ?? []) { id in
+            model.workRows([id]).first?.status.isOpen ?? true
+        }
         VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 8) {
                 DetailHeading(title: "Relations")
@@ -541,9 +803,7 @@ private struct DetailRelations: View {
                 .help("Add a relation")
                 .accessibilityLabel("Add a relation")
                 .popover(item: $adding, arrowEdge: .bottom) { kind in
-                    ChoiceList(prompt: kind.prompt, compact: true, empty: "No task matches.") { text in
-                        choices(kind, text: text, taken: Set(entries.map(\.other)))
-                    } close: {
+                    WorkPickerList(picker: WorkPicker(kind: kind.picker, ids: [row.id]), compact: true) {
                         adding = nil
                     }
                     .padding(.vertical, 4)
@@ -553,21 +813,6 @@ private struct DetailRelations: View {
             .padding(.bottom, 6)
             ForEach(entries) { entry in
                 RelationLine(entry: entry, place: place)
-            }
-        }
-    }
-
-    private func choices(_ kind: RelationAdd, text: String, taken: Set<String>) -> [WorkChoice] {
-        let id = row.id
-        let number = text.hasPrefix("#") ? String(text.dropFirst()) : text
-        let pool = (model.work.items ?? []).filter { other in
-            other.id != id && !taken.contains(other.id)
-                && (text.isEmpty || other.title.localizedCaseInsensitiveContains(text) || "\(other.number)" == number)
-        }
-        return pool.sorted { $0.updatedAtMs > $1.updatedAtMs }.prefix(30).map { other in
-            WorkChoice(id: other.id, title: other.title, mark: .status(other.status), detail: "#\(other.number)") {
-                let (from, to) = kind == .blockedBy ? (other.id, id) : (id, other.id)
-                model.changeWork { model.work.addRelation(from: from, to: to, kind: kind.kind) }
             }
         }
     }
@@ -586,30 +831,29 @@ private enum RelationAdd: String, CaseIterable, Identifiable {
         }
     }
 
-    var prompt: String {
+    var picker: WorkPicker.Kind {
         switch self {
-        case .blocks: "Blocks which task…"
-        case .blockedBy: "Blocked by which task…"
-        case .related: "Related to which task…"
+        case .blocks: .blocks
+        case .blockedBy: .blockedBy
+        case .related: .related
         }
     }
-
-    var kind: WorkRelationKind { self == .related ? .related : .blocks }
 }
 
-/// One relation from this task's side.
+/// One relation from this task's side. Once the blocking task is done, the
+/// link no longer blocks and reads as related.
 private struct RelationEntry: Identifiable {
     let id: String
     let title: String
     let other: String
 
-    static func all(for id: String, in relations: [WorkRelation]) -> [RelationEntry] {
+    static func all(for id: String, in relations: [WorkRelation], isOpen: (String) -> Bool) -> [RelationEntry] {
         let entries = relations.compactMap { relation -> RelationEntry? in
             switch relation.kind {
             case .blocks where relation.fromId == id:
-                RelationEntry(id: relation.id, title: "Blocks", other: relation.toId)
+                RelationEntry(id: relation.id, title: isOpen(id) ? "Blocks" : "Related", other: relation.toId)
             case .blocks where relation.toId == id:
-                RelationEntry(id: relation.id, title: "Blocked by", other: relation.fromId)
+                RelationEntry(id: relation.id, title: isOpen(relation.fromId) ? "Blocked by" : "Related", other: relation.fromId)
             case .related where relation.fromId == id || relation.toId == id:
                 RelationEntry(id: relation.id, title: "Related", other: relation.fromId == id ? relation.toId : relation.fromId)
             default:

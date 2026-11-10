@@ -670,8 +670,13 @@ final class AppModel {
     }
 
     /// A `sona://` link: the core resolves it and answers with a navigation
-    /// event, which lands in `open(_ target:)` or the meetings store.
+    /// event, which lands in `open(_ target:)` or the meetings store. A task
+    /// link opens here, since a task's page lives only in this app.
     func open(link: String) {
+        if let task = TaskCopy.task(in: link) {
+            openTask(task)
+            return
+        }
         Task { await query.open(link: link) }
     }
 

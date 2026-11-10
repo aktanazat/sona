@@ -424,7 +424,7 @@ enum RitualKeys {
         guard let shutdown = model.shutdown(at: .now), !shutdown.slipped.isEmpty else { return false }
         let rituals = model.rituals
         if flags == .command, key == "z" {
-            guard model.workFocus.toast != nil, model.work.undoTitle != nil else { return false }
+            guard model.workFocus.toast != nil, model.workFocus.toastUndoes, model.work.undoTitle != nil else { return false }
             model.undoWork()
             return true
         }

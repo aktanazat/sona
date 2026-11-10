@@ -6,7 +6,7 @@ import SwiftUI
 struct WorkPicker: Equatable {
     enum Kind: Equatable {
         case status, priority, owner, due, labels, project, duplicate, snooze
-        case delegate, cycle
+        case delegate, cycle, blockedBy, blocks, related
     }
 
     let kind: Kind
@@ -20,6 +20,7 @@ enum WorkAction: String, CaseIterable, Identifiable {
     case accept, decline, duplicate, snooze, nudge, archive
     case delegate, acceptProposal, acceptAllProposals, rejectProposal
     case cycle, block
+    case blockedBy, blocks, related
 
     var id: String { rawValue }
 
@@ -47,6 +48,9 @@ enum WorkAction: String, CaseIterable, Identifiable {
         case .rejectProposal: "Reject proposed change"
         case .cycle: "Move to cycle…"
         case .block: "Book time"
+        case .blockedBy: "Blocked by…"
+        case .blocks: "Blocks…"
+        case .related: "Related to…"
         }
     }
 
@@ -75,11 +79,15 @@ enum WorkAction: String, CaseIterable, Identifiable {
         case .rejectProposal: "n"
         case .cycle: "shift+c"
         case .block: "b"
+        case .blockedBy: "m b"
+        case .blocks: "m x"
+        case .related: "m r"
         }
     }
 
-    /// The same key as a menu's equivalent, so a row's menu shows it.
-    var equivalent: KeyboardShortcut {
+    /// The same key as a menu's equivalent, so a row's menu shows it. Keys
+    /// pressed one after another have none.
+    var equivalent: KeyboardShortcut? {
         switch self {
         case .open: KeyboardShortcut(.return, modifiers: [])
         case .peek: KeyboardShortcut(.space, modifiers: [])
@@ -103,6 +111,7 @@ enum WorkAction: String, CaseIterable, Identifiable {
         case .rejectProposal: KeyboardShortcut("n", modifiers: [])
         case .cycle: KeyboardShortcut("c", modifiers: .shift)
         case .block: KeyboardShortcut("b", modifiers: [])
+        case .blockedBy, .blocks, .related: nil
         }
     }
 
@@ -130,6 +139,9 @@ enum WorkAction: String, CaseIterable, Identifiable {
         case .rejectProposal: "xmark"
         case .cycle: "arrow.triangle.2.circlepath"
         case .block: "calendar.badge.clock"
+        case .blockedBy: "exclamationmark.octagon"
+        case .blocks: "hand.raised"
+        case .related: "arrow.left.arrow.right"
         }
     }
 
@@ -146,6 +158,9 @@ enum WorkAction: String, CaseIterable, Identifiable {
         case .open, .peek, .assignToMe, .rename, .accept, .decline, .nudge, .archive, .block: nil
         case .delegate: .delegate
         case .cycle: .cycle
+        case .blockedBy: .blockedBy
+        case .blocks: .blocks
+        case .related: .related
         case .acceptProposal, .acceptAllProposals, .rejectProposal: nil
         }
     }
@@ -167,8 +182,84 @@ enum WorkAction: String, CaseIterable, Identifiable {
         case .delegate: true
         case .cycle: rows.allSatisfy { $0.status.isOpen }
         case .block: rows.count == 1 && first.status.isOpen && first.timeBlock == nil
+        case .blockedBy, .blocks, .related: true
         case .acceptProposal, .acceptAllProposals, .rejectProposal: rows.contains { proposed.contains($0.id) }
         }
+    }
+}
+
+/// What a task copies as: the ID agents and the command line take, a Sona
+/// link, or Markdown to paste into a note or a message.
+@MainActor
+enum TaskCopy: String, CaseIterable, Identifiable {
+    case handle, link, markdown
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .handle: "Copy ID"
+        case .link: "Copy link"
+        case .markdown: "Copy as Markdown"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .handle: "number"
+        case .link: "link"
+        case .markdown: "doc.plaintext"
+        }
+    }
+
+    static func handle(_ row: WorkItemRow) -> String { "S-\(row.number)" }
+
+    static func link(_ row: WorkItemRow) -> String { "sona://task/\(row.id)" }
+
+    /// The task a `sona://task/<id>` link names.
+    static func task(in link: String) -> String? {
+        guard let url = URL(string: link), url.scheme?.lowercased() == "sona", url.host() == "task" else { return nil }
+        return url.pathComponents.dropFirst().first
+    }
+
+    func text(_ rows: [WorkItemRow]) -> String {
+        switch self {
+        case .handle: rows.map(Self.handle).joined(separator: "\n")
+        case .link: rows.map(Self.link).joined(separator: "\n")
+        case .markdown: rows.map(Self.markdown).joined(separator: "\n\n")
+        }
+    }
+
+    func done(_ rows: [WorkItemRow]) -> String {
+        guard rows.count == 1, let row = rows.first else {
+            return switch self {
+            case .handle: "Copied \(rows.count) IDs"
+            case .link: "Copied \(rows.count) links"
+            case .markdown: "Copied \(rows.count) tasks as Markdown"
+            }
+        }
+        return switch self {
+        case .handle: "Copied \(Self.handle(row))"
+        case .link: "Copied the link to \(Self.handle(row))"
+        case .markdown: "Copied \(Self.handle(row)) as Markdown"
+        }
+    }
+
+    private static func markdown(_ row: WorkItemRow) -> String {
+        var lines = ["## \(handle(row)) \(row.title)", "", "- Status: \(row.status.label)"]
+        if let owner = row.ownerIsSelf ? "Me" : row.ownerName { lines.append("- Owner: \(owner)") }
+        if let project = row.projectTitle { lines.append("- Project: \(project)") }
+        if let due = row.dueAtMs { lines.append("- Due: \(WorkChoices.long(due))") }
+        if let details = row.details?.trimmingCharacters(in: .whitespacesAndNewlines), !details.isEmpty {
+            lines += ["", details]
+        }
+        if let quote = row.sourceQuote {
+            lines.append("")
+            lines += quote.split(separator: "\n", omittingEmptySubsequences: false).map { "> \($0)" }
+            let heard = [row.sourceSpeaker, row.sourceMeetingTitle.map { "in \($0)" }].compactMap { $0 }
+            if !heard.isEmpty { lines += [">", "> \(heard.joined(separator: " "))"] }
+        }
+        return lines.joined(separator: "\n")
     }
 }
 
@@ -216,6 +307,8 @@ final class WorkFocus {
     /// The change the undo toast offers to take back, and a count that
     /// restarts its timer when the same words come twice.
     var toast: String?
+    /// Off for a toast that only says what happened, such as a copy.
+    private(set) var toastUndoes = true
     private(set) var toastStamp = 0
     /// The row keys moved to, for the list to bring into view.
     private(set) var scrollTarget: String?
@@ -247,8 +340,9 @@ final class WorkFocus {
         return highlighted.map { [$0] } ?? []
     }
 
-    func announce(_ title: String?) {
+    func announce(_ title: String?, undoes: Bool = true) {
         toast = title
+        toastUndoes = undoes
         toastStamp += 1
     }
 
@@ -397,8 +491,12 @@ final class WorkFocus {
 final class WorkKeys {
     private var monitor: Any?
     private var goPressedAt: TimeInterval?
+    private var relatePressedAt: TimeInterval?
     private static let destinations: [String: Place] = [
         "h": .capture, "d": .today, "m": .meetings, "t": .tasks, "i": .triage, "p": .people, "j": .projects,
+    ]
+    private static let relations: [String: WorkAction] = [
+        "b": .blockedBy, "x": .blocks, "r": .related, "m": .duplicate,
     ]
 
     func install(_ model: AppModel) {
@@ -463,7 +561,16 @@ final class WorkKeys {
             model.perform(action, on: [first.id])
             return true
         }
-        if event.keyCode == 53 { return focus.escape(in: place) }
+        if event.keyCode == 53 {
+            relatePressedAt = nil
+            return focus.escape(in: place)
+        }
+        if let pressed = relatePressedAt {
+            relatePressedAt = nil
+            if event.timestamp - pressed < 1.5, plain, let action = Self.relations[key] {
+                return run(action)
+            }
+        }
         switch event.specialKey {
         case .downArrow?, .upArrow?:
             guard plain || shift else { return false }
@@ -547,6 +654,10 @@ final class WorkKeys {
             return true
         case "c" where place != .people:
             focus.composing = place == .triage ? WorkPatch() : model.workDraftDefaults
+            return true
+        case "m":
+            guard !targets.isEmpty else { return false }
+            relatePressedAt = event.timestamp
             return true
         case "s": return run(.status)
         case "p": return run(.priority)
@@ -647,7 +758,8 @@ extension AppModel {
             work.rejectProposals(ids.compactMap { work.proposals(for: $0).first?.id })
         case .block:
             work.book(first)
-        case .status, .priority, .owner, .due, .labels, .project, .duplicate, .snooze, .delegate, .cycle:
+        case .status, .priority, .owner, .due, .labels, .project, .duplicate, .snooze, .delegate, .cycle,
+             .blockedBy, .blocks, .related:
             break
         }
     }
@@ -748,21 +860,49 @@ extension AppModel {
     var workPaletteActions: [PaletteAction] {
         let ids = workTargets
         let rows = workRows(ids)
-        let triageKeys: Set<WorkAction> = [.accept, .decline, .duplicate]
         let proposed = workProposed(rows)
         let verbs = WorkAction.allCases.filter { $0.applies(to: rows, proposed: proposed) }.map { action in
             PaletteAction(
                 id: "work-\(action.rawValue)", group: .work, title: action.title,
                 run: { [weak self] in self?.perform(action, on: ids) },
                 icon: action.icon,
-                shortcut: place == .triage || !triageKeys.contains(action) ? action.keys : nil)
+                shortcut: paletteKeys(action))
+        }
+        let copies = rows.isEmpty ? [] : TaskCopy.allCases.map { copy in
+            PaletteAction(
+                id: "work-copy-\(copy.rawValue)", group: .work, title: copy.title,
+                run: { [weak self] in self?.copy(copy, ids: ids) },
+                icon: copy.icon, shortcut: nil)
         }
         let overdue = overdueTargets
-        guard !overdue.isEmpty else { return verbs }
-        return verbs + [PaletteAction(
+        guard !overdue.isEmpty else { return verbs + copies }
+        return verbs + copies + [PaletteAction(
             id: "work-reschedule-overdue", group: .work, title: "Reschedule overdue",
             run: { [weak self] in self?.perform(.due, on: overdue) },
             icon: "calendar.badge.clock", shortcut: "shift+d")]
+    }
+
+    func copy(_ copy: TaskCopy, ids: [String]) {
+        let rows = workRows(ids)
+        guard !rows.isEmpty else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(copy.text(rows), forType: .string)
+        workFocus.announce(copy.done(rows), undoes: false)
+    }
+
+    /// A `sona://task/<id>` link: the task's page on Tasks.
+    func openTask(_ id: String) {
+        reveal()
+        go(.tasks)
+        workFocus.peeking = false
+        workFocus.highlighted = id
+        workFocus.open(id, in: .tasks)
+    }
+
+    private func paletteKeys(_ action: WorkAction) -> String? {
+        if action == .duplicate, place != .triage { return "m m" }
+        let triageKeys: Set<WorkAction> = [.accept, .decline, .duplicate]
+        return place == .triage || !triageKeys.contains(action) ? action.keys : nil
     }
 
     /// The tasks the palette acts on, for the chip over its field.

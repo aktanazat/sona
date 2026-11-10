@@ -450,6 +450,16 @@ struct WorkActionMenu: View {
             }
             .keyboardShortcut(keys ? action.equivalent : nil)
         }
+        if !rows.isEmpty {
+            Divider()
+            ForEach(TaskCopy.allCases) { copy in
+                Button {
+                    model.copy(copy, ids: ids)
+                } label: {
+                    Label(copy.title, systemImage: copy.icon)
+                }
+            }
+        }
     }
 }
 

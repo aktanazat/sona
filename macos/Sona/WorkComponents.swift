@@ -725,15 +725,17 @@ struct UndoToast: View {
             } else if let title = focus.toast {
                 toast {
                     Text(title).bodyText(13).lineLimit(1)
-                    Button {
-                        model.undoWork()
-                    } label: {
-                        HStack(spacing: 6) {
-                            Text("Undo").font(TypeScale.label(13)).foregroundStyle(Theme.accent)
-                            Shortcut("cmd+z")
+                    if focus.toastUndoes {
+                        Button {
+                            model.undoWork()
+                        } label: {
+                            HStack(spacing: 6) {
+                                Text("Undo").font(TypeScale.label(13)).foregroundStyle(Theme.accent)
+                                Shortcut("cmd+z")
+                            }
                         }
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
                 }
             }
         }
