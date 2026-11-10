@@ -129,6 +129,34 @@ shows what would move, the same words without `--dry-run` move it. Without a
 who it means the user's own open work. `watch pricing` tells the user when a
 meeting or dictation says the word; `watches` lists them, `unwatch` stops one.
 
+Projects and People pages. Keep the catalog the pages show from the terminal:
+
+```bash
+sona work projects [--all]                       # lead, status, target day, open and done counts
+sona work project-save "Q1 launch" --lead Dana --members "Dana,Lee" --target 2026-03-31 --status active
+sona work project-archive "Q1 launch" [--restore]
+sona work milestones "Q1 launch"
+sona work milestone-save "Q1 launch" "Beta" --target 2026-02-15
+sona work milestone-delete "Q1 launch" "Beta"
+sona work people [--query dana]                  # aliases, role, organization, open work
+sona work person-save "Dana Reyes" --aliases "Dayna,Dana R" --role "Design lead" --org Acme
+sona work person-merge Dayna --into "Dana Reyes" # tasks, quotes and speaker links move
+```
+
+`project-save` and `person-save` make the thing when nothing goes by that
+name and change it when something does; `--project` or `--person` with the
+old name renames. `--aliases` replaces the whole list (a rename keeps the
+old name as an alias). Every place that takes a person (`--owner`, `--lead`,
+`--members`, triage suggestions, speaker names) matches the name or any
+alias, so a misheard first name finds the right person. These writes need
+both grants and the Agents' changes setting on Apply. A running Sona shows
+them within a second or two.
+
+The meetings feed is read-only: `sona work meetings --since 2026-11-01`
+(a day or milliseconds) lists id, title, start, minutes, whether it was
+processed, and who was in it; `sona work meeting <ID> [--transcript]` gives
+the summary, commitments, and the transcript with speaker turns.
+
 Every write takes `--operation-id`. Left out, Sona derives one from the request
 and what it read, so running a command again never changes anything twice: a
 create repeated the same day answers with the first task and `replayed:true`,
