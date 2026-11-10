@@ -604,6 +604,7 @@ final class VoiceIdentityStore {
     /// Waiting speakers whose voice other meetings heard and nobody named
     /// there either. Naming the speaker names the meetings kept with it.
     private(set) var sameVoice: [SameVoice] = []
+    private(set) var namedByVoice: [VoiceNamedSpeaker] = []
     /// Who a label can point at. Nil until the read answers.
     private(set) var people: [PersonListEntry]?
     private(set) var peopleFailed = false
@@ -648,6 +649,7 @@ final class VoiceIdentityStore {
             unresolved = []
             suggestions = []
             sameVoice = []
+            namedByVoice = []
         }
         self.sessionId = sessionId
         do {
@@ -673,11 +675,13 @@ final class VoiceIdentityStore {
             let askable = Set(unresolved.map(\.speakerId))
             suggestions = status.suggestions.filter { askable.contains($0.speakerId) }
             sameVoice = status.sameVoice.filter { askable.contains($0.speakerId) }
+            namedByVoice = status.namedByVoice
         } catch {
             speakers = []
             unresolved = []
             suggestions = []
             sameVoice = []
+            namedByVoice = []
             throw error
         }
     }
@@ -740,6 +744,37 @@ final class VoiceIdentityStore {
 
     func speaker(_ speakerId: String) -> VoiceIdentitySpeaker? {
         speakers.first { $0.speakerId == speakerId }
+    }
+
+    func voiceName(_ speakerId: String) -> VoiceNamedSpeaker? {
+        namedByVoice.first { $0.speakerId == speakerId }
+    }
+
+    func undoVoiceName(_ speakerId: String) {
+        guard let sessionId, let named = voiceName(speakerId),
+              let expectedSpeaker = speaker(speakerId), !busy else { return }
+        busy = true
+        act { [self] in
+            defer { busy = false }
+            let meeting: VoiceIdentityMeeting = try await core.request(
+                "meeting_get", ["sessionId": sessionId])
+            guard meeting.speakers.first(where: { $0.speakerId == speakerId })?.revision
+                == expectedSpeaker.revision else {
+                try await reread(sessionId)
+                throw PersonFailure(message: "This speaker changed. Try again.")
+            }
+            let result: MeetingMutationResult = try await core.request(
+                "meeting_speaker_rename",
+                MeetingRequest.speakerRename(
+                    sessionId, revision: Int(meeting.session.revision),
+                    speakerId: speakerId, displayName: named.originalDisplayName))
+            if let refusal = result.receipt.refusal {
+                try await reread(sessionId)
+                throw PersonFailure(message: refusal)
+            }
+            try await reread(sessionId)
+            if question?.speakerId == speakerId { ask(nil) }
+        }
     }
 
     /// Names the speaker, and the same voice in the `sameVoice` meetings, and

@@ -405,6 +405,7 @@ struct VoiceIdentityStatus: Decodable {
     let suggestions: [VoiceSpeakerSuggestion]
     /// Speakers still waiting whose voice other meetings heard, unnamed there too.
     let sameVoice: [SameVoice]
+    let namedByVoice: [VoiceNamedSpeaker]
 }
 
 /// One waiting speaker and the other meetings where the same voice waits for a
@@ -440,6 +441,19 @@ struct VoiceSpeakerSuggestion: Decodable, Identifiable {
     let speakerId: String
     let personId: String?
     let displayName: String
+
+    var id: String { speakerId }
+}
+
+enum VoiceNameResolution: String, Decodable {
+    case namedByVoice = "named_by_voice"
+    case voiceMatch = "voice_match"
+}
+
+struct VoiceNamedSpeaker: Decodable, Identifiable {
+    let speakerId: String
+    let originalDisplayName: String
+    let resolutionKind: VoiceNameResolution
 
     var id: String { speakerId }
 }

@@ -555,6 +555,21 @@ pub(crate) fn resolved_person_for_speaker_in(
             _ => Err(StoreError::Corrupt),
         };
     }
+    let automatic: Option<String> = connection
+        .query_row(
+            "SELECT named.person_id FROM meeting_voice_names named
+             JOIN meeting_speakers speaker ON speaker.speaker_id = named.speaker_id
+             WHERE named.speaker_id = ?1 AND named.session_id = ?2
+               AND speaker.session_id = ?2 AND speaker.merged_into_speaker_id IS NULL
+               AND named.resolution_kind = 'named_by_voice' AND named.is_current = 1
+               AND named.speaker_revision = speaker.revision AND named.person_id IS NOT NULL",
+            params![id(speaker_id), id(session_id)],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(person_id) = automatic {
+        return Ok(Some(PersonId(parse_uuid(&person_id)?)));
+    }
     let model = wespeaker_embedding_model_key();
     let person_id: Option<String> = connection
         .query_row(
@@ -909,9 +924,12 @@ fn person_sessions_in(
          LEFT JOIN meeting_voice_speaker_resolutions resolution
            ON resolution.speaker_id = speaker.speaker_id AND resolution.is_current = 1
          LEFT JOIN voice_speaker_matches matched ON matched.speaker_id = speaker.speaker_id
+         LEFT JOIN meeting_voice_names named ON named.speaker_id = speaker.speaker_id
+           AND named.is_current = 1 AND named.speaker_revision = speaker.revision
+           AND named.resolution_kind = 'named_by_voice'
          WHERE session.phase != 'deleting' AND session.current_transcript_revision_id IS NOT NULL
            AND session.transcript_purged_at_utc_ms IS NULL
-           AND (resolution.resolved_person_id = ?1 OR matched.person_id = ?1)
+           AND (resolution.resolved_person_id = ?1 OR matched.person_id = ?1 OR named.person_id = ?1)
          ORDER BY session.id",
     )?;
     let sessions = statement

@@ -119,6 +119,10 @@ impl MeetingStore {
               WHERE resolved_person_id = ?2 AND is_current = 1",
             params![target_id.uuid().to_string(), source_id.uuid().to_string()],
         )?;
+        transaction.execute(
+            "UPDATE meeting_voice_names SET person_id = ?1 WHERE person_id = ?2",
+            params![target_id.uuid().to_string(), source_id.uuid().to_string()],
+        )?;
         merge_person_corrections_in(&transaction, source_id, target_id)?;
         transaction.execute(
             "INSERT OR IGNORE INTO person_avatars (person_id, png, updated_at_utc_ms, provenance_json, original)

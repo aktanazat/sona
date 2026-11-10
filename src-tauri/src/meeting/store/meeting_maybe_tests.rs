@@ -607,6 +607,7 @@ fn a_name_the_call_lists_is_offered_only_for_someone_sona_knows() {
 #[test]
 fn the_prep_shows_who_the_call_lists_and_what_the_user_owes_them() {
     let (_directory, store) = store();
+    store.set_user_name_source(|| Some("Aktan Azat".to_string()));
     let nolan = person(&store, "Nolan Smith", &[], &[]);
     let stephen = person(&store, "Stephen Lee", &[], &[]);
     churn_review(&store, nolan).unwrap();

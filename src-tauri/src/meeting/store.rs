@@ -1593,6 +1593,31 @@ static MIGRATIONS: &[M] = &[
     M::up(include_str!("store/meeting_documents.sql")),
     M::up(include_str!("store/open_windows.sql")),
     M::up(include_str!("store/snapshot_texts.sql")),
+    M::up(
+        "CREATE TABLE meeting_voice_names (
+            speaker_id TEXT PRIMARY KEY NOT NULL REFERENCES meeting_speakers(speaker_id) ON DELETE CASCADE,
+            session_id TEXT NOT NULL REFERENCES meeting_sessions(id) ON DELETE CASCADE,
+            person_id TEXT REFERENCES persons(id) ON DELETE SET NULL,
+            original_display_name TEXT NOT NULL,
+            resolution_kind TEXT NOT NULL CHECK (resolution_kind IN ('named_by_voice', 'voice_match')),
+            speaker_revision INTEGER NOT NULL CHECK (speaker_revision >= 0),
+            is_current INTEGER NOT NULL CHECK (is_current IN (0, 1)),
+            blocked INTEGER NOT NULL CHECK (blocked IN (0, 1))
+        );
+        DROP VIEW transcript_correction_dependent_sessions;
+        CREATE VIEW transcript_correction_dependent_sessions AS
+        SELECT DISTINCT session.id AS session_id,
+               COALESCE(resolution.resolved_person_id, named.person_id, matched.person_id) AS person_id
+        FROM meeting_sessions session
+        JOIN meeting_speakers speaker ON speaker.session_id = session.id
+        LEFT JOIN meeting_voice_speaker_resolutions resolution
+          ON resolution.speaker_id = speaker.speaker_id AND resolution.is_current = 1
+        LEFT JOIN meeting_voice_names named
+          ON named.speaker_id = speaker.speaker_id AND named.is_current = 1
+          AND named.speaker_revision = speaker.revision AND named.resolution_kind = 'named_by_voice'
+        LEFT JOIN voice_speaker_matches matched ON matched.speaker_id = speaker.speaker_id
+        WHERE session.phase != 'deleting' AND session.current_transcript_revision_id IS NOT NULL;",
+    ),
 ];
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StoreError {
@@ -1925,10 +1950,9 @@ pub(crate) struct TranscriptSegmentInput {
     pub end_offset_ns: u64,
     pub text: String,
     pub confidence_milli: Option<u16>,
-    /// The speaker this utterance is already attributed to: a name the
-    /// transcript arrived with, or the user's own for a live call's microphone
-    /// line. `None` takes the track's default speaker and waits for
-    /// diarization to say more.
+    /// A name supplied by the imported transcript or explicitly confirmed for
+    /// this speaker. `None` leaves identity unresolved until diarization or
+    /// manual confirmation supplies more evidence.
     pub speaker: Option<String>,
 }
 
@@ -5625,6 +5649,41 @@ impl MeetingStore {
         .collect()
     }
 
+    pub(crate) fn remove_diarization_echoes(
+        &self,
+        session_id: MeetingSessionId,
+        transcript_revision_id: TranscriptRevisionId,
+        segment_ids: &[TranscriptSegmentId],
+    ) -> Result<(), StoreError> {
+        if segment_ids.is_empty() {
+            return Ok(());
+        }
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut removed = 0;
+        for segment_id in segment_ids {
+            removed += transaction.execute(
+                "DELETE FROM meeting_transcript_segments
+                  WHERE segment_id = ?1 AND transcript_revision_id = ?2
+                    AND EXISTS (
+                        SELECT 1 FROM meeting_transcript_revisions revision
+                         WHERE revision.transcript_revision_id = ?2 AND revision.session_id = ?3
+                    )
+                    AND NOT EXISTS (
+                        SELECT 1 FROM meeting_segment_edits edit
+                         WHERE edit.segment_id = meeting_transcript_segments.segment_id
+                    )",
+                params![id(*segment_id), id(transcript_revision_id), id(session_id)],
+            )?;
+        }
+        if removed != 0 {
+            mark_artifacts_out_of_date(&transaction, session_id)?;
+            rebuild_search_documents_in(&transaction, session_id)?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub(crate) fn begin_diarization_generation(
         &self,
         session_id: MeetingSessionId,
@@ -5656,6 +5715,7 @@ impl MeetingStore {
     pub(crate) fn diarization_speaker(
         &self,
         session_id: MeetingSessionId,
+        source_kind: SourceKind,
         cluster: u32,
     ) -> Result<SpeakerId, StoreError> {
         let mut connection = self.connection()?;
@@ -5663,8 +5723,30 @@ impl MeetingStore {
         let speaker_id = named_speaker_for(
             &transaction,
             session_id,
-            SourceKind::SystemAudio,
+            source_kind,
             &format!("Speaker {}", cluster.saturating_add(1)),
+        )?;
+        transaction.commit()?;
+        Ok(speaker_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn local_diarization_speaker(
+        &self,
+        session_id: MeetingSessionId,
+        user_name: Option<&str>,
+    ) -> Result<SpeakerId, StoreError> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        let display_name = user_name
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .unwrap_or(LOCAL_SPEAKER_LABEL);
+        let speaker_id = named_speaker_for(
+            &transaction,
+            session_id,
+            SourceKind::Microphone,
+            display_name,
         )?;
         transaction.commit()?;
         Ok(speaker_id)
@@ -6349,13 +6431,14 @@ impl MeetingStore {
         Ok(())
     }
 
-    pub(crate) fn fallback_system_speaker(
+    pub(crate) fn unresolved_diarization_speaker(
         &self,
         session_id: MeetingSessionId,
+        source_kind: SourceKind,
     ) -> Result<SpeakerId, StoreError> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction()?;
-        let speaker_id = source_speaker_for(&transaction, session_id, SourceKind::SystemAudio)?;
+        let speaker_id = source_speaker_for(&transaction, session_id, source_kind)?;
         transaction.commit()?;
         Ok(speaker_id)
     }
@@ -9239,10 +9322,7 @@ fn source_speaker_for(
     session_id: MeetingSessionId,
     source_kind: SourceKind,
 ) -> Result<SpeakerId, StoreError> {
-    let display_name = match source_kind {
-        SourceKind::Microphone => LOCAL_SPEAKER_LABEL,
-        SourceKind::SystemAudio => "Unknown speaker",
-    };
+    let display_name = "Unknown speaker";
     named_speaker_for(transaction, session_id, source_kind, display_name)
 }
 
@@ -12874,10 +12954,13 @@ mod tests {
             .into_samples()
             .collect::<Result<_, _>>()
             .unwrap();
-        let per_packet = 512 * 16_000 / 48_000;
-        assert_eq!(pcm.len(), 16_000 + per_packet);
-        assert!(pcm[..per_packet * 3].iter().all(|sample| *sample == 8_191));
-        assert!(pcm[per_packet * 3..16_000]
+        let first_burst_samples = 3 * 512 * 16_000 / 48_000;
+        let last_burst_samples = (512_usize * 16_000).div_ceil(48_000);
+        assert_eq!(pcm.len(), 16_000 + last_burst_samples);
+        assert!(pcm[..first_burst_samples]
+            .iter()
+            .all(|sample| *sample == 8_191));
+        assert!(pcm[first_burst_samples..16_000]
             .iter()
             .all(|sample| *sample == 0));
         assert!(pcm[16_000..].iter().all(|sample| *sample == 8_191));
@@ -15556,7 +15639,7 @@ mod tests {
             .begin_diarization_generation(session_id, transcript_revision_id, 0, "test", "1")
             .expect("begin generation");
         let speaker_id = store
-            .diarization_speaker(session_id, 0)
+            .diarization_speaker(session_id, SourceKind::SystemAudio, 0)
             .expect("diarized speaker");
         let assignments = transcript_segments(&store, transcript_revision_id)
             .into_iter()

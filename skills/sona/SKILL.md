@@ -77,6 +77,11 @@ Paged reads default to 25 rows and cap at 100. `--meetings` also accepts `--last
 instead of `--limit`. `--from` and `--to` must appear together. A modifier that
 belongs to another verb is refused rather than ignored.
 
+meeting exports will include saved speaker labels and voice evidence from the
+selected meetings only. they will exclude full saved voice profiles, your saved
+voiceprint, and new identity guesses from other meetings. recordings marked “keep
+local” will stay excluded.
+
 Exit codes: `0` answered, `2` bad input, `1` consent refusal, unavailable storage,
 missing record, failed operation or rejected loop write. JSON success goes to
 stdout; JSON refusals go to stderr. A loop write rejected by its revision fence

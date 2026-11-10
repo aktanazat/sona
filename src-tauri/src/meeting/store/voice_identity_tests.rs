@@ -2,8 +2,8 @@ use super::encode_json;
 use super::voice_identity::{
     ExplicitVoiceConsent, MeetingSpeakerIdentifyDisposition, MeetingSpeakerIdentifyRequest,
     MeetingSpeakerIdentifyTarget, SameVoice, SameVoiceSpeaker, UserVoiceprint,
-    UserVoiceprintRequest, VoiceEnrollmentEvidence, VoiceProfileEnrollmentRequest,
-    VoiceProfileStatus, VoiceSpeakerSuggestion,
+    UserVoiceprintRequest, VoiceEnrollmentEvidence, VoiceNameResolution,
+    VoiceProfileEnrollmentRequest, VoiceProfileStatus, VoiceSpeakerSuggestion,
 };
 use super::workflow_core_tests::{meeting, person, reviewable_meeting, store};
 use super::*;
@@ -1733,7 +1733,11 @@ fn diarized_transcript(
         .map(|(segment_id, cluster)| {
             Ok(DiarizationAssignmentInput {
                 segment_id,
-                speaker_id: store.diarization_speaker(session_id, cluster)?,
+                speaker_id: store.diarization_speaker(
+                    session_id,
+                    SourceKind::SystemAudio,
+                    cluster,
+                )?,
                 assignment: SpeakerAssignmentKind::SystemSpeaker,
             })
         })
@@ -1791,8 +1795,8 @@ fn naming_a_speaker_remembers_the_voice_for_a_suggestion_in_the_next_meeting(
             (1, "Yes."),
         ],
     )?;
-    let speaker_one = store.diarization_speaker(first, 0)?;
-    let speaker_two = store.diarization_speaker(first, 1)?;
+    let speaker_one = store.diarization_speaker(first, SourceKind::SystemAudio, 0)?;
+    let speaker_two = store.diarization_speaker(first, SourceKind::SystemAudio, 1)?;
     keep_voices(&store, first, &[(speaker_one, 1), (speaker_two, 0)])?;
 
     rename(&store, first, speaker_two, "Maya", None)?;
@@ -1829,8 +1833,8 @@ fn naming_a_speaker_remembers_the_voice_for_a_suggestion_in_the_next_meeting(
         .contains(&speaker_two));
 
     let second = meeting(&store, "Second", 3);
-    let same_voice = store.diarization_speaker(second, 0)?;
-    let other_voice = store.diarization_speaker(second, 1)?;
+    let same_voice = store.diarization_speaker(second, SourceKind::SystemAudio, 0)?;
+    let other_voice = store.diarization_speaker(second, SourceKind::SystemAudio, 1)?;
     keep_voices(&store, second, &[(same_voice, 0), (other_voice, 1)])?;
     assert_eq!(
         store.voice_speaker_suggestions(second, None)?,
@@ -1906,7 +1910,7 @@ fn naming_a_speaker_names_the_ledger_receipts_that_quote_them() -> Result<(), St
         },
     );
 
-    let first_voice = store.diarization_speaker(session_id, 0)?;
+    let first_voice = store.diarization_speaker(session_id, SourceKind::SystemAudio, 0)?;
     rename(&store, session_id, first_voice, "Priya", None)?;
 
     let said_by = |ledger: &MeetingLedger| {
@@ -2042,7 +2046,7 @@ fn an_action_a_voice_took_on_reads_by_that_voices_name_now() -> Result<(), Store
 fn renaming_a_speaker_back_to_its_label_takes_the_voice_off_the_person() -> Result<(), StoreError> {
     let (_directory, store) = store();
     let first = meeting(&store, "First", 1);
-    let speaker = store.diarization_speaker(first, 1)?;
+    let speaker = store.diarization_speaker(first, SourceKind::SystemAudio, 1)?;
     keep_voices(&store, first, &[(speaker, 0)])?;
 
     rename(&store, first, speaker, "Maya", None)?;
@@ -2052,14 +2056,13 @@ fn renaming_a_speaker_back_to_its_label_takes_the_voice_off_the_person() -> Resu
         .unresolved_active_voice_speaker_ids(first, None)?
         .contains(&speaker));
     let second = meeting(&store, "Second", 3);
-    let same_voice = store.diarization_speaker(second, 0)?;
+    let same_voice = store.diarization_speaker(second, SourceKind::SystemAudio, 0)?;
     keep_voices(&store, second, &[(same_voice, 0)])?;
     assert!(store.voice_speaker_suggestions(second, None)?.is_empty());
     Ok(())
 }
 
-/// The microphone speaker is the user, who is never a person, whatever name
-/// they give it.
+/// A microphone voice named after the known user does not create a person.
 #[test]
 fn naming_the_users_own_microphone_voice_creates_no_person() -> Result<(), StoreError> {
     let (_directory, store) = store();
@@ -2067,11 +2070,11 @@ fn naming_the_users_own_microphone_voice_creates_no_person() -> Result<(), Store
     let local = SpeakerId::new();
     insert_speaker(&store, first, local);
 
-    rename(&store, first, local, "Aktan", None)?;
+    rename(&store, first, local, "Aktan", Some("Aktan Azat"))?;
 
     assert!(people_named(&store, "Aktan")?.is_empty());
-    assert!(store
-        .unresolved_active_voice_speaker_ids(first, None)?
+    assert!(!store
+        .unresolved_active_voice_speaker_ids(first, Some("Aktan Azat"))?
         .contains(&local));
     Ok(())
 }
@@ -2083,14 +2086,14 @@ fn a_first_name_names_the_one_person_known_by_it() -> Result<(), StoreError> {
     let (_directory, store) = store();
     let maya = person(&store, "Maya Chen", &[], &[]);
     let first = meeting(&store, "First", 1);
-    let speaker = store.diarization_speaker(first, 1)?;
+    let speaker = store.diarization_speaker(first, SourceKind::SystemAudio, 1)?;
     keep_voices(&store, first, &[(speaker, 0)])?;
 
     rename(&store, first, speaker, "Maya", None)?;
 
     assert!(people_named(&store, "Maya")?.is_empty());
     let second = meeting(&store, "Second", 3);
-    let same_voice = store.diarization_speaker(second, 0)?;
+    let same_voice = store.diarization_speaker(second, SourceKind::SystemAudio, 0)?;
     keep_voices(&store, second, &[(same_voice, 0)])?;
     assert_eq!(
         store.voice_speaker_suggestions(second, None)?,
@@ -2112,7 +2115,7 @@ fn naming_a_speaker_after_the_user_creates_no_person() -> Result<(), StoreError>
     let (_directory, store) = store();
     person(&store, "Maya Chen", &[], &[]);
     let first = meeting(&store, "First", 1);
-    let speaker = store.diarization_speaker(first, 1)?;
+    let speaker = store.diarization_speaker(first, SourceKind::SystemAudio, 1)?;
     keep_voices(&store, first, &[(speaker, 0)])?;
     let user = Some("Aktan Azat");
 
@@ -2141,13 +2144,13 @@ fn a_voice_named_after_the_user_is_suggested_as_theirs() -> Result<(), StoreErro
     let (_directory, store) = store();
     let user = Some("Aktan Azat");
     let first = meeting(&store, "First", 1);
-    let mine = store.diarization_speaker(first, 1)?;
+    let mine = store.diarization_speaker(first, SourceKind::SystemAudio, 1)?;
     keep_voices(&store, first, &[(mine, 0)])?;
     rename(&store, first, mine, "aktan", user)?;
 
     let second = meeting(&store, "Second", 3);
-    let same_voice = store.diarization_speaker(second, 0)?;
-    let other_voice = store.diarization_speaker(second, 1)?;
+    let same_voice = store.diarization_speaker(second, SourceKind::SystemAudio, 0)?;
+    let other_voice = store.diarization_speaker(second, SourceKind::SystemAudio, 1)?;
     keep_voices(&store, second, &[(same_voice, 0), (other_voice, 1)])?;
     let suggested = [VoiceSpeakerSuggestion {
         speaker_id: same_voice,
@@ -2170,12 +2173,12 @@ fn a_voice_named_after_the_user_in_any_script_is_suggested_as_theirs() -> Result
     let (_directory, store) = store();
     let user = Some("Émile Zola");
     let first = meeting(&store, "First", 1);
-    let mine = store.diarization_speaker(first, 1)?;
+    let mine = store.diarization_speaker(first, SourceKind::SystemAudio, 1)?;
     keep_voices(&store, first, &[(mine, 0)])?;
     rename(&store, first, mine, "Émile", user)?;
 
     let second = meeting(&store, "Second", 3);
-    let same_voice = store.diarization_speaker(second, 0)?;
+    let same_voice = store.diarization_speaker(second, SourceKind::SystemAudio, 0)?;
     keep_voices(&store, second, &[(same_voice, 0)])?;
     assert_eq!(
         store.voice_speaker_suggestions(second, user)?,
@@ -2209,12 +2212,12 @@ fn a_person_named_after_the_user_counts_as_the_users_voice() -> Result<(), Store
     )?;
 
     let second = meeting(&store, "Second", 2);
-    let renamed = store.diarization_speaker(second, 1)?;
+    let renamed = store.diarization_speaker(second, SourceKind::SystemAudio, 1)?;
     keep_voices(&store, second, &[(renamed, 0)])?;
     rename(&store, second, renamed, "Aktan", user)?;
 
     let third = meeting(&store, "Third", 3);
-    let same_voice = store.diarization_speaker(third, 0)?;
+    let same_voice = store.diarization_speaker(third, SourceKind::SystemAudio, 0)?;
     keep_voices(&store, third, &[(same_voice, 0)])?;
     assert_eq!(
         store.voice_speaker_suggestions(third, user)?,
@@ -2234,8 +2237,8 @@ fn a_learned_voice_is_suggested_as_the_users_until_forgotten() -> Result<(), Sto
     let (_directory, store) = store();
     let user = Some("Aktan Azat");
     let session = meeting(&store, "Standup", 1);
-    let same_voice = store.diarization_speaker(session, 0)?;
-    let other_voice = store.diarization_speaker(session, 1)?;
+    let same_voice = store.diarization_speaker(session, SourceKind::SystemAudio, 0)?;
+    let other_voice = store.diarization_speaker(session, SourceKind::SystemAudio, 1)?;
     keep_voices(&store, session, &[(same_voice, 0), (other_voice, 1)])?;
     assert!(store.voice_speaker_suggestions(session, user)?.is_empty());
 
@@ -2308,10 +2311,10 @@ fn a_label_names_the_same_voice_in_every_meeting_kept_with_it() -> Result<(), St
     let first = reviewable_meeting(&store, "Kickoff", 1);
     let second = reviewable_meeting(&store, "Design review", 2);
     let third = reviewable_meeting(&store, "Retro", 3);
-    let earlier = store.diarization_speaker(first, 0)?;
-    let somebody_else = store.diarization_speaker(first, 1)?;
-    let again = store.diarization_speaker(second, 0)?;
-    let here = store.diarization_speaker(third, 0)?;
+    let earlier = store.diarization_speaker(first, SourceKind::SystemAudio, 0)?;
+    let somebody_else = store.diarization_speaker(first, SourceKind::SystemAudio, 1)?;
+    let again = store.diarization_speaker(second, SourceKind::SystemAudio, 0)?;
+    let here = store.diarization_speaker(third, SourceKind::SystemAudio, 0)?;
     keep_voices(&store, first, &[(earlier, 0), (somebody_else, 1)])?;
     keep_voices(&store, second, &[(again, 0)])?;
     keep_voices(&store, third, &[(here, 0)])?;
@@ -2379,8 +2382,8 @@ fn a_label_leaves_a_same_voice_speaker_named_since_the_sheet_opened() -> Result<
     let (_directory, store) = store();
     let first = reviewable_meeting(&store, "Kickoff", 1);
     let second = reviewable_meeting(&store, "Retro", 2);
-    let earlier = store.diarization_speaker(first, 0)?;
-    let here = store.diarization_speaker(second, 0)?;
+    let earlier = store.diarization_speaker(first, SourceKind::SystemAudio, 0)?;
+    let here = store.diarization_speaker(second, SourceKind::SystemAudio, 0)?;
     keep_voices(&store, first, &[(earlier, 0)])?;
     keep_voices(&store, second, &[(here, 0)])?;
     let grouped = store.same_voice_meetings(second, None)?;
@@ -2418,17 +2421,17 @@ fn an_unnamed_voice_is_forgotten_after_ninety_days() -> Result<(), StoreError> {
     let (_directory, store) = store();
     let ada = person(&store, "Ada Lovelace", &[], &[]);
     let first = meeting(&store, "Kickoff", 1);
-    let unnamed = store.diarization_speaker(first, 0)?;
-    let named = store.diarization_speaker(first, 1)?;
+    let unnamed = store.diarization_speaker(first, SourceKind::SystemAudio, 0)?;
+    let named = store.diarization_speaker(first, SourceKind::SystemAudio, 1)?;
     keep_voices(&store, first, &[(unnamed, 0), (named, 1)])?;
     label_existing(&store, first, named, ada, meeting_revision(&store, first)?)?;
     let second = meeting(&store, "Standup", 1);
-    let sounds_known = store.diarization_speaker(second, 0)?;
+    let sounds_known = store.diarization_speaker(second, SourceKind::SystemAudio, 0)?;
     keep_voices(&store, second, &[(sounds_known, 1)])?;
     let day = 24 * 60 * 60 * 1000;
     let now = 1 + 90 * day + 1;
     let third = meeting(&store, "Retro", now - day);
-    let newer = store.diarization_speaker(third, 0)?;
+    let newer = store.diarization_speaker(third, SourceKind::SystemAudio, 0)?;
     store.store_speaker_voiceprints(
         third,
         wespeaker_embedding_model_key(),
@@ -2543,14 +2546,650 @@ fn speaker_analysis_says_how_each_speaker_got_its_name() -> Result<(), StoreErro
             .filter(|speaker| speaker.counts_as_user)
             .map(|speaker| speaker.speaker_id.clone())
             .collect::<Vec<_>>(),
-        [mine.uuid().to_string()]
+        Vec::<String>::new()
     );
-    let profile = analysis
-        .people
+    Ok(())
+}
+
+fn meeting_with_voice(
+    store: &MeetingStore,
+    at_utc_ms: i64,
+) -> Result<(MeetingSessionId, SpeakerId), StoreError> {
+    let session_id = reviewable_meeting(store, "Voice", at_utc_ms);
+    let speaker_id = store.diarization_speaker(session_id, SourceKind::SystemAudio, 0)?;
+    keep_voices(store, session_id, &[(speaker_id, 0)])?;
+    Ok((session_id, speaker_id))
+}
+
+fn confirmed_voice_meeting(
+    store: &MeetingStore,
+    person_id: PersonId,
+    at_utc_ms: i64,
+) -> Result<(MeetingSessionId, SpeakerId), StoreError> {
+    let (session_id, speaker_id) = meeting_with_voice(store, at_utc_ms)?;
+    label_existing(
+        store,
+        session_id,
+        speaker_id,
+        person_id,
+        meeting_revision(store, session_id)?,
+    )?;
+    Ok((session_id, speaker_id))
+}
+
+#[test]
+fn confirmed_voice_naming_requires_two_distinct_earlier_meetings() -> Result<(), StoreError> {
+    use super::analysis_export::SpeakerResolution;
+
+    let (_directory, store) = store();
+    let ada = person(&store, "Ada Lovelace", &[], &[]);
+    let (first, _) = confirmed_voice_meeting(&store, ada, 1)?;
+    let duplicate = store.diarization_speaker(first, SourceKind::SystemAudio, 1)?;
+    keep_voices(&store, first, &[(duplicate, 0)])?;
+    label_existing(
+        &store,
+        first,
+        duplicate,
+        ada,
+        meeting_revision(&store, first)?,
+    )?;
+    let (current, speaker_id) = meeting_with_voice(&store, 10)?;
+
+    store.apply_confirmed_voice_names(current, None)?;
+    assert_eq!(
+        speaker_names(&store, &[(current, speaker_id)])?,
+        ["Speaker 1"]
+    );
+    assert!(store.voice_named_speakers(current)?.is_empty());
+
+    confirmed_voice_meeting(&store, ada, 2)?;
+    store.apply_confirmed_voice_names(current, None)?;
+
+    assert_eq!(
+        speaker_names(&store, &[(current, speaker_id)])?,
+        ["Ada Lovelace"]
+    );
+    let names = store.voice_named_speakers(current)?;
+    assert_eq!(names.len(), 1);
+    assert_eq!(names[0].speaker_id, speaker_id);
+    assert_eq!(names[0].original_display_name, "Speaker 1");
+    assert_eq!(names[0].resolution_kind, VoiceNameResolution::NamedByVoice);
+    let analysis = store.speaker_analysis(current)?;
+    let speaker = analysis
+        .speakers
         .iter()
-        .find(|person| person.person_id == ada_id)
-        .and_then(|person| person.voice_profile.as_ref())
-        .ok_or(StoreError::PersonNotFound)?;
-    assert_eq!(profile.centroid, voice(1)?.as_slice());
+        .find(|speaker| speaker.speaker_id == id(speaker_id))
+        .ok_or(StoreError::SpeakerNotFound)?;
+    assert!(matches!(
+        &speaker.resolution,
+        SpeakerResolution::NamedByVoice {
+            person_id: Some(person_id), original_display_name, ..
+        } if *person_id == id(ada) && original_display_name == "Speaker 1"
+    ));
+    Ok(())
+}
+
+#[test]
+fn merging_people_preserves_automatic_identity_and_learned_corrections() -> Result<(), StoreError> {
+    use super::analysis_export::SpeakerResolution;
+
+    let (_directory, store) = store();
+    let source = person(&store, "Source", &[], &[]);
+    let target = person(&store, "Target", &[], &[]);
+    let (source_session, source_segment, source_speaker) =
+        learned_phrase_source(&store, source, "teach sowna")?;
+    keep_voices(&store, source_session, &[(source_speaker, 0)])?;
+    confirmed_voice_meeting(&store, source, 2)?;
+    teach_learned_phrase(&store, source, source_session, source_segment, "Sona")?;
+    let current = reviewable_meeting(&store, "Automatically named", 10);
+    diarized_transcript(&store, current, &[(0, "remember sowna")])?;
+    let speaker_id = store.diarization_speaker(current, SourceKind::SystemAudio, 0)?;
+    keep_voices(&store, current, &[(speaker_id, 0)])?;
+    store.apply_confirmed_voice_names(current, None)?;
+    assert_eq!(
+        store.transcript_correction_review(current)?.segments[0].corrected_text,
+        "remember Sona"
+    );
+
+    store.merge_persons_with_voice_resolution(source, target, people_revision(&store), None, 11)?;
+
+    let analysis = store.speaker_analysis(current)?;
+    let speaker = analysis
+        .speakers
+        .iter()
+        .find(|speaker| speaker.speaker_id == id(speaker_id))
+        .ok_or(StoreError::SpeakerNotFound)?;
+    assert!(matches!(
+        &speaker.resolution,
+        SpeakerResolution::NamedByVoice { person_id: Some(person_id), .. }
+            if *person_id == id(target)
+    ));
+    assert_eq!(
+        store.transcript_correction_review(current)?.segments[0].corrected_text,
+        "remember Sona"
+    );
+    let names = store.voice_named_speakers(current)?;
+    let name = names
+        .iter()
+        .find(|name| name.speaker_id == speaker_id)
+        .ok_or(StoreError::SpeakerNotFound)?;
+    rename(
+        &store,
+        current,
+        speaker_id,
+        &name.original_display_name,
+        None,
+    )?;
+    assert_eq!(
+        speaker_names(&store, &[(current, speaker_id)])?,
+        ["Speaker 1"]
+    );
+    assert!(store
+        .unresolved_active_voice_speaker_ids(current, None)?
+        .contains(&speaker_id));
+    Ok(())
+}
+
+#[test]
+fn confirmed_voice_naming_excludes_current_equal_date_and_later_meetings() -> Result<(), StoreError>
+{
+    let (_directory, store) = store();
+    let ada = person(&store, "Ada Lovelace", &[], &[]);
+    confirmed_voice_meeting(&store, ada, 1)?;
+    let (current, speaker_id) = meeting_with_voice(&store, 10)?;
+    let already_named = store.diarization_speaker(current, SourceKind::SystemAudio, 1)?;
+    keep_voices(&store, current, &[(already_named, 0)])?;
+    label_existing(
+        &store,
+        current,
+        already_named,
+        ada,
+        meeting_revision(&store, current)?,
+    )?;
+    confirmed_voice_meeting(&store, ada, 10)?;
+    confirmed_voice_meeting(&store, ada, 11)?;
+
+    store.apply_confirmed_voice_names(current, None)?;
+
+    assert_eq!(
+        speaker_names(&store, &[(current, speaker_id)])?,
+        ["Speaker 1"]
+    );
+    assert!(store.voice_named_speakers(current)?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn an_indistinguishable_competing_person_prevents_automatic_voice_naming() -> Result<(), StoreError>
+{
+    let (_directory, store) = store();
+    let ada = person(&store, "Ada Lovelace", &[], &[]);
+    let grace = person(&store, "Grace Hopper", &[], &[]);
+    confirmed_voice_meeting(&store, ada, 1)?;
+    confirmed_voice_meeting(&store, ada, 2)?;
+    confirmed_voice_meeting(&store, grace, 3)?;
+    let (current, speaker_id) = meeting_with_voice(&store, 10)?;
+
+    store.apply_confirmed_voice_names(current, None)?;
+
+    assert_eq!(
+        speaker_names(&store, &[(current, speaker_id)])?,
+        ["Speaker 1"]
+    );
+    assert!(store.voice_named_speakers(current)?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn automatic_voice_naming_preserves_a_typed_name_and_a_manual_correction() -> Result<(), StoreError>
+{
+    use super::analysis_export::SpeakerResolution;
+
+    let (_directory, store) = store();
+    let ada = person(&store, "Ada Lovelace", &[], &[]);
+    let grace = person(&store, "Grace Hopper", &[], &[]);
+    confirmed_voice_meeting(&store, ada, 1)?;
+    confirmed_voice_meeting(&store, ada, 2)?;
+    let (current, speaker_id) = meeting_with_voice(&store, 10)?;
+    rename(&store, current, speaker_id, "Katherine Johnson", None)?;
+
+    store.apply_confirmed_voice_names(current, None)?;
+    assert_eq!(
+        speaker_names(&store, &[(current, speaker_id)])?,
+        ["Katherine Johnson"]
+    );
+
+    store.identify_speaker(MeetingSpeakerIdentifyRequest {
+        operation_id: MeetingOperationId::new(),
+        requested_at_utc_ms: 11,
+        session_id: current,
+        expected_meeting_revision: meeting_revision(&store, current)?,
+        expected_people_revision: people_revision(&store),
+        speaker_id,
+        disposition: MeetingSpeakerIdentifyDisposition::CorrectTo {
+            target: MeetingSpeakerIdentifyTarget::Existing(grace),
+        },
+    })?;
+    keep_voices(&store, current, &[(speaker_id, 0)])?;
+    store.apply_confirmed_voice_names(current, None)?;
+
+    assert_eq!(
+        speaker_names(&store, &[(current, speaker_id)])?,
+        ["Grace Hopper"]
+    );
+    assert!(store.voice_named_speakers(current)?.is_empty());
+    let analysis = store.speaker_analysis(current)?;
+    let speaker = analysis
+        .speakers
+        .iter()
+        .find(|speaker| speaker.speaker_id == id(speaker_id))
+        .ok_or(StoreError::SpeakerNotFound)?;
+    assert!(matches!(
+        &speaker.resolution,
+        SpeakerResolution::Identified { person_id, .. } if *person_id == id(grace)
+    ));
+    Ok(())
+}
+
+#[test]
+fn automatic_voice_naming_preserves_a_generated_label_restored_by_the_user(
+) -> Result<(), StoreError> {
+    let (_directory, store) = store();
+    let ada = person(&store, "Ada Lovelace", &[], &[]);
+    confirmed_voice_meeting(&store, ada, 1)?;
+    confirmed_voice_meeting(&store, ada, 2)?;
+    let (current, speaker_id) = meeting_with_voice(&store, 10)?;
+    rename(&store, current, speaker_id, "Katherine Johnson", None)?;
+    rename(&store, current, speaker_id, "Speaker 1", None)?;
+
+    store.apply_confirmed_voice_names(current, None)?;
+
+    assert_eq!(
+        speaker_names(&store, &[(current, speaker_id)])?,
+        ["Speaker 1"]
+    );
+    assert!(store.voice_named_speakers(current)?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn automatic_voice_naming_preserves_a_user_marked_unknown_speaker() -> Result<(), StoreError> {
+    use super::analysis_export::SpeakerResolution;
+
+    let (_directory, store) = store();
+    let ada = person(&store, "Ada Lovelace", &[], &[]);
+    confirmed_voice_meeting(&store, ada, 1)?;
+    confirmed_voice_meeting(&store, ada, 2)?;
+    let (current, speaker_id) = meeting_with_voice(&store, 10)?;
+    store.identify_speaker(MeetingSpeakerIdentifyRequest {
+        operation_id: MeetingOperationId::new(),
+        requested_at_utc_ms: 11,
+        session_id: current,
+        expected_meeting_revision: meeting_revision(&store, current)?,
+        expected_people_revision: people_revision(&store),
+        speaker_id,
+        disposition: MeetingSpeakerIdentifyDisposition::MarkUnknown,
+    })?;
+    keep_voices(&store, current, &[(speaker_id, 0)])?;
+
+    store.apply_confirmed_voice_names(current, None)?;
+
+    assert_eq!(
+        speaker_names(&store, &[(current, speaker_id)])?,
+        ["Unknown"]
+    );
+    let analysis = store.speaker_analysis(current)?;
+    let speaker = analysis
+        .speakers
+        .iter()
+        .find(|speaker| speaker.speaker_id == id(speaker_id))
+        .ok_or(StoreError::SpeakerNotFound)?;
+    assert!(matches!(speaker.resolution, SpeakerResolution::Unknown));
+    Ok(())
+}
+
+#[test]
+fn undoing_an_automatic_voice_name_survives_reopening_and_reapplication() -> Result<(), StoreError>
+{
+    use super::analysis_export::SpeakerResolution;
+
+    let directory = TempDir::new().expect("temporary meeting store root");
+    let secrets = SecretManager::with_backend(Arc::new(crate::secrets::MemorySecretBackend::new()));
+    let root = directory.path().join("meetings");
+    let store = MeetingStore::open(
+        root.clone(),
+        tauri::async_runtime::block_on(secrets.meeting_storage_key()).expect("meeting key"),
+    )?;
+    let ada = person(&store, "Ada Lovelace", &[], &[]);
+    confirmed_voice_meeting(&store, ada, 1)?;
+    confirmed_voice_meeting(&store, ada, 2)?;
+    let (current, speaker_id) = meeting_with_voice(&store, 10)?;
+    store.apply_confirmed_voice_names(current, None)?;
+    assert_eq!(
+        speaker_names(&store, &[(current, speaker_id)])?,
+        ["Ada Lovelace"]
+    );
+    drop(store);
+
+    let store = MeetingStore::open(
+        root.clone(),
+        tauri::async_runtime::block_on(secrets.meeting_storage_key())
+            .expect("reopened meeting key"),
+    )?;
+    let names = store.voice_named_speakers(current)?;
+    assert_eq!(names.len(), 1);
+    assert_eq!(names[0].speaker_id, speaker_id);
+    assert_eq!(names[0].resolution_kind, VoiceNameResolution::NamedByVoice);
+    assert_eq!(names[0].original_display_name, "Speaker 1");
+    rename(
+        &store,
+        current,
+        speaker_id,
+        &names[0].original_display_name,
+        None,
+    )?;
+    assert_eq!(
+        speaker_names(&store, &[(current, speaker_id)])?,
+        ["Speaker 1"]
+    );
+    drop(store);
+
+    let reopened = MeetingStore::open(
+        root,
+        tauri::async_runtime::block_on(secrets.meeting_storage_key()).expect("undo meeting key"),
+    )?;
+    reopened.apply_confirmed_voice_names(current, None)?;
+
+    assert_eq!(
+        speaker_names(&reopened, &[(current, speaker_id)])?,
+        ["Speaker 1"]
+    );
+    assert!(reopened.voice_named_speakers(current)?.is_empty());
+    let analysis = reopened.speaker_analysis(current)?;
+    let speaker = analysis
+        .speakers
+        .iter()
+        .find(|speaker| speaker.speaker_id == id(speaker_id))
+        .ok_or(StoreError::SpeakerNotFound)?;
+    assert!(matches!(
+        speaker.resolution,
+        SpeakerResolution::VoiceNameUndone
+    ));
+    assert!(reopened
+        .unresolved_active_voice_speaker_ids(current, None)?
+        .contains(&speaker_id));
+    Ok(())
+}
+
+#[test]
+fn an_automatic_voice_name_does_not_replace_a_missing_manual_meeting_confirmation(
+) -> Result<(), StoreError> {
+    let (_directory, store) = store();
+    let ada = person(&store, "Ada Lovelace", &[], &[]);
+    let (first, first_speaker) = confirmed_voice_meeting(&store, ada, 1)?;
+    confirmed_voice_meeting(&store, ada, 2)?;
+    let (automatic, automatic_speaker) = meeting_with_voice(&store, 3)?;
+    store.apply_confirmed_voice_names(automatic, None)?;
+    assert_eq!(
+        speaker_names(&store, &[(automatic, automatic_speaker)])?,
+        ["Ada Lovelace"]
+    );
+    store.identify_speaker(MeetingSpeakerIdentifyRequest {
+        operation_id: MeetingOperationId::new(),
+        requested_at_utc_ms: 4,
+        session_id: first,
+        expected_meeting_revision: meeting_revision(&store, first)?,
+        expected_people_revision: people_revision(&store),
+        speaker_id: first_speaker,
+        disposition: MeetingSpeakerIdentifyDisposition::MarkUnknown,
+    })?;
+    let (next, next_speaker) = meeting_with_voice(&store, 10)?;
+
+    store.apply_confirmed_voice_names(next, None)?;
+
+    assert_eq!(
+        speaker_names(&store, &[(next, next_speaker)])?,
+        ["Speaker 1"]
+    );
+    assert!(store.voice_named_speakers(next)?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn automatic_voice_names_do_not_change_the_manually_confirmed_owner_reference(
+) -> Result<(), StoreError> {
+    let (_directory, store) = store();
+    let ada = person(&store, "Ada Lovelace", &[], &[]);
+    confirmed_voice_meeting(&store, ada, 1)?;
+    let (second, second_speaker) = confirmed_voice_meeting(&store, ada, 2)?;
+    let mut values = [0.0; SPEAKER_EMBEDDING_DIMENSIONS];
+    values[0] = 0.8;
+    values[1] = 0.6;
+    let second_voice =
+        SpeakerEmbedding::from_normalized_slice(&values).ok_or(StoreError::VoiceInvariant)?;
+    store.store_speaker_voiceprints(
+        second,
+        wespeaker_embedding_model_key(),
+        &[(second_speaker, second_voice)],
+        2,
+    )?;
+    let reference = store
+        .local_user_voice(Some("Ada Lovelace"))?
+        .ok_or(StoreError::VoiceInvariant)?;
+    assert!(reference.as_slice()[1] > 0.0);
+    let (current, speaker_id) = meeting_with_voice(&store, 10)?;
+
+    store.apply_confirmed_voice_names(current, None)?;
+
+    assert_eq!(
+        speaker_names(&store, &[(current, speaker_id)])?,
+        ["Ada Lovelace"]
+    );
+    let after = store
+        .local_user_voice(Some("Ada Lovelace"))?
+        .ok_or(StoreError::VoiceInvariant)?;
+    assert_eq!(after.as_slice(), reference.as_slice());
+    store.set_user_name_source(|| Some("Ada Lovelace".to_owned()));
+    let analysis = store.speaker_analysis(current)?;
+    let speaker = analysis
+        .speakers
+        .iter()
+        .find(|speaker| speaker.speaker_id == id(speaker_id))
+        .ok_or(StoreError::SpeakerNotFound)?;
+    assert!(!speaker.counts_as_user);
+    Ok(())
+}
+
+#[test]
+fn an_automatic_voice_name_is_not_manual_consent_to_enroll_a_profile() -> Result<(), StoreError> {
+    let (_directory, store) = store();
+    let ada = person(&store, "Ada Lovelace", &[], &[]);
+    confirmed_voice_meeting(&store, ada, 1)?;
+    confirmed_voice_meeting(&store, ada, 2)?;
+    let (current, speaker_id) = meeting_with_voice(&store, 10)?;
+    store.apply_confirmed_voice_names(current, None)?;
+    assert_eq!(
+        speaker_names(&store, &[(current, speaker_id)])?,
+        ["Ada Lovelace"]
+    );
+    let evidence = enrollment_evidence(&store, current, speaker_id)?;
+    let request = enrollment_request(
+        ada,
+        evidence,
+        meeting_revision(&store, current)?,
+        store.active_voice_speaker_revision(current, speaker_id)?,
+        people_revision(&store),
+    )?;
+
+    assert_eq!(
+        store.commit_voice_profile_enrollment(request),
+        Err(StoreError::Conflict)
+    );
+    assert_eq!(profile_count(&store, ada)?, 0);
+    Ok(())
+}
+
+#[test]
+fn microphone_speakers_are_not_the_owner_without_a_local_label_or_manual_name(
+) -> Result<(), StoreError> {
+    let (_directory, store) = store();
+    store.set_user_name_source(|| Some("Aktan Azat".to_owned()));
+    let current = reviewable_meeting(&store, "Microphone voices", 1);
+    let generated = store.diarization_speaker(current, SourceKind::Microphone, 0)?;
+    let local = store.local_diarization_speaker(current, None)?;
+    let named = store.diarization_speaker(current, SourceKind::Microphone, 1)?;
+    rename(&store, current, named, "Aktan", Some("Aktan Azat"))?;
+
+    let analysis = store.speaker_analysis(current)?;
+    let speaker = |speaker_id: SpeakerId| {
+        analysis
+            .speakers
+            .iter()
+            .find(|speaker| speaker.speaker_id == id(speaker_id))
+            .ok_or(StoreError::SpeakerNotFound)
+    };
+    assert_eq!(speaker(generated)?.source_kind, SourceKind::Microphone);
+    assert!(!speaker(generated)?.counts_as_user);
+    assert_eq!(speaker(local)?.display_name, LOCAL_SPEAKER_LABEL);
+    assert!(speaker(local)?.counts_as_user);
+    assert_eq!(speaker(named)?.display_name, "Aktan");
+    assert!(speaker(named)?.counts_as_user);
+    Ok(())
+}
+
+#[test]
+fn local_user_voice_requires_confirmation_and_combines_opted_in_dictation() -> Result<(), StoreError>
+{
+    let (_directory, store) = store();
+    let current = reviewable_meeting(&store, "Local voice", 1);
+    let speaker_id = store.local_diarization_speaker(current, Some("Aktan Azat"))?;
+    keep_voices(&store, current, &[(speaker_id, 0)])?;
+    assert!(store.local_user_voice(Some("Aktan Azat"))?.is_none());
+
+    rename(&store, current, speaker_id, "Aktan", Some("Aktan Azat"))?;
+    let confirmed = store
+        .local_user_voice(Some("Aktan Azat"))?
+        .ok_or(StoreError::VoiceInvariant)?;
+    assert_eq!(confirmed.as_slice(), voice(0)?.as_slice());
+    store.save_user_voiceprint(UserVoiceprintRequest {
+        consent: ExplicitVoiceConsent::granted(1)?,
+        model: wespeaker_embedding_model_key(),
+        embedding: voice(1)?,
+        voiceprint: UserVoiceprint {
+            dictation_count: 12,
+            speech_ms: 18_000,
+        },
+        created_at_utc_ms: 2,
+    })?;
+
+    let combined = store
+        .local_user_voice(Some("Aktan Azat"))?
+        .ok_or(StoreError::VoiceInvariant)?;
+    assert!((combined.as_slice()[0] - std::f32::consts::FRAC_1_SQRT_2).abs() < f32::EPSILON);
+    assert!((combined.as_slice()[1] - std::f32::consts::FRAC_1_SQRT_2).abs() < f32::EPSILON);
+    let dictation_only = store
+        .local_user_voice(None)?
+        .ok_or(StoreError::VoiceInvariant)?;
+    assert_eq!(dictation_only.as_slice(), voice(1)?.as_slice());
+    Ok(())
+}
+
+#[test]
+fn an_enrolled_profile_match_does_not_train_the_owner_reference() -> Result<(), StoreError> {
+    let (_directory, store) = store();
+    let ada = person(&store, "Ada Lovelace", &[], &[]);
+    insert_compatible_profile(&store, ada, &voice(0)?)?;
+    let (current, speaker_id) = meeting_with_voice(&store, 10)?;
+    let matched = store
+        .match_local_voice_profile(&voice(0)?, wespeaker_embedding_model_key())?
+        .ok_or(StoreError::VoiceInvariant)?;
+
+    store.commit_successful_voice_match(current, speaker_id, 0, matched, 11)?;
+
+    assert_eq!(
+        speaker_names(&store, &[(current, speaker_id)])?,
+        ["Ada Lovelace"]
+    );
+    assert!(store.local_user_voice(Some("Ada Lovelace"))?.is_none());
+    Ok(())
+}
+
+#[test]
+fn meeting_export_keeps_private_global_voice_evidence_out() -> Result<(), StoreError> {
+    use crate::meeting::series_types::MeetingSeriesRemoteOptOutSetRequest;
+
+    let (directory, store) = store();
+    let hidden = meeting(&store, "Hidden", 1);
+    let visible = reviewable_meeting(&store, "Visible", 2);
+    let hidden_speaker = store.diarization_speaker(hidden, SourceKind::SystemAudio, 0)?;
+    let local_speaker = store.diarization_speaker(visible, SourceKind::SystemAudio, 0)?;
+    let candidate = store.diarization_speaker(visible, SourceKind::SystemAudio, 1)?;
+    let ada = person(&store, "Ada Lovelace", &[], &[]);
+    keep_voices(&store, hidden, &[(hidden_speaker, 0)])?;
+    keep_voices(&store, visible, &[(local_speaker, 1), (candidate, 0)])?;
+    enroll(&store, hidden, hidden_speaker, ada)?;
+    let event = super::loops_tests::series_event(1);
+    store.remember_calendar_facts(hidden, &event)?;
+    store.set_series_remote_opt_out(
+        &MeetingSeriesRemoteOptOutSetRequest {
+            operation_id: MeetingOperationId::new(),
+            series_key: event.series_key,
+            remote_intelligence_opt_out: true,
+            expected_revision: 0,
+        },
+        3,
+    )?;
+    let user_voiceprint = UserVoiceprint {
+        dictation_count: 12,
+        speech_ms: 18_000,
+    };
+    store.save_user_voiceprint(UserVoiceprintRequest {
+        consent: ExplicitVoiceConsent::granted(1)?,
+        model: wespeaker_embedding_model_key(),
+        embedding: voice(2)?,
+        voiceprint: user_voiceprint,
+        created_at_utc_ms: 4,
+    })?;
+    let kept_local = crate::query::KeptLocal::read(&store)?;
+    assert!(kept_local.hides(hidden));
+    assert!(!kept_local.hides(visible));
+    assert_eq!(
+        store.voice_speaker_suggestions(visible, None)?,
+        [VoiceSpeakerSuggestion {
+            speaker_id: candidate,
+            person_id: Some(ada),
+            display_name: "Ada Lovelace".to_owned(),
+        }]
+    );
+
+    let exported = crate::meeting::analysis_export::export_meeting(
+        &store,
+        visible,
+        &directory.path().join("export"),
+        NotesTemplateChoice::default(),
+    )
+    .map_err(|_| StoreError::Io)?;
+    let json: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(exported.directory.join("speakers.json")).map_err(|_| StoreError::Io)?,
+    )
+    .map_err(|_| StoreError::Corrupt)?;
+    assert_eq!(
+        json["people"],
+        serde_json::json!([{"person_id": ada.uuid().to_string(), "display_name": "Ada Lovelace"}])
+    );
+    assert!(json.get("user_voiceprint").is_none());
+    let speakers = json["speakers"].as_array().ok_or(StoreError::Corrupt)?;
+    let local = speakers
+        .iter()
+        .find(|speaker| speaker["speaker_id"] == local_speaker.uuid().to_string())
+        .ok_or(StoreError::SpeakerNotFound)?;
+    assert_eq!(local["voiceprint"], serde_json::json!(voice(1)?.as_slice()));
+    let candidate = speakers
+        .iter()
+        .find(|speaker| speaker["speaker_id"] == candidate.uuid().to_string())
+        .ok_or(StoreError::SpeakerNotFound)?;
+    assert_eq!(candidate["resolution"], serde_json::json!({"kind": "none"}));
+    assert_eq!(profile_sample_count(&store, ada)?, 1);
+    assert_eq!(store.user_voiceprint()?, Some(user_voiceprint));
     Ok(())
 }

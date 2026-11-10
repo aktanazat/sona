@@ -3,7 +3,7 @@
 //! who the voice code thinks every speaker is.
 
 use super::export::{self, ExportDocument};
-use super::processing::{downmix_and_resample, record_starts_new_span};
+use super::processing::{record_starts_new_span, LaneResampler};
 use super::store::{DurableTrackRecord, MeetingStore, StoreError};
 use super::template_types::NotesTemplateChoice;
 use super::types::{
@@ -153,13 +153,14 @@ fn export_lane(
     let mut raw_format_changed = false;
     let mut records = 0_u64;
     let mut previous = SpanCursor::default();
+    let mut resampler = LaneResampler::default();
     let visited = store.visit_durable_track_records(session_id, track.track_id, None, |record| {
         records += 1;
         let span_start_ns = previous
             .starts_new_span(&record)
             .then_some(record.start_offset_ns);
         previous.advance(&record)?;
-        lane.place(span_start_ns, &downmix_and_resample(&record)?)
+        lane.place(span_start_ns, resampler.resample(&record)?)
             .map_err(|_| StoreError::Io)?;
         if raw_format_changed {
             return Ok(());
@@ -266,6 +267,7 @@ struct LaneSummary {
 struct LaneWriter<W: Write + Seek> {
     writer: WavWriter<W>,
     summary: LaneSummary,
+    overlap_frames: u64,
 }
 
 impl<W: Write + Seek> LaneWriter<W> {
@@ -277,6 +279,7 @@ impl<W: Write + Seek> LaneWriter<W> {
                 silence_frames: 0,
                 dropped_frames: 0,
             },
+            overlap_frames: 0,
         }
     }
 
@@ -289,7 +292,6 @@ impl<W: Write + Seek> LaneWriter<W> {
     fn place(&mut self, span_start_ns: Option<u64>, samples: &[f32]) -> hound::Result<()> {
         let spec = self.writer.spec();
         let channels = usize::from(spec.channels);
-        let mut skip_frames = 0_usize;
         if let Some(start_ns) = span_start_ns {
             let target =
                 u64::try_from(u128::from(start_ns) * u128::from(spec.sample_rate) / 1_000_000_000)
@@ -301,12 +303,17 @@ impl<W: Write + Seek> LaneWriter<W> {
                 }
                 self.summary.silence_frames += silence;
                 self.summary.frames = target;
+                self.overlap_frames = 0;
             } else {
-                let overlap = usize::try_from(self.summary.frames - target).unwrap_or(usize::MAX);
-                skip_frames = overlap.min(samples.len() / channels);
-                self.summary.dropped_frames += frame_count(skip_frames)?;
+                self.overlap_frames = self.summary.frames - target;
             }
         }
+        let skip_frames = usize::try_from(self.overlap_frames)
+            .unwrap_or(usize::MAX)
+            .min(samples.len() / channels);
+        let dropped_frames = frame_count(skip_frames)?;
+        self.overlap_frames -= dropped_frames;
+        self.summary.dropped_frames += dropped_frames;
         let kept = &samples[skip_frames * channels..];
         for sample in kept {
             self.write_sample(*sample)?;
@@ -381,5 +388,75 @@ mod tests {
                 dropped_frames: 2,
             }
         );
+    }
+
+    fn overlap_across_records(spec: WavSpec) -> (Vec<u8>, LaneSummary) {
+        let second = usize::try_from(spec.sample_rate).unwrap() * usize::from(spec.channels);
+        let mut bytes = Cursor::new(Vec::new());
+        let mut lane = LaneWriter::new(WavWriter::new(&mut bytes, spec).unwrap());
+        for (start, samples) in [
+            (Some(0), vec![0.25; second * 10]),
+            (Some(8_000_000_000), vec![0.5; second]),
+            (None, vec![0.75; second]),
+            (None, vec![-0.5; second]),
+            (Some(12_000_000_000), vec![0.5; second]),
+        ] {
+            lane.place(start, &samples).unwrap();
+        }
+        let summary = lane.finish().unwrap();
+        (bytes.into_inner(), summary)
+    }
+
+    #[test]
+    fn pipeline_wav_keeps_the_clock_when_overlap_spans_several_records() {
+        let (bytes, summary) = overlap_across_records(pipeline_spec());
+        let samples = hound::WavReader::new(Cursor::new(bytes))
+            .unwrap()
+            .into_samples::<i16>()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        assert_eq!(samples.len(), 16_000 * 13);
+        assert!(samples[..16_000 * 10].iter().all(|sample| *sample == 8_191));
+        assert!(samples[16_000 * 10..16_000 * 11]
+            .iter()
+            .all(|sample| *sample == -16_383));
+        assert!(samples[16_000 * 11..16_000 * 12]
+            .iter()
+            .all(|sample| *sample == 0));
+        assert!(samples[16_000 * 12..]
+            .iter()
+            .all(|sample| *sample == 16_383));
+        assert_eq!(summary.dropped_frames, 16_000 * 2);
+        assert_eq!(summary.silence_frames, 16_000);
+    }
+
+    #[test]
+    fn raw_stereo_wav_keeps_the_clock_when_overlap_spans_several_records() {
+        let spec = WavSpec {
+            channels: 2,
+            sample_rate: 48_000,
+            bits_per_sample: 32,
+            sample_format: SampleFormat::Float,
+        };
+        let (bytes, summary) = overlap_across_records(spec);
+        let samples = hound::WavReader::new(Cursor::new(bytes))
+            .unwrap()
+            .into_samples::<f32>()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let second = 48_000 * 2;
+
+        assert_eq!(samples.len(), second * 13);
+        assert!(samples[..second * 10].iter().all(|sample| *sample == 0.25));
+        assert!(samples[second * 10..second * 11]
+            .iter()
+            .all(|sample| *sample == -0.5));
+        assert!(samples[second * 11..second * 12]
+            .iter()
+            .all(|sample| *sample == 0.0));
+        assert!(samples[second * 12..].iter().all(|sample| *sample == 0.5));
+        assert_eq!(summary.dropped_frames, 48_000 * 2);
+        assert_eq!(summary.silence_frames, 48_000);
     }
 }

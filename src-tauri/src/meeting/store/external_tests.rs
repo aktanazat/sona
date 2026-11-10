@@ -65,9 +65,8 @@ const SUMMARY: &str = "Pricing stayed open.";
 const HEADLINE: &str = "Dana's tier question stayed open.";
 const THREAD: &str = "Dana's trial conversion tier";
 const COMMITMENT: &str = "Send the tier comparison";
-/// The display name the transcript fixture gives this machine's microphone
-/// speaker. A ledger row it owns is one the user owes.
-const ME: &str = "Speaker 1";
+/// The anonymous local operator's display name in the transcript fixture.
+const ME: &str = super::LOCAL_SPEAKER_LABEL;
 
 struct Corpus {
     directory: TempDir,
@@ -544,8 +543,7 @@ fn one_meeting_comes_back_with_its_summary_and_every_row_it_left() {
                     "meeting_title": TITLE,
                     "kind": "commitment",
                     "status": "done",
-                    // The microphone speaker is the user, so a row that speaker
-                    // owns is one the user owes.
+                    // The explicitly identified local speaker is the user.
                     "direction": "mine",
                     "text": COMMITMENT,
                     "owner": ME,
