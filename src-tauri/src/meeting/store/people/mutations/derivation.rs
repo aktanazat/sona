@@ -35,6 +35,8 @@ pub(in crate::meeting::store) fn derive_calendar_links_in(
             calendar_emails: vec![email.clone()],
             organization: None,
             summary: None,
+            role: None,
+            notes: None,
             created_at_utc_ms: now_utc_ms,
             updated_at_utc_ms: now_utc_ms,
         });
@@ -58,6 +60,14 @@ pub(in crate::meeting::store) fn recompute_organizations_in(
 ) -> Result<usize, StoreError> {
     let mut changed = 0;
     for person in all_people_in(connection)? {
+        let pinned: bool = connection.query_row(
+            "SELECT organization_pinned FROM persons WHERE id = ?1",
+            [person.id.uuid().to_string()],
+            |row| row.get(0),
+        )?;
+        if pinned {
+            continue;
+        }
         let organization = organization_for_person_in(connection, &person)?;
         if organization == person.organization {
             continue;
@@ -237,6 +247,8 @@ pub(in crate::meeting::store) fn derive_speaker_link_in(
         calendar_emails: Vec::new(),
         organization: None,
         summary: None,
+        role: None,
+        notes: None,
         created_at_utc_ms: now_utc_ms,
         updated_at_utc_ms: now_utc_ms,
     });
@@ -308,6 +320,8 @@ pub(in crate::meeting::store) fn person_for_named_speaker_in(
                 calendar_emails: Vec::new(),
                 organization: None,
                 summary: None,
+                role: None,
+                notes: None,
                 created_at_utc_ms: now_utc_ms,
                 updated_at_utc_ms: now_utc_ms,
             };

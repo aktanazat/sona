@@ -880,6 +880,39 @@ fn assigning_a_person_moves_a_row_the_user_said_off_the_users_own_list() {
     assert_eq!(row.owner_person_id, Some(amir));
 }
 
+/// Folding one person into another keeps the commitments the first one
+/// owned: they belong to the person who is left, not to nobody.
+#[test]
+fn merging_people_hands_their_commitments_to_the_person_who_is_left() {
+    let (_directory, store, session_id) = review_ready_meeting_with_ledger();
+    let commitment = loop_id(
+        session_id,
+        MeetingLoopKind::Commitment,
+        "Send the tier comparison",
+    );
+    let danny = person(&store, "Danny");
+    let daniel = person(&store, "Daniel Okafor");
+    store
+        .assign_loop(
+            MeetingLoopAssignRequest {
+                operation_id: MeetingOperationId::new(),
+                loop_id: commitment.clone(),
+                expected_revision: 0,
+                owner_person_id: Some(danny),
+            },
+            NOW,
+        )
+        .unwrap();
+
+    let revision = store.people_list().unwrap().revision;
+    store
+        .merge_persons_with_voice_resolution(danny, daniel, revision, None, NOW)
+        .unwrap();
+
+    let rows = store.meeting_loops(session_id).unwrap().rows;
+    assert_eq!(row_for(&rows, &commitment).owner_person_id, Some(daniel));
+}
+
 /// The corpus walk every cross-meeting reader shares: one entry per meeting
 /// that has a current ledger, with the rows already joined to their state.
 #[test]

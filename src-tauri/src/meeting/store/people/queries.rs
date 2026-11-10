@@ -308,6 +308,7 @@ fn people_list_in(
         "SELECT p.id, p.display_name, p.aliases_json, p.calendar_emails_json,
                 p.organization, p.created_at_utc_ms, p.updated_at_utc_ms,
                 p.summary, p.summary_generated_at_utc_ms, p.summary_model_id,
+                p.role, p.notes,
                 SUM(CASE WHEN l.confidence = 'confirmed' THEN 1 ELSE 0 END),
                 m.at_utc_ms,
                 SUM(CASE WHEN l.confidence = 'suggested' THEN 1 ELSE 0 END),
@@ -339,13 +340,13 @@ fn people_list_in(
         .query_map([hidden_json(hidden)], |row| {
             Ok((
                 person_from_row(row)?,
-                row.get::<_, i64>(10)?,
-                row.get::<_, Option<i64>>(11)?,
                 row.get::<_, i64>(12)?,
-                row.get::<_, String>(13)?,
-                row.get::<_, Option<String>>(14)?,
-                row.get::<_, Option<String>>(15)?,
+                row.get::<_, Option<i64>>(13)?,
+                row.get::<_, i64>(14)?,
+                row.get::<_, String>(15)?,
                 row.get::<_, Option<String>>(16)?,
+                row.get::<_, Option<String>>(17)?,
+                row.get::<_, Option<String>>(18)?,
             ))
         })?
         .collect::<Result<Vec<_>, _>>()?;

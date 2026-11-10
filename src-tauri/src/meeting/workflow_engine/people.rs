@@ -6,9 +6,38 @@ use crate::meeting::people_types::{
     PersonRenameRequest, PersonSplitRequest,
 };
 use crate::meeting::session::MeetingSessionManager;
+use crate::meeting::store::PersonProfileEdit;
 use crate::meeting::types::{MeetingCommandError, MeetingSessionId};
 
 impl MeetingSessionManager {
+    pub(crate) async fn person_profile_create(
+        &self,
+        display_name: String,
+        edit: PersonProfileEdit,
+    ) -> Result<PeopleMutationResult, MeetingCommandError> {
+        let result = self
+            .store()
+            .await?
+            .create_person_profile(display_name, edit, now_utc_ms())
+            .map_err(map_store_error)?;
+        self.emit_artifact_changed(None, result.revision);
+        Ok(result)
+    }
+
+    pub(crate) async fn person_profile_update(
+        &self,
+        person_id: PersonId,
+        edit: PersonProfileEdit,
+    ) -> Result<PeopleMutationResult, MeetingCommandError> {
+        let result = self
+            .store()
+            .await?
+            .update_person_profile(person_id, edit, now_utc_ms())
+            .map_err(map_store_error)?;
+        self.emit_artifact_changed(None, result.revision);
+        Ok(result)
+    }
+
     pub async fn people_list(&self) -> Result<PeopleListResult, MeetingCommandError> {
         self.store().await?.people_list().map_err(map_store_error)
     }

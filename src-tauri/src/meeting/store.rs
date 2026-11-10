@@ -56,6 +56,7 @@ mod open_windows;
 #[cfg(test)]
 mod open_windows_tests;
 mod people;
+pub(crate) use people::PersonProfileEdit;
 mod prep;
 pub(crate) mod privacy_inventory;
 pub(crate) mod processing_speed;
@@ -1618,6 +1619,7 @@ static MIGRATIONS: &[M] = &[
         LEFT JOIN voice_speaker_matches matched ON matched.speaker_id = speaker.speaker_id
         WHERE session.phase != 'deleting' AND session.current_transcript_revision_id IS NOT NULL;",
     ),
+    M::up(include_str!("store/people/profiles.sql")),
 ];
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StoreError {

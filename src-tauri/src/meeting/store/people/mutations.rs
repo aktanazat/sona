@@ -137,6 +137,10 @@ impl MeetingStore {
             params![target_id.uuid().to_string(), source_id.uuid().to_string()],
         )?;
         transaction.execute(
+            "UPDATE meeting_loop_states SET owner_person_id = ?1 WHERE owner_person_id = ?2",
+            params![target_id.uuid().to_string(), source_id.uuid().to_string()],
+        )?;
+        transaction.execute(
             "UPDATE person_merge_redirects SET target_person_id = ?1 WHERE target_person_id = ?2",
             params![target_id.uuid().to_string(), source_id.uuid().to_string()],
         )?;
@@ -176,6 +180,8 @@ impl MeetingStore {
                     calendar_emails: Vec::new(),
                     organization: None,
                     summary: None,
+                    role: None,
+                    notes: None,
                     created_at_utc_ms: now_utc_ms,
                     updated_at_utc_ms: now_utc_ms,
                 };
@@ -528,7 +534,11 @@ fn selected_keys(
     Ok(keys)
 }
 
-fn mutation_result(revision: u64, person: Option<Person>, removed: bool) -> PeopleMutationResult {
+pub(super) fn mutation_result(
+    revision: u64,
+    person: Option<Person>,
+    removed: bool,
+) -> PeopleMutationResult {
     PeopleMutationResult {
         schema_version: SCHEMA_VERSION,
         revision,
