@@ -34,6 +34,8 @@ pub(crate) enum Refusal {
     CaptureActive,
     SourceChanged,
     AlreadyTracked,
+    ParentLoop,
+    NotAuthor,
 }
 
 impl fmt::Display for Refusal {
@@ -50,6 +52,8 @@ impl fmt::Display for Refusal {
             Self::CaptureActive => "planning is paused while recording",
             Self::SourceChanged => "source changed during review",
             Self::AlreadyTracked => "loop is already tracked as planner work",
+            Self::ParentLoop => "a task cannot sit under itself or its own sub-task",
+            Self::NotAuthor => "only the comment's author can change it",
         })
     }
 }

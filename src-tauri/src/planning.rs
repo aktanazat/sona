@@ -18,7 +18,7 @@ pub use schema::{
     AGENTS_MIGRATION, CAPTURE_MIGRATION, CATALOG_MIGRATION, CYCLES_MIGRATION, DAY_PLAN_MIGRATION,
     DISMISSED_LOOP_MIGRATION, FOLLOW_MIGRATION, MEETING_NOTE_LINK_MIGRATION, MIGRATION,
     PROJECT_DELETE_KEEPS_TASKS_MIGRATION, QUIET_REVIEW_MIGRATION, REPEAT_MIGRATION,
-    WATCH_MIGRATION, WORK_MIGRATION,
+    THREADS_MIGRATION, WATCH_MIGRATION, WORK_MIGRATION,
 };
 pub use types::{
     EvidenceLink, EvidenceSourceKind, EvidenceTargetKind, Milestone, PlanningCalendarPage,
@@ -103,6 +103,10 @@ fn failure(error: anyhow::Error) -> String {
         Some(store::Refusal::CaptureActive) => "Planning is paused while recording.",
         Some(store::Refusal::SourceChanged) => "A source changed. Prepare the plan again.",
         Some(store::Refusal::AlreadyTracked) => "This action is already tracked.",
+        Some(store::Refusal::ParentLoop) => {
+            "A task cannot go under itself or one of its own sub-tasks."
+        }
+        Some(store::Refusal::NotAuthor) => "Only whoever wrote a comment can change it.",
         None => {
             log::error!("Planning database operation failed");
             "Plans could not be saved or read. Try again."

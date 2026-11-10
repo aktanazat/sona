@@ -556,6 +556,75 @@ CREATE TABLE planning_project_members (
 );
 CREATE INDEX planning_project_members_person ON planning_project_members(person_id);";
 
+/// Comments on a task, a reply kept under its thread's first comment, and a
+/// task's parent. "parent" and "comment" join what an item's history can
+/// say and "parent" what an agent may propose, so both tables are rebuilt as
+/// `CYCLES_MIGRATION` did, every row and its rowid kept.
+pub const THREADS_MIGRATION: &str = "ALTER TABLE planning_tasks ADD COLUMN parent_id TEXT;
+CREATE INDEX planning_tasks_parent ON planning_tasks(parent_id);
+CREATE TABLE planning_task_comments (
+    id TEXT PRIMARY KEY NOT NULL,
+    task_id TEXT NOT NULL,
+    parent_comment_id TEXT,
+    author_kind TEXT NOT NULL CHECK(author_kind IN ('me', 'sona', 'agent')),
+    author_name TEXT CHECK(author_name IS NULL OR length(trim(author_name)) > 0),
+    body TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    edited_at_ms INTEGER,
+    resolved_at_ms INTEGER,
+    deleted_at_ms INTEGER,
+    CHECK(deleted_at_ms IS NOT NULL OR length(trim(body)) > 0),
+    CHECK(parent_comment_id IS NULL OR resolved_at_ms IS NULL),
+    CHECK(parent_comment_id IS NULL OR parent_comment_id != id)
+);
+CREATE INDEX planning_task_comments_task ON planning_task_comments(task_id, created_at_ms, id);
+CREATE INDEX planning_task_comments_thread ON planning_task_comments(parent_comment_id);
+CREATE TRIGGER planning_task_threads_delete AFTER DELETE ON planning_tasks BEGIN
+    DELETE FROM planning_task_comments WHERE task_id = old.id;
+    UPDATE planning_tasks SET parent_id = NULL, revision = revision + 1 WHERE parent_id = old.id;
+END;
+CREATE TABLE planning_task_activity_next (
+    id TEXT PRIMARY KEY NOT NULL,
+    task_id TEXT NOT NULL,
+    at_ms INTEGER NOT NULL,
+    actor TEXT NOT NULL CHECK(actor IN ('me', 'sona', 'agent')),
+    kind TEXT NOT NULL CHECK(kind IN ('created', 'status', 'priority', 'owner', 'due', 'project',
+        'title', 'details', 'labels', 'archived', 'restored', 'duplicate', 'accepted', 'declined',
+        'snoozed', 'relation', 'kept', 'recurrence', 'cycle', 'block', 'parent', 'comment')),
+    from_value TEXT,
+    to_value TEXT
+);
+INSERT INTO planning_task_activity_next (rowid, id, task_id, at_ms, actor, kind, from_value, to_value)
+    SELECT rowid, id, task_id, at_ms, actor, kind, from_value, to_value FROM planning_task_activity;
+DROP TABLE planning_task_activity;
+ALTER TABLE planning_task_activity_next RENAME TO planning_task_activity;
+CREATE INDEX planning_task_activity_task ON planning_task_activity(task_id, at_ms, id);
+DROP TRIGGER planning_task_agents_delete;
+CREATE TABLE planning_task_proposals_next (
+    id TEXT PRIMARY KEY NOT NULL,
+    task_id TEXT NOT NULL,
+    agent TEXT NOT NULL CHECK(length(trim(agent)) > 0),
+    field TEXT NOT NULL CHECK(field IN ('title', 'details', 'status', 'priority', 'owner', 'due',
+        'project', 'milestone', 'labels', 'snoozed', 'recurrence', 'cycle', 'parent')),
+    from_value TEXT,
+    patch_json TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(state IN ('open', 'accepted', 'rejected')),
+    created_at_ms INTEGER NOT NULL,
+    decided_at_ms INTEGER,
+    CHECK((state = 'open') = (decided_at_ms IS NULL))
+);
+INSERT INTO planning_task_proposals_next (rowid, id, task_id, agent, field, from_value, patch_json,
+        state, created_at_ms, decided_at_ms)
+    SELECT rowid, id, task_id, agent, field, from_value, patch_json, state, created_at_ms,
+        decided_at_ms FROM planning_task_proposals;
+DROP TABLE planning_task_proposals;
+ALTER TABLE planning_task_proposals_next RENAME TO planning_task_proposals;
+CREATE INDEX planning_task_proposals_task ON planning_task_proposals(task_id, state, created_at_ms);
+CREATE TRIGGER planning_task_agents_delete AFTER DELETE ON planning_tasks BEGIN
+    DELETE FROM planning_task_doers WHERE task_id = old.id;
+    DELETE FROM planning_task_proposals WHERE task_id = old.id;
+END;";
+
 /// Every planner migration in order, for tests that build the schema without
 /// the rest of the history database.
 #[cfg(test)]
@@ -575,6 +644,7 @@ pub(crate) fn apply_all(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
         CYCLES_MIGRATION,
         WATCH_MIGRATION,
         CATALOG_MIGRATION,
+        THREADS_MIGRATION,
     ] {
         conn.execute_batch(migration)?;
     }

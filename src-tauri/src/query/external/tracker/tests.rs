@@ -123,6 +123,7 @@ fn task() -> WorkItem {
         revision: 1,
         sort_order: 0.0,
         cycle: None,
+        parent_id: None,
     }
 }
 
@@ -276,6 +277,7 @@ fn moving_a_task_to_another_cycle_is_a_change() {
         at_risk: false,
         time_block: None,
         repeat: None,
+        sub_tasks: None,
     };
     let board = Board {
         rows: vec![row.clone()],

@@ -5100,6 +5100,117 @@ pub(super) async fn call(
             })
             .await?
         }
+        "work_subtask_create" => {
+            let mut args = Args::parse(params)?;
+            let operation_id = args.take("operationId")?;
+            let parent_id = args.take("parentId")?;
+            let inputs = args.take("inputs")?;
+            reply(
+                crate::planning::work::work_subtask_create(
+                    app.clone(),
+                    operation_id,
+                    parent_id,
+                    inputs,
+                )
+                .await,
+            )
+        }
+        "work_set_parent" => {
+            let mut args = Args::parse(params)?;
+            let operation_id = args.take("operationId")?;
+            let id = args.take("id")?;
+            let parent_id = args.take("parentId")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::planning::work::work_set_parent(
+                    handle.clone(),
+                    operation_id,
+                    id,
+                    parent_id,
+                ))
+            })
+            .await?
+        }
+        "work_comments" => {
+            let mut args = Args::parse(params)?;
+            let item_id = args.take("itemId")?;
+            let limit = args.take("limit")?;
+            let cursor = args.take("cursor")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::planning::work::work_comments(
+                    handle.state(),
+                    item_id,
+                    limit,
+                    cursor,
+                ))
+            })
+            .await?
+        }
+        "work_comment_add" => {
+            let mut args = Args::parse(params)?;
+            let operation_id = args.take("operationId")?;
+            let item_id = args.take("itemId")?;
+            let body = args.take("body")?;
+            let reply_to = args.take("replyTo")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::planning::work::work_comment_add(
+                    handle.clone(),
+                    operation_id,
+                    item_id,
+                    body,
+                    reply_to,
+                ))
+            })
+            .await?
+        }
+        "work_comment_edit" => {
+            let mut args = Args::parse(params)?;
+            let operation_id = args.take("operationId")?;
+            let id = args.take("id")?;
+            let body = args.take("body")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::planning::work::work_comment_edit(
+                    handle.clone(),
+                    operation_id,
+                    id,
+                    body,
+                ))
+            })
+            .await?
+        }
+        "work_comment_delete" => {
+            let mut args = Args::parse(params)?;
+            let operation_id = args.take("operationId")?;
+            let id = args.take("id")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::planning::work::work_comment_delete(
+                    handle.clone(),
+                    operation_id,
+                    id,
+                ))
+            })
+            .await?
+        }
+        "work_comment_resolve" => {
+            let mut args = Args::parse(params)?;
+            let operation_id = args.take("operationId")?;
+            let id = args.take("id")?;
+            let resolved = args.take("resolved")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::planning::work::work_comment_resolve(
+                    handle.clone(),
+                    operation_id,
+                    id,
+                    resolved,
+                ))
+            })
+            .await?
+        }
         "work_labels" => {
             let handle = app.clone();
             off_main_thread(move || reply(crate::planning::work::work_labels(handle.state())))

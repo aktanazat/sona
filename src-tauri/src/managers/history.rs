@@ -282,6 +282,7 @@ pub(crate) static MIGRATIONS: &[M] = &[
     M::up(crate::planning::CYCLES_MIGRATION),
     M::up(crate::planning::WATCH_MIGRATION),
     M::up(crate::planning::CATALOG_MIGRATION),
+    M::up(crate::planning::THREADS_MIGRATION),
 ];
 
 const MAX_HISTORY_PAGE_SIZE: usize = 100;

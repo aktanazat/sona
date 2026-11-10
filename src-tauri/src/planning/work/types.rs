@@ -148,6 +148,8 @@ pub enum WorkActivityKind {
     Recurrence,
     Cycle,
     Block,
+    Parent,
+    Comment,
 }
 
 sql_enum!(WorkActivityKind {
@@ -171,6 +173,8 @@ sql_enum!(WorkActivityKind {
     Recurrence => "recurrence",
     Cycle => "cycle",
     Block => "block",
+    Parent => "parent",
+    Comment => "comment",
 });
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
@@ -212,6 +216,8 @@ pub struct WorkItem {
     pub sort_order: f64,
     /// The number of the cycle the item is planned in.
     pub cycle: Option<i64>,
+    /// The task this one is a sub-task of.
+    pub parent_id: Option<String>,
 }
 
 impl WorkItem {
@@ -261,6 +267,62 @@ pub struct WorkItemRow {
     pub time_block: Option<WorkTimeBlock>,
     /// How it comes back and how often its instances were done in time.
     pub repeat: Option<WorkRepeat>,
+    /// Its sub-tasks done out of all of them, canceled and duplicate ones
+    /// left out; none when it has none.
+    pub sub_tasks: Option<WorkProgress>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkProgress {
+    pub done: u32,
+    pub total: u32,
+}
+
+/// Another task as a detail page names it.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkItemRef {
+    pub id: String,
+    pub number: i64,
+    pub title: String,
+    pub status: WorkStatus,
+}
+
+/// Who wrote a comment: the user, Sona, or an agent by the name it gave.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkCommentAuthor {
+    pub kind: WorkActor,
+    pub name: Option<String>,
+}
+
+/// One comment. A thread's first comment carries its replies, oldest
+/// first, and whether the thread is resolved; a deleted comment keeps its
+/// place only while replies hang under it, with no body.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkComment {
+    pub id: String,
+    pub item_id: String,
+    /// The thread's first comment, for a reply.
+    pub parent_id: Option<String>,
+    pub author: WorkCommentAuthor,
+    /// Markdown; none once deleted.
+    pub body: Option<String>,
+    pub created_at_ms: i64,
+    pub edited_at_ms: Option<i64>,
+    pub resolved_at_ms: Option<i64>,
+    pub deleted: bool,
+    pub replies: Vec<WorkComment>,
+}
+
+/// A page of threads, oldest first; `next_cursor` reads the next page.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkCommentPage {
+    pub threads: Vec<WorkComment>,
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
@@ -303,6 +365,7 @@ pub enum WorkProposalField {
     Snoozed,
     Recurrence,
     Cycle,
+    Parent,
 }
 
 sql_enum!(WorkProposalField {
@@ -318,6 +381,7 @@ sql_enum!(WorkProposalField {
     Snoozed => "snoozed",
     Recurrence => "recurrence",
     Cycle => "cycle",
+    Parent => "parent",
 });
 
 /// One field an agent would change, waiting for the user. `from` is the
@@ -430,6 +494,13 @@ pub struct WorkPatch {
         skip_serializing_if = "Option::is_none"
     )]
     pub cycle: Option<Option<i64>>,
+    /// The task to sit under; null makes it a task of its own.
+    #[serde(
+        default,
+        deserialize_with = "nullable",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub parent_id: Option<Option<String>>,
 }
 
 /// A cycle a query or a change names: the one under way, the one after it,
@@ -725,6 +796,11 @@ pub struct WorkItemDetail {
     /// meeting, its meeting evidence and its people are not read.
     pub conversations_available: bool,
     pub proposals: Vec<WorkProposal>,
+    pub parent: Option<WorkItemRef>,
+    /// Its sub-tasks, archived ones left out, in number order.
+    pub sub_tasks: Vec<WorkItem>,
+    /// Every thread, oldest first.
+    pub comments: Vec<WorkComment>,
 }
 
 /// Sent after every committed change to tracker items, with the items it

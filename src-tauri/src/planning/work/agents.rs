@@ -247,6 +247,7 @@ fn proposed(field: WorkProposalField, patch: &WorkPatch) -> Option<String> {
             .map(|until| until.to_string()),
         WorkProposalField::Recurrence => patch.recurrence.clone().flatten(),
         WorkProposalField::Cycle => patch.cycle.flatten().map(|cycle| cycle.to_string()),
+        WorkProposalField::Parent => patch.parent_id.clone().flatten(),
     }
 }
 
@@ -404,6 +405,16 @@ fn field_changes(
             item.cycle.map(|cycle| cycle.to_string()),
             WorkPatch {
                 cycle: Some(cycle),
+                ..WorkPatch::default()
+            },
+        );
+    }
+    if let Some(parent_id) = &patch.parent_id {
+        add(
+            WorkProposalField::Parent,
+            item.parent_id.clone(),
+            WorkPatch {
+                parent_id: Some(parent_id.clone()),
                 ..WorkPatch::default()
             },
         );
@@ -667,6 +678,34 @@ pub(crate) async fn create_as(
         agent,
     )?;
     Ok(item)
+}
+
+/// An agent's new sub-tasks, in triage while agents' changes wait for the
+/// user, as [`create_as`] does.
+pub(crate) async fn subtask_create_as(
+    app: &AppHandle,
+    agent: &str,
+    operation_id: &str,
+    parent_id: &str,
+    inputs: &[WorkItemInput],
+) -> Result<Vec<WorkItem>, String> {
+    let inputs: Vec<WorkItemInput> = match autonomy(app) {
+        WorkAutonomy::Apply => inputs.to_vec(),
+        WorkAutonomy::Suggest => inputs
+            .iter()
+            .map(|input| WorkItemInput {
+                status: Some(WorkStatus::Triage),
+                ..input.clone()
+            })
+            .collect(),
+    };
+    let items =
+        super::subtask_create_as(app, WorkActor::Agent, operation_id, parent_id, &inputs).await?;
+    let ids: Vec<String> = items.iter().map(|item| item.id.clone()).collect();
+    if let Some(since) = items.iter().map(|item| item.created_at_ms).min() {
+        credit_since(app, &ids, since, agent)?;
+    }
+    Ok(items)
 }
 
 /// Puts an agent on an item: a Todo or Backlog item moves to In progress

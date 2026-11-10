@@ -7,8 +7,8 @@ use super::super::store::{self, Refusal};
 use super::parse;
 use super::types::{
     WorkActivity, WorkActivityKind, WorkActor, WorkCounts, WorkDay, WorkDisplay, WorkDue, WorkItem,
-    WorkLabel, WorkOwner, WorkPatch, WorkQuery, WorkRelation, WorkRelationKind, WorkStatus,
-    WorkView,
+    WorkItemRef, WorkLabel, WorkOwner, WorkPatch, WorkProgress, WorkQuery, WorkRelation,
+    WorkRelationKind, WorkStatus, WorkView,
 };
 use anyhow::Result;
 use chrono::{Datelike, Days, Local, NaiveDate, TimeZone};
@@ -20,7 +20,8 @@ const ITEM_COLUMNS: &str = "t.id, t.number, t.title, t.details, t.status, t.prio
     t.milestone_id, t.owner_person_id, t.owner_is_self, t.due_at_ms, t.source_loop_id,
     t.duplicate_of, t.snoozed_until_ms, t.archived_at_ms, t.status_changed_at_ms,
     t.created_at_ms, t.updated_at_ms, t.revision, t.sort_order,
-    (SELECT group_concat(label_id) FROM planning_task_labels WHERE task_id = t.id), t.cycle";
+    (SELECT group_concat(label_id) FROM planning_task_labels WHERE task_id = t.id), t.cycle,
+    t.parent_id";
 
 fn read_item(row: &Row<'_>) -> rusqlite::Result<WorkItem> {
     let owner_person_id: Option<String> = row.get(8)?;
@@ -54,6 +55,7 @@ fn read_item(row: &Row<'_>) -> rusqlite::Result<WorkItem> {
         revision: row.get(18)?,
         sort_order: row.get(19)?,
         cycle: row.get(21)?,
+        parent_id: row.get(22)?,
     })
 }
 
@@ -152,6 +154,88 @@ pub(crate) fn family(conn: &Connection, root_id: &str) -> Result<Vec<WorkItem>> 
     ))?;
     let rows = statement.query_map([root_id], read_item)?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// The task `parent_id` names, once it is sure `id` would not end up under
+/// itself: no task above the parent is `id`.
+fn existing_parent(conn: &Connection, id: &str, parent_id: &str) -> Result<String> {
+    let parent_id = item(conn, &store::uuid(parent_id)?)?.id;
+    let looped: bool = conn.query_row(
+        "WITH RECURSIVE above(id, depth) AS (
+             SELECT ?2, 0
+             UNION
+             SELECT t.parent_id, above.depth + 1 FROM planning_tasks t
+             JOIN above ON t.id = above.id
+             WHERE t.parent_id IS NOT NULL AND above.depth < 10000
+         )
+         SELECT EXISTS(SELECT 1 FROM above WHERE id = ?1)",
+        params![id, parent_id],
+        |row| row.get(0),
+    )?;
+    if looped {
+        return Err(Refusal::ParentLoop.into());
+    }
+    Ok(parent_id)
+}
+
+/// Another task as a detail page names it.
+pub(crate) fn item_ref(conn: &Connection, id: &str) -> Result<WorkItemRef> {
+    let item = item(conn, id)?;
+    Ok(WorkItemRef {
+        id: item.id,
+        number: item.number,
+        title: item.title,
+        status: item.status,
+    })
+}
+
+/// A task's sub-tasks, archived ones left out, in number order.
+pub(crate) fn sub_tasks(conn: &Connection, parent_id: &str) -> Result<Vec<WorkItem>> {
+    let mut statement = conn.prepare(&format!(
+        "SELECT {ITEM_COLUMNS} FROM planning_tasks t
+         WHERE t.parent_id = ?1 AND t.archived_at_ms IS NULL ORDER BY t.number"
+    ))?;
+    let rows = statement.query_map([parent_id], read_item)?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// Each parent's sub-tasks done out of all of them, by the parent's id.
+/// Archived, canceled and duplicate sub-tasks count for neither.
+pub(crate) fn sub_task_progress(conn: &Connection) -> Result<HashMap<String, WorkProgress>> {
+    let mut statement = conn.prepare(
+        "SELECT parent_id, sum(status = 'done'), count(*) FROM planning_tasks
+         WHERE parent_id IS NOT NULL AND archived_at_ms IS NULL
+           AND status NOT IN ('canceled', 'duplicate')
+         GROUP BY parent_id",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get(0)?,
+            WorkProgress {
+                done: row.get(1)?,
+                total: row.get(2)?,
+            },
+        ))
+    })?;
+    Ok(rows.collect::<rusqlite::Result<HashMap<_, _>>>()?)
+}
+
+/// The owner a new sub-task takes when none is given: the user when the
+/// parent is theirs, else the one owner every sub-task already shares, else
+/// nobody.
+pub(crate) fn inherited_owner(conn: &Connection, parent: &WorkItem) -> Result<WorkOwner> {
+    if parent.owner_is_self {
+        return Ok(WorkOwner::Myself);
+    }
+    let siblings = sub_tasks(conn, &parent.id)?;
+    let Some(first) = siblings.first().map(WorkItem::owner) else {
+        return Ok(WorkOwner::Nobody);
+    };
+    Ok(if siblings.iter().all(|sibling| sibling.owner() == first) {
+        first
+    } else {
+        WorkOwner::Nobody
+    })
 }
 
 fn clean_title(value: &str) -> Result<&str> {
@@ -443,6 +527,12 @@ pub(crate) fn apply(
         }
         None => {}
     }
+    if let Some(parent_id) = &patch.parent_id {
+        next.parent_id = parent_id
+            .as_deref()
+            .map(|parent_id| existing_parent(conn, id, parent_id))
+            .transpose()?;
+    }
     if next == before && repeats.is_none() {
         return Ok(Changed {
             after: before.clone(),
@@ -458,7 +548,8 @@ pub(crate) fn apply(
         "UPDATE planning_tasks SET title = ?2, details = ?3, status = ?4, priority = ?5,
             project_id = ?6, milestone_id = ?7, owner_person_id = ?8, owner_is_self = ?9,
             due_at_ms = ?10, duplicate_of = ?11, snoozed_until_ms = ?12,
-            status_changed_at_ms = ?13, revision = revision + 1, updated_at_ms = ?14, cycle = ?15
+            status_changed_at_ms = ?13, revision = revision + 1, updated_at_ms = ?14, cycle = ?15,
+            parent_id = ?16
          WHERE id = ?1",
         params![
             id,
@@ -475,7 +566,8 @@ pub(crate) fn apply(
             next.snoozed_until_ms,
             status_changed_at_ms,
             now_ms,
-            next.cycle
+            next.cycle,
+            next.parent_id
         ],
     )?;
     if next.label_ids != before.label_ids {
@@ -565,6 +657,13 @@ pub(crate) fn apply(
             WorkActivityKind::Cycle,
             before.cycle.map(|cycle| cycle.to_string()),
             next.cycle.map(|cycle| cycle.to_string()),
+        )?;
+    }
+    if next.parent_id != before.parent_id {
+        note(
+            WorkActivityKind::Parent,
+            before.parent_id.clone(),
+            next.parent_id.clone(),
         )?;
     }
     if !before.status.is_closed() && matches!(next.status, WorkStatus::Done | WorkStatus::Canceled)

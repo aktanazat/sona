@@ -7,6 +7,7 @@ pub(crate) mod ask;
 pub(crate) mod blocks;
 pub(crate) mod capture;
 pub(crate) mod command;
+pub(crate) mod comments;
 pub(crate) mod cycles;
 pub(crate) mod follow;
 mod hygiene;
@@ -27,10 +28,10 @@ use self::items::{Changed, DueSpan, NewItem};
 use self::sync::{MeetingReader, People};
 pub use self::types::WorkChanged;
 use self::types::{
-    WorkActivityKind, WorkActor, WorkCounts, WorkDay, WorkDisplay, WorkDoer, WorkItem,
-    WorkItemDetail, WorkItemInput, WorkItemRow, WorkLabel, WorkList, WorkOwner, WorkPatch,
-    WorkProjectChoice, WorkQuery, WorkRelation, WorkRelationKind, WorkRepeat, WorkSource,
-    WorkStatus, WorkTimeBlock, WorkView,
+    WorkActivityKind, WorkActor, WorkComment, WorkCommentPage, WorkCounts, WorkDay, WorkDisplay,
+    WorkDoer, WorkItem, WorkItemDetail, WorkItemInput, WorkItemRow, WorkLabel, WorkList,
+    WorkOwner, WorkPatch, WorkProgress, WorkProjectChoice, WorkQuery, WorkRelation,
+    WorkRelationKind, WorkRepeat, WorkSource, WorkStatus, WorkTimeBlock, WorkView,
 };
 use super::catalog;
 use super::sources;
@@ -377,6 +378,7 @@ struct RowContext {
     risks: std::collections::BTreeSet<String>,
     blocks: HashMap<String, WorkTimeBlock>,
     repeats: HashMap<String, WorkRepeat>,
+    progress: HashMap<String, WorkProgress>,
 }
 
 impl RowContext {
@@ -400,6 +402,7 @@ impl RowContext {
             risks: blocks::risks(history)?,
             blocks: blocks::booked(history)?,
             repeats: recur::repeats(history, now_ms())?,
+            progress: items::sub_task_progress(history)?,
         })
     }
 
@@ -437,6 +440,7 @@ impl RowContext {
             at_risk: self.risks.contains(&item.id),
             time_block: self.blocks.get(&item.id).copied(),
             repeat: self.repeats.get(&item.id).cloned(),
+            sub_tasks: self.progress.get(&item.id).copied(),
             item,
         };
         if let Some(source) = match &source_loop_id {
@@ -615,6 +619,13 @@ fn detail(
         }
     }
     Ok(WorkItemDetail {
+        parent: item
+            .parent_id
+            .as_deref()
+            .map(|parent_id| items::item_ref(history, parent_id))
+            .transpose()?,
+        sub_tasks: items::sub_tasks(history, &id)?,
+        comments: comments::all(history, &id)?,
         item: context.row(&mut reader, item)?,
         recurrence: items::recurrence(history, &id)?,
         evidence,
@@ -805,6 +816,324 @@ pub async fn work_create(
     input: WorkItemInput,
 ) -> Result<WorkItem, String> {
     create_as(&app, WorkActor::Me, &operation_id, &input).await
+}
+
+/// Puts `inputs` in under `parent_id`. What an input leaves unset comes
+/// from the parent as Linear does it: the project and milestone, the
+/// priority, and an owner by [`items::inherited_owner`].
+fn create_under(
+    history: &mut Connection,
+    meetings: Option<&Connection>,
+    change: Change<'_>,
+    parent_id: &str,
+    inputs: &[WorkItemInput],
+) -> StorageResult<Done<Vec<WorkItem>>> {
+    store::mutate(
+        history,
+        change.operation_id,
+        "work_subtask_create",
+        &(parent_id, inputs),
+        change.at_ms,
+        |tx| {
+            if inputs.is_empty() {
+                return Err(Refusal::Invalid.into());
+            }
+            let parent = items::item(tx, &store::uuid(parent_id)?)?;
+            let mut effects = Effects::default();
+            effects.item(&parent);
+            let mut value = Vec::with_capacity(inputs.len());
+            for input in inputs {
+                let owner = match &input.owner {
+                    Some(owner) => checked_owner(meetings, owner)?,
+                    None => items::inherited_owner(tx, &parent)?,
+                };
+                let (project_id, milestone_id) = match &input.project_id {
+                    Some(project_id) => (Some(project_id.as_str()), input.milestone_id.as_deref()),
+                    None => (
+                        parent.project_id.as_deref(),
+                        input
+                            .milestone_id
+                            .as_deref()
+                            .or(parent.milestone_id.as_deref()),
+                    ),
+                };
+                let item = items::insert(
+                    tx,
+                    &NewItem {
+                        title: &input.title,
+                        details: input.details.as_deref(),
+                        status: input.status.unwrap_or(WorkStatus::NotStarted),
+                        priority: input.priority.unwrap_or(parent.priority),
+                        project_id,
+                        milestone_id,
+                        owner: &owner,
+                        due_at_ms: input.due_at_ms,
+                        label_ids: input.label_ids.as_deref().unwrap_or_default(),
+                        source_loop_id: None,
+                        recurrence: input.recurrence.as_deref(),
+                    },
+                    change.actor,
+                    change.at_ms,
+                )?;
+                let changed = items::apply(
+                    tx,
+                    &item.id,
+                    &WorkPatch {
+                        parent_id: Some(Some(parent.id.clone())),
+                        ..WorkPatch::default()
+                    },
+                    WorkActivityKind::Status,
+                    change.actor,
+                    change.at_ms,
+                )?;
+                effects.item(&changed.after);
+                value.push(changed.after);
+            }
+            Ok(Done { value, effects })
+        },
+    )
+}
+
+/// [`work_subtask_create`] made by `actor`.
+pub(crate) async fn subtask_create_as(
+    app: &AppHandle,
+    actor: WorkActor,
+    operation_id: &str,
+    parent_id: &str,
+    inputs: &[WorkItemInput],
+) -> Result<Vec<WorkItem>, String> {
+    let change = Change::now(operation_id, actor);
+    if inputs
+        .iter()
+        .any(|input| matches!(input.owner, Some(WorkOwner::Person { .. })))
+    {
+        run_with_meetings(app, |history, meetings| {
+            create_under(history, meetings, change, parent_id, inputs)
+        })
+        .await
+    } else {
+        run_history(app, |history| {
+            create_under(history, None, change, parent_id, inputs)
+        })
+    }
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn work_subtask_create(
+    app: AppHandle,
+    operation_id: String,
+    parent_id: String,
+    inputs: Vec<WorkItemInput>,
+) -> Result<Vec<WorkItem>, String> {
+    subtask_create_as(&app, WorkActor::Me, &operation_id, &parent_id, &inputs).await
+}
+
+/// Puts a task under another, or with `None` makes it a task of its own,
+/// whatever revision it is at.
+#[tauri::command(async)]
+#[specta::specta]
+pub fn work_set_parent(
+    app: AppHandle,
+    operation_id: String,
+    id: String,
+    parent_id: Option<String>,
+) -> Result<WorkItem, String> {
+    let change = Change::now(&operation_id, WorkActor::Me);
+    run_history(&app, |history| {
+        store::mutate(
+            history,
+            change.operation_id,
+            "work_set_parent",
+            &(&id, &parent_id),
+            change.at_ms,
+            |tx| {
+                let changed = items::apply(
+                    tx,
+                    &store::uuid(&id)?,
+                    &WorkPatch {
+                        parent_id: Some(parent_id.clone()),
+                        ..WorkPatch::default()
+                    },
+                    WorkActivityKind::Status,
+                    change.actor,
+                    change.at_ms,
+                )?;
+                let mut effects = Effects::default();
+                effects.changed(&changed);
+                for parent in [&changed.before.parent_id, &changed.after.parent_id]
+                    .into_iter()
+                    .flatten()
+                {
+                    if !effects.items.contains(parent) {
+                        effects.items.push(parent.clone());
+                    }
+                }
+                Ok(Done {
+                    value: changed.after,
+                    effects,
+                })
+            },
+        )
+    })
+}
+
+/// One comment change made by `author`, telling the task's windows.
+fn comment_change(
+    app: &AppHandle,
+    operation_id: &str,
+    command: &str,
+    request: &impl Serialize,
+    write: impl FnOnce(&Connection, i64) -> StorageResult<WorkComment>,
+) -> Result<WorkComment, String> {
+    let at_ms = now_ms();
+    run_history(app, |history| {
+        store::mutate(history, operation_id, command, request, at_ms, |tx| {
+            let value = write(tx, at_ms)?;
+            Ok(Done {
+                effects: Effects {
+                    items: vec![value.item_id.clone()],
+                    ..Effects::default()
+                },
+                value,
+            })
+        })
+    })
+}
+
+/// [`work_comment_add`] written by `author`.
+pub(crate) fn comment_add_as(
+    app: &AppHandle,
+    author: comments::Author<'_>,
+    operation_id: &str,
+    item_id: &str,
+    body: &str,
+    reply_to: Option<&str>,
+) -> Result<WorkComment, String> {
+    comment_change(
+        app,
+        operation_id,
+        "work_comment_add",
+        &(item_id, body, reply_to, author.actor, author.agent),
+        |tx, at_ms| comments::add(tx, item_id, reply_to, author, body, at_ms),
+    )
+}
+
+/// [`work_comment_edit`] made by `author`.
+pub(crate) fn comment_edit_as(
+    app: &AppHandle,
+    author: comments::Author<'_>,
+    operation_id: &str,
+    id: &str,
+    body: &str,
+) -> Result<WorkComment, String> {
+    comment_change(
+        app,
+        operation_id,
+        "work_comment_edit",
+        &(id, body, author.actor, author.agent),
+        |tx, at_ms| comments::edit(tx, id, author, body, at_ms),
+    )
+}
+
+/// [`work_comment_delete`] made by `author`.
+pub(crate) fn comment_delete_as(
+    app: &AppHandle,
+    author: comments::Author<'_>,
+    operation_id: &str,
+    id: &str,
+) -> Result<WorkComment, String> {
+    comment_change(
+        app,
+        operation_id,
+        "work_comment_delete",
+        &(id, author.actor, author.agent),
+        |tx, at_ms| comments::delete(tx, id, author, at_ms),
+    )
+}
+
+/// [`work_comment_resolve`] made by `actor`.
+pub(crate) fn comment_resolve_as(
+    app: &AppHandle,
+    actor: WorkActor,
+    operation_id: &str,
+    id: &str,
+    resolved: bool,
+) -> Result<WorkComment, String> {
+    comment_change(
+        app,
+        operation_id,
+        "work_comment_resolve",
+        &(id, resolved, actor),
+        |tx, at_ms| comments::resolve(tx, id, resolved, at_ms),
+    )
+}
+
+const ME: comments::Author<'static> = comments::Author {
+    actor: WorkActor::Me,
+    agent: None,
+};
+
+#[tauri::command(async)]
+#[specta::specta]
+pub fn work_comments(
+    history_state: State<'_, Arc<HistoryManager>>,
+    item_id: String,
+    limit: Option<u32>,
+    cursor: Option<String>,
+) -> Result<WorkCommentPage, String> {
+    let limit = limit.map_or(comments::PAGE, |limit| {
+        usize::try_from(limit).map_or(comments::MAX_PAGE, |limit| {
+            limit.clamp(1, comments::MAX_PAGE)
+        })
+    });
+    super::history(&history_state, |history| {
+        comments::page(history, &item_id, limit, cursor.as_deref())
+    })
+}
+
+#[tauri::command(async)]
+#[specta::specta]
+pub fn work_comment_add(
+    app: AppHandle,
+    operation_id: String,
+    item_id: String,
+    body: String,
+    reply_to: Option<String>,
+) -> Result<WorkComment, String> {
+    comment_add_as(&app, ME, &operation_id, &item_id, &body, reply_to.as_deref())
+}
+
+#[tauri::command(async)]
+#[specta::specta]
+pub fn work_comment_edit(
+    app: AppHandle,
+    operation_id: String,
+    id: String,
+    body: String,
+) -> Result<WorkComment, String> {
+    comment_edit_as(&app, ME, &operation_id, &id, &body)
+}
+
+#[tauri::command(async)]
+#[specta::specta]
+pub fn work_comment_delete(
+    app: AppHandle,
+    operation_id: String,
+    id: String,
+) -> Result<WorkComment, String> {
+    comment_delete_as(&app, ME, &operation_id, &id)
+}
+
+#[tauri::command(async)]
+#[specta::specta]
+pub fn work_comment_resolve(
+    app: AppHandle,
+    operation_id: String,
+    id: String,
+    resolved: bool,
+) -> Result<WorkComment, String> {
+    comment_resolve_as(&app, WorkActor::Me, &operation_id, &id, resolved)
 }
 
 fn update(

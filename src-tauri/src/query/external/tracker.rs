@@ -34,7 +34,8 @@ use crate::planning::work::types::{
     WorkActivity, WorkActivityKind, WorkActor, WorkCycle, WorkCycleRef, WorkCycleState,
     WorkDirection, WorkDisplay, WorkDue, WorkFieldSuggestion, WorkGroupBy, WorkItem,
     WorkItemDetail, WorkItemInput, WorkItemRow, WorkLabel, WorkLayout, WorkList, WorkOrderBy,
-    WorkOwner, WorkPatch, WorkPersonChoice, WorkProjectChoice, WorkProposal, WorkProposalField,
+    WorkOwner, WorkPatch, WorkPersonChoice, WorkProgress, WorkProjectChoice, WorkProposal,
+    WorkProposalField,
     WorkQuery, WorkRelation, WorkRelationKind, WorkRepeat, WorkSource, WorkStatus,
     WorkSuggestionField, WorkSuggestionValue, WorkView,
 };
@@ -168,6 +169,19 @@ pub enum WorkVerb {
     Meetings(catalog::MeetingsArgs),
     /// One meeting: summary, commitments, and with --transcript who said what.
     Meeting(catalog::MeetingArgs),
+    /// Comment on a task: add, edit, delete, resolve.
+    Comment(threads::CommentCommand),
+    /// A task's comment threads, oldest first.
+    Comments(threads::CommentsArgs),
+    /// Change a comment you wrote.
+    CommentEdit(threads::CommentEditArgs),
+    /// Delete a comment you wrote. Replies under it stay.
+    CommentDelete(threads::CommentDeleteArgs),
+    /// Resolve the thread a comment is in, or reopen it with --reopen.
+    CommentResolve(threads::CommentResolveArgs),
+    /// Make sub-tasks under a task, one per title. Each takes the parent's
+    /// project and priority unless told otherwise.
+    Subtask(threads::SubtaskArgs),
 }
 
 #[derive(Args, Clone, Debug, Eq, PartialEq)]
@@ -252,6 +266,9 @@ pub struct UpdateArgs {
     /// Plan the task in a cycle: current, next, its number, or none.
     #[arg(long, value_parser = cycle_ref, value_name = "CYCLE")]
     pub cycle: Option<WorkCycleRef>,
+    /// Put the task under another: S-12, 12, its id, or none.
+    #[arg(long, value_parser = threads::parent_arg, value_name = "TASK")]
+    pub parent: Option<threads::ParentArg>,
     /// Refuse unless the task is still at this revision.
     #[arg(long)]
     pub expected_revision: Option<i64>,
@@ -912,6 +929,24 @@ impl WorkVerb {
             | Self::People(_)
             | Self::Meetings(_)
             | Self::Meeting(_)
+            | Self::Comments(_)
+            | Self::Comment(threads::CommentCommand {
+                verb:
+                    threads::CommentVerb::Add(threads::CommentAddArgs { dry_run: true, .. })
+                    | threads::CommentVerb::Edit(threads::CommentEditArgs { dry_run: true, .. })
+                    | threads::CommentVerb::Delete(threads::CommentDeleteArgs {
+                        dry_run: true,
+                        ..
+                    })
+                    | threads::CommentVerb::Resolve(threads::CommentResolveArgs {
+                        dry_run: true,
+                        ..
+                    }),
+            })
+            | Self::CommentEdit(threads::CommentEditArgs { dry_run: true, .. })
+            | Self::CommentDelete(threads::CommentDeleteArgs { dry_run: true, .. })
+            | Self::CommentResolve(threads::CommentResolveArgs { dry_run: true, .. })
+            | Self::Subtask(threads::SubtaskArgs { dry_run: true, .. })
             | Self::Update(UpdateArgs { dry_run: true, .. })
             | Self::Done(DoneArgs { dry_run: true, .. })
             | Self::Accept(AcceptArgs { dry_run: true, .. })
@@ -948,7 +983,12 @@ impl WorkVerb {
             | Self::Ask(_)
             | Self::Say(_)
             | Self::Watch(_)
-            | Self::Unwatch(_) => WRITE_SCOPES,
+            | Self::Unwatch(_)
+            | Self::Comment(_)
+            | Self::CommentEdit(_)
+            | Self::CommentDelete(_)
+            | Self::CommentResolve(_)
+            | Self::Subtask(_) => WRITE_SCOPES,
         }
     }
 
@@ -969,7 +1009,17 @@ impl WorkVerb {
                 "--expected-revision fences one task; name one."
             }
             Self::Update(args) if !args.changes_something() => {
-                "Name a change: --title, --details, --status, --priority, --owner, --due, --repeat, --project, --milestone, --labels, --add-label, --remove-label, --snooze-until or --cycle."
+                "Name a change: --title, --details, --status, --priority, --owner, --due, --repeat, --project, --milestone, --labels, --add-label, --remove-label, --snooze-until, --cycle or --parent."
+            }
+            Self::Comment(threads::CommentCommand {
+                verb:
+                    threads::CommentVerb::Add(threads::CommentAddArgs { body, .. })
+                    | threads::CommentVerb::Edit(threads::CommentEditArgs { body, .. }),
+            })
+            | Self::CommentEdit(threads::CommentEditArgs { body, .. })
+                if body.trim().is_empty() =>
+            {
+                "--body cannot be empty."
             }
             Self::Done(args) if args.evidence.is_some() && args.tasks.len() > 1 => {
                 "--evidence belongs to one task; name one."
@@ -1015,6 +1065,7 @@ impl UpdateArgs {
             || !self.remove_label.is_empty()
             || self.snooze_until.is_some()
             || self.cycle.is_some()
+            || self.parent.is_some()
     }
 }
 
@@ -1079,6 +1130,8 @@ pub enum WorkAnswer {
     Person(catalog::ExternalWorkPersonChange),
     Meetings(catalog::ExternalWorkMeetings),
     MeetingDetail(Box<catalog::ExternalWorkMeetingDetail>),
+    Comments(threads::ExternalWorkComments),
+    Comment(Box<threads::ExternalWorkCommentChange>),
 }
 
 /// What `ask` found: the lines that answer, numbered for --take.
@@ -1168,6 +1221,11 @@ pub struct ExternalWorkItem {
     /// How it repeats, and of its instances due so far how many were done
     /// by the end of their day.
     pub repeat: Option<WorkRepeat>,
+    /// The task it is a sub-task of, when the caller can see it.
+    pub parent: Option<ExternalWorkRef>,
+    /// Its sub-tasks done out of all of them, canceled and duplicate ones
+    /// left out; none when it has none.
+    pub sub_tasks: Option<WorkProgress>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -1264,6 +1322,11 @@ pub struct ExternalWorkDetail {
     pub activity: Vec<ExternalWorkActivity>,
     /// Changes agents proposed that wait for the user, oldest first.
     pub proposals: Vec<ExternalWorkProposal>,
+    pub parent: Option<ExternalWorkRef>,
+    /// Its sub-tasks the caller can see, archived ones left out.
+    pub sub_tasks: Vec<ExternalWorkItem>,
+    /// Every comment thread, oldest first.
+    pub comments: Vec<threads::ExternalWorkComment>,
     /// False while the conversations can't be opened: meeting quotes and
     /// suggestions are left out.
     pub conversations_available: bool,
@@ -1660,6 +1723,17 @@ pub(super) async fn answer(
         WorkVerb::Watches => tracker.watches().await,
         WorkVerb::Watch(args) => tracker.watch(args).await,
         WorkVerb::Unwatch(args) => tracker.unwatch(args).await,
+        WorkVerb::Comments(args) => tracker.comments(args).await,
+        WorkVerb::Comment(threads::CommentCommand { verb }) => match verb {
+            threads::CommentVerb::Add(args) => tracker.comment_add(args).await,
+            threads::CommentVerb::Edit(args) => tracker.comment_edit(args).await,
+            threads::CommentVerb::Delete(args) => tracker.comment_delete(args).await,
+            threads::CommentVerb::Resolve(args) => tracker.comment_resolve(args).await,
+        },
+        WorkVerb::CommentEdit(args) => tracker.comment_edit(args).await,
+        WorkVerb::CommentDelete(args) => tracker.comment_delete(args).await,
+        WorkVerb::CommentResolve(args) => tracker.comment_resolve(args).await,
+        WorkVerb::Subtask(args) => tracker.subtask(args).await,
     }
 }
 
@@ -2063,6 +2137,18 @@ impl Tracker<'_> {
             }
         }
         let base = board.patch(args)?;
+        if let Some(Some(parent_id)) = &base.parent_id {
+            if let Some(row) = targets
+                .iter()
+                .find(|row| board.above(&row.item.id, parent_id))
+            {
+                return Err(ExternalError::invalid(format!(
+                    "{} cannot go under {}: a task cannot sit under itself or one of its own sub-tasks.",
+                    handle(row.item.number),
+                    board.task_text(parent_id)
+                )));
+            }
+        }
         let add = board.label_ids(&args.add_label)?;
         let remove = board.label_ids(&args.remove_label)?;
         let planned = targets
@@ -3394,7 +3480,7 @@ impl Board {
     fn owner(&self, value: &str) -> Result<WorkOwner, ExternalError> {
         match value.trim().to_lowercase().as_str() {
             "me" | "self" | "you" | "mine" => Ok(WorkOwner::Myself),
-            "nobody" | "none" | "no one" => Ok(WorkOwner::Nobody),
+            "nobody" | "none" | "no one" | "null" => Ok(WorkOwner::Nobody),
             _ => self.person(value).map(|person| WorkOwner::Person {
                 person_id: person.id.clone(),
             }),
@@ -3567,6 +3653,16 @@ impl Board {
                     }
                 })
                 .transpose()?,
+            parent_id: args
+                .parent
+                .as_ref()
+                .map(|parent| match parent {
+                    threads::ParentArg::None => Ok(None),
+                    threads::ParentArg::Task(task) => {
+                        self.task(task).map(|row| Some(row.item.id.clone()))
+                    }
+                })
+                .transpose()?,
         })
     }
 
@@ -3691,6 +3787,15 @@ impl Board {
                 |cycle: Option<i64>| cycle.map_or_else(|| "none".to_owned(), |n| n.to_string());
             field("cycle", number(item.cycle), number(cycle));
         }
+        if let Some(parent) = &patch.parent_id {
+            let name =
+                |id: Option<&String>| id.map_or_else(|| "none".to_owned(), |id| self.task_text(id));
+            field(
+                "parent",
+                name(item.parent_id.as_ref()),
+                name(parent.as_ref()),
+            );
+        }
         changes
     }
 
@@ -3773,6 +3878,7 @@ impl Board {
             at_risk: before.is_some_and(|row| row.at_risk),
             time_block: before.and_then(|row| row.time_block),
             repeat: before.and_then(|row| row.repeat.clone()),
+            sub_tasks: before.and_then(|row| row.sub_tasks),
             item,
         };
         project_task(&row, self)
@@ -3825,7 +3931,25 @@ impl Board {
             .iter()
             .map(|entry| self.activity(entry))
             .collect();
+        let parent = detail
+            .parent
+            .as_ref()
+            .and_then(|parent| self.row(&parent.id))
+            .map(task_ref_of);
+        let sub_tasks = detail
+            .sub_tasks
+            .iter()
+            .filter_map(|item| self.row(&item.id))
+            .map(|row| project_task(row, self))
+            .collect();
         ExternalWorkDetail {
+            parent,
+            sub_tasks,
+            comments: detail
+                .comments
+                .into_iter()
+                .map(threads::project_comment)
+                .collect(),
             schema_version: QUERY_SCHEMA_VERSION,
             conversations_available: self.fence.is_open(),
             task: project_task(&detail.item, self),
@@ -3912,12 +4036,14 @@ impl Board {
                 }
                 None => value.to_owned(),
             },
+            WorkActivityKind::Parent => self.task_text(value),
             WorkActivityKind::Title
             | WorkActivityKind::Details
             | WorkActivityKind::Archived
             | WorkActivityKind::Restored
             | WorkActivityKind::Kept
-            | WorkActivityKind::Recurrence => value.to_owned(),
+            | WorkActivityKind::Recurrence
+            | WorkActivityKind::Comment => value.to_owned(),
         }
     }
 
@@ -3949,6 +4075,7 @@ impl Board {
             WorkProposalField::Snoozed => Some(WorkActivityKind::Snoozed),
             WorkProposalField::Recurrence => Some(WorkActivityKind::Recurrence),
             WorkProposalField::Cycle => Some(WorkActivityKind::Cycle),
+            WorkProposalField::Parent => Some(WorkActivityKind::Parent),
             WorkProposalField::Milestone => None,
         };
         let read = |value: &Option<String>| match (value.as_deref(), kind) {
@@ -4335,6 +4462,12 @@ fn project_task(row: &WorkItemRow, board: &Board) -> ExternalWorkItem {
             ends_at_ms: block.ends_at_ms,
         }),
         repeat: row.repeat.clone(),
+        parent: item
+            .parent_id
+            .as_deref()
+            .and_then(|id| board.row(id))
+            .map(task_ref_of),
+        sub_tasks: row.sub_tasks,
     }
 }
 
@@ -4511,6 +4644,7 @@ impl WorkAnswer {
             | Self::Person(_)
             | Self::Meetings(_)
             | Self::MeetingDetail(_) => catalog::text(self, &mut text),
+            Self::Comments(_) | Self::Comment(_) => threads::text(self, &mut text),
             Self::Label(change) => {
                 let verb = match (change.deleted, &change.operation_id) {
                     (true, _) => "Deleted",
@@ -4658,7 +4792,9 @@ impl WorkAnswer {
             | Self::People(_)
             | Self::Person(_)
             | Self::Meetings(_)
-            | Self::MeetingDetail(_) => true,
+            | Self::MeetingDetail(_)
+            | Self::Comments(_)
+            | Self::Comment(_) => true,
         }
     }
 }
@@ -4747,6 +4883,12 @@ fn task_line(text: &mut String, task: &ExternalWorkItem, today: &Today) {
         } else {
             repeat.every.clone()
         });
+    }
+    if let Some(parent) = &task.parent {
+        notes.push(format!("under {}", parent.handle));
+    }
+    if let Some(progress) = task.sub_tasks {
+        notes.push(format!("{}/{} sub-tasks done", progress.done, progress.total));
     }
     if let Some(project) = &task.project {
         notes.push(project.name.clone());
@@ -4911,6 +5053,26 @@ fn detail_text(text: &mut String, detail: &ExternalWorkDetail, today: &Today) {
             proposal_line(text, proposal);
         }
     }
+    if let Some(parent) = &detail.parent {
+        let _ = writeln!(
+            text,
+            "\nSub-task of {} {} ({})",
+            parent.handle,
+            parent.title,
+            status_text(parent.status)
+        );
+    }
+    if !detail.sub_tasks.is_empty() {
+        text.push_str("\nSub-tasks\n");
+        for sub_task in &detail.sub_tasks {
+            text.push_str("  ");
+            task_line(text, sub_task, today);
+        }
+    }
+    if !detail.comments.is_empty() {
+        text.push_str("\nComments\n");
+        threads::threads_text(text, &detail.comments);
+    }
     if !detail.activity.is_empty() {
         text.push_str("\nHistory\n");
         for entry in &detail.activity {
@@ -5073,6 +5235,7 @@ fn filters_text(filters: &ExternalWorkFilters) -> String {
 }
 
 mod catalog;
+mod threads;
 
 #[cfg(test)]
 mod tests;
