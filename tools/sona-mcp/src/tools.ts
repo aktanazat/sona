@@ -46,7 +46,9 @@ export interface ToolDefinition {
   readonly name: string;
   readonly title: string;
   readonly description: string;
-  readonly mutates?: true;
+  /** Whether a call changes the user's data, and whether that change takes
+   * something away the same tool cannot give back. Absent: read-only. */
+  readonly mutates?: "changes" | "destroys";
   /** Published only when `SONA_MCP_TOOLS` asks for it. */
   readonly optIn?: true;
   readonly inputSchema: {
@@ -110,6 +112,11 @@ function cleared(flag: string, input: ToolInput, key: string): string[] {
   return [`${flag}=${parsed.data}`];
 }
 
+/** A field where JSON null clears it, spelled the way Sona clears it. */
+function nullable(flag: string, input: ToolInput, key: string, clear: string): string[] {
+  return input[key] === null ? [`${flag}=${clear}`] : cleared(flag, input, key);
+}
+
 /** What every `sona work` write takes: the operation, and who makes it. */
 function writing(input: ToolInput, agent: string | undefined): string[] {
   return [
@@ -147,13 +154,13 @@ const LIMIT = {
 const MEETING_ID = {
   type: "string",
   description:
-    "The meeting's uuid, as it appears in a sona://meeting/<id> link or in the id field of a sona_search or sona_meetings row.",
+    "The meeting's uuid, as it appears in a sona://meeting/<id> link or in the id field of a sona_search, sona_meetings or sona_meeting_list row.",
 } as const;
 
 const PROJECT_ID = {
   type: "string",
   description:
-    "The exact saved project uuid returned by sona_projects. Project titles are not ids.",
+    "The exact saved project uuid returned by sona_project_list or sona_projects. Project titles are not ids.",
 } as const;
 
 
@@ -171,6 +178,20 @@ const SINCE_UTC_MS = {
 
 const WRITES =
   "This changes the user's Sona tasks. It needs Settings > Agents > External access and External mutations; with either off Sona refuses with consent_required and names the setting. Unless the user lets agents' changes apply in Settings > Agents, changes to a task's fields come back under proposed and wait for the user to accept them in Sona, a new task lands in Triage, and triage, duplicates, archiving and label changes are refused.";
+
+const CATALOG_WRITES =
+  "This changes the user's Sona projects and people. It needs Settings > Agents > External access and External mutations, and Agents' changes set to Apply: with access or mutations off Sona refuses with consent_required, and while agents' changes wait for the user it refuses with invalid_request naming the setting. Nothing is proposed for later and there is no dry run. A call that changes nothing answers with operation_id null.";
+
+const PROJECT = {
+  type: "string",
+  description: "A project's name or id from sona_project_list.",
+} as const;
+
+const PERSON = {
+  type: "string",
+  description:
+    "A person's name, any name they go by, or their id from sona_person_list. Sona refuses a name that matches several.",
+} as const;
 
 const TASK = {
   type: "string",
@@ -239,11 +260,11 @@ const FIELDS = {
   },
   project: {
     type: "string",
-    description: "A project's name or id from sona_projects, or none.",
+    description: "A project's name or id from sona_project_list, or none.",
   },
   milestone: {
     type: "string",
-    description: "A milestone id in the task's project from sona_project, or none.",
+    description: "A milestone id in the task's project from sona_milestone_list, or none.",
   },
   labels: {
     type: "string",
@@ -291,7 +312,7 @@ function archiving(verb: "archive" | "restore", title: string, what: string): To
     name: `sona_work_${verb}`,
     title,
     description: `${what} Tasks already that way are listed under skipped. dry_run:true shows the change without writing. ${WRITES}`,
-    mutates: true,
+    mutates: "changes",
     optIn: true,
     inputSchema: {
       type: "object",
@@ -317,7 +338,7 @@ function linking(verb: "relate" | "unrelate", title: string, what: string): Tool
     name: `sona_work_${verb}`,
     title,
     description: `${what} task blocks other, task blocked_by other, or task related other. ${WRITES}`,
-    mutates: true,
+    mutates: "changes",
     optIn: true,
     inputSchema: {
       type: "object",
@@ -647,7 +668,7 @@ export const TOOLS: readonly ToolDefinition[] = [
     argv: (input) => ["--projects", ...optional("--limit", count(input, "limit"))],
   },
   {
-    name: "sona_project",
+    name: "sona_project_get",
     title: "Read a Sona personal project",
     description:
       "Read one saved personal project with its description, its pulse (done, open and overdue task counts, next due date, meetings in the last 7 days, and person ids owning open work), milestones, tasks, states, revisions and exact source references. Owner and source availability are resolved live by the native planner. Unavailable sources have available:false, no title and no link. Nullable due dates are saved values, not inferred deadlines. Owners are explicit personal-plan assignments, not team membership. Requires external access; no writes, notifications or provider calls.",
@@ -803,7 +824,7 @@ export const TOOLS: readonly ToolDefinition[] = [
     title: "Resolve a Sona loop",
     description:
       "Mark one loop or commitment done, and get back the operation receipt. It reads the loop revision before writing, so it requires both Settings > Agents > External access and External mutations. If either is off, Sona returns consent_required and names the missing setting. The receipt's result is 'committed' when the write landed and 'rejected' when the meeting moved underneath it.",
-    mutates: true,
+    mutates: "changes",
     inputSchema: {
       type: "object",
       properties: {
@@ -949,7 +970,7 @@ export const TOOLS: readonly ToolDefinition[] = [
     name: "sona_work_create",
     title: "Create a Sona task",
     description: `Create a task: Todo, no priority and no owner unless told otherwise. ${WRITES} Calling again with the same arguments on the same day returns the first task with replayed:true instead of a second one; pass a new operation_id to create a twin on purpose.`,
-    mutates: true,
+    mutates: "changes",
     inputSchema: {
       type: "object",
       properties: {
@@ -974,7 +995,7 @@ export const TOOLS: readonly ToolDefinition[] = [
     name: "sona_work_update",
     title: "Change Sona tasks",
     description: `Change one task or several. Several tasks take the same change together or not at all; add_labels and remove_labels go task by task. Fields left out stay as they are, and tasks already as asked are reported under skipped. dry_run:true returns each field's from and to, and whether a meeting commitment would close or reopen, without writing. ${WRITES}`,
-    mutates: true,
+    mutates: "changes",
     inputSchema: {
       type: "object",
       properties: {
@@ -1031,7 +1052,7 @@ export const TOOLS: readonly ToolDefinition[] = [
     name: "sona_work_claim",
     title: "Start a Sona task",
     description: `Start a Todo or Backlog task before working on it: it moves to In progress with you shown working it, and its owner stays who it was. Claiming a task you already work changes nothing. Refused when another agent works it, or when it is in progress without you, still in triage, archived or closed, so two agents cannot both start it. ${WRITES}`,
-    mutates: true,
+    mutates: "changes",
     inputSchema: {
       type: "object",
       properties: { task: TASK, operation_id: OPERATION_ID },
@@ -1051,7 +1072,7 @@ export const TOOLS: readonly ToolDefinition[] = [
     name: "sona_work_done",
     title: "Finish Sona tasks",
     description: `Mark tasks done. The meeting commitment a task came from closes with it. evidence keeps a link, such as a pull request, with the task as evidence; any other line is added to its details. dry_run:true shows the change without writing. ${WRITES}`,
-    mutates: true,
+    mutates: "changes",
     inputSchema: {
       type: "object",
       properties: {
@@ -1082,7 +1103,7 @@ export const TOOLS: readonly ToolDefinition[] = [
     name: "sona_work_triage",
     title: "Triage Sona tasks",
     description: `Decide on work Sona pulled out of meetings. accept moves triage items to Todo with Sona's suggested owner, due day and project unless ignore_suggestions is true. decline cancels them and sets their meeting commitments aside. duplicate marks one task a duplicate of another (of), moving its quotes and links there. Items not in triage are left alone and listed under skipped. dry_run:true previews accept and decline. ${WRITES}`,
-    mutates: true,
+    mutates: "changes",
     inputSchema: {
       type: "object",
       properties: {
@@ -1188,7 +1209,7 @@ export const TOOLS: readonly ToolDefinition[] = [
     name: "sona_work_label_save",
     title: "Save a Sona label",
     description: `Create a label, or rename or recolor one. Saving a name that exists changes that label; label renames another label to name. ${WRITES}`,
-    mutates: true,
+    mutates: "changes",
     optIn: true,
     inputSchema: {
       type: "object",
@@ -1224,7 +1245,7 @@ export const TOOLS: readonly ToolDefinition[] = [
     name: "sona_work_label_delete",
     title: "Delete a Sona label",
     description: `Delete a label. Its tasks lose only that label. ${WRITES}`,
-    mutates: true,
+    mutates: "destroys",
     optIn: true,
     inputSchema: {
       type: "object",
@@ -1256,7 +1277,7 @@ export const TOOLS: readonly ToolDefinition[] = [
     name: "sona_work_view_save",
     title: "Save a Sona view",
     description: `Save named task filters the app shows as a view and sona_work_list reads with view. Saving a name that exists changes that view; filters given replace the ones it had. ${WRITES}`,
-    mutates: true,
+    mutates: "changes",
     optIn: true,
     inputSchema: {
       type: "object",
@@ -1320,7 +1341,7 @@ export const TOOLS: readonly ToolDefinition[] = [
     name: "sona_work_view_delete",
     title: "Delete a saved Sona view",
     description: `Delete a saved view. No task changes. ${WRITES}`,
-    mutates: true,
+    mutates: "destroys",
     optIn: true,
     inputSchema: {
       type: "object",
@@ -1359,7 +1380,7 @@ export const TOOLS: readonly ToolDefinition[] = [
     name: "sona_work_take",
     title: "Make tasks from Sona answer lines",
     description: `Ask the same question as sona_work_ask and make Triage tasks of the lines numbered in lines. Each task keeps its quote and where it was said; a line about something a meeting left open returns the task already following it. ${WRITES}`,
-    mutates: true,
+    mutates: "changes",
     inputSchema: {
       type: "object",
       properties: {
@@ -1390,7 +1411,7 @@ export const TOOLS: readonly ToolDefinition[] = [
     name: "sona_work_say",
     title: "Change Sona tasks in words",
     description: `Change tasks by saying the change: "push everything not urgent to monday", "move Dana's tasks to next week", "mark everything in triage for launch done", "archive canceled tasks". Sona reads it with a fixed grammar, never a model, and refuses words it cannot read. Without a who, it means the user's own open work. dry_run:true returns each task's from and to without writing; run it first. ${WRITES}`,
-    mutates: true,
+    mutates: "changes",
     inputSchema: {
       type: "object",
       properties: {
@@ -1424,7 +1445,7 @@ export const TOOLS: readonly ToolDefinition[] = [
     name: "sona_work_watch",
     title: "Watch a topic in Sona",
     description: `Listen for a word or phrase: when a processed meeting or a dictation says it, Sona notifies the user once, with the line. person limits it to what one person says. stop:true stops watching it. ${WRITES}`,
-    mutates: true,
+    mutates: "changes",
     optIn: true,
     inputSchema: {
       type: "object",
@@ -1450,6 +1471,345 @@ export const TOOLS: readonly ToolDefinition[] = [
             "--",
             text(input, "topic", true),
           ],
+  },
+  {
+    name: "sona_project_list",
+    title: "List Sona projects",
+    description:
+      "List the projects the Projects page shows, by name: each one's id, lead, members, status (active, paused or completed), target day, colour, open and done task counts, milestone count, whether it was put away, and revision. all:true includes projects put away.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        all: { type: "boolean", description: "Include projects that were put away." },
+      },
+      additionalProperties: false,
+    },
+    argv: (input) => [
+      "work",
+      "projects",
+      ...(flag(input, "all") ? ["--all"] : []),
+      "--json",
+    ],
+  },
+  {
+    name: "sona_project_save",
+    title: "Save a Sona project",
+    description: `Make a project, or change one. Saving a name no project has makes it; saving a name one has changes that one; project renames another project to name. Fields left out stay as they are. ${CATALOG_WRITES}`,
+    mutates: "changes",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "The project's name." },
+        project: {
+          ...PROJECT,
+          description: `The project to rename to name. ${PROJECT.description}`,
+        },
+        details: {
+          type: "string",
+          description: "Plain-text details. An empty string or null clears them.",
+        },
+        status: {
+          type: "string",
+          enum: ["active", "paused", "completed"],
+          description: "Where the project stands.",
+        },
+        lead: {
+          ...PERSON,
+          description: `Who leads it. ${PERSON.description} none or null clears it.`,
+        },
+        members: {
+          type: "string",
+          description:
+            "Every member, comma-separated, each as a name, alias or id from sona_person_list. Replaces the list; an empty string or null clears it.",
+        },
+        target: {
+          type: "string",
+          description: "The local day it should be done: YYYY-MM-DD, today, tomorrow, or none or null to clear it.",
+        },
+        hue: {
+          type: "integer",
+          minimum: 0,
+          maximum: 360,
+          description: "Its colour as degrees on the colour wheel.",
+        },
+        operation_id: OPERATION_ID,
+      },
+      required: ["name"],
+      additionalProperties: false,
+    },
+    argv: (input, agent) => [
+      "work",
+      "project-save",
+      ...assigned("--project", text(input, "project")),
+      ...nullable("--details", input, "details", ""),
+      ...assigned("--status", text(input, "status")),
+      ...nullable("--lead", input, "lead", "none"),
+      ...nullable("--members", input, "members", ""),
+      ...nullable("--target", input, "target", "none"),
+      ...assigned("--hue", count(input, "hue")),
+      ...writing(input, agent),
+      "--json",
+      "--",
+      text(input, "name", true),
+    ],
+  },
+  {
+    name: "sona_project_archive",
+    title: "Put a Sona project away",
+    description: `Put a project away so it leaves the Projects page and sona_project_list, or bring it back with restore:true. Its tasks and milestones stay. A project already that way is answered unchanged. ${CATALOG_WRITES}`,
+    mutates: "changes",
+    optIn: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        project: PROJECT,
+        restore: { type: "boolean", description: "Bring a put-away project back." },
+        operation_id: OPERATION_ID,
+      },
+      required: ["project"],
+      additionalProperties: false,
+    },
+    argv: (input, agent) => [
+      "work",
+      "project-archive",
+      ...(flag(input, "restore") ? ["--restore"] : []),
+      ...writing(input, agent),
+      "--json",
+      "--",
+      text(input, "project", true),
+    ],
+  },
+  {
+    name: "sona_milestone_list",
+    title: "List a Sona project's milestones",
+    description:
+      "List one project's milestones: each one's id, name, details, status, target day, open and done task counts, and revision.",
+    inputSchema: {
+      type: "object",
+      properties: { project: PROJECT },
+      required: ["project"],
+      additionalProperties: false,
+    },
+    argv: (input) => ["work", "milestones", "--json", "--", text(input, "project", true)],
+  },
+  {
+    name: "sona_milestone_save",
+    title: "Save a Sona milestone",
+    description: `Make a milestone in a project, or change one. Saving a name the project has no milestone by makes it; saving one it has changes that one; milestone renames another milestone to name. Fields left out stay as they are. ${CATALOG_WRITES}`,
+    mutates: "changes",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project: PROJECT,
+        name: { type: "string", description: "The milestone's name." },
+        milestone: {
+          type: "string",
+          description: "The milestone to rename to name, by name or id from sona_milestone_list.",
+        },
+        target: {
+          type: "string",
+          description: "The local day it should be reached: YYYY-MM-DD, today, tomorrow, or none or null to clear it.",
+        },
+        details: {
+          type: "string",
+          description: "Plain-text details. An empty string or null clears them.",
+        },
+        status: {
+          type: "string",
+          enum: ["not-started", "in-progress", "done", "canceled"],
+          description: "Where the milestone stands.",
+        },
+        operation_id: OPERATION_ID,
+      },
+      required: ["project", "name"],
+      additionalProperties: false,
+    },
+    argv: (input, agent) => [
+      "work",
+      "milestone-save",
+      ...assigned("--milestone", text(input, "milestone")),
+      ...nullable("--target", input, "target", "none"),
+      ...nullable("--details", input, "details", ""),
+      ...assigned("--status", text(input, "status")),
+      ...writing(input, agent),
+      "--json",
+      "--",
+      text(input, "project", true),
+      text(input, "name", true),
+    ],
+  },
+  {
+    name: "sona_milestone_delete",
+    title: "Delete a Sona milestone",
+    description: `Delete a milestone. Its tasks stay in the project without it. ${CATALOG_WRITES}`,
+    mutates: "destroys",
+    optIn: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        project: PROJECT,
+        milestone: {
+          type: "string",
+          description: "The milestone, by name or id from sona_milestone_list.",
+        },
+        operation_id: OPERATION_ID,
+      },
+      required: ["project", "milestone"],
+      additionalProperties: false,
+    },
+    argv: (input, agent) => [
+      "work",
+      "milestone-delete",
+      ...writing(input, agent),
+      "--json",
+      "--",
+      text(input, "project", true),
+      text(input, "milestone", true),
+    ],
+  },
+  {
+    name: "sona_person_list",
+    title: "List people in Sona",
+    description:
+      "List the people the People page shows, by name: each one's id, the other names they go by, role, organization, emails, notes, open tasks they owe, meeting count and last meeting. query keeps people whose name or any alias contains it. Every tool that takes a person matches the name or any alias.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: {
+          type: "string",
+          description: "Only people whose name or alias contains this.",
+        },
+      },
+      additionalProperties: false,
+    },
+    argv: (input) => [
+      "work",
+      "people",
+      ...assigned("--query", text(input, "query")),
+      "--json",
+    ],
+  },
+  {
+    name: "sona_person_save",
+    title: "Save a person in Sona",
+    description: `Add a person, or change one. Saving a name nobody goes by adds them; saving a name or alias one person goes by changes that person; person renames another person to name and keeps the old name as an alias. A name or alias that already belongs to someone else is refused: merge the two with sona_person_merge. Fields left out stay as they are. ${CATALOG_WRITES}`,
+    mutates: "changes",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "The person's name." },
+        person: {
+          ...PERSON,
+          description: `The person to rename to name. ${PERSON.description}`,
+        },
+        aliases: {
+          type: "string",
+          description:
+            "Every other name they go by, comma-separated. Replaces the list; an empty string or null clears it.",
+        },
+        role: { type: "string", description: "Their role. An empty string or null clears it." },
+        org: {
+          type: "string",
+          description: "Their organization. An empty string or null clears it.",
+        },
+        email: {
+          type: "string",
+          description:
+            "Their email addresses, comma-separated. Replaces the list; an empty string or null clears it.",
+        },
+        notes: { type: "string", description: "Notes about them. An empty string or null clears them." },
+        operation_id: OPERATION_ID,
+      },
+      required: ["name"],
+      additionalProperties: false,
+    },
+    argv: (input, agent) => [
+      "work",
+      "person-save",
+      ...assigned("--person", text(input, "person")),
+      ...nullable("--aliases", input, "aliases", ""),
+      ...nullable("--role", input, "role", ""),
+      ...nullable("--org", input, "org", ""),
+      ...nullable("--email", input, "email", ""),
+      ...nullable("--notes", input, "notes", ""),
+      ...writing(input, agent),
+      "--json",
+      "--",
+      text(input, "name", true),
+    ],
+  },
+  {
+    name: "sona_person_merge",
+    title: "Merge two people in Sona",
+    description: `Fold one person into another: their tasks, meeting quotes and speaker links move to into, and person is gone. When both have a voice profile Sona refuses and the user merges them on the People page. ${CATALOG_WRITES}`,
+    mutates: "destroys",
+    optIn: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        person: { ...PERSON, description: `The person to fold away. ${PERSON.description}` },
+        into: { ...PERSON, description: `The person who keeps everything. ${PERSON.description}` },
+        operation_id: OPERATION_ID,
+      },
+      required: ["person", "into"],
+      additionalProperties: false,
+    },
+    argv: (input, agent) => [
+      "work",
+      "person-merge",
+      `--into=${text(input, "into", true)}`,
+      ...writing(input, agent),
+      "--json",
+      "--",
+      text(input, "person", true),
+    ],
+  },
+  {
+    name: "sona_meeting_list",
+    title: "List Sona meetings with who was in them",
+    description:
+      "List meetings, newest first: each one's id, title, start, minutes, whether it was processed, and the people in it. Read has_more before treating the list as complete; to see older meetings, raise limit, or narrow with since.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        since: {
+          type: "string",
+          description: "Only meetings from then on: a local day as YYYY-MM-DD, or milliseconds since the epoch.",
+        },
+        limit: LIMIT,
+      },
+      additionalProperties: false,
+    },
+    argv: (input) => [
+      "work",
+      "meetings",
+      ...assigned("--since", text(input, "since")),
+      ...assigned("--limit", count(input, "limit")),
+      "--json",
+    ],
+  },
+  {
+    name: "sona_meeting_get",
+    title: "Read a Sona meeting with its commitments",
+    description:
+      "Read one meeting: its summary, the commitments it left with who owes them, and with transcript:true every line with who said it.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        meeting_id: MEETING_ID,
+        transcript: { type: "boolean", description: "Include the transcript with speaker turns." },
+      },
+      required: ["meeting_id"],
+      additionalProperties: false,
+    },
+    argv: (input) => [
+      "work",
+      "meeting",
+      ...(flag(input, "transcript") ? ["--transcript"] : []),
+      "--json",
+      "--",
+      text(input, "meeting_id", true),
+    ],
   },
 ];
 

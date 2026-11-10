@@ -214,6 +214,20 @@ const SONA_WRITES = {
   say: true,
   watch: true,
   unwatch: true,
+  "project-save": true,
+  "project-archive": true,
+  "milestone-save": true,
+  "milestone-delete": true,
+  "person-save": true,
+  "person-merge": true,
+};
+
+/** The verbs with which `sona` takes away what no Sona tool gives back. */
+const SONA_DESTROYS = {
+  "label-delete": true,
+  "view-delete": true,
+  "milestone-delete": true,
+  "person-merge": true,
 };
 
 /** Each required argument at its first enum value or a placeholder. */
@@ -258,9 +272,12 @@ describe("published tools", () => {
       const argv = tool.argv(smallest(tool));
       const verb = (argv[0] === "work" ? argv[1] : argv[0]) ?? "";
       const writes = verb in SONA_WRITES || argv.some((arg) => arg.startsWith("--take="));
-      const readOnly = listed.find((candidate) => candidate.name === tool.name)
-        ?.annotations?.readOnlyHint;
-      return readOnly !== !writes;
+      const annotations = listed.find((candidate) => candidate.name === tool.name)
+        ?.annotations;
+      return (
+        annotations?.readOnlyHint !== !writes ||
+        annotations?.destructiveHint !== verb in SONA_DESTROYS
+      );
     }).map((tool) => tool.name);
 
     expect(mislabelled).toEqual([]);

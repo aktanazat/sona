@@ -57,7 +57,7 @@ claude mcp add sona --env SONA_BIN=/path/to/sona/src-tauri/target/debug/sona \
 | `sona_roster`        | `meeting_id`                             | `sona --roster <id>`                                                    |
 | `sona_place`         | `meeting_id`, `limit?`                   | `sona --place <id> [--limit …]`                                         |
 | `sona_projects`      | `limit?`                                 | `sona --projects [--limit …]`                                           |
-| `sona_project`       | `project_id`                             | `sona --project <uuid>`                                                |
+| `sona_project_get`   | `project_id`                             | `sona --project <uuid>`                                                |
 | `sona_notes`         | `limit?`                                 | `sona --notes [--limit …]`                                              |
 | `sona_note`          | `note_id`                                | `sona --note <id>`                                                      |
 | `sona_note_context`  | `query`, `limit?`                         | `sona --note-context <text> [--limit …]`                                 |
@@ -127,7 +127,7 @@ saved task or milestone due date. Descriptions are not included in the list.
 `has_more:true` and `complete:false` mean other saved projects were omitted.
 The list has no continuation cursor.
 
-Pass a returned project id to `sona_project` for its saved description,
+Pass a returned project id to `sona_project_get` for its saved description,
 milestones, tasks and evidence references. States, revisions, dates and text
 are preserved. A missing due date remains `null`; no deadline, team membership
 or notification is inferred. Detail reads are not paged and reject `--limit`.
@@ -158,7 +158,9 @@ These tools do not edit, restore, link or synthesize notes. Those remain native
 app actions and do not gain a route around external-write or source-transfer
 consent. For human CLI output, append `--format text`; MCP keeps default JSON.
 MCP publishes `readOnlyHint:true` for every read and `false` for every tool
-that writes.
+that writes, and `destructiveHint:true` only for the writes that take away
+what no tool gives back: label and view deletes, milestone deletes and person
+merges.
 The server passes private source data to its approved client. Neither Sona nor
 this server calls a model provider for these reads. External access is not
 permission for an agent to send those records to another provider.
@@ -210,11 +212,12 @@ dictations that say it, numbered; `sona_work_take` makes Triage tasks of
 chosen lines. `sona_work_say` changes tasks from plain words ("push
 everything not urgent to monday"); run it with `dry_run:true` first.
 
-Twelve more are opt-in: `sona_work_archive`, `sona_work_restore`,
+Fifteen more are opt-in: `sona_work_archive`, `sona_work_restore`,
 `sona_work_relate`, `sona_work_unrelate`, `sona_work_labels`,
 `sona_work_label_save`, `sona_work_label_delete`, `sona_work_views`,
-`sona_work_view_save`, `sona_work_view_delete`, `sona_work_watches` and
-`sona_work_watch`. Publish them with
+`sona_work_view_save`, `sona_work_view_delete`, `sona_work_watches`,
+`sona_work_watch`, `sona_project_archive`, `sona_milestone_delete` and
+`sona_person_merge`. Publish them with
 `SONA_MCP_TOOLS`: `all` for every tool, or a comma-separated list of names
 beside the default ones. A name that matches no tool stops the server at
 start.
@@ -223,6 +226,33 @@ start.
 claude mcp add sona --env SONA_MCP_TOOLS=sona_work_archive,sona_work_restore \
   -- bun /absolute/path/to/sona/tools/sona-mcp/src/index.ts
 ```
+
+## Projects, people and meetings tools
+
+These run the same `sona work <verb> --json` catalog the Projects and People
+pages show. A project, milestone or person is named by its name, any name it
+goes by, or its id.
+
+| Tool                    | Arguments                                                              | Runs                                     |
+| ----------------------- | ---------------------------------------------------------------------- | ---------------------------------------- |
+| `sona_project_list`     | `all?`                                                                 | `sona work projects [--all]`             |
+| `sona_project_save`     | `name`, `project?`, `details?`, `status?`, `lead?`, `members?`, `target?`, `hue?` | `sona work project-save` — **writes** |
+| `sona_project_archive`  | `project`, `restore?`                                                  | `sona work project-archive` — **writes** |
+| `sona_milestone_list`   | `project`                                                              | `sona work milestones`                   |
+| `sona_milestone_save`   | `project`, `name`, `milestone?`, `target?`, `details?`, `status?`      | `sona work milestone-save` — **writes**  |
+| `sona_milestone_delete` | `project`, `milestone`                                                 | `sona work milestone-delete` — **writes** |
+| `sona_person_list`      | `query?`                                                               | `sona work people [--query …]`           |
+| `sona_person_save`      | `name`, `person?`, `aliases?`, `role?`, `org?`, `email?`, `notes?`     | `sona work person-save` — **writes**     |
+| `sona_person_merge`     | `person`, `into`                                                       | `sona work person-merge` — **writes**    |
+| `sona_meeting_list`     | `since?`, `limit?`                                                     | `sona work meetings`                     |
+| `sona_meeting_get`      | `meeting_id`, `transcript?`                                            | `sona work meeting`                      |
+
+A save makes the thing when nothing goes by that name and changes it when
+something does; `project`, `milestone` or `person` renames that one to `name`.
+Fields left out stay as they are; `null` clears one. These writes take
+`operation_id` but no `dry_run`, and they need both grants and **Agents'
+changes** on Apply: while agents' changes wait for the user they are refused,
+never proposed.
 
 Work raised in a meeting kept on this Mac never appears. While the
 conversations can't be opened, all work from meetings is left out and the
@@ -233,7 +263,7 @@ answers `not_found`.
 
 One JSON object per call, as one text block. Every payload carries a
 `schema_version`. Calendar occurrences from `sona_upcoming` have no `sona://`
-address. Project rows carry ids for `sona_project`, not a new app route. A
+address. Project rows carry ids for `sona_project_get`, not a new app route. A
 plan from `sona_plans` links to the meeting it was heard in, and a bookmark
 from `sona_bookmarks` to the moment it marks (`?atMs=`).
 Meeting, loop, person, dictation and note rows carry addresses the app can open:

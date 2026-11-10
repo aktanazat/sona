@@ -456,18 +456,33 @@ claude mcp add sona -- bun /absolute/path/to/sona/tools/sona-mcp/src/index.ts
 | `sona_work_ask`                   | `question`                                                   |
 | `sona_work_take`                  | `question`, `lines` — writes                                 |
 | `sona_work_say`                   | `words`, `dry_run?` — writes                                 |
+| `sona_project_list`               | `all?`                                                       |
+| `sona_project_get`                | `project_id`                                                 |
+| `sona_project_save`               | `name`, `project?`, `details?`, `status?`, `lead?`, `members?`, `target?`, `hue?` — writes |
+| `sona_project_archive`            | `project`, `restore?` — writes                               |
+| `sona_milestone_list`             | `project`                                                    |
+| `sona_milestone_save`             | `project`, `name`, `milestone?`, `target?`, `details?`, `status?` — writes |
+| `sona_milestone_delete`           | `project`, `milestone` — writes                              |
+| `sona_person_list`                | `query?`                                                     |
+| `sona_person_save`                | `name`, `person?`, `aliases?`, `role?`, `org?`, `email?`, `notes?` — writes |
+| `sona_person_merge`               | `person`, `into` — writes                                    |
+| `sona_meeting_list`               | `since?`, `limit?`                                           |
+| `sona_meeting_get`                | `meeting_id`, `transcript?`                                  |
 
-Archiving, links, labels, views and watches are opt-in tools: set
-`SONA_MCP_TOOLS=all`, or name the ones to add, when registering the server.
-Task export is CLI-only.
+Archiving, links, labels, views, watches, project archiving, milestone
+deletes and person merges are opt-in tools: set `SONA_MCP_TOOLS=all`, or name
+the ones to add, when registering the server. In project, milestone and
+person saves a `null` field clears it; those writes take no `dry_run` and are
+refused unless Agents' changes is on Apply. Task export is CLI-only.
 
 The result is the CLI JSON in one text block. Refusal messages lead with Sona's
 code, and `data.code` preserves it. Consent failures also carry
 `data.settingsPath`. `consent_required` maps to MCP InvalidRequest;
 `invalid_request` and `not_found` to InvalidParams; unavailable storage and
 execution failures to InternalError.
-Tools also declare `readOnlyHint:true`, except loop resolution and the task
-writes declare `false`.
+Tools also declare `readOnlyHint:true`, except loop resolution and the task,
+project, milestone and person writes declare `false`; label, view and
+milestone deletes and person merges also declare `destructiveHint:true`.
 The hints describe behavior; the CLI consent gate still makes the permission
 decision before any corpus read.
 
