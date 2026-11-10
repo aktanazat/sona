@@ -78,6 +78,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use uuid::Uuid;
 
+mod beacon;
+pub(crate) use beacon::watch as watch_external_writes;
 pub mod tracker;
 
 /// Where a person turns each scope on. Named in the refusal so an agent that is
@@ -1982,6 +1984,21 @@ pub(crate) fn meetings_page(
     before_utc_ms: Option<i64>,
     limit: usize,
 ) -> Result<ExternalMeetingsPage, ExternalError> {
+    let (entries, has_more) = meeting_summaries(store, since_utc_ms, before_utc_ms, limit)?;
+    Ok(ExternalMeetingsPage {
+        schema_version: QUERY_SCHEMA_VERSION,
+        entries: entries.into_iter().map(meeting_row).collect(),
+        has_more,
+    })
+}
+
+/// The newest `limit` meetings this reader may see, and whether more follow.
+fn meeting_summaries(
+    store: &MeetingStore,
+    since_utc_ms: Option<i64>,
+    before_utc_ms: Option<i64>,
+    limit: usize,
+) -> Result<(Vec<MeetingHistorySummary>, bool), ExternalError> {
     let kept_local = kept_local(store)?;
     let mut entries = Vec::with_capacity(limit);
     // The store's cursor is the upper bound, so `--to` is already applied. The
@@ -2011,11 +2028,7 @@ pub(crate) fn meetings_page(
             break false;
         }
     };
-    Ok(ExternalMeetingsPage {
-        schema_version: QUERY_SCHEMA_VERSION,
-        entries: entries.into_iter().map(meeting_row).collect(),
-        has_more,
-    })
+    Ok((entries, has_more))
 }
 
 fn meeting_row(summary: MeetingHistorySummary) -> ExternalMeetingRow {
@@ -4022,13 +4035,18 @@ pub fn run_cli(app: &tauri::AppHandle, args: &CliArgs) -> i32 {
             let meetings = app.state::<Arc<MeetingSessionManager>>();
             let history = app.state::<Arc<HistoryManager>>();
             let calendar = crate::meeting::detection::calendar::platform_calendar();
-            tauri::async_runtime::block_on(answer(
+            let response = tauri::async_runtime::block_on(answer(
                 &allowed,
                 app,
                 &meetings,
                 &history,
                 calendar.as_ref(),
-            ))
+            ))?;
+            if matches!(allowed.request(), ExternalRequest::Work(verb) if verb.required_scopes() == WRITE_SCOPES)
+            {
+                beacon::leave(app);
+            }
+            Ok(response)
         });
     let format = match &args.command {
         Some(Command::Work(work)) if work.json => ExternalFormat::Json,

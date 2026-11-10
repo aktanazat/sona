@@ -2344,6 +2344,9 @@ pub fn run(cli_args: CliArgs) {
             app.manage(secret_manager.clone());
 
             specta_builder.mount_events(app);
+            if !headless_mode {
+                query::external::watch_external_writes(app.handle().clone());
+            }
 
             // Headless read-only corpus query (`--query` / `--meetings` /
             // `--meeting` / `--transcript` / `--loops` / `--people` /

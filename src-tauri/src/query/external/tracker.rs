@@ -146,6 +146,28 @@ pub enum WorkVerb {
     Watch(WatchArgs),
     /// Stop watching a topic.
     Unwatch(UnwatchArgs),
+    /// Projects with their lead, status, target day and task counts.
+    Projects(catalog::ProjectsArgs),
+    /// Make a project, or change one: name, details, status, lead, members, target day, colour.
+    ProjectSave(catalog::ProjectSaveArgs),
+    /// Put a project away, or bring it back with --restore.
+    ProjectArchive(catalog::ProjectArchiveArgs),
+    /// A project's milestones, with target days and task counts.
+    Milestones(catalog::MilestonesArgs),
+    /// Make a milestone, or change one.
+    MilestoneSave(catalog::MilestoneSaveArgs),
+    /// Delete a milestone. Its tasks stay in the project.
+    MilestoneDelete(catalog::MilestoneDeleteArgs),
+    /// People, with the other names they go by and their open work.
+    People(catalog::PeopleArgs),
+    /// Add a person, or change one: other names, role, organization, email, notes.
+    PersonSave(catalog::PersonSaveArgs),
+    /// Fold one person into another: their tasks, quotes and speaker links move.
+    PersonMerge(catalog::PersonMergeArgs),
+    /// Meetings, newest first, with when, how long, whether processed, and who was in them.
+    Meetings(catalog::MeetingsArgs),
+    /// One meeting: summary, commitments, and with --transcript who said what.
+    Meeting(catalog::MeetingArgs),
 }
 
 #[derive(Args, Clone, Debug, Eq, PartialEq)]
@@ -885,6 +907,11 @@ impl WorkVerb {
             | Self::Labels
             | Self::Views
             | Self::FollowUp(_)
+            | Self::Projects(_)
+            | Self::Milestones(_)
+            | Self::People(_)
+            | Self::Meetings(_)
+            | Self::Meeting(_)
             | Self::Update(UpdateArgs { dry_run: true, .. })
             | Self::Done(DoneArgs { dry_run: true, .. })
             | Self::Accept(AcceptArgs { dry_run: true, .. })
@@ -910,6 +937,12 @@ impl WorkVerb {
             | Self::Unrelate(_)
             | Self::LabelSave(_)
             | Self::LabelDelete(_)
+            | Self::ProjectSave(_)
+            | Self::ProjectArchive(_)
+            | Self::MilestoneSave(_)
+            | Self::MilestoneDelete(_)
+            | Self::PersonSave(_)
+            | Self::PersonMerge(_)
             | Self::ViewSave(_)
             | Self::ViewDelete(_)
             | Self::Ask(_)
@@ -950,6 +983,11 @@ impl WorkVerb {
             }
             Self::LabelSave(args) if args.name.trim().is_empty() => "A label needs a name.",
             Self::ViewSave(args) if args.name.trim().is_empty() => "A view needs a name.",
+            Self::ProjectSave(args) if args.name.trim().is_empty() => "A project needs a name.",
+            Self::MilestoneSave(args) if args.name.trim().is_empty() => {
+                "A milestone needs a name."
+            }
+            Self::PersonSave(args) if args.name.trim().is_empty() => "A person needs a name.",
             Self::Ask(args) if args.take.contains(&0) => "Answer lines count from 1.",
             Self::Watch(args) if args.topic.join(" ").trim().is_empty() => {
                 "Name a word or phrase to watch."
@@ -1033,6 +1071,14 @@ pub enum WorkAnswer {
     Cycle(Box<ExternalWorkCycleProgress>),
     Lines(ExternalWorkLines),
     Watches(ExternalWorkWatches),
+    Projects(catalog::ExternalWorkProjects),
+    Project(catalog::ExternalWorkProjectChange),
+    Milestones(catalog::ExternalWorkMilestones),
+    Milestone(catalog::ExternalWorkMilestoneChange),
+    People(catalog::ExternalWorkPeople),
+    Person(catalog::ExternalWorkPersonChange),
+    Meetings(catalog::ExternalWorkMeetings),
+    MeetingDetail(Box<catalog::ExternalWorkMeetingDetail>),
 }
 
 /// What `ask` found: the lines that answer, numbered for --take.
@@ -1593,6 +1639,17 @@ pub(super) async fn answer(
         WorkVerb::Labels => tracker.labels(),
         WorkVerb::LabelSave(args) => tracker.label_save(args),
         WorkVerb::LabelDelete(args) => tracker.label_delete(args),
+        WorkVerb::Projects(args) => tracker.projects(args).await,
+        WorkVerb::ProjectSave(args) => tracker.project_save(args).await,
+        WorkVerb::ProjectArchive(args) => tracker.project_archive(args).await,
+        WorkVerb::Milestones(args) => tracker.milestones(args).await,
+        WorkVerb::MilestoneSave(args) => tracker.milestone_save(args).await,
+        WorkVerb::MilestoneDelete(args) => tracker.milestone_delete(args).await,
+        WorkVerb::People(args) => tracker.people(args).await,
+        WorkVerb::PersonSave(args) => tracker.person_save(args).await,
+        WorkVerb::PersonMerge(args) => tracker.person_merge(args).await,
+        WorkVerb::Meetings(args) => tracker.meetings(args).await,
+        WorkVerb::Meeting(args) => tracker.meeting(args).await,
         WorkVerb::Views => tracker.views(),
         WorkVerb::ViewSave(args) => tracker.view_save(args).await,
         WorkVerb::ViewDelete(args) => tracker.view_delete(args),
@@ -3236,6 +3293,58 @@ fn pick<'a, T>(
     }
 }
 
+/// Finds one person by id, then by exact name or alias, then by a part of a
+/// name or alias that only one person has. An alias is a name the person goes
+/// by, so a spelling the transcript keeps getting wrong finds them.
+fn pick_person<'a>(
+    value: &str,
+    people: &'a [WorkPersonChoice],
+) -> Result<&'a WorkPersonChoice, ExternalError> {
+    let wanted = value.trim();
+    if let Some(person) = people
+        .iter()
+        .find(|person| person.id.eq_ignore_ascii_case(wanted))
+    {
+        return Ok(person);
+    }
+    let lower = wanted.to_lowercase();
+    let goes_by = |person: &WorkPersonChoice, matches: &dyn Fn(&str) -> bool| {
+        matches(&person.name.to_lowercase())
+            || person
+                .aliases
+                .iter()
+                .any(|alias| matches(&alias.to_lowercase()))
+    };
+    let exact: Vec<&WorkPersonChoice> = people
+        .iter()
+        .filter(|person| goes_by(person, &|name| name == lower))
+        .collect();
+    let matches = if exact.is_empty() && !lower.is_empty() {
+        people
+            .iter()
+            .filter(|person| goes_by(person, &|name| name.contains(&lower)))
+            .collect()
+    } else {
+        exact
+    };
+    match matches.as_slice() {
+        [person] => Ok(*person),
+        [] => Err(ExternalError::invalid(format!(
+            "No person is called {wanted:?}."
+        ))),
+        several => Err(ExternalError::invalid(format!(
+            "{wanted:?} matches {} people: {}. Use the full name or the id.",
+            several.len(),
+            several
+                .iter()
+                .take(8)
+                .map(|person| format!("{} ({})", person.name, person.id))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))),
+    }
+}
+
 fn hue_for(name: &str) -> f64 {
     let hash = name.to_lowercase().bytes().fold(0_u32, |hash, byte| {
         hash.wrapping_mul(31).wrapping_add(u32::from(byte))
@@ -3278,14 +3387,8 @@ impl Board {
         if !self.fence.is_open() {
             return Err(conversations_closed());
         }
-        pick(
-            "person",
-            value,
-            &self.people,
-            |person| &person.id,
-            |person| &person.name,
-        )
-        .map_err(|refusal| refusal.hint("Look people up with: sona --people NAME"))
+        pick_person(value, &self.people)
+            .map_err(|refusal| refusal.hint("Look people up with: sona --people NAME"))
     }
 
     fn owner(&self, value: &str) -> Result<WorkOwner, ExternalError> {
@@ -4400,6 +4503,14 @@ impl WorkAnswer {
                     let _ = writeln!(text, "{}  (hue {})", label.name, label.hue);
                 }
             }
+            Self::Projects(_)
+            | Self::Project(_)
+            | Self::Milestones(_)
+            | Self::Milestone(_)
+            | Self::People(_)
+            | Self::Person(_)
+            | Self::Meetings(_)
+            | Self::MeetingDetail(_) => catalog::text(self, &mut text),
             Self::Label(change) => {
                 let verb = match (change.deleted, &change.operation_id) {
                     (true, _) => "Deleted",
@@ -4539,7 +4650,15 @@ impl WorkAnswer {
             | Self::Cycles(_)
             | Self::Cycle(_)
             | Self::Lines(_)
-            | Self::Watches(_) => true,
+            | Self::Watches(_)
+            | Self::Projects(_)
+            | Self::Project(_)
+            | Self::Milestones(_)
+            | Self::Milestone(_)
+            | Self::People(_)
+            | Self::Person(_)
+            | Self::Meetings(_)
+            | Self::MeetingDetail(_) => true,
         }
     }
 }
@@ -4952,6 +5071,8 @@ fn filters_text(filters: &ExternalWorkFilters) -> String {
         parts.join(" · ")
     }
 }
+
+mod catalog;
 
 #[cfg(test)]
 mod tests;

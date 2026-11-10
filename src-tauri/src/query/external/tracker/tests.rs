@@ -1,4 +1,6 @@
-use super::{Board, Fence, ShowArgs, TaskRef, WorkCommand, WorkVerb};
+use super::{
+    pick_person, Board, Fence, ShowArgs, TaskRef, WorkCommand, WorkPersonChoice, WorkVerb,
+};
 use crate::cli::{CliArgs, Command};
 use crate::meeting::processing::MeetingLivePromise;
 use crate::meeting::types::MeetingSessionId;
@@ -307,4 +309,31 @@ fn moving_a_task_to_another_cycle_is_a_change() {
         [("cycle", "4".to_owned(), "none".to_owned())]
     );
     assert_eq!(changes(Some(4)), []);
+}
+
+fn choice(id: &str, name: &str, aliases: &[&str]) -> WorkPersonChoice {
+    WorkPersonChoice {
+        id: id.to_owned(),
+        name: name.to_owned(),
+        aliases: aliases.iter().map(|alias| (*alias).to_owned()).collect(),
+    }
+}
+
+/// A transcript keeps hearing "Danny" for Daniel. The alias saved on the
+/// person finds them wherever an owner is named; a part of a name that two
+/// people share still refuses to guess.
+#[test]
+fn a_person_is_found_by_an_alias_and_a_shared_part_of_a_name_is_refused() {
+    let people = [
+        choice("p1", "Daniel Okafor", &["Danny", "Dan O"]),
+        choice("p2", "Dana Reyes", &[]),
+    ];
+    let found = |value: &str| pick_person(value, &people).map(|person| person.id.as_str());
+
+    assert_eq!(found("danny").ok(), Some("p1"));
+    assert_eq!(found("Dan O").ok(), Some("p1"));
+    assert_eq!(found("Reyes").ok(), Some("p2"));
+    assert_eq!(found("p2").ok(), Some("p2"));
+    assert!(found("Dan").is_err(), "both Daniel and Dana contain it");
+    assert!(found("Priya").is_err());
 }
