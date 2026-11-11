@@ -1,0 +1,53 @@
+# Written by Sona on every publish. Edits here are overwritten.
+name: Deploy shared pages
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the site without expired pages
+        run: |
+          set -eu
+          now=$(date +%s)
+          mkdir _site
+          cp index.html 404.html _site/
+          cp -R assets _site/assets
+          for dir in ./*/; do
+            slug=${dir%/}
+            [ -f "$slug/page.sona" ] || continue
+            if [ -f "$slug/expires" ] && [ "$(cat "$slug/expires")" -le "$now" ]; then
+              continue
+            fi
+            mkdir "_site/$slug"
+            find "$slug" -maxdepth 1 -type f \( -name index.html -o -name '*.sona' \) \
+              -exec cp {} "_site/$slug/" \;
+          done
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+          retention-days: 1
+
+      - id: deployment
+        uses: actions/deploy-pages@v4

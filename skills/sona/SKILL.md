@@ -34,7 +34,8 @@ Notes are readable by approved local CLI/MCP agents. They are not implicit
 context for the remote panel. Note edits, links, restores and synthesis remain
 native app actions; this CLI and MCP server expose no note-write tool. Do not
 route note synthesis through another command to bypass mutation or source-transfer
-consent. The external writes are loop resolution and the task tracker's verbs.
+consent. The external writes are loop resolution, the task tracker's verbs,
+saving a shared-page draft and removing a shared page.
 The approved MCP client receives private source data. These commands do not call
 a model provider. The external-access grant is not permission to send records
 to another provider, attach them to an unrelated remote request, or expand a
@@ -177,6 +178,36 @@ Work raised in a meeting kept on this Mac never appears. While the
 conversations can't be opened, every answer leaves out all work from meetings
 and says `conversations_available:false`; choosing a person as owner then
 refuses with `unavailable`.
+
+## Shared meeting pages
+
+Sona can publish one meeting's notes as an encrypted page on the user's own
+site. Publishing needs the user's click on Share in Sona, or `sona share
+--confirm` run at a terminal where the user then types `share` and presses
+Return. You cannot publish: `share` without `--confirm` refuses with
+`confirmation_required`, `--confirm` from a process without a terminal
+refuses with `confirmation_requires_terminal`, and any answer but `share`
+refuses with `confirmation_required`. Meetings kept on this Mac are never
+shared. Prepare the page instead and tell the user it is waiting in Sona.
+
+```bash
+sona share-preview <MEETING> --json                      # the exact page that would go out
+sona share-preview <MEETING> --include title,summary,action_items \
+  --speakers numbered --expires 7d --save --agent "Claude Code" --json
+sona shares --json                                       # every link, its contents and state
+sona unshare <SLUG_OR_URL> --dry-run --json              # which share would be removed
+sona unshare <SLUG_OR_URL> --json                        # remove it from the site
+```
+
+Sections: `title`, `summary`, `action_items`, `decisions`, `notes`,
+`transcript`, `audio`; the defaults leave out notes, transcript and audio.
+`--speakers numbered` replaces speaker names with Speaker 1, Speaker 2 in the
+transcript; names written inside the summary, notes or owners stay. `--save`
+keeps the draft for the user, shown as prepared by your `--agent` name, and
+needs External mutations, as does `unshare`. A preview without `--save`,
+`shares` and `unshare --dry-run` need External access only. Share only what
+the user asked to share, and never paste a share link anywhere they did not
+ask for it: the link carries the page's key.
 
 ## Before talking to someone
 

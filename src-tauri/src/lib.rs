@@ -52,6 +52,7 @@ mod scratchpad;
 mod secrets;
 mod secure_input;
 mod settings;
+mod shared_pages;
 mod shortcut;
 mod signal_handle;
 mod snippets;
@@ -1978,6 +1979,16 @@ pub fn run(cli_args: CliArgs) {
             commands::cloud_sync::cloud_share_list,
             commands::cloud_sync::cloud_share_import_file,
             commands::cloud_sync::cloud_sync_service_status,
+            commands::shared_pages::shared_draft,
+            commands::shared_pages::shared_draft_save,
+            commands::shared_pages::shared_draft_discard,
+            commands::shared_pages::shared_drafts,
+            commands::shared_pages::shared_preview,
+            commands::shared_pages::shared_publish,
+            commands::shared_pages::shared_list,
+            commands::shared_pages::shared_revoke,
+            commands::shared_pages::shared_site_get,
+            commands::shared_pages::shared_site_set,
             commands::updates::check_for_updates,
             commands::updates::change_update_check_enabled_setting,
             helpers::clamshell::is_laptop,

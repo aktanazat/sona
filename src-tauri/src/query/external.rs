@@ -80,6 +80,7 @@ use uuid::Uuid;
 
 mod beacon;
 pub(crate) use beacon::watch as watch_external_writes;
+pub mod share;
 pub mod tracker;
 
 /// Where a person turns each scope on. Named in the refusal so an agent that is
@@ -179,6 +180,20 @@ pub enum ExternalErrorCode {
     /// The id parsed but names nothing in this corpus.
     NotFound,
     Failed,
+    /// `share` without `--confirm` or `--dry-run`: nothing was published.
+    ConfirmationRequired,
+    /// `share --confirm` from a process with no terminal on stdin, which
+    /// is how an agent would call it: nothing was published.
+    ConfirmationRequiresTerminal,
+    /// No site is set up for shared pages; `share-site` sets one.
+    SiteNotSetUp,
+    TooLarge,
+    AudioUnavailable,
+    PushFailed,
+    /// Another share or removal holds the lock.
+    Locked,
+    /// The site repository holds files Sona did not write.
+    RemoteNotSonaSite,
 }
 
 impl ExternalErrorCode {
@@ -188,7 +203,9 @@ impl ExternalErrorCode {
     /// typo — is one.
     pub const fn exit_code(self) -> i32 {
         match self {
-            Self::InvalidRequest => 2,
+            Self::InvalidRequest
+            | Self::ConfirmationRequired
+            | Self::ConfirmationRequiresTerminal => 2,
             _ => 1,
         }
     }
@@ -374,6 +391,7 @@ pub enum ExternalRequest {
         loop_id: MeetingLoopId,
     },
     Work(tracker::WorkVerb),
+    Share(share::ShareVerb),
 }
 
 impl ExternalRequest {
@@ -383,6 +401,7 @@ impl ExternalRequest {
         match self {
             Self::LoopResolve { .. } => WRITE_SCOPES,
             Self::Work(verb) => verb.required_scopes(),
+            Self::Share(verb) => verb.required_scopes(),
             Self::Search { .. }
             | Self::Meetings { .. }
             | Self::Meeting { .. }
@@ -583,9 +602,29 @@ impl ExternalRequest {
     /// defeats `requires`, see [`foreign_modifier`] — that every modifier
     /// named belongs to the verb it was named beside.
     pub fn from_args(args: &CliArgs) -> Result<Self, ExternalError> {
-        if let Some(Command::Work(work)) = &args.command {
-            work.verb.check()?;
-            return Ok(Self::Work(work.verb.clone()));
+        match &args.command {
+            Some(Command::Work(work)) => {
+                work.verb.check()?;
+                return Ok(Self::Work(work.verb.clone()));
+            }
+            Some(Command::SharePreview(preview)) => {
+                return share::ShareVerb::Preview(preview.clone())
+                    .checked()
+                    .map(Self::Share)
+            }
+            Some(Command::Share(args)) => {
+                return share::ShareVerb::Share(args.clone())
+                    .checked()
+                    .map(Self::Share)
+            }
+            Some(Command::Shares(_)) => return Ok(Self::Share(share::ShareVerb::Shares)),
+            Some(Command::Unshare(args)) => {
+                return Ok(Self::Share(share::ShareVerb::Unshare(args.clone())))
+            }
+            Some(Command::ShareSite(args)) => {
+                return Ok(Self::Share(share::ShareVerb::Site(args.clone())))
+            }
+            None => {}
         }
         if let Some(refusal) = foreign_modifier(args) {
             return Err(ExternalError::invalid(refusal));
@@ -1388,6 +1427,7 @@ pub enum ExternalResponse {
     Stats(ExternalCorpusStats),
     ExportMeetings(ExternalMeetingExport),
     Work(tracker::WorkAnswer),
+    Share(share::ShareAnswer),
 }
 
 impl ExternalResponse {
@@ -1675,6 +1715,9 @@ pub async fn answer(
         ExternalRequest::Work(verb) => tracker::answer(verb, app, meetings, history)
             .await
             .map(ExternalResponse::Work),
+        ExternalRequest::Share(verb) => share::answer(verb, app, meetings)
+            .await
+            .map(ExternalResponse::Share),
     }
 }
 
@@ -3947,6 +3990,7 @@ fn text_response(response: &ExternalResponse) -> String {
             }
         }
         ExternalResponse::Work(answer) => text.push_str(&answer.text()),
+        ExternalResponse::Share(answer) => text.push_str(&answer.text()),
     }
     text
 }
@@ -4049,8 +4093,8 @@ pub fn run_cli(app: &tauri::AppHandle, args: &CliArgs) -> i32 {
             Ok(response)
         });
     let format = match &args.command {
-        Some(Command::Work(work)) if work.json => ExternalFormat::Json,
-        Some(Command::Work(_)) => ExternalFormat::Text,
+        Some(command) if command.json() => ExternalFormat::Json,
+        Some(_) => ExternalFormat::Text,
         None => args.format.unwrap_or_default(),
     };
     match outcome {
