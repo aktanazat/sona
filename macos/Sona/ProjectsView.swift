@@ -1413,6 +1413,7 @@ private struct BoardCard: View {
         .onHover { hovering = $0 }
         .hoverFade(hovering)
         .onTapGesture(perform: open)
+        .allowsWindowActivationEvents()
         .draggable(summary.id) {
             Text(summary.project.title)
                 .font(TypeScale.body(13).weight(.medium))

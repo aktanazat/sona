@@ -216,6 +216,7 @@ private struct InboxRow: View {
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
         .onTapGesture { model.openNotice(notice) }
+        .allowsWindowActivationEvents()
         .contextMenu { menu(store) }
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.isButton)

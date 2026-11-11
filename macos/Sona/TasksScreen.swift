@@ -498,6 +498,7 @@ struct TaskRowInteractions: ViewModifier {
                 if inside { model.workFocus.hover(id) }
             }
             .onTapGesture { model.clickTask(id) }
+            .allowsWindowActivationEvents()
             .contextMenu { WorkActionMenu(ids: model.menuTargets(id)) }
             .accessibilityAddTraits(.isButton)
             .accessibilityAction { model.perform(.open, on: [id]) }

@@ -103,6 +103,7 @@ private struct ProposalTask: View {
             .contentShape(Rectangle())
             .onHover { hovering = $0 }
             .onTapGesture { model.workFocus.open(row.id, in: .triage) }
+            .allowsWindowActivationEvents()
             .help("Open the task")
             ForEach(Array(proposals.enumerated()), id: \.element.id) { index, proposal in
                 ProposalLine(proposal: proposal, keyed: keyed && index == 0, showsAgent: agent == nil)
