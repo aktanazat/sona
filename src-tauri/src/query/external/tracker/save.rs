@@ -792,23 +792,9 @@ impl Tracker<'_> {
             planning::work::drawing_on(history, |kind, id| meetings.hides(kind, id))
         })
         .map_err(|message| refusal(self.history, message))?;
-        let hidden_notes: std::collections::HashSet<String> =
-            planning::history(self.history, |history| {
-                let mut statement = history.prepare(
-                    "SELECT note_id, target_id FROM scratch_note_sources WHERE kind = 'meeting'",
-                )?;
-                let found = statement
-                    .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                Ok(found
-                    .into_iter()
-                    .filter(|(_, meeting)| {
-                        meetings.hides(planning::EvidenceSourceKind::Meeting, meeting)
-                    })
-                    .map(|(note, _)| note)
-                    .collect())
-            })
-            .map_err(|message| refusal(self.history, message))?;
+        let hidden_notes =
+            planning::history(self.history, |history| Ok(hidden_notes(history, &meetings)?))
+                .map_err(|message| refusal(self.history, message))?;
         let numbers: std::collections::HashMap<String, i64> =
             planning::history(self.history, |history| {
                 let mut statement = history.prepare("SELECT id, number FROM planning_tasks")?;
@@ -882,6 +868,23 @@ impl MeetingFence {
     }
 }
 
+/// The notes, by id, that link a meeting the fence hides.
+fn hidden_notes(
+    history: &rusqlite::Connection,
+    meetings: &MeetingFence,
+) -> rusqlite::Result<std::collections::HashSet<String>> {
+    let mut statement = history
+        .prepare("SELECT note_id, target_id FROM scratch_note_sources WHERE kind = 'meeting'")?;
+    let found = statement
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(found
+        .into_iter()
+        .filter(|(_, meeting)| meetings.hides(planning::EvidenceSourceKind::Meeting, meeting))
+        .map(|(note, _)| note)
+        .collect())
+}
+
 /// Whether a change stays out of an outside reader's stream: it is on a
 /// task or a note drawn from a meeting the fence hides, on such a meeting
 /// itself, or it was drawn from one when it was written.
@@ -907,13 +910,10 @@ fn kept_here(
         || note.is_some_and(|id| hidden_notes.contains(id))
         || (change.entity == "meeting"
             && meetings.hides(planning::EvidenceSourceKind::Meeting, &change.entity_id))
-        || change.sources.iter().any(|(kind, id)| {
-            let kind = if kind == "loop" {
-                planning::EvidenceSourceKind::Loop
-            } else {
-                planning::EvidenceSourceKind::Meeting
-            };
-            meetings.hides(kind, id)
+        || change.sources.iter().any(|(kind, id)| match kind.as_str() {
+            "loop" => meetings.hides(planning::EvidenceSourceKind::Loop, id),
+            "meeting" => meetings.hides(planning::EvidenceSourceKind::Meeting, id),
+            _ => true,
         })
 }
 
@@ -1018,5 +1018,136 @@ mod tests {
 
         assert_eq!(left_out.iter().map(read).collect::<Vec<_>>(), [true; 3]);
         assert_eq!(shown.iter().map(read).collect::<Vec<_>>(), [false; 3]);
+    }
+
+    fn agent_view(
+        conn: &rusqlite::Connection,
+        meetings: &MeetingFence,
+    ) -> Vec<changes::WorkChange> {
+        let hidden = crate::planning::work::drawing_on(conn, |kind, id| meetings.hides(kind, id))
+            .expect("hidden tasks");
+        let notes = hidden_notes(conn, meetings).expect("hidden notes");
+        changes::page(conn, None, 50)
+            .expect("a read")
+            .expect("a page")
+            .changes
+            .into_iter()
+            .filter(|change| !kept_here(change, meetings, &hidden, &notes))
+            .collect()
+    }
+
+    fn kept_meeting(meeting: &str) -> MeetingFence {
+        let session = crate::meeting::types::MeetingSessionId::from_uuid(
+            Uuid::parse_str(meeting).expect("a meeting id"),
+        );
+        MeetingFence {
+            fence: Fence::Open(crate::query::KeptLocal(HashSet::from([session]))),
+            existing: HashSet::from([session]),
+        }
+    }
+
+    fn history() -> rusqlite::Connection {
+        let mut conn = rusqlite::Connection::open_in_memory().expect("a history database");
+        conn.pragma_update(None, "foreign_keys", true)
+            .expect("history foreign keys");
+        rusqlite_migration::Migrations::new(crate::managers::history::MIGRATIONS.to_vec())
+            .to_latest(&mut conn)
+            .expect("the app's history migrations");
+        conn
+    }
+
+    #[test]
+    fn a_purged_task_from_a_meeting_kept_here_leaves_no_trace_in_the_stream() {
+        use crate::planning::work::{bin, items, types};
+        let conn = history();
+        let meeting = "11111111-1111-4111-8111-111111111111";
+        let task = items::insert(
+            &conn,
+            &items::NewItem {
+                title: "Raise the salary band",
+                details: None,
+                status: types::WorkStatus::NotStarted,
+                priority: 0,
+                project_id: None,
+                milestone_id: None,
+                owner: &types::WorkOwner::Nobody,
+                due_at_ms: None,
+                label_ids: &[],
+                source_loop_id: None,
+                recurrence: None,
+            },
+            types::WorkActor::Me,
+            0,
+        )
+        .expect("a filed task")
+        .id;
+        conn.execute_batch(&format!(
+            "INSERT INTO planning_evidence_links
+                 (id, target_kind, target_id, source_kind, source_id, revision, created_at_ms)
+                 VALUES ('e1', 'task', '{task}', 'meeting', '{meeting}', 1, 1);
+             UPDATE planning_tasks SET title = 'Raise it to 140k', details = 'Per the board'
+                 WHERE id = '{task}';
+             UPDATE planning_tasks SET trashed_at_ms = 1 WHERE id = '{task}';"
+        ))
+        .expect("task edits");
+        bin::purge(&conn, i64::MAX).expect("a purge");
+
+        let written: Vec<_> = changes::page(&conn, None, 50)
+            .expect("a read")
+            .expect("a page")
+            .changes
+            .into_iter()
+            .filter(|change| change.item_id.as_deref() == Some(task.as_str()))
+            .map(|change| change.action)
+            .collect();
+        assert_eq!(written, ["create", "update", "update", "remove"]);
+        let shown: Vec<_> = agent_view(&conn, &kept_meeting(meeting))
+            .into_iter()
+            .map(|change| (change.action, change.data, change.updated_from))
+            .collect();
+
+        assert_eq!(shown, []);
+    }
+
+    #[test]
+    fn a_deleted_note_from_a_meeting_kept_here_leaves_no_trace_in_the_stream() {
+        let conn = history();
+        let meeting = "22222222-2222-4222-8222-222222222222";
+        conn.execute_batch(&format!(
+            "INSERT INTO scratch_notes (id, title, body, pinned, created_at_ms, updated_at_ms)
+                 VALUES ('n1', 'Board salary talk', 'Raise to 140k', 0, 1, 1);
+             INSERT INTO scratch_note_sources (note_id, kind, target_id, title)
+                 VALUES ('n1', 'meeting', '{meeting}', 'Conversation');
+             UPDATE scratch_notes SET title = 'Board salary decision', body = 'Raise to 150k'
+                 WHERE id = 'n1';
+             INSERT INTO planning_comments
+                 (id, subject_kind, subject_id, author_kind, author_name, body, created_at_ms)
+                 VALUES ('c1', 'note', 'n1', 'me', 'Me', 'Tell HR first', 2);"
+        ))
+        .expect("a note from a meeting");
+        crate::scratchpad::delete_note_with_connection(&conn, "n1").expect("a deleted note");
+
+        let written: Vec<_> = changes::page(&conn, None, 50)
+            .expect("a read")
+            .expect("a page")
+            .changes
+            .into_iter()
+            .map(|change| (change.entity, change.action))
+            .collect();
+        assert_eq!(
+            written,
+            [
+                ("note".to_owned(), "create".to_owned()),
+                ("note".to_owned(), "update".to_owned()),
+                ("comment".to_owned(), "create".to_owned()),
+                ("note".to_owned(), "remove".to_owned()),
+            ]
+        );
+        let shown: Vec<_> = agent_view(&conn, &kept_meeting(meeting))
+            .into_iter()
+            .map(|change| (change.entity, change.action, change.data))
+            .collect();
+
+        assert_eq!(shown, []);
     }
 }

@@ -757,6 +757,75 @@ BEGIN
     );
 END;";
 
+/// A task's meeting and loop links go with it when it is deleted, so the
+/// task's earlier changes take them as sources first: a reader can then
+/// still leave out every change on work drawn from a meeting kept on this
+/// Mac. Changes on a task already gone that name no source get an
+/// `unknown` one, since nothing says where that task came from.
+pub(crate) const TASK_PURGE_SOURCES_MIGRATION: &str =
+    "DROP TRIGGER planning_changes_task_remove;
+CREATE TRIGGER planning_changes_task_remove BEFORE DELETE ON planning_tasks BEGIN
+    UPDATE planning_changes SET sources = (
+        SELECT json_group_array(json_array(kind, id)) FROM (
+            SELECT json_extract(j.value, '$[0]') AS kind, json_extract(j.value, '$[1]') AS id
+            FROM json_each(coalesce(planning_changes.sources, '[]')) j
+            UNION SELECT source_kind, source_id FROM planning_evidence_links
+            WHERE target_kind = 'task' AND target_id = old.id AND source_kind IN ('meeting', 'loop')
+            UNION SELECT 'loop', old.source_loop_id WHERE old.source_loop_id IS NOT NULL))
+    WHERE task_id = old.id AND (old.source_loop_id IS NOT NULL OR EXISTS (
+        SELECT 1 FROM planning_evidence_links
+        WHERE target_kind = 'task' AND target_id = old.id AND source_kind IN ('meeting', 'loop')));
+    INSERT INTO planning_changes (at_ms, entity, entity_id, task_id, action, data, sources)
+    VALUES (CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER), 'task', old.id, old.id,
+        'remove', json_object('number', old.number, 'title', old.title),
+        (SELECT nullif(json_group_array(json_array(kind, id)), '[]') FROM (
+            SELECT source_kind AS kind, source_id AS id FROM planning_evidence_links
+            WHERE target_kind = 'task' AND target_id = old.id AND source_kind IN ('meeting', 'loop')
+            UNION SELECT 'loop', old.source_loop_id WHERE old.source_loop_id IS NOT NULL)));
+END;
+UPDATE planning_changes SET sources = coalesce(
+    (SELECT other.sources FROM planning_changes other
+     WHERE other.task_id = planning_changes.task_id AND other.sources IS NOT NULL
+     ORDER BY other.seq DESC LIMIT 1),
+    json_array(json_array('unknown', task_id)))
+WHERE task_id IS NOT NULL AND sources IS NULL
+    AND task_id NOT IN (SELECT id FROM planning_tasks);";
+
+/// The same for notes: a deleted note's meeting links go with it, so its
+/// earlier changes and the comments on it take them as sources first.
+pub(crate) const NOTE_PURGE_SOURCES_MIGRATION: &str =
+    "DROP TRIGGER planning_changes_note_remove;
+CREATE TRIGGER planning_changes_note_remove BEFORE DELETE ON scratch_notes BEGIN
+    UPDATE planning_changes SET sources = (
+        SELECT json_group_array(json_array(kind, id)) FROM (
+            SELECT json_extract(j.value, '$[0]') AS kind, json_extract(j.value, '$[1]') AS id
+            FROM json_each(coalesce(planning_changes.sources, '[]')) j
+            UNION SELECT 'meeting', target_id FROM scratch_note_sources
+            WHERE note_id = old.id AND kind = 'meeting'))
+    WHERE ((entity = 'note' AND entity_id = old.id)
+            OR (entity = 'comment' AND json_extract(data, '$.subject_kind') = 'note'
+                AND json_extract(data, '$.subject_id') = old.id))
+        AND EXISTS (SELECT 1 FROM scratch_note_sources WHERE note_id = old.id AND kind = 'meeting');
+    INSERT INTO planning_changes (at_ms, entity, entity_id, action, data, sources)
+    VALUES (CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER), 'note', old.id,
+        'remove', json_object('title', old.title),
+        (SELECT nullif(json_group_array(json_array('meeting', target_id)), '[]')
+            FROM scratch_note_sources WHERE note_id = old.id AND kind = 'meeting'));
+END;
+UPDATE planning_changes SET sources = coalesce(
+    (SELECT other.sources FROM planning_changes other
+     WHERE other.entity = 'note' AND other.entity_id = coalesce(
+         CASE WHEN planning_changes.entity = 'note' THEN planning_changes.entity_id END,
+         json_extract(planning_changes.data, '$.subject_id'))
+       AND other.sources IS NOT NULL
+     ORDER BY other.seq DESC LIMIT 1),
+    json_array(json_array('unknown', coalesce(
+        CASE WHEN entity = 'note' THEN entity_id END, json_extract(data, '$.subject_id')))))
+WHERE sources IS NULL
+    AND ((entity = 'note' AND entity_id NOT IN (SELECT id FROM scratch_notes))
+        OR (entity = 'comment' AND json_extract(data, '$.subject_kind') = 'note'
+            AND json_extract(data, '$.subject_id') NOT IN (SELECT id FROM scratch_notes)));";
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkChange {

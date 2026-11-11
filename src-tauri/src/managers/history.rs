@@ -312,6 +312,8 @@ pub(crate) static MIGRATIONS: &[M] = &[
     M::up(crate::planning::work::project_templates::PROJECT_TEMPLATES_MIGRATION),
     M::up(crate::planning::work::initiatives::INITIATIVES_MIGRATION),
     M::up(crate::planning::work::changes::INITIATIVE_CHANGES_MIGRATION),
+    M::up(crate::planning::work::changes::TASK_PURGE_SOURCES_MIGRATION),
+    M::up(crate::planning::work::changes::NOTE_PURGE_SOURCES_MIGRATION),
 ];
 
 const MAX_HISTORY_PAGE_SIZE: usize = 100;
