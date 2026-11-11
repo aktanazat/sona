@@ -31,6 +31,9 @@ struct ProjectsView: View {
     let showCalendar: () -> Void
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(AppModel.self) private var model
+    @State private var pageTab = ProjectPageTab.overview
+    @State private var showBin = false
     @AppStorage("projects.layout") private var layout = ProjectsLayout.list
     @State private var query = ""
     @State private var creation: PlanningCreation?
@@ -56,7 +59,11 @@ struct ProjectsView: View {
         .task(id: store.selectedProjectId) {
             if let id = store.selectedProjectId { await store.loadDetail(id) }
         }
-        .onChange(of: store.selectedProjectId) { _, _ in ownerFilter = nil }
+        .onChange(of: store.selectedProjectId) { _, _ in
+            ownerFilter = nil
+            pageTab = .overview
+        }
+        .overlay(alignment: .bottomLeading) { ProjectBinToast(store: store) }
         .onChange(of: store.detail?.pulse.owners) { _, owners in
             if let id = ownerFilter, !(owners ?? []).contains(where: { $0.personId == id }) { ownerFilter = nil }
         }
@@ -122,6 +129,9 @@ struct ProjectsView: View {
             } else {
                 ScrollViewReader { proxy in list(proxy) }
             }
+            if showBin {
+                ProjectBinList(store: store).padding(.top, 28)
+            }
         }
         .pageBar {
             headerTitle
@@ -168,6 +178,12 @@ struct ProjectsView: View {
             Button("Plan with Sona", systemImage: "bubble.left") { planWithSona() }
                 .buttonStyle(.secondary)
         }
+        Button { showBin.toggle() } label: { Image(systemName: "trash") }
+            .buttonStyle(.icon)
+            .background(showBin ? Theme.accentSoft : .clear, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
+            .help(showBin ? "Hide recently deleted" : "Recently deleted")
+            .accessibilityLabel("Recently deleted")
+            .accessibilityAddTraits(showBin ? .isSelected : [])
         Button("New project", systemImage: "plus") { creation = .project }
             .buttonStyle(.primary)
             .help("New project (C)")
@@ -274,6 +290,12 @@ struct ProjectsView: View {
         .focused($keysFocused)
         .onKeyPress(.downArrow) { moveCursor(1, in: rows, proxy: proxy) }
         .onKeyPress(.upArrow) { moveCursor(-1, in: rows, proxy: proxy) }
+        .onKeyPress(characters: CharacterSet(charactersIn: "j"), phases: .down) { press in
+            press.modifiers.isEmpty ? moveCursor(1, in: rows, proxy: proxy) : .ignored
+        }
+        .onKeyPress(characters: CharacterSet(charactersIn: "k"), phases: .down) { press in
+            press.modifiers.isEmpty ? moveCursor(-1, in: rows, proxy: proxy) : .ignored
+        }
         .onKeyPress(.return) {
             guard let cursor, rows.contains(where: { $0.id == ProjectListRow.projectId(cursor) }) else { return .ignored }
             store.open(cursor)
@@ -306,10 +328,17 @@ struct ProjectsView: View {
 
     private func projectRow(_ summary: PlanningProjectSummary, now: Int64) -> some View {
         let total = summary.openTaskCount + summary.completedTaskCount
-        let fraction = total > 0 ? Double(summary.completedTaskCount) / Double(total) : 0
+        let detail = store.details[summary.id]
+        let percent = detail?.progress?.percent
+            ?? (total > 0 ? Int(summary.completedTaskCount * 100 / total) : 0)
+        let priority = TaskPriority(summary.project.priority ?? 0)
         return DenseRow(highlighted: cursor == summary.id, action: { store.open(summary.id) },
                         hover: { if $0 { cursor = summary.id } }) {
-            ProjectStatusIcon(status: summary.project.status, progress: fraction)
+            PriorityIcon(priority: priority)
+                .frame(width: 16)
+                .help(priority.label)
+            ProjectStatusIcon(status: summary.project.status, progress: Double(percent) / 100)
+            if let icon = summary.project.icon { Text(icon).font(.system(size: 13)) }
             Text(summary.project.title)
                 .font(TypeScale.body(13.5).weight(.medium))
                 .foregroundStyle(Theme.ink)
@@ -318,24 +347,34 @@ struct ProjectsView: View {
             if let lead = summary.project.leadPersonId.flatMap({ id in people.first { $0.id == id } }) {
                 Text("Lead \(lead.name)").metaText().lineLimit(1)
             }
-            if let target = summary.project.targetAtMs {
-                Text("Target \(PlanningFormat.day(target))").metaText().lineLimit(1)
-                    .help(PlanningFormat.date(target))
-            }
             Spacer(minLength: 12)
-            AvatarStack(faces: store.details[summary.id].map(owners) ?? [], size: 18, revision: photoRevision)
+            AvatarStack(faces: detail.map(owners) ?? [], size: 18, revision: photoRevision)
                 .frame(width: 62, alignment: .trailing)
-            dueLabel(summary.nextDueAtMs, overdue: PlanningDue.isPast(summary.nextDueAtMs, at: now))
-                .frame(width: 58, alignment: .trailing)
-            ProjectProgressRing(done: summary.completedTaskCount, total: total)
-                .frame(width: 58, alignment: .trailing)
-            Text("\(summary.completedTaskCount)/\(total)")
-                .metaText()
-                .monospacedDigit()
-                .frame(width: 40, alignment: .trailing)
-                .accessibilityHidden(true)
+            ProjectHealthPill(health: detail?.latestUpdate?.health, compact: true)
+                .frame(width: 84, alignment: .leading)
+            HStack(spacing: 6) {
+                ProgressRing(fraction: Double(percent) / 100, size: 14, lineWidth: 2.25)
+                Text("\(percent)%").metaText().monospacedDigit()
+            }
+            .frame(width: 64, alignment: .trailing)
+            .help("\(summary.completedTaskCount) of \(total) tasks done; started tasks count a quarter")
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("\(percent)% complete")
+            Group {
+                if let target = summary.project.targetAtMs {
+                    Text(ProjectDates.text(target, summary.project.targetResolution)).metaText().lineLimit(1)
+                        .help("Target \(PlanningFormat.date(target))")
+                } else {
+                    Text("No target").metaText(Theme.inkDisabled)
+                }
+            }
+            .frame(width: 92, alignment: .trailing)
         }
-        .contextMenu { moveMenu(summary.project) }
+        .contextMenu {
+            moveMenu(summary.project)
+            Divider()
+            Button("Delete project", role: .destructive) { Task { await store.binProject(summary.project) } }
+        }
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.isButton)
         .accessibilityAction { store.open(summary.id) }
@@ -423,6 +462,13 @@ struct ProjectsView: View {
                     .accessibilityLabel("Refresh project")
                     .help("Refresh project")
                     .disabled(store.detailLoading)
+                Button {
+                    Task { await store.binProject(detail.project) }
+                } label: { Image(systemName: "trash") }
+                    .buttonStyle(.icon)
+                    .accessibilityLabel("Delete project")
+                    .help("Delete project. It stays in Recently deleted for 30 days.")
+                    .disabled(store.mutating)
             }
         }
     }
@@ -440,23 +486,52 @@ struct ProjectsView: View {
                 }
                 .padding(.bottom, 20)
             }
-            VStack(alignment: .leading, spacing: 12) {
-                numbers(detail.pulse, now: now)
-                ownerFaces(detail.pulse)
-            }
-            .padding(.bottom, 28)
-            if let series = detail.burnUp(until: .now) {
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("Progress").sectionLabel().accessibilityAddTraits(.isHeader)
-                    Card {
-                        BurnUpChart(series: series).padding(16)
+            SegmentedSwitch(items: ProjectPageTab.items, selection: pageTab) { pageTab = $0 }
+                .fixedSize()
+                .padding(.bottom, 20)
+            switch pageTab {
+            case .overview:
+                HStack(alignment: .top, spacing: 24) {
+                    VStack(alignment: .leading, spacing: 0) {
+                        ProjectDescriptionEditor(text: detail.project.description, busy: store.mutating) { text in
+                            Task {
+                                await store.saveProject(detail.project,
+                                                        PlanningProjectSave(description: text.isEmpty ? .clear : .set(text)))
+                            }
+                        }
+                        .padding(.bottom, 28)
+                        if let progress = detail.progress {
+                            VStack(alignment: .leading, spacing: 10) {
+                                Text("Progress").sectionLabel().accessibilityAddTraits(.isHeader)
+                                Card { ProjectProgressChart(progress: progress).padding(16) }
+                            }
+                            .padding(.bottom, 28)
+                        } else if let series = detail.burnUp(until: .now) {
+                            VStack(alignment: .leading, spacing: 10) {
+                                Text("Progress").sectionLabel().accessibilityAddTraits(.isHeader)
+                                Card { BurnUpChart(series: series).padding(16) }
+                            }
+                            .padding(.bottom, 28)
+                        }
+                        milestones(detail, now: now)
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    ProjectPropertiesPanel(detail: detail, people: people, labels: model.work.labels) { change in
+                        Task { await store.saveProject(detail.project, change) }
+                    }
+                    .frame(width: 260)
+                }
+            case .tasks:
+                VStack(alignment: .leading, spacing: 12) {
+                    numbers(detail.pulse, now: now)
+                    ownerFaces(detail.pulse)
                 }
                 .padding(.bottom, 28)
+                tasks(detail, now: now)
+                evidence(detail)
+            case .updates:
+                ProjectUpdatesView(store: store, detail: detail)
             }
-            milestones(detail, now: now)
-            tasks(detail, now: now)
-            evidence(detail)
         }
         .animation(Motion.settle(reduced: reduceMotion), value: detail)
         .focusable()
@@ -477,7 +552,8 @@ struct ProjectsView: View {
     private func header(_ detail: PlanningProjectDetail) -> some View {
         let pulse = detail.pulse
         let counted = pulse.done + pulse.open
-        let fraction = counted > 0 ? Double(pulse.done) / Double(counted) : 0
+        let fraction = detail.progress.map { Double($0.percent) / 100 }
+            ?? (counted > 0 ? Double(pulse.done) / Double(counted) : 0)
         let project = detail.project
         return VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .center, spacing: 16) {
@@ -513,14 +589,19 @@ struct ProjectsView: View {
                             .frame(height: Theme.compactHeight)
                             .background(Theme.control, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
                         }
-                        Text("Started \(PlanningFormat.day(project.createdAtMs))").metaText()
+                        if let start = project.startAtMs {
+                            let verb = start <= now ? "Started" : "Starts"
+                            Text("\(verb) \(ProjectDates.text(start, project.startResolution))").metaText()
+                        } else {
+                            Text("Created \(PlanningFormat.day(project.createdAtMs))").metaText()
+                        }
+                        ProjectHealthPill(health: detail.latestUpdate?.health)
+                        if detail.updateMissing {
+                            Button("Update due") { pageTab = .updates }
+                                .buttonStyle(.quiet)
+                        }
                     }
                 }
-            }
-            if let description = project.description, !description.isEmpty {
-                Text(description).bodyText(14, Theme.inkSecondary)
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
             }
         }
     }
@@ -624,7 +705,7 @@ struct ProjectsView: View {
             return TimelineMilestone(id: milestone.id, title: milestone.title, due: PlanningFormat.moment(due),
                                      status: milestone.status, overdue: milestone.isOverdue(at: now))
         }
-        let ordered = detail.milestones.sorted { ($0.dueAtMs ?? .max, $0.createdAtMs) < ($1.dueAtMs ?? .max, $1.createdAtMs) }
+        let ordered = detail.orderedMilestones
         return VStack(alignment: .leading, spacing: 10) {
             sectionHeader("Milestones", count: detail.milestones.count) {
                 Button("Add milestone", systemImage: "plus") { creation = .milestone(detail.project.id) }
@@ -645,8 +726,25 @@ struct ProjectsView: View {
                     }
                     ForEach(ordered) { milestone in
                         milestoneRow(milestone, detail: detail, now: now)
+                            .draggable(milestone.id) {
+                                Text(milestone.title).bodyText(13).padding(6)
+                            }
+                            .dropDestination(for: String.self) { ids, _ in
+                                let order = ordered.map(\.id)
+                                guard let moved = ids.first, moved != milestone.id,
+                                      let from = order.firstIndex(of: moved),
+                                      let to = order.firstIndex(of: milestone.id) else { return false }
+                                var changed = order
+                                changed.remove(at: from)
+                                changed.insert(moved, at: to)
+                                Task { await store.reorderMilestones(projectId: detail.project.id, ids: changed) }
+                                return true
+                            }
                     }
                 }
+            }
+            if ordered.count > 1 {
+                Text("Drag a milestone to change its order.").metaText()
             }
         }
         .padding(.bottom, 28)
@@ -654,8 +752,7 @@ struct ProjectsView: View {
 
     private func milestoneRow(_ milestone: PlanningMilestone, detail: PlanningProjectDetail, now: Int64) -> some View {
         let overdue = milestone.isOverdue(at: now)
-        let scoped = detail.tasks.filter { $0.milestoneId == milestone.id && $0.status != .canceled }
-        let done = scoped.filter { $0.status == .done }.count
+        let progress = detail.progress(of: milestone)
         return DenseRow {
             workStatusPicker(milestone.status, title: milestone.title) { status in
                 Task { await store.setMilestoneStatus(milestone, status) }
@@ -663,12 +760,22 @@ struct ProjectsView: View {
                 MilestoneMark(status: status, overdue: overdue && status == milestone.status)
             }
             Text(milestone.title).bodyText(13.5).lineLimit(1).help(milestone.title)
+            if progress?.nextOpen == true {
+                Text("Next")
+                    .font(TypeScale.label(11).weight(.semibold))
+                    .foregroundStyle(Theme.accent)
+                    .padding(.horizontal, 6)
+                    .frame(height: 18)
+                    .background(Theme.accentSoft, in: Capsule())
+                    .accessibilityLabel("Next open milestone")
+            }
             Spacer(minLength: 12)
             if let heat = detail.pulse.milestones.first(where: { $0.milestoneId == milestone.id }) {
                 heatLabel(heat, now: now)
             }
-            if !scoped.isEmpty {
-                Text("\(done)/\(scoped.count) tasks").metaText().monospacedDigit()
+            if let progress, progress.scope > 0 {
+                Text("\(progress.percent)%").metaText().monospacedDigit()
+                    .help("\(progress.done) done, \(progress.started) started of \(progress.scope) tasks")
             }
             dueLabel(milestone.dueAtMs, overdue: overdue)
             linkButton(milestone.title) {

@@ -27,6 +27,10 @@ enum CycleFormat {
         return (first..<last).formatted(.interval.month(.abbreviated).day())
     }
 
+    static func weeks(_ count: Int) -> String {
+        count == 1 ? "1 week" : "\(count) weeks"
+    }
+
     static func weekday(_ number: Int) -> String {
         let names = Calendar(identifier: .gregorian).weekdaySymbols
         return names[number % 7]
@@ -37,6 +41,7 @@ enum CycleFormat {
 /// dropped, and how much of it is done.
 struct CycleTally: Equatable {
     var scope = 0
+    var started = 0
     var done = 0
 
     init(_ rows: [WorkItemRow]) {
@@ -46,10 +51,16 @@ struct CycleTally: Equatable {
             case .done:
                 scope += 1
                 done += 1
-            case .backlog, .notStarted, .inProgress: scope += 1
+            case .inProgress:
+                scope += 1
+                started += 1
+            case .backlog, .notStarted: scope += 1
             }
         }
     }
+
+    /// Done counts 100 and started 25, over scope: the rule the core closes a cycle by.
+    var success: Int? { scope == 0 ? nil : (done * 100 + started * 25) / scope }
 }
 
 /// The head of the cycle tab: which cycle, how far it has come, and scope
@@ -60,22 +71,34 @@ struct CycleSummary: View {
     @Environment(AppModel.self) private var model
     @State private var progress: WorkCycleProgress?
     @State private var failed = false
+    @State private var renaming: String?
 
     var body: some View {
         let now = model.work.now
+        let success = cycle.success ?? tally.success
         VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .firstTextBaseline, spacing: 16) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Cycle \(cycle.number)").headlineText()
+                    Button { renaming = cycle.name ?? "" } label: {
+                        Text(cycle.title).headlineText()
+                    }
+                    .buttonStyle(.plain)
+                    .help("Rename cycle")
+                    .accessibilityLabel("\(cycle.title). Rename")
+                    .popover(isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
+                        renameForm
+                    }
                     Text(subtitle(now: now)).metaText()
                 }
                 Spacer(minLength: 0)
+                actions
                 VStack(alignment: .trailing, spacing: 4) {
-                    Text(tally.scope == 0 ? "No work yet" : "\(tally.done * 100 / tally.scope)%")
-                        .font(tally.scope == 0 ? TypeScale.list : TypeScale.stat)
+                    Text(success.map { "\($0)%" } ?? "No work yet")
+                        .font(success == nil ? TypeScale.list : TypeScale.stat)
                         .monospacedDigit()
-                        .foregroundStyle(tally.scope == 0 ? Theme.inkSecondary : Theme.ink)
-                    Text("\(tally.done) of \(tally.scope) done").metaText()
+                        .foregroundStyle(success == nil ? Theme.inkSecondary : Theme.ink)
+                        .help("Done counts in full, started counts a quarter")
+                    Text("\(tally.done) done, \(tally.started) started of \(tally.scope)").metaText()
                 }
             }
             if let (first, last) = CycleFormat.span(cycle) {
@@ -118,34 +141,72 @@ struct CycleSummary: View {
         return parts.joined(separator: " · ")
     }
 
-    /// Where scope and done stood at each day's end, through today's from
-    /// the rows on screen, so a change shows the moment it is made. Each
-    /// count is drawn across the day it closes.
+    private var renameForm: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            TextField("Cycle \(cycle.number)", text: Binding(get: { renaming ?? "" }, set: { renaming = $0 }))
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 220)
+                .onSubmit(rename)
+            HStack {
+                Text("Leave empty to use the number.").metaText()
+                Spacer()
+                Button("Save", action: rename).buttonStyle(.primary).keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(12)
+    }
+
+    private func rename() {
+        model.work.renameCycle(cycle.number, to: renaming ?? "")
+        renaming = nil
+    }
+
+    @ViewBuilder
+    private var actions: some View {
+        if cycle.state == .current {
+            Button("Roll over", systemImage: "arrow.uturn.right") { model.work.rolloverCycle(cycle.number) }
+                .buttonStyle(.secondary)
+                .help("Move unfinished work into the next cycle")
+            if let next = model.work.nextCycle {
+                Button("Start \(next.title) today") { model.work.startCycleToday(next.number) }
+                    .buttonStyle(.secondary)
+                    .help("End this cycle now and start the next one today")
+            }
+        } else if cycle.state == .upcoming {
+            Button("Start today") { model.work.startCycleToday(cycle.number) }
+                .buttonStyle(.secondary)
+        }
+    }
+
+    /// Where scope, started and done stood at each day's end, from the
+    /// frozen counts once the cycle closed, and through today's from the rows
+    /// on screen while it runs. Each count is drawn across the day it closes.
     private func points(now: Int64) -> [CycleChart.Point] {
         let calendar = Calendar.current
         let moment = PlanningFormat.moment(now)
         let today = calendar.startOfDay(for: moment)
         var points = (progress?.days ?? []).compactMap { day -> CycleChart.Point? in
-            guard let date = CycleFormat.day(day.day), date < today,
+            guard let date = CycleFormat.day(day.day), cycle.state == .past || date < today,
                   let end = calendar.date(byAdding: .day, value: 1, to: date) else { return nil }
-            return CycleChart.Point(at: end, scope: day.scope, done: day.done)
+            return CycleChart.Point(at: end, scope: day.scope, started: day.started, done: day.done)
         }
         if cycle.state == .current {
-            points.append(CycleChart.Point(at: moment, scope: tally.scope, done: tally.done))
+            points.append(CycleChart.Point(at: moment, scope: tally.scope, started: tally.started, done: tally.done))
         }
         if let first = points.first, let start = CycleFormat.day(cycle.startDay) {
-            points.insert(CycleChart.Point(at: start, scope: first.scope, done: first.done), at: 0)
+            points.insert(CycleChart.Point(at: start, scope: first.scope, started: first.started, done: first.done), at: 0)
         }
         return points
     }
 }
 
-/// Scope as a dashed step, done as a filled step under it, over every day
-/// of the cycle, so the days still to come read as room left.
+/// Scope as a dashed step, started and done as steps under it, over every
+/// day of the cycle, so the days still to come read as room left.
 struct CycleChart: View {
     struct Point: Identifiable {
         let at: Date
         let scope: Int
+        let started: Int
         let done: Int
         var id: Date { at }
     }
@@ -162,6 +223,11 @@ struct CycleChart: View {
                 ForEach(points) { point in
                     AreaMark(x: .value("Day", point.at), y: .value("Done", point.done))
                         .foregroundStyle(Theme.accentSoft)
+                        .interpolationMethod(.stepStart)
+                    LineMark(x: .value("Day", point.at), y: .value("Started", point.started + point.done),
+                             series: .value("Line", "Started"))
+                        .foregroundStyle(Theme.statusInProgress)
+                        .lineStyle(StrokeStyle(lineWidth: 1.5))
                         .interpolationMethod(.stepStart)
                     LineMark(x: .value("Day", point.at), y: .value("Done", point.done),
                              series: .value("Line", "Done"))
@@ -192,42 +258,74 @@ struct CycleChart: View {
             .foregroundStyle(Theme.inkTertiary)
         }
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(points.last.map { "Scope \($0.scope), done \($0.done)" } ?? "No days counted yet")
+        .accessibilityLabel(points.last.map { "Scope \($0.scope), started \($0.started), done \($0.done)" }
+            ?? "No days counted yet")
     }
 }
 
-/// How long cycles run and the weekday they start; a change applies from
-/// the next start day, and the current cycle ends then.
+/// Opens the cycle settings: length, cooldown, start day and how many
+/// cycles are kept ahead.
 struct CycleSettingsMenu: View {
     @Environment(AppModel.self) private var model
+    @State private var editing: WorkCycleSettings?
 
     var body: some View {
-        let store = model.work
-        if let settings = store.cycleSettings {
-            Menu {
-                Picker("Length", selection: Binding(
-                    get: { settings.weeks },
-                    set: { store.saveCycleSettings(WorkCycleSettings(weeks: $0, startWeekday: settings.startWeekday)) }
-                )) {
-                    Text("1 week").tag(1)
-                    Text("2 weeks").tag(2)
+        if let settings = model.work.cycleSettings {
+            Button { editing = settings } label: {
+                Text("\(CycleFormat.weeks(settings.weeks)) from \(CycleFormat.weekday(settings.startWeekday))")
+            }
+            .buttonStyle(.compact)
+            .fixedSize()
+            .help("Cycle settings")
+            .sheet(item: Binding(get: { editing.map(CycleSettingsDraft.init) }, set: { editing = $0?.settings })) { draft in
+                CycleSettingsSheet(settings: draft.settings) { saved in
+                    model.work.saveCycleSettings(saved)
+                    editing = nil
+                } cancel: { editing = nil }
+            }
+        }
+    }
+}
+
+private struct CycleSettingsDraft: Identifiable {
+    let settings: WorkCycleSettings
+    var id: Int { 0 }
+}
+
+private struct CycleSettingsSheet: View {
+    @State var settings: WorkCycleSettings
+    let save: (WorkCycleSettings) -> Void
+    let cancel: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Cycles").headlineText()
+            Form {
+                Stepper(value: $settings.weeks, in: 1...8) {
+                    LabeledContent("Length", value: CycleFormat.weeks(settings.weeks))
                 }
-                Picker("Starts on", selection: Binding(
-                    get: { settings.startWeekday },
-                    set: { store.saveCycleSettings(WorkCycleSettings(weeks: settings.weeks, startWeekday: $0)) }
-                )) {
+                Stepper(value: $settings.cooldownWeeks, in: 0...4) {
+                    LabeledContent("Cooldown",
+                                   value: settings.cooldownWeeks == 0 ? "None" : CycleFormat.weeks(settings.cooldownWeeks))
+                }
+                Picker("Starts on", selection: $settings.startWeekday) {
                     ForEach(1...7, id: \.self) { weekday in
                         Text(CycleFormat.weekday(weekday)).tag(weekday)
                     }
                 }
-            } label: {
-                Text("\(settings.weeks == 1 ? "1 week" : "2 weeks") from \(CycleFormat.weekday(settings.startWeekday))")
+                Stepper(value: $settings.upcoming, in: 1...15) {
+                    LabeledContent("Planned ahead", value: "\(settings.upcoming)")
+                }
             }
-            .menuStyle(.button)
-            .buttonStyle(.compact)
-            .menuIndicator(.hidden)
-            .fixedSize()
-            .help("Cycle length and start day")
+            .formStyle(.grouped)
+            Text("Changes apply from the next start day. The cycle under way keeps its dates.").metaText()
+            HStack {
+                Spacer()
+                Button("Cancel", action: cancel).buttonStyle(.secondary).keyboardShortcut(.cancelAction)
+                Button("Save") { save(settings) }.buttonStyle(.primary).keyboardShortcut(.defaultAction)
+            }
         }
+        .padding(20)
+        .frame(width: 380)
     }
 }

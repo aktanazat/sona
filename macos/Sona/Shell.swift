@@ -377,6 +377,7 @@ struct MeetingsPlace: View {
 
 struct Sidebar: View {
     @Environment(AppModel.self) private var model
+    @AppStorage(FavoriteViews.key) private var favoriteViews = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -428,16 +429,29 @@ struct Sidebar: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: Space.xxs) {
+                    let favorites = FavoriteViews.ids(favoriteViews)
+                    let pinnedOpen = model.place.parent == .tasks && favorites.contains { model.workFocus.tab == .view($0) }
                     ForEach(Place.sidebar) { place in
                         SidebarItem(
                             icon: place.icon,
                             title: place.title,
-                            selected: model.place.parent == place && !model.showingSettings,
+                            selected: model.place.parent == place && !model.showingSettings && !(place == .tasks && pinnedOpen),
                             count: count(place),
                             live: place == .capture && model.capture != .idle
                                 || place == .meetings && model.live.live != nil
                         ) {
                             model.go(place)
+                        }
+                    }
+                    ForEach(model.work.views.filter { favorites.contains($0.id) }) { view in
+                        SidebarItem(
+                            icon: "star",
+                            title: view.name,
+                            selected: model.place.parent == .tasks && model.workFocus.tab == .view(view.id)
+                                && !model.showingSettings
+                        ) {
+                            model.go(.tasks)
+                            model.workFocus.switchTab(.view(view.id))
                         }
                     }
                     gap

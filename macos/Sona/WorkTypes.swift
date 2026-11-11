@@ -344,11 +344,14 @@ enum WorkCycleRef: Codable, Hashable {
     }
 }
 
-/// How long cycles run and the weekday they start, 1 for Monday through 7
-/// for Sunday.
+/// How long cycles run, the weekday they start (1 for Monday through 7 for
+/// Sunday), the weeks of rest between them and how many are kept ahead.
+/// The core resets a field left out, so every save sends all four.
 struct WorkCycleSettings: Codable, Equatable {
     var weeks: Int
     var startWeekday: Int
+    var cooldownWeeks: Int
+    var upcoming: Int
 }
 
 enum WorkCycleState: String, Codable, Hashable { case past, current, upcoming }
@@ -357,15 +360,20 @@ enum WorkCycleState: String, Codable, Hashable { case past, current, upcoming }
 /// after it.
 struct WorkCycle: Codable, Identifiable, Equatable {
     var number: Int64
+    var name: String?
     var startDay: String
     var endDay: String
     var startsAtMs: Int64
     var endsAtMs: Int64
     var state: WorkCycleState
     var scope: Int
+    var started: Int
     var done: Int
+    /// Done at 100 and started at 25 over scope, set once the cycle ends.
+    var success: Int?
 
     var id: Int64 { number }
+    var title: String { name ?? "Cycle \(number)" }
 }
 
 struct WorkCycles: Codable, Equatable {
@@ -376,6 +384,7 @@ struct WorkCycles: Codable, Equatable {
 struct WorkCycleDay: Codable, Equatable, Identifiable {
     var day: String
     var scope: Int
+    var started: Int
     var done: Int
 
     var id: String { day }
@@ -495,12 +504,15 @@ struct WorkQuery: Codable, Equatable, Hashable {
     var includeArchived = false
     var includeSnoozed = false
     var cycle: WorkCycleRef?
+    /// Field conditions that must all hold, on top of the fields above.
+    var filters: [WorkCondition]?
 
     init(
         statuses: [WorkStatus]? = nil, direction: WorkDirection? = nil, ownerPersonIds: [String]? = nil,
         projectIds: [String]? = nil, labelIds: [String]? = nil, priorities: [Int]? = nil,
         dueBeforeMs: Int64? = nil, due: [WorkDue]? = nil, sourceMeetingId: String? = nil, search: String? = nil,
-        includeArchived: Bool = false, includeSnoozed: Bool = false, cycle: WorkCycleRef? = nil
+        includeArchived: Bool = false, includeSnoozed: Bool = false, cycle: WorkCycleRef? = nil,
+        filters: [WorkCondition]? = nil
     ) {
         self.statuses = statuses
         self.direction = direction
@@ -515,7 +527,48 @@ struct WorkQuery: Codable, Equatable, Hashable {
         self.includeArchived = includeArchived
         self.includeSnoozed = includeSnoozed
         self.cycle = cycle
+        self.filters = filters
     }
+}
+
+enum WorkConditionField: String, Codable, CaseIterable, Hashable, Identifiable {
+    case status, priority, owner, project, milestone, label, cycle, due, created, updated
+
+    var id: Self { self }
+    var label: String { rawValue.prefix(1).uppercased() + rawValue.dropFirst() }
+    var dated: Bool { self == .due || self == .created || self == .updated }
+    var operators: [WorkConditionOp] {
+        dated ? [.before, .after, .is, .isNot]
+            : self == .label ? [.includesAll, .includesAny, .noneOf]
+            : [.is, .isNot, .anyOf, .noneOf]
+    }
+}
+
+enum WorkConditionOp: String, Codable, CaseIterable, Hashable, Identifiable {
+    case `is`, isNot = "is_not", anyOf = "any_of", noneOf = "none_of"
+    case includesAll = "includes_all", includesAny = "includes_any", before, after
+
+    var id: Self { self }
+    var label: String {
+        switch self {
+        case .is: "is"
+        case .isNot: "is not"
+        case .anyOf: "is any of"
+        case .noneOf: "is none of"
+        case .includesAll: "includes all of"
+        case .includesAny: "includes any of"
+        case .before: "before"
+        case .after: "after"
+        }
+    }
+}
+
+struct WorkCondition: Codable, Equatable, Hashable, Identifiable {
+    var field: WorkConditionField
+    var op: WorkConditionOp
+    var values: [String]
+
+    var id: String { "\(field.rawValue) \(op.rawValue) \(values.joined(separator: ","))" }
 }
 
 enum WorkLayout: String, Codable, Hashable { case list, board }

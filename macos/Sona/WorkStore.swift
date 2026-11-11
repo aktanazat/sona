@@ -307,17 +307,46 @@ final class WorkStore {
         }
     }
 
-    /// Scope and done as each day of a cycle ended, read from history.
+    /// Names a cycle; an empty name goes back to its number.
+    func renameCycle(_ number: Int64, to name: String) {
+        changeCycles("work_cycle_save", CycleSaveParams(
+            operationId: Self.newId(), number: number, name: name.trimmingCharacters(in: .whitespacesAndNewlines)))
+    }
+
+    /// Moves a cycle's unfinished work into the cycle under way, or the next.
+    func rolloverCycle(_ number: Int64) {
+        changeCycles("work_cycle_rollover", CycleNumberParams(operationId: Self.newId(), number: number))
+    }
+
+    /// Starts a cycle today, ending the one before it now.
+    func startCycleToday(_ number: Int64) {
+        changeCycles("work_cycle_start_today", CycleNumberParams(operationId: Self.newId(), number: number))
+    }
+
+    private func changeCycles<P: Encodable & Sendable>(_ method: String, _ params: P) {
+        enqueue {
+            do {
+                let saved: WorkCycles = try await self.core.request(method, params)
+                self.cycleSettings = saved.settings
+                self.cycles = saved.cycles
+            } catch {
+                self.mutationError = error.localizedDescription
+            }
+            self.reloadWhenIdle = true
+        }
+    }
+
+    /// Scope, started and done as each day of a cycle ended, frozen once it closed.
     func progress(of number: Int64) async throws -> WorkCycleProgress {
         try await core.request("work_cycle", CycleParams(number: number))
     }
 
     var currentCycle: WorkCycle? { cycles.first { $0.state == .current } }
 
-    /// The cycle after the current one.
+    /// The first cycle after the current one, past any cooldown.
     var nextCycle: WorkCycle? {
         guard let current = currentCycle else { return nil }
-        return cycles.first { $0.startsAtMs == current.endsAtMs }
+        return cycles.filter { $0.startsAtMs >= current.endsAtMs }.min { $0.startsAtMs < $1.startsAtMs }
     }
 
     func accept(_ ids: [String], applySuggestions: Bool) {
@@ -1174,6 +1203,15 @@ private struct CycleParams: Encodable { let number: Int64 }
 private struct CycleSettingsParams: Encodable {
     let operationId: String
     let settings: WorkCycleSettings
+}
+private struct CycleSaveParams: Encodable, Sendable {
+    let operationId: String
+    let number: Int64
+    let name: String
+}
+private struct CycleNumberParams: Encodable, Sendable {
+    let operationId: String
+    let number: Int64
 }
 private struct CreateParams: Encodable {
     let operationId: String

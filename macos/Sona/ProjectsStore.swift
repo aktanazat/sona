@@ -2,15 +2,108 @@ import Foundation
 import Observation
 
 enum PlanningProjectStatus: String, Codable, CaseIterable, Identifiable {
-    case active, paused, completed
+    case backlog, planned, active, paused, completed, canceled
     var id: String { rawValue }
+
+    init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        self = Self(rawValue: raw) ?? .backlog
+    }
     var label: String {
         switch self {
+        case .backlog: "Backlog"
+        case .planned: "Planned"
         case .active: "Active"
         case .paused: "Paused"
         case .completed: "Completed"
+        case .canceled: "Canceled"
         }
     }
+}
+
+enum PlanningDateResolution: String, Codable, CaseIterable, Identifiable {
+    case day, month, quarter, halfYear, year
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .day: "Day"
+        case .month: "Month"
+        case .quarter: "Quarter"
+        case .halfYear: "Half year"
+        case .year: "Year"
+        }
+    }
+}
+
+enum PlanningProjectHealth: String, Codable, CaseIterable, Identifiable {
+    case onTrack, atRisk, offTrack
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .onTrack: "On track"
+        case .atRisk: "At risk"
+        case .offTrack: "Off track"
+        }
+    }
+}
+
+struct PlanningProjectLink: Codable, Equatable, Identifiable {
+    var id: String
+    var title: String?
+    var url: String
+}
+
+struct PlanningProjectUpdateAuthor: Decodable, Equatable {
+    let kind: WorkActor
+    let name: String?
+}
+
+struct PlanningProjectUpdate: Decodable, Identifiable, Equatable {
+    let id: String
+    let projectId: String
+    let health: PlanningProjectHealth
+    let body: String?
+    let progress: Int
+    let author: PlanningProjectUpdateAuthor
+    let createdAtMs: Int64
+    let editedAtMs: Int64?
+    let deleted: Bool
+}
+
+struct PlanningProjectUpdatePage: Decodable {
+    let updates: [PlanningProjectUpdate]
+    let nextCursor: String?
+}
+
+struct PlanningProjectWeek: Decodable, Equatable {
+    let weekStartMs: Int64
+    let scope: Int
+    let started: Int
+    let done: Int
+}
+
+struct PlanningProjectPrediction: Decodable, Equatable {
+    let expectedAtMs: Int64
+    let optimisticAtMs: Int64
+    let pessimisticAtMs: Int64
+}
+
+struct PlanningProjectProgress: Decodable, Equatable {
+    let scope: Int
+    let started: Int
+    let done: Int
+    let percent: Int
+    let weeks: [PlanningProjectWeek]
+    let prediction: PlanningProjectPrediction?
+}
+
+struct PlanningMilestoneProgress: Decodable, Equatable {
+    let milestoneId: String
+    let scope: Int
+    let started: Int
+    let done: Int
+    let percent: Int
+    let nextOpen: Bool
 }
 
 enum PlanningWorkStatus: String, Codable, CaseIterable, Identifiable {
@@ -33,15 +126,23 @@ struct PlanningProject: Decodable, Identifiable, Equatable {
     let id: String
     let title: String
     let description: String?
-    let status: PlanningProjectStatus
+    var status: PlanningProjectStatus
     let revision: Int64
     let createdAtMs: Int64
-    let updatedAtMs: Int64
+    var updatedAtMs: Int64
     var leadPersonId: String? = nil
     var memberPersonIds: [String]? = nil
     var targetAtMs: Int64? = nil
     var hue: Int? = nil
     var archivedAtMs: Int64? = nil
+    var priority: Int? = nil
+    var startAtMs: Int64? = nil
+    var startResolution: PlanningDateResolution? = nil
+    var targetResolution: PlanningDateResolution? = nil
+    var icon: String? = nil
+    var labelIds: [String]? = nil
+    var links: [PlanningProjectLink]? = nil
+    var trashedAtMs: Int64? = nil
 }
 
 struct PlanningMilestone: Decodable, Identifiable, Equatable {
@@ -53,6 +154,7 @@ struct PlanningMilestone: Decodable, Identifiable, Equatable {
     let revision: Int64
     let createdAtMs: Int64
     let updatedAtMs: Int64
+    var position: Int64? = nil
 }
 
 struct PlanningTask: Decodable, Identifiable, Equatable {
@@ -123,11 +225,15 @@ struct PlanningProjectPulse: Decodable, Equatable {
 }
 
 struct PlanningProjectDetail: Decodable, Equatable {
-    let project: PlanningProject
-    let milestones: [PlanningMilestone]
-    let tasks: [PlanningTask]
+    var project: PlanningProject
+    var milestones: [PlanningMilestone]
+    var tasks: [PlanningTask]
     let evidence: [PlanningEvidenceLink]
     let pulse: PlanningProjectPulse
+    var latestUpdate: PlanningProjectUpdate? = nil
+    var updateMissing = false
+    var progress: PlanningProjectProgress? = nil
+    var milestoneProgress: [PlanningMilestoneProgress] = []
 }
 
 /// What the projects list is narrowed to.
@@ -141,10 +247,10 @@ struct PlanningListFilter: Equatable {
 
 extension PlanningProject {
     func with(status: PlanningProjectStatus, at now: Int64) -> PlanningProject {
-        PlanningProject(id: id, title: title, description: description, status: status, revision: revision,
-                        createdAtMs: createdAtMs, updatedAtMs: now, leadPersonId: leadPersonId,
-                        memberPersonIds: memberPersonIds, targetAtMs: targetAtMs, hue: hue,
-                        archivedAtMs: archivedAtMs)
+        var changed = self
+        changed.status = status
+        changed.updatedAtMs = now
+        return changed
     }
 }
 
@@ -162,7 +268,7 @@ extension PlanningMilestone {
 
     func with(status: PlanningWorkStatus, at now: Int64) -> PlanningMilestone {
         PlanningMilestone(id: id, projectId: projectId, title: title, dueAtMs: dueAtMs, status: status,
-                          revision: revision, createdAtMs: createdAtMs, updatedAtMs: now)
+                          revision: revision, createdAtMs: createdAtMs, updatedAtMs: now, position: position)
     }
 }
 
@@ -179,17 +285,33 @@ extension PlanningTask {
 
 extension PlanningProjectDetail {
     func replacing(project: PlanningProject) -> PlanningProjectDetail {
-        PlanningProjectDetail(project: project, milestones: milestones, tasks: tasks, evidence: evidence, pulse: pulse)
+        var changed = self
+        changed.project = project
+        return changed
     }
 
     func replacing(milestone: PlanningMilestone) -> PlanningProjectDetail {
-        PlanningProjectDetail(project: project, milestones: milestones.map { $0.id == milestone.id ? milestone : $0 },
-                              tasks: tasks, evidence: evidence, pulse: pulse)
+        var changed = self
+        changed.milestones = milestones.map { $0.id == milestone.id ? milestone : $0 }
+        return changed
     }
 
     func replacing(task: PlanningTask) -> PlanningProjectDetail {
-        PlanningProjectDetail(project: project, milestones: milestones,
-                              tasks: tasks.map { $0.id == task.id ? task : $0 }, evidence: evidence, pulse: pulse)
+        var changed = self
+        changed.tasks = tasks.map { $0.id == task.id ? task : $0 }
+        return changed
+    }
+
+    /// Milestones in the order the project keeps them: position, then due day.
+    var orderedMilestones: [PlanningMilestone] {
+        milestones.sorted {
+            ($0.position ?? .max, $0.dueAtMs ?? .max, $0.createdAtMs)
+                < ($1.position ?? .max, $1.dueAtMs ?? .max, $1.createdAtMs)
+        }
+    }
+
+    func progress(of milestone: PlanningMilestone) -> PlanningMilestoneProgress? {
+        milestoneProgress.first { $0.milestoneId == milestone.id }
     }
 
     func overdueTaskCount(at now: Int64) -> Int { tasks.filter { $0.isOverdue(at: now) }.count }
@@ -426,6 +548,102 @@ private struct PlanningLinkParams: Encodable {
     let operationId: String
 }
 
+enum PlanningFieldChange<Value: Encodable & Equatable>: Equatable {
+    case set(Value)
+    case clear
+}
+
+struct PlanningProjectLinkInput: Encodable, Equatable {
+    var title: String?
+    var url: String
+}
+
+/// The fields of a project to change: a field left `nil` keeps its value,
+/// `.clear` empties it, the way `planning_project_save` reads a missing key
+/// and a `null`.
+struct PlanningProjectSave: Encodable, Equatable {
+    var title: String?
+    var description: PlanningFieldChange<String>?
+    var status: PlanningProjectStatus?
+    var priority: Int?
+    var leadPersonId: PlanningFieldChange<String>?
+    var memberPersonIds: [String]?
+    var startAtMs: PlanningFieldChange<Int64>?
+    var startResolution: PlanningFieldChange<PlanningDateResolution>?
+    var targetAtMs: PlanningFieldChange<Int64>?
+    var targetResolution: PlanningFieldChange<PlanningDateResolution>?
+    var hue: Int?
+    var icon: PlanningFieldChange<String>?
+    var labelIds: [String]?
+    var links: [PlanningProjectLinkInput]?
+    var trashed: Bool?
+
+    private enum Key: String, CodingKey {
+        case title, description, status, priority, leadPersonId, memberPersonIds, startAtMs, startResolution
+        case targetAtMs, targetResolution, hue, icon, labelIds, links, trashed
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: Key.self)
+        try container.encodeIfPresent(title, forKey: .title)
+        try Self.put(description, .description, &container)
+        try container.encodeIfPresent(status, forKey: .status)
+        try container.encodeIfPresent(priority, forKey: .priority)
+        try Self.put(leadPersonId, .leadPersonId, &container)
+        try container.encodeIfPresent(memberPersonIds, forKey: .memberPersonIds)
+        try Self.put(startAtMs, .startAtMs, &container)
+        try Self.put(startResolution, .startResolution, &container)
+        try Self.put(targetAtMs, .targetAtMs, &container)
+        try Self.put(targetResolution, .targetResolution, &container)
+        try container.encodeIfPresent(hue, forKey: .hue)
+        try Self.put(icon, .icon, &container)
+        try container.encodeIfPresent(labelIds, forKey: .labelIds)
+        try container.encodeIfPresent(links, forKey: .links)
+        try container.encodeIfPresent(trashed, forKey: .trashed)
+    }
+
+    private static func put<Value>(_ change: PlanningFieldChange<Value>?, _ key: Key,
+                                   _ container: inout KeyedEncodingContainer<Key>) throws {
+        switch change {
+        case nil: break
+        case let .set(value)?: try container.encode(value, forKey: key)
+        case .clear?: try container.encodeNil(forKey: key)
+        }
+    }
+}
+
+private struct PlanningProjectSaveParams: Encodable {
+    let operationId: String
+    let id: String?
+    let input: PlanningProjectSave
+}
+
+private struct PlanningUpdatesParams: Encodable {
+    let projectId: String
+    let limit: Int
+    let cursor: String?
+}
+
+private struct PlanningUpdateAddParams: Encodable {
+    let operationId: String
+    let projectId: String
+    let health: PlanningProjectHealth
+    let body: String
+}
+
+private struct PlanningUpdateDeleteParams: Encodable {
+    let operationId: String
+    let id: String
+}
+
+private struct PlanningProjectIdParams: Encodable { let projectId: String }
+
+private struct PlanningReorderParams: Encodable {
+    let operationId: String
+    let projectId: String
+    let milestoneIds: [String]
+}
+
 private struct PlanningChange: Decodable {
     let projectId: String
 }
@@ -458,6 +676,13 @@ final class ProjectsStore {
     private(set) var quietReviewRunningProjectId: String?
     private(set) var quietReviewStatus: [String: String] = [:]
     private(set) var quietReviewRevocationsPending: Set<String> = []
+    private(set) var trashed: [PlanningProjectSummary]?
+    private(set) var trashedError: String?
+    /// The project just put in the bin, while its Undo is offered.
+    private(set) var binned: PlanningProject?
+    private(set) var updates: [String: [PlanningProjectUpdate]] = [:]
+    private(set) var updatesCursor: [String: String] = [:]
+    private(set) var updatesError: String?
     /// What the list is narrowed to. Home sets it when it opens late work.
     var filter = PlanningListFilter()
 
@@ -522,10 +747,127 @@ final class ProjectsStore {
 
     func refresh() async {
         await loadProjects()
-        if let id = selectedProjectId { await loadDetail(id) }
+        if let id = selectedProjectId {
+            await loadDetail(id)
+            if updates[id] != nil { await loadUpdates(id) }
+        }
+        if trashed != nil { await loadTrashed() }
         if let range = calendarRange { await loadCalendar(range) }
         if reviewingLinks { await loadSuggestions() }
         await loadQuietReviewGrants()
+    }
+
+    func saveProject(_ project: PlanningProject, _ change: PlanningProjectSave) async {
+        do {
+            try await write {
+                let _: PlanningProject = try await self.core.request("planning_project_save", PlanningProjectSaveParams(
+                    operationId: UUID().uuidString, id: project.id, input: change))
+            }
+        } catch {
+            mutationError = error.localizedDescription
+        }
+        await refresh()
+    }
+
+    /// Puts a project in the 30-day bin and offers Undo.
+    func binProject(_ project: PlanningProject) async {
+        do {
+            try await write {
+                let _: PlanningProject = try await self.core.request("planning_project_save", PlanningProjectSaveParams(
+                    operationId: UUID().uuidString, id: project.id, input: PlanningProjectSave(trashed: true)))
+            }
+            if selectedProjectId == project.id { closeProject() }
+            binned = project
+        } catch {
+            mutationError = error.localizedDescription
+        }
+        await refresh()
+    }
+
+    func restoreProject(_ id: String) async {
+        if binned?.id == id { binned = nil }
+        do {
+            try await write {
+                let _: PlanningProject = try await self.core.request("planning_project_save", PlanningProjectSaveParams(
+                    operationId: UUID().uuidString, id: id, input: PlanningProjectSave(trashed: false)))
+            }
+        } catch {
+            mutationError = error.localizedDescription
+        }
+        await refresh()
+    }
+
+    func dismissBinned() { binned = nil }
+
+    func loadTrashed() async {
+        do {
+            trashed = try await core.request("planning_projects_trashed")
+            trashedError = nil
+        } catch {
+            trashedError = error.localizedDescription
+        }
+    }
+
+    func loadUpdates(_ projectId: String, more: Bool = false) async {
+        let cursor = more ? updatesCursor[projectId] : nil
+        if more, cursor == nil { return }
+        do {
+            let page: PlanningProjectUpdatePage = try await core.request(
+                "planning_project_updates", PlanningUpdatesParams(projectId: projectId, limit: 20, cursor: cursor))
+            updates[projectId] = (more ? updates[projectId] ?? [] : []) + page.updates.filter { !$0.deleted }
+            updatesCursor[projectId] = page.nextCursor
+            updatesError = nil
+        } catch {
+            updatesError = error.localizedDescription
+        }
+    }
+
+    func postUpdate(projectId: String, health: PlanningProjectHealth, body: String) async throws {
+        try await write {
+            let _: PlanningProjectUpdate = try await self.core.request("planning_project_update_add", PlanningUpdateAddParams(
+                operationId: UUID().uuidString, projectId: projectId, health: health, body: body))
+        }
+        await loadUpdates(projectId)
+        await loadDetail(projectId)
+    }
+
+    func deleteUpdate(_ update: PlanningProjectUpdate) async {
+        do {
+            try await write {
+                let _: PlanningProjectUpdate = try await self.core.request("planning_project_update_delete",
+                    PlanningUpdateDeleteParams(operationId: UUID().uuidString, id: update.id))
+            }
+        } catch {
+            mutationError = error.localizedDescription
+        }
+        await loadUpdates(update.projectId)
+        await loadDetail(update.projectId)
+    }
+
+    /// What moved since the last update, as the core drafts it.
+    func draftUpdate(projectId: String) async throws -> String {
+        try await core.request("planning_project_update_draft", PlanningProjectIdParams(projectId: projectId))
+    }
+
+    func reorderMilestones(projectId: String, ids: [String]) async {
+        if let detail = details[projectId] {
+            var changed = detail
+            changed.milestones = detail.milestones.map { milestone in
+                var moved = milestone
+                moved.position = ids.firstIndex(of: milestone.id).map(Int64.init)
+                return moved
+            }
+            details[projectId] = changed
+        }
+        do {
+            try await write {
+                let _: [PlanningMilestone] = try await self.core.request("planning_milestone_reorder", PlanningReorderParams(
+                    operationId: UUID().uuidString, projectId: projectId, milestoneIds: ids))
+            }
+        } catch {
+            mutationError = error.localizedDescription
+        }
+        await loadDetail(projectId)
     }
 
     func loadProjects() async {

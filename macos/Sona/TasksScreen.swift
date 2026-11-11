@@ -261,6 +261,21 @@ private struct TasksList: View {
     }
 }
 
+/// Saved views pinned to the sidebar, kept on this Mac as their ids.
+enum FavoriteViews {
+    static let key = "tasks.favoriteViews"
+
+    static func ids(_ stored: String) -> [String] {
+        stored.split(separator: ",").map(String.init)
+    }
+
+    static func toggled(_ stored: String, _ id: String) -> String {
+        var list = ids(stored)
+        if let index = list.firstIndex(of: id) { list.remove(at: index) } else { list.append(id) }
+        return list.joined(separator: ",")
+    }
+}
+
 /// I owe, Waiting on, All, then each saved view.
 private struct TaskTabs: View {
     @Environment(AppModel.self) private var model
@@ -277,9 +292,6 @@ private struct TaskTabs: View {
                 tab(.all, title: "All", count: nil)
                 ForEach(model.work.views) { view in
                     tab(.view(view.id), title: view.name, count: nil, edited: model.workFocus.viewDrafts[view.id] != nil)
-                        .contextMenu {
-                            Button("Delete view", role: .destructive) { delete(view) }
-                        }
                 }
             }
         }
@@ -291,13 +303,6 @@ private struct TaskTabs: View {
         WorkTab(title: title, count: count, edited: edited, on: model.workFocus.tab == tab) {
             model.workFocus.switchTab(tab)
         }
-    }
-
-    private func delete(_ view: WorkView) {
-        let focus = model.workFocus
-        if focus.tab == .view(view.id) { focus.switchTab(.all) }
-        focus.viewDrafts[view.id] = nil
-        model.work.deleteView(view.id)
     }
 }
 

@@ -125,6 +125,109 @@ enum TaskListing {
         let now: Int64
         private let due: [DueSpan]?
         private let cycle: CycleWant?
+        private let conditions: [Condition]
+
+        private enum Value {
+            case none, me, text(String), day(Int64, Int64), at(Int64)
+        }
+
+        /// One condition with its values read the way the core reads them.
+        private struct Condition {
+            let field: WorkConditionField
+            let op: WorkConditionOp
+            let values: [Value]
+
+            init(_ condition: WorkCondition, now: Int64, cycles: [WorkCycle]) {
+                field = condition.field
+                op = condition.op
+                values = condition.values.map { [field] raw in
+                    let text = raw.trimmingCharacters(in: .whitespaces).lowercased()
+                    if text == "none", field != .priority { return .none }
+                    switch field {
+                    case .owner where text == "me": return .me
+                    case .cycle where text == "current" || text == "next":
+                        let state: WorkCycleState = text == "current" ? .current : .upcoming
+                        return cycles.first { $0.state == state }.map { .text(String($0.number)) } ?? .none
+                    case .priority:
+                        let names = ["none": "0", "no_priority": "0", "urgent": "1", "high": "2", "medium": "3", "low": "4"]
+                        return .text(names[text] ?? text)
+                    case .due, .created, .updated:
+                        return Self.day(text, now: now)
+                    case .status: return .text(text)
+                    case .owner, .cycle, .project, .milestone, .label:
+                        return .text(raw.trimmingCharacters(in: .whitespaces))
+                    }
+                }
+            }
+
+            private static func day(_ text: String, now: Int64) -> Value {
+                if let ms = Int64(text) { return .at(ms) }
+                let calendar = Calendar.current
+                let today = calendar.startOfDay(for: PlanningFormat.moment(now))
+                let parts = text.split(separator: "-").compactMap { Int($0) }
+                let start: Date? = switch text {
+                case "today": today
+                case "tomorrow": calendar.date(byAdding: .day, value: 1, to: today)
+                case "yesterday": calendar.date(byAdding: .day, value: -1, to: today)
+                default: parts.count == 3
+                    ? calendar.date(from: DateComponents(year: parts[0], month: parts[1], day: parts[2])) : nil
+                }
+                guard let start, let end = calendar.date(byAdding: .day, value: 1, to: start) else { return .day(0, 0) }
+                return .day(TaskDates.milliseconds(start), TaskDates.milliseconds(end))
+            }
+
+            private func text(_ row: WorkItemRow) -> String? {
+                switch field {
+                case .status: row.status.rawValue
+                case .priority: String(row.priority)
+                case .owner: row.ownerPersonId
+                case .project: row.projectId
+                case .milestone: row.milestoneId
+                case .cycle: row.cycle.map { String($0) }
+                case .label, .due, .created, .updated: nil
+                }
+            }
+
+            private func at(_ row: WorkItemRow) -> Int64? {
+                switch field {
+                case .due: row.dueAtMs
+                case .created: row.createdAtMs
+                case .updated: row.updatedAtMs
+                default: nil
+                }
+            }
+
+            private func hits(_ row: WorkItemRow, _ value: Value) -> Bool {
+                switch (field, value) {
+                case (.label, .none): row.labelIds.isEmpty
+                case let (.label, .text(id)): row.labelIds.contains(id)
+                case (.owner, .me): row.ownerIsSelf
+                case (_, .me): false
+                case (_, .none): field.dated ? at(row) == nil : text(row) == nil
+                case let (_, .day(start, end)): at(row).map { start <= $0 && $0 < end } ?? false
+                case let (_, .at(ms)): at(row) == ms
+                case let (_, .text(value)): text(row) == value
+                }
+            }
+
+            func holds(_ row: WorkItemRow) -> Bool {
+                switch op {
+                case .is where field == .label, .includesAll: return values.allSatisfy { hits(row, $0) }
+                case .is, .anyOf, .includesAny: return values.contains { hits(row, $0) }
+                case .isNot, .noneOf: return !values.contains { hits(row, $0) }
+                case .before, .after:
+                    guard let at = at(row) else { return false }
+                    return values.contains { value in
+                        switch (op, value) {
+                        case let (.before, .day(start, _)), let (.before, .at(start)): at < start
+                        case let (.after, .day(_, end)): at >= end
+                        case let (.after, .at(ms)): at > ms
+                        default: false
+                        }
+                    }
+                }
+            }
+        }
 
         private enum CycleWant {
             case number(Int64), noCycle, nothing
@@ -154,6 +257,7 @@ enum TaskListing {
             case let .number(number)?: .number(number)
             case .current?, .next?: named.map { .number($0.number) } ?? .nothing
             }
+            conditions = (query.filters ?? []).map { Condition($0, now: now, cycles: cycles) }
         }
 
         func matches(_ row: WorkItemRow) -> Bool {
@@ -170,6 +274,7 @@ enum TaskListing {
             }
             if let due, !due.contains(where: { $0.holds(row) }) { return false }
             if let cycle, !cycle.holds(row) { return false }
+            if !conditions.allSatisfy({ $0.holds(row) }) { return false }
             if let meeting = query.sourceMeetingId, row.sourceMeetingId != meeting { return false }
             if let search = query.search?.trimmingCharacters(in: .whitespaces), !search.isEmpty {
                 let number = search.hasPrefix("#") ? String(search.dropFirst()) : search
