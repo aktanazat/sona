@@ -236,7 +236,7 @@ The MCP column says whether an agent over MCP can do it; `—` means no tool.
 
 | UI action | core/bridge method | CLI command | MCP tool | status |
 |---|---|---|---|---|
-| List people | `people_list` | `work people [--query]`, `sona --people NAME` | `sona_person_list`, `sona_people` | both |
+| List people (People list; J/K move, Space peeks, Return opens) | `people_list` | `work people [--query]`, `sona --people NAME` | `sona_person_list`, `sona_people` | both |
 | Person history, catch-up, what changed, stats | `person_memory` | `sona --person-catch-up ID`, `--person-changes ID --since-utc-ms`, `--person-stats ID` | `sona_person_catch_up`, `sona_person_changes`, `sona_person_stats` | both |
 | Person's work and open loops | `planning_person_work`, `work_list`, `open_loops_inbox` | `work list --owner PERSON`, `sona --loops [--mine\|--waiting]` | `sona_work_list` (`owner`), `sona_action_items` | both |
 | Person page in one read (summary, meeting links, documents, projects led or joined, contact) | `person_detail`, `planning_projects` (Projects on the Work tab) | `work person NAME` | `sona_person_get` | both |

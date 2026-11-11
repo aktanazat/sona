@@ -68,15 +68,20 @@ struct CardRow<Leading: View, Trailing: View>: View {
     let leading: Leading
     let trailing: Trailing
     var action: (() -> Void)?
+    /// Set by a list that owns which row is lit; the pointer then lights the
+    /// row only through that list.
+    var highlighted: Bool?
     @State private var hovering = false
     @FocusState private var focused: Bool
 
     init(
         action: (() -> Void)? = nil,
+        highlighted: Bool? = nil,
         @ViewBuilder leading: () -> Leading,
         @ViewBuilder trailing: () -> Trailing
     ) {
         self.action = action
+        self.highlighted = highlighted
         self.leading = leading()
         self.trailing = trailing()
     }
@@ -101,8 +106,8 @@ struct CardRow<Leading: View, Trailing: View>: View {
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(action != nil && hovering ? Theme.wash : .clear)
-        .hoverFade(hovering)
+        .background(lit ? Theme.wash : .clear)
+        .hoverFade(lit)
         .overlay(alignment: .bottom) { Hairline().padding(.horizontal, 16) }
         .overlay {
             RoundedRectangle(cornerRadius: Theme.radiusControl)
@@ -110,11 +115,16 @@ struct CardRow<Leading: View, Trailing: View>: View {
         }
         .contentShape(Rectangle())
         .onTapGesture { action?() }
+        .allowsWindowActivationEvents()
         .onHover { hovering = $0 }
         .focusable(action != nil, interactions: .activate)
         .focused($focused)
         .onKeyPress(.space) { press() }
         .onKeyPress(.return) { press() }
+    }
+
+    private var lit: Bool {
+        highlighted ?? (action != nil && hovering)
     }
 
     /// Space or return on the row itself. A control the row carries keeps

@@ -458,6 +458,8 @@ final class WorkFocus {
     var cycleListShown = false
     /// The cycle row J and K are on in the cycle list.
     var cycleHighlighted: Int64?
+    /// The person row J and K are on in the People list.
+    var personHighlighted: String?
     var allQuery = WorkQuery()
     var allDisplay = WorkDisplay(properties: TaskProperty.standard)
     var filterShown = false
@@ -542,10 +544,26 @@ final class WorkFocus {
     }
 
     func hover(_ id: String) {
-        let pointer = NSEvent.mouseLocation
-        if let pointerAtKeys, pointerAtKeys == pointer { return }
-        pointerAtKeys = nil
+        guard pointerMoved() else { return }
         highlighted = id
+    }
+
+    func hoverPerson(_ id: String) {
+        guard pointerMoved() else { return }
+        personHighlighted = id
+    }
+
+    /// J or K on the People list, which the still pointer must not take back.
+    func keyPerson(_ id: String) {
+        personHighlighted = id
+        pointerAtKeys = NSEvent.mouseLocation
+    }
+
+    private func pointerMoved() -> Bool {
+        let pointer = NSEvent.mouseLocation
+        if let pointerAtKeys, pointerAtKeys == pointer { return false }
+        pointerAtKeys = nil
+        return true
     }
 
     func toggle(_ id: String) {
@@ -757,6 +775,10 @@ final class WorkKeys {
         }
         if model.place == .tasks, model.workFocus.tab == .cycle, model.workFocus.opened(in: .tasks) == nil,
            CycleKeys.handle(event, key: key, flags: flags, model) {
+            return true
+        }
+        if model.place == .people, model.people.route == .list,
+           PeopleListKeys.handle(event, key: key, flags: flags, model) {
             return true
         }
         guard model.showsTasks else { return false }
