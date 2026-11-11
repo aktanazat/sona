@@ -1,5 +1,7 @@
 # Sona UI to CLI inventory: meetings, notes, search, recordings history
 
+> Summary table with an MCP column and current statuses: [README.md](README.md). This file keeps the per-button Swift evidence. The CLI verb is `work follow-up` (the rows below once said `work followup`, which does not exist).
+
 Repo: /Users/aktan/Developer/sona-confirmed-voice-mean (branch work/people-projects). Read-only inventory; no builds run.
 
 Swift paths are relative to /Users/aktan/Developer/sona-confirmed-voice-mean/macos/Sona/. Bridge names are the method strings in /Users/aktan/Developer/sona-confirmed-voice-mean/src-tauri/src/native_bridge/dispatch.rs. `import_chosen_media_file` and `shutdown` are the only two methods in native_bridge/mod.rs.
@@ -68,8 +70,8 @@ Clipboard-only, Finder-only and navigation-only actions are marked `ui-only-runt
 | "Try again" (load) | MeetingReviewView.swift:137 | meeting_get | `--meeting ID` | cli-exists |
 | "Send to" menu → pick connection | MeetingReviewView.swift:278 → ConnectionsView.swift:194-207 | connections_snapshot | MISSING | missing (SET) |
 | "Send to" review sheet preview | ConnectionsView.swift:212-258; ConnectionsStore.swift:196 | connections_preview_notes | MISSING | missing (MS + SET) |
-| "Send notes" | ConnectionsView.swift:249; ConnectionsStore.swift:202 | connections_send_notes | MISSING (`work followup` drafts and sends nothing) | missing (MS + SET; token in keychain) |
-| "Wrap up" | MeetingReviewView.swift:274; MeetingsStore.swift:2064 | meeting_wrap | `work followup` (who owes what, plus the follow-up text) | cli-exists |
+| "Send notes" | ConnectionsView.swift:249; ConnectionsStore.swift:202 | connections_send_notes | MISSING (`work follow-up` drafts and sends nothing) | missing (MS + SET; token in keychain) |
+| "Wrap up" | MeetingReviewView.swift:274; MeetingsStore.swift:2064 | meeting_wrap | `work follow-up` (who owes what, plus the follow-up text) | cli-exists |
 | "Add a document…" | MeetingReviewView.swift:287; MeetingsStore.swift:1597 | doc_ingest | MISSING | missing (MS) |
 | "Ask about this meeting" | MeetingReviewView.swift:290 → chat | sona_query_pack (session) | `work ask` (all conversations, not one meeting) | missing (MS; partial) |
 | "Write the notes again" / "Try again" / "Write again" / "Write it again" | MeetingReviewView.swift:297, :389, :1388, :1679; MeetingNotesPane.swift:151; MeetingsStore.swift:1534 | meeting_artifacts_regenerate | MISSING | missing (MS; needs a model, so the runtime engine) |
@@ -131,7 +133,7 @@ Clipboard-only, Finder-only and navigation-only actions are marked `ui-only-runt
 | read generated notes | MeetingNotesPane.swift:13 | meeting_get | `--meeting ID` | cli-exists |
 | action item done toggle | MeetingNotesPane.swift:250; MeetingsStore.swift:1668 | set_action_item_done | MISSING | missing (MS) |
 | cited line → jump to moment | MeetingNotesPane.swift:212 | none | n/a | ui-only-runtime (navigation) |
-| "Draft follow-up" | MeetingNotesPane.swift:135; MeetingsStore.swift:2084 | meeting_follow_up_draft | `work followup` | cli-exists |
+| "Draft follow-up" | MeetingNotesPane.swift:135; MeetingsStore.swift:2084 | meeting_follow_up_draft | `work follow-up` | cli-exists |
 | add a timestamped meeting note | MeetingReviewView.swift:1452, :1454; MeetingsStore.swift:1502 | meeting_note_create | MISSING | missing (MS) |
 | edit a meeting note and save | MeetingReviewView.swift:1468, :1470; MeetingsStore.swift:1510 | meeting_note_update | MISSING | missing (MS) |
 | delete a meeting note | MeetingReviewView.swift:1489; MeetingsStore.swift:1516 | meeting_note_delete | MISSING | missing (MS) |
@@ -163,13 +165,13 @@ Clipboard-only, Finder-only and navigation-only actions are marked `ui-only-runt
 
 | UI action | Swift trigger | bridge method | CLI | class |
 |---|---|---|---|---|
-| wrap sheet load | MeetingWrapSheet.swift:160 | meeting_wrap | `work followup` | cli-exists |
-| "Write the follow-up" | MeetingWrapSheet.swift:145 | meeting_follow_up_draft | `work followup` | cli-exists |
-| "Copy for chat" | MeetingWrapSheet.swift:73 | none (pasteboard) | `work followup` prints the text | ui-only-runtime (pasteboard) |
+| wrap sheet load | MeetingWrapSheet.swift:160 | meeting_wrap | `work follow-up` | cli-exists |
+| "Write the follow-up" | MeetingWrapSheet.swift:145 | meeting_follow_up_draft | `work follow-up` | cli-exists |
+| "Copy for chat" | MeetingWrapSheet.swift:73 | none (pasteboard) | `work follow-up` prints the text | ui-only-runtime (pasteboard) |
 | "Open in Mail" | MeetingWrapSheet.swift:76; MeetingsStore.swift:2116, :2127 | meeting_follow_up_compose / meeting_follow_up_mail, plus meeting_prep_preferences_get | MISSING | ui-only-runtime (opens Mail.app compose) |
 | wrap "Play said" | MeetingWrapSheet.swift:97, :121 | conversation_audio_clip | n/a | ui-only-runtime (audio) |
 | wrap Close | MeetingWrapSheet.swift:54 | none | n/a | ui-only-runtime (sheet) |
-| live wrap card "Copy follow-up" | MeetingLiveView.swift:1514; AppModel.swift:1194 | meeting_follow_up_draft | `work followup` | cli-exists |
+| live wrap card "Copy follow-up" | MeetingLiveView.swift:1514; AppModel.swift:1194 | meeting_follow_up_draft | `work follow-up` | cli-exists |
 | live wrap card Done | MeetingLiveView.swift:1520; MeetingLiveStore.swift:718 | meeting_ritual_respond | MISSING | ui-only-runtime (ritual panel of a just-ended live call) |
 | live card deliver route ⌘↩ | LiveCard.swift:512; :219 | connections_send_notes route | MISSING | missing (MS + SET) |
 

@@ -1,12 +1,14 @@
 # Sona UI to CLI inventory: Talk to Sona, Home, Settings (non-consent); Notes and Search pointer
 
+> Summary table with an MCP column and current statuses: [README.md](README.md). This file keeps the per-button Swift evidence. The view display rows below say `work view-save` covers empty groups and shown properties; it has no flag for either, so README.md lists them as missing.
+
 Read-only; no builds. Swift paths relative to macos/Sona/. Bridge names are `core.request` strings, checked against dispatch.rs (/private/var/tmp/bridge-methods.txt). CLI = `sona-core` flags in src-tauri/src/cli.rs and `sona-core work <verb>` in src-tauri/src/query/external/tracker.rs. There is no CLI for chat turns, chat history, model choice, or any settings read/write; `--agent-panel-public-identity` is the only chat-related flag. Classes: cli-ok, missing, ui-only (consent / privacy / security / permission / token = deliberate; runtime = needs a window, pasteboard, Finder, live keyboard or audio).
 
 Summary
 1. 318 actions listed: 18 cli-ok, 189 missing, 51 deliberate ui-only, 60 ui-only for runtime reasons (1 pointer row).
 2. Talk to Sona has no CLI at all: send/stop/retry a turn, chat history, model and effort, apply/undo/dismiss proposals and actions; `work ask` answers from local lines only.
 3. Plan mode: the AI draft (planning_prepare/revise) is missing; the accepted result can be rebuilt with `work project-save`, `milestone-save`, `create`.
-4. Home dictation start/stop/cancel already work via `sona --toggle-transcription` / `--cancel`; tasks.md marks them ui-only and should be corrected. Most Home cards are in tasks.md.
+4. Home dictation start/stop/cancel already work via `sona --toggle-transcription` / `--cancel`; tasks.md now says so too. Most Home cards are in tasks.md.
 5. Settings: no settings get/set verb exists, so every pane (essentials, dictation, modes, models, providers, vocabulary, prompts, workflows, prep, sync, about, debug) is missing apart from `--list-models`; keys, pairing, bridge permissions and sharing stay deliberate ui-only.
 
 ## 1. Talk to Sona: Ask and Configure modes (ChatView.swift, ChatStore.swift, ChatThread.swift, ChatWork.swift, ChatModelPicker.swift, ChatActionReview.swift)
