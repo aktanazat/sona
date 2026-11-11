@@ -143,6 +143,9 @@ struct SharedDraft: Codable {
     var include: SharedInclude
     var speakers: SharedSpeakers
     var expiresInDays: Int?
+    /// A version of the page written for one person: the action items keep
+    /// only his. `nil` shares the whole meeting.
+    var forPerson: String?
     var content: SharedContent
     var audioAvailable: Bool
 
@@ -151,6 +154,7 @@ struct SharedDraft: Codable {
         case meetingId = "meeting_id"
         case preparedBy = "prepared_by"
         case expiresInDays = "expires_in_days"
+        case forPerson = "for_person"
         case audioAvailable = "audio_available"
     }
 
@@ -162,6 +166,7 @@ struct SharedDraft: Codable {
         try container.encode(include, forKey: .include)
         try container.encode(speakers, forKey: .speakers)
         try container.encode(expiresInDays, forKey: .expiresInDays)
+        try container.encode(forPerson, forKey: .forPerson)
         try container.encode(content, forKey: .content)
         try container.encode(audioAvailable, forKey: .audioAvailable)
     }
@@ -172,6 +177,71 @@ struct SharedPreview: Decodable {
     let page: JSONValue
     let htmlPath: String
     let audioPath: String?
+    /// What the check found on the page that may not belong in a link.
+    let checks: [ShareCheck]
+}
+
+/// One thing the preview check flagged: `text` is the exact substring on
+/// the page, `index` places the flag on screen.
+struct ShareCheck: Decodable {
+    let kind: String
+    let section: String
+    let index: Int
+    let text: String
+
+    /// "Phone number 555-0142 in the summary"; a name from his people who
+    /// was not in the meeting says so.
+    var words: String {
+        kind == "person"
+            ? "\(text) is named in the \(place) but isn't a named speaker in this meeting"
+            : "\(noun) \(text) in the \(place)"
+    }
+
+    private var noun: String {
+        switch kind {
+        case "phone": "Phone number"
+        case "email": "Email address"
+        case "money": "Amount"
+        case "link": "Link"
+        case "number": "Number"
+        case "person": "Name"
+        default: kind.capitalized
+        }
+    }
+
+    private var place: String {
+        switch section {
+        case "title": "title"
+        case "for_person": "for-person line"
+        case "summary": "summary"
+        case "decisions": "decisions"
+        case "action_items": "action items"
+        case "notes": "notes"
+        case "speakers": "speakers"
+        case "transcript": "transcript"
+        default: section
+        }
+    }
+}
+
+/// Who the page is written for: the whole meeting, or only the action
+/// items owned by one person.
+enum ShareForChoice: Hashable {
+    case everyone
+    case person(String)
+
+    var label: String {
+        switch self {
+        case .everyone: "Everyone"
+        case let .person(name): name
+        }
+    }
+}
+
+/// `shared_draft_recap`: the meeting rewritten for someone who wasn't
+/// there, as a few short paragraphs.
+struct ShareRecap: Decodable {
+    let paragraphs: [String]
 }
 
 /// A draft waiting for him in the Shared list.
@@ -264,6 +334,12 @@ struct SharedRecord: Decodable, Identifiable {
     let url: String?
     let meetingId: String?
     let title: String?
+    /// Set when the page was written for one person; the list says
+    /// "for <name>".
+    let forPerson: String?
+    /// The first summary sentence, kept beside the link so it can be
+    /// pasted into a chat with it.
+    let blurb: String?
     let include: [String]
     let speakers: SharedSpeakers?
     let createdAt: String
@@ -272,7 +348,6 @@ struct SharedRecord: Decodable, Identifiable {
     let stateAt: String?
     let bytes: Int?
     let error: String?
-
     var id: String { slug }
 
     var expiry: Date? { SharedClock.date(expiresAt) }
@@ -355,10 +430,18 @@ enum SharedFailure {
             return "That repository already holds something else. Use an empty repository for shared pages."
         case "invalid_draft":
             return "Part of this draft is not in a form Sona can read. Discard it and start again from the meeting."
+        case "no_items_for_person":
+            return "A page for one person needs at least one of their action items. Turn on action items, pick someone else under For, or choose Everyone."
         case "failed":
             return "Sona could not finish that. Try again."
         case "unavailable":
             return "Meetings aren't open yet. Try again in a moment."
+        case "no_store":
+            return "The meeting's records aren't open, so it can't be rewritten right now."
+        case "no_engine":
+            return "No way to rewrite text is set up. Check Settings and try again."
+        case "recording":
+            return "The meeting is still recording. Stop it first, then try again."
         default:
             return detail ?? code ?? value.message
         }
