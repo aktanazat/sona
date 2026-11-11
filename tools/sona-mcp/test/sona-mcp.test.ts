@@ -105,6 +105,51 @@ describe("tool arguments", () => {
     );
   });
 
+  test("a task save sends its steps in order as one JSON argument", () => {
+    const save = tool("sona_task_save");
+    const patch: Record<string, string | string[] | null>[] = [
+      { field: "status", value: "in_progress" },
+      { field: "labels", op: "add", value: ["bug"] },
+      { field: "due", value: null },
+    ];
+
+    expect(save.argv({ task: "S-1", patch, expected_revision: 3 }, "Claude")).toEqual([
+      "work",
+      "save",
+      `--patch-json=${JSON.stringify(patch)}`,
+      "--expected-revision=3",
+      "--agent=Claude",
+      "--json",
+      "--",
+      "S-1",
+    ]);
+    expect(() => save.argv({ task: "S-1" })).toThrow("patch is required");
+    expect(() => save.argv({ task: "S-1", patch: ["status"] })).toThrow(SonaInputError);
+  });
+
+  test("a session question carries its choices and the plan as JSON", () => {
+    const options = [{ label: "Ship it", value: "ship" }];
+    const plan = [{ content: "Read the spec", status: "completed" }];
+
+    expect(
+      tool("sona_session_activity").argv(
+        { session: "5b0c6a8e-0000-4000-8000-000000000001", type: "elicitation", body: "Ship?", options, plan },
+        "Claude",
+      ),
+    ).toEqual([
+      "work",
+      "session-activity",
+      "--type=elicitation",
+      "--body=Ship?",
+      `--options-json=${JSON.stringify(options)}`,
+      `--plan-json=${JSON.stringify(plan)}`,
+      "--agent=Claude",
+      "--json",
+      "--",
+      "5b0c6a8e-0000-4000-8000-000000000001",
+    ]);
+  });
+
   test("person stats are read by the exact person id", () => {
     const stats = tool("sona_person_stats");
 
@@ -151,6 +196,120 @@ describe("tool arguments", () => {
     expect(update.argv({ tasks: "S-4" }).some((arg) => arg.startsWith("--parent"))).toBe(false);
   });
 
+  test("planner and note tools spell their choices as the CLI reads them", () => {
+    const note = "5b0c6a8e-0000-4000-8000-000000000003";
+    const subject = "5b0c6a8e-0000-4000-8000-000000000004";
+    const placed = tool("sona_scratchpad_subject_note");
+
+    expect(placed.argv({ subject_id: subject, note_id: note })).toEqual([
+      "work",
+      "subject-note",
+      "--json",
+      "--",
+      subject,
+      note,
+    ]);
+    expect(placed.argv({ subject_id: subject, note_id: note, action: "current" })).toContain("--current");
+    expect(() => placed.argv({ subject_id: subject, note_id: note, action: "drop" })).toThrow(SonaInputError);
+    expect(() => tool("sona_work_watch_task").argv({ watch: "pricing" })).toThrow("line is required");
+    expect(
+      tool("sona_work_view_save").argv({ name: "Mine", show_empty_groups: false, properties: ["id", "due"] }),
+    ).toEqual(expect.arrayContaining(["--show-empty-groups=false", "--properties=id,due"]));
+    expect(tool("sona_scratchpad_delete").mutates).toBe("destroys");
+  });
+
+  test("a setting's value arrives whole after --, and settings that take things away are opt-in", () => {
+    expect(tool("sona_setting").argv({ key: "keyword-trackers", value: "-[]", dry_run: true }, "Claude")).toEqual([
+      "work",
+      "setting",
+      "--dry-run",
+      "--agent=Claude",
+      "--json",
+      "--",
+      "keyword-trackers",
+      "-[]",
+    ]);
+    expect(() => tool("sona_setting").argv({ key: "theme", value: true })).toThrow(SonaInputError);
+    expect(tool("sona_mode_save").argv({ mode: '{"id":"m","name":"-x"}' })).toContain(
+      '--mode-json={"id":"m","name":"-x"}',
+    );
+    for (const name of ["sona_setting_reset", "sona_mode_delete", "sona_prompt_delete"]) {
+      expect(tool(name).mutates).toBe("destroys");
+      expect(tool(name).optIn).toBe(true);
+    }
+  });
+
+  test("a meeting write keeps a dash-led title a value, and meeting removals are opt-in", () => {
+    const meeting = "5b0c6a8e-0000-4000-8000-000000000001";
+    expect(tool("sona_meeting_rename").argv({ meeting_id: meeting, title: "-Pricing", dry_run: true }, "Claude")).toEqual([
+      "work",
+      "meeting-rename",
+      "--dry-run",
+      "--agent=Claude",
+      "--json",
+      "--",
+      meeting,
+      "-Pricing",
+    ]);
+    expect(tool("sona_meeting_unfile").argv({ meeting_id: meeting, folder: "-Q3" }).slice(0, 3)).toEqual([
+      "work",
+      "folder-remove",
+      "--folder=-Q3",
+    ]);
+    expect(tool("sona_heard_plan_edit").argv({ plan_id: "p", people: [] })).toContain("--people=");
+    expect(tool("sona_heard_plan_edit").argv({ plan_id: "p" }).some((arg) => arg.startsWith("--people"))).toBe(false);
+    for (const name of [
+      "sona_meeting_delete",
+      "sona_meeting_folder_delete",
+      "sona_meeting_note_delete",
+      "sona_meeting_my_notes",
+      "sona_meeting_snapshot_delete",
+      "sona_meeting_delete_forever",
+    ]) {
+      expect(tool(name).mutates).toBe("destroys");
+      expect(tool(name).optIn).toBe(true);
+    }
+    expect(tool("sona_meeting_restore").argv({ trash_id: "-entry" }, "Claude").slice(-2)).toEqual(["--", "-entry"]);
+    expect(tool("sona_meeting_restore").mutates).toBe("changes");
+    expect(tool("sona_meeting_trash").argv({})).toEqual(["work", "meeting-trash", "--json", "--"]);
+  });
+
+  test("transcript and dictation writes keep dash-led words values, and the ones that delete are opt-in", () => {
+    const meeting = "5b0c6a8e-0000-4000-8000-000000000001";
+    expect(tool("sona_transcript_line_edit").argv({ meeting_id: meeting, line_id: "l", text: "-ok", dry_run: true }, "Claude")).toEqual([
+      "work",
+      "line-edit",
+      "--dry-run",
+      "--agent=Claude",
+      "--json",
+      "--",
+      meeting,
+      "l",
+      "-ok",
+    ]);
+    expect(tool("sona_speaker_merge").argv({ meeting_id: meeting, speaker: "Speaker 2", into: "-Dana" }).slice(0, 3)).toEqual([
+      "work",
+      "speaker-merge",
+      "--into=-Dana",
+    ]);
+    expect(tool("sona_transcript_correction_edit").argv({ person: "Dana", correction_id: "c", enabled: false })).toContain("--pause");
+    expect(tool("sona_dictation_save").argv({ dictation_id: 7, saved: false })).toEqual([
+      "work",
+      "dictation-save",
+      "--unsave",
+      "--json",
+      "--",
+      "7",
+    ]);
+    expect(tool("sona_dictation_save").argv({ dictation_id: 7 })).not.toContain("--unsave");
+    expect(() => tool("sona_dictation_delete").argv({ dictation_id: "7" })).toThrow(SonaInputError);
+    for (const name of ["sona_speaker_merge", "sona_transcript_correction_remove", "sona_dictation_delete"]) {
+      expect(tool(name).mutates).toBe("destroys");
+      expect(tool(name).optIn).toBe(true);
+    }
+    expect(tool("sona_speaker_rename").mutates).toBe("changes");
+  });
+
   test("an attach takes a path or a url, never both, as the last argument", () => {
     const attach = tool("sona_task_attach");
 
@@ -174,6 +333,83 @@ describe("tool arguments", () => {
     expect(() =>
       attach.argv({ task: "S-1", path: "/tmp/a", url: "https://example.com" }),
     ).toThrow("exactly one of path or url");
+  });
+
+  test("a speaker assign names the meeting and speaker last, and the person by flag", () => {
+    const assign = tool("sona_speaker_assign");
+    const meeting = "5b0c6a8e-0000-4000-8000-000000000001";
+
+    expect(
+      assign.argv({ meeting_id: meeting, speaker: "Speaker 2", person: "-Dana", dry_run: true }, "Claude"),
+    ).toEqual([
+      "work",
+      "speaker-assign",
+      "--person=-Dana",
+      "--dry-run",
+      "--agent=Claude",
+      "--json",
+      "--",
+      meeting,
+      "Speaker 2",
+    ]);
+    expect(assign.argv({ meeting_id: meeting, speaker: "Speaker 2", new_person: "Lee Park" })).toContain(
+      "--new=Lee Park",
+    );
+    expect(assign.argv({ meeting_id: meeting, speaker: "Speaker 2", undo: true })).toContain("--undo");
+  });
+
+  test("people and voice tools name the person or meeting last, after --", () => {
+    const meeting = "5b0c6a8e-0000-4000-8000-000000000001";
+
+    expect(tool("sona_person_link").argv({ person: "-Dana", meeting_id: meeting, confirm: true }, "Claude")).toEqual([
+      "work",
+      "person-link",
+      "--confirm",
+      "--agent=Claude",
+      "--json",
+      "--",
+      "-Dana",
+      meeting,
+    ]);
+    expect(
+      tool("sona_person_split").argv({ person: "Dana", new_person: "-Dana Two", meetings: `${meeting},x` }),
+    ).toEqual(["work", "person-split", "--new=-Dana Two", `--meetings=${meeting},x`, "--json", "--", "Dana"]);
+    expect(tool("sona_person_first_met_answer").argv({ person: "Dana", answer: "no" }).slice(-2)).toEqual([
+      "Dana",
+      "no",
+    ]);
+    expect(tool("sona_person_merge").argv({ person: "A", into: "B", voice: "both" })).toContain("--voice=both");
+    expect(tool("sona_person_merge").argv({ person: "A", into: "B", dry_run: true })).toContain("--dry-run");
+    expect(
+      tool("sona_speaker_assign").argv({ meeting_id: meeting, speaker: "Speaker 2", person: "Dana", same_voice: true }),
+    ).toContain("--same-voice");
+    expect(tool("sona_speaker_voice_undo").argv({ meeting_id: meeting, speaker: "-Lee" }).slice(-3)).toEqual([
+      "--",
+      meeting,
+      "-Lee",
+    ]);
+  });
+
+  test("a source link names its kind as the flag and the target last", () => {
+    const link = tool("sona_planning_link_source");
+    const meeting = "5b0c6a8e-0000-4000-8000-000000000001";
+
+    expect(
+      link.argv({ target: "-Launch", kind: "meeting", source_id: meeting, at_seconds: 65, dry_run: true }, "Claude"),
+    ).toEqual([
+      "work",
+      "source-link",
+      `--meeting=${meeting}`,
+      "--at=65",
+      "--dry-run",
+      "--agent=Claude",
+      "--json",
+      "--",
+      "-Launch",
+    ]);
+    expect(() => link.argv({ target: "S-1", kind: "folder", source_id: meeting })).toThrow(
+      "kind must be meeting, note or loop",
+    );
   });
 
   test("an update save without id posts one, with id edits the one named", () => {
@@ -218,6 +454,45 @@ describe("tool arguments", () => {
     expect(() => save.argv({ id: update, project: "Harbor" })).toThrow(SonaInputError);
   });
 
+  test("a favorite names its kind, and an inbox mark of all names no ids", () => {
+    const favorite = tool("sona_work_favorite");
+    expect(favorite.argv({ kind: "task", target: "-S-1" }, "Claude")).toEqual([
+      "work",
+      "favorite",
+      "--agent=Claude",
+      "--json",
+      "--",
+      "-S-1",
+    ]);
+    expect(favorite.argv({ kind: "view", target: "-Open work", dry_run: true })).toEqual([
+      "work",
+      "favorite",
+      "--dry-run",
+      "--json",
+      "--view=-Open work",
+    ]);
+    expect(() => favorite.argv({ kind: "label", target: "ops" })).toThrow(SonaInputError);
+
+    const mark = tool("sona_work_inbox_mark");
+    expect(mark.argv({ notifications: "All", mark: "read" })).toEqual([
+      "work",
+      "inbox-mark",
+      "--mark=read",
+      "--all",
+      "--json",
+    ]);
+    expect(mark.argv({ notifications: "a, b", mark: "snooze", until: "tomorrow" })).toEqual([
+      "work",
+      "inbox-mark",
+      "--mark=snooze",
+      "--until=tomorrow",
+      "--json",
+      "--",
+      "a",
+      "b",
+    ]);
+  });
+
   test("a project save clears each planning field with null", () => {
     const argv = tool("sona_project_save").argv({
       name: "Harbor",
@@ -249,6 +524,13 @@ describe("tool arguments", () => {
     ).toContain("--link=https://b.example");
   });
 
+  test("a project save passes me through as lead and member", () => {
+    const argv = tool("sona_project_save").argv({ name: "Harbor", lead: "me", members: "me,Dana" });
+
+    expect(argv).toContain("--lead=me");
+    expect(argv).toContain("--members=me,Dana");
+  });
+
   test("a cycle save runs the one verb its arguments name", () => {
     const save = tool("sona_cycle_save");
 
@@ -276,6 +558,107 @@ describe("tool arguments", () => {
     );
     expect(() => save.argv({ cycle: "2", weeks: 2 })).toThrow("leave cycle out");
     expect(() => save.argv({ rollover: true })).toThrow("cycle is required");
+  });
+
+  test("an automation save spells its trigger, conditions and tools as single flags", () => {
+    const save = tool("sona_automation_save");
+
+    expect(
+      save.argv(
+        {
+          name: "-Weekly digest",
+          prompt: "Sum up the week",
+          schedule: "weekly",
+          first_run: "2026-11-16 09:00",
+          timezone: "America/Los_Angeles",
+          days: ["mon", "thu"],
+          tools: ["sona_search", "sona_meeting"],
+          dry_run: true,
+        },
+        "Claude",
+      ),
+    ).toEqual([
+      "work",
+      "automation-save",
+      "--prompt=Sum up the week",
+      "--schedule=weekly",
+      "--first-run=2026-11-16 09:00",
+      "--timezone=America/Los_Angeles",
+      "--days=mon,thu",
+      "--tools=sona_search,sona_meeting",
+      "--dry-run",
+      "--agent=Claude",
+      "--json",
+      "--",
+      "-Weekly digest",
+    ]);
+    expect(
+      save.argv({
+        name: "Triage bugs",
+        automation: "Old name",
+        on: "status-changed",
+        to: "in_progress",
+        if_label: ["bug", "ops"],
+        if_project: ["Harbor"],
+        if_status: [],
+        tools: [],
+      }),
+    ).toEqual([
+      "work",
+      "automation-save",
+      "--automation=Old name",
+      "--on=status-changed",
+      "--to=in_progress",
+      "--if-label=bug,ops",
+      "--if-project=Harbor",
+      "--if-status=",
+      "--tools=",
+      "--json",
+      "--",
+      "Triage bugs",
+    ]);
+    expect(() => save.argv({ name: "x", days: "mon" })).toThrow("days must be a list of strings");
+    expect(() => save.argv({ prompt: "x" })).toThrow("name is required");
+  });
+
+  test("an automation run, restore and delete name the automation last, and run and delete are opt-in", () => {
+    expect(tool("sona_automation_run").argv({ automation: "-Digest" }, "Claude")).toEqual([
+      "work",
+      "automation-run",
+      "--agent=Claude",
+      "--json",
+      "--",
+      "-Digest",
+    ]);
+    expect(tool("sona_automation_restore_version").argv({ automation: "Digest", version: 3, dry_run: true })).toEqual([
+      "work",
+      "automation-restore-version",
+      "--dry-run",
+      "--json",
+      "--",
+      "Digest",
+      "3",
+    ]);
+    expect(() => tool("sona_automation_restore_version").argv({ automation: "Digest" })).toThrow("version is required");
+    expect(tool("sona_automation_disable").argv({ automation: "Digest" })).toEqual([
+      "work",
+      "automation-disable",
+      "--json",
+      "--",
+      "Digest",
+    ]);
+    expect(tool("sona_automation_delete").argv({ automation: "Digest", operation_id: "op-1" })).toEqual([
+      "work",
+      "automation-delete",
+      "--operation-id=op-1",
+      "--json",
+      "--",
+      "Digest",
+    ]);
+    expect(tool("sona_automation_delete").mutates).toBe("destroys");
+    expect(tool("sona_automation_delete").optIn).toBe(true);
+    expect(tool("sona_automation_run").optIn).toBe(true);
+    expect(tool("sona_automation_save").optIn).toBeUndefined();
   });
 });
 
@@ -358,6 +741,30 @@ async function published(selection?: string) {
 
 /** The verbs and flags with which `sona` changes something. */
 const SONA_WRITES = {
+  "meeting-restore": true,
+  "meeting-delete-forever": true,
+  "meeting-export": true,
+  "meeting-rename": true,
+  "meeting-delete": true,
+  "folder-new": true,
+  "folder-rename": true,
+  "folder-delete": true,
+  "folder-add": true,
+  "folder-remove": true,
+  "meeting-note-add": true,
+  "meeting-note-edit": true,
+  "meeting-note-delete": true,
+  "my-notes": true,
+  "action-done": true,
+  "snapshot-delete": true,
+  "heard-plan-edit": true,
+  "heard-plan-not-now": true,
+  save: true,
+  "session-start": true,
+  "session-activity": true,
+  "session-plan": true,
+  "session-heartbeat": true,
+  "session-stop": true,
   "--loop-resolve": true,
   create: true,
   update: true,
@@ -372,6 +779,18 @@ const SONA_WRITES = {
   unrelate: true,
   "label-save": true,
   "label-delete": true,
+  "label-group": true,
+  "label-retire": true,
+  "template-save": true,
+  "template-delete": true,
+  "template-use": true,
+  "automation-save": true,
+  "automation-run": true,
+  "automation-enable": true,
+  "automation-disable": true,
+  "automation-restore-version": true,
+  "automation-delete": true,
+  remind: true,
   "view-save": true,
   "view-delete": true,
   say: true,
@@ -412,12 +831,75 @@ const SONA_WRITES = {
   "note-edit": true,
   "note-pin": true,
   "note-link": true,
+  "note-unlink": true,
+  "note-delete": true,
+  "note-restore": true,
+  "subject-new": true,
+  "subject-note": true,
+  "book": true,
+  "unbook": true,
+  "nudged": true,
+  "watch-task": true,
+  "link-accept": true,
+  "link-dismiss": true,
+  "suggestion-accept": true,
+  "suggestion-dismiss": true,
+  "plan-accept": true,
   "attachment-rename": true,
+  "speaker-assign": true,
+  "speaker-confirm": true,
+  "speaker-voice-undo": true,
+  "person-link": true,
+  "person-split": true,
+  "person-delete": true,
+  "person-photo": true,
+  "person-contact-remove": true,
+  "first-met-answer": true,
+  "source-link": true,
+  "doc-add": true,
+  "doc-delete": true,
   detach: true,
+  delete: true,
+  "description-restore": true,
+  favorite: true,
+  unfavorite: true,
+  subscribe: true,
+  unsubscribe: true,
+  "inbox-mark": true,
+  setting: true,
+  "setting-reset": true,
+  "mode-save": true,
+  "mode-delete": true,
+  "mode-reorder": true,
+  "prompt-save": true,
+  "prompt-delete": true,
+  "vocabulary-add": true,
+  "vocabulary-csv": true,
+  "workflow-enable": true,
+  "saved-prompt-save": true,
+  "saved-prompt-delete": true,
+  "series-template": true,
+  "series-digest": true,
+  filing: true,
+  "speaker-rename": true,
+  "speaker-merge": true,
+  "line-edit": true,
+  "correction-add": true,
+  "correction-edit": true,
+  "correction-remove": true,
+  "dictation-save": true,
+  "dictation-delete": true,
 };
 
 /** The verbs with which `sona` takes away what no Sona tool gives back. */
 const SONA_DESTROYS = {
+  "meeting-delete-forever": true,
+  "automation-delete": true,
+  "meeting-delete": true,
+  "folder-delete": true,
+  "meeting-note-delete": true,
+  "my-notes": true,
+  "snapshot-delete": true,
   "label-delete": true,
   "view-delete": true,
   "milestone-delete": true,
@@ -426,6 +908,21 @@ const SONA_DESTROYS = {
   "person-merge": true,
   "comment-delete": true,
   detach: true,
+  "template-delete": true,
+  "speaker-assign": true,
+  "person-split": true,
+  "person-delete": true,
+  "person-photo": true,
+  "person-contact-remove": true,
+  "doc-delete": true,
+  "note-delete": true,
+  "setting-reset": true,
+  "mode-delete": true,
+  "prompt-delete": true,
+  "saved-prompt-delete": true,
+  "speaker-merge": true,
+  "correction-remove": true,
+  "dictation-delete": true,
 };
 
 /** Each required argument at its first enum value or a placeholder, plus the
@@ -448,7 +945,9 @@ function smallest(tool: ToolDefinition): ToolInput {
         : property?.type === "boolean"
           ? true
           : property?.type === "array"
-            ? ["S-1"]
+            ? property.items?.type === "object"
+              ? [{}]
+              : ["S-1"]
             : "S-1");
   }
   return input;
@@ -655,6 +1154,20 @@ describe("the stdio server", () => {
       filter: [{ field: "label", op: "is", values: ["bug"], extra: true }],
     });
     expect(malformed.code).toBe(ErrorCode.InvalidParams);
+  });
+
+  test("filter words and the timeline's days each arrive as one flag", async () => {
+    const sona = stub({ stdout: "{}" });
+    const client = await connected();
+    try {
+      await client.callTool({ name: "sona_work_list", arguments: { where: "--mine high priority bugs" } });
+      expect(sona.argv()).toContain("--where=--mine high priority bugs");
+
+      await client.callTool({ name: "sona_project_timeline", arguments: { from: "2026-11-01", to: "2027-01-31" } });
+      expect(sona.argv().slice(-5)).toEqual(["work", "timeline", "--from=2026-11-01", "--to=2027-01-31", "--json"]);
+    } finally {
+      await client.close();
+    }
   });
 
   test("a tool this server does not have is method-not-found", async () => {

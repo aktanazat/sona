@@ -160,7 +160,8 @@ consent. For human CLI output, append `--format text`; MCP keeps default JSON.
 MCP publishes `readOnlyHint:true` for every read and `false` for every tool
 that writes, and `destructiveHint:true` only for the writes that take away
 what no tool gives back: label and view deletes, comment deletes, attachment
-removal, milestone deletes and person merges.
+removal, milestone deletes, person merges, and speaker naming, since changing
+who a named speaker is deletes the voice samples kept from them.
 The server passes private source data to its approved client. Neither Sona nor
 this server calls a model provider for these reads. External access is not
 permission for an agent to send those records to another provider.
@@ -168,11 +169,11 @@ permission for an agent to send those records to another provider.
 ## Task tools
 
 These run `sona work <verb> --json`. A task is named by its handle (`S-12`),
-its number or its id. Fifteen are published by default:
+its number or its id. Eighteen are published by default:
 
 | Tool               | Arguments                                                        | Runs                                       |
 | ------------------ | ---------------------------------------------------------------- | ------------------------------------------ |
-| `sona_work_list`   | filters (`status?`, `side?`, `owner?`, `label?`, …), `filter?`, `ready?`, `limit?` | `sona work list` or `sona work ready` |
+| `sona_work_list`   | filters (`status?`, `side?`, `owner?`, `label?`, …), `filter?`, `where?`, `ready?`, `limit?` | `sona work list` or `sona work ready` |
 | `sona_work_get`    | `task`                                                           | `sona work show`                           |
 | `sona_work_counts` | `limit?`                                                         | `sona work mine`                           |
 | `sona_work_create` | `title`, fields (`priority?`, `owner?`, `due?`, `labels?`, …)    | `sona work create` — **writes**            |
@@ -180,6 +181,9 @@ its number or its id. Fifteen are published by default:
 | `sona_work_claim`  | `task`                                                           | `sona work claim` — **writes**             |
 | `sona_work_done`   | `tasks`, `evidence?`, `dry_run?`                                 | `sona work done` — **writes**              |
 | `sona_work_triage` | `tasks`, `decision` (`accept`, `decline`, `duplicate`), `of?`    | `sona work accept`/`decline`/`duplicate` — **writes** |
+| `sona_work_triage_suggestions` | `task?`                                                | `sona work triage-suggestions`             |
+| `sona_work_suggestion_accept` | `id`, `dry_run?`                                        | `sona work suggestion-accept` — **writes** |
+| `sona_work_suggestion_dismiss` | `id`, `dry_run?`                                       | `sona work suggestion-dismiss` — **writes** |
 | `sona_work_follow_up` | `meeting`                                                     | `sona work follow-up`                      |
 | `sona_subtask_create` | `parent`, `titles` (a list), `owner?`, `priority?`, `dry_run?` | `sona work subtask` — **writes**        |
 | `sona_comment_list` | `task`, `limit?`, `cursor?`                                     | `sona work comments`                       |
@@ -203,9 +207,13 @@ Fields are `status`, `priority`, `owner`, `project`, `milestone`, `label`,
 `cycle`, `due`, `created` and `updated`; ops are `is`, `is_not`, `any_of`,
 `none_of`, `includes_all`, `includes_any`, `before` and `after` (dated fields
 only). Values are ids or names, `me`, `none`, cycle numbers or
-`current`/`next`, and days as `YYYY-MM-DD`, `today`, `tomorrow`, `yesterday` or
-epoch ms. `sona_work_view_save` stores a `filter` with the view. `ready:true`
-takes no `filter`, and the list has no sort or cursor: Sona orders it.
+`current`/`next`, and days as `YYYY-MM-DD`, `today`, `tomorrow`, `yesterday`,
+`this_week`, `next_week`, `last_week`, `this_month`, `next_month`, `last_month`
+or epoch ms. `where` takes plain words instead, such as `high priority bugs due
+this week that are mine`, read on this Mac without a model; the answer's
+`read_as` shows each condition and the words it could not read.
+`sona_work_view_save` stores a `filter` with the view. `ready:true` takes no
+`filter` or `where`, and the list has no sort or cursor: Sona orders it.
 `sona_work_claim` moves one Todo or Backlog task to In progress and shows the
 agent on it; it refuses a task another agent works or one already in
 progress, so two agents cannot both start it. The task's owner stays who it
@@ -246,6 +254,17 @@ dictations that say it, numbered; `sona_work_take` makes Triage tasks of
 chosen lines. `sona_work_say` changes tasks from plain words ("push
 everything not urgent to monday"); run it with `dry_run:true` first.
 
+`sona_work_triage_suggestions` lists what Sona suggests for tasks in Triage:
+a project, labels, an owner, a due day, and a task one repeats or relates to.
+Each has an id and its reason in plain words, such as "3 of the last 4 tasks
+from meetings with Dana went to Pier Lighting". Sona works them out from past
+tasks, their titles and the people in their meetings, with no model, and
+suggests nothing when the evidence is thin. `sona_work_suggestion_accept`
+applies one like any other change: a field change waits under `proposed`
+unless the user lets agents' changes apply. `sona_work_suggestion_dismiss`
+sets one aside for good, and is refused unless agents' changes apply.
+Suggestions that draw on a meeting kept on this Mac are left out.
+
 Twenty-one more are opt-in: `sona_work_archive`, `sona_work_restore`,
 `sona_work_relate`, `sona_work_unrelate`, `sona_cycle_list`, `sona_cycle_save`,
 `sona_work_labels`, `sona_work_label_save`, `sona_work_label_delete`,
@@ -280,6 +299,7 @@ and **Agents' changes** on Apply (refused, never proposed), and answers
 | `sona_work_talking_point_done`  | `id`, `undo?`                                              | `sona work talking-point-done` — **writes** |
 | `sona_meeting_loop_reopen`      | `loop_id`                                                  | `sona work loop-reopen` — **writes**  |
 | `sona_meeting_loop_assign`      | `loop_id`, `owner` (a person, or `none`)                   | `sona work loop-owner` — **writes**   |
+| `sona_speaker_assign`           | `meeting_id`, `speaker`, one of `person`, `new_person`, `undo` | `sona work speaker-assign` — **writes** |
 | `sona_planning_track_action`    | `loop_id`, `project`                                       | `sona work action-track` — **writes** |
 | `sona_planning_dismiss_action`  | `loop_id`                                                  | `sona work action-dismiss` — **writes** |
 | `sona_planning_restore_action`  | `loop_id`                                                  | `sona work action-restore` — **writes** |
@@ -292,8 +312,9 @@ and **Agents' changes** on Apply (refused, never proposed), and answers
 
 `sona_work_list` also takes `source` (meeting, dictation, agent, person) and
 `stale` (open work untouched for 30 days), and `sona_work_update` takes
-`snooze_until: "later-today"`. Loop changes are filed in the meeting's history
-as the user's.
+`snooze_until: "later-today"`. Loop changes and speaker names are filed in
+the meeting's history as the user's. `sona_speaker_assign` never remembers a
+voice: saving a voice profile stays a consent step the user takes in the app.
 
 ## Projects, people and meetings tools
 
@@ -312,6 +333,7 @@ goes by, or its id.
 | `sona_project_update_save`   | `project` + `health` + (`body` or `draft:true`), or `id` + `health?` + `body?`; `dry_run?` | `sona work project-update` or `project-update-edit` — **writes** |
 | `sona_project_update_delete` | `id`, `dry_run?`                                                       | `sona work project-update-delete` — **writes** |
 | `sona_milestone_list`        | `project`                                                              | `sona work milestones`                   |
+| `sona_project_timeline`      | `from?`, `to?`                                                         | `sona work timeline`                     |
 | `sona_milestone_save`        | `project`, `name`, `milestone?`, `target?`, `details?`, `status?`      | `sona work milestone-save` — **writes**  |
 | `sona_milestone_reorder`     | `project`, `milestones` (every one, in order), `dry_run?`              | `sona work milestone-reorder` — **writes** |
 | `sona_milestone_delete`      | `project`, `milestone`                                                 | `sona work milestone-delete` — **writes** |
@@ -321,7 +343,7 @@ goes by, or its id.
 | `sona_person_save`           | `name`, `person?`, `aliases?`, `role?`, `org?`, `email?`, `notes?`     | `sona work person-save` — **writes**     |
 | `sona_person_merge`          | `person`, `into`                                                       | `sona work person-merge` — **writes**    |
 | `sona_meeting_list`          | `since?`, `limit?`                                                     | `sona work meetings`                     |
-| `sona_meeting_get`           | `meeting_id`, `transcript?`                                            | `sona work meeting`                      |
+| `sona_meeting_get`           | `meeting_id`, `transcript?`; answers each speaker's id under `meeting_speakers` | `sona work meeting` |
 
 A save makes the thing when nothing goes by that name and changes it when
 something does; `project`, `milestone` or `person` renames that one to `name`.
