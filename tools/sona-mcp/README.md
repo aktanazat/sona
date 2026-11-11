@@ -159,8 +159,8 @@ app actions and do not gain a route around external-write or source-transfer
 consent. For human CLI output, append `--format text`; MCP keeps default JSON.
 MCP publishes `readOnlyHint:true` for every read and `false` for every tool
 that writes, and `destructiveHint:true` only for the writes that take away
-what no tool gives back: label and view deletes, milestone deletes and person
-merges.
+what no tool gives back: label and view deletes, comment deletes, milestone
+deletes and person merges.
 The server passes private source data to its approved client. Neither Sona nor
 this server calls a model provider for these reads. External access is not
 permission for an agent to send those records to another provider.
@@ -168,7 +168,7 @@ permission for an agent to send those records to another provider.
 ## Task tools
 
 These run `sona work <verb> --json`. A task is named by its handle (`S-12`),
-its number or its id. Nine are published by default:
+its number or its id. Thirteen are published by default:
 
 | Tool               | Arguments                                                        | Runs                                       |
 | ------------------ | ---------------------------------------------------------------- | ------------------------------------------ |
@@ -176,11 +176,15 @@ its number or its id. Nine are published by default:
 | `sona_work_get`    | `task`                                                           | `sona work show`                           |
 | `sona_work_counts` | `limit?`                                                         | `sona work mine`                           |
 | `sona_work_create` | `title`, fields (`priority?`, `owner?`, `due?`, `labels?`, …)    | `sona work create` — **writes**            |
-| `sona_work_update` | `tasks`, fields, `add_labels?`, `remove_labels?`, `dry_run?`     | `sona work update` — **writes**            |
+| `sona_work_update` | `tasks`, fields, `parent?`, `add_labels?`, `remove_labels?`, `dry_run?` | `sona work update` — **writes**   |
 | `sona_work_claim`  | `task`                                                           | `sona work claim` — **writes**             |
 | `sona_work_done`   | `tasks`, `evidence?`, `dry_run?`                                 | `sona work done` — **writes**              |
 | `sona_work_triage` | `tasks`, `decision` (`accept`, `decline`, `duplicate`), `of?`    | `sona work accept`/`decline`/`duplicate` — **writes** |
 | `sona_work_follow_up` | `meeting`                                                     | `sona work follow-up`                      |
+| `sona_subtask_create` | `parent`, `titles` (a list), `owner?`, `priority?`, `dry_run?` | `sona work subtask` — **writes**        |
+| `sona_comment_list` | `task`, `limit?`, `cursor?`                                     | `sona work comments`                       |
+| `sona_comment_save` | `body`, `task` or `id`, `reply_to?`, `dry_run?`                 | `sona work comment add` or `comment-edit` — **writes** |
+| `sona_comment_resolve` | `id`, `reopen?`, `dry_run?`                                  | `sona work comment-resolve` — **writes**   |
 
 Every write also takes `operation_id`. Left out, Sona derives one from the
 request and what it read, so a repeated call never changes anything twice: a
@@ -202,22 +206,33 @@ make the next one.
 `sona_work_follow_up` drafts one meeting's follow-up: who owes what, by
 when, quoting each promise. It sends nothing.
 
+`sona_work_get` also returns the task's parent, its sub-tasks with how many
+are done, and its comment threads. `sona_subtask_create` makes one sub-task
+per title under a parent; each takes the parent's project, milestone and
+priority. `sona_work_update` with `parent` moves tasks under another task,
+and `parent: null` lifts them back to top level. `sona_comment_save` without
+`id` comments on `task`, or replies in a thread with `reply_to`; with `id` it
+changes a comment the agent wrote. Comments are shown under the agent's
+name. An agent working a task it claimed should comment what it is doing,
+what it found and what is left, so the user can follow along in Sona.
+
 Unless the user sets **Settings > Agents > Agents' changes** to Apply, a
 change to a task's fields waits for them: the answer lists it under
 `proposed`, and the user accepts or rejects it in Sona. A created task lands
-in Triage, and triage, archiving and label changes are refused.
+in Triage, and triage, archiving and label changes are refused. Comments are
+added either way.
 
 `sona_work_ask` answers a question with the lines from meetings and
 dictations that say it, numbered; `sona_work_take` makes Triage tasks of
 chosen lines. `sona_work_say` changes tasks from plain words ("push
 everything not urgent to monday"); run it with `dry_run:true` first.
 
-Fifteen more are opt-in: `sona_work_archive`, `sona_work_restore`,
+Sixteen more are opt-in: `sona_work_archive`, `sona_work_restore`,
 `sona_work_relate`, `sona_work_unrelate`, `sona_work_labels`,
 `sona_work_label_save`, `sona_work_label_delete`, `sona_work_views`,
 `sona_work_view_save`, `sona_work_view_delete`, `sona_work_watches`,
-`sona_work_watch`, `sona_project_archive`, `sona_milestone_delete` and
-`sona_person_merge`. Publish them with
+`sona_work_watch`, `sona_comment_delete`, `sona_project_archive`,
+`sona_milestone_delete` and `sona_person_merge`. Publish them with
 `SONA_MCP_TOOLS`: `all` for every tool, or a comma-separated list of names
 beside the default ones. A name that matches no tool stops the server at
 start.

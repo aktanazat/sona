@@ -20,26 +20,30 @@ export const STATUSES = ["open", "done"] as const;
 /** Whose side of a loop `sona_action_items` keeps. */
 export const SIDES = ["mine", "waiting"] as const;
 
-/* The one shape an argv can be built out of: a flat object of JSON scalars,
- * keyed by field name. Nothing here re-checks a value it can turn into an
- * argument — Sona owns what a scope is and what a limit may be — so the schema
- * stops at "flat", which is the only property this file actually relies on. */
+/* The one shape an argv can be built out of: a flat object of JSON scalars
+ * and lists of strings, keyed by field name. Nothing here re-checks a value it
+ * can turn into an argument — Sona owns what a scope is and what a limit may
+ * be — so the schema stops at "flat", which is the only property this file
+ * actually relies on. A list of strings is flat too: each entry becomes one
+ * argument. */
 export const TOOL_INPUT = z.record(
   z.string(),
-  z.union([z.string(), z.number(), z.boolean(), z.null()]),
+  z.union([z.string(), z.number(), z.boolean(), z.null(), z.array(z.string())]),
 );
 
 export type ToolInput = z.infer<typeof TOOL_INPUT>;
 
 /** One JSON-schema property as this server publishes it: a flat string,
- * integer or boolean field, optionally enumerated and bounded. Typed so
- * readers get the enum without re-parsing the schema. */
+ * integer or boolean field, optionally enumerated and bounded, or a list of
+ * strings. Typed so readers get the enum without re-parsing the schema. */
 export interface ToolProperty {
-  readonly type: "string" | "integer" | "boolean";
+  readonly type: "string" | "integer" | "boolean" | "array";
   readonly description: string;
   readonly enum?: readonly string[];
   readonly minimum?: number;
   readonly maximum?: number;
+  readonly items?: { readonly type: "string" };
+  readonly minItems?: number;
 }
 
 export interface ToolDefinition {
@@ -144,6 +148,17 @@ function tasks(input: ToolInput, key: string): string[] {
   return found;
 }
 
+/** A list of strings, one argument each, none of them empty. */
+function strings(input: ToolInput, key: string): string[] {
+  const parsed = z.array(z.string()).safeParse(input[key]);
+  if (!parsed.success) {
+    throw new SonaInputError(`${key} must be a list of strings.`);
+  }
+  const found = parsed.data.filter((value) => value.trim() !== "");
+  if (found.length === 0) throw new SonaInputError(`${key} is required.`);
+  return found;
+}
+
 const LIMIT = {
   type: "integer",
   minimum: 1,
@@ -178,6 +193,15 @@ const SINCE_UTC_MS = {
 
 const WRITES =
   "This changes the user's Sona tasks. It needs Settings > Agents > External access and External mutations; with either off Sona refuses with consent_required and names the setting. Unless the user lets agents' changes apply in Settings > Agents, changes to a task's fields come back under proposed and wait for the user to accept them in Sona, a new task lands in Triage, and triage, duplicates, archiving and label changes are refused.";
+
+const COMMENT_WRITES =
+  "This changes the user's Sona tasks. It needs Settings > Agents > External access and External mutations; with either off Sona refuses with consent_required and names the setting.";
+
+const COMMENT = {
+  type: "string",
+  description:
+    "A comment's id, from sona_comment_list or the comments in sona_work_get.",
+} as const;
 
 const CATALOG_WRITES =
   "This changes the user's Sona projects and people. It needs Settings > Agents > External access and External mutations, and Agents' changes set to Apply: with access or mutations off Sona refuses with consent_required, and while agents' changes wait for the user it refuses with invalid_request naming the setting. Nothing is proposed for later and there is no dry run. A call that changes nothing answers with operation_id null.";
@@ -920,7 +944,7 @@ export const TOOLS: readonly ToolDefinition[] = [
     name: "sona_work_get",
     title: "Read a Sona task",
     description:
-      "Read one task: every field, how often it repeats, the meeting quote it came from with its speaker and a sona://loop link, the tasks it blocks, is blocked by or relates to, its evidence (meetings, notes, dictation quotes and links), what Sona suggests for it while it waits in triage (owner, due day, project, duplicate) with the reason and quote, and its history, each entry marked as made by the user (me), Sona or an agent.",
+      "Read one task: every field, how often it repeats, the meeting quote it came from with its speaker and a sona://loop link, the tasks it blocks, is blocked by or relates to, the task it sits under (parent) and its sub-tasks with how many are done (sub_tasks), its comment threads with replies, its evidence (meetings, notes, dictation quotes and links), what Sona suggests for it while it waits in triage (owner, due day, project, duplicate) with the reason and quote, and its history, each entry marked as made by the user (me), Sona or an agent.",
     inputSchema: {
       type: "object",
       properties: { task: TASK },
@@ -1010,6 +1034,11 @@ export const TOOLS: readonly ToolDefinition[] = [
           type: "string",
           description: "Labels to remove, by name or id, comma-separated.",
         },
+        parent: {
+          type: "string",
+          description:
+            "Put the tasks under another task (handle, number or id); null or none lifts them back to top level. A task cannot go under itself or one of its own sub-tasks.",
+        },
         snooze_until: {
           type: "string",
           description:
@@ -1040,6 +1069,7 @@ export const TOOLS: readonly ToolDefinition[] = [
       ...assigned("--remove-label", text(input, "remove_labels")),
       ...assigned("--snooze-until", text(input, "snooze_until")),
       ...assigned("--cycle", text(input, "cycle")),
+      ...nullable("--parent", input, "parent", "none"),
       ...assigned("--expected-revision", count(input, "expected_revision")),
       ...(flag(input, "dry_run") ? ["--dry-run"] : []),
       ...writing(input, agent),
@@ -1097,6 +1127,180 @@ export const TOOLS: readonly ToolDefinition[] = [
       "--json",
       "--",
       ...tasks(input, "tasks"),
+    ],
+  },
+  {
+    name: "sona_subtask_create",
+    title: "Make Sona sub-tasks",
+    description: `Make one sub-task under a task for each title. Each takes the parent's project, milestone and priority unless priority is given; the owner, left out, is the user when the parent is theirs, else the owner its other sub-tasks share, else nobody. dry_run:true shows them without writing. ${WRITES}`,
+    mutates: "changes",
+    inputSchema: {
+      type: "object",
+      properties: {
+        parent: { ...TASK, description: `The parent. ${TASK.description}` },
+        titles: {
+          type: "array",
+          items: { type: "string" },
+          minItems: 1,
+          description: "One title per sub-task.",
+        },
+        owner: FIELDS.owner,
+        priority: FIELDS.priority,
+        dry_run: DRY_RUN,
+        operation_id: OPERATION_ID,
+      },
+      required: ["parent", "titles"],
+      additionalProperties: false,
+    },
+    argv: (input, agent) => [
+      "work",
+      "subtask",
+      ...assigned("--owner", text(input, "owner")),
+      ...assigned("--priority", text(input, "priority")),
+      ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+      ...writing(input, agent),
+      "--json",
+      "--",
+      text(input, "parent", true),
+      ...strings(input, "titles"),
+    ],
+  },
+  {
+    name: "sona_comment_list",
+    title: "Read a Sona task's comments",
+    description:
+      "Read a task's comment threads, oldest first: each comment's id, author (me, sona or an agent by name), Markdown body, when it was written, edited and resolved, and its replies. A deleted comment keeps its place with body null while it has replies. Pass next_cursor back as cursor for the next page.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        task: TASK,
+        limit: {
+          ...LIMIT,
+          description: "How many threads to return. Sona defaults to 50 and caps at 100.",
+        },
+        cursor: {
+          type: "string",
+          description: "The next_cursor of the page before.",
+        },
+      },
+      required: ["task"],
+      additionalProperties: false,
+    },
+    argv: (input) => [
+      "work",
+      "comments",
+      ...assigned("--limit", count(input, "limit")),
+      ...assigned("--cursor", text(input, "cursor")),
+      "--json",
+      "--",
+      text(input, "task", true),
+    ],
+  },
+  {
+    name: "sona_comment_save",
+    title: "Comment on a Sona task",
+    description: `Without id, add a comment to task, or with reply_to answer in that comment's thread (a reply to a reply joins the thread's first comment). With id, change the body of a comment you wrote; task and reply_to are then left out. The comment is shown as yours. Use it to say what you are doing on a task you claimed, what you found and what is left. dry_run:true shows it without writing. ${COMMENT_WRITES} Agents may comment whether their changes apply or wait for the user.`,
+    mutates: "changes",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { ...COMMENT, description: `The comment to change. ${COMMENT.description}` },
+        task: { ...TASK, description: `The task to comment on, when id is left out. ${TASK.description}` },
+        reply_to: {
+          ...COMMENT,
+          description: `Reply in this comment's thread. ${COMMENT.description}`,
+        },
+        body: { type: "string", description: "The comment, in Markdown." },
+        dry_run: DRY_RUN,
+        operation_id: OPERATION_ID,
+      },
+      required: ["body"],
+      additionalProperties: false,
+    },
+    argv: (input, agent) => {
+      const id = text(input, "id");
+      const body = text(input, "body", true);
+      const dryRun = flag(input, "dry_run") ? ["--dry-run"] : [];
+      if (id !== null) {
+        if (text(input, "task") !== null || text(input, "reply_to") !== null) {
+          throw new SonaInputError("id changes a comment; leave task and reply_to out.");
+        }
+        return [
+          "work",
+          "comment-edit",
+          `--body=${body}`,
+          ...dryRun,
+          ...writing(input, agent),
+          "--json",
+          "--",
+          id,
+        ];
+      }
+      return [
+        "work",
+        "comment",
+        "add",
+        `--body=${body}`,
+        ...assigned("--reply-to", text(input, "reply_to")),
+        ...dryRun,
+        ...writing(input, agent),
+        "--json",
+        "--",
+        text(input, "task", true),
+      ];
+    },
+  },
+  {
+    name: "sona_comment_resolve",
+    title: "Resolve a Sona comment thread",
+    description: `Resolve the thread a comment is in, or reopen it with reopen:true. Any comment in the thread names it. dry_run:true shows the change without writing. ${COMMENT_WRITES} Unless the user lets agents' changes apply in Settings > Agents, Sona may refuse it.`,
+    mutates: "changes",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: COMMENT,
+        reopen: { type: "boolean", description: "Reopen a resolved thread instead." },
+        dry_run: DRY_RUN,
+        operation_id: OPERATION_ID,
+      },
+      required: ["id"],
+      additionalProperties: false,
+    },
+    argv: (input, agent) => [
+      "work",
+      "comment-resolve",
+      ...(flag(input, "reopen") ? ["--reopen"] : []),
+      ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+      ...writing(input, agent),
+      "--json",
+      "--",
+      text(input, "id", true),
+    ],
+  },
+  {
+    name: "sona_comment_delete",
+    title: "Delete a Sona comment",
+    description: `Delete a comment you wrote. Its body is gone; replies under it stay, under a deleted marker. dry_run:true shows the comment without deleting it. ${COMMENT_WRITES}`,
+    mutates: "destroys",
+    optIn: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: COMMENT,
+        dry_run: DRY_RUN,
+        operation_id: OPERATION_ID,
+      },
+      required: ["id"],
+      additionalProperties: false,
+    },
+    argv: (input, agent) => [
+      "work",
+      "comment-delete",
+      ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+      ...writing(input, agent),
+      "--json",
+      "--",
+      text(input, "id", true),
     ],
   },
   {

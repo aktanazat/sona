@@ -114,6 +114,42 @@ describe("tool arguments", () => {
     ]);
     expect(() => stats.argv({})).toThrow(SonaInputError);
   });
+
+  test("a comment save without id adds one, with id edits the one named", () => {
+    const save = tool("sona_comment_save");
+    const comment = "e7f77ae7-0000-4000-8000-000000000001";
+
+    expect(save.argv({ task: "S-1", body: "-started", reply_to: comment }, "Claude")).toEqual([
+      "work",
+      "comment",
+      "add",
+      "--body=-started",
+      `--reply-to=${comment}`,
+      "--agent=Claude",
+      "--json",
+      "--",
+      "S-1",
+    ]);
+    expect(save.argv({ id: comment, body: "fixed", dry_run: true })).toEqual([
+      "work",
+      "comment-edit",
+      "--body=fixed",
+      "--dry-run",
+      "--json",
+      "--",
+      comment,
+    ]);
+    expect(() => save.argv({ id: comment, task: "S-1", body: "x" })).toThrow(SonaInputError);
+    expect(() => save.argv({ body: "x" })).toThrow("task is required");
+  });
+
+  test("a null parent lifts a task to top level", () => {
+    const update = tool("sona_work_update");
+
+    expect(update.argv({ tasks: "S-4", parent: null })).toContain("--parent=none");
+    expect(update.argv({ tasks: "S-4", parent: "S-1" })).toContain("--parent=S-1");
+    expect(update.argv({ tasks: "S-4" }).some((arg) => arg.startsWith("--parent"))).toBe(false);
+  });
 });
 
 describe("running sona", () => {
@@ -220,6 +256,11 @@ const SONA_WRITES = {
   "milestone-delete": true,
   "person-save": true,
   "person-merge": true,
+  comment: true,
+  "comment-edit": true,
+  "comment-delete": true,
+  "comment-resolve": true,
+  subtask: true,
 };
 
 /** The verbs with which `sona` takes away what no Sona tool gives back. */
@@ -228,16 +269,26 @@ const SONA_DESTROYS = {
   "view-delete": true,
   "milestone-delete": true,
   "person-merge": true,
+  "comment-delete": true,
 };
 
-/** Each required argument at its first enum value or a placeholder. */
+/** Each required argument at its first enum value or a placeholder, and
+ * task wherever a tool takes one, since a comment save needs task or id. */
 function smallest(tool: ToolDefinition): ToolInput {
   const input: ToolInput = {};
-  for (const name of tool.inputSchema.required ?? []) {
+  const names = [...(tool.inputSchema.required ?? [])];
+  if ("task" in tool.inputSchema.properties && !names.includes("task")) names.push("task");
+  for (const name of names) {
     const property = tool.inputSchema.properties[name];
     input[name] =
       property?.enum?.[0] ??
-      (property?.type === "integer" ? 1 : property?.type === "boolean" ? true : "S-1");
+      (property?.type === "integer"
+        ? 1
+        : property?.type === "boolean"
+          ? true
+          : property?.type === "array"
+            ? ["S-1"]
+            : "S-1");
   }
   return input;
 }
@@ -407,6 +458,21 @@ describe("the stdio server", () => {
     expect(missing.code).toBe(ErrorCode.InvalidParams);
     expect(missing.message).toContain("name is required");
     expect(() => sona.argv()).toThrow();
+  });
+
+  test("sub-task titles arrive as one argument each", async () => {
+    const sona = stub({ stdout: "{}" });
+    const client = await connected();
+    try {
+      await client.callTool({
+        name: "sona_subtask_create",
+        arguments: { parent: "S-1", titles: ["Book the venue", "--order banners"] },
+      });
+    } finally {
+      await client.close();
+    }
+
+    expect(sona.argv().slice(-4)).toEqual(["--", "S-1", "Book the venue", "--order banners"]);
   });
 
   test("a tool this server does not have is method-not-found", async () => {
