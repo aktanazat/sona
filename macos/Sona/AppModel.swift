@@ -360,6 +360,8 @@ final class AppModel {
     /// the menu bar mark hands it over when it first appears. Observed, so a
     /// reveal the core asked for before then runs again once it can.
     var presentMainWindow: () -> Void = {}
+    @ObservationIgnored var mainWindowOpen = false
+    private static let reopenWindowKey = "reopenMainWindow"
 
     init() {
         settings = SettingsStore(core: core)
@@ -498,6 +500,16 @@ final class AppModel {
     func reveal() {
         presentMainWindow()
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    func rememberMainWindow() {
+        UserDefaults.standard.set(mainWindowOpen, forKey: Self.reopenWindowKey)
+    }
+
+    func reopenMainWindow() {
+        guard UserDefaults.standard.bool(forKey: Self.reopenWindowKey) else { return }
+        UserDefaults.standard.removeObject(forKey: Self.reopenWindowKey)
+        reveal()
     }
 
     /// The settings, on the tab last shown, from the app menu or the menu bar.

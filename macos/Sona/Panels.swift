@@ -1051,6 +1051,7 @@ struct CommandPalette: View {
     @State private var picked: [WorkAnswerLine] = []
     /// Answer lines already made into tasks from this palette.
     @State private var taken: Set<String> = []
+    @State private var listHeight: CGFloat = 0
     @FocusState private var focused: Bool
 
     /// A single letter matches half the corpus, so it is not a query yet.
@@ -1184,9 +1185,10 @@ struct CommandPalette: View {
                         footnote
                     }
                     .padding(.bottom, 8)
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { listHeight = $0 }
                 }
                 .scrollIndicators(.never)
-                .frame(maxHeight: 420)
+                .frame(height: min(listHeight, 420))
                 .onChange(of: selection) { _, index in
                     if rows.indices.contains(index) {
                         proxy.scrollTo(rows[index].id)
