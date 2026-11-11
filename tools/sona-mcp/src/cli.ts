@@ -103,6 +103,7 @@ export function runSona(argv: readonly string[]): Promise<SonaAnswer> {
   const binary = sonaBinary();
   const child = spawn(binary, [...argv], {
     stdio: ["ignore", "pipe", "pipe"],
+    env: { ...process.env, SONA_VIA: "mcp" },
   });
   let stdout = "";
   let stderr = "";

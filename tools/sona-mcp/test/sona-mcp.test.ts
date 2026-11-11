@@ -185,7 +185,18 @@ describe("tool arguments", () => {
       comment,
     ]);
     expect(() => save.argv({ id: comment, task: "S-1", body: "x" })).toThrow(SonaInputError);
-    expect(() => save.argv({ body: "x" })).toThrow("task is required");
+    expect(() => save.argv({ body: "x" })).toThrow("Name exactly one of task");
+    expect(() => save.argv({ task: "S-1", note: comment, body: "x" })).toThrow(SonaInputError);
+    expect(save.argv({ project: "Launch", milestone: "Beta", body: "held" })).toEqual([
+      "work",
+      "comment",
+      "add",
+      "--project=Launch",
+      "--milestone=Beta",
+      "--body=held",
+      "--json",
+      "--",
+    ]);
   });
 
   test("a null parent lifts a task to top level", () => {
@@ -216,6 +227,46 @@ describe("tool arguments", () => {
       tool("sona_work_view_save").argv({ name: "Mine", show_empty_groups: false, properties: ["id", "due"] }),
     ).toEqual(expect.arrayContaining(["--show-empty-groups=false", "--properties=id,due"]));
     expect(tool("sona_scratchpad_delete").mutates).toBe("destroys");
+  });
+
+  test("moving tasks and the board's display reach the CLI as its flags", () => {
+    const move = tool("sona_work_move");
+
+    expect(move.argv({ tasks: "S-2, S-3", to: "top" })).toEqual(
+      expect.arrayContaining(["move", "--top", "--", "S-2", "S-3"]),
+    );
+    expect(move.argv({ tasks: "S-2", to: "after", anchor: "S-7" })).toEqual(
+      expect.arrayContaining(["--after", "S-7", "--", "S-2"]),
+    );
+    expect(() => move.argv({ tasks: "S-2", to: "before" })).toThrow(SonaInputError);
+    expect(
+      tool("sona_work_view_save").argv({
+        name: "Board",
+        group_by: "label",
+        sub_group_by: "cycle",
+        show_sub_tasks: false,
+        hidden_columns: [],
+      }),
+    ).toEqual(
+      expect.arrayContaining([
+        "--group-by=label",
+        "--sub-group-by=cycle",
+        "--show-sub-tasks=false",
+        "--hidden-columns=",
+      ]),
+    );
+  });
+
+  test("a note can name the task, project or cycle it is a document of", () => {
+    const create = tool("sona_scratchpad_create");
+
+    expect(create.argv({ body: "Draft", task: "S-4" })).toEqual(
+      expect.arrayContaining(["note-new", "--task=S-4", "--", "Draft"]),
+    );
+    expect(create.argv({ body: "Draft" }).some((arg) => /^--(task|project|cycle)=/.test(arg))).toBe(false);
+    expect(
+      tool("sona_scratchpad_link").argv({ note_id: "n", kind: "cycle", source_id: "next" }),
+    ).toContain("--cycle=next");
   });
 
   test("a setting's value arrives whole after --, and settings that take things away are opt-in", () => {
@@ -493,6 +544,33 @@ describe("tool arguments", () => {
     ]);
   });
 
+  test("a favorite move names its folder or place, and a person by flag", () => {
+    const move = tool("sona_work_favorite_move");
+    expect(move.argv({ kind: "task", target: "-S-1", into: "-Launch", position: 2 })).toEqual([
+      "work",
+      "favorite-move",
+      "--json",
+      "--into=-Launch",
+      "--position=2",
+      "--",
+      "-S-1",
+    ]);
+    expect(move.argv({ kind: "person", target: "Priya Nair", top: true })).toEqual([
+      "work",
+      "favorite-move",
+      "--json",
+      "--top",
+      "--person=Priya Nair",
+    ]);
+    expect(tool("sona_work_favorite_folder_delete").argv({ folder: "-Launch" })).toEqual([
+      "work",
+      "favorite-folder-delete",
+      "--json",
+      "--",
+      "-Launch",
+    ]);
+  });
+
   test("a project save clears each planning field with null", () => {
     const argv = tool("sona_project_save").argv({
       name: "Harbor",
@@ -529,6 +607,23 @@ describe("tool arguments", () => {
 
     expect(argv).toContain("--lead=me");
     expect(argv).toContain("--members=me,Dana");
+  });
+
+  test("a project save clears summary and status name, and sends edits as one JSON flag", () => {
+    const steps = [{ field: "description", op: "insert_after", anchor: "## Scope", value: "Adds export." }];
+
+    expect(
+      tool("sona_project_save").argv({ name: "Harbor", summary: "", status_name: null, patch: steps }),
+    ).toEqual([
+      "work",
+      "project-save",
+      "--summary=none",
+      "--status-name=none",
+      `--patch-json=${JSON.stringify(steps)}`,
+      "--json",
+      "--",
+      "Harbor",
+    ]);
   });
 
   test("a cycle save runs the one verb its arguments name", () => {
@@ -744,6 +839,7 @@ const SONA_WRITES = {
   "meeting-restore": true,
   "meeting-delete-forever": true,
   "meeting-export": true,
+  export: true,
   "meeting-rename": true,
   "meeting-delete": true,
   "folder-new": true,
@@ -775,11 +871,13 @@ const SONA_WRITES = {
   duplicate: true,
   archive: true,
   restore: true,
+  move: true,
   relate: true,
   unrelate: true,
   "label-save": true,
   "label-delete": true,
   "label-group": true,
+  "label-scope": true,
   "label-retire": true,
   "template-save": true,
   "template-delete": true,
@@ -809,6 +907,19 @@ const SONA_WRITES = {
   "project-archive": true,
   "milestone-save": true,
   "milestone-delete": true,
+  "milestone-to-project": true,
+  "project-relate": true,
+  "project-unrelate": true,
+  "initiative-new": true,
+  "initiative-update": true,
+  "initiative-delete": true,
+  "initiative-add-project": true,
+  "initiative-remove-project": true,
+  "project-template-save": true,
+  "project-template-delete": true,
+  "project-new": true,
+  "project-status-save": true,
+  "project-status-delete": true,
   "person-save": true,
   "person-merge": true,
   comment: true,
@@ -863,9 +974,13 @@ const SONA_WRITES = {
   "description-restore": true,
   favorite: true,
   unfavorite: true,
+  "favorite-folder-save": true,
+  "favorite-folder-delete": true,
+  "favorite-move": true,
   subscribe: true,
   unsubscribe: true,
   "inbox-mark": true,
+  digest: true,
   setting: true,
   "setting-reset": true,
   "mode-save": true,
@@ -902,8 +1017,13 @@ const SONA_DESTROYS = {
   "snapshot-delete": true,
   "label-delete": true,
   "view-delete": true,
+  "favorite-folder-delete": true,
   "milestone-delete": true,
+  "milestone-to-project": true,
+  "project-status-delete": true,
+  "project-template-delete": true,
   "project-delete": true,
+  "initiative-delete": true,
   "project-update-delete": true,
   "person-merge": true,
   "comment-delete": true,
@@ -934,6 +1054,7 @@ function smallest(tool: ToolDefinition): ToolInput {
   const input: ToolInput = {};
   const names = [...(tool.inputSchema.required ?? [])];
   for (const optional of ["task", "path", "project", "health", "body", "cycle"]) {
+    if (optional === "project" && names.includes("task")) continue;
     if (optional in tool.inputSchema.properties && !names.includes(optional)) names.push(optional);
   }
   for (const name of names) {
@@ -1175,6 +1296,16 @@ describe("the stdio server", () => {
 
       await client.callTool({ name: "sona_project_timeline", arguments: { from: "2026-11-01", to: "2027-01-31" } });
       expect(sona.argv().slice(-5)).toEqual(["work", "timeline", "--from=2026-11-01", "--to=2027-01-31", "--json"]);
+
+      await client.callTool({ name: "sona_work_insights", arguments: { days: 90, project: "Sona", owner: "me" } });
+      expect(sona.argv().slice(-6)).toEqual([
+        "work",
+        "insights",
+        "--days=90",
+        "--owner=me",
+        "--project=Sona",
+        "--json",
+      ]);
     } finally {
       await client.close();
     }

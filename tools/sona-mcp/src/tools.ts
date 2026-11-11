@@ -12,6 +12,7 @@ export const SCOPES = [
   "people",
   "loops",
   "notes",
+  "tasks",
 ] as const;
 
 /** Which loop rows `sona_action_items` keeps. */
@@ -71,10 +72,15 @@ const CONDITION_SCHEMA = {
         "project",
         "milestone",
         "label",
+        "parent",
         "cycle",
+        "cycle_scope",
         "due",
         "created",
         "updated",
+        "estimate",
+        "for",
+        "completed",
       ],
       description: "The task field the condition reads.",
     },
@@ -91,13 +97,13 @@ const CONDITION_SCHEMA = {
         "after",
       ],
       description:
-        "How it compares. before and after take only due, created and updated. For labels, is and includes_all need every value, any_of and includes_any any, is_not and none_of none.",
+        "How it compares. before and after take only due, created, updated and completed. For labels, is and includes_all need every value, any_of and includes_any any, is_not and none_of none.",
     },
     values: {
       type: "array",
       items: { type: ["string", "integer"] },
       description:
-        "Ids or names; stored statuses (todo, in_progress, ...); priorities 0-4 or urgent, high, medium, low, none; me for the user; agent names (claude, codex, ...) for delegate; none for an empty field; cycle numbers, current or next; days as YYYY-MM-DD, today, tomorrow, yesterday or epoch ms.",
+        "Ids or names; stored statuses (todo, in_progress, ...); priorities 0-4 or urgent, high, medium, low, none; me for the user; agent names (claude, codex, ...) for delegate; a task id or S-12 for parent; planned or added (joined its cycle after it began) for cycle_scope; points 0-64 for estimate; a person's id for for, the person the work is owed to; none for an empty field; cycle numbers, current or next; days as YYYY-MM-DD, today, tomorrow, yesterday, this_week, last_week, this_month, last_month or epoch ms (completed is the day it was marked done).",
     },
   },
   required: ["field", "op", "values"],
@@ -138,6 +144,9 @@ export interface ToolDefinition {
   readonly mutates?: "changes" | "destroys";
   /** Published only when `SONA_MCP_TOOLS` asks for it. */
   readonly optIn?: true;
+  /** A write that, called again with the same arguments, answers the first
+   * result instead of changing anything more. */
+  readonly idempotent?: true;
   readonly inputSchema: {
     readonly type: "object";
     readonly properties: Record<string, ToolProperty>;
@@ -286,6 +295,17 @@ function links(input: ToolInput): string[] {
   return found.length === 0 ? ["--link=none"] : found.map((link) => `--link=${link}`);
 }
 
+/** An attachment's metadata, one `--meta KEY=VALUE` each. */
+function metadata(input: ToolInput): string[] {
+  const value = input.metadata;
+  if (value === undefined || value === null) return [];
+  const parsed = z.array(z.string()).safeParse(value);
+  if (!parsed.success) {
+    throw new SonaInputError("metadata must be a list of KEY=VALUE strings.");
+  }
+  return parsed.data.map((pair) => `--meta=${pair}`);
+}
+
 function joined(flagName: string, input: ToolInput, key: string): string[] {
   const value = input[key];
   if (value === undefined || value === null) return [];
@@ -375,6 +395,11 @@ const PROJECT = {
   description: "A project's name or id from sona_project_list.",
 } as const;
 
+const INITIATIVE = {
+  type: "string",
+  description: "An initiative's name or id from sona_initiative_list.",
+} as const;
+
 const PERSON = {
   type: "string",
   description:
@@ -385,6 +410,52 @@ const TASK = {
   type: "string",
   description: "A task: its handle (S-12), its number, or its id.",
 } as const;
+
+const COMMENT_ON = {
+  project: {
+    ...PROJECT,
+    description: `The project the threads are on, instead of a task. ${PROJECT.description}`,
+  },
+  milestone: {
+    type: "string",
+    description: "With project, one of its milestones by name or id: the threads are on it.",
+  },
+  meeting: {
+    type: "string",
+    description:
+      "A meeting's id from sona_meetings: the threads are on it, instead of a task. A meeting the user keeps on this Mac answers not_found.",
+  },
+  note: {
+    type: "string",
+    description: "A note's id from sona_notes: the threads are on it, instead of a task.",
+  },
+} as const;
+
+/** What the comments are on: the flags naming a project, a milestone, a
+ * meeting or a note, or the task as the trailing argument. Exactly one. */
+function commentOn(input: ToolInput) {
+  const task = text(input, "task");
+  const project = text(input, "project");
+  const milestone = text(input, "milestone");
+  const meeting = text(input, "meeting");
+  const note = text(input, "note");
+  const named = [task, project, meeting, note].filter((value) => value !== null).length;
+  if (named !== 1) {
+    throw new SonaInputError("Name exactly one of task, project, meeting or note.");
+  }
+  if (milestone !== null && project === null) {
+    throw new SonaInputError("milestone needs its project.");
+  }
+  return {
+    flags: [
+      ...assigned("--project", project),
+      ...assigned("--milestone", milestone),
+      ...assigned("--meeting", meeting),
+      ...assigned("--note", note),
+    ],
+    task: task === null ? [] : [task],
+  };
+}
 
 const TASKS = {
   type: "string",
@@ -402,6 +473,41 @@ const DRY_RUN = {
   description: "Return what would change, field by field, and write nothing.",
 } as const;
 
+/** The fields `initiative-new` and `initiative-update` share. */
+const INITIATIVE_FIELDS = {
+  details: {
+    type: "string",
+    description: "Plain-text details. An empty string or null clears them.",
+  },
+  owner: {
+    ...PERSON,
+    description: `Who owns it: me (the user), or a person. ${PERSON.description} nobody, none or null clears it.`,
+  },
+  target: {
+    type: "string",
+    description: "The local target day: YYYY-MM-DD, today, tomorrow, or none or null to clear it.",
+  },
+  status: {
+    type: "string",
+    enum: ["planned", "active", "completed"],
+    description: "Where the initiative stands. New ones start planned.",
+  },
+  dry_run: DRY_RUN,
+  operation_id: OPERATION_ID,
+} as const;
+
+function initiativeFlags(input: ToolInput, agent: string | undefined): string[] {
+  return [
+    ...nullable("--details", input, "details", ""),
+    ...nullable("--owner", input, "owner", "none"),
+    ...nullable("--target", input, "target", "none"),
+    ...assigned("--status", text(input, "status")),
+    ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+    ...writing(input, agent),
+    "--json",
+  ];
+}
+
 const SESSION = {
   type: "string",
   description: "An agent session's id, from sona_session_start or sona_session_list.",
@@ -412,22 +518,42 @@ const PATCH_STEP: ObjectSchema = {
   properties: {
     field: {
       type: "string",
-      enum: ["title", "description", "status", "priority", "owner", "due", "project", "milestone", "labels", "parent", "cycle", "repeat", "snooze"],
+      enum: ["title", "description", "status", "priority", "owner", "due", "project", "milestone", "labels", "parent", "cycle", "repeat", "snooze", "estimate", "for", "delegate", "blocks", "blocked_by", "related", "duplicate_of", "links", "source"],
       description: "The field this step changes.",
     },
     op: {
       type: "string",
       enum: ["set", "add", "remove", "replace", "append", "prepend", "insert_before", "insert_after", "replace_text"],
-      description: "labels: set, add or remove. description: replace, append, prepend, insert_before, insert_after or replace_text. Others take none.",
+      description: "labels: set, add or remove. description: replace, append, prepend, insert_before, insert_after or replace_text. blocks, blocked_by and related: add (default) or remove. links: add. Others take none.",
     },
     value: {
       type: ["string", "integer", "array", "null"],
       items: { type: "string" },
-      description: "The new value: text, a name or id, a day (YYYY-MM-DD, today, tomorrow), a status (todo, in_progress, done), a priority; a list for labels; null clears.",
+      description: "The new value: text, a name or id, a day (YYYY-MM-DD, today, tomorrow), a status (todo, in_progress, done), a priority; a list for labels; null clears. estimate: points, 0 to 64. for: the person the work is owed to, by name or id. delegate: an agent's name, null takes the task back. blocks, blocked_by, related: a task (S-12) or a list. duplicate_of: the task it repeats. links: a url or a list. source: a meeting's id.",
     },
     anchor: { type: "string", description: "For insert_before, insert_after and replace_text: text already in the description." },
   },
   required: ["field"],
+  additionalProperties: false,
+};
+
+const PROJECT_PATCH_STEP: ObjectSchema = {
+  type: "object",
+  properties: {
+    field: {
+      type: "string",
+      enum: ["description", "summary"],
+      description: "The text this step edits: description (the details) or summary.",
+    },
+    op: {
+      type: "string",
+      enum: ["replace", "append", "prepend", "insert_before", "insert_after", "replace_text"],
+      description: "replace the whole text, append or prepend to it, insert_before or insert_after anchor, or replace_text the anchor.",
+    },
+    anchor: { type: "string", description: "For insert_before, insert_after and replace_text: text already there." },
+    value: { type: "string", description: "The text to write." },
+  },
+  required: ["field", "op", "value"],
   additionalProperties: false,
 };
 
@@ -619,14 +745,35 @@ const VERSION = {
 } as const;
 
 const FAVORITE_TARGET = {
-  kind: { type: "string", enum: ["task", "project", "view"], description: "What target names." },
+  kind: { type: "string", enum: ["task", "project", "view", "person"], description: "What target names." },
   target: {
     type: "string",
-    description: "A task's handle (S-12), number or id; a project's name or id; or a saved view's name or id.",
+    description:
+      "A task's handle (S-12), number or id; a project's name or id; a saved view's name or id; or a person's name, another name they go by, or id.",
   },
 } as const;
 
-/** `favorite` and `unfavorite`: one task, project or saved view. */
+const FAVORITE_FOLDER = {
+  type: "string",
+  description: "A favorites folder's name or id, as sona_work_favorites lists it.",
+} as const;
+
+const FAVORITE_POSITION = {
+  type: "integer",
+  minimum: 1,
+  description: "The place from 1: at the top, among folders and loose favorites, or inside the folder.",
+} as const;
+
+/** The flag that names one favorite, last on the command line. */
+function favoriteNamed(input: ToolInput): string[] {
+  const kind = text(input, "kind", true);
+  const target = text(input, "target", true);
+  if (kind === "task") return ["--", target];
+  if (kind === "project" || kind === "view" || kind === "person") return [`--${kind}=${target}`];
+  throw new SonaInputError("kind must be task, project, view or person.");
+}
+
+/** `favorite` and `unfavorite`: one task, project, saved view or person. */
 function favoriting(verb: "favorite" | "unfavorite", title: string, what: string): ToolDefinition {
   return {
     name: `sona_work_${verb}`,
@@ -640,22 +787,111 @@ function favoriting(verb: "favorite" | "unfavorite", title: string, what: string
       required: ["kind", "target"],
       additionalProperties: false,
     },
-    argv: (input, agent) => {
-      const kind = text(input, "kind", true);
-      const target = text(input, "target", true);
-      const named =
-        kind === "task" ? ["--", target] : kind === "project" || kind === "view" ? [`--${kind}=${target}`] : null;
-      if (named === null) throw new SonaInputError("kind must be task, project or view.");
-      return [
+    argv: (input, agent) => [
+      "work",
+      verb,
+      ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+      ...writing(input, agent),
+      "--json",
+      ...favoriteNamed(input),
+    ],
+  };
+}
+
+function favoriteFolderTools(): ToolDefinition[] {
+  return [
+    {
+      name: "sona_work_favorite_folder_save",
+      title: "Make, rename or move a Sona favorites folder",
+      description: `Make a favorites folder (name, no folder), rename one (folder and name), or move one among the folders and loose favorites at the top (folder and position). A new folder goes last unless position says. Folders hold favorites, not other folders. ${ORGANIZE_WRITES}`,
+      mutates: "changes",
+      optIn: true,
+      inputSchema: {
+        type: "object",
+        properties: {
+          folder: { ...FAVORITE_FOLDER, description: "The folder to rename or move. Leave it out to make a new one." },
+          name: { type: "string", description: "The folder's name." },
+          position: FAVORITE_POSITION,
+          dry_run: DRY_RUN,
+          operation_id: OPERATION_ID,
+        },
+        additionalProperties: false,
+      },
+      argv: (input, agent) => {
+        const folder = text(input, "folder");
+        const name = text(input, "name");
+        const position = count(input, "position");
+        return [
+          "work",
+          "favorite-folder-save",
+          ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+          ...writing(input, agent),
+          "--json",
+          ...assigned("--folder", folder),
+          ...assigned("--name", name),
+          ...assigned("--position", position),
+        ];
+      },
+    },
+    {
+      name: "sona_work_favorite_folder_delete",
+      title: "Delete a Sona favorites folder",
+      description: `Delete a favorites folder. Its favorites stay, at the top where the folder was. ${ORGANIZE_WRITES}`,
+      mutates: "destroys",
+      optIn: true,
+      inputSchema: {
+        type: "object",
+        properties: { folder: FAVORITE_FOLDER, dry_run: DRY_RUN, operation_id: OPERATION_ID },
+        required: ["folder"],
+        additionalProperties: false,
+      },
+      argv: (input, agent) => [
         "work",
-        verb,
+        "favorite-folder-delete",
         ...(flag(input, "dry_run") ? ["--dry-run"] : []),
         ...writing(input, agent),
         "--json",
-        ...named,
-      ];
+        "--",
+        text(input, "folder", true),
+      ],
     },
-  };
+    {
+      name: "sona_work_favorite_move",
+      title: "Move a Sona favorite",
+      description: `Move one favorite into a folder (into), out of its folder to the top (top:true), or to another place where it is (position). Moving into a folder or to the top puts it last there unless position says. ${ORGANIZE_WRITES}`,
+      mutates: "changes",
+      optIn: true,
+      inputSchema: {
+        type: "object",
+        properties: {
+          ...FAVORITE_TARGET,
+          into: { ...FAVORITE_FOLDER, description: "The folder it goes into." },
+          top: { type: "boolean", description: "Take it out of its folder, to the top." },
+          position: FAVORITE_POSITION,
+          dry_run: DRY_RUN,
+          operation_id: OPERATION_ID,
+        },
+        required: ["kind", "target"],
+        additionalProperties: false,
+      },
+      argv: (input, agent) => {
+        const into = text(input, "into");
+        const top = flag(input, "top");
+        const position = count(input, "position");
+        return [
+          "work",
+          "favorite-move",
+          ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+          ...writing(input, agent),
+          "--json",
+          ...assigned("--into", into),
+          ...(top ? ["--top"] : []),
+          ...assigned("--position", position),
+          ...favoriteNamed(input),
+        ];
+      },
+    },
+  ];
 }
 
 function lifecycleTools(): ToolDefinition[] {
@@ -726,14 +962,23 @@ function lifecycleTools(): ToolDefinition[] {
         text(input, "version", true),
       ],
     },
-    favoriting("favorite", "Favorite a Sona task, project or view", "Add a task, a project or a saved view to the user's favorites."),
-    favoriting("unfavorite", "Unfavorite a Sona task, project or view", "Take a task, a project or a saved view out of the user's favorites."),
+    favoriting(
+      "favorite",
+      "Favorite a Sona task, project, view or person",
+      "Add a task, a project, a saved view or a person to the user's favorites, last at the top. Naming a person needs the conversations open.",
+    ),
+    favoriting(
+      "unfavorite",
+      "Unfavorite a Sona task, project, view or person",
+      "Take a task, a project, a saved view or a person out of the user's favorites.",
+    ),
     listing(
       "sona_work_favorites",
       "favorites",
       "Read Sona's favorites",
-      "Read the user's favorite tasks, projects and saved views, in the order added.",
+      "Read the user's favorites in the sidebar's order: tasks, projects, saved views and people (kind, id, name, handle for a task), and folders (kind folder, id, name) each holding its favorites in order.",
     ),
+    ...favoriteFolderTools(),
     onTasks(
       "subscribe",
       "Subscribe to Sona tasks",
@@ -750,7 +995,7 @@ function lifecycleTools(): ToolDefinition[] {
       name: "sona_work_inbox",
       title: "Read Sona's inbox",
       description:
-        "Read the inbox: status changes, comments, mentions and assignments that Sona or agents made on tasks the user is subscribed to, newest first, with the unread count. The user's own changes never notify. Snoozed ones stay out until they wake, archived ones until asked for.",
+        "Read the inbox, newest first, with the unread count: status changes, comments, mentions, assignments and other field changes (kind changed, with field) that Sona or agents made on tasks the user is subscribed to; a reminder firing (reminder) and open work the user owes coming due today (due); an automation run ending (automation, with automation name and error, task null when the run was about no task); and the weekly project digest (digest, task null, with digest holding each project's status, latest update, tasks done and risks, as sona_work_digest shows). The user's own changes never notify. Snoozed ones stay out until they wake, archived ones until asked for.",
       optIn: true,
       inputSchema: {
         type: "object",
@@ -773,7 +1018,7 @@ function lifecycleTools(): ToolDefinition[] {
     {
       name: "sona_work_inbox_mark",
       title: "Mark Sona inbox notifications",
-      description: `Mark notifications read or unread, archive or unarchive them, or snooze them until a day. notifications "all" with mark read marks every unread one. ${ORGANIZE_WRITES}`,
+      description: `Mark notifications read or unread, archive or unarchive them, or snooze them until a day. notifications "all" with mark read marks every unread one; "all" with mark archive clears every read one. ${ORGANIZE_WRITES}`,
       mutates: "changes",
       optIn: true,
       inputSchema: {
@@ -781,7 +1026,7 @@ function lifecycleTools(): ToolDefinition[] {
         properties: {
           notifications: {
             type: "string",
-            description: 'Notification ids from sona_work_inbox, comma-separated, or "all" for every unread one.',
+            description: 'Notification ids from sona_work_inbox, comma-separated, or "all": every unread one with mark read, every read one with mark archive.',
           },
           mark: {
             type: "string",
@@ -809,6 +1054,28 @@ function lifecycleTools(): ToolDefinition[] {
           ...(every ? [] : ["--", ...tasks(input, "notifications")]),
         ];
       },
+    },
+    {
+      name: "sona_work_digest",
+      title: "Post Sona's weekly project digest",
+      description: `The weekly project digest over the last seven days: for each planned, active or paused project its status, percent done, latest update (health and the start of its text), the tasks done in the week, and its risks (the update says at risk or off track, target passed, finishing after the target at its current pace, overdue tasks, a late milestone, no recent update). Posts it to the inbox now; dry_run:true only shows it. Sona also posts one on its own each week on the day Settings names (sona_setting project-digest, project-digest-day). Work from meetings kept on this Mac is left out. ${ORGANIZE_WRITES}`,
+      mutates: "changes",
+      optIn: true,
+      inputSchema: {
+        type: "object",
+        properties: {
+          dry_run: DRY_RUN,
+          operation_id: OPERATION_ID,
+        },
+        additionalProperties: false,
+      },
+      argv: (input, agent) => [
+        "work",
+        "digest",
+        ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+        ...writing(input, agent),
+        "--json",
+      ],
     },
   ];
 }
@@ -891,7 +1158,7 @@ const AGENT_LOOP_WRITES =
   "This changes the user's saved automations in Sona, nothing else. It needs Settings > Agents > External access and External mutations; with either off Sona refuses with consent_required and names the setting. dry_run:true shows the result without writing.";
 
 const AGENT_LOOP_KIND =
-  "An automation is a saved agent workflow: when its trigger fires, the running Sona app has its in-app agent carry out the automation's prompt, using only the read-only tools on the automation's list. It is not a meeting commitment loop (sona_loop_resolve, sona_meeting_loop_*).";
+  "An automation is a saved agent workflow: when its trigger fires, the running Sona app has its in-app agent carry out the automation's prompt, using only the tools on the automation's list. With sona_work_create or sona_work_update on the list it may propose new tasks or changes to tasks; they wait in Triage for the user and are never applied by the run. It is not a meeting commitment loop (sona_loop_resolve, sona_meeting_loop_*).";
 
 const AGENT_LOOP = {
   type: "string",
@@ -976,6 +1243,9 @@ const SETTING_KEYS = [
   "mode",
   "dictation-prompt",
   "keyword-trackers",
+  "auto-close-parents",
+  "project-digest",
+  "project-digest-day",
   "meeting-prep",
 ] as const;
 
@@ -1555,7 +1825,7 @@ export const TOOLS: readonly ToolDefinition[] = [
     name: "sona_search",
     title: "Search Sona",
     description:
-      "Search retained meetings, dictations, people, loops and notes. Results include matching text and a sona:// link. Read reason before treating an empty result as complete; semantic_unavailable means only literal matches were available. Notes are local data exposed through Sona's external-access grant, not remote panel context.",
+      "Search retained meetings, dictations, people, loops, notes and tasks in one call. Results include matching text and a sona:// link; a task row is titled with its handle (S-12) for sona_work_get, and matches its title, details or comments. Meetings kept on this Mac, and tasks drawn from them, are left out. Read reason before treating an empty result as complete; semantic_unavailable means only literal matches were available. Notes and tasks are local data exposed through Sona's external-access grant, not remote panel context.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1568,7 +1838,7 @@ export const TOOLS: readonly ToolDefinition[] = [
           type: "string",
           enum: [...SCOPES],
           description:
-            "Which records to search. 'all' includes notes; selecting one scope skips other sources.",
+            "Which records to search. 'all' includes notes and tasks; selecting one scope skips other sources.",
         },
         limit: LIMIT,
       },
@@ -2025,7 +2295,7 @@ export const TOOLS: readonly ToolDefinition[] = [
     name: "sona_work_list",
     title: "List Sona tasks",
     description:
-      "List tasks in Sona's tracker, most urgent first: priority, then due day. Without status it lists triage and open work that is neither archived nor snoozed. ready:true lists only Todo tasks that nothing open blocks and that are not snoozed, the work to pick up next, and takes only the side, owner, project, label, priority, due_by, due, meeting_id, search, cycle and limit filters. Each task has a handle (S-12) that works wherever a task is asked for, its id, status, priority, owner, due_date, follow_up_at_ms for work someone else owes, focus when it is one of today's focus picks, project, labels, cycle, revision and, for work raised in a meeting, the quote and a sona://loop link. at_risk marks the user's work due within two days with no free hour left on its due day; repeat says how a repeating task comes back and how many of its instances were done in time. Work from meetings kept on this Mac is left out. Read total and has_more before treating the list as complete.",
+      "List tasks in Sona's tracker, most urgent first: priority, then due day; order_by sorts by due, updated, created or manual instead. Without status it lists triage and open work that is neither archived nor snoozed. ready:true lists only Todo tasks that nothing open blocks and that are not snoozed, the work to pick up next, and takes only the side, owner, project, label, priority, due_by, due, meeting_id, search, cycle, limit, order_by, cursor and fields filters. Each task has a handle (S-12) that works wherever a task is asked for, its id, status, priority, owner, due_date, follow_up_at_ms for work someone else owes, focus when it is one of today's focus picks, project, labels, cycle, parent, revision and, for work raised in a meeting, the quote and a sona://loop link. at_risk marks the user's work due within two days with no free hour left on its due day; repeat says how a repeating task comes back and how many of its instances were done in time. Work from meetings kept on this Mac is left out. Read total and has_more before treating the list as complete; when has_more is true, pass next_cursor as cursor, with the same filters, for the next page.",
     inputSchema: {
       type: "object",
       properties: {
@@ -2075,6 +2345,27 @@ export const TOOLS: readonly ToolDefinition[] = [
           type: "string",
           description: "Only work planned in this cycle: current, next, its number, or none.",
         },
+        parent: {
+          type: "string",
+          description:
+            "Only the sub-tasks of this task, by handle (S-12) or id; none for work under no other task. Not with ready.",
+        },
+        cycle_scope: {
+          type: "string",
+          enum: ["planned", "added"],
+          description:
+            "Only work in a cycle that was planned when the cycle began (rolled-over work counts), or only work added after it began. Not with ready.",
+        },
+        for: {
+          type: "string",
+          description:
+            "Only work for these people, the ones it is owed to: names or ids, comma-separated. Not with ready.",
+        },
+        completed: {
+          type: "string",
+          description:
+            "Only work marked done in this window: YYYY-MM-DD, today, yesterday, this_week, last_week, this_month or last_month. Not with ready.",
+        },
         view: {
           type: "string",
           description:
@@ -2103,6 +2394,22 @@ export const TOOLS: readonly ToolDefinition[] = [
             'The filter in plain words, such as "high priority bugs due this week that are mine". The answer\'s read_as gives each condition the words were read as (the same shape filter takes) and not_understood the words that did not narrow the list; check it before trusting the list. Not with ready.',
         },
         limit: LIMIT,
+        order_by: {
+          type: "string",
+          enum: ["priority", "due", "updated", "created", "status", "manual"],
+          description:
+            "priority (the default: priority, then the soonest due), due (soonest first), updated or created (newest first), status (work under way first), or manual (the order the user arranged tasks in; sona_work_move changes it).",
+        },
+        cursor: {
+          type: "string",
+          description:
+            "The next_cursor of the page before, to read the tasks after it. Keep the filters the same; the cursor keeps its order.",
+        },
+        fields: {
+          type: "string",
+          description:
+            "Only these fields of each task, comma-separated, such as title,status,due_date; id and handle always come. Field names are the keys a task has in the answer.",
+        },
       },
       additionalProperties: false,
     },
@@ -2117,9 +2424,16 @@ export const TOOLS: readonly ToolDefinition[] = [
       ...(flag(input, "ready") ? [] : assigned("--source", text(input, "source"))),
       ...(flag(input, "ready") || !flag(input, "stale") ? [] : ["--stale"]),
       ...(flag(input, "ready") ? [] : assigned("--delegate", text(input, "delegate"))),
+      ...(flag(input, "ready") ? [] : assigned("--parent", text(input, "parent"))),
+      ...(flag(input, "ready") ? [] : assigned("--cycle-scope", text(input, "cycle_scope"))),
+      ...(flag(input, "ready") ? [] : assigned("--for", text(input, "for"))),
+      ...(flag(input, "ready") ? [] : assigned("--completed", text(input, "completed"))),
       ...conditions(input),
       ...(flag(input, "ready") ? [] : assigned("--where", text(input, "where"))),
       ...assigned("--limit", count(input, "limit")),
+      ...assigned("--order-by", text(input, "order_by")),
+      ...assigned("--cursor", text(input, "cursor")),
+      ...assigned("--fields", text(input, "fields")),
       "--json",
     ],
   },
@@ -2127,7 +2441,7 @@ export const TOOLS: readonly ToolDefinition[] = [
     name: "sona_work_get",
     title: "Read a Sona task",
     description:
-      "Read one task: every field, how often it repeats, the meeting quote it came from with its speaker and a sona://loop link, the tasks it blocks, is blocked by or relates to, the task it sits under (parent) and its sub-tasks with how many are done (sub_tasks), its comment threads with replies, its attachments (files with the path of Sona's copy, and links), its evidence (meetings, notes, dictation quotes and links), what Sona suggests for it while it waits in triage (owner, due day, project, duplicate) with the reason and quote, and its history, each entry marked as made by the user (me), Sona or an agent.",
+      "Read one task: every field and a sona://task link (link) that opens it in Sona, how often it repeats, the meeting quote it came from with its speaker and a sona://loop link, the tasks it blocks, is blocked by or relates to (a blocker that is done or canceled reads as related, as Sona shows it), the task it sits under (parent) and its sub-tasks with how many are done (sub_tasks), its reminder, the agent sessions working on it (sessions), its comment threads with replies, its attachments (files with the path of Sona's copy, and links), its evidence (meetings, notes, dictation quotes and links), what Sona suggests for it while it waits in triage (owner, due day, project, duplicate) with the reason and quote, and its history, each entry marked as made by the user (me), Sona or an agent, an agent's with how it came (via: mcp or cli), and the created entry of a task heard in a meeting naming that meeting. Writing S-12 in a description or comment links that task as related.",
     inputSchema: {
       type: "object",
       properties: { task: TASK },
@@ -2150,6 +2464,60 @@ export const TOOLS: readonly ToolDefinition[] = [
       additionalProperties: false,
     },
     argv: (input) => ["work", "follow-up", "--json", "--", text(input, "meeting", true)],
+  },
+  {
+    name: "sona_work_export",
+    title: "Export Sona tasks as Markdown",
+    description:
+      "Write the tasks that match the filters into a folder on this Mac as Markdown, one S-12.md file per task with its fields, details and meeting quote, replacing files of the same name; the folder is made when missing. Without status it writes triage and open work. Returns the folder and the files written. It needs Settings > Agents > External access and External mutations; with either off Sona refuses with consent_required and names the setting.",
+    mutates: "changes",
+    optIn: true,
+    idempotent: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        directory: {
+          type: "string",
+          description: "The folder to write into, as an absolute path.",
+        },
+        status: {
+          type: "string",
+          description:
+            "Comma-separated: triage, backlog, todo, in_progress, done, canceled, duplicate, open, closed or all.",
+        },
+        side: WORK_SIDE,
+        owner: { type: "string", description: "People by name or id, comma-separated; me or nobody." },
+        project: { type: "string", description: "Projects by name or id, comma-separated; none for work in no project." },
+        label: { type: "string", description: "Labels by name or id, comma-separated: work with any of them." },
+        priority: { type: "string", description: "Comma-separated: urgent, high, medium, low or none." },
+        due_by: { type: "string", description: "Due on or before this local day: YYYY-MM-DD, today or tomorrow." },
+        due: DUE_WINDOWS,
+        meeting_id: {
+          ...MEETING_ID,
+          description: "Only work raised in this meeting. " + MEETING_ID.description,
+        },
+        search: { type: "string", description: "Words in the title, details or comments, or a task handle such as S-12." },
+        cycle: { type: "string", description: "Only work planned in this cycle: current, next, its number, or none." },
+        parent: { type: "string", description: "Only the sub-tasks of this task, by handle or id; none for work under no other task." },
+        archived: { type: "boolean", description: "Include archived work." },
+        snoozed: { type: "boolean", description: "Include snoozed work." },
+        filter: FILTER,
+      },
+      required: ["directory"],
+      additionalProperties: false,
+    },
+    argv: (input) => [
+      "work",
+      "export",
+      `--md=${text(input, "directory", true)}`,
+      ...scopeFlags(input),
+      ...assigned("--status", text(input, "status")),
+      ...assigned("--parent", text(input, "parent")),
+      ...(flag(input, "archived") ? ["--archived"] : []),
+      ...(flag(input, "snoozed") ? ["--snoozed"] : []),
+      ...conditions(input),
+      "--json",
+    ],
   },
   {
     name: "sona_work_counts",
@@ -2178,6 +2546,7 @@ export const TOOLS: readonly ToolDefinition[] = [
     title: "Create a Sona task",
     description: `Create a task: Todo, no priority and no owner unless told otherwise. ${WRITES} Calling again with the same arguments on the same day returns the first task with replayed:true instead of a second one; pass a new operation_id to create a twin on purpose.`,
     mutates: "changes",
+    idempotent: true,
     inputSchema: {
       type: "object",
       properties: {
@@ -2205,6 +2574,7 @@ export const TOOLS: readonly ToolDefinition[] = [
     title: "Change Sona tasks",
     description: `Change one task or several. Several tasks take the same change together or not at all; add_labels and remove_labels go task by task. Fields left out stay as they are, and tasks already as asked are reported under skipped. dry_run:true returns each field's from and to, and whether a meeting commitment would close or reopen, without writing. ${WRITES}`,
     mutates: "changes",
+    idempotent: true,
     inputSchema: {
       type: "object",
       properties: {
@@ -2234,6 +2604,17 @@ export const TOOLS: readonly ToolDefinition[] = [
           description:
             "Plan the tasks in a cycle: current, next, its number, or none to take them out.",
         },
+        estimate: {
+          type: "integer",
+          minimum: 0,
+          maximum: 64,
+          description: "Points of effort, 0 to 64; null clears it.",
+        },
+        for: {
+          type: "string",
+          description:
+            "The person the work is for, who is owed it: a name or id; null or none clears it. Look people up with sona_people.",
+        },
         expected_revision: {
           type: "integer",
           description:
@@ -2255,6 +2636,8 @@ export const TOOLS: readonly ToolDefinition[] = [
       ...assigned("--snooze-until", text(input, "snooze_until")),
       ...assigned("--cycle", text(input, "cycle")),
       ...nullable("--parent", input, "parent", "none"),
+      ...(input["estimate"] === null ? ["--estimate=none"] : assigned("--estimate", count(input, "estimate"))),
+      ...nullable("--for", input, "for", "none"),
       ...assigned("--expected-revision", count(input, "expected_revision")),
       ...(flag(input, "dry_run") ? ["--dry-run"] : []),
       ...writing(input, agent),
@@ -2266,17 +2649,19 @@ export const TOOLS: readonly ToolDefinition[] = [
   {
     name: "sona_work_claim",
     title: "Start a Sona task",
-    description: `Start a Todo or Backlog task before working on it: it moves to In progress with you shown working it, and its owner stays who it was. Claiming a task you already work changes nothing. Refused when another agent works it, or when it is in progress without you, still in triage, archived or closed, so two agents cannot both start it. ${WRITES}`,
+    description: `Start a Todo or Backlog task before working on it: it moves to In progress with you shown working it, and its owner stays who it was. Claiming a task you already work changes nothing. Refused when another agent works it, or when it is in progress without you, still in triage, archived or closed, so two agents cannot both start it. dry_run:true shows the change, or the refusal, without writing. ${WRITES}`,
     mutates: "changes",
+    idempotent: true,
     inputSchema: {
       type: "object",
-      properties: { task: TASK, operation_id: OPERATION_ID },
+      properties: { task: TASK, dry_run: DRY_RUN, operation_id: OPERATION_ID },
       required: ["task"],
       additionalProperties: false,
     },
     argv: (input, agent) => [
       "work",
       "claim",
+      ...(flag(input, "dry_run") ? ["--dry-run"] : []),
       ...writing(input, agent),
       "--json",
       "--",
@@ -2317,7 +2702,7 @@ export const TOOLS: readonly ToolDefinition[] = [
   {
     name: "sona_subtask_create",
     title: "Make Sona sub-tasks",
-    description: `Make one sub-task under a task for each title. Each takes the parent's project, milestone and priority unless priority is given; the owner, left out, is the user when the parent is theirs, else the owner its other sub-tasks share, else nobody. dry_run:true shows them without writing. ${WRITES}`,
+    description: `Make one sub-task under a task for each title, or with from_checklist:true one for each open "- [ ]" line of the parent's description, which then leaves the description. Each takes the parent's project, milestone and priority unless priority is given; the owner, left out, is the user when the parent is theirs, else the owner its other sub-tasks share, else nobody. dry_run:true shows them without writing. ${WRITES}`,
     mutates: "changes",
     inputSchema: {
       type: "object",
@@ -2327,14 +2712,18 @@ export const TOOLS: readonly ToolDefinition[] = [
           type: "array",
           items: { type: "string" },
           minItems: 1,
-          description: "One title per sub-task.",
+          description: "One title per sub-task. Leave out with from_checklist.",
+        },
+        from_checklist: {
+          type: "boolean",
+          description: "Make the sub-tasks from the open checklist lines of the parent's description instead of titles.",
         },
         owner: FIELDS.owner,
         priority: FIELDS.priority,
         dry_run: DRY_RUN,
         operation_id: OPERATION_ID,
       },
-      required: ["parent", "titles"],
+      required: ["parent"],
       additionalProperties: false,
     },
     argv: (input, agent) => [
@@ -2343,22 +2732,24 @@ export const TOOLS: readonly ToolDefinition[] = [
       ...assigned("--owner", text(input, "owner")),
       ...assigned("--priority", text(input, "priority")),
       ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+      ...(flag(input, "from_checklist") ? ["--from-checklist"] : []),
       ...writing(input, agent),
       "--json",
       "--",
       text(input, "parent", true),
-      ...strings(input, "titles"),
+      ...(input.titles === undefined ? [] : strings(input, "titles")),
     ],
   },
   {
     name: "sona_comment_list",
-    title: "Read a Sona task's comments",
+    title: "Read comments in Sona",
     description:
-      "Read a task's comment threads, oldest first: each comment's id, author (me, sona or an agent by name), Markdown body, when it was written, edited and resolved, and its replies. A deleted comment keeps its place with body null while it has replies. Pass next_cursor back as cursor for the next page.",
+      "Read the comment threads on a task, a project, a milestone, a meeting or a note, oldest first: name exactly one of task, project (with milestone for one of its milestones), meeting or note. Each comment carries its id, author (me, sona or an agent by name), Markdown body, when it was written, edited and resolved, and its replies. A deleted comment keeps its place with body null while it has replies. Pass next_cursor back as cursor for the next page.",
     inputSchema: {
       type: "object",
       properties: {
         task: TASK,
+        ...COMMENT_ON,
         limit: {
           ...LIMIT,
           description: "How many threads to return. Sona defaults to 50 and caps at 100.",
@@ -2368,29 +2759,33 @@ export const TOOLS: readonly ToolDefinition[] = [
           description: "The next_cursor of the page before.",
         },
       },
-      required: ["task"],
       additionalProperties: false,
     },
-    argv: (input) => [
-      "work",
-      "comments",
-      ...assigned("--limit", count(input, "limit")),
-      ...assigned("--cursor", text(input, "cursor")),
-      "--json",
-      "--",
-      text(input, "task", true),
-    ],
+    argv: (input) => {
+      const on = commentOn(input);
+      return [
+        "work",
+        "comments",
+        ...on.flags,
+        ...assigned("--limit", count(input, "limit")),
+        ...assigned("--cursor", text(input, "cursor")),
+        "--json",
+        "--",
+        ...on.task,
+      ];
+    },
   },
   {
     name: "sona_comment_save",
-    title: "Comment on a Sona task",
-    description: `Without id, add a comment to task, or with reply_to answer in that comment's thread (a reply to a reply joins the thread's first comment). With id, change the body of a comment you wrote; task and reply_to are then left out. The comment is shown as yours. Use it to say what you are doing on a task you claimed, what you found and what is left. dry_run:true shows it without writing. ${COMMENT_WRITES} Agents may comment whether their changes apply or wait for the user.`,
+    title: "Comment in Sona",
+    description: `Without id, add a comment to a task, a project (with milestone, one of its milestones), a meeting or a note: name exactly one of task, project, meeting or note. With reply_to, answer in that comment's thread (a reply to a reply joins the thread's first comment). With id, change the body of a comment you wrote; leave out what it is on and reply_to. The comment is shown as yours. Use it to say what you are doing on a task you claimed, what you found and what is left. A meeting the user keeps on this Mac answers not_found. dry_run:true shows it without writing. ${COMMENT_WRITES} Agents may comment whether their changes apply or wait for the user.`,
     mutates: "changes",
     inputSchema: {
       type: "object",
       properties: {
         id: { ...COMMENT, description: `The comment to change. ${COMMENT.description}` },
         task: { ...TASK, description: `The task to comment on, when id is left out. ${TASK.description}` },
+        ...COMMENT_ON,
         reply_to: {
           ...COMMENT,
           description: `Reply in this comment's thread. ${COMMENT.description}`,
@@ -2407,8 +2802,12 @@ export const TOOLS: readonly ToolDefinition[] = [
       const body = text(input, "body", true);
       const dryRun = flag(input, "dry_run") ? ["--dry-run"] : [];
       if (id !== null) {
-        if (text(input, "task") !== null || text(input, "reply_to") !== null) {
-          throw new SonaInputError("id changes a comment; leave task and reply_to out.");
+        if (
+          ["task", "project", "milestone", "meeting", "note", "reply_to"].some(
+            (key) => text(input, key) !== null,
+          )
+        ) {
+          throw new SonaInputError("id changes a comment; leave what it is on and reply_to out.");
         }
         return [
           "work",
@@ -2421,17 +2820,19 @@ export const TOOLS: readonly ToolDefinition[] = [
           id,
         ];
       }
+      const on = commentOn(input);
       return [
         "work",
         "comment",
         "add",
+        ...on.flags,
         `--body=${body}`,
         ...assigned("--reply-to", text(input, "reply_to")),
         ...dryRun,
         ...writing(input, agent),
         "--json",
         "--",
-        text(input, "task", true),
+        ...on.task,
       ];
     },
   },
@@ -2491,7 +2892,7 @@ export const TOOLS: readonly ToolDefinition[] = [
   {
     name: "sona_task_attach",
     title: "Attach a file or link to a Sona task",
-    description: `Attach a file or a link to a task: exactly one of path or url. A file is copied into Sona (at most 50 MB); a link must start with http://, https://, mailto: or sona://. Attaching the same file or link to the same task again answers the one already there with replayed:true. Attach what you made for the task, such as a report, a screenshot or a pull request link; never attach secrets, keys, tokens or credentials. dry_run:true checks the file or link and writes nothing. ${COMMENT_WRITES} Agents may attach whether their changes apply or wait for the user.`,
+    description: `Attach a file or a link to a task: exactly one of path or url. A file is copied into Sona (at most 50 MB); a link must start with http://, https://, mailto: or sona://. Attaching the same file or link to the same task again answers the one already there with replayed:true; metadata given then replaces its metadata. comment puts it on one of the task's comments (an id from sona_comment_list), where the app shows it under that comment. Attach what you made for the task, such as a report, a screenshot or a pull request link; never attach secrets, keys, tokens or credentials. dry_run:true checks the file or link and writes nothing. ${COMMENT_WRITES} Agents may attach whether their changes apply or wait for the user.`,
     mutates: "changes",
     inputSchema: {
       type: "object",
@@ -2510,6 +2911,16 @@ export const TOOLS: readonly ToolDefinition[] = [
           description: "Shown instead of the file's name or the link.",
         },
         subtitle: { type: "string", description: "A second line under the title." },
+        metadata: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Key-value facts to keep on it, each KEY=VALUE, such as status=green or build=812.",
+        },
+        comment: {
+          type: "string",
+          description: "The id of a comment on the task to put it on.",
+        },
         dry_run: DRY_RUN,
         operation_id: OPERATION_ID,
       },
@@ -2527,6 +2938,8 @@ export const TOOLS: readonly ToolDefinition[] = [
         "attach",
         ...assigned("--title", text(input, "title")),
         ...assigned("--subtitle", text(input, "subtitle")),
+        ...metadata(input),
+        ...assigned("--comment", text(input, "comment")),
         ...(flag(input, "dry_run") ? ["--dry-run"] : []),
         ...writing(input, agent),
         "--json",
@@ -2540,7 +2953,7 @@ export const TOOLS: readonly ToolDefinition[] = [
     name: "sona_task_attachments",
     title: "Read a Sona task's attachments",
     description:
-      "Read a task's attachments, oldest first: each one's id, kind (file, image or link), title, subtitle, the link or the absolute path of Sona's copy of the file, its original name, type, size and sha256, when it was attached and by whom (me, sona or an agent by name).",
+      "Read a task's attachments, oldest first: each one's id, kind (file, image or link), title, subtitle, the link or the absolute path of Sona's copy of the file, its original name, type, size and sha256, its key-value metadata, the comment it is on (comment_id, absent for one on the task), when it was attached and by whom (me, sona or an agent by name).",
     inputSchema: {
       type: "object",
       properties: { task: TASK },
@@ -2580,8 +2993,9 @@ export const TOOLS: readonly ToolDefinition[] = [
   {
     name: "sona_work_triage",
     title: "Triage Sona tasks",
-    description: `Decide on work Sona pulled out of meetings. accept moves triage items to Todo with Sona's suggested owner, due day and project unless ignore_suggestions is true. decline cancels them and sets their meeting commitments aside; reason is kept in each task's history. duplicate marks one task a duplicate of another (of), moving its quotes and links there. Items not in triage are left alone and listed under skipped. dry_run:true previews accept and decline. ${WRITES}`,
+    description: `Decide on work Sona pulled out of meetings. accept moves triage items to Todo with Sona's suggested owner, due day and project unless ignore_suggestions is true. decline cancels them and sets their meeting commitments aside; reason is kept in each task's history. duplicate marks one task a duplicate of another (of), moving its quotes and links there. Items not in triage are left alone and listed under skipped. dry_run:true previews any decision without writing. ${WRITES}`,
     mutates: "changes",
+    idempotent: true,
     inputSchema: {
       type: "object",
       properties: {
@@ -2644,6 +3058,7 @@ export const TOOLS: readonly ToolDefinition[] = [
             "work",
             "duplicate",
             `--of=${text(input, "of", true)}`,
+            ...(flag(input, "dry_run") ? ["--dry-run"] : []),
             ...common,
             "--",
             ...tasks(input, "tasks"),
@@ -2655,6 +3070,43 @@ export const TOOLS: readonly ToolDefinition[] = [
   },
   archiving("archive", "Archive Sona tasks", "Hide tasks from every list without changing their status."),
   archiving("restore", "Restore Sona tasks", "Bring archived tasks back into their lists, or deleted tasks out of the bin as they were. One call restores from one place."),
+  {
+    name: "sona_work_move",
+    title: "Move Sona tasks in the manual order",
+    description: `Move tasks in the manual order lists show with order_by manual: to the top, to the bottom, or just before or after another task. The tasks keep their order among themselves, and nothing else about them changes. dry_run:true shows where they would go without writing. ${WRITES}`,
+    mutates: "changes",
+    optIn: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        tasks: TASKS,
+        to: {
+          type: "string",
+          enum: ["top", "bottom", "before", "after"],
+          description: "Where they go; before and after need anchor.",
+        },
+        anchor: { ...TASK, description: "For before or after: the task they go beside, S-12 or its id." },
+        dry_run: DRY_RUN,
+        operation_id: OPERATION_ID,
+      },
+      required: ["tasks", "to"],
+      additionalProperties: false,
+    },
+    argv: (input, agent) => {
+      const to = text(input, "to", true);
+      const beside = to === "before" || to === "after";
+      return [
+        "work",
+        "move",
+        ...(beside ? [`--${to}`, text(input, "anchor", true)] : [`--${to}`]),
+        ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+        ...writing(input, agent),
+        "--json",
+        "--",
+        ...tasks(input, "tasks"),
+      ];
+    },
+  },
   ...lifecycleTools(),
   linking("relate", "Link Sona tasks", "Link two tasks. Linking them again returns the link already there."),
   linking("unrelate", "Unlink Sona tasks", "Remove a link between two tasks."),
@@ -2662,7 +3114,7 @@ export const TOOLS: readonly ToolDefinition[] = [
     name: "sona_cycle_list",
     title: "Read Sona cycles",
     description:
-      "Read the tracker's cycles: how many weeks each runs, the weekday it starts, the cooldown weeks between cycles and how many are planned ahead, then every cycle with its number, name, state (past, current or upcoming), first and last day, scope (tasks planned in it and not dropped), started, done and, once ended, success (done counts 100, started 25, over scope). With cycle, read that one cycle's scope, started and done as each of its days ended, and how many tasks were carried over unfinished from earlier cycles. Unfinished work moves to the new cycle by itself when one starts.",
+      "Read the tracker's cycles: how many weeks each runs, the weekday it starts, the cooldown weeks between cycles, how many are planned ahead, whether started (auto_add_started) and done (auto_add_completed) work with no cycle joins one by itself, and capacity, the tasks a cycle usually finishes (the mean done of the last three ended cycles, null until that mean reaches one task; compare it with an upcoming cycle's scope), then every cycle with its number, name, state (past, current or upcoming), first and last day, scope (tasks planned in it and not dropped), started, done and, once ended, success (done counts 100, started 25, over scope). With cycle, read that one cycle's scope, started and done as each of its days ended, target (where an even pace would have done by each day of the cycle, flat on weekends), and how many tasks were carried over unfinished from earlier cycles. With ics:true, calendar holds every cycle as an iCalendar file's text for a calendar app. Unfinished work moves to the new cycle by itself when one starts.",
     optIn: true,
     inputSchema: {
       type: "object",
@@ -2671,20 +3123,25 @@ export const TOOLS: readonly ToolDefinition[] = [
           type: "string",
           description: "One cycle to read day by day: current, next, or its number.",
         },
+        ics: {
+          type: "boolean",
+          description: "Also answer every cycle as iCalendar text in calendar. Leave cycle out.",
+        },
       },
       additionalProperties: false,
     },
     argv: (input) => {
       const cycle = text(input, "cycle");
-      return cycle === null
-        ? ["work", "cycles", "--json"]
-        : ["work", "cycle", "--json", "--", cycle];
+      const ics = flag(input, "ics");
+      if (cycle !== null && ics) throw new SonaInputError("ics lists every cycle; leave cycle out.");
+      if (cycle !== null) return ["work", "cycle", "--json", "--", cycle];
+      return ["work", "cycles", ...(ics ? ["--ics"] : []), "--json"];
     },
   },
   {
     name: "sona_cycle_save",
     title: "Change Sona cycles",
-    description: `Change how cycles run, or one cycle. One kind of change per call: weeks, start_weekday, cooldown_weeks and upcoming set how every cycle runs (leave cycle out; fields left out stay); name, start and end rename or move one cycle; start_today:true starts the first upcoming cycle, or cycle, today; rollover:true moves cycle's unfinished work into the cycle under way. Answers with every cycle as sona_cycle_list reads them. ${PLANNING_WRITES}`,
+    description: `Change how cycles run, or one cycle. One kind of change per call: weeks, start_weekday, cooldown_weeks, upcoming, auto_add_started and auto_add_completed set how every cycle runs (leave cycle out; fields left out stay); name, start and end rename or move one cycle; start_today:true starts the first upcoming cycle, or cycle, today; rollover:true moves cycle's unfinished work into the cycle under way. Answers with every cycle as sona_cycle_list reads them. ${PLANNING_WRITES}`,
     mutates: "changes",
     optIn: true,
     inputSchema: {
@@ -2732,6 +3189,14 @@ export const TOOLS: readonly ToolDefinition[] = [
           maximum: 15,
           description: "How many cycles to plan ahead.",
         },
+        auto_add_started: {
+          type: "boolean",
+          description: "Started work with no cycle joins the cycle under way, or the next in a cooldown.",
+        },
+        auto_add_completed: {
+          type: "boolean",
+          description: "Done work with no cycle joins the cycle under way, or the last one in a cooldown.",
+        },
         dry_run: DRY_RUN,
         operation_id: OPERATION_ID,
       },
@@ -2744,6 +3209,12 @@ export const TOOLS: readonly ToolDefinition[] = [
         ...assigned("--start-weekday", count(input, "start_weekday")),
         ...assigned("--cooldown", count(input, "cooldown_weeks")),
         ...assigned("--upcoming", count(input, "upcoming")),
+        ...(input.auto_add_started === undefined
+          ? []
+          : [`--auto-add-started=${flag(input, "auto_add_started")}`]),
+        ...(input.auto_add_completed === undefined
+          ? []
+          : [`--auto-add-completed=${flag(input, "auto_add_completed")}`]),
       ];
       const edit = [
         ...nullable("--name", input, "name", "none"),
@@ -2755,7 +3226,7 @@ export const TOOLS: readonly ToolDefinition[] = [
       const kinds = [settings.length > 0, edit.length > 0, startToday, rollover];
       if (kinds.filter(Boolean).length > 1) {
         throw new SonaInputError(
-          "Pass one kind of change: settings (weeks, start_weekday, cooldown_weeks, upcoming), name/start/end, start_today or rollover.",
+          "Pass one kind of change: settings (weeks, start_weekday, cooldown_weeks, upcoming, auto_add_started, auto_add_completed), name/start/end, start_today or rollover.",
         );
       }
       const tail = [
@@ -2766,7 +3237,7 @@ export const TOOLS: readonly ToolDefinition[] = [
       if (settings.length > 0) {
         if (cycle !== null) {
           throw new SonaInputError(
-            "weeks, start_weekday, cooldown_weeks and upcoming apply to every cycle; leave cycle out.",
+            "weeks, start_weekday, cooldown_weeks, upcoming, auto_add_started and auto_add_completed apply to every cycle; leave cycle out.",
           );
         }
         return ["work", "cycle-settings", ...settings, ...tail];
@@ -2783,7 +3254,7 @@ export const TOOLS: readonly ToolDefinition[] = [
   {
     name: "sona_work_labels",
     title: "List Sona labels",
-    description: "List the tracker's labels with their ids, colors (hue in degrees) and revisions.",
+    description: "List the tracker's labels with their ids, colors (hue in degrees), scope (all, tasks or projects) and revisions.",
     optIn: true,
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     argv: () => ["work", "labels", "--json"],
@@ -2909,6 +3380,38 @@ export const TOOLS: readonly ToolDefinition[] = [
       "--json",
       "--",
       text(input, "label", true),
+    ],
+  },
+  {
+    name: "sona_work_label_scope",
+    title: "Scope a Sona label",
+    description: `Say what a label can go on: tasks, projects, or all (both). A tasks label cannot be put on a project and a projects label cannot be put on a task; narrowing a label already on the other kind is refused. ${WRITES}`,
+    mutates: "changes",
+    optIn: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        label: { type: "string", description: "The label's name or id." },
+        scope: {
+          type: "string",
+          enum: ["all", "tasks", "projects"],
+          description: "What it can go on.",
+        },
+        dry_run: DRY_RUN,
+        operation_id: OPERATION_ID,
+      },
+      required: ["label", "scope"],
+      additionalProperties: false,
+    },
+    argv: (input, agent) => [
+      "work",
+      "label-scope",
+      ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+      ...writing(input, agent),
+      "--json",
+      "--",
+      text(input, "label", true),
+      text(input, "scope", true),
     ],
   },
   {
@@ -3128,19 +3631,31 @@ export const TOOLS: readonly ToolDefinition[] = [
           description: "Comma-separated: urgent, high, medium, low or none.",
         },
         due: DUE_WINDOWS,
-        search: { type: "string", description: "Words in the title or details." },
+        search: { type: "string", description: "Words in the title, details or comments." },
         layout: { type: "string", enum: ["list", "board"], description: "How the app shows it." },
         group_by: {
           type: "string",
-          enum: ["status", "owner", "project", "meeting", "due", "priority", "none"],
-          description: "How the app groups it.",
+          enum: ["status", "owner", "project", "meeting", "due", "priority", "cycle", "label", "milestone", "none"],
+          description: "How the app groups it. With label, a task with two labels sits in both groups.",
         },
         order_by: {
           type: "string",
-          enum: ["priority", "due", "updated", "created", "manual"],
+          enum: ["priority", "due", "updated", "created", "status", "manual"],
           description: "How the app orders it.",
         },
         show_empty_groups: { type: "boolean", description: "Show groups that hold no tasks." },
+        show_sub_tasks: { type: "boolean", description: "Show sub-tasks as rows of their own." },
+        sub_group_by: {
+          type: "string",
+          enum: ["status", "owner", "project", "meeting", "due", "priority", "cycle", "label", "milestone", "none"],
+          description: "The board's swimlanes: one row of columns per group; none for a single row.",
+        },
+        hidden_columns: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Board columns to leave out, by group key: the grouping, a colon and the group, such as status:done, priority:4 or label:<id>. An empty list shows them all.",
+        },
         properties: {
           type: "array",
           items: { type: "string" },
@@ -3166,6 +3681,13 @@ export const TOOLS: readonly ToolDefinition[] = [
       ...(input.show_empty_groups === undefined
         ? []
         : [`--show-empty-groups=${flag(input, "show_empty_groups")}`]),
+      ...(input.show_sub_tasks === undefined ? [] : [`--show-sub-tasks=${flag(input, "show_sub_tasks")}`]),
+      ...assigned("--sub-group-by", text(input, "sub_group_by")),
+      ...(input.hidden_columns === undefined
+        ? []
+        : Array.isArray(input.hidden_columns) && input.hidden_columns.length === 0
+          ? ["--hidden-columns="]
+          : [`--hidden-columns=${strings(input, "hidden_columns").join(",")}`]),
       ...(input.properties === undefined
         ? []
         : [`--properties=${strings(input, "properties").join(",")}`]),
@@ -3221,8 +3743,9 @@ export const TOOLS: readonly ToolDefinition[] = [
   {
     name: "sona_work_take",
     title: "Make tasks from Sona answer lines",
-    description: `Ask the same question as sona_work_ask and make Triage tasks of the lines numbered in lines. Each task keeps its quote and where it was said; a line about something a meeting left open returns the task already following it. ${WRITES}`,
+    description: `Ask the same question as sona_work_ask and make Triage tasks of the lines numbered in lines. Each task keeps its quote and where it was said; a line about something a meeting left open returns the task already following it. dry_run:true lists the tasks it would make, and the ones it would return, without writing. ${WRITES}`,
     mutates: "changes",
+    idempotent: true,
     inputSchema: {
       type: "object",
       properties: {
@@ -3234,6 +3757,7 @@ export const TOOLS: readonly ToolDefinition[] = [
           type: "string",
           description: "Line numbers from that answer, comma-separated: 1,3.",
         },
+        dry_run: DRY_RUN,
         operation_id: OPERATION_ID,
       },
       required: ["question", "lines"],
@@ -3243,6 +3767,7 @@ export const TOOLS: readonly ToolDefinition[] = [
       "work",
       "ask",
       `--take=${tasks(input, "lines").join(",")}`,
+      ...(flag(input, "dry_run") ? ["--dry-run"] : []),
       ...writing(input, agent),
       "--json",
       "--",
@@ -3286,8 +3811,9 @@ export const TOOLS: readonly ToolDefinition[] = [
   {
     name: "sona_work_watch",
     title: "Watch a topic in Sona",
-    description: `Listen for a word or phrase: when a processed meeting or a dictation says it, Sona notifies the user once, with the line. person limits it to what one person says. stop:true stops watching it. ${WRITES}`,
+    description: `Listen for a word or phrase: when a processed meeting or a dictation says it, Sona notifies the user once, with the line. person limits it to what one person says. stop:true stops watching it. dry_run:true returns the watch it would save or stop, with the lines it would already have heard, without writing. ${WRITES}`,
     mutates: "changes",
+    idempotent: true,
     optIn: true,
     inputSchema: {
       type: "object",
@@ -3298,27 +3824,31 @@ export const TOOLS: readonly ToolDefinition[] = [
           description: "Only when this person says it: a name or id from sona_people.",
         },
         stop: { type: "boolean", description: "Stop watching topic." },
+        dry_run: DRY_RUN,
       },
       required: ["topic"],
       additionalProperties: false,
     },
-    argv: (input) =>
-      flag(input, "stop")
-        ? ["work", "unwatch", "--json", "--", text(input, "topic", true)]
+    argv: (input) => {
+      const dryRun = flag(input, "dry_run") ? ["--dry-run"] : [];
+      return flag(input, "stop")
+        ? ["work", "unwatch", ...dryRun, "--json", "--", text(input, "topic", true)]
         : [
             "work",
             "watch",
             ...assigned("--person", text(input, "person")),
+            ...dryRun,
             "--json",
             "--",
             text(input, "topic", true),
-          ],
+          ];
+    },
   },
   {
     name: "sona_project_list",
     title: "List Sona projects",
     description:
-      "List the projects the Projects page shows, by name: each one's id, lead, members, status (backlog, planned, active, paused, completed or canceled), priority, start and target days, colour, icon, labels, links, open and done task counts, milestone count, whether it was put away, and revision. all:true includes projects put away; trashed:true lists only the projects in the bin, deleted less than 30 days ago.",
+      "List the projects the Projects page shows, by name: each one's id, summary, lead, members, status (backlog, planned, active, paused, completed or canceled) and status_name, priority, start and target days, colour, icon, labels, links, open and done task counts, milestone count, latest_update_at_ms, whether it was put away, the initiative it sits in, and revision. all:true includes projects put away; trashed:true lists only the projects in the bin, deleted less than 30 days ago. update_before keeps the projects whose latest update was posted before that day, or that have none. link keeps projects that wait on another (blocked), that another waits on (blocking), or with a broken dependency on either side (broken). initiative keeps the projects in that initiative, or in none.",
     inputSchema: {
       type: "object",
       properties: {
@@ -3328,6 +3858,19 @@ export const TOOLS: readonly ToolDefinition[] = [
           description:
             "List only the projects in the bin, which sona_project_delete restore:true brings back.",
         },
+        update_before: {
+          type: "string",
+          description: "A local day, YYYY-MM-DD: only projects whose latest update was posted before it, or that have none.",
+        },
+        link: {
+          type: "string",
+          enum: ["blocked", "blocking", "broken"],
+          description: "Only projects that wait on another, that another waits on, or with a broken dependency.",
+        },
+        initiative: {
+          type: "string",
+          description: "An initiative, by name or id from sona_initiative_list: only its projects. none keeps the projects in no initiative.",
+        },
       },
       additionalProperties: false,
     },
@@ -3336,6 +3879,9 @@ export const TOOLS: readonly ToolDefinition[] = [
       "projects",
       ...(flag(input, "all") ? ["--all"] : []),
       ...(flag(input, "trashed") ? ["--trashed"] : []),
+      ...assigned("--update-before", text(input, "update_before")),
+      ...assigned("--link", text(input, "link")),
+      ...assigned("--initiative", text(input, "initiative")),
       "--json",
     ],
   },
@@ -3343,7 +3889,7 @@ export const TOOLS: readonly ToolDefinition[] = [
     name: "sona_project_detail",
     title: "Read a Sona project's progress",
     description:
-      "Read one project from the Projects page: its fields, the latest update with its health, update_missing when an active project has gone a cycle and three days without one, progress (scope, started, done, percent complete with done counting 100 and started 25, weekly history, and the predicted finish with optimistic and pessimistic days, null until there is enough history), and each milestone's progress in order, with next_open on the first one not complete.",
+      "Read one project from the Projects page: its fields, the latest update with its health, update_missing when an active project has gone a cycle and three days without one, progress (scope, started, done, percent complete with done counting 100 and started 25, weekly history, and the predicted finish with optimistic and pessimistic days, null until there is enough history), each milestone's progress in order, with next_open on the first one not complete, sources: the notes, meetings and links linked to it, each with its kind, id, title, at_ms and available (false when it cannot be opened, such as a meeting kept on this Mac), and blocked_by and blocking: the projects it waits on and the ones waiting on it, each with dependency_id, project and broken (the blocker is open and ends after the blocked project starts).",
     inputSchema: {
       type: "object",
       properties: { project: PROJECT },
@@ -3351,6 +3897,34 @@ export const TOOLS: readonly ToolDefinition[] = [
       additionalProperties: false,
     },
     argv: (input) => ["work", "project", "--json", "--", text(input, "project", true)],
+  },
+  {
+    name: "sona_project_history",
+    title: "Read a Sona project's history",
+    description:
+      "Read what changed on a project, newest first: each entry's kind (title, status, statusName, lead, members, startDate, targetDate, priority, milestoneAdded, milestoneRemoved, milestoneTarget, milestoneConverted), from and to with names resolved, and at_ms.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project: PROJECT,
+        limit: {
+          type: "integer",
+          minimum: 1,
+          maximum: 200,
+          description: "How many entries to return, at most 200.",
+        },
+      },
+      required: ["project"],
+      additionalProperties: false,
+    },
+    argv: (input) => [
+      "work",
+      "project-history",
+      ...assigned("--limit", count(input, "limit")),
+      "--json",
+      "--",
+      text(input, "project", true),
+    ],
   },
   {
     name: "sona_project_save",
@@ -3369,10 +3943,19 @@ export const TOOLS: readonly ToolDefinition[] = [
           type: "string",
           description: "Plain-text details. An empty string or null clears them.",
         },
+        summary: {
+          type: "string",
+          description: "A short one-line summary shown under the name, apart from details. An empty string or null clears it.",
+        },
         status: {
           type: "string",
           enum: ["backlog", "planned", "active", "paused", "completed", "canceled"],
           description: "Where the project stands.",
+        },
+        status_name: {
+          type: "string",
+          description:
+            "A status name from sona_project_status_list; the project takes its category as status. null clears the name and keeps the category. Setting only status to another category clears the name.",
         },
         priority: {
           type: "string",
@@ -3420,6 +4003,13 @@ export const TOOLS: readonly ToolDefinition[] = [
           description:
             "Every link, each TITLE=URL or a bare URL. Replaces the list; an empty list or null clears it.",
         },
+        patch: {
+          type: "array",
+          items: PROJECT_PATCH_STEP,
+          minItems: 1,
+          description:
+            'Edits to details or summary in place, in order, applied after the fields above: [{"field":"description","op":"insert_after","anchor":"## Scope","value":"\\nAdds the export."}]. A step whose anchor is not there refuses the whole save.',
+        },
         dry_run: DRY_RUN,
         operation_id: OPERATION_ID,
       },
@@ -3431,7 +4021,9 @@ export const TOOLS: readonly ToolDefinition[] = [
       "project-save",
       ...assigned("--project", text(input, "project")),
       ...nullable("--details", input, "details", ""),
+      ...(input.summary === "" ? ["--summary=none"] : nullable("--summary", input, "summary", "none")),
       ...assigned("--status", text(input, "status")),
+      ...nullable("--status-name", input, "status_name", "none"),
       ...nullable("--priority", input, "priority", "none"),
       ...nullable("--lead", input, "lead", "none"),
       ...nullable("--members", input, "members", ""),
@@ -3443,6 +4035,80 @@ export const TOOLS: readonly ToolDefinition[] = [
       ...nullable("--icon", input, "icon", "none"),
       ...nullable("--labels", input, "labels", ""),
       ...links(input),
+      ...objects("--patch-json", input, "patch", false),
+      ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+      ...writing(input, agent),
+      "--json",
+      "--",
+      text(input, "name", true),
+    ],
+  },
+  {
+    name: "sona_project_status_list",
+    title: "List Sona project status names",
+    description:
+      "List the status names projects can take, each inside one of the six categories (backlog, planned, active, paused, completed, canceled), ordered by category then position. sona_project_save status_name sets one.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    argv: () => ["work", "project-statuses", "--json"],
+  },
+  {
+    name: "sona_project_status_save",
+    title: "Save a Sona project status name",
+    description: `Make a project status name inside a category, or change one. Without status, makes name; with status, renames that one to name or moves it to category. Names are unique ignoring case. Moving a name in use to another category moves those projects' status with it. ${PLANNING_WRITES}`,
+    mutates: "changes",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "The status name." },
+        category: {
+          type: "string",
+          enum: ["backlog", "planned", "active", "paused", "completed", "canceled"],
+          description: "The category it belongs to.",
+        },
+        status: {
+          type: "string",
+          description: "The status name to change, from sona_project_status_list.",
+        },
+        dry_run: DRY_RUN,
+        operation_id: OPERATION_ID,
+      },
+      required: ["name", "category"],
+      additionalProperties: false,
+    },
+    argv: (input, agent) => [
+      "work",
+      "project-status-save",
+      `--category=${text(input, "category", true)}`,
+      ...assigned("--status", text(input, "status")),
+      ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+      ...writing(input, agent),
+      "--json",
+      "--",
+      text(input, "name", true),
+    ],
+  },
+  {
+    name: "sona_project_status_delete",
+    title: "Delete a Sona project status name",
+    description: `Delete a project status name. Projects using it keep its category and lose the name. ${PLANNING_WRITES}`,
+    mutates: "destroys",
+    optIn: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: {
+          type: "string",
+          description: "The status name, from sona_project_status_list.",
+        },
+        dry_run: DRY_RUN,
+        operation_id: OPERATION_ID,
+      },
+      required: ["name"],
+      additionalProperties: false,
+    },
+    argv: (input, agent) => [
+      "work",
+      "project-status-delete",
       ...(flag(input, "dry_run") ? ["--dry-run"] : []),
       ...writing(input, agent),
       "--json",
@@ -3511,7 +4177,7 @@ export const TOOLS: readonly ToolDefinition[] = [
   {
     name: "sona_project_update_save",
     title: "Post a Sona project update",
-    description: `Without id, post an update on project: its health and either a Markdown body or draft:true, which has Sona write it from what moved since the last update (tasks completed and started, milestones reached, the percent change); with dry_run:true it shows that draft without posting. With id, change the health or body of an update you posted; project and draft are then left out. ${PLANNING_WRITES}`,
+    description: `Without id, post an update on project: its health and either a Markdown body or draft:true, which has Sona write it from what moved since the last update (tasks completed and started, milestones reached, the percent change) and the meetings linked to the project or its tasks since then, with the passage that names them; meetings kept on this Mac are never read. With dry_run:true it shows that draft without posting. With id, change the health or body of an update you posted; project and draft are then left out. ${PLANNING_WRITES}`,
     mutates: "changes",
     inputSchema: {
       type: "object",
@@ -3630,10 +4296,36 @@ export const TOOLS: readonly ToolDefinition[] = [
     argv: (input) => ["work", "milestones", "--json", "--", text(input, "project", true)],
   },
   {
+    name: "sona_milestone_get",
+    title: "Read one Sona milestone",
+    description:
+      "Read one milestone of a project: its id, name, details, status, target day, open and done task counts, and revision.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project: PROJECT,
+        milestone: {
+          type: "string",
+          description: "The milestone, by name or id from sona_milestone_list.",
+        },
+      },
+      required: ["project", "milestone"],
+      additionalProperties: false,
+    },
+    argv: (input) => [
+      "work",
+      "milestone",
+      "--json",
+      "--",
+      text(input, "project", true),
+      text(input, "milestone", true),
+    ],
+  },
+  {
     name: "sona_project_timeline",
     title: "Show Sona projects on a timeline",
     description:
-      "List the projects whose days fall between from and to, earliest first, each with its status, start and target day, and the milestones with a target day in that span (id, name, status, target day, open and done task counts, revision). undated names the projects with neither a start nor a target day. Change a project's days with sona_project_save and a milestone's with sona_milestone_save.",
+      "List the projects whose days fall between from and to, earliest first, each with its status, start and target day, and the milestones with a target day in that span (id, name, status, target day, open and done task counts, revision). undated names the projects with neither a start nor a target day. cycles lists the cycles with a day in that span, as sona_cycle_list reads them. dependencies lists each project shown that waits on another shown, as sona_project_dependency_list reads them. Change a project's days with sona_project_save and a milestone's with sona_milestone_save.",
     inputSchema: {
       type: "object",
       properties: {
@@ -3653,6 +4345,37 @@ export const TOOLS: readonly ToolDefinition[] = [
       "timeline",
       ...assigned("--from", text(input, "from")),
       ...assigned("--to", text(input, "to")),
+      "--json",
+    ],
+  },
+  {
+    name: "sona_work_insights",
+    title: "Read lead time and triage time in Sona",
+    description:
+      "Read how long work takes over the last days: lead_time is created to done for each task done in the window, triage_time is time in triage until accepted or declined for each such decision in the window, each with count, median_ms and p90_ms (nearest rank, null when count is 0). accepted and declined count the triage decisions; weeks splits the window into weeks back from to, oldest first. The filters narrow the tasks as sona_work_list does; work from meetings kept on this Mac is left out.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        days: {
+          type: "integer",
+          minimum: 1,
+          maximum: 3650,
+          description: "How many days back to read, ending now. Sona defaults to 30.",
+        },
+        side: WORK_SIDE,
+        owner: { type: "string", description: "People by name or id, comma-separated; me or nobody." },
+        project: { type: "string", description: "Projects by name or id, comma-separated; none for work in no project." },
+        label: { type: "string", description: "Labels by name or id, comma-separated: work with any of them." },
+        priority: { type: "string", description: "Comma-separated: urgent, high, medium, low or none." },
+        cycle: { type: "string", description: "Only work planned in this cycle: current, next, its number, or none." },
+      },
+      additionalProperties: false,
+    },
+    argv: (input) => [
+      "work",
+      "insights",
+      ...assigned("--days", count(input, "days")),
+      ...scopeFlags(input),
       "--json",
     ],
   },
@@ -3768,6 +4491,351 @@ export const TOOLS: readonly ToolDefinition[] = [
     ],
   },
   {
+    name: "sona_milestone_to_project",
+    title: "Turn a Sona milestone into a project",
+    description: `Make a project from a milestone: the new project takes the milestone's name, details and target day, and the parent project's priority, lead and members; the milestone's tasks move into it, and the milestone is deleted. Refused when a project already has that name. ${PLANNING_WRITES}`,
+    mutates: "destroys",
+    optIn: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        project: PROJECT,
+        milestone: {
+          type: "string",
+          description: "The milestone, by name or id from sona_milestone_list.",
+        },
+        dry_run: DRY_RUN,
+        operation_id: OPERATION_ID,
+      },
+      required: ["project", "milestone"],
+      additionalProperties: false,
+    },
+    argv: (input, agent) => [
+      "work",
+      "milestone-to-project",
+      ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+      ...writing(input, agent),
+      "--json",
+      "--",
+      text(input, "project", true),
+      text(input, "milestone", true),
+    ],
+  },
+  {
+    name: "sona_project_dependency_list",
+    title: "List Sona project dependencies",
+    description:
+      "List the projects that wait on other projects, oldest first: each dependency's id, blocker and blocked (id and name), and broken, true when the blocker is still open and its target day, or start when it has none, falls after the day the blocked project starts, or its target when it has no start. project keeps the dependencies it is on either side of. Projects in the bin are left out.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project: { type: "string", description: "Only this project's dependencies, by name or id." },
+      },
+      additionalProperties: false,
+    },
+    argv: (input) => {
+      const project = text(input, "project");
+      return ["work", "project-dependencies", "--json", ...(project ? ["--", project] : [])];
+    },
+  },
+  {
+    name: "sona_project_relate",
+    title: "Make a Sona project wait on another",
+    description: `Make project wait on other (link blocked-by) or other wait on project (link blocking). The blocker should end before the project it blocks starts; the answer's broken says it does not. Relating two projects already related changes nothing and returns that dependency with already:true. Refused when the projects are the same or when the blocker already waits on the blocked project, directly or through others. ${PLANNING_WRITES}`,
+    mutates: "changes",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project: PROJECT,
+        link: { type: "string", enum: ["blocked-by", "blocking"], description: "Which way other points." },
+        other: { type: "string", description: "The other project, by name or id from sona_project_list." },
+        dry_run: DRY_RUN,
+        operation_id: OPERATION_ID,
+      },
+      required: ["project", "link", "other"],
+      additionalProperties: false,
+    },
+    argv: (input, agent) => [
+      "work",
+      "project-relate",
+      ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+      ...writing(input, agent),
+      "--json",
+      "--",
+      text(input, "project", true),
+      text(input, "link", true),
+      text(input, "other", true),
+    ],
+  },
+  {
+    name: "sona_project_unrelate",
+    title: "Take a Sona project dependency off",
+    description: `Take off the dependency named as sona_project_relate made it: project blocked-by other, or project blocking other. ${PLANNING_WRITES}`,
+    mutates: "changes",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project: PROJECT,
+        link: { type: "string", enum: ["blocked-by", "blocking"], description: "Which way other points." },
+        other: { type: "string", description: "The other project, by name or id from sona_project_list." },
+        dry_run: DRY_RUN,
+        operation_id: OPERATION_ID,
+      },
+      required: ["project", "link", "other"],
+      additionalProperties: false,
+    },
+    argv: (input, agent) => [
+      "work",
+      "project-unrelate",
+      ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+      ...writing(input, agent),
+      "--json",
+      "--",
+      text(input, "project", true),
+      text(input, "link", true),
+      text(input, "other", true),
+    ],
+  },
+  {
+    name: "sona_initiative_list",
+    title: "List Sona initiatives",
+    description:
+      "List the initiatives, goals one level above projects, by name: each one's id, name, details, status (planned, active or completed), owner (me or a person), target day, projects (id and name) and progress (projects, completed_projects, open_tasks, done_tasks, percent of tasks done). Archived projects and projects in the bin are left out of projects and progress.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    argv: () => ["work", "initiative-list", "--json"],
+  },
+  {
+    name: "sona_initiative_get",
+    title: "Read a Sona initiative",
+    description:
+      "Read one initiative as sona_initiative_list does, with each of its projects as sona_project_list reads them: status, lead, target day, open and done tasks.",
+    inputSchema: {
+      type: "object",
+      properties: { initiative: INITIATIVE },
+      required: ["initiative"],
+      additionalProperties: false,
+    },
+    argv: (input) => ["work", "initiative-show", "--json", "--", text(input, "initiative", true)],
+  },
+  {
+    name: "sona_initiative_new",
+    title: "Make a Sona initiative",
+    description: `Make an initiative called name. Names are unique ignoring case. ${PLANNING_WRITES}`,
+    mutates: "changes",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "The initiative's name." },
+        ...INITIATIVE_FIELDS,
+      },
+      required: ["name"],
+      additionalProperties: false,
+    },
+    argv: (input, agent) => [
+      "work",
+      "initiative-new",
+      ...initiativeFlags(input, agent),
+      "--",
+      text(input, "name", true),
+    ],
+  },
+  {
+    name: "sona_initiative_update",
+    title: "Change a Sona initiative",
+    description: `Change an initiative's name, details, owner, target day or status. Fields left out stay as they are; null clears one. A call that changes nothing answers with action unchanged and operation_id null. ${PLANNING_WRITES}`,
+    mutates: "changes",
+    inputSchema: {
+      type: "object",
+      properties: {
+        initiative: INITIATIVE,
+        name: { type: "string", description: "A new name." },
+        ...INITIATIVE_FIELDS,
+      },
+      required: ["initiative"],
+      additionalProperties: false,
+    },
+    argv: (input, agent) => [
+      "work",
+      "initiative-update",
+      ...assigned("--name", text(input, "name")),
+      ...initiativeFlags(input, agent),
+      "--",
+      text(input, "initiative", true),
+    ],
+  },
+  {
+    name: "sona_initiative_delete",
+    title: "Delete a Sona initiative",
+    description: `Delete an initiative for good. Its projects stay, in no initiative. ${PLANNING_WRITES}`,
+    mutates: "destroys",
+    optIn: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        initiative: INITIATIVE,
+        dry_run: DRY_RUN,
+        operation_id: OPERATION_ID,
+      },
+      required: ["initiative"],
+      additionalProperties: false,
+    },
+    argv: (input, agent) => [
+      "work",
+      "initiative-delete",
+      ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+      ...writing(input, agent),
+      "--json",
+      "--",
+      text(input, "initiative", true),
+    ],
+  },
+  {
+    name: "sona_initiative_add_project",
+    title: "Put a Sona project in an initiative",
+    description: `Put a project in an initiative. A project sits in one initiative at most, so this moves it out of any other. ${PLANNING_WRITES}`,
+    mutates: "changes",
+    inputSchema: {
+      type: "object",
+      properties: {
+        initiative: INITIATIVE,
+        project: PROJECT,
+        dry_run: DRY_RUN,
+        operation_id: OPERATION_ID,
+      },
+      required: ["initiative", "project"],
+      additionalProperties: false,
+    },
+    argv: (input, agent) => [
+      "work",
+      "initiative-add-project",
+      ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+      ...writing(input, agent),
+      "--json",
+      "--",
+      text(input, "initiative", true),
+      text(input, "project", true),
+    ],
+  },
+  {
+    name: "sona_initiative_remove_project",
+    title: "Take a Sona project out of its initiative",
+    description: `Take a project out of the initiative it is in. Refused when the project is not in that initiative. ${PLANNING_WRITES}`,
+    mutates: "changes",
+    inputSchema: {
+      type: "object",
+      properties: {
+        initiative: INITIATIVE,
+        project: PROJECT,
+        dry_run: DRY_RUN,
+        operation_id: OPERATION_ID,
+      },
+      required: ["initiative", "project"],
+      additionalProperties: false,
+    },
+    argv: (input, agent) => [
+      "work",
+      "initiative-remove-project",
+      ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+      ...writing(input, agent),
+      "--json",
+      "--",
+      text(input, "initiative", true),
+      text(input, "project", true),
+    ],
+  },
+  {
+    name: "sona_project_template_list",
+    title: "List Sona project templates",
+    description:
+      "List project templates by name: each one's id, details, lead, members, milestones (name, details, offset_days after the project's start, none when it has no target day), tasks (title, details, label names, priority, estimate, milestone name) and revision. A task drawn from a meeting kept on this Mac is left out.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    argv: () => ["work", "project-template-list", "--json"],
+  },
+  {
+    name: "sona_project_template_save",
+    title: "Save a Sona project as a template",
+    description: `Save a project as a template: its description, lead and members, its milestones as days after its start day (or the day it was made when it has no start), and its tasks with their details, priorities, labels, estimates and milestones. Tasks waiting in triage, canceled, duplicate and binned are left out, and so is work drawn from a meeting kept on this Mac; sub-tasks are kept as tasks of their own. Saving under a name a template already has refills that template. ${PLANNING_WRITES}`,
+    mutates: "changes",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "The template's name." },
+        project: PROJECT,
+        dry_run: DRY_RUN,
+        operation_id: OPERATION_ID,
+      },
+      required: ["name", "project"],
+      additionalProperties: false,
+    },
+    argv: (input, agent) => [
+      "work",
+      "project-template-save",
+      ...assigned("--project", text(input, "project", true)),
+      ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+      ...writing(input, agent),
+      "--json",
+      "--",
+      text(input, "name", true),
+    ],
+  },
+  {
+    name: "sona_project_template_delete",
+    title: "Delete a Sona project template",
+    description: `Delete a project template. Projects made from it stay. ${PLANNING_WRITES}`,
+    mutates: "destroys",
+    inputSchema: {
+      type: "object",
+      properties: {
+        template: { type: "string", description: "The template's name or id from sona_project_template_list." },
+        dry_run: DRY_RUN,
+        operation_id: OPERATION_ID,
+      },
+      required: ["template"],
+      additionalProperties: false,
+    },
+    argv: (input, agent) => [
+      "work",
+      "project-template-delete",
+      ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+      ...writing(input, agent),
+      "--json",
+      "--",
+      text(input, "template", true),
+    ],
+  },
+  {
+    name: "sona_project_new",
+    title: "Make a Sona project from a template",
+    description: `Make a project called name from a template, starting on start: the template's description, lead and members, each milestone due its offset_days after start, and each task, not started and owned by nobody, in its milestone with its priority, labels and estimate. A task drawn from a meeting since kept on this Mac is left out. A lead or member since merged into another person comes as that person; one since deleted is left off, and so are labels since deleted, retired or kept to projects. A name another project has is refused, except on a retry with the same operation_id. ${PLANNING_WRITES}`,
+    mutates: "changes",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "The new project's name." },
+        template: { type: "string", description: "The template's name or id from sona_project_template_list." },
+        start: {
+          type: "string",
+          description: "The project's start day: YYYY-MM-DD, today or tomorrow. Today when left out.",
+        },
+        dry_run: DRY_RUN,
+        operation_id: OPERATION_ID,
+      },
+      required: ["name", "template"],
+      additionalProperties: false,
+    },
+    argv: (input, agent) => [
+      "work",
+      "project-new",
+      ...assigned("--template", text(input, "template", true)),
+      ...assigned("--start", text(input, "start")),
+      ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+      ...writing(input, agent),
+      "--json",
+      "--",
+      text(input, "name", true),
+    ],
+  },
+  {
     name: "sona_person_list",
     title: "List people in Sona",
     description:
@@ -3878,7 +4946,7 @@ export const TOOLS: readonly ToolDefinition[] = [
     name: "sona_person_get",
     title: "Read one person's page in Sona",
     description:
-      "Read one person's page in one call: their summary, role, organization, emails and notes, the meetings they are linked to (confirmed or suggested), their open commitments, the documents filed under them, and their contact card. Meetings kept on this Mac are left out, and so is the summary when one of them fed it (summary_left_out:true).",
+      "Read one person's page in one call: their summary, role, organization, emails and notes, the meetings they are linked to (confirmed or suggested), their open commitments, the documents filed under them, the projects they lead or are a member of (lead:true for lead, archived:true when archived), and their contact card. Meetings kept on this Mac are left out, and so is the summary when one of them fed it (summary_left_out:true).",
     inputSchema: {
       type: "object",
       properties: { person: PERSON },
@@ -4515,28 +5583,38 @@ export const TOOLS: readonly ToolDefinition[] = [
   {
     name: "sona_scratchpad_create",
     title: "Make a Sona note",
-    description: `Make a note; its first words become its title. ${NOTE_WRITES}`,
+    description: `Make a note; its first words become its title. Name one of task, project or cycle to file the note as a document of it; the answer's document_of says which. ${NOTE_WRITES}`,
     mutates: "changes",
     optIn: true,
     inputSchema: {
       type: "object",
       properties: {
         body: { type: "string", description: "The note's text." },
+        task: { type: "string", description: "A task the note is about: S-12, 12 or its id." },
+        project: { type: "string", description: "A project the note is about, by name or id." },
+        cycle: { type: "string", description: "A cycle the note is about: current, next, or its number." },
         dry_run: DRY_RUN,
         operation_id: { ...OPERATION_ID, description: NOTE_OPERATION },
       },
       required: ["body"],
       additionalProperties: false,
     },
-    argv: (input, agent) => [
-      "work",
-      "note-new",
-      ...(flag(input, "dry_run") ? ["--dry-run"] : []),
-      ...writing(input, agent),
-      "--json",
-      "--",
-      text(input, "body", true),
-    ],
+    argv: (input, agent) => {
+      const about = (["task", "project", "cycle"] as const).flatMap((key) => {
+        const value = text(input, key);
+        return value === null ? [] : [`--${key}=${value}`];
+      });
+      return [
+        "work",
+        "note-new",
+        ...about,
+        ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+        ...writing(input, agent),
+        "--json",
+        "--",
+        text(input, "body", true),
+      ];
+    },
   },
   {
     name: "sona_scratchpad_update_body",
@@ -4597,7 +5675,7 @@ export const TOOLS: readonly ToolDefinition[] = [
   {
     name: "sona_scratchpad_link",
     title: "Link to a Sona note",
-    description: `Link a meeting, a person or another note to a note, as the note's sources. A link already there answers replayed:true. ${NOTE_WRITES}`,
+    description: `Link a meeting, a person or another note to a note, as the note's sources, or file the note under a cycle with kind:"cycle". A link already there answers replayed:true. To make a note a document of a task or project, use sona_planning_link_source with source_kind:"note". ${NOTE_WRITES}`,
     mutates: "changes",
     optIn: true,
     inputSchema: {
@@ -4606,13 +5684,13 @@ export const TOOLS: readonly ToolDefinition[] = [
         note_id: NOTE_ID,
         kind: {
           type: "string",
-          enum: ["meeting", "person", "note"],
-          description: "What to link: a meeting, a person, or another note.",
+          enum: ["meeting", "person", "note", "cycle"],
+          description: "What to link: a meeting, a person, another note, or a cycle the note is about.",
         },
         source_id: {
           type: "string",
           description:
-            "Its id: a meeting's uuid from sona_meeting_list, a person's uuid from sona_person_list, or another note's id.",
+            "Its id: a meeting's uuid from sona_meeting_list, a person's uuid from sona_person_list, another note's id, or a cycle: current, next, or its number.",
         },
         dry_run: DRY_RUN,
         operation_id: { ...OPERATION_ID, description: NOTE_OPERATION },
@@ -4622,8 +5700,8 @@ export const TOOLS: readonly ToolDefinition[] = [
     },
     argv: (input, agent) => {
       const kind = text(input, "kind", true);
-      if (kind !== "meeting" && kind !== "person" && kind !== "note") {
-        throw new SonaInputError("kind must be meeting, person or note.");
+      if (kind !== "meeting" && kind !== "person" && kind !== "note" && kind !== "cycle") {
+        throw new SonaInputError("kind must be meeting, person, note or cycle.");
       }
       return [
         "work",
@@ -4640,7 +5718,7 @@ export const TOOLS: readonly ToolDefinition[] = [
   {
     name: "sona_scratchpad_unlink",
     title: "Unlink a source from a Sona note",
-    description: `Take a linked meeting, person or note off a note's sources. A source not linked answers replayed:true. ${NOTE_WRITES}`,
+    description: `Take a linked meeting, person or note off a note's sources, or take the note off a cycle with kind:"cycle". A source not linked answers replayed:true. ${NOTE_WRITES}`,
     mutates: "changes",
     optIn: true,
     inputSchema: {
@@ -4649,8 +5727,8 @@ export const TOOLS: readonly ToolDefinition[] = [
         note_id: NOTE_ID,
         kind: {
           type: "string",
-          enum: ["meeting", "person", "note"],
-          description: "What to unlink: a meeting, a person, or another note.",
+          enum: ["meeting", "person", "note", "cycle"],
+          description: "What to unlink: a meeting, a person, another note, or a cycle.",
         },
         source_id: { type: "string", description: "Its id, as the note's sources list it." },
         dry_run: DRY_RUN,
@@ -4661,8 +5739,8 @@ export const TOOLS: readonly ToolDefinition[] = [
     },
     argv: (input, agent) => {
       const kind = text(input, "kind", true);
-      if (kind !== "meeting" && kind !== "person" && kind !== "note") {
-        throw new SonaInputError("kind must be meeting, person or note.");
+      if (kind !== "meeting" && kind !== "person" && kind !== "note" && kind !== "cycle") {
+        throw new SonaInputError("kind must be meeting, person, note or cycle.");
       }
       return [
         "work",
@@ -5124,13 +6202,16 @@ export const TOOLS: readonly ToolDefinition[] = [
   },
   {
     name: "sona_task_save",
-    title: "Change a Sona task in one save",
-    description: `Change one task with an ordered list of steps, applied together or not at all: a step that cannot apply refuses the whole save, naming it as patch[n]. Each step is {field, value}; a null value clears the field. labels takes op set, add or remove with a list of names or ids. description takes op replace (default), append, prepend, insert_before, insert_after or replace_text; the last three need anchor, text already in the description, and refuse when it is not there. Read the task with sona_work_get first and pass its revision as expected_revision so a change made meanwhile is refused instead of overwritten. ${WRITES} dry_run:true shows the result field by field without writing. Repeating the same save answers the first result again.`,
+    title: "Change or make a Sona task in one save",
+    description: `Change one task with an ordered list of steps; without task, make a new one from the steps, which then need a title (parent, cycle, snooze, estimate and for wait for a second save on it). Field steps apply together or not at all: a step that cannot apply refuses the whole save, naming it as patch[n]. Each step is {field, value}; a null value clears the field. labels takes op set, add or remove with a list of names or ids. description takes op replace (default), append, prepend, insert_before, insert_after or replace_text; the last three need anchor, text already in the description, and refuse when it is not there. Steps can also hand the task to an agent (delegate), add or remove links to other tasks (blocks, blocked_by, related), mark it a duplicate (duplicate_of), attach links (links) and link a meeting it came from (source). Every one of those is checked before anything is written, then saved one by one after the fields; if one still fails, the error names it and says what was kept, so send only the steps from it on. Read the task with sona_work_get first and pass its revision as expected_revision so a change made meanwhile is refused instead of overwritten. ${WRITES} Delegating and marking duplicates are refused unless changes apply. dry_run:true shows the result field by field, these steps included, without writing. Repeating the same save on the same day answers the first result again.`,
     mutates: "changes",
     inputSchema: {
       type: "object",
       properties: {
-        task: TASK,
+        task: {
+          ...TASK,
+          description: `${TASK.description} Leave it out to make a new task.`,
+        },
         patch: {
           type: "array",
           items: PATCH_STEP,
@@ -5145,7 +6226,7 @@ export const TOOLS: readonly ToolDefinition[] = [
         dry_run: DRY_RUN,
         operation_id: OPERATION_ID,
       },
-      required: ["task", "patch"],
+      required: ["patch"],
       additionalProperties: false,
     },
     argv: (input, agent) => [
@@ -5156,8 +6237,7 @@ export const TOOLS: readonly ToolDefinition[] = [
       ...(flag(input, "dry_run") ? ["--dry-run"] : []),
       ...writing(input, agent),
       "--json",
-      "--",
-      text(input, "task", true),
+      ...(text(input, "task") === null ? [] : ["--", text(input, "task", true)]),
     ],
   },
   {
@@ -5355,7 +6435,7 @@ export const TOOLS: readonly ToolDefinition[] = [
     name: "sona_work_changes",
     title: "Follow changes in Sona's tracker",
     description:
-      "What changed on tasks, projects, comments and agent sessions, oldest first, each with a seq, what changed, and under updated_from the fields' values before the change. Pass the answer's next_cursor as since to read only what came after; has_more says another page is waiting. Changes are kept 30 days: an older cursor is refused as expired, and the fix is to read the tasks again and follow from a fresh start. Changes on work kept on this Mac are left out.",
+      "What changed on tasks, projects, milestones, cycles, views, labels, project updates, notes, meetings Sona took work from, comments and agent sessions, oldest first, each with a seq, what changed, and under updated_from the fields' values before the change. Pass the answer's next_cursor as since to read only what came after; has_more says another page is waiting. Changes are kept 30 days: an older cursor is refused as expired, and the fix is to read the tasks again and follow from a fresh start. A comment on a project, milestone, meeting or note names it in data.subject_kind and data.subject_id; a note's text is left out, so read it with sona_note. Anything tied to a meeting kept on this Mac is left out.",
     inputSchema: {
       type: "object",
       properties: {
@@ -6007,7 +7087,7 @@ export const TOOLS: readonly ToolDefinition[] = [
         tools: {
           type: "array",
           items: { type: "string" },
-          description: "The read-only Sona tool names the agent may use on a run, such as sona_search or sona_meeting; Sona refuses names it does not offer. An empty list clears it.",
+          description: "The Sona tool names the agent may use on a run, such as sona_search or sona_meeting; sona_work_create and sona_work_update let it propose new tasks and changes into Triage, never applied by the run. Sona refuses names it does not offer. An empty list clears it.",
         },
         dry_run: DRY_RUN,
         operation_id: OPERATION_ID,
