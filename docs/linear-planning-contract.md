@@ -51,7 +51,12 @@ its tasks stay, in no project.
 - Cycles: `advance` keeps `upcoming` cycles ahead, spaced by the cooldown;
   an ended cycle's daily counts are frozen into `planning_cycle_days` and
   later reads use the frozen copy; unfinished work rolls into the cycle
-  under way. Success = (done*100 + started*25)/scope at close.
+  under way. Success = (done*100 + started*25)/scope at close. When the
+  cycles have stood idle into a cooldown, the next cycle made starts after
+  it, never already over.
+- Saving cycle settings that make fewer upcoming cycles, or reshape them,
+  works as in Linear: tasks planned in a cycle that is no longer made go
+  back to no cycle, each with a cycle entry in its history (by Sona).
 
 ## Bridge methods (`native_bridge/dispatch.rs`)
 
@@ -79,8 +84,8 @@ its tasks stay, in no project.
 `links: [{title, url}]`, `archived`, `trashed` (true bins, false restores).
 
 `settings` for `work_cycle_settings_save`: `{weeks, startWeekday,
-cooldownWeeks, upcoming}`. Swift must send all four: a missing
-`cooldownWeeks`/`upcoming` reads as 0 and 1 and resets them.
+cooldownWeeks, upcoming}`, all four required; a save missing any is
+refused.
 
 `WorkCycles` gains `settings.cooldownWeeks`, `settings.upcoming`; each
 `WorkCycle` gains `name`, `started`, `success`; `WorkCycleDay` gains
@@ -106,7 +111,9 @@ repeated operation id replays the first answer.
 - `work project PROJECT [--json]`: fields, latest update, update due,
   weekly progress, predicted finish, milestone progress.
 - `work project-update PROJECT --health on-track|at-risk|off-track
-  [--body MD]`: without `--body`, the auto-draft is posted.
+  [--body MD]`: without `--body`, the auto-draft is posted. Without
+  `--operation-id`, the id is derived from the project, health, trimmed
+  text and day, so a retry that day posts once.
 - `work project-updates PROJECT [--limit N] [--cursor ID]`.
 - `work project-update-edit ID [--health H] [--body MD]`,
   `work project-update-delete ID`: your own updates only.

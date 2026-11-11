@@ -82,7 +82,9 @@ WorkCommentPage  { threads: [WorkComment], nextCursor: string|null }
 Every write verb takes `--json`, `--agent NAME`, `--operation-id ID` and
 `--dry-run`; a dry run needs only the read scope.
 
-- `comment add <TASK> --body TEXT [--reply-to COMMENT]`
+- `comment add <TASK> --body TEXT [--reply-to COMMENT]`; without
+  `--operation-id`, the id is derived from the task, the thread, the
+  trimmed text and the day, so a retry that day posts once
 - `comments <TASK> [--limit N] [--cursor COMMENT]`
 - `comment edit <COMMENT> --body TEXT` (also `comment-edit`)
 - `comment delete <COMMENT>` (also `comment-delete`)

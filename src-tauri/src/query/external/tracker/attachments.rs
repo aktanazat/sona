@@ -280,17 +280,20 @@ impl Tracker<'_> {
             )));
         }
         let was_there = found.is_some();
-        let removed = work::detach_as(self.app, Self::attacher(&args.write), &operation_id, &id)
-            .map_err(|message| {
-                if was_there {
-                    self.write_refusal(message, &operation_id, "The attachment")
-                } else {
-                    missing(&args.attachment, &task)
-                }
-            })?;
-        if removed.item_id != row.item.id {
-            return Err(missing(&args.attachment, &task));
-        }
+        let removed = work::detach_as(
+            self.app,
+            Self::attacher(&args.write),
+            &operation_id,
+            &id,
+            Some(&row.item.id),
+        )
+        .map_err(|message| {
+            if was_there {
+                self.write_refusal(message, &operation_id, "The attachment")
+            } else {
+                missing(&args.attachment, &task)
+            }
+        })?;
         Ok(WorkAnswer::Attachment(Box::new(
             ExternalWorkAttachmentChange {
                 schema_version: QUERY_SCHEMA_VERSION,

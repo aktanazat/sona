@@ -12,7 +12,7 @@ use crate::planning::work::types::{WorkActor, WorkComment, WorkItemInput, WorkOw
 use crate::planning::work::{self};
 use crate::query::external::{local_time, ExternalError, ExternalErrorCode};
 use crate::query::QUERY_SCHEMA_VERSION;
-use chrono::Local;
+use chrono::{Local, NaiveDate};
 use clap::{Args, Subcommand};
 use serde::Serialize;
 use std::fmt::Write as _;
@@ -66,6 +66,17 @@ pub struct CommentAddArgs {
     pub dry_run: bool,
     #[command(flatten)]
     pub write: WriteArgs,
+}
+
+impl CommentAddArgs {
+    /// The caller's id, or one derived from the task, the thread, the
+    /// trimmed text and `day`: a retry that day posts the comment once.
+    fn operation_id(&self, task_id: &str, day: NaiveDate) -> Result<String, ExternalError> {
+        self.write.operation_id(
+            "comment",
+            &(task_id, self.reply_to, self.body.trim(), day.to_string()),
+        )
+    }
 }
 
 #[derive(Args, Clone, Debug, Eq, PartialEq)]
@@ -308,17 +319,17 @@ impl Tracker<'_> {
                 )));
             }
         }
+        let operation_id = args.operation_id(&row.item.id, Local::now().date_naive())?;
         if args.dry_run {
             return Ok(Self::comment_change(
                 CommentAction::Added,
                 true,
-                args.write.operation_id.map(|id| id.to_string()),
+                Some(operation_id),
                 row,
                 None,
                 false,
             ));
         }
-        let operation_id = args.write.fresh_operation_id();
         let started_ms = now_ms();
         let reply_to = args.reply_to.map(|id| id.to_string());
         let comment = work::comment_add_as(
@@ -716,5 +727,44 @@ pub(super) fn text(answer: &WorkAnswer, text: &mut String) {
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{WorkCommand, WorkVerb};
+    use super::{CommentAddArgs, CommentCommand, CommentVerb};
+    use crate::cli::{CliArgs, Command};
+    use chrono::NaiveDate;
+    use clap::Parser;
+
+    const TASK: &str = "5b0c6a8e-3d1f-4c2a-9e7b-0a1b2c3d4e5f";
+
+    fn comment(body: &str) -> CommentAddArgs {
+        match CliArgs::try_parse_from(["sona", "work", "comment", "add", "S-1", "--body", body]) {
+            Ok(CliArgs {
+                command:
+                    Some(Command::Work(WorkCommand {
+                        verb:
+                            WorkVerb::Comment(CommentCommand {
+                                verb: CommentVerb::Add(args),
+                            }),
+                        ..
+                    })),
+                ..
+            }) => args,
+            other => panic!("`work comment add` parsed as {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_retried_comment_is_posted_under_the_same_id() {
+        let day = NaiveDate::from_ymd_opt(2026, 11, 11).expect("a day");
+        let first = comment("Venue is held until Friday.").operation_id(TASK, day);
+        let retry = comment("Venue is held until Friday. ").operation_id(TASK, day);
+        let other = comment("Venue is held until Monday.").operation_id(TASK, day);
+        let first = first.expect("an id");
+        assert_eq!(first, retry.expect("an id"));
+        assert_ne!(first, other.expect("an id"));
     }
 }

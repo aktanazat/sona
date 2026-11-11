@@ -1201,7 +1201,8 @@ fn attachment_change(
 }
 
 /// [`work_attachment_attach_file`] made by `author`. The same bytes on the
-/// same task answer the attachment already there.
+/// same task answer the attachment already there; the file moves in once
+/// the attachment is saved.
 pub(crate) fn attach_file_as(
     app: &AppHandle,
     author: comments::Author<'_>,
@@ -1216,7 +1217,7 @@ pub(crate) fn attach_file_as(
         AttachSource::Bytes { data, name } => attachments::stage_bytes(&root, data, name),
     }
     .map_err(super::failure)?;
-    attachment_change(
+    let attached = attachment_change(
         app,
         &root,
         operation_id,
@@ -1232,7 +1233,9 @@ pub(crate) fn attach_file_as(
         |tx, root, at_ms| {
             attachments::attach_file(tx, root, item_id, &staged, naming, author, at_ms)
         },
-    )
+    )?;
+    attachments::place(&staged, &attached).map_err(super::failure)?;
+    Ok(attached)
 }
 
 /// [`work_attachment_attach_link`] made by `author`.
@@ -1255,13 +1258,15 @@ pub(crate) fn attach_link_as(
     )
 }
 
-/// [`work_attachment_detach`] made by `author`; the file goes once the
+/// [`work_attachment_detach`] made by `author`, refused as not found when
+/// the attachment is on another task than `on_task`; the file goes once the
 /// row is gone.
 pub(crate) fn detach_as(
     app: &AppHandle,
     author: comments::Author<'_>,
     operation_id: &str,
     id: &str,
+    on_task: Option<&str>,
 ) -> Result<WorkAttachment, String> {
     let root = attachment_root(app)?;
     let removed = attachment_change(
@@ -1269,8 +1274,8 @@ pub(crate) fn detach_as(
         &root,
         operation_id,
         "work_attachment_detach",
-        &(id, author.actor, author.agent),
-        |tx, root, at_ms| attachments::detach(tx, root, id, author, at_ms),
+        &(id, on_task, author.actor, author.agent),
+        |tx, root, at_ms| attachments::detach(tx, root, id, on_task, author, at_ms),
     )?;
     attachments::remove_file(&removed);
     Ok(removed)
@@ -1376,7 +1381,7 @@ pub fn work_attachment_detach(
     operation_id: String,
     id: String,
 ) -> Result<WorkAttachment, String> {
-    detach_as(&app, ME, &operation_id, &id)
+    detach_as(&app, ME, &operation_id, &id, None)
 }
 
 #[tauri::command(async)]

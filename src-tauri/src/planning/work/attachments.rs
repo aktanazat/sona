@@ -341,8 +341,9 @@ fn insert(
     note(conn, task_id, author, None, Some(new.title), now_ms)
 }
 
-/// Moves `staged` under the task as a new attachment, or answers the one
-/// already holding the same bytes.
+/// Records `staged` on the task as a new attachment, or answers the one
+/// already holding the same bytes. [`place`] moves the file in once this
+/// commits.
 pub(crate) fn attach_file(
     conn: &Connection,
     root: &Path,
@@ -381,10 +382,23 @@ pub(crate) fn attach_file(
         &author,
         now_ms,
     )?;
-    let folder = root.join(&task_id);
-    fs::create_dir_all(&folder)?;
-    fs::rename(&staged.path, folder.join(&stored_name))?;
     find(conn, root, &id)
+}
+
+/// Moves `staged` to where `attachment` keeps its file, unless a file is
+/// already there.
+pub(crate) fn place(staged: &Staged, attachment: &WorkAttachment) -> Result<()> {
+    let Some(path) = attachment.path.as_deref().map(Path::new) else {
+        return Ok(());
+    };
+    if path.exists() {
+        return Ok(());
+    }
+    if let Some(folder) = path.parent() {
+        fs::create_dir_all(folder)?;
+    }
+    fs::rename(&staged.path, path)?;
+    Ok(())
 }
 
 /// The link `url` normalised, refused unless it is web, mail or Sona.
@@ -452,16 +466,21 @@ pub(crate) fn counts(conn: &Connection) -> Result<HashMap<String, u32>> {
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
-/// Takes an attachment off its task. The user may remove any; an agent or
-/// Sona only its own. The caller removes the file once this commits.
+/// Takes an attachment off its task, refused as not found when it is on
+/// another task than `on_task`. The user may remove any; an agent or Sona
+/// only its own. The caller removes the file once this commits.
 pub(crate) fn detach(
     conn: &Connection,
     root: &Path,
     id: &str,
+    on_task: Option<&str>,
     author: Author<'_>,
     now_ms: i64,
 ) -> Result<WorkAttachment> {
     let found = find(conn, root, id)?;
+    if on_task.is_some_and(|task| task != found.item_id) {
+        return Err(Refusal::NotFound.into());
+    }
     if !owns(&author, &found) {
         return Err(Refusal::NotAttacher.into());
     }
@@ -522,7 +541,7 @@ mod tests {
     use super::super::comments::Author;
     use super::super::items::{self, NewItem};
     use super::super::types::{WorkActor, WorkOwner, WorkStatus};
-    use super::{attach_file, attach_link, list, stage_bytes, Naming};
+    use super::{attach_file, attach_link, detach, list, place, stage_bytes, Naming};
     use rusqlite::Connection;
     use std::path::Path;
 
@@ -536,13 +555,11 @@ mod tests {
         subtitle: None,
     };
 
-    fn tracker() -> (Connection, String) {
-        let conn = Connection::open_in_memory().expect("an in-memory history database");
-        schema::apply_all(&conn).expect("the planner schema");
-        let task = items::insert(
-            &conn,
+    fn task(conn: &Connection, title: &str) -> String {
+        items::insert(
+            conn,
             &NewItem {
-                title: "Launch the harbor site",
+                title,
                 details: None,
                 status: WorkStatus::NotStarted,
                 priority: 0,
@@ -558,7 +575,13 @@ mod tests {
             AT,
         )
         .expect("a task")
-        .id;
+        .id
+    }
+
+    fn tracker() -> (Connection, String) {
+        let conn = Connection::open_in_memory().expect("an in-memory history database");
+        schema::apply_all(&conn).expect("the planner schema");
+        let task = task(&conn, "Launch the harbor site");
         (conn, task)
     }
 
@@ -569,6 +592,7 @@ mod tests {
         let staged = stage_bytes(root.path(), b"payload", "../../evil.sh").expect("staged");
         let attached =
             attach_file(&conn, root.path(), &task, &staged, UNNAMED, ME, AT).expect("attached");
+        place(&staged, &attached).expect("placed");
         let path = Path::new(attached.path.as_deref().expect("a stored file"));
         assert_eq!(path.parent(), Some(root.path().join(&task).as_path()));
         assert!(path.is_file());
@@ -585,6 +609,44 @@ mod tests {
             attach_file(&conn, root.path(), &task, &again, UNNAMED, ME, AT + 1).expect("two");
         assert_eq!(first.id, again.id);
         assert_eq!(list(&conn, root.path(), &task).expect("listed").len(), 1);
+    }
+
+    #[test]
+    fn an_attach_that_rolls_back_leaves_no_file() {
+        let (mut conn, task) = tracker();
+        let root = tempfile::tempdir().expect("a scratch folder");
+        let staged = stage_bytes(root.path(), b"payload", "notes.txt").expect("staged");
+        let tx = conn.transaction().expect("a transaction");
+        let attached =
+            attach_file(&tx, root.path(), &task, &staged, UNNAMED, ME, AT).expect("attached");
+        drop(tx);
+        drop(staged);
+        assert!(!Path::new(attached.path.as_deref().expect("a stored file")).exists());
+        assert!(!root.path().join(&task).exists());
+    }
+
+    #[test]
+    fn a_detach_through_another_task_takes_nothing_off() {
+        let (conn, venue) = tracker();
+        let copy = task(&conn, "Write the copy");
+        let root = tempfile::tempdir().expect("a scratch folder");
+        let link = attach_link(
+            &conn,
+            root.path(),
+            &copy,
+            "https://example.com/brief",
+            UNNAMED,
+            ME,
+            AT,
+        )
+        .expect("a link on the copy task");
+        let refused =
+            detach(&conn, root.path(), &link.id, Some(&venue), ME, AT).expect_err("refused");
+        assert_eq!(
+            crate::planning::failure(refused),
+            crate::planning::failure(super::Refusal::NotFound.into())
+        );
+        assert_eq!(list(&conn, root.path(), &copy).expect("listed").len(), 1);
     }
 
     #[test]

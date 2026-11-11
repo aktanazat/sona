@@ -784,14 +784,8 @@ pub struct WorkList {
 pub struct WorkCycleSettings {
     pub weeks: u8,
     pub start_weekday: u8,
-    #[serde(default)]
     pub cooldown_weeks: u8,
-    #[serde(default = "one_upcoming")]
     pub upcoming: u8,
-}
-
-const fn one_upcoming() -> u8 {
-    1
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]

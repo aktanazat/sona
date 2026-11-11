@@ -903,6 +903,22 @@ pub(crate) fn start(app: AppHandle, prompts: Arc<dyn PromptPresenter>) {
     });
 }
 
+/// The brief for one person: my open work with them and theirs with me.
+pub(crate) async fn person_brief(
+    history: &HistoryManager,
+    meetings: &MeetingSessionManager,
+    person_id: String,
+) -> Result<WorkBrief, String> {
+    let store = meetings
+        .store()
+        .await
+        .map_err(|_| super::super::conversations_closed())?;
+    in_both(&store, history, |history, meetings| {
+        brief(history, meetings, None, &[person_id], now_ms())
+    })
+    .map_err(super::super::failure)
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn work_brief(
@@ -911,32 +927,32 @@ pub async fn work_brief(
     meetings: State<'_, Arc<MeetingSessionManager>>,
     subject: WorkBriefSubject,
 ) -> Result<WorkBrief, String> {
+    let event_key = match subject {
+        WorkBriefSubject::Event { event_key } => event_key,
+        WorkBriefSubject::Person { person_id } => {
+            return person_brief(&history_state, &meetings, person_id).await;
+        }
+    };
     let store = meetings
         .store()
         .await
         .map_err(|_| super::super::conversations_closed())?;
-    let (event, people) = match subject {
-        WorkBriefSubject::Event { event_key } => {
-            let runtime = Arc::clone(&runtime);
-            if !crate::settings::get_settings(runtime.app_handle()).detection_calendar_enabled {
-                return Err("Turn on Use my calendar in Meeting settings.".into());
-            }
-            if runtime.calendar_access() != CalendarAccess::Authorized {
-                return Err("Allow Sona to read Calendar in System Settings.".into());
-            }
-            let event = tauri::async_runtime::spawn_blocking(move || {
-                runtime.calendar_event_by_key(&event_key)
-            })
-            .await
-            .map_err(|_| "The calendar could not be read.")?
-            .ok_or("This event is no longer on your calendar.")?;
-            let people = attendees(&store, &event).map_err(super::super::failure)?;
-            (Some(event), people)
-        }
-        WorkBriefSubject::Person { person_id } => (None, vec![person_id]),
-    };
+    let runtime = Arc::clone(&runtime);
+    if !crate::settings::get_settings(runtime.app_handle()).detection_calendar_enabled {
+        return Err("Turn on Use my calendar in Meeting settings.".into());
+    }
+    if runtime.calendar_access() != CalendarAccess::Authorized {
+        return Err("Allow Sona to read Calendar in System Settings.".into());
+    }
+    let event = tauri::async_runtime::spawn_blocking(move || {
+        runtime.calendar_event_by_key(&event_key)
+    })
+    .await
+    .map_err(|_| "The calendar could not be read.")?
+    .ok_or("This event is no longer on your calendar.")?;
+    let people = attendees(&store, &event).map_err(super::super::failure)?;
     in_both(&store, &history_state, |history, meetings| {
-        brief(history, meetings, event.as_ref(), &people, now_ms())
+        brief(history, meetings, Some(&event), &people, now_ms())
     })
     .map_err(super::super::failure)
 }

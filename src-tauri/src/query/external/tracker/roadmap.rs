@@ -81,6 +81,22 @@ pub struct ProjectUpdateArgs {
     pub write: WriteArgs,
 }
 
+impl ProjectUpdateArgs {
+    /// The caller's id, or one derived from the project, the health, the
+    /// trimmed text and `day`: a retry that day posts the update once.
+    fn operation_id(&self, project_id: &str, day: NaiveDate) -> Result<String, ExternalError> {
+        self.write.operation_id(
+            "project-update",
+            &(
+                project_id,
+                self.health,
+                self.body.as_deref().map(str::trim),
+                day.to_string(),
+            ),
+        )
+    }
+}
+
 #[derive(Args, Clone, Debug, Eq, PartialEq)]
 pub struct ProjectUpdatesArgs {
     pub project: String,
@@ -545,6 +561,7 @@ impl Tracker<'_> {
         let author = Self::update_author(&args.write);
         let health = args.health.health();
         let body = args.body.as_deref();
+        let operation_id = args.operation_id(&project.id, chrono::Local::now().date_naive())?;
         if args.dry_run {
             let update = self.rehearse(|conn| {
                 let drafted = match body {
@@ -556,13 +573,12 @@ impl Tracker<'_> {
             return Ok(Self::update_change(
                 UpdateAction::Added,
                 true,
-                args.write.operation_id.map(|id| id.to_string()),
+                Some(operation_id),
                 &project,
                 update,
                 false,
             ));
         }
-        let operation_id = args.write.fresh_operation_id();
         self.applies("posting a project update")?;
         let started_ms = now_ms();
         let update = project_plans::update_add_as(
@@ -1047,5 +1063,44 @@ pub(super) fn text(answer: &WorkAnswer, text: &mut String) {
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{WorkCommand, WorkVerb};
+    use super::ProjectUpdateArgs;
+    use crate::cli::{CliArgs, Command};
+    use chrono::NaiveDate;
+    use clap::Parser;
+
+    const PROJECT: &str = "5b0c1e0e-8f1d-4c1e-9d43-0a6f0e3c2a11";
+
+    fn update(health: &str, body: &str) -> ProjectUpdateArgs {
+        let argv = [
+            "sona", "work", "project-update", "Harbor launch", "--health", health, "--body", body,
+        ];
+        match CliArgs::try_parse_from(argv) {
+            Ok(CliArgs {
+                command:
+                    Some(Command::Work(WorkCommand {
+                        verb: WorkVerb::ProjectUpdate(args),
+                        ..
+                    })),
+                ..
+            }) => args,
+            other => panic!("`work project-update` parsed as {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_retried_project_update_is_posted_under_the_same_id() {
+        let day = NaiveDate::from_ymd_opt(2026, 11, 11).expect("a day");
+        let first = update("at-risk", "Venue held.").operation_id(PROJECT, day);
+        let retry = update("at-risk", " Venue held.").operation_id(PROJECT, day);
+        let other = update("on-track", "Venue held.").operation_id(PROJECT, day);
+        let first = first.expect("an id");
+        assert_eq!(first, retry.expect("an id"));
+        assert_ne!(first, other.expect("an id"));
     }
 }

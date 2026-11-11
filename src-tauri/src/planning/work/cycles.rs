@@ -143,7 +143,12 @@ pub(crate) fn advance(conn: &Connection, now_ms: i64) -> Result<Advanced> {
                 } else {
                     let behind = u64::try_from((today - first).num_days())?;
                     let step = length + cooldown;
-                    Some(plus(first, behind / step * step)?)
+                    let start = plus(first, behind / step * step)?;
+                    Some(if plus(start, length)? <= today {
+                        plus(start, step)?
+                    } else {
+                        start
+                    })
                 }
             }
             Some(_) => None,
@@ -504,7 +509,8 @@ pub(crate) fn listing(conn: &Connection, now_ms: i64) -> Result<WorkCycles> {
 /// Saves how cycles run. When the length, start day or cooldown changes,
 /// the cycle under way ends on the next start day after today and the
 /// cycles after it are made again; work planned in them stays planned under
-/// the same numbers.
+/// the same numbers. Work planned in a cycle no longer made goes back to no
+/// cycle.
 pub(crate) fn save_settings(
     conn: &Connection,
     settings: WorkCycleSettings,
@@ -564,7 +570,25 @@ pub(crate) fn save_settings(
             }
         }
     }
-    Ok(advance(conn, now_ms)?.moved)
+    let mut moved = advance(conn, now_ms)?.moved;
+    moved.extend(unplan_removed(conn, now_ms)?);
+    Ok(moved)
+}
+
+/// Takes every task planned in a cycle that no longer exists out of it.
+fn unplan_removed(conn: &Connection, now_ms: i64) -> Result<Vec<String>> {
+    let mut statement = conn.prepare(
+        "SELECT id, cycle FROM planning_tasks
+         WHERE cycle IS NOT NULL AND cycle NOT IN (SELECT number FROM planning_cycles)
+         ORDER BY number",
+    )?;
+    let planned = statement
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (id, cycle) in &planned {
+        items::place_in_cycle(conn, id, Some(*cycle), None, WorkActor::Sona, now_ms)?;
+    }
+    Ok(planned.into_iter().map(|(id, _)| id).collect())
 }
 
 pub(crate) fn status(text: &str) -> Option<WorkStatus> {
@@ -982,4 +1006,118 @@ fn tick(app: &AppHandle, now_ms: i64) -> Result<Advanced> {
         crate::planning::changed_everywhere(app);
     }
     Ok(changed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::super::schema;
+    use super::super::items::{self, NewItem};
+    use super::super::types::{
+        WorkActivityKind, WorkActor, WorkCycleSettings, WorkOwner, WorkStatus,
+    };
+    use super::{advance, day_text, insert, local_midnight_ms, plus, save_settings, spans};
+    use chrono::{Days, NaiveDate};
+    use rusqlite::Connection;
+
+    const HOUR_MS: i64 = 60 * 60 * 1000;
+
+    fn today() -> NaiveDate {
+        NaiveDate::from_ymd_opt(2026, 11, 11).expect("a day")
+    }
+
+    fn noon() -> i64 {
+        local_midnight_ms(today()).expect("midnight") + 12 * HOUR_MS
+    }
+
+    fn tracker() -> Connection {
+        let conn = Connection::open_in_memory().expect("an in-memory history database");
+        schema::apply_all(&conn).expect("the planner schema");
+        conn
+    }
+
+    fn every(weeks: u8, cooldown_weeks: u8, upcoming: u8) -> WorkCycleSettings {
+        WorkCycleSettings {
+            weeks,
+            start_weekday: 1,
+            cooldown_weeks,
+            upcoming,
+        }
+    }
+
+    #[test]
+    fn a_save_without_cooldown_and_upcoming_is_refused() {
+        let partial = serde_json::from_str::<WorkCycleSettings>(r#"{"weeks":2,"startWeekday":1}"#);
+        assert!(partial.is_err(), "{partial:?}");
+    }
+
+    #[test]
+    fn work_in_a_cycle_no_longer_made_goes_back_to_no_cycle() {
+        let conn = tracker();
+        let now = noon();
+        save_settings(&conn, every(2, 0, 3), now).expect("three cycles ahead");
+        let last = spans(&conn).expect("cycles").last().expect("a cycle").number;
+        let task = items::insert(
+            &conn,
+            &NewItem {
+                title: "Ship the site",
+                details: None,
+                status: WorkStatus::NotStarted,
+                priority: 0,
+                project_id: None,
+                milestone_id: None,
+                owner: &WorkOwner::Nobody,
+                due_at_ms: None,
+                label_ids: &[],
+                source_loop_id: None,
+                recurrence: None,
+            },
+            WorkActor::Me,
+            now,
+        )
+        .expect("a task")
+        .id;
+        items::place_in_cycle(&conn, &task, None, Some(last), WorkActor::Me, now)
+            .expect("planned in the last cycle");
+
+        let moved = save_settings(&conn, every(2, 0, 1), now + 1).expect("one cycle ahead");
+
+        assert!(spans(&conn)
+            .expect("cycles")
+            .iter()
+            .all(|span| span.number != last));
+        assert_eq!(moved, vec![task.clone()]);
+        assert_eq!(items::item(&conn, &task).expect("the task").cycle, None);
+        let entry = items::activity(&conn, &task)
+            .expect("history")
+            .into_iter()
+            .rfind(|entry| entry.kind == WorkActivityKind::Cycle)
+            .expect("a cycle entry");
+        assert_eq!(
+            (entry.actor, entry.from, entry.to),
+            (WorkActor::Sona, Some(last.to_string()), None)
+        );
+    }
+
+    #[test]
+    fn a_cycle_made_inside_a_cooldown_starts_after_it() {
+        let conn = tracker();
+        conn.execute(
+            "UPDATE planning_cycle_settings SET weeks = 1, cooldown_weeks = 1, upcoming = 1",
+            [],
+        )
+        .expect("weekly cycles with a week off");
+        let ended = today().checked_sub_days(Days::new(15)).expect("a day");
+        let started = ended.checked_sub_days(Days::new(7)).expect("a day");
+        insert(&conn, 1, started, ended, noon()).expect("a cycle long over");
+
+        advance(&conn, noon()).expect("cycles moved on");
+
+        let made = spans(&conn).expect("cycles");
+        let next = made.iter().find(|span| span.number == 2).expect("cycle 2");
+        assert_eq!(
+            day_text(next.start),
+            day_text(plus(today(), 6).expect("a day"))
+        );
+        assert!(made.iter().all(|span| span.number == 1 || span.start > today()));
+    }
 }
