@@ -1,4 +1,5 @@
 import SwiftUI
+import CoreImage.CIFilterBuiltins
 
 /// The Shared place: drafts waiting for him first, then every link with
 /// where it stands.
@@ -7,6 +8,8 @@ struct SharedPagesView: View {
     @State private var stopping: SharedRecord?
     @State private var discarding: SharedDraftSummary?
     @State private var copied: String?
+    @State private var qr: SharedRecord?
+    @State private var copyingSummary: SharedRecord?
 
     private var store: SharedPagesStore { model.shared }
 
@@ -67,6 +70,16 @@ struct SharedPagesView: View {
         } message: { _ in
             Text("Its edits are deleted. The meeting itself stays as it is.")
         }
+        .alert("Copy the link with its first line?", item: $copyingSummary) { record in
+            Button("Cancel", role: .cancel) {}
+            Button("Copy") {
+                if let url = record.url {
+                    CloudSyncClipboard.copy("\(record.blurb ?? "")\n\(url)")
+                }
+            }
+        } message: { record in
+            Text("\"\(record.blurb ?? "")\" and the link go into the chat. This line stays in the chat even after the page is taken down.")
+        }
     }
 
     private var subtitle: String {
@@ -111,6 +124,9 @@ struct SharedPagesView: View {
         return CardRow {
             VStack(alignment: .leading, spacing: 4) {
                 Text(record.title ?? "Untitled meeting").bodyText().lineLimit(1)
+                if let forPerson = record.forPerson, !forPerson.isEmpty {
+                    Text("for \(forPerson)").metaText(Theme.accent)
+                }
                 Text(record.contents).metaText(Theme.inkSecondary)
                 Text(record.dates).metaText()
                 if phase == .failed, let error = record.error {
@@ -126,6 +142,25 @@ struct SharedPagesView: View {
                         copied = record.slug
                     }
                     .buttonStyle(.quiet)
+                    Button("Copy with summary") {
+                        if let blurb = record.blurb, !blurb.isEmpty {
+                            copyingSummary = record
+                        } else {
+                            CloudSyncClipboard.copy(url)
+                        }
+                    }
+                    .buttonStyle(.quiet)
+                    Button { qr = record } label: {
+                        Image(systemName: "qrcode")
+                    }
+                    .buttonStyle(.icon)
+                    .help("Show QR code")
+                    .accessibilityLabel("Show QR code")
+                    .popover(item: $qr) { record in
+                        if let url = record.url {
+                            ShareQRView(url: url)
+                        }
+                    }
                     if let link = URL(string: url) {
                         Button("Open") { NSWorkspace.shared.open(link) }
                             .buttonStyle(.quiet)
@@ -175,5 +210,36 @@ struct SharedSiteSetup: View {
             }
             .padding(16)
         }
+    }
+}
+
+/// A QR code of the full link, crisp squares on a white quiet zone.
+struct ShareQRView: View {
+    let url: String
+
+    var body: some View {
+        VStack {
+            if let image = ShareQRView.image(url) {
+                Image(nsImage: image)
+                    .interpolation(.none)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: 200, height: 200)
+            }
+        }
+        .padding(16)
+    }
+
+    private static func image(_ url: String) -> NSImage? {
+        let filter = CIFilter.qrCodeGenerator()
+        filter.message = Data(url.utf8)
+        filter.correctionLevel = "M"
+        guard let code = filter.outputImage else { return nil }
+        // Readers need four modules of white around the code; one module is one unit here.
+        let framed = code.composited(over: CIImage(color: .white).cropped(to: code.extent.insetBy(dx: -4, dy: -4)))
+        let scale = 400 / framed.extent.width
+        let scaled = framed.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        guard let cg = CIContext().createCGImage(scaled, from: scaled.extent) else { return nil }
+        return NSImage(cgImage: cg, size: NSSize(width: 400, height: 400))
     }
 }

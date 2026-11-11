@@ -53,6 +53,8 @@ final class ShareSheetModel {
     ) { didSet { edited() } }
     var speakers = SharedSpeakers.names { didSet { edited() } }
     var expiry = SharedExpiry.never { didSet { edited() } }
+    /// Who the page is written for; `nil` shares the whole meeting.
+    var forPerson: String? { didSet { edited() } }
     var title = "" { didSet { edited() } }
     var summary: [String] = [] { didSet { edited() } }
     var decisions: [String] = [] { didSet { edited() } }
@@ -63,9 +65,15 @@ final class ShareSheetModel {
     private(set) var frame: SharePreviewFrame?
     private(set) var previewFailure: String?
     private(set) var saveFailure: String?
+    /// What the last preview's check found on the page.
+    private(set) var checks: [ShareCheck] = []
     private(set) var record: SharedRecord?
     private(set) var stopFailure: String?
     private(set) var stopping = false
+    private(set) var recapping = false
+    private(set) var recapFailure: String?
+    /// The summary the last rewrite replaced, and whether it was on the page; one Undo.
+    private(set) var recapUndo: (summary: [String], included: Bool)?
 
     @ObservationIgnored private let core: Core
     @ObservationIgnored private let shared: SharedPagesStore
@@ -137,10 +145,12 @@ final class ShareSheetModel {
                     audio: preview.audioPath,
                     page: try JSONEncoder().encode(preview.page),
                     generation: mine)
+                checks = preview.checks
                 previewFailure = nil
             }
         } catch {
             if mine == revision {
+                checks = []
                 previewFailure = SharedFailure.words(error)
             }
         }
@@ -173,6 +183,99 @@ final class ShareSheetModel {
         } catch {
             phase = .failed(SharedFailure.words(error))
             await shared.readSite()
+        }
+    }
+
+    /// After a version for one person: back to the same draft, his edits
+    /// kept, for the next person. The core cleared for_person when it kept
+    /// the draft.
+    func anotherVersion() async {
+        record = nil
+        forPerson = nil
+        base?.forPerson = nil
+        phase = .editing
+        await sync()
+    }
+
+    /// Rewrites the summary for someone who wasn't there. The draft is
+    /// sent as-is; the result is dropped if it changed while the core
+    /// worked.
+    func recap() async {
+        guard let draft = current() else { return }
+        pending?.cancel()
+        recapping = true
+        defer { recapping = false }
+        do {
+            let answer: ShareRecap = try await core.request(
+                "shared_draft_recap", CloudSyncRequest(request: SharedDraftBody(draft: draft)))
+            guard !dirty, editable else { return }
+            recapUndo = (summary, include.summary)
+            summary = answer.paragraphs
+            include.summary = true
+            recapFailure = nil
+        } catch {
+            recapFailure = SharedFailure.words(error)
+        }
+    }
+
+    /// Puts back the summary the last rewrite replaced, on or off as it was.
+    func undoRecap() {
+        guard let before = recapUndo else { return }
+        recapUndo = nil
+        summary = before.summary
+        include.summary = before.included
+    }
+
+    /// Replaces every occurrence of the flagged text across the draft,
+    /// then saves it through the normal edit path.
+    func removeCheck(_ check: ShareCheck) {
+        let needle = check.text
+        guard !needle.isEmpty else { return }
+        title = title.replacingOccurrences(of: needle, with: "[removed]")
+        forPerson = forPerson?.replacingOccurrences(of: needle, with: "[removed]")
+        summary = summary.map { $0.replacingOccurrences(of: needle, with: "[removed]") }
+        decisions = decisions.map { $0.replacingOccurrences(of: needle, with: "[removed]") }
+        actionItems = actionItems.map { item in
+            var item = item
+            item.text = item.text.replacingOccurrences(of: needle, with: "[removed]")
+            item.owner = item.owner?.replacingOccurrences(of: needle, with: "[removed]")
+            item.due = item.due?.replacingOccurrences(of: needle, with: "[removed]")
+            return item
+        }
+        notes = notes.map { $0.replacingOccurrences(of: needle, with: "[removed]") }
+        speakerNames = speakerNames.map { $0.replacingOccurrences(of: needle, with: "[removed]") }
+        for turn in turns {
+            turn.text = turn.text.replacingOccurrences(of: needle, with: "[removed]")
+        }
+        edited()
+    }
+
+    /// "Everyone" plus each action-item owner that still has an item,
+    /// folded and deduplicated like the core compares them, plus the
+    /// chosen person even when they no longer own one, so he can switch away.
+    var forChoices: [ShareForChoice] {
+        var seen: Set<String> = []
+        var choices: [ShareForChoice] = [.everyone]
+        for item in actionItems {
+            guard let owner = item.owner else { continue }
+            let folded = owner.split(separator: " ").joined(separator: " ")
+            guard !folded.isEmpty, seen.insert(folded.lowercased()).inserted else { continue }
+            choices.append(.person(folded))
+        }
+        if let forPerson, !seen.contains(forPerson.lowercased()) {
+            choices.append(.person(forPerson))
+        }
+        return choices
+    }
+
+    /// The picker's view of `forPerson`.
+    var forChoice: ShareForChoice {
+        get { forPerson.map { .person($0) } ?? .everyone }
+        set {
+            switch newValue {
+            case .everyone: forPerson = nil
+            case let .person(name): forPerson = name
+            }
         }
     }
 
@@ -211,6 +314,7 @@ final class ShareSheetModel {
         include = draft.include
         speakers = draft.speakers
         expiry = SharedExpiry(days: draft.expiresInDays)
+        forPerson = draft.forPerson
         title = draft.content.title ?? ""
         summary = draft.content.summary
         decisions = draft.content.decisions
@@ -230,6 +334,7 @@ final class ShareSheetModel {
         draft.include = include
         draft.speakers = speakers
         draft.expiresInDays = expiry.days
+        draft.forPerson = forPerson
         draft.content.title = title
         draft.content.summary = summary
         draft.content.decisions = decisions
@@ -377,6 +482,11 @@ private struct ShareEditor: View {
                 PageSection("On the page") {
                     ShareParts(share: share)
                 }
+                if !share.checks.isEmpty {
+                    PageSection("Check before sharing") {
+                        ShareChecks(share: share)
+                    }
+                }
                 PageSection("Link") {
                     Card {
                         ChoiceRow(
@@ -384,6 +494,14 @@ private struct ShareEditor: View {
                             choices: SharedExpiry.allCases,
                             label: \.label,
                             selection: $share.expiry)
+                        if share.forChoices.count > 1 {
+                            ChoiceRow(
+                                title: "For",
+                                detail: share.forPerson.map { "Keeps only \($0)'s action items on the page." },
+                                choices: share.forChoices,
+                                label: \.label,
+                                selection: $share.forChoice)
+                        }
                     }
                 }
                 if share.include.title {
@@ -396,6 +514,7 @@ private struct ShareEditor: View {
                         ShareParagraphs(prompt: "Empty paragraph", paragraphs: $share.summary)
                     }
                 }
+                ShareRecapBlock(share: share)
                 if share.include.actionItems, !share.actionItems.isEmpty {
                     ShareEditorBlock("Action items") {
                         ShareActionItems(items: $share.actionItems)
@@ -547,6 +666,55 @@ private struct ShareActionItems: View {
     }
 }
 
+/// The preview check's flags: each is the exact text found on the page,
+/// with a Remove that blanks it everywhere before saving.
+private struct ShareChecks: View {
+    let share: ShareSheetModel
+
+    var body: some View {
+        Card {
+            ForEach(Array(share.checks.enumerated()), id: \.offset) { _, check in
+                CardRow {
+                    Text(check.words)
+                        .bodyText(13)
+                        .fixedSize(horizontal: false, vertical: true)
+                } trailing: {
+                    Button("Remove") { share.removeCheck(check) }
+                        .buttonStyle(.quiet)
+                }
+            }
+        }
+    }
+}
+
+/// Rewrites the summary for someone who wasn't there, keeping one Undo.
+private struct ShareRecapBlock: View {
+    let share: ShareSheetModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                if share.recapping {
+                    ProgressView().controlSize(.small)
+                }
+                Button(share.recapping ? "Rewriting…" : "Rewrite for someone who wasn't there") {
+                    Task { await share.recap() }
+                }
+                .buttonStyle(.secondary)
+                .disabled(share.recapping)
+                if share.recapUndo != nil {
+                    Button("Undo") { share.undoRecap() }
+                        .buttonStyle(.quiet)
+                }
+            }
+            if let failure = share.recapFailure {
+                Text(failure).metaText(Theme.live).textSelection(.enabled)
+            }
+        }
+        .padding(.bottom, 24)
+    }
+}
+
 private struct ShareTranscriptRows: View {
     let share: ShareSheetModel
 
@@ -590,6 +758,8 @@ private struct SharePublishedPanel: View {
     let share: ShareSheetModel
     @State private var copied = false
     @State private var confirming = false
+    @State private var qr = false
+    @State private var copyingSummary = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -620,6 +790,25 @@ private struct SharePublishedPanel: View {
                             copied = true
                         }
                         .buttonStyle(.secondary)
+                        Button("Copy with summary") {
+                            if let blurb = record.blurb, !blurb.isEmpty {
+                                copyingSummary = true
+                            } else {
+                                CloudSyncClipboard.copy(url)
+                            }
+                        }
+                        .buttonStyle(.secondary)
+                        Button { qr = true } label: {
+                            Image(systemName: "qrcode")
+                        }
+                        .buttonStyle(.icon)
+                        .help("Show QR code")
+                        .accessibilityLabel("Show QR code")
+                        .popover(isPresented: $qr) {
+                            ShareQRView(url: url)
+                        }
+                    }
+                    HStack(spacing: 8) {
                         if let link = URL(string: url) {
                             Button("Open in browser") { NSWorkspace.shared.open(link) }
                                 .buttonStyle(.secondary)
@@ -644,6 +833,16 @@ private struct SharePublishedPanel: View {
             }
         } message: {
             Text("The page goes offline within about a minute. People who already opened it may have kept a copy.")
+        }
+        .alert("Copy the link with its first line?", isPresented: $copyingSummary) {
+            Button("Cancel", role: .cancel) {}
+            Button("Copy") {
+                if let record = share.record, let url = record.url {
+                    CloudSyncClipboard.copy("\(record.blurb ?? "")\n\(url)")
+                }
+            }
+        } message: {
+            Text("\"\(share.record?.blurb ?? "")\" and the link go into the chat. This line stays in the chat even after the page is taken down.")
         }
     }
 
@@ -728,6 +927,10 @@ private struct ShareSheetFooter: View {
             Spacer(minLength: 12)
             switch share.phase {
             case .published:
+                if share.record?.forPerson != nil {
+                    Button("Make a version for someone else") { Task { await share.anotherVersion() } }
+                        .buttonStyle(.secondary)
+                }
                 Button("Done", action: close)
                     .buttonStyle(.primary)
                     .keyboardShortcut(.defaultAction)
