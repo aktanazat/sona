@@ -2,11 +2,12 @@ use std::fs;
 
 use chrono::{TimeZone, Utc};
 
+use super::checks::{check_page, ShareCheckKind, ShareCheckSection};
 use super::content::{
     page_from_draft, ActionItem, Draft, DraftContent, Include, SpeakerMode, Turn, DRAFT_VERSION,
 };
 use super::site::{write_tree, Change, EXPIRES_FILE, MARKER, PAGE_FILE};
-use super::{draft, publish, Code, Paths};
+use super::{blurb_of, draft, publish, Code, Paths};
 use crate::meeting::detection::machine::{
     CalendarAttendee, CalendarEventSummary, ParticipationStatus,
 };
@@ -31,6 +32,7 @@ fn invented_draft() -> Draft {
             audio: false,
         },
         speakers: SpeakerMode::Numbered,
+        for_person: None,
         expires_in_days: None,
         content: DraftContent {
             title: "Greenhouse sensor review".to_owned(),
@@ -87,6 +89,170 @@ fn numbered_page_leaves_out_speaker_names_and_excluded_sections() {
     );
 }
 
+/// A one-person page names that person and keeps only her action items; the
+/// name matches however it is spaced or cased, and a page for a person
+/// with no items, or with action items left off, is refused.
+#[test]
+fn person_page_keeps_only_the_persons_items() {
+    let mut draft = invented_draft();
+    draft.content.action_items = vec![
+        ActionItem {
+            text: "Recalibrate bench three.".to_owned(),
+            owner: Some("  jane   doe ".to_owned()),
+            due: None,
+        },
+        ActionItem {
+            text: "Book the cold room.".to_owned(),
+            owner: Some("Teodor Vance".to_owned()),
+            due: None,
+        },
+        ActionItem {
+            text: "File the drift report.".to_owned(),
+            owner: None,
+            due: None,
+        },
+    ];
+    let shared_at = Utc.with_ymd_and_hms(2026, 3, 5, 9, 0, 0).unwrap();
+
+    draft.for_person = Some("JANE  DOE".to_owned());
+    let page = page_from_draft(&draft, None, shared_at).unwrap().page;
+    assert_eq!(page.for_person.as_deref(), Some("JANE DOE"));
+    let items = page.action_items.as_deref().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].text, "Recalibrate bench three.");
+
+    for (person, items_on) in [("Nobody Here", true), ("Teodor Vance", false)] {
+        draft.for_person = Some(person.to_owned());
+        draft.include.action_items = items_on;
+        let Err(error) = page_from_draft(&draft, None, shared_at) else {
+            panic!("a page for {person} with none of their items is refused");
+        };
+        assert_eq!(error.code, Code::NoItemsForPerson);
+    }
+}
+
+/// The checks flag a phone number, an address, an amount, a long digit run
+/// and a person who was not in the meeting, each once and exactly as it
+/// reads — but not a date, a date beside a time, a year, a version, a
+/// speaker or the person the page is for.
+#[test]
+fn checks_flag_only_what_should_be_replaced() {
+    let mut draft = invented_draft();
+    draft.include.decisions = true;
+    draft.include.notes = true;
+    draft.for_person = Some("Marta Illen".to_owned());
+    draft.content.title = "Greenhouse sensor review on 2026-11-10".to_owned();
+    draft.content.summary = vec![
+        "Call Odile Brask on +1 (415) 555-0132 about the drift. The review also covered Marta Illen, Al Reiss and Ted.".to_owned(),
+    ];
+    draft.content.decisions =
+        vec!["Pay $4,500 to mirela@example.com before 10:00 on Tuesday.".to_owned()];
+    draft.content.action_items = vec![ActionItem {
+        text: "Follow up on ticket 9912034 by Odile Brask.".to_owned(),
+        owner: Some("Marta Illen".to_owned()),
+        due: Some("2026-11-12".to_owned()),
+    }];
+    draft.content.notes = vec![
+        "The invoice was 2026 dollars for firmware 1.2.3.".to_owned(),
+        "Next check-in 2026-11-24 10:30 at the shed.".to_owned(),
+        "Pay $420, then call +1 (415) 555-0132 again.".to_owned(),
+    ];
+    draft.content.transcript = vec![
+        Turn {
+            s: 0,
+            t: 0.0,
+            text: "Order placed in 2026, total $850.".to_owned(),
+        },
+        Turn {
+            s: 1,
+            t: 4.5,
+            text: "The link is https://example.com/spec.".to_owned(),
+        },
+    ];
+    let people = [
+        vec!["Marta Illen".to_owned()],
+        vec!["Al Reiss".to_owned()],
+        vec!["Al".to_owned()],
+        vec!["Odile Brask".to_owned()],
+        vec!["Ted".to_owned(), "Teodor Vance".to_owned()],
+    ];
+    let shared_at = Utc.with_ymd_and_hms(2026, 3, 5, 9, 0, 0).unwrap();
+    let page = page_from_draft(&draft, None, shared_at).unwrap().page;
+
+    let flags: Vec<(ShareCheckKind, ShareCheckSection, String)> = check_page(
+        &page,
+        &draft.content.speakers,
+        &people,
+    )
+    .into_iter()
+    .map(|check| (check.kind, check.section, check.text))
+    .collect();
+
+    let flagged = |kind: ShareCheckKind, section: ShareCheckSection, text: &str| {
+        flags
+            .iter()
+            .any(|(k, s, t)| *k == kind && *s == section && t == text)
+    };
+    assert!(flagged(ShareCheckKind::Phone, ShareCheckSection::Summary, "+1 (415) 555-0132"));
+    assert!(flagged(ShareCheckKind::Email, ShareCheckSection::Decisions, "mirela@example.com"));
+    assert!(flagged(ShareCheckKind::Money, ShareCheckSection::Decisions, "$4,500"));
+    assert!(flagged(ShareCheckKind::Number, ShareCheckSection::ActionItems, "9912034"));
+    assert!(flagged(ShareCheckKind::Link, ShareCheckSection::Transcript, "https://example.com/spec"));
+    assert!(flagged(ShareCheckKind::Money, ShareCheckSection::Transcript, "$850"));
+    assert!(flagged(ShareCheckKind::Money, ShareCheckSection::Notes, "$420"));
+    assert!(flagged(ShareCheckKind::Person, ShareCheckSection::Summary, "Al Reiss"));
+    assert_eq!(
+        flags.iter().filter(|(_, _, found)| found == "+1 (415) 555-0132").count(),
+        1,
+        "a repeated number is one flag: {flags:?}"
+    );
+    assert!(
+        !flags.iter().any(|(_, _, found)| {
+            found.contains("2026-") || found.contains("10:30") || found == "Marta Illen"
+        }),
+        "no date, time or the page's own person is flagged: {flags:?}"
+    );
+
+    for text in ["2026-11-10", "2026-11-12", "10:00", "2026", "1.2.3", "Al", "Ted"] {
+        assert!(
+            !flags.iter().any(|(_, _, found)| found.as_str() == text),
+            "{text} should not be flagged: {flags:?}"
+        );
+    }
+    assert!(
+        !flags
+            .iter()
+            .any(|(kind, _, found)| *kind == ShareCheckKind::Person
+                && (found == "Odile Brask" || found == "Teodor Vance")),
+        "a speaker is never flagged: {flags:?}"
+    );
+}
+
+/// The share's blurb is the first sentence of the first summary paragraph
+/// on the page, capped at 200 characters, and absent without a summary.
+#[test]
+fn blurb_is_the_first_sentence_within_two_hundred_chars() {
+    let shared_at = Utc.with_ymd_and_hms(2026, 3, 5, 9, 0, 0).unwrap();
+    let mut draft = invented_draft();
+    draft.content.summary = vec![
+        "The sensors cost $4.50 each. More detail follows.".to_owned(),
+        "Second paragraph.".to_owned(),
+    ];
+    let page = page_from_draft(&draft, None, shared_at).unwrap().page;
+    assert_eq!(blurb_of(&page).as_deref(), Some("The sensors cost $4.50 each."));
+
+    draft.content.summary = vec!["x".repeat(300)];
+    let page = page_from_draft(&draft, None, shared_at).unwrap().page;
+    assert_eq!(
+        blurb_of(&page).map(|blurb| blurb.chars().count()),
+        Some(200)
+    );
+
+    draft.include.summary = false;
+    let page = page_from_draft(&draft, None, shared_at).unwrap().page;
+    assert_eq!(blurb_of(&page), None);
+}
+
 /// Rebuilding the site for a new share, given one share whose `expires` time
 /// has passed and one still live, removes the expired one and keeps the live.
 #[test]
@@ -105,6 +271,7 @@ fn site_rebuild_drops_expired_shares() {
 
     write_tree(
         root.path(),
+        "https://example.test",
         &Change::Add {
             slug: "newNewNewNewNewNewNew0",
             files: &files,
@@ -125,7 +292,13 @@ fn deploy_build_keeps_slug_starting_with_dash() {
     let root = tempfile::tempdir().unwrap();
     let slug = "-IKmJ-WLVs_MccgjGriYog";
     let files = [(PAGE_FILE.to_owned(), b"sealed".to_vec())];
-    write_tree(root.path(), &Change::Add { slug, files: &files }, WHEN / 1000).unwrap();
+    write_tree(
+        root.path(),
+        "https://example.test",
+        &Change::Add { slug, files: &files },
+        WHEN / 1000,
+    )
+    .unwrap();
 
     let workflow = fs::read_to_string(root.path().join(".github/workflows/pages.yml")).unwrap();
     let indent = "          ";

@@ -6,6 +6,7 @@
 //! shared-link envelope and its key travels only in the link's fragment.
 
 mod audio;
+mod checks;
 mod content;
 mod git;
 mod registry;
@@ -25,10 +26,15 @@ use crate::cloud_sync::crypto::{
     base64_url_encode, seal_share_payload, SharePayloadContext, SharePayloadDomain,
 };
 use crate::meeting::analytics::MeetingNotesTemplate;
+use crate::meeting::processing;
+use crate::meeting::processing::MeetingProcessingService;
 use crate::meeting::store::{MeetingStore, StoreError};
 use crate::meeting::types::MeetingSessionId;
 use crate::query::KeptLocal;
+pub(crate) use audio::draft_audio_path;
+pub(crate) use checks::{check_page, people_names};
 
+pub use checks::ShareCheck;
 pub(crate) use content::{Draft, ExpiresInDays, Include, Page, PageSummary, SpeakerMode};
 pub(crate) use registry::{DraftEntry, Paths, ShareRecord, ShareState, SiteSettings};
 
@@ -54,8 +60,16 @@ pub enum SharedPagesErrorCode {
     Locked,
     RemoteNotSonaSite,
     InvalidDraft,
+    /// The page is for one person, but none of its action items are theirs.
+    NoItemsForPerson,
     Unavailable,
     Failed,
+    /// No meeting store is open, so the page's notes cannot be rewritten.
+    NoStore,
+    /// No text engine is available to rewrite the summary.
+    NoEngine,
+    /// The meeting is still recording; its notes are not final.
+    Recording,
 }
 
 pub(crate) use SharedPagesErrorCode as Code;
@@ -133,6 +147,26 @@ pub(crate) fn forget_published_draft(paths: &Paths, meeting_id: &str) {
         );
     }
 }
+/// The draft of a page shared for one person stays, without its person, so
+/// the next person's version keeps his edits. As with
+/// [`forget_published_draft`], a failure is logged rather than reported.
+pub(crate) fn reset_published_draft(paths: &Paths, meeting_id: &str) {
+    let updated = paths
+        .draft::<Draft>(meeting_id)
+        .and_then(|draft| match draft {
+            Some(mut draft) => {
+                draft.for_person = None;
+                paths.save_draft(meeting_id, &draft)
+            }
+            None => Ok(()),
+        });
+    if let Err(error) = updated {
+        log::warn!(
+            "Shared page is live but its draft's person could not be cleared: {}",
+            error.message
+        );
+    }
+}
 
 pub(crate) fn drafts(paths: &Paths) -> Result<Vec<DraftEntry>> {
     Ok(paths
@@ -192,7 +226,6 @@ impl BuiltPageView {
     pub(crate) fn page(&self) -> &Page {
         &self.0.page
     }
-
     pub(crate) fn into_page(self) -> Page {
         self.0.page
     }
@@ -215,6 +248,7 @@ impl BuiltPageView {
 #[derive(Clone, Debug, Serialize, Type)]
 pub struct SharedPreview {
     pub page: Page,
+    pub checks: Vec<ShareCheck>,
     pub html_path: String,
     pub audio_path: Option<String>,
 }
@@ -229,6 +263,10 @@ pub(crate) fn preview(
     let audio_path = draft_audio(paths, meetings, draft)?;
     let built = build_page(draft, audio_path.as_deref())?;
     let dir = paths.draft_dir(&draft.meeting_id)?;
+    let people = match meetings {
+        Some(store) => checks::people_names(store)?,
+        None => Vec::new(),
+    };
     fs::create_dir_all(&dir).map_err(registry::io_failed)?;
     let html_path = dir.join("preview.html");
     let audio_name = audio_path
@@ -237,6 +275,7 @@ pub(crate) fn preview(
         .and_then(|name| name.to_str());
     fs::write(&html_path, built.preview_html(audio_name)).map_err(registry::io_failed)?;
     Ok(SharedPreview {
+        checks: check_page(built.page(), &draft.content.speakers, &people),
         page: built.into_page(),
         html_path: html_path.display().to_string(),
         audio_path: audio_path.map(|path| path.display().to_string()),
@@ -328,6 +367,8 @@ pub(crate) fn publish(
         )),
         meeting_id: draft.meeting_id.clone(),
         title: title_of(draft),
+        for_person: built.page.for_person.clone(),
+        blurb: blurb_of(&built.page),
         include: PageSummary::of(&built)
             .sections
             .into_iter()
@@ -410,8 +451,8 @@ pub(crate) fn revoke(paths: &Paths, slug: &str) -> Result<ShareRecord> {
 
 fn push(paths: &Paths, site: &SiteSettings, change: &Change<'_>) -> Result<()> {
     git::publish(&paths.clone_dir(), &site.remote, |dir| {
-        let written =
-            site::write_tree(dir, change, Utc::now().timestamp()).map_err(registry::io_failed)?;
+        let written = site::write_tree(dir, &site.base_url, change, Utc::now().timestamp())
+            .map_err(registry::io_failed)?;
         if written.bytes > MAX_TREE_BYTES {
             return Err(SharedPagesError::new(
                 Code::TooLarge,
@@ -637,6 +678,139 @@ fn title_of(draft: &Draft) -> String {
     } else {
         title
     }
+}
+
+/// The recap's request to the engine: someone who was not in the meeting,
+/// two to four short paragraphs, only what the page says.
+const RECAP_INSTRUCTIONS: &str = "Rewrite the summary of these meeting notes \
+    for someone who was not in the meeting. Use only facts present in the \
+    page below; do not guess, and do not use names the page does not carry. \
+    Write in plain words and short sentences. Reply as one JSON object \
+    {\"paragraphs\": [..]} holding two to four short paragraphs.";
+const RECAP_MAX_TOKENS: i32 = 700;
+
+#[derive(Deserialize)]
+struct RecapReply {
+    paragraphs: Vec<String>,
+}
+
+/// Summary paragraphs for someone who was not in the meeting, written by
+/// the text engine this meeting's series allows, from the page the draft
+/// would publish. Runs blocking: callers send it to a worker thread.
+pub(crate) fn recap(
+    store: &MeetingStore,
+    processing: &MeetingProcessingService,
+    draft: &Draft,
+) -> Result<Vec<String>> {
+    check_draft(draft)?;
+    let id = meeting_id(&draft.meeting_id)?;
+    ensure_shareable(Some(store), id)?;
+    let snapshot = store.session_snapshot(id).map_err(store_error)?;
+    if snapshot.phase.capture_mode().is_some() {
+        return Err(SharedPagesError::new(
+            Code::Recording,
+            "The meeting is still recording; its notes are not final.",
+        ));
+    }
+    let generator = processing
+        .text_generator_for_session(store, id)
+        .filter(|generator| generator.is_available())
+        .ok_or_else(|| {
+            SharedPagesError::new(
+                Code::NoEngine,
+                "No text engine is available to rewrite the summary.",
+            )
+        })?;
+    let mut shown = draft.clone();
+    shown.include.audio = false;
+    let built = build_page(&shown, None)?;
+    let budget = processing::evidence_budget(
+        generator.as_ref(),
+        RECAP_INSTRUCTIONS,
+        RECAP_MAX_TOKENS,
+    );
+    let evidence = recap_evidence(built.page(), budget)?;
+    let answer = generator
+        .generate(
+            RECAP_INSTRUCTIONS,
+            &evidence,
+            RECAP_MAX_TOKENS,
+            processing::ReplyShape::Json,
+        )
+        .map_err(|_| {
+            SharedPagesError::new(Code::Failed, "The engine could not rewrite the summary.")
+        })?;
+    let reply: RecapReply = processing::first_json_value(&answer).map_err(|()| {
+        SharedPagesError::new(Code::Failed, "The engine's rewrite could not be read.")
+    })?;
+    reply
+        .paragraphs
+        .into_iter()
+        .take(4)
+        .map(|paragraph| {
+            let paragraph = paragraph.trim().to_owned();
+            if paragraph.len() > content::MAX_TEXT_BYTES {
+                return Err(SharedPagesError::new(
+                    Code::TooLarge,
+                    "A rewritten paragraph is larger than 64 KiB.",
+                ));
+            }
+            Ok(paragraph)
+        })
+        .filter(|paragraph| match paragraph {
+            Ok(text) => !text.is_empty(),
+            Err(_) => true,
+        })
+        .collect()
+}
+
+/// The page as engine evidence. When it does not fit the engine's budget
+/// the transcript leaves with its speakers, then the notes; a page still
+/// too large is refused rather than cut mid-section.
+fn recap_evidence(page: &Page, budget: usize) -> Result<String> {
+    let mut shown = page.clone();
+    let mut pack = serde_json::to_string(&shown)
+        .map_err(|_| SharedPagesError::new(Code::Failed, "The page could not be encoded."))?;
+    if pack.len() > budget {
+        shown.transcript = None;
+        shown.speakers = None;
+        pack = serde_json::to_string(&shown).map_err(|_| {
+            SharedPagesError::new(Code::Failed, "The page could not be encoded.")
+        })?;
+    }
+    if pack.len() > budget {
+        shown.notes = None;
+        pack = serde_json::to_string(&shown).map_err(|_| {
+            SharedPagesError::new(Code::Failed, "The page could not be encoded.")
+        })?;
+    }
+    if pack.len() > budget {
+        return Err(SharedPagesError::new(
+            Code::TooLarge,
+            "The page is larger than the engine can read.",
+        ));
+    }
+    Ok(pack)
+}
+
+/// The first sentence of the first summary paragraph the page carries, at
+/// most 200 characters: the share's blurb for copying with its link. A
+/// sentence ends at `.`, `!` or `?` before a space or the paragraph's end,
+/// so "$4.50" stays whole. `None` when no summary is on the page.
+fn blurb_of(page: &Page) -> Option<String> {
+    let paragraph = page.summary.as_ref()?.first()?;
+    let end = paragraph
+        .char_indices()
+        .find(|&(at, mark)| {
+            matches!(mark, '.' | '!' | '?')
+                && paragraph[at + 1..].chars().next().is_none_or(char::is_whitespace)
+        })
+        .map_or(paragraph.len(), |(at, _)| at + 1);
+    let sentence = paragraph[..end].trim();
+    if sentence.is_empty() {
+        return None;
+    }
+    Some(sentence.chars().take(200).collect())
 }
 
 fn seal(

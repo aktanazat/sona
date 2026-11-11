@@ -5,6 +5,7 @@ const PAGE_FORMAT = "sona-meeting-page-v1";
 const PAGE_KEYS = [
   "format",
   "title",
+  "for_person",
   "date",
   "duration_s",
   "summary",
@@ -38,6 +39,8 @@ const fetchOptions = {
   credentials: "omit",
   referrerPolicy: "no-referrer",
 };
+const momentPattern = /^(0|[1-9][0-9]{0,5})$/u;
+
 
 const STATES = {
   missingKey: [
@@ -194,20 +197,24 @@ function parseFragment(hash) {
   const seen = new Set();
   params.forEach((_value, key) => seen.add(key));
   requireValue(
-    seen.size === 2 &&
+    seen.size >= 2 &&
+      seen.size <= 3 &&
       seen.has("v") &&
       seen.has("k") &&
+      [...seen].every((key) => key === "v" || key === "k" || key === "t") &&
       params.getAll("v").length === 1 &&
-      params.getAll("k").length === 1,
+      params.getAll("k").length === 1 &&
+      params.getAll("t").length <= 1,
   );
   requireValue(params.get("v") === "1");
-  const root = base64UrlDecode(params.get("k"));
+  const encoded = params.get("k");
+  const root = base64UrlDecode(encoded);
   requireValue(
-    root !== null &&
-      root.length === 32 &&
-      base64UrlEncode(root) === params.get("k"),
+    root !== null && root.length === 32 && base64UrlEncode(root) === encoded,
   );
-  return root;
+  const stamp = params.get("t");
+  requireValue(stamp === null || momentPattern.test(stamp));
+  return { root, key: encoded, moment: stamp === null ? null : Number(stamp) };
 }
 
 function exactKeys(value, keys) {
@@ -291,6 +298,11 @@ function parsePage(page) {
         (page.duration_s === null || isSeconds(page.duration_s)),
     );
   }
+  requireValue(
+    page.for_person === null ||
+      (isText(page.for_person) &&
+        [...page.for_person].length <= MAX_TITLE_CHARS),
+  );
   for (const key of ["summary", "decisions", "notes"])
     requireValue(page[key] === null || isTextList(page[key]));
   requireValue(
@@ -364,10 +376,17 @@ const recording = {
 };
 let generation = 0;
 let transcript = null;
+let published = false;
+let currentPage = null;
+let pendingMoment = null;
+let playFromButton = null;
+let momentMarked = null;
+
 
 function showState([title, detail]) {
   generation += 1;
   transcript = null;
+  currentPage = null;
   if (recording.audio !== null) recording.audio.pause();
   document.title = title;
   view.replaceChildren(node("h1", null, title), node("p", null, detail));
@@ -426,6 +445,97 @@ function setTimesEnabled(enabled) {
   for (const item of transcript.items) item.firstChild.disabled = !enabled;
 }
 
+function copyMoment(index, button) {
+  if (currentPage === null || currentPage.transcript === null) return;
+  const url = new URL(location.href);
+  const params = new URLSearchParams(
+    url.hash.startsWith("#") ? url.hash.slice(1) : url.hash,
+  );
+  params.delete("t");
+  params.append("t", String(Math.floor(currentPage.transcript[index].t)));
+  url.hash = params.toString();
+  navigator.clipboard.writeText(url.toString()).then(
+    () => {
+      button.textContent = "Copied";
+      setTimeout(() => {
+        button.textContent = "Copy link";
+      }, 1500);
+    },
+    () => {},
+  );
+}
+
+function showPlayFrom(seconds) {
+  if (playFromButton === null) {
+    playFromButton = node("button", "playfrom");
+    playFromButton.type = "button";
+    playFromButton.addEventListener("click", () => {
+      if (recording.audio === null || pendingMoment === null) return;
+      recording.audio.currentTime = pendingMoment;
+      recording.audio.play().catch(() => {});
+    });
+  }
+  if (!playFromButton.isConnected) recording.slot.append(playFromButton);
+  playFromButton.textContent = `Play from ${clock(seconds)}`;
+}
+
+function clearMoment() {
+  if (momentMarked !== null) {
+    momentMarked.removeAttribute("data-moment");
+    momentMarked = null;
+  }
+  if (playFromButton !== null) {
+    playFromButton.remove();
+    playFromButton = null;
+  }
+  pendingMoment = null;
+}
+
+async function applyMoment(seconds) {
+  if (
+    currentPage === null ||
+    currentPage.transcript === null ||
+    transcript === null
+  )
+    return;
+  const renderGeneration = generation;
+  let low = 0;
+  let high = transcript.times.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if (Math.floor(transcript.times[middle]) <= seconds) low = middle + 1;
+    else high = middle;
+  }
+  const target = transcript.order[Math.max(0, low - 1)];
+  while (
+    transcript.items.length <= target &&
+    transcript.items.length < currentPage.transcript.length
+  ) {
+    const start = transcript.items.length;
+    appendTurns(
+      currentPage,
+      start,
+      Math.min(start + TURN_BATCH, currentPage.transcript.length),
+    );
+    await nextPaint();
+    if (renderGeneration !== generation) return;
+  }
+  const item = transcript.items[target];
+  if (item === undefined) return;
+  clearMoment();
+  item.setAttribute("data-moment", "");
+  momentMarked = item;
+  item.scrollIntoView({ block: "center" });
+  pendingMoment = seconds;
+  if (
+    recording.audio !== null &&
+    Number.isFinite(recording.audio.duration)
+  ) {
+    recording.audio.currentTime = seconds;
+    showPlayFrom(seconds);
+  }
+}
+
 function turnItem(page, index, timed) {
   const turn = page.transcript[index];
   const time = clock(turn.t);
@@ -446,6 +556,14 @@ function turnItem(page, index, timed) {
     node("p", null, turn.text),
   );
   item.append(stamp, said);
+  if (published && currentPage !== null && currentPage.transcript !== null) {
+    const link = node("button", "moment", "Copy link");
+    link.type = "button";
+    link.dataset.index = String(index);
+    link.setAttribute("aria-label", "Copy link to this moment");
+    link.addEventListener("click", () => copyMoment(index, link));
+    item.append(link);
+  }
   if (transcript !== null && index === transcript.active)
     item.setAttribute("aria-current", "true");
   return item;
@@ -463,10 +581,14 @@ function appendTurns(page, start, end) {
 
 async function fillTranscript(page, renderGeneration) {
   const total = page.transcript.length;
-  for (let start = FIRST_TURNS; start < total; start += TURN_BATCH) {
+  while (transcript.items.length < total) {
     await new Promise((resolve) => setTimeout(resolve, 0));
     if (renderGeneration !== generation) return;
-    appendTurns(page, start, Math.min(total, start + TURN_BATCH));
+    appendTurns(
+      page,
+      transcript.items.length,
+      Math.min(total, transcript.items.length + TURN_BATCH),
+    );
   }
 }
 
@@ -508,14 +630,23 @@ function footer(page) {
       ? "The text is decrypted in this browser with the key at the end of the link."
       : "The text and recording are decrypted in this browser with the key at the end of the link.";
   element.append(node("p", null, when), node("p", null, what));
+  if (published) {
+    const print = node("button", "print", "Print or save as PDF");
+    print.type = "button";
+    print.addEventListener("click", () => window.print());
+    const line = node("p");
+    line.append(print);
+    element.append(line);
+  }
   return element;
 }
 
 function renderPage(page) {
   generation += 1;
   transcript = null;
+  clearMoment();
+  currentPage = page;
   const title = page.title ?? "Meeting notes";
-  document.title = title;
   const content = [node("h1", null, title)];
   const when = [];
   if (page.date !== null) when.push(momentFormat.format(new Date(page.date)));
@@ -530,6 +661,8 @@ function renderPage(page) {
     );
     content.push(line);
   }
+  if (page.for_person !== null)
+    content.push(node("p", "for", `For ${page.for_person}`));
   if (page.audio !== null) content.push(recording.slot);
   if (page.summary !== null)
     content.push(section("Summary", ...paragraphs(page.summary)));
@@ -571,6 +704,11 @@ function useAudio(audio) {
   recording.ready = true;
   recording.slot.replaceChildren(audio);
   setTimesEnabled(true);
+  audio.addEventListener("loadedmetadata", () => {
+    if (pendingMoment === null || recording.audio !== audio) return;
+    audio.currentTime = pendingMoment;
+    showPlayFrom(pendingMoment);
+  });
 }
 
 function recordingNote(text) {
@@ -636,13 +774,14 @@ function pageLocation(pathname) {
 }
 
 async function openPublished() {
-  let root;
+  let link;
   try {
-    root = parseFragment(location.hash);
+    link = parseFragment(location.hash);
   } catch {
     showState(STATES.missingKey);
     return;
   }
+  const { root, key, moment: initialMoment } = link;
   try {
     const place = pageLocation(location.pathname);
     if (place === null) {
@@ -699,7 +838,25 @@ async function openPublished() {
       plaintext.fill(0);
     }
     if (page.audio !== null) recordingNote("Loading the recording");
+    published = true;
     renderPage(page);
+    if (initialMoment !== null) void applyMoment(initialMoment);
+    window.addEventListener("hashchange", () => {
+      let next;
+      try {
+        next = parseFragment(location.hash);
+      } catch {
+        showState(STATES.missingKey);
+        return;
+      }
+      next.root.fill(0);
+      if (next.key !== key || currentPage === null) {
+        location.reload();
+        return;
+      }
+      if (next.moment === null) clearMoment();
+      else void applyMoment(next.moment);
+    });
     if (page.audio === null) return;
     await nextPaint();
     try {

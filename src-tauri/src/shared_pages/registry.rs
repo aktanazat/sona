@@ -42,6 +42,13 @@ pub struct ShareRecord {
     pub url: Option<String>,
     pub meeting_id: String,
     pub title: String,
+    /// The person the page was for, when it was a one-person share.
+    #[serde(default)]
+    pub for_person: Option<String>,
+    /// The first sentence of the summary the page carried, for copying with
+    /// the link. Lives only in this file; the page never carries it back.
+    #[serde(default)]
+    pub blurb: Option<String>,
     pub include: Vec<String>,
     pub speakers: SpeakerMode,
     pub created_at: String,

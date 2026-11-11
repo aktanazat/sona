@@ -33,6 +33,7 @@ ul li { margin-top: 4px; }
 .together { white-space: nowrap; }
 .quiet { color: #444; }
 .owner { display: block; color: #444; font-size: 0.9em; margin-top: 2px; }
+.for { color: #444; font-style: italic; margin: 0.2em 0 0; }
 
 .recording {
   margin: 1em 0 0;
@@ -95,6 +96,45 @@ button.time {
 }
 button.time:hover { color: #0b0080; text-decoration: underline; }
 button.time:disabled { color: #444; cursor: default; text-decoration: none; }
+button.moment {
+  grid-column: 2;
+  justify-self: start;
+  align-self: end;
+  margin: 0;
+  padding: 0 4px 2px;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: #0645ad;
+  font: inherit;
+  font-size: 0.8em;
+  line-height: 1.4;
+  cursor: pointer;
+}
+button.moment:hover { color: #0b0080; text-decoration: underline; }
+.turn[data-moment] { background-color: #f4f4f4; outline: 2px solid #0645ad; outline-offset: -2px; }
+.playfrom {
+  margin-top: 0.5em;
+  padding: 4px 12px;
+  border: 1px solid #d9d9d9;
+  border-radius: 6px;
+  background: #fff;
+  color: #0645ad;
+  font: inherit;
+  font-size: 0.9em;
+  cursor: pointer;
+}
+.playfrom:hover { color: #0b0080; }
+button.print {
+  padding: 4px 12px;
+  border: 1px solid #d9d9d9;
+  border-radius: 6px;
+  background: #fff;
+  color: #0645ad;
+  font: inherit;
+  cursor: pointer;
+}
+button.print:hover { color: #0b0080; }
 
 .who { display: block; font-weight: 700; }
 .said p { margin: 2px 0 0; }
@@ -116,6 +156,15 @@ footer {
 }
 
 @media print {
-  .back, .recording { display: none; }
+  .back,
+  .recording,
+  button.moment,
+  button.print { display: none; }
+  html, body { background: #fff; color: #000; }
+  .turn {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+  .turn[data-moment] { outline: none; }
   .transcript[data-long] .turn { content-visibility: visible; }
 }
