@@ -152,19 +152,29 @@ extension WorkItemRow {
     }
 }
 
-/// "Tomorrow", in red once it has come or gone and the task is still open.
+/// "Tomorrow": red once it has come or gone, orange within the week, while
+/// the task is still open.
 struct TaskDue: View {
     let due: Int64
     let open: Bool
     let now: Int64
 
     var body: some View {
-        let pressing = open && PlanningFormat.days(from: now, to: due) <= 0
         Text(TaskDates.label(due, now: now))
             .font(TypeScale.label(12))
             .monospacedDigit()
-            .foregroundStyle(pressing ? Theme.live : Theme.inkTertiary)
+            .foregroundStyle(Self.tone(due, open: open, now: now) ?? Theme.inkTertiary)
             .lineLimit(1)
+    }
+
+    /// The due date's color when it presses, nil when it does not.
+    static func tone(_ due: Int64, open: Bool, now: Int64) -> Color? {
+        guard open else { return nil }
+        return switch PlanningFormat.days(from: now, to: due) {
+        case ...0: Theme.live
+        case 1...7: Theme.dueSoon
+        default: nil
+        }
     }
 }
 
@@ -480,12 +490,7 @@ struct TaskGroupHeader: View {
             .accessibilityHint(collapsed ? "Expand" : "Collapse")
             Spacer(minLength: 8)
             if let reschedule {
-                Button(action: reschedule) {
-                    HStack(spacing: 6) {
-                        Text("Reschedule all")
-                        Shortcut("shift+d")
-                    }
-                }
+                Button("Reschedule all", action: reschedule)
                 .buttonStyle(QuietButton(compact: true))
                 .accessibilityLabel("Reschedule all overdue")
             }
@@ -523,6 +528,14 @@ struct TaskGroupMarkView: View {
         case let .owner(face): Avatar(face: face, size: 16, revision: revision)
         case .project: symbol("folder")
         case .meeting: symbol("waveform")
+        case .cycle: symbol("arrow.triangle.2.circlepath")
+        case .milestone: symbol("flag")
+        case let .label(hue):
+            if let hue {
+                Circle().fill(Theme.label(hue: hue)).frame(width: 8, height: 8).frame(width: 16, height: 16)
+            } else {
+                symbol("tag")
+            }
         case .focus: symbol("scope")
         case let .bucket(bucket): symbol(bucket.symbol)
         case .agent: symbol("sparkle")

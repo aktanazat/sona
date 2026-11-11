@@ -113,6 +113,9 @@ struct MeetingReviewView: View {
         switch store.tab {
         case .review:
             ConversationAfterCaptureView(store: store, snapshot: snapshot, core: model.core)
+            PlanningCommentsView(threads: model.comments,
+                                 subject: PlanningCommentSubject(kind: .meeting, id: snapshot.session.sessionId))
+                .padding(.top, 32)
         case .transcript:
             TranscriptPane(store: store, snapshot: snapshot)
         case .insights:

@@ -36,8 +36,10 @@ enum WorkChoices {
         case .due: "Due date, or type one…"
         case .labels: "Change labels…"
         case .project: "Move to project…"
+        case .milestone: "Set milestone…"
         case .duplicate: "Duplicate of…"
         case .snooze: "Snooze until, or type a date…"
+        case .remind: "Remind me at, or type a time…"
         case .decline: "Why decline? Optional…"
         case .delegate: "Delegate to…"
         case .cycle: "Move to cycle…"
@@ -45,6 +47,11 @@ enum WorkChoices {
         case .blocks: "Blocks which task…"
         case .related: "Related to which task…"
         case .parent: "Parent task…"
+        case .estimate: "Set estimate…"
+        case .forPerson: "Who is it for…"
+        case .recent: "Recent tasks…"
+        case .person: "Go to person…"
+        case .label: "Go to label…"
         }
     }
 
@@ -91,11 +98,20 @@ enum WorkChoices {
                 let value: WorkPatchValue<String> = project.map { .set($0) } ?? .clear
                 model.changeWork { work.update(ids, WorkPatch(projectId: value)) }
             }
+        case .milestone:
+            milestones(model.workFocus.milestones) { milestone in rows.allSatisfy { $0.milestoneId == milestone } } pick: { milestone in
+                let value: WorkPatchValue<String> = milestone.map { .set($0) } ?? .clear
+                model.changeWork { work.update(ids, WorkPatch(milestoneId: value)) }
+            }
         case .duplicate:
             duplicates(of: ids, text: text, model: model)
         case .snooze:
             snoozes(text, pickDay: pickDay) { moment in
                 model.leave(ids) { work.update(ids, WorkPatch(snoozedUntilMs: .set(moment))) }
+            }
+        case .remind:
+            reminds(text, set: rows.contains { model.routines.reminders[$0.id] != nil }) { moment in
+                model.remind(ids, at: moment)
             }
         case .decline:
             [WorkChoice(id: "decline", title: text.isEmpty ? "Decline" : "Decline: \(text)", mark: .symbol("xmark.circle"),
@@ -115,6 +131,34 @@ enum WorkChoices {
             relations(picker.kind, of: ids, text: text, model: model)
         case .parent:
             parents(of: ids, text: text, model: model)
+        case .estimate:
+            estimates { points in rows.allSatisfy { $0.estimate == points } } pick: { points in
+                let value: WorkPatchValue<Int> = points.map { .set($0) } ?? .clear
+                model.changeWork { work.update(ids, WorkPatch(estimate: value)) }
+            }
+        case .forPerson:
+            forPeople(work.people) { person in rows.allSatisfy { $0.forPersonId == person } } pick: { person in
+                let value: WorkPatchValue<String> = person.map { .set($0) } ?? .clear
+                model.changeWork { work.update(ids, WorkPatch(forPersonId: value)) }
+            }
+        case .recent:
+            model.workRows(model.workFocus.recent).map { row in
+                WorkChoice(id: row.id, title: row.title, mark: .status(row.status), detail: TaskCopy.handle(row)) {
+                    model.openTask(row.id)
+                }
+            }
+        case .person:
+            work.people.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }.map { person in
+                WorkChoice(id: person.id, title: person.name, mark: .face(AvatarFace(kind: .person(person.id), name: person.name))) {
+                    model.openPerson(person.id)
+                }
+            }
+        case .label:
+            work.labels.filter { !$0.retired }.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }.map { label in
+                WorkChoice(id: label.id, title: label.name, mark: .label(label.hue), detail: label.group) {
+                    model.open(PaletteMatch(kind: .label(label.hue), id: label.id, title: label.name))
+                }
+            }
         }
         return filtered(choices, by: text, kind: picker.kind)
     }
@@ -122,7 +166,7 @@ enum WorkChoices {
     /// Typed letters narrow a list of names; dates and tasks read the text
     /// themselves.
     static func filtered(_ choices: [WorkChoice], by text: String, kind: WorkPicker.Kind) -> [WorkChoice] {
-        guard !text.isEmpty, kind != .due, kind != .snooze, kind != .decline, !picksTask(kind) else { return choices }
+        guard !text.isEmpty, kind != .due, kind != .snooze, kind != .remind, kind != .decline, !picksTask(kind) else { return choices }
         return choices.filter { $0.id == newLabel || $0.title.localizedCaseInsensitiveContains(text) }
     }
 
@@ -152,6 +196,23 @@ enum WorkChoices {
             WorkChoice(id: "\(priority.rawValue)", title: priority.label, mark: .priority(priority),
                        checked: checked(priority.rawValue), key: "\(priority.rawValue)") { pick(priority.rawValue) }
         }
+    }
+
+    static func estimates(checked: (Int?) -> Bool, pick: @escaping @MainActor (Int?) -> Void) -> [WorkChoice] {
+        TaskEstimate.points.map { points in
+            WorkChoice(id: "\(points)", title: TaskEstimate.title(points), mark: .symbol("triangle"),
+                       checked: checked(points), key: points < 10 ? "\(points)" : nil) { pick(points) }
+        } + [WorkChoice(id: "none", title: "No estimate", mark: .symbol("minus"), checked: checked(nil), key: "0") { pick(nil) }]
+    }
+
+    static func forPeople(
+        _ people: [WorkPersonChoice], checked: (String?) -> Bool, pick: @escaping @MainActor (String?) -> Void
+    ) -> [WorkChoice] {
+        people.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }.map { person in
+            WorkChoice(id: person.id, title: person.name, mark: .face(AvatarFace(kind: .person(person.id), name: person.name)),
+                       checked: checked(person.id)) { pick(person.id) }
+        } + [WorkChoice(id: "nobody", title: "No one", mark: .face(AvatarFace(kind: .unassigned, name: "No one")),
+                        checked: checked(nil)) { pick(nil) }]
     }
 
     static func owners(
@@ -198,7 +259,7 @@ enum WorkChoices {
         create: (@MainActor (String) -> Void)? = nil
     ) -> [WorkChoice] {
         let on = Set(labels.map(\.id).filter(checked))
-        let shown = labels.filter { !$0.retired || on.contains($0.id) }
+        let shown = labels.filter { (!$0.retired && $0.scope != .projects) || on.contains($0.id) }
         let choice = { (label: WorkLabel) in
             WorkChoice(id: label.id, title: label.name, mark: .label(label.hue), detail: text.isEmpty ? nil : label.group,
                        checked: on.contains(label.id)) {
@@ -248,6 +309,57 @@ enum WorkChoices {
         choices.append(WorkChoice(id: "none", title: "No project", mark: .symbol("folder.badge.minus"),
                                   checked: checked(nil)) { pick(nil) })
         return choices
+    }
+
+    static func milestones(
+        _ milestones: [PlanningMilestone], checked: (String?) -> Bool, pick: @escaping @MainActor (String?) -> Void
+    ) -> [WorkChoice] {
+        milestones.map { milestone in
+            WorkChoice(id: milestone.id, title: milestone.title, mark: .symbol("flag"), checked: checked(milestone.id)) {
+                pick(milestone.id)
+            }
+        } + [WorkChoice(id: "none", title: "No milestone", mark: .symbol("flag.slash"), checked: checked(nil)) { pick(nil) }]
+    }
+
+    /// A typed time, "fri 10am", "tomorrow at 3"; later today and the usual
+    /// mornings; and, when a reminder is set, no reminder.
+    static func reminds(_ text: String, set: Bool, pick: @escaping @MainActor (Int64?) -> Void) -> [WorkChoice] {
+        var choices: [WorkChoice] = []
+        if let typed = remindTime(text) {
+            choices.append(WorkChoice(id: "typed", title: TaskDates.label(typed, now: TaskDates.now()),
+                                      mark: .symbol("bell"), detail: at(typed)) { pick(typed) })
+        }
+        if let later = TaskDates.laterToday(), text.isEmpty || "later today".localizedCaseInsensitiveContains(text) {
+            choices.append(WorkChoice(id: "later", title: "Later today", mark: .symbol("bell"),
+                                      detail: PlanningFormat.moment(later).formatted(date: .omitted, time: .shortened)) {
+                pick(later)
+            })
+        }
+        let presets: [(String, Int64)] = [
+            ("Tomorrow", TaskDates.day(1, hour: 9)), ("Next week", TaskDates.next(weekday: 2, hour: 9)),
+            ("In a month", TaskDates.day(30, hour: 9)),
+        ]
+        for (title, moment) in distinct(presets) where text.isEmpty || title.localizedCaseInsensitiveContains(text) {
+            choices.append(WorkChoice(id: title, title: title, mark: .symbol("bell"), detail: at(moment)) { pick(moment) })
+        }
+        if set, text.isEmpty || "no reminder".localizedCaseInsensitiveContains(text) {
+            choices.append(WorkChoice(id: "none", title: "No reminder", mark: .symbol("bell.slash")) { pick(nil) })
+        }
+        return choices
+    }
+
+    /// The moment typed words name, at the hour they name, else 9 am that
+    /// day; nil once it has passed.
+    static func remindTime(_ text: String, now: Date = .now) -> Int64? {
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        guard trimmed.count >= 2,
+              let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.date.rawValue),
+              let date = detector.firstMatch(in: trimmed, range: NSRange(trimmed.startIndex..., in: trimmed))?.date
+        else { return nil }
+        let timed = trimmed.range(of: #"\d\s*(am|pm|a\.m\.|p\.m\.)|\d:\d\d|\bnoon\b|\bat\s+\d"#,
+                                  options: [.regularExpression, .caseInsensitive]) != nil
+        let moment = timed ? Int64(date.timeIntervalSince1970 * 1000) : TaskDates.day(0, hour: 9, from: date)
+        return moment > Int64(now.timeIntervalSince1970 * 1000) ? moment : nil
     }
 
     static func snoozes(
@@ -410,6 +522,11 @@ enum WorkChoices {
     /// "Fri, Nov 14".
     static func long(_ milliseconds: Int64) -> String {
         PlanningFormat.moment(milliseconds).formatted(.dateTime.weekday(.abbreviated).month(.abbreviated).day())
+    }
+
+    static func at(_ milliseconds: Int64) -> String {
+        PlanningFormat.moment(milliseconds)
+            .formatted(.dateTime.weekday(.abbreviated).month(.abbreviated).day().hour().minute())
     }
 }
 

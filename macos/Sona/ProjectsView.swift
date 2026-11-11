@@ -34,7 +34,6 @@ struct ProjectsView: View {
     var material: AppearanceMaterial = .solid
     var photoRevision: UInt64 = 0
     let openEvidence: (PlanningEvidenceLink) -> Void
-    let openPerson: (String) -> Void
     let discussProject: (PlanningProject) -> Void
     let planWithSona: () -> Void
     let showCalendar: () -> Void
@@ -51,6 +50,13 @@ struct ProjectsView: View {
     @State private var cursor: String?
     @State private var collapsed: Set<PlanningProjectStatus> = []
     @State private var ownerFilter: String?
+    @State private var peeking = false
+    @State private var editingMilestone: PlanningMilestone?
+    @State private var discussedMilestone: PlanningMilestone?
+    @State private var titleDraft: String?
+    @State private var convertingMilestone: PlanningMilestone?
+    @State private var templatingProject: PlanningProject?
+    @State private var pickingUpdateDay = false
     @FocusState private var keysFocused: Bool
 
     var body: some View {
@@ -60,6 +66,15 @@ struct ProjectsView: View {
                     .transition(.opacity)
             } else {
                 Page { projectList }
+                    .overlay(alignment: .trailing) {
+                        if peeking, layout == .list, let cursor, let detail = store.details[cursor] {
+                            ProjectPeek(store: store, detail: detail, people: people, labels: model.work.labels) {
+                                peeking = false
+                            }
+                            .transition(reduceMotion ? .opacity : .move(edge: .trailing).combined(with: .opacity))
+                        }
+                    }
+                    .animation(Motion.regular, value: peeking)
                     .transition(.opacity)
             }
         }
@@ -71,6 +86,9 @@ struct ProjectsView: View {
         .onChange(of: store.selectedProjectId) { _, _ in
             ownerFilter = nil
             pageTab = .overview
+            peeking = false
+            titleDraft = nil
+            model.workFocus.open(nil, in: .projects)
         }
         .overlay(alignment: .bottomLeading) { ProjectBinToast(store: store) }
         .onChange(of: store.detail?.pulse.owners) { _, owners in
@@ -82,11 +100,28 @@ struct ProjectsView: View {
         .sheet(item: $sourceLink) { request in
             PlanningLinkSourceSheet(request: request, store: store, material: material)
         }
+        .sheet(item: $editingMilestone) { milestone in
+            MilestoneEditSheet(milestone: milestone, store: store)
+        }
+        .sheet(item: $discussedMilestone) { milestone in
+            MilestoneCommentsSheet(milestone: milestone, threads: store.comments)
+        }
+        .sheet(item: $templatingProject) { project in
+            ProjectTemplateSaveSheet(project: project, store: store)
+        }
         .sheet(item: $reviewProject) { project in
             PlannerReviewView(project: project, store: store, material: material) { link in
                 reviewProject = nil
                 openEvidence(link)
             }
+        }
+        .alert("Convert to a project?", isPresented: Binding(get: { convertingMilestone != nil },
+                                                             set: { if !$0 { convertingMilestone = nil } }),
+               presenting: convertingMilestone) { milestone in
+            Button("Convert") { Task { await store.convertMilestone(milestone) } }
+            Button("Cancel", role: .cancel) {}
+        } message: { milestone in
+            Text("“\(milestone.title)” becomes a project and takes its tasks with it.")
         }
         .transaction {
             if reduceMotion { $0.animation = nil; $0.disablesAnimations = true }
@@ -99,10 +134,14 @@ struct ProjectsView: View {
         let search = query.trimmingCharacters(in: .whitespacesAndNewlines)
         let filter = store.filter
         let now = now
+        let cutoff = filter.updateBefore?.cutoffMs(now: .now)
         return (store.projects ?? []).filter { summary in
             if let status = filter.status, summary.project.status != status { return false }
             if filter.overdueOnly, (store.details[summary.id]?.overdueTaskCount(at: now) ?? 0) == 0 { return false }
             if filter.mineOnly, store.details[summary.id]?.hasMyOpenWork != true { return false }
+            if let cutoff, let latest = summary.latestUpdateAtMs, latest >= cutoff { return false }
+            if let link = filter.link, !link.keeps(summary.id, store.dependencies) { return false }
+            if let initiative = filter.initiative, !initiative.keeps(store.initiative(of: summary.id)?.id) { return false }
             guard !search.isEmpty else { return true }
             return summary.project.title.localizedCaseInsensitiveContains(search)
                 || (summary.project.description?.localizedCaseInsensitiveContains(search) ?? false)
@@ -150,6 +189,12 @@ struct ProjectsView: View {
             ViewThatFits(in: .horizontal) {
                 HStack(spacing: 10) { headerControls(compact: false) }
                 HStack(spacing: 10) { headerControls(compact: true) }
+            }
+            .popover(isPresented: $pickingUpdateDay, arrowEdge: .bottom) {
+                ProjectDayPicker(start: .now) { day in
+                    store.filter.updateBefore = .day(day)
+                    pickingUpdateDay = false
+                }
             }
         }
     }
@@ -219,6 +264,45 @@ struct ProjectsView: View {
                 Toggle("Assigned to me", isOn: Binding(get: { store.filter.mineOnly },
                                                        set: { store.filter.mineOnly = $0 }))
             }
+            Section("Latest update before") {
+                Picker("Latest update before", selection: Binding(get: { store.filter.updateBefore },
+                                                                  set: { store.filter.updateBefore = $0 })) {
+                    Text("Any time").tag(PlanningUpdateBefore?.none)
+                    ForEach(PlanningUpdateBefore.spans, id: \.self) { span in
+                        Text(span.label).tag(PlanningUpdateBefore?.some(span))
+                    }
+                    if let picked = store.filter.updateBefore, !PlanningUpdateBefore.spans.contains(picked) {
+                        Text(picked.label).tag(PlanningUpdateBefore?.some(picked))
+                    }
+                }
+                .pickerStyle(.inline)
+                .labelsHidden()
+                Button("Pick a day…") { pickingUpdateDay = true }
+            }
+            Section("Dependencies") {
+                Picker("Dependencies", selection: Binding(get: { store.filter.link }, set: { store.filter.link = $0 })) {
+                    Text("Any").tag(PlanningLinkFilter?.none)
+                    ForEach(PlanningLinkFilter.allCases) { link in
+                        Text(link.label).tag(PlanningLinkFilter?.some(link))
+                    }
+                }
+                .pickerStyle(.inline)
+                .labelsHidden()
+            }
+            if !store.initiatives.isEmpty {
+                Section("Initiative") {
+                    Picker("Initiative", selection: Binding(get: { store.filter.initiative },
+                                                            set: { store.filter.initiative = $0 })) {
+                        Text("Any").tag(PlanningInitiativeFilter?.none)
+                        Text("No initiative").tag(PlanningInitiativeFilter?.some(.outside))
+                        ForEach(store.initiatives) { initiative in
+                            Text(initiative.name).tag(PlanningInitiativeFilter?.some(.within(initiative.id)))
+                        }
+                    }
+                    .pickerStyle(.inline)
+                    .labelsHidden()
+                }
+            }
             if store.filter.isActive {
                 Button("Clear filters") { store.filter = PlanningListFilter() }
             }
@@ -246,6 +330,22 @@ struct ProjectsView: View {
             if store.filter.mineOnly {
                 filterChip("Assigned to me") { store.filter.mineOnly = false }
             }
+            if let before = store.filter.updateBefore {
+                filterChip("Latest update before \(before.label)") { store.filter.updateBefore = nil }
+            }
+            if let link = store.filter.link {
+                filterChip(link.label) { store.filter.link = nil }
+            }
+            if let initiative = store.filter.initiative {
+                filterChip(initiativeLabel(initiative)) { store.filter.initiative = nil }
+            }
+        }
+    }
+
+    private func initiativeLabel(_ filter: PlanningInitiativeFilter) -> String {
+        switch filter {
+        case .outside: "No initiative"
+        case .within(let id): store.initiatives.first { $0.id == id }?.name ?? "Initiative"
         }
     }
 
@@ -314,6 +414,16 @@ struct ProjectsView: View {
             return .handled
         }
         .onKeyPress(characters: CharacterSet(charactersIn: "c"), phases: .down, action: createProject)
+        .onKeyPress(.space) {
+            guard cursor != nil else { return .ignored }
+            peeking.toggle()
+            return .handled
+        }
+        .onKeyPress(.escape) {
+            guard peeking else { return .ignored }
+            peeking = false
+            return .handled
+        }
         .onAppear { keysFocused = true }
         .animation(Motion.settle(reduced: reduceMotion), value: rows.map(\.id))
         .animation(Motion.settle(reduced: reduceMotion), value: store.projects)
@@ -344,6 +454,8 @@ struct ProjectsView: View {
         let percent = detail?.progress?.percent
             ?? (total > 0 ? Int(summary.completedTaskCount * 100 / total) : 0)
         let priority = TaskPriority(summary.project.priority ?? 0)
+        let labels = model.workLabels
+        let tags = (summary.project.labelIds ?? []).compactMap { labels[$0] }
         return DenseRow(highlighted: cursor == summary.id, action: { store.open(summary.id) },
                         hover: { if $0 { cursor = summary.id } }) {
             PriorityIcon(priority: priority)
@@ -361,7 +473,17 @@ struct ProjectsView: View {
             } else if let lead = summary.project.leadPersonId.flatMap({ id in people.first { $0.id == id } }) {
                 Text("Lead \(lead.name)").metaText().lineLimit(1)
             }
-            Spacer(minLength: 12)
+            if let text = summary.project.summary {
+                ProjectRowSummary(text: text)
+            } else {
+                Spacer(minLength: 12)
+            }
+            if !tags.isEmpty {
+                HStack(spacing: 4) {
+                    ForEach(tags.prefix(2)) { LabelPill(label: $0) }
+                }
+                .layoutPriority(-1)
+            }
             AvatarStack(faces: detail.map(owners) ?? [], size: 18, revision: photoRevision)
                 .frame(width: 62, alignment: .trailing)
             ProjectHealthPill(health: detail?.latestUpdate?.health, compact: true)
@@ -386,6 +508,8 @@ struct ProjectsView: View {
         }
         .contextMenu {
             moveMenu(summary.project)
+            Divider()
+            ProjectDependencyMenu(store: store, project: summary.project)
             Divider()
             Button("Delete project", role: .destructive) { Task { await store.binProject(summary.project) } }
         }
@@ -452,7 +576,39 @@ struct ProjectsView: View {
 
     // MARK: Detail
 
+    /// The project's page, or a task opened from its Tasks tab in its place.
+    /// The tab it left comes back on Esc.
     private func projectPage(_ id: String) -> some View {
+        let focus = model.workFocus
+        let opened = focus.opened(in: .projects)
+        return ZStack(alignment: .bottomLeading) {
+            if let opened {
+                TaskDetailView(id: opened, place: .projects)
+            } else {
+                projectBody(id)
+            }
+            UndoToast()
+        }
+        .overlay(alignment: .trailing) {
+            if focus.peeking, opened == nil, focus.projectList != nil, let task = focus.highlighted,
+               let row = model.workRows([task]).first {
+                TaskPeek(row: row, place: .projects)
+                    .transition(reduceMotion ? .opacity : .move(edge: .trailing).combined(with: .opacity))
+            }
+        }
+        .overlay(alignment: .bottom) {
+            if focus.selecting, opened == nil, focus.projectList != nil {
+                BulkActionBar(place: .projects)
+                    .padding(.bottom, 20)
+                    .transition(reduceMotion ? .opacity : .move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .animation(Motion.regular, value: focus.peeking)
+        .animation(Motion.regular, value: focus.selecting)
+        .modifier(WorkSheets())
+    }
+
+    private func projectBody(_ id: String) -> some View {
         let detail = store.detail
         return Page(back: PageBack("Projects") { store.closeProject() }, title: detail?.project.title) {
             if let detail {
@@ -484,12 +640,28 @@ struct ProjectsView: View {
                     .help("Refresh project")
                     .disabled(store.detailLoading)
                 Button {
+                    templatingProject = detail.project
+                } label: { Image(systemName: "square.on.square") }
+                    .buttonStyle(.icon)
+                    .accessibilityLabel("Save as template")
+                    .help("Save as template")
+                    .disabled(store.mutating)
+                Button {
                     Task { await store.binProject(detail.project) }
                 } label: { Image(systemName: "trash") }
                     .buttonStyle(.icon)
                     .accessibilityLabel("Delete project")
                     .help("Delete project. It stays in Recently deleted for 30 days.")
                     .disabled(store.mutating)
+                Menu {
+                    ProjectDependencyMenu(store: store, project: detail.project)
+                } label: { Image(systemName: "ellipsis") }
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
+                    .fixedSize()
+                    .frame(width: Theme.controlHeight, height: Theme.controlHeight)
+                    .help("More")
+                    .accessibilityLabel("More project actions")
             }
         }
     }
@@ -521,10 +693,14 @@ struct ProjectsView: View {
                             }
                         }
                         .padding(.bottom, 28)
+                        latestUpdate(detail, now: now)
                         if let progress = detail.progress {
                             VStack(alignment: .leading, spacing: 10) {
                                 Text("Progress").sectionLabel().accessibilityAddTraits(.isHeader)
-                                Card { ProjectProgressChart(progress: progress).padding(16) }
+                                Card {
+                                    ProjectProgressChart(progress: progress, targetAtMs: detail.project.targetAtMs)
+                                        .padding(16)
+                                }
                             }
                             .padding(.bottom, 28)
                         } else if let series = detail.burnUp(until: .now) {
@@ -535,12 +711,18 @@ struct ProjectsView: View {
                             .padding(.bottom, 28)
                         }
                         milestones(detail, now: now)
+                        evidence(detail)
+                        PlanningCommentsView(threads: store.comments,
+                                             subject: PlanningCommentSubject(kind: .project, id: detail.project.id))
+                            .padding(.top, 28)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    ProjectPropertiesPanel(detail: detail, people: people, labels: model.work.labels) { change in
-                        Task { await store.saveProject(detail.project, change) }
+                    if !model.workFocus.panelHidden {
+                        ProjectPropertiesPanel(detail: detail, people: people, labels: model.work.labels) { change in
+                            Task { await store.saveProject(detail.project, change) }
+                        }
+                        .frame(width: 260)
                     }
-                    .frame(width: 260)
                 }
             case .tasks:
                 VStack(alignment: .leading, spacing: 12) {
@@ -548,10 +730,11 @@ struct ProjectsView: View {
                     ownerFaces(detail.pulse)
                 }
                 .padding(.bottom, 28)
-                tasks(detail, now: now)
-                evidence(detail)
+                tasks(detail)
             case .updates:
-                ProjectUpdatesView(store: store, detail: detail)
+                ProjectUpdatesView(store: store, detail: detail, people: people)
+            case .insights:
+                WorkInsightsView(projectId: detail.project.id, labels: model.work.labels, people: people)
             }
         }
         .animation(Motion.settle(reduced: reduceMotion), value: detail)
@@ -559,16 +742,25 @@ struct ProjectsView: View {
         .focusEffectDisabled()
         .focused($keysFocused)
         .onKeyPress(characters: CharacterSet(charactersIn: "c"), phases: .down) { press in
-            guard press.modifiers.isEmpty, !store.mutating else { return .ignored }
+            guard !typing, press.modifiers.isEmpty, titleDraft == nil, !store.mutating else { return .ignored }
             creation = .task(detail.project.id, detail.milestones)
             return .handled
         }
         .onKeyPress(.escape) {
-            store.closeProject()
+            if titleDraft != nil {
+                titleDraft = nil
+            } else if !typing {
+                store.closeProject()
+            } else {
+                return .ignored
+            }
             return .handled
         }
         .onAppear { keysFocused = true }
     }
+
+    /// True while a text field or editor on the page takes the keys.
+    private var typing: Bool { NSApp.keyWindow?.firstResponder is NSText }
 
     private func header(_ detail: PlanningProjectDetail) -> some View {
         let pulse = detail.pulse
@@ -588,18 +780,23 @@ struct ProjectsView: View {
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel(counted > 0 ? "Progress, \(pulse.done) of \(counted) done" : "Progress, no tasks")
                 VStack(alignment: .leading, spacing: 8) {
-                    Text(project.title).heroText()
-                        .fixedSize(horizontal: false, vertical: true)
-                        .accessibilityAddTraits(.isHeader)
-                        .pageHeadline()
+                    ProjectTitleField(title: project.title, draft: $titleDraft) { title in
+                        Task { await store.saveProject(project, PlanningProjectSave(title: title)) }
+                    }
+                    .pageHeadline()
+                    ProjectSummaryField(summary: project.summary) { summary in
+                        Task {
+                            await store.saveProject(project, PlanningProjectSave(
+                                summary: summary.isEmpty ? .clear : .set(summary)))
+                        }
+                    }
                     HStack(spacing: 12) {
-                        ChoicePicker(PlanningProjectStatus.allCases, current: project.status, title: \.label,
-                                     accessibility: "Project status: \(project.status.label)",
-                                     pick: { status in Task { await store.setProjectStatus(project, status) } },
-                                     icon: { ProjectStatusIcon(status: $0, progress: fraction) }) {
+                        ProjectStatusPicker(project: project, progress: fraction) { change in
+                            Task { await store.saveProject(project, change) }
+                        } label: {
                             HStack(spacing: 6) {
                                 ProjectStatusIcon(status: project.status, progress: fraction)
-                                Text(project.status.label)
+                                Text(store.statusTitle(of: project))
                                     .font(TypeScale.label(12.5))
                                     .foregroundStyle(Theme.ink)
                                 Image(systemName: "chevron.down")
@@ -625,6 +822,21 @@ struct ProjectsView: View {
                 }
             }
         }
+    }
+
+    private func latestUpdate(_ detail: PlanningProjectDetail, now: Int64) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            sectionHeader("Latest update", count: 0) {
+                Button(detail.latestUpdate == nil ? "Write update" : "All updates") { pageTab = .updates }
+                    .buttonStyle(.quiet)
+            }
+            if let update = detail.latestUpdate {
+                ProjectUpdateCard(update: update, now: now)
+            } else {
+                Card { CardLine("No update yet.") }
+            }
+        }
+        .padding(.bottom, 28)
     }
 
     private func numbers(_ pulse: PlanningProjectPulse, now: Int64) -> some View {
@@ -774,13 +986,20 @@ struct ProjectsView: View {
     private func milestoneRow(_ milestone: PlanningMilestone, detail: PlanningProjectDetail, now: Int64) -> some View {
         let overdue = milestone.isOverdue(at: now)
         let progress = detail.progress(of: milestone)
-        return DenseRow {
+        return DenseRow(action: { editingMilestone = milestone }) {
             workStatusPicker(milestone.status, title: milestone.title) { status in
                 Task { await store.setMilestoneStatus(milestone, status) }
             } icon: { status in
                 MilestoneMark(status: status, overdue: overdue && status == milestone.status)
             }
-            Text(milestone.title).bodyText(13.5).lineLimit(1).help(milestone.title)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(milestone.title).bodyText(13.5).lineLimit(1)
+                if let description = milestone.description, !description.isEmpty {
+                    Text(description).metaText().lineLimit(1)
+                }
+            }
+            .padding(.vertical, 8)
+            .help(milestone.description.map { "\(milestone.title)\n\($0)" } ?? milestone.title)
             if progress?.nextOpen == true {
                 Text("Next")
                     .font(TypeScale.label(11).weight(.semibold))
@@ -802,6 +1021,18 @@ struct ProjectsView: View {
             linkButton(milestone.title) {
                 linkSource(to: .milestone, id: milestone.id, title: milestone.title, detail: detail)
             }
+            Button { discussedMilestone = milestone } label: {
+                Image(systemName: "bubble.left").font(.system(size: 11, weight: .semibold))
+            }
+            .buttonStyle(.quiet)
+            .help("Comments")
+            .accessibilityLabel("Comments on \(milestone.title)")
+        }
+        .contextMenu {
+            Button("Edit milestone…") { editingMilestone = milestone }
+            Button("Comments…") { discussedMilestone = milestone }
+            Divider()
+            Button("Convert to project…") { convertingMilestone = milestone }
         }
     }
 
@@ -818,20 +1049,30 @@ struct ProjectsView: View {
             .accessibilityLabel("\(meetings), latest \(ago)")
     }
 
-    private func tasks(_ detail: PlanningProjectDetail, now: Int64) -> some View {
+    /// The project's tasks as the Tasks screen lists them, with filters and
+    /// a display of this project's own; an owner's face narrows them to
+    /// that person's open tasks.
+    private func tasks(_ detail: PlanningProjectDetail) -> some View {
+        let id = detail.project.id
+        let now = model.work.now
         let person = activeOwner(detail.pulse)
-        let shown = person.map { person in detail.tasks.filter { $0.ownerPersonId == person.id && $0.status.isOpen } }
-            ?? detail.tasks
+        let draft = model.workFocus.projectListing(id)
+        let rows = (model.work.items ?? []).filter { row in
+            row.projectId == id && (person.map { row.ownerPersonId == $0.id && row.status.isOpen } ?? true)
+        }
+        let groups = model.listedGroups(rows, draft: draft, now: now)
+        let shown = Set(groups.flatMap(\.rows).map(\.id)).count
         return VStack(alignment: .leading, spacing: 10) {
-            sectionHeader("Tasks", count: shown.count) {
+            sectionHeader("Tasks", count: shown) {
                 if person != nil {
                     Button("Show all") {
                         withAnimation(Motion.settle(reduced: reduceMotion)) { ownerFilter = nil }
                     }
                     .buttonStyle(.quiet)
                 }
+                TaskListingButtons(draft: draft)
                 Button("Add task", systemImage: "plus") {
-                    creation = .task(detail.project.id, detail.milestones)
+                    creation = .task(id, detail.milestones)
                 }
                 .buttonStyle(.quiet)
                 .disabled(store.mutating)
@@ -839,89 +1080,22 @@ struct ProjectsView: View {
             if let person {
                 Text("Showing \(person.name)'s open tasks.").metaText()
             }
-            Card {
-                if detail.tasks.isEmpty { CardLine("No tasks yet.") }
-                ForEach(TaskListRow.rows(shown)) { row in
-                    switch row {
-                    case let .group(status, count):
-                        GroupHeader(title: status.label, count: count) {
-                            WorkStatusIcon(status: status)
-                        }
-                    case let .task(task):
-                        taskRow(task, detail: detail, now: now)
-                    }
-                }
+            TaskFilterBar(draft: draft)
+            if shown == 0 {
+                Card { CardLine(rows.isEmpty ? "No tasks yet." : "No tasks match these filters.") }
+                    .onAppear { model.workFocus.show([]) }
+            } else {
+                TaskListingBody(groups: groups, draft: draft, now: now, scrolls: false)
             }
         }
         .padding(.bottom, 28)
-    }
-
-    private func taskRow(_ task: PlanningTask, detail: PlanningProjectDetail, now: Int64) -> some View {
-        let overdue = task.isOverdue(at: now)
-        let milestone = task.milestoneId.flatMap { id in detail.milestones.first { $0.id == id } }
-        return DenseRow {
-            workStatusPicker(task.status, title: task.title) { status in
-                Task { await store.setTaskStatus(task, status) }
-            } icon: { status in
-                WorkStatusIcon(status: status, overdue: overdue && status == task.status)
-            }
-            VStack(alignment: .leading, spacing: 2) {
-                Text(task.title)
-                    .bodyText(13.5, task.status == .canceled ? Theme.inkTertiary : Theme.ink)
-                    .strikethrough(task.status == .canceled, color: Theme.inkTertiary)
-                    .lineLimit(1)
-                if let details = task.details, !details.isEmpty {
-                    Text(details).metaText().lineLimit(1)
-                }
-            }
-            .padding(.vertical, 8)
-            .help(task.details.map { "\(task.title)\n\($0)" } ?? task.title)
-            Spacer(minLength: 12)
-            if let milestone {
-                HStack(spacing: 5) {
-                    MilestoneMark(status: milestone.status, size: 9)
-                    Text(milestone.title).lineLimit(1)
-                }
-                .font(TypeScale.label(11.5))
-                .foregroundStyle(Theme.inkSecondary)
-                .padding(.horizontal, 8)
-                .frame(height: 20)
-                .frame(maxWidth: 150)
-                .background(Theme.inset, in: Capsule())
-                .fixedSize()
-                .help(milestone.title)
-            }
-            owner(task)
-            dueLabel(task.dueAtMs, overdue: overdue)
-            linkButton(task.title) {
-                linkSource(to: .task, id: task.id, title: task.title, detail: detail)
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func owner(_ task: PlanningTask) -> some View {
-        if task.ownerIsSelf {
-            Avatar(face: AvatarFace(kind: .me, name: "Me"), size: 20, revision: photoRevision)
-                .help("Me")
-        } else if let id = task.ownerPersonId, task.ownerAvailable,
-                  let person = people.first(where: { $0.id == id }) {
-            Button { openPerson(id) } label: {
-                Avatar(face: AvatarFace(kind: .person(id), name: person.name), size: 20, revision: photoRevision)
-            }
-            .buttonStyle(.plain)
-            .help(person.name)
-            .accessibilityLabel("Open \(person.name)")
-        } else if task.ownerPersonId != nil || !task.ownerAvailable {
-            Image(systemName: "person.crop.circle.badge.questionmark")
-                .font(.system(size: 15))
-                .foregroundStyle(Theme.inkTertiary)
-                .frame(width: 20, height: 20)
-                .help("Person unavailable")
-                .accessibilityLabel("Person unavailable")
-        } else {
-            Avatar(face: AvatarFace(kind: .unassigned, name: "No owner"), size: 20, revision: photoRevision)
-                .help("No owner")
+        .onAppear { model.workFocus.projectList = id }
+        .onDisappear {
+            let focus = model.workFocus
+            if focus.projectList == id { focus.projectList = nil }
+            focus.peeking = false
+            focus.renaming = nil
+            focus.clearSelection()
         }
     }
 
@@ -961,6 +1135,9 @@ struct ProjectsView: View {
     private func evidence(_ detail: PlanningProjectDetail) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             sectionHeader("Sources", count: sourceGroups(detail).count) {
+                Button("New note", systemImage: "square.and.pencil") { model.newNote(about: detail.project) }
+                    .buttonStyle(.quiet)
+                    .disabled(store.mutating || store.detailLoading)
                 Button("Link source", systemImage: "link") {
                     linkSource(to: .project, id: detail.project.id, title: detail.project.title, detail: detail)
                 }
@@ -1048,26 +1225,6 @@ private enum ProjectListRow: Identifiable {
 
     var projectId: String? {
         if case let .project(summary) = self { summary.id } else { nil }
-    }
-}
-
-private enum TaskListRow: Identifiable {
-    case group(PlanningWorkStatus, Int)
-    case task(PlanningTask)
-
-    static func rows(_ tasks: [PlanningTask]) -> [TaskListRow] {
-        let order: [PlanningWorkStatus] = [.inProgress, .notStarted, .done, .canceled]
-        return order.flatMap { status in
-            let members = tasks.filter { $0.status == status }
-            return members.isEmpty ? [] : [.group(status, members.count)] + members.map(TaskListRow.task)
-        }
-    }
-
-    var id: String {
-        switch self {
-        case let .group(status, _): "group:\(status.rawValue)"
-        case let .task(task): "task:\(task.id)"
-        }
     }
 }
 
@@ -1603,12 +1760,32 @@ private enum PlanningCreation: Identifiable {
     }
 }
 
+/// A project's summary in its row, in the room the row leaves: whole when it
+/// fits, cut short when some room is left, and left out when none is.
+private struct ProjectRowSummary: View {
+    let text: String
+
+    var body: some View {
+        ViewThatFits(in: .horizontal) {
+            Text(text).metaText().lineLimit(1)
+            Text(text).metaText().lineLimit(1)
+                .frame(idealWidth: 96, maxWidth: .infinity, alignment: .leading)
+            Color.clear.frame(width: 0, height: 0)
+        }
+        .padding(.trailing, 12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
 private struct PlanningDraft: Equatable {
     var title = ""
+    var summary = ""
     var body = ""
     var dueAt: Date?
     var milestoneId: String?
     var owner: PlanningOwner = .unassigned
+    var templateId: String?
+    var start = Date()
 }
 
 private struct PlanningCreateSheet: View {
@@ -1622,6 +1799,7 @@ private struct PlanningCreateSheet: View {
     @State private var operationId = UUID().uuidString
     @State private var saving = false
     @State private var error: String?
+    @State private var deletingTemplate: PlanningProjectTemplate?
     @FocusState private var titleFocused: Bool
 
     private var ownerAvailable: Bool {
@@ -1642,7 +1820,40 @@ private struct PlanningCreateSheet: View {
                     }
                     switch target {
                     case .project:
-                        bodyField("Description")
+                        VStack(alignment: .leading, spacing: 7) {
+                            Text("Summary").sectionLabel()
+                            InputField(prompt: "Add a short summary…", text: $draft.summary)
+                                .accessibilityLabel("Summary")
+                        }
+                        if !store.projectTemplates.isEmpty {
+                            HStack {
+                                Picker("Template", selection: $draft.templateId) {
+                                    Text("None").tag(String?.none)
+                                    ForEach(store.projectTemplates) { Text($0.name).tag(Optional($0.id)) }
+                                }
+                                if let template {
+                                    Button("Delete template", systemImage: "trash") { deletingTemplate = template }
+                                        .labelStyle(.iconOnly)
+                                        .buttonStyle(.borderless)
+                                        .help("Delete the template “\(template.name)”")
+                                }
+                            }
+                            .confirmationDialog("Delete the template “\(deletingTemplate?.name ?? "")”?",
+                                                isPresented: Binding(get: { deletingTemplate != nil },
+                                                                     set: { if !$0 { deletingTemplate = nil } }),
+                                                presenting: deletingTemplate) { doomed in
+                                Button("Delete template", role: .destructive) {
+                                    Task { await deleteTemplate(doomed) }
+                                }
+                            } message: { doomed in
+                                Text("\(templateContents(doomed)) Projects made from it stay.")
+                            }
+                        }
+                        bodyField(template == nil ? "Description" : "Description, in place of the template's")
+                        if let template {
+                            DatePicker("Starts", selection: $draft.start, displayedComponents: .date)
+                            Text(templateContents(template)).metaText()
+                        }
                     case .milestone:
                         PlanningDateField(date: $draft.dueAt)
                     case let .task(_, milestones):
@@ -1689,6 +1900,7 @@ private struct PlanningCreateSheet: View {
         .interactiveDismissDisabled(saving)
         .onChange(of: draft) { _, _ in operationId = UUID().uuidString; error = nil }
         .onAppear { titleFocused = true }
+        .task { if case .project = target { await store.loadProjectTemplates() } }
         .transaction {
             if reduceMotion { $0.animation = nil; $0.disablesAnimations = true }
         }
@@ -1696,10 +1908,20 @@ private struct PlanningCreateSheet: View {
 
     private var sheetHeight: CGFloat {
         switch target {
-        case .project: 350
+        case .project: store.projectTemplates.isEmpty ? 420 : 480
         case .milestone: 300
         case .task: 500
         }
+    }
+
+    private var template: PlanningProjectTemplate? {
+        store.projectTemplates.first { $0.id == draft.templateId }
+    }
+
+    private func templateContents(_ template: PlanningProjectTemplate) -> String {
+        let milestones = template.fields.milestones.count
+        let tasks = template.fields.tasks.count
+        return "\(milestones) \(milestones == 1 ? "milestone" : "milestones") and \(tasks) \(tasks == 1 ? "task" : "tasks"), dated from the start day."
     }
 
     private func bodyField(_ label: String) -> some View {
@@ -1713,6 +1935,16 @@ private struct PlanningCreateSheet: View {
         }
     }
 
+    private func deleteTemplate(_ doomed: PlanningProjectTemplate) async {
+        error = nil
+        do {
+            try await store.deleteProjectTemplate(id: doomed.id, operationId: UUID().uuidString)
+            if draft.templateId == doomed.id { draft.templateId = nil }
+        } catch {
+            self.error = error.localizedDescription
+        }
+    }
+
     private func save() async {
         guard !saving, ownerAvailable else { return }
         saving = true
@@ -1723,7 +1955,16 @@ private struct PlanningCreateSheet: View {
         do {
             switch target {
             case .project:
-                _ = try await store.createProject(title: title, description: body.isEmpty ? nil : body, operationId: operationId)
+                let summary = draft.summary.trimmingCharacters(in: .whitespacesAndNewlines)
+                if let template {
+                    _ = try await store.createProject(template: template, title: title,
+                                                      summary: summary.isEmpty ? nil : summary,
+                                                      description: body.isEmpty ? nil : body,
+                                                      start: draft.start, operationId: operationId)
+                } else {
+                    _ = try await store.createProject(title: title, summary: summary.isEmpty ? nil : summary,
+                                                      description: body.isEmpty ? nil : body, operationId: operationId)
+                }
             case let .milestone(projectId):
                 try await store.createMilestone(projectId: projectId, title: title, dueAt: draft.dueAt, operationId: operationId)
             case let .task(projectId, _):
@@ -1735,6 +1976,149 @@ private struct PlanningCreateSheet: View {
         } catch {
             self.error = error.localizedDescription
         }
+    }
+}
+
+/// Saves a project as a template under a name, refilling the template of
+/// that name when there is one.
+private struct ProjectTemplateSaveSheet: View {
+    let project: PlanningProject
+    let store: ProjectsStore
+    @Environment(\.dismiss) private var dismiss
+    @State private var name: String
+    @State private var operationId = UUID().uuidString
+    @State private var saving = false
+    @State private var error: String?
+    @FocusState private var nameFocused: Bool
+
+    init(project: PlanningProject, store: ProjectsStore) {
+        self.project = project
+        self.store = store
+        _name = State(initialValue: project.title)
+    }
+
+    private var trimmed: String { name.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+    private var replaced: PlanningProjectTemplate? {
+        store.projectTemplates.first { $0.name.lowercased() == trimmed.lowercased() }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            Text("Save as template").titleText().accessibilityAddTraits(.isHeader)
+            VStack(alignment: .leading, spacing: 7) {
+                Text("Name").sectionLabel()
+                InputField(prompt: "Template name", text: $name)
+                    .accessibilityLabel("Name")
+                    .focused($nameFocused)
+            }
+            Text("Keeps the description, lead, members, milestones and tasks with their priorities, labels and estimates.")
+                .metaText()
+                .fixedSize(horizontal: false, vertical: true)
+            if let replaced { Text("Replaces the template “\(replaced.name)”.").metaText() }
+            if let error { ErrorNote(error) }
+            Spacer(minLength: 0)
+            HStack {
+                Button("Cancel") { dismiss() }
+                    .buttonStyle(.quiet)
+                    .keyboardShortcut(.cancelAction)
+                    .disabled(saving)
+                Spacer()
+                if saving { ProgressView().controlSize(.small).accessibilityLabel("Saving") }
+                Button("Save") { Task { await save() } }
+                    .buttonStyle(.primary)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(saving || store.mutating || trimmed.isEmpty)
+            }
+        }
+        .padding(24)
+        .frame(width: 420, height: 280)
+        .background(Theme.page)
+        .interactiveDismissDisabled(saving)
+        .onChange(of: name) { _, _ in operationId = UUID().uuidString; error = nil }
+        .onAppear { nameFocused = true }
+        .task { await store.loadProjectTemplates() }
+    }
+
+    private func save() async {
+        guard !saving, !trimmed.isEmpty else { return }
+        saving = true
+        error = nil
+        defer { saving = false }
+        do {
+            try await store.saveProjectTemplate(name: trimmed, projectId: project.id, operationId: operationId)
+            dismiss()
+        } catch {
+            self.error = error.localizedDescription
+        }
+    }
+}
+
+/// A milestone's name, description and due day, changed together through
+/// the save `work milestone-save` makes.
+private struct MilestoneEditSheet: View {
+    let milestone: PlanningMilestone
+    let store: ProjectsStore
+    @Environment(\.dismiss) private var dismiss
+    @State private var title: String
+    @State private var details: String
+    @State private var due: Date?
+
+    init(milestone: PlanningMilestone, store: ProjectsStore) {
+        self.milestone = milestone
+        self.store = store
+        _title = State(initialValue: milestone.title)
+        _details = State(initialValue: milestone.description ?? "")
+        _due = State(initialValue: milestone.dueAtMs.map(PlanningFormat.moment))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            Text("Edit milestone").titleText().accessibilityAddTraits(.isHeader)
+            VStack(alignment: .leading, spacing: 18) {
+                VStack(alignment: .leading, spacing: 7) {
+                    Text("Title").sectionLabel()
+                    InputField(prompt: "Title", text: $title)
+                        .accessibilityLabel("Title")
+                }
+                VStack(alignment: .leading, spacing: 7) {
+                    Text("Description").sectionLabel()
+                    TextField("Description", text: $details, axis: .vertical)
+                        .lineLimit(3...6)
+                        .textFieldStyle(.roundedBorder)
+                        .font(TypeScale.body())
+                        .accessibilityLabel("Description")
+                }
+                PlanningDateField(date: $due)
+            }
+            Spacer(minLength: 0)
+            HStack {
+                Button("Cancel") { dismiss() }
+                    .buttonStyle(.quiet)
+                    .keyboardShortcut(.cancelAction)
+                Spacer()
+                Button("Save") { save() }
+                    .buttonStyle(.primary)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(store.mutating || title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(24)
+        .frame(width: 460, height: 380)
+        .background(Theme.page)
+    }
+
+    private func save() {
+        let name = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = details.trimmingCharacters(in: .whitespacesAndNewlines)
+        let dueMs = due.map(ProjectsStore.milliseconds)
+        let change = PlanningMilestoneSave(
+            title: name == milestone.title ? nil : name,
+            description: text == (milestone.description ?? "") ? nil : text,
+            dueAtMs: dueMs == milestone.dueAtMs ? nil : dueMs.map { .set($0) } ?? .clear)
+        dismiss()
+        guard change != PlanningMilestoneSave() else { return }
+        Task { await store.saveMilestone(milestone, change) }
     }
 }
 

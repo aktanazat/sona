@@ -123,7 +123,23 @@ enum TaskFilters {
     /// The operator a new condition on `field` starts with: one that takes
     /// several values, so picking more widens it.
     static func startingOp(_ field: WorkConditionField) -> WorkConditionOp {
-        field.dated ? .before : field == .label ? .includesAny : .anyOf
+        field.dated ? .before : field == .label ? .includesAny : field == .cycleScope ? .is : .anyOf
+    }
+
+    /// Cycle scopes as the panel offers them, in the core's words.
+    static let cycleScopes = [ConditionChoice(value: "planned", title: "Planned at start"),
+                              ConditionChoice(value: "added", title: "Added after start")]
+
+    /// Whether `filters` keep only the work of `scope`.
+    static func scoped(_ filters: [WorkCondition]?, _ scope: String) -> Bool {
+        filters?.contains { $0.field == .cycleScope && $0.op == .is && $0.values == [scope] } == true
+    }
+
+    /// `filters` keeping only `scope`, or no scope when it was already kept.
+    static func toggledScope(_ filters: [WorkCondition]?, _ scope: String) -> [WorkCondition]? {
+        let others = (filters ?? []).filter { $0.field != .cycleScope }
+        let next = scoped(filters, scope) ? others : others + [WorkCondition(field: .cycleScope, op: .is, values: [scope])]
+        return next.isEmpty ? nil : next
     }
 
     /// Operators that compare against one value only.
@@ -145,6 +161,20 @@ enum TaskFilters {
             return [ConditionChoice(value: "me", title: "Me"), ConditionChoice(value: "none", title: "No owner")]
                 + store.people.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
                 .map { ConditionChoice(value: $0.id, title: $0.name) }
+        case .forPerson:
+            return store.people.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+                .map { ConditionChoice(value: $0.id, title: $0.name) }
+                + [ConditionChoice(value: "none", title: "No one")]
+        case .estimate:
+            return TaskEstimate.points.map { ConditionChoice(value: "\($0)", title: TaskEstimate.title($0)) }
+                + [ConditionChoice(value: "none", title: "No estimate")]
+        case .completed:
+            return [ConditionChoice(value: "today", title: "Today"),
+                    ConditionChoice(value: "yesterday", title: "Yesterday"),
+                    ConditionChoice(value: "this_week", title: "This week"),
+                    ConditionChoice(value: "last_week", title: "Last week"),
+                    ConditionChoice(value: "this_month", title: "This month"),
+                    ConditionChoice(value: "last_month", title: "Last month")]
         case .delegate:
             var agents = WorkChoices.agents
             for agent in (store.items ?? []).compactMap(\.doer?.agent).sorted() where !agents.contains(agent) {
@@ -163,6 +193,12 @@ enum TaskFilters {
                 + [ConditionChoice(value: "none", title: "No milestone")]
         case .label:
             return store.labels.map { ConditionChoice(value: $0.id, title: $0.name) }
+        case .parent:
+            return (store.items ?? []).filter { $0.subTasks != nil }
+                .map { ConditionChoice(value: $0.id, title: "S-\($0.number) \($0.title)") }
+                + [ConditionChoice(value: "none", title: "No parent")]
+        case .cycleScope:
+            return cycleScopes
         case .cycle:
             return [ConditionChoice(value: "current", title: "Current cycle"),
                     ConditionChoice(value: "next", title: "Next cycle")]
@@ -241,7 +277,7 @@ private struct TaskFilterPanel: View {
 
     var body: some View {
         let store = model.work
-        let query = model.workFocus.listing(store.views)?.query ?? WorkQuery()
+        let query = model.listing?.query ?? WorkQuery()
         VStack(spacing: 0) {
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass")
@@ -344,6 +380,13 @@ private struct TaskFilterPanel: View {
                                 symbol(cycle == .noCycle ? "minus.circle" : "arrow.triangle.2.circlepath")
                             } toggle: {
                                 model.editListing { $0.query.cycle = $0.query.cycle == cycle ? nil : cycle }
+                            }
+                        }
+                        ForEach(TaskFilters.cycleScopes) { scope in
+                            option(scope.title, on: TaskFilters.scoped(query.filters, scope.value)) {
+                                symbol(scope.value == "added" ? "plus.circle" : "checklist")
+                            } toggle: {
+                                model.editListing { $0.query.filters = TaskFilters.toggledScope($0.query.filters, scope.value) }
                             }
                         }
                     }
@@ -576,8 +619,8 @@ struct TaskFilterBar: View {
             .padding(.trailing, 8)
             .frame(maxWidth: .infinity, alignment: .leading)
             .alignmentGuide(.firstChipRow) { _ in Theme.compactHeight / 2 }
-            switch focus.tab {
-            case .all:
+            switch model.listedProject == nil ? focus.tab : nil {
+            case .all?:
                 if !chips.isEmpty {
                     Button("Clear") { model.editListing { $0.query = WorkQuery() } }
                         .buttonStyle(QuietButton(compact: true))
@@ -588,7 +631,7 @@ struct TaskFilterBar: View {
                     .buttonStyle(.compact)
                     .popover(isPresented: $naming, arrowEdge: .bottom) { namer }
                 }
-            case let .view(id):
+            case let .view(id)?:
                 if focus.viewDrafts[id] != nil {
                     Button("Revert") { focus.viewDrafts[id] = nil }
                         .buttonStyle(QuietButton(compact: true))
@@ -612,8 +655,13 @@ struct TaskFilterBar: View {
                     .fixedSize()
                     .accessibilityLabel("\(view.name) options")
                 }
-            case .owe, .waiting, .cycle:
+            case .owe?, .waiting?, .cycle?:
                 EmptyView()
+            case nil:
+                if !chips.isEmpty {
+                    Button("Clear") { model.editListing { $0.query = WorkQuery() } }
+                        .buttonStyle(QuietButton(compact: true))
+                }
             }
         }
         .padding(.leading, 16)

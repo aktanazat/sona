@@ -30,6 +30,8 @@ final class AgentBridgeStore {
     /// meeting, land at once or wait for the user.
     private(set) var agentChanges = WorkAutonomy.suggest
     private(set) var sonaChanges = WorkAutonomy.suggest
+    /// Whether a task closes itself once its sub-tasks are done.
+    private(set) var closeParents = false
     private(set) var autonomyBusy = false
     /// The tasks a session waits on the user's approval for, by the name the
     /// session gave each. Set only when it changes, so task lists redraw then
@@ -260,6 +262,21 @@ final class AgentBridgeStore {
         await setAutonomy("change_work_sona_changes_setting", autonomy, keyPath: \.sonaChanges)
     }
 
+    func setCloseParents(_ enabled: Bool) async {
+        autonomyBusy = true
+        defer { autonomyBusy = false }
+        let previous = closeParents
+        closeParents = enabled
+        do {
+            try await core.request("change_work_close_parents_setting", ["enabled": enabled])
+            error = nil
+            await loadSettings()
+        } catch {
+            closeParents = previous
+            self.error = "Couldn't save that setting: \(Self.reason(error))"
+        }
+    }
+
     private func setAutonomy(
         _ method: String, _ autonomy: WorkAutonomy, keyPath: ReferenceWritableKeyPath<AgentBridgeStore, WorkAutonomy>
     ) async {
@@ -304,6 +321,7 @@ final class AgentBridgeStore {
             }
             agentChanges = settings.workAgentChanges ?? .suggest
             sonaChanges = settings.workSonaChanges ?? .suggest
+            closeParents = settings.workCloseParents ?? false
             error = nil
         } catch {
             self.error = "Couldn't load agent connection details: \(Self.reason(error))"

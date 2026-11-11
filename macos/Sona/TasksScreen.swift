@@ -57,17 +57,52 @@ extension AppModel {
                                       projects: work.projects, people: work.people)
         case .all, .view:
             guard let draft else { return [] }
-            let triageAsked = draft.query.statuses?.contains(.triage) == true
-            let filter = TaskListing.Filter(draft.query, now: now, cycles: work.cycles)
-            let rows = items.filter { ($0.status != .triage || triageAsked) && filter.matches($0) }
-            return TaskListing.groups(rows, display: draft.display, now: now,
-                                      projects: work.projects, people: work.people)
+            return listedGroups(items, draft: draft, now: now)
         }
     }
 
-    /// The tasks planned in the current cycle, as the cycle tab lists them.
+    /// `rows` through a listing's filters, grouped and ordered as its display
+    /// asks; a board leaves its hidden columns out.
+    func listedGroups(_ rows: [WorkItemRow], draft: WorkViewDraft, now: Int64) -> [TaskGroup] {
+        let triageAsked = draft.query.statuses?.contains(.triage) == true
+        let filter = TaskListing.Filter(draft.query, now: now, cycles: work.cycles)
+        let shown = rows.filter { ($0.status != .triage || triageAsked) && filter.matches($0) }
+        let groups = TaskListing.groups(shown, display: draft.display, now: now, projects: work.projects,
+                                        people: work.people, cycles: work.cycles, labels: workLabels,
+                                        milestones: milestones)
+        guard draft.display.layout == .board, !draft.display.hiddenColumns.isEmpty else { return groups }
+        return groups.filter { !draft.display.hiddenColumns.contains($0.id) }
+    }
+
+    /// A group's plus: a new task that already sits in that group.
+    func composeTask(in group: TaskGroup) {
+        guard let patch = group.patch else { return }
+        var start = workDraftDefaults
+        if let status = patch.status { start.status = status }
+        if let priority = patch.priority { start.priority = priority }
+        if let owner = patch.owner { start.owner = owner }
+        if let project = patch.projectId { start.projectId = project }
+        if let due = patch.dueAtMs { start.dueAtMs = due }
+        if let labels = patch.labelIds { start.labelIds = labels }
+        if let milestone = patch.milestoneId { start.milestoneId = milestone }
+        if let cycle = patch.cycle { start.cycle = cycle }
+        workFocus.composing = start
+    }
+
+    /// Every milestone of the projects read so far, for milestone groups.
+    var milestones: [PlanningMilestone] { projects.details.values.flatMap(\.milestones) }
+
+    /// The cycle the Cycle tab's page shows: the one opened from the list,
+    /// else the one under way. Nil while the tab lists every cycle.
+    var cycleShown: WorkCycle? {
+        guard !workFocus.cycleListShown,
+              let number = workFocus.cycleOpened ?? work.currentCycle?.number else { return nil }
+        return work.cycles.first { $0.number == number }
+    }
+
+    /// The tasks planned in the cycle the tab shows, as its page lists them.
     var cycleRows: [WorkItemRow] {
-        guard let number = work.currentCycle?.number else { return [] }
+        guard let number = cycleShown?.number else { return [] }
         return (work.items ?? []).filter {
             $0.cycle == number && $0.archivedAtMs == nil && $0.status != .triage && $0.status != .duplicate
         }
@@ -107,7 +142,12 @@ private struct TasksList: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .overlay(alignment: .trailing) {
-            if focus.peeking, let id = focus.highlighted, let row = model.workRows([id]).first {
+            if focus.peeking, focus.tab == .cycle, model.cycleShown == nil {
+                if let number = focus.cycleHighlighted, let cycle = model.work.cycles.first(where: { $0.number == number }) {
+                    CyclePeek(cycle: cycle)
+                        .transition(reduceMotion ? .opacity : .move(edge: .trailing).combined(with: .opacity))
+                }
+            } else if focus.peeking, let id = focus.highlighted, let row = model.workRows([id]).first {
                 TaskPeek(row: row, place: .tasks)
                     .transition(reduceMotion ? .opacity : .move(edge: .trailing).combined(with: .opacity))
             }
@@ -135,7 +175,7 @@ private struct TasksList: View {
             } else {
                 TaskSkeleton()
             }
-        } else if focus.tab == .cycle, let cycle = store.currentCycle {
+        } else if focus.tab == .cycle, let cycle = model.cycleShown {
             TaskListBody(groups: groups, lead: {
                 CycleSummary(cycle: cycle, tally: CycleTally(model.cycleRows))
                 if groups.allSatisfy(\.rows.isEmpty) {
@@ -144,32 +184,14 @@ private struct TasksList: View {
                         .frame(maxWidth: .infinity)
                         .padding(.top, 48)
                 }
-            }, row: { itemRow($0, shows: shows, now: now) })
+            }, row: { TaskListingRow(item: $0, shows: shows, now: now) })
+        } else if focus.tab == .cycle, !store.cycles.isEmpty {
+            CycleList()
         } else if groups.allSatisfy(\.rows.isEmpty) {
             empty(draft)
                 .onAppear { focus.show([]) }
-        } else if draft?.display.layout == .board {
-            TaskBoardBody(groups: groups, shows: shows, now: now)
         } else {
-            TaskListBody(groups: groups, headers: draft?.display.groupBy != WorkGroupBy.none, add: add) { item in
-                itemRow(item, shows: shows, now: now)
-            }
-        }
-    }
-
-    private func itemRow(_ item: WorkItemRow, shows: Set<String>, now: Int64) -> some View {
-        let focus = model.workFocus
-        let labels = model.workLabels
-        return ItemRow(
-            row: item, shows: shows, labels: item.labelIds.compactMap { labels[$0] },
-            highlighted: focus.highlighted == item.id, selected: focus.selection.contains(item.id),
-            selecting: focus.selecting, renaming: focus.renaming == item.id, now: now,
-            revision: model.people.photoRevision, waiting: model.agents.waits(on: item),
-            session: model.work.working[item.id]
-        ) {
-            focus.toggle(item.id)
-        } rename: { title in
-            model.renameTask(item.id, to: title)
+            TaskListingBody(groups: groups, draft: draft, now: now)
         }
     }
 
@@ -190,7 +212,7 @@ private struct TasksList: View {
         case .waiting:
             TaskEmpty(line: "Nobody owes you anything.")
         case .cycle:
-            TaskEmpty(line: "No cycle is running.")
+            TaskEmpty(line: "No cycles yet.")
         case .all, .view:
             if let draft, !TaskFilters.chips(draft.query, model: model).isEmpty {
                 TaskEmpty(line: "No tasks match these filters.") {
@@ -215,8 +237,35 @@ private struct TasksList: View {
                 isOn: Bindable(focus).oweThisCycle)
         }
         if focus.tab == .cycle {
+            CycleNavigation()
             CycleSettingsMenu()
         }
+        TaskListingButtons(draft: draft)
+        WorkChangesButton()
+        WorkBarButton(icon: "archivebox", help: "Archive and recently deleted") {
+            model.go(.archive)
+        }
+        Button {
+            model.newTask()
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "plus").font(.system(size: 11, weight: .bold))
+                Text("New task")
+            }
+        }
+        .buttonStyle(.primary)
+        .help("New task  C")
+    }
+}
+
+/// A listing's filter button, its list-or-board switch, and its display
+/// options; F, ⌘B and ⇧V reach them from the keyboard.
+struct TaskListingButtons: View {
+    let draft: WorkViewDraft?
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        let focus = model.workFocus
         if let draft {
             TaskFilterButton()
             SegmentedSwitch(
@@ -237,31 +286,53 @@ private struct TasksList: View {
             DisplayOptionsView()
                 .environment(model)
         }
-        WorkBarButton(icon: "archivebox", help: "Archive and recently deleted") {
-            model.go(.archive)
-        }
-        Button {
-            model.newTask()
-        } label: {
-            HStack(spacing: 6) {
-                Image(systemName: "plus").font(.system(size: 11, weight: .bold))
-                Text("New task")
+    }
+}
+
+/// A listing's tasks as its display lays them out: a board, or rows in
+/// their groups. Outside a scrolling page of its own, the page scrolls them.
+struct TaskListingBody: View {
+    let groups: [TaskGroup]
+    let draft: WorkViewDraft?
+    let now: Int64
+    var scrolls = true
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        let shows = Set(draft?.display.properties ?? model.workFocus.myProperties)
+        if let display = draft?.display, display.layout == .board {
+            TaskBoardBody(groups: groups, display: display, shows: shows, now: now, scrolls: scrolls,
+                          add: model.composeTask(in:))
+        } else {
+            TaskListBody(groups: groups, headers: draft?.display.groupBy != WorkGroupBy.none, scrolls: scrolls,
+                         add: model.composeTask(in:)) { item in
+                TaskListingRow(item: item, shows: shows, now: now)
             }
         }
-        .buttonStyle(.primary)
-        .help("New task  C")
     }
+}
 
-    /// The header's plus: a new task that already sits in that group.
-    private func add(_ group: TaskGroup) {
-        guard let patch = group.patch else { return }
-        var start = model.workDraftDefaults
-        if let status = patch.status { start.status = status }
-        if let priority = patch.priority { start.priority = priority }
-        if let owner = patch.owner { start.owner = owner }
-        if let project = patch.projectId { start.projectId = project }
-        if let due = patch.dueAtMs { start.dueAtMs = due }
-        model.workFocus.composing = start
+/// One task's row in a listing.
+struct TaskListingRow: View {
+    let item: WorkItemRow
+    let shows: Set<String>
+    let now: Int64
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        let focus = model.workFocus
+        let labels = model.workLabels
+        ItemRow(
+            row: item, shows: shows, labels: item.labelIds.compactMap { labels[$0] },
+            highlighted: focus.highlighted == item.id, selected: focus.selection.contains(item.id),
+            selecting: focus.selecting, renaming: focus.renaming == item.id, now: now,
+            revision: model.people.photoRevision, waiting: model.agents.waits(on: item),
+            session: model.work.working[item.id]
+        ) {
+            focus.toggle(item.id)
+        } rename: { title in
+            model.renameTask(item.id, to: title)
+        }
     }
 }
 
@@ -275,8 +346,8 @@ private struct TaskTabs: View {
             HStack(spacing: 2) {
                 tab(.owe, title: "I owe", count: counts?.mineOpen)
                 tab(.waiting, title: "Waiting on", count: counts?.waitingOn)
-                if let cycle = model.work.currentCycle {
-                    tab(.cycle, title: "Cycle \(cycle.number)", count: nil)
+                if !model.work.cycles.isEmpty {
+                    tab(.cycle, title: model.work.currentCycle.map { "Cycle \($0.number)" } ?? "Cycles", count: nil)
                 }
                 tab(.all, title: "All", count: nil)
                 ForEach(model.work.views) { view in
@@ -334,6 +405,7 @@ struct WorkTab: View {
 struct TaskListBody<Row: View, Lead: View>: View {
     let groups: [TaskGroup]
     var headers = true
+    var scrolls = true
     var add: ((TaskGroup) -> Void)?
     @ViewBuilder let lead: () -> Lead
     @ViewBuilder let row: (WorkItemRow) -> Row
@@ -344,34 +416,12 @@ struct TaskListBody<Row: View, Lead: View>: View {
         let focus = model.workFocus
         let visible = groups.filter { !focus.collapsed.contains($0.id) }.flatMap(\.rows).map(\.id)
         ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 0, pinnedViews: headers ? [.sectionHeaders] : []) {
-                    lead()
-                    ForEach(groups) { group in
-                        Section {
-                            if !focus.collapsed.contains(group.id) {
-                                ForEach(group.rows.map { GroupedRow(group: group.id, item: $0) }) { entry in
-                                    row(entry.item)
-                                        .modifier(TaskRowInteractions(id: entry.item.id))
-                                        .transition(WorkMotion.insert(reduced: reduceMotion))
-                                }
-                            }
-                        } header: {
-                            if headers {
-                                TaskGroupHeader(
-                                    group: group, collapsed: focus.collapsed.contains(group.id),
-                                    revision: model.people.photoRevision,
-                                    toggle: { toggle(group.id) },
-                                    add: group.patch == nil ? nil : add.map { add in { add(group) } },
-                                    reschedule: group.mark == .bucket(.overdue)
-                                        ? { model.perform(.due, on: group.rows.map(\.id)) } : nil)
-                            }
-                        }
-                    }
+            Group {
+                if scrolls {
+                    ScrollView { stack }
+                } else {
+                    stack
                 }
-                .padding(.top, headers ? 0 : 6)
-                .padding(.bottom, 96)
-                .animation(Motion.regular, value: model.work.items?.map(\.id))
             }
             .onChange(of: focus.scrollTarget) { _, id in
                 guard let id, let group = groups.first(where: { $0.rows.contains { $0.id == id } }) else { return }
@@ -381,6 +431,37 @@ struct TaskListBody<Row: View, Lead: View>: View {
         .onChange(of: visible, initial: true) { _, ids in focus.show(ids) }
     }
 
+    private var stack: some View {
+        let focus = model.workFocus
+        return LazyVStack(alignment: .leading, spacing: 0, pinnedViews: headers && scrolls ? [.sectionHeaders] : []) {
+            lead()
+            ForEach(groups) { group in
+                Section {
+                    if !focus.collapsed.contains(group.id) {
+                        ForEach(group.rows.map { GroupedRow(group: group.id, item: $0) }) { entry in
+                            row(entry.item)
+                                .modifier(TaskRowInteractions(id: entry.item.id))
+                                .transition(WorkMotion.insert(reduced: reduceMotion))
+                        }
+                    }
+                } header: {
+                    if headers {
+                        TaskGroupHeader(
+                            group: group, collapsed: focus.collapsed.contains(group.id),
+                            revision: model.people.photoRevision,
+                            toggle: { toggle(group.id) },
+                            add: group.patch == nil ? nil : add.map { add in { add(group) } },
+                            reschedule: group.mark == .bucket(.overdue)
+                                ? { model.perform(.due, on: group.rows.map(\.id)) } : nil)
+                    }
+                }
+            }
+        }
+        .padding(.top, headers ? 0 : 6)
+        .padding(.bottom, scrolls ? 96 : 0)
+        .animation(Motion.regular, value: model.work.items?.map(\.id))
+    }
+
     private func toggle(_ group: String) {
         let focus = model.workFocus
         if focus.collapsed.contains(group) { focus.collapsed.remove(group) } else { focus.collapsed.insert(group) }
@@ -388,9 +469,9 @@ struct TaskListBody<Row: View, Lead: View>: View {
 }
 
 extension TaskListBody where Lead == EmptyView {
-    init(groups: [TaskGroup], headers: Bool = true, add: ((TaskGroup) -> Void)? = nil,
+    init(groups: [TaskGroup], headers: Bool = true, scrolls: Bool = true, add: ((TaskGroup) -> Void)? = nil,
          @ViewBuilder row: @escaping (WorkItemRow) -> Row) {
-        self.init(groups: groups, headers: headers, add: add, lead: { EmptyView() }, row: row)
+        self.init(groups: groups, headers: headers, scrolls: scrolls, add: add, lead: { EmptyView() }, row: row)
     }
 }
 
@@ -464,25 +545,110 @@ struct WorkActionMenu: View {
     }
 }
 
-/// The board: one column per group, cards dragged between them.
+/// The board: one column per group, cards dragged between them; with
+/// swimlanes, one row of those columns per group of the second grouping.
 private struct TaskBoardBody: View {
     let groups: [TaskGroup]
+    let display: WorkDisplay
     let shows: Set<String>
     let now: Int64
+    var scrolls = true
+    let add: (TaskGroup) -> Void
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        let visible = groups.flatMap(\.rows).map(\.id)
-        ScrollView(.horizontal) {
-            HStack(alignment: .top, spacing: 12) {
-                ForEach(groups) { group in
-                    TaskColumn(group: group, shows: shows, now: now)
+        let lanes = lanes
+        let visible = lanes.flatMap { $0.columns.flatMap(\.rows).map(\.id) }
+        Group {
+            if let only = lanes.first, lanes.count == 1, only.lane == nil, scrolls {
+                ScrollView(.horizontal) {
+                    columns(only.columns, scrolls: true)
+                        .padding(16)
+                        .frame(maxHeight: .infinity, alignment: .top)
+                }
+            } else {
+                ScrollView(scrolls ? [.horizontal, .vertical] : .horizontal) {
+                    VStack(alignment: .leading, spacing: 20) {
+                        ForEach(lanes, id: \.id) { lane in
+                            VStack(alignment: .leading, spacing: 8) {
+                                if let header = lane.lane {
+                                    HStack(spacing: 8) {
+                                        TaskGroupMarkView(mark: header.mark, revision: model.people.photoRevision)
+                                        Text(header.title).font(TypeScale.listTitle).foregroundStyle(Theme.ink)
+                                        Text("\(header.rows.count)").font(TypeScale.label(12)).monospacedDigit()
+                                            .foregroundStyle(Theme.inkTertiary)
+                                    }
+                                    .padding(.horizontal, 6)
+                                    .accessibilityElement(children: .combine)
+                                    .accessibilityAddTraits(.isHeader)
+                                }
+                                columns(lane.columns, scrolls: false)
+                            }
+                        }
+                    }
+                    .padding(16)
                 }
             }
-            .padding(16)
-            .frame(maxHeight: .infinity, alignment: .top)
         }
         .onChange(of: visible, initial: true) { _, ids in model.workFocus.show(ids) }
+    }
+
+    private func columns(_ columns: [TaskGroup], scrolls: Bool) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            ForEach(columns) { group in
+                TaskColumn(group: group, shows: shows, now: now, scrolls: scrolls, add: group.patch == nil ? nil : { add(group) })
+            }
+        }
+    }
+
+    private struct Lane {
+        let id: String
+        let lane: TaskGroup?
+        let columns: [TaskGroup]
+    }
+
+    /// The columns once, or once per swimlane holding only that lane's
+    /// cards; a card dropped in a lane's column takes both groups' fields.
+    private var lanes: [Lane] {
+        guard display.subGroupBy != .none, display.subGroupBy != display.groupBy else {
+            return [Lane(id: "all", lane: nil, columns: groups)]
+        }
+        var byLane = display
+        byLane.groupBy = display.subGroupBy
+        let rows = Self.unique(groups.flatMap(\.rows))
+        let work = model.work
+        let laneGroups = TaskListing.grouped(
+            rows, display: byLane, now: now, projects: work.projects, people: work.people, cycles: work.cycles,
+            labels: model.workLabels, milestones: model.milestones)
+        return laneGroups.map { lane in
+            let inLane = Set(lane.rows.map(\.id))
+            let columns = groups.map { column in
+                TaskGroup(id: "\(lane.id)|\(column.id)", title: column.title, mark: column.mark,
+                          rows: column.rows.filter { inLane.contains($0.id) },
+                          patch: Self.both(column.patch, lane.patch), addsLabel: column.addsLabel ?? lane.addsLabel)
+            }
+            return Lane(id: lane.id, lane: lane, columns: columns)
+        }
+    }
+
+    private static func unique(_ rows: [WorkItemRow]) -> [WorkItemRow] {
+        var seen = Set<String>()
+        return rows.filter { seen.insert($0.id).inserted }
+    }
+
+    /// A column's fields with its lane's beside them; nil when neither sets one.
+    private static func both(_ column: WorkPatch?, _ lane: WorkPatch?) -> WorkPatch? {
+        guard var patch = column else { return lane }
+        guard let lane else { return patch }
+        patch.status = patch.status ?? lane.status
+        patch.priority = patch.priority ?? lane.priority
+        patch.owner = patch.owner ?? lane.owner
+        patch.projectId = patch.projectId ?? lane.projectId
+        patch.milestoneId = patch.milestoneId ?? lane.milestoneId
+        patch.dueAtMs = patch.dueAtMs ?? lane.dueAtMs
+        patch.cycle = patch.cycle ?? lane.cycle
+        patch.labelIds = patch.labelIds.map { Array(Set($0 + (lane.labelIds ?? []))) } ?? lane.labelIds
+        return patch
     }
 }
 
@@ -490,13 +656,13 @@ private struct TaskColumn: View {
     let group: TaskGroup
     let shows: Set<String>
     let now: Int64
+    let scrolls: Bool
+    let add: (() -> Void)?
     @Environment(AppModel.self) private var model
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var targeted = false
 
     var body: some View {
-        let focus = model.workFocus
-        let labels = model.workLabels
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 8) {
                 TaskGroupMarkView(mark: group.mark, revision: model.people.photoRevision)
@@ -509,31 +675,40 @@ private struct TaskColumn: View {
                     .monospacedDigit()
                     .foregroundStyle(Theme.inkTertiary)
                 Spacer(minLength: 0)
+                Menu {
+                    Button("Hide column") { hide() }
+                } label: {
+                    Image(systemName: "ellipsis").font(.system(size: 11, weight: .semibold))
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .foregroundStyle(Theme.inkTertiary)
+                .help("Column options")
+                if let add {
+                    Button(action: add) {
+                        Image(systemName: "plus").font(.system(size: 11, weight: .semibold))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(Theme.inkTertiary)
+                    .help("New task in \(group.title)")
+                    .accessibilityLabel("New task in \(group.title)")
+                }
             }
             .padding(.horizontal, 12)
             .frame(height: Theme.listRow)
-            .accessibilityElement(children: .combine)
+            .accessibilityElement(children: .contain)
             .accessibilityAddTraits(.isHeader)
-            ScrollView {
-                LazyVStack(spacing: 6) {
-                    ForEach(group.rows) { item in
-                        TaskCard(
-                            row: item, shows: shows, labels: item.labelIds.compactMap { labels[$0] },
-                            highlighted: focus.highlighted == item.id, selected: focus.selection.contains(item.id),
-                            now: now, revision: model.people.photoRevision, waiting: model.agents.waits(on: item),
-                            session: model.work.working[item.id])
-                            .modifier(TaskRowInteractions(id: item.id))
-                            .draggable(model.menuTargets(item.id).joined(separator: "\n"))
-                            .transition(WorkMotion.insert(reduced: reduceMotion))
-                    }
-                }
-                .padding(.bottom, 24)
+            if scrolls {
+                ScrollView { cards.padding(.bottom, 24) }
+                    .scrollIndicators(.never)
+            } else {
+                cards.padding(.bottom, 12)
             }
-            .scrollIndicators(.never)
         }
         .padding(.horizontal, 6)
         .frame(width: 280)
-        .frame(maxHeight: .infinity, alignment: .top)
+        .frame(maxHeight: scrolls ? .infinity : nil, alignment: .top)
         .background(targeted ? Theme.selection : Theme.inset, in: RoundedRectangle(cornerRadius: Theme.radiusCard, style: .continuous))
         .animation(Motion.regular, value: model.work.items?.map(\.id))
         .dropDestination(for: String.self) { payloads, _ in
@@ -541,10 +716,48 @@ private struct TaskColumn: View {
             let ids = payloads.flatMap { $0.split(separator: "\n").map(String.init) }
                 .filter { id in !group.rows.contains { $0.id == id } }
             guard !ids.isEmpty else { return false }
-            model.changeWork { model.work.update(ids, patch) }
+            drop(ids, patch)
             return true
         } isTargeted: { inside in
             targeted = inside && group.patch != nil
+        }
+    }
+
+    private var cards: some View {
+        let focus = model.workFocus
+        let labels = model.workLabels
+        return LazyVStack(spacing: 6) {
+            ForEach(group.rows) { item in
+                TaskCard(
+                    row: item, shows: shows, labels: item.labelIds.compactMap { labels[$0] },
+                    highlighted: focus.highlighted == item.id, selected: focus.selection.contains(item.id),
+                    now: now, revision: model.people.photoRevision, waiting: model.agents.waits(on: item),
+                    session: model.work.working[item.id])
+                    .modifier(TaskRowInteractions(id: item.id))
+                    .draggable(model.menuTargets(item.id).joined(separator: "\n"))
+                    .transition(WorkMotion.insert(reduced: reduceMotion))
+            }
+        }
+    }
+
+    /// A label column adds its label to the ones each card has; every other
+    /// column sets its fields outright.
+    private func drop(_ ids: [String], _ patch: WorkPatch) {
+        guard let label = group.addsLabel else {
+            model.changeWork { model.work.update(ids, patch) }
+            return
+        }
+        for row in model.workRows(ids) {
+            var each = patch
+            each.labelIds = Array(Set(row.labelIds + (patch.labelIds ?? []) + [label]))
+            model.changeWork { model.work.update([row.id], each) }
+        }
+    }
+
+    private func hide() {
+        let column = group.id.split(separator: "|").last.map(String.init) ?? group.id
+        model.editListing { draft in
+            if !draft.display.hiddenColumns.contains(column) { draft.display.hiddenColumns.append(column) }
         }
     }
 }

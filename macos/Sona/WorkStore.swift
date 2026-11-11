@@ -25,6 +25,8 @@ final class WorkStore {
     /// Every cycle, oldest first, and how long they run.
     private(set) var cycles: [WorkCycle] = []
     private(set) var cycleSettings: WorkCycleSettings?
+    /// The tasks a cycle usually finishes, from the last three that ended.
+    private(set) var cycleCapacity: Int?
     private(set) var loading = false
     private(set) var listError: String?
     private(set) var mutationError: String?
@@ -37,8 +39,11 @@ final class WorkStore {
     private(set) var watches: [WorkWatch] = []
     /// What `undo` would take back.
     private(set) var undoTitle: String?
-    /// Starred tasks, projects and saved views, in the order starred.
+    /// Starred tasks, projects, saved views and people, each at its place in
+    /// its folder or at the top.
     private(set) var favorites: [WorkFavorite] = []
+    /// The favorites folders, at their places at the top.
+    private(set) var favoriteFolders: [WorkFavoriteFolder] = []
     /// The tasks the inbox follows, by item id.
     private(set) var subscriptions: [String: WorkSubscription] = [:]
     /// Every notice not archived, snoozed ones too, newest first.
@@ -136,9 +141,24 @@ final class WorkStore {
         keepTime()
     }
 
-    func addComment(on itemId: String, body: String, replyTo: String? = nil) async -> Bool {
-        await write(on: itemId, "work_comment_add", CommentAddParams(
-            operationId: Self.newId(), itemId: itemId, body: body, replyTo: replyTo))
+    /// Posts a comment, then puts `files` on it. False when the comment was
+    /// not saved; a file that fails leaves its reason in `mutationError`.
+    func addComment(on itemId: String, body: String, replyTo: String? = nil, files: [URL] = []) async -> Bool {
+        let comment: WorkComment
+        do {
+            comment = try await core.request("work_comment_add", CommentAddParams(
+                operationId: Self.newId(), itemId: itemId, body: body, replyTo: replyTo))
+            mutationError = nil
+        } catch {
+            mutationError = error.localizedDescription
+            return false
+        }
+        if files.isEmpty {
+            await loadDetail(itemId)
+        } else {
+            _ = await attach(files.map { .file($0) }, to: itemId, comment: comment.id)
+        }
+        return true
     }
 
     func editComment(_ id: String, on itemId: String, body: String) async -> Bool {
@@ -154,14 +174,15 @@ final class WorkStore {
             operationId: Self.newId(), id: id, resolved: resolved))
     }
 
-    func attach(_ sources: [WorkAttachmentSource], to itemId: String) async -> Int {
+    func attach(_ sources: [WorkAttachmentSource], to itemId: String, comment commentId: String? = nil) async -> Int {
         let had = Set(detail.map { $0.item.id == itemId ? $0.attachments.map(\.id) : [] } ?? [])
         var failure: String?
         var repeats = 0
         for source in sources {
             do {
-                let made: WorkAttachment = try await core.request(
-                    source.method, source.params(itemId: itemId, operationId: Self.newId()))
+                var params = source.params(itemId: itemId, operationId: Self.newId())
+                params.commentId = commentId
+                let made: WorkAttachment = try await core.request(source.method, params)
                 if had.contains(made.id) { repeats += 1 }
             } catch {
                 failure = error.localizedDescription
@@ -180,7 +201,7 @@ final class WorkStore {
     func detach(_ attachment: WorkAttachment) async -> Bool {
         let kept: WorkAttachmentSource?
         if let url = attachment.linkURL, attachment.kind == .link {
-            kept = .link(url.absoluteString, title: attachment.title)
+            kept = .link(url.absoluteString, title: attachment.title, subtitle: attachment.subtitle)
         } else if let file = attachment.fileURL {
             let folder = FileManager.default.temporaryDirectory
                 .appending(path: "sona-detached/\(Self.newId())", directoryHint: .isDirectory)
@@ -262,7 +283,8 @@ final class WorkStore {
     }
 
     /// New tasks under `parentId`, one per title, in the parent's project.
-    func createSubtasks(under parentId: String, titles: [String]) {
+    /// `made` runs once they exist.
+    func createSubtasks(under parentId: String, titles: [String], made: @escaping @MainActor () -> Void = {}) {
         let titles = titles.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
         guard let parent = rows([parentId]).first, !titles.isEmpty else { return }
         let inputs = titles.map { WorkItemInput(title: $0, projectId: parent.projectId) }
@@ -270,6 +292,7 @@ final class WorkStore {
             do {
                 let _: [WorkItem] = try await self.core.request("work_subtask_create", SubtaskParams(
                     operationId: Self.newId(), parentId: parentId, inputs: inputs))
+                made()
             } catch {
                 self.mutationError = error.localizedDescription
             }
@@ -333,6 +356,26 @@ final class WorkStore {
         }
     }
 
+    /// Moves tasks in the manual order, keeping their order among themselves.
+    func move(_ ids: [String], to place: WorkPlace) {
+        let moving = rows(ids).sorted { ($0.sortOrder, $0.number) < ($1.sortOrder, $1.number) }
+        guard !moving.isEmpty else { return }
+        let ids = moving.map(\.id)
+        let moved = Set(ids)
+        let others = (items ?? []).filter { !moved.contains($0.id) }.map(\.sortOrder)
+        let slot = Dictionary(uniqueKeysWithValues: ids.enumerated().map { ($1, Double($0)) })
+        change(ids, undo: nil, { row in
+            let index = slot[row.id] ?? 0
+            switch place {
+            case .top: row.sortOrder = (others.min() ?? 0) - Double(ids.count) + index
+            case .bottom: row.sortOrder = (others.max() ?? 0) + 1 + index
+            case .before, .after: break
+            }
+        }) { operationId, _ in
+            try await self.core.request("work_move", MoveParams(operationId: operationId, ids: ids, place: place))
+        }
+    }
+
     /// Books the next free hour before the task is due in the Sona
     /// calendar. The row stops reading at risk at once; the hour shows
     /// when the calendar answers.
@@ -362,6 +405,7 @@ final class WorkStore {
                     "work_cycle_settings_save", CycleSettingsParams(operationId: Self.newId(), settings: settings))
                 self.cycleSettings = saved.settings
                 self.cycles = saved.cycles
+                self.cycleCapacity = saved.capacity
             } catch {
                 self.cycleSettings = before
                 self.mutationError = error.localizedDescription
@@ -386,12 +430,34 @@ final class WorkStore {
         changeCycles("work_cycle_start_today", CycleNumberParams(operationId: Self.newId(), number: number))
     }
 
+    /// Moves a cycle's days; `lastDay` is the last day it runs. The core
+    /// keeps a cycle under way on its start and off its neighbours.
+    func moveCycle(_ number: Int64, firstDay: Date?, lastDay: Date) {
+        let calendar = Calendar.current
+        let end = calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: lastDay)) ?? lastDay
+        changeCycles("work_cycle_save", CycleMoveParams(
+            operationId: Self.newId(), number: number,
+            startDay: firstDay.map(CycleFormat.dayText), endDay: CycleFormat.dayText(end)))
+    }
+
+    /// Every cycle as an iCalendar file's text.
+    func cycleCalendar() async throws -> String {
+        try await core.request("work_cycle_calendar")
+    }
+
+    /// The newest changes across tasks, projects, cycles, views, labels,
+    /// notes, meetings and comments, oldest first.
+    func recentChanges(limit: Int = 60) async throws -> WorkChangePage {
+        try await core.request("work_changes", RecentChangesParams(limit: limit, latest: true))
+    }
+
     private func changeCycles<P: Encodable & Sendable>(_ method: String, _ params: P) {
         enqueue {
             do {
                 let saved: WorkCycles = try await self.core.request(method, params)
                 self.cycleSettings = saved.settings
                 self.cycles = saved.cycles
+                self.cycleCapacity = saved.capacity
             } catch {
                 self.mutationError = error.localizedDescription
             }
@@ -402,6 +468,11 @@ final class WorkStore {
     /// Scope, started and done as each day of a cycle ended, frozen once it closed.
     func progress(of number: Int64) async throws -> WorkCycleProgress {
         try await core.request("work_cycle", CycleParams(number: number))
+    }
+
+    /// Lead time and triage time over the last `days`, for the tasks `query` keeps.
+    func insights(_ query: WorkQuery, days: Int) async throws -> WorkInsights {
+        try await core.request("work_insights", InsightsParams(query: query, days: days))
     }
 
     var currentCycle: WorkCycle? { cycles.first { $0.state == .current } }
@@ -581,7 +652,7 @@ final class WorkStore {
         let id = id ?? Self.newId()
         let before = labels.first { $0.id == id }
         place(WorkLabel(id: id, name: name, hue: hue, revision: before?.revision ?? 0,
-                        group: before?.group, retiredAtMs: before?.retiredAtMs))
+                        group: before?.group, retiredAtMs: before?.retiredAtMs, scope: before?.scope ?? .all))
         enqueue {
             do {
                 let saved: WorkLabel = try await self.core.request("work_label_save", LabelParams(
@@ -625,6 +696,14 @@ final class WorkStore {
         let before = shown
         shown.retiredAtMs = retired ? ProjectsStore.milliseconds(.now) : nil
         changeLabel(before, to: shown, "work_label_retire", LabelRetireParams(operationId: Self.newId(), id: id, retired: retired))
+    }
+
+    /// Keeps a label to tasks or to projects, or lets it go on both.
+    func scopeLabel(_ id: String, _ scope: WorkLabelScope) {
+        guard var shown = labels.first(where: { $0.id == id }), shown.scope != scope else { return }
+        let before = shown
+        shown.scope = scope
+        changeLabel(before, to: shown, "work_label_scope", LabelScopeParams(operationId: Self.newId(), id: id, scope: scope))
     }
 
     private func changeLabel<P: Encodable>(_ before: WorkLabel, to shown: WorkLabel, _ method: String, _ params: P) {
@@ -854,11 +933,25 @@ final class WorkStore {
         favorites.contains { $0.kind == kind && $0.targetId == id }
     }
 
+    /// The folders and loose favorites at the top, in the sidebar's order.
+    var favoriteTop: [WorkFavoriteEntry] {
+        (favoriteFolders.map { ($0.position, WorkFavoriteEntry.folder(id: $0.id)) }
+            + favorites.filter { $0.folderId == nil }.map { ($0.position, $0.entry) })
+            .sorted { $0.0 < $1.0 }
+            .map(\.1)
+    }
+
+    func favorites(in folder: String) -> [WorkFavorite] {
+        favorites.filter { $0.folderId == folder }.sorted { $0.position < $1.position }
+    }
+
     func setFavorite(_ kind: WorkFavoriteKind, _ id: String, _ on: Bool) {
         guard isFavorite(kind, id) != on else { return }
         let before = favorites
         if on {
-            favorites.append(WorkFavorite(kind: kind, targetId: id, createdAtMs: TaskDates.now()))
+            let last = (favoriteFolders.map(\.position) + favorites.filter { $0.folderId == nil }.map(\.position)).max()
+            favorites.append(WorkFavorite(kind: kind, targetId: id, folderId: nil, position: (last ?? -1) + 1,
+                                          createdAtMs: TaskDates.now()))
         } else {
             favorites.removeAll { $0.kind == kind && $0.targetId == id }
         }
@@ -869,6 +962,99 @@ final class WorkStore {
             } catch {
                 favorites = before
                 mutationError = error.localizedDescription
+            }
+        }
+    }
+
+    /// Moves a favorite into a folder or to the top, or a folder among the
+    /// top, at `index` there counted without it, or last.
+    func moveFavorite(_ entry: WorkFavoriteEntry, into folder: String?, at index: Int?) {
+        if case .folder = entry, folder != nil { return }
+        let before = folder.map { favorites(in: $0).map(\.entry) } ?? favoriteTop
+        var after = before.filter { $0 != entry }
+        let at = min(index ?? after.count, after.count)
+        after.insert(entry, at: at)
+        guard after != before else { return }
+        let (keptFavorites, keptFolders) = (favorites, favoriteFolders)
+        placeFavorites(after, in: folder)
+        Task {
+            do {
+                let _: Bool = try await core.request("work_favorite_move", FavoriteMoveParams(
+                    operationId: Self.newId(), entry: entry, into: folder, index: at))
+            } catch {
+                (favorites, favoriteFolders) = (keptFavorites, keptFolders)
+                mutationError = error.localizedDescription
+            }
+        }
+    }
+
+    /// Makes a folder where `entry` sits at the top, or last, and moves `entry` into it.
+    @discardableResult
+    func createFavoriteFolder(_ name: String, holding entry: WorkFavoriteEntry? = nil) async -> WorkFavoriteFolder? {
+        let at = entry.flatMap { favoriteTop.firstIndex(of: $0) }
+        do {
+            let folder: WorkFavoriteFolder = try await core.request("work_favorite_folder_save", FavoriteFolderParams(
+                operationId: Self.newId(), id: nil, name: name, index: at))
+            var top = favoriteTop
+            favoriteFolders.append(folder)
+            top.insert(.folder(id: folder.id), at: min(at ?? top.count, top.count))
+            placeFavorites(top, in: nil)
+            if let entry { moveFavorite(entry, into: folder.id, at: nil) }
+            return folder
+        } catch {
+            mutationError = error.localizedDescription
+            return nil
+        }
+    }
+
+    func renameFavoriteFolder(_ id: String, _ name: String) {
+        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, let at = favoriteFolders.firstIndex(where: { $0.id == id }),
+              favoriteFolders[at].name != name else { return }
+        let before = favoriteFolders
+        favoriteFolders[at].name = name
+        Task {
+            do {
+                let _: WorkFavoriteFolder = try await core.request("work_favorite_folder_save", FavoriteFolderParams(
+                    operationId: Self.newId(), id: id, name: name, index: nil))
+            } catch {
+                favoriteFolders = before
+                mutationError = error.localizedDescription
+            }
+        }
+    }
+
+    /// Deletes a folder. Its favorites stay, at the top where it was.
+    func deleteFavoriteFolder(_ id: String) {
+        let (keptFavorites, keptFolders) = (favorites, favoriteFolders)
+        let top = favoriteTop.flatMap { entry in
+            entry == .folder(id: id) ? favorites(in: id).map(\.entry) : [entry]
+        }
+        placeFavorites(top, in: nil)
+        favoriteFolders.removeAll { $0.id == id }
+        Task {
+            do {
+                try await core.request("work_favorite_folder_delete", FavoriteFolderDeleteParams(
+                    operationId: Self.newId(), id: id))
+            } catch {
+                (favorites, favoriteFolders) = (keptFavorites, keptFolders)
+                mutationError = error.localizedDescription
+            }
+        }
+    }
+
+    /// Writes `entries` as the whole order of a folder, or of the top, as the
+    /// core does.
+    private func placeFavorites(_ entries: [WorkFavoriteEntry], in folder: String?) {
+        for (position, entry) in entries.enumerated() {
+            switch entry {
+            case let .favorite(kind, id):
+                guard let at = favorites.firstIndex(where: { $0.kind == kind && $0.targetId == id }) else { continue }
+                favorites[at].folderId = folder
+                favorites[at].position = position
+            case let .folder(id):
+                guard let at = favoriteFolders.firstIndex(where: { $0.id == id }) else { continue }
+                favoriteFolders[at].position = position
             }
         }
     }
@@ -1124,6 +1310,7 @@ final class WorkStore {
                 viewsLoaded = true
                 cycles = cycleList.cycles
                 cycleSettings = cycleList.settings
+                cycleCapacity = cycleList.capacity
                 working = Dictionary(openSessions.map { ($0.itemId, $0) }) { newest, _ in newest }
                 listError = nil
             }
@@ -1142,7 +1329,7 @@ final class WorkStore {
     private func loadLifecycle() async {
         let core = core
         do {
-            async let starred: [WorkFavorite] = core.request("work_favorites")
+            async let starred: WorkFavorites = core.request("work_favorites")
             async let followed: [WorkSubscription] = core.request("work_subscriptions")
             async let heard: WorkInbox = core.request("work_inbox", InboxParams(snoozed: true))
             async let trashed: [WorkBinned] = core.request("work_bin")
@@ -1150,7 +1337,8 @@ final class WorkStore {
             if pending > 0 {
                 reloadWhenIdle = true
             } else {
-                favorites = starredList
+                favorites = starredList.favorites
+                favoriteFolders = starredList.folders
                 subscriptions = Dictionary(followedList.map { ($0.itemId, $0) }) { first, _ in first }
                 notifications = inboxRead.notifications
                 binned = Dictionary(binList.map { ($0.id, $0) }) { first, _ in first }
@@ -1546,6 +1734,7 @@ private extension WorkPatchValue {
 private struct QueryParams: Encodable { let query: WorkQuery }
 private struct IdParams: Encodable { let id: String }
 private struct CycleParams: Encodable { let number: Int64 }
+private struct InsightsParams: Encodable { let query: WorkQuery; let days: Int }
 private struct CycleSettingsParams: Encodable {
     let operationId: String
     let settings: WorkCycleSettings
@@ -1554,6 +1743,12 @@ private struct CycleSaveParams: Encodable, Sendable {
     let operationId: String
     let number: Int64
     let name: String
+}
+private struct CycleMoveParams: Encodable, Sendable {
+    let operationId: String
+    let number: Int64
+    let startDay: String?
+    let endDay: String
 }
 private struct CycleNumberParams: Encodable, Sendable {
     let operationId: String
@@ -1578,6 +1773,11 @@ private struct IdsParams: Encodable {
     let operationId: String
     let ids: [String]
 }
+private struct MoveParams: Encodable {
+    let operationId: String
+    let ids: [String]
+    let place: WorkPlace
+}
 private struct DeclineParams: Encodable {
     let operationId: String
     let ids: [String]
@@ -1592,6 +1792,11 @@ private struct LabelRetireParams: Encodable {
     let operationId: String
     let id: String
     let retired: Bool
+}
+private struct LabelScopeParams: Encodable {
+    let operationId: String
+    let id: String
+    let scope: WorkLabelScope
 }
 private struct AcceptParams: Encodable {
     let operationId: String
@@ -1702,6 +1907,22 @@ private struct FavoriteParams: Encodable {
     let id: String
     let on: Bool
 }
+private struct FavoriteMoveParams: Encodable {
+    let operationId: String
+    let entry: WorkFavoriteEntry
+    let into: String?
+    let index: Int?
+}
+private struct FavoriteFolderParams: Encodable {
+    let operationId: String
+    let id: String?
+    let name: String?
+    let index: Int?
+}
+private struct FavoriteFolderDeleteParams: Encodable {
+    let operationId: String
+    let id: String
+}
 private struct SubscribeParams: Encodable {
     let operationId: String
     let ids: [String]
@@ -1733,12 +1954,14 @@ private struct AttachParams: Encodable {
     var fileName: String?
     var url: String?
     var title: String?
+    var subtitle: String?
+    var commentId: String?
 }
 
 enum WorkAttachmentSource {
     case file(URL, title: String? = nil)
     case data(Data, fileName: String)
-    case link(String, title: String? = nil)
+    case link(String, title: String? = nil, subtitle: String? = nil)
 
     static let linkSchemes: Set<String> = ["http", "https", "mailto", "sona"]
 
@@ -1755,8 +1978,8 @@ enum WorkAttachmentSource {
             AttachParams(operationId: operationId, itemId: itemId, path: url.path(percentEncoded: false), title: title)
         case let .data(data, fileName):
             AttachParams(operationId: operationId, itemId: itemId, data: data.base64EncodedString(), fileName: fileName)
-        case let .link(url, title):
-            AttachParams(operationId: operationId, itemId: itemId, url: url, title: title)
+        case let .link(url, title, subtitle):
+            AttachParams(operationId: operationId, itemId: itemId, url: url, title: title, subtitle: subtitle)
         }
     }
 }

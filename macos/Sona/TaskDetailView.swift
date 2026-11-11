@@ -8,6 +8,7 @@ struct TaskDetailView: View {
     let place: Place
     @Environment(AppModel.self) private var model
     @State private var width: CGFloat = 1100
+    @State private var flashed: String?
 
     var body: some View {
         let store = model.work
@@ -34,6 +35,8 @@ struct TaskDetailView: View {
                     DetailStepper(id: row.id)
                     Menu {
                         WorkActionMenu(ids: [row.id], omit: [.peek, .open], keys: false)
+                        Divider()
+                        Button("New note about this task") { model.newNote(about: row) }
                     } label: {
                         Image(systemName: "ellipsis")
                     }
@@ -47,21 +50,27 @@ struct TaskDetailView: View {
             }
             if let row {
                 HStack(spacing: 0) {
-                    ScrollView {
-                        DetailMain(row: row, detail: detail, place: place)
-                            .frame(maxWidth: 720, alignment: .leading)
-                            .padding(.horizontal, 40)
-                            .padding(.top, 28)
-                            .padding(.bottom, 96)
-                            .frame(maxWidth: .infinity)
+                    ScrollViewReader { proxy in
+                        ScrollView {
+                            DetailMain(row: row, detail: detail, place: place, flashed: flashed)
+                                .frame(maxWidth: 720, alignment: .leading)
+                                .padding(.horizontal, 40)
+                                .padding(.top, 28)
+                                .padding(.bottom, 96)
+                                .frame(maxWidth: .infinity)
+                        }
+                        .onChange(of: model.workFocus.pageAsk, initial: true) { _, ask in answer(ask, proxy: proxy) }
+                        .onChange(of: detail?.comments) { answer(model.workFocus.pageAsk, proxy: proxy) }
                     }
-                    Rectangle().fill(Theme.hairline).frame(width: 1)
-                    ScrollView {
-                        TaskPropertyList(row: row)
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 18)
+                    if !model.workFocus.panelHidden {
+                        Rectangle().fill(Theme.hairline).frame(width: 1)
+                        ScrollView {
+                            TaskPropertyList(row: row, place: place)
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 18)
+                        }
+                        .frame(width: width <= 1060 ? 280 : 320)
                     }
-                    .frame(width: width <= 1060 ? 280 : 320)
                 }
                 .modifier(AttachmentDrop(itemId: row.id, number: row.number))
             } else if store.items == nil {
@@ -94,12 +103,49 @@ struct TaskDetailView: View {
         model.workFocus.open(nil, in: place)
     }
 
+    /// Scrolls to the part a key or the palette asked for; that part takes
+    /// focus itself. A comment link flashes the comment once it has loaded.
+    private func answer(_ ask: TaskPageAsk?, proxy: ScrollViewProxy) {
+        guard let ask, ask.id == id else { return }
+        switch ask.part {
+        case .composer: proxy.scrollTo(TaskPageAnchor.composer, anchor: .bottom)
+        case .subtask: proxy.scrollTo(TaskPageAnchor.subtasks, anchor: .center)
+        case .link: proxy.scrollTo(TaskPageAnchor.attachments, anchor: .top)
+        case .history: break
+        case let .comment(comment):
+            guard let detail = model.work.detail, detail.item.id == id else { return }
+            model.workFocus.pageAsk = nil
+            guard let thread = detail.comments.first(where: { $0.id == comment || $0.replies.contains { $0.id == comment } }) else {
+                Task {
+                    await model.work.loadDetail(id)
+                    let threads = model.work.detail?.comments ?? []
+                    if threads.contains(where: { $0.id == comment || $0.replies.contains { $0.id == comment } }) {
+                        model.workFocus.pageAsk = ask
+                    } else {
+                        model.workFocus.announce("That comment was deleted.", undoes: false)
+                    }
+                }
+                return
+            }
+            flashed = comment
+            let target = thread.resolvedAtMs == nil ? comment : thread.id
+            DispatchQueue.main.async {
+                withAnimation(Motion.quick) { proxy.scrollTo(TaskPageAnchor.comment(target), anchor: .center) }
+            }
+            Task {
+                try? await Task.sleep(for: .seconds(2))
+                if flashed == comment { flashed = nil }
+            }
+        }
+    }
+
     /// Where Esc and the back link return: the list, or the person whose
     /// page the task was opened from.
     private var back: String {
         switch place {
         case .triage: "Triage"
         case .people: model.people.detail?.person.displayName ?? "People"
+        case .projects: model.projects.detail?.project.title ?? "Projects"
         case .inbox: "Inbox"
         default: "Tasks"
         }
@@ -133,6 +179,7 @@ private struct DetailMain: View {
     let row: WorkItemRow
     let detail: WorkItemDetail?
     let place: Place
+    let flashed: String?
     @Environment(AppModel.self) private var model
 
     var body: some View {
@@ -150,6 +197,10 @@ private struct DetailMain: View {
                 DuplicateBanner(canonical: row.duplicateOfId, place: place)
                     .padding(.bottom, 16)
             }
+            if let reminder = model.routines.reminders[row.id] {
+                ReminderBanner(itemId: row.id, reminder: reminder)
+                    .padding(.bottom, 16)
+            }
             DetailTitle(row: row)
             ProposalStrip(proposals: model.work.proposals(for: row.id))
             DetailNotes(row: row)
@@ -158,20 +209,27 @@ private struct DetailMain: View {
             DetailAgentSessions(row: row)
             DetailSubtasks(row: row, subTasks: detail?.subTasks, place: place)
                 .padding(.top, 32)
+                .id(TaskPageAnchor.subtasks)
             DetailAttachments(row: row, attachments: detail?.attachments)
                 .padding(.top, 32)
+                .id(TaskPageAnchor.attachments)
             if row.status == .triage {
                 DetailSuggestions(itemId: row.id, suggestions: detail?.suggestions ?? model.work.suggestions[row.id] ?? [])
             }
             DetailEvidence(row: row, links: detail?.evidence ?? [])
-            DetailRelations(row: row, relations: detail?.relations, place: place)
-                .padding(.top, 32)
             DetailActivity(row: row, activity: detail?.activity)
                 .padding(.top, 32)
-            DetailComments(row: row, comments: detail?.comments)
+            DetailComments(row: row, comments: detail?.comments,
+                           files: detail?.attachments.filter { $0.commentId != nil } ?? [], flashed: flashed)
                 .padding(.top, 24)
         }
     }
+}
+
+/// Where a key or a link scrolls the task's page to.
+private enum TaskPageAnchor: Hashable {
+    case subtasks, attachments, composer
+    case comment(String)
 }
 
 /// On a duplicate: the task it repeats, which opens on a click.
@@ -211,6 +269,56 @@ private struct DuplicateBanner: View {
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(other == nil ? [] : .isButton)
         .help(other == nil ? "" : "Open the original")
+    }
+}
+
+/// The reminder set on the task: when it comes, or that it came. Change
+/// picks another time; the cross clears it.
+private struct ReminderBanner: View {
+    let itemId: String
+    let reminder: WorkReminder
+    @Environment(AppModel.self) private var model
+    @State private var changing = false
+
+    var body: some View {
+        let sent = reminder.notifiedAtMs != nil
+        HStack(spacing: 10) {
+            Image(systemName: sent ? "bell.badge" : "bell.fill")
+                .font(.system(size: 12))
+                .foregroundStyle(Theme.accent)
+            Text(sent ? "Reminded you" : "Reminder").metaText()
+            Text(Self.when(reminder.remindAtMs, now: TaskDates.now())).bodyText(13).lineLimit(1)
+            Spacer(minLength: 0)
+            Button("Change") { changing = true }
+                .buttonStyle(QuietButton(compact: true))
+                .popover(isPresented: $changing, arrowEdge: .bottom) {
+                    ReminderPicker(itemId: itemId, reminder: reminder) { changing = false }
+                        .environment(model)
+                }
+            Button {
+                let routines = model.routines
+                let id = itemId
+                Task { await routines.setReminder(on: id, at: nil) }
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .bold))
+                    .frame(width: 20, height: 20)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(QuietButton(compact: true))
+            .help("Remove the reminder")
+            .accessibilityLabel("Remove the reminder")
+        }
+        .padding(.leading, 12)
+        .padding(.trailing, 6)
+        .frame(height: 36)
+        .background(Theme.inset, in: RoundedRectangle(cornerRadius: Theme.radiusCard))
+        .accessibilityElement(children: .contain)
+    }
+
+    /// "Tomorrow at 9:00 AM".
+    static func when(_ at: Int64, now: Int64) -> String {
+        "\(TaskDates.label(at, now: now)) at \(PlanningFormat.moment(at).formatted(date: .omitted, time: .shortened))"
     }
 }
 
@@ -272,6 +380,7 @@ private struct DetailNotes: View {
 
     var body: some View {
         let details = row.details ?? ""
+        let open = MarkdownBody.openChecklist(details).titles.count
         Group {
             if editing || details.isEmpty {
                 editor
@@ -284,16 +393,35 @@ private struct DetailNotes: View {
                 .contentShape(Rectangle())
                 .onTapGesture(count: 2) { edit() }
                 .overlay(alignment: .topTrailing) {
-                    Button { edit() } label: { Image(systemName: "pencil") }
-                        .buttonStyle(.icon)
-                        .opacity(hovering ? 1 : 0)
-                        .help("Edit details")
-                        .accessibilityLabel("Edit details")
+                    VStack(spacing: 2) {
+                        Button { edit() } label: { Image(systemName: "pencil") }
+                            .buttonStyle(.icon)
+                            .help("Edit details")
+                            .accessibilityLabel("Edit details")
+                        if open > 0 {
+                            Button { makeSubtasks(from: details) } label: { Image(systemName: "checklist") }
+                                .buttonStyle(.icon)
+                                .help("Make sub-tasks from the open checklist items")
+                                .accessibilityLabel("Make sub-tasks from the checklist")
+                        }
+                    }
+                    .opacity(hovering ? 1 : 0)
                 }
                 .onHover { hovering = $0 }
+                .contextMenu {
+                    Button("Edit details") { edit() }
+                    if open > 0 {
+                        Button("Make sub-tasks from the checklist") { makeSubtasks(from: details) }
+                    }
+                }
                 .accessibilityElement(children: .contain)
                 .accessibilityLabel("Details")
                 .accessibilityAction(named: "Edit") { edit() }
+                .accessibilityActions {
+                    if open > 0 {
+                        Button("Make sub-tasks from the checklist") { makeSubtasks(from: details) }
+                    }
+                }
                 .help("Double-click to edit")
             }
         }
@@ -350,6 +478,17 @@ private struct DetailNotes: View {
 
     private func toggle(_ line: Int, in details: String) {
         save(MarkdownBody.toggled(details, line: line))
+    }
+
+    /// The open checklist items become sub-tasks and leave the details;
+    /// checked items stay as they are.
+    private func makeSubtasks(from details: String) {
+        let (titles, rest) = MarkdownBody.openChecklist(details)
+        guard !titles.isEmpty else { return }
+        let id = row.id
+        model.work.createSubtasks(under: id, titles: titles) {
+            model.changeWork { model.work.update([id], WorkPatch(details: rest.isEmpty ? .clear : .set(rest))) }
+        }
     }
 
     private func save(_ details: String) {
@@ -531,6 +670,32 @@ struct MarkdownBody: View {
         guard mark < lines[line].endIndex else { return source }
         lines[line].replaceSubrange(mark...mark, with: lines[line][mark] == " " ? "x" : " ")
         return lines.joined(separator: "\n")
+    }
+
+    /// The unchecked checklist items' text, outside code, and the source
+    /// without their lines.
+    static func openChecklist(_ source: String) -> (titles: [String], rest: String) {
+        var titles: [String] = []
+        var kept: [String] = []
+        var fenced = false
+        var removed = false
+        for line in source.components(separatedBy: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("```") { fenced.toggle() }
+            if !fenced, let match = trimmed.wholeMatch(of: /[-*+] \[ \] (.+)/) {
+                titles.append(String(match.1))
+                removed = true
+            } else if removed, trimmed.isEmpty, kept.last?.trimmingCharacters(in: .whitespaces).isEmpty ?? true {
+                continue
+            } else {
+                kept.append(line)
+                removed = false
+            }
+        }
+        while !titles.isEmpty, kept.last?.trimmingCharacters(in: .whitespaces).isEmpty == true {
+            kept.removeLast()
+        }
+        return (titles, kept.joined(separator: "\n"))
     }
 }
 
@@ -874,47 +1039,72 @@ private struct EvidenceLine: View {
     }
 }
 
-/// Blocks, blocked by, related: each opens its task, and the plus adds one.
-private struct DetailRelations: View {
+/// Blocked by, blocks, related, among the properties: each opens its task,
+/// and Add relation adds one.
+private struct TaskRelations: View {
     let row: WorkItemRow
-    let relations: [WorkRelation]?
     let place: Place
     @Environment(AppModel.self) private var model
     @State private var adding: RelationAdd?
 
     var body: some View {
-        let entries = RelationEntry.all(for: row.id, in: relations ?? []) { id in
+        let relations = model.work.detail.flatMap { $0.item.id == row.id ? $0.relations : nil } ?? []
+        let entries = RelationEntry.all(for: row.id, in: relations) { id in
             model.workRows([id]).first?.status.isOpen ?? true
         }
-        VStack(alignment: .leading, spacing: 2) {
-            HStack(spacing: 8) {
-                DetailHeading(title: "Relations")
-                Spacer(minLength: 0)
-                Menu {
-                    ForEach(RelationAdd.allCases) { kind in
-                        Button(kind.title) { adding = kind }
+        ForEach(RelationGroup.all(entries)) { group in
+            PropertyLine(title: group.title) {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(group.entries) { entry in
+                        RelationLine(entry: entry, place: place)
                     }
-                } label: {
-                    Image(systemName: "plus")
                 }
-                .menuStyle(.borderlessButton)
-                .menuIndicator(.hidden)
-                .fixedSize()
-                .help("Add a relation")
-                .accessibilityLabel("Add a relation")
-                .popover(item: $adding, arrowEdge: .bottom) { kind in
-                    WorkPickerList(picker: WorkPicker(kind: kind.picker, ids: [row.id]), compact: true) {
-                        adding = nil
-                    }
-                    .padding(.vertical, 4)
-                    .environment(model)
-                }
-            }
-            .padding(.bottom, 6)
-            ForEach(entries) { entry in
-                RelationLine(entry: entry, place: place)
             }
         }
+        PropertyLine(title: entries.isEmpty ? "Relations" : "") {
+            Menu {
+                ForEach(RelationAdd.allCases) { kind in
+                    Button(kind.title) { adding = kind }
+                }
+            } label: {
+                PropertyValue(text: "Add relation", faint: true) {
+                    Image(systemName: "arrow.left.arrow.right").font(.system(size: 12)).foregroundStyle(Theme.inkSecondary)
+                }
+            }
+            .menuStyle(.button)
+            .buttonStyle(.plain)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("Blocks, blocked by or related to another task")
+            .accessibilityLabel("Add a relation")
+            .popover(item: $adding, arrowEdge: .leading) { kind in
+                WorkPickerList(picker: WorkPicker(kind: kind.picker, ids: [row.id]), compact: true) {
+                    adding = nil
+                }
+                .padding(.vertical, 4)
+                .environment(model)
+            }
+        }
+    }
+}
+
+private struct RelationGroup: Identifiable {
+    let title: String
+    var entries: [RelationEntry]
+
+    var id: String { title }
+
+    /// The entries under their titles, in the order `RelationEntry.all` sorts them.
+    static func all(_ entries: [RelationEntry]) -> [RelationGroup] {
+        var groups: [RelationGroup] = []
+        for entry in entries {
+            if groups.last?.title == entry.title {
+                groups[groups.count - 1].entries.append(entry)
+            } else {
+                groups.append(RelationGroup(title: entry.title, entries: [entry]))
+            }
+        }
+        return groups
     }
 }
 
@@ -973,8 +1163,7 @@ private struct RelationLine: View {
 
     var body: some View {
         let other = model.workRows([entry.other]).first
-        HStack(spacing: 10) {
-            Text(entry.title).metaText().frame(width: 76, alignment: .leading)
+        HStack(spacing: 8) {
             if let other {
                 TaskStatusIcon(status: other.status)
                 Text("#\(other.number)").font(TypeScale.mono(12)).foregroundStyle(Theme.inkTertiary)
@@ -982,24 +1171,26 @@ private struct RelationLine: View {
             } else {
                 Text("An archived task").bodyText(13, Theme.inkTertiary)
             }
-            Spacer(minLength: 8)
-            Button {
-                let id = entry.id
-                model.changeWork { model.work.removeRelation(id) }
-            } label: {
-                Image(systemName: "xmark")
-                    .font(.system(size: 9, weight: .bold))
-                    .frame(width: 20, height: 20)
-                    .contentShape(Rectangle())
+            Spacer(minLength: 0)
+            if hovering {
+                Button {
+                    let id = entry.id
+                    model.changeWork { model.work.removeRelation(id) }
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9, weight: .bold))
+                        .frame(width: 18, height: 18)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(QuietButton(compact: true))
+                .help("Remove")
+                .accessibilityLabel("Remove \(entry.title.lowercased()) relation")
             }
-            .buttonStyle(QuietButton(compact: true))
-            .opacity(hovering ? 1 : 0)
-            .help("Remove")
-            .accessibilityLabel("Remove \(entry.title.lowercased()) relation")
         }
-        .padding(.horizontal, 8)
-        .frame(height: 32)
-        .background(hovering ? Theme.wash : .clear, in: RoundedRectangle(cornerRadius: Theme.radiusRow))
+        .padding(.leading, 8)
+        .padding(.trailing, 4)
+        .frame(height: 28)
+        .background(hovering ? Theme.controlHover : .clear, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
         .hoverFade(hovering)
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
@@ -1008,8 +1199,14 @@ private struct RelationLine: View {
             model.workFocus.highlighted = other.id
             model.workFocus.open(other.id, in: place)
         }
+        .help(other.map { "#\($0.number) \($0.title)" } ?? "")
         .accessibilityElement(children: .contain)
+        .accessibilityLabel(other.map { "\(entry.title), #\($0.number) \($0.title)" } ?? "\(entry.title), an archived task")
         .accessibilityAddTraits(.isButton)
+        .accessibilityAction(named: "Remove") {
+            let id = entry.id
+            model.changeWork { model.work.removeRelation(id) }
+        }
     }
 }
 
@@ -1117,6 +1314,11 @@ private struct DetailSubtasks: View {
             .frame(minHeight: 32)
             .background(focused ? Theme.inset : .clear, in: RoundedRectangle(cornerRadius: Theme.radiusRow))
         }
+        .onChange(of: model.workFocus.pageAsk, initial: true) { _, ask in
+            guard ask == TaskPageAsk(id: row.id, part: .subtask) else { return }
+            focused = true
+            DispatchQueue.main.async { model.workFocus.pageAsk = nil }
+        }
     }
 
     private func add() {
@@ -1155,7 +1357,8 @@ private struct SubtaskLine: View {
                 .lineLimit(1)
             Spacer(minLength: 8)
             if let due = item.dueAtMs {
-                Text(TaskDates.label(due, now: TaskDates.now())).metaText()
+                let now = TaskDates.now()
+                Text(TaskDates.label(due, now: now)).metaText(TaskDue.tone(due, open: !finished, now: now) ?? Theme.inkTertiary)
             }
             Button {
                 let id = item.id
@@ -1220,13 +1423,16 @@ private struct ParentLink: View {
 private struct DetailComments: View {
     let row: WorkItemRow
     let comments: [WorkComment]?
+    let files: [WorkAttachment]
+    let flashed: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             ForEach(comments ?? []) { thread in
-                CommentThread(thread: thread, itemId: row.id)
+                CommentThread(thread: thread, itemId: row.id, files: files, flashed: flashed)
             }
             CommentComposer(itemId: row.id, prompt: "Leave a comment")
+                .id(TaskPageAnchor.composer)
         }
     }
 }
@@ -1234,6 +1440,8 @@ private struct DetailComments: View {
 private struct CommentThread: View {
     let thread: WorkComment
     let itemId: String
+    let files: [WorkAttachment]
+    let flashed: String?
     @State private var replying = false
     @State private var expanded = false
 
@@ -1258,11 +1466,16 @@ private struct CommentThread: View {
                 }
                 .buttonStyle(.plain)
                 .help("Show the thread")
+                .id(TaskPageAnchor.comment(thread.id))
             } else {
-                CommentEntry(comment: thread, thread: thread, itemId: itemId) { replying = true }
+                CommentEntry(comment: thread, thread: thread, itemId: itemId, files: filesOn(thread),
+                             flashed: flashed == thread.id) { replying = true }
+                    .id(TaskPageAnchor.comment(thread.id))
                 ForEach(thread.replies) { reply in
-                    CommentEntry(comment: reply, thread: thread, itemId: itemId) { replying = true }
+                    CommentEntry(comment: reply, thread: thread, itemId: itemId, files: filesOn(reply),
+                                 flashed: flashed == reply.id) { replying = true }
                         .padding(.leading, 24)
+                        .id(TaskPageAnchor.comment(reply.id))
                 }
                 if replying {
                     CommentComposer(itemId: itemId, replyTo: thread.id, prompt: "Reply", autofocus: true) {
@@ -1286,6 +1499,14 @@ private struct CommentThread: View {
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .overlay(RoundedRectangle(cornerRadius: Theme.radiusCard).strokeBorder(Theme.hairline))
+        .onChange(of: flashed, initial: true) { _, id in
+            guard let id, id == thread.id || thread.replies.contains(where: { $0.id == id }) else { return }
+            expanded = true
+        }
+    }
+
+    private func filesOn(_ comment: WorkComment) -> [WorkAttachment] {
+        files.filter { $0.commentId == comment.id }
     }
 }
 
@@ -1293,6 +1514,8 @@ private struct CommentEntry: View {
     let comment: WorkComment
     let thread: WorkComment
     let itemId: String
+    let files: [WorkAttachment]
+    let flashed: Bool
     let reply: () -> Void
     @Environment(AppModel.self) private var model
     @State private var editing = false
@@ -1322,6 +1545,7 @@ private struct CommentEntry: View {
                                 run { await model.work.resolveComment(thread.id, on: itemId, resolved: !resolved) }
                             }
                         }
+                        action("Copy link", "link") { copyLink() }
                         if comment.author.kind == .me {
                             action("Edit", "pencil") { editing = true }
                         }
@@ -1344,13 +1568,23 @@ private struct CommentEntry: View {
                     MarkdownBody(source: body, toggle: nil)
                         .textSelection(.enabled)
                 }
+                if !files.isEmpty, !editing {
+                    CommentFiles(files: files)
+                }
             }
             .padding(.leading, 24)
         }
         .padding(.vertical, 6)
+        .background(flashed ? Theme.accentSoft : .clear, in: RoundedRectangle(cornerRadius: Theme.radiusRow))
+        .animation(Motion.quick, value: flashed)
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
         .accessibilityElement(children: .contain)
+        .accessibilityActions {
+            if !comment.deleted {
+                Button("Copy link") { copyLink() }
+            }
+        }
     }
 
     private func action(_ title: String, _ icon: String, _ run: @escaping () -> Void) -> some View {
@@ -1368,6 +1602,12 @@ private struct CommentEntry: View {
     private func run(_ work: @escaping @MainActor () async -> Bool) {
         Task { _ = await work() }
     }
+
+    private func copyLink() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(TaskCopy.commentLink(task: itemId, comment: comment.id), forType: .string)
+        model.workFocus.announce("Copied the comment's link", undoes: false)
+    }
 }
 
 private struct CommentComposer: View {
@@ -1379,6 +1619,7 @@ private struct CommentComposer: View {
     var done: () -> Void = {}
     @Environment(AppModel.self) private var model
     @State private var text = ""
+    @State private var files: [URL] = []
     @State private var sending = false
     @FocusState private var focused: Bool
 
@@ -1426,8 +1667,25 @@ private struct CommentComposer: View {
             )
             .contentShape(Rectangle())
             .onTapGesture { focused = true }
-            if focused || !empty || nested {
+            if !files.isEmpty {
+                ChatFlowRow(spacing: 6) {
+                    ForEach(files, id: \.self) { file in
+                        FileChip(title: file.lastPathComponent, icon: "doc") { files.removeAll { $0 == file } }
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            if focused || !empty || nested || !files.isEmpty {
                 HStack(spacing: 12) {
+                    if editing == nil {
+                        Button(action: chooseFiles) {
+                            Image(systemName: "paperclip").font(.system(size: 12))
+                        }
+                        .buttonStyle(QuietButton(compact: true))
+                        .help("Attach files to this comment")
+                        .accessibilityLabel("Attach files")
+                    }
+                    Spacer(minLength: 0)
                     Text("⌘↩").metaText()
                     if nested {
                         Button("Cancel") { done() }.buttonStyle(QuietButton(compact: true))
@@ -1442,6 +1700,26 @@ private struct CommentComposer: View {
             if let editing { text = editing.body ?? "" }
             if autofocus { focused = true }
         }
+        .onChange(of: model.workFocus.pageAsk, initial: true) { _, ask in
+            guard replyTo == nil, editing == nil, ask == TaskPageAsk(id: itemId, part: .composer) else { return }
+            focused = true
+            DispatchQueue.main.async { model.workFocus.pageAsk = nil }
+        }
+    }
+
+    private func chooseFiles() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = true
+        panel.prompt = "Attach"
+        panel.begin { response in
+            MainActor.assumeIsolated {
+                guard response == .OK else { return }
+                files += panel.urls.filter { !files.contains($0) }
+                focused = true
+            }
+        }
     }
 
     private func post() {
@@ -1449,15 +1727,17 @@ private struct CommentComposer: View {
         guard !body.isEmpty, !sending else { return }
         sending = true
         let work = model.work
+        let attached = files
         Task {
             let saved = if let editing {
                 await work.editComment(editing.id, on: itemId, body: body)
             } else {
-                await work.addComment(on: itemId, body: body, replyTo: replyTo)
+                await work.addComment(on: itemId, body: body, replyTo: replyTo, files: attached)
             }
             sending = false
             guard saved else { return }
             text = ""
+            files = []
             done()
         }
     }
@@ -1517,9 +1797,11 @@ struct DetailHeading: View {
 
 /// The properties, each a value that opens its picker: the detail page's
 /// inspector and the peek. Tab or a click focuses one; return or space opens
-/// it, the arrows move between them.
+/// it, the arrows move between them. Given the page's place, the relations
+/// follow, opening there.
 struct TaskPropertyList: View {
     let row: WorkItemRow
+    var place: Place?
     @Environment(AppModel.self) private var model
     @FocusState private var focused: PropertyField?
     @State private var opened: PropertyField?
@@ -1543,6 +1825,14 @@ struct TaskPropertyList: View {
                 }
                 .modifier(focus(.priority))
             }
+            PropertyLine(title: "Estimate") {
+                WorkPickerButton(kind: .estimate, ids: ids, presented: shown(.estimate)) {
+                    PropertyValue(text: row.estimate.map(TaskEstimate.title) ?? "Set estimate", faint: row.estimate == nil) {
+                        Image(systemName: "triangle").font(.system(size: 12)).foregroundStyle(Theme.inkSecondary)
+                    }
+                }
+                .modifier(focus(.estimate))
+            }
             PropertyLine(title: "Owner") {
                 WorkPickerButton(kind: .owner, ids: ids, presented: shown(.owner)) {
                     let unowned = !row.ownerIsSelf && row.ownerPersonId == nil
@@ -1551,6 +1841,21 @@ struct TaskPropertyList: View {
                     }
                 }
                 .modifier(focus(.owner))
+            }
+            PropertyLine(title: "For") {
+                WorkPickerButton(kind: .forPerson, ids: ids, presented: shown(.forPerson)) {
+                    let name = row.forPersonId.map { id in work.people.first { $0.id == id }?.name ?? "Someone" }
+                    PropertyValue(text: name ?? "Add who it’s for", faint: name == nil) {
+                        if let id = row.forPersonId, let name {
+                            Avatar(face: AvatarFace(kind: .person(id), name: name), size: 16, revision: model.people.photoRevision)
+                        } else {
+                            Image(systemName: "person.crop.circle.badge.checkmark").font(.system(size: 12))
+                                .foregroundStyle(Theme.inkSecondary)
+                        }
+                    }
+                }
+                .help("The person this work is owed to")
+                .modifier(focus(.forPerson))
             }
             PropertyLine(title: "Agent") {
                 WorkPickerButton(kind: .delegate, ids: ids, presented: shown(.agent)) {
@@ -1565,8 +1870,9 @@ struct TaskPropertyList: View {
             }
             PropertyLine(title: "Due date") {
                 WorkPickerButton(kind: .due, ids: ids, presented: shown(.due)) {
-                    PropertyValue(text: row.dueAtMs.map(PlanningFormat.day) ?? "Add due date", faint: row.dueAtMs == nil) {
-                        Image(systemName: "calendar").font(.system(size: 12)).foregroundStyle(Theme.inkSecondary)
+                    let tone = row.dueAtMs.flatMap { TaskDue.tone($0, open: row.status.isOpen, now: TaskDates.now()) }
+                    PropertyValue(text: row.dueAtMs.map(PlanningFormat.day) ?? "Add due date", faint: row.dueAtMs == nil, tone: tone) {
+                        Image(systemName: "calendar").font(.system(size: 12)).foregroundStyle(tone ?? Theme.inkSecondary)
                     }
                 }
                 .modifier(focus(.due))
@@ -1663,6 +1969,9 @@ struct TaskPropertyList: View {
                 .help(row.parentId.flatMap { model.workRows([$0]).first }.map { "#\($0.number) \($0.title)" } ?? "")
                 .modifier(focus(.parent))
             }
+            if let place {
+                TaskRelations(row: row, place: place)
+            }
             Hairline().padding(.vertical, 12)
             if let meeting = row.sourceMeetingId {
                 PropertyLine(title: "Meeting") {
@@ -1683,13 +1992,18 @@ struct TaskPropertyList: View {
             PropertyLine(title: "Updated") {
                 Text(PlanningFormat.date(row.updatedAtMs)).metaText(Theme.inkSecondary).padding(.horizontal, 8)
             }
+            if let completed = row.completedAtMs {
+                PropertyLine(title: "Completed") {
+                    Text(PlanningFormat.date(completed)).metaText(Theme.inkSecondary).padding(.horizontal, 8)
+                }
+            }
         }
         .onChange(of: focused) { _, field in model.workFocus.propertyFocused = field != nil }
         .onDisappear { model.workFocus.propertyFocused = false }
     }
 
     private var fields: [PropertyField] {
-        var list: [PropertyField] = [.status, .priority, .owner, .agent, .due, .reminder, .repeats]
+        var list: [PropertyField] = [.status, .priority, .estimate, .owner, .forPerson, .agent, .due, .reminder, .repeats]
         if row.status.isOpen || row.cycle != nil { list.append(.cycle) }
         if row.status.isOpen, row.timeBlock == nil { list.append(.time) }
         list.append(.project)
@@ -1716,7 +2030,8 @@ struct TaskPropertyList: View {
 }
 
 enum PropertyField: Hashable {
-    case status, priority, owner, agent, due, reminder, repeats, cycle, time, project, milestone, labels, parent
+    case status, priority, estimate, owner, forPerson, agent, due, reminder, repeats, cycle, time, project, milestone
+    case labels, parent
 }
 
 private struct PropertyFocus: ViewModifier {
@@ -1799,11 +2114,19 @@ private struct RepeatMenu: View {
         }
         .buttonStyle(.plain)
         .popover(isPresented: shown, arrowEdge: .bottom) {
-            PropertyChoices(choices: Self.rules.map { every in
-                PropertyChoice(id: every, title: Recurrence.display(every), on: every == rule) { set(every) }
-            } + (rule == nil ? [] : [PropertyChoice(id: "none", title: "Don't repeat", on: false) { set(nil) }])) {
-                shown.wrappedValue = false
+            VStack(alignment: .leading, spacing: 0) {
+                PropertyChoices(choices: Self.rules.map { every in
+                    PropertyChoice(id: every, title: Recurrence.display(every), on: every == rule) { set(every) }
+                } + (rule == nil ? [] : [PropertyChoice(id: "none", title: "Don't repeat", on: false) { set(nil) }])) {
+                    shown.wrappedValue = false
+                }
+                Hairline().padding(.bottom, 8)
+                RepeatRuleField { every in
+                    set(every)
+                    shown.wrappedValue = false
+                }
             }
+            .environment(model)
         }
         .accessibilityLabel("Repeats")
     }
@@ -1811,6 +2134,51 @@ private struct RepeatMenu: View {
     private func set(_ every: String?) {
         let task = row.id
         model.changeWork { model.work.update([task], WorkPatch(recurrence: every.map { .set($0) } ?? .clear)) }
+    }
+}
+
+/// A repeat typed in words, "every 2 weeks" or "every other friday", read
+/// the way a typed title is.
+private struct RepeatRuleField: View {
+    let set: (String) -> Void
+    @Environment(AppModel.self) private var model
+    @State private var text = ""
+    @State private var unread = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            TextField("", text: $text, prompt: Text("Every 2 weeks").foregroundStyle(Theme.inkDisabled))
+                .textFieldStyle(.roundedBorder)
+                .onSubmit(read)
+                .onChange(of: text) { unread = false }
+                .accessibilityLabel("Repeat in words")
+            if unread {
+                Text("Sona can’t read that as a repeat.").metaText(Theme.live)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.bottom, 10)
+        .frame(width: 220)
+    }
+
+    private func read() {
+        let typed = text.trimmingCharacters(in: .whitespaces)
+        guard !typed.isEmpty else { return }
+        Task {
+            if let every = await rule(typed) {
+                set(every)
+            } else if let every = await rule("every " + typed) {
+                set(every)
+            } else {
+                unread = true
+            }
+        }
+    }
+
+    private func rule(_ text: String) async -> String? {
+        await model.work.parse(text, plain: [])?.tokens.lazy.compactMap { token -> String? in
+            if case let .recurrence(every, _) = token.field { every } else { nil }
+        }.first
     }
 }
 
@@ -1900,6 +2268,7 @@ private struct PropertyLine<Value: View>: View {
 private struct PropertyValue<Mark: View>: View {
     let text: String
     var faint = false
+    var tone: Color?
     @ViewBuilder let mark: () -> Mark
     @State private var hovering = false
 
@@ -1907,7 +2276,7 @@ private struct PropertyValue<Mark: View>: View {
         HStack(alignment: .top, spacing: 8) {
             mark().frame(width: 16, height: 16)
             Text(text)
-                .bodyText(13, faint ? Theme.inkTertiary : Theme.ink)
+                .bodyText(13, tone ?? (faint ? Theme.inkTertiary : Theme.ink))
                 .lineLimit(2)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -1947,7 +2316,12 @@ enum WorkActivityText {
         let actor = switch entry.actor {
         case .me: "You"
         case .sona: "Sona"
-        case .agent: entry.agent ?? "An agent"
+        case .agent:
+            switch entry.via {
+            case "mcp"?: "\(entry.agent ?? "An agent") via MCP"
+            case "cli"?: "\(entry.agent ?? "An agent") via the command line"
+            default: entry.agent ?? "An agent"
+            }
         }
         return "\(actor) \(verb(entry, model: model))"
     }
@@ -1956,7 +2330,10 @@ enum WorkActivityText {
         let work = model.work
         switch entry.kind {
         case .created:
-            return entry.to == WorkStatus.triage.rawValue ? "heard this in a meeting" : "created the task"
+            guard let row = model.workRows([entry.itemId]).first, row.sourceLoopId != nil else {
+                return entry.to == WorkStatus.triage.rawValue ? "heard this in a meeting" : "created the task"
+            }
+            return row.sourceMeetingTitle.map { "heard this in “\($0)”" } ?? "heard this in a meeting"
         case .status:
             return "changed the status from \(status(entry.from)) to \(status(entry.to))"
         case .priority:
@@ -2021,6 +2398,12 @@ enum WorkActivityText {
             if let added = entry.to { return "attached “\(added)”" }
             if let removed = entry.from { return "removed “\(removed)”" }
             return "changed an attachment"
+        case .estimate:
+            guard let points = entry.to.flatMap({ Int($0) }) else { return "removed the estimate" }
+            return "set the estimate to \(TaskEstimate.title(points))"
+        case .forPerson:
+            guard let id = entry.to else { return "cleared who it’s for" }
+            return "marked it for \(work.people.first { $0.id == id }?.name ?? "someone")"
         case .unknown:
             return "changed the task"
         }
@@ -2058,6 +2441,30 @@ enum TaskRepeatText {
     static func line(_ repeating: WorkRepeat) -> String {
         let rule = Recurrence.display(repeating.every)
         return repeating.of > 0 ? "\(rule), kept \(repeating.kept) of \(repeating.of)" : rule
+    }
+}
+
+extension AppModel {
+    /// A note about the task, linked to it as a source and opened to write in.
+    /// The note still opens when the link is refused.
+    func newNote(about row: WorkItemRow) {
+        Task {
+            let note: ScratchNote
+            do {
+                note = try await core.request("scratchpad_create", ["body": "\(row.title)\n\n"])
+            } catch {
+                workFocus.announce(error.localizedDescription, undoes: false)
+                return
+            }
+            do {
+                try await projects.linkSource(targetKind: .task, targetId: row.id, sourceKind: .note, sourceId: note.id,
+                                              atMs: nil, operationId: UUID().uuidString.lowercased())
+                await work.loadDetail(row.id)
+            } catch {
+                workFocus.announce("The note couldn’t be linked to the task. \(error.localizedDescription)", undoes: false)
+            }
+            open(link: "sona://note/\(note.id)")
+        }
     }
 }
 

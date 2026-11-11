@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// The main window: the sidebar on the left, one page on the right. Before
 /// the core answers, a wait; on a first run, the onboarding flow instead of
@@ -154,7 +155,6 @@ struct Shell: View {
                     material: model.about.material,
                     photoRevision: model.people.photoRevision,
                     openEvidence: model.openPlanningEvidence,
-                    openPerson: model.openPerson,
                     discussProject: model.discussProject,
                     planWithSona: model.planWithSona,
                     showCalendar: { model.go(.calendar) })
@@ -177,6 +177,8 @@ struct Shell: View {
                 TaskArchiveScreen()
             case .loops:
                 LoopsScreen()
+            case .initiatives:
+                InitiativesScreen(store: model.projects, people: model.plannerPeople, openProject: model.openProject)
             }
         }
     }
@@ -385,6 +387,11 @@ struct MeetingsPlace: View {
 
 struct Sidebar: View {
     @Environment(AppModel.self) private var model
+    @State private var draggedFavorite: WorkFavoriteEntry?
+    @State private var favoriteDrop: FavoriteDrop?
+    @State private var endTargeted = false
+    @State private var renamingFolder: String?
+    @AppStorage("sidebar.closedFavoriteFolders") private var closedFolders = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -450,10 +457,17 @@ struct Sidebar: View {
                             model.go(place)
                         }
                     }
-                    ForEach(favorites, id: \.self) { favorite in
-                        favoriteRow(favorite)
-                    }
+                    favoritesSection
                     gap
+                        .overlay(alignment: .top) {
+                            if endTargeted { Theme.accent.frame(height: 2).allowsHitTesting(false) }
+                        }
+                        .onDrop(of: [.utf8PlainText], isTargeted: $endTargeted) { _ in
+                            guard let dragged = draggedFavorite else { return false }
+                            model.work.moveFavorite(dragged, into: nil, at: nil)
+                            draggedFavorite = nil
+                            return true
+                        }
                     SidebarItem(
                         icon: "gearshape",
                         title: "Settings",
@@ -493,9 +507,118 @@ struct Sidebar: View {
         case .view:
             return model.place.parent == .tasks && model.workFocus.tab == .view(favorite.targetId)
                 && model.work.views.contains { $0.id == favorite.targetId }
+        case .person:
+            return model.place == .people && model.people.route == .person(favorite.targetId)
         case .unknown:
             return false
         }
+    }
+
+    /// Favorites at the top and folders of them, in the user's order. A row
+    /// drags to another place, into a folder, or out of one.
+    @ViewBuilder
+    private var favoritesSection: some View {
+        let store = model.work
+        let top = store.favoriteTop
+        if !top.isEmpty {
+            Text("Favorites")
+                .font(TypeScale.meta)
+                .foregroundStyle(Theme.inkTertiary)
+                .padding(.horizontal, Space.s)
+                .padding(.top, Space.m)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+                .contextMenu { Button("New Folder") { newFolder(holding: nil) } }
+                .accessibilityAddTraits(.isHeader)
+        }
+        ForEach(top, id: \.self) { entry in
+            switch entry {
+            case let .favorite(kind, id):
+                if let favorite = store.favorites.first(where: { $0.kind == kind && $0.targetId == id }) {
+                    favoriteRow(favorite)
+                        .modifier(favoritePlace(entry, in: nil))
+                        .contextMenu { favoriteMenu(favorite) }
+                }
+            case let .folder(id):
+                if let folder = store.favoriteFolders.first(where: { $0.id == id }) {
+                    let open = !closedFolders.split(separator: ",").contains(Substring(id))
+                    FavoriteFolderRow(
+                        folder: folder,
+                        open: open,
+                        dropInto: favoriteDrop == .into(id),
+                        renaming: Binding(get: { renamingFolder == id }, set: { if !$0 { renamingFolder = nil } }),
+                        toggle: { toggleFolder(id) },
+                        rename: { store.renameFavoriteFolder(id, $0) })
+                    .modifier(favoritePlace(entry, in: nil))
+                    .contextMenu {
+                        Button("Rename…") { renamingFolder = id }
+                        Button("Delete Folder") { store.deleteFavoriteFolder(id) }
+                    }
+                    if open {
+                        ForEach(store.favorites(in: id), id: \.self) { favorite in
+                            favoriteRow(favorite)
+                                .padding(.leading, Space.l)
+                                .modifier(favoritePlace(favorite.entry, in: id))
+                                .contextMenu { favoriteMenu(favorite) }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func favoriteMenu(_ favorite: WorkFavorite) -> some View {
+        let store = model.work
+        Menu("Move to Folder") {
+            ForEach(store.favoriteFolders.sorted { $0.position < $1.position }) { folder in
+                Button(folder.name) { store.moveFavorite(favorite.entry, into: folder.id, at: nil) }
+                    .disabled(favorite.folderId == folder.id)
+            }
+            if !store.favoriteFolders.isEmpty { Divider() }
+            Button("New Folder") { newFolder(holding: favorite.entry) }
+        }
+        if favorite.folderId != nil {
+            Button("Move Out of Folder") { store.moveFavorite(favorite.entry, into: nil, at: nil) }
+        }
+        Divider()
+        Button("Remove from Favorites") { store.setFavorite(favorite.kind, favorite.targetId, false) }
+    }
+
+    private func favoritePlace(_ entry: WorkFavoriteEntry, in folder: String?) -> FavoritePlace {
+        FavoritePlace(entry: entry, folder: folder, dragged: $draggedFavorite, drop: $favoriteDrop) { dragged, drop in
+            landFavorite(dragged, drop)
+        }
+    }
+
+    private func landFavorite(_ dragged: WorkFavoriteEntry, _ drop: FavoriteDrop) {
+        let store = model.work
+        switch drop {
+        case let .into(folder):
+            store.moveFavorite(dragged, into: folder, at: nil)
+        case let .beside(target, folder, after):
+            let order = folder.map { store.favorites(in: $0).map(\.entry) } ?? store.favoriteTop
+            guard let at = order.filter({ $0 != dragged }).firstIndex(of: target) else { return }
+            store.moveFavorite(dragged, into: folder, at: after ? at + 1 : at)
+        }
+    }
+
+    private func newFolder(holding entry: WorkFavoriteEntry?) {
+        Task {
+            if let folder = await model.work.createFavoriteFolder("New folder", holding: entry) {
+                renamingFolder = folder.id
+            }
+        }
+    }
+
+    private func toggleFolder(_ id: String) {
+        var closed = closedFolders.split(separator: ",").map(String.init)
+        if let at = closed.firstIndex(of: id) {
+            closed.remove(at: at)
+        } else {
+            closed.append(id)
+        }
+        closedFolders = closed.joined(separator: ",")
     }
 
     @ViewBuilder
@@ -521,6 +644,12 @@ struct Sidebar: View {
                     focus.switchTab(.view(view.id))
                 }
             }
+        case .person:
+            if let person = model.people.entries?.first(where: { $0.person.id == favorite.targetId })?.person {
+                SidebarItem(icon: "star", title: person.displayName, selected: favoriteOpen(favorite)) {
+                    model.openPerson(person.id)
+                }
+            }
         case .unknown:
             EmptyView()
         }
@@ -539,13 +668,139 @@ struct Sidebar: View {
                          meaning: "due today or late")
         case .inbox:
             SidebarCount(value: model.work.unread, meaning: "unread")
-        case .capture, .library, .meetings, .scratchpad, .calendar, .today, .projects, .archive, .loops:
+        case .capture, .library, .meetings, .scratchpad, .calendar, .today, .projects, .archive, .loops, .initiatives:
             nil
         }
     }
 
     private var gap: some View {
         Spacer().frame(height: Space.l)
+    }
+}
+
+/// Where a dragged favorite or folder lands: beside a row in that row's
+/// folder or at the top, or into a folder.
+private enum FavoriteDrop: Equatable {
+    case beside(WorkFavoriteEntry, folder: String?, after: Bool)
+    case into(String)
+}
+
+/// Makes a favorites row draggable and a place to drop another: the upper
+/// half lands before it, the lower half after it, and a favorite over the
+/// lower part of a folder row lands inside that folder.
+private struct FavoritePlace: ViewModifier, DropDelegate {
+    let entry: WorkFavoriteEntry
+    let folder: String?
+    @Binding var dragged: WorkFavoriteEntry?
+    @Binding var drop: FavoriteDrop?
+    let land: (WorkFavoriteEntry, FavoriteDrop) -> Void
+
+    func body(content: Content) -> some View {
+        content
+            .overlay(alignment: shown?.after == true ? .bottom : .top) {
+                if shown != nil {
+                    Theme.accent.frame(height: 2).allowsHitTesting(false)
+                }
+            }
+            .onDrag {
+                dragged = entry
+                return NSItemProvider(object: "sona favorite" as NSString)
+            }
+            .onDrop(of: [.utf8PlainText], delegate: self)
+    }
+
+    private var shown: (target: WorkFavoriteEntry, after: Bool)? {
+        guard case let .beside(target, folder, after) = drop, target == entry, folder == self.folder else { return nil }
+        return (target, after)
+    }
+
+    private func landing(_ info: DropInfo) -> FavoriteDrop? {
+        guard let dragged, dragged != entry else { return nil }
+        let y = info.location.y
+        switch (dragged, entry) {
+        case (.folder, _) where folder != nil:
+            return nil
+        case let (.favorite, .folder(id)) where y > Theme.sidebarRow / 3:
+            return .into(id)
+        default:
+            return .beside(entry, folder: folder, after: y > Theme.sidebarRow / 2)
+        }
+    }
+
+    func validateDrop(info: DropInfo) -> Bool { landing(info) != nil }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        drop = landing(info)
+        return DropProposal(operation: .move)
+    }
+
+    func dropExited(info: DropInfo) { drop = nil }
+
+    func performDrop(info: DropInfo) -> Bool {
+        defer { (drop, dragged) = (nil, nil) }
+        guard let dragged, let landing = landing(info) else { return false }
+        land(dragged, landing)
+        return true
+    }
+}
+
+/// A favorites folder: a chevron that opens and closes it, and its name,
+/// edited in place on Rename.
+private struct FavoriteFolderRow: View {
+    let folder: WorkFavoriteFolder
+    let open: Bool
+    let dropInto: Bool
+    @Binding var renaming: Bool
+    let toggle: () -> Void
+    let rename: (String) -> Void
+    @State private var name = ""
+    @State private var hovering = false
+    @FocusState private var editing: Bool
+
+    var body: some View {
+        HStack(spacing: Space.s) {
+            Image(systemName: open ? "folder" : "folder.fill")
+                .font(.system(size: 13))
+                .frame(width: 16)
+            if renaming {
+                TextField("Folder name", text: $name)
+                    .textFieldStyle(.plain)
+                    .font(TypeScale.list)
+                    .focused($editing)
+                    .onAppear {
+                        name = folder.name
+                        editing = true
+                    }
+                    .onSubmit {
+                        rename(name)
+                        renaming = false
+                    }
+                    .onExitCommand { renaming = false }
+                    .onChange(of: editing) { _, now in if !now { renaming = false } }
+            } else {
+                Text(folder.name)
+                    .font(TypeScale.list)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 4)
+            Image(systemName: "chevron.right")
+                .font(.system(size: 10, weight: .semibold))
+                .rotationEffect(.degrees(open ? 90 : 0))
+                .foregroundStyle(Theme.inkTertiary)
+        }
+        .foregroundStyle(Theme.inkSecondary)
+        .padding(.horizontal, Space.s)
+        .frame(height: Theme.sidebarRow)
+        .background(dropInto || hovering ? Theme.wash : .clear, in: RoundedRectangle(cornerRadius: Theme.radiusRow))
+        .hoverFade(hovering)
+        .contentShape(Rectangle())
+        .onTapGesture { if !renaming { toggle() } }
+        .onHover { hovering = $0 }
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityLabel("Folder \(folder.name)")
+        .accessibilityValue(open ? "Open" : "Closed")
+        .accessibilityAction { toggle() }
     }
 }
 

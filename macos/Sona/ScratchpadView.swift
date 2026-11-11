@@ -158,6 +158,7 @@ private struct ScratchNoteRow: View {
 
 private struct ScratchNoteEditorPage: View {
     let store: ScratchpadStore
+    @Environment(AppModel.self) private var model
     let share: ((ScratchNote) -> Void)?
     let openSource: ((String) -> Void)?
     let showSynthesis: () -> Void
@@ -215,9 +216,14 @@ private struct ScratchNoteEditorPage: View {
             .padding(.bottom, 20)
             ErrorNote(store.error)
             ErrorNote(sourceError)
-            ScratchNoteEditor(text: bodyText, focused: $editorFocused)
+            ScratchNoteEditor(text: bodyText, focused: $editorFocused, mentions: mentions, mention: mention)
             .padding(.bottom, 24)
+            .zIndex(1)
             connections
+            if let note = store.saved {
+                PlanningCommentsView(threads: model.comments, subject: PlanningCommentSubject(kind: .note, id: note.id))
+                    .padding(.top, 32)
+            }
         } actions: {
             HStack(spacing: 8) {
                 Button("Subjects", action: showSubjects).buttonStyle(.quiet)
@@ -300,6 +306,19 @@ private struct ScratchNoteEditorPage: View {
             Text("Reading sources…").metaText()
         }
         if let memory = store.memory {
+            if !memory.documents.isEmpty {
+                PageSection("About") {
+                    Card {
+                        ForEach(memory.documents) { document in
+                            CardRow(action: { open(document) }) {
+                                Text(document.title).bodyText().lineLimit(2)
+                            } trailing: {
+                                Text(document.kind.rawValue.capitalized).metaText()
+                            }
+                        }
+                    }
+                }
+            }
             if !memory.passages.isEmpty {
                 PageSection("Saved passage") {
                     Card {
@@ -384,6 +403,60 @@ private struct ScratchNoteEditorPage: View {
         }
     }
 
+    /// What `@` offers for `query`: people, projects and tasks whose names
+    /// have a word starting with it.
+    private func mentions(_ query: String) -> [ScratchMention] {
+        let needle = query.lowercased()
+        let people = model.work.people.map {
+            ScratchMention(kind: .person, targetId: $0.id, label: $0.name, detail: "Person")
+        }
+        let projects = model.work.projects.map {
+            ScratchMention(kind: .project, targetId: $0.id, label: $0.title, detail: "Project")
+        }
+        let tasks = (model.work.items ?? []).map {
+            ScratchMention(kind: .task, targetId: $0.id, label: $0.title, detail: "S-\($0.number)")
+        }
+        let matching = (people + projects + tasks).filter { mention in
+            needle.isEmpty || mention.label.lowercased().split(separator: " ").contains { $0.hasPrefix(needle) }
+        }
+        return Array(matching.prefix(8))
+    }
+
+    /// A person becomes one of the note's sources; a project or task holds
+    /// the note as one of its own.
+    private func mention(_ mention: ScratchMention) {
+        Task {
+            switch mention.kind {
+            case .person:
+                _ = await store.link(ScratchSourceRef(kind: "person", id: mention.targetId))
+            case .project, .task:
+                guard await store.flush(), let id = store.openId else { return }
+                do {
+                    try await model.projects.linkSource(
+                        targetKind: mention.kind == .task ? .task : .project, targetId: mention.targetId,
+                        sourceKind: .note, sourceId: id, atMs: nil, operationId: UUID().uuidString.lowercased())
+                    sourceError = nil
+                    await store.loadMemory()
+                } catch {
+                    sourceError = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    private func open(_ document: ScratchDocumentOf) {
+        switch document.kind {
+        case .task: model.openTask(document.targetId)
+        case .project: model.openProject(document.targetId)
+        case .milestone: break
+        case .cycle:
+            guard let number = Int64(document.targetId) else { return }
+            model.go(.tasks)
+            model.workFocus.switchTab(.cycle)
+            CycleList.open(number, model)
+        }
+    }
+
     private func navigate(_ source: ScratchSource) {
         Task {
             guard await store.flush(), !store.hasPendingSave else { return }
@@ -454,13 +527,118 @@ struct ScratchNoteActions: View {
     }
 }
 
+/// One thing `@` can name in a note.
+struct ScratchMention: Identifiable, Equatable {
+    enum Kind { case person, project, task }
+
+    let kind: Kind
+    let targetId: String
+    let label: String
+    let detail: String
+
+    var id: String { "\(kind):\(targetId)" }
+}
+
+/// One block the `/` menu turns the line into, as Markdown.
+private struct ScratchSlashCommand: Identifiable {
+    let id: String
+    let symbol: String
+    let insert: String
+    /// Where the cursor lands, counted from the start of `insert`.
+    let caret: Int
+
+    init(_ id: String, _ symbol: String, _ insert: String, caret: Int? = nil) {
+        self.id = id
+        self.symbol = symbol
+        self.insert = insert
+        self.caret = caret ?? insert.count
+    }
+
+    static let all = [
+        ScratchSlashCommand("Heading", "textformat.size.larger", "# "),
+        ScratchSlashCommand("Subheading", "textformat.size", "## "),
+        ScratchSlashCommand("Bulleted list", "list.bullet", "- "),
+        ScratchSlashCommand("Numbered list", "list.number", "1. "),
+        ScratchSlashCommand("Checklist", "checklist", "- [ ] "),
+        ScratchSlashCommand("Code block", "chevron.left.forwardslash.chevron.right", "```\n\n```", caret: 4),
+        ScratchSlashCommand("Quote", "text.quote", "> "),
+        ScratchSlashCommand("Divider", "minus", "---\n"),
+    ]
+}
+
+/// A `/` or `@` the cursor stands just after, with the word typed since.
+private struct ScratchTrigger: Equatable {
+    let mark: Character
+    let range: Range<String.Index>
+    let query: String
+
+    /// The trigger the cursor is in, when it is a `/` or `@` that starts a
+    /// word and nothing but letters follow it up to the cursor.
+    init?(text: String, selection: TextSelection?) {
+        guard case let .selection(selected)? = selection?.indices, selected.isEmpty,
+              selected.lowerBound <= text.endIndex else { return nil }
+        let cursor = selected.lowerBound
+        var index = cursor
+        while index > text.startIndex {
+            let before = text.index(before: index)
+            let character = text[before]
+            if character == "/" || character == "@" {
+                guard before == text.startIndex || text[text.index(before: before)].isWhitespace else { return nil }
+                mark = character
+                range = before..<cursor
+                query = String(text[text.index(after: before)..<cursor])
+                return
+            }
+            if character.isWhitespace || character.isPunctuation { return nil }
+            index = before
+        }
+        return nil
+    }
+}
+
 /// The note's words, growing with them: a few lines when empty, a line more
 /// for every line written, so the page scrolls and the editor never does.
 /// A `TextEditor` is an `NSTextView`, which is where the system's dictation
-/// insertion lands while the cursor is in it.
+/// insertion lands while the cursor is in it. `/` at the start of a word
+/// offers blocks; `@` offers people, projects and tasks to mention.
 private struct ScratchNoteEditor: View {
     @Binding var text: String
     var focused: FocusState<Bool>.Binding
+    let mentions: (String) -> [ScratchMention]
+    let mention: (ScratchMention) -> Void
+
+    @State private var selection: TextSelection?
+    @State private var highlighted = 0
+    @State private var dismissed: ScratchTrigger?
+    @State private var caretBottom: CGFloat = 0
+
+    private var trigger: ScratchTrigger? {
+        guard let found = ScratchTrigger(text: text, selection: selection), found != dismissed else { return nil }
+        return found
+    }
+
+    private var commands: [ScratchSlashCommand] {
+        guard let trigger, trigger.mark == "/" else { return [] }
+        let needle = trigger.query.lowercased()
+        return ScratchSlashCommand.all.filter {
+            needle.isEmpty || $0.id.lowercased().split(separator: " ").contains { $0.hasPrefix(needle) }
+        }
+    }
+
+    private var people: [ScratchMention] {
+        guard let trigger, trigger.mark == "@" else { return [] }
+        return mentions(trigger.query)
+    }
+
+    private var choices: Int { trigger?.mark == "/" ? commands.count : people.count }
+
+    /// The words up to the end of the cursor's line, to measure where the
+    /// menu goes.
+    private var throughCaretLine: String {
+        guard let trigger else { return "" }
+        let end = text[trigger.range.upperBound...].firstIndex(of: "\n") ?? text.endIndex
+        return String(text[..<end])
+    }
 
     var body: some View {
         // The editor cannot size itself to its words; a hidden copy of them
@@ -471,24 +649,132 @@ private struct ScratchNoteEditor: View {
             .frame(maxWidth: .infinity, minHeight: 240, alignment: .topLeading)
             .padding(.bottom, 8)
             .hidden()
+            .background(alignment: .topLeading) {
+                Text(throughCaretLine + " ")
+                    .font(TypeScale.body())
+                    .padding(.horizontal, 8)
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                    .hidden()
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { caretBottom = $0 }
+            }
             .overlay(alignment: .topLeading) {
                 ZStack(alignment: .topLeading) {
                     if text.isEmpty {
-                        Text("Note")
+                        Text("Note, or / for blocks and @ to mention")
                             .font(TypeScale.body())
                             .foregroundStyle(Theme.inkTertiary)
                             .padding(.horizontal, 5)
                     }
-                    TextEditor(text: $text)
+                    TextEditor(text: $text, selection: $selection)
                         .font(TypeScale.body())
                         .foregroundStyle(Theme.ink)
                         .scrollContentBackground(.hidden)
                         .scrollDisabled(true)
                         .focused(focused)
                         .accessibilityLabel("Note")
+                        .onKeyPress(keys: [.upArrow, .downArrow, .return, .tab, .escape]) { press in
+                            key(press.key)
+                        }
+                }
+            }
+            .overlay(alignment: .topLeading) {
+                if choices > 0 {
+                    menu
+                        .offset(x: 5, y: caretBottom + 4)
                 }
             }
             .padding(.horizontal, -5)
+            .onChange(of: trigger) { _, _ in highlighted = 0 }
+    }
+
+    private var menu: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if trigger?.mark == "/" {
+                ForEach(Array(commands.enumerated()), id: \.element.id) { index, command in
+                    menuRow(index: index, symbol: command.symbol, title: command.id, detail: nil) { run(command) }
+                }
+            } else {
+                ForEach(Array(people.enumerated()), id: \.element.id) { index, choice in
+                    menuRow(index: index, symbol: symbol(choice.kind), title: choice.label, detail: choice.detail) {
+                        insert(choice)
+                    }
+                }
+            }
+        }
+        .padding(4)
+        .frame(width: 280, alignment: .leading)
+        .background(Theme.page, in: RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Theme.inkTertiary.opacity(0.4)))
+        .shadow(color: .black.opacity(0.12), radius: 8, y: 3)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(trigger?.mark == "/" ? "Blocks" : "Mentions")
+    }
+
+    private func menuRow(index: Int, symbol: String, title: String, detail: String?,
+                         action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Image(systemName: symbol).frame(width: 18).foregroundStyle(Theme.inkSecondary)
+                Text(title).bodyText(13).lineLimit(1)
+                Spacer(minLength: 8)
+                if let detail { Text(detail).metaText() }
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(index == highlighted ? Theme.inkTertiary.opacity(0.18) : .clear,
+                        in: RoundedRectangle(cornerRadius: 5))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func symbol(_ kind: ScratchMention.Kind) -> String {
+        switch kind {
+        case .person: "person"
+        case .project: "folder"
+        case .task: "checkmark.circle"
+        }
+    }
+
+    private func key(_ key: KeyEquivalent) -> KeyPress.Result {
+        guard choices > 0 else { return .ignored }
+        switch key {
+        case .upArrow:
+            highlighted = (highlighted + choices - 1) % choices
+        case .downArrow:
+            highlighted = (highlighted + 1) % choices
+        case .escape:
+            dismissed = trigger
+        default:
+            let index = min(highlighted, choices - 1)
+            if trigger?.mark == "/" {
+                run(commands[index])
+            } else {
+                insert(people[index])
+            }
+        }
+        return .handled
+    }
+
+    private func run(_ command: ScratchSlashCommand) {
+        replaceTrigger(with: command.insert, caret: command.caret)
+    }
+
+    private func insert(_ choice: ScratchMention) {
+        let words = choice.kind == .task ? "\(choice.detail) \(choice.label) " : "@\(choice.label) "
+        replaceTrigger(with: words, caret: words.count)
+        mention(choice)
+    }
+
+    private func replaceTrigger(with words: String, caret: Int) {
+        guard let trigger else { return }
+        var edited = text
+        let start = edited.distance(from: edited.startIndex, to: trigger.range.lowerBound)
+        edited.replaceSubrange(trigger.range, with: words)
+        text = edited
+        selection = TextSelection(insertionPoint: edited.index(edited.startIndex, offsetBy: start + caret))
+        dismissed = nil
     }
 }
 
@@ -551,7 +837,8 @@ private struct ScratchVersionRow: View {
 
     private var when: String {
         let ago = FeedClock.ago(version.savedAtMs)
-        return version.kind == .restore ? "Restored \(ago)" : "Saved \(ago)"
+        let saved = version.kind == .restore ? "Restored \(ago)" : "Saved \(ago)"
+        return version.byline.map { "\(saved) \($0)" } ?? saved
     }
 
     var body: some View {

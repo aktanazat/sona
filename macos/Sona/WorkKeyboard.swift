@@ -1,12 +1,14 @@
 import AppKit
 import SwiftUI
 
-/// A list of choices the palette panel shows for the tasks it names: a
-/// status, an owner, a date.
+/// A list of choices the palette panel shows: a status, an owner or a date
+/// for the tasks it names, or, with no tasks, a recent task, a person or a
+/// label to go to.
 struct WorkPicker: Equatable {
     enum Kind: Equatable {
-        case status, priority, owner, due, labels, project, duplicate, snooze, decline
-        case delegate, cycle, blockedBy, blocks, related, parent
+        case status, priority, owner, due, labels, project, milestone, duplicate, snooze, remind, decline
+        case delegate, cycle, blockedBy, blocks, related, parent, estimate, forPerson
+        case recent, person, label
     }
 
     let kind: Kind
@@ -16,10 +18,11 @@ struct WorkPicker: Equatable {
 /// Everything a person can do to tasks from the keyboard, the palette, a
 /// row's menu or the bulk bar, with the one key each answers to.
 enum WorkAction: String, CaseIterable, Identifiable {
-    case open, peek, status, priority, owner, assignToMe, due, labels, project, rename
-    case accept, decline, duplicate, snooze, nudge, archive, delete
+    case open, peek, status, priority, owner, assignToMe, due, labels, project, milestone, rename
+    case comment, history
+    case accept, decline, duplicate, snooze, remind, nudge, archive, restore, delete
     case delegate, acceptProposal, acceptAllProposals, rejectProposal
-    case cycle, block
+    case cycle, block, estimate, forPerson
     case blockedBy, blocks, related, parent, removeParent
 
     var id: String { rawValue }
@@ -35,13 +38,18 @@ enum WorkAction: String, CaseIterable, Identifiable {
         case .due: "Set due date…"
         case .labels: "Change labels…"
         case .project: "Move to project…"
+        case .milestone: "Set milestone…"
         case .rename: "Rename"
+        case .comment: "Comment…"
+        case .history: "Description history"
         case .accept: "Accept"
         case .decline: "Decline…"
         case .duplicate: "Mark as duplicate…"
         case .snooze: "Snooze…"
+        case .remind: "Remind me…"
         case .nudge: "Nudge…"
         case .archive: "Archive"
+        case .restore: "Restore"
         case .delete: "Delete"
         case .delegate: "Delegate to…"
         case .acceptProposal: "Accept proposed change"
@@ -49,6 +57,8 @@ enum WorkAction: String, CaseIterable, Identifiable {
         case .rejectProposal: "Reject proposed change"
         case .cycle: "Move to cycle…"
         case .block: "Book time"
+        case .estimate: "Set estimate…"
+        case .forPerson: "Set who it’s for…"
         case .blockedBy: "Blocked by…"
         case .blocks: "Blocks…"
         case .related: "Related to…"
@@ -66,23 +76,27 @@ enum WorkAction: String, CaseIterable, Identifiable {
         case .priority: "p"
         case .owner: "a"
         case .assignToMe: "i"
-        case .due: "d"
+        case .due: "shift+d"
         case .labels: "l"
         case .project: "shift+p"
+        case .milestone: "shift+m"
         case .rename: "e"
+        case .comment, .history: ""
         case .accept: "1"
         case .decline: "2"
         case .duplicate: "3"
-        case .snooze: "h"
+        case .snooze, .remind: "h"
         case .nudge: "r"
-        case .archive: "cmd+backspace"
-        case .delete: ""
+        case .archive, .restore: ""
+        case .delete: "cmd+backspace"
         case .delegate: "shift+cmd+;"
         case .acceptProposal: "y"
         case .acceptAllProposals: "shift+y"
         case .rejectProposal: "n"
         case .cycle: "shift+c"
         case .block: "b"
+        case .estimate: "shift+e"
+        case .forPerson: ""
         case .blockedBy: "m b"
         case .blocks: "m x"
         case .related: "m r"
@@ -92,7 +106,8 @@ enum WorkAction: String, CaseIterable, Identifiable {
     }
 
     /// The same key as a menu's equivalent, so a row's menu shows it. Keys
-    /// pressed one after another have none.
+    /// pressed one after another have none, and neither has Snooze: H snoozes
+    /// only Triage's tasks and reminds about the rest.
     var equivalent: KeyboardShortcut? {
         switch self {
         case .open: KeyboardShortcut(.return, modifiers: [])
@@ -101,23 +116,26 @@ enum WorkAction: String, CaseIterable, Identifiable {
         case .priority: KeyboardShortcut("p", modifiers: [])
         case .owner: KeyboardShortcut("a", modifiers: [])
         case .assignToMe: KeyboardShortcut("i", modifiers: [])
-        case .due: KeyboardShortcut("d", modifiers: [])
+        case .due: KeyboardShortcut("d", modifiers: .shift)
         case .labels: KeyboardShortcut("l", modifiers: [])
         case .project: KeyboardShortcut("p", modifiers: .shift)
+        case .milestone: KeyboardShortcut("m", modifiers: .shift)
         case .rename: KeyboardShortcut("e", modifiers: [])
         case .accept: KeyboardShortcut("1", modifiers: [])
         case .decline: KeyboardShortcut("2", modifiers: [])
         case .duplicate: KeyboardShortcut("3", modifiers: [])
-        case .snooze: KeyboardShortcut("h", modifiers: [])
+        case .remind: KeyboardShortcut("h", modifiers: [])
         case .nudge: KeyboardShortcut("r", modifiers: [])
-        case .archive: KeyboardShortcut(.delete, modifiers: .command)
+        case .delete: KeyboardShortcut(.delete, modifiers: .command)
         case .delegate: KeyboardShortcut(";", modifiers: [.command, .shift])
         case .acceptProposal: KeyboardShortcut("y", modifiers: [])
         case .acceptAllProposals: KeyboardShortcut("y", modifiers: .shift)
         case .rejectProposal: KeyboardShortcut("n", modifiers: [])
         case .cycle: KeyboardShortcut("c", modifiers: .shift)
         case .block: KeyboardShortcut("b", modifiers: [])
-        case .blockedBy, .blocks, .related, .parent, .removeParent, .delete: nil
+        case .estimate: KeyboardShortcut("e", modifiers: .shift)
+        case .blockedBy, .blocks, .related, .parent, .removeParent, .archive, .restore, .snooze, .comment, .history,
+             .forPerson: nil
         }
     }
 
@@ -132,13 +150,18 @@ enum WorkAction: String, CaseIterable, Identifiable {
         case .due: "calendar"
         case .labels: "tag"
         case .project: "folder"
+        case .milestone: "flag"
         case .rename: "pencil"
+        case .comment: "text.bubble"
+        case .history: "clock.arrow.circlepath"
         case .accept: "checkmark.circle"
         case .decline: "xmark.circle"
         case .duplicate: "square.on.square"
         case .snooze: "moon.zzz"
+        case .remind: "bell.badge"
         case .nudge: "arrowshape.turn.up.right"
         case .archive: "archivebox"
+        case .restore: "arrow.uturn.backward"
         case .delete: "trash"
         case .delegate: "sparkle"
         case .acceptProposal: "checkmark"
@@ -146,6 +169,8 @@ enum WorkAction: String, CaseIterable, Identifiable {
         case .rejectProposal: "xmark"
         case .cycle: "arrow.triangle.2.circlepath"
         case .block: "calendar.badge.clock"
+        case .estimate: "triangle"
+        case .forPerson: "person.crop.circle.badge.checkmark"
         case .blockedBy: "exclamationmark.octagon"
         case .blocks: "hand.raised"
         case .related: "arrow.left.arrow.right"
@@ -162,16 +187,21 @@ enum WorkAction: String, CaseIterable, Identifiable {
         case .due: .due
         case .labels: .labels
         case .project: .project
+        case .milestone: .milestone
         case .duplicate: .duplicate
         case .snooze: .snooze
+        case .remind: .remind
         case .decline: .decline
-        case .open, .peek, .assignToMe, .rename, .accept, .nudge, .archive, .delete, .block, .removeParent: nil
+        case .open, .peek, .assignToMe, .rename, .comment, .history, .accept, .nudge, .archive, .restore, .delete, .block,
+             .removeParent: nil
         case .delegate: .delegate
         case .cycle: .cycle
         case .blockedBy: .blockedBy
         case .blocks: .blocks
         case .related: .related
         case .parent: .parent
+        case .estimate: .estimate
+        case .forPerson: .forPerson
         case .acceptProposal, .acceptAllProposals, .rejectProposal: nil
         }
     }
@@ -182,16 +212,19 @@ enum WorkAction: String, CaseIterable, Identifiable {
     func applies(to rows: [WorkItemRow], proposed: Set<String> = []) -> Bool {
         guard let first = rows.first else { return false }
         return switch self {
-        case .open, .peek, .rename: rows.count == 1
+        case .open, .peek, .rename, .comment, .history: rows.count == 1
         case .duplicate: rows.count == 1 && first.status != .duplicate
         case .assignToMe: rows.contains { !$0.ownerIsSelf }
         case .accept, .decline: rows.allSatisfy { $0.status == .triage }
         case .snooze: rows.allSatisfy { $0.status == .triage || $0.status.isOpen }
+        case .remind: rows.allSatisfy { $0.status != .triage }
         case .nudge: rows.count == 1 && first.status.isOpen && first.followUpAtMs != nil
         case .archive: rows.contains { $0.archivedAtMs == nil }
+        case .restore: rows.contains { $0.archivedAtMs != nil }
         case .delete: true
         case .status, .priority, .owner, .due, .labels, .project: true
-        case .delegate: true
+        case .milestone: first.projectId != nil && rows.allSatisfy { $0.projectId == first.projectId }
+        case .delegate, .estimate, .forPerson: true
         case .cycle: rows.allSatisfy { $0.status.isOpen }
         case .block: rows.count == 1 && first.status.isOpen && first.timeBlock == nil
         case .blockedBy, .blocks, .related: true
@@ -203,10 +236,11 @@ enum WorkAction: String, CaseIterable, Identifiable {
 }
 
 /// What a task copies as: the ID agents and the command line take, a Sona
-/// link, or Markdown to paste into a note or a message.
+/// link, Markdown to paste into a note or a message, or a link that opens a
+/// new task filled in like this one.
 @MainActor
 enum TaskCopy: String, CaseIterable, Identifiable {
-    case handle, link, markdown
+    case handle, link, markdown, createLink
 
     var id: String { rawValue }
 
@@ -215,6 +249,7 @@ enum TaskCopy: String, CaseIterable, Identifiable {
         case .handle: "Copy ID"
         case .link: "Copy link"
         case .markdown: "Copy as Markdown"
+        case .createLink: "Copy create link"
         }
     }
 
@@ -223,6 +258,7 @@ enum TaskCopy: String, CaseIterable, Identifiable {
         case .handle: "number"
         case .link: "link"
         case .markdown: "doc.plaintext"
+        case .createLink: "plus.square.on.square"
         }
     }
 
@@ -230,10 +266,81 @@ enum TaskCopy: String, CaseIterable, Identifiable {
 
     static func link(_ row: WorkItemRow) -> String { "sona://task/\(row.id)" }
 
+    static func commentLink(task: String, comment: String) -> String { "sona://task/\(task)?comment=\(comment)" }
+
     /// The task a `sona://task/<id>` link names.
     static func task(in link: String) -> String? {
         guard let url = URL(string: link), url.scheme?.lowercased() == "sona", url.host() == "task" else { return nil }
         return url.pathComponents.dropFirst().first
+    }
+
+    /// The comment a `sona://task/<id>?comment=<id>` link names.
+    static func comment(in link: String) -> String? {
+        URLComponents(string: link)?.queryItems?.first { $0.name == "comment" }?.value
+    }
+
+    /// `sona://new?title=…&details=…&priority=2&project=…&labels=a,b&owner=me&due=friday`:
+    /// a new task's fields. Project, labels and owner take an id or a name;
+    /// due takes a day or words.
+    static func createLink(_ row: WorkItemRow) -> String {
+        var parts = URLComponents()
+        parts.scheme = "sona"
+        parts.host = "new"
+        var items = [URLQueryItem(name: "title", value: row.title)]
+        if let details = row.details, !details.isEmpty { items.append(URLQueryItem(name: "details", value: details)) }
+        if row.priority != 0 { items.append(URLQueryItem(name: "priority", value: "\(row.priority)")) }
+        if let project = row.projectId { items.append(URLQueryItem(name: "project", value: project)) }
+        if !row.labelIds.isEmpty { items.append(URLQueryItem(name: "labels", value: row.labelIds.joined(separator: ","))) }
+        let owner = switch row.owner {
+        case .myself: "me"
+        case let .person(id): id
+        case .nobody: "none"
+        }
+        items.append(URLQueryItem(name: "owner", value: owner))
+        if let due = row.dueAtMs { items.append(URLQueryItem(name: "due", value: RitualStore.day(PlanningFormat.moment(due)))) }
+        parts.queryItems = items
+        return parts.string ?? "sona://new"
+    }
+
+    /// The fields a `sona://new` link fills in; nil for any other link.
+    static func draft(in link: String, work: WorkStore) -> WorkPatch? {
+        guard let parts = URLComponents(string: link), parts.scheme?.lowercased() == "sona", parts.host == "new" else { return nil }
+        var fields: [String: String] = [:]
+        for item in parts.queryItems ?? [] {
+            if let value = item.value?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty {
+                fields[item.name.lowercased()] = value
+            }
+        }
+        var patch = WorkPatch(status: .notStarted, owner: .myself)
+        patch.title = fields["title"]
+        if let details = fields["details"] ?? fields["description"] { patch.details = .set(details) }
+        if let priority = fields["priority"].flatMap(Int.init), (0...4).contains(priority) { patch.priority = priority }
+        if let project = fields["project"],
+           let found = work.projects.first(where: { $0.id == project || $0.title.localizedCaseInsensitiveCompare(project) == .orderedSame }) {
+            patch.projectId = .set(found.id)
+        }
+        if let labels = fields["labels"] {
+            let ids = labels.split(separator: ",").compactMap { name in
+                let name = name.trimmingCharacters(in: .whitespaces)
+                return work.labels.first { $0.id == name || $0.name.localizedCaseInsensitiveCompare(name) == .orderedSame }?.id
+            }
+            if !ids.isEmpty { patch.labelIds = ids }
+        }
+        if let owner = fields["owner"] ?? fields["assignee"] {
+            switch owner.lowercased() {
+            case "me": patch.owner = .myself
+            case "none", "nobody": patch.owner = .nobody
+            default:
+                if let person = work.people.first(where: { $0.id == owner || $0.name.localizedCaseInsensitiveCompare(owner) == .orderedSame }) {
+                    patch.owner = .person(person.id)
+                }
+            }
+        }
+        if let due = fields["due"] {
+            let day = CycleFormat.day(due).map { TaskDates.day(0, from: $0) } ?? TaskDates.parse(due)
+            if let day { patch.dueAtMs = .set(day) }
+        }
+        return patch
     }
 
     func text(_ rows: [WorkItemRow]) -> String {
@@ -241,6 +348,7 @@ enum TaskCopy: String, CaseIterable, Identifiable {
         case .handle: rows.map(Self.handle).joined(separator: "\n")
         case .link: rows.map(Self.link).joined(separator: "\n")
         case .markdown: rows.map(Self.markdown).joined(separator: "\n\n")
+        case .createLink: rows.map(Self.createLink).joined(separator: "\n")
         }
     }
 
@@ -250,12 +358,14 @@ enum TaskCopy: String, CaseIterable, Identifiable {
             case .handle: "Copied \(rows.count) IDs"
             case .link: "Copied \(rows.count) links"
             case .markdown: "Copied \(rows.count) tasks as Markdown"
+            case .createLink: "Copied \(rows.count) create links"
             }
         }
         return switch self {
         case .handle: "Copied \(Self.handle(row))"
         case .link: "Copied the link to \(Self.handle(row))"
         case .markdown: "Copied \(Self.handle(row)) as Markdown"
+        case .createLink: "Copied a link that creates a task like \(Self.handle(row))"
         }
     }
 
@@ -282,6 +392,18 @@ enum TasksTab: Hashable {
     case view(String)
 }
 
+/// A part of an open task's page that a key or the palette asked for: the
+/// page acts on it once, then clears it.
+struct TaskPageAsk: Equatable {
+    enum Part: Equatable {
+        case composer, subtask, link, history
+        case comment(String)
+    }
+
+    let id: String
+    let part: Part
+}
+
 /// A saved view's filters and display as edited, before they are saved.
 struct WorkViewDraft: Equatable {
     var query: WorkQuery
@@ -298,6 +420,8 @@ final class WorkFocus {
     var inboxHighlighted: String?
     /// The inbox shows snoozed notices instead of awake ones.
     var inboxSnoozed = false
+    /// The archive row J/K or the pointer are on, for # to restore.
+    var archiveHighlighted: String?
     private(set) var selection: Set<String> = []
     var peeking = false
     @ObservationIgnored var propertyFocused = false
@@ -306,21 +430,41 @@ final class WorkFocus {
     /// The person whose page shows their tasks now; while it does, the task
     /// keys work on People as they do on Tasks.
     var personList: String?
+    /// The project whose Tasks tab shows; while it does, the task keys work
+    /// on Projects as they do on Tasks.
+    var projectList: String?
+    var pageAsk: TaskPageAsk?
+    /// ⌘I hid the property panel beside a task's or a project's page.
+    var panelHidden = false
+    /// Tasks opened lately, the latest first, for O I.
+    private(set) var recent: [String] = []
     var picker: WorkPicker?
     var renaming: String?
     /// The new-task sheet, holding what the task starts with.
     var composing: WorkPatch?
+    /// ⌥C: the new-task sheet opens on its template list.
+    var composingFromTemplate = false
+    /// The milestones of the project the milestone picker's tasks share.
+    var milestones: [PlanningMilestone] = []
     var shortcutsShown = false
     var displayShown = false
     var collapsed: Set<String> = []
     var tab: TasksTab = .owe
     /// I owe narrowed to the current cycle.
     var oweThisCycle = false
+    /// The cycle the Cycle tab shows; nil shows the one under way.
+    var cycleOpened: Int64?
+    /// The Cycle tab lists every cycle instead of one cycle's page.
+    var cycleListShown = false
+    /// The cycle row J and K are on in the cycle list.
+    var cycleHighlighted: Int64?
     var allQuery = WorkQuery()
     var allDisplay = WorkDisplay(properties: TaskProperty.standard)
     var filterShown = false
     var myProperties = TaskProperty.standard
     var viewDrafts: [String: WorkViewDraft] = [:]
+    /// Each project's Tasks tab keeps its own filters and display.
+    var projectDrafts: [String: WorkViewDraft] = [:]
     /// Which source Triage shows; nil shows all of it.
     var triageSplit: WorkSource?
     /// The change the undo toast offers to take back, and a count that
@@ -349,6 +493,8 @@ final class WorkFocus {
 
     func open(_ id: String?, in place: Place) {
         openedIn[place] = id
+        guard let id else { return }
+        recent = [id] + recent.filter { $0 != id }.prefix(19)
     }
 
     /// What a verb acts on: the open task, else the selection, else the
@@ -411,6 +557,17 @@ final class WorkFocus {
     func extendSelection(to id: String) {
         selectRange(from: anchor ?? highlighted ?? id, to: id)
         highlighted = id
+    }
+
+    /// ⇧X: selects from the last row picked to the highlighted one.
+    func extendSelectionToHighlight() -> Bool {
+        guard let highlighted else { return false }
+        if anchor == nil, selection.isEmpty {
+            toggle(highlighted)
+        } else {
+            selectRange(from: anchor ?? highlighted, to: highlighted)
+        }
+        return true
     }
 
     func selectAll() {
@@ -497,6 +654,12 @@ final class WorkFocus {
         }
     }
 
+    func projectListing(_ project: String) -> WorkViewDraft {
+        projectDrafts[project] ?? WorkViewDraft(
+            query: WorkQuery(),
+            display: WorkDisplay(properties: TaskProperty.standard.filter { $0 != TaskProperty.project.rawValue }))
+    }
+
     private func selectRange(from start: String, to end: String) {
         guard let a = visible.firstIndex(of: start), let b = visible.firstIndex(of: end) else { return }
         selection.formUnion(visible[min(a, b)...max(a, b)])
@@ -510,10 +673,13 @@ final class WorkFocus {
 final class WorkKeys {
     private var monitor: Any?
     private var goPressedAt: TimeInterval?
+    private var openPressedAt: TimeInterval?
     private var relatePressedAt: TimeInterval?
     private static let destinations: [String: Place] = [
         "h": .capture, "d": .today, "m": .meetings, "t": .tasks, "i": .triage, "p": .people, "j": .projects,
     ]
+    /// O then a letter: a recent task, a person or a label to go to.
+    private static let openers: [String: WorkPicker.Kind] = ["i": .recent, "u": .person, "l": .label]
     private static let relations: [String: WorkAction] = [
         "b": .blockedBy, "x": .blocks, "r": .related, "m": .duplicate, "p": .parent,
     ]
@@ -545,11 +711,23 @@ final class WorkKeys {
                 return true
             }
         }
-        if flags.isEmpty, key == "g" {
-            goPressedAt = event.timestamp
+        if let pressed = openPressedAt {
+            openPressedAt = nil
+            if event.timestamp - pressed < 1.5, flags.isEmpty, let kind = Self.openers[key] {
+                model.workFocus.picker = WorkPicker(kind: kind, ids: [])
+                model.paletteShown = true
+                return true
+            }
+        }
+        if flags.isEmpty, key == "g" || key == "o" {
+            if key == "g" { goPressedAt = event.timestamp } else { openPressedAt = event.timestamp }
             return true
         }
         guard !model.showingSettings else { return false }
+        if flags.isEmpty, key == "/" {
+            model.toggleSearch()
+            return true
+        }
         if model.place == .inbox, model.workFocus.opened(in: .inbox) == nil {
             return InboxKeys.handle(event, key: key, flags: flags, model)
         }
@@ -559,16 +737,56 @@ final class WorkKeys {
         if model.place == .meetings {
             return LiveCardKeys.handle(event, key: key, flags: flags, model)
         }
-        if model.place == .archive, flags == .command, key == "z", model.work.undoTitle != nil {
-            model.undoWork()
-            return true
+        if model.place == .archive {
+            return archive(key: key, flags: flags, model)
         }
-        if flags.isEmpty, key == "/", model.place == .projects {
-            model.toggleSearch()
+        if model.place == .projects, model.workFocus.opened(in: .projects) == nil,
+           let project = model.projects.selectedProjectId {
+            switch (flags, key) {
+            case (.command, "i"):
+                model.workFocus.panelHidden.toggle()
+                return true
+            case (.option, "f") where model.workFocus.targets(in: .projects).isEmpty:
+                let on = !model.work.isFavorite(.project, project)
+                model.work.setFavorite(.project, project, on)
+                model.workFocus.announce(on ? "Added to favorites" : "Removed from favorites", undoes: false)
+                return true
+            default:
+                break
+            }
+        }
+        if model.place == .tasks, model.workFocus.tab == .cycle, model.workFocus.opened(in: .tasks) == nil,
+           CycleKeys.handle(event, key: key, flags: flags, model) {
             return true
         }
         guard model.showsTasks else { return false }
         return work(event, key: key, flags: flags, model)
+    }
+
+    /// The archive page: J/K move along it, # restores the row under them,
+    /// ⌘Z takes the last change back.
+    private func archive(key: String, flags: NSEvent.ModifierFlags, _ model: AppModel) -> Bool {
+        let focus = model.workFocus
+        let shown = model.work.archive.map { $0.deleted.map(\.item.id) + $0.archived.map(\.id) } ?? []
+        switch (flags, key) {
+        case (.command, "z"):
+            guard model.work.undoTitle != nil else { return false }
+            model.undoWork()
+            return true
+        case ([], "j"), ([], "k"):
+            guard let first = shown.first, let last = shown.last else { return false }
+            let index = focus.archiveHighlighted.flatMap(shown.firstIndex(of:))
+            focus.archiveHighlighted = index.map { shown[min(max($0 + (key == "j" ? 1 : -1), 0), shown.count - 1)] }
+                ?? (key == "j" ? first : last)
+            return true
+        case (.shift, "#"):
+            guard let id = focus.archiveHighlighted, let index = shown.firstIndex(of: id) else { return false }
+            focus.archiveHighlighted = index + 1 < shown.count ? shown[index + 1] : index > 0 ? shown[index - 1] : nil
+            model.changeWork { model.work.restoreFromArchive(id) }
+            return true
+        default:
+            return false
+        }
     }
 
     private func work(_ event: NSEvent, key: String, flags: NSEvent.ModifierFlags, _ model: AppModel) -> Bool {
@@ -607,6 +825,9 @@ final class WorkKeys {
         }
         switch event.specialKey {
         case .downArrow?, .upArrow?:
+            if flags == [.option, .shift], opened == nil {
+                return model.moveToEdge(targets, top: event.specialKey == .upArrow)
+            }
             guard plain || shift else { return false }
             let delta = event.specialKey == .downArrow ? 1 : -1
             if let opened {
@@ -619,7 +840,7 @@ final class WorkKeys {
             return run(.open)
         case .delete?:
             guard command else { return false }
-            return run(.archive)
+            return run(.delete)
         case .tab?, .backTab?:
             guard place == .triage, opened == nil, plain || shift else { return false }
             focus.cycleSplit(by: event.specialKey == .backTab || shift ? -1 : 1)
@@ -642,6 +863,14 @@ final class WorkKeys {
             case "v":
                 guard let opened else { return false }
                 return model.attachPasteboard(to: opened)
+            case "f":
+                guard place == .tasks || model.listedProject != nil, opened == nil, model.listing != nil else { return false }
+                focus.filterShown = true
+                return true
+            case "i":
+                guard opened != nil else { return false }
+                focus.panelHidden.toggle()
+                return true
             default:
                 return false
             }
@@ -649,16 +878,40 @@ final class WorkKeys {
         if flags == [.command, .shift], key == ";" || key == ":" {
             return run(.delegate)
         }
+        if flags == [.command, .shift], key == "o", let opened {
+            focus.pageAsk = TaskPageAsk(id: opened, part: .subtask)
+            return true
+        }
+        if flags == .control, key == "l", let opened {
+            focus.pageAsk = TaskPageAsk(id: opened, part: .link)
+            return true
+        }
+        if flags == .option {
+            switch key {
+            case "f":
+                return model.toggleFavorite(targets)
+            case "c" where place != .people && place != .projects:
+                focus.composing = model.workDraftDefaults
+                focus.composingFromTemplate = true
+                return true
+            default:
+                return false
+            }
+        }
         if shift {
             switch key {
             case "p": return run(.project)
+            case "m": return run(.milestone)
             case "c": return run(.cycle)
+            case "e": return run(.estimate)
             case "y": return answer(.acceptAllProposals)
-            case "d":
-                guard place == .tasks, opened == nil else { return false }
-                return model.rescheduleOverdue()
+            case "d": return run(.due)
+            case "s": return model.toggleSubscription(targets)
+            case "x":
+                guard opened == nil else { return false }
+                return focus.extendSelectionToHighlight()
             case "v":
-                guard place == .tasks, opened == nil else { return false }
+                guard place == .tasks || model.listedProject != nil, opened == nil else { return false }
                 focus.displayShown.toggle()
                 return true
             case "?", "/":
@@ -678,15 +931,8 @@ final class WorkKeys {
             focus.move(delta, extend: false)
             return true
         case "f":
-            guard place == .tasks, opened == nil, focus.listing(model.work.views) != nil else { return false }
+            guard place == .tasks || model.listedProject != nil, opened == nil, model.listing != nil else { return false }
             focus.filterShown = true
-            return true
-        case "/":
-            if place == .tasks, opened == nil, focus.listing(model.work.views) != nil {
-                focus.filterShown = true
-            } else {
-                model.toggleSearch()
-            }
             return true
         case "x":
             guard opened == nil, let id = focus.highlighted else { return false }
@@ -696,7 +942,7 @@ final class WorkKeys {
             guard opened == nil, focus.highlighted != nil else { return false }
             focus.peeking.toggle()
             return true
-        case "c" where place != .people:
+        case "c" where place != .people && place != .projects:
             focus.composing = place == .triage ? WorkPatch() : model.workDraftDefaults
             return true
         case "m":
@@ -713,7 +959,7 @@ final class WorkKeys {
         case "1" where place == .triage: return run(.accept)
         case "2" where place == .triage: return run(.decline)
         case "3" where place == .triage: return run(.duplicate)
-        case "h": return run(.snooze)
+        case "h": return run(place == .triage ? .snooze : .remind)
         case "b": return run(.block)
         case "r": return run(.nudge)
         case "y": return answer(.acceptProposal)
@@ -734,6 +980,7 @@ extension AppModel {
         switch place {
         case .tasks, .triage: true
         case .people: workFocus.personList != nil || workFocus.opened(in: .people) != nil
+        case .projects: workFocus.projectList != nil || workFocus.opened(in: .projects) != nil
         case .inbox: workFocus.opened(in: .inbox) != nil
         default: false
         }
@@ -770,6 +1017,14 @@ extension AppModel {
     func perform(_ action: WorkAction, on ids: [String]) {
         guard let first = ids.first else { return }
         let focus = workFocus
+        if action == .milestone, let project = workRows(ids).first?.projectId {
+            Task {
+                focus.milestones = await projects.milestones(of: project)
+                focus.picker = WorkPicker(kind: .milestone, ids: ids)
+                paletteShown = true
+            }
+            return
+        }
         if let kind = action.picker {
             focus.picker = WorkPicker(kind: kind, ids: ids)
             paletteShown = true
@@ -787,6 +1042,13 @@ extension AppModel {
             changeWork { work.update(ids, WorkPatch(owner: .myself)) }
         case .rename:
             focus.renaming = first
+        case .comment, .history:
+            focus.peeking = false
+            focus.highlighted = first
+            focus.open(first, in: place)
+            focus.pageAsk = TaskPageAsk(id: first, part: action == .comment ? .composer : .history)
+        case .restore:
+            changeWork { work.restore(ids) }
         case .accept:
             leave(ids) { work.accept(ids, applySuggestions: true) }
         case .archive:
@@ -806,8 +1068,8 @@ extension AppModel {
         case .removeParent:
             let children = workRows(ids).filter { $0.parentId != nil }.map(\.id)
             changeWork { work.update(children, WorkPatch(parentId: .clear)) }
-        case .status, .priority, .owner, .due, .labels, .project, .duplicate, .snooze, .decline, .delegate, .cycle,
-             .blockedBy, .blocks, .related, .parent:
+        case .status, .priority, .owner, .due, .labels, .project, .milestone, .duplicate, .snooze, .remind, .decline,
+             .delegate, .cycle, .blockedBy, .blocks, .related, .parent, .estimate, .forPerson:
             break
         }
     }
@@ -844,12 +1106,30 @@ extension AppModel {
         changeWork { work.update([id], WorkPatch(title: trimmed)) }
     }
 
+    /// The project whose Tasks tab is in front.
+    var listedProject: String? { place == .projects ? workFocus.projectList : nil }
+
+    /// The filters and display of the list in front; a project's Tasks tab
+    /// keeps its own.
+    var listing: WorkViewDraft? {
+        if let project = listedProject { return workFocus.projectListing(project) }
+        return workFocus.listing(work.views)
+    }
+
     /// Changes the filters or display of the list showing, as a draft until
     /// a saved view is saved.
     func editListing(_ change: (inout WorkViewDraft) -> Void) {
-        guard var draft = workFocus.listing(work.views) else { return }
+        guard var draft = listing else { return }
         change(&draft)
-        workFocus.setListing(draft, views: work.views)
+        setListing(draft)
+    }
+
+    private func setListing(_ draft: WorkViewDraft) {
+        if let project = listedProject {
+            workFocus.projectDrafts[project] = draft
+        } else {
+            workFocus.setListing(draft, views: work.views)
+        }
     }
 
     /// Every change made from a task screen goes through here, so the toast
@@ -890,22 +1170,43 @@ extension AppModel {
     }
 
     func toggleWorkLayout() -> Bool {
-        let focus = workFocus
-        guard place == .tasks, focus.opened(in: place) == nil, var draft = focus.listing(work.views) else { return false }
+        guard place == .tasks || listedProject != nil, workFocus.opened(in: place) == nil,
+              var draft = listing else { return false }
         draft.display.layout = draft.display.layout == .list ? .board : .list
-        focus.setListing(draft, views: work.views)
+        setListing(draft)
         return true
     }
 
-    /// What a new task starts with on the tab showing: on Waiting on, nobody
-    /// yet; elsewhere, me.
+    /// ⌥⇧↑ and ⌥⇧↓: the tasks go to the top or the bottom of the manual
+    /// order, and the list showing orders by hand so the move shows.
+    func moveToEdge(_ ids: [String], top: Bool) -> Bool {
+        guard place == .tasks || listedProject != nil, !ids.isEmpty, var draft = listing else { return false }
+        work.move(ids, to: top ? .top : .bottom)
+        if draft.display.orderBy != .manual {
+            draft.display.orderBy = .manual
+            setListing(draft)
+        }
+        return true
+    }
+
+    /// What a new task starts with: on Waiting on, nobody yet; elsewhere, me.
+    /// On a project's Tasks tab it starts in that project.
     var workDraftDefaults: WorkPatch {
-        WorkPatch(status: .notStarted, owner: workFocus.tab == .waiting ? .nobody : .myself)
+        var start = WorkPatch(status: .notStarted,
+                              owner: listedProject == nil && workFocus.tab == .waiting ? .nobody : .myself)
+        if let project = listedProject { start.projectId = .set(project) }
+        return start
     }
 
     /// The palette's verbs for the tasks in front: only those that apply, and
     /// a key only where that key works.
     var workPaletteActions: [PaletteAction] {
+        if place == .archive, let id = workFocus.archiveHighlighted {
+            return [PaletteAction(
+                id: "work-restore", group: .work, title: WorkAction.restore.title,
+                run: { [weak self] in self?.changeWork { self?.work.restoreFromArchive(id) } },
+                icon: WorkAction.restore.icon, shortcut: "#")]
+        }
         let ids = workTargets
         let rows = workRows(ids)
         let proposed = workProposed(rows)
@@ -922,12 +1223,62 @@ extension AppModel {
                 run: { [weak self] in self?.copy(copy, ids: ids) },
                 icon: copy.icon, shortcut: nil)
         }
+        let toggles = rows.count == 1 ? watchToggles(ids) : []
         let overdue = overdueTargets
-        guard !overdue.isEmpty else { return verbs + copies }
-        return verbs + copies + [PaletteAction(
+        guard !overdue.isEmpty else { return verbs + toggles + copies }
+        return verbs + toggles + copies + [PaletteAction(
             id: "work-reschedule-overdue", group: .work, title: "Reschedule overdue",
             run: { [weak self] in self?.perform(.due, on: overdue) },
-            icon: "calendar.badge.clock", shortcut: "shift+d")]
+            icon: "calendar.badge.clock", shortcut: nil)]
+    }
+
+    /// Subscribe and favorite for the one task in front, each named for
+    /// what it will do.
+    private func watchToggles(_ ids: [String]) -> [PaletteAction] {
+        guard let id = ids.first else { return [] }
+        let watched = work.subscriptions[id] != nil
+        let starred = work.isFavorite(.task, id)
+        return [
+            PaletteAction(
+                id: "work-subscribe", group: .work, title: watched ? "Unsubscribe" : "Subscribe",
+                run: { [weak self] in _ = self?.toggleSubscription(ids) },
+                icon: watched ? "bell.slash" : "bell", shortcut: "shift+s"),
+            PaletteAction(
+                id: "work-favorite", group: .work, title: starred ? "Remove from favorites" : "Add to favorites",
+                run: { [weak self] in _ = self?.toggleFavorite(ids) },
+                icon: starred ? "star.slash" : "star", shortcut: "option+f"),
+        ]
+    }
+
+    /// ⇧S: subscribes to every task here unless all of them already are.
+    func toggleSubscription(_ ids: [String]) -> Bool {
+        guard !ids.isEmpty else { return false }
+        let on = ids.contains { work.subscriptions[$0] == nil }
+        for id in ids { work.subscribe(id, on) }
+        let noun = ids.count == 1 ? "this task" : "\(ids.count) tasks"
+        workFocus.announce(on ? "Subscribed to \(noun)" : "Unsubscribed from \(noun)", undoes: false)
+        return true
+    }
+
+    /// ⌥F: stars the one task here, or takes its star away.
+    func toggleFavorite(_ ids: [String]) -> Bool {
+        guard ids.count == 1, let id = ids.first else { return false }
+        let on = !work.isFavorite(.task, id)
+        work.setFavorite(.task, id, on)
+        workFocus.announce(on ? "Added to favorites" : "Removed from favorites", undoes: false)
+        return true
+    }
+
+    /// Sets, moves or, with nil, takes away the reminder on each task.
+    func remind(_ ids: [String], at moment: Int64?) {
+        let routines = self.routines
+        let focus = workFocus
+        Task {
+            for id in ids { await routines.setReminder(on: id, at: moment) }
+            guard routines.error == nil else { return focus.announce(routines.error, undoes: false) }
+            let when = moment.map { "Reminder set for \(WorkChoices.long($0))" } ?? "Reminder removed"
+            focus.announce(when, undoes: false)
+        }
     }
 
     func copy(_ copy: TaskCopy, ids: [String]) {
@@ -950,20 +1301,24 @@ extension AppModel {
     func paletteMatches(_ query: String) -> [PaletteMatch] {
         guard !query.isEmpty else { return [] }
         let number = Self.taskNumber(query)
-        var found: [WorkItemRow] = []
+        var found: [(row: WorkItemRow, rank: Int)] = []
         for row in work.items ?? [] where row.archivedAtMs == nil {
-            if row.number == number || row.title.localizedCaseInsensitiveContains(query) {
-                found.append(row)
+            if row.number == number {
+                found.append((row, 0))
+            } else if row.title.localizedCaseInsensitiveContains(query) {
+                found.append((row, 1))
+            } else if row.details?.localizedCaseInsensitiveContains(query) == true {
+                found.append((row, 2))
             }
         }
         let tasks = found.sorted { a, b in
-            (a.number == number ? 0 : 1, a.status.isOpen ? 0 : 1, -a.updatedAtMs)
-                < (b.number == number ? 0 : 1, b.status.isOpen ? 0 : 1, -b.updatedAtMs)
+            (a.rank, a.row.status.isOpen ? 0 : 1, -a.row.updatedAtMs) < (b.rank, b.row.status.isOpen ? 0 : 1, -b.row.updatedAtMs)
         }
         .prefix(6)
-        .map { row in
+        .map { row, rank in
             PaletteMatch(kind: .task(row.status), id: row.id, title: row.title,
-                         meta: ["#\(row.number)", row.projectTitle].compactMap { $0 }.joined(separator: " · "))
+                         meta: ["#\(row.number)", rank == 2 ? "in description" : nil, row.projectTitle]
+                            .compactMap { $0 }.joined(separator: " · "))
         }
         let projects = work.projects.filter { $0.title.localizedCaseInsensitiveContains(query) }.prefix(4).map {
             PaletteMatch(kind: .project, id: $0.id, title: $0.title, meta: $0.status.label)
@@ -1004,6 +1359,7 @@ extension AppModel {
 
     private func paletteKeys(_ action: WorkAction) -> String? {
         if action == .duplicate, place != .triage { return "m m" }
+        if action == (place == .triage ? .remind : .snooze) { return nil }
         let triageKeys: Set<WorkAction> = [.accept, .decline, .duplicate]
         let keys = place == .triage || !triageKeys.contains(action) ? action.keys : nil
         return keys?.isEmpty == true ? nil : keys

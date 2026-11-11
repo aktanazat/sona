@@ -39,6 +39,16 @@ struct ScratchNoteVersion: Decodable, Identifiable, Equatable {
     let kind: Kind
     let body: String
     let savedAtMs: Int64
+    /// Who wrote it: you in the app, or an agent through the CLI or MCP.
+    let actor: WorkActor
+    /// The name the agent gave, when it gave one.
+    let agent: String?
+
+    /// "by Claude Code" or "by an agent" for an agent's save; nil for yours.
+    var byline: String? {
+        guard actor == .agent else { return nil }
+        return agent.map { "by \($0)" } ?? "by an agent"
+    }
 }
 
 /// `scratchpad-changed-event`: some note was written or deleted, by this
@@ -121,6 +131,27 @@ struct ScratchNoteMemory: Decodable {
     let passages: [ScratchPassage]
     let interpretation: Bool
     let connections: [ScratchConnection]
+    /// The projects, milestones, tasks and cycles the note is a document of.
+    let documents: [ScratchDocumentOf]
+}
+
+/// One thing a note was written for. `id` is a cycle's number for a cycle.
+struct ScratchDocumentOf: Decodable, Identifiable, Equatable {
+    enum Kind: String, Decodable {
+        case project, milestone, task, cycle
+    }
+
+    let kind: Kind
+    let targetId: String
+    let title: String
+
+    var id: String { "\(kind.rawValue):\(targetId)" }
+
+    private enum CodingKeys: String, CodingKey {
+        case kind
+        case targetId = "id"
+        case title
+    }
 }
 
 struct ScratchSourceEvidence: Decodable, Identifiable {
@@ -721,12 +752,21 @@ final class ScratchpadStore {
         return evidence
     }
 
+    /// Notes, meetings and people matching `query`, ten of each at most, so
+    /// tasks and dictations in the shared search never take a source's place.
     func searchSources(_ query: String) async throws -> [ScratchSourceCandidate] {
+        async let notes = searchSources(query, scope: "notes")
+        async let meetings = searchSources(query, scope: "meetings")
+        async let people = searchSources(query, scope: "people")
+        return try await notes + meetings + people
+    }
+
+    private func searchSources(_ query: String, scope: String) async throws -> [ScratchSourceCandidate] {
         let page: ScratchSourceSearchPage = try await core.request(
             "sona_query_search",
-            ["scope": .string("all"), "query": .string(query), "limit": .number(30), "cursor": .null] as [String: JSONValue]
+            ["scope": .string(scope), "query": .string(query), "limit": .number(10), "cursor": .null] as [String: JSONValue]
         )
-        return page.entries.filter { ["note", "meeting", "person"].contains($0.kind) }
+        return page.entries
     }
 
     func link(_ target: ScratchSourceRef) async -> Bool {
@@ -841,7 +881,63 @@ final class ScratchpadStore {
         try await core.request("scratchpad_subject_delete", ScratchIdParams(id: id))
     }
 
+    /// The notes filed under cycle `number`, newest modified first.
+    func cycleNotes(_ number: Int64) async throws -> [ScratchNote] {
+        try await core.request("scratchpad_cycle_notes", ScratchCycleParams(number: number))
+    }
+
+    /// Files note `id` under cycle `number`, or takes it off.
+    func fileUnderCycle(_ id: String, number: Int64, filed: Bool) async throws {
+        try await core.request(filed ? "scratchpad_link_cycle" : "scratchpad_unlink_cycle",
+                               ScratchCycleLinkParams(id: id, number: number))
+    }
+
     private func isBlank(_ text: String) -> Bool {
         text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+}
+
+private struct ScratchCycleParams: Encodable {
+    let number: Int64
+}
+
+private struct ScratchCycleLinkParams: Encodable {
+    let id: String
+    let number: Int64
+}
+
+extension AppModel {
+    /// A note about a project, held as one of its sources and opened to write in.
+    /// The note still opens when the link is refused.
+    func newNote(about project: PlanningProject) {
+        newDocument(titled: project.title, of: "project") { id in
+            try await self.projects.linkSource(targetKind: .project, targetId: project.id, sourceKind: .note,
+                                               sourceId: id, atMs: nil, operationId: UUID().uuidString.lowercased())
+        }
+    }
+
+    /// A note about cycle `number`, filed under it and opened to write in.
+    func newNote(aboutCycle number: Int64, titled title: String) {
+        newDocument(titled: title, of: "cycle") { id in
+            try await self.scratchpad.fileUnderCycle(id, number: number, filed: true)
+        }
+    }
+
+    private func newDocument(titled title: String, of kind: String, file: @escaping (String) async throws -> Void) {
+        Task {
+            let note: ScratchNote
+            do {
+                note = try await core.request("scratchpad_create", ["body": "\(title)\n\n"])
+            } catch {
+                workFocus.announce(error.localizedDescription, undoes: false)
+                return
+            }
+            do {
+                try await file(note.id)
+            } catch {
+                workFocus.announce("The note couldn’t be linked to the \(kind). \(error.localizedDescription)", undoes: false)
+            }
+            open(link: "sona://note/\(note.id)")
+        }
     }
 }

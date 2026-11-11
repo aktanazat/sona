@@ -19,6 +19,7 @@ struct TaskComposer: View {
     @State private var reading = TitleReading()
     @State private var picked: Set<Choice> = []
     @State private var template: WorkTemplate?
+    @State private var fromTemplate = false
 
     /// Fields set in their pickers: the title's words no longer set them.
     private enum Choice { case priority, owner, due, project }
@@ -52,7 +53,7 @@ struct TaskComposer: View {
                 .padding(.top, Space.s)
             ChatFlowRow(spacing: Space.s) {
                 if !model.routines.templates.isEmpty {
-                    ComposerChip(title: template?.name ?? "Template", prompt: "Template…") {
+                    ComposerChip(title: template?.name ?? "Template", prompt: "Template…", opensAtStart: fromTemplate) {
                         Image(systemName: "doc.on.doc").font(.system(size: 11)).foregroundStyle(Theme.inkSecondary)
                     } make: { text in
                         WorkChoices.filtered(templateChoices, by: text, kind: .project)
@@ -145,7 +146,9 @@ struct TaskComposer: View {
         .background(Theme.elevated)
         .onAppear {
             take(start)
-            DispatchQueue.main.async { titleFocused = true }
+            fromTemplate = model.workFocus.composingFromTemplate
+            model.workFocus.composingFromTemplate = false
+            if !fromTemplate { DispatchQueue.main.async { titleFocused = true } }
         }
     }
 
@@ -308,6 +311,11 @@ struct TaskComposer: View {
                 failure = failure ?? model.work.mutationError ?? "The task wasn't created."
                 return
             }
+            var place = WorkPatch(cycle: start.cycle)
+            if case .set? = start.milestoneId, start.projectId == item.projectId.map({ .set($0) }) {
+                place.milestoneId = start.milestoneId
+            }
+            if place != WorkPatch() { work.update([item.id], place) }
             model.workFocus.highlightWhenShown(item.id)
             model.workFocus.composing = nil
         }
@@ -342,6 +350,7 @@ private struct ComposerChip<Mark: View>: View {
     let title: String
     let prompt: String
     var keepsOpen = false
+    var opensAtStart = false
     var words: WorkToken?
     var selected: WorkToken.ID?
     var keep: (WorkToken) -> Void = { _ in }
@@ -383,6 +392,9 @@ private struct ComposerChip<Mark: View>: View {
             ChoiceList(prompt: prompt, keepsOpen: keepsOpen, compact: true, make: make) { shown = false }
                 .padding(.vertical, Space.xs)
                 .environment(model)
+        }
+        .onChange(of: opensAtStart, initial: true) {
+            if opensAtStart { DispatchQueue.main.async { shown = true } }
         }
     }
 }

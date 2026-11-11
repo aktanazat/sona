@@ -13,7 +13,7 @@ final class ThemeTests: XCTestCase {
         for (appearance, seed) in appearances {
             for contrast in contrasts {
                 let theme = seed(contrast)
-                for text in [ThemeRole.ink, .inkSecondary, .inkTertiary, .accent, .live] {
+                for text in [ThemeRole.ink, .inkSecondary, .inkTertiary, .accent, .live, .dueSoon] {
                     for background in [ThemeRole.page, .inset, .surface] {
                         XCTAssertGreaterThanOrEqual(
                             ratio(theme.value(text), theme.value(background)), floor,

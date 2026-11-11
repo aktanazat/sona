@@ -6,9 +6,9 @@ import SwiftUI
 /// The places a window shows. Library opens from Home and Calendar from
 /// Projects, so the sidebar lists only the rest.
 enum Place: Int, CaseIterable, Identifiable {
-    case capture, library, meetings, people, scratchpad, projects, calendar, tasks, triage, today, inbox, archive, loops
+    case capture, library, meetings, people, scratchpad, projects, calendar, tasks, triage, today, inbox, archive, loops, initiatives
 
-    static let sidebar: [Place] = [.capture, .inbox, .tasks, .triage, .meetings, .people, .scratchpad, .projects, .loops]
+    static let sidebar: [Place] = [.capture, .inbox, .tasks, .triage, .meetings, .people, .scratchpad, .projects, .initiatives, .loops]
 
     var id: Int { rawValue }
 
@@ -18,7 +18,7 @@ enum Place: Int, CaseIterable, Identifiable {
         case .library: .capture
         case .calendar: .projects
         case .today, .archive: .tasks
-        case .capture, .meetings, .people, .scratchpad, .projects, .tasks, .triage, .inbox, .loops: self
+        case .capture, .meetings, .people, .scratchpad, .projects, .tasks, .triage, .inbox, .loops, .initiatives: self
         }
     }
 
@@ -37,6 +37,7 @@ enum Place: Int, CaseIterable, Identifiable {
         case .inbox: "Inbox"
         case .archive: "Archive"
         case .loops: "Automations"
+        case .initiatives: "Initiatives"
         }
     }
 
@@ -55,6 +56,7 @@ enum Place: Int, CaseIterable, Identifiable {
         case .inbox: "bell"
         case .archive: "archivebox"
         case .loops: "repeat"
+        case .initiatives: "scope"
         }
     }
 }
@@ -318,6 +320,8 @@ final class AppModel {
     let people: PeopleStore
     let scratchpad: ScratchpadStore
     let projects: ProjectsStore
+    /// The comment threads on projects, milestones, meetings and notes.
+    let comments: CommentThreads
     let modes: ModesStore
     let providers: ProvidersStore
     let vocabulary: VocabularyStore
@@ -388,7 +392,9 @@ final class AppModel {
         personPhotos = photos
         people = PeopleStore(core: core, photos: photos)
         scratchpad = ScratchpadStore(core: core)
-        projects = ProjectsStore(core: core)
+        let comments = CommentThreads(core: core)
+        self.comments = comments
+        projects = ProjectsStore(core: core, comments: comments)
         modes = ModesStore(core: core)
         providers = ProvidersStore(core: core)
         vocabulary = VocabularyStore(core: core)
@@ -457,6 +463,7 @@ final class AppModel {
     /// The places and verbs the palette offers before the plane is asked.
     var paletteActions: [PaletteAction] {
         var actions = workPaletteActions + briefPaletteActions
+        if place == .projects { actions += projects.dependencyPaletteActions }
         actions += Place.allCases.map { place in
             PaletteAction(id: "go-\(place.rawValue)", group: .navigation, title: place.title) { [weak self] in
                 self?.go(place)
@@ -695,10 +702,21 @@ final class AppModel {
 
     /// A `sona://` link: the core resolves it and answers with a navigation
     /// event, which lands in `open(_ target:)` or the meetings store. A task
-    /// link opens here, since a task's page lives only in this app.
+    /// link, with or without a comment, and a `sona://new` link open here,
+    /// since a task's page and the new-task sheet live only in this app.
     func open(link: String) {
         if let task = TaskCopy.task(in: link) {
             openTask(task)
+            if let comment = TaskCopy.comment(in: link) {
+                workFocus.pageAsk = TaskPageAsk(id: task, part: .comment(comment))
+            }
+            return
+        }
+        if let draft = TaskCopy.draft(in: link, work: work) {
+            reveal()
+            go(.tasks)
+            workFocus.open(nil, in: .tasks)
+            workFocus.composing = draft
             return
         }
         Task { await query.open(link: link) }

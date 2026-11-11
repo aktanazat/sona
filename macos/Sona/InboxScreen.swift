@@ -1,8 +1,9 @@
 import AppKit
 import SwiftUI
 
-/// What agents and Sona did to the tasks the user follows. Return opens the
-/// task here; Esc comes back to the list.
+/// What agents and Sona did to the tasks the user follows, reminders and due
+/// days, automation runs, and the weekly project digest. Return opens the
+/// task here, or the digest beside the list; Esc comes back to the list.
 struct InboxScreen: View {
     @Environment(AppModel.self) private var model
 
@@ -17,6 +18,7 @@ struct InboxScreen: View {
             UndoToast()
         }
         .modifier(WorkSheets())
+        .onDisappear { focus.peeking = false }
     }
 }
 
@@ -29,12 +31,39 @@ extension AppModel {
     func openNotice(_ notice: WorkNotification) {
         if notice.readAtMs == nil { work.mark([notice.id], .read) }
         workFocus.inboxHighlighted = notice.id
-        if work.binned[notice.itemId] != nil {
+        workFocus.peeking = notice.digest != nil
+        guard let itemId = notice.itemId else {
+            if let automation = notice.automation {
+                go(.loops)
+                loops.select(automation.id)
+            }
+            return
+        }
+        if work.binned[itemId] != nil {
             go(.archive)
             return
         }
-        workFocus.highlighted = notice.itemId
-        workFocus.open(notice.itemId, in: .inbox)
+        workFocus.highlighted = itemId
+        workFocus.open(itemId, in: .inbox)
+    }
+
+    /// The task row behind the highlighted notice, for Space's peek.
+    var inboxPeeked: WorkItemRow? {
+        guard workFocus.peeking, let id = workFocus.inboxHighlighted,
+              let itemId = inboxShown.first(where: { $0.id == id })?.itemId
+        else { return nil }
+        return workRows([itemId]).first
+    }
+
+    /// The digest behind the highlighted notice, shown beside the list.
+    var inboxDigest: WorkProjectDigest? {
+        guard workFocus.peeking, let id = workFocus.inboxHighlighted else { return nil }
+        return inboxShown.first(where: { $0.id == id })?.digest
+    }
+
+    /// ⇧⌫: archives every read notice the inbox shows.
+    func clearReadNotices() {
+        work.mark(inboxShown.filter { $0.readAtMs != nil }.map(\.id), .archive)
     }
 }
 
@@ -61,6 +90,7 @@ enum InboxSnooze: CaseIterable {
 
 private struct InboxList: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         let store = model.work
@@ -74,14 +104,19 @@ private struct InboxList: View {
                     selection: focus.inboxSnoozed
                 ) { focus.inboxSnoozed = $0 }
             } trailing: {
+                Button("Clear read") { model.clearReadNotices() }
+                    .buttonStyle(QuietButton(compact: true))
+                    .disabled(!shown.contains { $0.readAtMs != nil })
+                    .help("Archive every read notice  ⇧⌫")
                 Button("Mark all read") { store.markAllRead() }
                     .buttonStyle(QuietButton(compact: true))
                     .disabled(store.unread == 0)
+                    .help("Mark all read  ⌥U")
             }
             if shown.isEmpty {
                 TaskEmpty(line: focus.inboxSnoozed
                     ? "Nothing snoozed."
-                    : "Nothing new. Agents' changes to tasks you follow land here.")
+                    : "Nothing new. Agents' changes, reminders, automation runs and the weekly project digest land here.")
             } else {
                 ScrollViewReader { proxy in
                     ScrollView {
@@ -99,7 +134,17 @@ private struct InboxList: View {
                 }
             }
         }
-        .onChange(of: shown.map(\.itemId), initial: true) { _, ids in
+        .overlay(alignment: .trailing) {
+            if let row = model.inboxPeeked {
+                TaskPeek(row: row, place: .inbox)
+                    .transition(reduceMotion ? .opacity : .move(edge: .trailing).combined(with: .opacity))
+            } else if let digest = model.inboxDigest {
+                ProjectDigestPanel(digest: digest)
+                    .transition(reduceMotion ? .opacity : .move(edge: .trailing).combined(with: .opacity))
+            }
+        }
+        .animation(Motion.regular, value: focus.peeking)
+        .onChange(of: shown.compactMap(\.itemId), initial: true) { _, ids in
             var seen = Set<String>()
             focus.show(ids.filter { seen.insert($0).inserted })
         }
@@ -114,8 +159,8 @@ private struct InboxRow: View {
 
     var body: some View {
         let store = model.work
-        let row = model.workRows([notice.itemId]).first
-        let deleted = row == nil ? store.binned[notice.itemId]?.item : nil
+        let row = notice.itemId.flatMap { model.workRows([$0]).first }
+        let deleted = row == nil ? notice.itemId.flatMap { store.binned[$0]?.item } : nil
         let unread = notice.readAtMs == nil
         HStack(spacing: 10) {
             Circle()
@@ -126,13 +171,21 @@ private struct InboxRow: View {
             } else if deleted != nil {
                 Image(systemName: "trash").font(.system(size: 12)).foregroundStyle(Theme.inkTertiary)
                     .frame(width: 14)
+            } else if notice.kind == .automation {
+                Image(systemName: "arrow.triangle.2.circlepath").font(.system(size: 12))
+                    .foregroundStyle(notice.failed ? Theme.live : Theme.inkTertiary)
+                    .frame(width: 14)
+            } else if notice.kind == .digest {
+                Image(systemName: "chart.bar.doc.horizontal").font(.system(size: 12))
+                    .foregroundStyle(Theme.inkSecondary)
+                    .frame(width: 14)
             }
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     if let number = row?.number ?? deleted?.number {
                         Text("#\(number)").font(TypeScale.mono(12)).foregroundStyle(Theme.inkTertiary)
                     }
-                    Text(row?.title ?? deleted?.title ?? "A task deleted for good")
+                    Text(row?.title ?? deleted?.title ?? subject)
                         .bodyText(13.5, unread ? Theme.ink : Theme.inkSecondary)
                         .fontWeight(unread ? .semibold : .regular)
                         .lineLimit(1)
@@ -141,12 +194,12 @@ private struct InboxRow: View {
                     }
                 }
                 HStack(spacing: 4) {
-                    if notice.actor == .agent {
-                        Image(systemName: "sparkle").font(.system(size: 10))
+                    if let icon {
+                        Image(systemName: icon).font(.system(size: 10))
                     }
                     Text("\(notice.who) \(notice.what)").lineLimit(1)
                 }
-                .metaText(Theme.inkSecondary)
+                .metaText(notice.failed ? Theme.live : Theme.inkSecondary)
             }
             Spacer(minLength: 12)
             if hovering || highlighted {
@@ -167,6 +220,22 @@ private struct InboxRow: View {
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.isButton)
         .accessibilityValue(unread ? "Unread" : "")
+    }
+
+    /// The row's title when no task stands behind it.
+    private var subject: String {
+        if notice.itemId == nil, let automation = notice.automation { return automation.name }
+        if notice.digest != nil { return "Weekly project digest" }
+        return "A task deleted for good"
+    }
+
+    private var icon: String? {
+        switch notice.kind {
+        case .reminder: "alarm"
+        case .due: "calendar"
+        case .automation: nil
+        default: notice.actor == .agent ? "sparkle" : nil
+        }
     }
 
     private var time: String {
@@ -209,10 +278,16 @@ private struct InboxRow: View {
 
     @ViewBuilder
     private func menu(_ store: WorkStore) -> some View {
-        if store.binned[notice.itemId] != nil {
-            Button("Show in Recently deleted", systemImage: "trash") { model.openNotice(notice) }
-        } else if model.workRows([notice.itemId]).first != nil {
-            Button("Open task", systemImage: "arrow.up.right.square") { model.openNotice(notice) }
+        if let itemId = notice.itemId {
+            if store.binned[itemId] != nil {
+                Button("Show in Recently deleted", systemImage: "trash") { model.openNotice(notice) }
+            } else if model.workRows([itemId]).first != nil {
+                Button("Open task", systemImage: "arrow.up.right.square") { model.openNotice(notice) }
+            }
+        } else if notice.automation != nil {
+            Button("Open automation", systemImage: "arrow.up.right.square") { model.openNotice(notice) }
+        } else if notice.digest != nil {
+            Button("Open digest", systemImage: "arrow.up.right.square") { model.openNotice(notice) }
         }
         if notice.readAtMs == nil {
             Button("Mark read", systemImage: "envelope.open") { store.mark([notice.id], .read) }
@@ -224,16 +299,29 @@ private struct InboxRow: View {
     }
 }
 
-/// J and K move through the inbox, Return opens the task, U flips read,
-/// H snoozes until tomorrow and Delete archives.
+/// J and K move through the inbox, Space peeks at the task, Return opens
+/// it, U flips read, ⌥U marks all read, H snoozes until tomorrow, Delete
+/// archives and ⇧Delete clears every read notice.
 @MainActor
 enum InboxKeys {
     static func handle(_ event: NSEvent, key: String, flags: NSEvent.ModifierFlags, _ model: AppModel) -> Bool {
-        guard flags.isEmpty else { return false }
         let focus = model.workFocus
         let notices = model.inboxShown
         let index = focus.inboxHighlighted.flatMap { id in notices.firstIndex { $0.id == id } }
         let notice = index.map { notices[$0] }
+        if flags == .option, key == "u" {
+            model.work.markAllRead()
+            return true
+        }
+        if flags == .shift, event.keyCode == 51 {
+            if let notice, notice.readAtMs != nil {
+                focus.inboxHighlighted = notices[(index ?? 0)...].first { $0.readAtMs == nil }?.id
+                    ?? notices.last { $0.readAtMs == nil }?.id
+            }
+            model.clearReadNotices()
+            return true
+        }
+        guard flags.isEmpty else { return false }
         func move(_ delta: Int) -> Bool {
             guard !notices.isEmpty else { return true }
             let next = index.map { min(max($0 + delta, 0), notices.count - 1) } ?? (delta > 0 ? 0 : notices.count - 1)
@@ -245,6 +333,11 @@ enum InboxKeys {
             let rest = notices.filter { $0.id != notice.id }
             focus.inboxHighlighted = rest.isEmpty ? nil : rest[min(index, rest.count - 1)].id
             model.work.mark([notice.id], mark, until: until)
+            return true
+        }
+        if event.keyCode == 53 {
+            guard focus.peeking else { return false }
+            focus.peeking = false
             return true
         }
         if event.keyCode == 51 { return leave(.archive) }
@@ -260,6 +353,14 @@ enum InboxKeys {
         switch key {
         case "j": return move(1)
         case "k": return move(-1)
+        case " ":
+            if focus.peeking {
+                focus.peeking = false
+                return true
+            }
+            if notice == nil { _ = move(1) }
+            focus.peeking = true
+            return true
         case "u":
             guard let notice else { return false }
             model.work.mark([notice.id], notice.readAtMs == nil ? .read : .unread)

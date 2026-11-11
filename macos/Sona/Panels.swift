@@ -1024,7 +1024,8 @@ private enum Lookup {
 
 /// ⌘K. A floating panel: one field, the places and verbs that match, the
 /// lines said in meetings that match, the meeting pictures whose words match,
-/// then the meetings, people, dictations and loops the query plane found, and
+/// then the meetings, tasks (those matched by their comments or across fields
+/// the list above missed), people, dictations and loops the query plane found, and
 /// the ask row when the agent is allowed to hear the question. The corpus
 /// rows are never filtered by the letters typed: the plane matched them,
 /// sometimes by meaning, and a title need not share one letter with the
@@ -1062,7 +1063,7 @@ struct CommandPalette: View {
     /// few enough that the meetings stay in view.
     private static let heardLimit = 4
     private static let kinds: [(kind: QueryRowKind, label: String)] = [
-        (.meeting, "Meetings"), (.person, "People"), (.note, "Notes"),
+        (.meeting, "Meetings"), (.task, "Tasks"), (.person, "People"), (.note, "Notes"),
         (.dictation, "Dictations"), (.loop, "Loops"),
     ]
 
@@ -1234,6 +1235,7 @@ struct CommandPalette: View {
             sections.append((label, picked.map(PaletteRow.match), true))
         }
         let named = Set(matches.compactMap { if case .person = $0.kind { $0.title } else { nil } })
+        let listed = Set(matches.compactMap { if case .task = $0.kind { $0.id } else { nil } })
         let settled = if case .pending = lookup { false } else { true }
         if let command, !command.items.isEmpty {
             sections.append(("Change", [.command(command)], settled))
@@ -1242,7 +1244,13 @@ struct CommandPalette: View {
         if !watching.isEmpty { sections.append(("Watch", watching, true)) }
         if !navigation.isEmpty { sections.append(("Navigation", navigation, true)) }
         if !verbs.isEmpty { sections.append(("Actions", verbs, true)) }
-        let hits = lookup.earlier.filter { $0.kind != .person || !named.contains($0.title) }
+        let hits = lookup.earlier.filter {
+            switch $0.kind {
+            case .person: !named.contains($0.title)
+            case .task: !listed.contains($0.id)
+            default: true
+            }
+        }
         let live = settled
         if let answer, !answer.lines.isEmpty {
             sections.append(("Answer", answer.lines.map(PaletteRow.answer), live))
@@ -1256,7 +1264,7 @@ struct CommandPalette: View {
         }
         for (kind, label) in Self.kinds {
             let rows = hits.filter { $0.kind == kind }.map(PaletteRow.hit)
-            if !rows.isEmpty { sections.append((label, rows, live)) }
+            if !rows.isEmpty { sections.append((kind == .task && !listed.isEmpty ? "More tasks" : label, rows, live)) }
         }
         if case let .answered(answer) = lookup, answer.next != nil, !answer.loadingMore, !answer.moreFailed {
             sections.append(("More", [.more], true))
@@ -1973,6 +1981,7 @@ private struct PaletteRowView: View {
             case .meeting: "video"
             case .dictation: "waveform"
             case .note: "square.and.pencil"
+            case .task: "checkmark.circle"
             case .person: "person"
             case .series: "calendar"
             case .loop: "arrow.triangle.2.circlepath"

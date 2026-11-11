@@ -70,7 +70,8 @@ struct TaskArchiveScreen: View {
     }
 
     private func row(_ item: WorkItem, note: String?) -> some View {
-        HStack(spacing: 10) {
+        let lit = model.workFocus.archiveHighlighted == item.id
+        return HStack(spacing: 10) {
             TaskStatusIcon(status: item.status)
             Text("#\(item.number)").font(TypeScale.mono(12)).foregroundStyle(Theme.inkTertiary)
             Text(item.title).bodyText(13.5).lineLimit(1)
@@ -80,9 +81,15 @@ struct TaskArchiveScreen: View {
             }
             Button("Restore") { model.changeWork { model.work.restoreFromArchive(item.id) } }
                 .buttonStyle(.secondary)
+                .help("Restore  #")
         }
         .padding(.horizontal, 16)
         .frame(height: Theme.listRow)
+        .background(lit ? Theme.controlHover : Color.clear)
+        .contentShape(Rectangle())
+        .onHover { inside in
+            if inside { model.workFocus.archiveHighlighted = item.id }
+        }
     }
 }
 
@@ -94,6 +101,7 @@ struct TaskLifecycleButtons: View {
 
     var body: some View {
         let store = model.work
+        let asked = model.workFocus.pageAsk
         let starred = store.isFavorite(.task, row.id)
         let subscription = store.subscriptions[row.id]
         Button {
@@ -123,6 +131,11 @@ struct TaskLifecycleButtons: View {
                  arrowEdge: .bottom) {
             DescriptionHistory(row: row, versions: versions ?? []) { versions = nil }
                 .environment(model)
+        }
+        .onChange(of: asked, initial: true) {
+            guard let asked, asked.id == row.id, asked.part == .history else { return }
+            model.workFocus.pageAsk = nil
+            Task { versions = await store.descriptionVersions(row.id) }
         }
     }
 }

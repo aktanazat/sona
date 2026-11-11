@@ -180,8 +180,9 @@ struct TasksSettingsView: View {
 
     var body: some View {
         Page {
-            PageTitle("Tasks", subtitle: "Label groups, retired labels and task templates.")
+            PageTitle("Tasks", subtitle: "The weekly project digest, label groups, retired labels and task templates.")
             ErrorNote(model.routines.error ?? model.work.mutationError)
+            ProjectDigestSettings()
             labels
             templates
         }
@@ -265,6 +266,17 @@ private struct LabelSettingsRow: View {
                 }
                 .menuStyle(.borderlessButton)
                 .fixedSize()
+                Menu(label.scope.label) {
+                    Picker("Use on", selection: Binding(get: { label.scope }, set: { work.scopeLabel(label.id, $0) })) {
+                        ForEach(WorkLabelScope.allCases) { Text($0.label).tag($0) }
+                    }
+                    .pickerStyle(.inline)
+                    .labelsHidden()
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .help("Where the label can go")
+                .accessibilityLabel("Use on: \(label.scope.label)")
                 Button(label.retired ? "Restore" : "Retire") {
                     work.retireLabel(label.id, !label.retired)
                 }
@@ -287,6 +299,7 @@ private struct TemplateSettingsRow: View {
     @Environment(AppModel.self) private var model
     @State private var renaming = false
     @State private var deleting = false
+    @State private var editing = false
     @State private var name = ""
 
     var body: some View {
@@ -317,6 +330,12 @@ private struct TemplateSettingsRow: View {
                 }
                 .menuStyle(.borderlessButton)
                 .fixedSize()
+                Button("Edit") { editing = true }
+                    .buttonStyle(.compact)
+                    .popover(isPresented: $editing, arrowEdge: .bottom) {
+                        TemplateFieldsEditor(template: template) { editing = false }
+                            .environment(model)
+                    }
                 Button("Rename") {
                     name = template.name
                     renaming = true
@@ -357,6 +376,86 @@ private struct TemplateSettingsRow: View {
         }
         if !fields.labelIds.isEmpty { parts.append(fields.labelIds.count == 1 ? "1 label" : "\(fields.labelIds.count) labels") }
         return parts.isEmpty ? nil : parts.joined(separator: ", ")
+    }
+}
+
+/// A template's title, details, priority, owner, project and sub-tasks,
+/// changed in place; due day and labels keep their own controls.
+private struct TemplateFieldsEditor: View {
+    let template: WorkTemplate
+    let close: () -> Void
+    @Environment(AppModel.self) private var model
+    @State private var fields = WorkTemplateFields()
+    @State private var subtasks = ""
+
+    var body: some View {
+        let work = model.work
+        VStack(alignment: .leading, spacing: Space.m) {
+            Text("Edit “\(template.name)”").font(TypeScale.label(13)).foregroundStyle(Theme.inkSecondary)
+            TextField("Task title", text: text(\.title))
+                .textFieldStyle(.roundedBorder)
+            TextField("Details", text: text(\.details), axis: .vertical)
+                .textFieldStyle(.roundedBorder)
+                .lineLimit(2...6)
+            Picker("Priority", selection: $fields.priority) {
+                Text("No priority").tag(Int?.none)
+                ForEach([TaskPriority.urgent, .high, .medium, .low], id: \.rawValue) { priority in
+                    Text(priority.label).tag(Int?.some(priority.rawValue))
+                }
+            }
+            Picker("Owner", selection: $fields.owner) {
+                Text("No owner").tag(WorkOwner?.none)
+                Text("Me").tag(WorkOwner?.some(.myself))
+                ForEach(work.people.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }) { person in
+                    Text(person.name).tag(WorkOwner?.some(.person(person.id)))
+                }
+            }
+            Picker("Project", selection: $fields.projectId) {
+                Text("No project").tag(String?.none)
+                ForEach(work.projects.filter { $0.status != .completed || $0.id == fields.projectId }, id: \.id) { project in
+                    Text(project.title).tag(String?.some(project.id))
+                }
+            }
+            VStack(alignment: .leading, spacing: Space.xs) {
+                Text("Sub-tasks, one a line").metaText()
+                TextEditor(text: $subtasks)
+                    .font(TypeScale.body(13))
+                    .frame(height: 80)
+                    .overlay(RoundedRectangle(cornerRadius: Theme.radiusControl).strokeBorder(Theme.border, lineWidth: 1))
+            }
+            HStack {
+                Spacer(minLength: 0)
+                Button("Cancel", action: close)
+                    .buttonStyle(.quiet)
+                    .keyboardShortcut(.cancelAction)
+                Button("Save", action: save)
+                    .buttonStyle(.primary)
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(14)
+        .frame(width: 340)
+        .onAppear {
+            fields = template.fields
+            subtasks = template.fields.subtasks.joined(separator: "\n")
+        }
+    }
+
+    private func text(_ path: WritableKeyPath<WorkTemplateFields, String?>) -> Binding<String> {
+        Binding(get: { fields[keyPath: path] ?? "" }, set: { fields[keyPath: path] = $0.isEmpty ? nil : $0 })
+    }
+
+    private func save() {
+        var saved = fields
+        saved.title = saved.title?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if saved.title?.isEmpty == true { saved.title = nil }
+        saved.subtasks = subtasks.split(separator: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        let routines = model.routines
+        let template = template
+        close()
+        Task { await routines.saveTemplate(id: template.id, name: template.name, fields: saved) }
     }
 }
 

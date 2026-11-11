@@ -1,7 +1,7 @@
 import SwiftUI
 
 enum ProjectsTimelineZoom: String, CaseIterable {
-    case week, month, quarter
+    case week, month, quarter, year
 
     static var items: [SwitchItem<ProjectsTimelineZoom>] {
         allCases.map { SwitchItem(id: $0, title: $0.title) }
@@ -12,6 +12,7 @@ enum ProjectsTimelineZoom: String, CaseIterable {
         case .week: "Week"
         case .month: "Month"
         case .quarter: "Quarter"
+        case .year: "Year"
         }
     }
 
@@ -20,6 +21,7 @@ enum ProjectsTimelineZoom: String, CaseIterable {
         case .week: 28
         case .month: 9
         case .quarter: 3
+        case .year: 1
         }
     }
 }
@@ -28,6 +30,7 @@ private struct TimelineMove: Equatable {
     enum Part: Equatable {
         case start(String)
         case target(String)
+        case span(String)
         case milestone(String)
 
         var isStart: Bool {
@@ -47,6 +50,29 @@ private struct TimelineRow: Identifiable {
     let order: Date
     let milestones: [(milestone: PlanningMilestone, due: Date)]
     var id: String { project.id }
+}
+
+/// A curve from the end of the blocker's bar to the start of the bar it
+/// blocks, with a dot at each end. With `hitWidth`, the band around the
+/// curve a click lands on.
+private struct DependencyLine: Shape {
+    let from: CGPoint
+    let to: CGPoint
+    var hitWidth: CGFloat?
+
+    func path(in rect: CGRect) -> Path {
+        let reach = max(abs(to.x - from.x) / 2, 24)
+        var curve = Path()
+        curve.move(to: from)
+        curve.addCurve(to: to, control1: CGPoint(x: from.x + reach, y: from.y),
+                       control2: CGPoint(x: to.x - reach, y: to.y))
+        if let hitWidth { return curve.strokedPath(StrokeStyle(lineWidth: hitWidth, lineCap: .round)) }
+        var line = curve.strokedPath(StrokeStyle(lineWidth: 1.5, lineCap: .round))
+        for point in [from, to] {
+            line.addEllipse(in: CGRect(x: point.x - 3, y: point.y - 3, width: 6, height: 6))
+        }
+        return line
+    }
 }
 
 private struct TimelineAxis {
@@ -76,7 +102,11 @@ private struct TimelineAxis {
         func monthStart(_ date: Date) -> Date {
             calendar.date(from: calendar.dateComponents([.year, .month], from: date)) ?? date
         }
-        let lead = zoom == .quarter ? 3 : 1
+        let lead = switch zoom {
+        case .week, .month: 1
+        case .quarter: 3
+        case .year: 6
+        }
         let first = calendar.date(byAdding: .month, value: -lead, to: monthStart(min(dates.min() ?? today, today))) ?? today
         let last = calendar.date(byAdding: .month, value: lead + 2, to: monthStart(max(dates.max() ?? today, today))) ?? today
         let days = max(calendar.dateComponents([.day], from: first, to: last).day ?? 1, 1)
@@ -85,9 +115,11 @@ private struct TimelineAxis {
         for day in 0..<days {
             guard let date = calendar.date(byAdding: .day, value: day, to: first) else { continue }
             let parts = calendar.dateComponents([.year, .month, .day, .weekday], from: date)
-            let group = zoom == .quarter
-                ? "Q\(((parts.month ?? 1) - 1) / 3 + 1) \(parts.year ?? 0)"
-                : date.formatted(.dateTime.month(.wide).year())
+            let group = switch zoom {
+            case .week, .month: date.formatted(.dateTime.month(.wide).year())
+            case .quarter: "Q\(((parts.month ?? 1) - 1) / 3 + 1) \(parts.year ?? 0)"
+            case .year: "\(parts.year ?? 0)"
+            }
             if let last = groups.indices.last, groups[last].title == group {
                 groups[last].span += 1
             } else {
@@ -98,7 +130,7 @@ private struct TimelineAxis {
                 ticks.append(Tick(day: day, title: "\(date.formatted(.dateTime.weekday(.narrow))) \(parts.day ?? 0)"))
             case .month where parts.weekday == calendar.firstWeekday:
                 ticks.append(Tick(day: day, title: "\(parts.day ?? 0)"))
-            case .quarter where parts.day == 1:
+            case .quarter where parts.day == 1, .year where parts.day == 1:
                 ticks.append(Tick(day: day, title: date.formatted(.dateTime.month(.abbreviated))))
             default:
                 break
@@ -121,16 +153,21 @@ private struct TimelineAxis {
 }
 
 /// Projects on one time axis: a bar from start to target day, milestones as
-/// diamonds, today as a line. Dragging a bar's end or a diamond moves that
-/// date through the saves the project page makes.
+/// diamonds, today as a line. Dragging a bar moves both its dates, dragging
+/// one of its ends or a diamond moves that date, through the saves the
+/// project page makes.
 struct ProjectsTimeline: View {
     let store: ProjectsStore
+    @Environment(AppModel.self) private var model
     let projects: [PlanningProjectSummary]
 
     @AppStorage("projects.timeline.zoom") private var zoom = ProjectsTimelineZoom.month
     @State private var move: TimelineMove?
     @State private var position = ScrollPosition(edge: .leading)
     @State private var scrolled: CGFloat = 0
+    @State private var pickedLine: String?
+    @State private var hoveredBar: String?
+    @State private var linking: TimelineLinkDrag?
 
     private static let space = "projectsTimeline"
     private static let nameWidth: CGFloat = 196
@@ -213,15 +250,52 @@ struct ProjectsTimeline: View {
     private func chart(_ rows: [TimelineRow], _ axis: TimelineAxis, height: CGFloat) -> some View {
         ZStack(alignment: .topLeading) {
             grid(axis, rows: rows.count)
+            cycleBands(axis, height: height)
             header(axis)
             todayMark(axis, height: height)
+            dependencyLines(rows, axis)
             ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
                 lane(row, axis)
                     .offset(y: Self.headerHeight + CGFloat(index) * Self.rowHeight)
             }
+            if let linking {
+                DependencyLine(from: linking.from, to: linking.to)
+                    .fill(Self.kept.opacity(0.8))
+                    .allowsHitTesting(false)
+            }
         }
         .frame(width: axis.width, height: height, alignment: .topLeading)
         .coordinateSpace(.named(Self.space))
+    }
+
+    /// Each cycle as a faint band behind the lanes, named at its foot; the
+    /// one under way in the accent.
+    private func cycleBands(_ axis: TimelineAxis, height: CGFloat) -> some View {
+        ZStack(alignment: .topLeading) {
+            ForEach(model.work.cycles) { cycle in
+                if let (first, last) = CycleFormat.span(cycle) {
+                    let x = axis.x(first)
+                    let width = axis.x(last) + axis.dayWidth - x
+                    Rectangle()
+                        .fill(cycle.state == .current ? Theme.accent.opacity(0.08) : Theme.wash)
+                        .overlay(alignment: .bottomLeading) {
+                            Text(cycle.title)
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundStyle(Theme.inkTertiary)
+                                .lineLimit(1)
+                                .frame(maxWidth: max(width - 8, 0), alignment: .leading)
+                                .padding(.leading, 4)
+                                .padding(.bottom, 3)
+                                .opacity(width >= 48 ? 1 : 0)
+                        }
+                        .frame(width: width, height: height - Self.headerHeight)
+                        .offset(x: x, y: Self.headerHeight)
+                        .help("\(cycle.title): \(CycleFormat.title(cycle))")
+                        .accessibilityLabel("\(cycle.title), \(CycleFormat.title(cycle))")
+                }
+            }
+        }
+        .frame(width: axis.width, height: height, alignment: .topLeading)
     }
 
     private func grid(_ axis: TimelineAxis, rows: Int) -> some View {
@@ -295,6 +369,65 @@ struct ProjectsTimeline: View {
         .allowsHitTesting(false)
     }
 
+    /// Each dependency between two dated rows, blue while the blocker ends
+    /// before the blocked project starts, red once it does not; the dates
+    /// being dragged count. A click offers to open either project or remove it.
+    private func dependencyLines(_ rows: [TimelineRow], _ axis: TimelineAxis) -> some View {
+        let middle = Self.barTop + Self.barHeight / 2
+        let placed = Dictionary(uniqueKeysWithValues: rows.enumerated().compactMap { index, row in
+            row.span.map { (row.id, (row: row, span: $0, y: Self.headerHeight + CGFloat(index) * Self.rowHeight + middle)) }
+        })
+        return ZStack(alignment: .topLeading) {
+            ForEach(store.dependencies) { dependency in
+                if let blocker = placed[dependency.blockerId], let blocked = placed[dependency.blockedId] {
+                    let broken = PlanningProjectDependency.breaks(blockerStatus: blocker.row.project.status,
+                                                                  blockerEnd: blocker.span.end, blockedStart: blocked.span.start)
+                    let from = CGPoint(x: axis.x(blocker.span.end) + axis.dayWidth, y: blocker.y)
+                    let to = CGPoint(x: axis.x(blocked.span.start), y: blocked.y)
+                    let title = "\(blocked.row.project.title) waits on \(blocker.row.project.title)"
+                    DependencyLine(from: from, to: to)
+                        .fill(broken ? Theme.live : Self.kept)
+                        .contentShape(DependencyLine(from: from, to: to, hitWidth: 10))
+                        .onTapGesture { pickedLine = dependency.id }
+                        .popover(isPresented: Binding(get: { pickedLine == dependency.id },
+                                                      set: { if !$0, pickedLine == dependency.id { pickedLine = nil } }),
+                                 attachmentAnchor: .rect(.rect(CGRect(x: (from.x + to.x) / 2 - 4, y: (from.y + to.y) / 2 - 4,
+                                                                      width: 8, height: 8)))) {
+                            lineMenu(dependency, title: title, broken: broken,
+                                     blocker: blocker.row.project, blocked: blocked.row.project)
+                        }
+                        .help(broken ? "\(title), but it ends after \(blocked.row.project.title) starts" : title)
+                        .accessibilityElement()
+                        .accessibilityLabel(broken ? "\(title), broken" : title)
+                        .accessibilityAddTraits(.isButton)
+                        .accessibilityAction { pickedLine = dependency.id }
+                }
+            }
+        }
+    }
+
+    private func lineMenu(_ dependency: PlanningProjectDependency, title: String, broken: Bool,
+                          blocker: PlanningProject, blocked: PlanningProject) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title).font(TypeScale.label(12.5)).foregroundStyle(Theme.ink)
+            if broken {
+                Text("\(blocker.title) ends after \(blocked.title) starts.").metaText(Theme.live)
+            }
+            Divider()
+            Button("Open \(blocker.title)") { pickedLine = nil; store.open(blocker.id) }.buttonStyle(.plain)
+            Button("Open \(blocked.title)") { pickedLine = nil; store.open(blocked.id) }.buttonStyle(.plain)
+            Button("Remove dependency") {
+                pickedLine = nil
+                Task { await store.removeDependency(dependency) }
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(Theme.live)
+        }
+        .font(TypeScale.label(12.5))
+        .padding(12)
+        .frame(minWidth: 220, alignment: .leading)
+    }
+
     private func lane(_ row: TimelineRow, _ axis: TimelineAxis) -> some View {
         let tint = tint(row.project)
         return ZStack(alignment: .topLeading) {
@@ -317,7 +450,7 @@ struct ProjectsTimeline: View {
         let width = max(axis.x(span.end) + axis.dayWidth - x, axis.dayWidth)
         let shift = min(max(scrolled - x, 0), width)
         let room = min(marks.filter { $0 > x + shift }.min().map { $0 - x - shift - 24 } ?? .infinity, width - shift - 28)
-        return RoundedRectangle(cornerRadius: Theme.radiusRow)
+        let bar = RoundedRectangle(cornerRadius: Theme.radiusRow)
             .fill(tint.opacity(0.22))
             .overlay { RoundedRectangle(cornerRadius: Theme.radiusRow).strokeBorder(tint.opacity(0.8), lineWidth: 1) }
             .overlay(alignment: .leading) {
@@ -334,8 +467,62 @@ struct ProjectsTimeline: View {
             .overlay(alignment: .leading) { handle(.start(project.id), project, span.start, tint) }
             .overlay(alignment: .trailing) { handle(.target(project.id), project, span.end, tint) }
             .frame(width: width, height: Self.barHeight)
-            .help("\(project.title): \(Self.day(span.start)) – \(Self.day(span.end))")
-            .offset(x: x, y: Self.barTop)
+            .contentShape(RoundedRectangle(cornerRadius: Theme.radiusRow))
+            .pointerStyle(.grabIdle)
+            .gesture(dragging(.span(project.id), from: project.startAtMs ?? project.targetAtMs))
+            .help("\(project.title): \(Self.day(span.start)) – \(Self.day(span.end)). Drag to move both dates.")
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel(project.title)
+            .accessibilityAction(named: "Move a day earlier") {
+                commit(.span(project.id), days: -1, from: project.startAtMs ?? project.targetAtMs)
+            }
+            .accessibilityAction(named: "Move a day later") {
+                commit(.span(project.id), days: 1, from: project.startAtMs ?? project.targetAtMs)
+            }
+        return HStack(spacing: 3) {
+            bar
+            connector(project, tint)
+                .opacity(hoveredBar == project.id || linking?.blockerId == project.id ? 1 : 0)
+        }
+        .contentShape(Rectangle())
+        .onHover { inside in
+            if inside { hoveredBar = project.id } else if hoveredBar == project.id { hoveredBar = nil }
+        }
+        .offset(x: x, y: Self.barTop)
+        .contextMenu { ProjectDependencyMenu(store: store, project: project) }
+    }
+
+    /// The circle past a bar's end: dragged onto another bar, it makes that
+    /// project wait on this one.
+    private func connector(_ project: PlanningProject, _ tint: Color) -> some View {
+        Circle()
+            .strokeBorder(tint, lineWidth: 1.5)
+            .background(Circle().fill(Theme.surface))
+            .frame(width: 9, height: 9)
+            .frame(width: 14, height: Self.barHeight)
+            .contentShape(Rectangle())
+            .pointerStyle(.grabIdle)
+            .gesture(DragGesture(minimumDistance: 2, coordinateSpace: .named(Self.space))
+                .onChanged { value in
+                    linking = TimelineLinkDrag(blockerId: project.id, from: value.startLocation, to: value.location)
+                }
+                .onEnded { value in
+                    linking = nil
+                    guard let target = dropTarget(at: value.location), target != project.id else { return }
+                    Task { await store.addDependency(blockerId: project.id, blockedId: target) }
+                })
+            .help("Drag onto a project that waits on \(project.title)")
+            .accessibilityHidden(true)
+    }
+
+    /// The dated project whose bar is under `point`, in the chart's space.
+    private func dropTarget(at point: CGPoint) -> String? {
+        let rows = rows()
+        let axis = axis(rows)
+        let index = Int(((point.y - Self.headerHeight) / Self.rowHeight).rounded(.down))
+        guard rows.indices.contains(index), let span = rows[index].span,
+              point.x >= axis.x(span.start) - 8, point.x <= axis.x(span.end) + axis.dayWidth + 8 else { return nil }
+        return rows[index].id
     }
 
     private func handle(_ part: TimelineMove.Part, _ project: PlanningProject, _ date: Date, _ tint: Color) -> some View {
@@ -417,10 +604,16 @@ struct ProjectsTimeline: View {
                     ? PlanningProjectSave(startAtMs: .set(ProjectsStore.milliseconds(span.start)))
                     : PlanningProjectSave(targetAtMs: .set(ProjectsStore.milliseconds(span.end)))
                 await store.saveProject(project, change)
+            case let .span(id):
+                guard let project = projects.first(where: { $0.id == id })?.project,
+                      let span = span(of: project, moved: moved) else { break }
+                await store.saveProject(project, PlanningProjectSave(
+                    startAtMs: project.startAtMs.map { _ in .set(ProjectsStore.milliseconds(span.start)) },
+                    targetAtMs: project.targetAtMs.map { _ in .set(ProjectsStore.milliseconds(span.end)) }))
             case let .milestone(id):
                 guard let milestone = store.details.values.lazy.flatMap(\.milestones).first(where: { $0.id == id }),
                       let due = due(of: milestone, moved: moved) else { break }
-                await store.moveMilestone(milestone, dueAtMs: ProjectsStore.milliseconds(due))
+                await store.saveMilestone(milestone, PlanningMilestoneSave(dueAtMs: .set(ProjectsStore.milliseconds(due))))
             }
             if move == moved { move = nil }
         }
@@ -435,6 +628,8 @@ struct ProjectsTimeline: View {
             return (min(shift(start, moved.days), end), end)
         case .target(project.id) where moved.from == project.targetAtMs:
             return (start, max(shift(end, moved.days), start))
+        case .span(project.id) where moved.from == (project.startAtMs ?? project.targetAtMs):
+            return (shift(start, moved.days), shift(end, moved.days))
         default: return (start, end)
         }
     }
@@ -457,7 +652,50 @@ struct ProjectsTimeline: View {
         Theme.label(hue: Double(project.hue ?? 210))
     }
 
+    private static var kept: Color { Theme.label(hue: 285) }
+
     private static func day(_ date: Date) -> String {
         date.formatted(date: .abbreviated, time: .omitted)
+    }
+}
+
+/// A dependency being drawn from a bar's end, in the chart's space.
+private struct TimelineLinkDrag: Equatable {
+    let blockerId: String
+    let from: CGPoint
+    let to: CGPoint
+}
+
+/// Blocked by and Blocking submenus for one project, and one taking a link
+/// off: for its timeline bar, its list row and its page's menu.
+struct ProjectDependencyMenu: View {
+    let store: ProjectsStore
+    let project: PlanningProject
+
+    var body: some View {
+        let choices = store.dependencyChoices(for: project.id)
+        let links = store.dependencies.filter { $0.blockerId == project.id || $0.blockedId == project.id }
+        Menu("Blocked by") {
+            ForEach(choices) { other in
+                Button(other.title) { Task { await store.addDependency(blockerId: other.id, blockedId: project.id) } }
+            }
+        }
+        .disabled(choices.isEmpty)
+        Menu("Blocking") {
+            ForEach(choices) { other in
+                Button(other.title) { Task { await store.addDependency(blockerId: project.id, blockedId: other.id) } }
+            }
+        }
+        .disabled(choices.isEmpty)
+        Menu("Remove link") {
+            ForEach(links) { link in
+                Button(link.blockedId == project.id
+                    ? "Waits on \(store.projectTitle(link.blockerId))"
+                    : "\(store.projectTitle(link.blockedId)) waits on this") {
+                    Task { await store.removeDependency(link) }
+                }
+            }
+        }
+        .disabled(links.isEmpty)
     }
 }

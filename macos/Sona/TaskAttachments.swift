@@ -167,7 +167,7 @@ struct DetailAttachments: View {
     @FocusState private var focused: Bool
 
     var body: some View {
-        let list = attachments ?? []
+        let list = (attachments ?? []).filter { $0.commentId == nil }
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 10) {
                 DetailHeading(title: "Attachments")
@@ -213,6 +213,11 @@ struct DetailAttachments: View {
                 NSApp.keyWindow?.makeFirstResponder(nil)
                 if !list.isEmpty { focused = true }
             }
+        }
+        .onChange(of: model.workFocus.pageAsk, initial: true) { _, ask in
+            guard ask == TaskPageAsk(id: row.id, part: .link) else { return }
+            addingLink = true
+            DispatchQueue.main.async { model.workFocus.pageAsk = nil }
         }
         .onChange(of: row.id) {
             highlighted = nil
@@ -365,7 +370,13 @@ private struct AttachmentTile<Menu: View>: View {
                     .foregroundStyle(Theme.ink)
                     .lineLimit(1)
                     .truncationMode(.middle)
+                if let subtitle = attachment.subtitle, !subtitle.isEmpty {
+                    Text(subtitle).metaText(Theme.inkSecondary).lineLimit(1)
+                }
                 Text(meta).metaText().lineLimit(1)
+                ForEach(facts, id: \.key) { fact in
+                    Text("\(fact.key): \(fact.value)").metaText(Theme.inkSecondary).lineLimit(1)
+                }
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 8)
@@ -393,7 +404,8 @@ private struct AttachmentTile<Menu: View>: View {
         .help(help)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(attachment.title)
-        .accessibilityValue(meta)
+        .accessibilityValue(([attachment.subtitle, meta].compactMap { $0 } + facts.map { "\($0.key): \($0.value)" })
+            .joined(separator: ", "))
         .accessibilityAddTraits(highlighted ? [.isButton, .isSelected] : .isButton)
         .accessibilityAction(named: "Open", open)
     }
@@ -409,10 +421,97 @@ private struct AttachmentTile<Menu: View>: View {
         return [what, who].compactMap { $0 }.joined(separator: " · ")
     }
 
+    private var facts: [(key: String, value: String)] {
+        attachment.metadata.sorted { $0.key < $1.key }
+    }
+
     private var help: String {
         let source = attachment.url ?? attachment.originalName ?? attachment.title
         let keys = attachment.kind == .link ? "Double-click to open" : "Space to preview, double-click to open"
-        return "\(source)\nAdded by \(attachment.createdBy.display), \(PlanningFormat.date(attachment.createdAtMs))\n\(keys)"
+        let lines = [attachment.subtitle, source, "Added by \(attachment.createdBy.display), \(PlanningFormat.date(attachment.createdAtMs))", keys]
+        return lines.compactMap { $0 }.joined(separator: "\n")
+    }
+}
+
+/// The files and links put on one comment, under its words. A click opens
+/// one; its menu shows it in Finder or takes it off.
+struct CommentFiles: View {
+    let files: [WorkAttachment]
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        ChatFlowRow(spacing: 6) {
+            ForEach(files) { file in
+                Button { open(file) } label: {
+                    FileChip(title: file.title, icon: icon(file))
+                }
+                .buttonStyle(.plain)
+                .help(file.originalName ?? file.url ?? file.title)
+                .contextMenu {
+                    Button("Open") { open(file) }
+                    if let url = file.fileURL {
+                        Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([url]) }
+                    }
+                    Divider()
+                    Button("Remove", role: .destructive) { remove(file) }
+                }
+            }
+        }
+    }
+
+    private func icon(_ file: WorkAttachment) -> String {
+        switch file.kind {
+        case .image: "photo"
+        case .link: "link"
+        case .file: "doc"
+        }
+    }
+
+    private func open(_ file: WorkAttachment) {
+        guard let url = file.fileURL ?? file.linkURL else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    private func remove(_ file: WorkAttachment) {
+        let work = model.work
+        let focus = model.workFocus
+        Task {
+            if await work.detach(file) { focus.announce(work.undoTitle) }
+        }
+    }
+}
+
+/// A file's name in a small pill, with an optional button to take it off.
+struct FileChip: View {
+    let title: String
+    let icon: String
+    var remove: (() -> Void)?
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: icon)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(Theme.inkTertiary)
+            Text(title)
+                .font(TypeScale.label(12))
+                .foregroundStyle(Theme.ink)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            if let remove {
+                Button(action: remove) {
+                    Image(systemName: "xmark").font(.system(size: 9, weight: .semibold))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Theme.inkTertiary)
+                .help("Remove \(title)")
+                .accessibilityLabel("Remove \(title)")
+            }
+        }
+        .padding(.horizontal, 8)
+        .frame(height: 24)
+        .background(Theme.inset, in: Capsule())
+        .overlay(Capsule().strokeBorder(Theme.hairline))
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -467,9 +566,10 @@ private struct AddLinkForm: View {
     @Environment(AppModel.self) private var model
     @State private var url = ""
     @State private var title = ""
+    @State private var subtitle = ""
     @FocusState private var field: Field?
 
-    private enum Field { case url, title }
+    private enum Field { case url, title, subtitle }
 
     var body: some View {
         let link = WorkAttachmentSource.linkText(url)
@@ -485,6 +585,11 @@ private struct AddLinkForm: View {
                 .focused($field, equals: .title)
                 .onSubmit(add)
                 .accessibilityLabel("Title")
+            TextField("", text: $subtitle, prompt: Text("Subtitle (optional)").foregroundStyle(Theme.inkDisabled))
+                .textFieldStyle(.roundedBorder)
+                .focused($field, equals: .subtitle)
+                .onSubmit(add)
+                .accessibilityLabel("Subtitle")
             if !url.trimmingCharacters(in: .whitespaces).isEmpty, link == nil {
                 Text("A link must start with http://, https://, mailto: or sona://.")
                     .metaText(Theme.live)
@@ -513,9 +618,10 @@ private struct AddLinkForm: View {
     private func add() {
         guard let link = WorkAttachmentSource.linkText(url) else { return }
         let named = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let note = subtitle.trimmingCharacters(in: .whitespacesAndNewlines)
         let model = model
         let itemId = itemId
-        Task { await model.attach([.link(link, title: named.isEmpty ? nil : named)], to: itemId) }
+        Task { await model.attach([.link(link, title: named.isEmpty ? nil : named, subtitle: note.isEmpty ? nil : note)], to: itemId) }
         done()
     }
 }
