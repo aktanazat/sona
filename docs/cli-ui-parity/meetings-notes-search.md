@@ -95,9 +95,9 @@ Clipboard-only, Finder-only and navigation-only actions are marked `ui-only-runt
 | read transcript | MeetingsStore.swift:1061 | meeting_get | `--transcript ID`; `work meeting ID --transcript` | cli-exists |
 | transcript search ⌘F, clear | MeetingReviewView.swift:574, :595; MeetingsStore.swift:1269 | meeting_search | MISSING (no in-meeting search; `--query` is corpus-wide) | missing (MS) |
 | "Show everyone" | MeetingReviewView.swift:635 | none | n/a | ui-only-runtime (view filter) |
-| speaker menu "Rename…", then save | MeetingReviewView.swift:797, :646; MeetingsStore.swift:1449 | meeting_speaker_rename | MISSING | missing (MS) |
-| speaker menu "Same person as X" | MeetingReviewView.swift:799; MeetingsStore.swift:1458 | meeting_speaker_merge | MISSING | missing (MS) |
-| call names "Use <name>" suggestion | CallNamesView.swift:254 | meeting_speaker_rename | MISSING | missing (MS) |
+| speaker menu "Rename…", then save | MeetingReviewView.swift:797, :646; MeetingsStore.swift:1449 | meeting_speaker_rename | `work speaker-rename MEETING SPEAKER NAME` | cli-exists |
+| speaker menu "Same person as X" | MeetingReviewView.swift:799; MeetingsStore.swift:1458 | meeting_speaker_merge | `work speaker-merge MEETING SPEAKER --into OTHER` (deletes the folded speaker's voice samples) | cli-exists |
+| call names "Use <name>" suggestion | CallNamesView.swift:254 | meeting_speaker_rename | `work speaker-rename MEETING SPEAKER NAME` | cli-exists |
 | call names "Dismiss" suggestion | CallNamesView.swift:252, :307 | meeting_call_name_dismiss | MISSING | missing (MS) |
 | call names status / read | CallNamesView.swift:170, :293 | meeting_call_name_status | `--roster ID` | cli-exists |
 | "Choose a call to read names…" / "Refresh calls" | CallNamesView.swift:126, :201 | meeting_call_name_targets | MISSING | ui-only-runtime (reads live call windows) |
@@ -108,7 +108,7 @@ Clipboard-only, Finder-only and navigation-only actions are marked `ui-only-runt
 | remove a voice profile | PeopleStore.swift:492 | voice_remove_profile | MISSING | ui-only-deliberate (biometric, privacy) |
 | assign a speaker to a person (People screen) | PeopleStore.swift:767, :847 | meeting_speaker_rename | MISSING | missing (MS) |
 | voice identity status | PeopleStore.swift:668 | voice_identity_status | MISSING | missing (MS; read) |
-| tap a line → SegmentEditor Save / "Remove this line" | MeetingReviewView.swift:828, :908, :914; MeetingsStore.swift:1475 | meeting_segment_edit | MISSING | missing (MS) |
+| tap a line → SegmentEditor Save / "Remove this line" | MeetingReviewView.swift:828, :908, :914; MeetingsStore.swift:1475 | meeting_segment_edit | `work line-edit MEETING LINE TEXT` (Save); removing a line stays in the app | cli-exists (Save) |
 | play a turn | MeetingReviewView.swift:763 | conversation_audio_clip | n/a | ui-only-runtime (audio playback) |
 | context menu "Listen with context" | MeetingReviewView.swift:847; ConversationAudioPlayback.swift:238, :264 | conversation_audio_retained / conversation_audio_clip | n/a | ui-only-runtime (audio playback) |
 | context menu "Save passage…", then "Save passage" | MeetingReviewView.swift:850; ScratchpadView.swift:866; ScratchpadStore.swift:811 | scratchpad_capture_passage | MISSING | missing (NS + MS) |
@@ -116,12 +116,12 @@ Clipboard-only, Finder-only and navigation-only actions are marked `ui-only-runt
 | recording tail "Cut the last N min…" and confirm "Cut" / "Put them back" | RecordingTailSection.swift:75, :37, :53; MeetingsStore.swift:1488 | meeting_segments_set_removed | MISSING | missing (MS) |
 | recording tail read | RecordingTailSection.swift:101 | meeting_recording_tail | MISSING | missing (MS) |
 | recording tail "Keep" | RecordingTailSection.swift:73 | none (view state) | n/a | ui-only-runtime (view state) |
-| corrections "Teach for <name>" | TranscriptCorrectionsView.swift:517; :218 | transcript_correction_teach | MISSING | missing (MS) |
-| corrections "Review & edit", then Save | TranscriptCorrectionsView.swift:404, :584; :238 | transcript_correction_update | MISSING | missing (MS) |
-| corrections Pause/Resume | TranscriptCorrectionsView.swift:406 | transcript_correction_update | MISSING | missing (MS) |
-| corrections Remove and confirm | TranscriptCorrectionsView.swift:411, :351; :256 | transcript_correction_remove | MISSING | missing (MS) |
-| corrections list / review / Reload | TranscriptCorrectionsView.swift:321; :163, :170 | transcript_correction_list / transcript_correction_review | MISSING | missing (MS) |
-| corrections edit a line | TranscriptCorrectionsView.swift:189 | meeting_segment_edit | MISSING | missing (MS) |
+| corrections "Teach for <name>" | TranscriptCorrectionsView.swift:517; :218 | transcript_correction_teach | `work correction-add MEETING LINE --heard W --fix W [--kind] [--context\|--around]` | cli-exists |
+| corrections "Review & edit", then Save | TranscriptCorrectionsView.swift:404, :584; :238 | transcript_correction_update | `work correction-edit PERSON ID [--heard] [--fix] [--kind] [--context\|--around]` | cli-exists |
+| corrections Pause/Resume | TranscriptCorrectionsView.swift:406 | transcript_correction_update | `work correction-edit PERSON ID --pause\|--resume` | cli-exists |
+| corrections Remove and confirm | TranscriptCorrectionsView.swift:411, :351; :256 | transcript_correction_remove | `work correction-remove PERSON ID` | cli-exists |
+| corrections list / review / Reload | TranscriptCorrectionsView.swift:321; :163, :170 | transcript_correction_list / transcript_correction_review | `work corrections PERSON`; lines with `--transcript ID` | cli-exists |
+| corrections edit a line | TranscriptCorrectionsView.swift:189 | meeting_segment_edit | `work line-edit MEETING LINE TEXT` | cli-exists |
 | corrections "Listen at source" / "Listen" | TranscriptCorrectionsView.swift:432, :488, :560 | conversation_audio_clip | n/a | ui-only-runtime (audio) |
 | relisten "Accept" / "Skip" / "Accept all shown" | RelistenSheet.swift:378, :376, :348; :170 | transcript_relisten_decide | MISSING | missing (MS) |
 | relisten offer read / "Review" / "Try again" / Done | RelistenSheet.swift:221, :229, :346; :196 | transcript_relisten_offer | MISSING | missing (MS) |
@@ -343,7 +343,7 @@ All of these drive the live recorder, the audio device or the in-call overlay. N
 
 | UI action | Swift trigger | bridge method | CLI | class |
 |---|---|---|---|---|
-| history list, "Load more", "Try again" | LibraryScreen.swift:530, :526, :378; LibraryStore.swift:210 | get_history_entries | MISSING (`--query --scope dictations` returns search rows, not the paged list) | missing (HDB) |
+| history list, "Load more", "Try again" | LibraryScreen.swift:530, :526, :378; LibraryStore.swift:210 | get_history_entries | `work dictations [--search T] [--limit N] [--before ID]` | cli-exists |
 | history search field | LibraryScreen.swift (search field near :105); LibraryStore.swift:212 | search_history_entries | `--query TEXT --scope dictations` | cli-exists |
 | stats / stats "Try again" | LibraryScreen.swift:120; LibraryStore.swift:344 | get_history_stats | `--stats` (partial) | cli-exists |
 | trend range picker | LibraryScreen.swift:180; LibraryStore.swift:358 | get_history_trend | MISSING | missing (HDB) |
@@ -352,10 +352,10 @@ All of these drive the live recorder, the audio device or the in-call overlay. N
 | "Show raw text" toggle | LibraryScreen.swift:144 | none (view mode) | n/a | ui-only-runtime |
 | "Open recordings folder" | LibraryScreen.swift:149; LibraryStore.swift:500 | open_recordings_folder | n/a | ui-only-runtime (Finder) |
 | play / pause | LibraryScreen.swift:756; LibraryStore.swift:655 | read_history_audio_chunk | n/a | ui-only-runtime (audio playback) |
-| "Transcribe" / "Transcribe again" | LibraryScreen.swift:320, :700; LibraryStore.swift:477 | retry_history_entry_transcription | MISSING (`-f` transcribes a file but writes no entry) | missing (HDB + transcription engine) |
-| "Save entry" / "Remove from saved" | LibraryScreen.swift:708; LibraryStore.swift:435 | toggle_history_entry_saved | MISSING | missing (HDB) |
-| "Process again", pick mode, "Process" | LibraryScreen.swift:712, :1180, :1202; LibraryStore.swift:495 | reprocess_history_entry | MISSING | missing (HDB + model) |
-| Delete and confirm | LibraryScreen.swift:325, :715, :347; LibraryStore.swift:461 | delete_history_entry | MISSING | missing (HDB) |
+| "Transcribe" / "Transcribe again" | LibraryScreen.swift:320, :700; LibraryStore.swift:477 | retry_history_entry_transcription | MISSING (`-f` transcribes a file but writes no entry) | window-bound (reruns the app's speech model) |
+| "Save entry" / "Remove from saved" | LibraryScreen.swift:708; LibraryStore.swift:435 | toggle_history_entry_saved | `work dictation-save ID [--unsave]` | cli-exists |
+| "Process again", pick mode, "Process" | LibraryScreen.swift:712, :1180, :1202; LibraryStore.swift:495 | reprocess_history_entry | MISSING | window-bound (reruns the app's cleanup model) |
+| Delete and confirm | LibraryScreen.swift:325, :715, :347; LibraryStore.swift:461 | delete_history_entry | `work dictation-delete ID` | cli-exists |
 | "Add correction", then "Save correction" | LibraryScreen.swift:706, :1143; Shell.swift:119; VocabularyStore.swift:391 | add_vocabulary_correction | MISSING | missing (SET vocabulary) |
 | storage status | LibraryStore.swift:680 | history_storage_status | MISSING | missing (HDB) |
 | history limit field | LibraryScreen.swift:1064; LibraryStore.swift:697 | update_history_limit | MISSING | missing (SET) |
@@ -382,8 +382,8 @@ The CLI reads meetings well: list, summary, notes, ledger, transcript, roster, p
 The only meeting write the CLI has is closing a loop.
 
 Missing write verbs, with their data location:
-- Meeting writes (MS): rename, speaker rename and merge, line edits and cuts, meeting notes and my notes, folders, delete and trash, export to md/json/csv/ledger html, rewrite notes, loop reopen and owner, action item done, corrections and relisten, heard plan edit, context, import of a recording or transcript.
+- Meeting writes (MS): rename, line cuts, meeting notes and my notes, folders, delete and trash, export to md/json/csv/ledger html, rewrite notes, loop reopen and owner, action item done, relisten, heard plan edit, context, import of a recording or transcript.
 - Scratchpad writes (NS): create, edit, pin, delete, restore, link, synthesis, subjects, save passage.
-- Dictation history (HDB): list, delete, save, transcribe again, process again.
+- Dictation history (HDB): transcribe again and process again stay in the app, since they rerun its models.
 - Connections: send notes and undo send. The security parts stay in the UI.
 - Cloud share links (CS).

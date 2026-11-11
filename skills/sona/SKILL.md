@@ -111,15 +111,56 @@ also closes the meeting commitment the task came from. A link given to
 `--evidence` is kept with the task as evidence; any other line goes into its
 details. `--due overdue,today,next:14` narrows `list` and `ready` to due
 windows. `--repeat "every monday"` on `create` or `update` keeps how often a
-task comes back (`none` stops it); finishing it does not make the next one.
+task comes back (`none` stops it); finishing it makes the next copy.
 `snooze S-12 --until 2026-12-01` keeps a task out of lists and `ready` until
 that day; `--until none` wakes it. List items carry `focus` (one of today's
 picks), `snoozed_until_ms` and `follow_up_at_ms` (when to ask whoever owes it).
 
+While you work a task, run a session on it so the user can watch and stop
+you:
+
+```bash
+sona work session-start S-12 --agent Codex --json          # note .session.id
+sona work session-plan ID --agent Codex --plan-json '[{"content":"Read the spec","status":"in_progress"}]'
+sona work session-activity ID --agent Codex --type thought --body "Checking the deposit terms"
+sona work session-activity ID --agent Codex --type action --action Searching --parameter "deposit" --result "2 matches"
+sona work session-activity ID --agent Codex --type elicitation --body "Which deposit?" --option "10 percent" --option "20 percent"
+sona work session-heartbeat ID --agent Codex --json        # stop_requested, unread_prompts
+sona work session-activity ID --agent Codex --type response --body "Done: drafted with 10 percent."
+```
+
+Write within 10 seconds of starting and keep writing or heartbeating; after
+30 minutes of silence the session shows as stale. Every answer carries
+`stop_requested`, `unread_prompts` and an `instruction`: once the user asks
+you to stop, only a `response` or an `error` is accepted, and either one ends
+the session. A question with choices waits in `awaiting_input` until the user
+answers; the answer arrives in `unread_prompts` with its `value`.
+`sessions [TASK] [--open]` lists sessions; `list --delegate Codex` (or `any`,
+`none`) lists the tasks delegated to an agent.
+
+`save S-12 --patch-json '[{"field":"status","value":"in_progress"},{"field":"labels","op":"add","value":["bug"]},{"field":"description","op":"append","value":"Found it."}]' --expected-revision 7`
+applies the steps in order, all or none: a bad step refuses the whole save
+as `patch[n]`. `changes --since CURSOR` follows every change to tasks,
+projects, comments and sessions in order, with `updated_from`, `next_cursor`
+and `has_more`; a cursor older than 30 days is refused as expired, so read
+the tasks again and start from the newest.
+
 Triage holds work Sona heard in meetings. Read the quote with `show` before
 deciding: `accept` moves items to Todo with Sona's suggested owner, due day and
 project (`--ignore-suggestions` keeps none), `decline` cancels them and sets
-their commitments aside, `duplicate S-14 --of S-12` folds one into another.
+their commitments aside (`--reason "the venue prints them"` keeps why in each
+task's history), `duplicate S-14 --of S-12` folds one into another.
+
+Templates make the same task with its sub-tasks again: `template-save
+"Weekly report" --title "Send the weekly report" --priority high --due-in 2
+--repeat "every friday" --subtask "Gather the numbers" --subtask "Write it"`
+saves one (saving a name that exists changes it; `--subtask ""` clears the
+sub-tasks), `templates` lists them, `template-use "Weekly report" [--title]
+[--due DAY]` makes the task and its sub-tasks, `template-delete` removes one.
+`remind S-12 "tomorrow 9am"` sets when Sona reminds the user of a task (`none`
+clears it); `reminders [--due]` lists them. `label-group bug Type` puts a
+label in a group (`none` takes it out); `label-retire legacy` keeps it on its
+tasks but out of pickers and new tags, `--restore` brings it back.
 
 `ask "what did Dana promise about pricing"` answers with the lines that say
 it, numbered, from meetings, what they left open and dictations; `--take 1,3`
@@ -133,7 +174,7 @@ Projects and People pages. Keep the catalog the pages show from the terminal:
 
 ```bash
 sona work projects [--all]                       # lead, status, target day, open and done counts
-sona work project-save "Q1 launch" --lead Dana --members "Dana,Lee" --target 2026-03-31 --status active
+sona work project-save "Q1 launch" --lead me --members "me,Dana,Lee" --target 2026-03-31 --status active
 sona work project-archive "Q1 launch" [--restore]
 sona work milestones "Q1 launch"
 sona work milestone-save "Q1 launch" "Beta" --target 2026-02-15
@@ -141,21 +182,46 @@ sona work milestone-delete "Q1 launch" "Beta"
 sona work people [--query dana]                  # aliases, role, organization, open work
 sona work person-save "Dana Reyes" --aliases "Dayna,Dana R" --role "Design lead" --org Acme
 sona work person-merge Dayna --into "Dana Reyes" # tasks, quotes and speaker links move
+sona work person-merge Dayna --into "Dana Reyes" --voice into   # both saved a voice: into, from or both
+sona work person-merge Dayna --into "Dana Reyes" --dry-run      # the person as the merge would leave them
+sona work person "Dana Reyes"                    # the whole page: summary, meetings, open items, documents, contact, photo
+sona work person-link "Dana Reyes" <MEETING_ID> [--confirm | --remove]
+sona work person-split "Dana Reyes" --new "Dana Ortiz" --meetings <ID>,<ID> [--aliases A] [--emails E] [--documents ID]
+sona work person-delete "Lee Park"               # with their links and saved voice; cannot be undone
+sona work person-photo "Dana Reyes" --file ~/Pictures/dana.jpg   # or --remove
+sona work person-contact-remove "Dana Reyes"
+sona work first-met "Dana Reyes"                 # when, where, and who introduced you
+sona work first-met-answer "Dana Reyes" yes      # or no
+sona work companies
+sona work company Acme                           # its people, meetings and open items
 ```
+
+The people writes take `--dry-run`, `--operation-id` and `--agent`, and
+need the Agents' changes setting on Apply. Meetings kept on this Mac stay
+out of every answer: the person page drops them and its summary,
+`person-link` and `person-split` answer `not_found` for them, and a person
+in one is not deleted. `--voice into` keeps the voice of the person who
+keeps everything, `from` keeps the folded person's, `both` combines them;
+the first two delete one saved voice for good. Rewriting a person's summary
+needs the app: the text engine runs there.
 
 `project-save` and `person-save` make the thing when nothing goes by that
 name and change it when something does; `--project` or `--person` with the
 old name renames. `--aliases` replaces the whole list (a rename keeps the
 old name as an alias). Every place that takes a person (`--owner`, `--lead`,
 `--members`, triage suggestions, speaker names) matches the name or any
-alias, so a misheard first name finds the right person. These writes need
+alias, so a misheard first name finds the right person. `--owner`, `--lead`
+and `--members` also take `me` for the user and `nobody` for no one. These
+writes need
 both grants and the Agents' changes setting on Apply. A running Sona shows
 them within a second or two.
 
 The meetings feed is read-only: `sona work meetings --since 2026-11-01`
 (a day or milliseconds) lists id, title, start, minutes, whether it was
 processed, and who was in it; `sona work meeting <ID> [--transcript]` gives
-the summary, commitments, and the transcript with speaker turns.
+the summary, commitments, each speaker with their id under
+`meeting_speakers` (`needs_name:true` for the ones nobody has named), and the
+transcript with speaker turns.
 
 Every write takes `--operation-id`. Left out, Sona derives one from the request
 and what it read, so running a command again never changes anything twice: a
@@ -173,6 +239,28 @@ applies at once. A task you create lands in Triage, and triage decisions,
 duplicates, archiving and label changes are refused. Links between tasks
 always apply.
 
+```bash
+sona work delete S-4 [S-5…]          # to the bin; restore within 30 days, then gone
+sona work restore S-4                # out of the bin as it was, or out of the archive
+sona work bin                        # deleted tasks with days_left
+sona work archive-list               # archived and deleted tasks
+sona work description-versions S-4   # every description, newest first, current marked
+sona work description-version <ID>
+sona work description-restore <ID>  # proposed while changes wait for the user
+sona work favorite S-4 | --project "Q1 launch" | --view "Open work"
+sona work unfavorite …; sona work favorites
+sona work subscribe S-4; sona work unsubscribe S-4; sona work subscriptions
+sona work inbox [--unread] [--snoozed] [--archived]
+sona work inbox-mark <ID…> --mark read|unread|archive|unarchive|snooze [--until tomorrow] [--all]
+```
+
+The inbox is the user's: status changes, comments, mentions (`@me` or their
+name) and assignments that Sona or agents made on tasks they follow, with an
+`unread` count. Creating a task, being made its owner or being mentioned
+subscribes them. The user's own changes never notify. Each of these writes
+takes `--dry-run`, `--operation-id` and `--agent` and, except the description
+restore, refuses unless Agents' changes is on Apply.
+
 Work raised in a meeting kept on this Mac never appears. While the
 conversations can't be opened, every answer leaves out all work from meetings
 and says `conversations_available:false`; choosing a person as owner then
@@ -188,12 +276,30 @@ sona work focus S-12 S-7 S-3 [--day tomorrow]  # replaces the day's picks; --cle
 sona work list --stale                         # open work untouched for 30 days
 sona work keep S-4                             # still stands: leaves the stale list
 sona work list --status triage --source meeting,dictation
+sona work list --where "high priority bugs due this week that are mine"   # words read as filters; prints what it could not read
 sona work snooze S-12 --until later-today      # the next hour three hours from now
 sona work brief "Dana Reyes"                   # owed both ways, talking points, last time
 sona work talking-point "Dana Reyes" "ask about the pricing page"
 sona work talking-point-done <POINT_ID> [--undo]
 sona work loop-reopen <LOOP_ID>                # a resolved or dropped meeting loop
 sona work loop-owner <LOOP_ID> --owner Dana    # or --owner none
+sona work speaker-assign <MEETING_ID> "Speaker 2" --person "Dana Reyes"
+sona work speaker-assign <MEETING_ID> <SPEAKER_ID> --new "Lee Park"   # adds the person
+sona work speaker-assign <MEETING_ID> "Dana Reyes" --undo            # marks the speaker unknown
+sona work speaker-assign <MEETING_ID> "Speaker 2" --person "Dana Reyes" --same-voice   # names the voice in its other unnamed meetings too
+sona work speaker-voices <MEETING_ID>          # voice suggestions, same-voice meetings, names voice matching gave
+sona work speaker-confirm <MEETING_ID> "Speaker 2"     # takes voice matching's suggestion
+sona work speaker-voice-undo <MEETING_ID> "Dana Reyes" # gives back the name voice matching replaced
+sona work speaker-rename <MEETING_ID> "Speaker 2" "Dana"    # the name the transcript shows; voice samples stay
+sona work speaker-merge <MEETING_ID> "Speaker 3" --into "Dana"   # moves the lines; deletes Speaker 3's voice samples
+sona work line-edit <MEETING_ID> <SEGMENT_ID> "We ship on Monday."   # segment_id from sona --transcript ID --json
+sona work corrections "Dana Reyes"            # how Sona fixes what it hears from Dana; reads only
+sona work correction-add <MEETING_ID> <SEGMENT_ID> --heard "Sauna" --fix "Sona" [--kind name] [--context conversation | --around "the app"]
+sona work correction-edit "Dana Reyes" <CORRECTION_ID> [--fix "…"] [--pause | --resume]
+sona work correction-remove "Dana Reyes" <CORRECTION_ID>
+sona work dictations [--search "pricing"] [--limit 20] [--before <ID>]   # dictation history, newest first
+sona work dictation-save <ID> [--unsave]
+sona work dictation-delete <ID>               # the entry and its recording; cannot be undone
 sona work action-track <LOOP_ID> --project "Q1 launch"   # a meeting action with no task
 sona work action-dismiss <LOOP_ID>             # not work; action-restore asks again
 sona work attachment-rename S-12 <ATTACHMENT_ID> --title "Signed contract"
@@ -202,12 +308,133 @@ sona work note-new "Pricing: keep the free tier"
 sona work note-edit <NOTE_ID> --body "…"       # the old body stays as a version
 sona work note-pin <NOTE_ID> [--unpin]
 sona work note-link <NOTE_ID> --meeting <MEETING_ID>   # or --person ID, --note ID
+sona work note-unlink <NOTE_ID> --meeting <MEETING_ID> # takes a source off the note
+sona work note-delete <NOTE_ID>                # the note and its versions; cannot be undone
+sona work note-restore <NOTE_ID> <VERSION_ID>  # versions: sona --note-versions <NOTE_ID>
+sona work subjects                             # read-only
+sona work subject-new "Pricing"
+sona work subject-note <SUBJECT_ID> <NOTE_ID> [--current | --remove]
+sona work source-link S-12 --meeting <MEETING_ID> [--at 95]   # or --note ID, --loop ID; a project by name
+sona work ask-pack "what did Dana say about pricing" [--folder "Sales"]
+sona work docs [--person "Dana Reyes" | --meeting <MEETING_ID>]
+sona work doc-add ~/Downloads/contract.pdf [--meeting <MEETING_ID>]
+sona work doc-delete <DOCUMENT_ID>
 ```
 
 Each takes `--dry-run`, `--operation-id` and `--agent`, and each refuses
 unless Agents' changes is on Apply: nothing here is proposed for later. A
-change already made answers `replayed:true`. Loop changes are filed in the
-meeting's history as the user's. Note writes touch notes only.
+change already made answers `replayed:true`. Loop changes and speaker names
+are filed in the meeting's history as the user's. Note writes touch notes
+only.
+
+`speaker-assign` does what the transcript's speaker menu does. It never
+remembers the voice: saving a voice profile stays a consent step the user
+takes in the app. Changing who a named speaker is, and `--undo`, delete the
+voice samples Sona kept from that speaker, as the app does; `--undo` leaves
+the speaker reading Unknown, not their old "Speaker 2" label, and the person
+keeps the meeting on their page. A meeting kept on this Mac answers
+`not_found`.
+
+`correction-add` teaches from a line whose speaker is already a confirmed
+person; the correction is theirs and applies to their other lines. Corrections
+taught in a meeting kept on this Mac stay out of `corrections`. `dictations`
+needs only External access, the same grant as `--query --scope dictations`.
+Transcribing or processing a dictation again stays in the app, which holds
+the models.
+
+The planner's buttons, from the terminal:
+
+```bash
+sona work parse "call Dana friday p1 #design" [--spoken] [--plain friday]   # reads only
+sona work book S-12                            # next free working hour in the "Sona" calendar
+sona work unbook S-12
+sona work nudged S-12                          # asked the person today; back in a week
+sona work watch-task pricing --line 2          # a Triage task from a heard line
+sona work link-suggestions [--all]             # reads only
+sona work link-accept <SUGGESTION_ID>          # or link-dismiss
+sona work triage-suggestions [S-12]            # reads only: project, labels, owner, similar tasks, each with why
+sona work suggestion-accept <SUGGESTION_ID>    # a field change waits for the user unless Agents' changes is on Apply
+sona work suggestion-dismiss <SUGGESTION_ID>   # stays dismissed; refused unless Agents' changes is on Apply
+sona work calendar [--from 2026-03-02] [--to 2026-03-08]   # reads only
+sona work timeline [--from 2026-11-01] [--to 2027-01-31]   # projects start to target, with milestones; reads only
+sona work trend [--range 7|30|180]             # dictation and meeting totals by day
+sona work today                                # Home's Today strip; reads only
+sona work plan-accept --draft-file plan.json   # or --draft-file - (stdin), or --draft '{…}'
+sona work view-save "Mine" --show-empty-groups false --properties id,due,owner
+```
+
+Writes take `--dry-run`, `--operation-id` and `--agent`. `book`, `unbook`,
+`nudged` and the link decisions refuse unless Agents' changes is on Apply;
+`watch-task` lands its task in Triage either way. `book` needs calendar
+actions on in Settings > Connections and Calendar access for the process
+running `sona`. Link suggestions drawn from a meeting kept on this Mac never
+show, and `today` counts none of them. `plan-accept` takes the draft Plan
+with Sona makes (goal, sources, project, milestones, tasks,
+linkedCommitments, camelCase). An agent may write one itself with `sources`
+and every `citations` list empty; only the app's planner can fill sources
+in. A draft of another shape is refused with what is wrong. The app's own suggestion
+run, Plan with Sona drafts and note synthesis run Sona's local model inside
+the app, so they stay in the app.
+
+`source-link` does what a task's or project's Sources section does; a source
+already linked answers `replayed:true`, and the link names no author.
+`ask-pack` returns the evidence the app's Ask hands its model: answer from it
+and cite its links; Sona runs no model for it. `docs --meeting` adds, per
+document, what was said in the meeting that differs from what it says.
+`doc-add` reads .txt, .md, .markdown and .pdf files; `doc-delete` cannot be
+undone. Documents added to a meeting kept on this Mac never appear, and that
+meeting answers `not_found`. `ask-pack` and `docs` only read, and take no
+write flags.
+
+## Meetings library
+
+What the meetings list and an open meeting do, without the window:
+
+```sh
+sona work meetings --title pricing --status ready --folder "Q3"   # search box, status filter, folder chip
+sona work meeting-rename <MEETING_ID> "Pricing sync"
+sona work meeting-delete <MEETING_ID>                   # to the trash for 30 days; answers its trash_id
+sona work meeting-trash                                 # what the app's Trash shows
+sona work meeting-restore <TRASH_ID>                    # back where it was, filed again
+sona work meeting-delete-forever <TRASH_ID>             # gone for good, audio too
+sona work folders
+sona work folder-new "Q3"
+sona work folder-rename "Q3" "Q3 deals"
+sona work folder-delete "Q3 deals"                    # meetings stay, the folder goes
+sona work folder-add <MEETING_ID> --folder "Q3"        # folder-remove takes it out
+sona work meeting-notes <MEETING_ID>                    # notes, my notes, typed notes, numbered action items
+sona work meeting-note-add <MEETING_ID> "Follow up on SSO" [--at 95]
+sona work meeting-note-edit <MEETING_ID> <NOTE_ID> "Follow up on SSO by Friday"
+sona work meeting-note-delete <MEETING_ID> <NOTE_ID>
+sona work my-notes <MEETING_ID> "whole text"           # replaces the user's own notes
+sona work action-done <MEETING_ID> 2 [--undo]
+sona work snapshots <MEETING_ID>
+sona work snapshot-delete <MEETING_ID> <SNAPSHOT_ID>
+sona work heard-plans <MEETING_ID>
+sona work heard-plan-edit <PLAN_ID> --start "2026-11-20 15:00" --people "Dana,Lee" --place ""
+sona work heard-plan-not-now <PLAN_ID>
+sona work said "pricing" [--limit 20]                  # what the user said, across meetings
+sona work screen-text "invoice" [--limit 20]            # text read off the screen in meetings
+sona work meeting-search <MEETING_ID> "renewal"
+sona work meeting-export <MEETING_ID> --format json --out /abs/path/meeting.json
+sona work meeting-ledger <MEETING_ID> [--out /abs/path/ledger.html]
+sona work meetings-csv [--out /abs/path/meetings.csv]
+```
+
+A folder is named by its name or its id from `folders`. Every change takes
+`--dry-run`, `--operation-id` and `--agent`, needs the same settings as task
+writes, and answers `replayed:true` when it repeats an operation or asks for
+what is already so. A meeting kept on this Mac answers `not_found`, is left
+out of `meetings-csv`, and stays out of `meeting-trash` while it is trashed.
+`heard-plan-edit` refuses a plan already on
+the calendar. `meeting-export` writes the pictures beside the file and needs the
+write settings; `meeting-ledger` and `meetings-csv` only read.
+
+Not from the command line: writing the notes again, catch me up and rewriting
+with my notes, and importing a recording, all run the notes model or
+transcription inside the app. Share links need the app's sync. Posting a
+follow-up or sending notes to a connection sends in the user's name, so only the
+user does it.
 
 ## Before talking to someone
 
@@ -365,6 +592,94 @@ newlines. Reading a diff never restores or writes a note.
 `saved_at_ms`, `kind` and a version-scoped note `link`. Cite both when discussing
 the change. Version retention still applies when a link is opened later.
 
+## Sona's settings
+
+```bash
+sona work settings                                  # dictation, sounds, microphones, cleanup, modes, prompts, vocabulary, shortcuts, trackers, prep
+sona work setting theme dark --dry-run
+sona work setting push-to-talk false
+sona work setting cleanup-model gpt-5-mini --provider openai
+sona work setting mode <MODE_ID>                    # the capture mode chip
+sona work setting dictation-prompt <PROMPT_ID>      # use a prompt
+sona work setting keyword-trackers '[{"name":"Pricing","patterns":["price","discount"]}]'
+sona work setting-reset shortcut <SHORTCUT_ID>
+sona work setting-reset replacements                # back to the starter library
+sona work mode-save --mode-json '<MODE_JSON>'      # one entry of settings --json modes.modes
+sona work mode-delete <MODE_ID>
+sona work mode-reorder <MODE_ID> <MODE_ID> ...
+sona work prompt-save "Short replies" --prompt "Keep it to two lines." [--id <PROMPT_ID>]
+sona work prompt-delete <PROMPT_ID>
+sona work vocabulary-add "sona" "Sona" [--mode <MODE_ID>]
+sona work vocabulary-csv words.csv [--mode <MODE_ID>]
+sona work workflows [--runs] [--workflow <ID>]
+sona work workflow-enable <WORKFLOW_ID> [--off]
+sona work saved-prompts
+sona work saved-prompt-save "Risks" --body "What could go wrong?" --about meeting [--schema '<JSON_SCHEMA>'] [--id <PROMPT_ID>]
+sona work saved-prompt-delete <PROMPT_ID>
+sona work series <MEETING_ID>                       # its series' template and digest choice
+sona work series-template <MEETING_ID> one-on-one    # or none, or --custom <TEMPLATE_ID>
+sona work series-digest <MEETING_ID> [--off]
+sona work evening                                   # today's lines and recordings waiting to be filed
+sona work filing <SUGGESTION_ID> [--decline]
+sona work connections                               # connections, send rules, recent sends; no tokens
+```
+
+`sona work setting --help` lists every key and the values it takes. Each
+write takes `--dry-run`, `--agent`, `--operation-id` and `--json`, needs
+outside changes allowed, and obeys the Apply or Suggest setting. The answer
+shows the value before and after. A running Sona reads the settings file again
+within a second and follows the change as it does one made in Settings: the
+theme, overlay, shortcuts, modes, tray language, log level and quiet speech
+change at once. A change made in Sona's window in that same second wins.
+Leaving out `--operation-id` makes each call a new change; pass one to make a
+retry safe.
+
+The saved prompts, series, workflow and filing writes change the meeting
+library, and a running Sona's windows show them within a second. A meeting
+kept on this Mac answers not_found; the evening card
+leaves out lines drawn on one (`lines_left_out`), its recordings, and
+suggestions from a plan heard in one; the connections leave out its sends,
+and leave out a send rule for a series kept on this Mac (`rules_left_out`).
+
+Not here, by design: API keys, consent and privacy switches, the meeting prep
+switches that read mail or the web, and anything that grants a permission.
+Choosing a microphone, offline cleanup, downloading or switching models,
+checking for updates, sync, running a saved prompt, writing the evening lines
+now, testing or undoing a connection, and the agent panel need the running
+app or its keychain, so they stay in its window.
+
+## Automations
+
+An automation is a saved agent workflow, not a meeting commitment loop (those
+are `--loops` and `--loop-resolve`). When its trigger fires, the running app has
+its in-app agent carry out the automation's prompt, using only the tools on the
+automation's list. The in-app agent can only read; it cannot change tasks.
+
+```bash
+sona work automation-list
+sona work automation-show "Weekly digest"           # the automation, its versions and its runs
+sona work automation-save "Weekly digest" --prompt "Sum up what moved this week." \
+  --schedule weekly --first-run "2026-11-16 09:00" --days mon --tools sona_search,sona_meeting
+sona work automation-save "Bug watch" --prompt "Say who should look at it." \
+  --on status-changed --to in_progress --if-label bug
+sona work automation-run "Weekly digest"            # queues a run for the running app
+sona work automation-enable "Weekly digest"
+sona work automation-disable "Weekly digest"
+sona work automation-restore-version "Weekly digest" 3
+sona work automation-delete "Weekly digest"         # permanent, with its versions and runs
+```
+
+A schedule is `hourly`, `daily`, `weekly` or `monthly`; the first run sets the
+time of day and must not be in the past, and `--timezone` defaults to this
+Mac's. An event is `task-created`, `status-changed`, `label-added`, `assigned`,
+`comment-added`, `project-status-changed` or `meeting-ended`. `--if-label`,
+`--if-project`, `--if-status` and `--tools` take comma lists, and `""` clears
+one. A new automation needs `--prompt` and a trigger; changing one keeps what
+is not given. Every save is kept as a version, and restoring one saves a new
+version. Writes need External mutations like every other `work` write and take
+`--dry-run`, `--agent` and `--operation-id`. Runs are skipped, with the reason
+on the run, while External access or External mutations is off.
+
 ## Statistics
 
 `--stats` returns `measured_at_utc_ms`, `population:"retained_records"`,
@@ -473,6 +788,11 @@ claude mcp add sona -- bun /absolute/path/to/sona/tools/sona-mcp/src/index.ts
 | `sona_note`, `sona_note_versions` | `note_id`                                                    |
 | `sona_note_context`               | `query`, `limit?`                                            |
 | `sona_note_diff`                  | `note_id`, `from_version`, `to_version?`                     |
+| `sona_ask_pack`                   | `question`, `folder?`                                        |
+| `sona_documents`                  | `person?` or `meeting_id?`                                   |
+| `sona_planning_link_source`       | `target`, `kind` (meeting, note, loop), `source_id`, `at_seconds?`, `dry_run?` — writes |
+| `sona_document_add`               | `path`, `meeting_id?`, `dry_run?` — writes                   |
+| `sona_document_delete`            | `document_id`, `dry_run?` — writes, cannot be undone         |
 | `sona_stats`                      | none                                                         |
 | `sona_events`                     | `after?`, `limit?`                                           |
 | `sona_loop_resolve`               | `loop_id` — writes                                           |
@@ -482,8 +802,50 @@ claude mcp add sona -- bun /absolute/path/to/sona/tools/sona-mcp/src/index.ts
 | `sona_work_create`                | `title`, fields — writes                                     |
 | `sona_work_update`                | `tasks`, fields, `parent?` (`null` clears), `dry_run?` — writes |
 | `sona_work_claim`                 | `task` — writes                                              |
+| `sona_task_save`                  | `task`, `patch` (`{field, op?, value?, anchor?}` steps), `expected_revision?`, `dry_run?` — writes |
+| `sona_session_start`              | `task` — writes                                              |
+| `sona_session_activity`           | `session`, `type`, `body?`, `action?`, `parameter?`, `result?`, `options?`, `ephemeral?`, `plan?` — writes |
+| `sona_session_plan`               | `session`, `plan` (`{content, status}` steps) — writes       |
+| `sona_session_heartbeat`          | `session` — writes                                           |
+| `sona_session_get`                | `session`                                                    |
+| `sona_session_list`               | `task?`, `open?`, `agent?`                                   |
+| `sona_session_stop` *(opt-in)*    | `session` — writes                                           |
+| `sona_work_changes`               | `since?`, `limit?`                                           |
+| `sona_settings`                   | none                                                         |
+| `sona_setting`                    | `key`, `value`, `provider?`, `dry_run?` — writes             |
+| `sona_setting_reset` *(opt-in)*   | `target` (`shortcut` or `replacements`), `id?`, `dry_run?` — writes, takes away |
+| `sona_mode_save`, `sona_mode_reorder` | `mode` (JSON) or `modes`, `dry_run?` — writes            |
+| `sona_mode_delete`, `sona_prompt_delete` *(opt-in)* | `mode` or `id`, `dry_run?` — writes, takes away |
+| `sona_prompt_save`                | `name`, `prompt`, `id?`, `dry_run?` — writes                 |
+| `sona_vocabulary_add`             | `spoken`, `written`, `mode?`, `dry_run?` — writes            |
+| `sona_vocabulary_csv`             | `file`, `mode?`, `dry_run?` — writes                         |
+| `sona_workflows`                  | `runs?`, `workflow?`, `limit?`                               |
+| `sona_workflow_enable`            | `workflow`, `off?`, `dry_run?` — writes                      |
+| `sona_saved_prompts`, `sona_evening`, `sona_connections` | none                              |
+| `sona_saved_prompt_save`          | `name`, `body`, `about`, `schema?`, `id?`, `dry_run?` — writes |
+| `sona_saved_prompt_delete` *(opt-in)* | `id`, `dry_run?` — writes, takes away                    |
+| `sona_series`                     | `meeting_id`                                                 |
+| `sona_series_template`            | `meeting_id`, `template?` or `custom?`, `dry_run?` — writes  |
+| `sona_series_digest`              | `meeting_id`, `off?`, `dry_run?` — writes                    |
+| `sona_filing`                     | `suggestion`, `decline?`, `dry_run?` — writes                |
+| `sona_automation_list`            | none — automations, not meeting commitments                  |
+| `sona_automation_show`            | `automation`                                                 |
+| `sona_automation_save`            | `name`, `automation?`, `prompt?`, `schedule?` + `first_run?`, `timezone?`, `days?` or `on?`, `to?`, `label?`; `if_label?`, `if_project?`, `if_status?`, `tools?` (lists, `[]` clears), `dry_run?` — writes |
+| `sona_automation_run` *(opt-in)*  | `automation`, `dry_run?` — writes                            |
+| `sona_automation_enable`, `sona_automation_disable` | `automation`, `dry_run?` — writes          |
+| `sona_automation_restore_version` | `automation`, `version`, `dry_run?` — writes                 |
+| `sona_automation_delete` *(opt-in)* | `automation`, `dry_run?` — deletes                         |
 | `sona_work_done`                  | `tasks`, `evidence?`, `dry_run?` — writes                    |
-| `sona_work_triage`                | `tasks`, `decision`, `of?`, `dry_run?` — writes              |
+| `sona_work_triage`                | `tasks`, `decision`, `of?`, `reason?` (decline), `dry_run?` — writes |
+| `sona_work_triage_suggestions`    | `task?` — each suggestion's id, value and reason              |
+| `sona_work_suggestion_accept`, `sona_work_suggestion_dismiss` | `id`, `dry_run?` — writes        |
+| `sona_work_templates`             | none                                                         |
+| `sona_work_template_save`         | `name`, `template?`, fields, `due_in_days?`, `subtasks?`, `dry_run?` — writes |
+| `sona_work_template_use`          | `template`, `title?`, `due?`, `dry_run?` — writes            |
+| `sona_work_template_delete`       | `template`, `dry_run?` — deletes                             |
+| `sona_work_remind`                | `task`, `when` (`none` clears), `dry_run?` — writes          |
+| `sona_work_reminders`             | `due?`                                                       |
+| `sona_work_label_group`, `sona_work_label_retire` (opt-in) | `label`, `group` or `restore?`, `dry_run?` — writes |
 | `sona_subtask_create`             | `parent`, `titles` (a list), `owner?`, `priority?`, `dry_run?` — writes |
 | `sona_comment_list`               | `task`, `limit?`, `cursor?`                                  |
 | `sona_comment_save`               | `body`, `task` or `id`, `reply_to?`, `dry_run?` — writes     |
@@ -513,8 +875,18 @@ claude mcp add sona -- bun /absolute/path/to/sona/tools/sona-mcp/src/index.ts
 | `sona_person_list`                | `query?`                                                     |
 | `sona_person_save`                | `name`, `person?`, `aliases?`, `role?`, `org?`, `email?`, `notes?` — writes |
 | `sona_person_merge`               | `person`, `into` — writes                                    |
-| `sona_meeting_list`               | `since?`, `limit?`                                           |
+| `sona_meeting_list`               | `since?`, `limit?`, `title?`, `status?` (ready, processing, failed), `folder?` |
 | `sona_meeting_get`                | `meeting_id`, `transcript?`                                  |
+| `sona_meeting_folders`            | none                                                         |
+| `sona_meeting_trash`              | none                                                         |
+| `sona_meeting_notes`              | `meeting_id`                                                 |
+| `sona_meeting_snapshots`          | `meeting_id`                                                 |
+| `sona_meeting_heard_plans`        | `meeting_id`                                                 |
+| `sona_meeting_search`             | `meeting_id`, `query`, `limit?`                              |
+| `sona_said_search`                | `query`, `limit?`                                            |
+| `sona_screen_text_search`         | `query`, `limit?`                                            |
+| `sona_meeting_ledger`             | `meeting_id`, `out?`                                         |
+| `sona_meetings_csv`               | `out?`                                                       |
 | `sona_work_delegate`              | `task`, `to` (an agent, or `none`), `dry_run?` — writes      |
 | `sona_work_day`                   | `day?`                                                       |
 | `sona_work_day_plan`              | `tasks` (up to three, or `none`), `day?`, `dry_run?` — writes |
@@ -537,12 +909,30 @@ claude mcp add sona -- bun /absolute/path/to/sona/tools/sona-mcp/src/index.ts
 The tools in the last eighteen rows above are opt-in, and so are archiving,
 links, cycles, labels, views, watches, comment deletes, attachment
 removal, project archiving, the project bin, update deletes, milestone deletes
-and person merges: set `SONA_MCP_TOOLS=all`, or name the ones
+and person merges, and the task bin, description history, favorites,
+subscriptions and the inbox (`sona_work_delete`, `sona_work_bin`,
+`sona_work_archive_list`, `sona_work_description_versions`,
+`sona_work_description_version`, `sona_work_description_restore`,
+`sona_work_favorite`/`unfavorite` with `kind` and `target`,
+`sona_work_favorites`, `sona_work_subscribe`/`unsubscribe`,
+`sona_work_subscriptions`, `sona_work_inbox`, `sona_work_inbox_mark` with
+`notifications` ids or `"all"`): set `SONA_MCP_TOOLS=all`, or name the ones
 to add, when registering the server. In project, milestone, person and cycle
 saves a `null` field clears it. Project, update, milestone, cycle and person
 writes are refused unless Agents' changes is on Apply; project saves, the bin,
 updates, milestone order and cycle writes take `dry_run`, milestone and person
 saves do not. Task export is CLI-only.
+Source links and document adds and deletes (`sona_planning_link_source`,
+`sona_document_add`, `sona_document_delete`) are opt-in too.
+The meetings library writes are opt-in as well, each with `dry_run?`:
+`sona_meeting_export` (`meeting_id`, `out`, `format?`), `sona_meeting_rename`,
+`sona_meeting_delete`, `sona_meeting_restore`, `sona_meeting_delete_forever`,
+`sona_meeting_folder_new`/`_rename`/`_delete`,
+`sona_meeting_file`/`unfile`, `sona_meeting_note_add`/`_edit`/`_delete`,
+`sona_meeting_my_notes`, `sona_meeting_action_done`,
+`sona_meeting_snapshot_delete`, `sona_heard_plan_edit` and
+`sona_heard_plan_not_now`. Deletes and `sona_meeting_my_notes` are marked
+destructive.
 
 `sona_project_detail` returns the latest update, `update_missing`, progress
 (done 100, started 25, over scope), weekly history, the predicted finish and

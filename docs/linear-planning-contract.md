@@ -71,6 +71,8 @@ its tasks stay, in no project.
 | `planning_project_save` | `operationId`, `id?` (none creates), `input` | `Project` |
 | `planning_projects_trashed` | none | `[ProjectSummary]`, same shape as `planning_projects`, `trashedAtMs` set, newest deletion first; restore with `planning_project_save` `input.trashed: false` |
 | `planning_milestone_reorder` | `operationId`, `projectId`, `milestoneIds` (all, in order) | `[Milestone]` |
+| `planning_milestone_save` | `operationId`, `projectId`, `id?` (none creates), `input: {title?, description?, dueAtMs?, status?}` (`dueAtMs: null` clears) | `Milestone` |
+| `work_where` | `text` | `{terms: [{text, label, condition: WorkCondition}], unread: [{text, couldBe}]}` |
 | `work_cycle_settings_save` (existing) | `operationId`, `settings` | `WorkCycles` |
 | `work_cycle_save` | `operationId`, `number`, `name?`, `startDay?`, `endDay?` (YYYY-MM-DD, end exclusive) | `WorkCycles` |
 | `work_cycle_rollover` | `operationId`, `number` | `WorkCycles` |
@@ -79,9 +81,17 @@ its tasks stay, in no project.
 
 `planning_project_save.input` (camelCase; a missing key leaves the field,
 `null` clears it): `title`, `description`, `status`, `leadPersonId`,
-`memberPersonIds`, `targetAtMs`, `hue`, `priority`, `startAtMs`,
-`startResolution`, `targetResolution`, `icon`, `labelIds`,
-`links: [{title, url}]`, `archived`, `trashed` (true bins, false restores).
+`leadIsSelf`, `memberPersonIds`, `membersIncludeSelf`, `targetAtMs`,
+`hue`, `priority`, `startAtMs`, `startResolution`, `targetResolution`,
+`icon`, `labelIds`, `links: [{title, url}]`, `archived`, `trashed` (true
+bins, false restores).
+
+The lead is nobody, the user, or one person. The people store keeps no
+person for the user, so `leadIsSelf: true` makes the user the lead and
+`membersIncludeSelf` says whether the user is a member, as a task's
+`ownerIsSelf` does. `leadIsSelf: true` with a `leadPersonId` is refused;
+a `leadPersonId` or `null` replaces the user as lead. `Project` and
+`ProjectSummary.project` carry `leadIsSelf` and `membersIncludeSelf`.
 
 `settings` for `work_cycle_settings_save`: `{weeks, startWeekday,
 cooldownWeeks, upcoming}`, all four required; a save missing any is
@@ -96,7 +106,9 @@ owner project milestone label cycle due created updated`; `op` one of `is
 is_not any_of none_of includes_all includes_any before after`. Values are
 ids, stored status names (`not_started`...), priorities (0-4 or names),
 `me` (owner), `none` (empty field), cycle numbers or `current`/`next`, and
-days as `YYYY-MM-DD`, `today`, `tomorrow`, `yesterday` or epoch ms.
+days as `YYYY-MM-DD`, `today`, `tomorrow`, `yesterday`, `this_week`,
+`next_week`, `last_week` (weeks start on Monday), `this_month`,
+`next_month`, `last_month` or epoch ms.
 `before`/`after` take dated fields only. Labels: `is`/`includes_all` need
 every value, `any_of`/`includes_any` any, `is_not`/`none_of` none. All
 conditions must hold, on top of the older query fields, which still work.
@@ -121,7 +133,10 @@ repeated operation id replays the first answer.
 - `work project-save NAME` gains `--priority`, `--start DAY`,
   `--start-resolution`, `--target-resolution`, `--icon`, `--labels a,b`,
   `--link TITLE=URL` (repeatable; `none` clears), `--dry-run`; `none`
-  clears each.
+  clears each. `--lead` and `--members` take the words `--owner` takes:
+  `me` (or `self`, `you`, `mine`) for the user, `nobody` or `none` for no
+  one, else a person. The JSON shows the user as `lead_is_self` and
+  `members_include_self`.
 - `work project-delete PROJECT [--restore]`; `work projects --trashed`.
 - `work milestone-reorder PROJECT M1 M2 ...`.
 - `work cycle-settings [--weeks 1-8] [--start-weekday 1-7] [--cooldown
@@ -131,6 +146,17 @@ repeated operation id replays the first answer.
 - `work cycle-rollover CYCLE`, `work cycle-start-today [CYCLE]`.
 - `work list --filter JSON` and `work view-save NAME --filter JSON`: one
   condition object or a list.
+- `work list --where WORDS`: plain words read as conditions on this Mac,
+  no model ("high priority bugs due this week that are mine"). Prints what
+  each word was read as and the words it could not read; the JSON carries
+  them as `read_as`. A word naming two things (a label and a project) is
+  left unread with both readings. Status words replace the default open
+  statuses unless `--view` or `--status` is given.
+- `work timeline [--from DAY] [--to DAY]`: projects whose start-to-target
+  span or milestones fall in the window (default: the first of this month
+  to three months on), earliest first, with those milestones; `undated`
+  names projects with neither day. Dates move with `work project-save` and
+  `work milestone-save`, the saves the app's timeline drags make.
 
 ## MCP to add
 
@@ -138,7 +164,8 @@ repeated operation id replays the first answer.
 `sona_project_updates`, `sona_project_delete`, `sona_milestone_reorder`,
 `sona_cycle_settings`, `sona_cycle_save`, `sona_cycle_rollover`,
 `sona_cycle_start_today`, and a `filter` array on `sona_list`/view save,
-each wrapping the verbs above with `--json`.
+each wrapping the verbs above with `--json`. `sona_work_list` takes
+`where` (plain words), and `sona_project_timeline` wraps `work timeline`.
 
 ## Swift to do
 
@@ -148,11 +175,6 @@ and update feed; trash list with restore; milestone drag order and
 fields); cycle rename/date move/start today/rollover; cycle graph from
 `days` (scope/started/done); project progress chart and prediction band;
 filter builder writing `query.filters`.
-
-## Not built
-
-- The natural-language filter helper ("due next week", "waiting on X"):
-  skipped.
 
 ## Verified
 
