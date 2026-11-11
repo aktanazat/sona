@@ -7,13 +7,15 @@
 //! Consent, privacy, secrets and the agent gates themselves are not here.
 
 use super::{now_ms, refusal, Tracker, WorkAnswer, WriteArgs};
+use crate::analytics::{DashboardTrendRange, DashboardTrendRequest};
+use crate::commands::audio::CustomSounds;
 use crate::commands::vocabulary::{self, VocabularyScope};
 use crate::integrations::types::{Connection, ConnectionPreferences, SendScope, SendState};
 use crate::meeting::analytics::{KeywordTracker, MeetingNotesTemplate};
 use crate::meeting::evening::{FilingTarget, UnfiledRecording};
 use crate::meeting::prep::PrepPreferences;
 use crate::meeting::prompt_types::{
-    normalized_prompt, PromptOutput, PromptTarget, SavedPromptDeleteRequest,
+    normalized_prompt, PromptOutput, PromptTarget, PromptTargetRef, SavedPromptDeleteRequest,
     SavedPromptSaveRequest,
 };
 use crate::meeting::series_types::{
@@ -30,16 +32,18 @@ use crate::meeting::workflow_types::{
 use crate::modes::{self, ModeDefinition, RequestedEngine};
 use crate::planning;
 use crate::query::external::{
-    beacon, command_error, kept_local, meeting_refusal, session_id, store, visible_meeting,
+    beacon, command_error, kept_local, meeting_refusal, person_id, session_id, store,
+    visible_meeting,
     ExternalError,
     ExternalErrorCode, ExternalScope, READ_SCOPES, WRITE_SCOPES,
 };
 use crate::query::{KeptLocal, QueryError, QUERY_SCHEMA_VERSION};
 use crate::settings::{
-    self, AppSettings, DigestDay, LLMPrompt, LogLevel, OverlayStyle, PasteMethod, SoundTheme,
-    Theme, VocabularyEntry, LOCAL_CLEANUP_PROVIDER_ID,
+    self, AppSettings, AppearanceMaterial, DigestDay, EnglishSpelling, HudPillEdge, LLMPrompt,
+    LogLevel, OverlayStyle, PasteMethod, PersonaSample, SoundTheme, Theme, VocabularyEntry,
+    LOCAL_CLEANUP_PROVIDER_ID,
 };
-use clap::{Args, Subcommand, ValueEnum};
+use clap::{ArgGroup, Args, Subcommand, ValueEnum};
 use rusqlite::OptionalExtension as _;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -54,7 +58,8 @@ const LIVE: &str = "A running Sona reads the change within a second and follows 
 #[derive(Subcommand, Clone, Debug, Eq, PartialEq)]
 pub enum SettingsVerb {
     /// Sona's settings an agent may read: dictation, sounds, appearance,
-    /// cleanup, modes, prompts, vocabulary, shortcuts, trackers, prep.
+    /// cleanup, modes, prompts, vocabulary, writing samples, shortcuts,
+    /// trackers, prep, and where Sona keeps its data and log.
     Settings,
     /// Change one setting, as its switch or picker in Settings does.
     Setting(SettingArgs),
@@ -82,6 +87,9 @@ pub enum SettingsVerb {
     WorkflowEnable(WorkflowEnableArgs),
     /// The saved prompts: questions kept for a meeting, a person or a series.
     SavedPrompts,
+    /// The answers saved prompts gave about one meeting, person or series,
+    /// newest first.
+    SavedPromptRuns(SavedPromptRunsArgs),
     /// Save a saved prompt, or change one with --id.
     SavedPromptSave(SavedPromptSaveArgs),
     /// Delete a saved prompt.
@@ -122,19 +130,39 @@ pub enum SettingKey {
     QuietSpeech,
     /// The command mode shortcut: true or false.
     CommandMode,
+    /// A spoken question's answer goes to the chat sheet (true) or replaces
+    /// the selection (false).
+    CommandAnswersInChat,
     /// The dictation overlay: none, minimal or live.
     Overlay,
+    /// The pill shown between dictations: true or false.
+    HudPill,
+    /// Where that pill stands: top, bottom, left or right.
+    HudPillPosition,
     /// Dictation languages, comma-separated codes, primary first; "" for
     /// automatic.
     DictationLanguages,
+    /// Write what is said in English, whatever the language spoken: true or
+    /// false.
+    TranslateToEnglish,
+    /// English spelling: as-spoken or british.
+    EnglishSpelling,
     /// The app's own language, a code such as en.
     AppLanguage,
     /// system, light or dark.
     Theme,
+    /// The window material: solid or glass.
+    AppearanceMaterial,
     /// trace, debug, info, warn or error.
     LogLevel,
     /// Debug mode: true or false.
     DebugMode,
+    /// Experimental features: true or false.
+    Experimental,
+    /// Check for updates: true or false.
+    UpdateCheck,
+    /// Show what's new after an update: true or false.
+    WhatsNew,
     /// Turn cleanup of dictated text on or off: true or false.
     Cleanup,
     /// The cleanup provider's id, from `sona work settings`.
@@ -145,6 +173,8 @@ pub enum SettingKey {
     CleanupBaseUrl,
     /// The evening digest: true or false.
     EveningDigest,
+    /// When the evening digest arrives, HH:MM on this Mac's clock.
+    EveningDigestTime,
     /// Close a task as done once its sub-tasks are all closed and at least
     /// one is done: true or false.
     AutoCloseParents,
@@ -156,6 +186,10 @@ pub enum SettingKey {
     Snippets,
     /// Text replacements: true or false.
     TextReplacements,
+    /// Spoken edits such as "scratch that": true or false.
+    SpokenEdits,
+    /// Emoji replacements: true or false.
+    Emoji,
     /// The active mode's id: the capture mode chip.
     Mode,
     /// Use a dictation prompt by id: the active mode takes its text.
@@ -296,6 +330,23 @@ pub struct WorkflowsArgs {
     /// How many runs.
     #[arg(long)]
     pub limit: Option<usize>,
+    /// Runs per day over the last 7 days instead.
+    #[arg(long, conflicts_with_all = ["runs", "workflow", "limit"])]
+    pub trend: bool,
+}
+
+#[derive(Args, Clone, Debug, Eq, PartialEq)]
+#[command(group(ArgGroup::new("about").required(true).args(["meeting", "person", "series"])))]
+pub struct SavedPromptRunsArgs {
+    /// The answers about this meeting, by its id.
+    #[arg(long, value_name = "MEETING_ID")]
+    pub meeting: Option<String>,
+    /// The answers about this person: a name they go by, or their id.
+    #[arg(long, value_name = "PERSON")]
+    pub person: Option<String>,
+    /// The answers about the series this meeting belongs to, by the meeting's id.
+    #[arg(long, value_name = "MEETING_ID")]
+    pub series: Option<String>,
 }
 
 #[derive(Args, Clone, Debug, Eq, PartialEq)]
@@ -416,6 +467,7 @@ impl SettingsVerb {
             Self::Settings
             | Self::Workflows(_)
             | Self::SavedPrompts
+            | Self::SavedPromptRuns(_)
             | Self::Series(_)
             | Self::Evening
             | Self::Connections => None,
@@ -452,6 +504,7 @@ impl SettingsVerb {
             Self::Workflows(_) => "workflows",
             Self::WorkflowEnable(_) => "workflow-enable",
             Self::SavedPrompts => "saved-prompts",
+            Self::SavedPromptRuns(_) => "saved-prompt-runs",
             Self::SavedPromptSave(_) => "saved-prompt-save",
             Self::SavedPromptDelete(_) => "saved-prompt-delete",
             Self::Series(_) => "series",
@@ -483,21 +536,21 @@ pub struct ExternalSettings {
 
 /// A change to the settings document: what it shows before and after, and
 /// the mutation itself, which a dry run makes on a copy.
-struct SettingsChange<'a> {
-    what: String,
-    request: Value,
-    show: Show<'a>,
-    apply: Apply<'a>,
+pub(super) struct SettingsChange<'a> {
+    pub(super) what: String,
+    pub(super) request: Value,
+    pub(super) show: Show<'a>,
+    pub(super) apply: Apply<'a>,
 }
 
-type Show<'a> = Box<dyn Fn(&AppSettings) -> Value + 'a>;
-type Apply<'a> = Box<dyn Fn(&mut AppSettings) -> Result<(), String> + 'a>;
+pub(super) type Show<'a> = Box<dyn Fn(&AppSettings) -> Value + 'a>;
+pub(super) type Apply<'a> = Box<dyn Fn(&mut AppSettings) -> Result<(), String> + 'a>;
 
-fn show<'a>(read: impl Fn(&AppSettings) -> Value + 'a) -> Show<'a> {
+pub(super) fn show<'a>(read: impl Fn(&AppSettings) -> Value + 'a) -> Show<'a> {
     Box::new(read)
 }
 
-fn apply<'a>(change: impl Fn(&mut AppSettings) -> Result<(), String> + 'a) -> Apply<'a> {
+pub(super) fn apply<'a>(change: impl Fn(&mut AppSettings) -> Result<(), String> + 'a) -> Apply<'a> {
     Box::new(change)
 }
 
@@ -527,6 +580,17 @@ fn log_level(value: &str) -> Result<LogLevel, String> {
         "error" => Ok(LogLevel::Error),
         other => Err(format!("{other} is not one of: trace, debug, info, warn, error.")),
     }
+}
+
+fn digest_minute(value: &str) -> Result<u32, String> {
+    let value = value.trim();
+    let time = chrono::NaiveTime::parse_from_str(value, "%H:%M")
+        .map_err(|_| format!("{value} is not a time such as 18:30."))?;
+    Ok(chrono::Timelike::hour(&time) * 60 + chrono::Timelike::minute(&time))
+}
+
+fn clock(minute_of_day: u32) -> String {
+    format!("{:02}:{:02}", minute_of_day / 60, minute_of_day % 60)
 }
 
 fn provider_for(settings: &AppSettings, asked: Option<&str>) -> Result<String, String> {
@@ -604,6 +668,76 @@ fn setting_change<'a>(args: &'a SettingArgs) -> SettingsChange<'a> {
         SettingKey::CommandMode => (
             show(|s| json!(s.command_mode_enabled)),
             apply(move |s| Ok(s.command_mode_enabled = flag(value)?)),
+        ),
+        SettingKey::CommandAnswersInChat => (
+            show(|s| json!(s.command_answers_in_chat)),
+            apply(move |s| Ok(s.command_answers_in_chat = flag(value)?)),
+        ),
+        SettingKey::HudPill => (
+            show(|s| json!(s.hud_pill_enabled)),
+            apply(move |s| {
+                s.hud_pill_enabled = flag(value)?;
+                s.hud_pill_hidden_until_ms = None;
+                Ok(())
+            }),
+        ),
+        SettingKey::HudPillPosition => (
+            show(|s| json!(s.hud_pill_position)),
+            apply(move |s| {
+                s.hud_pill_position = named::<HudPillEdge>(
+                    &value.trim().to_ascii_lowercase(),
+                    "top, bottom, left, right",
+                )?;
+                Ok(())
+            }),
+        ),
+        SettingKey::TranslateToEnglish => (
+            show(|s| json!(s.translate_to_english)),
+            apply(move |s| Ok(s.translate_to_english = flag(value)?)),
+        ),
+        SettingKey::EnglishSpelling => (
+            show(|s| json!(s.english_spelling)),
+            apply(move |s| {
+                s.english_spelling = named::<EnglishSpelling>(
+                    &value.trim().to_ascii_lowercase().replace('-', "_"),
+                    "as-spoken, british",
+                )?;
+                Ok(())
+            }),
+        ),
+        SettingKey::AppearanceMaterial => (
+            show(|s| json!(s.appearance_material)),
+            apply(move |s| {
+                s.appearance_material = named::<AppearanceMaterial>(
+                    &value.trim().to_ascii_lowercase(),
+                    "solid, glass",
+                )?;
+                Ok(())
+            }),
+        ),
+        SettingKey::Experimental => (
+            show(|s| json!(s.experimental_enabled)),
+            apply(move |s| Ok(s.experimental_enabled = flag(value)?)),
+        ),
+        SettingKey::UpdateCheck => (
+            show(|s| json!(s.update_check_enabled)),
+            apply(move |s| Ok(s.update_check_enabled = flag(value)?)),
+        ),
+        SettingKey::WhatsNew => (
+            show(|s| json!(s.show_whats_new_on_update)),
+            apply(move |s| Ok(s.show_whats_new_on_update = flag(value)?)),
+        ),
+        SettingKey::EveningDigestTime => (
+            show(|s| json!(clock(s.meeting_digest_minute_of_day))),
+            apply(move |s| Ok(s.meeting_digest_minute_of_day = digest_minute(value)?)),
+        ),
+        SettingKey::SpokenEdits => (
+            show(|s| json!(s.spoken_edits_enabled)),
+            apply(move |s| Ok(s.spoken_edits_enabled = flag(value)?)),
+        ),
+        SettingKey::Emoji => (
+            show(|s| json!(s.emoji_replacements_enabled)),
+            apply(move |s| Ok(s.emoji_replacements_enabled = flag(value)?)),
         ),
         SettingKey::Overlay => (
             show(|s| json!(s.overlay_style)),
@@ -756,7 +890,7 @@ fn setting_change<'a>(args: &'a SettingArgs) -> SettingsChange<'a> {
     }
 }
 
-fn mode_error(error: modes::ModeMutationError) -> String {
+pub(super) fn mode_error(error: modes::ModeMutationError) -> String {
     serde_json::to_string(&error).unwrap_or_else(|_| "The mode could not be changed.".to_owned())
 }
 
@@ -815,18 +949,36 @@ struct DictationView<'a> {
     mute_while_recording: bool,
     quiet_speech: bool,
     command_mode: bool,
+    command_answers_in_chat: bool,
     overlay: OverlayStyle,
+    hud_pill: bool,
+    hud_pill_position: HudPillEdge,
     dictation_languages: &'a [String],
+    translate_to_english: bool,
+    english_spelling: EnglishSpelling,
     microphone: Option<&'a str>,
     microphones: Vec<String>,
+    custom_sounds: CustomSounds,
 }
 
 #[derive(Serialize)]
 struct AppearanceView<'a> {
     theme: Theme,
+    material: AppearanceMaterial,
     app_language: &'a str,
     log_level: LogLevel,
     debug_mode: bool,
+    experimental: bool,
+    update_check: bool,
+    whats_new: bool,
+}
+
+/// Where Sona keeps its data and log on this Mac, as Settings › About shows.
+#[derive(Serialize)]
+struct AboutView {
+    app_dir: Option<String>,
+    log_dir: Option<String>,
+    portable: bool,
 }
 
 #[derive(Serialize)]
@@ -863,16 +1015,26 @@ struct SettingsView<'a> {
     vocabulary: &'a [VocabularyEntry],
     snippets: bool,
     text_replacements: bool,
+    spoken_edits: bool,
+    emoji: bool,
+    persona_samples: &'a [PersonaSample],
     shortcuts: Vec<ShortcutView<'a>>,
     evening_digest: bool,
+    evening_digest_time: String,
     auto_close_parents: bool,
     project_digest: bool,
     project_digest_day: DigestDay,
     keyword_trackers: &'a [KeywordTracker],
     meeting_prep: &'a PrepPreferences,
+    about: AboutView,
 }
 
-fn settings_view(settings: &AppSettings, microphones: Vec<String>) -> SettingsView<'_> {
+fn settings_view(
+    settings: &AppSettings,
+    microphones: Vec<String>,
+    custom_sounds: CustomSounds,
+    about: AboutView,
+) -> SettingsView<'_> {
     let mut shortcuts: Vec<ShortcutView<'_>> = settings
         .bindings
         .values()
@@ -893,16 +1055,26 @@ fn settings_view(settings: &AppSettings, microphones: Vec<String>) -> SettingsVi
             mute_while_recording: settings.mute_while_recording,
             quiet_speech: settings.quiet_speech_enabled,
             command_mode: settings.command_mode_enabled,
+            command_answers_in_chat: settings.command_answers_in_chat,
             overlay: settings.overlay_style,
+            hud_pill: settings.hud_pill_enabled,
+            hud_pill_position: settings.hud_pill_position,
             dictation_languages: &settings.dictation_languages,
+            translate_to_english: settings.translate_to_english,
+            english_spelling: settings.english_spelling,
             microphone: settings.selected_microphone.as_deref(),
             microphones,
+            custom_sounds,
         },
         appearance: AppearanceView {
             theme: settings.theme,
+            material: settings.appearance_material,
             app_language: &settings.app_language,
             log_level: settings.log_level,
             debug_mode: settings.debug_mode,
+            experimental: settings.experimental_enabled,
+            update_check: settings.update_check_enabled,
+            whats_new: settings.show_whats_new_on_update,
         },
         cleanup: CleanupView {
             enabled: settings.post_process_enabled,
@@ -924,13 +1096,18 @@ fn settings_view(settings: &AppSettings, microphones: Vec<String>) -> SettingsVi
         vocabulary: &settings.custom_words,
         snippets: settings.snippets_enabled,
         text_replacements: settings.replacements_enabled,
+        spoken_edits: settings.spoken_edits_enabled,
+        emoji: settings.emoji_replacements_enabled,
+        persona_samples: &settings.persona_samples,
         shortcuts,
         evening_digest: settings.meeting_digest_enabled,
+        evening_digest_time: clock(settings.meeting_digest_minute_of_day),
         auto_close_parents: settings.work_close_parents,
         project_digest: settings.work_digest_enabled,
         project_digest_day: settings.work_digest_day,
         keyword_trackers: &settings.trackers_list,
         meeting_prep: &settings.meeting_prep,
+        about,
     }
 }
 
@@ -951,7 +1128,16 @@ impl Tracker<'_> {
                     .await
                     .unwrap_or_default();
                 let settings = settings::get_settings(self.app);
-                Ok(read(verb.name(), &settings_view(&settings, microphones)))
+                let custom_sounds = crate::commands::audio::check_custom_sounds(self.app.clone());
+                let about = AboutView {
+                    app_dir: crate::commands::get_app_dir_path(self.app.clone()).ok(),
+                    log_dir: crate::commands::get_log_dir_path(self.app.clone()).ok(),
+                    portable: crate::commands::is_portable(),
+                };
+                Ok(read(
+                    verb.name(),
+                    &settings_view(&settings, microphones, custom_sounds, about),
+                ))
             }
             SettingsVerb::Setting(args) => {
                 let change = setting_change(args);
@@ -1071,6 +1257,7 @@ impl Tracker<'_> {
                 let list = self.meetings.saved_prompts().await.map_err(meeting_error)?;
                 Ok(read(verb.name(), &list))
             }
+            SettingsVerb::SavedPromptRuns(args) => self.saved_prompt_runs(args).await,
             SettingsVerb::SavedPromptSave(args) => self.saved_prompt_save(args).await,
             SettingsVerb::SavedPromptDelete(args) => self.saved_prompt_delete(args).await,
             SettingsVerb::Series(args) => {
@@ -1087,7 +1274,7 @@ impl Tracker<'_> {
 
     /// Runs `change` once per operation id, on the settings file, and leaves
     /// the stamp a running Sona follows.
-    async fn change_settings(
+    pub(super) async fn change_settings(
         &self,
         args: &Change,
         change: SettingsChange<'_>,
@@ -1152,7 +1339,7 @@ impl Tracker<'_> {
         Ok(WorkAnswer::Settings(Box::new(answer)))
     }
 
-    fn settings_record(
+    pub(super) fn settings_record(
         &self,
         operation_id: &str,
         command: &str,
@@ -1240,7 +1427,7 @@ impl Tracker<'_> {
 
     /// The answer an earlier run with this operation id gave, if the request
     /// is the same; a refusal if it is not.
-    fn settings_replay(
+    pub(super) fn settings_replay(
         &self,
         operation_id: &str,
         command: &str,
@@ -1280,7 +1467,16 @@ impl Tracker<'_> {
 
     async fn workflows(&self, args: &WorkflowsArgs) -> Result<WorkAnswer, ExternalError> {
         let failed = |_| refusal(self.history, planning::CONVERSATIONS_CLOSED.to_owned());
-        let value = if args.runs {
+        let value = if args.trend {
+            let trend = self
+                .meetings
+                .workflow_run_trend(DashboardTrendRequest {
+                    range: DashboardTrendRange::Days7,
+                })
+                .await
+                .map_err(failed)?;
+            json!(trend)
+        } else if args.runs {
             let workflow_id = args.workflow.as_deref().map(workflow_id).transpose()?;
             let runs = self
                 .meetings
@@ -1436,6 +1632,54 @@ impl Tracker<'_> {
             Ok(deleted.prompts)
         })
         .await
+    }
+
+    /// The answers saved prompts gave about one noun. A person who was in a
+    /// meeting kept on this Mac has their answers left out, since an answer
+    /// may quote that meeting.
+    async fn saved_prompt_runs(&self, args: &SavedPromptRunsArgs) -> Result<WorkAnswer, ExternalError> {
+        let mut left_out = false;
+        let target = match (&args.meeting, &args.person, &args.series) {
+            (Some(meeting), _, _) => {
+                let session = session_id(meeting)?;
+                let store = store(self.meetings).await?;
+                visible_meeting(&store, session)?;
+                store
+                    .session_snapshot(session)
+                    .map_err(|error| meeting_refusal(session, error))?;
+                PromptTargetRef::Meeting { session_id: session }
+            }
+            (_, Some(person), _) => {
+                let person_id = person_id(&self.board().await?.person(person)?.id)?;
+                let store = store(self.meetings).await?;
+                let hidden = kept_local(&store)?;
+                left_out = store
+                    .person_detail(person_id)
+                    .map_err(store_failed)?
+                    .detail
+                    .links
+                    .iter()
+                    .any(|link| hidden.hides(link.meeting.id));
+                PromptTargetRef::Person { person_id }
+            }
+            (_, _, Some(series)) => PromptTargetRef::Series {
+                series_key: self.meeting_series(series).await?.0,
+            },
+            (None, None, None) => {
+                return Err(ExternalError::invalid(
+                    "Name a meeting, a person or a series.",
+                ))
+            }
+        };
+        let runs = if left_out {
+            Vec::new()
+        } else {
+            self.meetings.prompt_runs(target).await.map_err(meeting_error)?
+        };
+        Ok(read(
+            "saved-prompt-runs",
+            &json!({ "runs": runs, "answers_left_out": left_out }),
+        ))
     }
 
     /// The series a meeting an agent may see belongs to.
@@ -1799,13 +2043,13 @@ fn workflows_view(list: &WorkflowsListResult) -> WorkflowsView<'_> {
     }
 }
 
-fn scope(mode: Option<&str>) -> VocabularyScope {
+pub(super) fn scope(mode: Option<&str>) -> VocabularyScope {
     mode.map_or(VocabularyScope::Global, |mode_id| VocabularyScope::Mode {
         mode_id: mode_id.to_owned(),
     })
 }
 
-fn vocabulary_shown<'a>(scope: VocabularyScope) -> Show<'a> {
+pub(super) fn vocabulary_shown<'a>(scope: VocabularyScope) -> Show<'a> {
     show(move |s| json!(vocabulary::entries_in(s, &scope).unwrap_or_default()))
 }
 
@@ -1856,7 +2100,7 @@ fn reset_change(args: &SettingResetArgs) -> Result<SettingsChange<'_>, ExternalE
     })
 }
 
-fn read(what: &str, value: &impl Serialize) -> WorkAnswer {
+pub(super) fn read(what: &str, value: &impl Serialize) -> WorkAnswer {
     WorkAnswer::Settings(Box::new(ExternalSettings {
         schema_version: QUERY_SCHEMA_VERSION,
         what: what.to_owned(),

@@ -499,6 +499,8 @@ pub enum WorkVerb {
     #[command(flatten)]
     Settings(preferences::SettingsVerb),
     #[command(flatten)]
+    DictationRules(dictation_rules::DictationRulesVerb),
+    #[command(flatten)]
     Sources(sources::SourcesVerb),
     #[command(flatten)]
     Library(library::LibraryVerb),
@@ -506,6 +508,8 @@ pub enum WorkVerb {
     Transcript(transcript::TranscriptVerb),
     #[command(flatten)]
     Dictations(dictations::DictationVerb),
+    #[command(flatten)]
+    Cloud(cloud::CloudVerb),
     /// One session: state, plan, question, and every activity.
     Session(sessions::SessionShowArgs),
     /// Agent sessions, newest first: one task's or every task's.
@@ -1647,10 +1651,12 @@ impl WorkVerb {
     pub(super) const fn required_scopes(&self) -> &'static [ExternalScope] {
         match self {
             Self::Settings(verb) => verb.required_scopes(),
+            Self::DictationRules(verb) => verb.required_scopes(),
             Self::Sources(verb) => verb.required_scopes(),
             Self::Library(verb) => verb.required_scopes(),
             Self::Transcript(verb) => verb.required_scopes(),
             Self::Dictations(verb) => verb.required_scopes(),
+            Self::Cloud(verb) => verb.required_scopes(),
             Self::List(_)
             | Self::Bin
             | Self::ArchiveList
@@ -3058,10 +3064,12 @@ pub(super) async fn answer(
         WorkVerb::ActionRestore(args) => tracker.action_set_aside(args, false).await,
         WorkVerb::NoteNew(args) => tracker.note_new(args).await,
         WorkVerb::Settings(verb) => tracker.settings_verb(verb).await,
+        WorkVerb::DictationRules(verb) => tracker.dictation_rules(verb).await,
         WorkVerb::Sources(verb) => tracker.sources(verb).await,
         WorkVerb::Library(verb) => tracker.library(verb).await,
         WorkVerb::Transcript(verb) => tracker.transcript(verb).await,
         WorkVerb::Dictations(verb) => tracker.dictations(verb).await,
+        WorkVerb::Cloud(verb) => tracker.cloud(verb).await,
         WorkVerb::NoteEdit(args) => tracker.note_edit(args),
         WorkVerb::NotePin(args) => tracker.note_pin(args),
         WorkVerb::NoteLink(args) => tracker.note_link(args).await,
@@ -7405,6 +7413,8 @@ fn filters_text(filters: &ExternalWorkFilters) -> String {
 mod attachments;
 mod catalog;
 mod preferences;
+mod cloud;
+mod dictation_rules;
 mod lifecycle;
 mod notes;
 mod organize;

@@ -403,6 +403,7 @@ sona work source-link S-12 --meeting <MEETING_ID> [--at 95]   # or --note ID, --
 sona work ask-pack "what did Dana say about pricing" [--folder "Sales"]
 sona work docs [--person "Dana Reyes" | --meeting <MEETING_ID>]
 sona work doc-add ~/Downloads/contract.pdf [--meeting <MEETING_ID>]
+sona work meeting-import ~/Downloads/standup.sona   # a meeting someone shared; --dry-run shows it first
 sona work doc-delete <DOCUMENT_ID>
 ```
 
@@ -684,9 +685,11 @@ the change. Version retention still applies when a link is opened later.
 ## Sona's settings
 
 ```bash
-sona work settings                                  # dictation, sounds, microphones, cleanup, modes, prompts, vocabulary, shortcuts, trackers, prep
+sona work settings                                  # dictation, sounds, microphones, cleanup, modes, prompts, vocabulary, writing samples, shortcuts, trackers, prep, data and log folders
 sona work setting theme dark --dry-run
 sona work setting push-to-talk false
+sona work setting hud-pill-position top             # the pill between dictations moves at once
+sona work setting evening-digest-time 19:30
 sona work setting cleanup-model gpt-5-mini --provider openai
 sona work setting mode <MODE_ID>                    # the capture mode chip
 sona work setting dictation-prompt <PROMPT_ID>      # use a prompt
@@ -695,14 +698,29 @@ sona work setting-reset shortcut <SHORTCUT_ID>
 sona work setting-reset replacements                # back to the starter library
 sona work mode-save --mode-json '<MODE_JSON>'      # one entry of settings --json modes.modes
 sona work mode-delete <MODE_ID>
+sona work mode-rule-remove <MODE_ID> --app com.apple.mail   # or --website example.com [--match subdomains]
 sona work mode-reorder <MODE_ID> <MODE_ID> ...
 sona work prompt-save "Short replies" --prompt "Keep it to two lines." [--id <PROMPT_ID>]
 sona work prompt-delete <PROMPT_ID>
+sona work vocabulary [--mode <MODE_ID>]             # words, snippets, rewrites, emoji, and their switches
 sona work vocabulary-add "sona" "Sona" [--mode <MODE_ID>]
+sona work vocabulary-remove "sona" [--mode <MODE_ID>]
 sona work vocabulary-csv words.csv [--mode <MODE_ID>]
-sona work workflows [--runs] [--workflow <ID>]
+sona work heard-words                               # words meetings keep using that the vocabulary lacks
+sona work snippet-save "my address" --text "1 Harbor Way" [--id <SNIPPET_ID>] [--off]
+sona work snippet-enable <SNIPPET_ID> [--off]
+sona work snippet-delete <SNIPPET_ID>
+sona work rewrite-save "dot com" ".com" [--off]     # a phrase that has one takes the new text
+sona work rewrite-enable "dot com" [--off]
+sona work rewrite-delete "dot com"
+sona work emoji-save "party popper" "🎉"
+sona work emoji-delete "party popper"
+sona work persona-sample-save "A paragraph I wrote." [--id <SAMPLE_ID>]   # five at most
+sona work persona-sample-delete <SAMPLE_ID>
+sona work workflows [--runs] [--workflow <ID>]      # --trend: runs per day, last 7 days
 sona work workflow-enable <WORKFLOW_ID> [--off]
 sona work saved-prompts
+sona work saved-prompt-runs --meeting <MEETING_ID>  # or --person NAME, --series <MEETING_ID>; their past answers
 sona work saved-prompt-save "Risks" --body "What could go wrong?" --about meeting [--schema '<JSON_SCHEMA>'] [--id <PROMPT_ID>]
 sona work saved-prompt-delete <PROMPT_ID>
 sona work series <MEETING_ID>                       # its series' template and digest choice
@@ -711,6 +729,7 @@ sona work series-digest <MEETING_ID> [--off]
 sona work evening                                   # today's lines and recordings waiting to be filed
 sona work filing <SUGGESTION_ID> [--decline]
 sona work connections                               # connections, send rules, recent sends; no tokens
+sona work sync [--meeting <MEETING_ID>]             # cloud sync status, each meeting's sync state, shares; no keys
 ```
 
 `sona work setting --help` lists every key and the values it takes. Each
@@ -718,8 +737,9 @@ write takes `--dry-run`, `--agent`, `--operation-id` and `--json`, needs
 outside changes allowed, and obeys the Apply or Suggest setting. The answer
 shows the value before and after. A running Sona reads the settings file again
 within a second and follows the change as it does one made in Settings: the
-theme, overlay, shortcuts, modes, tray language, log level and quiet speech
-change at once. A change made in Sona's window in that same second wins.
+theme, window material, overlay, the pill between dictations, shortcuts, modes,
+tray language, log level and quiet speech change at once. A change made in
+Sona's window in that same second wins.
 Leaving out `--operation-id` makes each call a new change; pass one to make a
 retry safe.
 
@@ -887,6 +907,7 @@ claude mcp add sona -- bun /absolute/path/to/sona/tools/sona-mcp/src/index.ts
 | `sona_documents`                  | `person?` or `meeting_id?`                                   |
 | `sona_planning_link_source`       | `target`, `kind` (meeting, note, loop), `source_id`, `at_seconds?`, `dry_run?` — writes |
 | `sona_document_add`               | `path`, `meeting_id?`, `dry_run?` — writes                   |
+| `sona_meeting_import` *(opt-in)*  | `path`, `dry_run?` — writes                                  |
 | `sona_document_delete`            | `document_id`, `dry_run?` — writes, cannot be undone         |
 | `sona_stats`                      | none                                                         |
 | `sona_events`                     | `after?`, `limit?`                                           |
@@ -912,12 +933,23 @@ claude mcp add sona -- bun /absolute/path/to/sona/tools/sona-mcp/src/index.ts
 | `sona_setting_reset` *(opt-in)*   | `target` (`shortcut` or `replacements`), `id?`, `dry_run?` — writes, takes away |
 | `sona_mode_save`, `sona_mode_reorder` | `mode` (JSON) or `modes`, `dry_run?` — writes            |
 | `sona_mode_delete`, `sona_prompt_delete` *(opt-in)* | `mode` or `id`, `dry_run?` — writes, takes away |
+| `sona_mode_rule_remove` *(opt-in)* | `mode`, `app` or `website`, `match?`, `dry_run?` — writes, takes away |
 | `sona_prompt_save`                | `name`, `prompt`, `id?`, `dry_run?` — writes                 |
+| `sona_vocabulary`                 | `mode?`                                                      |
 | `sona_vocabulary_add`             | `spoken`, `written`, `mode?`, `dry_run?` — writes            |
+| `sona_vocabulary_remove` *(opt-in)* | `spoken`, `mode?`, `dry_run?` — writes, takes away         |
 | `sona_vocabulary_csv`             | `file`, `mode?`, `dry_run?` — writes                         |
-| `sona_workflows`                  | `runs?`, `workflow?`, `limit?`                               |
+| `sona_heard_words`                | none                                                         |
+| `sona_snippet_save`, `sona_snippet_enable` | `trigger`, `text`, `id?`, `off?` or `id`, `off?`; `dry_run?` — writes |
+| `sona_rewrite_save`, `sona_rewrite_enable` | `spoken`, `written`, `off?` or `spoken`, `off?`; `dry_run?` — writes |
+| `sona_emoji_save`                 | `spoken`, `emoji`, `dry_run?` — writes                       |
+| `sona_persona_sample_save`        | `text`, `id?`, `dry_run?` — writes                           |
+| `sona_snippet_delete`, `sona_rewrite_delete`, `sona_emoji_delete`, `sona_persona_sample_delete` *(opt-in)* | `id` or `spoken`, `dry_run?` — writes, takes away |
+| `sona_workflows`                  | `runs?`, `workflow?`, `limit?`, `trend?`                     |
 | `sona_workflow_enable`            | `workflow`, `off?`, `dry_run?` — writes                      |
 | `sona_saved_prompts`, `sona_evening`, `sona_connections` | none                              |
+| `sona_saved_prompt_runs`          | `meeting_id`, `person` or `series_meeting_id`                |
+| `sona_sync`                       | `meeting_id?`                                                |
 | `sona_saved_prompt_save`          | `name`, `body`, `about`, `schema?`, `id?`, `dry_run?` — writes |
 | `sona_saved_prompt_delete` *(opt-in)* | `id`, `dry_run?` — writes, takes away                    |
 | `sona_series`                     | `meeting_id`                                                 |

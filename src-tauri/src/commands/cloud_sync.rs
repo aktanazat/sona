@@ -323,7 +323,7 @@ pub struct CloudSyncServiceStatus {
     pub reason: String,
 }
 
-fn service_status(
+pub(crate) fn service_status(
     settings: &CloudSyncSettings,
     portable_mode: bool,
     operational_error: Option<CloudSyncErrorKind>,

@@ -241,6 +241,136 @@ fn active_status_error(
     error
 }
 
+/// Where sync stands as the store records it, with `status_error` the problem
+/// a running sync has hit, if any.
+pub(crate) fn overview_in(
+    store: &MeetingStore,
+    settings: &CloudSyncSettings,
+    portable_mode: bool,
+    status_error: Option<CloudSyncErrorKind>,
+) -> Result<CloudSyncOverview, CloudRuntimeError> {
+    let counts = store.cloud_status_counts().map_err(map_store_error)?;
+    let terminal_error = store
+        .cloud_latest_terminal_error()
+        .map_err(map_store_error)?
+        .as_deref()
+        .and_then(terminal_error_kind);
+    let state_paused = store
+        .cloud_state()
+        .map_err(map_store_error)?
+        .is_some_and(|state| state.paused);
+    Ok(CloudSyncOverview {
+        enabled: settings.enabled && settings.has_current_consent(),
+        portable_mode,
+        paused: settings.paused || state_paused,
+        queued_objects: counts.queued_outbox.saturating_add(counts.claimed_outbox),
+        pending_deletions: counts.pending_tombstones,
+        terminal_error: status_error.or(terminal_error),
+    })
+}
+
+/// One meeting's sync state as the store records it.
+pub(crate) fn meeting_status_in(
+    store: &MeetingStore,
+    sync_paused: bool,
+    session_id: MeetingSessionId,
+) -> Result<CloudMeetingStatus, CloudRuntimeError> {
+    let head = store
+        .cloud_head_for_session(session_id)
+        .map_err(map_store_error)?;
+    let share_count = store
+        .cloud_share_count_for_session(session_id)
+        .map_err(map_store_error)?;
+    let outboxes = store
+        .cloud_outboxes_for_session(session_id)
+        .map_err(map_store_error)?;
+    let conflict = head
+        .as_ref()
+        .map(|head| store.cloud_conflict(&head.object_id))
+        .transpose()
+        .map_err(map_store_error)?
+        .flatten();
+    let state = if conflict.is_some() {
+        CloudObjectState::Conflict
+    } else if let Some(outbox) = outboxes
+        .iter()
+        .rev()
+        .find(|outbox| outbox.state == CloudOutboxState::Terminal)
+    {
+        terminal_object_state(
+            outbox
+                .terminal_error
+                .as_deref()
+                .unwrap_or("integrity_failure"),
+        )
+    } else if outboxes
+        .iter()
+        .any(|outbox| outbox.state == CloudOutboxState::Claimed)
+    {
+        CloudObjectState::Uploading
+    } else if outboxes.iter().any(|outbox| {
+        outbox.state == CloudOutboxState::Pending && outbox.kind == CloudOutboxKind::Tombstone
+    }) {
+        CloudObjectState::PendingDeletion
+    } else if outboxes
+        .iter()
+        .any(|outbox| outbox.state == CloudOutboxState::Pending)
+    {
+        CloudObjectState::Queued
+    } else if head.as_ref().is_some_and(|head| head.tombstone) {
+        CloudObjectState::Deleted
+    } else if head
+        .as_ref()
+        .and_then(|head| head.remote_revision_id.as_ref())
+        .is_some()
+    {
+        CloudObjectState::Committed
+    } else if sync_paused {
+        CloudObjectState::Paused
+    } else {
+        CloudObjectState::Local
+    };
+    let retry_at_utc_ms = outboxes
+        .iter()
+        .filter(|outbox| outbox.state == CloudOutboxState::Pending)
+        .map(|outbox| outbox.next_attempt_utc_ms)
+        .min();
+    Ok(CloudMeetingStatus {
+        session_id,
+        state,
+        remote_revision_id: head.and_then(|head| head.remote_revision_id),
+        retry_at_utc_ms,
+        share_count,
+    })
+}
+
+/// Every share of one meeting, with where each stands. A revoked share
+/// reads as revoking until the outbox item carrying the revocation has
+/// completed: until then the server is still serving the link, and the
+/// row must not say otherwise.
+pub(crate) fn meeting_shares_in(
+    store: &MeetingStore,
+    session_id: MeetingSessionId,
+) -> Result<Vec<CloudShareSummary>, CloudRuntimeError> {
+    let records = store
+        .cloud_shares_for_session(session_id)
+        .map_err(map_store_error)?;
+    note_shares::share_summaries(store, records)
+}
+
+/// The meeting a .sona file carries, opened with the key inside the file.
+pub(crate) fn read_share_bundle(path: &Path) -> Result<CloudMeetingBundleV1, CloudRuntimeError> {
+    if !path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("sona"))
+    {
+        return Err(CloudRuntimeError::IntegrityFailure);
+    }
+    let file = read_share_file(path).map_err(|_| CloudRuntimeError::IntegrityFailure)?;
+    decrypt_capability_bundle(&file)
+}
+
 pub(crate) struct CloudSyncRuntime {
     app: AppHandle,
     meetings: Arc<MeetingSessionManager>,
@@ -899,26 +1029,8 @@ impl CloudSyncRuntime {
                 terminal_error: self.status_error_for(&settings, portable_mode),
             });
         };
-        let counts = store.cloud_status_counts().map_err(map_store_error)?;
-        let terminal_error = store
-            .cloud_latest_terminal_error()
-            .map_err(map_store_error)?
-            .as_deref()
-            .and_then(terminal_error_kind);
-        let state_paused = store
-            .cloud_state()
-            .map_err(map_store_error)?
-            .is_some_and(|state| state.paused);
-        Ok(CloudSyncOverview {
-            enabled: settings.enabled && settings.has_current_consent(),
-            portable_mode,
-            paused: settings.paused || state_paused,
-            queued_objects: counts.queued_outbox.saturating_add(counts.claimed_outbox),
-            pending_deletions: counts.pending_tombstones,
-            terminal_error: self
-                .status_error_for(&settings, portable_mode)
-                .or(terminal_error),
-        })
+        let status_error = self.status_error_for(&settings, portable_mode);
+        overview_in(&store, &settings, portable_mode, status_error)
     }
 
     pub(crate) async fn meeting_status(
@@ -1578,10 +1690,6 @@ impl CloudSyncRuntime {
         self.overview().await
     }
 
-    /// Every share of one meeting, with where each stands. A revoked share
-    /// reads as revoking until the outbox item carrying the revocation has
-    /// completed: until then the server is still serving the link, and the
-    /// row must not say otherwise.
     pub(crate) async fn share_list(
         &self,
         request: CloudShareListRequest,
@@ -1591,10 +1699,7 @@ impl CloudSyncRuntime {
             .cloud_store()
             .await
             .map_err(|_| CloudRuntimeError::SetupRequired)?;
-        let records = store
-            .cloud_shares_for_session(request.session_id)
-            .map_err(map_store_error)?;
-        note_shares::share_summaries(&store, records)
+        meeting_shares_in(&store, request.session_id)
     }
 
     pub(crate) async fn share_import(
@@ -1602,16 +1707,7 @@ impl CloudSyncRuntime {
         request: CloudShareImportRequest,
     ) -> Result<CloudShareImportResult, CloudRuntimeError> {
         let _activity = crate::planning::quiet::foreground_activity();
-        let path = Path::new(&request.path);
-        if !path
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("sona"))
-        {
-            return Err(CloudRuntimeError::IntegrityFailure);
-        }
-        let file = read_share_file(path).map_err(|_| CloudRuntimeError::IntegrityFailure)?;
-        let bundle = decrypt_capability_bundle(&file)?;
+        let bundle = read_share_bundle(Path::new(&request.path))?;
         let snapshot = self
             .meetings
             .import_cloud_bundle(bundle)
@@ -3570,74 +3666,11 @@ impl CloudSyncRuntime {
         store: &MeetingStore,
         session_id: MeetingSessionId,
     ) -> Result<CloudMeetingStatus, CloudRuntimeError> {
-        let cloud_settings = settings::get_settings(&self.app).cloud_sync;
-        let head = store
-            .cloud_head_for_session(session_id)
-            .map_err(map_store_error)?;
-        let share_count = store
-            .cloud_share_count_for_session(session_id)
-            .map_err(map_store_error)?;
-        let outboxes = store
-            .cloud_outboxes_for_session(session_id)
-            .map_err(map_store_error)?;
-        let conflict = head
-            .as_ref()
-            .map(|head| store.cloud_conflict(&head.object_id))
-            .transpose()
-            .map_err(map_store_error)?
-            .flatten();
-        let state = if conflict.is_some() {
-            CloudObjectState::Conflict
-        } else if let Some(outbox) = outboxes
-            .iter()
-            .rev()
-            .find(|outbox| outbox.state == CloudOutboxState::Terminal)
-        {
-            terminal_object_state(
-                outbox
-                    .terminal_error
-                    .as_deref()
-                    .unwrap_or("integrity_failure"),
-            )
-        } else if outboxes
-            .iter()
-            .any(|outbox| outbox.state == CloudOutboxState::Claimed)
-        {
-            CloudObjectState::Uploading
-        } else if outboxes.iter().any(|outbox| {
-            outbox.state == CloudOutboxState::Pending && outbox.kind == CloudOutboxKind::Tombstone
-        }) {
-            CloudObjectState::PendingDeletion
-        } else if outboxes
-            .iter()
-            .any(|outbox| outbox.state == CloudOutboxState::Pending)
-        {
-            CloudObjectState::Queued
-        } else if head.as_ref().is_some_and(|head| head.tombstone) {
-            CloudObjectState::Deleted
-        } else if head
-            .as_ref()
-            .and_then(|head| head.remote_revision_id.as_ref())
-            .is_some()
-        {
-            CloudObjectState::Committed
-        } else if cloud_settings.paused {
-            CloudObjectState::Paused
-        } else {
-            CloudObjectState::Local
-        };
-        let retry_at_utc_ms = outboxes
-            .iter()
-            .filter(|outbox| outbox.state == CloudOutboxState::Pending)
-            .map(|outbox| outbox.next_attempt_utc_ms)
-            .min();
-        Ok(CloudMeetingStatus {
+        meeting_status_in(
+            store,
+            settings::get_settings(&self.app).cloud_sync.paused,
             session_id,
-            state,
-            remote_revision_id: head.and_then(|head| head.remote_revision_id),
-            retry_at_utc_ms,
-            share_count,
-        })
+        )
     }
 
     fn emit_changed(&self, session_id: Option<MeetingSessionId>, state: Option<CloudObjectState>) {

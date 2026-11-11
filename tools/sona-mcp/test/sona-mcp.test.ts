@@ -284,10 +284,37 @@ describe("tool arguments", () => {
     expect(tool("sona_mode_save").argv({ mode: '{"id":"m","name":"-x"}' })).toContain(
       '--mode-json={"id":"m","name":"-x"}',
     );
-    for (const name of ["sona_setting_reset", "sona_mode_delete", "sona_prompt_delete"]) {
+    for (const name of [
+      "sona_setting_reset",
+      "sona_mode_delete",
+      "sona_prompt_delete",
+      "sona_vocabulary_remove",
+      "sona_snippet_delete",
+      "sona_rewrite_delete",
+      "sona_emoji_delete",
+      "sona_persona_sample_delete",
+      "sona_mode_rule_remove",
+    ]) {
       expect(tool(name).mutates).toBe("destroys");
       expect(tool(name).optIn).toBe(true);
     }
+  });
+
+  test("a mode rule removal names exactly one of an app or a website", () => {
+    const remove = tool("sona_mode_rule_remove");
+    expect(remove.argv({ mode: "notes", website: "docs.example.com", match: "subdomains" })).toEqual([
+      "work",
+      "mode-rule-remove",
+      "--json",
+      "--website=docs.example.com",
+      "--match=subdomains",
+      "--",
+      "notes",
+    ]);
+    expect(() => remove.argv({ mode: "notes" })).toThrow(SonaInputError);
+    expect(() => remove.argv({ mode: "notes", app: "com.apple.mail", website: "example.com" })).toThrow(
+      SonaInputError,
+    );
   });
 
   test("a meeting write keeps a dash-led title a value, and meeting removals are opt-in", () => {
@@ -968,6 +995,7 @@ const SONA_WRITES = {
   "first-met-answer": true,
   "source-link": true,
   "doc-add": true,
+  "meeting-import": true,
   "doc-delete": true,
   detach: true,
   delete: true,
@@ -990,6 +1018,18 @@ const SONA_WRITES = {
   "prompt-delete": true,
   "vocabulary-add": true,
   "vocabulary-csv": true,
+  "vocabulary-remove": true,
+  "snippet-save": true,
+  "snippet-enable": true,
+  "snippet-delete": true,
+  "rewrite-save": true,
+  "rewrite-enable": true,
+  "rewrite-delete": true,
+  "emoji-save": true,
+  "emoji-delete": true,
+  "persona-sample-save": true,
+  "persona-sample-delete": true,
+  "mode-rule-remove": true,
   "workflow-enable": true,
   "saved-prompt-save": true,
   "saved-prompt-delete": true,
@@ -1039,6 +1079,12 @@ const SONA_DESTROYS = {
   "setting-reset": true,
   "mode-delete": true,
   "prompt-delete": true,
+  "vocabulary-remove": true,
+  "snippet-delete": true,
+  "rewrite-delete": true,
+  "emoji-delete": true,
+  "persona-sample-delete": true,
+  "mode-rule-remove": true,
   "saved-prompt-delete": true,
   "speaker-merge": true,
   "correction-remove": true,
@@ -1049,11 +1095,11 @@ const SONA_DESTROYS = {
  * optional ones a tool needs one of: task, since a comment save needs task or
  * id; path, since an attach needs path or url; project, health and body,
  * since an update save needs project or id; cycle, since a cycle save needs
- * a cycle or settings. */
+ * a cycle or settings; app, since a mode rule removal needs app or website. */
 function smallest(tool: ToolDefinition): ToolInput {
   const input: ToolInput = {};
   const names = [...(tool.inputSchema.required ?? [])];
-  for (const optional of ["task", "path", "project", "health", "body", "cycle"]) {
+  for (const optional of ["task", "path", "project", "health", "body", "cycle", "app"]) {
     if (optional === "project" && names.includes("task")) continue;
     if (optional in tool.inputSchema.properties && !names.includes(optional)) names.push(optional);
   }

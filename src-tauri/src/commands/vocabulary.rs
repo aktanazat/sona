@@ -318,12 +318,18 @@ pub fn update_vocabulary_entries(
     scope: VocabularyScope,
     entries: Vec<VocabularyEntry>,
 ) -> Result<Vec<VocabularyEntry>, String> {
+    settings::try_update_settings(&app, |settings| set_entries_in(settings, &scope, entries))
+}
+
+pub(crate) fn set_entries_in(
+    settings: &mut AppSettings,
+    scope: &VocabularyScope,
+    entries: Vec<VocabularyEntry>,
+) -> Result<Vec<VocabularyEntry>, String> {
     let entries = normalize_entries(entries)?;
-    settings::try_update_settings(&app, |settings| {
-        *entries_for_scope_mut(settings, &scope)? = entries.clone();
-        touch_mode_revision(settings, &scope);
-        Ok::<_, String>(entries.clone())
-    })
+    *entries_for_scope_mut(settings, scope)? = entries.clone();
+    touch_mode_revision(settings, scope);
+    Ok(entries)
 }
 
 #[tauri::command]
@@ -380,13 +386,18 @@ pub fn update_emoji_replacements(
     app: AppHandle,
     replacements: Vec<EmojiReplacement>,
 ) -> Result<Vec<EmojiReplacement>, String> {
+    settings::try_update_settings(&app, |settings| set_emoji_replacements_in(settings, replacements))
+}
+
+pub(crate) fn set_emoji_replacements_in(
+    settings: &mut AppSettings,
+    replacements: Vec<EmojiReplacement>,
+) -> Result<Vec<EmojiReplacement>, String> {
     let replacements = replacements
         .into_iter()
         .map(normalize_emoji_replacement)
         .collect::<Result<Vec<_>, _>>()?;
-    settings::update_settings(&app, |settings| {
-        settings.emoji_replacements = replacements.clone();
-    })?;
+    settings.emoji_replacements = replacements.clone();
     Ok(replacements)
 }
 
@@ -469,11 +480,17 @@ pub fn save_text_replacements(
     app: AppHandle,
     rules: Vec<ReplacementRule>,
 ) -> Result<Vec<ReplacementRule>, String> {
-    let normalized = normalize_replacement_rules(rules);
-    settings::update_settings(&app, |settings| {
-        settings.replacements_rules = normalized.clone();
-    })?;
-    Ok(normalized)
+    Ok(settings::update_settings(&app, |settings| {
+        save_text_replacements_in(settings, rules)
+    })?)
+}
+
+pub(crate) fn save_text_replacements_in(
+    settings: &mut AppSettings,
+    rules: Vec<ReplacementRule>,
+) -> Vec<ReplacementRule> {
+    settings.replacements_rules = normalize_replacement_rules(rules);
+    settings.replacements_rules.clone()
 }
 
 /// Restores the shipped starter library, discarding user edits. The frontend

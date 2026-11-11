@@ -99,6 +99,19 @@ fn follow_settings(app: &AppHandle) {
         crate::shortcut::apply_window_theme(app, after.theme);
         let _ = app.emit("theme-changed", after.theme);
     }
+    if before.appearance_material != after.appearance_material {
+        let effective = crate::shortcut::apply_window_material(app, after.appearance_material);
+        let _ = app.emit(
+            "settings-changed",
+            json!({ "setting": "appearance_material", "value": effective.as_str() }),
+        );
+    }
+    if before.hud_pill_enabled != after.hud_pill_enabled
+        || before.hud_pill_position != after.hud_pill_position
+        || before.hud_pill_hidden_until_ms != after.hud_pill_hidden_until_ms
+    {
+        crate::overlay::sync_hud_pill(app);
+    }
     if before.overlay_style != after.overlay_style {
         crate::overlay::update_overlay_enabled_cache(
             after.overlay_style != crate::settings::OverlayStyle::None,

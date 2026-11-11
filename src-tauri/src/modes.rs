@@ -978,7 +978,7 @@ fn apply_capture_mode_activation_rule(
     Ok(())
 }
 
-fn apply_remove_mode_activation_rule(
+pub(crate) fn apply_remove_mode_activation_rule(
     settings: &mut AppSettings,
     app_id: &str,
     expected_revision: u64,
@@ -1027,7 +1027,7 @@ fn apply_capture_mode_website_activation_rule(
     Ok(())
 }
 
-fn apply_remove_mode_website_activation_rule(
+pub(crate) fn apply_remove_mode_website_activation_rule(
     settings: &mut AppSettings,
     host: &str,
     match_kind: WebsiteHostMatch,
