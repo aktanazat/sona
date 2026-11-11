@@ -161,7 +161,7 @@ pub async fn scratchpad_capture_passage(
             let now = now_ms();
             let note = ScratchNote { id: note_id.to_string(), title: super::derive_title(&body), body, pinned: false, created_at_ms: now, updated_at_ms: now };
             transaction.execute("INSERT INTO scratch_notes (id, title, body, pinned, created_at_ms, updated_at_ms) VALUES (?1, ?2, ?3, 0, ?4, ?4)", params![note.id, note.title, note.body, now])?;
-            super::record_version(&transaction, &note.id, &note.body, now, super::ScratchVersionKind::Edit)?;
+            super::record_version(&transaction, &note.id, &note.body, now, super::ScratchVersionKind::Edit, super::Author::Me)?;
             insert_source(&transaction, &note.id, &ResolvedSource { source, evidence: None })?;
             if let Some(source) = person { insert_source(&transaction, &note.id, &ResolvedSource { source, evidence: None })?; }
             transaction.execute("INSERT INTO scratch_note_passages (note_id, meeting_id, segment_id, start_ms, end_ms, person_id, wording) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)", params![note.id, meeting_id, segment_id, start_ms, end_ms, person_id, wording])?;

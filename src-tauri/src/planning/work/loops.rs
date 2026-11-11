@@ -1,11 +1,12 @@
 use super::sessions::{self, ActivityInput, WorkSessionActivityKind};
-use super::types::WorkStatus;
+use super::types::{WorkActor, WorkItemInput, WorkPatch, WorkStatus};
 use super::{now_ms, tasks_changed};
 use crate::managers::history::HistoryManager;
+use crate::meeting::session::MeetingSessionManager;
 use crate::meeting::store::MeetingStore;
 use crate::meeting::types::MeetingSessionId;
 use crate::planning::store::{self, Refusal};
-use crate::planning::types::ProjectStatus;
+use crate::planning::types::{EvidenceSourceKind, EvidenceTargetKind, ProjectStatus};
 use crate::query::KeptLocal;
 use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension, Row, Transaction};
@@ -67,7 +68,7 @@ CREATE INDEX planning_loop_runs_loop ON planning_loop_runs(loop_id, queued_at_ms
 CREATE INDEX planning_loop_runs_waiting ON planning_loop_runs(status, queued_at_ms)
     WHERE status IN ('queued', 'running');";
 
-pub(crate) const LOOP_TOOLS: [(&str, &str, &[&str]); 8] = [
+pub(crate) const LOOP_TOOLS: [(&str, &str, &[&str]); 10] = [
     ("sona_search", "Search", &["search", "dictation"]),
     ("sona_meetings", "List meetings", &["recent"]),
     ("sona_meeting", "Read a meeting", &["meeting"]),
@@ -76,7 +77,16 @@ pub(crate) const LOOP_TOOLS: [(&str, &str, &[&str]); 8] = [
     ("sona_action_items", "Action items", &["loops"]),
     ("sona_upcoming", "Upcoming meetings", &["upcoming"]),
     ("sona_stats", "Statistics", &["word_stats", "activity"]),
+    (PROPOSE_NEW, "Propose new tasks for Triage", &[]),
+    (PROPOSE_CHANGE, "Propose task changes for Triage", &[]),
 ];
+
+const PROPOSE_NEW: &str = "sona_work_create";
+const PROPOSE_CHANGE: &str = "sona_work_update";
+const OFFER_FENCE: &str = "```sona-proposals";
+const OFFER_LIMIT: usize = 10;
+const KEPT_HERE: &str =
+    "Skipped: this meeting's series is kept on this Mac, so it isn't sent to the in-app agent.";
 
 pub(crate) const LOOP_AGENT: &str = "Sona automation";
 const NAME_LIMIT: usize = 64;
@@ -1404,7 +1414,7 @@ pub(crate) fn meeting_ended_in(
         if started_at_ms.is_some_and(|started| started < armed_at_ms) {
             continue;
         }
-        if queue(
+        let run = queue(
             conn,
             Queue {
                 loop_id: &id,
@@ -1415,27 +1425,12 @@ pub(crate) fn meeting_ended_in(
                 meeting_id: Some(meeting_id.to_owned()),
             },
             now,
-        )?
-        .is_some()
-        {
+        )?;
+        if run.is_some() {
             queued += 1;
         }
     }
     Ok(queued)
-}
-
-/// The title and start of a meeting that has ended, for the automations
-/// waiting on one. None for a meeting kept on this Mac, or when the store
-/// cannot say whether it is: a run's reason leaves the Mac.
-fn ended_meeting(
-    store: &MeetingStore,
-    session_id: MeetingSessionId,
-) -> Option<(String, Option<i64>)> {
-    if KeptLocal::read(store).map_or(true, |kept| kept.hides(session_id)) {
-        return None;
-    }
-    let snapshot = store.session_snapshot(session_id).ok()?;
-    Some((snapshot.title, snapshot.started_at_utc_ms))
 }
 
 pub(crate) fn meeting_ended(
@@ -1464,13 +1459,41 @@ struct Claimed {
     tools: Vec<String>,
     cause: String,
     task_id: Option<String>,
+    meeting_id: Option<String>,
+}
+
+/// Whether a meeting is kept on this Mac. A store that cannot say counts as
+/// kept: a run's reason and its lookups leave the Mac.
+fn kept_here(store: &MeetingStore, session_id: MeetingSessionId) -> bool {
+    KeptLocal::read(store).map_or(true, |kept| kept.hides(session_id))
+}
+
+/// The title and start of a meeting that has ended, for the automations
+/// waiting on one. None for a meeting kept on this Mac.
+fn ended_meeting(
+    store: &MeetingStore,
+    session_id: MeetingSessionId,
+) -> Option<(String, Option<i64>)> {
+    if kept_here(store, session_id) {
+        return None;
+    }
+    let snapshot = store.session_snapshot(session_id).ok()?;
+    Some((snapshot.title, snapshot.started_at_utc_ms))
 }
 
 fn claim(conn: &mut Connection, now: i64) -> Result<Option<Claimed>> {
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    let next: Option<(String, String, String, String, String, Option<String>)> = tx
+    let next: Option<(
+        String,
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+    )> = tx
         .query_row(
-            "SELECT r.id, l.name, l.prompt, l.tools_json, r.cause, r.task_id
+            "SELECT r.id, l.name, l.prompt, l.tools_json, r.cause, r.task_id, r.meeting_id
              FROM planning_loop_runs r JOIN planning_loops l ON l.id = r.loop_id
              WHERE r.status = 'queued' ORDER BY r.queued_at_ms, r.rowid LIMIT 1",
             [],
@@ -1482,11 +1505,12 @@ fn claim(conn: &mut Connection, now: i64) -> Result<Option<Claimed>> {
                     row.get(3)?,
                     row.get(4)?,
                     row.get(5)?,
+                    row.get(6)?,
                 ))
             },
         )
         .optional()?;
-    let Some((run_id, loop_name, prompt, tools, cause, task_id)) = next else {
+    let Some((run_id, loop_name, prompt, tools, cause, task_id, meeting_id)) = next else {
         return Ok(None);
     };
     tx.execute(
@@ -1509,6 +1533,7 @@ fn claim(conn: &mut Connection, now: i64) -> Result<Option<Claimed>> {
         tools: json(&tools)?,
         cause,
         task_id,
+        meeting_id,
     }))
 }
 
@@ -1520,12 +1545,29 @@ fn skip_waiting(conn: &Connection, reason: &str, now: i64) -> Result<usize> {
     )?)
 }
 
-fn recover(conn: &Connection, now: i64) -> Result<usize> {
-    Ok(conn.execute(
-        "UPDATE planning_loop_runs SET status = 'failed', error = 'Sona stopped during this run.', ended_at_ms = ?1
-         WHERE status = 'running'",
-        [now],
-    )?)
+fn skip_run(conn: &Connection, run_id: &str, reason: &str, now: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE planning_loop_runs SET status = 'skipped', error = ?2, started_at_ms = ?3, ended_at_ms = ?3
+         WHERE id = ?1",
+        params![run_id, reason, now],
+    )?;
+    Ok(())
+}
+
+fn recover(conn: &mut Connection, now: i64) -> Result<usize> {
+    let tx = conn.transaction()?;
+    let ids = tx
+        .prepare(
+            "UPDATE planning_loop_runs SET status = 'failed', error = 'Sona stopped during this run.', ended_at_ms = ?1
+             WHERE status = 'running' RETURNING id",
+        )?
+        .query_map([now], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for id in &ids {
+        super::inbox::automation_ended(&tx, id, now)?;
+    }
+    tx.commit()?;
+    Ok(ids.len())
 }
 
 pub(crate) struct LoopOutcome {
@@ -1551,6 +1593,7 @@ fn finish(conn: &mut Connection, run_id: &str, outcome: &LoopOutcome, now: i64) 
             now,
         ],
     )?;
+    super::inbox::automation_ended(&tx, run_id, now)?;
     let session_id: Option<String> = tx.query_row(
         "SELECT session_id FROM planning_loop_runs WHERE id = ?1",
         [run_id],
@@ -1619,17 +1662,268 @@ pub(crate) fn wake(app: &AppHandle) {
     }
 }
 
-async fn execute(app: &AppHandle, history: &HistoryManager, claimed: Claimed) {
-    let message = format!(
+/// Whether the run's meeting is kept on this Mac by now: the series can be
+/// kept between the meeting ending and its run starting.
+async fn meeting_kept_here(app: &AppHandle, meeting_id: &str) -> bool {
+    let Ok(uuid) = uuid::Uuid::parse_str(meeting_id) else {
+        return true;
+    };
+    let Some(meetings) = app.try_state::<Arc<MeetingSessionManager>>() else {
+        return true;
+    };
+    match meetings.store().await {
+        Ok(store) => kept_here(&store, MeetingSessionId::from_uuid(uuid)),
+        Err(_) => true,
+    }
+}
+
+fn brief(claimed: &Claimed) -> String {
+    let mut message = format!(
         "You are running the saved automation \"{}\".\n\n{}\n\nWhy this ran: {}",
         claimed.loop_name, claimed.prompt, claimed.cause
     );
+    if let Some(meeting_id) = &claimed.meeting_id {
+        message += &format!("\nThe meeting's id: {meeting_id}");
+    }
+    let new = claimed.tools.iter().any(|tool| tool == PROPOSE_NEW);
+    let change = claimed.tools.iter().any(|tool| tool == PROPOSE_CHANGE);
+    if !new && !change {
+        return message;
+    }
+    let mut what = Vec::new();
+    let mut example = Vec::new();
+    if new {
+        what.push("new tasks");
+        example.push(NEW_EXAMPLE);
+    }
+    if change {
+        what.push("changes to existing tasks");
+        example.push(CHANGE_EXAMPLE);
+    }
+    message += &format!(
+        "\n\nYou can't change Sona's tasks yourself, but you may propose {}. Each waits in Triage until the user accepts or declines it. To propose, end your reply with one block:\n{OFFER_FENCE}\n{{{}}}\n```\nLeave the block out when there is nothing to propose; at most {OFFER_LIMIT} of each. Priority: 0 none, 1 urgent, 2 high, 3 medium, 4 low. Status: backlog, not_started, in_progress, done or canceled. Name a task by its number, such as S-12.",
+        what.join(" or "),
+        example.join(", ")
+    );
+    message
+}
+
+const NEW_EXAMPLE: &str = r#""newTasks": [{"title": "Send Priya the deck", "details": "She asked for it before Friday.", "priority": 2}]"#;
+const CHANGE_EXAMPLE: &str = r#""changes": [{"task": "S-12", "status": "done"}]"#;
+
+/// What a run may leave in Triage: tasks it proposes, and changes to
+/// existing tasks that wait for the user field by field.
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Offers {
+    #[serde(default)]
+    new_tasks: Vec<NewTaskOffer>,
+    #[serde(default)]
+    changes: Vec<ChangeOffer>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct NewTaskOffer {
+    title: String,
+    #[serde(default)]
+    details: Option<String>,
+    #[serde(default)]
+    priority: Option<u8>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ChangeOffer {
+    task: String,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    details: Option<String>,
+    #[serde(default)]
+    status: Option<WorkStatus>,
+    #[serde(default)]
+    priority: Option<u8>,
+}
+
+/// The reply without its proposals block, and what the block proposed.
+fn split_offers(reply: &str) -> Result<(String, Offers), String> {
+    let Some(start) = reply.rfind(OFFER_FENCE) else {
+        return Ok((reply.trim().to_owned(), Offers::default()));
+    };
+    let unreadable = |reason: &dyn std::fmt::Display| {
+        format!("The agent's proposals could not be read, so none were kept: {reason}.")
+    };
+    let block = &reply[start + OFFER_FENCE.len()..];
+    let end = block.find("```").ok_or_else(|| unreadable(&"the block never ends"))?;
+    let offers = serde_json::from_str(block[..end].trim()).map_err(|error| unreadable(&error))?;
+    let answer = format!("{}{}", &reply[..start], &block[end + 3..]);
+    Ok((answer.trim().to_owned(), offers))
+}
+
+/// Files a run's offers in one change: new tasks in Triage with the meeting
+/// as their evidence, and changes as proposals, whatever Settings > Agents
+/// lets agents apply. Returns a line for each task touched.
+fn file_offers(
+    tx: &Connection,
+    meetings: Option<&Connection>,
+    change: super::Change<'_>,
+    meeting_id: Option<&str>,
+    offers: &Offers,
+) -> Result<super::Done<Vec<String>>> {
+    let mut effects = super::Effects::default();
+    let mut lines = Vec::new();
+    for offer in &offers.new_tasks {
+        let input = WorkItemInput {
+            title: offer.title.clone(),
+            details: offer.details.clone(),
+            status: Some(WorkStatus::Triage),
+            priority: offer.priority,
+            project_id: None,
+            milestone_id: None,
+            owner: None,
+            due_at_ms: None,
+            label_ids: None,
+            recurrence: None,
+        };
+        let item = super::insert_input(tx, meetings, change, &input)?;
+        super::agents::credit(tx, &item.id, change.at_ms, LOOP_AGENT, super::agents::via())?;
+        if let Some(session_id) = meeting_id {
+            store::insert_link(
+                tx,
+                &store::SourceLinkDraft {
+                    target_kind: EvidenceTargetKind::Task,
+                    target_id: &item.id,
+                    source_kind: EvidenceSourceKind::Meeting,
+                    source_id: session_id,
+                    at_ms: None,
+                    meeting_note_id: None,
+                },
+                change.at_ms,
+            )?;
+        }
+        effects.item(&item);
+        lines.push(format!("New in Triage: S-{} {}", item.number, item.title));
+    }
+    for offer in &offers.changes {
+        let patch = WorkPatch {
+            title: offer.title.clone(),
+            details: offer.details.clone().map(Some),
+            status: offer.status,
+            priority: offer.priority,
+            ..WorkPatch::default()
+        };
+        let changed = super::agents::suggest(
+            tx,
+            meetings,
+            change,
+            LOOP_AGENT,
+            &offer.task,
+            &patch,
+            &mut effects,
+        )?;
+        lines.push(match changed {
+            None => format!("{} isn't a task, so nothing was proposed for it.", offer.task),
+            Some(changed) if changed.proposed.is_empty() => {
+                format!("S-{} already reads as proposed.", changed.item.number)
+            }
+            Some(changed) => format!(
+                "Waiting for you on S-{}: {}",
+                changed.item.number,
+                changed
+                    .proposed
+                    .iter()
+                    .map(|proposal| proposal.field.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        });
+    }
+    Ok(super::Done {
+        value: lines,
+        effects,
+    })
+}
+
+async fn offer(app: &AppHandle, claimed: &Claimed, offers: &Offers) -> Result<Vec<String>, String> {
+    let operation_id = uuid::Uuid::new_v5(
+        &uuid::Uuid::NAMESPACE_URL,
+        format!("sona-loop-run:{}", claimed.run_id).as_bytes(),
+    )
+    .to_string();
+    let change = super::Change::now(&operation_id, WorkActor::Agent);
+    let meeting_id = claimed.meeting_id.as_deref();
+    super::run_with_meetings(app, |history, meetings| {
+        store::mutate(
+            history,
+            change.operation_id,
+            "work_loop_offer",
+            &(&claimed.run_id, offers),
+            change.at_ms,
+            |tx| file_offers(tx, meetings, change, meeting_id, offers),
+        )
+    })
+    .await
+}
+
+/// The run's answer, with what it proposed filed and listed under it.
+/// Proposals the automation's tools do not allow are refused; none are
+/// kept once the consent switches closed during the run.
+async fn settle_reply(
+    app: &AppHandle,
+    claimed: &Claimed,
+    reply: &str,
+    refused: &mut Vec<String>,
+) -> Result<String, String> {
+    let (answer, mut offers) = split_offers(reply)?;
+    let allows = |tool: &str| claimed.tools.iter().any(|name| name == tool);
+    if !offers.new_tasks.is_empty() && !allows(PROPOSE_NEW) {
+        refused.push(PROPOSE_NEW.to_owned());
+        offers.new_tasks.clear();
+    }
+    if !offers.changes.is_empty() && !allows(PROPOSE_CHANGE) {
+        refused.push(PROPOSE_CHANGE.to_owned());
+        offers.changes.clear();
+    }
+    if offers.new_tasks.is_empty() && offers.changes.is_empty() {
+        return Ok(answer);
+    }
+    if offers.new_tasks.len() > OFFER_LIMIT || offers.changes.len() > OFFER_LIMIT {
+        return Err(format!(
+            "The agent proposed more than {OFFER_LIMIT} new tasks or changes, so none were kept."
+        ));
+    }
+    if closed_gate(app).is_some() {
+        return Err(
+            "Agents' access was turned off during this run, so nothing it proposed was kept."
+                .to_owned(),
+        );
+    }
+    let filed = offer(app, claimed, &offers).await?;
+    Ok(format!("{answer}\n\n{}", filed.join("\n")).trim().to_owned())
+}
+
+async fn execute(app: &AppHandle, history: &HistoryManager, claimed: Claimed) {
+    if let Some(meeting_id) = &claimed.meeting_id {
+        if meeting_kept_here(app, meeting_id).await {
+            if let Err(error) = history
+                .with_connection(|conn| skip_run(conn, &claimed.run_id, KEPT_HERE, now_ms()))
+            {
+                log::warn!("A loop run could not be recorded: {error:#}");
+            }
+            tasks_changed(app, Vec::new());
+            return;
+        }
+    }
+    let message = brief(&claimed);
     let lookups = lookups(&claimed.tools);
     let turn = crate::agent_panel::run_loop_turn(app, &message, &lookups, RUN_DEADLINE).await;
-    let outcome = LoopOutcome {
-        answer: turn.answer.map_err(turn_error),
-        refused: turn.refused,
+    let mut refused = turn.refused;
+    let answer = match turn.answer {
+        Ok(reply) => settle_reply(app, &claimed, &reply, &mut refused).await,
+        Err(error) => Err(turn_error(error)),
     };
+    let outcome = LoopOutcome { answer, refused };
     if let Err(error) =
         history.with_connection(|conn| finish(conn, &claimed.run_id, &outcome, now_ms()))
     {
@@ -1791,6 +2085,7 @@ mod tests {
     use crate::meeting::store::workflow_core_tests::{self, reviewable_meeting};
     use crate::meeting::types::MeetingOperationId;
     use crate::planning::schema;
+    use crate::planning::work::inbox;
     use crate::planning::work::items::{self, NewItem};
     use crate::planning::work::types::{WorkActivityKind, WorkActor, WorkOwner, WorkPatch};
 
@@ -1860,6 +2155,60 @@ mod tests {
         assert_eq!(
             causes,
             [(format!("S-{} moved to Done", task.number), Some(task.id))]
+        );
+    }
+
+    #[test]
+    fn a_run_cut_off_by_a_quit_posts_one_inbox_notice_however_often_sona_restarts() {
+        let mut conn = Connection::open_in_memory().expect("a history database");
+        schema::apply_all(&conn).expect("the planner schema");
+        let digest = save(
+            &conn,
+            None,
+            &LoopInput {
+                name: "Weekly digest".to_owned(),
+                prompt: "Sum up what moved this week.".to_owned(),
+                trigger: LoopTrigger::MeetingEnded,
+                conditions: LoopConditions::default(),
+                tools: Vec::new(),
+            },
+            "you",
+            1,
+        )
+        .expect("a saved loop");
+        run_now(&conn, &digest.id, "op-1", 2).expect("a queued run");
+        let claimed = claim(&mut conn, 3).expect("the queue").expect("a run started");
+
+        let closed = [
+            recover(&mut conn, 4).expect("the first restart"),
+            recover(&mut conn, 5).expect("the second restart"),
+        ];
+        inbox::automation_ended(&conn, &claimed.run_id, 6).expect("a late report of the end");
+        let notices: Vec<_> = inbox::notifications(&conn, inbox::Shown::default(), 7)
+            .expect("the inbox")
+            .into_iter()
+            .map(|notice| {
+                (
+                    notice.kind,
+                    notice.item_id,
+                    notice.to,
+                    notice.automation.map(|automation| (automation.name, automation.error)),
+                )
+            })
+            .collect();
+
+        assert_eq!(closed, [1, 0]);
+        assert_eq!(
+            notices,
+            [(
+                inbox::NotificationKind::Automation,
+                None,
+                Some("failed".to_owned()),
+                Some((
+                    "Weekly digest".to_owned(),
+                    Some("Sona stopped during this run.".to_owned())
+                )),
+            )]
         );
     }
 
@@ -1985,5 +2334,81 @@ mod tests {
 
         assert!(claimed.is_none());
         assert_eq!(statuses, ["skipped"]);
+    }
+
+    #[test]
+    fn a_run_leaves_new_tasks_in_triage_and_changes_waiting_for_you() {
+        let mut conn = Connection::open_in_memory().expect("a history database");
+        schema::apply_all(&conn).expect("the planner schema");
+        let task = items::insert(
+            &conn,
+            &NewItem {
+                title: "Survey the dock",
+                details: None,
+                status: WorkStatus::NotStarted,
+                priority: 0,
+                project_id: None,
+                milestone_id: None,
+                owner: &WorkOwner::Nobody,
+                due_at_ms: None,
+                label_ids: &[],
+                source_loop_id: None,
+                recurrence: None,
+            },
+            WorkActor::Me,
+            0,
+        )
+        .expect("a filed task");
+        let reply = format!(
+            "Two follow-ups.\n\n{OFFER_FENCE}\n{{\"newTasks\":[{{\"title\":\"Send the map notes\"}}],\"changes\":[{{\"task\":\"S-{}\",\"status\":\"done\"}}]}}\n```",
+            task.number
+        );
+        let (answer, offers) = split_offers(&reply).expect("readable proposals");
+        let meeting = uuid::Uuid::new_v4().to_string();
+        let operation = uuid::Uuid::new_v4().to_string();
+
+        let tx = conn.transaction().expect("a transaction");
+        let filed = file_offers(
+            &tx,
+            None,
+            super::super::Change {
+                operation_id: &operation,
+                actor: WorkActor::Agent,
+                at_ms: 5,
+            },
+            Some(&meeting),
+            &offers,
+        )
+        .expect("the proposals filed");
+        tx.commit().expect("the proposals kept");
+
+        let (new_id, new_status): (String, String) = conn
+            .query_row(
+                "SELECT id, status FROM planning_tasks WHERE title = 'Send the map notes'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("the proposed task");
+        let evidence: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM planning_evidence_links WHERE target_id = ?1 AND source_kind = 'meeting'",
+                [&new_id],
+                |row| row.get(0),
+            )
+            .expect("the task's evidence");
+        let waiting: Vec<(String, String)> = conn
+            .prepare("SELECT field, agent FROM planning_task_proposals WHERE task_id = ?1 AND state = 'open'")
+            .expect("a proposal read")
+            .query_map([&task.id], |row| Ok((row.get(0)?, row.get(1)?)))
+            .expect("the proposals")
+            .collect::<rusqlite::Result<_>>()
+            .expect("the proposals");
+
+        assert_eq!(answer, "Two follow-ups.");
+        assert_eq!(new_status, "triage");
+        assert_eq!(evidence, 1);
+        assert_eq!(items::item(&conn, &task.id).expect("the task").status, WorkStatus::NotStarted);
+        assert_eq!(waiting, [("status".to_owned(), LOOP_AGENT.to_owned())]);
+        assert_eq!(filed.value.len(), 2);
     }
 }

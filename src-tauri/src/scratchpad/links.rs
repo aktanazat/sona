@@ -89,6 +89,8 @@ pub struct ScratchNoteMemory {
     pub passages: Vec<super::passages::ScratchPassage>,
     pub interpretation: bool,
     pub connections: Vec<ScratchConnection>,
+    /// The projects, milestones, tasks and cycles this note is a document of.
+    pub documents: Vec<super::documents::ScratchDocumentOf>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
@@ -355,7 +357,8 @@ pub(crate) fn read_memory(
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let passages = super::passages::read(conn, id)?;
         let interpretation = conn.query_row("SELECT EXISTS(SELECT 1 FROM scratch_note_origins WHERE note_id = ?1)", params![id], |row| row.get(0))?;
-        Ok(Some(ScratchNoteMemory { note, sources, related_notes, passages, interpretation, connections: Vec::new(), phone_sources: Vec::new() }))
+        let documents = super::documents::documents_of(conn, id)?;
+        Ok(Some(ScratchNoteMemory { note, sources, related_notes, passages, interpretation, connections: Vec::new(), phone_sources: Vec::new(), documents }))
     }).map_err(|_| "The note's sources could not be read.".to_string())?;
     let Some(mut memory) = memory else {
         return Ok(None);

@@ -1697,6 +1697,7 @@ mod tests {
                 revision: 1,
                 group: None,
                 retired_at_ms: None,
+                scope: Default::default(),
             }],
             projects: ["Launch", "Q4 pricing"]
                 .iter()

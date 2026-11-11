@@ -15,8 +15,8 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use uuid::Uuid;
 
-const PROJECT_COLUMNS: &str = "id, title, description, status, revision, created_at_ms, updated_at_ms, lead_person_id, target_at_ms, hue, archived_at_ms, priority, start_at_ms, start_resolution, target_resolution, icon, trashed_at_ms, lead_is_self, members_include_self";
-const PROJECT_COLUMN_COUNT: usize = 19;
+const PROJECT_COLUMNS: &str = "id, title, description, status, revision, created_at_ms, updated_at_ms, lead_person_id, target_at_ms, hue, archived_at_ms, priority, start_at_ms, start_resolution, target_resolution, icon, trashed_at_ms, lead_is_self, members_include_self, summary, status_name_id";
+const PROJECT_COLUMN_COUNT: usize = 21;
 const MILESTONE_COLUMNS: &str =
     "id, project_id, title, due_at_ms, status, revision, created_at_ms, updated_at_ms, description, position";
 /// Milestones in the order the owner set, then by due day.
@@ -45,6 +45,8 @@ pub(crate) enum Refusal {
     NoFile,
     TooLarge,
     BadLink,
+    LabelScope,
+    DependencyLoop,
 }
 
 impl fmt::Display for Refusal {
@@ -68,6 +70,8 @@ impl fmt::Display for Refusal {
             Self::NoFile => "no file at that path",
             Self::TooLarge => "attachment is over the size cap",
             Self::BadLink => "link scheme is not allowed",
+            Self::LabelScope => "label is kept to the other kind of item",
+            Self::DependencyLoop => "a project cannot wait on itself or on a project waiting on it",
         })
     }
 }
@@ -184,6 +188,8 @@ fn read_project(row: &Row<'_>) -> rusqlite::Result<Project> {
         label_ids: Vec::new(),
         links: Vec::new(),
         trashed_at_ms: row.get(16)?,
+        summary: row.get(19)?,
+        status_name_id: row.get(20)?,
     })
 }
 
@@ -332,15 +338,17 @@ pub(crate) fn projects(conn: &Connection, trashed: bool) -> Result<Vec<ProjectSu
     let mut statement = conn.prepare(&format!(
         "SELECT {PROJECT_COLUMNS},
             (SELECT count(*) FROM planning_tasks t WHERE t.project_id = p.id AND t.archived_at_ms IS NULL
-                AND t.status IN ('triage', 'backlog', 'not_started', 'in_progress')),
+                AND t.status IN ('backlog', 'not_started', 'in_progress')),
             (SELECT count(*) FROM planning_tasks t WHERE t.project_id = p.id AND t.archived_at_ms IS NULL
                 AND t.status = 'done'),
             (SELECT min(due_at_ms) FROM (
                 SELECT due_at_ms FROM planning_tasks WHERE project_id = p.id AND archived_at_ms IS NULL
-                    AND status IN ('triage', 'backlog', 'not_started', 'in_progress')
+                    AND status IN ('backlog', 'not_started', 'in_progress')
                 UNION ALL
                 SELECT due_at_ms FROM planning_milestones WHERE project_id = p.id AND status IN ('not_started', 'in_progress')
-            ))
+            )),
+            (SELECT max(u.created_at_ms) FROM planning_project_updates u
+                WHERE u.project_id = p.id AND u.deleted_at_ms IS NULL)
          FROM planning_projects p WHERE {shelf}"
     ))?;
     let rows = statement.query_map([], |row| {
@@ -349,6 +357,7 @@ pub(crate) fn projects(conn: &Connection, trashed: bool) -> Result<Vec<ProjectSu
             open_task_count: row.get(PROJECT_COLUMN_COUNT)?,
             completed_task_count: row.get(PROJECT_COLUMN_COUNT + 1)?,
             next_due_at_ms: row.get(PROJECT_COLUMN_COUNT + 2)?,
+            latest_update_at_ms: row.get(PROJECT_COLUMN_COUNT + 3)?,
         })
     })?;
     let mut summaries = rows.collect::<rusqlite::Result<Vec<_>>>()?;
@@ -402,6 +411,9 @@ pub(crate) struct ProjectRecords {
     pub(crate) milestones: Vec<Milestone>,
     pub(crate) tasks: Vec<PlanningTask>,
     pub(crate) evidence: Vec<EvidenceLink>,
+    /// Tasks still in triage: not accepted yet, so not counted as open.
+    #[serde(skip)]
+    pub(crate) triage: HashSet<String>,
 }
 
 pub(crate) fn records(conn: &Connection, id: &str) -> Result<ProjectRecords> {
@@ -417,9 +429,17 @@ pub(crate) fn records(conn: &Connection, id: &str) -> Result<ProjectRecords> {
         "SELECT {TASK_COLUMNS} FROM planning_tasks WHERE project_id = ?1 AND archived_at_ms IS NULL
          ORDER BY due_at_ms IS NULL, due_at_ms, created_at_ms, id"
     ))?;
-    let tasks = statement
-        .query_map([id], read_task)?
+    let rows = statement
+        .query_map([id], |row| {
+            Ok((read_task(row)?, row.get::<_, WorkStatus>(8)? == WorkStatus::Triage))
+        })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    let triage = rows
+        .iter()
+        .filter(|(_, triage)| *triage)
+        .map(|(task, _)| task.id.clone())
+        .collect();
+    let tasks = rows.into_iter().map(|(task, _)| task).collect();
     let mut statement = conn.prepare(&format!(
         "SELECT {EVIDENCE_COLUMNS} FROM planning_evidence_links WHERE
             (target_kind = 'project' AND target_id = ?1) OR
@@ -436,6 +456,7 @@ pub(crate) fn records(conn: &Connection, id: &str) -> Result<ProjectRecords> {
         milestones,
         tasks,
         evidence,
+        triage,
     })
 }
 
@@ -496,11 +517,12 @@ fn pulse(
     let mut open = 0_usize;
     let mut overdue = 0_usize;
     let mut owned = HashMap::<&str, usize>::new();
+    let open_task = |task: &PlanningTask| is_open(task.status) && !records.triage.contains(&task.id);
     for task in &records.tasks {
         if task.status == TaskStatus::Done {
             done += 1;
         }
-        if !is_open(task.status) {
+        if !open_task(task) {
             continue;
         }
         open += 1;
@@ -514,7 +536,7 @@ fn pulse(
     let next_due_at_ms = records
         .tasks
         .iter()
-        .filter(|task| is_open(task.status))
+        .filter(|task| open_task(task))
         .filter_map(|task| task.due_at_ms)
         .chain(
             records
@@ -816,22 +838,32 @@ pub(crate) fn update_milestone(
     )
 }
 
+/// The project a link target belongs to; a task outside any project has none.
 pub(crate) fn target_project(
     conn: &Connection,
     kind: EvidenceTargetKind,
     id: &str,
-) -> Result<String> {
+) -> Result<Option<String>> {
     match kind {
-        EvidenceTargetKind::Project => Ok(project(conn, id)?.id),
+        EvidenceTargetKind::Project => Ok(Some(project(conn, id)?.id)),
         EvidenceTargetKind::Milestone => {
             let milestone = milestone(conn, id)?;
             project(conn, &milestone.project_id)?;
-            Ok(milestone.project_id)
+            Ok(Some(milestone.project_id))
         }
         EvidenceTargetKind::Task => {
-            let task = task(conn, id)?;
-            project(conn, &task.project_id)?;
-            Ok(task.project_id)
+            let project_id = conn
+                .query_row(
+                    "SELECT project_id FROM planning_tasks WHERE id = ?1",
+                    [id],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .optional()?
+                .ok_or(Refusal::NotFound)?;
+            if let Some(project_id) = &project_id {
+                project(conn, project_id)?;
+            }
+            Ok(project_id)
         }
     }
 }
@@ -955,8 +987,10 @@ pub(crate) fn calendar(
 mod tests {
     use super::*;
 
+    /// A task still in triage is not open work yet: the pulse and the
+    /// Projects list both leave it out, as the project's task list does.
     #[test]
-    fn pulse_counts_work_due_today_as_open_not_overdue() -> Result<()> {
+    fn pulse_counts_work_due_today_as_open_not_overdue_and_leaves_triage_out() -> Result<()> {
         let conn = Connection::open_in_memory()?;
         super::super::schema::apply_all(&conn)?;
         let now = Local::now();
@@ -983,6 +1017,7 @@ mod tests {
         let due_today = task("Book the room", today_ms + 1, None)?;
         let canceled = task("Order banners", today_ms - 3_600_000, None)?;
         let done = task("Draft the outline", today_ms - 3_600_000, None)?;
+        let triage = task("Check the permit", today_ms, Some(&owner))?;
         conn.execute(
             "UPDATE planning_tasks SET status = 'canceled' WHERE id = ?1",
             [&canceled.id],
@@ -991,6 +1026,11 @@ mod tests {
             "UPDATE planning_tasks SET status = 'done' WHERE id = ?1",
             [&done.id],
         )?;
+        conn.execute(
+            "UPDATE planning_tasks SET status = 'triage' WHERE id = ?1",
+            [&triage.id],
+        )?;
+        assert_eq!(projects(&conn, false)?[0].open_task_count, 2);
 
         let records = records(&conn, &project.id)?;
         let outlook =
@@ -1012,6 +1052,55 @@ mod tests {
                 milestones: Vec::new(),
             }
         );
+        Ok(())
+    }
+
+    #[test]
+    fn a_task_outside_any_project_takes_a_note_as_a_source() -> Result<()> {
+        let mut conn = Connection::open_in_memory()?;
+        super::super::schema::apply_all(&conn)?;
+        let project = insert_project(&conn, "Launch", None, 1)?;
+        let task = insert_task(
+            &conn,
+            &TaskDraft {
+                project_id: &project.id,
+                milestone_id: None,
+                title: "Loose end",
+                details: None,
+                due_at_ms: None,
+                owner_person_id: None,
+                owner_is_self: false,
+            },
+            1,
+            |id| Ok(id.to_owned()),
+        )?;
+        conn.execute(
+            "UPDATE planning_tasks SET project_id = NULL WHERE id = ?1",
+            [&task.id],
+        )?;
+        let note = Uuid::new_v4().to_string();
+        link_source(
+            &mut conn,
+            &SourceLinkDraft {
+                target_kind: EvidenceTargetKind::Task,
+                target_id: &task.id,
+                source_kind: EvidenceSourceKind::Note,
+                source_id: &note,
+                at_ms: None,
+                meeting_note_id: None,
+            },
+            &Uuid::new_v4().to_string(),
+            2,
+            |_| Ok(()),
+        )?;
+
+        let linked: i64 = conn.query_row(
+            "SELECT count(*) FROM planning_evidence_links WHERE target_id = ?1 AND source_id = ?2",
+            [&task.id, &note],
+            |row| row.get(0),
+        )?;
+        assert_eq!(linked, 1);
+        assert_eq!(target_project(&conn, EvidenceTargetKind::Task, &task.id)?, None);
         Ok(())
     }
 }

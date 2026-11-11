@@ -135,8 +135,9 @@ pub struct LoopSaveArgs {
     /// Run only for tasks in one of these statuses; "" clears.
     #[arg(long, value_delimiter = ',', value_name = "STATUS")]
     pub if_status: Option<Vec<String>>,
-    /// The lookups the agent may use, as Sona MCP tool names such as
-    /// sona_search; "" clears. automation-list names them.
+    /// The tools the agent may use, as Sona MCP tool names such as
+    /// sona_search; sona_work_create and sona_work_update let it propose
+    /// tasks and changes into Triage. "" clears. automation-list names them.
     #[arg(long, value_delimiter = ',', value_name = "TOOL")]
     pub tools: Option<Vec<String>>,
     /// Print what would change and write nothing.

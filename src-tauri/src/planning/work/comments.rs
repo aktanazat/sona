@@ -1,14 +1,55 @@
-//! Comments on a task, in threads one reply deep as Linear keeps them: a
-//! reply to a reply joins the thread's first comment. Deleting a comment
-//! blanks it and keeps its place while replies hang under it.
+//! Comments in threads one reply deep as Linear keeps them: a reply to a
+//! reply joins the thread's first comment. Deleting a comment blanks it and
+//! keeps its place while replies hang under it. A task's comments go into
+//! its history; a project's, a milestone's, a meeting's or a note's are
+//! kept beside it.
 
 use super::super::store::{self, Refusal};
 use super::agents;
 use super::items;
-use super::types::{WorkActivityKind, WorkActor, WorkComment, WorkCommentAuthor, WorkCommentPage};
+use super::types::{
+    WorkActivityKind, WorkActor, WorkComment, WorkCommentAuthor, WorkCommentPage,
+    WorkCommentSubject,
+};
 use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension, Row};
+use std::collections::HashMap;
 use uuid::Uuid;
+
+/// Threads on a project, a milestone, a meeting or a note, kept as a task's
+/// are. A project's and a milestone's leave with it.
+pub(crate) const SUBJECTS_MIGRATION: &str = "CREATE TABLE planning_comments (
+    id TEXT PRIMARY KEY NOT NULL,
+    subject_kind TEXT NOT NULL CHECK(subject_kind IN ('project', 'milestone', 'meeting', 'note')),
+    subject_id TEXT NOT NULL,
+    parent_comment_id TEXT,
+    author_kind TEXT NOT NULL CHECK(author_kind IN ('me', 'sona', 'agent')),
+    author_name TEXT CHECK(author_name IS NULL OR length(trim(author_name)) > 0),
+    body TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    edited_at_ms INTEGER,
+    resolved_at_ms INTEGER,
+    deleted_at_ms INTEGER,
+    CHECK(deleted_at_ms IS NOT NULL OR length(trim(body)) > 0),
+    CHECK(parent_comment_id IS NULL OR resolved_at_ms IS NULL),
+    CHECK(parent_comment_id IS NULL OR parent_comment_id != id)
+);
+CREATE INDEX planning_comments_subject
+    ON planning_comments(subject_kind, subject_id, created_at_ms, id);
+CREATE INDEX planning_comments_thread ON planning_comments(parent_comment_id);
+CREATE TRIGGER planning_comments_project_delete AFTER DELETE ON planning_projects BEGIN
+    DELETE FROM planning_comments WHERE subject_kind = 'project' AND subject_id = old.id;
+END;
+CREATE TRIGGER planning_comments_milestone_delete AFTER DELETE ON planning_milestones BEGIN
+    DELETE FROM planning_comments WHERE subject_kind = 'milestone' AND subject_id = old.id;
+END;";
+
+/// A note's threads leave with it. Kept apart from [`SUBJECTS_MIGRATION`]
+/// because notes are not in the planner's own schema.
+pub(crate) const NOTE_COMMENTS_MIGRATION: &str =
+    "CREATE TRIGGER planning_comments_note_delete AFTER DELETE ON scratch_notes BEGIN
+    DELETE FROM planning_comments WHERE subject_kind = 'note' AND subject_id = old.id;
+END;";
 
 pub(crate) const PAGE: usize = 50;
 pub(crate) const MAX_PAGE: usize = 100;
@@ -38,27 +79,77 @@ impl Author<'_> {
     }
 }
 
-const COLUMNS: &str = "id, task_id, parent_comment_id, author_kind, author_name, body,
-    created_at_ms, edited_at_ms, resolved_at_ms, deleted_at_ms";
+const TASK_COLUMNS: &str = "id, 'task', task_id, parent_comment_id, author_kind, author_name,
+    body, created_at_ms, edited_at_ms, resolved_at_ms, deleted_at_ms";
 
-const SHOWN: &str = "(c.deleted_at_ms IS NULL OR EXISTS (
-    SELECT 1 FROM planning_task_comments r
-    WHERE r.parent_comment_id = c.id AND r.deleted_at_ms IS NULL))";
+const SUBJECT_COLUMNS: &str = "id, subject_kind, subject_id, parent_comment_id, author_kind,
+    author_name, body, created_at_ms, edited_at_ms, resolved_at_ms, deleted_at_ms";
+
+fn table(subject: WorkCommentSubject) -> &'static str {
+    match subject {
+        WorkCommentSubject::Task => "planning_task_comments",
+        _ => "planning_comments",
+    }
+}
+
+fn columns(subject: WorkCommentSubject) -> &'static str {
+    match subject {
+        WorkCommentSubject::Task => TASK_COLUMNS,
+        _ => SUBJECT_COLUMNS,
+    }
+}
+
+/// Picks the comments on `?1` among `c`, a row of [`table`].
+fn on(subject: WorkCommentSubject) -> &'static str {
+    match subject {
+        WorkCommentSubject::Task => "c.task_id = ?1",
+        WorkCommentSubject::Project => "c.subject_kind = 'project' AND c.subject_id = ?1",
+        WorkCommentSubject::Milestone => "c.subject_kind = 'milestone' AND c.subject_id = ?1",
+        WorkCommentSubject::Meeting => "c.subject_kind = 'meeting' AND c.subject_id = ?1",
+        WorkCommentSubject::Note => "c.subject_kind = 'note' AND c.subject_id = ?1",
+    }
+}
+
+/// Whether `c` shows: live, or deleted with live replies under it.
+fn shown(subject: WorkCommentSubject) -> String {
+    format!(
+        "(c.deleted_at_ms IS NULL OR EXISTS (
+            SELECT 1 FROM {} r
+            WHERE r.parent_comment_id = c.id AND r.deleted_at_ms IS NULL))",
+        table(subject)
+    )
+}
+
+/// `id` as `subject` keeps it, refused when there is no such subject. A
+/// meeting is the caller's to check: meetings are kept in their own store.
+fn subject_id(conn: &Connection, subject: WorkCommentSubject, id: &str) -> Result<String> {
+    let id = store::uuid(id)?;
+    match subject {
+        WorkCommentSubject::Task => Ok(items::item(conn, &id)?.id),
+        WorkCommentSubject::Project => Ok(store::project(conn, &id)?.id),
+        WorkCommentSubject::Milestone => Ok(store::milestone(conn, &id)?.id),
+        WorkCommentSubject::Note => crate::scratchpad::note_with_connection(conn, &id)?
+            .map(|note| note.id)
+            .ok_or_else(|| Refusal::NotFound.into()),
+        WorkCommentSubject::Meeting => Ok(id),
+    }
+}
 
 fn read(row: &Row<'_>) -> rusqlite::Result<WorkComment> {
-    let deleted = row.get::<_, Option<i64>>(9)?.is_some();
+    let deleted = row.get::<_, Option<i64>>(10)?.is_some();
     Ok(WorkComment {
         id: row.get(0)?,
-        item_id: row.get(1)?,
-        parent_id: row.get(2)?,
+        subject: row.get(1)?,
+        item_id: row.get(2)?,
+        parent_id: row.get(3)?,
         author: WorkCommentAuthor {
-            kind: row.get(3)?,
-            name: row.get(4)?,
+            kind: row.get(4)?,
+            name: row.get(5)?,
         },
-        body: if deleted { None } else { Some(row.get(5)?) },
-        created_at_ms: row.get(6)?,
-        edited_at_ms: row.get(7)?,
-        resolved_at_ms: row.get(8)?,
+        body: if deleted { None } else { Some(row.get(6)?) },
+        created_at_ms: row.get(7)?,
+        edited_at_ms: row.get(8)?,
+        resolved_at_ms: row.get(9)?,
         deleted,
         replies: Vec::new(),
     })
@@ -67,7 +158,10 @@ fn read(row: &Row<'_>) -> rusqlite::Result<WorkComment> {
 fn comment(conn: &Connection, id: &str) -> Result<WorkComment> {
     let id = store::uuid(id)?;
     conn.query_row(
-        &format!("SELECT {COLUMNS} FROM planning_task_comments WHERE id = ?1"),
+        &format!(
+            "SELECT {TASK_COLUMNS} FROM planning_task_comments WHERE id = ?1
+             UNION ALL SELECT {SUBJECT_COLUMNS} FROM planning_comments WHERE id = ?1"
+        ),
         [&id],
         read,
     )
@@ -99,9 +193,11 @@ pub(crate) fn thread(conn: &Connection, id: &str) -> Result<WorkComment> {
         None => found,
     };
     let mut statement = conn.prepare(&format!(
-        "SELECT {COLUMNS} FROM planning_task_comments
+        "SELECT {} FROM {}
          WHERE parent_comment_id = ?1 AND deleted_at_ms IS NULL
-         ORDER BY created_at_ms, id"
+         ORDER BY created_at_ms, id",
+        columns(root.subject),
+        table(root.subject)
     ))?;
     root.replies = statement
         .query_map([&root.id], read)?
@@ -109,19 +205,20 @@ pub(crate) fn thread(conn: &Connection, id: &str) -> Result<WorkComment> {
     Ok(root)
 }
 
-/// A task's threads oldest first, from just after `cursor`, a thread's
-/// first comment, at most `limit` of them.
+/// The threads on `subject_id` oldest first, from just after `cursor`, a
+/// thread's first comment, at most `limit` of them.
 pub(crate) fn page(
     conn: &Connection,
-    task_id: &str,
+    subject: WorkCommentSubject,
+    subject_id: &str,
     limit: usize,
     cursor: Option<&str>,
 ) -> Result<WorkCommentPage> {
-    let task_id = items::item(conn, &store::uuid(task_id)?)?.id;
+    let subject_id = self::subject_id(conn, subject, subject_id)?;
     let after = cursor
         .map(|cursor| {
             let at = comment(conn, cursor)?;
-            if at.item_id != task_id || at.parent_id.is_some() {
+            if at.subject != subject || at.item_id != subject_id || at.parent_id.is_some() {
                 return Err(Refusal::Invalid.into());
             }
             Ok::<_, anyhow::Error>((at.created_at_ms, at.id))
@@ -129,14 +226,17 @@ pub(crate) fn page(
         .transpose()?;
     let (after_ms, after_id) = after.unwrap_or((i64::MIN, String::new()));
     let mut statement = conn.prepare(&format!(
-        "SELECT c.id FROM planning_task_comments c
-         WHERE c.task_id = ?1 AND c.parent_comment_id IS NULL AND {SHOWN}
+        "SELECT c.id FROM {} c
+         WHERE {} AND c.parent_comment_id IS NULL AND {}
            AND (c.created_at_ms, c.id) > (?2, ?3)
-         ORDER BY c.created_at_ms, c.id LIMIT ?4"
+         ORDER BY c.created_at_ms, c.id LIMIT ?4",
+        table(subject),
+        on(subject),
+        shown(subject)
     ))?;
     let fetch = i64::try_from(limit.saturating_add(1)).unwrap_or(i64::MAX);
     let mut ids: Vec<String> = statement
-        .query_map(params![task_id, after_ms, after_id, fetch], |row| {
+        .query_map(params![subject_id, after_ms, after_id, fetch], |row| {
             row.get(0)
         })?
         .collect::<rusqlite::Result<_>>()?;
@@ -153,30 +253,64 @@ pub(crate) fn page(
     Ok(WorkCommentPage {
         threads,
         next_cursor,
+        kept_local: false,
     })
 }
 
-/// Every thread on a task, oldest first.
-pub(crate) fn all(conn: &Connection, task_id: &str) -> Result<Vec<WorkComment>> {
-    Ok(page(conn, task_id, usize::MAX - 1, None)?.threads)
+/// `page` for a meeting kept on this Mac. Agents cannot read such a
+/// meeting, so their comments on it, and the threads they began, are left
+/// out.
+pub(crate) fn kept_local(mut page: WorkCommentPage) -> WorkCommentPage {
+    let by_agent = |comment: &WorkComment| comment.author.kind == WorkActor::Agent;
+    page.threads.retain(|thread| !by_agent(thread));
+    for thread in &mut page.threads {
+        thread.replies.retain(|reply| !by_agent(reply));
+    }
+    page.kept_local = true;
+    page
 }
 
-/// A new comment, or a reply joining the thread `reply_to` is in, written
-/// into the task's history under its author.
+/// Every thread on `subject_id`, oldest first.
+pub(crate) fn all(
+    conn: &Connection,
+    subject: WorkCommentSubject,
+    subject_id: &str,
+) -> Result<Vec<WorkComment>> {
+    Ok(page(conn, subject, subject_id, usize::MAX - 1, None)?.threads)
+}
+
+/// The words of every comment not deleted, by task, oldest first: what a
+/// search reads besides a task's own fields.
+pub(crate) fn bodies(conn: &Connection) -> Result<HashMap<String, Vec<String>>> {
+    let mut statement = conn.prepare(
+        "SELECT task_id, body FROM planning_task_comments
+         WHERE deleted_at_ms IS NULL ORDER BY created_at_ms, id",
+    )?;
+    let mut rows = statement.query([])?;
+    let mut bodies: HashMap<String, Vec<String>> = HashMap::new();
+    while let Some(row) = rows.next()? {
+        bodies.entry(row.get(0)?).or_default().push(row.get(1)?);
+    }
+    Ok(bodies)
+}
+
+/// A new comment, or a reply joining the thread `reply_to` is in. On a task
+/// it is written into the task's history under its author.
 pub(crate) fn add(
     conn: &Connection,
-    task_id: &str,
+    subject: WorkCommentSubject,
+    subject_id: &str,
     reply_to: Option<&str>,
     author: Author<'_>,
     text: &str,
     now_ms: i64,
 ) -> Result<WorkComment> {
-    let task_id = items::item(conn, &store::uuid(task_id)?)?.id;
+    let subject_id = self::subject_id(conn, subject, subject_id)?;
     let text = body(text)?;
     let parent_id = reply_to
         .map(|reply_to| {
             let to = comment(conn, reply_to)?;
-            if to.item_id != task_id {
+            if to.subject != subject || to.item_id != subject_id {
                 return Err(Refusal::Invalid.into());
             }
             Ok::<_, anyhow::Error>(to.parent_id.unwrap_or(to.id))
@@ -184,6 +318,25 @@ pub(crate) fn add(
         .transpose()?;
     let id = Uuid::new_v4().to_string();
     let name = author.name();
+    if subject != WorkCommentSubject::Task {
+        conn.execute(
+            "INSERT INTO planning_comments (id, subject_kind, subject_id, parent_comment_id,
+                author_kind, author_name, body, created_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                id,
+                subject.as_str(),
+                subject_id,
+                parent_id,
+                author.actor.as_str(),
+                name,
+                text,
+                now_ms
+            ],
+        )?;
+        return comment(conn, &id);
+    }
+    let task_id = subject_id;
     conn.execute(
         "INSERT INTO planning_task_comments
             (id, task_id, parent_comment_id, author_kind, author_name, body, created_at_ms)
@@ -207,13 +360,9 @@ pub(crate) fn add(
         None,
         Some(&id),
     )?;
+    items::relate_mentions(conn, &task_id, None, Some(text), author.actor, now_ms)?;
     if let Some(name) = &name {
-        conn.execute(
-            "INSERT INTO planning_activity_agents (activity_id, agent)
-             SELECT id, ?3 FROM planning_task_activity
-             WHERE task_id = ?1 AND kind = 'comment' AND to_value = ?2",
-            params![task_id, id, name],
-        )?;
+        agents::credit(conn, &task_id, now_ms, name, agents::via())?;
     }
     comment(conn, &id)
 }
@@ -233,9 +382,25 @@ pub(crate) fn edit(
     let text = body(text)?;
     if found.body.as_deref() != Some(text) {
         conn.execute(
-            "UPDATE planning_task_comments SET body = ?2, edited_at_ms = ?3 WHERE id = ?1",
+            &format!(
+                "UPDATE {} SET body = ?2, edited_at_ms = ?3 WHERE id = ?1",
+                table(found.subject)
+            ),
             params![found.id, text, now_ms],
         )?;
+        if found.subject == WorkCommentSubject::Task {
+            items::relate_mentions(
+                conn,
+                &found.item_id,
+                found.body.as_deref(),
+                Some(text),
+                author.actor,
+                now_ms,
+            )?;
+            if let Some(name) = author.name() {
+                agents::credit(conn, &found.item_id, now_ms, &name, agents::via())?;
+            }
+        }
     }
     comment(conn, &found.id)
 }
@@ -256,7 +421,10 @@ pub(crate) fn delete(
         return Err(Refusal::NotAuthor.into());
     }
     conn.execute(
-        "UPDATE planning_task_comments SET body = '', deleted_at_ms = ?2 WHERE id = ?1",
+        &format!(
+            "UPDATE {} SET body = '', deleted_at_ms = ?2 WHERE id = ?1",
+            table(found.subject)
+        ),
         params![found.id, now_ms],
     )?;
     comment(conn, &found.id)
@@ -272,9 +440,12 @@ pub(crate) fn resolve(
     let found = live(conn, id)?;
     let root = found.parent_id.unwrap_or(found.id);
     conn.execute(
-        "UPDATE planning_task_comments
-         SET resolved_at_ms = CASE WHEN ?2 THEN coalesce(resolved_at_ms, ?3) END
-         WHERE id = ?1",
+        &format!(
+            "UPDATE {}
+             SET resolved_at_ms = CASE WHEN ?2 THEN coalesce(resolved_at_ms, ?3) END
+             WHERE id = ?1",
+            table(found.subject)
+        ),
         params![root, resolved, now_ms],
     )?;
     thread(conn, &root)
@@ -283,13 +454,16 @@ pub(crate) fn resolve(
 #[cfg(test)]
 mod tests {
     use super::super::super::schema;
-    use super::super::super::store::Refusal;
+    use super::super::super::store::{insert_project, Refusal};
     use super::super::items::{self, NewItem};
-    use super::super::types::{WorkActivityKind, WorkActor, WorkOwner, WorkPatch, WorkStatus};
-    use super::{add, delete, page, Author};
+    use super::super::types::{
+        WorkActivityKind, WorkActor, WorkCommentSubject, WorkOwner, WorkPatch, WorkStatus,
+    };
+    use super::{add, comment, delete, kept_local, page, Author};
     use rusqlite::Connection;
 
     const AT: i64 = 1_700_000_000_000;
+    const TASK: WorkCommentSubject = WorkCommentSubject::Task;
     const ME: Author<'static> = Author {
         actor: WorkActor::Me,
         agent: None,
@@ -361,13 +535,14 @@ mod tests {
     fn a_reply_to_a_reply_joins_the_thread_root() {
         let conn = tracker();
         let id = task(&conn, "Launch");
-        let root = add(&conn, &id, None, ME, "Who books the venue?", AT).expect("root");
-        let reply = add(&conn, &id, Some(&root.id), ME, "Dana", AT + 1).expect("reply");
+        let root = add(&conn, TASK, &id, None, ME, "Who books the venue?", AT).expect("root");
+        let reply = add(&conn, TASK, &id, Some(&root.id), ME, "Dana", AT + 1).expect("reply");
 
-        let nested = add(&conn, &id, Some(&reply.id), ME, "Confirmed", AT + 2).expect("nested");
+        let nested =
+            add(&conn, TASK, &id, Some(&reply.id), ME, "Confirmed", AT + 2).expect("nested");
 
         assert_eq!(nested.parent_id.as_deref(), Some(root.id.as_str()));
-        let threads = page(&conn, &id, 10, None).expect("threads").threads;
+        let threads = page(&conn, TASK, &id, 10, None).expect("threads").threads;
         assert_eq!(threads.len(), 1);
         assert_eq!(threads[0].replies.len(), 2);
     }
@@ -376,15 +551,61 @@ mod tests {
     fn deleting_a_thread_root_keeps_its_replies_readable() {
         let conn = tracker();
         let id = task(&conn, "Launch");
-        let root = add(&conn, &id, None, ME, "Who books the venue?", AT).expect("root");
-        add(&conn, &id, Some(&root.id), ME, "Dana", AT + 1).expect("reply");
+        let root = add(&conn, TASK, &id, None, ME, "Who books the venue?", AT).expect("root");
+        add(&conn, TASK, &id, Some(&root.id), ME, "Dana", AT + 1).expect("reply");
 
         delete(&conn, &root.id, ME, AT + 2).expect("deleted root");
 
-        let threads = page(&conn, &id, 10, None).expect("threads").threads;
+        let threads = page(&conn, TASK, &id, 10, None).expect("threads").threads;
         assert_eq!(threads.len(), 1);
         assert!(threads[0].deleted);
         assert_eq!(threads[0].body, None);
         assert_eq!(threads[0].replies[0].body.as_deref(), Some("Dana"));
+    }
+
+    #[test]
+    fn a_projects_threads_stay_apart_from_its_tasks_and_leave_with_it() {
+        let conn = tracker();
+        let task_id = task(&conn, "Launch");
+        let project_id = insert_project(&conn, "Harbor", None, AT).expect("a project").id;
+        let project = WorkCommentSubject::Project;
+        let on_task = add(&conn, TASK, &task_id, None, ME, "On the task", AT).expect("task");
+        let on_project =
+            add(&conn, project, &project_id, None, ME, "On the project", AT + 1).expect("project");
+
+        let crossed = add(&conn, project, &project_id, Some(&on_task.id), ME, "x", AT + 2);
+
+        assert_eq!(
+            crossed.expect_err("a reply across subjects").downcast_ref::<Refusal>(),
+            Some(&Refusal::Invalid)
+        );
+        let threads = page(&conn, project, &project_id, 10, None).expect("threads").threads;
+        assert_eq!(threads.len(), 1);
+        assert_eq!(threads[0].body.as_deref(), Some("On the project"));
+        assert_eq!(page(&conn, TASK, &task_id, 10, None).expect("threads").threads.len(), 1);
+        conn.execute("DELETE FROM planning_projects WHERE id = ?1", [&project_id])
+            .expect("project deleted");
+        assert!(comment(&conn, &on_project.id).is_err());
+    }
+
+    #[test]
+    fn a_meeting_kept_here_shows_no_agent_comments() {
+        let conn = tracker();
+        let meeting = WorkCommentSubject::Meeting;
+        let id = "a6f47cca-0000-4000-8000-000000000001";
+        let claude = Author {
+            actor: WorkActor::Agent,
+            agent: Some("claude"),
+        };
+        let mine = add(&conn, meeting, id, None, ME, "Pricing slipped", AT).expect("mine");
+        add(&conn, meeting, id, Some(&mine.id), claude, "Read it", AT + 1).expect("reply");
+        add(&conn, meeting, id, None, claude, "Summary", AT + 2).expect("agent thread");
+
+        let kept = kept_local(page(&conn, meeting, id, 10, None).expect("threads"));
+
+        assert!(kept.kept_local);
+        assert_eq!(kept.threads.len(), 1);
+        assert_eq!(kept.threads[0].id, mine.id);
+        assert!(kept.threads[0].replies.is_empty());
     }
 }

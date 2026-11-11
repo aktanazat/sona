@@ -19,6 +19,7 @@ use crate::planning::work::types::{WorkOwner, WorkStatus};
 use crate::planning::{
     DateResolution, Milestone, Project, ProjectLink, ProjectStatus, TaskStatus,
 };
+use crate::planning::ProjectStatusName;
 use crate::query::external::{
     meeting_detail, meeting_summaries, session_id, store, transcript, ExternalError,
     ExternalErrorCode, ExternalMeetingDetail, ExternalTranscript,
@@ -154,6 +155,22 @@ pub struct ProjectsArgs {
     /// Only the projects in the bin, deleted less than 30 days ago.
     #[arg(long)]
     pub trashed: bool,
+    /// Only projects whose latest update is from before this day
+    /// (YYYY-MM-DD), and those with no update yet.
+    #[arg(long, value_parser = calendar_day, value_name = "DAY")]
+    pub update_before: Option<NaiveDate>,
+    /// Only projects that wait on another (blocked), that another waits on
+    /// (blocking), or with a broken dependency on either side (broken).
+    #[arg(long, value_enum, value_name = "LINK")]
+    pub link: Option<super::dependencies::LinkFilter>,
+    /// Only the projects in this initiative, by name or id; none keeps the
+    /// projects in no initiative.
+    #[arg(long, value_name = "INITIATIVE")]
+    pub initiative: Option<String>,
+}
+
+fn calendar_day(value: &str) -> Result<NaiveDate, String> {
+    NaiveDate::parse_from_str(value.trim(), "%Y-%m-%d").map_err(|_| "expected YYYY-MM-DD".to_owned())
 }
 
 #[derive(Args, Clone, Debug, Eq, PartialEq)]
@@ -200,6 +217,21 @@ pub struct ProjectSaveArgs {
     /// the project's links; none clears them.
     #[arg(long = "link", value_parser = link_arg, value_name = "LINK")]
     pub links: Vec<LinkArg>,
+    /// A one-line summary shown under the name, or none.
+    #[arg(long)]
+    pub summary: Option<String>,
+    /// A custom status from project-statuses; it sets --status to its
+    /// kind. none clears it.
+    #[arg(long, value_name = "NAME")]
+    pub status_name: Option<String>,
+    /// Anchored edits to the details or the summary, applied after
+    /// --details and --summary, as JSON:
+    /// [{"field":"description","op":"insert_after","anchor":"Scope:","value":" phase 2"}].
+    /// field is description or summary; op is replace, append, prepend,
+    /// insert_before, insert_after or replace_text, the last three with an
+    /// anchor: text already in it. A null value clears the field.
+    #[arg(long, value_name = "JSON")]
+    pub patch_json: Option<String>,
     /// Show the project as it would be saved; nothing changes.
     #[arg(long)]
     pub dry_run: bool,
@@ -256,6 +288,61 @@ pub struct MilestoneDeleteArgs {
     pub dry_run: bool,
     #[command(flatten)]
     pub write: WriteArgs,
+}
+
+#[derive(Args, Clone, Debug, Eq, PartialEq)]
+pub struct MilestoneArgs {
+    pub project: String,
+    pub milestone: String,
+}
+
+#[derive(Args, Clone, Debug, Eq, PartialEq)]
+pub struct MilestoneToProjectArgs {
+    pub project: String,
+    /// The milestone that becomes a project; its tasks move with it.
+    pub milestone: String,
+    /// Show the project it would make; nothing changes.
+    #[arg(long)]
+    pub dry_run: bool,
+    #[command(flatten)]
+    pub write: WriteArgs,
+}
+
+#[derive(Args, Clone, Debug, Eq, PartialEq)]
+pub struct ProjectStatusSaveArgs {
+    /// The status's name. Makes the status when none has that name.
+    pub name: String,
+    /// The built-in status it is a kind of. Changing it moves the projects
+    /// that show this status.
+    #[arg(long, value_enum)]
+    pub category: Option<ProjectState>,
+    /// Rename this existing status to NAME.
+    #[arg(long, value_name = "STATUS")]
+    pub status: Option<String>,
+    /// Show the status as it would be saved; nothing changes.
+    #[arg(long)]
+    pub dry_run: bool,
+    #[command(flatten)]
+    pub write: WriteArgs,
+}
+
+#[derive(Args, Clone, Debug, Eq, PartialEq)]
+pub struct ProjectStatusDeleteArgs {
+    /// The status, by name or id. Its projects keep their built-in status.
+    pub status: String,
+    /// Show what would change; nothing changes.
+    #[arg(long)]
+    pub dry_run: bool,
+    #[command(flatten)]
+    pub write: WriteArgs,
+}
+
+#[derive(Args, Clone, Debug, Eq, PartialEq)]
+pub struct ProjectHistoryArgs {
+    pub project: String,
+    /// How many changes, newest first. Default 50, at most 200.
+    #[arg(long, value_parser = clap::value_parser!(u16).range(1..=200))]
+    pub limit: Option<u16>,
 }
 
 #[derive(Args, Clone, Debug, Eq, PartialEq)]
@@ -364,7 +451,11 @@ pub struct ExternalWorkProject {
     pub id: String,
     pub name: String,
     pub details: Option<String>,
+    /// A one-line summary shown under the name.
+    pub summary: Option<String>,
     pub status: ProjectStatus,
+    /// The custom status it shows, a kind of `status`.
+    pub status_name: Option<String>,
     pub priority: Priority,
     pub icon: Option<String>,
     pub lead: Option<ExternalWorkPersonRef>,
@@ -383,9 +474,13 @@ pub struct ExternalWorkProject {
     pub archived: bool,
     /// When it went to the bin; it is purged 30 days later.
     pub trashed_at_ms: Option<i64>,
+    /// When its latest update was posted.
+    pub latest_update_at_ms: Option<i64>,
     pub open_tasks: u32,
     pub done_tasks: u32,
     pub milestones: u32,
+    /// The initiative it sits in, if any.
+    pub initiative: Option<ExternalWorkPersonRef>,
     pub revision: i64,
 }
 
@@ -433,6 +528,97 @@ pub struct ExternalWorkMilestoneChange {
     pub deleted: bool,
     pub project: ExternalWorkPersonRef,
     pub milestone: ExternalWorkMilestone,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ExternalWorkMilestoneTask {
+    pub id: String,
+    pub handle: String,
+    pub title: String,
+    pub status: WorkStatus,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ExternalWorkMilestoneDetail {
+    pub schema_version: u32,
+    pub project: ExternalWorkPersonRef,
+    pub milestone: ExternalWorkMilestone,
+    pub tasks: Vec<ExternalWorkMilestoneTask>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ExternalWorkMilestoneConverted {
+    pub schema_version: u32,
+    pub dry_run: bool,
+    pub operation_id: String,
+    /// The project the milestone was in.
+    pub from_project: ExternalWorkPersonRef,
+    pub project: ExternalWorkProject,
+    pub moved_tasks: u32,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ExternalWorkProjectStatus {
+    pub id: String,
+    pub name: String,
+    /// The built-in status it is a kind of.
+    pub category: ProjectStatus,
+    pub position: i64,
+    /// Projects that show it, the bin left out.
+    pub projects: u32,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ExternalWorkProjectStatuses {
+    pub schema_version: u32,
+    pub statuses: Vec<ExternalWorkProjectStatus>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ExternalWorkProjectStatusChange {
+    pub schema_version: u32,
+    pub dry_run: bool,
+    pub operation_id: Option<String>,
+    pub created: bool,
+    pub deleted: bool,
+    pub status: ExternalWorkProjectStatus,
+    /// Projects whose status the change moved or cleared.
+    pub changed_projects: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ExternalWorkProjectChangeEntry {
+    /// title, status, statusName, lead, members, startDate, targetDate,
+    /// priority, milestoneAdded, milestoneRemoved or milestoneTarget.
+    pub kind: String,
+    /// The milestone a milestone change is about.
+    pub subject: Option<String>,
+    pub from: Option<String>,
+    pub to: Option<String>,
+    pub at_ms: i64,
+    pub at: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ExternalWorkProjectHistory {
+    pub schema_version: u32,
+    pub project: ExternalWorkPersonRef,
+    pub changes: Vec<ExternalWorkProjectChangeEntry>,
+}
+
+/// Custom statuses, a project's history and single milestones.
+#[derive(Clone, Debug, Serialize)]
+#[serde(untagged)]
+pub enum ProjectAdminAnswer {
+    Statuses(ExternalWorkProjectStatuses),
+    Status(ExternalWorkProjectStatusChange),
+    History(ExternalWorkProjectHistory),
+    Milestone(ExternalWorkMilestoneDetail),
+    Converted(ExternalWorkMilestoneConverted),
+}
+
+fn admin(answer: ProjectAdminAnswer) -> WorkAnswer {
+    WorkAnswer::ProjectAdmin(Box::new(answer))
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -593,8 +779,22 @@ impl Tracker<'_> {
                 done += 1;
             }
         }
-        let milestones = planning::history(self.history, |conn| {
-            Ok(plans::records(conn, &project.id)?.milestones.len())
+        let (milestones, latest_update_at_ms, status_name, initiative) = planning::history(self.history, |conn| {
+            let milestones = plans::records(conn, &project.id)?.milestones.len();
+            let latest = planning::updates::latest(conn, &project.id)?
+                .map(|update| update.created_at_ms);
+            let status_name = project
+                .status_name_id
+                .as_deref()
+                .map(|id| planning::catalog::status_name(conn, id))
+                .transpose()?
+                .map(|name| name.name);
+            let initiative = planning::work::initiatives::initiative_of(conn, &project.id)?
+                .map(|initiative| ExternalWorkPersonRef {
+                    id: initiative.id,
+                    name: initiative.name,
+                });
+            Ok((milestones, latest, status_name, initiative))
         })
         .unwrap_or_default();
         let labels = self.all_labels().unwrap_or_default();
@@ -602,7 +802,9 @@ impl Tracker<'_> {
             id: project.id.clone(),
             name: project.title.clone(),
             details: project.description.clone(),
+            summary: project.summary.clone(),
             status: project.status,
+            status_name,
             priority: Priority::of(project.priority),
             icon: project.icon.clone(),
             lead: project.lead_person_id.as_ref().and_then(person),
@@ -629,9 +831,11 @@ impl Tracker<'_> {
             links: project.links.clone(),
             archived: project.archived_at_ms.is_some(),
             trashed_at_ms: project.trashed_at_ms,
+            latest_update_at_ms,
             open_tasks: open,
             done_tasks: done,
             milestones: u32::try_from(milestones).unwrap_or(u32::MAX),
+            initiative,
             revision: project.revision,
         }
     }
@@ -669,11 +873,36 @@ impl Tracker<'_> {
             }
         });
         projects.sort_by_key(|project| project.title.to_lowercase());
+        let before_ms = args.update_before.map(super::midnight).transpose()?;
+        let links = args
+            .link
+            .map(|filter| self.all_dependencies().map(|all| (filter, all)))
+            .transpose()?;
+        let initiative = match args.initiative.as_deref().map(str::trim) {
+            None => None,
+            Some(value) if value.eq_ignore_ascii_case("none") => Some(None),
+            Some(value) => {
+                let all = self.all_initiatives()?;
+                Some(Some(Self::pick_initiative(value, &all)?.id.clone()))
+            }
+        };
         Ok(WorkAnswer::Projects(ExternalWorkProjects {
             schema_version: QUERY_SCHEMA_VERSION,
             projects: projects
                 .iter()
+                .filter(|project| {
+                    links
+                        .as_ref()
+                        .is_none_or(|(filter, all)| filter.keeps(&project.id, all))
+                })
                 .map(|project| self.project_row(project, &board))
+                .filter(|row| {
+                    before_ms.is_none_or(|before| {
+                        row.latest_update_at_ms.is_none_or(|latest| latest < before)
+                    }) && initiative.as_ref().is_none_or(|wanted| {
+                        row.initiative.as_ref().map(|initiative| &initiative.id) == wanted.as_ref()
+                    })
+                })
                 .collect(),
         }))
     }
@@ -734,9 +963,11 @@ impl Tracker<'_> {
                 })
                 .collect::<Vec<_>>()
         });
+        let status_name_id = self.status_named(args)?;
+        let (description, summary) = patched(args, existing)?;
         let edit = ProjectEdit {
             title: (existing.is_none() || args.project.is_some()).then(|| name.to_owned()),
-            description: args.details.clone(),
+            description,
             status: args.status.map(Into::into),
             lead: people.lead,
             member_person_ids: people.member_person_ids,
@@ -755,6 +986,8 @@ impl Tracker<'_> {
             label_ids,
             links,
             trashed: None,
+            summary,
+            status_name_id,
         };
         if let Some(current) = existing {
             if !changes_project(current, &edit) {
@@ -1441,6 +1674,11 @@ fn changes_project(current: &Project, edit: &ProjectEdit) -> bool {
             .target_resolution
             .is_some_and(|resolution| resolution != current.target_resolution)
         || text(&edit.icon, &current.icon)
+        || text(&edit.summary, &current.summary)
+        || edit
+            .status_name_id
+            .as_ref()
+            .is_some_and(|id| *id != current.status_name_id)
         || edit.label_ids.as_ref().is_some_and(|ids| {
             let (mut want, mut have) = (ids.clone(), current.label_ids.clone());
             want.sort();
@@ -1468,6 +1706,473 @@ fn changes_milestone(current: &Milestone, edit: &MilestoneEdit) -> bool {
         || edit.due_at_ms.is_some_and(|due| due != current.due_at_ms)
 }
 
+fn pick_status<'a>(
+    value: &str,
+    names: &'a [ProjectStatusName],
+) -> Result<&'a ProjectStatusName, ExternalError> {
+    pick("status", value, names, |name| &name.id, |name| &name.name)
+        .map_err(|refusal| refusal.hint("List them with: sona work project-statuses"))
+}
+
+fn using(projects: &[Project], status: &ProjectStatusName) -> Vec<String> {
+    projects
+        .iter()
+        .filter(|project| project.status_name_id.as_deref() == Some(status.id.as_str()))
+        .map(|project| project.title.clone())
+        .collect()
+}
+
+fn status_row(name: &ProjectStatusName, projects: &[Project]) -> ExternalWorkProjectStatus {
+    let shown = projects
+        .iter()
+        .filter(|project| {
+            project.trashed_at_ms.is_none()
+                && project.status_name_id.as_deref() == Some(name.id.as_str())
+        })
+        .count();
+    ExternalWorkProjectStatus {
+        id: name.id.clone(),
+        name: name.name.clone(),
+        category: name.category,
+        position: name.position,
+        projects: u32::try_from(shown).unwrap_or(u32::MAX),
+    }
+}
+
+/// The details and summary a save writes: the flags first, then each
+/// `--patch-json` edit on top of them or of what is saved.
+fn patched(
+    args: &ProjectSaveArgs,
+    existing: Option<&Project>,
+) -> Result<(Option<String>, Option<String>), ExternalError> {
+    let mut description = args.details.clone();
+    let mut summary = args.summary.as_deref().map(|value| {
+        if cleared(value) {
+            String::new()
+        } else {
+            value.trim().to_owned()
+        }
+    });
+    let Some(json) = &args.patch_json else {
+        return Ok((description, summary));
+    };
+    let entries: Vec<super::save::PatchEntry> = serde_json::from_str(json).map_err(|error| {
+        ExternalError::invalid(format!(
+            "--patch-json must be a JSON list of {{field, op, value, anchor}}: {error}."
+        ))
+    })?;
+    if entries.is_empty() {
+        return Err(ExternalError::invalid("--patch-json names no change."));
+    }
+    for (at, entry) in entries.iter().enumerate() {
+        let (slot, saved) = match entry.field.as_str() {
+            "description" => (
+                &mut description,
+                existing.and_then(|project| project.description.clone()),
+            ),
+            "summary" => (
+                &mut summary,
+                existing.and_then(|project| project.summary.clone()),
+            ),
+            other => {
+                return Err(ExternalError::invalid(format!(
+                    "patch[{at}]: a project patch takes description or summary, not {other:?}."
+                )))
+            }
+        };
+        let current = match slot.as_deref() {
+            Some(text) => (!text.is_empty()).then(|| text.to_owned()),
+            None => saved,
+        };
+        *slot = Some(super::save::rewritten(at, entry, current)?.unwrap_or_default());
+    }
+    Ok((description, summary))
+}
+
+impl Tracker<'_> {
+    fn status_names(&self) -> Result<Vec<ProjectStatusName>, ExternalError> {
+        planning::history(self.history, |conn| planning::catalog::status_names(conn))
+            .map_err(|message| super::refusal(self.history, message))
+    }
+
+    fn status_named(&self, args: &ProjectSaveArgs) -> Result<Option<Option<String>>, ExternalError> {
+        let Some(value) = args.status_name.as_deref() else {
+            return Ok(None);
+        };
+        if cleared(value) {
+            return Ok(Some(None));
+        }
+        let names = self.status_names()?;
+        let name = pick_status(value, &names)?;
+        if let Some(status) = args.status.map(ProjectStatus::from) {
+            if status != name.category {
+                return Err(ExternalError::invalid(format!(
+                    "{} is a kind of {:?}; leave out --status or pick a {:?} status.",
+                    name.name, name.category, status
+                )));
+            }
+        }
+        Ok(Some(Some(name.id.clone())))
+    }
+
+    pub(super) fn project_statuses(&self) -> Result<WorkAnswer, ExternalError> {
+        let projects = self.every_project()?;
+        Ok(admin(ProjectAdminAnswer::Statuses(
+            ExternalWorkProjectStatuses {
+                schema_version: QUERY_SCHEMA_VERSION,
+                statuses: self
+                    .status_names()?
+                    .iter()
+                    .map(|name| status_row(name, &projects))
+                    .collect(),
+            },
+        )))
+    }
+
+    pub(super) fn project_status_save(
+        &self,
+        args: &ProjectStatusSaveArgs,
+    ) -> Result<WorkAnswer, ExternalError> {
+        let name = args.name.trim();
+        let names = self.status_names()?;
+        let existing = match &args.status {
+            Some(value) => Some(pick_status(value, &names)?),
+            None => names
+                .iter()
+                .find(|status| status.name.to_lowercase() == name.to_lowercase()),
+        };
+        if let Some(taken) = names.iter().find(|status| {
+            status.name.to_lowercase() == name.to_lowercase()
+                && existing.is_none_or(|existing| existing.id != status.id)
+        }) {
+            return Err(ExternalError::invalid(format!(
+                "A status called {:?} already exists.",
+                taken.name
+            )));
+        }
+        let category = match (args.category, existing) {
+            (Some(category), _) => category.into(),
+            (None, Some(existing)) => existing.category,
+            (None, None) => {
+                return Err(ExternalError::invalid(
+                    "A new status needs --category: backlog, planned, active, paused, completed or canceled.",
+                ))
+            }
+        };
+        let projects = self.every_project()?;
+        let change = |dry_run, operation_id, status: &ProjectStatusName, changed_projects| {
+            admin(ProjectAdminAnswer::Status(ExternalWorkProjectStatusChange {
+                schema_version: QUERY_SCHEMA_VERSION,
+                dry_run,
+                operation_id,
+                created: existing.is_none(),
+                deleted: false,
+                status: status_row(status, &projects),
+                changed_projects,
+            }))
+        };
+        if let Some(current) = existing {
+            if current.name == name && current.category == category {
+                return Ok(change(args.dry_run, None, current, Vec::new()));
+            }
+        }
+        let moved = existing
+            .filter(|current| current.category != category)
+            .map(|current| using(&projects, current))
+            .unwrap_or_default();
+        let operation_id = match existing {
+            Some(current) => args.write.operation_id(
+                "project-status-save",
+                &(&current.id, &current.name, current.category, category, name),
+            )?,
+            None => args.write.fresh_operation_id(),
+        };
+        let id = existing.map(|status| status.id.clone());
+        let saved = if args.dry_run {
+            self.rehearse(|conn| {
+                planning::catalog::save_status_name(conn, id.as_deref(), category, name, now_ms())
+            })?
+            .0
+        } else {
+            self.applies("saving a project status")?;
+            work::catalog_status_name_save(self.app, &operation_id, id, category, name)
+                .map_err(|message| self.write_refusal(message, &operation_id, "The status"))?
+        };
+        Ok(change(args.dry_run, Some(operation_id), &saved, moved))
+    }
+
+    pub(super) fn project_status_delete(
+        &self,
+        args: &ProjectStatusDeleteArgs,
+    ) -> Result<WorkAnswer, ExternalError> {
+        let names = self.status_names()?;
+        let status = pick_status(&args.status, &names)?;
+        let projects = self.every_project()?;
+        let operation_id = args
+            .write
+            .operation_id("project-status-delete", &status.id)?;
+        if args.dry_run {
+            self.rehearse(|conn| {
+                planning::catalog::delete_status_name(conn, &status.id, now_ms())
+            })?;
+        } else {
+            self.applies("deleting a project status")?;
+            work::catalog_status_name_delete(self.app, &operation_id, &status.id)
+                .map_err(|message| self.write_refusal(message, &operation_id, "The status"))?;
+        }
+        Ok(admin(ProjectAdminAnswer::Status(
+            ExternalWorkProjectStatusChange {
+                schema_version: QUERY_SCHEMA_VERSION,
+                dry_run: args.dry_run,
+                operation_id: Some(operation_id),
+                created: false,
+                deleted: true,
+                status: status_row(status, &projects),
+                changed_projects: using(&projects, status),
+            },
+        )))
+    }
+
+    pub(super) async fn project_history(
+        &self,
+        args: &ProjectHistoryArgs,
+    ) -> Result<WorkAnswer, ExternalError> {
+        let board = self.board().await?;
+        let projects = self.every_project()?;
+        let project = Self::pick_project(&args.project, &projects)?;
+        let limit = usize::from(args.limit.unwrap_or(50));
+        let activity = planning::history(self.history, |conn| {
+            planning::catalog::history(conn, &project.id, limit)
+        })
+        .map_err(|message| super::refusal(self.history, message))?;
+        let people = |value: &str| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .map(|id| match id {
+                    "me" => "you".to_owned(),
+                    id => board
+                        .people
+                        .iter()
+                        .find(|person| person.id == id)
+                        .map_or_else(|| id.to_owned(), |person| person.name.clone()),
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let shown = |kind: &str, value: Option<String>| {
+            value.map(|value| match kind {
+                "lead" | "members" => people(&value),
+                "startDate" | "targetDate" | "milestoneAdded" | "milestoneRemoved"
+                | "milestoneTarget" => value
+                    .parse::<i64>()
+                    .map_or(value.clone(), |ms| day_text(Some(ms))),
+                "priority" => value
+                    .parse::<u8>()
+                    .map_or(value.clone(), |priority| Priority::of(priority).text().to_owned()),
+                _ => value,
+            })
+        };
+        Ok(admin(ProjectAdminAnswer::History(
+            ExternalWorkProjectHistory {
+                schema_version: QUERY_SCHEMA_VERSION,
+                project: ExternalWorkPersonRef {
+                    id: project.id.clone(),
+                    name: project.title.clone(),
+                },
+                changes: activity
+                    .into_iter()
+                    .map(|change| ExternalWorkProjectChangeEntry {
+                        from: shown(&change.kind, change.from_value),
+                        to: shown(&change.kind, change.to_value),
+                        kind: change.kind,
+                        subject: change.subject,
+                        at: super::local_time(change.at_ms),
+                        at_ms: change.at_ms,
+                    })
+                    .collect(),
+            },
+        )))
+    }
+
+    pub(super) async fn milestone(&self, args: &MilestoneArgs) -> Result<WorkAnswer, ExternalError> {
+        let board = self.board().await?;
+        let projects = self.every_project()?;
+        let project = Self::pick_project(&args.project, &projects)?;
+        let milestones = self.milestones_of(project)?;
+        let milestone = pick_milestone(&args.milestone, &milestones)?;
+        Ok(admin(ProjectAdminAnswer::Milestone(
+            ExternalWorkMilestoneDetail {
+                schema_version: QUERY_SCHEMA_VERSION,
+                project: ExternalWorkPersonRef {
+                    id: project.id.clone(),
+                    name: project.title.clone(),
+                },
+                milestone: Self::milestone_row(milestone, &board),
+                tasks: board
+                    .rows
+                    .iter()
+                    .filter(|row| {
+                        row.item.milestone_id.as_deref() == Some(milestone.id.as_str())
+                            && row.item.archived_at_ms.is_none()
+                    })
+                    .map(|row| ExternalWorkMilestoneTask {
+                        id: row.item.id.clone(),
+                        handle: super::handle(row.item.number),
+                        title: row.item.title.clone(),
+                        status: row.item.status,
+                    })
+                    .collect(),
+            },
+        )))
+    }
+
+    pub(super) async fn milestone_to_project(
+        &self,
+        args: &MilestoneToProjectArgs,
+    ) -> Result<WorkAnswer, ExternalError> {
+        let board = self.board().await?;
+        let projects = self.every_project()?;
+        let project = Self::pick_project(&args.project, &projects)?;
+        let milestones = self.milestones_of(project)?;
+        let milestone = pick_milestone(&args.milestone, &milestones)?;
+        if let Some(taken) = projects
+            .iter()
+            .find(|project| project.title.to_lowercase() == milestone.title.to_lowercase())
+        {
+            return Err(ExternalError::invalid(format!(
+                "A project called {:?} already exists; rename the milestone first.",
+                taken.title
+            )));
+        }
+        let moved = board
+            .rows
+            .iter()
+            .filter(|row| row.item.milestone_id.as_deref() == Some(milestone.id.as_str()))
+            .count();
+        let operation_id = args
+            .write
+            .operation_id("milestone-to-project", &(&milestone.id, milestone.revision))?;
+        let made = if args.dry_run {
+            self.rehearse(|conn| {
+                planning::catalog::milestone_to_project(conn, &milestone.id, now_ms())
+            })?
+            .0
+        } else {
+            self.applies("turning a milestone into a project")?;
+            work::catalog_milestone_to_project(self.app, &operation_id, &milestone.id)
+                .map_err(|message| self.write_refusal(message, &operation_id, "The milestone"))?
+        };
+        let board = if args.dry_run {
+            board
+        } else {
+            self.board().await?
+        };
+        Ok(admin(ProjectAdminAnswer::Converted(
+            ExternalWorkMilestoneConverted {
+                schema_version: QUERY_SCHEMA_VERSION,
+                dry_run: args.dry_run,
+                operation_id,
+                from_project: ExternalWorkPersonRef {
+                    id: project.id.clone(),
+                    name: project.title.clone(),
+                },
+                project: self.project_row(&made, &board),
+                moved_tasks: u32::try_from(moved).unwrap_or(u32::MAX),
+            },
+        )))
+    }
+}
+
+pub(super) fn admin_text(answer: &ProjectAdminAnswer, text: &mut String) {
+    let dry = |text: &mut String, dry_run: bool| {
+        if dry_run {
+            text.push_str("Dry run. ");
+        }
+    };
+    match answer {
+        ProjectAdminAnswer::Statuses(list) => {
+            if list.statuses.is_empty() {
+                text.push_str(
+                    "No custom statuses. Make one with: sona work project-status-save NAME --category active\n",
+                );
+            }
+            for status in &list.statuses {
+                let _ = writeln!(
+                    text,
+                    "{}  · kind of {:?} · {} projects",
+                    status.name, status.category, status.projects
+                );
+            }
+        }
+        ProjectAdminAnswer::Status(change) => {
+            dry(text, change.dry_run);
+            let verb = match (change.deleted, change.created, &change.operation_id) {
+                (true, _, _) => "Deleted",
+                (false, true, _) => "Made",
+                (false, false, None) => "Unchanged",
+                (false, false, Some(_)) => "Saved",
+            };
+            let _ = writeln!(
+                text,
+                "{verb} status {} (kind of {:?}).",
+                change.status.name, change.status.category
+            );
+            if !change.changed_projects.is_empty() {
+                let _ = writeln!(text, "Projects changed: {}.", change.changed_projects.join(", "));
+            }
+        }
+        ProjectAdminAnswer::History(history) => {
+            if history.changes.is_empty() {
+                let _ = writeln!(text, "{} has no recorded changes yet.", history.project.name);
+            }
+            for change in &history.changes {
+                let _ = write!(text, "{}  {}", change.at, change.kind);
+                if let Some(subject) = &change.subject {
+                    let _ = write!(text, " {subject:?}");
+                }
+                let _ = writeln!(
+                    text,
+                    ": {} → {}",
+                    change.from.as_deref().unwrap_or("none"),
+                    change.to.as_deref().unwrap_or("none")
+                );
+            }
+        }
+        ProjectAdminAnswer::Milestone(detail) => {
+            let milestone = &detail.milestone;
+            let _ = write!(
+                text,
+                "{} in {}  · {:?} · {} open, {} done",
+                milestone.name,
+                detail.project.name,
+                milestone.status,
+                milestone.open_tasks,
+                milestone.done_tasks
+            );
+            if let Some(target) = &milestone.target {
+                let _ = write!(text, " · target {target}");
+            }
+            text.push('\n');
+            if let Some(details) = &milestone.details {
+                let _ = writeln!(text, "{details}");
+            }
+            for task in &detail.tasks {
+                let _ = writeln!(text, "{}  {}  · {:?}", task.handle, task.title, task.status);
+            }
+        }
+        ProjectAdminAnswer::Converted(converted) => {
+            dry(text, converted.dry_run);
+            let _ = writeln!(
+                text,
+                "Turned milestone {} of {} into a project; {} tasks moved.",
+                converted.project.name, converted.from_project.name, converted.moved_tasks
+            );
+        }
+    }
+}
+
 pub(super) fn text(answer: &WorkAnswer, text: &mut String) {
     match answer {
         WorkAnswer::Projects(projects) => {
@@ -1477,8 +2182,14 @@ pub(super) fn text(answer: &WorkAnswer, text: &mut String) {
             for project in &projects.projects {
                 let _ = write!(
                     text,
-                    "{}  · {:?} · {} open, {} done",
-                    project.name, project.status, project.open_tasks, project.done_tasks
+                    "{}  · {} · {} open, {} done",
+                    project.name,
+                    project
+                        .status_name
+                        .clone()
+                        .unwrap_or_else(|| format!("{:?}", project.status)),
+                    project.open_tasks,
+                    project.done_tasks
                 );
                 if project.lead_is_self {
                     text.push_str(" · lead you");
@@ -1487,6 +2198,9 @@ pub(super) fn text(answer: &WorkAnswer, text: &mut String) {
                 }
                 if let Some(target) = &project.target {
                     let _ = write!(text, " · target {target}");
+                }
+                if let Some(initiative) = &project.initiative {
+                    let _ = write!(text, " · in {}", initiative.name);
                 }
                 if project.archived {
                     text.push_str(" · put away");

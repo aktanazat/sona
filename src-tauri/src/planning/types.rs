@@ -16,6 +16,16 @@ pub enum ProjectStatus {
     Canceled,
 }
 
+/// What a label may go on: tasks and projects, or only one of them.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum LabelScope {
+    #[default]
+    All,
+    Tasks,
+    Projects,
+}
+
 /// How finely a project's start or target date is meant: the day itself,
 /// or the month, quarter, half-year or year it falls in.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
@@ -101,6 +111,11 @@ sql_enum!(ProjectStatus {
     Completed => "completed",
     Canceled => "canceled",
 });
+sql_enum!(LabelScope {
+    All => "all",
+    Tasks => "tasks",
+    Projects => "projects",
+});
 sql_enum!(DateResolution {
     Day => "day",
     Month => "month",
@@ -159,6 +174,37 @@ pub struct Project {
     pub links: Vec<ProjectLink>,
     /// Set while the project sits in the bin; it is purged 30 days later.
     pub trashed_at_ms: Option<i64>,
+    /// A line on what the project is, shown apart from the description.
+    pub summary: Option<String>,
+    /// The custom status name it sits under, inside its status's category.
+    pub status_name_id: Option<String>,
+}
+
+/// A name of the owner's for a project status, inside one of the six
+/// categories.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectStatusName {
+    pub id: String,
+    pub category: ProjectStatus,
+    pub name: String,
+    pub position: i64,
+}
+
+/// One change to a project's properties or milestones, as its history
+/// lists it. Dates are epoch milliseconds and people are ids or `me`,
+/// written as text.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectActivity {
+    pub id: String,
+    pub project_id: String,
+    pub kind: String,
+    /// The milestone a milestone change is about.
+    pub subject: Option<String>,
+    pub from_value: Option<String>,
+    pub to_value: Option<String>,
+    pub at_ms: i64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
@@ -303,6 +349,8 @@ pub struct ProjectSummary {
     pub open_task_count: i64,
     pub completed_task_count: i64,
     pub next_due_at_ms: Option<i64>,
+    /// When the newest update was posted; none without one.
+    pub latest_update_at_ms: Option<i64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]

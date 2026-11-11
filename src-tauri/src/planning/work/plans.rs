@@ -3,20 +3,26 @@
 
 use super::super::catalog::{self, LinkEdit, ProjectEdit};
 use super::super::types::{
-    DateResolution, Milestone, Project, ProjectHealth, ProjectStatus, ProjectUpdate,
-    ProjectUpdatePage, TaskStatus,
+    DateResolution, Milestone, Project, ProjectActivity, ProjectHealth, ProjectStatus,
+    ProjectStatusName, ProjectUpdate, ProjectUpdatePage, TaskStatus,
 };
 use super::super::updates;
 use super::comments::Author;
 use super::types::{nullable, WorkActor, WorkOwner};
 use super::{now_ms, run_history, store, Done, Effects};
 use crate::managers::history::HistoryManager;
+use crate::meeting::session::MeetingSessionManager;
+use crate::query::KeptLocal;
 use anyhow::Result;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use std::sync::Arc;
 use tauri::{AppHandle, State};
+
+/// A project's history reads this many changes unless asked for fewer.
+const HISTORY_PAGE: usize = 50;
+const HISTORY_MAX: usize = 200;
 
 const ME: Author<'static> = Author {
     actor: WorkActor::Me,
@@ -54,6 +60,7 @@ pub(crate) fn update_add_as(
     project_id: &str,
     health: ProjectHealth,
     body: Option<&str>,
+    discussed: &[String],
 ) -> Result<ProjectUpdate, String> {
     project_change(
         app,
@@ -65,7 +72,7 @@ pub(crate) fn update_add_as(
             let body = match body {
                 Some(body) => body,
                 None => {
-                    drafted = updates::draft(tx, project_id)?;
+                    drafted = updates::draft(tx, project_id, discussed)?;
                     drafted.as_str()
                 }
             };
@@ -160,7 +167,7 @@ pub fn planning_project_update_add(
     health: ProjectHealth,
     body: String,
 ) -> Result<ProjectUpdate, String> {
-    update_add_as(&app, ME, &operation_id, &project_id, health, Some(&body))
+    update_add_as(&app, ME, &operation_id, &project_id, health, Some(&body), &[])
 }
 
 #[tauri::command(async)]
@@ -175,6 +182,93 @@ pub fn planning_project_update_edit(
     update_edit_as(&app, ME, &operation_id, &id, health, body.as_deref())
 }
 
+/// The draft lines for meetings linked to a project, read before the draft
+/// from the conversations. Meetings kept on this Mac are left out, and so is
+/// every meeting while the conversations cannot be read.
+pub(crate) async fn discussed_lines(
+    history: &HistoryManager,
+    meetings: &MeetingSessionManager,
+    project_id: &str,
+) -> Result<Vec<String>, String> {
+    let (since_ms, mentions) = super::super::history(history, |conn| {
+        updates::meeting_mentions(conn, project_id)
+    })?;
+    if mentions.is_empty() {
+        return Ok(Vec::new());
+    }
+    let Ok(store) = meetings.store().await else {
+        return Ok(Vec::new());
+    };
+    let Ok(kept) = KeptLocal::read(&store) else {
+        return Ok(Vec::new());
+    };
+    store
+        .with_planning_snapshot(|conn| Ok(updates::discussed(conn, &kept, since_ms, &mentions)))
+        .map_err(|_| "Conversations could not be read.".to_string())?
+        .map_err(crate::planning::failure)
+}
+
+/// The custom status names projects may take, by category.
+#[tauri::command(async)]
+#[specta::specta]
+pub fn planning_project_status_names(
+    history_state: State<'_, Arc<HistoryManager>>,
+) -> Result<Vec<ProjectStatusName>, String> {
+    super::super::history(&history_state, |conn| catalog::status_names(conn))
+}
+
+/// Makes a custom status name in a category, or with `id` renames one or
+/// moves it, and the projects under it, to another category.
+#[tauri::command(async)]
+#[specta::specta]
+pub fn planning_project_status_name_save(
+    app: AppHandle,
+    operation_id: String,
+    id: Option<String>,
+    category: ProjectStatus,
+    name: String,
+) -> Result<ProjectStatusName, String> {
+    super::catalog_status_name_save(&app, &operation_id, id, category, &name)
+}
+
+/// Deletes a custom status name; its projects keep their status.
+#[tauri::command(async)]
+#[specta::specta]
+pub fn planning_project_status_name_delete(
+    app: AppHandle,
+    operation_id: String,
+    id: String,
+) -> Result<(), String> {
+    super::catalog_status_name_delete(&app, &operation_id, &id)
+}
+
+/// What changed on a project, newest first.
+#[tauri::command(async)]
+#[specta::specta]
+pub fn planning_project_history(
+    history_state: State<'_, Arc<HistoryManager>>,
+    project_id: String,
+    limit: Option<u32>,
+) -> Result<Vec<ProjectActivity>, String> {
+    let limit = limit.map_or(HISTORY_PAGE, |limit| {
+        usize::try_from(limit).map_or(HISTORY_MAX, |limit| limit.clamp(1, HISTORY_MAX))
+    });
+    super::super::history(&history_state, |conn| {
+        catalog::history(conn, &project_id, limit)
+    })
+}
+
+/// Makes a project of a milestone and moves its tasks there.
+#[tauri::command(async)]
+#[specta::specta]
+pub fn planning_milestone_to_project(
+    app: AppHandle,
+    operation_id: String,
+    id: String,
+) -> Result<Project, String> {
+    super::catalog_milestone_to_project(&app, &operation_id, &id)
+}
+
 #[tauri::command(async)]
 #[specta::specta]
 pub fn planning_project_update_delete(
@@ -185,14 +279,19 @@ pub fn planning_project_update_delete(
     update_delete_as(&app, ME, &operation_id, &id)
 }
 
-/// A plain draft of what moved since the project's last update.
-#[tauri::command(async)]
+/// A plain draft of what moved since the project's last update, with the
+/// meetings it was discussed in.
+#[tauri::command]
 #[specta::specta]
-pub fn planning_project_update_draft(
+pub async fn planning_project_update_draft(
     history_state: State<'_, Arc<HistoryManager>>,
+    meetings: State<'_, Arc<MeetingSessionManager>>,
     project_id: String,
 ) -> Result<String, String> {
-    super::super::history(&history_state, |conn| updates::draft(conn, &project_id))
+    let discussed = discussed_lines(&history_state, &meetings, &project_id).await?;
+    super::super::history(&history_state, |conn| {
+        updates::draft(conn, &project_id, &discussed)
+    })
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, Type)]
@@ -234,6 +333,10 @@ pub struct ProjectSaveInput {
     pub links: Option<Vec<ProjectLinkInput>>,
     pub archived: Option<bool>,
     pub trashed: Option<bool>,
+    #[serde(deserialize_with = "nullable")]
+    pub summary: Option<Option<String>>,
+    #[serde(deserialize_with = "nullable")]
+    pub status_name_id: Option<Option<String>>,
 }
 
 impl ProjectSaveInput {
@@ -277,6 +380,10 @@ impl ProjectSaveInput {
                     .collect()
             }),
             trashed: self.trashed,
+            summary: cleared(self.summary),
+            status_name_id: self
+                .status_name_id
+                .map(|id| id.filter(|id| !id.trim().is_empty())),
         })
     }
 }

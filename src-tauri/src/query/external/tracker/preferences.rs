@@ -36,8 +36,8 @@ use crate::query::external::{
 };
 use crate::query::{KeptLocal, QueryError, QUERY_SCHEMA_VERSION};
 use crate::settings::{
-    self, AppSettings, LLMPrompt, LogLevel, OverlayStyle, PasteMethod, SoundTheme, Theme,
-    VocabularyEntry, LOCAL_CLEANUP_PROVIDER_ID,
+    self, AppSettings, DigestDay, LLMPrompt, LogLevel, OverlayStyle, PasteMethod, SoundTheme,
+    Theme, VocabularyEntry, LOCAL_CLEANUP_PROVIDER_ID,
 };
 use clap::{Args, Subcommand, ValueEnum};
 use rusqlite::OptionalExtension as _;
@@ -145,6 +145,13 @@ pub enum SettingKey {
     CleanupBaseUrl,
     /// The evening digest: true or false.
     EveningDigest,
+    /// Close a task as done once its sub-tasks are all closed and at least
+    /// one is done: true or false.
+    AutoCloseParents,
+    /// The weekly project digest in the inbox: true or false.
+    ProjectDigest,
+    /// The day it arrives: monday to sunday.
+    ProjectDigestDay,
     /// Snippet expansion: true or false.
     Snippets,
     /// Text replacements: true or false.
@@ -684,6 +691,24 @@ fn setting_change<'a>(args: &'a SettingArgs) -> SettingsChange<'a> {
             show(|s| json!(s.meeting_digest_enabled)),
             apply(move |s| Ok(s.meeting_digest_enabled = flag(value)?)),
         ),
+        SettingKey::AutoCloseParents => (
+            show(|s| json!(s.work_close_parents)),
+            apply(move |s| Ok(s.work_close_parents = flag(value)?)),
+        ),
+        SettingKey::ProjectDigest => (
+            show(|s| json!(s.work_digest_enabled)),
+            apply(move |s| Ok(s.work_digest_enabled = flag(value)?)),
+        ),
+        SettingKey::ProjectDigestDay => (
+            show(|s| json!(s.work_digest_day)),
+            apply(move |s| {
+                s.work_digest_day = named::<DigestDay>(
+                    &value.trim().to_ascii_lowercase(),
+                    "monday, tuesday, wednesday, thursday, friday, saturday, sunday",
+                )?;
+                Ok(())
+            }),
+        ),
         SettingKey::Snippets => (
             show(|s| json!(s.snippets_enabled)),
             apply(move |s| Ok(s.snippets_enabled = flag(value)?)),
@@ -840,6 +865,9 @@ struct SettingsView<'a> {
     text_replacements: bool,
     shortcuts: Vec<ShortcutView<'a>>,
     evening_digest: bool,
+    auto_close_parents: bool,
+    project_digest: bool,
+    project_digest_day: DigestDay,
     keyword_trackers: &'a [KeywordTracker],
     meeting_prep: &'a PrepPreferences,
 }
@@ -898,6 +926,9 @@ fn settings_view(settings: &AppSettings, microphones: Vec<String>) -> SettingsVi
         text_replacements: settings.replacements_enabled,
         shortcuts,
         evening_digest: settings.meeting_digest_enabled,
+        auto_close_parents: settings.work_close_parents,
+        project_digest: settings.work_digest_enabled,
+        project_digest_day: settings.work_digest_day,
         keyword_trackers: &settings.trackers_list,
         meeting_prep: &settings.meeting_prep,
     }

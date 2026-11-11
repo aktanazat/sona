@@ -346,7 +346,11 @@ fn folder_only(folder: &FolderScope) -> String {
 fn folder_search_scope(scope: QueryScope, folder: &FolderScope) -> Result<(), String> {
     match scope {
         QueryScope::All | QueryScope::Meetings => Ok(()),
-        QueryScope::Dictations | QueryScope::People | QueryScope::Loops | QueryScope::Notes => {
+        QueryScope::Dictations
+        | QueryScope::People
+        | QueryScope::Loops
+        | QueryScope::Notes
+        | QueryScope::Tasks => {
             Err(folder_only(folder))
         }
     }

@@ -1252,6 +1252,8 @@ pub struct ExternalNoteVersion {
     pub saved_at_ms: i64,
     pub words: usize,
     pub bytes: usize,
+    pub actor: crate::planning::work::types::WorkActor,
+    pub agent: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1635,6 +1637,8 @@ pub async fn answer(
                     saved_at_ms: version.saved_at_ms,
                     words: version.body.split_whitespace().count(),
                     bytes: version.body.len(),
+                    actor: version.actor,
+                    agent: version.agent,
                 })
                 .collect();
             Ok(ExternalResponse::NoteVersions(ExternalNoteVersions {
@@ -2709,7 +2713,11 @@ fn project_detail(detail: planning::ProjectDetail) -> ExternalProjectDetail {
     }
 }
 
-fn evidence_kept_local(kind: EvidenceSourceKind, source_id: &str, kept_local: &KeptLocal) -> bool {
+pub(crate) fn evidence_kept_local(
+    kind: EvidenceSourceKind,
+    source_id: &str,
+    kept_local: &KeptLocal,
+) -> bool {
     match kind {
         EvidenceSourceKind::Meeting => kept_local.hides_meeting(source_id),
         EvidenceSourceKind::Loop => MeetingLoopId(source_id.to_owned())
@@ -4030,6 +4038,8 @@ fn terminal_safe(text: String) -> String {
 /// without ANSI or other terminal control sequences. Errors keep their exit codes.
 pub fn run_cli(app: &tauri::AppHandle, args: &CliArgs) -> i32 {
     use tauri::Manager;
+
+    crate::planning::work::agents::arrived_from_command_line();
 
     let outcome = ExternalRequest::from_args(args)
         .and_then(|request| {

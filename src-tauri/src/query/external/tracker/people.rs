@@ -17,6 +17,7 @@ use crate::meeting::session::MeetingSessionManager;
 use crate::meeting::store::{MeetingStore, StoreError};
 use crate::meeting::types::MeetingCommandError;
 use crate::planning;
+use crate::planning::ProjectStatus;
 use crate::query::external::{
     kept_local, local_time, missing_meeting, session_id, store, ExternalError, ExternalErrorCode,
 };
@@ -177,6 +178,15 @@ pub struct ExternalPersonLoop {
     pub at_ms: i64,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct ExternalPersonProject {
+    pub project_id: String,
+    pub name: String,
+    pub status: ProjectStatus,
+    pub lead: bool,
+    pub archived: bool,
+}
+
 /// One person's page. The written summary is left out while any of their
 /// meetings is kept on this Mac: it may draw on that meeting.
 #[derive(Clone, Debug, Serialize)]
@@ -197,6 +207,8 @@ pub struct ExternalPersonPage {
     pub documents: Vec<DocumentSummary>,
     pub contact: Option<PersonContactCard>,
     pub photo: bool,
+    /// Projects they lead or are a member of, leaving out deleted ones.
+    pub projects: Vec<ExternalPersonProject>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -488,6 +500,7 @@ pub(super) async fn person_page(
         documents: page.documents,
         contact: page.contact,
         photo,
+        projects: Vec::new(),
     })
 }
 
@@ -1001,11 +1014,31 @@ impl PeoplePlan {
     }
 }
 
+fn person_projects(mut projects: Vec<planning::Project>, person_id: &str) -> Vec<ExternalPersonProject> {
+    projects.sort_by_key(|project| project.title.to_lowercase());
+    projects
+        .into_iter()
+        .filter(|project| project.trashed_at_ms.is_none())
+        .filter_map(|project| {
+            let lead = project.lead_person_id.as_deref() == Some(person_id);
+            (lead || project.member_person_ids.iter().any(|id| id == person_id)).then(|| {
+                ExternalPersonProject {
+                    archived: project.archived_at_ms.is_some(),
+                    project_id: project.id,
+                    name: project.title,
+                    status: project.status,
+                    lead,
+                }
+            })
+        })
+        .collect()
+}
+
 impl Tracker<'_> {
     pub(super) async fn person_page(&self, args: &PersonArgs) -> Result<WorkAnswer, ExternalError> {
-        Ok(WorkAnswer::PersonPage(Box::new(
-            person_page(self.meetings, &args.person).await?,
-        )))
+        let mut page = person_page(self.meetings, &args.person).await?;
+        page.projects = person_projects(self.every_project()?, &page.id);
+        Ok(WorkAnswer::PersonPage(Box::new(page)))
     }
 
     pub(super) async fn companies(&self, _: &CompaniesArgs) -> Result<WorkAnswer, ExternalError> {
@@ -1250,6 +1283,19 @@ pub(super) fn text(answer: &WorkAnswer, text: &mut String) {
                 }
             }
             loops_text(&page.open_loops, text);
+            if !page.projects.is_empty() {
+                text.push_str("Projects:\n");
+                for project in &page.projects {
+                    let _ = writeln!(
+                        text,
+                        "  {}  {}{}  {}",
+                        if project.lead { "lead  " } else { "member" },
+                        project.name,
+                        if project.archived { " (archived)" } else { "" },
+                        project.project_id
+                    );
+                }
+            }
             if !page.documents.is_empty() {
                 text.push_str("Documents:\n");
                 for document in &page.documents {
@@ -1374,8 +1420,8 @@ pub(super) fn text(answer: &WorkAnswer, text: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::{
-        companies, company, first_met, person_page, plan_delete, plan_link, plan_split,
-        PeopleAction, PersonDeleteArgs, PersonLinkArgs, PersonSplitArgs,
+        companies, company, first_met, person_page, person_projects, plan_delete, plan_link,
+        plan_split, PeopleAction, PersonDeleteArgs, PersonLinkArgs, PersonSplitArgs,
     };
     use super::super::catalog::merge_people;
     use crate::meeting::detection::machine::CalendarEventSummary;
@@ -1750,5 +1796,35 @@ mod tests {
                 .iter()
                 .any(|entry| entry.person.id == lee));
         });
+    }
+
+    #[test]
+    fn person_page_lists_projects_they_lead_or_joined() {
+        let project = |id: &str, lead: Option<&str>, members: &[&str], archived: bool, trashed: bool| {
+            serde_json::from_value::<crate::planning::Project>(serde_json::json!({
+                "id": id, "title": id, "status": "active", "revision": 1,
+                "createdAtMs": 0, "updatedAtMs": 0, "leadPersonId": lead, "leadIsSelf": false,
+                "memberPersonIds": members, "membersIncludeSelf": false, "priority": 0,
+                "labelIds": [], "links": [],
+                "archivedAtMs": archived.then_some(1), "trashedAtMs": trashed.then_some(1),
+            }))
+            .unwrap()
+        };
+        let listed = person_projects(
+            vec![
+                project("Pier", None, &["dana"], true, false),
+                project("Ferry", None, &["lee"], false, false),
+                project("Harbor", Some("dana"), &["lee"], false, false),
+                project("Binned", Some("dana"), &[], false, true),
+            ],
+            "dana",
+        );
+        assert_eq!(
+            listed
+                .iter()
+                .map(|row| (row.name.as_str(), row.lead, row.archived))
+                .collect::<Vec<_>>(),
+            [("Harbor", true, false), ("Pier", false, true)]
+        );
     }
 }

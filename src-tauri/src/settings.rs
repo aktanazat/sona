@@ -1221,6 +1221,34 @@ pub enum WorkAutonomy {
     Apply,
 }
 
+/// The day the weekly project digest reaches the inbox, on this Mac's clock.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum DigestDay {
+    #[default]
+    Monday,
+    Tuesday,
+    Wednesday,
+    Thursday,
+    Friday,
+    Saturday,
+    Sunday,
+}
+
+impl DigestDay {
+    pub const fn weekday(self) -> chrono::Weekday {
+        match self {
+            Self::Monday => chrono::Weekday::Mon,
+            Self::Tuesday => chrono::Weekday::Tue,
+            Self::Wednesday => chrono::Weekday::Wed,
+            Self::Thursday => chrono::Weekday::Thu,
+            Self::Friday => chrono::Weekday::Fri,
+            Self::Saturday => chrono::Weekday::Sat,
+            Self::Sunday => chrono::Weekday::Sun,
+        }
+    }
+}
+
 /* still useful for composing the initial JSON in the store ------------- */
 /// The container-level `serde(default)` (backed by the `Default` impl below)
 /// guarantees every field — including ones added in the future — falls back to
@@ -1649,6 +1677,19 @@ pub struct AppSettings {
     /// filled in as it adds the task, or wait in triage as suggestions.
     #[serde(default)]
     pub work_sona_changes: WorkAutonomy,
+    /// Whether a task closes as done once its sub-tasks are all closed and
+    /// at least one is done. Off by default.
+    #[serde(default)]
+    pub work_close_parents: bool,
+    /// Whether a digest of the user's projects reaches the inbox each week.
+    #[serde(default = "default_work_digest_enabled")]
+    pub work_digest_enabled: bool,
+    #[serde(default)]
+    pub work_digest_day: DigestDay,
+}
+
+fn default_work_digest_enabled() -> bool {
+    true
 }
 
 fn default_count_words_per_app() -> bool {
@@ -2338,6 +2379,9 @@ pub fn get_default_settings() -> AppSettings {
         meeting_open_windows_enabled: default_meeting_open_windows_enabled(),
         work_agent_changes: WorkAutonomy::Suggest,
         work_sona_changes: WorkAutonomy::Suggest,
+        work_close_parents: false,
+        work_digest_enabled: default_work_digest_enabled(),
+        work_digest_day: DigestDay::Monday,
     };
     settings.modes = default_modes(&settings);
     ensure_mode_settings(&mut settings);
@@ -3405,6 +3449,29 @@ pub fn change_work_sona_changes_setting(
 ) -> Result<(), String> {
     update_settings(&app, |settings| {
         settings.work_sona_changes = autonomy;
+    })?;
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn change_work_close_parents_setting(app: AppHandle, enabled: bool) -> Result<(), String> {
+    update_settings(&app, |settings| {
+        settings.work_close_parents = enabled;
+    })?;
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn change_work_digest_setting(
+    app: AppHandle,
+    enabled: bool,
+    day: DigestDay,
+) -> Result<(), String> {
+    update_settings(&app, |settings| {
+        settings.work_digest_enabled = enabled;
+        settings.work_digest_day = day;
     })?;
     Ok(())
 }

@@ -129,6 +129,19 @@ pub async fn person_rename(
     manager.person_rename(request).await
 }
 
+/// Replaces the emails a person is matched by in calendar invites.
+pub async fn person_emails_set(
+    manager: State<'_, Arc<MeetingSessionManager>>,
+    person_id: PersonId,
+    calendar_emails: Vec<String>,
+) -> Result<PeopleMutationResult, MeetingCommandError> {
+    let edit = crate::meeting::store::PersonProfileEdit {
+        calendar_emails: Some(calendar_emails),
+        ..Default::default()
+    };
+    manager.person_profile_update(person_id, edit).await
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn person_merge(

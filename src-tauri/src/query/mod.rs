@@ -17,6 +17,7 @@
 //! | dictation | `HistoryManager::search_history_entries` — FTS5 first, static-embedding recall for what it misses |
 //! | person    | every token present across display name, aliases and calendar addresses |
 //! | loop      | every token present in the loop's own words                   |
+//! | task      | every token present across its title, details and live comments, or naming its number |
 //!
 //! **Relevance decides membership; recency decides order.** This is the rule
 //! dictation search already documents (`managers/history.rs`: "one order, not
@@ -63,7 +64,7 @@ use std::sync::Arc;
 /// Wire version of everything in this module, and of the read-only external
 /// surface in [`external`] that projects the same nouns out of the same
 /// corpus. Bumped whenever a public payload's bytes or interpretation changes.
-pub const QUERY_SCHEMA_VERSION: u32 = 6;
+pub const QUERY_SCHEMA_VERSION: u32 = 7;
 
 const DEFAULT_PAGE_SIZE: usize = 25;
 const MAX_PAGE_SIZE: usize = 100;
@@ -99,6 +100,7 @@ pub enum QueryScope {
     People,
     Loops,
     Notes,
+    Tasks,
 }
 
 impl QueryScope {
@@ -111,12 +113,14 @@ impl QueryScope {
                     | QueryRowKind::Person
                     | QueryRowKind::Loop
                     | QueryRowKind::Note
+                    | QueryRowKind::Task
             ),
             Self::Meetings => kind == QueryRowKind::Meeting,
             Self::Dictations => kind == QueryRowKind::Dictation,
             Self::People => kind == QueryRowKind::Person,
             Self::Loops => kind == QueryRowKind::Loop,
             Self::Notes => kind == QueryRowKind::Note,
+            Self::Tasks => kind == QueryRowKind::Task,
         }
     }
 }
@@ -127,14 +131,17 @@ pub enum QueryAudience {
     /// This app's own screens: everything.
     Local,
     /// An agent on this Mac reading through the CLI or the MCP server. It may
-    /// read notes, but what it reads goes to whatever model drives it.
+    /// read notes and tasks, but what it reads goes to whatever model drives
+    /// it.
     External,
-    /// Anything bound for the relay: neither notes nor a kept-local series.
+    /// Anything bound for the relay: neither notes, tasks nor a kept-local
+    /// series.
     Remote,
 }
 
 impl QueryAudience {
-    fn reads_notes(self) -> bool {
+    /// Notes and tasks: what this Mac keeps of its own rather than heard.
+    fn reads_own_records(self) -> bool {
         self != Self::Remote
     }
 
@@ -210,6 +217,7 @@ pub enum QueryRowKind {
     Loop,
     Receipt,
     Note,
+    Task,
 }
 
 /// One answer. `link` is always a `sona://` URL this app parses, so an agent
@@ -500,6 +508,39 @@ pub(crate) fn note_row(note: &crate::scratchpad::ScratchNote) -> QueryRow {
     }
 }
 
+/// `sona://task/<id>` — the task's page.
+pub fn task_link(task_id: &str) -> String {
+    format!("sona://task/{task_id}")
+}
+
+/// The tasks that hold every word of `query`, each titled with its number so
+/// a reader can name it to `sona work`. A task drawn from a meeting kept on
+/// this Mac is left out wherever `kept_local` hides it.
+fn task_rows(
+    conn: &rusqlite::Connection,
+    query: &str,
+    kept_local: Option<&KeptLocal>,
+) -> anyhow::Result<Vec<QueryRow>> {
+    let hidden = match kept_local {
+        Some(kept_local) => crate::planning::work::drawing_on(conn, |kind, source_id| {
+            external::evidence_kept_local(kind, source_id, kept_local)
+        })?,
+        None => HashSet::new(),
+    };
+    Ok(crate::planning::work::search(conn, &tokens(query))?
+        .into_iter()
+        .filter(|(item, _)| !hidden.contains(&item.id))
+        .map(|(item, snippet)| QueryRow {
+            kind: QueryRowKind::Task,
+            title: bounded(&format!("S-{} {}", item.number, item.title), MAX_TITLE_CHARS),
+            snippet: bounded(&snippet, MAX_SNIPPET_CHARS),
+            when_utc_ms: item.updated_at_ms,
+            link: task_link(&item.id),
+            id: item.id,
+        })
+        .collect())
+}
+
 /// `sona://search?q=…` — this plane's own surface, with the question in it.
 pub fn search_link(query: &str) -> String {
     // SAFETY: this constant ASCII URL is valid by construction.
@@ -536,7 +577,8 @@ pub async fn search(
     cursor: Option<QueryCursor>,
 ) -> Result<QuerySearchPage, QueryError> {
     let limit = page_size(limit)?;
-    let includes_notes = audience.reads_notes() && scope.includes(QueryRowKind::Note);
+    let includes_notes = audience.reads_own_records() && scope.includes(QueryRowKind::Note);
+    let includes_tasks = audience.reads_own_records() && scope.includes(QueryRowKind::Task);
     if tokens(query).is_empty() {
         return Ok(QuerySearchPage::nothing_searchable());
     }
@@ -574,34 +616,48 @@ pub async fn search(
         SearchRequest {
             scope,
             query,
-            limit: if includes_notes { limit + 1 } else { limit },
+            limit: if includes_notes || includes_tasks {
+                limit + 1
+            } else {
+                limit
+            },
             cursor: cursor.as_ref(),
             kept_local: kept_local.as_ref(),
         },
     )?;
-    if !includes_notes {
+    if !includes_notes && !includes_tasks {
         return Ok(page);
     }
     history.ensure_storage_unlocked().await;
-    let notes = crate::scratchpad::search_notes_after(
-        history,
-        query,
-        cursor.as_ref().map(|cursor| cursor.when_utc_ms),
-        cursor
-            .as_ref()
-            .filter(|cursor| cursor.kind == QueryRowKind::Note)
-            .map(|cursor| cursor.id.as_str()),
-        limit + 1,
-    )
-    .map_err(|_| {
+    let storage_failure = || {
         if history.storage_is_ready() {
             QueryError::Failed
         } else {
             QueryError::Unavailable
         }
-    })?;
+    };
     let mut candidates = page.entries;
-    candidates.extend(notes.iter().map(note_row));
+    if includes_notes {
+        let notes = crate::scratchpad::search_notes_after(
+            history,
+            query,
+            cursor.as_ref().map(|cursor| cursor.when_utc_ms),
+            cursor
+                .as_ref()
+                .filter(|cursor| cursor.kind == QueryRowKind::Note)
+                .map(|cursor| cursor.id.as_str()),
+            limit + 1,
+        )
+        .map_err(|_| storage_failure())?;
+        candidates.extend(notes.iter().map(note_row));
+    }
+    if includes_tasks {
+        let tasks = crate::planning::history(history, |conn| {
+            task_rows(conn, query, kept_local.as_ref())
+        })
+        .map_err(|_| storage_failure())?;
+        candidates.extend(tasks);
+    }
     let (entries, next_cursor) = merge(candidates, cursor.as_ref(), limit);
     let reason = search_reason(&entries, model.as_deref(), scope);
     Ok(QuerySearchPage {

@@ -8,6 +8,7 @@ use super::{
     WorkAnswer, WriteArgs,
 };
 use crate::planning;
+use crate::planning::LabelScope;
 use crate::planning::work::parse;
 use crate::planning::work::routines::{self, WorkReminder, WorkTemplate, WorkTemplateUse};
 use crate::planning::work::types::{WorkActor, WorkLabel, WorkOwner};
@@ -202,6 +203,39 @@ pub struct LabelGroupArgs {
     pub write: WriteArgs,
 }
 
+/// What a label may go on.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, clap::ValueEnum)]
+pub enum LabelScopeArg {
+    All,
+    Tasks,
+    Projects,
+}
+
+impl From<LabelScopeArg> for LabelScope {
+    fn from(scope: LabelScopeArg) -> Self {
+        match scope {
+            LabelScopeArg::All => Self::All,
+            LabelScopeArg::Tasks => Self::Tasks,
+            LabelScopeArg::Projects => Self::Projects,
+        }
+    }
+}
+
+#[derive(Args, Clone, Debug, Eq, PartialEq)]
+pub struct LabelScopeArgs {
+    /// The label, by name or id.
+    pub label: String,
+    /// all, tasks or projects. Narrowing is refused while the label is on
+    /// the kind it would leave out.
+    #[arg(value_enum)]
+    pub scope: LabelScopeArg,
+    /// Print what would change and write nothing.
+    #[arg(long)]
+    pub dry_run: bool,
+    #[command(flatten)]
+    pub write: WriteArgs,
+}
+
 #[derive(Args, Clone, Debug, Eq, PartialEq)]
 pub struct LabelRetireArgs {
     /// The label, by name or id.
@@ -251,6 +285,7 @@ pub enum RoutineAction {
     Ungrouped,
     Retired,
     Restored,
+    Scoped,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -302,7 +337,11 @@ pub struct ExternalWorkLabelEdit {
     pub label: ExternalWorkLabel,
 }
 
-fn reminder_of(row: &super::WorkItemRow, reminder: WorkReminder, now: i64) -> ExternalWorkReminder {
+pub(super) fn reminder_of(
+    row: &super::WorkItemRow,
+    reminder: WorkReminder,
+    now: i64,
+) -> ExternalWorkReminder {
     ExternalWorkReminder {
         task: task_ref_of(row),
         remind_at: local_time(reminder.remind_at_ms),
@@ -778,6 +817,41 @@ impl Tracker<'_> {
             .map_err(|message| self.write_refusal(message, &operation_id, "The label"))?;
         Ok(Self::label_edit(action, false, Some(operation_id), saved))
     }
+
+    pub(super) fn label_scope(&self, args: &LabelScopeArgs) -> Result<WorkAnswer, ExternalError> {
+        let label = self.label_named(&args.label)?;
+        let scope = LabelScope::from(args.scope);
+        if label.scope == scope {
+            return Ok(Self::label_edit(
+                RoutineAction::Unchanged,
+                args.dry_run,
+                None,
+                label,
+            ));
+        }
+        let operation_id = args
+            .write
+            .operation_id("label-scope", &(&label.id, label.revision, scope))?;
+        if args.dry_run {
+            let rehearsed =
+                self.rehearse(|conn| routines::scope_label(conn, &label.id, scope, now_ms()))?;
+            return Ok(Self::label_edit(
+                RoutineAction::Scoped,
+                true,
+                Some(operation_id),
+                rehearsed,
+            ));
+        }
+        self.applies("changing what a label goes on")?;
+        let saved = routines::label_scope_as(self.app, &operation_id, &label.id, scope)
+            .map_err(|message| self.write_refusal(message, &operation_id, "The label"))?;
+        Ok(Self::label_edit(
+            RoutineAction::Scoped,
+            false,
+            Some(operation_id),
+            saved,
+        ))
+    }
 }
 
 fn action_text(action: RoutineAction) -> &'static str {
@@ -791,6 +865,7 @@ fn action_text(action: RoutineAction) -> &'static str {
         RoutineAction::Ungrouped => "Ungrouped",
         RoutineAction::Retired => "Retired",
         RoutineAction::Restored => "Restored",
+        RoutineAction::Scoped => "Scoped",
     }
 }
 
@@ -844,6 +919,11 @@ pub(super) fn label_text(label: &ExternalWorkLabel) -> String {
     }
     if label.retired_at_ms.is_some() {
         line.push_str("  (retired)");
+    }
+    match label.scope {
+        LabelScope::All => {}
+        LabelScope::Tasks => line.push_str("  tasks only"),
+        LabelScope::Projects => line.push_str("  projects only"),
     }
     line
 }

@@ -1,12 +1,17 @@
 //! `sona work` verbs that write notes: make one, change its body, pin it,
-//! link a meeting, a person or another note to it. Only notes are written.
+//! link a meeting, a person or another note to it, or file it as a document
+//! of a task, a project or a cycle. Only notes and those links are written.
 
-use super::{now_ms, refusal, Fence, Tracker, WorkAnswer, WriteArgs};
-use crate::planning;
+use super::{
+    cycle_ref, named_cycle, now_ms, refusal, task_ref, Fence, Tracker, WorkAnswer, WriteArgs,
+};
+use crate::planning::{self, EvidenceSourceKind, EvidenceTargetKind};
+use crate::planning::work::types::WorkCycleRef;
 use crate::query::external::{ExternalError, ExternalErrorCode};
 use crate::query::QUERY_SCHEMA_VERSION;
+use crate::scratchpad::documents::{self, ScratchDocumentKind, ScratchDocumentOf};
 use crate::scratchpad::links::{self, ScratchSourceKind, ScratchSourceRef};
-use crate::scratchpad::{self, ScratchNote, ScratchpadError};
+use crate::scratchpad::{self, Author, ScratchNote, ScratchpadError};
 use clap::{ArgGroup, Args};
 use rusqlite::{Connection, OptionalExtension as _};
 use serde::Serialize;
@@ -19,6 +24,15 @@ pub struct NoteNewArgs {
     /// The note's text. Its first words become its title.
     #[arg(required = true, num_args = 1.., value_name = "TEXT")]
     pub body: Vec<String>,
+    /// File it as a document of this task: S-12, 12 or its id.
+    #[arg(long, value_name = "TASK", conflicts_with_all = ["project", "cycle"])]
+    pub task: Option<String>,
+    /// File it as a document of this project, by name or id.
+    #[arg(long, value_name = "PROJECT", conflicts_with = "cycle")]
+    pub project: Option<String>,
+    /// File it as a document of this cycle: current, next, or its number.
+    #[arg(long, value_parser = cycle_ref, value_name = "CYCLE")]
+    pub cycle: Option<WorkCycleRef>,
     /// Print what would be written and write nothing.
     #[arg(long)]
     pub dry_run: bool,
@@ -57,7 +71,7 @@ pub struct NotePinArgs {
 }
 
 #[derive(Args, Clone, Debug, Eq, PartialEq)]
-#[command(group(ArgGroup::new("source").required(true).args(["meeting", "person", "other"])))]
+#[command(group(ArgGroup::new("source").required(true).args(["meeting", "person", "other", "cycle"])))]
 pub struct NoteLinkArgs {
     /// The note's id, from `sona --notes`.
     #[arg(value_name = "NOTE_ID")]
@@ -71,6 +85,9 @@ pub struct NoteLinkArgs {
     /// Another note's id.
     #[arg(long = "note", value_name = "NOTE_ID")]
     pub other: Option<Uuid>,
+    /// A cycle the note is a document of: current, next, or its number.
+    #[arg(long, value_parser = cycle_ref, value_name = "CYCLE")]
+    pub cycle: Option<WorkCycleRef>,
     /// Print what would change and write nothing.
     #[arg(long)]
     pub dry_run: bool,
@@ -79,17 +96,18 @@ pub struct NoteLinkArgs {
 }
 
 impl NoteLinkArgs {
-    fn source(&self) -> ScratchSourceRef {
+    /// The source named; `None` when the link is to a cycle.
+    fn source(&self) -> Option<ScratchSourceRef> {
         let (kind, id) = match (self.meeting, self.person, self.other) {
             (Some(id), _, _) => (ScratchSourceKind::Meeting, id),
             (None, Some(id), _) => (ScratchSourceKind::Person, id),
             (None, None, Some(id)) => (ScratchSourceKind::Note, id),
-            (None, None, None) => unreachable!("clap requires one source"),
+            (None, None, None) => return None,
         };
-        ScratchSourceRef {
+        Some(ScratchSourceRef {
             kind,
             id: id.to_string(),
-        }
+        })
     }
 }
 
@@ -177,6 +195,8 @@ pub struct ExternalNoteChange {
     /// What a dry run of a new note would write.
     pub would_write: Option<String>,
     pub linked: Option<ExternalNoteSource>,
+    /// The task, project or cycle the note was filed as a document of.
+    pub document_of: Option<ScratchDocumentOf>,
 }
 
 /// What the ledger holds for an operation id: nothing yet, so `T` is what
@@ -323,11 +343,16 @@ impl Tracker<'_> {
             note: note.map(project_note),
             would_write: None,
             linked: None,
+            document_of: None,
         }))
     }
 
-    pub(super) fn note_new(&self, args: &NoteNewArgs) -> Result<WorkAnswer, ExternalError> {
+    pub(super) async fn note_new(&self, args: &NoteNewArgs) -> Result<WorkAnswer, ExternalError> {
         let body = args.body.join(" ");
+        let document = match args.cycle {
+            Some(cycle) => Some(self.cycle_document(cycle)?.1),
+            None => self.planning_document(args.task.as_deref(), args.project.as_deref()).await?,
+        };
         if args.dry_run {
             let mut answer = Self::note_change(
                 NoteAction::Created,
@@ -338,23 +363,178 @@ impl Tracker<'_> {
             );
             if let WorkAnswer::Note(change) = &mut answer {
                 change.would_write = Some(body);
+                change.document_of = document;
             }
             return Ok(answer);
         }
+        let request = match &document {
+            None => serde_json::json!(body),
+            Some(document) => serde_json::json!([body, document]),
+        };
+        let author = Author::Agent(args.write.agent.as_deref());
         let (operation_id, note, replayed) = self.once(
             &args.write,
             "cli_note_create",
-            &body,
+            &request,
             "The note could not be saved.",
-            |tx| scratchpad::create_note_in(tx, &body, now_ms()),
+            |tx| scratchpad::create_note_in(tx, &body, author, now_ms()),
         )?;
-        Ok(Self::note_change(
+        if let Some(document) = &document {
+            self.file_document(&note.id, document, &operation_id).await?;
+        }
+        let mut answer = Self::note_change(
             NoteAction::Created,
             false,
             Some(operation_id),
             Some(note),
             replayed,
+        );
+        if let WorkAnswer::Note(change) = &mut answer {
+            change.document_of = document;
+        }
+        Ok(answer)
+    }
+
+    /// The task `--task` or the project `--project` names.
+    async fn planning_document(
+        &self,
+        task: Option<&str>,
+        project: Option<&str>,
+    ) -> Result<Option<ScratchDocumentOf>, ExternalError> {
+        if let Some(value) = task {
+            let board = self.board().await?;
+            let row = board.task(&task_ref(value).map_err(ExternalError::invalid)?)?;
+            return Ok(Some(ScratchDocumentOf {
+                kind: ScratchDocumentKind::Task,
+                id: row.item.id.clone(),
+                title: row.item.title.clone(),
+            }));
+        }
+        let Some(value) = project else {
+            return Ok(None);
+        };
+        let board = self.board().await?;
+        let project = board
+            .project(value)?
+            .ok_or_else(|| ExternalError::invalid("Name the project the note is about."))?;
+        Ok(Some(ScratchDocumentOf {
+            kind: ScratchDocumentKind::Project,
+            id: project.id.clone(),
+            title: project.title.clone(),
+        }))
+    }
+
+    /// The cycle `--cycle` names: its number, and how it reads as a document.
+    fn cycle_document(
+        &self,
+        cycle: WorkCycleRef,
+    ) -> Result<(i64, ScratchDocumentOf), ExternalError> {
+        let listing = planning::work::cycles::work_cycles(self.app.clone())
+            .map_err(|message| refusal(self.history, message))?;
+        let number = named_cycle(&listing.cycles, cycle)?;
+        let title = listing
+            .cycles
+            .iter()
+            .find(|found| found.number == number)
+            .and_then(|found| found.name.clone())
+            .unwrap_or_else(|| format!("Cycle {number}"));
+        Ok((
+            number,
+            ScratchDocumentOf {
+                kind: ScratchDocumentKind::Cycle,
+                id: number.to_string(),
+                title,
+            },
         ))
+    }
+
+    /// Files note `note_id` as a document of `document`. Filing it again
+    /// changes nothing.
+    async fn file_document(
+        &self,
+        note_id: &str,
+        document: &ScratchDocumentOf,
+        operation_id: &str,
+    ) -> Result<(), ExternalError> {
+        let target_kind = match document.kind {
+            ScratchDocumentKind::Cycle => {
+                let number = document.id.parse().map_err(|_| {
+                    ExternalError::new(ExternalErrorCode::Failed, "The cycle has no number.")
+                })?;
+                scratchpad::immediate(
+                    self.history,
+                    "The note could not be filed under the cycle.",
+                    |tx| documents::link_cycle_in(tx, note_id, number, now_ms()),
+                )
+                .map_err(|message| refusal(self.history, message))?;
+                scratchpad::emit_changed(self.app, note_id, false);
+                return Ok(());
+            }
+            ScratchDocumentKind::Project => EvidenceTargetKind::Project,
+            ScratchDocumentKind::Milestone => EvidenceTargetKind::Milestone,
+            ScratchDocumentKind::Task => EvidenceTargetKind::Task,
+        };
+        let link_operation =
+            Uuid::new_v5(&Uuid::NAMESPACE_OID, format!("{operation_id}/document").as_bytes());
+        planning::planning_link_source(
+            self.app.clone(),
+            self.app.state(),
+            self.app.state(),
+            target_kind,
+            document.id.clone(),
+            EvidenceSourceKind::Note,
+            note_id.to_string(),
+            None,
+            link_operation.to_string(),
+        )
+        .await
+        .map_err(|message| refusal(self.history, message))?;
+        scratchpad::emit_changed(self.app, note_id, false);
+        Ok(())
+    }
+
+    /// `note-link --cycle` and `note-unlink --cycle`: files the note under
+    /// a cycle or takes it off. Both settle on the same state when run twice.
+    fn note_cycle(&self, args: &NoteLinkArgs, link: bool) -> Result<WorkAnswer, ExternalError> {
+        let note = self.note(&args.note)?;
+        let cycle = args
+            .cycle
+            .ok_or_else(|| ExternalError::invalid("Name a meeting, a person, a note or a cycle."))?;
+        let (number, document) = self.cycle_document(cycle)?;
+        let present = planning::history(self.history, |conn| {
+            Ok(documents::documents_of(conn, &note.id)?)
+        })
+        .map_err(|message| refusal(self.history, message))?
+        .iter()
+        .any(|found| found.kind == ScratchDocumentKind::Cycle && found.id == document.id);
+        let settled = present == link;
+        if !args.dry_run && !settled {
+            self.applies("writing notes")?;
+            scratchpad::immediate(self.history, "The note's cycle could not be changed.", |tx| {
+                if link {
+                    documents::link_cycle_in(tx, &note.id, number, now_ms())
+                } else {
+                    documents::unlink_cycle_in(tx, &note.id, number)
+                }
+            })
+            .map_err(|message| refusal(self.history, message))?;
+            scratchpad::emit_changed(self.app, &note.id, false);
+        }
+        let mut answer = Self::note_change(
+            if link {
+                NoteAction::Linked
+            } else {
+                NoteAction::Unlinked
+            },
+            args.dry_run,
+            args.write.operation_id.map(|id| id.to_string()),
+            Some(note),
+            settled,
+        );
+        if let WorkAnswer::Note(change) = &mut answer {
+            change.document_of = Some(document);
+        }
+        Ok(answer)
     }
 
     pub(super) fn note_edit(&self, args: &NoteEditArgs) -> Result<WorkAnswer, ExternalError> {
@@ -376,7 +556,15 @@ impl Tracker<'_> {
             "cli_note_edit",
             &(&note.id, &args.body),
             "The note could not be saved.",
-            |tx| scratchpad::update_body_in(tx, &note.id, &args.body, now_ms()),
+            |tx| {
+                scratchpad::update_body_in(
+                    tx,
+                    &note.id,
+                    &args.body,
+                    Author::Agent(args.write.agent.as_deref()),
+                    now_ms(),
+                )
+            },
         )?;
         Ok(Self::note_change(
             NoteAction::Edited,
@@ -425,7 +613,9 @@ impl Tracker<'_> {
 
     pub(super) async fn note_link(&self, args: &NoteLinkArgs) -> Result<WorkAnswer, ExternalError> {
         let note = self.note(&args.note)?;
-        let source = args.source();
+        let Some(source) = args.source() else {
+            return self.note_cycle(args, true);
+        };
         if source.kind == ScratchSourceKind::Note {
             self.note(&args.other.unwrap_or_default())?;
         }
@@ -455,6 +645,7 @@ impl Tracker<'_> {
                 note: Some(project_note(note)),
                 would_write: None,
                 linked: Some(linked),
+                document_of: None,
             })));
         }
         let operation_id = args.write.fresh_operation_id();
@@ -512,6 +703,7 @@ impl Tracker<'_> {
             note: Some(project_note(memory.note)),
             would_write: None,
             linked: Some(linked),
+            document_of: None,
         })))
     }
 
@@ -606,6 +798,7 @@ impl Tracker<'_> {
                 note: Some(project_note(note)),
                 would_write: args.dry_run.then_some(body),
                 linked: None,
+                document_of: None,
             })));
         }
         let operation_id = args.write.fresh_operation_id();
@@ -624,11 +817,12 @@ impl Tracker<'_> {
             Receipt::Conflict => return Err(conflict(&operation_id)),
         }
         self.applies("writing notes")?;
-        let restored = scratchpad::scratchpad_restore_version(
-            self.app.clone(),
-            self.app.state(),
-            note.id.clone(),
+        let restored = scratchpad::restore_version(
+            self.app,
+            self.history,
+            &note.id,
             args.version,
+            Author::Agent(args.write.agent.as_deref()),
         )
         .map_err(|message| refusal(self.history, message))?;
         self.file_receipt(&operation_id, "cli_note_restore", &request, &restored.id)?;
@@ -646,7 +840,9 @@ impl Tracker<'_> {
         args: &NoteLinkArgs,
     ) -> Result<WorkAnswer, ExternalError> {
         let note = self.note(&args.note)?;
-        let source = args.source();
+        let Some(source) = args.source() else {
+            return self.note_cycle(args, false);
+        };
         if source.kind == ScratchSourceKind::Meeting
             && Fence::read(self.meetings).await?.hides_meeting(&source.id)
         {
@@ -686,6 +882,7 @@ impl Tracker<'_> {
                 note: Some(project_note(note)),
                 would_write: None,
                 linked: Some(unlinked),
+                document_of: None,
             }))
         };
         if args.dry_run || present.is_none() {
@@ -772,5 +969,14 @@ pub(super) fn text(answer: &WorkAnswer, text: &mut String) {
             linked.title.as_deref().unwrap_or(""),
             linked.id
         );
+    }
+    if let Some(document) = &change.document_of {
+        let kind = match document.kind {
+            ScratchDocumentKind::Project => "project",
+            ScratchDocumentKind::Milestone => "milestone",
+            ScratchDocumentKind::Task => "task",
+            ScratchDocumentKind::Cycle => "cycle",
+        };
+        let _ = writeln!(text, "  about {kind} {}  {}", document.title, document.id);
     }
 }

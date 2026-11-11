@@ -5,6 +5,7 @@
 
 use super::super::sources;
 use super::super::store::{self, Refusal};
+use super::inbox;
 use super::items;
 use super::routines;
 use super::sync::People;
@@ -384,6 +385,32 @@ fn record(history: &mut Connection, keys: &[String], now_ms: i64) -> Result<()> 
     )?;
     tx.commit()?;
     Ok(())
+}
+
+/// Posts to the inbox what is due to be said: open work I owe that is due
+/// today, once its morning has come, and each reminder whose time came.
+/// Each is posted once however many ticks or restarts offer it again,
+/// whatever the notification centre made of it. Returns the tasks posted.
+fn post_due(history: &mut Connection, due: &[Reminder], now_ms: i64) -> Result<Vec<String>> {
+    let tx = history.transaction()?;
+    let mut posted = Vec::new();
+    for due in due {
+        if let Some(due_at) = due.item.due_at_ms {
+            if inbox::remind(&tx, &due.item.id, inbox::Remind::Due, due_at, now_ms)? {
+                posted.push(due.item.id.clone());
+            }
+        }
+    }
+    for reminder in routines::due_reminders(&tx, now_ms)? {
+        let kind = inbox::Remind::Reminder {
+            set_at_ms: reminder.set_at_ms,
+        };
+        if inbox::remind(&tx, &reminder.item_id, kind, reminder.remind_at_ms, now_ms)? {
+            posted.push(reminder.item_id);
+        }
+    }
+    tx.commit()?;
+    Ok(posted)
 }
 
 fn unreadable(error: StoreError) -> anyhow::Error {
@@ -891,12 +918,18 @@ pub(super) fn probe_inputs(
 fn tick(app: &AppHandle, prompts: &dyn PromptPresenter, now_ms: i64) -> Result<()> {
     let history = app.state::<Arc<HistoryManager>>();
     let store = app.state::<Arc<MeetingSessionManager>>().open_store();
-    let (sent, (due, waits), reminded) = history.with_connection(|conn| {
+    let (sent, (due, waits), reminded, posted) = history.with_connection(|conn| {
         let sent = sent(conn)?;
-        let pending = pending(conn, &sent, now_ms)?;
+        let (mut due, mut waits) = pending(conn, &HashSet::new(), now_ms)?;
+        let posted = post_due(conn, &due, now_ms)?;
+        due.retain(|due| !sent.contains(&due.key));
+        waits.retain(|wait| !sent.contains(&wait.key));
         let reminded = reminder_notices(conn, now_ms)?;
-        Ok((sent, pending, reminded))
+        Ok((sent, (due, waits), reminded, posted))
     })?;
+    if !posted.is_empty() {
+        super::tasks_changed(app, posted);
+    }
     let mut shown = Vec::new();
     let mut show = |notice: &Notice, keys: Vec<String>| {
         if prompts.present_follow_up(&notice.id, &notice.title, &notice.body) {
@@ -932,6 +965,9 @@ fn tick(app: &AppHandle, prompts: &dyn PromptPresenter, now_ms: i64) -> Result<(
     if !reminded.is_empty() {
         routines::reminders_notified(app, &Uuid::new_v4().to_string(), &reminded)
             .map_err(anyhow::Error::msg)?;
+    }
+    if super::digest::post_weekly(app, &history, store.as_deref(), now_ms)? {
+        super::tasks_changed(app, Vec::new());
     }
     Ok(())
 }
@@ -1587,5 +1623,49 @@ mod tests {
         assert!(reminder_notices(&desk.history, at(0, 12))
             .expect("the due reminders")
             .is_empty());
+    }
+
+    #[test]
+    fn a_due_day_and_a_reminder_each_post_one_inbox_notice_across_restarts() {
+        let mut desk = desk();
+        let directory = TempDir::new().expect("a scratch directory");
+        let path = directory.path().join("history.db");
+        desk.history = Connection::open(&path).expect("a history database on disk");
+        schema::apply_all(&desk.history).expect("the planner schema");
+        let launch = desk.task(
+            "Draft the launch email",
+            WorkOwner::Myself,
+            Some(at(1, 12)),
+            at(0, 10),
+        );
+        let berth = desk.task("Renew the berth permit", WorkOwner::Myself, None, at(0, 10));
+        desk.history
+            .execute(
+                "INSERT INTO planning_task_reminders (task_id, remind_at_ms, set_at_ms, actor)
+                 VALUES (?1, ?2, ?3, 'me')",
+                params![berth.id, at(1, 10), at(0, 10)],
+            )
+            .expect("a reminder set");
+
+        let mut posted = Vec::new();
+        for now in [at(1, 8), at(1, 9), at(1, 11), at(1, 11), at(1, 15)] {
+            desk.history = Connection::open(&path).expect("the database after a restart");
+            let (due, _) = pending(&desk.history, &HashSet::new(), now).expect("the work due");
+            posted.extend(post_due(&mut desk.history, &due, now).expect("the notices posted"));
+        }
+        let kinds: Vec<_> = inbox::notifications(&desk.history, inbox::Shown::default(), at(1, 16))
+            .expect("the inbox")
+            .into_iter()
+            .map(|notice| (notice.kind, notice.item_id))
+            .collect();
+
+        assert_eq!(posted, [launch.id.clone(), berth.id.clone()]);
+        assert_eq!(
+            kinds,
+            [
+                (inbox::NotificationKind::Reminder, Some(berth.id)),
+                (inbox::NotificationKind::Due, Some(launch.id)),
+            ]
+        );
     }
 }

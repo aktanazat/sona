@@ -9,19 +9,27 @@ use super::items::{self, local_midnight_ms, local_today};
 use super::store::{self, Refusal};
 use super::types::{
     WorkActor, WorkCycle, WorkCycleDay, WorkCycleProgress, WorkCycleRef, WorkCycleSettings,
-    WorkCycleState, WorkCycles, WorkItem, WorkStatus,
+    WorkCycleState, WorkCycleTarget, WorkCycles, WorkItem, WorkStatus,
 };
 use super::{blocks, now_ms, recur, run_history, tasks_changed, Done, Effects};
 use crate::managers::history::HistoryManager;
 use anyhow::Result;
-use chrono::{Datelike, Days, NaiveDate};
+use chrono::{Datelike, Days, NaiveDate, Utc, Weekday};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::{AppHandle, Manager};
 
 const DAY: &str = "%Y-%m-%d";
+
+/// Whether work with no cycle joins one by itself once started, and once
+/// done. Started work always joined the cycle under way, so that stays on.
+pub const AUTO_ADD_MIGRATION: &str = "ALTER TABLE planning_cycle_settings
+    ADD COLUMN auto_add_started INTEGER NOT NULL DEFAULT 1 CHECK(auto_add_started IN (0, 1));
+ALTER TABLE planning_cycle_settings
+    ADD COLUMN auto_add_completed INTEGER NOT NULL DEFAULT 0 CHECK(auto_add_completed IN (0, 1));";
 
 struct Span {
     number: i64,
@@ -75,7 +83,8 @@ fn after(spans: &[Span], day: NaiveDate) -> Option<&Span> {
 
 pub(crate) fn settings(conn: &Connection) -> Result<WorkCycleSettings> {
     Ok(conn.query_row(
-        "SELECT weeks, start_weekday, cooldown_weeks, upcoming FROM planning_cycle_settings WHERE id = 1",
+        "SELECT weeks, start_weekday, cooldown_weeks, upcoming, auto_add_started, auto_add_completed
+         FROM planning_cycle_settings WHERE id = 1",
         [],
         |row| {
             Ok(WorkCycleSettings {
@@ -83,6 +92,8 @@ pub(crate) fn settings(conn: &Connection) -> Result<WorkCycleSettings> {
                 start_weekday: row.get(1)?,
                 cooldown_weeks: row.get(2)?,
                 upcoming: row.get(3)?,
+                auto_add_started: row.get(4)?,
+                auto_add_completed: row.get(5)?,
             })
         },
     )?)
@@ -357,27 +368,38 @@ pub(crate) fn start_today(conn: &Connection, number: i64, now_ms: i64) -> Result
     Ok(advance(conn, now_ms)?.moved)
 }
 
-/// The cycle under way, when one has been made.
-pub(crate) fn current(conn: &Connection, now_ms: i64) -> Result<Option<i64>> {
-    Ok(under_way(&spans(conn)?, local_today(now_ms)?).map(|span| span.number))
-}
-
-/// The cycle open work lands in by itself: the one under way once it is
-/// started, else the one not yet over that holds its due day.
+/// The cycle work with none joins by itself. Started work joins the cycle
+/// under way, or the next in a cooldown, and done work the one under way,
+/// or the last one ended in a cooldown, each when cycles are set to add
+/// it. Other open work joins the cycle not yet over that holds its due day.
 pub(crate) fn fitting(
     conn: &Connection,
     status: WorkStatus,
     due_at_ms: Option<i64>,
     now_ms: i64,
 ) -> Result<Option<i64>> {
-    if status == WorkStatus::InProgress {
-        return current(conn, now_ms);
+    let today = local_today(now_ms)?;
+    let auto = settings(conn)?;
+    let all = spans(conn)?;
+    match status {
+        WorkStatus::InProgress if auto.auto_add_started => {
+            return Ok(under_way(&all, today)
+                .or_else(|| after(&all, today))
+                .map(|span| span.number));
+        }
+        WorkStatus::Done if auto.auto_add_completed => {
+            return Ok(under_way(&all, today)
+                .or_else(|| all.iter().rev().find(|span| span.end <= today))
+                .map(|span| span.number));
+        }
+        _ if !status.is_open() => return Ok(None),
+        _ => {}
     }
     let Some(due) = due_at_ms else {
         return Ok(None);
     };
-    let (day, today) = (local_today(due)?, local_today(now_ms)?);
-    Ok(spans(conn)?
+    let day = local_today(due)?;
+    Ok(all
         .iter()
         .find(|span| span.start <= day && day < span.end && today < span.end)
         .map(|span| span.number))
@@ -431,7 +453,13 @@ fn success(counts: Counts) -> Option<u8> {
     })
 }
 
-fn shown(span: &Span, today: NaiveDate, counts: Counts, at_close: Option<Counts>) -> Result<WorkCycle> {
+fn shown(
+    span: &Span,
+    today: NaiveDate,
+    counts: Counts,
+    at_close: Option<Counts>,
+    added_after_start: Vec<String>,
+) -> Result<WorkCycle> {
     let state = if today < span.start {
         WorkCycleState::Upcoming
     } else if today < span.end {
@@ -452,11 +480,60 @@ fn shown(span: &Span, today: NaiveDate, counts: Counts, at_close: Option<Counts>
         started,
         done,
         success: success(at_close.unwrap_or(counts)),
+        added_after_start,
     })
 }
 
 /// Scope, started and done.
 type Counts = (u32, u32, u32);
+
+/// The tasks each started cycle holds that joined it after it began, by
+/// cycle: made in it later, or moved in later other than by a rollover.
+fn added_after_start(
+    conn: &Connection,
+    spans: &[Span],
+    today: NaiveDate,
+) -> Result<HashMap<i64, Vec<String>>> {
+    let mut starts = HashMap::new();
+    for span in spans.iter().filter(|span| span.start <= today) {
+        starts.insert(span.number, local_midnight_ms(span.start)?);
+    }
+    let mut statement = conn.prepare(
+        "SELECT t.id, t.cycle, t.created_at_ms, a.at_ms,
+            a.actor = 'sona' AND a.from_value IS NOT NULL
+         FROM planning_tasks t
+         LEFT JOIN planning_task_activity a ON a.rowid = (
+            SELECT rowid FROM planning_task_activity
+            WHERE task_id = t.id AND kind = 'cycle' AND to_value = CAST(t.cycle AS TEXT)
+            ORDER BY at_ms DESC, rowid DESC LIMIT 1)
+         WHERE t.cycle IS NOT NULL ORDER BY t.number",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, Option<i64>>(3)?,
+            row.get::<_, Option<bool>>(4)?,
+        ))
+    })?;
+    let mut added: HashMap<i64, Vec<String>> = HashMap::new();
+    for row in rows {
+        let (id, cycle, created_at_ms, entered_at_ms, rolled) = row?;
+        let Some(start_ms) = starts.get(&cycle) else {
+            continue;
+        };
+        let late = match entered_at_ms {
+            Some(_) if rolled == Some(true) => false,
+            Some(at_ms) => at_ms > *start_ms,
+            None => created_at_ms > *start_ms,
+        };
+        if late {
+            added.entry(cycle).or_default().push(id);
+        }
+    }
+    Ok(added)
+}
 
 /// Each ended cycle's counts on its last frozen day.
 fn closing_counts(conn: &Connection) -> Result<HashMap<i64, Counts>> {
@@ -486,7 +563,9 @@ pub(crate) fn all(conn: &Connection, now_ms: i64) -> Result<Vec<WorkCycle>> {
         })?
         .collect::<rusqlite::Result<HashMap<i64, Counts>>>()?;
     let closing = closing_counts(conn)?;
-    spans(conn)?
+    let made = spans(conn)?;
+    let mut added = added_after_start(conn, &made, today)?;
+    made
         .iter()
         .map(|span| {
             shown(
@@ -494,16 +573,86 @@ pub(crate) fn all(conn: &Connection, now_ms: i64) -> Result<Vec<WorkCycle>> {
                 today,
                 counts.get(&span.number).copied().unwrap_or((0, 0, 0)),
                 closing.get(&span.number).copied(),
+                added.remove(&span.number).unwrap_or_default(),
             )
         })
         .collect()
+}
+
+/// The tasks a cycle usually finishes: the mean done, as each closed, of
+/// the last three ended cycles. None until that mean reaches one task.
+fn capacity(closing: &HashMap<i64, Counts>) -> Option<u32> {
+    let mut ended: Vec<_> = closing.iter().collect();
+    ended.sort_unstable_by_key(|(number, _)| std::cmp::Reverse(**number));
+    let last: Vec<u32> = ended.iter().take(3).map(|(_, (_, _, done))| *done).collect();
+    let count = u32::try_from(last.len()).ok().filter(|count| *count > 0)?;
+    Some((last.iter().sum::<u32>() + count / 2) / count).filter(|usual| *usual > 0)
 }
 
 pub(crate) fn listing(conn: &Connection, now_ms: i64) -> Result<WorkCycles> {
     Ok(WorkCycles {
         settings: settings(conn)?,
         cycles: all(conn, now_ms)?,
+        capacity: capacity(&closing_counts(conn)?),
     })
+}
+
+/// Where an even pace would have `scope` done by each day's end: it grows
+/// on weekdays and holds on weekends, or every day for a cycle all
+/// weekend.
+fn target(span: &Span, scope: u32) -> Result<Vec<WorkCycleTarget>> {
+    let mut days = Vec::new();
+    let mut day = span.start;
+    while day < span.end {
+        days.push(day);
+        day = plus(day, 1)?;
+    }
+    let weekday = |day: &NaiveDate| !matches!(day.weekday(), Weekday::Sat | Weekday::Sun);
+    let all_weekend = !days.iter().any(weekday);
+    let counts = |day: &NaiveDate| all_weekend || weekday(day);
+    let total = f64::from(u32::try_from(days.iter().filter(|day| counts(day)).count())?);
+    let mut passed = 0_u32;
+    Ok(days
+        .into_iter()
+        .map(|day| {
+            passed += u32::from(counts(&day));
+            WorkCycleTarget {
+                day: day_text(day),
+                done: (f64::from(scope) * f64::from(passed) / total * 10.0).round() / 10.0,
+            }
+        })
+        .collect())
+}
+
+/// Every cycle as all-day events, for a calendar app to subscribe to or
+/// import.
+pub(crate) fn calendar(cycles: &[WorkCycle], now_ms: i64) -> String {
+    let stamp = chrono::DateTime::<Utc>::from_timestamp_millis(now_ms)
+        .unwrap_or_default()
+        .format("%Y%m%dT%H%M%SZ");
+    let mut text = String::from(
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Sona//Cycles//EN\r\nCALSCALE:GREGORIAN\r\nX-WR-CALNAME:Sona cycles\r\n",
+    );
+    for cycle in cycles {
+        let title = cycle
+            .name
+            .clone()
+            .unwrap_or_else(|| format!("Cycle {}", cycle.number));
+        let escaped = title
+            .replace('\\', "\\\\")
+            .replace(';', "\\;")
+            .replace(',', "\\,")
+            .replace(['\r', '\n'], " ");
+        let _ = write!(
+            text,
+            "BEGIN:VEVENT\r\nUID:sona-cycle-{}@sona.local\r\nDTSTAMP:{stamp}\r\nDTSTART;VALUE=DATE:{}\r\nDTEND;VALUE=DATE:{}\r\nSUMMARY:{escaped}\r\nTRANSP:TRANSPARENT\r\nEND:VEVENT\r\n",
+            cycle.number,
+            cycle.start_day.replace('-', ""),
+            cycle.end_day.replace('-', ""),
+        );
+    }
+    text.push_str("END:VCALENDAR\r\n");
+    text
 }
 
 /// Saves how cycles run. When the length, start day or cooldown changes,
@@ -529,12 +678,16 @@ pub(crate) fn save_settings(
     }
     conn.execute(
         "UPDATE planning_cycle_settings
-            SET weeks = ?1, start_weekday = ?2, cooldown_weeks = ?3, upcoming = ?4 WHERE id = 1",
+            SET weeks = ?1, start_weekday = ?2, cooldown_weeks = ?3, upcoming = ?4,
+                auto_add_started = ?5, auto_add_completed = ?6
+          WHERE id = 1",
         params![
             settings.weeks,
             settings.start_weekday,
             settings.cooldown_weeks,
-            settings.upcoming
+            settings.upcoming,
+            settings.auto_add_started,
+            settings.auto_add_completed
         ],
     )?;
     let today = local_today(now_ms)?;
@@ -768,10 +921,20 @@ pub(crate) fn progress(conn: &Connection, number: i64, now_ms: i64) -> Result<Wo
         |row| row.get(0),
     )?;
     let counts = all_counts(conn, number)?;
+    let target = target(span, at_close.unwrap_or(counts).0)?;
     Ok(WorkCycleProgress {
-        cycle: shown(span, today, counts, at_close)?,
+        cycle: shown(
+            span,
+            today,
+            counts,
+            at_close,
+            added_after_start(conn, &all, today)?
+                .remove(&number)
+                .unwrap_or_default(),
+        )?,
         days,
         carried_over,
+        target,
     })
 }
 
@@ -811,6 +974,16 @@ pub fn work_cycle(app: AppHandle, number: i64) -> Result<WorkCycleProgress, Stri
     let now = now_ms();
     super::super::history(&app.state::<Arc<HistoryManager>>(), |conn| {
         progress(conn, number, now)
+    })
+}
+
+/// Every cycle as an iCalendar file's text.
+#[tauri::command(async)]
+#[specta::specta]
+pub fn work_cycle_calendar(app: AppHandle) -> Result<String, String> {
+    let now = now_ms();
+    super::super::history(&app.state::<Arc<HistoryManager>>(), |conn| {
+        Ok(calendar(&all(conn, now)?, now))
     })
 }
 
@@ -1016,7 +1189,11 @@ mod tests {
     use super::super::types::{
         WorkActivityKind, WorkActor, WorkCycleSettings, WorkOwner, WorkStatus,
     };
-    use super::{advance, day_text, insert, local_midnight_ms, plus, save_settings, spans};
+    use super::{
+        added_after_start, advance, capacity, day_text, insert, local_midnight_ms, plus,
+        save_settings, spans, target, Counts, Span,
+    };
+    use std::collections::HashMap;
     use chrono::{Days, NaiveDate};
     use rusqlite::Connection;
 
@@ -1042,6 +1219,8 @@ mod tests {
             start_weekday: 1,
             cooldown_weeks,
             upcoming,
+            auto_add_started: true,
+            auto_add_completed: false,
         }
     }
 
@@ -1120,5 +1299,141 @@ mod tests {
             day_text(plus(today(), 6).expect("a day"))
         );
         assert!(made.iter().all(|span| span.number == 1 || span.start > today()));
+    }
+
+    /// Work the user moves into a cycle already under way is scope added
+    /// after the start; work Sona rolls over from the cycle before was
+    /// planned, however late the rollover ran.
+    #[test]
+    fn work_moved_into_a_cycle_under_way_is_added_but_rolled_over_work_is_planned() {
+        let conn = tracker();
+        let now = noon();
+        save_settings(&conn, every(2, 0, 1), now).expect("cycles");
+        let made = spans(&conn).expect("cycles");
+        let current = made
+            .iter()
+            .find(|span| span.start <= today() && today() <= span.end)
+            .expect("a cycle under way")
+            .number;
+        let task = |title: &'static str| {
+            items::insert(
+                &conn,
+                &NewItem {
+                    title,
+                    details: None,
+                    status: WorkStatus::NotStarted,
+                    priority: 0,
+                    project_id: None,
+                    milestone_id: None,
+                    owner: &WorkOwner::Nobody,
+                    due_at_ms: None,
+                    label_ids: &[],
+                    source_loop_id: None,
+                    recurrence: None,
+                },
+                WorkActor::Me,
+                now,
+            )
+            .expect("a task")
+            .id
+        };
+        let moved_in = task("Ship the site");
+        let rolled_over = task("Fix the login");
+        items::place_in_cycle(&conn, &moved_in, None, Some(current), WorkActor::Me, now)
+            .expect("moved in by the user");
+        items::place_in_cycle(
+            &conn,
+            &rolled_over,
+            Some(current - 1),
+            Some(current),
+            WorkActor::Sona,
+            now,
+        )
+        .expect("rolled over by Sona");
+
+        let added = added_after_start(&conn, &made, today()).expect("scope added");
+
+        assert_eq!(added.get(&current), Some(&vec![moved_in]));
+    }
+
+    #[test]
+    fn the_target_grows_on_weekdays_and_holds_on_weekends() {
+        let monday = NaiveDate::from_ymd_opt(2026, 11, 9).expect("a Monday");
+        let span = Span {
+            number: 1,
+            start: monday,
+            end: plus(monday, 14).expect("two weeks on"),
+            name: None,
+        };
+
+        let pace: Vec<f64> = target(&span, 10)
+            .expect("a target")
+            .into_iter()
+            .map(|day| day.done)
+            .collect();
+
+        assert_eq!(
+            pace,
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, 5.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 10.0, 10.0]
+        );
+    }
+
+    #[test]
+    fn done_work_with_no_cycle_joins_the_one_under_way_only_when_asked() {
+        let conn = tracker();
+        let now = noon();
+        let done = |conn: &Connection| {
+            items::insert(
+                conn,
+                &NewItem {
+                    title: "Ship the site",
+                    details: None,
+                    status: WorkStatus::Done,
+                    priority: 0,
+                    project_id: None,
+                    milestone_id: None,
+                    owner: &WorkOwner::Nobody,
+                    due_at_ms: None,
+                    label_ids: &[],
+                    source_loop_id: None,
+                    recurrence: None,
+                },
+                WorkActor::Me,
+                now,
+            )
+            .expect("a task")
+            .cycle
+        };
+        save_settings(&conn, every(2, 0, 1), now).expect("cycles");
+        let current = spans(&conn)
+            .expect("cycles")
+            .iter()
+            .find(|span| span.start <= today() && today() < span.end)
+            .expect("a cycle under way")
+            .number;
+
+        let left_out = done(&conn);
+        let settings = WorkCycleSettings {
+            auto_add_completed: true,
+            ..every(2, 0, 1)
+        };
+        save_settings(&conn, settings, now + 1).expect("auto-add done work");
+        let joined = done(&conn);
+
+        assert_eq!((left_out, joined), (None, Some(current)));
+    }
+
+    #[test]
+    fn capacity_waits_until_ended_cycles_usually_finish_a_task() {
+        let ended = |done: &[u32]| {
+            (1..)
+                .zip(done.iter().map(|done| (0, 0, *done)))
+                .collect::<HashMap<i64, Counts>>()
+        };
+
+        assert_eq!(
+            [&[][..], &[0, 0], &[0, 1], &[9, 3, 4, 5]].map(|done| capacity(&ended(done))),
+            [None, None, Some(1), Some(4)]
+        );
     }
 }

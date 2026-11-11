@@ -1,6 +1,6 @@
 //! The tracker's wire shapes: what the Tasks and Triage screens read and send.
 
-use super::super::types::{sql_enum, EvidenceLink, ProjectStatus, TaskStatus};
+use super::super::types::{sql_enum, EvidenceLink, LabelScope, ProjectStatus, TaskStatus};
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ValueRef};
 use serde::{Deserialize, Deserializer, Serialize};
 use specta::Type;
@@ -125,6 +125,29 @@ sql_enum!(WorkActor {
     Agent => "agent",
 });
 
+/// How an agent reached Sona: through the MCP server, or the command line
+/// run some other way.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkVia {
+    Mcp,
+    Cli,
+}
+
+sql_enum!(WorkVia {
+    Mcp => "mcp",
+    Cli => "cli",
+});
+
+impl WorkVia {
+    pub(crate) const fn text(self) -> &'static str {
+        match self {
+            Self::Mcp => "MCP",
+            Self::Cli => "CLI",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkActivityKind {
@@ -151,6 +174,8 @@ pub enum WorkActivityKind {
     Parent,
     Comment,
     Attachment,
+    Estimate,
+    ForPerson,
 }
 
 sql_enum!(WorkActivityKind {
@@ -177,6 +202,8 @@ sql_enum!(WorkActivityKind {
     Parent => "parent",
     Comment => "comment",
     Attachment => "attachment",
+    Estimate => "estimate",
+    ForPerson => "for_person",
 });
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
@@ -220,6 +247,12 @@ pub struct WorkItem {
     pub cycle: Option<i64>,
     /// The task this one is a sub-task of.
     pub parent_id: Option<String>,
+    /// Points of effort, 0 to 64.
+    pub estimate: Option<u8>,
+    /// When it was marked done; none while it is not done.
+    pub completed_at_ms: Option<i64>,
+    /// The person the work is for, who is owed it.
+    pub for_person_id: Option<String>,
 }
 
 impl WorkItem {
@@ -301,6 +334,25 @@ pub struct WorkCommentAuthor {
     pub name: Option<String>,
 }
 
+/// What a comment thread is on.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkCommentSubject {
+    Task,
+    Project,
+    Milestone,
+    Meeting,
+    Note,
+}
+
+sql_enum!(WorkCommentSubject {
+    Task => "task",
+    Project => "project",
+    Milestone => "milestone",
+    Meeting => "meeting",
+    Note => "note",
+});
+
 /// One comment. A thread's first comment carries its replies, oldest
 /// first, and whether the thread is resolved; a deleted comment keeps its
 /// place only while replies hang under it, with no body.
@@ -308,6 +360,8 @@ pub struct WorkCommentAuthor {
 #[serde(rename_all = "camelCase")]
 pub struct WorkComment {
     pub id: String,
+    pub subject: WorkCommentSubject,
+    /// The id of what it is on, as `subject` names it.
     pub item_id: String,
     /// The thread's first comment, for a reply.
     pub parent_id: Option<String>,
@@ -327,6 +381,9 @@ pub struct WorkComment {
 pub struct WorkCommentPage {
     pub threads: Vec<WorkComment>,
     pub next_cursor: Option<String>,
+    /// The meeting these threads are on is kept on this Mac: agents cannot
+    /// read it, so what an agent wrote on it is left out.
+    pub kept_local: bool,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
@@ -361,6 +418,10 @@ pub struct WorkAttachment {
     pub sha256: Option<String>,
     pub created_at_ms: i64,
     pub created_by: WorkCommentAuthor,
+    /// Key-value facts an integration keeps on it, by key.
+    pub metadata: BTreeMap<String, String>,
+    /// The task comment it was added with; none for one on the task itself.
+    pub comment_id: Option<String>,
 }
 
 /// The file to attach: a `path` on this Mac, or pasted `data` in base64
@@ -549,6 +610,20 @@ pub struct WorkPatch {
         skip_serializing_if = "Option::is_none"
     )]
     pub parent_id: Option<Option<String>>,
+    /// Points of effort, 0 to 64; null clears it.
+    #[serde(
+        default,
+        deserialize_with = "nullable",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub estimate: Option<Option<u8>>,
+    /// The person the work is for; null clears it.
+    #[serde(
+        default,
+        deserialize_with = "nullable",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub for_person_id: Option<Option<String>>,
 }
 
 /// A cycle a query or a change names: the one under way, the one after it,
@@ -652,6 +727,8 @@ pub struct WorkActivity {
     pub to: Option<String>,
     /// The agent behind an `agent` entry, when it gave its name.
     pub agent: Option<String>,
+    /// How that agent reached Sona, when it was recorded.
+    pub via: Option<WorkVia>,
     /// Why, when one was given: a declined triage item's reason.
     pub reason: Option<String>,
 }
@@ -677,6 +754,9 @@ pub struct WorkLabel {
     pub group: Option<String>,
     /// Set once retired: kept on its tasks, left out of pickers.
     pub retired_at_ms: Option<i64>,
+    /// What it may go on: tasks, projects or both.
+    #[serde(default)]
+    pub scope: LabelScope,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
@@ -695,6 +775,9 @@ pub enum WorkGroupBy {
     Meeting,
     Due,
     Priority,
+    Cycle,
+    Label,
+    Milestone,
     None,
 }
 
@@ -705,9 +788,12 @@ pub enum WorkOrderBy {
     Due,
     Updated,
     Created,
+    Status,
     Manual,
 }
 
+/// How a list shows its tasks. Fields added after the first saved views
+/// read their default when a stored view lacks them.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkDisplay {
@@ -716,6 +802,33 @@ pub struct WorkDisplay {
     pub order_by: WorkOrderBy,
     pub show_empty_groups: bool,
     pub properties: Vec<String>,
+    /// Whether sub-tasks show as rows of their own.
+    #[serde(default = "shown")]
+    pub show_sub_tasks: bool,
+    /// The board's swimlanes: rows of columns, one per group.
+    #[serde(default = "no_lanes")]
+    pub sub_group_by: WorkGroupBy,
+    /// Board columns left out, by group key such as `status:done`.
+    #[serde(default)]
+    pub hidden_columns: Vec<String>,
+}
+
+const fn shown() -> bool {
+    true
+}
+
+const fn no_lanes() -> WorkGroupBy {
+    WorkGroupBy::None
+}
+
+/// Where tasks go in the manual order.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "snake_case", tag = "at", content = "id")]
+pub enum WorkPlace {
+    Top,
+    Bottom,
+    Before(String),
+    After(String),
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize, Type)]
@@ -788,8 +901,9 @@ pub struct WorkList {
 }
 
 /// How long a cycle runs, 1 to 8 weeks, the weekday each starts on, 1 for
-/// Monday through 7 for Sunday, the weeks of cooldown after each, and how
-/// many cycles after the one under way are made ahead, 1 to 15.
+/// Monday through 7 for Sunday, the weeks of cooldown after each, how
+/// many cycles after the one under way are made ahead, 1 to 15, and
+/// whether work with no cycle joins one by itself once started or done.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkCycleSettings {
@@ -797,6 +911,10 @@ pub struct WorkCycleSettings {
     pub start_weekday: u8,
     pub cooldown_weeks: u8,
     pub upcoming: u8,
+    /// Started work joins the cycle under way, or the next in a cooldown.
+    pub auto_add_started: bool,
+    /// Done work joins the cycle under way, or the last one in a cooldown.
+    pub auto_add_completed: bool,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
@@ -826,6 +944,9 @@ pub struct WorkCycle {
     /// Done counted fully and started a quarter, out of the scope; for a
     /// past cycle, as it stood when it ended. None while the scope is empty.
     pub success: Option<u8>,
+    /// The tasks in it that joined after it began, by id: scope added since
+    /// the start. Work rolled over from an earlier cycle counts as planned.
+    pub added_after_start: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
@@ -833,6 +954,9 @@ pub struct WorkCycle {
 pub struct WorkCycles {
     pub settings: WorkCycleSettings,
     pub cycles: Vec<WorkCycle>,
+    /// The tasks a cycle usually finishes: the mean done of the last three
+    /// ended cycles, rounded. None until that mean reaches one task.
+    pub capacity: Option<u32>,
 }
 
 /// Scope, started and done as each day of a cycle ended, through today;
@@ -846,13 +970,24 @@ pub struct WorkCycleDay {
     pub done: u32,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+/// Where an even pace would have the done count at the end of a day:
+/// the scope spread over the cycle's weekdays, flat on weekends.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkCycleTarget {
+    pub day: String,
+    pub done: f64,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkCycleProgress {
     pub cycle: WorkCycle,
     pub days: Vec<WorkCycleDay>,
     /// Tasks moved in unfinished from earlier cycles.
     pub carried_over: u32,
+    /// The target for every day of the cycle, first to last.
+    pub target: Vec<WorkCycleTarget>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize, Type)]

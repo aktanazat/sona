@@ -9,6 +9,7 @@ use super::types::{
 use super::{checked_owner, now_ms, run_history, run_with_meetings, Change, Done, Effects};
 use crate::managers::history::HistoryManager;
 use crate::planning::store::{self, Refusal};
+use crate::planning::types::LabelScope;
 use crate::settings::WorkAutonomy;
 use anyhow::Result as StorageResult;
 use rusqlite::{params, Connection, OptionalExtension, Row};
@@ -378,23 +379,22 @@ fn set_reminder(
     now_ms: i64,
 ) -> StorageResult<Option<WorkReminder>> {
     let item = items::item(conn, &store::uuid(item_id)?)?;
-    match at_ms {
-        Some(at_ms) => {
-            conn.execute(
-                "INSERT INTO planning_task_reminders (task_id, remind_at_ms, set_at_ms, actor, agent, notified_at_ms)
-                 VALUES (?1, ?2, ?3, ?4, ?5, NULL)
-                 ON CONFLICT(task_id) DO UPDATE SET remind_at_ms = excluded.remind_at_ms,
-                    set_at_ms = excluded.set_at_ms, actor = excluded.actor, agent = excluded.agent,
-                    notified_at_ms = NULL",
-                params![item.id, at_ms, now_ms, actor.as_str(), agent],
-            )?;
-        }
-        None => {
-            conn.execute(
-                "DELETE FROM planning_task_reminders WHERE task_id = ?1",
-                [&item.id],
-            )?;
-        }
+    let changed = match at_ms {
+        Some(at_ms) => conn.execute(
+            "INSERT INTO planning_task_reminders (task_id, remind_at_ms, set_at_ms, actor, agent, notified_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, NULL)
+             ON CONFLICT(task_id) DO UPDATE SET remind_at_ms = excluded.remind_at_ms,
+                set_at_ms = excluded.set_at_ms, actor = excluded.actor, agent = excluded.agent,
+                notified_at_ms = NULL",
+            params![item.id, at_ms, now_ms, actor.as_str(), agent],
+        )?,
+        None => conn.execute(
+            "DELETE FROM planning_task_reminders WHERE task_id = ?1",
+            [&item.id],
+        )?,
+    };
+    if changed > 0 && actor == WorkActor::Agent {
+        super::inbox::reminder_changed(conn, &item.id, agent, at_ms, now_ms)?;
     }
     reminder(conn, &item.id)
 }
@@ -439,6 +439,41 @@ fn group_label(
         "UPDATE planning_labels SET group_name = ?2, revision = revision + 1, updated_at_ms = ?3
          WHERE id = ?1",
         params![id, trimmed(group), now_ms],
+    )?;
+    label(conn, &id)
+}
+
+/// Sets what a label may go on. Narrowing it is refused while it sits on
+/// the kind it would leave out.
+pub(crate) fn scope_label(
+    conn: &Connection,
+    id: &str,
+    scope: LabelScope,
+    now_ms: i64,
+) -> StorageResult<WorkLabel> {
+    let id = store::uuid(id)?;
+    label(conn, &id)?;
+    let used_elsewhere = match scope {
+        LabelScope::All => None,
+        LabelScope::Tasks => Some("planning_project_labels"),
+        LabelScope::Projects => Some("planning_task_labels"),
+    };
+    if let Some(table) = used_elsewhere {
+        let used: bool = conn.query_row(
+            &format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE label_id = ?1)"),
+            [&id],
+            |row| row.get(0),
+        )?;
+        if used {
+            return Err(Refusal::LabelScope.into());
+        }
+    }
+    conn.execute(
+        "UPDATE planning_labels SET scope = ?2,
+            revision = revision + CASE WHEN scope IS ?2 THEN 0 ELSE 1 END,
+            updated_at_ms = ?3
+         WHERE id = ?1",
+        params![id, scope.as_str(), now_ms],
     )?;
     label(conn, &id)
 }
@@ -685,6 +720,31 @@ pub(crate) fn label_retire_as(
             |tx| {
                 Ok(Done {
                     value: retire_label(tx, id, retired, now)?,
+                    effects: Effects::default(),
+                })
+            },
+        )
+    })
+}
+
+/// Sets what a label may go on. The app's `work_label_scope`.
+pub(crate) fn label_scope_as(
+    app: &AppHandle,
+    operation_id: &str,
+    id: &str,
+    scope: LabelScope,
+) -> Result<WorkLabel, String> {
+    let now = now_ms();
+    run_history(app, |history| {
+        store::mutate(
+            history,
+            operation_id,
+            "work_label_scope",
+            &(id, scope),
+            now,
+            |tx| {
+                Ok(Done {
+                    value: scope_label(tx, id, scope, now)?,
                     effects: Effects::default(),
                 })
             },

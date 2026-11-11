@@ -8,7 +8,7 @@ use super::sync::{self, MeetingReader};
 use super::types::{
     WorkActivityKind, WorkActor, WorkDelegation, WorkDoer, WorkItem, WorkItemDetail, WorkItemInput,
     WorkOwner, WorkPatch, WorkProposal, WorkProposalField, WorkStatus, WorkSuggestionField,
-    WorkSuggestionValue,
+    WorkSuggestionValue, WorkVia,
 };
 use super::{
     edit, now_ms, run_history, run_with_meetings, unique, with_meetings, Change, Done, Effects,
@@ -24,12 +24,34 @@ use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tauri::{AppHandle, Manager};
 use uuid::Uuid;
 
 /// What Sona calls an agent that gave no name.
 pub(crate) const UNNAMED: &str = "Agent";
+
+/// Lets each agent entry and proposal say how the agent reached Sona.
+pub const VIA_MIGRATION: &str = "ALTER TABLE planning_activity_agents ADD COLUMN via TEXT CHECK (via IN ('mcp', 'cli'));
+ALTER TABLE planning_task_proposals ADD COLUMN via TEXT CHECK (via IN ('mcp', 'cli'));";
+
+static VIA: OnceLock<WorkVia> = OnceLock::new();
+
+/// Marks this process as the command line, run by the MCP server when it
+/// says so in `SONA_VIA`.
+pub(crate) fn arrived_from_command_line() {
+    let via = if std::env::var_os("SONA_VIA").is_some_and(|via| via == "mcp") {
+        WorkVia::Mcp
+    } else {
+        WorkVia::Cli
+    };
+    let _ = VIA.set(via);
+}
+
+/// How agents reach Sona in this process: none inside the app.
+pub(crate) fn via() -> Option<WorkVia> {
+    VIA.get().copied()
+}
 
 /// How a delegation prompt begins, before the item's handle: a watched
 /// session whose prompt carries it is working that item.
@@ -142,14 +164,24 @@ fn set_doer(
 }
 
 /// Names `agent` on the history entries agents wrote for an item since
-/// `since_ms` that name no agent yet.
-fn credit(conn: &Connection, task_id: &str, since_ms: i64, agent: &str) -> StorageResult<()> {
+/// `since_ms` that name no agent yet, with the relations they made to it
+/// from other items.
+pub(crate) fn credit(
+    conn: &Connection,
+    task_id: &str,
+    since_ms: i64,
+    agent: &str,
+    via: Option<WorkVia>,
+) -> StorageResult<()> {
     conn.execute(
-        "INSERT INTO planning_activity_agents (activity_id, agent)
-         SELECT a.id, ?3 FROM planning_task_activity a
-         WHERE a.task_id = ?1 AND a.at_ms >= ?2 AND a.actor = 'agent'
+        "INSERT INTO planning_activity_agents (activity_id, agent, via)
+         SELECT a.id, ?3, ?4 FROM planning_task_activity a
+         WHERE (a.task_id = ?1
+                OR (a.kind = 'relation'
+                    AND (a.to_value LIKE '%:' || ?1 OR a.from_value LIKE '%:' || ?1)))
+           AND a.at_ms >= ?2 AND a.actor = 'agent'
            AND NOT EXISTS (SELECT 1 FROM planning_activity_agents n WHERE n.activity_id = a.id)",
-        params![task_id, since_ms, agent],
+        params![task_id, since_ms, agent, via.map(WorkVia::as_str)],
     )?;
     Ok(())
 }
@@ -165,7 +197,7 @@ pub(crate) fn credit_since(
     crate::planning::history(&app.state::<Arc<HistoryManager>>(), |conn| {
         let tx = conn.transaction()?;
         for id in ids {
-            credit(&tx, id, since_ms, agent)?;
+            credit(&tx, id, since_ms, agent, via())?;
         }
         tx.commit()?;
         Ok(())
@@ -439,8 +471,8 @@ fn propose(
     let id = Uuid::new_v4().to_string();
     conn.execute(
         "INSERT INTO planning_task_proposals
-             (id, task_id, agent, field, from_value, patch_json, state, created_at_ms)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'open', ?7)",
+             (id, task_id, agent, field, from_value, patch_json, state, created_at_ms, via)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'open', ?7, ?8)",
         params![
             id,
             task_id,
@@ -448,7 +480,8 @@ fn propose(
             change.field.as_str(),
             change.from,
             serde_json::to_string(&change.patch)?,
-            now_ms
+            now_ms,
+            via().map(WorkVia::as_str)
         ],
     )?;
     Ok(WorkProposal {
@@ -514,7 +547,7 @@ fn agent_edit(
         before
     } else {
         let item = edit(tx, meetings, change, id, &direct, effects)?;
-        credit(tx, id, change.at_ms, agent.name)?;
+        credit(tx, id, change.at_ms, agent.name, via())?;
         item
     };
     let proposed = waiting
@@ -525,6 +558,28 @@ fn agent_edit(
         effects.item(&item);
     }
     Ok(AgentChange { item, proposed })
+}
+
+/// Leaves every field `patch` would change on the item `task` names, `S-12`
+/// or an id, waiting for the user whatever Settings > Agents says: an
+/// automation only suggests. `None` when no item has that number.
+pub(super) fn suggest(
+    tx: &Connection,
+    meetings: Option<&Connection>,
+    change: Change<'_>,
+    agent: &str,
+    task: &str,
+    patch: &WorkPatch,
+    effects: &mut Effects,
+) -> StorageResult<Option<AgentChange>> {
+    let Some(id) = named_item(tx, task)? else {
+        return Ok(None);
+    };
+    let agent = Agent {
+        name: agent,
+        autonomy: WorkAutonomy::Suggest,
+    };
+    agent_edit(tx, meetings, change, agent, &id, patch, effects).map(Some)
 }
 
 /// One agent's change to one item it read at `expected_revision`, and the
@@ -751,7 +806,7 @@ fn claim(
                         ..WorkPatch::default()
                     };
                     let item = edit(tx, meetings, change, &id, &started, &mut effects)?;
-                    credit(tx, &id, change.at_ms, agent)?;
+                    credit(tx, &id, change.at_ms, agent, via())?;
                     item
                 }
                 WorkStatus::InProgress if works_it => item,
@@ -997,7 +1052,12 @@ fn accept(
                     &patch,
                     &mut effects,
                 )?;
-                credit(tx, &proposal.item_id, change.at_ms, &proposal.agent)?;
+                let via: Option<WorkVia> = tx.query_row(
+                    "SELECT via FROM planning_task_proposals WHERE id = ?1",
+                    [&proposal.id],
+                    |row| row.get(0),
+                )?;
+                credit(tx, &proposal.item_id, change.at_ms, &proposal.agent, via)?;
                 decide(tx, &proposal.id, "accepted", change.at_ms)?;
                 value.retain(|other| other.id != item.id);
                 value.push(item);

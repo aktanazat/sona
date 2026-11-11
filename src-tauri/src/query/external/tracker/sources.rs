@@ -608,7 +608,10 @@ impl Tracker<'_> {
         Ok(WorkAnswer::Sources(Box::new(answer)))
     }
 
-    async fn source_link(&self, args: &SourceLinkArgs) -> Result<ExternalSourceLink, ExternalError> {
+    pub(super) async fn source_link(
+        &self,
+        args: &SourceLinkArgs,
+    ) -> Result<ExternalSourceLink, ExternalError> {
         let source = linked_source(self.meetings, args).await?;
         let board = self.board().await?;
         let target = link_target(&board, &args.target)?;

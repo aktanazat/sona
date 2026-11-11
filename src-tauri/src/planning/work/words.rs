@@ -3,12 +3,13 @@
 //! are, or is kept as not understood; none is dropped.
 
 use super::filter::{self, WorkCondition, WorkFilterField, WorkFilterOp};
+use super::items::MAX_ESTIMATE;
 use super::parse::{self, Lexicon, Said, WorkField, WorkToken};
 use super::types::{WorkLabel, WorkPersonChoice, WorkProjectChoice};
 use super::with_meetings;
 use crate::managers::history::HistoryManager;
 use crate::meeting::session::MeetingSessionManager;
-use chrono::{DateTime, Datelike, NaiveDate, TimeZone};
+use chrono::{DateTime, Datelike, Days, Months, NaiveDate, TimeZone};
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use std::ops::Range;
@@ -171,6 +172,9 @@ impl Term {
 
 enum Reading {
     Term(Term),
+    /// A day range: the words up to `usize` say where it starts, the rest
+    /// where it ends.
+    Range(Term, usize, Term),
     Not,
     Or,
     Glue,
@@ -347,6 +351,7 @@ enum Relation {
     After,
     By,
     Since,
+    Between,
 }
 
 const RELATIONS: &[(&str, Relation)] = &[
@@ -358,7 +363,14 @@ const RELATIONS: &[(&str, Relation)] = &[
     ("till", Relation::By),
     ("since", Relation::Since),
     ("from", Relation::Since),
+    ("between", Relation::Between),
 ];
+
+/// Words between a range's first day and its last: "from Nov 2 to Nov 6".
+const RANGE_ENDS: &[&str] = &["to", "through", "thru", "until", "till", "and"];
+
+/// Words after an estimate's number: "4 points".
+const POINTS: &[&str] = &["point", "points", "pt", "pts"];
 
 const DATED_FIELDS: &[(&str, WorkFilterField)] = &[
     ("due", WorkFilterField::Due),
@@ -368,6 +380,9 @@ const DATED_FIELDS: &[(&str, WorkFilterField)] = &[
     ("updated", WorkFilterField::Updated),
     ("changed", WorkFilterField::Updated),
     ("edited", WorkFilterField::Updated),
+    ("completed", WorkFilterField::Completed),
+    ("finished", WorkFilterField::Completed),
+    ("done", WorkFilterField::Completed),
 ];
 
 /// A day a condition compares against: one that moves with the calendar,
@@ -523,6 +538,11 @@ impl<Tz: TimeZone> Reader<'_, Tz> {
                 Reading::Glue => glue[span].fill(true),
                 Reading::Not => unread.extend(not.replace(span).map(|word| (word, Vec::new()))),
                 Reading::Or => unread.extend(or.replace(span).map(|word| (word, Vec::new()))),
+                Reading::Range(first, split, last) => {
+                    unread.extend(not.take().into_iter().chain(or.take()).map(|word| (word, Vec::new())));
+                    terms.push((span.start..span.start + split, first));
+                    terms.push((span.start + split..span.end, last));
+                }
                 Reading::Term(mut term) => {
                     let mut span = span;
                     if let Some(word) = not.take() {
@@ -635,7 +655,10 @@ impl<Tz: TimeZone> Reader<'_, Tz> {
                 best = Some((len, reading));
             }
         };
-        if let Some((len, term)) = self.dated(at) {
+        if let Some((len, reading)) = self.dated(at) {
+            offer(len, reading);
+        }
+        if let Some((len, term)) = self.estimate(at) {
             offer(len, Reading::Term(term));
         }
         if let Some((len, fixed)) = PHRASES
@@ -689,6 +712,31 @@ impl<Tz: TimeZone> Reader<'_, Tz> {
                         &title,
                     )),
                 );
+            }
+        }
+        if key == "for" {
+            if let Some((len, named)) = self.names(at + 1) {
+                let people: Vec<&WorkPersonChoice> = named
+                    .iter()
+                    .filter_map(|one| match one {
+                        Named::Person(person) => Some(*person),
+                        Named::Label(_) | Named::Project(_) => None,
+                    })
+                    .collect();
+                if people.len() == named.len() {
+                    let reading = match people.as_slice() {
+                        [person] => Reading::Term(Term::one(
+                            WorkFilterField::For,
+                            WorkFilterOp::Is,
+                            &person.id,
+                            &person.name,
+                        )),
+                        many => Reading::Unclear(
+                            many.iter().map(|person| format!("for {}", person.name)).collect(),
+                        ),
+                    };
+                    offer(1 + len, reading);
+                }
             }
         }
         let lead = usize::from(key == "waiting" && self.key(at + 1) == Some("on")) * 2;
@@ -854,11 +902,36 @@ impl<Tz: TimeZone> Reader<'_, Tz> {
         None
     }
 
-    /// A day condition from `at`: a field (due, created, updated), how it
-    /// compares (on, before, after, by, since) and the day. Without a field
-    /// it is the due day; without a word saying when, only a day that moves
-    /// with the calendar, a weekday or a day with numbers in it is read.
-    fn dated(&self, at: usize) -> Option<(usize, Term)> {
+    /// An estimate: "estimate 4", "estimated 4 points", "4 pts".
+    fn estimate(&self, at: usize) -> Option<(usize, Term)> {
+        let lead = usize::from(matches!(self.key(at)?, "estimate" | "estimated"));
+        let points = self
+            .key(at + lead)?
+            .parse::<u8>()
+            .ok()
+            .filter(|points| *points <= MAX_ESTIMATE)?;
+        let unit = usize::from(self.key(at + lead + 1).is_some_and(|word| POINTS.contains(&word)));
+        let points = points.to_string();
+        (lead + unit > 0).then(|| {
+            (
+                lead + 1 + unit,
+                Term::one(
+                    WorkFilterField::Estimate,
+                    WorkFilterOp::Is,
+                    &points,
+                    &format!("{points} points"),
+                ),
+            )
+        })
+    }
+
+    /// A day condition from `at`: a field (due, created, updated, completed),
+    /// how it compares (on, before, after, by, since, between) and the day.
+    /// Without a field it is the due day; without a word saying when, only a
+    /// day that moves with the calendar, a weekday or a day with numbers in
+    /// it is read. "from" or "between" a day "to" or "and" another is a
+    /// range taking both days in.
+    fn dated(&self, at: usize) -> Option<(usize, Reading)> {
         let mut next = at;
         let field = DATED_FIELDS
             .iter()
@@ -870,24 +943,42 @@ impl<Tz: TimeZone> Reader<'_, Tz> {
             .find(|(word, _)| self.key(next) == Some(*word))
             .map(|(_, relation)| *relation);
         next += usize::from(relation.is_some());
-        let (len, day) = self.day(next, field.is_some() || relation.is_some())?;
-        let (op, day) = match relation.unwrap_or(Relation::On) {
+        let past = matches!(
+            field,
+            Some(WorkFilterField::Created | WorkFilterField::Updated | WorkFilterField::Completed)
+        );
+        let (len, day) = self.day(next, field.is_some() || relation.is_some(), past)?;
+        next += len;
+        let field = field.unwrap_or(WorkFilterField::Due);
+        let term = |op, day: Day| Term::one(field, op, &day.value(), &day.name(self.today));
+        let relation = relation.unwrap_or(Relation::On);
+        if matches!(relation, Relation::Since | Relation::Between) {
+            let last = self
+                .key(next)
+                .filter(|word| RANGE_ENDS.contains(word))
+                .and_then(|_| self.day(next + 1, true, past));
+            if let Some((last_len, last)) = last {
+                let first = term(WorkFilterOp::After, day.preceding(self.today)?);
+                let last_term = term(WorkFilterOp::Before, last.following(self.today)?);
+                return Some((next + 1 + last_len - at, Reading::Range(first, next - at, last_term)));
+            }
+        }
+        let (op, day) = match relation {
             Relation::On => (WorkFilterOp::Is, day),
             Relation::Before => (WorkFilterOp::Before, day),
             Relation::After => (WorkFilterOp::After, day),
             Relation::By => (WorkFilterOp::Before, day.following(self.today)?),
             Relation::Since => (WorkFilterOp::After, day.preceding(self.today)?),
+            Relation::Between => return None,
         };
-        let term = Term::one(
-            field.unwrap_or(WorkFilterField::Due),
-            op,
-            &day.value(),
-            &day.name(self.today),
-        );
-        Some((next + len - at, term))
+        Some((next - at, Reading::Term(term(op, day))))
     }
 
-    fn day(&self, at: usize, led: bool) -> Option<(usize, Day)> {
+    /// The day the words from `at` name. A day said without a year is the
+    /// next one for a due date, and for a day work was `past` (created,
+    /// updated, completed) the last one: "Monday" is this week's, "Nov 9"
+    /// this year's once it has gone by.
+    fn day(&self, at: usize, led: bool, past: bool) -> Option<(usize, Day)> {
         if let Some(&(words, name)) = WINDOWS.iter().find(|(words, _)| self.starts(at, words)) {
             return Some((words.len(), Day::Named(name)));
         }
@@ -916,11 +1007,31 @@ impl<Tz: TimeZone> Reader<'_, Tz> {
                         .timestamp_millis_opt(*due_at)
                         .single()?
                         .date_naive();
-                    return Some((len, Day::On(day)));
+                    return Some((len, Day::On(if past { self.gone_by(day, span) } else { day })));
                 }
             }
         }
         None
+    }
+
+    /// `day`, read forward from today, moved back to the last time it came:
+    /// a weekday a week back, a day of the year a year back.
+    fn gone_by(&self, day: NaiveDate, span: &[Tok]) -> NaiveDate {
+        let year_said = span
+            .iter()
+            .any(|tok| tok.key.len() == 4 && tok.key.chars().all(|character| character.is_ascii_digit()));
+        if day <= self.today || year_said {
+            return day;
+        }
+        let weekday = span.iter().any(|tok| parse::weekday_named(&tok.key).is_some());
+        let back = if weekday {
+            day.checked_sub_days(Days::new(7))
+        } else if (day - self.today).num_days() > 182 {
+            day.checked_sub_months(Months::new(12))
+        } else {
+            None
+        };
+        back.unwrap_or(day)
     }
 }
 
@@ -939,6 +1050,7 @@ mod tests {
             revision: 1,
             group: None,
             retired_at_ms: None,
+            scope: Default::default(),
         };
         let project = |id: &str, title: &str| WorkProjectChoice {
             id: id.to_owned(),
@@ -982,7 +1094,7 @@ mod tests {
 
     #[test]
     fn plain_phrases_read_as_the_conditions_they_say() {
-        let phrases: [(&str, Vec<(F, O, Vec<&str>)>); 6] = [
+        let phrases: [(&str, Vec<(F, O, Vec<&str>)>); 12] = [
             (
                 "high priority bugs due this week that are mine",
                 vec![
@@ -1005,7 +1117,7 @@ mod tests {
                 ],
             ),
             (
-                "open tasks for Dana created since last week",
+                "open tasks assigned to Dana created since last week",
                 vec![
                     (F::Status, O::AnyOf, vec!["backlog", "not_started", "in_progress"]),
                     (F::Owner, O::Is, vec!["dana"]),
@@ -1020,6 +1132,29 @@ mod tests {
                 "done or canceled this cycle",
                 vec![(F::Status, O::AnyOf, vec!["done", "canceled"]), (F::Cycle, O::Is, vec!["current"])],
             ),
+            ("completed today", vec![(F::Completed, O::Is, vec!["today"])]),
+            ("done last week", vec![(F::Completed, O::Is, vec!["last_week"])]),
+            ("done since Monday", vec![(F::Completed, O::After, vec!["2026-11-08"])]),
+            (
+                "completed from Nov 2 to Nov 6",
+                vec![
+                    (F::Completed, O::After, vec!["2026-11-01"]),
+                    (F::Completed, O::Before, vec!["2026-11-07"]),
+                ],
+            ),
+            (
+                "bugs for Dana estimate 4",
+                vec![
+                    (F::Label, O::Is, vec!["bug"]),
+                    (F::For, O::Is, vec!["dana"]),
+                    (F::Estimate, O::Is, vec!["4"]),
+                ],
+            ),
+            ("8 points due between today and Friday", vec![
+                (F::Estimate, O::Is, vec!["8"]),
+                (F::Due, O::After, vec!["yesterday"]),
+                (F::Due, O::Before, vec!["2026-11-14"]),
+            ]),
         ];
         for (text, expected) in phrases {
             let read = words(text);

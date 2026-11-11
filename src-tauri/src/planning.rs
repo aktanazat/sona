@@ -1,6 +1,7 @@
 //! Owner-authored local plans and references to their original evidence.
 
 pub(crate) mod catalog;
+pub(crate) mod dependencies;
 pub(crate) mod person;
 pub(crate) mod progress;
 mod proposal;
@@ -24,9 +25,10 @@ pub use schema::{
     ROUTINES_MIGRATION, THREADS_MIGRATION, WATCH_MIGRATION, WORK_MIGRATION,
 };
 pub use types::{
-    DateResolution, EvidenceLink, EvidenceSourceKind, EvidenceTargetKind, Milestone,
-    PlanningCalendarPage, PlanningTask, Project, ProjectDetail, ProjectHealth, ProjectLink,
-    ProjectProgress, ProjectStatus, ProjectSummary, ProjectUpdate, TaskStatus,
+    DateResolution, EvidenceLink, EvidenceSourceKind, EvidenceTargetKind, LabelScope, Milestone,
+    PlanningCalendarPage, PlanningTask, Project, ProjectDetail, ProjectHealth,
+    ProjectLink, ProjectProgress, ProjectStatus, ProjectStatusName, ProjectSummary, ProjectUpdate,
+    TaskStatus,
 };
 
 use crate::managers::history::HistoryManager;
@@ -117,6 +119,12 @@ pub(crate) fn failure(error: anyhow::Error) -> String {
         Some(store::Refusal::TooLarge) => "Attachments can be at most 50 MB.",
         Some(store::Refusal::BadLink) => {
             "A link must start with http://, https://, mailto: or sona://."
+        }
+        Some(store::Refusal::LabelScope) => {
+            "This label is kept to tasks or to projects, or still sits on the other kind. Change where it applies first."
+        }
+        Some(store::Refusal::DependencyLoop) => {
+            "A project cannot wait on itself, or on a project that already waits on it."
         }
         None => {
             log::error!("Planning database operation failed");
@@ -456,7 +464,9 @@ pub async fn planning_link_source(
         })
         .await?
     };
-    changed(&app, project_id);
+    if let Some(project_id) = project_id {
+        changed(&app, project_id);
+    }
     if target_kind == EvidenceTargetKind::Task {
         work::tasks_changed(&app, vec![target_id]);
     }

@@ -167,6 +167,14 @@ pub struct CycleSettingsArgs {
     /// How many cycles to make ahead, 1 to 15.
     #[arg(long, value_parser = clap::value_parser!(u8).range(1..=15))]
     pub upcoming: Option<u8>,
+    /// Whether started work with no cycle joins the cycle under way, or the
+    /// next in a cooldown: true or false.
+    #[arg(long, value_name = "BOOL")]
+    pub auto_add_started: Option<bool>,
+    /// Whether done work with no cycle joins the cycle under way, or the
+    /// last one in a cooldown: true or false.
+    #[arg(long, value_name = "BOOL")]
+    pub auto_add_completed: Option<bool>,
     #[arg(long)]
     pub dry_run: bool,
     #[command(flatten)]
@@ -179,6 +187,8 @@ impl CycleSettingsArgs {
             || self.start_weekday.is_some()
             || self.cooldown.is_some()
             || self.upcoming.is_some()
+            || self.auto_add_started.is_some()
+            || self.auto_add_completed.is_some()
     }
 }
 
@@ -298,6 +308,14 @@ pub struct ExternalWorkProjectDetail {
     pub update_missing: bool,
     pub progress: ExternalProjectProgress,
     pub milestones: Vec<ExternalMilestoneProgress>,
+    /// Notes, meetings, dictations and pages linked to the project, its
+    /// milestones and open tasks. Meetings kept on this Mac stay out.
+    pub sources: Vec<crate::query::external::ExternalPlanningEvidence>,
+    /// Projects this one waits on, each marked broken when it ends after
+    /// this one starts.
+    pub blocked_by: Vec<super::dependencies::ExternalProjectDependencyLink>,
+    /// Projects waiting on this one.
+    pub blocking: Vec<super::dependencies::ExternalProjectDependencyLink>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -479,6 +497,20 @@ impl Tracker<'_> {
         })
         .map_err(|message| refusal(self.history, message))?;
         let (list, shares) = milestones;
+        let (blocked_by, blocking) = super::dependencies::links(
+            &self.all_dependencies()?,
+            &project.id,
+            &self.every_project()?,
+        );
+        let sources = planning::project_detail_without(
+            self.history,
+            self.meetings,
+            project.id.clone(),
+            |evidence| board.fence.hides_evidence(evidence),
+        )
+        .await
+        .map_err(|message| refusal(self.history, message))?
+        .evidence;
         Ok(WorkAnswer::ProjectDetail(Box::new(
             ExternalWorkProjectDetail {
                 schema_version: QUERY_SCHEMA_VERSION,
@@ -500,6 +532,9 @@ impl Tracker<'_> {
                         next_open: share.next_open,
                     })
                     .collect(),
+                sources: sources.into_iter().map(super::project_evidence).collect(),
+                blocked_by,
+                blocking,
             },
         )))
     }
@@ -526,13 +561,22 @@ impl Tracker<'_> {
         }))
     }
 
-    pub(super) fn project_update_draft(
+    async fn discussed(&self, project_id: &str) -> Result<Vec<String>, ExternalError> {
+        project_plans::discussed_lines(self.history, self.meetings, project_id)
+            .await
+            .map_err(|message| refusal(self.history, message))
+    }
+
+    pub(super) async fn project_update_draft(
         &self,
         args: &ProjectArgs,
     ) -> Result<WorkAnswer, ExternalError> {
         let project = self.project_named(&args.project)?;
-        let body = planning::history(self.history, |conn| updates::draft(conn, &project.id))
-            .map_err(|message| refusal(self.history, message))?;
+        let discussed = self.discussed(&project.id).await?;
+        let body = planning::history(self.history, |conn| {
+            updates::draft(conn, &project.id, &discussed)
+        })
+        .map_err(|message| refusal(self.history, message))?;
         Ok(WorkAnswer::ProjectDraft(ExternalWorkProjectDraft {
             schema_version: QUERY_SCHEMA_VERSION,
             project: project_ref(&project),
@@ -559,7 +603,7 @@ impl Tracker<'_> {
         }))
     }
 
-    pub(super) fn project_update(
+    pub(super) async fn project_update(
         &self,
         args: &ProjectUpdateArgs,
     ) -> Result<WorkAnswer, ExternalError> {
@@ -568,11 +612,15 @@ impl Tracker<'_> {
         let health = args.health.health();
         let body = args.body.as_deref();
         let operation_id = args.operation_id(&project.id, chrono::Local::now().date_naive())?;
+        let discussed = match body {
+            Some(_) => Vec::new(),
+            None => self.discussed(&project.id).await?,
+        };
         if args.dry_run {
             let update = self.rehearse(|conn| {
                 let drafted = match body {
                     Some(body) => body.to_owned(),
-                    None => updates::draft(conn, &project.id)?,
+                    None => updates::draft(conn, &project.id, &discussed)?,
                 };
                 updates::add(conn, author, &project.id, health, &drafted, now_ms())
             })?;
@@ -594,6 +642,7 @@ impl Tracker<'_> {
             &project.id,
             health,
             body,
+            &discussed,
         )
         .map_err(|message| self.write_refusal(message, &operation_id, "The project"))?;
         let replayed = update.created_at_ms < started_ms;
@@ -799,6 +848,8 @@ impl Tracker<'_> {
             start_weekday: args.start_weekday.unwrap_or(before.start_weekday),
             cooldown_weeks: args.cooldown.unwrap_or(before.cooldown_weeks),
             upcoming: args.upcoming.unwrap_or(before.upcoming),
+            auto_add_started: args.auto_add_started.unwrap_or(before.auto_add_started),
+            auto_add_completed: args.auto_add_completed.unwrap_or(before.auto_add_completed),
         };
         let today = chrono::Local::now().date_naive().to_string();
         let operation_id = args
@@ -959,14 +1010,23 @@ pub(super) fn text(answer: &WorkAnswer, text: &mut String) {
             let progress = &detail.progress;
             let _ = writeln!(
                 text,
-                "{} · {:?} · {}% ({} done, {} started of {})",
+                "{} · {} · {}% ({} done, {} started of {})",
                 project.name,
-                project.status,
+                project
+                    .status_name
+                    .clone()
+                    .unwrap_or_else(|| format!("{:?}", project.status)),
                 progress.percent,
                 progress.done,
                 progress.started,
                 progress.scope
             );
+            if let Some(summary) = &project.summary {
+                let _ = writeln!(text, "{summary}");
+            }
+            if let Some(initiative) = &project.initiative {
+                let _ = writeln!(text, "In initiative {}", initiative.name);
+            }
             if let Some(prediction) = &progress.prediction {
                 let _ = writeln!(
                     text,
@@ -993,6 +1053,19 @@ pub(super) fn text(answer: &WorkAnswer, text: &mut String) {
                     if milestone.next_open { "> " } else { "  " },
                     milestone.name,
                     milestone.percent
+                );
+            }
+            super::dependencies::links_text(text, "Blocked by", &detail.blocked_by);
+            super::dependencies::links_text(text, "Blocking", &detail.blocking);
+            if !detail.sources.is_empty() {
+                text.push_str("Sources:\n");
+            }
+            for source in &detail.sources {
+                let _ = writeln!(
+                    text,
+                    "  {:?} {}",
+                    source.source_kind,
+                    source.title.as_deref().unwrap_or("(gone)")
                 );
             }
         }

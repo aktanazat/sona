@@ -857,6 +857,83 @@ CREATE TRIGGER planning_favorite_view_delete AFTER DELETE ON planning_views BEGI
     DELETE FROM planning_favorites WHERE kind = 'view' AND target_id = old.id;
 END;";
 
+/// A task's estimate, when it was marked done, and the person it is for.
+/// A done task takes its completion from the last time its history moved
+/// it to done, or else from when its status last changed. The history
+/// widens to the new fields, every row and rowid kept, and the change
+/// stream reports them.
+pub const TASK_COLUMNS_MIGRATION: &str = "ALTER TABLE planning_tasks ADD COLUMN estimate INTEGER
+    CHECK(estimate IS NULL OR estimate BETWEEN 0 AND 64);
+ALTER TABLE planning_tasks ADD COLUMN completed_at_ms INTEGER;
+ALTER TABLE planning_tasks ADD COLUMN for_person_id TEXT;
+UPDATE planning_tasks SET completed_at_ms = coalesce(
+    (SELECT max(a.at_ms) FROM planning_task_activity a
+     WHERE a.task_id = planning_tasks.id AND a.to_value = 'done'
+       AND a.kind IN ('created', 'status', 'accepted')),
+    status_changed_at_ms)
+WHERE status = 'done';
+CREATE TABLE planning_task_activity_next (
+    id TEXT PRIMARY KEY NOT NULL,
+    task_id TEXT NOT NULL,
+    at_ms INTEGER NOT NULL,
+    actor TEXT NOT NULL CHECK(actor IN ('me', 'sona', 'agent')),
+    kind TEXT NOT NULL CHECK(kind IN ('created', 'status', 'priority', 'owner', 'due', 'project',
+        'title', 'details', 'labels', 'archived', 'restored', 'duplicate', 'accepted', 'declined',
+        'snoozed', 'relation', 'kept', 'recurrence', 'cycle', 'block', 'parent', 'comment',
+        'attachment', 'estimate', 'for_person')),
+    from_value TEXT,
+    to_value TEXT
+);
+INSERT INTO planning_task_activity_next (rowid, id, task_id, at_ms, actor, kind, from_value, to_value)
+    SELECT rowid, id, task_id, at_ms, actor, kind, from_value, to_value FROM planning_task_activity;
+DROP TABLE planning_task_activity;
+ALTER TABLE planning_task_activity_next RENAME TO planning_task_activity;
+CREATE INDEX planning_task_activity_task ON planning_task_activity(task_id, at_ms, id);
+DROP TRIGGER planning_changes_task_update;
+CREATE TRIGGER planning_changes_task_update AFTER UPDATE ON planning_tasks
+WHEN old.title IS NOT new.title OR old.details IS NOT new.details OR old.status IS NOT new.status
+    OR old.priority IS NOT new.priority OR old.owner_person_id IS NOT new.owner_person_id
+    OR old.owner_is_self IS NOT new.owner_is_self OR old.due_at_ms IS NOT new.due_at_ms
+    OR old.project_id IS NOT new.project_id OR old.milestone_id IS NOT new.milestone_id
+    OR old.snoozed_until_ms IS NOT new.snoozed_until_ms
+    OR old.archived_at_ms IS NOT new.archived_at_ms OR old.duplicate_of IS NOT new.duplicate_of
+    OR old.recurrence IS NOT new.recurrence OR old.cycle IS NOT new.cycle
+    OR old.parent_id IS NOT new.parent_id OR old.trashed_at_ms IS NOT new.trashed_at_ms
+    OR old.estimate IS NOT new.estimate OR old.for_person_id IS NOT new.for_person_id
+BEGIN
+    INSERT INTO planning_changes (at_ms, entity, entity_id, task_id, action, updated_from, data)
+    SELECT CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER), 'task', new.id, new.id,
+        'update', json_group_object(field, value),
+        json_object('number', new.number, 'title', new.title)
+    FROM (
+        SELECT 'title' AS field, old.title AS value WHERE old.title IS NOT new.title
+        UNION ALL SELECT 'description', old.details WHERE old.details IS NOT new.details
+        UNION ALL SELECT 'status', old.status WHERE old.status IS NOT new.status
+        UNION ALL SELECT 'priority', old.priority WHERE old.priority IS NOT new.priority
+        UNION ALL SELECT 'owner', CASE WHEN old.owner_is_self THEN 'me' ELSE old.owner_person_id END
+            WHERE old.owner_person_id IS NOT new.owner_person_id
+               OR old.owner_is_self IS NOT new.owner_is_self
+        UNION ALL SELECT 'due_at_ms', old.due_at_ms WHERE old.due_at_ms IS NOT new.due_at_ms
+        UNION ALL SELECT 'project_id', old.project_id WHERE old.project_id IS NOT new.project_id
+        UNION ALL SELECT 'milestone_id', old.milestone_id
+            WHERE old.milestone_id IS NOT new.milestone_id
+        UNION ALL SELECT 'snoozed_until_ms', old.snoozed_until_ms
+            WHERE old.snoozed_until_ms IS NOT new.snoozed_until_ms
+        UNION ALL SELECT 'archived_at_ms', old.archived_at_ms
+            WHERE old.archived_at_ms IS NOT new.archived_at_ms
+        UNION ALL SELECT 'duplicate_of', old.duplicate_of
+            WHERE old.duplicate_of IS NOT new.duplicate_of
+        UNION ALL SELECT 'recurrence', old.recurrence WHERE old.recurrence IS NOT new.recurrence
+        UNION ALL SELECT 'cycle', old.cycle WHERE old.cycle IS NOT new.cycle
+        UNION ALL SELECT 'parent_id', old.parent_id WHERE old.parent_id IS NOT new.parent_id
+        UNION ALL SELECT 'trashed_at_ms', old.trashed_at_ms
+            WHERE old.trashed_at_ms IS NOT new.trashed_at_ms
+        UNION ALL SELECT 'estimate', old.estimate WHERE old.estimate IS NOT new.estimate
+        UNION ALL SELECT 'for_person_id', old.for_person_id
+            WHERE old.for_person_id IS NOT new.for_person_id
+    );
+END;";
+
 /// Every planner migration in order, for tests that build the schema without
 /// the rest of the history database.
 #[cfg(test)]
@@ -887,6 +964,21 @@ pub(crate) fn apply_all(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
         crate::planning::work::changes::PROJECT_LEAD_CHANGES_MIGRATION,
         crate::planning::work::loops::LOOPS_MIGRATION,
         crate::planning::work::triage_hints::DISMISSED_HINTS_MIGRATION,
+        crate::planning::work::inbox::INBOX_NOTICES_MIGRATION,
+        crate::planning::work::agents::VIA_MIGRATION,
+        crate::planning::work::favorites::FAVORITE_FOLDERS_MIGRATION,
+        crate::planning::work::cycles::AUTO_ADD_MIGRATION,
+        crate::planning::work::comments::SUBJECTS_MIGRATION,
+        crate::planning::work::attachments::METADATA_MIGRATION,
+        TASK_COLUMNS_MIGRATION,
+        crate::planning::work::changes::COVERAGE_MIGRATION,
+        crate::planning::catalog::PROJECT_CORE_MIGRATION,
+        crate::planning::work::changes::PROJECT_FIELDS_CHANGES_MIGRATION,
+        crate::planning::dependencies::DEPENDENCIES_MIGRATION,
+        crate::planning::work::inbox::DIGEST_NOTICES_MIGRATION,
+        crate::planning::work::project_templates::PROJECT_TEMPLATES_MIGRATION,
+        crate::planning::work::initiatives::INITIATIVES_MIGRATION,
+        crate::planning::work::changes::INITIATIVE_CHANGES_MIGRATION,
     ] {
         conn.execute_batch(migration)?;
     }

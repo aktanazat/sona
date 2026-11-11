@@ -1,5 +1,6 @@
 use super::{
-    pick_person, Board, Fence, ShowArgs, TaskRef, WorkCommand, WorkPersonChoice, WorkVerb,
+    cursor, page, pick_person, project_task, Board, Fence, OrderArg, PageArgs, ShowArgs,
+    TaskField, TaskRef, WorkCommand, WorkPersonChoice, WorkVerb,
 };
 use crate::cli::{CliArgs, Command};
 use crate::meeting::processing::MeetingLivePromise;
@@ -13,9 +14,9 @@ use crate::planning::work::types::{
     WorkPatch, WorkSource, WorkStatus,
 };
 use crate::query::KeptLocal;
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use rusqlite::Connection;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use uuid::Uuid;
 
 const KEPT_MEETING: &str = "1e1a5f0e-0000-4000-8000-000000000001";
@@ -75,6 +76,33 @@ fn a_task_is_named_by_handle_number_or_id() {
     );
 }
 
+/// An agent with read access only can rehearse claiming, marking a duplicate,
+/// taking answer lines and watching a phrase; the real run still needs write
+/// access.
+#[test]
+fn a_dry_run_of_a_claim_duplicate_take_or_watch_needs_only_read_access() {
+    use crate::query::external::{READ_SCOPES, WRITE_SCOPES};
+    let scopes = |argv: &[&str]| match CliArgs::try_parse_from(["sona", "work"].iter().chain(argv)) {
+        Ok(CliArgs {
+            command: Some(Command::Work(WorkCommand { verb, .. })),
+            ..
+        }) => verb.required_scopes(),
+        other => panic!("`work {argv:?}` parsed as {other:?}"),
+    };
+    let writes: [&[&str]; 5] = [
+        &["claim", "S-1", "--agent", "Codex"],
+        &["duplicate", "S-1", "--of", "S-2"],
+        &["ask", "pricing", "--take", "1"],
+        &["watch", "pricing"],
+        &["unwatch", "pricing"],
+    ];
+    for argv in writes {
+        assert_eq!(scopes(argv), WRITE_SCOPES, "{argv:?}");
+        let rehearsed = [argv, &["--dry-run"]].concat();
+        assert_eq!(scopes(&rehearsed), READ_SCOPES, "{rehearsed:?}");
+    }
+}
+
 /// A saved view shows its due windows as --due takes them, so an agent can
 /// copy one into a list; a window of no days is refused, not read as none.
 #[test]
@@ -125,6 +153,9 @@ fn task() -> WorkItem {
         sort_order: 0.0,
         cycle: None,
         parent_id: None,
+        estimate: None,
+        completed_at_ms: None,
+        for_person_id: None,
     }
 }
 
@@ -412,4 +443,78 @@ fn a_person_is_found_by_an_alias_and_a_shared_part_of_a_name_is_refused() {
     assert_eq!(found("p2").ok(), Some("p2"));
     assert!(found("Dan").is_err(), "both Daniel and Dana contain it");
     assert!(found("Priya").is_err());
+}
+
+/// An agent reading a long list a page at a time, passing each page's
+/// next_cursor back, gets every task once, in the order one long page has.
+#[test]
+fn paging_with_the_cursor_reads_every_task_once_in_order() {
+    let shapes = [
+        (0, Some(3_000), 5, 2.0),
+        (2, None, 5, 1.0),
+        (1, Some(1_000), 3, 2.0),
+        (2, Some(3_000), 9, -1.0),
+        (0, None, 1, 0.5),
+        (3, Some(1_000), 5, 2.0),
+        (2, None, 7, 1.0),
+    ];
+    let rows: Vec<WorkItemRow> = shapes
+        .iter()
+        .zip(1..)
+        .map(|(&(priority, due_at_ms, at, sort_order), number)| {
+            row(WorkItem {
+                number,
+                priority,
+                due_at_ms,
+                created_at_ms: at,
+                updated_at_ms: at,
+                sort_order,
+                ..task()
+            })
+        })
+        .collect();
+    let board = board(rows.clone(), Vec::new());
+    for order in OrderArg::value_variants() {
+        let paging = |limit, cursor| PageArgs {
+            limit: Some(limit),
+            order_by: Some(*order),
+            cursor,
+            fields: Vec::new(),
+        };
+        let numbers = |listed: &super::ExternalWorkPage| -> Vec<i64> {
+            listed.entries.tasks.iter().map(|task| task.number).collect()
+        };
+        let whole = numbers(&page(rows.clone(), &paging(100, None), &board).expect("one page"));
+        let mut paged = Vec::new();
+        let mut after = None;
+        for _ in 0..rows.len() {
+            let listed = page(rows.clone(), &paging(2, after), &board).expect("a page");
+            paged.extend(numbers(&listed));
+            match listed.next_cursor {
+                Some(text) => after = Some(cursor(&text).expect("the cursor reads back")),
+                None => break,
+            }
+        }
+        assert_eq!(paged, whole, "{order:?}");
+    }
+}
+
+/// --fields offers exactly the keys a task has in JSON, so every field can
+/// be asked for and no offered name trims a task down to nothing.
+#[test]
+fn the_fields_a_list_offers_are_the_keys_of_a_task() {
+    let board = board(vec![row(task())], Vec::new());
+    let shown = serde_json::to_value(project_task(&board.rows[0], &board)).expect("a task");
+    let keys: BTreeSet<String> = shown
+        .as_object()
+        .expect("a task is an object")
+        .keys()
+        .cloned()
+        .collect();
+    let offered: BTreeSet<String> = TaskField::value_variants()
+        .iter()
+        .filter_map(ValueEnum::to_possible_value)
+        .map(|value| value.get_name().to_owned())
+        .collect();
+    assert_eq!(offered, keys);
 }

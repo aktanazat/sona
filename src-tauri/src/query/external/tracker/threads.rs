@@ -1,19 +1,28 @@
-//! `sona work` verbs for comments on a task and for sub-tasks.
+//! `sona work` verbs for comments on a task, a project, a milestone, a
+//! meeting or a note, and for sub-tasks.
 
+use super::catalog::pick_milestone;
+use super::roadmap::ExternalProjectRef;
 use super::{
     handle, now_ms, refusal, status_text, task_ref, task_ref_of, Board, ExternalFieldChange,
     ExternalWorkChange, ExternalWorkPlanned, ExternalWorkPreview, ExternalWorkRef, Priority,
     TaskRef, Tracker, WorkAction, WorkAnswer, WriteArgs,
 };
+use crate::meeting::types::MeetingSessionId;
 use crate::planning;
+use crate::planning::store as plans;
 use crate::planning::work::agents;
 use crate::planning::work::comments::{self, Author};
-use crate::planning::work::types::{WorkActor, WorkComment, WorkItemInput, WorkOwner};
+use crate::planning::work::types::{
+    WorkActor, WorkComment, WorkCommentSubject, WorkItemInput, WorkOwner, WorkPatch,
+};
 use crate::planning::work::{self};
-use crate::query::external::{local_time, ExternalError, ExternalErrorCode};
+use crate::planning::{Milestone, Project};
+use crate::query::external::{local_time, review, store, ExternalError, ExternalErrorCode};
 use crate::query::QUERY_SCHEMA_VERSION;
+use crate::scratchpad;
 use chrono::{Local, NaiveDate};
-use clap::{Args, Subcommand};
+use clap::{ArgGroup, Args, Subcommand};
 use serde::Serialize;
 use std::fmt::Write as _;
 use uuid::Uuid;
@@ -40,7 +49,8 @@ pub struct CommentCommand {
 
 #[derive(Subcommand, Clone, Debug, Eq, PartialEq)]
 pub enum CommentVerb {
-    /// Comment on a task, or reply in a thread with --reply-to.
+    /// Comment on a task, a project, a milestone, a meeting or a note, or
+    /// reply in a thread with --reply-to.
     Add(CommentAddArgs),
     /// Change a comment you wrote.
     Edit(CommentEditArgs),
@@ -50,11 +60,31 @@ pub enum CommentVerb {
     Resolve(CommentResolveArgs),
 }
 
+/// What the threads are on when it is not a task.
+#[derive(Args, Clone, Debug, Default, Eq, PartialEq)]
+pub struct CommentOnArgs {
+    /// A project's name or id.
+    #[arg(long, value_name = "PROJECT")]
+    pub project: Option<String>,
+    /// With --project, one of its milestones by name or id.
+    #[arg(long, requires = "project", value_name = "MILESTONE")]
+    pub milestone: Option<String>,
+    /// A meeting's id. A meeting kept on this Mac reads as absent.
+    #[arg(long, value_name = "MEETING_ID")]
+    pub meeting: Option<Uuid>,
+    /// A note's id.
+    #[arg(long, value_name = "NOTE_ID")]
+    pub note: Option<Uuid>,
+}
+
 #[derive(Args, Clone, Debug, Eq, PartialEq)]
+#[command(group(ArgGroup::new("on").required(true).args(["task", "project", "meeting", "note"])))]
 pub struct CommentAddArgs {
     /// S-12, 12, or the task's id.
     #[arg(value_parser = task_ref, value_name = "TASK")]
-    pub task: TaskRef,
+    pub task: Option<TaskRef>,
+    #[command(flatten)]
+    pub on: CommentOnArgs,
     /// The comment, in Markdown.
     #[arg(long)]
     pub body: String,
@@ -69,12 +99,13 @@ pub struct CommentAddArgs {
 }
 
 impl CommentAddArgs {
-    /// The caller's id, or one derived from the task, the thread, the
-    /// trimmed text and `day`: a retry that day posts the comment once.
-    fn operation_id(&self, task_id: &str, day: NaiveDate) -> Result<String, ExternalError> {
+    /// The caller's id, or one derived from what the comment is on, the
+    /// thread, the trimmed text and `day`: a retry that day posts the
+    /// comment once.
+    fn operation_id(&self, subject_id: &str, day: NaiveDate) -> Result<String, ExternalError> {
         self.write.operation_id(
             "comment",
-            &(task_id, self.reply_to, self.body.trim(), day.to_string()),
+            &(subject_id, self.reply_to, self.body.trim(), day.to_string()),
         )
     }
 }
@@ -118,10 +149,13 @@ pub struct CommentResolveArgs {
 }
 
 #[derive(Args, Clone, Debug, Eq, PartialEq)]
+#[command(group(ArgGroup::new("on").required(true).args(["task", "project", "meeting", "note"])))]
 pub struct CommentsArgs {
     /// S-12, 12, or the task's id.
     #[arg(value_parser = task_ref, value_name = "TASK")]
-    pub task: TaskRef,
+    pub task: Option<TaskRef>,
+    #[command(flatten)]
+    pub on: CommentOnArgs,
     /// Threads to print, at most 100.
     #[arg(long, value_parser = clap::value_parser!(u32).range(1..=100))]
     pub limit: Option<u32>,
@@ -136,8 +170,16 @@ pub struct SubtaskArgs {
     #[arg(value_parser = task_ref, value_name = "PARENT")]
     pub parent: TaskRef,
     /// One title per sub-task.
-    #[arg(required = true, value_name = "TITLE")]
+    #[arg(
+        required_unless_present = "from_checklist",
+        conflicts_with = "from_checklist",
+        value_name = "TITLE"
+    )]
     pub titles: Vec<String>,
+    /// Turn the open `- [ ]` lines of the parent's description into
+    /// sub-tasks, and take them out of the description.
+    #[arg(long)]
+    pub from_checklist: bool,
     /// me, nobody, or a person's name or id. Left out: you when the parent is
     /// yours, else the owner its sub-tasks share.
     #[arg(long)]
@@ -159,12 +201,25 @@ pub struct ExternalCommentAuthor {
     pub name: Option<String>,
 }
 
+/// The id of what a comment is on, under its kind's key: `task_id`,
+/// `project_id`, `milestone_id`, `meeting_id` or `note_id`.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExternalCommentOnId {
+    TaskId(String),
+    ProjectId(String),
+    MilestoneId(String),
+    MeetingId(String),
+    NoteId(String),
+}
+
 /// One comment. A thread's first comment carries its replies and whether
 /// the thread is resolved.
 #[derive(Clone, Debug, Serialize)]
 pub struct ExternalWorkComment {
     pub id: String,
-    pub task_id: String,
+    #[serde(flatten)]
+    pub on: ExternalCommentOnId,
     /// The thread's first comment, for a reply.
     pub reply_to: Option<String>,
     pub author: ExternalCommentAuthor,
@@ -178,9 +233,16 @@ pub struct ExternalWorkComment {
 }
 
 pub(super) fn project_comment(comment: WorkComment) -> ExternalWorkComment {
+    let id = comment.item_id;
     ExternalWorkComment {
         id: comment.id,
-        task_id: comment.item_id,
+        on: match comment.subject {
+            WorkCommentSubject::Task => ExternalCommentOnId::TaskId(id),
+            WorkCommentSubject::Project => ExternalCommentOnId::ProjectId(id),
+            WorkCommentSubject::Milestone => ExternalCommentOnId::MilestoneId(id),
+            WorkCommentSubject::Meeting => ExternalCommentOnId::MeetingId(id),
+            WorkCommentSubject::Note => ExternalCommentOnId::NoteId(id),
+        },
         reply_to: comment.parent_id,
         author: ExternalCommentAuthor {
             kind: comment.author.kind,
@@ -196,9 +258,35 @@ pub(super) fn project_comment(comment: WorkComment) -> ExternalWorkComment {
 }
 
 #[derive(Clone, Debug, Serialize)]
+pub struct ExternalCommentSubjectRef {
+    pub id: String,
+    pub title: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ExternalCommentMilestoneRef {
+    pub id: String,
+    pub name: String,
+    pub project: ExternalProjectRef,
+}
+
+/// What threads are on, under its kind's key: `task`, `project`,
+/// `milestone`, `meeting` or `note`.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExternalCommentOn {
+    Task(ExternalWorkRef),
+    Project(ExternalProjectRef),
+    Milestone(ExternalCommentMilestoneRef),
+    Meeting(ExternalCommentSubjectRef),
+    Note(ExternalCommentSubjectRef),
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub struct ExternalWorkComments {
     pub schema_version: u32,
-    pub task: ExternalWorkRef,
+    #[serde(flatten)]
+    pub on: ExternalCommentOn,
     /// Threads oldest first.
     pub threads: Vec<ExternalWorkComment>,
     /// Pass as --cursor for the next page; none on the last.
@@ -222,7 +310,8 @@ pub struct ExternalWorkCommentChange {
     pub dry_run: bool,
     /// Absent on a dry run that names none.
     pub operation_id: Option<String>,
-    pub task: ExternalWorkRef,
+    #[serde(flatten)]
+    pub on: ExternalCommentOn,
     /// The comment as it is now, or for a dry run as it would be; for
     /// resolve, the thread. Absent on a dry run of add.
     pub comment: Option<ExternalWorkComment>,
@@ -234,6 +323,60 @@ fn missing_comment(id: &Uuid) -> ExternalError {
     ExternalError::new(ExternalErrorCode::NotFound, format!("No comment {id}."))
 }
 
+/// What a comment is on, as the caller may see it.
+struct Subject {
+    kind: WorkCommentSubject,
+    id: String,
+    on: ExternalCommentOn,
+}
+
+impl Subject {
+    fn task(row: &super::WorkItemRow) -> Self {
+        Self {
+            kind: WorkCommentSubject::Task,
+            id: row.item.id.clone(),
+            on: ExternalCommentOn::Task(task_ref_of(row)),
+        }
+    }
+
+    fn project(project: &Project) -> Self {
+        Self {
+            kind: WorkCommentSubject::Project,
+            id: project.id.clone(),
+            on: ExternalCommentOn::Project(ExternalProjectRef {
+                id: project.id.clone(),
+                name: project.title.clone(),
+            }),
+        }
+    }
+
+    fn milestone(milestone: &Milestone, project: &Project) -> Self {
+        Self {
+            kind: WorkCommentSubject::Milestone,
+            id: milestone.id.clone(),
+            on: ExternalCommentOn::Milestone(ExternalCommentMilestoneRef {
+                id: milestone.id.clone(),
+                name: milestone.title.clone(),
+                project: ExternalProjectRef {
+                    id: project.id.clone(),
+                    name: project.title.clone(),
+                },
+            }),
+        }
+    }
+
+    /// "The task", "The project" and so on, for a refusal.
+    fn the(&self) -> &'static str {
+        match self.kind {
+            WorkCommentSubject::Task => "The task",
+            WorkCommentSubject::Project => "The project",
+            WorkCommentSubject::Milestone => "The milestone",
+            WorkCommentSubject::Meeting => "The meeting",
+            WorkCommentSubject::Note => "The note",
+        }
+    }
+}
+
 impl Tracker<'_> {
     fn author<'a>(write: &'a WriteArgs) -> Author<'a> {
         Author {
@@ -242,17 +385,123 @@ impl Tracker<'_> {
         }
     }
 
-    /// The comment and the task it is on, when that task is one the caller
-    /// may see.
-    fn comment_on<'b>(
+    /// What TASK or `on` names, refused when the caller may not see it.
+    async fn subject(
         &self,
-        board: &'b Board,
+        board: &Board,
+        task: Option<&TaskRef>,
+        on: &CommentOnArgs,
+    ) -> Result<Subject, ExternalError> {
+        if let Some(task) = task {
+            return Ok(Subject::task(board.task(task)?));
+        }
+        if let Some(project) = &on.project {
+            let projects = self.every_project()?;
+            let project = Self::pick_project(project, &projects)?;
+            return match &on.milestone {
+                Some(milestone) => {
+                    let milestones = self.milestones_of(project)?;
+                    Ok(Subject::milestone(
+                        pick_milestone(milestone, &milestones)?,
+                        project,
+                    ))
+                }
+                None => Ok(Subject::project(project)),
+            };
+        }
+        if let Some(meeting) = on.meeting {
+            return self
+                .meeting_subject(MeetingSessionId::from_uuid(meeting))
+                .await;
+        }
+        if let Some(note) = on.note {
+            return self.note_subject(&note.to_string())?.ok_or_else(|| {
+                ExternalError::new(ExternalErrorCode::NotFound, format!("No note {note}."))
+            });
+        }
+        Err(ExternalError::invalid(
+            "Name a task, or pass --project, --meeting or --note.",
+        ))
+    }
+
+    /// A meeting the caller may see; one kept on this Mac reads as absent.
+    async fn meeting_subject(&self, session_id: MeetingSessionId) -> Result<Subject, ExternalError> {
+        let store = store(self.meetings).await?;
+        let review = review(&store, session_id)?;
+        let id = session_id.uuid().to_string();
+        Ok(Subject {
+            kind: WorkCommentSubject::Meeting,
+            id: id.clone(),
+            on: ExternalCommentOn::Meeting(ExternalCommentSubjectRef {
+                id,
+                title: review.session.title,
+            }),
+        })
+    }
+
+    fn note_subject(&self, id: &str) -> Result<Option<Subject>, ExternalError> {
+        let note = planning::history(self.history, |conn| {
+            scratchpad::note_with_connection(conn, id)
+        })
+        .map_err(|message| refusal(self.history, message))?;
+        Ok(note.map(|note| Subject {
+            kind: WorkCommentSubject::Note,
+            id: note.id.clone(),
+            on: ExternalCommentOn::Note(ExternalCommentSubjectRef {
+                id: note.id,
+                title: note.title,
+            }),
+        }))
+    }
+
+    /// What `comment` is on, when the caller may see it.
+    async fn subject_of(
+        &self,
+        board: &Board,
+        comment: &WorkComment,
+    ) -> Result<Option<Subject>, ExternalError> {
+        let id = comment.item_id.as_str();
+        Ok(match comment.subject {
+            WorkCommentSubject::Task => board.row(id).map(Subject::task),
+            WorkCommentSubject::Project => planning::history(self.history, |conn| {
+                plans::project(conn, id)
+            })
+            .ok()
+            .map(|project| Subject::project(&project)),
+            WorkCommentSubject::Milestone => planning::history(self.history, |conn| {
+                let milestone = plans::milestone(conn, id)?;
+                let project = plans::project(conn, &milestone.project_id)?;
+                Ok((milestone, project))
+            })
+            .ok()
+            .map(|(milestone, project)| Subject::milestone(&milestone, &project)),
+            WorkCommentSubject::Meeting => match Uuid::parse_str(id) {
+                Ok(uuid) => match self
+                    .meeting_subject(MeetingSessionId::from_uuid(uuid))
+                    .await
+                {
+                    Ok(subject) => Some(subject),
+                    Err(error) if error.error == ExternalErrorCode::NotFound => None,
+                    Err(error) => return Err(error),
+                },
+                Err(_) => None,
+            },
+            WorkCommentSubject::Note => self.note_subject(id)?,
+        })
+    }
+
+    /// The comment and what it is on, when that is something the caller
+    /// may see.
+    async fn comment_on(
+        &self,
+        board: &Board,
         id: &Uuid,
-    ) -> Result<(WorkComment, &'b super::WorkItemRow), ExternalError> {
+    ) -> Result<(WorkComment, Subject), ExternalError> {
         let found = planning::history(self.history, |conn| comments::thread(conn, &id.to_string()))
             .map_err(|_| missing_comment(id))?;
-        let row = board
-            .row(&found.item_id)
+        let subject = self
+            .subject_of(board, &found)
+            .await?
             .ok_or_else(|| missing_comment(id))?;
         let comment = if found.id == id.to_string() {
             found
@@ -263,14 +512,14 @@ impl Tracker<'_> {
                 .find(|reply| reply.id == id.to_string())
                 .ok_or_else(|| missing_comment(id))?
         };
-        Ok((comment, row))
+        Ok((comment, subject))
     }
 
     fn comment_change(
         action: CommentAction,
         dry_run: bool,
         operation_id: Option<String>,
-        row: &super::WorkItemRow,
+        on: ExternalCommentOn,
         comment: Option<WorkComment>,
         replayed: bool,
     ) -> WorkAnswer {
@@ -279,7 +528,7 @@ impl Tracker<'_> {
             action,
             dry_run,
             operation_id,
-            task: task_ref_of(row),
+            on,
             comment: comment.map(project_comment),
             replayed,
         }))
@@ -287,19 +536,19 @@ impl Tracker<'_> {
 
     pub(super) async fn comments(&self, args: &CommentsArgs) -> Result<WorkAnswer, ExternalError> {
         let board = self.board().await?;
-        let row = board.task(&args.task)?;
+        let subject = self.subject(&board, args.task.as_ref(), &args.on).await?;
         let limit = args
             .limit
             .and_then(|limit| usize::try_from(limit).ok())
             .unwrap_or(comments::PAGE);
         let cursor = args.cursor.map(|cursor| cursor.to_string());
         let page = planning::history(self.history, |conn| {
-            comments::page(conn, &row.item.id, limit, cursor.as_deref())
+            comments::page(conn, subject.kind, &subject.id, limit, cursor.as_deref())
         })
         .map_err(|message| refusal(self.history, message))?;
         Ok(WorkAnswer::Comments(ExternalWorkComments {
             schema_version: QUERY_SCHEMA_VERSION,
-            task: task_ref_of(row),
+            on: subject.on,
             threads: page.threads.into_iter().map(project_comment).collect(),
             next_cursor: page.next_cursor,
         }))
@@ -310,22 +559,22 @@ impl Tracker<'_> {
         args: &CommentAddArgs,
     ) -> Result<WorkAnswer, ExternalError> {
         let board = self.board().await?;
-        let row = board.task(&args.task)?;
+        let subject = self.subject(&board, args.task.as_ref(), &args.on).await?;
         if let Some(reply_to) = &args.reply_to {
-            let (to, _) = self.comment_on(&board, reply_to)?;
-            if to.item_id != row.item.id {
+            let (to, _) = self.comment_on(&board, reply_to).await?;
+            if to.subject != subject.kind || to.item_id != subject.id {
                 return Err(ExternalError::invalid(format!(
-                    "Comment {reply_to} is on another task."
+                    "Comment {reply_to} is on something else."
                 )));
             }
         }
-        let operation_id = args.operation_id(&row.item.id, Local::now().date_naive())?;
+        let operation_id = args.operation_id(&subject.id, Local::now().date_naive())?;
         if args.dry_run {
             return Ok(Self::comment_change(
                 CommentAction::Added,
                 true,
                 Some(operation_id),
-                row,
+                subject.on,
                 None,
                 false,
             ));
@@ -336,17 +585,18 @@ impl Tracker<'_> {
             self.app,
             Self::author(&args.write),
             &operation_id,
-            &row.item.id,
+            subject.kind,
+            &subject.id,
             &args.body,
             reply_to.as_deref(),
         )
-        .map_err(|message| self.write_refusal(message, &operation_id, "The task"))?;
+        .map_err(|message| self.write_refusal(message, &operation_id, subject.the()))?;
         let replayed = comment.created_at_ms < started_ms;
         Ok(Self::comment_change(
             CommentAction::Added,
             false,
             Some(operation_id),
-            row,
+            subject.on,
             Some(comment),
             replayed,
         ))
@@ -357,7 +607,7 @@ impl Tracker<'_> {
         args: &CommentEditArgs,
     ) -> Result<WorkAnswer, ExternalError> {
         let board = self.board().await?;
-        let (comment, row) = self.comment_on(&board, &args.comment)?;
+        let (comment, subject) = self.comment_on(&board, &args.comment).await?;
         let operation_id = args.write.operation_id(
             "comment-edit",
             &(&comment.id, comment.edited_at_ms, args.body.trim()),
@@ -371,7 +621,7 @@ impl Tracker<'_> {
                 CommentAction::Edited,
                 true,
                 Some(operation_id),
-                row,
+                subject.on,
                 Some(edited),
                 false,
             ));
@@ -388,7 +638,7 @@ impl Tracker<'_> {
             CommentAction::Edited,
             false,
             Some(operation_id),
-            row,
+            subject.on,
             Some(comment),
             false,
         ))
@@ -399,14 +649,14 @@ impl Tracker<'_> {
         args: &CommentDeleteArgs,
     ) -> Result<WorkAnswer, ExternalError> {
         let board = self.board().await?;
-        let (comment, row) = self.comment_on(&board, &args.comment)?;
+        let (comment, subject) = self.comment_on(&board, &args.comment).await?;
         let operation_id = args.write.operation_id("comment-delete", &comment.id)?;
         if args.dry_run {
             return Ok(Self::comment_change(
                 CommentAction::Deleted,
                 true,
                 Some(operation_id),
-                row,
+                subject.on,
                 Some(comment),
                 false,
             ));
@@ -422,7 +672,7 @@ impl Tracker<'_> {
             CommentAction::Deleted,
             false,
             Some(operation_id),
-            row,
+            subject.on,
             Some(comment),
             false,
         ))
@@ -438,7 +688,7 @@ impl Tracker<'_> {
             CommentAction::Resolved
         };
         let board = self.board().await?;
-        let (comment, row) = self.comment_on(&board, &args.comment)?;
+        let (comment, subject) = self.comment_on(&board, &args.comment).await?;
         let thread = planning::history(self.history, |conn| comments::thread(conn, &comment.id))
             .map_err(|message| refusal(self.history, message))?;
         let operation_id = args.write.operation_id(
@@ -458,7 +708,7 @@ impl Tracker<'_> {
                 action,
                 true,
                 Some(operation_id),
-                row,
+                subject.on,
                 Some(would),
                 false,
             ));
@@ -480,7 +730,7 @@ impl Tracker<'_> {
             action,
             false,
             Some(operation_id),
-            row,
+            subject.on,
             Some(thread),
             false,
         ))
@@ -494,8 +744,19 @@ impl Tracker<'_> {
             .as_deref()
             .map(|owner| board.owner(owner))
             .transpose()?;
-        let inputs: Vec<WorkItemInput> = args
-            .titles
+        let (titles, kept) = if args.from_checklist {
+            let (titles, kept) = checklist(parent.item.details.as_deref().unwrap_or_default());
+            if titles.is_empty() {
+                return Err(ExternalError::invalid(format!(
+                    "{}'s description has no open checklist lines (- [ ] ...).",
+                    handle(parent.item.number)
+                )));
+            }
+            (titles, Some(kept))
+        } else {
+            (args.titles.clone(), None)
+        };
+        let inputs: Vec<WorkItemInput> = titles
             .iter()
             .map(|title| WorkItemInput {
                 title: title.trim().to_owned(),
@@ -510,6 +771,10 @@ impl Tracker<'_> {
                 recurrence: None,
             })
             .collect();
+        let stripped = kept.map(|kept| WorkPatch {
+            details: Some(Some(kept).filter(|kept| !kept.is_empty())),
+            ..WorkPatch::default()
+        });
         if inputs.iter().any(|input| input.title.is_empty()) {
             return Err(ExternalError::invalid("A sub-task needs a title."));
         }
@@ -521,7 +786,7 @@ impl Tracker<'_> {
             let inherited = owner
                 .clone()
                 .unwrap_or_else(|| board.inherited_owner(parent));
-            let changes = inputs
+            let mut changes: Vec<ExternalWorkPlanned> = inputs
                 .iter()
                 .map(|input| ExternalWorkPlanned {
                     id: String::new(),
@@ -559,6 +824,9 @@ impl Tracker<'_> {
                     skipped: None,
                 })
                 .collect();
+            if let Some(stripped) = &stripped {
+                changes.push(board.planned(parent, stripped, None));
+            }
             return Ok(WorkAnswer::Preview(ExternalWorkPreview {
                 schema_version: QUERY_SCHEMA_VERSION,
                 dry_run: true,
@@ -579,6 +847,26 @@ impl Tracker<'_> {
         .map_err(|message| {
             self.write_refusal(message, &operation_id, &handle(parent.item.number))
         })?;
+        if let Some(stripped) = &stripped {
+            let checklist_operation =
+                Uuid::new_v5(&Uuid::NAMESPACE_OID, format!("{operation_id}/checklist").as_bytes())
+                    .to_string();
+            agents::update_as(
+                self.app,
+                &args.write.agent(),
+                &checklist_operation,
+                agents::ItemChange {
+                    id: &parent.item.id,
+                    expected_revision: parent.item.revision,
+                    patch: stripped,
+                    link: None,
+                },
+            )
+            .await
+            .map_err(|message| {
+                self.write_refusal(message, &checklist_operation, &handle(parent.item.number))
+            })?;
+        }
         let replayed = items.iter().all(|item| item.created_at_ms < started_ms);
         Ok(WorkAnswer::Change(ExternalWorkChange {
             schema_version: QUERY_SCHEMA_VERSION,
@@ -594,6 +882,26 @@ impl Tracker<'_> {
             evidence_url: None,
         }))
     }
+}
+
+/// The open checklist lines of `details` (`- [ ] title`, also with `*` or
+/// `+`) as titles, and the details without them.
+fn checklist(details: &str) -> (Vec<String>, String) {
+    let mut titles = Vec::new();
+    let mut kept = Vec::new();
+    for line in details.lines() {
+        let open = line
+            .trim_start()
+            .strip_prefix(['-', '*', '+'])
+            .and_then(|rest| rest.strip_prefix(" [ ]"))
+            .map(str::trim)
+            .filter(|title| !title.is_empty());
+        match open {
+            Some(title) => titles.push(title.to_owned()),
+            None => kept.push(line),
+        }
+    }
+    (titles, kept.join("\n").trim().to_owned())
 }
 
 impl Board {
@@ -680,16 +988,33 @@ pub(super) fn threads_text(text: &mut String, threads: &[ExternalWorkComment]) {
     }
 }
 
+/// What threads are on, as a line names it.
+fn on_text(on: &ExternalCommentOn) -> String {
+    match on {
+        ExternalCommentOn::Task(task) => format!("{} {}", task.handle, task.title),
+        ExternalCommentOn::Project(project) => format!("project {}", project.name),
+        ExternalCommentOn::Milestone(milestone) => format!(
+            "milestone {} in {}",
+            milestone.name, milestone.project.name
+        ),
+        ExternalCommentOn::Meeting(meeting) => format!("meeting {}", meeting.title),
+        ExternalCommentOn::Note(note) => format!("note {}", note.title),
+    }
+}
+
 pub(super) fn text(answer: &WorkAnswer, text: &mut String) {
     match answer {
         WorkAnswer::Comments(page) => {
-            let _ = writeln!(
-                text,
-                "{} {} ({})",
-                page.task.handle,
-                page.task.title,
-                status_text(page.task.status)
-            );
+            let _ = match &page.on {
+                ExternalCommentOn::Task(task) => writeln!(
+                    text,
+                    "{} {} ({})",
+                    task.handle,
+                    task.title,
+                    status_text(task.status)
+                ),
+                on => writeln!(text, "Comments on {}", on_text(on)),
+            };
             if page.threads.is_empty() {
                 text.push_str("No comments.\n");
             }
@@ -713,9 +1038,8 @@ pub(super) fn text(answer: &WorkAnswer, text: &mut String) {
             };
             let _ = writeln!(
                 text,
-                "{verb} {} {}{}",
-                change.task.handle,
-                change.task.title,
+                "{verb} {}{}",
+                on_text(&change.on),
                 if change.replayed {
                     " (already done)"
                 } else {

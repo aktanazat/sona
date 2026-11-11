@@ -1,8 +1,9 @@
 //! `sona work timeline`: projects on a time axis from their start to their
-//! target day, with the milestones that fall in the days shown.
+//! target day, with the milestones and cycles that fall in the days shown.
 
 use super::catalog::{ExternalWorkMilestone, ExternalWorkPersonRef};
-use super::{day_text, midnight, Tracker, WorkAnswer};
+use super::{day_text, midnight, project_cycle, refusal, ExternalWorkCycle, Tracker, WorkAnswer};
+use crate::planning::work::cycles;
 use crate::planning::ProjectStatus;
 use crate::query::external::ExternalError;
 use crate::query::QUERY_SCHEMA_VERSION;
@@ -34,6 +35,12 @@ pub struct ExternalWorkTimeline {
     /// Projects with neither a start nor a target day, which have no place
     /// on the axis.
     pub undated: Vec<ExternalWorkPersonRef>,
+    /// Cycles with a day between `from` and `to`, earliest first.
+    pub cycles: Vec<ExternalWorkCycle>,
+    /// Dependencies between the projects shown, each a line from the
+    /// blocker's end to the blocked project's start; broken when the
+    /// blocker ends after that start.
+    pub dependencies: Vec<super::dependencies::ExternalProjectDependency>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -115,13 +122,35 @@ impl Tracker<'_> {
                     .collect(),
             });
         }
+        let (first_day, last_day) = (
+            from.format("%Y-%m-%d").to_string(),
+            to.format("%Y-%m-%d").to_string(),
+        );
+        let cycles = cycles::work_cycles(self.app.clone())
+            .map_err(|message| refusal(self.history, message))?
+            .cycles
+            .iter()
+            .filter(|cycle| cycle.start_day <= last_day && cycle.end_day > first_day)
+            .map(project_cycle)
+            .collect();
+        let dependencies = self
+            .all_dependencies()?
+            .iter()
+            .filter(|dependency| {
+                let shows = |id: &String| shown.iter().any(|project| &project.id == id);
+                shows(&dependency.blocker_id) && shows(&dependency.blocked_id)
+            })
+            .map(|dependency| super::dependencies::external(dependency, &projects))
+            .collect();
         Ok(WorkAnswer::Timeline(ExternalWorkTimeline {
             schema_version: QUERY_SCHEMA_VERSION,
-            from: from.format("%Y-%m-%d").to_string(),
-            to: to.format("%Y-%m-%d").to_string(),
+            from: first_day,
+            to: last_day,
             today: today.format("%Y-%m-%d").to_string(),
             projects: shown,
             undated,
+            cycles,
+            dependencies,
         }))
     }
 }
@@ -160,5 +189,20 @@ pub(super) fn text(timeline: &ExternalWorkTimeline, text: &mut String) {
             .map(|project| project.name.as_str())
             .collect();
         let _ = writeln!(text, "No days set: {}", names.join(", "));
+    }
+    for dependency in &timeline.dependencies {
+        let _ = writeln!(text, "⤷ {}", super::dependencies::line(dependency));
+    }
+    for cycle in &timeline.cycles {
+        let _ = writeln!(
+            text,
+            "↻ {} · {} → {}",
+            cycle
+                .name
+                .clone()
+                .unwrap_or_else(|| format!("Cycle {}", cycle.number)),
+            cycle.first_day,
+            cycle.last_day
+        );
     }
 }

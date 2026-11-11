@@ -1,17 +1,19 @@
-//! Files, images and links on a task. A file is copied into Sona's data
-//! folder, `<root>/<task id>/<attachment id>-<safe name>`, so it outlives
-//! the original; the same bytes or the same link land on a task once.
+//! Files, images and links on a task, or on one of its comments. A file is
+//! copied into Sona's data folder, `<root>/<task id>/<attachment id>-<safe
+//! name>`, so it outlives the original; the same bytes or the same link
+//! land on a task once.
 
 use super::super::store::{self, Refusal};
+use super::agents;
 use super::comments::Author;
 use super::items;
 use super::types::{
-    WorkActivityKind, WorkActor, WorkAttachment, WorkAttachmentKind, WorkCommentAuthor,
+    WorkActivityKind, WorkActor, WorkAttachment, WorkAttachmentKind, WorkCommentAuthor, WorkVia,
 };
 use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -22,7 +24,15 @@ const MAX_NAME_CHARS: usize = 120;
 const LINK_SCHEMES: [&str; 4] = ["http", "https", "mailto", "sona"];
 
 const COLUMNS: &str = "id, task_id, kind, title, subtitle, url, stored_name, original_name, mime,
-    size, sha256, created_at_ms, created_by_kind, created_by_name";
+    size, sha256, created_at_ms, created_by_kind, created_by_name, metadata, comment_id";
+
+/// Key-value facts an integration keeps on an attachment, as a JSON object
+/// of strings, and the task comment a file was added with.
+pub(crate) const METADATA_MIGRATION: &str =
+    "ALTER TABLE planning_task_attachments ADD COLUMN metadata TEXT
+    CHECK(metadata IS NULL OR json_type(metadata) = 'object');
+ALTER TABLE planning_task_attachments ADD COLUMN comment_id TEXT
+    REFERENCES planning_task_comments(id) ON DELETE SET NULL;";
 
 /// A file's bytes copied into the staging folder and hashed, waiting to be
 /// moved under its task. Dropping it removes whatever is still staged.
@@ -215,6 +225,19 @@ fn read(root: &Path) -> impl Fn(&Row<'_>) -> rusqlite::Result<WorkAttachment> + 
                 kind: row.get(12)?,
                 name: row.get(13)?,
             },
+            metadata: row
+                .get::<_, Option<String>>(14)?
+                .map(|json| serde_json::from_str(&json))
+                .transpose()
+                .map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        14,
+                        rusqlite::types::Type::Text,
+                        error.into(),
+                    )
+                })?
+                .unwrap_or_default(),
+            comment_id: row.get(15)?,
         })
     }
 }
@@ -281,19 +304,54 @@ fn note(
     )?;
     if let Some(name) = author.name() {
         conn.execute(
-            "INSERT INTO planning_activity_agents (activity_id, agent) VALUES (?1, ?2)",
-            params![activity_id, name],
+            "INSERT INTO planning_activity_agents (activity_id, agent, via) VALUES (?1, ?2, ?3)",
+            params![activity_id, name, agents::via().map(WorkVia::as_str)],
         )?;
     }
     Ok(())
 }
 
-/// The title and subtitle a caller gives an attachment; left out, the
-/// title is the file's name or the link.
+/// What a caller says about an attachment: a title and subtitle (left out,
+/// the title is the file's name or the link), key-value metadata, and the
+/// task comment it goes on.
 #[derive(Clone, Copy, serde::Serialize)]
 pub(crate) struct Naming<'a> {
     pub(crate) title: Option<&'a str>,
     pub(crate) subtitle: Option<&'a str>,
+    pub(crate) metadata: Option<&'a BTreeMap<String, String>>,
+    pub(crate) comment_id: Option<&'a str>,
+}
+
+impl Naming<'_> {
+    /// The metadata as stored, refused when a key is blank.
+    fn metadata(&self) -> Result<Option<String>> {
+        let Some(metadata) = self.metadata.filter(|metadata| !metadata.is_empty()) else {
+            return Ok(None);
+        };
+        if metadata.keys().any(|key| key.trim().is_empty()) {
+            return Err(Refusal::Invalid.into());
+        }
+        Ok(Some(serde_json::to_string(metadata)?))
+    }
+
+    /// The comment as stored, refused as not found unless it is a comment on
+    /// `task_id` still there.
+    fn comment(&self, conn: &Connection, task_id: &str) -> Result<Option<String>> {
+        let Some(id) = self.comment_id else {
+            return Ok(None);
+        };
+        let id = store::uuid(id)?;
+        let found: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM planning_task_comments
+              WHERE id = ?1 AND task_id = ?2 AND deleted_at_ms IS NULL)",
+            params![id, task_id],
+            |row| row.get(0),
+        )?;
+        if !found {
+            return Err(Refusal::NotFound.into());
+        }
+        Ok(Some(id))
+    }
 }
 
 struct NewAttachment<'a> {
@@ -306,6 +364,8 @@ struct NewAttachment<'a> {
     mime: Option<&'a str>,
     size: Option<u64>,
     sha256: Option<&'a str>,
+    metadata: Option<&'a str>,
+    comment_id: Option<&'a str>,
 }
 
 fn insert(
@@ -319,8 +379,8 @@ fn insert(
     conn.execute(
         "INSERT INTO planning_task_attachments
             (id, task_id, kind, title, subtitle, url, stored_name, original_name, mime, size,
-             sha256, created_at_ms, created_by_kind, created_by_name)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+             sha256, created_at_ms, created_by_kind, created_by_name, metadata, comment_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
         params![
             id,
             task_id,
@@ -335,10 +395,35 @@ fn insert(
             new.sha256,
             now_ms,
             author.actor.as_str(),
-            author.name()
+            author.name(),
+            new.metadata,
+            new.comment_id
         ],
     )?;
     note(conn, task_id, author, None, Some(new.title), now_ms)
+}
+
+/// Answers `found`, the attachment already holding the same bytes or link,
+/// with `metadata` put in place of its own when the caller gives some. The
+/// user may replace any; an agent or Sona only its own.
+fn again(
+    conn: &Connection,
+    root: &Path,
+    found: WorkAttachment,
+    metadata: Option<&str>,
+    author: &Author<'_>,
+) -> Result<WorkAttachment> {
+    let Some(metadata) = metadata else {
+        return Ok(found);
+    };
+    if !owns(author, &found) {
+        return Err(Refusal::NotAttacher.into());
+    }
+    conn.execute(
+        "UPDATE planning_task_attachments SET metadata = ?2 WHERE id = ?1",
+        params![found.id, metadata],
+    )?;
+    find(conn, root, &found.id)
 }
 
 /// Records `staged` on the task as a new attachment, or answers the one
@@ -354,8 +439,10 @@ pub(crate) fn attach_file(
     now_ms: i64,
 ) -> Result<WorkAttachment> {
     let task_id = items::item(conn, &store::uuid(task_id)?)?.id;
+    let metadata = naming.metadata()?;
+    let comment_id = naming.comment(conn, &task_id)?;
     if let Some(found) = existing(conn, root, &task_id, "sha256", &staged.sha256)? {
-        return Ok(found);
+        return again(conn, root, found, metadata.as_deref(), &author);
     }
     let id = Uuid::new_v4().to_string();
     let stored_name = format!("{id}-{}", safe_name(&staged.name));
@@ -378,6 +465,8 @@ pub(crate) fn attach_file(
             mime: Some(staged.mime),
             size: Some(staged.size),
             sha256: Some(&staged.sha256),
+            metadata: metadata.as_deref(),
+            comment_id: comment_id.as_deref(),
         },
         &author,
         now_ms,
@@ -427,8 +516,10 @@ pub(crate) fn attach_link(
 ) -> Result<WorkAttachment> {
     let task_id = items::item(conn, &store::uuid(task_id)?)?.id;
     let url = link(url)?;
+    let metadata = naming.metadata()?;
+    let comment_id = naming.comment(conn, &task_id)?;
     if let Some(found) = existing(conn, root, &task_id, "url", &url)? {
-        return Ok(found);
+        return again(conn, root, found, metadata.as_deref(), &author);
     }
     let id = Uuid::new_v4().to_string();
     insert(
@@ -445,6 +536,8 @@ pub(crate) fn attach_link(
             mime: None,
             size: None,
             sha256: None,
+            metadata: metadata.as_deref(),
+            comment_id: comment_id.as_deref(),
         },
         &author,
         now_ms,
@@ -546,7 +639,11 @@ mod tests {
     use super::super::comments::Author;
     use super::super::items::{self, NewItem};
     use super::super::types::{WorkActor, WorkOwner, WorkStatus};
+    use super::super::comments::add;
+    use super::super::store::Refusal;
+    use super::super::types::WorkCommentSubject;
     use super::{attach_file, attach_link, detach, list, place, stage_bytes, Naming};
+    use std::collections::BTreeMap;
     use rusqlite::Connection;
     use std::path::Path;
 
@@ -558,6 +655,8 @@ mod tests {
     const UNNAMED: Naming<'static> = Naming {
         title: None,
         subtitle: None,
+        metadata: None,
+        comment_id: None,
     };
 
     fn task(conn: &Connection, title: &str) -> String {
@@ -690,5 +789,54 @@ mod tests {
             AT,
         )
         .expect("a mail link");
+    }
+
+    #[test]
+    fn only_a_links_attacher_replaces_its_metadata() {
+        let (conn, task) = tracker();
+        let root = tempfile::tempdir().expect("a scratch folder");
+        let link = "https://ci.example/run/9";
+        let agent = |name| Author {
+            actor: WorkActor::Agent,
+            agent: Some(name),
+        };
+        let red = BTreeMap::from([("status".to_owned(), "red".to_owned())]);
+        let green = BTreeMap::from([("status".to_owned(), "green".to_owned())]);
+        let red_facts = Naming { metadata: Some(&red), ..UNNAMED };
+        let green_facts = Naming { metadata: Some(&green), ..UNNAMED };
+        attach_link(&conn, root.path(), &task, link, red_facts, agent("claude"), AT).expect("attached");
+
+        let refused = attach_link(&conn, root.path(), &task, link, green_facts, agent("codex"), AT + 1);
+        assert_eq!(
+            refused.expect_err("another agent").downcast_ref::<Refusal>(),
+            Some(&Refusal::NotAttacher)
+        );
+        let replaced = attach_link(&conn, root.path(), &task, link, green_facts, agent("claude"), AT + 2)
+            .expect("replaced");
+
+        assert_eq!(replaced.metadata, green);
+        assert_eq!(list(&conn, root.path(), &task).expect("listed")[0].metadata, green);
+    }
+
+    #[test]
+    fn an_attachment_goes_only_on_a_comment_of_its_own_task() {
+        let (conn, launch) = tracker();
+        let venue = task(&conn, "Book the venue");
+        let root = tempfile::tempdir().expect("a scratch folder");
+        let link = "https://a.example";
+        let here = add(&conn, WorkCommentSubject::Task, &launch, None, ME, "Trace", AT).expect("here");
+        let there = add(&conn, WorkCommentSubject::Task, &venue, None, ME, "Quote", AT).expect("there");
+
+        let crossed = attach_link(&conn, root.path(), &launch, link,
+            Naming { comment_id: Some(&there.id), ..UNNAMED }, ME, AT);
+        assert_eq!(
+            crossed.expect_err("another task's comment").downcast_ref::<Refusal>(),
+            Some(&Refusal::NotFound)
+        );
+        let attached = attach_link(&conn, root.path(), &launch, link,
+            Naming { comment_id: Some(&here.id), ..UNNAMED }, ME, AT)
+            .expect("attached");
+
+        assert_eq!(attached.comment_id.as_deref(), Some(here.id.as_str()));
     }
 }

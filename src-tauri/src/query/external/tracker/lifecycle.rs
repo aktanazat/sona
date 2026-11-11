@@ -2,16 +2,19 @@
 //! versions, favorites, subscriptions and the inbox.
 
 use super::{
-    handle, iso_day, now_ms, refusal, task_ref, Board, ExternalWorkRef, TaskRef, TasksArgs,
+    handle, iso_day, now_ms, pick, refusal, task_ref, Board, ExternalWorkRef, TaskRef, TasksArgs,
     Tracker, WorkAnswer, WriteArgs,
 };
 use crate::planning;
 use crate::planning::work::agents;
 use crate::planning::work::bin::{self, Binned};
-use crate::planning::work::favorites::{self, FavoriteKind};
+use crate::planning::work::favorites::{
+    self, FavoriteEntry, FavoriteKind, FavoriteMove, Favorites, FolderSave,
+};
 use crate::planning::work::inbox::{
     self, Mark, Notification, NotificationKind, Shown, SubscribeReason,
 };
+use crate::planning::work::digest::{DigestRisk, ProjectDigest};
 use crate::planning::work::types::{WorkActor, WorkItem, WorkPatch};
 use crate::planning::work::versions::{self, DescriptionVersion};
 use crate::query::external::{ExternalError, ExternalErrorCode};
@@ -51,17 +54,79 @@ pub struct VersionRestoreArgs {
     pub write: WriteArgs,
 }
 
+/// One favorite: a task, or a project, saved view or person by flag.
 #[derive(Args, Clone, Debug, Eq, PartialEq)]
-pub struct FavoriteArgs {
+pub struct FavoriteTarget {
     /// A task: S-12, 12, or its id.
-    #[arg(value_parser = task_ref, value_name = "TASK", required_unless_present_any = ["project", "view"], conflicts_with_all = ["project", "view"])]
+    #[arg(value_parser = task_ref, value_name = "TASK", required_unless_present_any = ["project", "view", "person"], conflicts_with_all = ["project", "view", "person"])]
     pub task: Option<TaskRef>,
     /// A project, by name or id.
-    #[arg(long, value_name = "PROJECT", conflicts_with = "view")]
+    #[arg(long, value_name = "PROJECT", conflicts_with_all = ["view", "person"])]
     pub project: Option<String>,
     /// A saved view, by name or id.
-    #[arg(long, value_name = "VIEW")]
+    #[arg(long, value_name = "VIEW", conflicts_with = "person")]
     pub view: Option<String>,
+    /// A person: a name, another name they go by, or their id.
+    #[arg(long, value_name = "PERSON")]
+    pub person: Option<String>,
+}
+
+#[derive(Args, Clone, Debug, Eq, PartialEq)]
+pub struct FavoriteArgs {
+    #[command(flatten)]
+    pub target: FavoriteTarget,
+    /// Print what would change and write nothing.
+    #[arg(long)]
+    pub dry_run: bool,
+    #[command(flatten)]
+    pub write: WriteArgs,
+}
+
+#[derive(Args, Clone, Debug, Eq, PartialEq)]
+pub struct FavoriteFolderSaveArgs {
+    /// The folder to rename or move, by name or id. Without it a new folder
+    /// is made.
+    #[arg(long, value_name = "FOLDER", required_unless_present = "name")]
+    pub folder: Option<String>,
+    /// The folder's name.
+    #[arg(long, value_name = "NAME", required_unless_present = "position")]
+    pub name: Option<String>,
+    /// Its place among the folders and loose favorites at the top, from 1.
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u64).range(1..))]
+    pub position: Option<u64>,
+    /// Print what would change and write nothing.
+    #[arg(long)]
+    pub dry_run: bool,
+    #[command(flatten)]
+    pub write: WriteArgs,
+}
+
+#[derive(Args, Clone, Debug, Eq, PartialEq)]
+pub struct FavoriteFolderDeleteArgs {
+    /// The folder, by name or id.
+    #[arg(value_name = "FOLDER")]
+    pub folder: String,
+    /// Print what would change and write nothing.
+    #[arg(long)]
+    pub dry_run: bool,
+    #[command(flatten)]
+    pub write: WriteArgs,
+}
+
+#[derive(Args, Clone, Debug, Eq, PartialEq)]
+pub struct FavoriteMoveArgs {
+    #[command(flatten)]
+    pub target: FavoriteTarget,
+    /// Into this folder, by name or id.
+    #[arg(long, value_name = "FOLDER", conflicts_with = "top")]
+    pub into: Option<String>,
+    /// Out of its folder, to the top.
+    #[arg(long)]
+    pub top: bool,
+    /// Its place there, from 1. Last without it when it changes folder;
+    /// otherwise it must be given.
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u64).range(1..), required_unless_present_any = ["into", "top"])]
+    pub position: Option<u64>,
     /// Print what would change and write nothing.
     #[arg(long)]
     pub dry_run: bool,
@@ -93,7 +158,8 @@ pub struct InboxMarkArgs {
     /// For snooze: YYYY-MM-DD, tomorrow, or none to wake it now.
     #[arg(long, value_name = "DAY", required_if_eq("mark", "snooze"))]
     pub until: Option<String>,
-    /// Every unread notification, for --mark read.
+    /// Every notification of a kind: with --mark read, every unread one;
+    /// with --mark archive, every read one, clearing them out.
     #[arg(long, conflicts_with = "notifications")]
     pub all: bool,
     /// Print what would change and write nothing.
@@ -111,6 +177,9 @@ pub enum LifecycleAction {
     DescriptionRestored,
     Favorited,
     Unfavorited,
+    FavoriteMoved,
+    FolderSaved,
+    FolderDeleted,
     Subscribed,
     Unsubscribed,
     InboxMarked,
@@ -129,6 +198,12 @@ impl LifecycleAction {
             (Self::Favorited, true) => "Would add to favorites",
             (Self::Unfavorited, false) => "Removed from favorites",
             (Self::Unfavorited, true) => "Would remove from favorites",
+            (Self::FavoriteMoved, false) => "Moved",
+            (Self::FavoriteMoved, true) => "Would move",
+            (Self::FolderSaved, false) => "Saved",
+            (Self::FolderSaved, true) => "Would save",
+            (Self::FolderDeleted, false) => "Deleted",
+            (Self::FolderDeleted, true) => "Would delete",
             (Self::Subscribed, false) => "Subscribed",
             (Self::Subscribed, true) => "Would subscribe",
             (Self::Unsubscribed, false) => "Unsubscribed",
@@ -158,6 +233,12 @@ pub struct ExternalLifecycleChange {
     pub tasks: Vec<ExternalWorkRef>,
     pub skipped: Vec<ExternalLifecycleSkip>,
     pub favorite: Option<ExternalFavorite>,
+    /// The folder made, renamed or deleted, or the one a favorite moved
+    /// into.
+    pub folder: Option<ExternalFolderRef>,
+    /// Where the favorite or folder now sits in its folder or at the top,
+    /// from 1.
+    pub position: Option<usize>,
     pub notifications: Vec<ExternalNotification>,
     /// For a description restore under suggest: it waits for the user.
     pub proposed: bool,
@@ -209,10 +290,36 @@ pub struct ExternalFavorite {
     pub handle: Option<String>,
 }
 
+/// A favorites folder a write names. No id yet on a dry run that makes one.
+#[derive(Clone, Debug, Serialize)]
+pub struct ExternalFolderRef {
+    pub id: Option<String>,
+    pub name: String,
+}
+
+/// A folder in the favorites, with its favorites in order.
+#[derive(Clone, Debug, Serialize)]
+pub struct ExternalFavoriteFolder {
+    /// Always `folder`.
+    pub kind: &'static str,
+    pub id: String,
+    pub name: String,
+    pub favorites: Vec<ExternalFavorite>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(untagged)]
+pub enum ExternalFavoriteEntry {
+    Favorite(ExternalFavorite),
+    Folder(ExternalFavoriteFolder),
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct ExternalWorkFavorites {
     pub schema_version: u32,
-    pub favorites: Vec<ExternalFavorite>,
+    /// The sidebar's order: loose favorites and folders, each folder with
+    /// its own.
+    pub favorites: Vec<ExternalFavoriteEntry>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -231,16 +338,46 @@ pub struct ExternalWorkSubscriptions {
 pub struct ExternalNotification {
     pub id: String,
     pub kind: NotificationKind,
-    pub task: ExternalWorkRef,
+    /// None only for an automation run about no task.
+    pub task: Option<ExternalWorkRef>,
     /// Sona or the agent's name.
     pub by: String,
     pub comment_id: Option<String>,
+    /// For `changed`: what changed, as the task history names it (due,
+    /// priority, details, owner, labels, project, parent, relation,
+    /// attachment) or `reminder`.
+    pub field: Option<String>,
+    /// For `automation`: which automation ran, and its error when it failed.
+    pub automation: Option<ExternalNoticeAutomation>,
     pub from: Option<String>,
     pub to: Option<String>,
     pub created_at_ms: i64,
     pub read: bool,
     pub snoozed_until_ms: Option<i64>,
     pub archived: bool,
+    /// For `digest`: each project's status, latest update, tasks done and
+    /// risks over its week, as posted.
+    pub digest: Option<ProjectDigest>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ExternalNoticeAutomation {
+    pub id: String,
+    pub run_id: String,
+    pub name: String,
+    pub error: Option<String>,
+}
+
+impl ExternalNotification {
+    /// The task it is about, or the automation for a run about no task.
+    fn about(&self) -> String {
+        match (&self.task, &self.automation) {
+            (Some(task), _) => format!("{} {}", task.handle, task.title),
+            (None, Some(automation)) => format!("automation {}", automation.name),
+            (None, None) if self.digest.is_some() => "weekly project digest".to_owned(),
+            (None, None) => String::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -320,13 +457,32 @@ pub(super) fn text(answer: &WorkAnswer, text: &mut String) {
                 .chain(change.favorite.iter().map(|favorite| favorite.name.clone()))
                 .chain(
                     change
+                        .folder
+                        .iter()
+                        .filter(|_| change.favorite.is_none())
+                        .map(|folder| format!("folder {}", folder.name)),
+                )
+                .chain(
+                    change
                         .notifications
                         .iter()
-                        .map(|notice| format!("{} on {}", notice.id, notice.task.handle)),
+                        .map(|notice| format!("{} on {}", notice.id, notice.about())),
                 )
                 .collect();
             if !what.is_empty() {
                 let _ = writeln!(text, "{verb}: {}.", what.join(", "));
+            }
+            if change.action == LifecycleAction::FavoriteMoved {
+                if let Some(position) = change.position {
+                    let place = change
+                        .folder
+                        .as_ref()
+                        .map_or_else(|| "at the top".to_owned(), |folder| format!("in {}", folder.name));
+                    let _ = writeln!(text, "Place {position} {place}.");
+                }
+            }
+            if change.action == LifecycleAction::FolderDeleted && change.operation_id.is_some() {
+                text.push_str("Its favorites stay, at the top where it was.\n");
             }
             if change.proposed {
                 text.push_str("It waits for the user to accept in Sona.\n");
@@ -391,10 +547,10 @@ pub(super) fn text(answer: &WorkAnswer, text: &mut String) {
             if favorites.favorites.is_empty() {
                 text.push_str("No favorites yet. Add one with: sona work favorite S-12\n");
             }
-            for favorite in &favorites.favorites {
+            let line = |text: &mut String, indent: &str, favorite: &ExternalFavorite| {
                 let _ = writeln!(
                     text,
-                    "{:?}  {}{}",
+                    "{indent}{:?}  {}{}",
                     favorite.kind,
                     favorite
                         .handle
@@ -403,6 +559,20 @@ pub(super) fn text(answer: &WorkAnswer, text: &mut String) {
                         .unwrap_or_default(),
                     favorite.name
                 );
+            };
+            for entry in &favorites.favorites {
+                match entry {
+                    ExternalFavoriteEntry::Favorite(favorite) => line(text, "", favorite),
+                    ExternalFavoriteEntry::Folder(folder) => {
+                        let _ = writeln!(text, "Folder  {}", folder.name);
+                        if folder.favorites.is_empty() {
+                            text.push_str("  (empty)\n");
+                        }
+                        for favorite in &folder.favorites {
+                            line(text, "  ", favorite);
+                        }
+                    }
+                }
             }
         }
         WorkAnswer::Subscriptions(subscriptions) => {
@@ -420,17 +590,32 @@ pub(super) fn text(answer: &WorkAnswer, text: &mut String) {
         WorkAnswer::Inbox(inbox) => {
             let _ = writeln!(text, "{} unread.", inbox.unread);
             for notice in &inbox.notifications {
+                let what = match (&notice.field, &notice.automation) {
+                    (Some(field), _) => format!("{:?} {field}", notice.kind),
+                    (None, Some(_)) => format!(
+                        "{:?} {}",
+                        notice.kind,
+                        notice.to.as_deref().unwrap_or_default()
+                    ),
+                    (None, None) => format!("{:?}", notice.kind),
+                };
                 let _ = writeln!(
                     text,
-                    "{} {}  {:?} by {} on {} {}{}",
+                    "{} {}  {what} by {} on {}{}",
                     if notice.read { " " } else { "*" },
                     notice.id,
-                    notice.kind,
                     notice.by,
-                    notice.task.handle,
-                    notice.task.title,
+                    notice.about(),
                     if notice.archived { " (archived)" } else { "" }
                 );
+            }
+            let newest = inbox
+                .notifications
+                .iter()
+                .find_map(|notice| notice.digest.as_ref());
+            if let Some(digest) = newest {
+                text.push('\n');
+                super::digest::digest_text(digest, text);
             }
         }
         _ => {}
@@ -459,6 +644,8 @@ impl Tracker<'_> {
             tasks: Vec::new(),
             skipped: Vec::new(),
             favorite: None,
+            folder: None,
+            position: None,
             notifications: Vec::new(),
             proposed: false,
         }
@@ -695,9 +882,9 @@ impl Tracker<'_> {
     fn favorite_target(
         &self,
         board: &Board,
-        args: &FavoriteArgs,
+        target: &FavoriteTarget,
     ) -> Result<ExternalFavorite, ExternalError> {
-        if let Some(task) = &args.task {
+        if let Some(task) = &target.task {
             let row = board.task(task)?;
             return Ok(ExternalFavorite {
                 kind: FavoriteKind::Task,
@@ -706,7 +893,7 @@ impl Tracker<'_> {
                 handle: Some(handle(row.item.number)),
             });
         }
-        if let Some(project) = &args.project {
+        if let Some(project) = &target.project {
             let project = board
                 .project(project)?
                 .ok_or_else(|| ExternalError::invalid("Name a project."))?;
@@ -717,7 +904,16 @@ impl Tracker<'_> {
                 handle: None,
             });
         }
-        let view = self.view_named(args.view.as_deref().unwrap_or_default())?;
+        if let Some(person) = &target.person {
+            let person = board.person(person)?;
+            return Ok(ExternalFavorite {
+                kind: FavoriteKind::Person,
+                id: person.id.clone(),
+                name: person.name.clone(),
+                handle: None,
+            });
+        }
+        let view = self.view_named(target.view.as_deref().unwrap_or_default())?;
         Ok(ExternalFavorite {
             kind: FavoriteKind::View,
             id: view.id,
@@ -726,13 +922,30 @@ impl Tracker<'_> {
         })
     }
 
+    fn saved_favorites(&self) -> Result<Favorites, ExternalError> {
+        planning::history(self.history, |conn| favorites::favorites(conn))
+            .map_err(|message| refusal(self.history, message))
+    }
+
+    fn favorite_folder(
+        saved: &Favorites,
+        value: &str,
+    ) -> Result<ExternalFolderRef, ExternalError> {
+        pick("favorites folder", value, &saved.folders, |folder| &folder.id, |folder| &folder.name)
+            .map(|folder| ExternalFolderRef {
+                id: Some(folder.id.clone()),
+                name: folder.name.clone(),
+            })
+            .map_err(|refusal| refusal.hint("List them with: sona work favorites"))
+    }
+
     pub(super) async fn favorite(
         &self,
         args: &FavoriteArgs,
         on: bool,
     ) -> Result<WorkAnswer, ExternalError> {
         let board = self.board().await?;
-        let target = self.favorite_target(&board, args)?;
+        let target = self.favorite_target(&board, &args.target)?;
         let action = if on {
             LifecycleAction::Favorited
         } else {
@@ -741,12 +954,7 @@ impl Tracker<'_> {
         let mut answer = self.change(action, args.dry_run);
         let operation_id = args.write.fresh_operation_id();
         let replayed = self.ran(&operation_id)?;
-        let already = planning::history(self.history, |conn| {
-            Ok(favorites::favorites(conn)?
-                .iter()
-                .any(|favorite| favorite.kind == target.kind && favorite.target_id == target.id))
-        })
-        .map_err(|message| refusal(self.history, message))?;
+        let already = self.saved_favorites()?.contains(target.kind, &target.id);
         answer.favorite = Some(target.clone());
         if already == on && !replayed {
             answer.skipped.push(ExternalLifecycleSkip {
@@ -766,7 +974,158 @@ impl Tracker<'_> {
         }
         self.applies("changing favorites")?;
         favorites::set_as(self.app, &operation_id, target.kind, &target.id, on)
+            .await
             .map_err(|message| self.write_refusal(message, &operation_id, "The favorite"))?;
+        answer.replayed = replayed;
+        Ok(WorkAnswer::Lifecycle(Box::new(answer)))
+    }
+
+    pub(super) async fn favorite_folder_save(
+        &self,
+        args: &FavoriteFolderSaveArgs,
+    ) -> Result<WorkAnswer, ExternalError> {
+        let saved = self.saved_favorites()?;
+        let existing = args
+            .folder
+            .as_deref()
+            .map(|folder| Self::favorite_folder(&saved, folder))
+            .transpose()?;
+        let name = args.name.as_deref().map(str::trim);
+        if name.is_some_and(str::is_empty) {
+            return Err(ExternalError::invalid("Give the folder a name."));
+        }
+        let index = args.position.map(|position| usize::try_from(position - 1).unwrap_or(usize::MAX));
+        let mut answer = self.change(LifecycleAction::FolderSaved, args.dry_run);
+        let operation_id = args.write.fresh_operation_id();
+        let replayed = self.ran(&operation_id)?;
+        answer.folder = Some(ExternalFolderRef {
+            id: existing.as_ref().and_then(|folder| folder.id.clone()),
+            name: name
+                .map(str::to_owned)
+                .or_else(|| existing.as_ref().map(|folder| folder.name.clone()))
+                .unwrap_or_default(),
+        });
+        answer.operation_id = Some(operation_id.clone());
+        if args.dry_run {
+            return Ok(WorkAnswer::Lifecycle(Box::new(answer)));
+        }
+        self.applies("changing favorites")?;
+        let folder = favorites::save_folder_as(
+            self.app,
+            &operation_id,
+            &FolderSave {
+                id: existing.and_then(|folder| folder.id),
+                name: name.map(str::to_owned),
+                index,
+            },
+        )
+        .map_err(|message| self.write_refusal(message, &operation_id, "The folder"))?;
+        answer.position = self.saved_favorites()?.top().iter().position(|entry| {
+            matches!(entry, FavoriteEntry::Folder { id } if *id == folder.id)
+        }).map(|at| at + 1);
+        answer.folder = Some(ExternalFolderRef {
+            id: Some(folder.id),
+            name: folder.name,
+        });
+        answer.replayed = replayed;
+        Ok(WorkAnswer::Lifecycle(Box::new(answer)))
+    }
+
+    pub(super) async fn favorite_folder_delete(
+        &self,
+        args: &FavoriteFolderDeleteArgs,
+    ) -> Result<WorkAnswer, ExternalError> {
+        let folder = Self::favorite_folder(&self.saved_favorites()?, &args.folder)?;
+        let mut answer = self.change(LifecycleAction::FolderDeleted, args.dry_run);
+        let operation_id = args.write.fresh_operation_id();
+        let replayed = self.ran(&operation_id)?;
+        answer.folder = Some(folder.clone());
+        answer.operation_id = Some(operation_id.clone());
+        if args.dry_run {
+            return Ok(WorkAnswer::Lifecycle(Box::new(answer)));
+        }
+        self.applies("changing favorites")?;
+        favorites::delete_folder_as(self.app, &operation_id, folder.id.as_deref().unwrap_or_default())
+            .map_err(|message| self.write_refusal(message, &operation_id, "The folder"))?;
+        answer.replayed = replayed;
+        Ok(WorkAnswer::Lifecycle(Box::new(answer)))
+    }
+
+    pub(super) async fn favorite_move(
+        &self,
+        args: &FavoriteMoveArgs,
+    ) -> Result<WorkAnswer, ExternalError> {
+        let board = self.board().await?;
+        let target = self.favorite_target(&board, &args.target)?;
+        let saved = self.saved_favorites()?;
+        let Some(current) = saved
+            .favorites
+            .iter()
+            .find(|favorite| favorite.kind == target.kind && favorite.target_id == target.id)
+        else {
+            return Err(ExternalError::invalid(format!(
+                "{} is not a favorite. Add it with: sona work favorite",
+                target.name
+            )));
+        };
+        let into = match (&args.into, args.top) {
+            (Some(folder), _) => Some(Self::favorite_folder(&saved, folder)?),
+            (None, true) => None,
+            (None, false) => current
+                .folder_id
+                .as_deref()
+                .map(|folder| Self::favorite_folder(&saved, folder))
+                .transpose()?,
+        };
+        let into_id = into.as_ref().and_then(|folder| folder.id.clone());
+        let entry = FavoriteEntry::Favorite {
+            kind: target.kind,
+            id: target.id.clone(),
+        };
+        let mut others: Vec<FavoriteEntry> = match &into_id {
+            Some(folder) => saved
+                .inside(folder)
+                .map(|favorite| FavoriteEntry::Favorite {
+                    kind: favorite.kind,
+                    id: favorite.target_id.clone(),
+                })
+                .collect(),
+            None => saved.top(),
+        };
+        let before = others.iter().position(|kept| *kept == entry);
+        others.retain(|kept| *kept != entry);
+        let index = args
+            .position
+            .map(|position| usize::try_from(position - 1).unwrap_or(usize::MAX));
+        let at = index.unwrap_or(others.len()).min(others.len());
+        let mut answer = self.change(LifecycleAction::FavoriteMoved, args.dry_run);
+        let operation_id = args.write.fresh_operation_id();
+        let replayed = self.ran(&operation_id)?;
+        answer.favorite = Some(target.clone());
+        answer.folder = into;
+        answer.position = Some(at + 1);
+        if before == Some(at) && !replayed {
+            answer.skipped.push(ExternalLifecycleSkip {
+                id: target.handle.clone().unwrap_or_else(|| target.name.clone()),
+                reason: "already there".to_owned(),
+            });
+            return Ok(WorkAnswer::Lifecycle(Box::new(answer)));
+        }
+        answer.operation_id = Some(operation_id.clone());
+        if args.dry_run {
+            return Ok(WorkAnswer::Lifecycle(Box::new(answer)));
+        }
+        self.applies("changing favorites")?;
+        favorites::move_as(
+            self.app,
+            &operation_id,
+            &FavoriteMove {
+                entry,
+                into: into_id,
+                index: Some(at),
+            },
+        )
+        .map_err(|message| self.write_refusal(message, &operation_id, "The favorite"))?;
         answer.replayed = replayed;
         Ok(WorkAnswer::Lifecycle(Box::new(answer)))
     }
@@ -774,37 +1133,62 @@ impl Tracker<'_> {
     pub(super) async fn favorites(&self) -> Result<WorkAnswer, ExternalError> {
         let board = self.board().await?;
         let views = self.all_views()?;
-        let saved = planning::history(self.history, |conn| favorites::favorites(conn))
-            .map_err(|message| refusal(self.history, message))?;
-        let favorites = saved
-            .into_iter()
-            .filter_map(|favorite| match favorite.kind {
-                FavoriteKind::Task => board.row(&favorite.target_id).map(|row| ExternalFavorite {
+        let saved = self.saved_favorites()?;
+        let named = |favorite: &favorites::Favorite| match favorite.kind {
+            FavoriteKind::Task => board.row(&favorite.target_id).map(|row| ExternalFavorite {
+                kind: favorite.kind,
+                id: row.item.id.clone(),
+                name: row.item.title.clone(),
+                handle: Some(handle(row.item.number)),
+            }),
+            FavoriteKind::Project => board
+                .projects
+                .iter()
+                .find(|project| project.id == favorite.target_id)
+                .map(|project| ExternalFavorite {
                     kind: favorite.kind,
-                    id: row.item.id.clone(),
-                    name: row.item.title.clone(),
-                    handle: Some(handle(row.item.number)),
+                    id: project.id.clone(),
+                    name: project.title.clone(),
+                    handle: None,
                 }),
-                FavoriteKind::Project => board
-                    .projects
+            FavoriteKind::View => views
+                .iter()
+                .find(|view| view.id == favorite.target_id)
+                .map(|view| ExternalFavorite {
+                    kind: favorite.kind,
+                    id: view.id.clone(),
+                    name: view.name.clone(),
+                    handle: None,
+                }),
+            FavoriteKind::Person => board
+                .people
+                .iter()
+                .find(|person| person.id == favorite.target_id)
+                .map(|person| ExternalFavorite {
+                    kind: favorite.kind,
+                    id: person.id.clone(),
+                    name: person.name.clone(),
+                    handle: None,
+                }),
+        };
+        let favorites = saved
+            .top()
+            .into_iter()
+            .filter_map(|entry| match entry {
+                FavoriteEntry::Favorite { kind, id } => saved
+                    .favorites
                     .iter()
-                    .find(|project| project.id == favorite.target_id)
-                    .map(|project| ExternalFavorite {
-                        kind: favorite.kind,
-                        id: project.id.clone(),
-                        name: project.title.clone(),
-                        handle: None,
-                    }),
-                FavoriteKind::View => {
-                    views
-                        .iter()
-                        .find(|view| view.id == favorite.target_id)
-                        .map(|view| ExternalFavorite {
-                            kind: favorite.kind,
-                            id: view.id.clone(),
-                            name: view.name.clone(),
-                            handle: None,
-                        })
+                    .find(|favorite| favorite.kind == kind && favorite.target_id == id)
+                    .and_then(named)
+                    .map(ExternalFavoriteEntry::Favorite),
+                FavoriteEntry::Folder { id } => {
+                    let folder = saved.folders.iter().find(|folder| folder.id == id)?;
+                    Some(ExternalFavoriteEntry::Folder(ExternalFavoriteFolder {
+                        kind: "folder",
+                        id: folder.id.clone(),
+                        name: folder.name.clone(),
+                        favorites: saved.inside(&folder.id).filter_map(named).collect(),
+                    }))
                 }
             })
             .collect();
@@ -887,19 +1271,45 @@ impl Tracker<'_> {
     }
 
     fn notice(board: &Board, notification: Notification) -> Option<ExternalNotification> {
-        let row = board.row(&notification.item_id)?;
+        let task = match &notification.item_id {
+            Some(id) => Some(item_ref(&board.row(id)?.item)),
+            None => None,
+        };
         Some(ExternalNotification {
-            task: item_ref(&row.item),
+            task,
             by: author(Some(notification.actor), notification.agent.as_deref()),
             id: notification.id,
             kind: notification.kind,
             comment_id: notification.comment_id,
+            field: notification.field,
+            automation: notification
+                .automation
+                .map(|automation| ExternalNoticeAutomation {
+                    id: automation.id,
+                    run_id: automation.run_id,
+                    name: automation.name,
+                    error: automation.error,
+                }),
             from: notification.from,
             to: notification.to,
             created_at_ms: notification.created_at_ms,
             read: notification.read_at_ms.is_some(),
             snoozed_until_ms: notification.snoozed_until_ms,
             archived: notification.archived_at_ms.is_some(),
+            digest: notification.digest.map(|mut digest| {
+                for project in &mut digest.projects {
+                    project.done.retain(|task| board.row(&task.id).is_some());
+                    for risk in &mut project.risks {
+                        if let DigestRisk::Overdue { tasks } = risk {
+                            tasks.retain(|task| board.row(&task.id).is_some());
+                        }
+                    }
+                    project.risks.retain(|risk| {
+                        !matches!(risk, DigestRisk::Overdue { tasks } if tasks.is_empty())
+                    });
+                }
+                digest
+            }),
         })
     }
 
@@ -958,9 +1368,16 @@ impl Tracker<'_> {
             "unarchive" => Mark::Unarchive,
             _ => Mark::Snooze(snooze_until(args.until.as_deref().unwrap_or("none"))?),
         };
-        if args.all && how != Mark::Read {
-            return Err(ExternalError::invalid("--all goes with --mark read."));
-        }
+        let wanted_read = match how {
+            Mark::Read => false,
+            Mark::Archive => true,
+            _ if args.all => {
+                return Err(ExternalError::invalid(
+                    "--all goes with --mark read or --mark archive.",
+                ))
+            }
+            _ => false,
+        };
         let every = self.notices(
             &board,
             Shown {
@@ -973,7 +1390,7 @@ impl Tracker<'_> {
             every
                 .into_iter()
                 .filter(|notice| {
-                    !notice.read
+                    notice.read == wanted_read
                         && !notice.archived
                         && notice
                             .snoozed_until_ms

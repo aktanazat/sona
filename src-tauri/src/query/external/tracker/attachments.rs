@@ -13,6 +13,7 @@ use crate::query::external::{local_time, ExternalError, ExternalErrorCode};
 use crate::query::QUERY_SCHEMA_VERSION;
 use clap::Args;
 use serde::Serialize;
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::PathBuf;
 use uuid::Uuid;
@@ -34,6 +35,17 @@ fn attach_target(value: &str) -> Result<AttachTarget, String> {
         .map_err(|error| error.to_string())
 }
 
+fn meta_pair(value: &str) -> Result<(String, String), String> {
+    let (key, value) = value
+        .split_once('=')
+        .ok_or_else(|| "Write it as KEY=VALUE.".to_owned())?;
+    let key = key.trim();
+    if key.is_empty() {
+        return Err("The key is empty.".to_owned());
+    }
+    Ok((key.to_owned(), value.to_owned()))
+}
+
 #[derive(Args, Clone, Debug, Eq, PartialEq)]
 pub struct AttachArgs {
     /// S-12, 12, or the task's id.
@@ -48,6 +60,14 @@ pub struct AttachArgs {
     /// A second line under the title.
     #[arg(long)]
     pub subtitle: Option<String>,
+    /// A key-value fact to keep on it, as KEY=VALUE; repeat for more. On a
+    /// file or link already there, these replace its metadata.
+    #[arg(long = "meta", value_parser = meta_pair, value_name = "KEY=VALUE")]
+    pub meta: Vec<(String, String)>,
+    /// The id of a comment on the task to put the file or link on, from
+    /// `comments`.
+    #[arg(long, value_name = "COMMENT")]
+    pub comment: Option<Uuid>,
     /// Check the file or link and write nothing.
     #[arg(long)]
     pub dry_run: bool,
@@ -100,6 +120,10 @@ pub struct ExternalWorkAttachment {
     pub sha256: Option<String>,
     pub created_at_ms: i64,
     pub created_by: ExternalAttachmentAuthor,
+    /// Key-value facts kept on it, by key.
+    pub metadata: BTreeMap<String, String>,
+    /// The comment it is on; absent for one on the task itself.
+    pub comment_id: Option<String>,
 }
 
 pub(super) fn project_attachment(attachment: WorkAttachment) -> ExternalWorkAttachment {
@@ -120,6 +144,8 @@ pub(super) fn project_attachment(attachment: WorkAttachment) -> ExternalWorkAtta
             kind: attachment.created_by.kind,
             name: attachment.created_by.name,
         },
+        metadata: attachment.metadata,
+        comment_id: attachment.comment_id,
     }
 }
 
@@ -193,9 +219,13 @@ impl Tracker<'_> {
         let board = self.board().await?;
         let row = board.task(&args.task)?;
         let task = task_ref_of(row);
+        let metadata: BTreeMap<String, String> = args.meta.iter().cloned().collect();
+        let comment_id = args.comment.map(|id| id.to_string());
         let naming = Naming {
             title: args.title.as_deref(),
             subtitle: args.subtitle.as_deref(),
+            metadata: Some(&metadata),
+            comment_id: comment_id.as_deref(),
         };
         if args.dry_run {
             let would = match &args.target {
@@ -348,6 +378,12 @@ fn attachment_text(text: &mut String, attachment: &ExternalWorkAttachment) {
     }
     if let Some(at) = attachment.url.as_deref().or(attachment.path.as_deref()) {
         let _ = writeln!(text, "    {at}");
+    }
+    if let Some(comment) = &attachment.comment_id {
+        let _ = writeln!(text, "    on comment {comment}");
+    }
+    for (key, value) in &attachment.metadata {
+        let _ = writeln!(text, "    {key}: {value}");
     }
 }
 

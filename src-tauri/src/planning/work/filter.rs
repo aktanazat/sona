@@ -3,14 +3,15 @@
 
 use super::agents;
 use super::cycles;
-use super::items::{local_midnight_ms, local_today};
+use super::items::{local_midnight_ms, local_today, MAX_ESTIMATE};
 use super::store::Refusal;
-use super::types::{WorkCycleState, WorkItem};
+use super::types::{WorkCycle, WorkCycleState, WorkItem};
 use anyhow::Result;
 use chrono::{Datelike, Days, Months, NaiveDate};
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use specta::Type;
+use std::collections::HashSet;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
 #[serde(rename_all = "snake_case")]
@@ -22,10 +23,15 @@ pub enum WorkFilterField {
     Project,
     Milestone,
     Label,
+    Parent,
     Cycle,
+    CycleScope,
     Due,
     Created,
     Updated,
+    Estimate,
+    For,
+    Completed,
 }
 
 impl WorkFilterField {
@@ -38,10 +44,15 @@ impl WorkFilterField {
             Self::Project => "project",
             Self::Milestone => "milestone",
             Self::Label => "label",
+            Self::Parent => "parent",
             Self::Cycle => "cycle",
+            Self::CycleScope => "cycle scope",
             Self::Due => "due",
             Self::Created => "created",
             Self::Updated => "updated",
+            Self::Estimate => "estimate",
+            Self::For => "for",
+            Self::Completed => "completed",
         }
     }
 }
@@ -78,8 +89,12 @@ impl WorkFilterOp {
 /// their names), cycle numbers or `current`/`next`, days as YYYY-MM-DD,
 /// `today`, `tomorrow`, `yesterday`, weeks (Monday to Sunday) as
 /// `this_week`, `next_week` or `last_week`, months as `this_month`,
-/// `next_month` or `last_month`, or epoch ms, and agents by name. `none`
-/// stands for an empty field and `me` for the user as owner.
+/// `next_month` or `last_month`, or epoch ms, and agents by name. A parent
+/// is a task's id or number (`S-12`). Cycle scope is `planned` for work in
+/// its cycle since the start, rollovers included, or `added` for work that
+/// joined after the start. An estimate is its points, 0 to 64; `for` is
+/// the person the work is owed to; `completed` is the day it was marked
+/// done. `none` stands for an empty field and `me` for the user as owner.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkCondition {
@@ -98,6 +113,10 @@ enum Value {
     /// last.
     Day(i64, i64),
     At(i64),
+    /// Work planned in its cycle from the start; holds the ids added after.
+    Planned(HashSet<String>),
+    /// Work that joined its cycle after the start, by id.
+    Added(HashSet<String>),
 }
 
 /// A condition with its values read: people with the ids merged into
@@ -112,7 +131,10 @@ pub(crate) struct Ready {
 const fn dated(field: WorkFilterField) -> bool {
     matches!(
         field,
-        WorkFilterField::Due | WorkFilterField::Created | WorkFilterField::Updated
+        WorkFilterField::Due
+            | WorkFilterField::Created
+            | WorkFilterField::Updated
+            | WorkFilterField::Completed
     )
 }
 
@@ -176,7 +198,7 @@ pub(crate) fn ready(
     merged: impl Fn(&str) -> Vec<String>,
     now_ms: i64,
 ) -> Result<Vec<Ready>> {
-    let mut cycle_numbers = None;
+    let mut made: Option<Vec<WorkCycle>> = None;
     let mut out = Vec::with_capacity(conditions.len());
     for condition in conditions {
         let field = condition.field;
@@ -202,21 +224,59 @@ pub(crate) fn ready(
                     ));
                 }
                 WorkFilterField::Owner if text == "me" => values.push(Value::Me),
-                WorkFilterField::Owner => {
+                WorkFilterField::Owner | WorkFilterField::For => {
                     values.extend(merged(raw.trim()).into_iter().map(Value::Text));
+                }
+                WorkFilterField::Estimate => {
+                    let points = text
+                        .parse::<u8>()
+                        .ok()
+                        .filter(|points| *points <= MAX_ESTIMATE)
+                        .ok_or(Refusal::Invalid)?;
+                    values.push(Value::Text(points.to_string()));
                 }
                 WorkFilterField::Delegate => {
                     values.push(Value::Text(
                         agents::agent_name(Some(raw)).to_lowercase(),
                     ));
                 }
-                WorkFilterField::Cycle => {
+                WorkFilterField::Parent => {
+                    let number = text
+                        .strip_prefix("s-")
+                        .or_else(|| text.strip_prefix('#'))
+                        .unwrap_or(&text);
+                    let id = match number.parse::<i64>() {
+                        Ok(number) => conn
+                            .query_row(
+                                "SELECT id FROM planning_tasks WHERE number = ?1",
+                                [number],
+                                |row| row.get(0),
+                            )
+                            .optional()?
+                            .ok_or(Refusal::NotFound)?,
+                        Err(_) => raw.trim().to_owned(),
+                    };
+                    values.push(Value::Text(id));
+                }
+                WorkFilterField::Cycle | WorkFilterField::CycleScope => {
+                    if made.is_none() {
+                        made = Some(cycles::all(conn, now_ms)?);
+                    }
+                    let all = made.as_deref().unwrap_or_default();
+                    if field == WorkFilterField::CycleScope {
+                        let added = all
+                            .iter()
+                            .flat_map(|cycle| cycle.added_after_start.iter().cloned())
+                            .collect();
+                        values.push(match text.as_str() {
+                            "planned" => Value::Planned(added),
+                            "added" => Value::Added(added),
+                            _ => return Err(Refusal::Invalid.into()),
+                        });
+                        continue;
+                    }
                     let number = match text.as_str() {
                         "current" | "next" => {
-                            let all = match &cycle_numbers {
-                                Some(all) => all,
-                                None => cycle_numbers.insert(cycles::all(conn, now_ms)?),
-                            };
                             let state = if text == "current" {
                                 WorkCycleState::Current
                             } else {
@@ -231,7 +291,10 @@ pub(crate) fn ready(
                     values
                         .push(number.map_or(Value::None, |number| Value::Text(number.to_string())));
                 }
-                WorkFilterField::Due | WorkFilterField::Created | WorkFilterField::Updated => {
+                WorkFilterField::Due
+                | WorkFilterField::Created
+                | WorkFilterField::Updated
+                | WorkFilterField::Completed => {
                     values.push(day(&text, now_ms)?);
                 }
                 WorkFilterField::Project | WorkFilterField::Milestone | WorkFilterField::Label => {
@@ -256,11 +319,17 @@ fn text_of(field: WorkFilterField, item: &WorkItem, doer: Option<&str>) -> Optio
         WorkFilterField::Delegate => doer.map(str::to_lowercase),
         WorkFilterField::Project => item.project_id.clone(),
         WorkFilterField::Milestone => item.milestone_id.clone(),
-        WorkFilterField::Cycle => item.cycle.map(|number| number.to_string()),
+        WorkFilterField::Parent => item.parent_id.clone(),
+        WorkFilterField::Estimate => item.estimate.map(|points| points.to_string()),
+        WorkFilterField::For => item.for_person_id.clone(),
+        WorkFilterField::Cycle | WorkFilterField::CycleScope => {
+            item.cycle.map(|number| number.to_string())
+        }
         WorkFilterField::Label
         | WorkFilterField::Due
         | WorkFilterField::Created
-        | WorkFilterField::Updated => None,
+        | WorkFilterField::Updated
+        | WorkFilterField::Completed => None,
     }
 }
 
@@ -269,12 +338,20 @@ const fn at_of(field: WorkFilterField, item: &WorkItem) -> Option<i64> {
         WorkFilterField::Due => item.due_at_ms,
         WorkFilterField::Created => Some(item.created_at_ms),
         WorkFilterField::Updated => Some(item.updated_at_ms),
+        WorkFilterField::Completed => item.completed_at_ms,
         _ => None,
     }
 }
 
 fn hits(field: WorkFilterField, item: &WorkItem, doer: Option<&str>, value: &Value) -> bool {
     match (field, value) {
+        (WorkFilterField::CycleScope, Value::Added(ids)) => {
+            item.cycle.is_some() && ids.contains(&item.id)
+        }
+        (WorkFilterField::CycleScope, Value::Planned(ids)) => {
+            item.cycle.is_some() && !ids.contains(&item.id)
+        }
+        (_, Value::Planned(_) | Value::Added(_)) => false,
         (WorkFilterField::Label, Value::None) => item.label_ids.is_empty(),
         (WorkFilterField::Label, Value::Text(id)) => item.label_ids.contains(id),
         (WorkFilterField::Owner, Value::Me) => item.owner_is_self,
@@ -362,6 +439,9 @@ mod tests {
             sort_order: 0.0,
             cycle: None,
             parent_id: None,
+            estimate: None,
+            completed_at_ms: None,
+            for_person_id: None,
         }
     }
 

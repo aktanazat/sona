@@ -251,7 +251,7 @@ fn project_activity(activity: WorkSessionActivity) -> ExternalSessionActivity {
     }
 }
 
-fn project(session: WorkSession, task: ExternalWorkRef) -> ExternalWorkSession {
+pub(super) fn project(session: WorkSession, task: ExternalWorkRef) -> ExternalWorkSession {
     ExternalWorkSession {
         id: session.id,
         task,
@@ -858,7 +858,7 @@ const fn state_text(state: WorkSessionState) -> &'static str {
     }
 }
 
-fn session_line(text: &mut String, session: &ExternalWorkSession) {
+pub(super) fn session_line(text: &mut String, session: &ExternalWorkSession) {
     let _ = writeln!(
         text,
         "{} {} on {} {}: {}{}{}",

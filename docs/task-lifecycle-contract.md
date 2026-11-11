@@ -25,7 +25,12 @@ One migration, `LIFECYCLE_MIGRATION` (`planning/schema.rs`), appended last in
   text it wrote; the first edit also keeps the text the task had before
   (actor NULL, "before"). The agent's name joins through
   `planning_activity_agents` on `activity_id`.
-- `planning_favorites(kind task|project|view, target_id, created_at_ms)`.
+- `planning_favorites(kind task|project|view|person, target_id, folder_id,
+  position, created_at_ms)`: `folder_id` NULL sits at the top.
+- `planning_favorite_folders(id, name, position, created_at_ms)`: folders sit
+  at the top and share its positions with the loose favorites; a folder's
+  favorites count their own from 0. Folders hold favorites only. Deleting a
+  folder puts its favorites at the top where it was.
 - `planning_task_subscriptions(task_id, reason
   subscribed|created|assigned|mentioned, created_at_ms)`.
 - `planning_notifications(id, task_id, kind status|comment|mention|assigned,
@@ -33,6 +38,8 @@ One migration, `LIFECYCLE_MIGRATION` (`planning/schema.rs`), appended last in
   created_at_ms, read_at_ms, snoozed_until_ms, archived_at_ms)`.
 - Triggers drop a task's versions, subscription, notifications and favorite
   when the task row is deleted, and a project's or view's favorite with it.
+  People live in the meetings database, so no trigger drops a person's
+  favorite; readers skip a favorite whose target is gone.
 
 History: delete records `archived` with to `bin`; restore from the bin
 records `restored` with from `bin`. No new activity kinds.
@@ -81,8 +88,11 @@ including the bin, the archive, favorites, subscriptions and the inbox.
 | `work description-versions TASK` | versions newest first, `current` marked |
 | `work description-version VERSION` | one version |
 | `work description-restore VERSION` | puts it back |
-| `work favorite [TASK] [--project P] [--view V]`, `work unfavorite ...` | favorites |
-| `work favorites` | in the order added |
+| `work favorite [TASK] [--project P] [--view V] [--person P]`, `work unfavorite ...` | favorites; a new one goes last at the top |
+| `work favorites` | the sidebar's order, folders with their favorites |
+| `work favorite-folder-save [--folder F] [--name N] [--position N]` | makes, renames or moves a folder |
+| `work favorite-folder-delete FOLDER` | its favorites stay at the top |
+| `work favorite-move [TASK] [--project P] [--view V] [--person P] [--into F \| --top] [--position N]` | moves one favorite |
 | `work subscribe TASK...`, `work unsubscribe TASK...` | subscriptions |
 | `work subscriptions` | with reason |
 | `work inbox [--unread] [--snoozed] [--archived]` | notifications and `unread` |
@@ -93,10 +103,14 @@ including the bin, the archive, favorites, subscriptions and the inbox.
 `sona_work_delete`, `sona_work_restore` (now also the bin), `sona_work_bin`,
 `sona_work_archive_list`, `sona_work_description_versions`,
 `sona_work_description_version`, `sona_work_description_restore`,
-`sona_work_favorite` / `sona_work_unfavorite` (`kind`, `target`),
-`sona_work_favorites`, `sona_work_subscribe`, `sona_work_unsubscribe`,
+`sona_work_favorite` / `sona_work_unfavorite` (`kind` task, project, view or
+person, `target`), `sona_work_favorites`, `sona_work_favorite_folder_save`
+(`folder`, `name`, `position`), `sona_work_favorite_folder_delete`
+(`folder`), `sona_work_favorite_move` (`kind`, `target`, `into`, `top`,
+`position`), `sona_work_subscribe`, `sona_work_unsubscribe`,
 `sona_work_subscriptions`, `sona_work_inbox`, `sona_work_inbox_mark`
-(`notifications` ids or `"all"`, `mark`, `until`).
+(`notifications` ids or `"all"`, `mark`, `until`), `sona_work_digest`
+(`dry_run`).
 
 ## Bridge commands for the UI (not added yet)
 
@@ -111,8 +125,11 @@ Core functions are in place; each bridge command is a thin call with
 | `work_archive_list` | `{}` | `{archived: [WorkItem], deleted: [Binned]}` | `bin::archived`, `bin::binned` |
 | `work_description_versions` | `{id}` | `[{id, itemId, body?, actor?, agent?, createdAtMs}]` | `versions::list` |
 | `work_description_restore` | `{operationId, id, expectedRevision, versionId}` | `WorkItem` | `work_update` with `details` from `versions::version` |
-| `work_favorite_set` | `{operationId, kind: task\|project\|view, id, on}` | `bool` | `favorites::set_as` |
-| `work_favorites` | `{}` | `[{kind, targetId, createdAtMs}]` | `favorites::favorites` |
+| `work_favorite_set` | `{operationId, kind: task\|project\|view\|person, id, on}` | `bool` | `favorites::set_as` |
+| `work_favorites` | `{}` | `{folders: [{id, name, position, createdAtMs}], favorites: [{kind, targetId, folderId?, position, createdAtMs}]}` | `favorites::favorites` |
+| `work_favorite_folder_save` | `{operationId, id?, name?, index?}` | `{id, name, position, createdAtMs}` | `favorites::save_folder_as` |
+| `work_favorite_folder_delete` | `{operationId, id}` | `null` | `favorites::delete_folder_as` |
+| `work_favorite_move` | `{operationId, entry: {favorite: {kind, id}}\|{folder: {id}}, into?, index?}` | `bool` changed | `favorites::move_as` |
 | `work_subscribe` | `{operationId, ids, on}` | `[String]` changed | `inbox::subscribe_as` |
 | `work_subscriptions` | `{}` | `[{itemId, reason, createdAtMs}]` | `inbox::subscriptions` |
 | `work_inbox` | `{unreadOnly?, snoozed?, archived?}` | `{unread, notifications: [{id, itemId, kind, actor, agent?, commentId?, from?, to?, createdAtMs, readAtMs?, snoozedUntilMs?, archivedAtMs?}]}` | `inbox::notifications` |

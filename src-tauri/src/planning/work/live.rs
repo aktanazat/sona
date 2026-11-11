@@ -214,8 +214,10 @@ pub(super) fn heard_live(history: &Connection, row: &MeetingLoopRow) -> Result<O
     }
 }
 
-/// Where each task with no commitment behind it was heard in a meeting, by
-/// task id. A meeting deleted or with its words purged is left out.
+/// Where each task with no commitment behind it came from in a meeting, by
+/// task id: the words it was heard in when a link carries them, else a link
+/// to the whole meeting. A meeting deleted or with its words purged is left
+/// out.
 pub(super) fn heard(
     history: &Connection,
     meetings: Option<&Connection>,
@@ -224,9 +226,9 @@ pub(super) fn heard(
         "SELECT e.target_id, e.source_id, e.at_ms, e.caption
          FROM planning_evidence_links e
          JOIN planning_tasks t ON t.id = e.target_id
-         WHERE e.target_kind = 'task' AND e.source_kind = 'meeting' AND e.caption IS NOT NULL
+         WHERE e.target_kind = 'task' AND e.source_kind = 'meeting'
            AND t.source_loop_id IS NULL
-         ORDER BY e.created_at_ms, e.id",
+         ORDER BY e.caption IS NULL, e.created_at_ms, e.id",
     )?;
     let links = statement
         .query_map([], |found| {
@@ -234,7 +236,7 @@ pub(super) fn heard(
                 found.get::<_, String>(0)?,
                 found.get::<_, String>(1)?,
                 found.get::<_, Option<i64>>(2)?,
-                found.get::<_, String>(3)?,
+                found.get::<_, Option<String>>(3)?,
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -252,7 +254,7 @@ pub(super) fn heard(
                 let Some(Some(title)) = titles.get(&meeting_id) else {
                     continue;
                 };
-                (Some(title.clone()), Some(quote))
+                (Some(title.clone()), quote)
             }
             None => (None, None),
         };
