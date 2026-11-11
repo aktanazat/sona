@@ -214,6 +214,7 @@ const SONA_WRITES = {
   say: true,
   watch: true,
   unwatch: true,
+  unshare: true,
 };
 
 /** Each required argument at its first enum value or a placeholder. */
@@ -257,7 +258,8 @@ describe("published tools", () => {
     const mislabelled = TOOLS.filter((tool) => {
       const argv = tool.argv(smallest(tool));
       const verb = (argv[0] === "work" ? argv[1] : argv[0]) ?? "";
-      const writes = verb in SONA_WRITES || argv.some((arg) => arg.startsWith("--take="));
+      const writes =
+        verb in SONA_WRITES || argv.some((arg) => arg.startsWith("--take=") || arg === "--save");
       const readOnly = listed.find((candidate) => candidate.name === tool.name)
         ?.annotations?.readOnlyHint;
       return readOnly !== !writes;
