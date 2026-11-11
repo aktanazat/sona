@@ -4055,6 +4055,58 @@ pub(super) async fn call(
             })
             .await?
         }
+        "shared_draft" => {
+            let mut args = Args::parse(params)?;
+            let request = args.take("request")?;
+            reply(
+                crate::commands::shared_pages::shared_draft(app.clone(), app.state(), request)
+                    .await,
+            )
+        }
+        "shared_draft_save" => {
+            let mut args = Args::parse(params)?;
+            let request = args.take("request")?;
+            reply(
+                crate::commands::shared_pages::shared_draft_save(app.clone(), app.state(), request)
+                    .await,
+            )
+        }
+        "shared_draft_discard" => {
+            let mut args = Args::parse(params)?;
+            let request = args.take("request")?;
+            reply(crate::commands::shared_pages::shared_draft_discard(app.clone(), request).await)
+        }
+        "shared_drafts" => reply(crate::commands::shared_pages::shared_drafts(app.clone()).await),
+        "shared_preview" => {
+            let mut args = Args::parse(params)?;
+            let request = args.take("request")?;
+            reply(
+                crate::commands::shared_pages::shared_preview(app.clone(), app.state(), request)
+                    .await,
+            )
+        }
+        "shared_publish" => {
+            let mut args = Args::parse(params)?;
+            let request = args.take("request")?;
+            reply(
+                crate::commands::shared_pages::shared_publish(app.clone(), app.state(), request)
+                    .await,
+            )
+        }
+        "shared_list" => reply(crate::commands::shared_pages::shared_list(app.clone()).await),
+        "shared_revoke" => {
+            let mut args = Args::parse(params)?;
+            let request = args.take("request")?;
+            reply(crate::commands::shared_pages::shared_revoke(app.clone(), request).await)
+        }
+        "shared_site_get" => {
+            reply(crate::commands::shared_pages::shared_site_get(app.clone()).await)
+        }
+        "shared_site_set" => {
+            let mut args = Args::parse(params)?;
+            let request = args.take("request")?;
+            reply(crate::commands::shared_pages::shared_site_set(app.clone(), request).await)
+        }
         "check_for_updates" => {
             reply(crate::commands::updates::check_for_updates(app.clone()).await)
         }
