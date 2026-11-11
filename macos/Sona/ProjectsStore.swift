@@ -561,6 +561,13 @@ final class ProjectsStore {
         }
     }
 
+    /// A project's milestones, from its page when that is read, else read now.
+    func milestones(of projectId: String) async -> [PlanningMilestone] {
+        if let known = details[projectId] { return known.milestones }
+        let read: PlanningProjectDetail? = try? await core.request("planning_project", PlanningIdParams(id: projectId))
+        return read?.milestones ?? []
+    }
+
     /// Pages other than the open one, read one after another and shown in
     /// one change, so the list settles once.
     private func loadDetails(_ ids: [String]) async {

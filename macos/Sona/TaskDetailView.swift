@@ -21,6 +21,9 @@ struct TaskDetailView: View {
                         .font(TypeScale.mono(12))
                         .foregroundStyle(Theme.inkTertiary)
                         .textSelection(.enabled)
+                    if let parent = parent(of: row, detail: detail) {
+                        ParentLink(parent: parent, place: place)
+                    }
                 }
             } trailing: {
                 if let row {
@@ -69,6 +72,20 @@ struct TaskDetailView: View {
         }
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
         .task(id: "\(id):\(row?.revision ?? -1)") { await store.loadDetail(id) }
+        .environment(\.openURL, OpenURLAction { url in
+            guard url.scheme == TaskMention.scheme else { return .systemAction }
+            guard let number = Int64(url.host() ?? ""),
+                  let target = store.items?.first(where: { $0.number == number }) else { return .discarded }
+            model.workFocus.highlighted = target.id
+            model.workFocus.open(target.id, in: place)
+            return .handled
+        })
+    }
+
+    private func parent(of row: WorkItemRow, detail: WorkItemDetail?) -> WorkItemRef? {
+        guard let id = row.parentId else { return nil }
+        if let known = detail?.parent, known.id == id { return known }
+        return model.workRows([id]).first.map { WorkItemRef(id: $0.id, number: $0.number, title: $0.title, status: $0.status) }
     }
 
     private func close() {
@@ -117,6 +134,15 @@ private struct DetailMain: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
+            if let error = model.work.listError {
+                HStack(spacing: 10) {
+                    Image(systemName: "exclamationmark.triangle").font(.system(size: 12)).foregroundStyle(Theme.live)
+                    Text(error).metaText(Theme.live).lineLimit(2)
+                    Button("Retry") { Task { await model.work.refresh() } }
+                        .buttonStyle(QuietButton(compact: true))
+                }
+                .padding(.bottom, 16)
+            }
             if row.status == .duplicate {
                 DuplicateBanner(canonical: row.duplicateOfId, place: place)
                     .padding(.bottom, 16)
@@ -125,6 +151,9 @@ private struct DetailMain: View {
             ProposalStrip(proposals: model.work.proposals(for: row.id))
             DetailNotes(row: row)
                 .padding(.top, 10)
+            DetailSource(row: row)
+            DetailSubtasks(row: row, subTasks: detail?.subTasks, place: place)
+                .padding(.top, 32)
             if row.status == .triage {
                 DetailSuggestions(suggestions: detail?.suggestions ?? model.work.suggestions[row.id] ?? [])
             }
@@ -133,6 +162,8 @@ private struct DetailMain: View {
                 .padding(.top, 32)
             DetailActivity(row: row, activity: detail?.activity)
                 .padding(.top, 32)
+            DetailComments(row: row, comments: detail?.comments)
+                .padding(.top, 24)
         }
     }
 }
@@ -231,6 +262,7 @@ private struct DetailNotes: View {
     @State private var text = ""
     @State private var editing = false
     @FocusState private var focused: Bool
+    @State private var hovering = false
 
     var body: some View {
         let details = row.details ?? ""
@@ -242,12 +274,21 @@ private struct DetailNotes: View {
                     toggle(line, in: details)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.trailing, 32)
                 .contentShape(Rectangle())
-                .onTapGesture { edit() }
+                .onTapGesture(count: 2) { edit() }
+                .overlay(alignment: .topTrailing) {
+                    Button { edit() } label: { Image(systemName: "pencil") }
+                        .buttonStyle(.icon)
+                        .opacity(hovering ? 1 : 0)
+                        .help("Edit details")
+                        .accessibilityLabel("Edit details")
+                }
+                .onHover { hovering = $0 }
                 .accessibilityElement(children: .contain)
                 .accessibilityLabel("Details")
                 .accessibilityAction(named: "Edit") { edit() }
-                .help("Click to edit")
+                .help("Double-click to edit")
             }
         }
         .onChange(of: row.details, initial: true) { _, details in
@@ -263,7 +304,7 @@ private struct DetailNotes: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .hidden()
             if text.isEmpty {
-                Text("Details").font(TypeScale.body(14)).foregroundStyle(Theme.inkDisabled)
+                Text("Add details, a checklist or links").font(TypeScale.body(14)).foregroundStyle(Theme.inkDisabled)
                     .allowsHitTesting(false)
             }
             TextEditor(text: $text)
@@ -395,7 +436,8 @@ private struct MarkdownBody: View {
         }
     }
 
-    /// Emphasis, links and inline code, with bare web addresses made links.
+    /// Emphasis, links and inline code, with bare web addresses and task
+    /// mentions like S-12 made links.
     private static func inline(_ text: String) -> Text {
         Text(attributed(text))
     }
@@ -405,12 +447,20 @@ private struct MarkdownBody: View {
             markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
         )) ?? AttributedString(text)
         let plain = String(string.characters)
-        guard let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) else { return string }
-        for match in detector.matches(in: plain, range: NSRange(plain.startIndex..., in: plain)) {
-            guard let url = match.url, let range = Range(match.range, in: plain) else { continue }
+        func link(_ range: Range<String.Index>, to url: URL?) {
+            guard let url else { return }
             let start = string.characters.index(string.startIndex, offsetBy: plain.distance(from: plain.startIndex, to: range.lowerBound))
             let end = string.characters.index(start, offsetBy: plain.distance(from: range.lowerBound, to: range.upperBound))
             if string[start..<end].link == nil { string[start..<end].link = url }
+        }
+        if let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) {
+            for match in detector.matches(in: plain, range: NSRange(plain.startIndex..., in: plain)) {
+                guard let range = Range(match.range, in: plain) else { continue }
+                link(range, to: match.url)
+            }
+        }
+        for match in plain.matches(of: /\bS-(\d+)\b/) {
+            link(match.range, to: TaskMention.url(match.output.1))
         }
         return string
     }
@@ -538,21 +588,34 @@ private struct DetailEvidence: View {
         let others = links.filter { link in
             !(quoted && link.sourceKind == .meeting && link.sourceId == row.sourceMeetingId && link.atMs == row.sourceAtMs)
         }
-        if quoted || !others.isEmpty {
+        if !others.isEmpty {
             VStack(alignment: .leading, spacing: 10) {
                 DetailHeading(title: "Evidence")
-                if row.raisedIn > 1 {
-                    Text("Raised in \(row.raisedIn) meetings").metaText()
-                }
-                if let quote = row.sourceQuote {
-                    QuoteCard(quote: quote, speaker: row.sourceSpeaker, meetingTitle: row.sourceMeetingTitle,
-                              meetingId: row.sourceMeetingId, atMs: row.sourceAtMs)
-                }
                 ForEach(others) { link in
                     EvidenceLine(link: link)
                 }
             }
             .padding(.top, 32)
+        }
+    }
+}
+
+private struct DetailSource: View {
+    let row: WorkItemRow
+
+    var body: some View {
+        if let quote = row.sourceQuote {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 8) {
+                    DetailHeading(title: "Source")
+                    if row.raisedIn > 1 {
+                        Text("Raised in \(row.raisedIn) meetings").metaText()
+                    }
+                }
+                QuoteCard(quote: quote, speaker: row.sourceSpeaker, meetingTitle: row.sourceMeetingTitle,
+                          meetingId: row.sourceMeetingId, atMs: row.sourceAtMs)
+            }
+            .padding(.top, 24)
         }
     }
 }
@@ -568,17 +631,35 @@ struct QuoteCard: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        let meta = [speaker, meetingTitle, atMs?.meetingMsClock].compactMap { $0 }.joined(separator: " · ")
-        VStack(alignment: .leading, spacing: 10) {
-            Text("“\(quote)”")
-                .bodyText(14)
-                .fixedSize(horizontal: false, vertical: true)
-                .textSelection(.enabled)
+        VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 8) {
-                Text(meta).metaText().lineLimit(1)
+                Image(systemName: "waveform")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Theme.accent)
+                    .frame(width: 16)
+                Text(speaker ?? "Someone").font(TypeScale.label(13)).foregroundStyle(Theme.ink).lineLimit(1)
+                if let meetingTitle {
+                    Text(meetingTitle).metaText().lineLimit(1)
+                }
                 Spacer(minLength: 8)
+                if let atMs {
+                    Text(atMs.meetingMsClock).font(TypeScale.mono(11)).foregroundStyle(Theme.inkTertiary)
+                }
+            }
+            HStack(alignment: .top, spacing: 12) {
+                RoundedRectangle(cornerRadius: 1).fill(Theme.accent.opacity(0.45)).frame(width: 2)
+                Text(quote)
+                    .font(TypeScale.body(15))
+                    .lineSpacing(3)
+                    .foregroundStyle(Theme.ink)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+            }
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.leading, 7)
+            HStack(spacing: 14) {
                 if let meetingId, let atMs {
-                    PlayMoment(sessionId: meetingId, atMs: atMs)
+                    PlayMoment(sessionId: meetingId, atMs: atMs, prominent: true)
                 }
                 if let meetingId {
                     Button {
@@ -590,11 +671,12 @@ struct QuoteCard: View {
                     .buttonStyle(QuietButton(compact: true))
                     .help("Open the meeting at this moment")
                 }
+                Spacer(minLength: 0)
             }
         }
-        .padding(14)
+        .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.inset, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
+        .background(Theme.inset, in: RoundedRectangle(cornerRadius: Theme.radiusCard))
     }
 }
 
@@ -603,6 +685,7 @@ struct QuoteCard: View {
 struct PlayMoment: View {
     let sessionId: String
     let atMs: Int64
+    var prominent = false
     @Environment(AppModel.self) private var model
 
     var body: some View {
@@ -617,12 +700,18 @@ struct PlayMoment: View {
                     .metaText(error == ConversationAudioPlayback.heldNotice ? Theme.inkSecondary : Theme.live)
                     .lineLimit(1)
             }
-            Button {
+            let button = Button {
                 Self.toggle(sessionId: sessionId, atMs: atMs, model: model)
             } label: {
                 Label(running ? "Stop" : "Play", systemImage: running ? "stop.fill" : "play.fill")
             }
-            .buttonStyle(QuietButton(color: Theme.accent, compact: true))
+            Group {
+                if prominent {
+                    button.buttonStyle(PrimaryButton(compact: true))
+                } else {
+                    button.buttonStyle(QuietButton(color: Theme.accent, compact: true))
+                }
+            }
             .disabled(audio.heldForRecording)
             .help(audio.heldForRecording ? ConversationAudioPlayback.heldNotice : "Play from \(atMs.meetingMsClock)")
         }
@@ -961,6 +1050,415 @@ private struct DetailActivity: View {
     }
 }
 
+private struct DetailSubtasks: View {
+    let row: WorkItemRow
+    let subTasks: [WorkItem]?
+    let place: Place
+    @Environment(AppModel.self) private var model
+    @State private var text = ""
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        let tasks = subTasks ?? []
+        let done = tasks.filter { $0.status == .done }.count
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 10) {
+                DetailHeading(title: "Sub-tasks")
+                if !tasks.isEmpty {
+                    Text("\(done)/\(tasks.count)").metaText().monospacedDigit()
+                    Gauge(value: Double(done), in: 0...Double(tasks.count)) {}
+                        .gaugeStyle(.accessoryLinearCapacity)
+                        .tint(Theme.accent)
+                        .frame(width: 72)
+                        .accessibilityLabel("\(done) of \(tasks.count) done")
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.bottom, 6)
+            ForEach(tasks) { task in
+                SubtaskLine(item: task, place: place)
+            }
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                Image(systemName: "plus")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(focused ? Theme.accent : Theme.inkTertiary)
+                    .frame(width: 16)
+                TextField("", text: $text, prompt: Text(tasks.isEmpty ? "Add a sub-task, or paste a list" : "Add a sub-task")
+                    .foregroundStyle(Theme.inkDisabled), axis: .vertical)
+                    .textFieldStyle(.plain)
+                    .font(TypeScale.body(13))
+                    .focused($focused)
+                    .onSubmit(add)
+                    .onExitCommand {
+                        text = ""
+                        focused = false
+                    }
+                    .onChange(of: text) { _, now in
+                        if now.contains("\n") { add() }
+                    }
+                    .accessibilityLabel("Add a sub-task")
+                    .onChange(of: row.id) {
+                        text = ""
+                        focused = false
+                    }
+            }
+            .padding(.horizontal, 8)
+            .frame(minHeight: 32)
+            .background(focused ? Theme.inset : .clear, in: RoundedRectangle(cornerRadius: Theme.radiusRow))
+        }
+    }
+
+    private func add() {
+        let titles = text.components(separatedBy: .newlines).map { line in
+            line.replacing(/^\s*(?:[-*+•]|\d+[.)])\s+(?:\[[ xX]\]\s+)?/, with: "")
+        }
+        text = ""
+        model.work.createSubtasks(under: row.id, titles: titles)
+    }
+}
+
+private struct SubtaskLine: View {
+    let item: WorkItem
+    let place: Place
+    @Environment(AppModel.self) private var model
+    @State private var hovering = false
+
+    var body: some View {
+        let finished = item.status == .done || item.status == .canceled
+        HStack(spacing: 10) {
+            Button {
+                let id = item.id
+                let status: WorkStatus = finished ? .notStarted : .done
+                model.changeWork { model.work.update([id], WorkPatch(status: status)) }
+            } label: {
+                TaskStatusIcon(status: item.status).contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(finished ? "Reopen" : "Mark done")
+            .accessibilityLabel(finished ? "Reopen \(item.title)" : "Mark \(item.title) done")
+            Text("#\(item.number)").font(TypeScale.mono(12)).foregroundStyle(Theme.inkTertiary)
+                .frame(minWidth: 28, alignment: .leading)
+            Text(item.title)
+                .bodyText(13, finished ? Theme.inkTertiary : Theme.ink)
+                .strikethrough(item.status == .canceled)
+                .lineLimit(1)
+            Spacer(minLength: 8)
+            if let due = item.dueAtMs {
+                Text(TaskDates.label(due, now: TaskDates.now())).metaText()
+            }
+            Button {
+                let id = item.id
+                model.changeWork { model.work.setParent(of: id, to: nil) }
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .bold))
+                    .frame(width: 20, height: 20)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(QuietButton(compact: true))
+            .opacity(hovering ? 1 : 0)
+            .help("Remove from this task")
+            .accessibilityLabel("Remove \(item.title) from this task")
+        }
+        .padding(.horizontal, 8)
+        .frame(height: 32)
+        .background(hovering ? Theme.wash : .clear, in: RoundedRectangle(cornerRadius: Theme.radiusRow))
+        .hoverFade(hovering)
+        .contentShape(Rectangle())
+        .onHover { hovering = $0 }
+        .onTapGesture {
+            model.workFocus.highlighted = item.id
+            model.workFocus.open(item.id, in: place)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityAddTraits(.isButton)
+    }
+}
+
+private struct ParentLink: View {
+    let parent: WorkItemRef
+    let place: Place
+    @Environment(AppModel.self) private var model
+    @State private var hovering = false
+
+    var body: some View {
+        Button {
+            model.workFocus.highlighted = parent.id
+            model.workFocus.open(parent.id, in: place)
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(Theme.inkTertiary)
+                TaskStatusIcon(status: parent.status)
+                Text("#\(parent.number)").font(TypeScale.mono(12)).foregroundStyle(Theme.inkTertiary)
+                Text(parent.title).bodyText(13, hovering ? Theme.ink : Theme.inkSecondary).lineLimit(1)
+            }
+            .padding(.horizontal, 6)
+            .frame(height: 24)
+            .background(hovering ? Theme.controlHover : .clear, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .help("Open the parent task")
+        .accessibilityLabel("Parent, #\(parent.number) \(parent.title)")
+    }
+}
+
+private struct DetailComments: View {
+    let row: WorkItemRow
+    let comments: [WorkComment]?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            ForEach(comments ?? []) { thread in
+                CommentThread(thread: thread, itemId: row.id)
+            }
+            CommentComposer(itemId: row.id, prompt: "Leave a comment")
+        }
+    }
+}
+
+private struct CommentThread: View {
+    let thread: WorkComment
+    let itemId: String
+    @State private var replying = false
+    @State private var expanded = false
+
+    var body: some View {
+        let resolved = thread.resolvedAtMs != nil
+        VStack(alignment: .leading, spacing: 0) {
+            if resolved && !expanded {
+                Button { expanded = true } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 12))
+                            .foregroundStyle(Theme.inkTertiary)
+                            .frame(width: 16)
+                        Text("Resolved thread from \(thread.author.display)").bodyText(13, Theme.inkSecondary)
+                        if !thread.replies.isEmpty {
+                            Text(thread.replies.count == 1 ? "1 reply" : "\(thread.replies.count) replies").metaText()
+                        }
+                        Spacer(minLength: 0)
+                        Image(systemName: "chevron.down").font(.system(size: 10)).foregroundStyle(Theme.inkTertiary)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Show the thread")
+            } else {
+                CommentEntry(comment: thread, thread: thread, itemId: itemId) { replying = true }
+                ForEach(thread.replies) { reply in
+                    CommentEntry(comment: reply, thread: thread, itemId: itemId) { replying = true }
+                        .padding(.leading, 24)
+                }
+                if replying {
+                    CommentComposer(itemId: itemId, replyTo: thread.id, prompt: "Reply", autofocus: true) {
+                        replying = false
+                    }
+                    .padding(.leading, 24)
+                    .padding(.top, 6)
+                } else if !resolved {
+                    Button("Reply") { replying = true }
+                        .buttonStyle(QuietButton(compact: true))
+                        .padding(.leading, 24)
+                        .padding(.top, 2)
+                }
+                if resolved {
+                    Button("Hide") { expanded = false }
+                        .buttonStyle(QuietButton(compact: true))
+                        .padding(.top, 4)
+                }
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .overlay(RoundedRectangle(cornerRadius: Theme.radiusCard).strokeBorder(Theme.hairline))
+    }
+}
+
+private struct CommentEntry: View {
+    let comment: WorkComment
+    let thread: WorkComment
+    let itemId: String
+    let reply: () -> Void
+    @Environment(AppModel.self) private var model
+    @State private var editing = false
+    @State private var hovering = false
+
+    var body: some View {
+        let root = comment.id == thread.id
+        let resolved = thread.resolvedAtMs != nil
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                ActorMark(actor: comment.author.kind)
+                Text(comment.author.display).font(TypeScale.label(13)).foregroundStyle(Theme.ink)
+                Text(TaskDates.ago(comment.createdAtMs, now: TaskDates.now()))
+                    .metaText()
+                    .help(PlanningFormat.date(comment.createdAtMs))
+                if comment.editedAtMs != nil {
+                    Text("edited").metaText()
+                }
+                Spacer(minLength: 8)
+                if !comment.deleted && !editing {
+                    HStack(spacing: 2) {
+                        if !resolved {
+                            action("Reply", "arrowshape.turn.up.left", reply)
+                        }
+                        if root {
+                            action(resolved ? "Reopen" : "Resolve", resolved ? "arrow.uturn.backward" : "checkmark") {
+                                run { await model.work.resolveComment(thread.id, on: itemId, resolved: !resolved) }
+                            }
+                        }
+                        if comment.author.kind == .me {
+                            action("Edit", "pencil") { editing = true }
+                        }
+                        action("Delete", "trash") {
+                            run { await model.work.deleteComment(comment.id, on: itemId) }
+                        }
+                    }
+                    .opacity(hovering ? 1 : 0)
+                }
+            }
+            .frame(height: 22)
+            Group {
+                if comment.deleted {
+                    Text("Deleted").bodyText(13, Theme.inkTertiary).italic()
+                } else if editing, comment.author.kind == .me {
+                    CommentComposer(itemId: itemId, editing: comment, prompt: "Edit comment", autofocus: true) {
+                        editing = false
+                    }
+                } else if let body = comment.body {
+                    MarkdownBody(source: body) { _ in }
+                        .textSelection(.enabled)
+                }
+            }
+            .padding(.leading, 24)
+        }
+        .padding(.vertical, 6)
+        .contentShape(Rectangle())
+        .onHover { hovering = $0 }
+        .accessibilityElement(children: .contain)
+    }
+
+    private func action(_ title: String, _ icon: String, _ run: @escaping () -> Void) -> some View {
+        Button(action: run) {
+            Image(systemName: icon)
+                .font(.system(size: 11))
+                .frame(width: 24, height: 22)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(QuietButton(compact: true))
+        .help(title)
+        .accessibilityLabel(title)
+    }
+
+    private func run(_ work: @escaping @MainActor () async -> Bool) {
+        Task { _ = await work() }
+    }
+}
+
+private struct CommentComposer: View {
+    let itemId: String
+    var replyTo: String?
+    var editing: WorkComment?
+    let prompt: String
+    var autofocus = false
+    var done: () -> Void = {}
+    @Environment(AppModel.self) private var model
+    @State private var text = ""
+    @State private var sending = false
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        let empty = text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let nested = editing != nil || replyTo != nil
+        VStack(alignment: .trailing, spacing: 8) {
+            ZStack(alignment: .topLeading) {
+                Text(text.isEmpty ? " " : text + "\n")
+                    .font(TypeScale.body(13))
+                    .lineSpacing(2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .hidden()
+                if text.isEmpty {
+                    Text(prompt).font(TypeScale.body(13)).foregroundStyle(Theme.inkDisabled)
+                        .allowsHitTesting(false)
+                }
+                TextEditor(text: $text)
+                    .font(TypeScale.body(13))
+                    .lineSpacing(2)
+                    .foregroundStyle(Theme.ink)
+                    .textEditorStyle(.plain)
+                    .scrollContentBackground(.hidden)
+                    .scrollDisabled(true)
+                    .padding(.horizontal, -5)
+                    .focused($focused)
+                    .onKeyPress(.return, phases: .down) { press in
+                        guard press.modifiers.contains(.command) else { return .ignored }
+                        post()
+                        return .handled
+                    }
+                    .onExitCommand {
+                        focused = false
+                        if nested { done() }
+                    }
+                    .accessibilityLabel(prompt)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 9)
+            .background(Theme.inset, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
+            .overlay(
+                RoundedRectangle(cornerRadius: Theme.radiusControl)
+                    .strokeBorder(focused ? Theme.accent.opacity(0.6) : Theme.hairline, lineWidth: 1)
+            )
+            .contentShape(Rectangle())
+            .onTapGesture { focused = true }
+            if focused || !empty || nested {
+                HStack(spacing: 12) {
+                    Text("⌘↩").metaText()
+                    if nested {
+                        Button("Cancel") { done() }.buttonStyle(QuietButton(compact: true))
+                    }
+                    Button(editing != nil ? "Save" : replyTo != nil ? "Reply" : "Comment") { post() }
+                        .buttonStyle(PrimaryButton(compact: true))
+                        .disabled(empty || sending)
+                }
+            }
+        }
+        .onAppear {
+            if let editing { text = editing.body ?? "" }
+            if autofocus { focused = true }
+        }
+    }
+
+    private func post() {
+        let body = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !body.isEmpty, !sending else { return }
+        sending = true
+        let work = model.work
+        Task {
+            let saved = if let editing {
+                await work.editComment(editing.id, on: itemId, body: body)
+            } else {
+                await work.addComment(on: itemId, body: body, replyTo: replyTo)
+            }
+            sending = false
+            guard saved else { return }
+            text = ""
+            done()
+        }
+    }
+}
+
+enum TaskMention {
+    static let scheme = "sona-task"
+
+    static func url(_ number: Substring) -> URL? {
+        URL(string: "\(scheme)://\(number)")
+    }
+}
+
 private struct ActorMark: View {
     let actor: WorkActor
     @Environment(AppModel.self) private var model
@@ -1040,22 +1538,9 @@ struct TaskPropertyList: View {
                     }
                 }
             }
-            if let rule = row.repeat?.every
-                ?? work.detail.flatMap({ $0.item.id == row.id ? $0.recurrence : nil }) {
-                PropertyLine(title: "Repeats") {
-                    HStack(spacing: 8) {
-                        Image(systemName: "repeat")
-                            .font(.system(size: 12))
-                            .foregroundStyle(Theme.inkSecondary)
-                            .frame(width: 16, height: 16)
-                        Text(Recurrence.display(rule)).bodyText(13, Theme.ink).lineLimit(1)
-                        if let repeating = row.repeat, repeating.of > 0 {
-                            Text("kept \(repeating.kept) of \(repeating.of)").metaText()
-                        }
-                    }
-                    .padding(.horizontal, 8)
-                    .frame(height: 28)
-                }
+            PropertyLine(title: "Repeats") {
+                RepeatMenu(row: row, rule: row.repeat?.every
+                    ?? work.detail.flatMap({ $0.item.id == row.id ? $0.recurrence : nil }))
             }
             if row.status.isOpen || row.cycle != nil {
                 PropertyLine(title: "Cycle") {
@@ -1076,7 +1561,7 @@ struct TaskPropertyList: View {
                         }
                     } else {
                         Button { work.book(row.id) } label: {
-                            PropertyValue(text: row.atRisk ? "At risk · Book time" : "Book time",
+                            PropertyValue(text: row.atRisk ? "At risk, book time" : "Book time",
                                           faint: !row.atRisk) {
                                 Image(systemName: row.atRisk ? "exclamationmark.circle.fill" : "calendar.badge.clock")
                                     .font(.system(size: 12))
@@ -1096,6 +1581,11 @@ struct TaskPropertyList: View {
                     }
                 }
             }
+            if let projectId = row.projectId {
+                PropertyLine(title: "Milestone") {
+                    MilestoneMenu(row: row, projectId: projectId)
+                }
+            }
             PropertyLine(title: "Labels") {
                 WorkPickerButton(kind: .labels, ids: ids) {
                     let labels = row.labelIds.compactMap { id in work.labels.first { $0.id == id } }
@@ -1105,6 +1595,15 @@ struct TaskPropertyList: View {
                         }
                     } else {
                         FlowLabels(labels: labels)
+                    }
+                }
+            }
+            PropertyLine(title: "Parent") {
+                WorkPickerButton(kind: .parent, ids: ids) {
+                    let parent = row.parentId.flatMap { model.workRows([$0]).first }
+                    PropertyValue(text: parent.map { "#\($0.number) \($0.title)" } ?? (row.parentId == nil ? "No parent" : "A task"),
+                                  faint: row.parentId == nil) {
+                        Image(systemName: "arrow.turn.left.up").font(.system(size: 12)).foregroundStyle(Theme.inkSecondary)
                     }
                 }
             }
@@ -1129,6 +1628,86 @@ struct TaskPropertyList: View {
                 Text(PlanningFormat.date(row.updatedAtMs)).metaText(Theme.inkSecondary).padding(.horizontal, 8)
             }
         }
+    }
+}
+
+private struct MilestoneMenu: View {
+    let row: WorkItemRow
+    let projectId: String
+    @Environment(AppModel.self) private var model
+    @State private var milestones: [PlanningMilestone] = []
+
+    var body: some View {
+        let current = milestones.first { $0.id == row.milestoneId }
+        Menu {
+            Button("No milestone") { set(nil) }
+            if !milestones.isEmpty { Divider() }
+            ForEach(milestones) { milestone in
+                Button { set(milestone.id) } label: {
+                    if milestone.id == row.milestoneId {
+                        Label(milestone.title, systemImage: "checkmark")
+                    } else {
+                        Text(milestone.title)
+                    }
+                }
+            }
+        } label: {
+            PropertyValue(text: current?.title ?? (row.milestoneId == nil ? "No milestone" : "A milestone"),
+                          faint: row.milestoneId == nil) {
+                Image(systemName: "flag").font(.system(size: 12)).foregroundStyle(Theme.inkSecondary)
+            }
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .task(id: projectId) { milestones = await model.projects.milestones(of: projectId) }
+        .accessibilityLabel("Milestone")
+    }
+
+    private func set(_ id: String?) {
+        let task = row.id
+        model.changeWork { model.work.update([task], WorkPatch(milestoneId: id.map { .set($0) } ?? .clear)) }
+    }
+}
+
+private struct RepeatMenu: View {
+    let row: WorkItemRow
+    let rule: String?
+    @Environment(AppModel.self) private var model
+    private static let rules = ["every day", "every weekday", "every monday", "every month"]
+
+    var body: some View {
+        let kept = row.repeat.flatMap { $0.of > 0 ? ", kept \($0.kept) of \($0.of)" : nil } ?? ""
+        Menu {
+            ForEach(Self.rules, id: \.self) { every in
+                Button { set(every) } label: {
+                    if every == rule {
+                        Label(Recurrence.display(every), systemImage: "checkmark")
+                    } else {
+                        Text(Recurrence.display(every))
+                    }
+                }
+            }
+            if rule != nil {
+                Divider()
+                Button("Don't repeat") { set(nil) }
+            }
+        } label: {
+            PropertyValue(text: rule.map { Recurrence.display($0) + kept } ?? "Doesn't repeat", faint: rule == nil) {
+                Image(systemName: "repeat").font(.system(size: 12)).foregroundStyle(Theme.inkSecondary)
+            }
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .accessibilityLabel("Repeats")
+    }
+
+    private func set(_ every: String?) {
+        let task = row.id
+        model.changeWork { model.work.update([task], WorkPatch(recurrence: every.map { .set($0) } ?? .clear)) }
     }
 }
 
@@ -1262,6 +1841,13 @@ enum WorkActivityText {
         case .block:
             guard let start = entry.to.flatMap({ Int64($0) }) else { return "cleared its booked time" }
             return "booked time \(PlanningFormat.day(start))"
+        case .parent:
+            guard let to = entry.to, !to.isEmpty else { return "took it out of its parent" }
+            return "made it a sub-task of \(task(to, model: model))"
+        case .comment:
+            return "commented"
+        case .unknown:
+            return "changed the task"
         }
     }
 
@@ -1293,10 +1879,10 @@ enum WorkActivityText {
 }
 
 enum TaskRepeatText {
-    /// "Every week · kept 3 of 4".
+    /// "Every week, kept 3 of 4".
     static func line(_ repeating: WorkRepeat) -> String {
         let rule = Recurrence.display(repeating.every)
-        return repeating.of > 0 ? "\(rule) · kept \(repeating.kept) of \(repeating.of)" : rule
+        return repeating.of > 0 ? "\(rule), kept \(repeating.kept) of \(repeating.of)" : rule
     }
 }
 

@@ -255,6 +255,18 @@ struct ItemRow: View {
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel("Raised in \(row.raisedIn) meetings")
             }
+            if let progress = row.subTasks, progress.total > 0 {
+                HStack(spacing: 3) {
+                    Image(systemName: "checklist").font(.system(size: 9, weight: .medium))
+                    Text(verbatim: "\(progress.done)/\(progress.total)")
+                }
+                .font(TypeScale.label(11))
+                .monospacedDigit()
+                .foregroundStyle(progress.done == progress.total ? Theme.accent : Theme.inkTertiary)
+                .help("\(progress.done) of \(progress.total) sub-tasks done")
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("\(progress.done) of \(progress.total) sub-tasks done")
+            }
             if let repeating = row.repeat {
                 HStack(spacing: 3) {
                     Image(systemName: "repeat").font(.system(size: 9, weight: .medium))

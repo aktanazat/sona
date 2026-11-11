@@ -42,6 +42,7 @@ enum WorkChoices {
         case .blockedBy: "Blocked by which task…"
         case .blocks: "Blocks which task…"
         case .related: "Related to which task…"
+        case .parent: "Parent task…"
         }
     }
 
@@ -105,6 +106,8 @@ enum WorkChoices {
             }
         case .blockedBy, .blocks, .related:
             relations(picker.kind, of: ids, text: text, model: model)
+        case .parent:
+            parents(of: ids, text: text, model: model)
         }
         return filtered(choices, by: text, kind: picker.kind)
     }
@@ -117,7 +120,7 @@ enum WorkChoices {
     }
 
     static func picksTask(_ kind: WorkPicker.Kind) -> Bool {
-        [.duplicate, .blockedBy, .blocks, .related].contains(kind)
+        [.duplicate, .blockedBy, .blocks, .related, .parent].contains(kind)
     }
 
     static let newLabel = "new-label"
@@ -328,6 +331,32 @@ enum WorkChoices {
                     let (from, to) = kind == .blockedBy ? (other.id, id) : (id, other.id)
                     work.addRelation(from: from, to: to, kind: kind == .related ? .related : .blocks)
                 }
+            }
+        }
+    }
+
+    /// Tasks these can sit under, newest first: never themselves or one of
+    /// their own sub-tasks. "No parent" leads when one has a parent.
+    private static func parents(of ids: [String], text: String, model: AppModel) -> [WorkChoice] {
+        let work = model.work
+        let rows = model.workRows(ids)
+        let mine = Set(ids)
+        let number = text.hasPrefix("#") ? String(text.dropFirst()) : text
+        let pool = (work.items ?? []).filter { row in
+            !mine.contains(row.id) && !mine.contains(row.parentId ?? "") && row.archivedAtMs == nil
+                && row.status != .duplicate
+                && (text.isEmpty || row.title.localizedCaseInsensitiveContains(text) || "\(row.number)" == number)
+        }
+        let current = rows.compactMap(\.parentId)
+        let clear = rows.contains { $0.parentId != nil } && text.isEmpty
+            ? [WorkChoice(id: "no-parent", title: "No parent", mark: .symbol("arrow.uturn.down")) {
+                model.changeWork { work.update(ids, WorkPatch(parentId: .clear)) }
+            }]
+            : []
+        return clear + pool.sorted { $0.updatedAtMs > $1.updatedAtMs }.prefix(30).map { other in
+            WorkChoice(id: other.id, title: other.title, mark: .status(other.status), detail: "#\(other.number)",
+                       checked: current.contains(other.id)) {
+                model.changeWork { work.update(ids, WorkPatch(parentId: .set(other.id))) }
             }
         }
     }

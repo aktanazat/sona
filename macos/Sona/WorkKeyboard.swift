@@ -6,7 +6,7 @@ import SwiftUI
 struct WorkPicker: Equatable {
     enum Kind: Equatable {
         case status, priority, owner, due, labels, project, duplicate, snooze
-        case delegate, cycle, blockedBy, blocks, related
+        case delegate, cycle, blockedBy, blocks, related, parent
     }
 
     let kind: Kind
@@ -20,7 +20,7 @@ enum WorkAction: String, CaseIterable, Identifiable {
     case accept, decline, duplicate, snooze, nudge, archive
     case delegate, acceptProposal, acceptAllProposals, rejectProposal
     case cycle, block
-    case blockedBy, blocks, related
+    case blockedBy, blocks, related, parent, removeParent
 
     var id: String { rawValue }
 
@@ -51,6 +51,8 @@ enum WorkAction: String, CaseIterable, Identifiable {
         case .blockedBy: "Blocked by…"
         case .blocks: "Blocks…"
         case .related: "Related to…"
+        case .parent: "Set parent…"
+        case .removeParent: "Remove parent"
         }
     }
 
@@ -82,6 +84,8 @@ enum WorkAction: String, CaseIterable, Identifiable {
         case .blockedBy: "m b"
         case .blocks: "m x"
         case .related: "m r"
+        case .parent: "m p"
+        case .removeParent: ""
         }
     }
 
@@ -111,7 +115,7 @@ enum WorkAction: String, CaseIterable, Identifiable {
         case .rejectProposal: KeyboardShortcut("n", modifiers: [])
         case .cycle: KeyboardShortcut("c", modifiers: .shift)
         case .block: KeyboardShortcut("b", modifiers: [])
-        case .blockedBy, .blocks, .related: nil
+        case .blockedBy, .blocks, .related, .parent, .removeParent: nil
         }
     }
 
@@ -142,6 +146,8 @@ enum WorkAction: String, CaseIterable, Identifiable {
         case .blockedBy: "exclamationmark.octagon"
         case .blocks: "hand.raised"
         case .related: "arrow.left.arrow.right"
+        case .parent: "arrow.turn.left.up"
+        case .removeParent: "arrow.uturn.down"
         }
     }
 
@@ -155,12 +161,13 @@ enum WorkAction: String, CaseIterable, Identifiable {
         case .project: .project
         case .duplicate: .duplicate
         case .snooze: .snooze
-        case .open, .peek, .assignToMe, .rename, .accept, .decline, .nudge, .archive, .block: nil
+        case .open, .peek, .assignToMe, .rename, .accept, .decline, .nudge, .archive, .block, .removeParent: nil
         case .delegate: .delegate
         case .cycle: .cycle
         case .blockedBy: .blockedBy
         case .blocks: .blocks
         case .related: .related
+        case .parent: .parent
         case .acceptProposal, .acceptAllProposals, .rejectProposal: nil
         }
     }
@@ -183,6 +190,8 @@ enum WorkAction: String, CaseIterable, Identifiable {
         case .cycle: rows.allSatisfy { $0.status.isOpen }
         case .block: rows.count == 1 && first.status.isOpen && first.timeBlock == nil
         case .blockedBy, .blocks, .related: true
+        case .parent: rows.count == 1
+        case .removeParent: rows.contains { $0.parentId != nil }
         case .acceptProposal, .acceptAllProposals, .rejectProposal: rows.contains { proposed.contains($0.id) }
         }
     }
@@ -496,7 +505,7 @@ final class WorkKeys {
         "h": .capture, "d": .today, "m": .meetings, "t": .tasks, "i": .triage, "p": .people, "j": .projects,
     ]
     private static let relations: [String: WorkAction] = [
-        "b": .blockedBy, "x": .blocks, "r": .related, "m": .duplicate,
+        "b": .blockedBy, "x": .blocks, "r": .related, "m": .duplicate, "p": .parent,
     ]
 
     func install(_ model: AppModel) {
@@ -758,8 +767,11 @@ extension AppModel {
             work.rejectProposals(ids.compactMap { work.proposals(for: $0).first?.id })
         case .block:
             work.book(first)
+        case .removeParent:
+            let children = workRows(ids).filter { $0.parentId != nil }.map(\.id)
+            changeWork { work.update(children, WorkPatch(parentId: .clear)) }
         case .status, .priority, .owner, .due, .labels, .project, .duplicate, .snooze, .delegate, .cycle,
-             .blockedBy, .blocks, .related:
+             .blockedBy, .blocks, .related, .parent:
             break
         }
     }
@@ -902,7 +914,8 @@ extension AppModel {
     private func paletteKeys(_ action: WorkAction) -> String? {
         if action == .duplicate, place != .triage { return "m m" }
         let triageKeys: Set<WorkAction> = [.accept, .decline, .duplicate]
-        return place == .triage || !triageKeys.contains(action) ? action.keys : nil
+        let keys = place == .triage || !triageKeys.contains(action) ? action.keys : nil
+        return keys?.isEmpty == true ? nil : keys
     }
 
     /// The tasks the palette acts on, for the chip over its field.

@@ -88,13 +88,14 @@ struct WorkPatch: Equatable {
     var snoozedUntilMs: WorkPatchValue<Int64>?
     var recurrence: WorkPatchValue<String>?
     var cycle: WorkPatchValue<Int64>?
+    var parentId: WorkPatchValue<String>?
 
     init(
         title: String? = nil, details: WorkPatchValue<String>? = nil, status: WorkStatus? = nil,
         priority: Int? = nil, projectId: WorkPatchValue<String>? = nil, milestoneId: WorkPatchValue<String>? = nil,
         owner: WorkOwner? = nil, dueAtMs: WorkPatchValue<Int64>? = nil, labelIds: [String]? = nil,
         snoozedUntilMs: WorkPatchValue<Int64>? = nil, recurrence: WorkPatchValue<String>? = nil,
-        cycle: WorkPatchValue<Int64>? = nil
+        cycle: WorkPatchValue<Int64>? = nil, parentId: WorkPatchValue<String>? = nil
     ) {
         self.title = title
         self.details = details
@@ -108,13 +109,14 @@ struct WorkPatch: Equatable {
         self.snoozedUntilMs = snoozedUntilMs
         self.recurrence = recurrence
         self.cycle = cycle
+        self.parentId = parentId
     }
 }
 
 extension WorkPatch: Encodable {
     private enum Key: String, CodingKey {
         case title, details, status, priority, projectId, milestoneId, owner, dueAtMs, labelIds, snoozedUntilMs
-        case recurrence, cycle
+        case recurrence, cycle, parentId
     }
 
     func encode(to encoder: Encoder) throws {
@@ -131,6 +133,7 @@ extension WorkPatch: Encodable {
         try Self.encode(snoozedUntilMs, .snoozedUntilMs, in: &container)
         try Self.encode(recurrence, .recurrence, in: &container)
         try Self.encode(cycle, .cycle, in: &container)
+        try Self.encode(parentId, .parentId, in: &container)
     }
 
     private static func encode<T: Encodable & Equatable>(
@@ -169,6 +172,7 @@ struct WorkItem: Codable, Identifiable, Equatable {
     var sortOrder: Double
     /// The number of the cycle it is planned in.
     var cycle: Int64?
+    var parentId: String?
 }
 
 /// An item with the names its row shows; the core sends the item's fields
@@ -197,6 +201,8 @@ struct WorkItemRow: Codable, Identifiable, Equatable {
     var revision: Int64
     var sortOrder: Double
     var cycle: Int64?
+    var parentId: String?
+    var subTasks: WorkProgress?
     var projectTitle: String?
     var ownerName: String?
     /// The agent working the item; none when the user is.
@@ -227,13 +233,51 @@ struct WorkItemRow: Codable, Identifiable, Equatable {
             direction: direction, dueAtMs: dueAtMs, labelIds: labelIds, sourceLoopId: sourceLoopId,
             duplicateOfId: duplicateOfId, snoozedUntilMs: snoozedUntilMs, archivedAtMs: archivedAtMs,
             statusChangedAtMs: statusChangedAtMs, createdAtMs: createdAtMs, updatedAtMs: updatedAtMs,
-            revision: revision, sortOrder: sortOrder, cycle: cycle)
+            revision: revision, sortOrder: sortOrder, cycle: cycle, parentId: parentId)
     }
 
     var owner: WorkOwner {
         if ownerIsSelf { return .myself }
         return ownerPersonId.map { .person($0) } ?? .nobody
     }
+}
+
+struct WorkProgress: Codable, Equatable {
+    var done: Int
+    var total: Int
+}
+
+struct WorkItemRef: Codable, Equatable {
+    var id: String
+    var number: Int64
+    var title: String
+    var status: WorkStatus
+}
+
+struct WorkCommentAuthor: Codable, Equatable {
+    var kind: WorkActor
+    var name: String?
+
+    var display: String {
+        switch kind {
+        case .me: "Aktan"
+        case .sona: "Sona"
+        case .agent: name ?? "Agent"
+        }
+    }
+}
+
+struct WorkComment: Codable, Identifiable, Equatable {
+    var id: String
+    var itemId: String
+    var parentId: String?
+    var author: WorkCommentAuthor
+    var body: String?
+    var createdAtMs: Int64
+    var editedAtMs: Int64?
+    var resolvedAtMs: Int64?
+    var deleted: Bool
+    var replies: [WorkComment]
 }
 
 struct WorkTimeBlock: Codable, Equatable {
@@ -328,7 +372,12 @@ struct WorkDoer: Codable, Equatable {
 }
 
 enum WorkProposalField: String, Codable, Hashable {
-    case title, details, status, priority, owner, due, project, milestone, labels, snoozed, recurrence, cycle
+    case title, details, status, priority, owner, due, project, milestone, labels, snoozed, recurrence, cycle, parent
+    case unknown
+
+    init(from decoder: Decoder) throws {
+        self = Self(rawValue: try decoder.singleValueContainer().decode(String.self)) ?? .unknown
+    }
 }
 
 /// One field an agent would change, waiting for the user. `from` is the
@@ -508,7 +557,12 @@ enum WorkActor: String, Codable, Hashable { case me, sona, agent }
 
 enum WorkActivityKind: String, Codable, Hashable {
     case created, status, priority, owner, due, project, title, details, labels, archived, restored
-    case duplicate, accepted, declined, snoozed, relation, kept, recurrence, cycle, block
+    case duplicate, accepted, declined, snoozed, relation, kept, recurrence, cycle, block, parent, comment
+    case unknown
+
+    init(from decoder: Decoder) throws {
+        self = Self(rawValue: try decoder.singleValueContainer().decode(String.self)) ?? .unknown
+    }
 }
 
 /// One change in an item's history. `from` and `to` hold raw values: a
@@ -610,6 +664,9 @@ struct WorkItemDetail: Decodable, Equatable {
     /// meeting, its meeting evidence and its people are not read.
     var conversationsAvailable: Bool
     var proposals: [WorkProposal]
+    var parent: WorkItemRef?
+    var subTasks: [WorkItem]
+    var comments: [WorkComment]
 }
 
 /// The `work-changed` event: the items one committed change touched, or

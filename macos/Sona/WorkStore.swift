@@ -101,11 +101,73 @@ final class WorkStore {
             }
             detail = result
             detailError = nil
+            fold(result.item)
         } catch {
             guard detailId == id else { return }
             detail = nil
             detailError = error.localizedDescription
         }
+    }
+
+    /// A change written elsewhere can reach the item's own read before the
+    /// list's; the newer row wins so every view of the task agrees.
+    private func fold(_ fresh: WorkItemRow) {
+        guard var rows = items, let index = rows.firstIndex(where: { $0.id == fresh.id }),
+              rows[index].revision < fresh.revision else { return }
+        rows[index] = fresh
+        items = rows
+        keepTime()
+    }
+
+    func addComment(on itemId: String, body: String, replyTo: String? = nil) async -> Bool {
+        await comment(on: itemId, "work_comment_add", CommentAddParams(
+            operationId: Self.newId(), itemId: itemId, body: body, replyTo: replyTo))
+    }
+
+    func editComment(_ id: String, on itemId: String, body: String) async -> Bool {
+        await comment(on: itemId, "work_comment_edit", CommentEditParams(operationId: Self.newId(), id: id, body: body))
+    }
+
+    func deleteComment(_ id: String, on itemId: String) async -> Bool {
+        await comment(on: itemId, "work_comment_delete", OperationIdParams(operationId: Self.newId(), id: id))
+    }
+
+    func resolveComment(_ id: String, on itemId: String, resolved: Bool) async -> Bool {
+        await comment(on: itemId, "work_comment_resolve", CommentResolveParams(
+            operationId: Self.newId(), id: id, resolved: resolved))
+    }
+
+    private func comment<P: Encodable>(on itemId: String, _ method: String, _ params: P) async -> Bool {
+        do {
+            try await core.request(method, params)
+            mutationError = nil
+            await loadDetail(itemId)
+            return true
+        } catch {
+            mutationError = error.localizedDescription
+            return false
+        }
+    }
+
+    /// New tasks under `parentId`, one per title, in the parent's project.
+    func createSubtasks(under parentId: String, titles: [String]) {
+        let titles = titles.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        guard let parent = rows([parentId]).first, !titles.isEmpty else { return }
+        let inputs = titles.map { WorkItemInput(title: $0, projectId: parent.projectId) }
+        enqueue {
+            do {
+                let _: [WorkItem] = try await self.core.request("work_subtask_create", SubtaskParams(
+                    operationId: Self.newId(), parentId: parentId, inputs: inputs))
+            } catch {
+                self.mutationError = error.localizedDescription
+            }
+            self.reloadWhenIdle = true
+        }
+    }
+
+    func setParent(of id: String, to parentId: String?) {
+        guard id != parentId else { return }
+        update([id], WorkPatch(parentId: parentId.map { .set($0) } ?? .clear))
     }
 
     // MARK: Changes
@@ -869,7 +931,8 @@ final class WorkStore {
             dueAtMs: item.dueAtMs, labelIds: item.labelIds, sourceLoopId: item.sourceLoopId,
             duplicateOfId: item.duplicateOfId, snoozedUntilMs: item.snoozedUntilMs, archivedAtMs: item.archivedAtMs,
             statusChangedAtMs: item.statusChangedAtMs, createdAtMs: item.createdAtMs, updatedAtMs: item.updatedAtMs,
-            revision: item.revision, sortOrder: item.sortOrder, cycle: item.cycle,
+            revision: item.revision, sortOrder: item.sortOrder, cycle: item.cycle, parentId: item.parentId,
+            subTasks: old?.subTasks,
             projectTitle: projectTitle(item.projectId),
             ownerName: personName(item.ownerPersonId), doer: old?.doer, sourceMeetingId: old?.sourceMeetingId,
             sourceMeetingTitle: old?.sourceMeetingTitle, sourceQuote: old?.sourceQuote,
@@ -898,6 +961,7 @@ final class WorkStore {
         if let labelIds = patch.labelIds { row.labelIds = labelIds }
         if let wake = patch.snoozedUntilMs { row.snoozedUntilMs = wake.value }
         if let cycle = patch.cycle { row.cycle = cycle.value }
+        if let parent = patch.parentId { row.parentId = parent.value }
         row.updatedAtMs = now
     }
 
@@ -966,6 +1030,7 @@ final class WorkStore {
         if patch.labelIds != nil { inverse.labelIds = row.labelIds }
         if patch.snoozedUntilMs != nil { inverse.snoozedUntilMs = clearable(row.snoozedUntilMs) }
         if patch.cycle != nil { inverse.cycle = clearable(row.cycle) }
+        if patch.parentId != nil { inverse.parentId = clearable(row.parentId) }
         return inverse
     }
 
@@ -1006,6 +1071,8 @@ final class WorkStore {
         case .snoozed: patch.snoozedUntilMs = clearable(to.flatMap { Int64($0) })
         case .recurrence: patch.recurrence = clearable(to)
         case .cycle: patch.cycle = clearable(to.flatMap { Int64($0) })
+        case .parent: patch.parentId = clearable(to)
+        case .unknown: break
         }
     }
 
@@ -1024,6 +1091,9 @@ final class WorkStore {
         if patch.snoozedUntilMs != nil { return "Snoozed \(noun)" }
         if let cycle = patch.cycle {
             return cycle.value.map { "Moved \(noun) to cycle \($0)" } ?? "Took \(noun) out of its cycle"
+        }
+        if let parent = patch.parentId {
+            return parent.value == nil ? "Took \(noun) out of its parent" : "Moved \(noun) under a parent"
         }
         if patch.title != nil { return "Renamed \(noun)" }
         return "Changed \(noun)"
@@ -1085,6 +1155,27 @@ private struct RelationParams: Encodable {
 private struct OperationIdParams: Encodable {
     let operationId: String
     let id: String
+}
+private struct CommentAddParams: Encodable {
+    let operationId: String
+    let itemId: String
+    let body: String
+    let replyTo: String?
+}
+private struct CommentEditParams: Encodable {
+    let operationId: String
+    let id: String
+    let body: String
+}
+private struct CommentResolveParams: Encodable {
+    let operationId: String
+    let id: String
+    let resolved: Bool
+}
+private struct SubtaskParams: Encodable {
+    let operationId: String
+    let parentId: String
+    let inputs: [WorkItemInput]
 }
 private struct LabelParams: Encodable {
     let operationId: String
