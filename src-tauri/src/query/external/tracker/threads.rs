@@ -230,14 +230,14 @@ pub struct ExternalWorkComment {
     pub resolved_at_ms: Option<i64>,
     pub deleted: bool,
     /// The `sona://task/<id>?comment=<id>` address the app's Copy link gives,
-    /// on a task's comment.
+    /// on a task's comment that is not deleted.
     pub link: Option<String>,
     pub replies: Vec<ExternalWorkComment>,
 }
 
 pub(super) fn project_comment(comment: WorkComment) -> ExternalWorkComment {
     let id = comment.item_id;
-    let link = matches!(comment.subject, WorkCommentSubject::Task)
+    let link = (matches!(comment.subject, WorkCommentSubject::Task) && !comment.deleted)
         .then(|| format!("sona://task/{id}?comment={}", comment.id));
     ExternalWorkComment {
         id: comment.id,
