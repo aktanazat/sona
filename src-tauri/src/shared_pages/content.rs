@@ -16,7 +16,7 @@ use crate::meeting::types::MeetingReviewSnapshot;
 pub(crate) const PAGE_FORMAT: &str = "sona-meeting-page-v1";
 pub(crate) const DRAFT_VERSION: u32 = 1;
 const MAX_TITLE_CHARS: usize = 240;
-const MAX_TEXT_BYTES: usize = 64 * 1024;
+pub(crate) const MAX_TEXT_BYTES: usize = 64 * 1024;
 const MAX_TURNS: usize = 20_000;
 const MAX_PAGE_BYTES: usize = 8 * 1024 * 1024;
 const UNKNOWN_SPEAKER: &str = "Unknown speaker";
@@ -166,6 +166,10 @@ pub struct Draft {
     pub include: Include,
     pub speakers: SpeakerMode,
     pub expires_in_days: Option<ExpiresInDays>,
+    /// The one person the page is for; its action items then keep only his.
+    /// `None` shares the page to everyone.
+    #[serde(default)]
+    pub for_person: Option<String>,
     pub content: DraftContent,
     pub audio_available: bool,
 }
@@ -184,6 +188,7 @@ pub struct PageAudio {
 pub struct Page {
     pub format: String,
     pub title: Option<String>,
+    pub for_person: Option<String>,
     pub date: Option<String>,
     pub duration_s: Option<u64>,
     pub summary: Option<Vec<String>>,
@@ -262,6 +267,7 @@ pub(crate) fn draft_from_meeting(
         include: Include::default(),
         speakers: SpeakerMode::Names,
         expires_in_days: None,
+        for_person: None,
         content: DraftContent {
             title: single_line(&session.title)
                 .chars()
@@ -322,6 +328,17 @@ pub(crate) fn page_from_draft(
     {
         return Err(too_large("The title is longer than 240 characters."));
     }
+    let for_person = draft
+        .for_person
+        .as_deref()
+        .map(single_line)
+        .filter(|person| !person.is_empty());
+    if for_person
+        .as_ref()
+        .is_some_and(|person| person.chars().count() > MAX_TITLE_CHARS)
+    {
+        return Err(too_large("The person is longer than 240 characters."));
+    }
     if content.date.as_deref().is_some_and(|date| {
         DateTime::parse_from_rfc3339(date).is_err()
             || date.as_bytes().get(10) != Some(&b'T')
@@ -345,9 +362,14 @@ pub(crate) fn page_from_draft(
         date: title.as_ref().and(content.date.clone()),
         duration_s: title.as_ref().and(content.duration_s),
         title,
+        for_person: for_person.clone(),
         summary: texts(include.summary, &content.summary)?,
         decisions: texts(include.decisions, &content.decisions)?,
-        action_items: action_items(include.action_items, &content.action_items)?,
+        action_items: action_items(
+            include.action_items,
+            &content.action_items,
+            for_person.as_deref(),
+        )?,
         notes: texts(include.notes, &content.notes)?,
         speakers,
         transcript,
@@ -494,13 +516,25 @@ fn texts(included: bool, values: &[String]) -> Result<Option<Vec<String>>, Share
     Ok((!kept.is_empty()).then_some(kept))
 }
 
+/// A one-person page keeps only that person's items, and is refused when
+/// none are left. `person` is the folded `for_person`; the owner is folded
+/// the same way and compared without case, so "  jane   doe " and "Jane Doe"
+/// are the same owner.
 fn action_items(
     included: bool,
     items: &[ActionItem],
+    person: Option<&str>,
 ) -> Result<Option<Vec<ActionItem>>, SharedPagesError> {
+    let none_for = |person: &str| {
+        SharedPagesError::new(
+            Code::NoItemsForPerson,
+            format!("A page for {person} needs at least one of their action items on it."),
+        )
+    };
     if !included {
-        return Ok(None);
+        return person.map_or(Ok(None), |person| Err(none_for(person)));
     }
+    let folded = person.map(str::to_lowercase);
     let mut kept = Vec::new();
     for item in items {
         let text = item.text.trim();
@@ -508,6 +542,14 @@ fn action_items(
             continue;
         }
         let owner = non_empty(item.owner.as_deref());
+        if let Some(person) = &folded {
+            let owns = owner
+                .as_deref()
+                .is_some_and(|owner| &single_line(owner).to_lowercase() == person);
+            if !owns {
+                continue;
+            }
+        }
         let due = non_empty(item.due.as_deref());
         for value in [Some(text), owner.as_deref(), due.as_deref()]
             .into_iter()
@@ -521,7 +563,10 @@ fn action_items(
             due,
         });
     }
-    Ok((!kept.is_empty()).then_some(kept))
+    if kept.is_empty() {
+        return person.map_or(Ok(None), |person| Err(none_for(person)));
+    }
+    Ok(Some(kept))
 }
 
 fn bounded_text(value: &str) -> Result<(), SharedPagesError> {

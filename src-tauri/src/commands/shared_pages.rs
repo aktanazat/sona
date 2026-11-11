@@ -84,6 +84,29 @@ pub async fn shared_draft_discard(
         .map(|()| SharedEmpty {})
 }
 
+#[derive(Clone, Debug, Serialize, Type)]
+pub struct SharedRecapAnswer {
+    pub paragraphs: Vec<String>,
+}
+
+/// Summary paragraphs for someone who was not in the meeting, written by
+/// the engine this meeting's series allows.
+#[tauri::command]
+#[specta::specta]
+pub async fn shared_draft_recap(
+    manager: State<'_, Arc<MeetingSessionManager>>,
+    request: SharedDraftBody,
+) -> Result<SharedRecapAnswer, SharedPagesErrorCode> {
+    let store = meetings(&manager)
+        .await
+        .ok_or(SharedPagesErrorCode::NoStore)?;
+    let meetings = Arc::clone(manager.inner());
+    let draft = request.draft;
+    blocking(move || shared_pages::recap(&store, meetings.processing(), &draft))
+        .await
+        .map(|paragraphs| SharedRecapAnswer { paragraphs })
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn shared_drafts(app: AppHandle) -> Result<Vec<DraftEntry>, SharedPagesErrorCode> {
@@ -121,7 +144,11 @@ pub async fn shared_publish(
             let draft = request.draft;
             let audio = shared_pages::draft_audio(&paths, store.as_deref(), &draft)?;
             let record = shared_pages::publish(&paths, store.as_deref(), &draft, audio.as_deref())?;
-            shared_pages::forget_published_draft(&paths, &draft.meeting_id);
+            if record.for_person.is_some() {
+                shared_pages::reset_published_draft(&paths, &draft.meeting_id);
+            } else {
+                shared_pages::forget_published_draft(&paths, &draft.meeting_id);
+            }
             Ok(record)
         })
         .await?

@@ -194,6 +194,10 @@ pub enum ExternalErrorCode {
     Locked,
     /// The site repository holds files Sona did not write.
     RemoteNotSonaSite,
+    /// The meeting's text engine is not available for a rewrite.
+    NoEngine,
+    /// The meeting is still recording; its notes are not final.
+    Recording,
 }
 
 impl ExternalErrorCode {

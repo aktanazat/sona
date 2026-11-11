@@ -66,8 +66,8 @@ claude mcp add sona --env SONA_BIN=/path/to/sona/src-tauri/target/debug/sona \
 | `sona_stats`         | none                                     | `sona --stats`                                                          |
 | `sona_events`        | `after?`, `limit?`                       | `sona --events [--after …] [--limit …]`                                 |
 | `sona_loop_resolve`  | `loop_id`                                | `sona --loop-resolve <loop_id>` — **writes**                            |
-| `sona_share_preview` | `meeting_id`, `include?`, `speakers?`, `expires?` | `sona share-preview [--include=…] [--speakers=…] [--expires=…] <id>` |
-| `sona_share_prepare` | `meeting_id`, `include?`, `speakers?`, `expires?` | `sona share-preview … --save --agent=<client> <id>` — **writes** a draft |
+| `sona_share_preview` | `meeting_id`, `include?`, `speakers?`, `expires?`, `for_person?` | `sona share-preview [--include=…] [--speakers=…] [--expires=…] [--for=…] <id>` |
+| `sona_share_prepare` | `meeting_id`, `include?`, `speakers?`, `expires?`, `for_person?` | `sona share-preview … --save --agent=<client> <id>` — **writes** a draft |
 | `sona_shares`        | none                                     | `sona shares`                                                           |
 | `sona_unshare`       | `share`, `dry_run?`                      | `sona unshare [--dry-run] <slug or link>` — **writes**                  |
 

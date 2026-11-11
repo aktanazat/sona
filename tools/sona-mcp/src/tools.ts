@@ -365,6 +365,11 @@ const SHARE_PAGE_PROPERTIES = {
     enum: ["1d", "7d", "30d", "never"],
     description: "When the page would stop working. Defaults to never.",
   },
+  for_person: {
+    type: "string",
+    description:
+      "Share the page for one person only: the action items keep only his and the page reads 'For <name>' under its title.",
+  },
 } satisfies Record<string, ToolProperty>;
 
 /** The page a meeting would publish to the user's site: shown, or kept as a
@@ -376,6 +381,7 @@ function sharePage(save: boolean): ToolDefinition {
     ...assigned("--include", text(input, "include")),
     ...assigned("--speakers", text(input, "speakers")),
     ...assigned("--expires", text(input, "expires")),
+    ...assigned("--for", text(input, "for_person")),
     ...(save ? ["--save", ...assigned("--agent", agent ?? null)] : []),
     "--json",
     "--",
@@ -392,7 +398,7 @@ function sharePage(save: boolean): ToolDefinition {
         name: "sona_share_prepare",
         title: "Prepare a meeting page for the user to share",
         description:
-          "Save the page a meeting would publish to the user's site as a draft the user sees under Shared in Sona, marked as prepared by you. It does not publish: nothing goes online until the user checks it and presses Share in Sona, and this server has no way to publish. Returns the draft and the page it makes. Requires Settings > Agents > External access and External mutations.",
+          "Save the page a meeting would publish to the user's site as a draft the user sees under Shared in Sona, marked as prepared by you. It does not publish: nothing goes online until the user checks it and presses Share in Sona, and this server has no way to publish. Returns the draft, the page it makes and sharing checks flagging things like phone numbers, emails and people not in the meeting. Requires Settings > Agents > External access and External mutations.",
         mutates: true,
         inputSchema,
         argv,
@@ -401,7 +407,7 @@ function sharePage(save: boolean): ToolDefinition {
         name: "sona_share_preview",
         title: "Preview a shared meeting page",
         description:
-          "Build the exact page a meeting would publish to the user's site, without publishing or saving anything: title, summary, action items and decisions by default; notes, transcript and audio only when include names them. Returns the page JSON, its size and the sections it holds. Requires Settings > Agents > External access.",
+          "Build the exact page a meeting would publish to the user's site, without publishing or saving anything: title, summary, action items and decisions by default; notes, transcript and audio only when include names them. Returns the page JSON, its size, the sections it holds and sharing checks flagging things like phone numbers, emails and people not in the meeting. Requires Settings > Agents > External access.",
         inputSchema,
         argv,
       };
