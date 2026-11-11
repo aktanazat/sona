@@ -1693,6 +1693,8 @@ final class WorkStore {
         case .recurrence: patch.recurrence = clearable(to)
         case .cycle: patch.cycle = clearable(to.flatMap { Int64($0) })
         case .parent: patch.parentId = clearable(to)
+        case .estimate: patch.estimate = clearable(to.flatMap { Int($0) })
+        case .forPerson: patch.forPersonId = clearable(to)
         case .unknown: break
         }
     }

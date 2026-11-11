@@ -127,7 +127,7 @@ fn a_due_window_reads_back_as_the_flag_it_came_from() {
     assert_eq!(not_refused, Vec::<&str>::new(), "these name no window");
 }
 
-fn task() -> WorkItem {
+pub(super) fn task() -> WorkItem {
     WorkItem {
         id: Uuid::new_v4().to_string(),
         number: 1,

@@ -8,6 +8,7 @@ use crate::meeting::session::MeetingSessionManager;
 use crate::meeting::store::note_evidence::{NoteEvidenceError, NoteEvidenceRemoval};
 use crate::meeting::store::MeetingStore;
 use crate::meeting::types::{MeetingPhase, MeetingSessionId, MeetingSessionSnapshot};
+use crate::planning::EvidenceSourceKind;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use specta::Type;
@@ -332,13 +333,14 @@ fn has_non_note_sources(history: &HistoryManager, id: &str) -> Result<bool, Stri
 }
 
 /// A note with what it cites and what it connects to, as a reader who may not
-/// see the meetings `hides_meeting` names has it: those leave the sources
-/// before any passage, connection or related note is drawn from them.
+/// see the sources `hides` holds back has it: the meetings it names leave the
+/// sources before any passage, connection or related note is drawn from them,
+/// and the tasks drawn from any of them leave what the note is a document of.
 pub(crate) fn read_memory(
     history: &HistoryManager,
     store: Option<&MeetingStore>,
     id: &str,
-    hides_meeting: impl Fn(&str) -> bool,
+    hides: impl Fn(EvidenceSourceKind, &str) -> bool,
 ) -> Result<Option<ScratchNoteMemory>, String> {
     let memory = history.with_connection(|conn| {
         let Some(note) = note_with_connection(conn, id)? else { return Ok(None) };
@@ -357,7 +359,7 @@ pub(crate) fn read_memory(
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let passages = super::passages::read(conn, id)?;
         let interpretation = conn.query_row("SELECT EXISTS(SELECT 1 FROM scratch_note_origins WHERE note_id = ?1)", params![id], |row| row.get(0))?;
-        let documents = super::documents::documents_of(conn, id)?;
+        let documents = super::documents::documents_of(conn, id, &hides)?;
         Ok(Some(ScratchNoteMemory { note, sources, related_notes, passages, interpretation, connections: Vec::new(), phone_sources: Vec::new(), documents }))
     }).map_err(|_| "The note's sources could not be read.".to_string())?;
     let Some(mut memory) = memory else {
@@ -365,7 +367,10 @@ pub(crate) fn read_memory(
     };
     memory
         .sources
-        .retain(|source| source.kind != ScratchSourceKind::Meeting || !hides_meeting(&source.id));
+        .retain(|source| {
+            source.kind != ScratchSourceKind::Meeting
+                || !hides(EvidenceSourceKind::Meeting, &source.id)
+        });
     if store.is_none()
         && memory
             .sources
@@ -496,7 +501,7 @@ pub async fn scratchpad_memory(
     } else {
         None
     };
-    read_memory(&history, store.as_deref(), &id, |_| false)
+    read_memory(&history, store.as_deref(), &id, |_, _| false)
 }
 
 /// What linking `source` to note `id` files, read before the write: the
@@ -568,7 +573,7 @@ pub async fn scratchpad_link(
     run(&history, |conn| link_in(conn, &id, source))
         .map_err(|error| failure_sentence(&history, error, "The source could not be linked."))?;
     emit_changed(&app, &id, false);
-    read_memory(&history, store.as_deref(), &id, |_| false)?
+    read_memory(&history, store.as_deref(), &id, |_, _| false)?
         .ok_or_else(|| "This note no longer exists.".to_string())
 }
 

@@ -1578,8 +1578,8 @@ pub async fn answer(
         ExternalRequest::Note { id } => {
             let store = store(meetings).await?;
             let kept_local = kept_local(&store)?;
-            let memory = scratchpad::read_note_with_sources(history, &store, id, |meeting_id| {
-                kept_local.hides_meeting(meeting_id)
+            let memory = scratchpad::read_note_with_sources(history, &store, id, |kind, source_id| {
+                evidence_kept_local(kind, source_id, &kept_local)
             })
             .map_err(|message| note_read_error(history, message))?
             .ok_or_else(|| missing_note(id))?;
@@ -1605,8 +1605,8 @@ pub async fn answer(
             let mut entries = Vec::with_capacity(page.entries.len());
             for row in page.entries {
                 let memory =
-                    scratchpad::read_note_with_sources(history, &store, &row.id, |meeting_id| {
-                        kept_local.hides_meeting(meeting_id)
+                    scratchpad::read_note_with_sources(history, &store, &row.id, |kind, source_id| {
+                        evidence_kept_local(kind, source_id, &kept_local)
                     })
                     .map_err(|message| note_read_error(history, message))?
                     .ok_or_else(|| missing_note(&row.id))?;

@@ -1,5 +1,6 @@
 //! `sona work` verbs for projects that wait on other projects.
 
+use super::organize::ran_in;
 use super::roadmap::ExternalProjectRef;
 use super::{now_ms, refusal, Tracker, WorkAnswer, WriteArgs};
 use crate::planning::dependencies::{self, ProjectDependency};
@@ -7,6 +8,7 @@ use crate::planning::{self, work, Project};
 use crate::query::external::{ExternalError, ExternalErrorCode};
 use crate::query::QUERY_SCHEMA_VERSION;
 use clap::{Args, ValueEnum};
+use rusqlite::Connection;
 use serde::Serialize;
 use std::fmt::Write as _;
 
@@ -198,9 +200,12 @@ impl Tracker<'_> {
         let projects = self.every_project()?;
         let (blocker, blocked) = Self::ends(args, &projects)?;
         let operation_id = args.write.fresh_operation_id();
-        if let Some(existing) = self.all_dependencies()?.into_iter().find(|dependency| {
-            dependency.blocker_id == blocker.id && dependency.blocked_id == blocked.id
-        }) {
+        let replaying = (!args.dry_run).then_some(operation_id.as_str());
+        let linked = planning::history(self.history, |conn| {
+            standing(conn, replaying, &blocker.id, &blocked.id)
+        })
+        .map_err(|message| refusal(self.history, message))?;
+        if let Some(existing) = linked {
             return Ok(change(&existing, &projects, args.dry_run, operation_id, Change::Already));
         }
         let dependency = if args.dry_run {
@@ -248,6 +253,24 @@ enum Change {
     Added,
     Already,
     Removed,
+}
+
+/// The link from `blocker_id` to `blocked_id` already there, unless
+/// `replaying` already ran: then its write answers from that first run.
+fn standing(
+    conn: &Connection,
+    replaying: Option<&str>,
+    blocker_id: &str,
+    blocked_id: &str,
+) -> anyhow::Result<Option<ProjectDependency>> {
+    if let Some(operation_id) = replaying {
+        if ran_in(conn, operation_id)? {
+            return Ok(None);
+        }
+    }
+    Ok(dependencies::dependencies(conn)?
+        .into_iter()
+        .find(|dependency| dependency.blocker_id == blocker_id && dependency.blocked_id == blocked_id))
 }
 
 fn change(
@@ -318,5 +341,43 @@ pub(super) fn text(answer: &WorkAnswer, text: &mut String) {
             let _ = writeln!(text, "{verb}: {}", line(&change.dependency));
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::standing;
+    use crate::planning::catalog::{self, ProjectEdit};
+    use crate::planning::{dependencies, schema};
+    use rusqlite::{params, Connection};
+    use uuid::Uuid;
+
+    #[test]
+    fn a_relate_retried_under_its_id_replays_instead_of_reading_already_linked() {
+        let conn = Connection::open_in_memory().expect("a history database");
+        schema::apply_all(&conn).expect("the planner schema");
+        let project = |title: &str| {
+            let edit = ProjectEdit {
+                title: Some(title.to_owned()),
+                ..ProjectEdit::default()
+            };
+            catalog::save_project(&conn, None, &edit, 1).expect("a project").id
+        };
+        let (harbor, ferry) = (project("Harbor"), project("Ferry"));
+        let first = Uuid::new_v4().to_string();
+        dependencies::add(&conn, &harbor, &ferry, 2).expect("the link");
+        conn.execute(
+            "INSERT INTO planning_operations (operation_id, command, request_json, response_json, created_at_ms)
+             VALUES (?1, 'catalog_dependency_add', '[]', '{}', 2)",
+            params![first],
+        )
+        .expect("the first run's receipt");
+
+        let retry = standing(&conn, Some(&first), &harbor, &ferry).expect("the lookup");
+        assert!(retry.is_none());
+        let other = Uuid::new_v4().to_string();
+        let fresh = standing(&conn, Some(&other), &harbor, &ferry).expect("the lookup");
+        assert_eq!(fresh.map(|link| link.blocked_id), Some(ferry.clone()));
+        assert!(standing(&conn, None, &harbor, &ferry).expect("the lookup").is_some());
     }
 }

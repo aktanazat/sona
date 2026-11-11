@@ -1,6 +1,8 @@
 //! `sona work` verbs for the Projects and People pages, and the read-only
 //! meetings feed: what an organizer agent needs to keep the tracker tidy.
 
+use super::notes::request_json;
+use super::organize::sent_before;
 use super::{
     conversations_closed, day_or_none, day_text, now_ms, pick, Board, DayArg, Priority, Tracker,
     WorkAnswer, WorkPersonChoice, WriteArgs,
@@ -27,6 +29,7 @@ use crate::query::external::{
 use crate::query::{QueryError, QUERY_SCHEMA_VERSION};
 use chrono::NaiveDate;
 use clap::{Args, ValueEnum};
+use rusqlite::Connection;
 use serde::Serialize;
 use std::fmt::Write as _;
 use std::sync::Arc;
@@ -2035,40 +2038,68 @@ impl Tracker<'_> {
         let board = self.board().await?;
         let projects = self.every_project()?;
         let project = Self::pick_project(&args.project, &projects)?;
-        let milestones = self.milestones_of(project)?;
-        let milestone = pick_milestone(&args.milestone, &milestones)?;
-        if let Some(taken) = projects
-            .iter()
-            .find(|project| project.title.to_lowercase() == milestone.title.to_lowercase())
-        {
-            return Err(ExternalError::invalid(format!(
-                "A project called {:?} already exists; rename the milestone first.",
-                taken.title
-            )));
-        }
-        let moved = board
-            .rows
-            .iter()
-            .filter(|row| row.item.milestone_id.as_deref() == Some(milestone.id.as_str()))
-            .count();
-        let operation_id = args
+        let caller = args
             .write
-            .operation_id("milestone-to-project", &(&milestone.id, milestone.revision))?;
+            .operation_id
+            .filter(|_| !args.dry_run)
+            .map(|id| id.to_string());
+        let asked = request_json(&(&project.id, &args.milestone))?;
+        let replaying = match &caller {
+            Some(id) => planning::history(self.history, |conn| converted_milestone(conn, id, &asked))
+                .map_err(|message| self.write_refusal(message, id, "The milestone"))?
+                .map(|milestone_id| (milestone_id, id.clone())),
+            None => None,
+        };
+        let (milestone_id, operation_id, moved) = match replaying {
+            Some((milestone_id, operation_id)) => (milestone_id, operation_id, None),
+            None => {
+                let milestones = self.milestones_of(project)?;
+                let milestone = pick_milestone(&args.milestone, &milestones)?;
+                if let Some(taken) = projects.iter().find(|project| {
+                    project.title.to_lowercase() == milestone.title.to_lowercase()
+                }) {
+                    return Err(ExternalError::invalid(format!(
+                        "A project called {:?} already exists; rename the milestone first.",
+                        taken.title
+                    )));
+                }
+                let moved = board
+                    .rows
+                    .iter()
+                    .filter(|row| row.item.milestone_id.as_deref() == Some(milestone.id.as_str()))
+                    .count();
+                let operation_id = args
+                    .write
+                    .operation_id("milestone-to-project", &(&milestone.id, milestone.revision))?;
+                (milestone.id.clone(), operation_id, Some(moved))
+            }
+        };
         let made = if args.dry_run {
             self.rehearse(|conn| {
-                planning::catalog::milestone_to_project(conn, &milestone.id, now_ms())
+                planning::catalog::milestone_to_project(conn, &milestone_id, now_ms())
             })?
             .0
         } else {
             self.applies("turning a milestone into a project")?;
-            work::catalog_milestone_to_project(self.app, &operation_id, &milestone.id)
-                .map_err(|message| self.write_refusal(message, &operation_id, "The milestone"))?
+            let made = work::catalog_milestone_to_project(self.app, &operation_id, &milestone_id)
+                .map_err(|message| self.write_refusal(message, &operation_id, "The milestone"))?;
+            if caller.is_some() && moved.is_some() {
+                self.file_sent(&operation_id, MILESTONE_TO_PROJECT_ASKED, &asked, &milestone_id)?;
+            }
+            made
         };
         let board = if args.dry_run {
             board
         } else {
             self.board().await?
         };
+        let moved = moved.unwrap_or_else(|| {
+            board
+                .rows
+                .iter()
+                .filter(|row| row.item.project_id.as_deref() == Some(made.id.as_str()))
+                .count()
+        });
         Ok(admin(ProjectAdminAnswer::Converted(
             ExternalWorkMilestoneConverted {
                 schema_version: QUERY_SCHEMA_VERSION,
@@ -2083,6 +2114,19 @@ impl Tracker<'_> {
             },
         )))
     }
+}
+
+const MILESTONE_TO_PROJECT_ASKED: &str = "cli_milestone_to_project";
+
+/// The milestone a milestone-to-project run under `operation_id` turned
+/// into a project when asked `asked`: the milestone is gone by then, so a
+/// retry finds it here, not by name. Asked for another, refused.
+fn converted_milestone(
+    conn: &Connection,
+    operation_id: &str,
+    asked: &str,
+) -> anyhow::Result<Option<String>> {
+    sent_before(conn, operation_id, MILESTONE_TO_PROJECT_ASKED, asked)
 }
 
 pub(super) fn admin_text(answer: &ProjectAdminAnswer, text: &mut String) {
@@ -2513,6 +2557,49 @@ mod tests {
             }) => verb.required_scopes(),
             other => panic!("`work {argv:?}` parsed as {other:?}"),
         }
+    }
+
+    /// The milestone is gone once it became a project, so a retry under the
+    /// same id finds it by what was asked, and the same id asked for
+    /// another milestone is refused.
+    #[test]
+    fn a_converted_milestone_is_found_by_the_id_and_request_that_converted_it() {
+        use super::super::organize::file_sent;
+        use super::MILESTONE_TO_PROJECT_ASKED;
+        let conn = Connection::open_in_memory().expect("a history database");
+        schema::apply_all(&conn).expect("the planner schema");
+        let harbor = ProjectEdit {
+            title: Some("Harbor".to_owned()),
+            ..ProjectEdit::default()
+        };
+        let project = planning::catalog::save_project(&conn, None, &harbor, 1).expect("Harbor");
+        let prototype = MilestoneEdit {
+            title: Some("Prototype".to_owned()),
+            ..MilestoneEdit::default()
+        };
+        let milestone = planning::catalog::save_milestone(&conn, &project.id, None, &prototype, 1)
+            .expect("the milestone");
+        let asked = |name: &str| serde_json::to_string(&(&project.id, name)).expect("json");
+        let operation_id = Uuid::new_v4().to_string();
+        assert_eq!(
+            converted_milestone(&conn, &operation_id, &asked("Prototype")).expect("the ledger"),
+            None
+        );
+        planning::catalog::milestone_to_project(&conn, &milestone.id, 2).expect("the conversion");
+        file_sent(
+            &conn,
+            &operation_id,
+            MILESTONE_TO_PROJECT_ASKED,
+            &asked("Prototype"),
+            &milestone.id,
+        )
+        .expect("filed");
+
+        assert_eq!(
+            converted_milestone(&conn, &operation_id, &asked("Prototype")).expect("the ledger"),
+            Some(milestone.id)
+        );
+        assert!(converted_milestone(&conn, &operation_id, &asked("Launch")).is_err());
     }
 
     /// A dry run of putting a project away or saving a person needs only

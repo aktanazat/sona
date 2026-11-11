@@ -475,6 +475,8 @@ pub enum WorkProposalField {
     Recurrence,
     Cycle,
     Parent,
+    Estimate,
+    ForPerson,
 }
 
 sql_enum!(WorkProposalField {
@@ -491,6 +493,8 @@ sql_enum!(WorkProposalField {
     Recurrence => "recurrence",
     Cycle => "cycle",
     Parent => "parent",
+    Estimate => "estimate",
+    ForPerson => "for_person",
 });
 
 /// One field an agent would change, waiting for the user. `from` is the

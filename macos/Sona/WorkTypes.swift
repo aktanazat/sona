@@ -448,7 +448,8 @@ struct WorkDoer: Codable, Equatable {
 }
 
 enum WorkProposalField: String, Codable, Hashable {
-    case title, details, status, priority, owner, due, project, milestone, labels, snoozed, recurrence, cycle, parent
+    case title, details, status, priority, owner, due, project, milestone, labels, snoozed, recurrence, cycle, parent, estimate
+    case forPerson = "for_person"
     case unknown
 
     init(from decoder: Decoder) throws {

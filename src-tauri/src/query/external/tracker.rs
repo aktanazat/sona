@@ -3030,8 +3030,8 @@ pub(super) async fn answer(
         WorkVerb::Detach(args) => tracker.detach(args).await,
         WorkVerb::Project(args) => tracker.project(args).await,
         WorkVerb::ProjectUpdate(args) => tracker.project_update(args).await,
-        WorkVerb::ProjectUpdates(args) => tracker.project_updates(args),
-        WorkVerb::ProjectUpdateEdit(args) => tracker.project_update_edit(args),
+        WorkVerb::ProjectUpdates(args) => tracker.project_updates(args).await,
+        WorkVerb::ProjectUpdateEdit(args) => tracker.project_update_edit(args).await,
         WorkVerb::ProjectUpdateDelete(args) => tracker.project_update_delete(args),
         WorkVerb::ProjectUpdateDraft(args) => tracker.project_update_draft(args).await,
         WorkVerb::ProjectDelete(args) => tracker.project_delete(args).await,
@@ -5939,6 +5939,8 @@ impl Board {
             WorkProposalField::Recurrence => Some(WorkActivityKind::Recurrence),
             WorkProposalField::Cycle => Some(WorkActivityKind::Cycle),
             WorkProposalField::Parent => Some(WorkActivityKind::Parent),
+            WorkProposalField::Estimate => Some(WorkActivityKind::Estimate),
+            WorkProposalField::ForPerson => Some(WorkActivityKind::ForPerson),
             WorkProposalField::Milestone => None,
         };
         let read = |value: &Option<String>| match (value.as_deref(), kind) {
@@ -7409,6 +7411,7 @@ mod organize;
 mod people;
 mod roadmap;
 mod save;
+pub(crate) use save::MeetingFence;
 mod speakers;
 mod voices;
 mod sources;

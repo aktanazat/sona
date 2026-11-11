@@ -60,7 +60,7 @@ pub(crate) fn update_add_as(
     project_id: &str,
     health: ProjectHealth,
     body: Option<&str>,
-    discussed: &[String],
+    discussed: &[updates::Discussed],
 ) -> Result<ProjectUpdate, String> {
     project_change(
         app,
@@ -69,14 +69,14 @@ pub(crate) fn update_add_as(
         &(project_id, health, body, author.actor, author.agent),
         |tx, now| {
             let drafted;
-            let body = match body {
-                Some(body) => body,
+            let (body, quoted) = match body {
+                Some(body) => (body, None),
                 None => {
                     drafted = updates::draft(tx, project_id, discussed)?;
-                    drafted.as_str()
+                    (drafted.as_str(), Some(discussed))
                 }
             };
-            let update = updates::add(tx, author, project_id, health, body, now)?;
+            let update = updates::add(tx, author, project_id, health, body, quoted, now)?;
             Ok((update.project_id.clone(), update))
         },
     )
@@ -189,7 +189,7 @@ pub(crate) async fn discussed_lines(
     history: &HistoryManager,
     meetings: &MeetingSessionManager,
     project_id: &str,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<updates::Discussed>, String> {
     let (since_ms, mentions) = super::super::history(history, |conn| {
         updates::meeting_mentions(conn, project_id)
     })?;

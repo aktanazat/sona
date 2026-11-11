@@ -2,11 +2,12 @@
 //! meeting or a note, and for sub-tasks.
 
 use super::catalog::pick_milestone;
+use super::organize::sent_before;
 use super::roadmap::ExternalProjectRef;
 use super::{
     handle, now_ms, refusal, status_text, task_ref, task_ref_of, Board, ExternalFieldChange,
-    ExternalWorkChange, ExternalWorkPlanned, ExternalWorkPreview, ExternalWorkRef, Priority,
-    TaskRef, Tracker, WorkAction, WorkAnswer, WriteArgs,
+    ExternalWorkChange, ExternalWorkPlanned, ExternalWorkPreview, ExternalWorkRef, ExternalWorkSkip,
+    Priority, TaskRef, Tracker, WorkAction, WorkAnswer, WriteArgs,
 };
 use crate::meeting::types::MeetingSessionId;
 use crate::planning;
@@ -22,6 +23,7 @@ use crate::query::external::{local_time, review, store, ExternalError, ExternalE
 use crate::query::QUERY_SCHEMA_VERSION;
 use crate::scratchpad;
 use chrono::{Local, NaiveDate};
+use rusqlite::Connection;
 use clap::{ArgGroup, Args, Subcommand};
 use serde::Serialize;
 use std::fmt::Write as _;
@@ -762,7 +764,7 @@ impl Tracker<'_> {
         } else {
             (args.titles.clone(), None)
         };
-        let inputs: Vec<WorkItemInput> = titles
+        let mut inputs: Vec<WorkItemInput> = titles
             .iter()
             .map(|title| WorkItemInput {
                 title: title.trim().to_owned(),
@@ -787,7 +789,29 @@ impl Tracker<'_> {
         let today = Local::now().date_naive().format("%Y-%m-%d").to_string();
         let operation_id = args
             .write
-            .operation_id("subtask", &(&parent.item.id, &inputs, today))?;
+            .operation_id("subtask", &(&parent.item.id, &inputs, &today))?;
+        let mut skipped = Vec::new();
+        let mut asked = None;
+        if args.from_checklist {
+            (inputs, skipped, asked) = planning::history(self.history, |conn| {
+                board.checklist_request(conn, &operation_id, parent, inputs)
+            })
+            .map_err(|message| {
+                self.write_refusal(message, &operation_id, &handle(parent.item.number))
+            })?;
+        }
+        if inputs.is_empty() {
+            return Ok(WorkAnswer::Change(ExternalWorkChange {
+                schema_version: QUERY_SCHEMA_VERSION,
+                action: WorkAction::Created,
+                operation_id: None,
+                tasks: Vec::new(),
+                skipped,
+                proposed: Vec::new(),
+                replayed: false,
+                evidence_url: None,
+            }));
+        }
         if args.dry_run {
             let inherited = owner
                 .clone()
@@ -853,11 +877,15 @@ impl Tracker<'_> {
         .map_err(|message| {
             self.write_refusal(message, &operation_id, &handle(parent.item.number))
         })?;
+        if let Some(asked) = asked {
+            self.file_sent(&operation_id, SUBTASK_CHECKLIST_ASKED, &asked, &inputs)?;
+        }
+        let mut proposed = Vec::new();
         if let Some(stripped) = &stripped {
             let checklist_operation =
                 Uuid::new_v5(&Uuid::NAMESPACE_OID, format!("{operation_id}/checklist").as_bytes())
                     .to_string();
-            agents::update_as(
+            let change = agents::update_as(
                 self.app,
                 &args.write.agent(),
                 &checklist_operation,
@@ -872,6 +900,11 @@ impl Tracker<'_> {
             .map_err(|message| {
                 self.write_refusal(message, &checklist_operation, &handle(parent.item.number))
             })?;
+            proposed = change
+                .proposed
+                .iter()
+                .map(|proposal| board.proposal(proposal))
+                .collect();
         }
         let replayed = items.iter().all(|item| item.created_at_ms < started_ms);
         Ok(WorkAnswer::Change(ExternalWorkChange {
@@ -882,8 +915,8 @@ impl Tracker<'_> {
                 .into_iter()
                 .map(|item| board.project_item(item))
                 .collect(),
-            skipped: Vec::new(),
-            proposed: Vec::new(),
+            skipped,
+            proposed,
             replayed,
             evidence_url: None,
         }))
@@ -910,7 +943,57 @@ fn checklist(details: &str) -> (Vec<String>, String) {
     (titles, kept.join("\n").trim().to_owned())
 }
 
+const SUBTASK_CHECKLIST_ASKED: &str = "cli_subtask_from_checklist";
+
 impl Board {
+    /// The sub-tasks a checklist run under `operation_id` sends, a skip for
+    /// each line `parent` already has as a sub-task, and the checklist as
+    /// asked, to file once written. A retry sends what the first run sent,
+    /// whatever sub-tasks that run made since.
+    fn checklist_request(
+        &self,
+        conn: &Connection,
+        operation_id: &str,
+        parent: &super::WorkItemRow,
+        inputs: Vec<WorkItemInput>,
+    ) -> anyhow::Result<(Vec<WorkItemInput>, Vec<ExternalWorkSkip>, Option<String>)> {
+        let asked = serde_json::to_string(&(&parent.item.id, &inputs))?;
+        if let Some(sent) = sent_before(conn, operation_id, SUBTASK_CHECKLIST_ASKED, &asked)? {
+            return Ok((sent, Vec::new(), None));
+        }
+        let (unmade, skipped) = self.unmade_subtasks(parent, inputs);
+        Ok((unmade, skipped, Some(asked)))
+    }
+
+    /// `inputs` split into the sub-tasks `parent` lacks and a skip for each
+    /// it already has by that title, so a checklist made into sub-tasks
+    /// once is not made again while its lines wait to be taken out.
+    fn unmade_subtasks(
+        &self,
+        parent: &super::WorkItemRow,
+        inputs: Vec<WorkItemInput>,
+    ) -> (Vec<WorkItemInput>, Vec<ExternalWorkSkip>) {
+        let mut skipped = Vec::new();
+        let unmade = inputs
+            .into_iter()
+            .filter(|input| {
+                let made = self.rows.iter().find(|row| {
+                    row.item.parent_id.as_deref() == Some(parent.item.id.as_str())
+                        && row.item.title.trim().eq_ignore_ascii_case(&input.title)
+                });
+                if let Some(row) = made {
+                    skipped.push(ExternalWorkSkip {
+                        id: row.item.id.clone(),
+                        handle: handle(row.item.number),
+                        reason: "already a sub-task".to_owned(),
+                    });
+                }
+                made.is_none()
+            })
+            .collect();
+        (unmade, skipped)
+    }
+
     /// The owner a new sub-task of `parent` takes when none is given, as
     /// the tracker decides it, from the sub-tasks the caller can see.
     fn inherited_owner(&self, parent: &super::WorkItemRow) -> WorkOwner {
@@ -1070,8 +1153,111 @@ mod tests {
     use super::super::{WorkCommand, WorkVerb};
     use super::{CommentAddArgs, CommentCommand, CommentVerb};
     use crate::cli::{CliArgs, Command};
+    use crate::planning::work::types::{WorkItem, WorkItemInput};
     use chrono::NaiveDate;
     use clap::Parser;
+
+    fn input(title: &str) -> WorkItemInput {
+        WorkItemInput {
+            title: title.to_owned(),
+            details: None,
+            status: None,
+            priority: None,
+            project_id: None,
+            milestone_id: None,
+            owner: None,
+            due_at_ms: None,
+            label_ids: None,
+            recurrence: None,
+        }
+    }
+
+    /// A checklist made into sub-tasks keeps its lines in the parent while
+    /// their removal waits for the user, so the next run must not make
+    /// those sub-tasks again.
+    #[test]
+    fn a_checklist_line_already_made_into_a_sub_task_is_skipped() {
+        use super::super::tests::{board, row, task};
+        let parent = task();
+        let made = WorkItem {
+            id: uuid::Uuid::new_v4().to_string(),
+            number: 2,
+            title: "Book the venue".to_owned(),
+            parent_id: Some(parent.id.clone()),
+            ..task()
+        };
+        let elsewhere = WorkItem {
+            id: uuid::Uuid::new_v4().to_string(),
+            number: 3,
+            title: "Send invites".to_owned(),
+            ..task()
+        };
+        let board = board(
+            vec![row(parent.clone()), row(made.clone()), row(elsewhere)],
+            Vec::new(),
+        );
+        let (unmade, skipped) = board.unmade_subtasks(
+            &row(parent),
+            vec![input("book the venue"), input("Send invites")],
+        );
+        assert_eq!(
+            unmade.iter().map(|input| input.title.as_str()).collect::<Vec<_>>(),
+            ["Send invites"]
+        );
+        assert_eq!(
+            skipped.iter().map(|skip| skip.id.as_str()).collect::<Vec<_>>(),
+            [made.id.as_str()]
+        );
+    }
+
+    /// The retry finds the sub-task its first run made; it must still send
+    /// what that run sent, or the store refuses it as another change.
+    #[test]
+    fn a_checklist_retried_after_a_skip_sends_what_its_first_run_sent() {
+        use super::super::organize::file_sent;
+        use super::super::tests::{board, row, task};
+        use super::SUBTASK_CHECKLIST_ASKED;
+        use crate::planning::schema;
+        use rusqlite::Connection;
+        let conn = Connection::open_in_memory().expect("a history database");
+        schema::apply_all(&conn).expect("the planner schema");
+        let parent = task();
+        let made = WorkItem {
+            id: uuid::Uuid::new_v4().to_string(),
+            number: 2,
+            title: "Book the venue".to_owned(),
+            parent_id: Some(parent.id.clone()),
+            ..task()
+        };
+        let asked = || vec![input("book the venue"), input("Send invites")];
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        let before = board(vec![row(parent.clone()), row(made.clone())], Vec::new());
+        let (sent, _, filed) = before
+            .checklist_request(&conn, &operation_id, &row(parent.clone()), asked())
+            .expect("the first run");
+        let filed = filed.expect("the checklist as asked");
+        file_sent(&conn, &operation_id, SUBTASK_CHECKLIST_ASKED, &filed, &sent).expect("filed");
+        let invites = WorkItem {
+            id: uuid::Uuid::new_v4().to_string(),
+            number: 3,
+            title: "Send invites".to_owned(),
+            parent_id: Some(parent.id.clone()),
+            ..task()
+        };
+        let after = board(
+            vec![row(parent.clone()), row(made), row(invites)],
+            Vec::new(),
+        );
+        let (retry, skipped, filed) = after
+            .checklist_request(&conn, &operation_id, &row(parent.clone()), asked())
+            .expect("the retry");
+        assert_eq!(retry, sent);
+        assert!(skipped.is_empty());
+        assert!(filed.is_none());
+        assert!(after
+            .checklist_request(&conn, &operation_id, &row(parent), vec![input("Send invites")])
+            .is_err());
+    }
 
     const TASK: &str = "5b0c6a8e-3d1f-4c2a-9e7b-0a1b2c3d4e5f";
 

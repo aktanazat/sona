@@ -100,6 +100,11 @@ impl Effects {
     pub(super) fn changed(&mut self, changed: &Changed) {
         self.item(&changed.before);
         self.item(&changed.after);
+        if !changed.before.status.is_closed() && changed.after.status.is_closed() {
+            if let Some(parent_id) = &changed.after.parent_id {
+                self.parents.push(parent_id.clone());
+            }
+        }
     }
 }
 
@@ -275,18 +280,62 @@ fn close_parents(
         return Ok(());
     }
     let tx = history.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    close_parents_in(&tx, meetings, effects)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// [`close_parents`] inside the caller's transaction.
+fn close_parents_in(
+    history: &Connection,
+    meetings: Option<&Connection>,
+    effects: &mut Effects,
+) -> StorageResult<()> {
     let change = Change::now("", WorkActor::Sona);
     let done = WorkPatch {
         status: Some(WorkStatus::Done),
         ..WorkPatch::default()
     };
     while let Some(parent_id) = effects.parents.pop() {
-        if items::sub_tasks_finished(&tx, &parent_id)? {
-            edit(&tx, meetings, change, &parent_id, &done, effects)?;
+        if items::sub_tasks_finished(history, &parent_id)? {
+            edit(history, meetings, change, &parent_id, &done, effects)?;
         }
     }
-    tx.commit()?;
     Ok(())
+}
+
+/// What a loop's tracker items moving changed, with the parents they
+/// finished closed when `close_parents` is set.
+fn followed_effects(
+    history: &Connection,
+    meetings: &Connection,
+    followed: sync::Followed,
+    close_parents: bool,
+) -> StorageResult<Effects> {
+    let mut effects = Effects {
+        loops: followed.loops,
+        ..Effects::default()
+    };
+    for changed in &followed.changed {
+        effects.changed(changed);
+    }
+    if close_parents {
+        close_parents_in(history, Some(meetings), &mut effects)?;
+    }
+    Ok(effects)
+}
+
+/// What `sona --loop-resolve` and a meeting page's resolve do to the
+/// tracker: moves the item behind the loop, then its finished parents.
+fn follow_loop_with(
+    history: &Connection,
+    meetings: &Connection,
+    loop_id: &MeetingLoopId,
+    close_parents: bool,
+    now_ms: i64,
+) -> StorageResult<Effects> {
+    let followed = sync::follow_loop_in(history, meetings, loop_id, now_ms)?;
+    followed_effects(history, meetings, followed, close_parents)
 }
 
 /// Brings a just-processed meeting's open commitments into triage.
@@ -336,19 +385,16 @@ pub(crate) fn follow_loop(
     let Some(history) = app.try_state::<Arc<HistoryManager>>() else {
         return Vec::new();
     };
+    let close = crate::settings::get_settings(app).work_close_parents;
     let now = now_ms();
     match in_both(store, &history, |history, meetings| {
-        sync::follow_loop_in(history, meetings, loop_id, now)
+        follow_loop_with(history, meetings, loop_id, close, now)
     }) {
-        Ok(followed) => {
-            if !followed.items.is_empty() {
-                let mut effects = Effects::default();
-                for item in &followed.items {
-                    effects.item(item);
-                }
+        Ok(effects) => {
+            if !effects.items.is_empty() {
                 tell(app, &effects);
             }
-            followed.loops
+            effects.loops
         }
         Err(error) => {
             log::warn!("The tracker could not follow a meeting loop: {error:#}");
@@ -369,7 +415,8 @@ pub(crate) fn catch_up(app: AppHandle, store: Arc<MeetingStore>) {
             return;
         };
         let user_name = store.user_name();
-        let sona = crate::settings::get_settings(&app).work_sona_changes;
+        let settings = crate::settings::get_settings(&app);
+        let (sona, close) = (settings.work_sona_changes, settings.work_close_parents);
         let now = now_ms();
         let sessions = match in_both(&store, &history, |_, meetings| {
             sync::meetings_since(meetings, now - sync::BACKFILL_MS)
@@ -404,10 +451,12 @@ pub(crate) fn catch_up(app: AppHandle, store: Arc<MeetingStore>) {
             Err(error) => log::warn!("Tracker repeats could not be folded: {error:#}"),
         }
         match in_both(&store, &history, |history, meetings| {
-            sync::reconcile(history, meetings, now)
+            let followed = sync::reconcile(history, meetings, now)?;
+            followed_effects(history, meetings, followed, close)
         }) {
             Ok(followed) => {
-                followed.items.iter().for_each(|item| effects.item(item));
+                effects.items.extend(followed.items);
+                effects.projects.extend(followed.projects);
                 effects.loops = followed.loops;
             }
             Err(error) => {
@@ -871,11 +920,6 @@ fn edit(
         change.at_ms,
     )?;
     effects.changed(&changed);
-    if !changed.before.status.is_closed() && changed.after.status.is_closed() {
-        if let Some(parent_id) = &changed.after.parent_id {
-            effects.parents.push(parent_id.clone());
-        }
-    }
     if changed.after.status.is_closed() {
         if let Some(next) = recur::next_of(history, id)? {
             effects.item(&items::item(history, &next)?);

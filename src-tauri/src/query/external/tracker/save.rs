@@ -778,16 +778,7 @@ impl Tracker<'_> {
                 )))
             }
         };
-        let fence = Fence::read(self.meetings).await?;
-        let existing = if fence.is_open() {
-            crate::query::external::store(self.meetings)
-                .await?
-                .session_ids()
-                .map_err(|error| ExternalError::from(crate::query::QueryError::from(error)))?
-        } else {
-            std::collections::HashSet::new()
-        };
-        let meetings = MeetingFence { fence, existing };
+        let meetings = MeetingFence::read(self.meetings).await?;
         let hidden = planning::history(self.history, |history| {
             planning::work::drawing_on(history, |kind, id| meetings.hides(kind, id))
         })
@@ -795,6 +786,10 @@ impl Tracker<'_> {
         let hidden_notes =
             planning::history(self.history, |history| Ok(hidden_notes(history, &meetings)?))
                 .map_err(|message| refusal(self.history, message))?;
+        let quotes_shown = planning::history(self.history, |history| {
+            planning::updates::quotes_shown(history, |meeting| meetings.hides_meeting(meeting))
+        })
+        .map_err(|message| refusal(self.history, message))?;
         let numbers: std::collections::HashMap<String, i64> =
             planning::history(self.history, |history| {
                 let mut statement = history.prepare("SELECT id, number FROM planning_tasks")?;
@@ -808,7 +803,23 @@ impl Tracker<'_> {
             .changes
             .into_iter()
             .filter(|change| !kept_here(change, &meetings, &hidden, &hidden_notes))
-            .map(|change| {
+            .map(|mut change| {
+                if change.entity == "project_update" {
+                    if let Some(body) = change
+                        .updated_from
+                        .as_mut()
+                        .and_then(|from| from.get_mut("body"))
+                    {
+                        if let Some(text) = body.as_str() {
+                            *body = planning::updates::for_agents(
+                                &change.entity_id,
+                                text,
+                                &quotes_shown,
+                            )
+                            .into();
+                        }
+                    }
+                }
                 let number = change
                     .item_id
                     .as_ref()
@@ -842,15 +853,55 @@ impl Tracker<'_> {
     }
 }
 
-/// The meetings an outside reader of the stream may not see: those kept on
-/// this Mac and, failing closed, any the store no longer holds, since a
-/// deleted meeting can no longer say whether it was kept here.
-struct MeetingFence {
+/// The meetings an outside reader may not see: those kept on this Mac and,
+/// failing closed, any the store no longer holds, since a deleted meeting
+/// can no longer say whether it was kept here.
+pub(crate) struct MeetingFence {
     fence: Fence,
     existing: std::collections::HashSet<crate::meeting::types::MeetingSessionId>,
 }
 
 impl MeetingFence {
+    pub(super) async fn read(
+        meetings: &std::sync::Arc<crate::meeting::session::MeetingSessionManager>,
+    ) -> Result<Self, ExternalError> {
+        let fence = Fence::read(meetings).await?;
+        let existing = if fence.is_open() {
+            crate::query::external::store(meetings)
+                .await?
+                .session_ids()
+                .map_err(|error| ExternalError::from(crate::query::QueryError::from(error)))?
+        } else {
+            std::collections::HashSet::new()
+        };
+        Ok(Self { fence, existing })
+    }
+
+    /// The fence over `store`; with no store, or one that cannot answer,
+    /// every meeting is hidden.
+    pub(crate) fn of_store(store: Option<&crate::meeting::store::MeetingStore>) -> Self {
+        let open = store.and_then(|store| {
+            Some((
+                crate::query::KeptLocal::read(store).ok()?,
+                store.session_ids().ok()?,
+            ))
+        });
+        match open {
+            Some((kept, existing)) => Self {
+                fence: Fence::Open(kept),
+                existing,
+            },
+            None => Self {
+                fence: Fence::Closed,
+                existing: std::collections::HashSet::new(),
+            },
+        }
+    }
+
+    pub(crate) fn hides_meeting(&self, meeting_id: &str) -> bool {
+        self.hides(planning::EvidenceSourceKind::Meeting, meeting_id)
+    }
+
     fn hides(&self, kind: planning::EvidenceSourceKind, id: &str) -> bool {
         let session = match kind {
             planning::EvidenceSourceKind::Meeting => Uuid::parse_str(id)

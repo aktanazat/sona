@@ -10,8 +10,8 @@ use super::types::{
     WorkOwner, WorkPatch, WorkPlace, WorkQuery, WorkRelationKind, WorkStatus,
 };
 use super::{
-    accept, bulk_update, close_parents, create, keep, list, mark_duplicate, set_archived, update,
-    Change,
+    accept, bulk_update, close_parents, create, follow_loop_with, keep, list, mark_duplicate,
+    set_archived, update, Change,
 };
 use super::{bin, inbox, live, sync};
 use crate::meeting::ledger::{
@@ -193,7 +193,7 @@ impl Desk {
             let tx = history.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let followed = sync::follow_loop_in(&tx, meetings, loop_id, at)?;
             tx.commit()?;
-            Ok(followed.items)
+            Ok(followed.changed.into_iter().map(|moved| moved.after).collect())
         })
         .expect("the tracker following its commitment")
     }
@@ -872,7 +872,7 @@ fn a_change_made_while_the_conversations_are_closed_reaches_its_commitment_when_
         })
         .expect("the catch-up as the conversations open");
     assert_eq!(caught_up.loops, [loop_id.clone()]);
-    assert!(caught_up.items.is_empty());
+    assert!(caught_up.changed.is_empty());
     let row = desk.page_row(&loop_id);
     assert_eq!(row.status, MeetingLoopStatus::Done);
     assert_eq!(row.resolved_by, Some(OperationActor::User));
@@ -1787,6 +1787,109 @@ fn a_parent_closes_once_its_last_open_sub_task_does() {
     assert_eq!(closed_by, Some(WorkActor::Sona));
 }
 
+fn typed_item(desk: &mut Desk, title: &str) -> WorkItem {
+    let at = desk.tick();
+    create(&mut desk.history, None, by_me(&operation(), at), &typed(title))
+        .expect("a typed item")
+        .value
+}
+
+fn sub_task_of(desk: &mut Desk, item: &WorkItem, parent_id: &str) -> WorkItem {
+    let at = desk.tick();
+    update(
+        &mut desk.history,
+        None,
+        by_me(&operation(), at),
+        &item.id,
+        item.revision,
+        &WorkPatch {
+            parent_id: Some(Some(parent_id.to_owned())),
+            ..WorkPatch::default()
+        },
+    )
+    .expect("made a sub-task")
+    .value
+}
+
+/// A launch whose deck is done and whose outline, the meeting's
+/// commitment, is its last open sub-task.
+fn launch_left_open() -> (Desk, WorkItem, WorkItem, MeetingLoopId) {
+    let mut desk = desk(&["Send the outline"]);
+    let (outline, loop_id) = desk.accepted();
+    let launch = typed_item(&mut desk, "Ship the launch");
+    let deck = typed_item(&mut desk, "Draw the deck");
+    let deck = sub_task_of(&mut desk, &deck, &launch.id);
+    let outline = sub_task_of(&mut desk, &outline, &launch.id);
+    let at = desk.tick();
+    // PANIC: the deck was just made a sub-task at this revision.
+    update(
+        &mut desk.history,
+        None,
+        by_me(&operation(), at),
+        &deck.id,
+        deck.revision,
+        &status(WorkStatus::Done),
+    )
+    .expect("the deck done");
+    (desk, launch, outline, loop_id)
+}
+
+#[test]
+fn a_parent_closes_when_resolving_its_commitment_closes_its_last_sub_task() {
+    for close in [true, false] {
+        let (mut desk, launch, _, loop_id) = launch_left_open();
+        let revision = desk.page_row(&loop_id).revision;
+        let at = desk.tick();
+        desk.meetings
+            .resolve_loop(
+                MeetingLoopResolveRequest {
+                    operation_id: MeetingOperationId::new(),
+                    loop_id: loop_id.clone(),
+                    expected_revision: revision,
+                    resolution: MeetingLoopResolution::Done,
+                },
+                OperationActor::User,
+                at,
+            )
+            .expect("the commitment resolved on its page");
+        let at = desk.tick();
+        desk.both(|history, meetings| {
+            let tx = history.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            follow_loop_with(&tx, meetings, &loop_id, close, at)?;
+            tx.commit()?;
+            Ok(())
+        })
+        .expect("the tracker following its commitment");
+        let expected = if close { WorkStatus::Done } else { launch.status };
+        assert_eq!(desk.item(&launch.id).status, expected);
+    }
+}
+
+#[test]
+fn a_parent_closes_when_its_last_sub_task_is_marked_a_duplicate() {
+    for close in [true, false] {
+        let (mut desk, launch, outline, _) = launch_left_open();
+        let original = typed_item(&mut desk, "Send the launch outline");
+        let at = desk.tick();
+        let mut done = desk
+            .both(|history, meetings| {
+                mark_duplicate(
+                    history,
+                    Some(meetings),
+                    by_me(&operation(), at),
+                    &outline.id,
+                    &original.id,
+                )
+            })
+            .expect("the outline folded into the original");
+        if close {
+            close_parents(&mut desk.history, None, &mut done.effects).expect("parents closed");
+        }
+        let expected = if close { WorkStatus::Done } else { launch.status };
+        assert_eq!(desk.item(&launch.id).status, expected);
+    }
+}
+
 #[test]
 fn a_view_saved_before_sub_tasks_swimlanes_and_hidden_columns_reads_with_their_defaults() {
     let desk = desk(&[]);
@@ -1996,8 +2099,10 @@ fn the_weekly_digest_leaves_out_meeting_work_and_posts_once_a_week() {
     let now = desk.tick();
 
     let hidden = super::digest::hidden(&desk.history, None).expect("the hidden tasks");
-    let digest = super::digest::build(&desk.history, &hidden, now - super::digest::WEEK_MS, now)
-        .expect("the digest");
+    let shown = std::collections::HashSet::new();
+    let digest =
+        super::digest::build(&desk.history, &hidden, &shown, now - super::digest::WEEK_MS, now)
+            .expect("the digest");
     let done: Vec<(&str, Vec<&str>)> = digest
         .projects
         .iter()

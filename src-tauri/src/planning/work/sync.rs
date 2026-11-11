@@ -293,7 +293,7 @@ fn followed_status(
 /// commitments that moved with them.
 #[derive(Default)]
 pub(crate) struct Followed {
-    pub items: Vec<WorkItem>,
+    pub changed: Vec<items::Changed>,
     pub loops: Vec<MeetingLoopId>,
 }
 
@@ -317,7 +317,7 @@ pub(crate) fn follow_loop_in(
     let changed = items::follow(history, &root.id, status, now_ms)?;
     Ok(Followed {
         loops: settle(history, Some(meetings), &root.id, WorkActor::Sona, now_ms)?,
-        items: vec![changed.after],
+        changed: vec![changed],
     })
 }
 
@@ -360,7 +360,7 @@ pub(crate) fn reconcile(
         }
         if moved_at.is_some_and(|at| at > root.status_changed_at_ms) {
             let more = follow_loop_in(history, meetings, &loop_id, now_ms)?;
-            followed.items.extend(more.items);
+            followed.changed.extend(more.changed);
             followed.loops.extend(more.loops);
         } else {
             followed.loops.extend(settle(

@@ -11,6 +11,7 @@ use crate::query::KeptLocal;
 use anyhow::Result;
 use chrono::{Local, TimeZone};
 use rusqlite::{params, Connection, OptionalExtension, Row};
+use std::collections::HashSet;
 use std::fmt::Write as _;
 use uuid::Uuid;
 
@@ -21,6 +22,13 @@ const PROGRESS_STEP: u8 = 2;
 /// How much of a meeting's words a draft quotes, around the linked moment.
 const PASSAGE_WINDOW_MS: i64 = 15_000;
 const PASSAGE_CHARS: usize = 240;
+/// How a draft's line quoting a meeting begins.
+const DISCUSSED: &str = "- Discussed in ";
+
+/// The meetings a drafted update quoted, as a JSON list of ids. Null for an
+/// update its author wrote, or one posted before this was kept.
+pub(crate) const QUOTED_MEETINGS_MIGRATION: &str =
+    "ALTER TABLE planning_project_updates ADD COLUMN quoted_meetings TEXT;";
 
 const COLUMNS: &str = "id, project_id, health, body, progress, author_kind, author_name,
     created_at_ms, edited_at_ms, deleted_at_ms";
@@ -84,23 +92,37 @@ fn touch(conn: &Connection, project_id: &str, now_ms: i64) -> Result<()> {
     Ok(())
 }
 
+/// Posts an update. `quoted` holds the `discussed` lines of the draft the
+/// body was made from, and is none for a body its author wrote.
 pub(crate) fn add(
     conn: &Connection,
     author: Author<'_>,
     project_id: &str,
     health: ProjectHealth,
     body: &str,
+    quoted: Option<&[Discussed]>,
     now_ms: i64,
 ) -> Result<ProjectUpdate> {
     let project = store::project(conn, &store::uuid(project_id)?)?;
     if project.trashed_at_ms.is_some() {
         return Err(Refusal::NotFound.into());
     }
+    let quoted = quoted
+        .map(|lines| {
+            serde_json::to_string(
+                &lines
+                    .iter()
+                    .map(|line| line.meeting_id.as_str())
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .transpose()?;
     let id = Uuid::new_v4().to_string();
     conn.execute(
         "INSERT INTO planning_project_updates
-            (id, project_id, health, body, progress, author_kind, author_name, created_at_ms)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            (id, project_id, health, body, progress, author_kind, author_name, created_at_ms,
+             quoted_meetings)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             id,
             project.id,
@@ -109,11 +131,75 @@ pub(crate) fn add(
             progress::percent_now(conn, &project.id)?,
             author.actor.as_str(),
             author.name(),
-            now_ms
+            now_ms,
+            quoted
         ],
     )?;
     touch(conn, &project.id, now_ms)?;
     update(conn, &id)
+}
+
+/// The updates an agent may read the `discussed` lines of: each that
+/// recorded the meetings it quoted, none of which `hides` now hides. Any
+/// other update, or one no longer here, is read without them.
+pub(crate) fn quotes_shown(
+    conn: &Connection,
+    hides: impl Fn(&str) -> bool,
+) -> Result<HashSet<String>> {
+    let mut statement = conn.prepare(
+        "SELECT id, quoted_meetings FROM planning_project_updates
+          WHERE quoted_meetings IS NOT NULL",
+    )?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut shown = HashSet::new();
+    for (id, quoted) in rows {
+        let quoted: Vec<String> = serde_json::from_str(&quoted)?;
+        if !quoted.iter().any(|meeting| hides(meeting)) {
+            shown.insert(id);
+        }
+    }
+    Ok(shown)
+}
+
+/// The body as an agent reads it: without its `discussed` lines unless the
+/// update is in `shown`.
+pub(crate) fn for_agents(id: &str, body: &str, shown: &HashSet<String>) -> String {
+    if shown.contains(id) {
+        body.to_owned()
+    } else {
+        unquoted(body)
+    }
+}
+
+/// One-line `text` cut before its first `discussed` line, for text that no
+/// longer says which meetings it quoted; none when nothing comes before it.
+pub(crate) fn before_quotes(text: &str) -> Option<String> {
+    let Some(at) = text.find(DISCUSSED) else {
+        return Some(text.to_owned());
+    };
+    let head = text[..at].trim_end();
+    (!head.is_empty()).then(|| format!("{head}…"))
+}
+
+/// A body without its `discussed` lines.
+fn unquoted(body: &str) -> String {
+    let mut quoting = false;
+    body.lines()
+        .filter(|line| {
+            let line = line.trim_start();
+            if line.starts_with(DISCUSSED) {
+                quoting = true;
+            } else if line.starts_with("- ") {
+                quoting = false;
+            }
+            !quoting
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 pub(crate) fn edit(
@@ -329,6 +415,17 @@ fn passage(meetings: &Connection, meeting_id: &str, at_ms: i64) -> Result<Option
     Ok(Some(format!("{}…", cut.trim_end())))
 }
 
+/// A draft's line quoting a meeting, and the meeting.
+#[derive(Clone, Debug)]
+pub(crate) struct Discussed {
+    pub meeting_id: String,
+    pub line: String,
+}
+
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// One draft line per linked meeting held since `since_ms`, quoting what
 /// was said at the linked moment. A meeting kept on this Mac, deleted, or
 /// with its transcript purged is left out.
@@ -337,7 +434,7 @@ pub(crate) fn discussed(
     kept: &KeptLocal,
     since_ms: i64,
     mentions: &[MeetingMention],
-) -> Result<Vec<String>> {
+) -> Result<Vec<Discussed>> {
     let mut lines = Vec::new();
     let mut seen: Vec<&str> = Vec::new();
     for mention in mentions {
@@ -363,7 +460,7 @@ pub(crate) fn discussed(
             continue;
         }
         let title = title
-            .map(|title| title.trim().to_owned())
+            .map(|title| one_line(&title))
             .filter(|title| !title.is_empty())
             .unwrap_or_else(|| "a conversation".to_owned());
         let day = Local
@@ -375,9 +472,12 @@ pub(crate) fn discussed(
             None => None,
         }
         .or_else(|| mention.caption.clone());
-        lines.push(match quote {
-            Some(quote) => format!("- Discussed in {title} ({day}): \"{quote}\""),
-            None => format!("- Discussed in {title} ({day})."),
+        lines.push(Discussed {
+            meeting_id: mention.meeting_id.clone(),
+            line: match quote {
+                Some(quote) => format!("{DISCUSSED}{title} ({day}): \"{}\"", one_line(&quote)),
+                None => format!("{DISCUSSED}{title} ({day})."),
+            },
         });
     }
     Ok(lines)
@@ -387,7 +487,11 @@ pub(crate) fn discussed(
 /// the project began: tasks finished, started and added, milestones
 /// reached, the one in focus, progress once it moved past two points, and
 /// the `discussed` lines for meetings.
-pub(crate) fn draft(conn: &Connection, project_id: &str, discussed: &[String]) -> Result<String> {
+pub(crate) fn draft(
+    conn: &Connection,
+    project_id: &str,
+    discussed: &[Discussed],
+) -> Result<String> {
     let project = store::project(conn, &store::uuid(project_id)?)?;
     let (last, since_ms) = since(conn, &project.id)?;
     let done = moved(conn, &project.id, since_ms, "done")?;
@@ -439,8 +543,8 @@ pub(crate) fn draft(conn: &Connection, project_id: &str, discussed: &[String]) -
     if now.abs_diff(before) > PROGRESS_STEP {
         writeln!(text, "- Progress: {before}% to {now}%.")?;
     }
-    for line in discussed {
-        writeln!(text, "{line}")?;
+    for discussed in discussed {
+        writeln!(text, "{}", discussed.line)?;
     }
     Ok(text.trim_end().to_owned())
 }
@@ -450,25 +554,21 @@ mod tests {
     use super::*;
     use crate::meeting::detection::machine::CalendarEventSummary;
     use crate::meeting::series_types::MeetingSeriesRemoteOptOutSetRequest;
-    use crate::meeting::store::workflow_core_tests;
-    use crate::meeting::types::MeetingOperationId;
+    use crate::meeting::store::{workflow_core_tests, MeetingStore};
+    use crate::meeting::types::{MeetingOperationId, MeetingSessionId};
+    use crate::planning::catalog::{save_project, ProjectEdit};
+    use crate::planning::schema;
+    use crate::planning::work::types::WorkActor;
+    use crate::query::external::tracker::MeetingFence;
 
-    /// A draft quotes the meetings that discussed the project, and never
-    /// one whose series is kept on this Mac.
-    #[test]
-    fn a_draft_quotes_shared_meetings_and_leaves_out_ones_kept_on_this_mac() {
-        let (_directory, meetings) = workflow_core_tests::store();
-        let shared = workflow_core_tests::meeting(&meetings, "Pricing sync", 1_700_000_000_000);
-        workflow_core_tests::transcript(&meetings, shared, "We agreed to ship the beta");
-        let private = workflow_core_tests::meeting(&meetings, "Board prep", 1_700_000_100_000);
-        workflow_core_tests::transcript(&meetings, private, "Salary numbers for the board");
+    fn keep_series_here(meetings: &MeetingStore, meeting: MeetingSessionId, started_ms: i64) {
         let event = CalendarEventSummary {
             event_key: "board-prep#1".to_owned(),
             series_key: "board-prep".to_owned(),
             title: "Board prep".to_owned(),
             attendee_count: 2,
-            start_utc_ms: 1_700_000_100_000,
-            end_utc_ms: 1_700_001_900_000,
+            start_utc_ms: started_ms,
+            end_utc_ms: started_ms + 1_800_000,
             attendees: Vec::new(),
             notes: None,
             calendar_name: None,
@@ -477,7 +577,7 @@ mod tests {
             place: None,
         };
         meetings
-            .remember_calendar_facts(private, &event)
+            .remember_calendar_facts(meeting, &event)
             .expect("the calendar facts");
         meetings
             .set_series_remote_opt_out(
@@ -490,6 +590,18 @@ mod tests {
                 3,
             )
             .expect("the series kept on this Mac");
+    }
+
+    /// A draft quotes the meetings that discussed the project, and never
+    /// one whose series is kept on this Mac.
+    #[test]
+    fn a_draft_quotes_shared_meetings_and_leaves_out_ones_kept_on_this_mac() {
+        let (_directory, meetings) = workflow_core_tests::store();
+        let shared = workflow_core_tests::meeting(&meetings, "Pricing sync", 1_700_000_000_000);
+        workflow_core_tests::transcript(&meetings, shared, "We agreed to ship the beta");
+        let private = workflow_core_tests::meeting(&meetings, "Board prep", 1_700_000_100_000);
+        workflow_core_tests::transcript(&meetings, private, "Salary numbers for the board");
+        keep_series_here(&meetings, private, 1_700_000_100_000);
         let kept = KeptLocal::read(&meetings).expect("the kept meetings");
         let mentions = [shared, private].map(|id| MeetingMention {
             meeting_id: id.uuid().to_string(),
@@ -503,7 +615,210 @@ mod tests {
             .expect("the discussed lines");
 
         assert_eq!(lines.len(), 1, "{lines:?}");
-        assert!(lines[0].starts_with("- Discussed in Pricing sync ("), "{lines:?}");
-        assert!(lines[0].ends_with(": \"We agreed to ship the beta\""), "{lines:?}");
+        assert!(
+            lines[0].line.starts_with("- Discussed in Pricing sync ("),
+            "{lines:?}"
+        );
+        assert!(
+            lines[0].line.ends_with(": \"We agreed to ship the beta\""),
+            "{lines:?}"
+        );
+    }
+
+    struct Posted {
+        _directory: tempfile::TempDir,
+        meetings: std::sync::Arc<MeetingStore>,
+        board: MeetingSessionId,
+        history: Connection,
+        drafted: ProjectUpdate,
+        written: ProjectUpdate,
+    }
+
+    /// An active project with a drafted update quoting a shared meeting, and
+    /// a later one its author wrote around the same quote.
+    fn posted() -> Posted {
+        let (directory, meetings) = workflow_core_tests::store();
+        let board = workflow_core_tests::meeting(&meetings, "Board prep", 1_700_000_100_000);
+        workflow_core_tests::transcript(&meetings, board, "Salary numbers for the board");
+        let history = Connection::open_in_memory().expect("a history database");
+        schema::apply_all(&history).expect("the planner schema");
+        let project = save_project(
+            &history,
+            None,
+            &ProjectEdit {
+                title: Some("Launch".to_owned()),
+                status: Some(crate::planning::types::ProjectStatus::Active),
+                ..ProjectEdit::default()
+            },
+            1,
+        )
+        .expect("a project");
+        let agent = Author {
+            actor: WorkActor::Agent,
+            agent: Some("bot"),
+        };
+        let mentions = [MeetingMention {
+            meeting_id: board.uuid().to_string(),
+            at_ms: Some(0),
+            caption: None,
+        }];
+        let shared = KeptLocal::read(&meetings).expect("the kept meetings");
+        let lines = meetings
+            .with_planning_snapshot(|conn| Ok(discussed(conn, &shared, 0, &mentions)))
+            .expect("a snapshot")
+            .expect("the discussed lines");
+        let body = draft(&history, &project.id, &lines).expect("a draft");
+        assert!(body.contains("Salary numbers"), "{body}");
+        let drafted = add(
+            &history,
+            agent,
+            &project.id,
+            ProjectHealth::OnTrack,
+            &body,
+            Some(&lines),
+            2,
+        )
+        .expect("the drafted update");
+        let written = add(
+            &history,
+            agent,
+            &project.id,
+            ProjectHealth::AtRisk,
+            &format!("{body}\n- Next: pricing."),
+            None,
+            3,
+        )
+        .expect("the written update");
+        Posted {
+            _directory: directory,
+            meetings,
+            board,
+            history,
+            drafted,
+            written,
+        }
+    }
+
+    fn read_by_agents(update: &ProjectUpdate, shown: &HashSet<String>) -> String {
+        for_agents(&update.id, update.body.as_deref().unwrap_or_default(), shown)
+    }
+
+    fn shown(history: &Connection, meetings: &MeetingStore) -> HashSet<String> {
+        let fence = MeetingFence::of_store(Some(meetings));
+        quotes_shown(history, |meeting| fence.hides_meeting(meeting)).expect("the shown quotes")
+    }
+
+    /// A posted draft that quoted a meeting loses the quote for agents once
+    /// the meeting's series is kept on this Mac; so does an update with no
+    /// record of what it quoted.
+    #[test]
+    fn a_posted_quote_is_hidden_once_its_meeting_is_kept_on_this_mac() {
+        let posted = posted();
+        let open = shown(&posted.history, &posted.meetings);
+        assert!(read_by_agents(&posted.drafted, &open).contains("Salary"));
+        let written = read_by_agents(&posted.written, &open);
+        assert!(!written.contains("Board prep") && !written.contains("Salary"), "{written}");
+        assert!(written.ends_with("- Next: pricing."), "{written}");
+
+        keep_series_here(&posted.meetings, posted.board, 1_700_000_100_000);
+
+        let kept = shown(&posted.history, &posted.meetings);
+        assert!(!read_by_agents(&posted.drafted, &kept).contains("Salary"));
+    }
+
+    /// A quote of a meeting the store no longer holds stays hidden, since
+    /// the meeting can no longer say whether it was kept on this Mac.
+    #[test]
+    fn a_posted_quote_is_hidden_once_its_meeting_is_gone() {
+        let posted = posted();
+        let (_elsewhere, without) = workflow_core_tests::store();
+
+        let gone = shown(&posted.history, &without);
+
+        assert!(!read_by_agents(&posted.drafted, &gone).contains("Salary"));
+    }
+
+    /// The change stream keeps an update's old body after the update is
+    /// purged; the quote in it stays hidden with no row left to vouch for it.
+    #[test]
+    fn a_purged_update_keeps_its_quote_hidden() {
+        let posted = posted();
+        posted
+            .history
+            .execute(
+                "DELETE FROM planning_project_updates WHERE id = ?1",
+                [&posted.drafted.id],
+            )
+            .expect("the update purged");
+
+        let purged = shown(&posted.history, &posted.meetings);
+
+        assert!(!read_by_agents(&posted.drafted, &purged).contains("Salary"));
+    }
+
+    /// The digest's excerpt of a project's latest update leaves out the
+    /// quote of a meeting kept on this Mac.
+    #[test]
+    fn a_digest_leaves_out_the_quote_of_a_meeting_kept_on_this_mac() {
+        let posted = posted();
+        posted
+            .history
+            .execute(
+                "DELETE FROM planning_project_updates WHERE id = ?1",
+                [&posted.written.id],
+            )
+            .expect("only the draft left");
+        keep_series_here(&posted.meetings, posted.board, 1_700_000_100_000);
+        let quotes = shown(&posted.history, &posted.meetings);
+
+        let digest = crate::planning::work::digest::build(
+            &posted.history,
+            &HashSet::new(),
+            &quotes,
+            0,
+            1_700_000_200_000,
+        )
+        .expect("the digest");
+
+        let excerpts: Vec<_> = digest
+            .projects
+            .iter()
+            .map(|project| project.latest_update.as_ref().and_then(|u| u.excerpt.clone()))
+            .collect();
+        assert_eq!(excerpts.len(), 1, "{excerpts:?}");
+        assert!(!format!("{excerpts:?}").contains("Salary"), "{excerpts:?}");
+    }
+
+    /// A digest stored in the inbox while its quote could be shown loses the
+    /// quote when an agent reads it back, whatever the meeting is now.
+    #[test]
+    fn a_stored_digest_read_by_agents_leaves_out_quotes() {
+        let posted = posted();
+        posted
+            .history
+            .execute(
+                "DELETE FROM planning_project_updates WHERE id = ?1",
+                [&posted.written.id],
+            )
+            .expect("only the draft left");
+        let quotes = shown(&posted.history, &posted.meetings);
+        let digest = crate::planning::work::digest::build(
+            &posted.history,
+            &HashSet::new(),
+            &quotes,
+            0,
+            1_700_000_200_000,
+        )
+        .expect("the digest");
+        assert!(format!("{digest:?}").contains("Salary"), "{digest:?}");
+        let stored = crate::planning::work::inbox::digest_posted(&posted.history, &digest, None, 4)
+            .expect("a post")
+            .and_then(|notice| notice.digest)
+            .expect("the stored digest");
+
+        let read = stored.for_agents();
+
+        assert_eq!(read.projects.len(), 1);
+        assert!(!format!("{read:?}").contains("Salary"), "{read:?}");
     }
 }

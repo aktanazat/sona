@@ -7,11 +7,13 @@ use super::{
     conversations_closed, day, now_ms, refusal, task_ref, task_ref_of, ExternalWorkRef, Fence,
     TaskRef, Tracker, WorkAnswer, WriteArgs,
 };
+use super::notes::{receipt_in, Receipt};
 use crate::meeting::loop_types::{
     MeetingLoopAssignRequest, MeetingLoopId, MeetingLoopReopenRequest, MeetingLoopRow,
 };
 use crate::meeting::types::MeetingOperationId;
 use crate::planning;
+use crate::planning::store::Refusal;
 use crate::planning::untracked as untracked_actions;
 use crate::planning::work::comments::Author;
 use crate::planning::work::types::WorkActor;
@@ -23,6 +25,7 @@ use crate::query::external::{
 use crate::query::QUERY_SCHEMA_VERSION;
 use chrono::{Local, NaiveDate};
 use clap::Args;
+use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::fmt::Write as _;
 use tauri::Manager;
@@ -345,18 +348,78 @@ fn today() -> String {
     Local::now().date_naive().format("%Y-%m-%d").to_string()
 }
 
+/// Whether the planning ledger in `conn` already holds `operation_id`.
+pub(super) fn ran_in(conn: &rusqlite::Connection, operation_id: &str) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM planning_operations WHERE operation_id = ?1)",
+        [operation_id],
+        |row| row.get(0),
+    )
+}
+
+/// Where the request a caller gave under `operation_id` is filed, beside
+/// the write it became under the id itself.
+fn asked_id(operation_id: &str) -> String {
+    Uuid::new_v5(&Uuid::NAMESPACE_OID, format!("{operation_id}/asked").as_bytes()).to_string()
+}
+
+/// What the first run under `operation_id` sent when asked `asked`: a check
+/// may rewrite the request before it is written, so a retry is matched on
+/// the request as the caller gave it. None before the first run; asked
+/// differently, refused.
+pub(super) fn sent_before<T: DeserializeOwned>(
+    conn: &rusqlite::Connection,
+    operation_id: &str,
+    command: &str,
+    asked: &str,
+) -> anyhow::Result<Option<T>> {
+    match receipt_in(conn, &asked_id(operation_id), command, asked)? {
+        Receipt::New(()) => Ok(None),
+        Receipt::Replay(sent) => Ok(Some(serde_json::from_str(&sent)?)),
+        Receipt::Conflict => Err(Refusal::OperationConflict.into()),
+    }
+}
+
+/// Files what a run under `operation_id` sent for `asked`, once it wrote.
+pub(super) fn file_sent(
+    conn: &rusqlite::Connection,
+    operation_id: &str,
+    command: &str,
+    asked: &str,
+    sent: &impl Serialize,
+) -> anyhow::Result<()> {
+    conn.execute(
+        "INSERT INTO planning_operations (operation_id, command, request_json, response_json, created_at_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(operation_id) DO NOTHING",
+        rusqlite::params![
+            asked_id(operation_id),
+            command,
+            asked,
+            serde_json::to_string(sent)?,
+            now_ms()
+        ],
+    )?;
+    Ok(())
+}
+
 impl Tracker<'_> {
     /// Whether the planning ledger already holds `operation_id`: a write
     /// under it answers from that run.
     pub(super) fn ran(&self, operation_id: &str) -> Result<bool, ExternalError> {
-        planning::history(self.history, |conn| {
-            Ok(conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM planning_operations WHERE operation_id = ?1)",
-                [operation_id],
-                |row| row.get::<_, bool>(0),
-            )?)
-        })
-        .map_err(|message| refusal(self.history, message))
+        planning::history(self.history, |conn| Ok(ran_in(conn, operation_id)?))
+            .map_err(|message| refusal(self.history, message))
+    }
+
+    /// Files what a run under `operation_id` sent for `asked`.
+    pub(super) fn file_sent(
+        &self,
+        operation_id: &str,
+        command: &str,
+        asked: &str,
+        sent: &impl Serialize,
+    ) -> Result<(), ExternalError> {
+        planning::history(self.history, |conn| file_sent(conn, operation_id, command, asked, sent))
+            .map_err(|message| refusal(self.history, message))
     }
 
     pub(super) async fn delegate(&self, args: &DelegateArgs) -> Result<WorkAnswer, ExternalError> {

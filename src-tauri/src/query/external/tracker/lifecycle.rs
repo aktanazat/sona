@@ -5,6 +5,7 @@ use super::{
     handle, iso_day, now_ms, pick, refusal, task_ref, Board, ExternalWorkRef, TaskRef, TasksArgs,
     Tracker, WorkAnswer, WriteArgs,
 };
+use super::organize::sent_before;
 use crate::planning;
 use crate::planning::work::agents;
 use crate::planning::work::bin::{self, Binned};
@@ -21,6 +22,7 @@ use crate::query::external::{ExternalError, ExternalErrorCode};
 use crate::query::QUERY_SCHEMA_VERSION;
 use chrono::{Local, NaiveDate, TimeZone};
 use clap::Args;
+use rusqlite::Connection;
 use serde::Serialize;
 use std::collections::HashSet;
 use std::fmt::Write as _;
@@ -995,31 +997,24 @@ impl Tracker<'_> {
             return Err(ExternalError::invalid("Give the folder a name."));
         }
         let index = args.position.map(|position| usize::try_from(position - 1).unwrap_or(usize::MAX));
-        let mut answer = self.change(LifecycleAction::FolderSaved, args.dry_run);
         let operation_id = args.write.fresh_operation_id();
+        let (shown, save, asked) = planning::history(self.history, |conn| {
+            folder_request(conn, &operation_id, existing, name, index)
+        })
+        .map_err(|message| self.write_refusal(message, &operation_id, "The folder"))?;
+        let mut answer = self.change(LifecycleAction::FolderSaved, args.dry_run);
         let replayed = self.ran(&operation_id)?;
-        answer.folder = Some(ExternalFolderRef {
-            id: existing.as_ref().and_then(|folder| folder.id.clone()),
-            name: name
-                .map(str::to_owned)
-                .or_else(|| existing.as_ref().map(|folder| folder.name.clone()))
-                .unwrap_or_default(),
-        });
+        answer.folder = Some(shown);
         answer.operation_id = Some(operation_id.clone());
         if args.dry_run {
             return Ok(WorkAnswer::Lifecycle(Box::new(answer)));
         }
         self.applies("changing favorites")?;
-        let folder = favorites::save_folder_as(
-            self.app,
-            &operation_id,
-            &FolderSave {
-                id: existing.and_then(|folder| folder.id),
-                name: name.map(str::to_owned),
-                index,
-            },
-        )
-        .map_err(|message| self.write_refusal(message, &operation_id, "The folder"))?;
+        let folder = favorites::save_folder_as(self.app, &operation_id, &save)
+            .map_err(|message| self.write_refusal(message, &operation_id, "The folder"))?;
+        if let Some(asked) = asked {
+            self.file_sent(&operation_id, FOLDER_SAVE_ASKED, &asked, &save)?;
+        }
         answer.position = self.saved_favorites()?.top().iter().position(|entry| {
             matches!(entry, FavoriteEntry::Folder { id } if *id == folder.id)
         }).map(|at| at + 1);
@@ -1296,7 +1291,8 @@ impl Tracker<'_> {
             read: notification.read_at_ms.is_some(),
             snoozed_until_ms: notification.snoozed_until_ms,
             archived: notification.archived_at_ms.is_some(),
-            digest: notification.digest.map(|mut digest| {
+            digest: notification.digest.map(|digest| {
+                let mut digest = digest.for_agents();
                 for project in &mut digest.projects {
                     project.done.retain(|task| board.row(&task.id).is_some());
                     for risk in &mut project.risks {
@@ -1461,4 +1457,106 @@ fn versions_answer(item: &WorkItem, found: Vec<DescriptionVersion>) -> WorkAnswe
             })
             .collect(),
     })
+}
+
+const FOLDER_SAVE_ASKED: &str = "cli_favorite_folder_save";
+
+/// The folder a save under `operation_id` names, the change it sends, and
+/// the request as asked, to file once written. A retry sends what the
+/// first run sent and files nothing. A new folder's name already taken
+/// names that folder, so a run under a new id makes no second one.
+fn folder_request(
+    conn: &Connection,
+    operation_id: &str,
+    existing: Option<ExternalFolderRef>,
+    name: Option<&str>,
+    index: Option<usize>,
+) -> anyhow::Result<(ExternalFolderRef, FolderSave, Option<String>)> {
+    let id = existing.as_ref().and_then(|folder| folder.id.clone());
+    let shown_name = name
+        .map(str::to_owned)
+        .or_else(|| existing.map(|folder| folder.name))
+        .unwrap_or_default();
+    let asked = FolderSave {
+        id: id.clone(),
+        name: name.map(str::to_owned),
+        index,
+    };
+    let asked_json = serde_json::to_string(&asked)?;
+    if let Some(sent) = sent_before::<FolderSave>(conn, operation_id, FOLDER_SAVE_ASKED, &asked_json)? {
+        let shown = ExternalFolderRef {
+            id: sent.id.clone(),
+            name: shown_name,
+        };
+        return Ok((shown, sent, None));
+    }
+    let taken = match (&id, name) {
+        (None, Some(name)) => favorites::favorites(conn)?
+            .folders
+            .into_iter()
+            .find(|folder| folder.name.trim().eq_ignore_ascii_case(name)),
+        _ => None,
+    };
+    let (shown, save) = match taken {
+        Some(folder) => (
+            ExternalFolderRef {
+                id: Some(folder.id.clone()),
+                name: folder.name,
+            },
+            FolderSave {
+                id: Some(folder.id),
+                name: None,
+                index,
+            },
+        ),
+        None => (ExternalFolderRef { id, name: shown_name }, asked),
+    };
+    Ok((shown, save, Some(asked_json)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{folder_request, FOLDER_SAVE_ASKED};
+    use super::super::organize::file_sent;
+    use crate::planning::schema;
+    use crate::planning::work::favorites;
+    use rusqlite::Connection;
+    use uuid::Uuid;
+
+    /// What one run of `favorite-folder-save` writes: the change, then the
+    /// request as asked beside it.
+    fn run(conn: &Connection, operation_id: &str, name: &str) -> anyhow::Result<String> {
+        let (_, save, asked) = folder_request(conn, operation_id, None, Some(name), None)?;
+        favorites::save_folder(conn, &save, 0)?;
+        if let Some(asked) = asked {
+            file_sent(conn, operation_id, FOLDER_SAVE_ASKED, &asked, &save)?;
+        }
+        Ok(serde_json::to_string(&save)?)
+    }
+
+    #[test]
+    fn saving_a_folder_under_a_taken_name_makes_no_second_folder() {
+        let conn = Connection::open_in_memory().expect("a history database");
+        schema::apply_all(&conn).expect("the planner schema");
+        for name in ["Launch", "launch"] {
+            run(&conn, &Uuid::new_v4().to_string(), name).expect("the folder saves");
+        }
+        let folders = favorites::favorites(&conn).expect("the favorites").folders;
+        assert_eq!(
+            folders.iter().map(|folder| folder.name.as_str()).collect::<Vec<_>>(),
+            ["Launch"]
+        );
+    }
+
+    /// The retry finds the folder its first run made; it must still send
+    /// the first run's request, or the store refuses it as another change.
+    #[test]
+    fn a_folder_save_retried_under_its_id_sends_what_the_first_run_sent() {
+        let conn = Connection::open_in_memory().expect("a history database");
+        schema::apply_all(&conn).expect("the planner schema");
+        let id = Uuid::new_v4().to_string();
+        let first = run(&conn, &id, "Launch").expect("the first run");
+        assert_eq!(run(&conn, &id, "Launch").expect("the retry"), first);
+        assert!(run(&conn, &id, "Other").is_err());
+    }
 }

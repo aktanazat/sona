@@ -595,9 +595,9 @@ pub(crate) fn read_note_with_sources(
     history: &HistoryManager,
     store: &crate::meeting::store::MeetingStore,
     id: &str,
-    hides_meeting: impl Fn(&str) -> bool,
+    hides: impl Fn(crate::planning::EvidenceSourceKind, &str) -> bool,
 ) -> Result<Option<ScratchNoteMemory>, String> {
-    links::read_memory(history, Some(store), id, hides_meeting)
+    links::read_memory(history, Some(store), id, hides)
 }
 
 pub(crate) fn read_versions(
@@ -1144,6 +1144,39 @@ mod tests {
         assert_eq!(
             refusal(&delete_note_with_connection(&conn, &note.id).expect_err("gone")),
             Some(ScratchpadRefusal::NotFound)
+        );
+    }
+
+    #[test]
+    fn a_task_drawn_from_a_hidden_meeting_leaves_what_a_note_is_a_document_of() {
+        let conn = connection();
+        conn.execute_batch(
+            "INSERT INTO planning_tasks (id, number, title, owner_is_self, status, priority,
+                status_changed_at_ms, sort_order, revision, created_at_ms, updated_at_ms) VALUES
+                ('kept', 1, 'Fire the vendor', 0, 'not_started', 0, 1, 1, 1, 1, 1),
+                ('shared', 2, 'Send the outline', 0, 'not_started', 0, 1, 2, 1, 1, 1);
+             INSERT INTO planning_evidence_links (id, target_kind, target_id, source_kind, source_id,
+                at_ms, revision, created_at_ms) VALUES
+                ('e1', 'task', 'kept', 'meeting', 'board-prep', NULL, 1, 1),
+                ('e2', 'task', 'shared', 'meeting', 'pricing-sync', NULL, 1, 1),
+                ('e3', 'task', 'kept', 'note', 'n', NULL, 1, 2),
+                ('e4', 'task', 'shared', 'note', 'n', NULL, 1, 3);",
+        )
+        .expect("two tasks the note is filed under");
+        let titles = |hides: &dyn Fn(crate::planning::EvidenceSourceKind, &str) -> bool| {
+            documents::documents_of(&conn, "n", hides)
+                .expect("documents")
+                .into_iter()
+                .map(|document| document.title)
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(titles(&|_, _| false), ["Fire the vendor", "Send the outline"]);
+        assert_eq!(
+            titles(&|kind, id| {
+                kind == crate::planning::EvidenceSourceKind::Meeting && id == "board-prep"
+            }),
+            ["Send the outline"]
         );
     }
 }

@@ -35,6 +35,36 @@ pub(crate) const UNNAMED: &str = "Agent";
 pub const VIA_MIGRATION: &str = "ALTER TABLE planning_activity_agents ADD COLUMN via TEXT CHECK (via IN ('mcp', 'cli'));
 ALTER TABLE planning_task_proposals ADD COLUMN via TEXT CHECK (via IN ('mcp', 'cli'));";
 
+/// Lets an agent propose an estimate and the person work is for. The
+/// proposal table is rebuilt to widen its fields, every row and rowid kept.
+pub const ESTIMATE_FOR_PROPOSALS_MIGRATION: &str = "DROP TRIGGER planning_task_agents_delete;
+CREATE TABLE planning_task_proposals_next (
+    id TEXT PRIMARY KEY NOT NULL,
+    task_id TEXT NOT NULL,
+    agent TEXT NOT NULL CHECK(length(trim(agent)) > 0),
+    field TEXT NOT NULL CHECK(field IN ('title', 'details', 'status', 'priority', 'owner', 'due',
+        'project', 'milestone', 'labels', 'snoozed', 'recurrence', 'cycle', 'parent', 'estimate',
+        'for_person')),
+    from_value TEXT,
+    patch_json TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(state IN ('open', 'accepted', 'rejected')),
+    created_at_ms INTEGER NOT NULL,
+    decided_at_ms INTEGER,
+    via TEXT CHECK (via IN ('mcp', 'cli')),
+    CHECK((state = 'open') = (decided_at_ms IS NULL))
+);
+INSERT INTO planning_task_proposals_next (rowid, id, task_id, agent, field, from_value, patch_json,
+        state, created_at_ms, decided_at_ms, via)
+    SELECT rowid, id, task_id, agent, field, from_value, patch_json, state, created_at_ms,
+        decided_at_ms, via FROM planning_task_proposals;
+DROP TABLE planning_task_proposals;
+ALTER TABLE planning_task_proposals_next RENAME TO planning_task_proposals;
+CREATE INDEX planning_task_proposals_task ON planning_task_proposals(task_id, state, created_at_ms);
+CREATE TRIGGER planning_task_agents_delete AFTER DELETE ON planning_tasks BEGIN
+    DELETE FROM planning_task_doers WHERE task_id = old.id;
+    DELETE FROM planning_task_proposals WHERE task_id = old.id;
+END;";
+
 static VIA: OnceLock<WorkVia> = OnceLock::new();
 
 /// Marks this process as the command line, run by the MCP server when it
@@ -280,6 +310,8 @@ fn proposed(field: WorkProposalField, patch: &WorkPatch) -> Option<String> {
         WorkProposalField::Recurrence => patch.recurrence.clone().flatten(),
         WorkProposalField::Cycle => patch.cycle.flatten().map(|cycle| cycle.to_string()),
         WorkProposalField::Parent => patch.parent_id.clone().flatten(),
+        WorkProposalField::Estimate => patch.estimate.flatten().map(|points| points.to_string()),
+        WorkProposalField::ForPerson => patch.for_person_id.clone().flatten(),
     }
 }
 
@@ -447,6 +479,26 @@ fn field_changes(
             item.parent_id.clone(),
             WorkPatch {
                 parent_id: Some(parent_id.clone()),
+                ..WorkPatch::default()
+            },
+        );
+    }
+    if let Some(estimate) = patch.estimate {
+        add(
+            WorkProposalField::Estimate,
+            item.estimate.map(|points| points.to_string()),
+            WorkPatch {
+                estimate: Some(estimate),
+                ..WorkPatch::default()
+            },
+        );
+    }
+    if let Some(for_person_id) = &patch.for_person_id {
+        add(
+            WorkProposalField::ForPerson,
+            item.for_person_id.clone(),
+            WorkPatch {
+                for_person_id: Some(for_person_id.clone()),
                 ..WorkPatch::default()
             },
         );
@@ -1402,6 +1454,67 @@ mod tests {
         assert_eq!(
             landed.iter().map(|item| item.cycle).collect::<Vec<_>>(),
             [Some(next)]
+        );
+    }
+
+    #[test]
+    fn an_agents_estimate_and_for_wait_for_the_user_then_land() {
+        let mut history = history();
+        let task = todo(&mut history, "Price the renewal");
+        let dana = "6f1c2a4e-8b3d-4f7a-9c21-5d0e7b3a1f42";
+        // PANIC: a fixture that cannot open its database is a broken test.
+        let meetings = Connection::open_in_memory().expect("an in-memory meetings database");
+        meetings
+            .execute_batch(&format!(
+                "CREATE TABLE persons (id TEXT PRIMARY KEY, display_name TEXT);
+                 CREATE TABLE person_merge_redirects (source_person_id TEXT, target_person_id TEXT);
+                 INSERT INTO persons VALUES ('{dana}', 'Dana');"
+            ))
+            .expect("a person");
+        let sized = WorkPatch {
+            estimate: Some(Some(5)),
+            for_person_id: Some(Some(dana.to_owned())),
+            ..WorkPatch::default()
+        };
+        let proposed = update(
+            &mut history,
+            Some(&meetings),
+            by(WorkActor::Agent, &operation(), AT + 1_000),
+            CLAUDE,
+            ItemChange {
+                id: &task.id,
+                expected_revision: task.revision,
+                patch: &sized,
+                link: None,
+            },
+        )
+        .expect("the agent's change")
+        .value
+        .proposed;
+        assert_eq!(items::item(&history, &task.id).expect("the task"), task);
+        assert_eq!(
+            proposed
+                .iter()
+                .map(|proposal| (proposal.field.as_str(), proposal.to.as_deref()))
+                .collect::<Vec<_>>(),
+            [("estimate", Some("5")), ("for_person", Some(dana))]
+        );
+
+        let ids: Vec<String> = proposed.into_iter().map(|proposal| proposal.id).collect();
+        let landed = accept(
+            &mut history,
+            Some(&meetings),
+            by(WorkActor::Agent, &operation(), AT + 2_000),
+            &ids,
+        )
+        .expect("accepting them")
+        .value;
+        assert_eq!(
+            landed
+                .iter()
+                .map(|item| (item.estimate, item.for_person_id.as_deref()))
+                .collect::<Vec<_>>(),
+            [(Some(5), Some(dana))]
         );
     }
 

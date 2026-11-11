@@ -502,7 +502,7 @@ impl Tracker<'_> {
             .ok_or_else(|| ExternalError::invalid("Name a meeting, a person, a note or a cycle."))?;
         let (number, document) = self.cycle_document(cycle)?;
         let present = planning::history(self.history, |conn| {
-            Ok(documents::documents_of(conn, &note.id)?)
+            documents::documents_of(conn, &note.id, |_, _| false)
         })
         .map_err(|message| refusal(self.history, message))?
         .iter()
@@ -673,7 +673,7 @@ impl Tracker<'_> {
             match written {
                 Receipt::New(()) => {
                     scratchpad::emit_changed(self.app, &note.id, false);
-                    links::read_memory(self.history, store.as_deref(), &note.id, |_| false)
+                    links::read_memory(self.history, store.as_deref(), &note.id, |_, _| false)
                         .map_err(|message| refusal(self.history, message))?
                         .ok_or_else(|| {
                             ExternalError::new(

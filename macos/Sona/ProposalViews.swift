@@ -171,6 +171,8 @@ enum WorkProposalText {
         case .recurrence: "Repeats"
         case .cycle: "Cycle"
         case .parent: "Parent"
+        case .estimate: "Estimate"
+        case .forPerson: "For"
         case .unknown: "Change"
         }
     }
@@ -187,7 +189,8 @@ enum WorkProposalText {
         switch proposal.field {
         case .title, .details, .unknown:
             return to
-        case .status, .priority, .owner, .due, .project, .milestone, .labels, .snoozed, .recurrence, .cycle, .parent:
+        case .status, .priority, .owner, .due, .project, .milestone, .labels, .snoozed, .recurrence, .cycle, .parent,
+             .estimate, .forPerson:
             return "\(value(proposal.field, proposal.from, model: model, now: now)) → \(to)"
         }
     }
@@ -232,6 +235,10 @@ enum WorkProposalText {
         case .parent:
             return text.map { id in work.items?.first { $0.id == id }.map { "#\($0.number) \($0.title)" } ?? "A task" }
                 ?? "No parent"
+        case .estimate:
+            return text.map { "\($0) pt" } ?? "No estimate"
+        case .forPerson:
+            return text.map { id in work.people.first { $0.id == id }?.name ?? "Someone" } ?? "No one"
         case .unknown:
             return text ?? "A change"
         }

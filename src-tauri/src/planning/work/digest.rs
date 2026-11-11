@@ -12,7 +12,8 @@ use crate::meeting::store::MeetingStore;
 use crate::planning::types::{
     DateResolution, Project, ProjectHealth, ProjectStatus, ProjectUpdateAuthor, TaskStatus,
 };
-use crate::planning::{catalog, progress, EvidenceSourceKind};
+use crate::planning::{catalog, progress, updates, EvidenceSourceKind};
+use crate::query::external::tracker::MeetingFence;
 use crate::query::KeptLocal;
 use anyhow::Result;
 use chrono::{Datelike, Days, Local, Months, NaiveDate, TimeZone, Weekday};
@@ -34,6 +35,20 @@ pub struct ProjectDigest {
     pub to_ms: i64,
     /// Those at risk first, then those with the most done.
     pub projects: Vec<DigestProject>,
+}
+
+impl ProjectDigest {
+    /// A stored digest as an agent reads it: each update excerpt cut before
+    /// its first `discussed` line, since the stored copy no longer says
+    /// which meetings it quoted.
+    pub(crate) fn for_agents(mut self) -> Self {
+        for project in &mut self.projects {
+            if let Some(update) = &mut project.latest_update {
+                update.excerpt = update.excerpt.as_deref().and_then(updates::before_quotes);
+            }
+        }
+        self
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -97,10 +112,12 @@ pub(crate) fn hidden(conn: &Connection, kept: Option<&KeptLocal>) -> Result<Hash
     })
 }
 
-/// The digest of [`from_ms`, `to_ms`), leaving out `hidden` tasks.
+/// The digest of [`from_ms`, `to_ms`), leaving out `hidden` tasks, and the
+/// `discussed` lines of every update not in `quotes_shown`.
 pub(crate) fn build(
     conn: &Connection,
     hidden: &HashSet<String>,
+    quotes_shown: &HashSet<String>,
     from_ms: i64,
     to_ms: i64,
 ) -> Result<ProjectDigest> {
@@ -196,7 +213,9 @@ pub(crate) fn build(
             target_at_ms: project.target_at_ms,
             latest_update: outlook.latest_update.map(|update| DigestUpdate {
                 health: update.health,
-                excerpt: update.body.as_deref().and_then(excerpt),
+                excerpt: update.body.as_deref().and_then(|body| {
+                    excerpt(&updates::for_agents(&update.id, body, quotes_shown))
+                }),
                 author: update.author,
                 created_at_ms: update.created_at_ms,
             }),
@@ -325,7 +344,9 @@ fn weekly(
         }
         let kept = meetings.and_then(|store| KeptLocal::read(store).ok());
         let hidden = hidden(conn, kept.as_ref())?;
-        let digest = build(conn, &hidden, due_ms - WEEK_MS, due_ms)?;
+        let fence = MeetingFence::of_store(meetings);
+        let shown = updates::quotes_shown(conn, |meeting| fence.hides_meeting(meeting))?;
+        let digest = build(conn, &hidden, &shown, due_ms - WEEK_MS, due_ms)?;
         if digest.projects.is_empty() {
             return Ok(false);
         }

@@ -3,12 +3,13 @@
 //! its own each week on the day Settings names. Work from meetings kept on
 //! this Mac stays out.
 
-use super::{day_text, now_ms, refusal, Tracker, WorkAnswer, WriteArgs};
+use super::{day_text, now_ms, refusal, MeetingFence, Tracker, WorkAnswer, WriteArgs};
 use crate::planning;
 use crate::planning::ProjectHealth;
 use crate::planning::work::digest::{self, DigestRisk, DigestTask, ProjectDigest};
 use crate::query::external::ExternalError;
 use crate::query::QUERY_SCHEMA_VERSION;
+use chrono::{Local, NaiveDate};
 use clap::Args;
 use serde::Serialize;
 use std::fmt::Write as _;
@@ -20,6 +21,14 @@ pub struct DigestArgs {
     pub dry_run: bool,
     #[command(flatten)]
     pub write: WriteArgs,
+}
+
+impl DigestArgs {
+    /// The caller's id, or one derived from `day`: a hand-asked digest is
+    /// posted once a day, as the weekly one is posted once a week.
+    fn operation_id(&self, day: NaiveDate) -> Result<String, ExternalError> {
+        self.write.operation_id("digest", &day.to_string())
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -40,10 +49,13 @@ pub struct ExternalWorkDigest {
 impl Tracker<'_> {
     pub(super) async fn digest(&self, args: &DigestArgs) -> Result<WorkAnswer, ExternalError> {
         let board = self.board().await?;
+        let meetings = MeetingFence::read(self.meetings).await?;
         let to_ms = now_ms();
         let built = planning::history(self.history, |conn| {
             let hidden = board.fence.hidden_tasks(conn)?;
-            digest::build(conn, &hidden, to_ms - digest::WEEK_MS, to_ms)
+            let shown =
+                planning::updates::quotes_shown(conn, |meeting| meetings.hides_meeting(meeting))?;
+            digest::build(conn, &hidden, &shown, to_ms - digest::WEEK_MS, to_ms)
         })
         .map_err(|message| refusal(self.history, message))?;
         let mut answer = ExternalWorkDigest {
@@ -58,7 +70,7 @@ impl Tracker<'_> {
         if args.dry_run || answer.digest.projects.is_empty() {
             return Ok(WorkAnswer::Digest(Box::new(answer)));
         }
-        let operation_id = args.write.fresh_operation_id();
+        let operation_id = args.operation_id(Local::now().date_naive())?;
         self.applies("posting the project digest")?;
         answer.replayed = self.ran(&operation_id)?;
         let posted = digest::post_as(self.app, &operation_id, &answer.digest)
@@ -66,7 +78,7 @@ impl Tracker<'_> {
         if let Some(notification) = posted {
             answer.notification_id = Some(notification.id);
             if let Some(stored) = notification.digest {
-                answer.digest = stored;
+                answer.digest = stored.for_agents();
             }
         }
         answer.operation_id = Some(operation_id);
@@ -183,4 +195,36 @@ pub(super) fn text(answer: &ExternalWorkDigest, text: &mut String) {
     };
     let _ = writeln!(text, "{posted}");
     digest_text(&answer.digest, text);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{WorkCommand, WorkVerb};
+    use super::DigestArgs;
+    use crate::cli::{CliArgs, Command};
+    use chrono::NaiveDate;
+    use clap::Parser;
+
+    fn digest() -> DigestArgs {
+        match CliArgs::try_parse_from(["sona", "work", "digest", "--agent", "bot"]) {
+            Ok(CliArgs {
+                command:
+                    Some(Command::Work(WorkCommand {
+                        verb: WorkVerb::Digest(args),
+                        ..
+                    })),
+                ..
+            }) => args,
+            other => panic!("`work digest` parsed as {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_digest_asked_for_twice_in_a_day_is_posted_under_one_id() {
+        let day = NaiveDate::from_ymd_opt(2026, 11, 11).expect("a day");
+        let next = NaiveDate::from_ymd_opt(2026, 11, 12).expect("a day");
+        let first = digest().operation_id(day).expect("an id");
+        assert_eq!(first, digest().operation_id(day).expect("an id"));
+        assert_ne!(first, digest().operation_id(next).expect("an id"));
+    }
 }

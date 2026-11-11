@@ -3,8 +3,8 @@
 
 use super::catalog::ExternalWorkProject;
 use super::{
-    cycle_ref, external_cycles, named_cycle, now_ms, refusal, ExternalWorkCycles, Tracker,
-    WorkAnswer, WriteArgs,
+    cycle_ref, external_cycles, named_cycle, now_ms, refusal, ExternalWorkCycles, MeetingFence,
+    Tracker, WorkAnswer, WriteArgs,
 };
 use crate::planning::catalog::ProjectEdit;
 use crate::planning::store as plans;
@@ -22,6 +22,7 @@ use chrono::NaiveDate;
 use clap::{Args, ValueEnum};
 use rusqlite::Connection;
 use serde::Serialize;
+use std::collections::HashSet;
 use std::fmt::Write as _;
 use uuid::Uuid;
 
@@ -395,11 +396,20 @@ fn project_ref(project: &Project) -> ExternalProjectRef {
     }
 }
 
-fn external_update(update: ProjectUpdate) -> ExternalProjectUpdate {
+/// The update as an agent reads it: without its `discussed` lines unless it
+/// is in `quotes_shown`.
+fn external_update(
+    update: ProjectUpdate,
+    quotes_shown: &HashSet<String>,
+) -> ExternalProjectUpdate {
+    let body = update
+        .body
+        .as_deref()
+        .map(|body| updates::for_agents(&update.id, body, quotes_shown));
     ExternalProjectUpdate {
         id: update.id,
         health: Health::of(update.health),
-        body: update.body,
+        body,
         progress: update.progress,
         author: ExternalUpdateAuthor {
             kind: update.author.kind,
@@ -488,12 +498,15 @@ impl Tracker<'_> {
 
     pub(super) async fn project(&self, args: &ProjectArgs) -> Result<WorkAnswer, ExternalError> {
         let board = self.board().await?;
+        let meetings = MeetingFence::read(self.meetings).await?;
         let project = self.project_named(&args.project)?;
         let now = now_ms();
-        let (outlook, milestones) = planning::history(self.history, |conn| {
+        let (outlook, milestones, quotes_shown) = planning::history(self.history, |conn| {
             let outlook = progress::outlook(conn, &project, now)?;
             let milestones = progress::milestone_progress(conn, &project.id)?;
-            Ok((outlook, milestones))
+            let quotes_shown =
+                updates::quotes_shown(conn, |meeting| meetings.hides_meeting(meeting))?;
+            Ok((outlook, milestones, quotes_shown))
         })
         .map_err(|message| refusal(self.history, message))?;
         let (list, shares) = milestones;
@@ -515,7 +528,9 @@ impl Tracker<'_> {
             ExternalWorkProjectDetail {
                 schema_version: QUERY_SCHEMA_VERSION,
                 project: self.project_row(&project, &board),
-                latest_update: outlook.latest_update.map(external_update),
+                latest_update: outlook
+                    .latest_update
+                    .map(|update| external_update(update, &quotes_shown)),
                 update_missing: outlook.update_missing,
                 progress: external_progress(outlook.progress),
                 milestones: list
@@ -539,7 +554,16 @@ impl Tracker<'_> {
         )))
     }
 
-    pub(super) fn project_updates(
+    /// The updates whose `discussed` lines an agent may read.
+    async fn quotes_shown(&self) -> Result<HashSet<String>, ExternalError> {
+        let meetings = MeetingFence::read(self.meetings).await?;
+        planning::history(self.history, |conn| {
+            updates::quotes_shown(conn, |meeting| meetings.hides_meeting(meeting))
+        })
+        .map_err(|message| refusal(self.history, message))
+    }
+
+    pub(super) async fn project_updates(
         &self,
         args: &ProjectUpdatesArgs,
     ) -> Result<WorkAnswer, ExternalError> {
@@ -553,15 +577,20 @@ impl Tracker<'_> {
             updates::page(conn, &project.id, limit, cursor.as_deref())
         })
         .map_err(|message| refusal(self.history, message))?;
+        let quotes_shown = self.quotes_shown().await?;
         Ok(WorkAnswer::ProjectUpdates(ExternalWorkProjectUpdates {
             schema_version: QUERY_SCHEMA_VERSION,
             project: project_ref(&project),
-            updates: page.updates.into_iter().map(external_update).collect(),
+            updates: page
+                .updates
+                .into_iter()
+                .map(|update| external_update(update, &quotes_shown))
+                .collect(),
             next_cursor: page.next_cursor,
         }))
     }
 
-    async fn discussed(&self, project_id: &str) -> Result<Vec<String>, ExternalError> {
+    async fn discussed(&self, project_id: &str) -> Result<Vec<updates::Discussed>, ExternalError> {
         project_plans::discussed_lines(self.history, self.meetings, project_id)
             .await
             .map_err(|message| refusal(self.history, message))
@@ -591,6 +620,7 @@ impl Tracker<'_> {
         project: &Project,
         update: ProjectUpdate,
         replayed: bool,
+        quotes_shown: &HashSet<String>,
     ) -> WorkAnswer {
         WorkAnswer::ProjectUpdate(Box::new(ExternalWorkProjectUpdateChange {
             schema_version: QUERY_SCHEMA_VERSION,
@@ -598,7 +628,7 @@ impl Tracker<'_> {
             dry_run,
             operation_id,
             project: project_ref(project),
-            update: external_update(update),
+            update: external_update(update, quotes_shown),
             replayed,
         }))
     }
@@ -616,13 +646,26 @@ impl Tracker<'_> {
             Some(_) => Vec::new(),
             None => self.discussed(&project.id).await?,
         };
+        let quoted = body.is_none().then_some(discussed.as_slice());
         if args.dry_run {
-            let update = self.rehearse(|conn| {
+            let meetings = MeetingFence::read(self.meetings).await?;
+            let (update, quotes_shown) = self.rehearse(|conn| {
                 let drafted = match body {
                     Some(body) => body.to_owned(),
                     None => updates::draft(conn, &project.id, &discussed)?,
                 };
-                updates::add(conn, author, &project.id, health, &drafted, now_ms())
+                let update = updates::add(
+                    conn,
+                    author,
+                    &project.id,
+                    health,
+                    &drafted,
+                    quoted,
+                    now_ms(),
+                )?;
+                let shown =
+                    updates::quotes_shown(conn, |meeting| meetings.hides_meeting(meeting))?;
+                Ok((update, shown))
             })?;
             return Ok(Self::update_change(
                 UpdateAction::Added,
@@ -631,6 +674,7 @@ impl Tracker<'_> {
                 &project,
                 update,
                 false,
+                &quotes_shown,
             ));
         }
         self.applies("posting a project update")?;
@@ -653,10 +697,11 @@ impl Tracker<'_> {
             &project,
             update,
             replayed,
+            &self.quotes_shown().await?,
         ))
     }
 
-    pub(super) fn project_update_edit(
+    pub(super) async fn project_update_edit(
         &self,
         args: &ProjectUpdateEditArgs,
     ) -> Result<WorkAnswer, ExternalError> {
@@ -678,6 +723,7 @@ impl Tracker<'_> {
                 &project,
                 edited,
                 false,
+                &self.quotes_shown().await?,
             ));
         }
         self.applies("editing a project update")?;
@@ -697,6 +743,7 @@ impl Tracker<'_> {
             &project,
             edited,
             false,
+            &self.quotes_shown().await?,
         ))
     }
 
@@ -719,6 +766,7 @@ impl Tracker<'_> {
                 &project,
                 deleted,
                 false,
+                &HashSet::new(),
             ));
         }
         self.applies("deleting a project update")?;
@@ -731,6 +779,7 @@ impl Tracker<'_> {
             &project,
             deleted,
             false,
+            &HashSet::new(),
         ))
     }
 

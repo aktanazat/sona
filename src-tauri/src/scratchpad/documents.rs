@@ -7,6 +7,7 @@ use super::{
     ScratchpadError, ScratchpadRefusal,
 };
 use crate::managers::history::HistoryManager;
+use crate::planning::EvidenceSourceKind;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use specta::Type;
@@ -42,8 +43,13 @@ pub struct ScratchDocumentOf {
 }
 
 /// The projects, milestones, tasks and cycles note `id` is a document of,
-/// oldest link first.
-pub(crate) fn documents_of(conn: &Connection, id: &str) -> rusqlite::Result<Vec<ScratchDocumentOf>> {
+/// oldest link first, without the tasks drawn from a source `hides` holds
+/// back.
+pub(crate) fn documents_of(
+    conn: &Connection,
+    id: &str,
+    hides: impl Fn(EvidenceSourceKind, &str) -> bool,
+) -> anyhow::Result<Vec<ScratchDocumentOf>> {
     let mut statement = conn.prepare_cached(
         "SELECT kind, target, title FROM (
             SELECT e.target_kind AS kind, e.target_id AS target,
@@ -60,7 +66,7 @@ pub(crate) fn documents_of(conn: &Connection, id: &str) -> rusqlite::Result<Vec<
             WHERE n.note_id = ?1
          ) WHERE title IS NOT NULL ORDER BY at, tie",
     )?;
-    let documents = statement
+    let mut documents = statement
         .query_map(params![id], |row| {
             let kind = match row.get::<_, String>(0)?.as_str() {
                 "project" => ScratchDocumentKind::Project,
@@ -74,8 +80,14 @@ pub(crate) fn documents_of(conn: &Connection, id: &str) -> rusqlite::Result<Vec<
                 title: row.get(2)?,
             })
         })?
-        .collect();
-    documents
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if documents.iter().any(|document| document.kind == ScratchDocumentKind::Task) {
+        let hidden = crate::planning::work::drawing_on(conn, hides)?;
+        documents.retain(|document| {
+            document.kind != ScratchDocumentKind::Task || !hidden.contains(&document.id)
+        });
+    }
+    Ok(documents)
 }
 
 /// Files note `id` under cycle `number`. Filing it twice changes nothing.
