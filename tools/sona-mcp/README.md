@@ -66,6 +66,14 @@ claude mcp add sona --env SONA_BIN=/path/to/sona/src-tauri/target/debug/sona \
 | `sona_stats`         | none                                     | `sona --stats`                                                          |
 | `sona_events`        | `after?`, `limit?`                       | `sona --events [--after …] [--limit …]`                                 |
 | `sona_loop_resolve`  | `loop_id`                                | `sona --loop-resolve <loop_id>` — **writes**                            |
+| `sona_share_preview` | `meeting_id`, `include?`, `speakers?`, `expires?` | `sona share-preview [--include=…] [--speakers=…] [--expires=…] <id>` |
+| `sona_share_prepare` | `meeting_id`, `include?`, `speakers?`, `expires?` | `sona share-preview … --save --agent=<client> <id>` — **writes** a draft |
+| `sona_shares`        | none                                     | `sona shares`                                                           |
+| `sona_unshare`       | `share`, `dry_run?`                      | `sona unshare [--dry-run] <slug or link>` — **writes**                  |
+
+No tool publishes a meeting page. `sona_share_prepare` leaves a draft the user
+checks under Shared in Sona; only the user's Share click there, or
+`sona share --confirm` typed in a terminal, puts it online.
 
 `scope` is one of `all`, `meetings`, `dictations`, `people`, `loops`, `notes`. `status`
 is `open` or `done`. `side` is `mine` (what you owe) or `waiting` (what

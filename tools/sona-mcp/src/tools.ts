@@ -347,6 +347,66 @@ function linking(verb: "relate" | "unrelate", title: string, what: string): Tool
   };
 }
 
+const SHARE_PAGE_PROPERTIES = {
+  meeting_id: MEETING_ID,
+  include: {
+    type: "string",
+    description:
+      "Sections, comma-separated: title, summary, action_items, decisions, notes, transcript, audio. Omit for title, summary, action_items, decisions.",
+  },
+  speakers: {
+    type: "string",
+    enum: ["names", "numbered"],
+    description:
+      "names shows speaker names in the transcript; numbered shows Speaker 1, Speaker 2. Names written inside the summary or notes stay as written.",
+  },
+  expires: {
+    type: "string",
+    enum: ["1d", "7d", "30d", "never"],
+    description: "When the page would stop working. Defaults to never.",
+  },
+} satisfies Record<string, ToolProperty>;
+
+/** The page a meeting would publish to the user's site: shown, or kept as a
+ * draft for the user. Neither publishes; only the user's Share click or a
+ * --confirm typed in a terminal does. */
+function sharePage(save: boolean): ToolDefinition {
+  const argv = (input: ToolInput, agent?: string): string[] => [
+    "share-preview",
+    ...assigned("--include", text(input, "include")),
+    ...assigned("--speakers", text(input, "speakers")),
+    ...assigned("--expires", text(input, "expires")),
+    ...(save ? ["--save", ...assigned("--agent", agent ?? null)] : []),
+    "--json",
+    "--",
+    text(input, "meeting_id", true),
+  ];
+  const inputSchema = {
+    type: "object",
+    properties: SHARE_PAGE_PROPERTIES,
+    required: ["meeting_id"],
+    additionalProperties: false,
+  } as const;
+  return save
+    ? {
+        name: "sona_share_prepare",
+        title: "Prepare a meeting page for the user to share",
+        description:
+          "Save the page a meeting would publish to the user's site as a draft the user sees under Shared in Sona, marked as prepared by you. It does not publish: nothing goes online until the user checks it and presses Share in Sona, and this server has no way to publish. Returns the draft and the page it makes. Requires Settings > Agents > External access and External mutations.",
+        mutates: true,
+        inputSchema,
+        argv,
+      }
+    : {
+        name: "sona_share_preview",
+        title: "Preview a shared meeting page",
+        description:
+          "Build the exact page a meeting would publish to the user's site, without publishing or saving anything: title, summary, action items and decisions by default; notes, transcript and audio only when include names them. Returns the page JSON, its size and the sections it holds. Requires Settings > Agents > External access.",
+        inputSchema,
+        argv,
+      };
+}
+
 export const TOOLS: readonly ToolDefinition[] = [
   {
     name: "sona_search",
@@ -1450,6 +1510,42 @@ export const TOOLS: readonly ToolDefinition[] = [
             "--",
             text(input, "topic", true),
           ],
+  },
+  sharePage(false),
+  sharePage(true),
+  {
+    name: "sona_shares",
+    title: "List shared meeting pages",
+    description:
+      "Every meeting page the user has shared to the site: title, link (null once removed or expired), what it contains, when it was shared, when it expires and its state (publishing, live, failed, removing, removed, expired). Requires Settings > Agents > External access.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    argv: () => ["shares", "--json"],
+  },
+  {
+    name: "sona_unshare",
+    title: "Take a shared meeting page down",
+    description:
+      "Remove one shared page from the site and delete its files; the link stops working within about a minute. People who already opened it may have kept a copy. dry_run:true shows what would be removed without removing it. Requires Settings > Agents > External access and External mutations.",
+    mutates: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        share: {
+          type: "string",
+          description: "The share's slug or its full link, from sona_shares.",
+        },
+        dry_run: DRY_RUN,
+      },
+      required: ["share"],
+      additionalProperties: false,
+    },
+    argv: (input) => [
+      "unshare",
+      ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+      "--json",
+      "--",
+      text(input, "share", true),
+    ],
   },
 ];
 
