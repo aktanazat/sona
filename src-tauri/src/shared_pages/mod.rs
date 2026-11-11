@@ -122,6 +122,18 @@ pub(crate) fn discard_draft(paths: &Paths, meeting_id: &str) -> Result<()> {
     paths.discard_draft(meeting_id)
 }
 
+/// Clears the draft of a page that is already on the site. The page is
+/// live either way, so a failure here is logged rather than reported as a
+/// failed share that would invite publishing it twice.
+pub(crate) fn forget_published_draft(paths: &Paths, meeting_id: &str) {
+    if let Err(error) = paths.discard_draft(meeting_id) {
+        log::warn!(
+            "Shared page is live but its draft could not be cleared: {}",
+            error.message
+        );
+    }
+}
+
 pub(crate) fn drafts(paths: &Paths) -> Result<Vec<DraftEntry>> {
     Ok(paths
         .drafts::<Draft>()?

@@ -121,7 +121,7 @@ pub async fn shared_publish(
             let draft = request.draft;
             let audio = shared_pages::draft_audio(&paths, store.as_deref(), &draft)?;
             let record = shared_pages::publish(&paths, store.as_deref(), &draft, audio.as_deref())?;
-            shared_pages::discard_draft(&paths, &draft.meeting_id)?;
+            shared_pages::forget_published_draft(&paths, &draft.meeting_id);
             Ok(record)
         })
         .await?
