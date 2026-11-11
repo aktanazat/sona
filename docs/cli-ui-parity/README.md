@@ -407,16 +407,12 @@ Meetings. The core keeps its loop names (`work_loop*`, `planning_loop*`).
 | Count words per app | `change_count_words_per_app_setting` | — | — | UI-only by design: a privacy toggle that records which app dictation goes to |
 | Capture mode chip | `get_modes`, `set_active_mode` | `work settings` (modes), `work setting mode ID` | `sona_settings`, `sona_setting` | both |
 
-## Missing, ranked by how often an organizer agent would need it
+## Missing
 
-1. Link sources to projects and review link suggestions (`planning_link_source`, `planning_suggestions` and friends).
-2. Rename a meeting, folders, and asking about one meeting or one folder.
-3. Notes: delete, restore a version, unlink a source, subjects, synthesis.
-4. People: one-read person page, split, delete, meeting links, companies.
-5. Words read as fields on create.
-6. Watch hit to task, record a nudge, book time on the calendar.
-7. Confirming a voice suggestion across meetings, and transcript corrections.
-8. Settings writes (modes, models, vocabulary, prompts, workflows) and chat turns.
+None. Checked 2026-11-11: every `work` verb this table names is in
+`sona work --help`, and every MCP tool it names is in `TOOLS` in
+`tools/sona-mcp/src/tools.ts`. The `missing` rows in the inventories beside
+this file are their state when they were written; this table is current.
 
 MCP gaps where the CLI already has the verb: `work snooze` (reachable as
 `sona_work_update` `snooze_until`), `work project-update-draft` (draft
@@ -428,12 +424,12 @@ opt-in only.
 
 | status | rows |
 |---|---|
-| both | 166 |
-| CLI only | 30 |
+| both | 218 |
+| CLI only | 20 |
 | missing | 0 |
 | UI-only by design | 28 |
 | window-bound | 34 |
-| total | 258 |
+| total | 300 |
 
 Rows are grouped: one row can cover several buttons that call the same
 method. The inventories beside this file list every button.
