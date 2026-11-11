@@ -178,6 +178,37 @@ conversations can't be opened, every answer leaves out all work from meetings
 and says `conversations_available:false`; choosing a person as owner then
 refuses with `unavailable`.
 
+Organizing the day, hand-offs and meetings:
+
+```bash
+sona work delegate S-12 --to "Codex"           # shows Codex on it; prints the prompt to paste
+sona work delegate S-12 --take-back
+sona work day                                  # today's focus, up to three
+sona work focus S-12 S-7 S-3 [--day tomorrow]  # replaces the day's picks; --clear empties it
+sona work list --stale                         # open work untouched for 30 days
+sona work keep S-4                             # still stands: leaves the stale list
+sona work list --status triage --source meeting,dictation
+sona work snooze S-12 --until later-today      # the next hour three hours from now
+sona work brief "Dana Reyes"                   # owed both ways, talking points, last time
+sona work talking-point "Dana Reyes" "ask about the pricing page"
+sona work talking-point-done <POINT_ID> [--undo]
+sona work loop-reopen <LOOP_ID>                # a resolved or dropped meeting loop
+sona work loop-owner <LOOP_ID> --owner Dana    # or --owner none
+sona work action-track <LOOP_ID> --project "Q1 launch"   # a meeting action with no task
+sona work action-dismiss <LOOP_ID>             # not work; action-restore asks again
+sona work attachment-rename S-12 <ATTACHMENT_ID> --title "Signed contract"
+sona work create "Reply to Lee" --source-url https://mail.example/thread/9
+sona work note-new "Pricing: keep the free tier"
+sona work note-edit <NOTE_ID> --body "…"       # the old body stays as a version
+sona work note-pin <NOTE_ID> [--unpin]
+sona work note-link <NOTE_ID> --meeting <MEETING_ID>   # or --person ID, --note ID
+```
+
+Each takes `--dry-run`, `--operation-id` and `--agent`, and each refuses
+unless Agents' changes is on Apply: nothing here is proposed for later. A
+change already made answers `replayed:true`. Loop changes are filed in the
+meeting's history as the user's. Note writes touch notes only.
+
 ## Before talking to someone
 
 Look up the person first. Names and aliases find candidate profiles; they do not
@@ -484,10 +515,29 @@ claude mcp add sona -- bun /absolute/path/to/sona/tools/sona-mcp/src/index.ts
 | `sona_person_merge`               | `person`, `into` — writes                                    |
 | `sona_meeting_list`               | `since?`, `limit?`                                           |
 | `sona_meeting_get`                | `meeting_id`, `transcript?`                                  |
+| `sona_work_delegate`              | `task`, `to` (an agent, or `none`), `dry_run?` — writes      |
+| `sona_work_day`                   | `day?`                                                       |
+| `sona_work_day_plan`              | `tasks` (up to three, or `none`), `day?`, `dry_run?` — writes |
+| `sona_work_keep`                  | `tasks`, `dry_run?` — writes                                 |
+| `sona_work_brief`                 | `person`                                                     |
+| `sona_work_talking_point_add`     | `person`, `text`, `dry_run?` — writes                        |
+| `sona_work_talking_point_done`    | `id`, `undo?`, `dry_run?` — writes                           |
+| `sona_meeting_loop_reopen`        | `loop_id`, `dry_run?` — writes                               |
+| `sona_meeting_loop_assign`        | `loop_id`, `owner`, `dry_run?` — writes                      |
+| `sona_planning_track_action`      | `loop_id`, `project`, `dry_run?` — writes                    |
+| `sona_planning_dismiss_action`    | `loop_id`, `dry_run?` — writes                               |
+| `sona_planning_restore_action`    | `loop_id`, `dry_run?` — writes                               |
+| `sona_scratchpad_create`          | `body`, `dry_run?` — writes                                  |
+| `sona_scratchpad_update_body`     | `note_id`, `body`, `dry_run?` — writes                       |
+| `sona_scratchpad_set_pinned`      | `note_id`, `pinned`, `dry_run?` — writes                     |
+| `sona_scratchpad_link`            | `note_id`, `kind` (meeting, person, note), `source_id`, `dry_run?` — writes |
+| `sona_work_attachment_rename`     | `task`, `id`, `title`, `dry_run?` — writes                   |
+| `sona_work_capture`               | `title`, `url`, `url_title?`, task fields, `dry_run?` — writes |
 
-Archiving, links, cycles, labels, views, watches, comment deletes, attachment
+The tools in the last eighteen rows above are opt-in, and so are archiving,
+links, cycles, labels, views, watches, comment deletes, attachment
 removal, project archiving, the project bin, update deletes, milestone deletes
-and person merges are opt-in tools: set `SONA_MCP_TOOLS=all`, or name the ones
+and person merges: set `SONA_MCP_TOOLS=all`, or name the ones
 to add, when registering the server. In project, milestone, person and cycle
 saves a `null` field clears it. Project, update, milestone, cycle and person
 writes are refused unless Agents' changes is on Apply; project saves, the bin,

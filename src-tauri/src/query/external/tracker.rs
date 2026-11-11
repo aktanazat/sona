@@ -28,7 +28,7 @@ use crate::meeting::types::MeetingSessionId;
 use crate::planning;
 use crate::planning::work::agents::{self, AgentChange};
 use crate::planning::work::ask::WorkAnswerLine;
-use crate::planning::work::capture::{WorkCaptureSource, WorkTakenLine};
+use crate::planning::work::capture::{self, WorkCaptureSource, WorkTakenLine};
 use crate::planning::work::command::WorkCommandChange;
 use crate::planning::work::filter::WorkCondition;
 use crate::planning::work::types::{
@@ -44,7 +44,7 @@ use crate::planning::work::watch::WorkWatch;
 use crate::planning::work::{self, items, parse};
 use crate::query::{loop_link, KeptLocal, QueryAudience, QUERY_SCHEMA_VERSION};
 use crate::settings::WorkAutonomy;
-use chrono::{Local, NaiveDate};
+use chrono::{Local, NaiveDate, TimeDelta, Timelike};
 use clap::{Args, Subcommand, ValueEnum};
 use rusqlite::Connection;
 use serde::Serialize;
@@ -58,6 +58,9 @@ use uuid::Uuid;
 /// Names derived operation ids, so the same request always derives the same
 /// id and no other request in Sona can.
 const OPERATION_NAMESPACE: Uuid = Uuid::from_u128(0x5f0e_2c71_a8d4_4b39_9e06_d13a_7c52_e8b4);
+
+/// Open work untouched this long is stale, as the morning plan counts it.
+const STALE_AFTER_MS: i64 = 30 * 24 * 3_600_000;
 
 /// The properties the app's own new views show.
 const VIEW_PROPERTIES: [&str; 6] = ["id", "priority", "labels", "project", "owner", "due"];
@@ -216,6 +219,41 @@ pub enum WorkVerb {
     CycleRollover(roadmap::CycleRolloverArgs),
     /// Start the next cycle today; the one under way ends and its unfinished work moves in.
     CycleStartToday(roadmap::CycleStartTodayArgs),
+    /// Hand a task to a named agent, or take it back with --take-back.
+    Delegate(organize::DelegateArgs),
+    /// A day's focus: up to three tasks, in order.
+    Day(organize::DayArgs),
+    /// Pick a day's focus: up to three tasks, in order, replacing the old ones.
+    Focus(organize::FocusArgs),
+    /// Keep month-old tasks as they are: they leave the stale list.
+    Keep(TasksArgs),
+    /// One screen before talking to someone: what you owe them, what they
+    /// owe you, talking points, and what was decided last time.
+    Brief(organize::BriefArgs),
+    /// Add something to raise the next time you talk to someone.
+    TalkingPoint(organize::TalkingPointArgs),
+    /// Mark a talking point done, or not done with --undo.
+    TalkingPointDone(organize::TalkingPointDoneArgs),
+    /// Reopen a meeting loop that was resolved or set aside.
+    LoopReopen(organize::LoopArgs),
+    /// Set who owns a meeting loop, or none.
+    LoopOwner(organize::LoopOwnerArgs),
+    /// Track an action a meeting left with no task as a task in a project.
+    ActionTrack(organize::ActionTrackArgs),
+    /// Set an untracked meeting action aside as not work.
+    ActionDismiss(organize::LoopArgs),
+    /// Ask about an action set aside as not work again.
+    ActionRestore(organize::LoopArgs),
+    /// Make a note.
+    NoteNew(notes::NoteNewArgs),
+    /// Replace a note's body. The old body stays as a version.
+    NoteEdit(notes::NoteEditArgs),
+    /// Pin a note, or unpin it with --unpin.
+    NotePin(notes::NotePinArgs),
+    /// Link a meeting, a person or another note to a note.
+    NoteLink(notes::NoteLinkArgs),
+    /// Rename a task's attachment.
+    AttachmentRename(organize::AttachmentRenameArgs),
 }
 
 #[derive(Args, Clone, Debug, Eq, PartialEq)]
@@ -235,6 +273,31 @@ pub struct ListArgs {
     /// Rows to print, at most 100.
     #[arg(long, value_parser = limit)]
     pub limit: Option<usize>,
+    /// Only tasks that came from these: meeting, dictation, agent, person.
+    #[arg(long, value_enum, value_delimiter = ',', value_name = "SOURCE")]
+    pub source: Vec<SourceArg>,
+    /// Only open work nobody has touched for 30 days.
+    #[arg(long)]
+    pub stale: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum SourceArg {
+    Meeting,
+    Dictation,
+    Agent,
+    Person,
+}
+
+impl SourceArg {
+    const fn source(self) -> WorkSource {
+        match self {
+            Self::Meeting => WorkSource::Meeting,
+            Self::Dictation => WorkSource::Dictation,
+            Self::Agent => WorkSource::Agent,
+            Self::Person => WorkSource::Person,
+        }
+    }
 }
 
 #[derive(Args, Clone, Debug, Eq, PartialEq)]
@@ -267,6 +330,15 @@ pub struct CreateArgs {
     pub fields: Fields,
     #[command(flatten)]
     pub write: WriteArgs,
+    /// The page or file the task came from: an http, https or file address.
+    #[arg(long, value_name = "URL")]
+    pub source_url: Option<String>,
+    /// What that page or file is called.
+    #[arg(long, requires = "source_url", value_name = "TITLE")]
+    pub source_title: Option<String>,
+    /// Print what would be created and write nothing.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Args, Clone, Debug, Eq, PartialEq)]
@@ -294,8 +366,8 @@ pub struct UpdateArgs {
         conflicts_with = "labels"
     )]
     pub remove_label: Vec<String>,
-    /// Hide the task until this day: YYYY-MM-DD, today, tomorrow, or none.
-    #[arg(long, value_parser = day_or_none, value_name = "DAY")]
+    /// Hide the task until this day: YYYY-MM-DD, today, tomorrow, later-today, or none.
+    #[arg(long, value_parser = snooze_day, value_name = "DAY")]
     pub snooze_until: Option<DayArg>,
     /// Plan the task in a cycle: current, next, its number, or none.
     #[arg(long, value_parser = cycle_ref, value_name = "CYCLE")]
@@ -370,8 +442,9 @@ pub struct SnoozeArgs {
     /// S-12, 12, or task ids.
     #[arg(required = true, value_parser = task_ref, value_name = "TASK")]
     pub tasks: Vec<TaskRef>,
-    /// The day it comes back: YYYY-MM-DD, today, tomorrow, or none to wake it.
-    #[arg(long, value_parser = day_or_none, value_name = "DAY")]
+    /// When it comes back: YYYY-MM-DD, today, tomorrow, later-today (the
+    /// next hour three hours from now), or none to wake it.
+    #[arg(long, value_parser = snooze_day, value_name = "DAY")]
     pub until: DayArg,
     /// Print what would change and write nothing.
     #[arg(long)]
@@ -664,6 +737,7 @@ impl fmt::Display for TaskRef {
 pub enum DayArg {
     Clear,
     On(NaiveDate),
+    At(i64),
 }
 
 impl DayArg {
@@ -671,6 +745,7 @@ impl DayArg {
         match self {
             Self::Clear => Ok(None),
             Self::On(day) => midnight(day).map(Some),
+            Self::At(ms) => Ok(Some(ms)),
         }
     }
 }
@@ -911,6 +986,28 @@ fn day_or_none(value: &str) -> Result<DayArg, String> {
     }
 }
 
+fn snooze_day(value: &str) -> Result<DayArg, String> {
+    if !value.trim().eq_ignore_ascii_case("later-today") {
+        return day_or_none(value);
+    }
+    let now = Local::now();
+    let later = now + TimeDelta::hours(3);
+    let hour = later
+        .with_minute(0)
+        .and_then(|time| time.with_second(0))
+        .and_then(|time| time.with_nanosecond(0))
+        .ok_or_else(|| "later today has no clock time".to_owned())?;
+    let hour = if hour < later {
+        hour + TimeDelta::hours(1)
+    } else {
+        hour
+    };
+    if hour.date_naive() != now.date_naive() {
+        return Err("later today runs past midnight; snooze until tomorrow".to_owned());
+    }
+    Ok(DayArg::At(hour.timestamp_millis()))
+}
+
 fn repeat(value: &str) -> Result<RepeatArg, String> {
     if value.trim().eq_ignore_ascii_case("none") {
         return Ok(RepeatArg::Clear);
@@ -1029,7 +1126,25 @@ impl WorkVerb {
             | Self::CycleSettings(roadmap::CycleSettingsArgs { dry_run: true, .. })
             | Self::CycleSave(roadmap::CycleSaveArgs { dry_run: true, .. })
             | Self::CycleRollover(roadmap::CycleRolloverArgs { dry_run: true, .. })
-            | Self::CycleStartToday(roadmap::CycleStartTodayArgs { dry_run: true, .. }) => {
+            | Self::CycleStartToday(roadmap::CycleStartTodayArgs { dry_run: true, .. })
+            | Self::Create(CreateArgs { dry_run: true, .. })
+            | Self::Day(_)
+            | Self::Brief(_)
+            | Self::Delegate(organize::DelegateArgs { dry_run: true, .. })
+            | Self::Focus(organize::FocusArgs { dry_run: true, .. })
+            | Self::Keep(TasksArgs { dry_run: true, .. })
+            | Self::TalkingPoint(organize::TalkingPointArgs { dry_run: true, .. })
+            | Self::TalkingPointDone(organize::TalkingPointDoneArgs { dry_run: true, .. })
+            | Self::LoopReopen(organize::LoopArgs { dry_run: true, .. })
+            | Self::LoopOwner(organize::LoopOwnerArgs { dry_run: true, .. })
+            | Self::ActionTrack(organize::ActionTrackArgs { dry_run: true, .. })
+            | Self::ActionDismiss(organize::LoopArgs { dry_run: true, .. })
+            | Self::ActionRestore(organize::LoopArgs { dry_run: true, .. })
+            | Self::NoteNew(notes::NoteNewArgs { dry_run: true, .. })
+            | Self::NoteEdit(notes::NoteEditArgs { dry_run: true, .. })
+            | Self::NotePin(notes::NotePinArgs { dry_run: true, .. })
+            | Self::NoteLink(notes::NoteLinkArgs { dry_run: true, .. })
+            | Self::AttachmentRename(organize::AttachmentRenameArgs { dry_run: true, .. }) => {
                 READ_SCOPES
             }
             Self::Ask(AskArgs { take, .. }) if take.is_empty() => READ_SCOPES,
@@ -1075,7 +1190,22 @@ impl WorkVerb {
             | Self::CycleSave(_)
             | Self::CycleRollover(_)
             | Self::CycleStartToday(_)
-            | Self::Detach(_) => WRITE_SCOPES,
+            | Self::Detach(_)
+            | Self::Delegate(_)
+            | Self::Focus(_)
+            | Self::Keep(_)
+            | Self::TalkingPoint(_)
+            | Self::TalkingPointDone(_)
+            | Self::LoopReopen(_)
+            | Self::LoopOwner(_)
+            | Self::ActionTrack(_)
+            | Self::ActionDismiss(_)
+            | Self::ActionRestore(_)
+            | Self::NoteNew(_)
+            | Self::NoteEdit(_)
+            | Self::NotePin(_)
+            | Self::NoteLink(_)
+            | Self::AttachmentRename(_) => WRITE_SCOPES,
         }
     }
 
@@ -1084,6 +1214,23 @@ impl WorkVerb {
     pub(super) fn check(&self) -> Result<(), ExternalError> {
         let refusal = match self {
             Self::Create(args) if args.title.trim().is_empty() => "A task needs a title.",
+            Self::Create(args)
+                if args
+                    .source_url
+                    .as_deref()
+                    .is_some_and(|url| agents::evidence_link(url.trim()).is_none()) =>
+            {
+                "--source-url must be an http, https or file address."
+            }
+            Self::NoteNew(args) if args.body.join(" ").trim().is_empty() => {
+                "A note needs some text."
+            }
+            Self::AttachmentRename(args) if args.title.trim().is_empty() => {
+                "--title cannot be empty."
+            }
+            Self::TalkingPoint(args) if args.text.join(" ").trim().is_empty() => {
+                "A talking point needs some text."
+            }
             Self::Update(args)
                 if args
                     .title
@@ -1246,6 +1393,10 @@ pub enum WorkAnswer {
     ProjectDraft(roadmap::ExternalWorkProjectDraft),
     MilestoneOrder(roadmap::ExternalWorkMilestoneOrder),
     CycleChange(Box<roadmap::ExternalWorkCycleChange>),
+    Organize(Box<organize::ExternalOrganizeChange>),
+    Day(organize::ExternalWorkDay),
+    Brief(Box<organize::ExternalWorkBrief>),
+    Note(Box<notes::ExternalNoteChange>),
 }
 
 /// What `ask` found: the lines that answer, numbered for --take.
@@ -1879,6 +2030,23 @@ pub(super) async fn answer(
         WorkVerb::CycleSave(args) => tracker.cycle_save(args),
         WorkVerb::CycleRollover(args) => tracker.cycle_rollover(args),
         WorkVerb::CycleStartToday(args) => tracker.cycle_start_today(args),
+        WorkVerb::Delegate(args) => tracker.delegate(args).await,
+        WorkVerb::Day(args) => tracker.day(args).await,
+        WorkVerb::Focus(args) => tracker.focus(args).await,
+        WorkVerb::Keep(args) => tracker.keep(args).await,
+        WorkVerb::Brief(args) => tracker.brief(args).await,
+        WorkVerb::TalkingPoint(args) => tracker.talking_point(args).await,
+        WorkVerb::TalkingPointDone(args) => tracker.talking_point_done(args),
+        WorkVerb::LoopReopen(args) => tracker.loop_reopen(args).await,
+        WorkVerb::LoopOwner(args) => tracker.loop_owner(args).await,
+        WorkVerb::ActionTrack(args) => tracker.action_track(args).await,
+        WorkVerb::ActionDismiss(args) => tracker.action_set_aside(args, true).await,
+        WorkVerb::ActionRestore(args) => tracker.action_set_aside(args, false).await,
+        WorkVerb::NoteNew(args) => tracker.note_new(args),
+        WorkVerb::NoteEdit(args) => tracker.note_edit(args),
+        WorkVerb::NotePin(args) => tracker.note_pin(args),
+        WorkVerb::NoteLink(args) => tracker.note_link(args).await,
+        WorkVerb::AttachmentRename(args) => tracker.attachment_rename(args).await,
     }
 }
 
@@ -2155,7 +2323,18 @@ impl Tracker<'_> {
             },
         };
         let query = args.filters.narrow(&board, base)?;
-        let rows = self.listed(&board.fence, query).await?.items;
+        let mut rows = self.listed(&board.fence, query).await?.items;
+        if !args.source.is_empty() {
+            rows.retain(|row| {
+                args.source
+                    .iter()
+                    .any(|source| source.source() == row.source)
+            });
+        }
+        if args.stale {
+            let cutoff = now_ms() - STALE_AFTER_MS;
+            rows.retain(|row| row.item.status.is_open() && row.item.updated_at_ms < cutoff);
+        }
         Ok(WorkAnswer::Page(page(rows, args.limit, &board)))
     }
 
@@ -2251,11 +2430,51 @@ impl Tracker<'_> {
             recurrence: fields.repeat.as_ref().and_then(RepeatArg::every),
         };
         let today = Local::now().date_naive().format("%Y-%m-%d").to_string();
-        let operation_id = args.write.operation_id("create", &(&input, today))?;
+        let source = args
+            .source_url
+            .as_deref()
+            .map(|url| WorkCaptureSource::Link {
+                url: url.trim().to_owned(),
+                title: args.source_title.clone(),
+            });
+        let operation_id = args
+            .write
+            .operation_id("create", &(&input, today, &source))?;
+        if args.dry_run {
+            return Ok(WorkAnswer::Preview(ExternalWorkPreview {
+                schema_version: QUERY_SCHEMA_VERSION,
+                dry_run: true,
+                action: WorkAction::Created,
+                operation_id: Some(operation_id),
+                changes: vec![ExternalWorkPlanned {
+                    id: String::new(),
+                    handle: String::new(),
+                    title: input.title,
+                    fields: args
+                        .source_url
+                        .iter()
+                        .map(|url| ExternalFieldChange {
+                            field: "source",
+                            from: String::new(),
+                            to: url.trim().to_owned(),
+                        })
+                        .collect(),
+                    commitment: None,
+                    skipped: None,
+                }],
+            }));
+        }
         let started_ms = now_ms();
         let item = agents::create_as(self.app, &args.write.agent(), &operation_id, &input)
             .await
             .map_err(|message| self.write_refusal(message, &operation_id, "The new task"))?;
+        if let Some(source) = source {
+            crate::planning::history(&self.app.state::<Arc<HistoryManager>>(), |conn| {
+                capture::attach(conn, &item.id, &source, started_ms)
+            })
+            .map_err(|message| self.write_refusal(message, &operation_id, "The new task"))?;
+            self.credit(&args.write, std::slice::from_ref(&item.id), started_ms)?;
+        }
         let replayed = item.created_at_ms < started_ms;
         Ok(WorkAnswer::Change(ExternalWorkChange {
             schema_version: QUERY_SCHEMA_VERSION,
@@ -4819,6 +5038,8 @@ impl WorkAnswer {
             | Self::CycleChange(_) => roadmap::text(self, &mut text),
             Self::Comments(_) | Self::Comment(_) => threads::text(self, &mut text),
             Self::Attachments(_) | Self::Attachment(_) => attachments::text(self, &mut text),
+            Self::Organize(_) | Self::Day(_) | Self::Brief(_) => organize::text(self, &mut text),
+            Self::Note(_) => notes::text(self, &mut text),
             Self::Label(change) => {
                 let verb = match (change.deleted, &change.operation_id) {
                     (true, _) => "Deleted",
@@ -4976,7 +5197,11 @@ impl WorkAnswer {
             | Self::Comments(_)
             | Self::Comment(_)
             | Self::Attachments(_)
-            | Self::Attachment(_) => true,
+            | Self::Attachment(_)
+            | Self::Organize(_)
+            | Self::Day(_)
+            | Self::Brief(_)
+            | Self::Note(_) => true,
         }
     }
 }
@@ -5435,6 +5660,8 @@ fn filters_text(filters: &ExternalWorkFilters) -> String {
 
 mod attachments;
 mod catalog;
+mod notes;
+mod organize;
 mod roadmap;
 mod threads;
 

@@ -507,6 +507,58 @@ function linking(verb: "relate" | "unrelate", title: string, what: string): Tool
   };
 }
 
+const DAY = {
+  type: "string",
+  description: "A local day: YYYY-MM-DD, today or tomorrow. Today unless told.",
+} as const;
+
+const LOOP_ID = {
+  type: "string",
+  description:
+    "The loop's own address, as it appears in a sona://loop/<id> link or in the id field of a sona_action_items row.",
+} as const;
+
+const NOTE_ID = {
+  type: "string",
+  description: "A note's id, as sona_search with scope notes returns it.",
+} as const;
+
+const ORGANIZE_WRITES =
+  "This changes the user's Sona tasks. It needs Settings > Agents > External access and External mutations, and Agents' changes set to Apply: with access or mutations off Sona refuses with consent_required, and while agents' changes wait for the user it refuses with invalid_request naming the setting. Nothing is proposed for later. dry_run:true shows the result without writing. Repeating an operation_id answers replayed:true.";
+
+const LOOP_WRITES = `${ORGANIZE_WRITES} The meeting's history names the user as the one who changed the loop.`;
+
+const NOTE_WRITES =
+  "This changes the user's Sona notes, nothing else. It needs Settings > Agents > External access and External mutations, and Agents' changes set to Apply: with access or mutations off Sona refuses with consent_required, and while agents' changes wait for the user it refuses with invalid_request naming the setting. dry_run:true shows the result without writing.";
+
+const NOTE_OPERATION =
+  "A UUID naming this change so a retry cannot apply it twice: the same id with the same request answers the first note with replayed:true. Left out, each call is new.";
+
+function actionAside(verb: "dismiss" | "restore", title: string, what: string): ToolDefinition {
+  return {
+    name: `sona_planning_${verb}_action`,
+    title,
+    description: `${what} ${ORGANIZE_WRITES}`,
+    mutates: "changes",
+    optIn: true,
+    inputSchema: {
+      type: "object",
+      properties: { loop_id: LOOP_ID, dry_run: DRY_RUN, operation_id: OPERATION_ID },
+      required: ["loop_id"],
+      additionalProperties: false,
+    },
+    argv: (input, agent) => [
+      "work",
+      `action-${verb}`,
+      ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+      ...writing(input, agent),
+      "--json",
+      "--",
+      text(input, "loop_id", true),
+    ],
+  };
+}
+
 export const TOOLS: readonly ToolDefinition[] = [
   {
     name: "sona_search",
@@ -1039,6 +1091,15 @@ export const TOOLS: readonly ToolDefinition[] = [
         },
         archived: { type: "boolean", description: "Include archived work." },
         snoozed: { type: "boolean", description: "Include snoozed work." },
+        source: {
+          type: "string",
+          description:
+            "Only work that came from these, comma-separated: meeting, dictation, agent, person. Not with ready.",
+        },
+        stale: {
+          type: "boolean",
+          description: "Only open work nobody has touched for 30 days. Not with ready.",
+        },
         filter: FILTER,
         limit: LIMIT,
       },
@@ -1052,6 +1113,8 @@ export const TOOLS: readonly ToolDefinition[] = [
       ...assigned("--view", text(input, "view")),
       ...(flag(input, "archived") ? ["--archived"] : []),
       ...(flag(input, "snoozed") ? ["--snoozed"] : []),
+      ...(flag(input, "ready") ? [] : assigned("--source", text(input, "source"))),
+      ...(flag(input, "ready") || !flag(input, "stale") ? [] : ["--stale"]),
       ...conditions(input),
       ...assigned("--limit", count(input, "limit")),
       "--json",
@@ -1159,7 +1222,7 @@ export const TOOLS: readonly ToolDefinition[] = [
         snooze_until: {
           type: "string",
           description:
-            "Hide the task until this local day: YYYY-MM-DD, today, tomorrow, or none to wake it.",
+            "Hide the task until this local day: YYYY-MM-DD, today, tomorrow, later-today (the next hour three hours from now, refused once that is past midnight), or none to wake it.",
         },
         cycle: {
           type: "string",
@@ -2545,6 +2608,444 @@ export const TOOLS: readonly ToolDefinition[] = [
       "--json",
       "--",
       text(input, "meeting_id", true),
+    ],
+  },
+  {
+    name: "sona_work_delegate",
+    title: "Hand a Sona task to an agent",
+    description: `Hand one task to a named agent so the app shows who is working it, or take it back with to:"none". The answer carries the prompt to paste into that agent. Handing it to the agent already on it changes nothing and answers replayed:true. ${ORGANIZE_WRITES}`,
+    mutates: "changes",
+    optIn: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        task: TASK,
+        to: {
+          type: "string",
+          description: 'The agent, as Sona shows it: "Claude Code", "Codex"; none takes the task back.',
+        },
+        dry_run: DRY_RUN,
+        operation_id: OPERATION_ID,
+      },
+      required: ["task", "to"],
+      additionalProperties: false,
+    },
+    argv: (input, agent) => {
+      const to = text(input, "to", true);
+      return [
+        "work",
+        "delegate",
+        to.trim().toLowerCase() === "none" ? "--take-back" : `--to=${to}`,
+        ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+        ...writing(input, agent),
+        "--json",
+        "--",
+        text(input, "task", true),
+      ];
+    },
+  },
+  {
+    name: "sona_work_day",
+    title: "Read a day's focus in Sona",
+    description:
+      "Read the up to three tasks picked as a day's focus, in order, and when they were picked.",
+    optIn: true,
+    inputSchema: {
+      type: "object",
+      properties: { day: DAY },
+      additionalProperties: false,
+    },
+    argv: (input) => ["work", "day", "--json", "--", text(input, "day") ?? "today"],
+  },
+  {
+    name: "sona_work_day_plan",
+    title: "Pick a day's focus in Sona",
+    description: `Pick up to three tasks as a day's focus, in order. They replace the day's earlier picks; tasks:"none" empties it. Picking what is already picked answers replayed:true. ${ORGANIZE_WRITES}`,
+    mutates: "changes",
+    optIn: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        tasks: { ...TASKS, description: `${TASKS.description} At most three, in order; none empties the day.` },
+        day: DAY,
+        dry_run: DRY_RUN,
+        operation_id: OPERATION_ID,
+      },
+      required: ["tasks"],
+      additionalProperties: false,
+    },
+    argv: (input, agent) => {
+      const picked = tasks(input, "tasks");
+      const clear = picked.length === 1 && picked[0]?.toLowerCase() === "none";
+      return [
+        "work",
+        "focus",
+        ...assigned("--day", text(input, "day")),
+        ...(clear ? ["--clear"] : []),
+        ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+        ...writing(input, agent),
+        "--json",
+        ...(clear ? [] : ["--", ...picked]),
+      ];
+    },
+  },
+  {
+    name: "sona_work_keep",
+    title: "Keep stale Sona tasks as they are",
+    description: `Keep open tasks nobody has touched for 30 days as they are: they leave the stale list (sona_work_list with stale:true) without another change. ${ORGANIZE_WRITES}`,
+    mutates: "changes",
+    optIn: true,
+    inputSchema: {
+      type: "object",
+      properties: { tasks: TASKS, dry_run: DRY_RUN, operation_id: OPERATION_ID },
+      required: ["tasks"],
+      additionalProperties: false,
+    },
+    argv: (input, agent) => [
+      "work",
+      "keep",
+      ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+      ...writing(input, agent),
+      "--json",
+      "--",
+      ...tasks(input, "tasks"),
+    ],
+  },
+  {
+    name: "sona_work_brief",
+    title: "Brief before talking to someone",
+    description:
+      "One screen before talking to a person: the open work the user owes them and they owe the user (task handles), the talking points saved for them with their ids, and what was decided the last time they met.",
+    optIn: true,
+    inputSchema: {
+      type: "object",
+      properties: { person: PERSON },
+      required: ["person"],
+      additionalProperties: false,
+    },
+    argv: (input) => ["work", "brief", "--json", "--", text(input, "person", true)],
+  },
+  {
+    name: "sona_work_talking_point_add",
+    title: "Add a Sona talking point",
+    description: `Save something to raise the next time the user talks to a person; it shows in their brief. The same text for the same person on the same day lands once. ${ORGANIZE_WRITES}`,
+    mutates: "changes",
+    optIn: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        person: PERSON,
+        text: { type: "string", description: "What to raise, up to 500 characters." },
+        dry_run: DRY_RUN,
+        operation_id: OPERATION_ID,
+      },
+      required: ["person", "text"],
+      additionalProperties: false,
+    },
+    argv: (input, agent) => [
+      "work",
+      "talking-point",
+      ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+      ...writing(input, agent),
+      "--json",
+      "--",
+      text(input, "person", true),
+      text(input, "text", true),
+    ],
+  },
+  {
+    name: "sona_work_talking_point_done",
+    title: "Mark a Sona talking point done",
+    description: `Mark a talking point done, or not done with undo:true. A point already that way answers replayed:true. ${ORGANIZE_WRITES}`,
+    mutates: "changes",
+    optIn: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "The talking point's id, from sona_work_brief." },
+        undo: { type: "boolean", description: "Mark it not done again." },
+        dry_run: DRY_RUN,
+        operation_id: OPERATION_ID,
+      },
+      required: ["id"],
+      additionalProperties: false,
+    },
+    argv: (input, agent) => [
+      "work",
+      "talking-point-done",
+      ...(flag(input, "undo") ? ["--undo"] : []),
+      ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+      ...writing(input, agent),
+      "--json",
+      "--",
+      text(input, "id", true),
+    ],
+  },
+  {
+    name: "sona_meeting_loop_reopen",
+    title: "Reopen a Sona meeting loop",
+    description: `Reopen a meeting loop that was resolved or set aside; a task tracking it reopens with it. A loop already open answers replayed:true. ${LOOP_WRITES}`,
+    mutates: "changes",
+    optIn: true,
+    inputSchema: {
+      type: "object",
+      properties: { loop_id: LOOP_ID, dry_run: DRY_RUN, operation_id: OPERATION_ID },
+      required: ["loop_id"],
+      additionalProperties: false,
+    },
+    argv: (input, agent) => [
+      "work",
+      "loop-reopen",
+      ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+      ...writing(input, agent),
+      "--json",
+      "--",
+      text(input, "loop_id", true),
+    ],
+  },
+  {
+    name: "sona_meeting_loop_assign",
+    title: "Set a Sona meeting loop's owner",
+    description: `Set who owns a meeting loop, or owner:"none" to clear it. The same owner again answers replayed:true. ${LOOP_WRITES}`,
+    mutates: "changes",
+    optIn: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        loop_id: LOOP_ID,
+        owner: { ...PERSON, description: `${PERSON.description} none clears the owner.` },
+        dry_run: DRY_RUN,
+        operation_id: OPERATION_ID,
+      },
+      required: ["loop_id", "owner"],
+      additionalProperties: false,
+    },
+    argv: (input, agent) => [
+      "work",
+      "loop-owner",
+      `--owner=${text(input, "owner", true)}`,
+      ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+      ...writing(input, agent),
+      "--json",
+      "--",
+      text(input, "loop_id", true),
+    ],
+  },
+  {
+    name: "sona_planning_track_action",
+    title: "Track a meeting action as a Sona task",
+    description: `Make a task in a project from an action a meeting left with no task; the answer lists the task. ${ORGANIZE_WRITES}`,
+    mutates: "changes",
+    optIn: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        loop_id: LOOP_ID,
+        project: PROJECT,
+        dry_run: DRY_RUN,
+        operation_id: OPERATION_ID,
+      },
+      required: ["loop_id", "project"],
+      additionalProperties: false,
+    },
+    argv: (input, agent) => [
+      "work",
+      "action-track",
+      `--project=${text(input, "project", true)}`,
+      ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+      ...writing(input, agent),
+      "--json",
+      "--",
+      text(input, "loop_id", true),
+    ],
+  },
+  actionAside("dismiss", "Set a meeting action aside", "Set an action a meeting left with no task aside as not work, so planning stops asking about it."),
+  actionAside("restore", "Ask about a meeting action again", "Bring back an action set aside as not work, so planning asks about it again."),
+  {
+    name: "sona_scratchpad_create",
+    title: "Make a Sona note",
+    description: `Make a note; its first words become its title. ${NOTE_WRITES}`,
+    mutates: "changes",
+    optIn: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        body: { type: "string", description: "The note's text." },
+        dry_run: DRY_RUN,
+        operation_id: { ...OPERATION_ID, description: NOTE_OPERATION },
+      },
+      required: ["body"],
+      additionalProperties: false,
+    },
+    argv: (input, agent) => [
+      "work",
+      "note-new",
+      ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+      ...writing(input, agent),
+      "--json",
+      "--",
+      text(input, "body", true),
+    ],
+  },
+  {
+    name: "sona_scratchpad_update_body",
+    title: "Change a Sona note",
+    description: `Replace a note's whole body; the old body stays as a version the user can put back. The same body again answers replayed:true. ${NOTE_WRITES}`,
+    mutates: "changes",
+    optIn: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        note_id: NOTE_ID,
+        body: { type: "string", description: "The whole new body." },
+        dry_run: DRY_RUN,
+        operation_id: { ...OPERATION_ID, description: NOTE_OPERATION },
+      },
+      required: ["note_id", "body"],
+      additionalProperties: false,
+    },
+    argv: (input, agent) => [
+      "work",
+      "note-edit",
+      `--body=${text(input, "body") ?? ""}`,
+      ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+      ...writing(input, agent),
+      "--json",
+      "--",
+      text(input, "note_id", true),
+    ],
+  },
+  {
+    name: "sona_scratchpad_set_pinned",
+    title: "Pin a Sona note",
+    description: `Pin a note, or unpin it with pinned:false. A note already that way answers replayed:true. ${NOTE_WRITES}`,
+    mutates: "changes",
+    optIn: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        note_id: NOTE_ID,
+        pinned: { type: "boolean", description: "true pins, false unpins." },
+        dry_run: DRY_RUN,
+        operation_id: { ...OPERATION_ID, description: NOTE_OPERATION },
+      },
+      required: ["note_id", "pinned"],
+      additionalProperties: false,
+    },
+    argv: (input, agent) => [
+      "work",
+      "note-pin",
+      ...(flag(input, "pinned") ? [] : ["--unpin"]),
+      ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+      ...writing(input, agent),
+      "--json",
+      "--",
+      text(input, "note_id", true),
+    ],
+  },
+  {
+    name: "sona_scratchpad_link",
+    title: "Link to a Sona note",
+    description: `Link a meeting, a person or another note to a note, as the note's sources. A link already there answers replayed:true. ${NOTE_WRITES}`,
+    mutates: "changes",
+    optIn: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        note_id: NOTE_ID,
+        kind: {
+          type: "string",
+          enum: ["meeting", "person", "note"],
+          description: "What to link: a meeting, a person, or another note.",
+        },
+        source_id: {
+          type: "string",
+          description:
+            "Its id: a meeting's uuid from sona_meeting_list, a person's uuid from sona_person_list, or another note's id.",
+        },
+        dry_run: DRY_RUN,
+        operation_id: { ...OPERATION_ID, description: NOTE_OPERATION },
+      },
+      required: ["note_id", "kind", "source_id"],
+      additionalProperties: false,
+    },
+    argv: (input, agent) => {
+      const kind = text(input, "kind", true);
+      if (kind !== "meeting" && kind !== "person" && kind !== "note") {
+        throw new SonaInputError("kind must be meeting, person or note.");
+      }
+      return [
+        "work",
+        "note-link",
+        `--${kind}=${text(input, "source_id", true)}`,
+        ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+        ...writing(input, agent),
+        "--json",
+        "--",
+        text(input, "note_id", true),
+      ];
+    },
+  },
+  {
+    name: "sona_work_attachment_rename",
+    title: "Rename a Sona task's attachment",
+    description: `Rename a file or link attached to a task. The same title again answers replayed:true. ${COMMENT_WRITES}`,
+    mutates: "changes",
+    optIn: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        task: TASK,
+        id: ATTACHMENT,
+        title: { type: "string", description: "The new title." },
+        dry_run: DRY_RUN,
+        operation_id: OPERATION_ID,
+      },
+      required: ["task", "id", "title"],
+      additionalProperties: false,
+    },
+    argv: (input, agent) => [
+      "work",
+      "attachment-rename",
+      `--title=${text(input, "title", true)}`,
+      ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+      ...writing(input, agent),
+      "--json",
+      "--",
+      text(input, "task", true),
+      text(input, "id", true),
+    ],
+  },
+  {
+    name: "sona_work_capture",
+    title: "Capture a Sona task from a page",
+    description: `Create a task with the page or file it came from kept as its source, as the app's capture does. ${WRITES} Calling again with the same arguments on the same day returns the first task with replayed:true. dry_run:true shows the task without creating it.`,
+    mutates: "changes",
+    optIn: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        title: { type: "string", description: "The task's title." },
+        url: { type: "string", description: "The page or file: an http, https or file address." },
+        url_title: { type: "string", description: "What the page or file is called." },
+        ...FIELDS,
+        dry_run: DRY_RUN,
+        operation_id: OPERATION_ID,
+      },
+      required: ["title", "url"],
+      additionalProperties: false,
+    },
+    argv: (input, agent) => [
+      "work",
+      "create",
+      `--source-url=${text(input, "url", true)}`,
+      ...assigned("--source-title", text(input, "url_title")),
+      ...fieldFlags(input),
+      ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+      ...writing(input, agent),
+      "--json",
+      "--",
+      text(input, "title", true),
     ],
   },
 ];

@@ -263,6 +263,38 @@ claude mcp add sona --env SONA_MCP_TOOLS=sona_work_archive,sona_work_restore \
   -- bun /absolute/path/to/sona/tools/sona-mcp/src/index.ts
 ```
 
+## Organizing, meeting loop and note tools
+
+All opt-in. Each write takes `dry_run` and `operation_id`, needs both grants
+and **Agents' changes** on Apply (refused, never proposed), and answers
+`replayed:true` when the change was already made.
+
+| Tool                            | Arguments                                                  | Runs                                  |
+| ------------------------------- | ---------------------------------------------------------- | ------------------------------------- |
+| `sona_work_delegate`            | `task`, `to` (an agent, or `none` to take it back)          | `sona work delegate` — **writes**     |
+| `sona_work_day`                 | `day?`                                                     | `sona work day`                       |
+| `sona_work_day_plan`            | `tasks` (up to three, or `none`), `day?`                   | `sona work focus` — **writes**        |
+| `sona_work_keep`                | `tasks`                                                    | `sona work keep` — **writes**         |
+| `sona_work_brief`               | `person`                                                   | `sona work brief`                     |
+| `sona_work_talking_point_add`   | `person`, `text`                                           | `sona work talking-point` — **writes** |
+| `sona_work_talking_point_done`  | `id`, `undo?`                                              | `sona work talking-point-done` — **writes** |
+| `sona_meeting_loop_reopen`      | `loop_id`                                                  | `sona work loop-reopen` — **writes**  |
+| `sona_meeting_loop_assign`      | `loop_id`, `owner` (a person, or `none`)                   | `sona work loop-owner` — **writes**   |
+| `sona_planning_track_action`    | `loop_id`, `project`                                       | `sona work action-track` — **writes** |
+| `sona_planning_dismiss_action`  | `loop_id`                                                  | `sona work action-dismiss` — **writes** |
+| `sona_planning_restore_action`  | `loop_id`                                                  | `sona work action-restore` — **writes** |
+| `sona_scratchpad_create`        | `body`                                                     | `sona work note-new` — **writes**     |
+| `sona_scratchpad_update_body`   | `note_id`, `body`                                          | `sona work note-edit` — **writes**    |
+| `sona_scratchpad_set_pinned`    | `note_id`, `pinned`                                        | `sona work note-pin` — **writes**     |
+| `sona_scratchpad_link`          | `note_id`, `kind` (meeting, person, note), `source_id`     | `sona work note-link` — **writes**    |
+| `sona_work_attachment_rename`   | `task`, `id`, `title`                                      | `sona work attachment-rename` — **writes** |
+| `sona_work_capture`             | `title`, `url`, `url_title?`, task fields                  | `sona work create --source-url` — **writes** |
+
+`sona_work_list` also takes `source` (meeting, dictation, agent, person) and
+`stale` (open work untouched for 30 days), and `sona_work_update` takes
+`snooze_until: "later-today"`. Loop changes are filed in the meeting's history
+as the user's.
+
 ## Projects, people and meetings tools
 
 These run the same `sona work <verb> --json` catalog the Projects and People

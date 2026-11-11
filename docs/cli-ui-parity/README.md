@@ -42,7 +42,7 @@ The MCP column says whether an agent over MCP can do it; `—` means no tool.
 | Include archived tasks in a list | — | `work list --archived` | `sona_work_list` (`archived`) | CLI only |
 | New task: composer, group header +, quick entry | `work_create` | `work create TITLE --details --status --priority --owner --due --repeat --project --milestone --labels` | `sona_work_create` | both |
 | Typed words read as fields (owner, due, "every monday") with chips | `work_parse` | — | — | missing |
-| Quick entry keeps the page it was pressed over as the task's link | `work_capture` | — (closest: `work create`, then `work attach TASK URL`) | — | missing |
+| Quick entry keeps the page it was pressed over as the task's link | `work_capture` | `work create TITLE --source-url URL [--source-title T] [--dry-run]` | `sona_work_capture` *(opt-in)* | both |
 | Quick entry words read as a change | `work_command` | `work say "…" [--dry-run]` | `sona_work_say` | both |
 | Reschedule overdue (header button, ⇧D) | `work_bulk_update` | `work list --due overdue`, then `work update … --due DAY` | `sona_work_list`, `sona_work_update` | both |
 | Drag tasks onto a board column or group | `work_update`, `work_bulk_update` | `work update --status/--priority/--owner/--project/--due` | `sona_work_update` | both |
@@ -65,7 +65,7 @@ The MCP column says whether an agent over MCP can do it; `—` means no tool.
 | Rename, edit details | `work_update` | `work update --title`, `--details` | `sona_work_update` | both |
 | Repeats | `work_update` (`recurrence`) | `work update --repeat WORDS\|none` | `sona_work_update` (`repeat`) | both |
 | Snooze to a day | `work_bulk_update` | `work snooze --until DAY`, `work update --snooze-until DAY` | `sona_work_update` (`snooze_until`) | both |
-| Snooze "Later today" (a time) | `work_bulk_update` | — (days only) | — | missing |
+| Snooze "Later today" (a time) | `work_bulk_update` | `work snooze TASK --until later-today`, `work update --snooze-until later-today` | `sona_work_update` (`snooze_until`) | both |
 | Archive | `work_archive` | `work archive` | `sona_work_archive` *(opt-in)* | both |
 | Restore (undo of archive) | `work_restore` | `work restore` | `sona_work_restore` *(opt-in)* | both |
 | Relations: blocks, blocked by, related; remove | `work_relation_add`, `work_relation_remove` | `work relate S-1 blocks\|blocked-by\|related S-2`, `work unrelate` | `sona_work_relate`, `sona_work_unrelate` *(opt-in)* | both |
@@ -79,10 +79,10 @@ The MCP column says whether an agent over MCP can do it; `—` means no tool.
 | List attachments | `work_attachments` | `work attachments TASK` | `sona_task_attachments` | both |
 | Attach a file | `work_attachment_attach_file` | `work attach TASK PATH [--title --subtitle]` | `sona_task_attach` (`path`) | both |
 | Attach a link | `work_attachment_attach_link` | `work attach TASK URL [--title --subtitle]` | `sona_task_attach` (`url`) | both |
-| Rename an attachment | `work_attachment_rename` | — (`--title` only when attaching) | — | missing |
+| Rename an attachment | `work_attachment_rename` | `work attachment-rename TASK ID --title` | `sona_work_attachment_rename` *(opt-in)* | both |
 | Detach | `work_attachment_detach` | `work detach TASK ID` | `sona_task_detach` *(opt-in)* | both |
 | Open an attachment, Copy path, Copy link | none | — | — | window-bound: Finder, pasteboard |
-| Delegate to a named agent (copies the hand-off prompt) | `work_delegate` | — (`work claim` only takes it for the caller) | — | missing |
+| Delegate to a named agent (copies the hand-off prompt) | `work_delegate` | `work delegate TASK --to AGENT`, `--take-back`; prints the prompt | `sona_work_delegate` *(opt-in)* | both |
 | Book time / unbook | `work_time_block`, `work_time_block_remove` | — | — | missing |
 | Nudge: record it (Copy) | `work_nudged` | — | — | missing |
 | Nudge: open a Mail draft | `work_nudge_mail` | — | — | window-bound: Mail compose window |
@@ -95,7 +95,7 @@ The MCP column says whether an agent over MCP can do it; `—` means no tool.
 |---|---|---|---|---|
 | Open Triage | `work_list` | `work list --status triage` | `sona_work_list` (`status`) | both |
 | Group by source meeting | `work_list` | `work list --status triage --meeting ID` | `sona_work_list` (`meeting_id`) | both |
-| Source splits: meetings, dictation, agents, people | none (client filter on source) | — | — | missing |
+| Source splits: meetings, dictation, agents, people | none (client filter on source) | `work list --source meeting,dictation,agent,person` | `sona_work_list` (`source`) | both |
 | Accept (with Sona's suggestions) | `work_triage_accept` | `work accept [--ignore-suggestions]` | `sona_work_triage` (`accept`) | both |
 | Decline | `work_triage_decline` | `work decline` | `sona_work_triage` (`decline`) | both |
 | Duplicate of | `work_mark_duplicate` | `work duplicate TASK --of TASK` | `sona_work_triage` (`duplicate`) | both |
@@ -213,9 +213,9 @@ The MCP column says whether an agent over MCP can do it; `—` means no tool.
 | Wrap up, write the follow-up | `meeting_wrap`, `meeting_follow_up_draft`, `work_follow_up` | `work follow-up MEETING` | `sona_work_follow_up` | both |
 | Post the follow-up to a connection | `work_follow_up_post` | — | — | missing |
 | Ledger loops: read, done, drop | `meeting_loops`, `meeting_loop_resolve` | `sona --loops`, `sona --loop-resolve LOOP_ID` | `sona_action_items`, `sona_loop_resolve` | both |
-| Loop reopen, loop owner | `meeting_loop_reopen`, `meeting_loop_assign` | — | — | missing |
+| Loop reopen, loop owner | `meeting_loop_reopen`, `meeting_loop_assign` | `work loop-reopen LOOP_ID`, `work loop-owner LOOP_ID --owner PERSON\|none` | `sona_meeting_loop_reopen`, `sona_meeting_loop_assign` *(opt-in)* | both |
 | Live card Accept / Decline | `work_triage_accept`, `work_triage_decline` | `work accept`, `work decline` | `sona_work_triage` | both |
-| Untracked action: Track, Dismiss, Restore | `planning_track_action`, `planning_dismiss_action`, `planning_restore_action` | — (`work create` makes an unlinked task) | — | missing |
+| Untracked action: Track, Dismiss, Restore | `planning_track_action`, `planning_dismiss_action`, `planning_restore_action` | `work action-track LOOP_ID --project P`, `work action-dismiss LOOP_ID`, `work action-restore LOOP_ID` | `sona_planning_track_action`, `sona_planning_dismiss_action`, `sona_planning_restore_action` *(opt-in)* | both |
 | Who was in the call; place; bookmarks; heard plans | `meeting_call_name_status`, `conversation_place_review`, `meeting_heard_plans` | `sona --roster ID`, `--place ID`, `--bookmarks`, `--plans` | `sona_roster`, `sona_place`, `sona_bookmarks`, `sona_plans` | both |
 | Upcoming meetings | `meeting_upcoming_events` | `sona --upcoming` | `sona_upcoming` | both |
 | Rename a meeting | `meeting_title_set` | — | — | missing |
@@ -238,8 +238,10 @@ The MCP column says whether an agent over MCP can do it; `—` means no tool.
 | Heard plan: add to calendar | `meeting_heard_plan_add_to_calendar` | — | — | UI-only by design: writes to the owner's calendar |
 | Heard plan: edit, not now | `meeting_heard_plan_edit`, `meeting_heard_plan_not_now` | — | — | missing |
 | Notes: list, open, search, versions, diff, related | `scratchpad_list`, `scratchpad_get`, `scratchpad_versions` | `sona --notes`, `--note ID`, `--query T --scope notes`, `--note-versions ID`, `--note-diff ID`, `--note-context T` | `sona_notes`, `sona_note`, `sona_search`, `sona_note_versions`, `sona_note_diff`, `sona_note_context` | both |
-| Notes: new, edit, pin, delete, restore a version | `scratchpad_create`, `scratchpad_update_body`, `scratchpad_set_pinned`, `scratchpad_delete`, `scratchpad_restore_version` | — | — | missing |
-| Notes: link or unlink a source, subjects, synthesis | `scratchpad_link`, `scratchpad_unlink`, `scratchpad_subject_create`, `scratchpad_synthesize` | — | — | missing |
+| Notes: new, edit, pin | `scratchpad_create`, `scratchpad_update_body`, `scratchpad_set_pinned` | `work note-new TEXT`, `work note-edit ID --body`, `work note-pin ID [--unpin]` | `sona_scratchpad_create`, `sona_scratchpad_update_body`, `sona_scratchpad_set_pinned` *(opt-in)* | both |
+| Notes: delete, restore a version | `scratchpad_delete`, `scratchpad_restore_version` | — | — | missing |
+| Notes: link a meeting, person or note as a source | `scratchpad_link` | `work note-link ID --meeting\|--person\|--note ID` | `sona_scratchpad_link` *(opt-in)* | both |
+| Notes: unlink a source, subjects, synthesis | `scratchpad_unlink`, `scratchpad_subject_create`, `scratchpad_synthesize` | — | — | missing |
 | Palette corpus search; events | `sona_query_search`, `sona_query_events` | `sona --query T [--scope]`, `sona --events` | `sona_search`, `sona_events` | both |
 | Said lines, on-screen text, in-meeting search | `meeting_said_search`, `meeting_snapshot_text_search`, `meeting_search` | — | — | missing |
 | Dictation history: search, totals | `search_history_entries`, `get_history_stats` | `sona --query T --scope dictations`, `sona --stats` | `sona_search`, `sona_stats` | both |
@@ -309,11 +311,12 @@ The MCP column says whether an agent over MCP can do it; `—` means no tool.
 | Record the screen; import audio from Finder | recorder sheet, file picker | — | — | window-bound: screen capture, file picker |
 | Today strip (meetings today, unnamed speakers, owed) | `home_today` | — (parts: `sona --upcoming`, `sona --loops`, `work counts`) | — | missing |
 | Morning plan: read focus | `work_day` | `work list`, `work show` print `focus` | `sona_work_list` | both |
-| Morning plan: save up to 3 focus tasks | `work_day_plan` | — | — | missing |
-| Stale task: still stands (Keep) | `work_keep` | — | — | missing |
-| Stale tasks list (untouched 30 days) | `work_list` (computed in Swift) | — | — | missing |
+| Morning plan: save up to 3 focus tasks | `work_day_plan` | `work focus TASK... [--day]`, `work focus --clear`; read with `work day [DAY]` | `sona_work_day_plan`, `sona_work_day` *(opt-in)* | both |
+| Stale task: still stands (Keep) | `work_keep` | `work keep TASK...` | `sona_work_keep` *(opt-in)* | both |
+| Stale tasks list (untouched 30 days) | `work_list` (computed in Swift) | `work list --stale` | `sona_work_list` (`stale`) | both |
 | Evening: slipped to tomorrow, this week, drop | `work_update` | `work update --due`, `work update --status canceled` | `sona_work_update` | both |
-| Meeting brief and talking points | `work_brief`, `work_talking_point_add`, `work_talking_point_done` | — | — | missing |
+| Person brief and talking points | `work_brief` (person), `work_talking_point_add`, `work_talking_point_done` | `work brief PERSON`, `work talking-point PERSON TEXT`, `work talking-point-done ID [--undo]` | `sona_work_brief`, `sona_work_talking_point_add`, `sona_work_talking_point_done` *(opt-in)* | both |
+| Meeting brief for a calendar event | `work_brief` (event) | — | — | window-bound: calendar runtime |
 | Watches: list, add, stop | `work_watches`, `work_watch_save`, `work_watch_remove` | `work watches`, `work watch`, `work unwatch` | `sona_work_watches`, `sona_work_watch` *(opt-in)* | both |
 | Watch hit: make a task | `work_watch_task` | — | — | missing |
 | Learning suggestions: yes, no thanks | `learning_suggestions`, `learning_decide` | — | — | missing |
@@ -322,18 +325,14 @@ The MCP column says whether an agent over MCP can do it; `—` means no tool.
 
 ## Missing, ranked by how often an organizer agent would need it
 
-1. Delegate a task to a named agent, and today's focus plus "still stands" (`work_delegate`, `work_day_plan`, `work_keep`): an organizer hands work out and plans the day every day.
-2. Meeting brief and talking points (`work_brief`, `work_talking_point_add`, `work_talking_point_done`): prepares every meeting.
-3. Link sources to projects and review link suggestions (`planning_link_source`, `planning_suggestions` and friends).
-4. Meeting loop reopen and owner, and untracked action Track or Dismiss (`meeting_loop_reopen`, `meeting_loop_assign`, `planning_track_action`, `planning_dismiss_action`).
-5. Triage source filter, stale-task filter, and a "later today" snooze time.
-6. Rename a meeting, folders, and asking about one meeting or one folder.
-7. Notes: create, edit, pin, link (`scratchpad_create`, `scratchpad_update_body`, `scratchpad_link`).
-8. People: one-read person page, split, delete, meeting links, companies.
-9. Task capture with a source link, words read as fields on create, rename an attachment.
-10. Watch hit to task, record a nudge, book time on the calendar.
-11. Speaker naming and transcript corrections.
-12. Settings writes (modes, models, vocabulary, prompts, workflows) and chat turns.
+1. Link sources to projects and review link suggestions (`planning_link_source`, `planning_suggestions` and friends).
+2. Rename a meeting, folders, and asking about one meeting or one folder.
+3. Notes: delete, restore a version, unlink a source, subjects, synthesis.
+4. People: one-read person page, split, delete, meeting links, companies.
+5. Words read as fields on create.
+6. Watch hit to task, record a nudge, book time on the calendar.
+7. Speaker naming and transcript corrections.
+8. Settings writes (modes, models, vocabulary, prompts, workflows) and chat turns.
 
 MCP gaps where the CLI already has the verb: `work snooze` (reachable as
 `sona_work_update` `snooze_until`), `work export`, `work project-update-draft`
@@ -345,12 +344,12 @@ opt-in only.
 
 | status | rows |
 |---|---|
-| both | 88 |
+| both | 97 |
 | CLI only | 17 |
-| missing | 77 |
+| missing | 65 |
 | UI-only by design | 23 |
-| window-bound | 17 |
-| total | 222 |
+| window-bound | 18 |
+| total | 220 |
 
 Rows are grouped: one row can cover several buttons that call the same
 method. The inventories beside this file list every button.
