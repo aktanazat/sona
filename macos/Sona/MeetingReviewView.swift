@@ -198,6 +198,7 @@ struct MeetingReviewHeader: View {
     let delete: () -> Void
     var openMeetingSettings: () -> Void = {}
     var askAgent: ((String) -> Void)?
+    @Environment(AppModel.self) private var model
     @State private var editing = false
     @State private var draft = ""
     /// The line that confirms a copy, cleared after a moment.
@@ -279,6 +280,9 @@ struct MeetingReviewHeader: View {
                     .menuStyle(.button)
                     .buttonStyle(.secondary)
                     .fixedSize()
+                Button("Share") { model.sheet = .share(snapshot.session.sessionId) }
+                    .buttonStyle(.secondary)
+                    .help("Make a page of these notes to share")
             }
             Menu {
                 Button("Add to folder…") {
