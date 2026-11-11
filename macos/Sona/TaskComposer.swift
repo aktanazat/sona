@@ -18,6 +18,7 @@ struct TaskComposer: View {
     @FocusState private var titleFocused: Bool
     @State private var reading = TitleReading()
     @State private var picked: Set<Choice> = []
+    @State private var template: WorkTemplate?
 
     /// Fields set in their pickers: the title's words no longer set them.
     private enum Choice { case priority, owner, due, project }
@@ -50,6 +51,13 @@ struct TaskComposer: View {
                 .padding(.horizontal, Space.l)
                 .padding(.top, Space.s)
             ChatFlowRow(spacing: Space.s) {
+                if !model.routines.templates.isEmpty {
+                    ComposerChip(title: template?.name ?? "Template", prompt: "Template…") {
+                        Image(systemName: "doc.on.doc").font(.system(size: 11)).foregroundStyle(Theme.inkSecondary)
+                    } make: { text in
+                        WorkChoices.filtered(templateChoices, by: text, kind: .project)
+                    }
+                }
                 ComposerChip(title: status.label, prompt: "Status…") {
                     TaskStatusIcon(status: status)
                 } make: { text in
@@ -224,7 +232,7 @@ struct TaskComposer: View {
     /// A label the title named is unchecked by keeping its words as text.
     private func toggleLabel(_ id: String) {
         guard labelChecked(id) else {
-            labels.append(id)
+            labels = WorkChoices.adding(id, to: labels, among: model.work.labels)
             return
         }
         labels.removeAll { $0 == id }
@@ -232,6 +240,46 @@ struct TaskComposer: View {
             let text = title
             Task { await reading.keepAsText(token, in: text, work: model.work) }
         }
+    }
+
+    private var templateChoices: [WorkChoice] {
+        var choices = model.routines.templates.map { candidate in
+            let count = candidate.fields.subtasks.count
+            return WorkChoice(
+                id: candidate.id, title: candidate.name, mark: .symbol("doc.on.doc"),
+                detail: count == 0 ? nil : count == 1 ? "1 sub-task" : "\(count) sub-tasks",
+                checked: template?.id == candidate.id
+            ) { apply(candidate) }
+        }
+        if template != nil {
+            choices.insert(WorkChoice(id: "no-template", title: "No template", mark: .symbol("xmark")) { template = nil }, at: 0)
+        }
+        return choices
+    }
+
+    private func apply(_ chosen: WorkTemplate) {
+        template = chosen
+        let fields = chosen.fields
+        if title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, let value = fields.title { title = value }
+        if let value = fields.details { details = value }
+        if let value = fields.status { status = value }
+        if let value = fields.priority {
+            priority = value
+            picked.insert(.priority)
+        }
+        if let value = fields.owner {
+            owner = value
+            picked.insert(.owner)
+        }
+        if let days = fields.dueInDays {
+            due = TaskDates.day(days)
+            picked.insert(.due)
+        }
+        if let value = fields.projectId {
+            project = value
+            picked.insert(.project)
+        }
+        labels += fields.labelIds.filter { !labels.contains($0) }
     }
 
     private func create() {
@@ -244,19 +292,46 @@ struct TaskComposer: View {
         Task {
             let work = model.work
             let words = TitleFields(await reading.settled(typed, in: work))
-            let item = await work.create(
-                title: words.title ?? trimmed, details: text.isEmpty ? nil : text, status: status,
-                priority: chosenPriority, projectId: chosenProject, owner: chosenOwner, dueAtMs: chosenDue,
-                labelIds: labels + words.labels(making: work).filter { !labels.contains($0) },
-                recurrence: words.recurrence)
+            let chosenLabels = labels + words.labels(making: work).filter { !labels.contains($0) }
+            let item: WorkItem?
+            if let template {
+                item = await make(from: template, title: words.title ?? trimmed, details: text.isEmpty ? nil : text,
+                                  labelIds: chosenLabels)
+            } else {
+                item = await work.create(
+                    title: words.title ?? trimmed, details: text.isEmpty ? nil : text, status: status,
+                    priority: chosenPriority, projectId: chosenProject, owner: chosenOwner, dueAtMs: chosenDue,
+                    labelIds: chosenLabels, recurrence: words.recurrence)
+            }
             creating = false
             guard let item else {
-                failure = model.work.mutationError ?? "The task wasn't created."
+                failure = failure ?? model.work.mutationError ?? "The task wasn't created."
                 return
             }
             model.workFocus.highlightWhenShown(item.id)
             model.workFocus.composing = nil
         }
+    }
+
+    private func make(from template: WorkTemplate, title: String, details: String?, labelIds: [String]) async -> WorkItem? {
+        let made: [WorkItem]
+        do {
+            made = try await model.routines.use(template, title: title, dueAtMs: chosenDue, status: status)
+        } catch {
+            failure = error.localizedDescription
+            return nil
+        }
+        guard let item = made.first else { return nil }
+        var patch = WorkPatch()
+        if item.priority != chosenPriority { patch.priority = chosenPriority }
+        if item.projectId != chosenProject { patch.projectId = chosenProject.map { .set($0) } ?? .clear }
+        let madeOwner: WorkOwner = item.ownerIsSelf ? .myself : item.ownerPersonId.map { .person($0) } ?? .nobody
+        if madeOwner != chosenOwner { patch.owner = chosenOwner }
+        if Set(item.labelIds) != Set(labelIds) { patch.labelIds = labelIds }
+        if item.details != details { patch.details = details.map { .set($0) } ?? .clear }
+        await model.work.refresh()
+        if patch != WorkPatch() { model.work.update([item.id], patch) }
+        return item
     }
 }
 

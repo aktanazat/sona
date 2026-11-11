@@ -623,7 +623,9 @@ struct Page<Content: View, Actions: View, Pinned: View>: View {
     private var pane: some View {
         if #available(macOS 26.0, *) {
             column
-                .safeAreaBar(edge: .top, spacing: 0) { chrome }
+                .safeAreaBar(edge: .top, spacing: 0) {
+                    chrome.background { Theme.page.ignoresSafeArea(edges: .top) }
+                }
                 .scrollEdgeEffectStyle(.hard, for: .top)
         } else {
             column.safeAreaInset(edge: .top, spacing: 0) {

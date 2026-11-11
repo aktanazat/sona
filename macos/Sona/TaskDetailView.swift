@@ -30,6 +30,7 @@ struct TaskDetailView: View {
                     if row.status == .triage {
                         TriageButtons(ids: [row.id])
                     }
+                    TaskLifecycleButtons(row: row)
                     DetailStepper(id: row.id)
                     Menu {
                         WorkActionMenu(ids: [row.id], omit: [.peek, .open], keys: false)
@@ -99,6 +100,7 @@ struct TaskDetailView: View {
         switch place {
         case .triage: "Triage"
         case .people: model.people.detail?.person.displayName ?? "People"
+        case .inbox: "Inbox"
         default: "Tasks"
         }
     }
@@ -153,12 +155,13 @@ private struct DetailMain: View {
             DetailNotes(row: row)
                 .padding(.top, 10)
             DetailSource(row: row)
+            DetailAgentSessions(row: row)
             DetailSubtasks(row: row, subTasks: detail?.subTasks, place: place)
                 .padding(.top, 32)
             DetailAttachments(row: row, attachments: detail?.attachments)
                 .padding(.top, 32)
             if row.status == .triage {
-                DetailSuggestions(suggestions: detail?.suggestions ?? model.work.suggestions[row.id] ?? [])
+                DetailSuggestions(itemId: row.id, suggestions: detail?.suggestions ?? model.work.suggestions[row.id] ?? [])
             }
             DetailEvidence(row: row, links: detail?.evidence ?? [])
             DetailRelations(row: row, relations: detail?.relations, place: place)
@@ -319,6 +322,7 @@ private struct DetailNotes: View {
                 .scrollDisabled(true)
                 .padding(.horizontal, -5)
                 .focused($focused)
+                .withoutWritingTools()
                 .onExitCommand {
                     text = row.details ?? ""
                     focused = false
@@ -358,9 +362,9 @@ private struct DetailNotes: View {
 /// Markdown read as blocks: headings, lists, checklists, quotes and code,
 /// with links, emphasis and inline code inside each. `toggle` checks or
 /// unchecks the checklist item on that line of the source.
-private struct MarkdownBody: View {
+struct MarkdownBody: View {
     let source: String
-    let toggle: (Int) -> Void
+    let toggle: ((Int) -> Void)?
 
     private enum Block {
         case paragraph(String)
@@ -405,13 +409,14 @@ private struct MarkdownBody: View {
             .padding(.leading, CGFloat(indent) * 18)
         case let .check(line, indent, done, text):
             HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Button { toggle(line) } label: {
+                Button { toggle?(line) } label: {
                     Image(systemName: done ? "checkmark.square.fill" : "square")
                         .font(.system(size: 13))
                         .foregroundStyle(done ? Theme.accent : Theme.inkTertiary)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .disabled(toggle == nil)
                 .accessibilityLabel(String(Self.attributed(text).characters))
                 .accessibilityValue(done ? "Checked" : "Unchecked")
                 .accessibilityAddTraits(.isToggle)
@@ -529,16 +534,17 @@ private struct MarkdownBody: View {
     }
 }
 
-/// What Sona would fill in on accepting, each with why and what it heard.
+/// What Sona suggests for the task, each with why and what it heard, to use or dismiss.
 private struct DetailSuggestions: View {
+    let itemId: String
     let suggestions: [WorkFieldSuggestion]
 
     var body: some View {
         if !suggestions.isEmpty {
             VStack(alignment: .leading, spacing: 14) {
                 DetailHeading(title: "Suggested")
-                ForEach(Array(suggestions.enumerated()), id: \.offset) { _, suggestion in
-                    SuggestionLine(suggestion: suggestion)
+                ForEach(suggestions, id: \.id) { suggestion in
+                    SuggestionLine(itemId: itemId, suggestion: suggestion)
                 }
             }
             .padding(16)
@@ -550,6 +556,7 @@ private struct DetailSuggestions: View {
 }
 
 private struct SuggestionLine: View {
+    let itemId: String
     let suggestion: WorkFieldSuggestion
     @Environment(AppModel.self) private var model
 
@@ -572,12 +579,13 @@ private struct SuggestionLine: View {
                     Text("“\(quote)”").bodyText(12, Theme.inkSecondary).italic()
                 }
             }
+            .accessibilityElement(children: .combine)
             Spacer(minLength: 8)
             if let meeting = suggestion.meetingId, let at = suggestion.atMs {
                 PlayMoment(sessionId: meeting, atMs: at)
             }
+            SuggestionActions(itemId: itemId, suggestion: suggestion)
         }
-        .accessibilityElement(children: .combine)
     }
 }
 
@@ -1333,7 +1341,7 @@ private struct CommentEntry: View {
                         editing = false
                     }
                 } else if let body = comment.body {
-                    MarkdownBody(source: body) { _ in }
+                    MarkdownBody(source: body, toggle: nil)
                         .textSelection(.enabled)
                 }
             }
@@ -1397,6 +1405,7 @@ private struct CommentComposer: View {
                     .scrollDisabled(true)
                     .padding(.horizontal, -5)
                     .focused($focused)
+                    .withoutWritingTools()
                     .onKeyPress(.return, phases: .down) { press in
                         guard press.modifiers.contains(.command) else { return .ignored }
                         post()
@@ -1450,6 +1459,17 @@ private struct CommentComposer: View {
             guard saved else { return }
             text = ""
             done()
+        }
+    }
+}
+
+private extension View {
+    @ViewBuilder
+    func withoutWritingTools() -> some View {
+        if #available(macOS 15.0, *) {
+            writingToolsBehavior(.disabled)
+        } else {
+            self
         }
     }
 }
@@ -1550,6 +1570,21 @@ struct TaskPropertyList: View {
                     }
                 }
                 .modifier(focus(.due))
+            }
+            PropertyLine(title: "Reminder") {
+                let reminder = model.routines.reminders[row.id]
+                Button { opened = .reminder } label: {
+                    PropertyValue(text: reminder.map(ReminderPicker.label) ?? "Add reminder", faint: reminder == nil) {
+                        Image(systemName: reminder == nil ? "bell" : "bell.fill").font(.system(size: 12))
+                            .foregroundStyle(Theme.inkSecondary)
+                    }
+                }
+                .buttonStyle(.plain)
+                .popover(isPresented: shown(.reminder), arrowEdge: .leading) {
+                    ReminderPicker(itemId: row.id, reminder: reminder) { opened = nil }
+                        .environment(model)
+                }
+                .modifier(focus(.reminder))
             }
             PropertyLine(title: "Repeats") {
                 RepeatMenu(row: row, rule: row.repeat?.every
@@ -1654,7 +1689,7 @@ struct TaskPropertyList: View {
     }
 
     private var fields: [PropertyField] {
-        var list: [PropertyField] = [.status, .priority, .owner, .agent, .due, .repeats]
+        var list: [PropertyField] = [.status, .priority, .owner, .agent, .due, .reminder, .repeats]
         if row.status.isOpen || row.cycle != nil { list.append(.cycle) }
         if row.status.isOpen, row.timeBlock == nil { list.append(.time) }
         list.append(.project)
@@ -1681,7 +1716,7 @@ struct TaskPropertyList: View {
 }
 
 enum PropertyField: Hashable {
-    case status, priority, owner, agent, due, repeats, cycle, time, project, milestone, labels, parent
+    case status, priority, owner, agent, due, reminder, repeats, cycle, time, project, milestone, labels, parent
 }
 
 private struct PropertyFocus: ViewModifier {
@@ -1949,15 +1984,15 @@ enum WorkActivityText {
             }
             return names.isEmpty ? "removed the labels" : "set the labels to \(names.joined(separator: ", "))"
         case .archived:
-            return "archived it"
+            return entry.to == "bin" ? "deleted it" : "archived it"
         case .restored:
-            return "restored it"
+            return entry.from == "bin" ? "restored it from Recently deleted" : "restored it"
         case .duplicate:
             return "marked it a duplicate of \(task(entry.to, model: model))"
         case .accepted:
             return "accepted it"
         case .declined:
-            return "declined it"
+            return entry.reason.map { "declined it: \($0)" } ?? "declined it"
         case .snoozed:
             guard let wake = entry.to.flatMap({ Int64($0) }) else { return "woke it" }
             return "snoozed it until \(PlanningFormat.day(wake))"

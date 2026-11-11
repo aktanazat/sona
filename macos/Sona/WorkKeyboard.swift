@@ -5,7 +5,7 @@ import SwiftUI
 /// status, an owner, a date.
 struct WorkPicker: Equatable {
     enum Kind: Equatable {
-        case status, priority, owner, due, labels, project, duplicate, snooze
+        case status, priority, owner, due, labels, project, duplicate, snooze, decline
         case delegate, cycle, blockedBy, blocks, related, parent
     }
 
@@ -17,7 +17,7 @@ struct WorkPicker: Equatable {
 /// row's menu or the bulk bar, with the one key each answers to.
 enum WorkAction: String, CaseIterable, Identifiable {
     case open, peek, status, priority, owner, assignToMe, due, labels, project, rename
-    case accept, decline, duplicate, snooze, nudge, archive
+    case accept, decline, duplicate, snooze, nudge, archive, delete
     case delegate, acceptProposal, acceptAllProposals, rejectProposal
     case cycle, block
     case blockedBy, blocks, related, parent, removeParent
@@ -37,11 +37,12 @@ enum WorkAction: String, CaseIterable, Identifiable {
         case .project: "Move to project…"
         case .rename: "Rename"
         case .accept: "Accept"
-        case .decline: "Decline"
+        case .decline: "Decline…"
         case .duplicate: "Mark as duplicate…"
         case .snooze: "Snooze…"
         case .nudge: "Nudge…"
         case .archive: "Archive"
+        case .delete: "Delete"
         case .delegate: "Delegate to…"
         case .acceptProposal: "Accept proposed change"
         case .acceptAllProposals: "Accept all proposed changes"
@@ -75,6 +76,7 @@ enum WorkAction: String, CaseIterable, Identifiable {
         case .snooze: "h"
         case .nudge: "r"
         case .archive: "cmd+backspace"
+        case .delete: ""
         case .delegate: "shift+cmd+;"
         case .acceptProposal: "y"
         case .acceptAllProposals: "shift+y"
@@ -115,7 +117,7 @@ enum WorkAction: String, CaseIterable, Identifiable {
         case .rejectProposal: KeyboardShortcut("n", modifiers: [])
         case .cycle: KeyboardShortcut("c", modifiers: .shift)
         case .block: KeyboardShortcut("b", modifiers: [])
-        case .blockedBy, .blocks, .related, .parent, .removeParent: nil
+        case .blockedBy, .blocks, .related, .parent, .removeParent, .delete: nil
         }
     }
 
@@ -137,6 +139,7 @@ enum WorkAction: String, CaseIterable, Identifiable {
         case .snooze: "moon.zzz"
         case .nudge: "arrowshape.turn.up.right"
         case .archive: "archivebox"
+        case .delete: "trash"
         case .delegate: "sparkle"
         case .acceptProposal: "checkmark"
         case .acceptAllProposals: "checklist.checked"
@@ -161,7 +164,8 @@ enum WorkAction: String, CaseIterable, Identifiable {
         case .project: .project
         case .duplicate: .duplicate
         case .snooze: .snooze
-        case .open, .peek, .assignToMe, .rename, .accept, .decline, .nudge, .archive, .block, .removeParent: nil
+        case .decline: .decline
+        case .open, .peek, .assignToMe, .rename, .accept, .nudge, .archive, .delete, .block, .removeParent: nil
         case .delegate: .delegate
         case .cycle: .cycle
         case .blockedBy: .blockedBy
@@ -185,6 +189,7 @@ enum WorkAction: String, CaseIterable, Identifiable {
         case .snooze: rows.allSatisfy { $0.status == .triage || $0.status.isOpen }
         case .nudge: rows.count == 1 && first.status.isOpen && first.followUpAtMs != nil
         case .archive: rows.contains { $0.archivedAtMs == nil }
+        case .delete: true
         case .status, .priority, .owner, .due, .labels, .project: true
         case .delegate: true
         case .cycle: rows.allSatisfy { $0.status.isOpen }
@@ -289,6 +294,10 @@ struct WorkViewDraft: Equatable {
 @Observable
 final class WorkFocus {
     var highlighted: String?
+    /// The inbox notice J and K are on.
+    var inboxHighlighted: String?
+    /// The inbox shows snoozed notices instead of awake ones.
+    var inboxSnoozed = false
     private(set) var selection: Set<String> = []
     var peeking = false
     @ObservationIgnored var propertyFocused = false
@@ -541,11 +550,18 @@ final class WorkKeys {
             return true
         }
         guard !model.showingSettings else { return false }
+        if model.place == .inbox, model.workFocus.opened(in: .inbox) == nil {
+            return InboxKeys.handle(event, key: key, flags: flags, model)
+        }
         if model.place == .today || model.place == .capture {
             return RitualKeys.handle(event, key: key, flags: flags, model)
         }
         if model.place == .meetings {
             return LiveCardKeys.handle(event, key: key, flags: flags, model)
+        }
+        if model.place == .archive, flags == .command, key == "z", model.work.undoTitle != nil {
+            model.undoWork()
+            return true
         }
         if flags.isEmpty, key == "/", model.place == .projects {
             model.toggleSearch()
@@ -718,6 +734,7 @@ extension AppModel {
         switch place {
         case .tasks, .triage: true
         case .people: workFocus.personList != nil || workFocus.opened(in: .people) != nil
+        case .inbox: workFocus.opened(in: .inbox) != nil
         default: false
         }
     }
@@ -772,10 +789,10 @@ extension AppModel {
             focus.renaming = first
         case .accept:
             leave(ids) { work.accept(ids, applySuggestions: true) }
-        case .decline:
-            leave(ids) { work.decline(ids) }
         case .archive:
             leave(ids) { work.archive(ids) }
+        case .delete:
+            leave(ids) { work.delete(ids) }
         case .nudge:
             sheet = .nudge(first)
         case .acceptProposal:
@@ -789,7 +806,7 @@ extension AppModel {
         case .removeParent:
             let children = workRows(ids).filter { $0.parentId != nil }.map(\.id)
             changeWork { work.update(children, WorkPatch(parentId: .clear)) }
-        case .status, .priority, .owner, .due, .labels, .project, .duplicate, .snooze, .delegate, .cycle,
+        case .status, .priority, .owner, .due, .labels, .project, .duplicate, .snooze, .decline, .delegate, .cycle,
              .blockedBy, .blocks, .related, .parent:
             break
         }

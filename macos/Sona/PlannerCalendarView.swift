@@ -98,6 +98,9 @@ struct PlannerCalendarView: View {
             case .board:
                 layout = .board
                 showProjects()
+            case .timeline:
+                layout = .timeline
+                showProjects()
             case .calendar:
                 break
             }

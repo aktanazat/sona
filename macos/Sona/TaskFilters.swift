@@ -145,6 +145,13 @@ enum TaskFilters {
             return [ConditionChoice(value: "me", title: "Me"), ConditionChoice(value: "none", title: "No owner")]
                 + store.people.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
                 .map { ConditionChoice(value: $0.id, title: $0.name) }
+        case .delegate:
+            var agents = WorkChoices.agents
+            for agent in (store.items ?? []).compactMap(\.doer?.agent).sorted() where !agents.contains(agent) {
+                agents.append(agent)
+            }
+            return agents.map { ConditionChoice(value: $0, title: $0) }
+                + [ConditionChoice(value: "none", title: "No agent")]
         case .project:
             return store.projects.map { ConditionChoice(value: $0.id, title: $0.title) }
                 + [ConditionChoice(value: "none", title: "No project")]
@@ -195,6 +202,9 @@ enum TaskFilters {
     }
 
     private static func dayTitle(_ value: String) -> String? {
+        let spans = ["last_week": "Last week", "this_week": "This week", "next_week": "Next week",
+                     "last_month": "Last month", "this_month": "This month", "next_month": "Next month"]
+        if let title = spans[value] { return title }
         let parts = value.split(separator: "-").compactMap { Int($0) }
         guard parts.count == 3,
               let date = Calendar.current.date(from: DateComponents(year: parts[0], month: parts[1], day: parts[2]))
@@ -514,56 +524,70 @@ private struct TaskFilterPanel: View {
     }
 }
 
+private extension VerticalAlignment {
+    enum FirstChipRow: AlignmentID {
+        static func defaultValue(in context: ViewDimensions) -> CGFloat {
+            context[VerticalAlignment.center]
+        }
+    }
+
+    static let firstChipRow = VerticalAlignment(FirstChipRow.self)
+}
+
 /// The filters in force, each with its own ✕, and saving them as a view.
 struct TaskFilterBar: View {
     let draft: WorkViewDraft
     @Environment(AppModel.self) private var model
-    @AppStorage(FavoriteViews.key) private var favoriteViews = ""
     @State private var naming = false
     @State private var name = ""
+    @State private var unread: [WorkWhereWord] = []
 
     var body: some View {
         let focus = model.workFocus
         let chips = TaskFilters.chips(draft.query, model: model)
-        HStack(spacing: 6) {
-            ScrollView(.horizontal) {
-                HStack(spacing: 6) {
-                    ForEach(chips) { chip in
-                        HStack(spacing: 6) {
-                            Text(chip.text).lineLimit(1)
-                            Button {
-                                model.editListing { chip.clear(&$0.query) }
-                            } label: {
-                                Image(systemName: "xmark")
-                                    .font(.system(size: 8, weight: .bold))
-                                    .frame(width: 14, height: 14)
-                                    .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel("Remove \(chip.text)")
+        HStack(alignment: .firstChipRow, spacing: 6) {
+            TaskWordsField(unread: $unread)
+            ChatFlowRow(spacing: 6) {
+                ForEach(unread, id: \.self) { word in
+                    TaskUnreadWordChip(word: word) { unread.removeAll { $0 == word } }
+                }
+                ForEach(chips) { chip in
+                    HStack(spacing: 6) {
+                        Text(chip.text).lineLimit(1)
+                        Button {
+                            model.editListing { chip.clear(&$0.query) }
+                        } label: {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 8, weight: .bold))
+                                .frame(width: 14, height: 14)
+                                .contentShape(Rectangle())
                         }
-                        .font(TypeScale.label(12))
-                        .foregroundStyle(Theme.inkSecondary)
-                        .padding(.leading, 8)
-                        .padding(.trailing, 4)
-                        .frame(height: Theme.compactHeight)
-                        .background(Theme.control, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Remove \(chip.text)")
                     }
+                    .font(TypeScale.label(12))
+                    .foregroundStyle(Theme.inkSecondary)
+                    .padding(.leading, 8)
+                    .padding(.trailing, 4)
+                    .frame(height: Theme.compactHeight)
+                    .background(Theme.control, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
                 }
             }
-            .scrollIndicators(.never)
-            .scrollBounceBehavior(.basedOnSize)
-            Spacer(minLength: 8)
+            .padding(.trailing, 8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .alignmentGuide(.firstChipRow) { _ in Theme.compactHeight / 2 }
             switch focus.tab {
             case .all:
-                Button("Clear") { model.editListing { $0.query = WorkQuery() } }
-                    .buttonStyle(QuietButton(compact: true))
-                Button("Save view") {
-                    name = ""
-                    naming = true
+                if !chips.isEmpty {
+                    Button("Clear") { model.editListing { $0.query = WorkQuery() } }
+                        .buttonStyle(QuietButton(compact: true))
+                    Button("Save view") {
+                        name = ""
+                        naming = true
+                    }
+                    .buttonStyle(.compact)
+                    .popover(isPresented: $naming, arrowEdge: .bottom) { namer }
                 }
-                .buttonStyle(.compact)
-                .popover(isPresented: $naming, arrowEdge: .bottom) { namer }
             case let .view(id):
                 if focus.viewDrafts[id] != nil {
                     Button("Revert") { focus.viewDrafts[id] = nil }
@@ -572,11 +596,11 @@ struct TaskFilterBar: View {
                         .buttonStyle(.compact)
                 }
                 if let view = model.work.views.first(where: { $0.id == id }) {
-                    let favorite = FavoriteViews.ids(favoriteViews).contains(id)
+                    let favorite = model.work.isFavorite(.view, id)
                     Menu {
-                        Button(favorite ? "Remove from sidebar" : "Pin to sidebar",
+                        Button(favorite ? "Remove from favorites" : "Add to favorites",
                                systemImage: favorite ? "star.slash" : "star") {
-                            favoriteViews = FavoriteViews.toggled(favoriteViews, id)
+                            model.work.setFavorite(.view, id, !favorite)
                         }
                         Button("Delete view", systemImage: "trash", role: .destructive) { delete(view) }
                     } label: {
@@ -594,7 +618,8 @@ struct TaskFilterBar: View {
         }
         .padding(.leading, 16)
         .padding(.trailing, 24)
-        .frame(height: 40)
+        .padding(.vertical, 6)
+        .frame(minHeight: 40)
         .overlay(alignment: .bottom) { Hairline() }
     }
 

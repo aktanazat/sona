@@ -110,7 +110,7 @@ struct ProjectDescriptionEditor: View {
             Button { draft = text ?? "" } label: {
                 Group {
                     if let text, !text.isEmpty {
-                        Text(Self.markdown(text)).bodyText(14, Theme.inkSecondary)
+                        MarkdownBody(source: text, toggle: nil)
                     } else {
                         Text("Add a description").bodyText(14, Theme.inkTertiary)
                     }
@@ -123,11 +123,6 @@ struct ProjectDescriptionEditor: View {
             .help("Edit description")
             .accessibilityLabel(text?.isEmpty == false ? "Description: \(text ?? ""). Edit" : "Add a description")
         }
-    }
-
-    static func markdown(_ text: String) -> AttributedString {
-        (try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
-            ?? AttributedString(text)
     }
 }
 
@@ -209,16 +204,20 @@ struct ProjectPropertiesPanel: View {
     private func name(_ id: String) -> String { people.first { $0.id == id }?.name ?? "Someone" }
 
     private func leadMenu(_ project: PlanningProject) -> some View {
-        Menu {
+        let mine = project.leadIsSelf == true
+        let nobody = project.leadPersonId == nil && !mine
+        return Menu {
             Button("No lead") { save(PlanningProjectSave(leadPersonId: .clear)) }
-                .disabled(project.leadPersonId == nil)
+                .disabled(nobody)
             Divider()
+            Button("Me") { save(PlanningProjectSave(leadIsSelf: true)) }
+                .disabled(mine)
             ForEach(people) { person in
                 Button(person.name) { save(PlanningProjectSave(leadPersonId: .set(person.id))) }
                     .disabled(project.leadPersonId == person.id)
             }
         } label: {
-            menuLabel(project.leadPersonId.map(name) ?? "No lead", muted: project.leadPersonId == nil)
+            menuLabel(mine ? "Me" : project.leadPersonId.map(name) ?? "No lead", muted: nobody)
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
@@ -228,7 +227,14 @@ struct ProjectPropertiesPanel: View {
 
     private func membersMenu(_ project: PlanningProject) -> some View {
         let members = project.memberPersonIds ?? []
+        let mine = project.membersIncludeSelf == true
+        let names = (mine ? ["Me"] : []) + members.map(name)
         return Menu {
+            Button {
+                save(PlanningProjectSave(membersIncludeSelf: !mine))
+            } label: {
+                if mine { Label("Me", systemImage: "checkmark") } else { Text("Me") }
+            }
             ForEach(people) { person in
                 let on = members.contains(person.id)
                 Button {
@@ -238,7 +244,7 @@ struct ProjectPropertiesPanel: View {
                 }
             }
         } label: {
-            menuLabel(members.isEmpty ? "None" : members.map(name).joined(separator: ", "), muted: members.isEmpty)
+            menuLabel(names.isEmpty ? "None" : names.joined(separator: ", "), muted: names.isEmpty)
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
@@ -663,10 +669,8 @@ struct ProjectUpdatesView: View {
                 Text("\(update.progress)%").metaText().monospacedDigit()
             }
             if let body = update.body, !body.isEmpty {
-                Text(ProjectDescriptionEditor.markdown(body))
-                    .bodyText(13.5, Theme.inkSecondary)
+                MarkdownBody(source: body, toggle: nil)
                     .textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .padding(14)

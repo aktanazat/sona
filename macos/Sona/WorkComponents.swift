@@ -209,6 +209,7 @@ struct ItemRow: View {
     let now: Int64
     let revision: UInt64
     var waiting = false
+    var session: WorkSession?
     let toggle: () -> Void
     let rename: (String?) -> Void
 
@@ -331,8 +332,8 @@ struct ItemRow: View {
                     .foregroundStyle(Theme.inkTertiary)
                     .frame(width: 40, alignment: .trailing)
             }
-            if let doer = row.doer, row.status.isOpen {
-                TaskDoer(doer: doer, waiting: waiting)
+            if let agent = session?.agent ?? (row.status.isOpen ? row.doer?.agent : nil) {
+                TaskDoer(agent: agent, waiting: waiting, session: session)
             }
             if shows.contains(TaskProperty.owner.rawValue) {
                 Avatar(face: row.ownerFace, size: 20, revision: revision)
@@ -391,15 +392,25 @@ struct AgentName: View {
 /// The agent working a task: its name, or, while its session waits on the
 /// user's approval, "Waiting for you" in red.
 struct TaskDoer: View {
-    let doer: WorkDoer
+    let agent: String
     var waiting = false
+    var session: WorkSession?
 
     var body: some View {
-        let help = waiting ? "\(doer.agent) is waiting for your approval" : "\(doer.agent) is working on it"
-        AgentName(name: waiting ? "Waiting for you" : doer.agent, tint: waiting ? Theme.live : Theme.inkTertiary)
-            .help(help)
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel(help)
+        let live = session.map(SessionLiveness.describe)
+        let help = waiting ? "\(agent) is waiting for your approval" : live?.help ?? "\(agent) is working on it"
+        HStack(spacing: Space.xs) {
+            if let live, !waiting {
+                Image(systemName: "circle.fill")
+                    .font(.system(size: 6))
+                    .foregroundStyle(live.tint)
+                    .symbolEffect(.pulse, options: .repeating, isActive: live.moving)
+            }
+            AgentName(name: waiting ? "Waiting for you" : agent, tint: waiting ? Theme.live : Theme.inkTertiary)
+        }
+        .help(help)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(help)
     }
 }
 

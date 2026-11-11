@@ -153,7 +153,7 @@ enum TaskListing {
                         return .text(names[text] ?? text)
                     case .due, .created, .updated:
                         return Self.day(text, now: now)
-                    case .status: return .text(text)
+                    case .status, .delegate: return .text(text)
                     case .owner, .cycle, .project, .milestone, .label:
                         return .text(raw.trimmingCharacters(in: .whitespaces))
                     }
@@ -165,14 +165,21 @@ enum TaskListing {
                 let calendar = Calendar.current
                 let today = calendar.startOfDay(for: PlanningFormat.moment(now))
                 let parts = text.split(separator: "-").compactMap { Int($0) }
-                let start: Date? = switch text {
-                case "today": today
-                case "tomorrow": calendar.date(byAdding: .day, value: 1, to: today)
-                case "yesterday": calendar.date(byAdding: .day, value: -1, to: today)
-                default: parts.count == 3
-                    ? calendar.date(from: DateComponents(year: parts[0], month: parts[1], day: parts[2])) : nil
+                let step = text.hasPrefix("next_") ? 1 : text.hasPrefix("last_") ? -1 : 0
+                let monday = calendar.date(byAdding: .day, value: -((calendar.component(.weekday, from: today) + 5) % 7), to: today)
+                let month = calendar.date(from: calendar.dateComponents([.year, .month], from: today))
+                let (start, unit): (Date?, Calendar.Component) = switch text {
+                case "today": (today, .day)
+                case "tomorrow": (calendar.date(byAdding: .day, value: 1, to: today), .day)
+                case "yesterday": (calendar.date(byAdding: .day, value: -1, to: today), .day)
+                case "this_week", "next_week", "last_week":
+                    (monday.flatMap { calendar.date(byAdding: .day, value: 7 * step, to: $0) }, .weekOfYear)
+                case "this_month", "next_month", "last_month":
+                    (month.flatMap { calendar.date(byAdding: .month, value: step, to: $0) }, .month)
+                default: (parts.count == 3
+                    ? calendar.date(from: DateComponents(year: parts[0], month: parts[1], day: parts[2])) : nil, .day)
                 }
-                guard let start, let end = calendar.date(byAdding: .day, value: 1, to: start) else { return .day(0, 0) }
+                guard let start, let end = calendar.date(byAdding: unit, value: 1, to: start) else { return .day(0, 0) }
                 return .day(TaskDates.milliseconds(start), TaskDates.milliseconds(end))
             }
 
@@ -181,6 +188,7 @@ enum TaskListing {
                 case .status: row.status.rawValue
                 case .priority: String(row.priority)
                 case .owner: row.ownerPersonId
+                case .delegate: row.doer?.agent.lowercased()
                 case .project: row.projectId
                 case .milestone: row.milestoneId
                 case .cycle: row.cycle.map { String($0) }

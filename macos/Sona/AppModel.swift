@@ -6,9 +6,9 @@ import SwiftUI
 /// The places a window shows. Library opens from Home and Calendar from
 /// Projects, so the sidebar lists only the rest.
 enum Place: Int, CaseIterable, Identifiable {
-    case capture, library, meetings, people, scratchpad, projects, calendar, tasks, triage, today
+    case capture, library, meetings, people, scratchpad, projects, calendar, tasks, triage, today, inbox, archive, loops
 
-    static let sidebar: [Place] = [.capture, .tasks, .triage, .meetings, .people, .scratchpad, .projects]
+    static let sidebar: [Place] = [.capture, .inbox, .tasks, .triage, .meetings, .people, .scratchpad, .projects, .loops]
 
     var id: Int { rawValue }
 
@@ -17,8 +17,8 @@ enum Place: Int, CaseIterable, Identifiable {
         switch self {
         case .library: .capture
         case .calendar: .projects
-        case .today: .tasks
-        case .capture, .meetings, .people, .scratchpad, .projects, .tasks, .triage: self
+        case .today, .archive: .tasks
+        case .capture, .meetings, .people, .scratchpad, .projects, .tasks, .triage, .inbox, .loops: self
         }
     }
 
@@ -34,6 +34,9 @@ enum Place: Int, CaseIterable, Identifiable {
         case .tasks: "Tasks"
         case .triage: "Triage"
         case .today: "Today"
+        case .inbox: "Inbox"
+        case .archive: "Archive"
+        case .loops: "Automations"
         }
     }
 
@@ -49,6 +52,9 @@ enum Place: Int, CaseIterable, Identifiable {
         case .tasks: "checklist"
         case .triage: "tray"
         case .today: "sun.max"
+        case .inbox: "bell"
+        case .archive: "archivebox"
+        case .loops: "repeat"
         }
     }
 }
@@ -57,7 +63,7 @@ enum Place: Int, CaseIterable, Identifiable {
 enum SettingsPlace: Int, CaseIterable, Identifiable {
     case essentials, dictation, models, modes, vocabulary, prompts, workflows, meetings
     case agents, sync, privacy, importing, documents, about, debug
-    case connections
+    case connections, tasks
 
     var id: Int { rawValue }
 
@@ -79,6 +85,7 @@ enum SettingsPlace: Int, CaseIterable, Identifiable {
         case .about: "About"
         case .debug: "Debug"
         case .connections: "Connections"
+        case .tasks: "Tasks"
         }
     }
 }
@@ -93,6 +100,7 @@ enum Sheet: Identifiable, Hashable {
     case nudge(String)
     /// What is open with the people of a meeting, or with one person.
     case workBrief(WorkBriefSubject)
+    case saveTemplate(String)
 
     var id: Self { self }
 }
@@ -329,6 +337,8 @@ final class AppModel {
     let debug: DebugStore
     let spotlight: SpotlightStore
     let work: WorkStore
+    let routines: RoutinesStore
+    let loops: LoopsStore
     let workFocus = WorkFocus()
     let rituals: RitualStore
     let heard: LiveCardStore
@@ -399,6 +409,8 @@ final class AppModel {
         windowAttached = WindowAttachedCard(core: core)
         spotlight = SpotlightStore(core: core)
         work = WorkStore(core: core)
+        routines = RoutinesStore(core: core)
+        loops = LoopsStore(core: core)
         rituals = RitualStore(core: core)
         heard = LiveCardStore(core: core)
 
@@ -997,6 +1009,7 @@ final class AppModel {
         Task { await about.start() }
         Task { await debug.start() }
         Task { await spotlight.start() }
+        Task { await routines.start() }
         Task {
             await work.start()
             self.openMorningPlanIfDue()

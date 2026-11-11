@@ -131,7 +131,9 @@ struct PlanningProject: Decodable, Identifiable, Equatable {
     let createdAtMs: Int64
     var updatedAtMs: Int64
     var leadPersonId: String? = nil
+    var leadIsSelf: Bool? = nil
     var memberPersonIds: [String]? = nil
+    var membersIncludeSelf: Bool? = nil
     var targetAtMs: Int64? = nil
     var hue: Int? = nil
     var archivedAtMs: Int64? = nil
@@ -567,7 +569,9 @@ struct PlanningProjectSave: Encodable, Equatable {
     var status: PlanningProjectStatus?
     var priority: Int?
     var leadPersonId: PlanningFieldChange<String>?
+    var leadIsSelf: Bool?
     var memberPersonIds: [String]?
+    var membersIncludeSelf: Bool?
     var startAtMs: PlanningFieldChange<Int64>?
     var startResolution: PlanningFieldChange<PlanningDateResolution>?
     var targetAtMs: PlanningFieldChange<Int64>?
@@ -579,7 +583,8 @@ struct PlanningProjectSave: Encodable, Equatable {
     var trashed: Bool?
 
     private enum Key: String, CodingKey {
-        case title, description, status, priority, leadPersonId, memberPersonIds, startAtMs, startResolution
+        case title, description, status, priority, leadPersonId, leadIsSelf, memberPersonIds, membersIncludeSelf
+        case startAtMs, startResolution
         case targetAtMs, targetResolution, hue, icon, labelIds, links, trashed
     }
 
@@ -590,7 +595,9 @@ struct PlanningProjectSave: Encodable, Equatable {
         try container.encodeIfPresent(status, forKey: .status)
         try container.encodeIfPresent(priority, forKey: .priority)
         try Self.put(leadPersonId, .leadPersonId, &container)
+        try container.encodeIfPresent(leadIsSelf, forKey: .leadIsSelf)
         try container.encodeIfPresent(memberPersonIds, forKey: .memberPersonIds)
+        try container.encodeIfPresent(membersIncludeSelf, forKey: .membersIncludeSelf)
         try Self.put(startAtMs, .startAtMs, &container)
         try Self.put(startResolution, .startResolution, &container)
         try Self.put(targetAtMs, .targetAtMs, &container)
@@ -642,6 +649,15 @@ private struct PlanningReorderParams: Encodable {
     let operationId: String
     let projectId: String
     let milestoneIds: [String]
+}
+
+private struct PlanningMilestoneSaveParams: Encodable {
+    let operationId: String
+    let projectId: String
+    let id: String
+    let input: Due
+
+    struct Due: Encodable { let dueAtMs: Int64 }
 }
 
 private struct PlanningChange: Decodable {
@@ -767,6 +783,21 @@ final class ProjectsStore {
             mutationError = error.localizedDescription
         }
         await refresh()
+    }
+
+    /// Moves a milestone to another day, the save `work milestone-save` makes.
+    func moveMilestone(_ milestone: PlanningMilestone, dueAtMs: Int64) async {
+        do {
+            try await write {
+                let _: PlanningMilestone = try await self.core.request("planning_milestone_save", PlanningMilestoneSaveParams(
+                    operationId: UUID().uuidString, projectId: milestone.projectId, id: milestone.id,
+                    input: .init(dueAtMs: dueAtMs)))
+            }
+        } catch {
+            mutationError = error.localizedDescription
+        }
+        await refresh()
+        await loadDetails([milestone.projectId])
     }
 
     /// Puts a project in the 30-day bin and offers Undo.

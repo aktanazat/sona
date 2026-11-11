@@ -70,6 +70,8 @@ struct SettingsScreen: View {
             }
         case .connections:
             ConnectionsView(store: model.connections)
+        case .tasks:
+            TasksSettingsView()
         case .privacy:
             PrivacyView(store: model.privacy)
         case .importing:

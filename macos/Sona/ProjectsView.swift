@@ -1,18 +1,27 @@
 import SwiftUI
 
 enum ProjectsLayout: String {
-    case list, board
+    case list, board, timeline
+
+    var choice: ProjectsViewChoice {
+        switch self {
+        case .list: .list
+        case .board: .board
+        case .timeline: .timeline
+        }
+    }
 }
 
 /// The ways to look at planned work. Calendar is its own place, so choosing
 /// it leaves the projects list.
 enum ProjectsViewChoice: Hashable {
-    case list, board, calendar
+    case list, board, timeline, calendar
 
     static var items: [SwitchItem<ProjectsViewChoice>] {
         [
             SwitchItem(id: .list, title: "List", icon: "list.bullet"),
             SwitchItem(id: .board, title: "Board", icon: "rectangle.split.3x1"),
+            SwitchItem(id: .timeline, title: "Timeline", icon: "chart.bar.xaxis"),
             SwitchItem(id: .calendar, title: "Calendar", icon: "calendar"),
         ]
     }
@@ -126,6 +135,8 @@ struct ProjectsView: View {
                 }
             } else if layout == .board {
                 board
+            } else if layout == .timeline {
+                ProjectsTimeline(store: store, projects: visibleProjects)
             } else {
                 ScrollViewReader { proxy in list(proxy) }
             }
@@ -159,11 +170,12 @@ struct ProjectsView: View {
             .frame(width: 160)
             .accessibilityLabel("Search projects")
         filterMenu
-        SegmentedSwitch(items: ProjectsViewChoice.items, selection: layout == .board ? .board : .list,
+        SegmentedSwitch(items: ProjectsViewChoice.items, selection: layout.choice,
                         iconOnly: true) { choice in
             switch choice {
             case .list: layout = .list
             case .board: layout = .board
+            case .timeline: layout = .timeline
             case .calendar: showCalendar()
             }
         }
@@ -344,7 +356,9 @@ struct ProjectsView: View {
                 .foregroundStyle(Theme.ink)
                 .lineLimit(1)
             if total == 0 { Text("No tasks").metaText() }
-            if let lead = summary.project.leadPersonId.flatMap({ id in people.first { $0.id == id } }) {
+            if summary.project.leadIsSelf == true {
+                Text("Lead Me").metaText().lineLimit(1)
+            } else if let lead = summary.project.leadPersonId.flatMap({ id in people.first { $0.id == id } }) {
                 Text("Lead \(lead.name)").metaText().lineLimit(1)
             }
             Spacer(minLength: 12)
@@ -455,6 +469,13 @@ struct ProjectsView: View {
                     .disabled(store.mutating)
                 Button("Talk to Sona", systemImage: "bubble.left") { discussProject(detail.project) }
                     .buttonStyle(.secondary)
+                let starred = model.work.isFavorite(.project, detail.project.id)
+                Button {
+                    model.work.setFavorite(.project, detail.project.id, !starred)
+                } label: { Image(systemName: starred ? "star.fill" : "star") }
+                    .buttonStyle(.icon)
+                    .accessibilityLabel(starred ? "Remove from favorites" : "Add to favorites")
+                    .help(starred ? "Remove from favorites" : "Add to favorites")
                 Button {
                     Task { await store.loadDetail(id) }
                 } label: { Image(systemName: "arrow.clockwise") }

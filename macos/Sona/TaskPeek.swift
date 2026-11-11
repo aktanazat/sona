@@ -42,8 +42,8 @@ struct TaskPeek: View {
                     }
                     if !suggestions.isEmpty {
                         HStack(spacing: 6) {
-                            ForEach(Array(suggestions.enumerated()), id: \.offset) { _, suggestion in
-                                SuggestionChip(suggestion: suggestion, now: TaskDates.now())
+                            ForEach(suggestions, id: \.id) { suggestion in
+                                SuggestionChip(itemId: row.id, suggestion: suggestion, now: TaskDates.now())
                             }
                         }
                     }

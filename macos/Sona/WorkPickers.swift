@@ -19,6 +19,7 @@ struct WorkChoice: Identifiable {
     var key: String?
     /// Leaves the picker open: the choice swaps the list for its next step.
     var staysOpen = false
+    var inner: [WorkChoice]?
     let run: @MainActor () -> Void
 }
 
@@ -37,6 +38,7 @@ enum WorkChoices {
         case .project: "Move to project…"
         case .duplicate: "Duplicate of…"
         case .snooze: "Snooze until, or type a date…"
+        case .decline: "Why decline? Optional…"
         case .delegate: "Delegate to…"
         case .cycle: "Move to cycle…"
         case .blockedBy: "Blocked by which task…"
@@ -95,6 +97,11 @@ enum WorkChoices {
             snoozes(text, pickDay: pickDay) { moment in
                 model.leave(ids) { work.update(ids, WorkPatch(snoozedUntilMs: .set(moment))) }
             }
+        case .decline:
+            [WorkChoice(id: "decline", title: text.isEmpty ? "Decline" : "Decline: \(text)", mark: .symbol("xmark.circle"),
+                        detail: text.isEmpty ? "No reason" : nil) {
+                model.leave(ids) { work.decline(ids, reason: text) }
+            }]
         case .delegate:
             delegates(rows) { agent in
                 model.changeWork { work.delegate(ids, to: agent) }
@@ -115,7 +122,7 @@ enum WorkChoices {
     /// Typed letters narrow a list of names; dates and tasks read the text
     /// themselves.
     static func filtered(_ choices: [WorkChoice], by text: String, kind: WorkPicker.Kind) -> [WorkChoice] {
-        guard !text.isEmpty, kind != .due, kind != .snooze, !picksTask(kind) else { return choices }
+        guard !text.isEmpty, kind != .due, kind != .snooze, kind != .decline, !picksTask(kind) else { return choices }
         return choices.filter { $0.id == newLabel || $0.title.localizedCaseInsensitiveContains(text) }
     }
 
@@ -190,10 +197,26 @@ enum WorkChoices {
         _ labels: [WorkLabel], text: String, checked: (String) -> Bool, toggle: @escaping @MainActor (String) -> Void,
         create: (@MainActor (String) -> Void)? = nil
     ) -> [WorkChoice] {
-        var choices = labels.map { label in
-            WorkChoice(id: label.id, title: label.name, mark: .label(label.hue), checked: checked(label.id)) {
+        let on = Set(labels.map(\.id).filter(checked))
+        let shown = labels.filter { !$0.retired || on.contains($0.id) }
+        let choice = { (label: WorkLabel) in
+            WorkChoice(id: label.id, title: label.name, mark: .label(label.hue), detail: text.isEmpty ? nil : label.group,
+                       checked: on.contains(label.id)) {
                 toggle(label.id)
             }
+        }
+        var choices: [WorkChoice]
+        if text.isEmpty {
+            let groups = Dictionary(grouping: shown.filter { $0.group != nil }) { $0.group ?? "" }
+            choices = groups.map { name, members in
+                let current = members.filter { on.contains($0.id) }
+                return WorkChoice(id: "group:\(name)", title: name, mark: current.first.map { .label($0.hue) } ?? .symbol("circle.dashed"),
+                                  detail: current.isEmpty ? "None" : current.map(\.name).joined(separator: ", "),
+                                  inner: members.map(choice)) {}
+            } + shown.filter { $0.group == nil }.map(choice)
+            choices.sort { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+        } else {
+            choices = shown.map(choice)
         }
         let exists = labels.contains { $0.name.localizedCaseInsensitiveCompare(text) == .orderedSame }
         if !text.isEmpty, !exists {
@@ -202,6 +225,13 @@ enum WorkChoices {
             })
         }
         return choices
+    }
+
+    static func adding(_ label: String, to ids: [String], among labels: [WorkLabel]) -> [String] {
+        guard !ids.contains(label) else { return ids }
+        let group = labels.first { $0.id == label }?.group
+        let siblings = Set(labels.filter { group != nil && $0.group == group }.map(\.id))
+        return ids.filter { !siblings.contains($0) } + [label]
     }
 
     static func projects(
@@ -265,9 +295,11 @@ enum WorkChoices {
         return choices
     }
 
+    /// The agents a task can go to, by the names the core gives them.
+    static let agents = ["Claude Code", "Codex", "OMP", "Grok"]
+
     /// The agents a task can go to, and no agent once one has it.
     private static func delegates(_ rows: [WorkItemRow], pick: @escaping @MainActor (String?) -> Void) -> [WorkChoice] {
-        let agents = ["Claude Code", "Codex", "OMP", "Grok"]
         var choices = agents.enumerated().map { index, agent in
             WorkChoice(id: agent, title: agent, mark: .symbol("sparkle"),
                        checked: !rows.isEmpty && rows.allSatisfy { $0.doer?.agent == agent }, key: "\(index + 1)") {
@@ -366,9 +398,10 @@ enum WorkChoices {
     private static func toggle(_ label: String, _ rows: [WorkItemRow], _ model: AppModel) {
         let on = rows.allSatisfy { $0.labelIds.contains(label) }
         let alike = Dictionary(grouping: rows, by: \.labelIds)
+        let all = model.work.labels
         model.changeWork {
             for (labels, members) in alike {
-                let next = on ? labels.filter { $0 != label } : labels.contains(label) ? labels : labels + [label]
+                let next = on ? labels.filter { $0 != label } : adding(label, to: labels, among: all)
                 if next != labels { model.work.update(members.map(\.id), WorkPatch(labelIds: next)) }
             }
         }
@@ -474,10 +507,11 @@ struct ChoiceList: View {
     let close: () -> Void
     @State private var query = ""
     @State private var selection = 0
+    @State private var opened: String?
     @FocusState private var focused: Bool
 
     var body: some View {
-        let choices = make(query)
+        let choices = shown(make(query))
         VStack(spacing: 0) {
             if let context {
                 WorkContextChip(text: context)
@@ -547,7 +581,17 @@ struct ChoiceList: View {
             selection = choices.firstIndex(where: \.checked) ?? 0
             DispatchQueue.main.async { focused = true }
         }
-        .onChange(of: query) { _, _ in selection = 0 }
+        .onChange(of: query) { _, _ in
+            selection = 0
+            opened = nil
+        }
+    }
+
+    private static let back = "back"
+
+    private func shown(_ all: [WorkChoice]) -> [WorkChoice] {
+        guard let opened, let group = all.first(where: { $0.id == opened }), let inner = group.inner else { return all }
+        return [WorkChoice(id: Self.back, title: group.title, mark: .symbol("chevron.left"), staysOpen: true) {}] + inner
     }
 
     private var footer: some View {
@@ -575,9 +619,24 @@ struct ChoiceList: View {
     private func pick(_ choices: [WorkChoice], at index: Int) {
         guard choices.indices.contains(index) else { return }
         let choice = choices[index]
+        if choice.inner != nil {
+            opened = choice.id
+            selection = (choice.inner?.firstIndex(where: \.checked) ?? 0) + 1
+            return
+        }
+        if choice.id == Self.back, let group = opened {
+            closeGroup(group)
+            return
+        }
         if keepsOpen || !choice.checked { choice.run() }
         if choice.id == WorkChoices.newLabel { query = "" }
+        if let group = opened { closeGroup(group) }
         if !keepsOpen && !choice.staysOpen { close() }
+    }
+
+    private func closeGroup(_ group: String) {
+        opened = nil
+        selection = make(query).firstIndex { $0.id == group } ?? 0
     }
 }
 
@@ -605,6 +664,11 @@ struct WorkChoiceRow: View {
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(Theme.accent)
                         .accessibilityLabel("Current")
+                }
+                if choice.inner != nil {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(Theme.inkTertiary)
                 }
                 if let key = choice.key, !compact {
                     KeyCap(key)

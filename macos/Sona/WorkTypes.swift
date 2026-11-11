@@ -532,10 +532,10 @@ struct WorkQuery: Codable, Equatable, Hashable {
 }
 
 enum WorkConditionField: String, Codable, CaseIterable, Hashable, Identifiable {
-    case status, priority, owner, project, milestone, label, cycle, due, created, updated
+    case status, priority, owner, delegate, project, milestone, label, cycle, due, created, updated
 
     var id: Self { self }
-    var label: String { rawValue.prefix(1).uppercased() + rawValue.dropFirst() }
+    var label: String { self == .delegate ? "Agent" : rawValue.prefix(1).uppercased() + rawValue.dropFirst() }
     var dated: Bool { self == .due || self == .created || self == .updated }
     var operators: [WorkConditionOp] {
         dated ? [.before, .after, .is, .isNot]
@@ -608,6 +608,10 @@ struct WorkLabel: Codable, Identifiable, Equatable {
     /// Degrees on the color wheel, 0 to 360.
     var hue: Double
     var revision: Int64
+    var group: String?
+    var retiredAtMs: Int64?
+
+    var retired: Bool { retiredAtMs != nil }
 }
 
 struct WorkCounts: Codable, Equatable {
@@ -655,6 +659,7 @@ struct WorkActivity: Codable, Identifiable, Equatable {
     var to: String?
     /// The agent behind an `agent` entry, when it gave its name.
     var agent: String?
+    var reason: String?
 }
 
 enum WorkRelationKind: String, Codable, Hashable { case blocks, related }
@@ -666,16 +671,18 @@ struct WorkRelation: Codable, Identifiable, Equatable {
     var kind: WorkRelationKind
 }
 
-enum WorkSuggestionField: String, Codable, Hashable { case owner, due, project, duplicate }
+enum WorkSuggestionField: String, Codable, Hashable { case owner, due, project, label, duplicate, related }
 
 enum WorkSuggestionValue: Equatable {
     case owner(WorkOwner)
     case due(Int64)
     case project(String)
+    case label(String)
     case item(String)
 }
 
 struct WorkFieldSuggestion: Equatable {
+    var id: String
     var field: WorkSuggestionField
     var value: WorkSuggestionValue
     var reason: String
@@ -686,16 +693,18 @@ struct WorkFieldSuggestion: Equatable {
 }
 
 extension WorkFieldSuggestion: Decodable {
-    private enum Key: String, CodingKey { case field, value, reason, quote, atMs, meetingId }
+    private enum Key: String, CodingKey { case id, field, value, reason, quote, atMs, meetingId }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: Key.self)
+        id = try container.decode(String.self, forKey: .id)
         field = try container.decode(WorkSuggestionField.self, forKey: .field)
         switch field {
         case .owner: value = .owner(try container.decode(WorkOwner.self, forKey: .value))
         case .due: value = .due(try container.decode(Int64.self, forKey: .value))
         case .project: value = .project(try container.decode(String.self, forKey: .value))
-        case .duplicate: value = .item(try container.decode(String.self, forKey: .value))
+        case .label: value = .label(try container.decode(String.self, forKey: .value))
+        case .duplicate, .related: value = .item(try container.decode(String.self, forKey: .value))
         }
         reason = try container.decode(String.self, forKey: .reason)
         quote = try container.decodeIfPresent(String.self, forKey: .quote)

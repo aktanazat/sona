@@ -90,7 +90,7 @@ private struct TasksList: View {
             } trailing: {
                 trailing(draft)
             }
-            if let draft, focus.tab != .all || !TaskFilters.chips(draft.query, model: model).isEmpty {
+            if let draft {
                 TaskFilterBar(draft: draft)
             }
             if let error = store.listError, store.items != nil {
@@ -164,7 +164,8 @@ private struct TasksList: View {
             row: item, shows: shows, labels: item.labelIds.compactMap { labels[$0] },
             highlighted: focus.highlighted == item.id, selected: focus.selection.contains(item.id),
             selecting: focus.selecting, renaming: focus.renaming == item.id, now: now,
-            revision: model.people.photoRevision, waiting: model.agents.waits(on: item)
+            revision: model.people.photoRevision, waiting: model.agents.waits(on: item),
+            session: model.work.working[item.id]
         ) {
             focus.toggle(item.id)
         } rename: { title in
@@ -236,6 +237,9 @@ private struct TasksList: View {
             DisplayOptionsView()
                 .environment(model)
         }
+        WorkBarButton(icon: "archivebox", help: "Archive and recently deleted") {
+            model.go(.archive)
+        }
         Button {
             model.newTask()
         } label: {
@@ -258,21 +262,6 @@ private struct TasksList: View {
         if let project = patch.projectId { start.projectId = project }
         if let due = patch.dueAtMs { start.dueAtMs = due }
         model.workFocus.composing = start
-    }
-}
-
-/// Saved views pinned to the sidebar, kept on this Mac as their ids.
-enum FavoriteViews {
-    static let key = "tasks.favoriteViews"
-
-    static func ids(_ stored: String) -> [String] {
-        stored.split(separator: ",").map(String.init)
-    }
-
-    static func toggled(_ stored: String, _ id: String) -> String {
-        var list = ids(stored)
-        if let index = list.firstIndex(of: id) { list.remove(at: index) } else { list.append(id) }
-        return list.joined(separator: ",")
     }
 }
 
@@ -464,6 +453,13 @@ struct WorkActionMenu: View {
                     Label(copy.title, systemImage: copy.icon)
                 }
             }
+            if rows.count == 1, let row = rows.first {
+                Button {
+                    model.sheet = .saveTemplate(row.id)
+                } label: {
+                    Label("Save as template…", systemImage: "doc.on.doc")
+                }
+            }
         }
     }
 }
@@ -524,7 +520,8 @@ private struct TaskColumn: View {
                         TaskCard(
                             row: item, shows: shows, labels: item.labelIds.compactMap { labels[$0] },
                             highlighted: focus.highlighted == item.id, selected: focus.selection.contains(item.id),
-                            now: now, revision: model.people.photoRevision, waiting: model.agents.waits(on: item))
+                            now: now, revision: model.people.photoRevision, waiting: model.agents.waits(on: item),
+                            session: model.work.working[item.id])
                             .modifier(TaskRowInteractions(id: item.id))
                             .draggable(model.menuTargets(item.id).joined(separator: "\n"))
                             .transition(WorkMotion.insert(reduced: reduceMotion))
@@ -561,6 +558,7 @@ private struct TaskCard: View {
     let now: Int64
     let revision: UInt64
     var waiting = false
+    var session: WorkSession?
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: Theme.radiusControl, style: .continuous)
@@ -576,8 +574,8 @@ private struct TaskCard: View {
                     if shows.contains(TaskProperty.updated.rawValue) {
                         Text(TaskDates.ago(row.updatedAtMs, now: now)).metaText()
                     }
-                    if let doer = row.doer, row.status.isOpen {
-                        TaskDoer(doer: doer, waiting: waiting)
+                    if let agent = session?.agent ?? (row.status.isOpen ? row.doer?.agent : nil) {
+                        TaskDoer(agent: agent, waiting: waiting, session: session)
                     }
                     if shows.contains(TaskProperty.owner.rawValue) {
                         Avatar(face: row.ownerFace, size: 18, revision: revision)
@@ -633,7 +631,7 @@ private struct TaskCard: View {
 
     private var hasTop: Bool {
         [TaskProperty.number, .updated, .owner].contains { shows.contains($0.rawValue) }
-            || (row.doer != nil && row.status.isOpen)
+            || session != nil || (row.doer != nil && row.status.isOpen)
     }
 
     private var hasMeta: Bool {

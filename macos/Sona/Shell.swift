@@ -81,6 +81,8 @@ struct Shell: View {
                 NudgeSheet(id: id).environment(model)
             case let .workBrief(subject):
                 WorkBriefSheet(subject: subject).environment(model)
+            case let .saveTemplate(id):
+                SaveTemplateSheet(id: id).environment(model)
             }
         }
     }
@@ -169,6 +171,12 @@ struct Shell: View {
                 TriageScreen()
             case .today:
                 MorningPlanView()
+            case .inbox:
+                InboxScreen()
+            case .archive:
+                TaskArchiveScreen()
+            case .loops:
+                LoopsScreen()
             }
         }
     }
@@ -377,7 +385,6 @@ struct MeetingsPlace: View {
 
 struct Sidebar: View {
     @Environment(AppModel.self) private var model
-    @AppStorage(FavoriteViews.key) private var favoriteViews = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -429,13 +436,13 @@ struct Sidebar: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: Space.xxs) {
-                    let favorites = FavoriteViews.ids(favoriteViews)
-                    let pinnedOpen = model.place.parent == .tasks && favorites.contains { model.workFocus.tab == .view($0) }
+                    let favorites = model.work.favorites
+                    let favoriteShown = favorites.contains(where: favoriteOpen)
                     ForEach(Place.sidebar) { place in
                         SidebarItem(
                             icon: place.icon,
                             title: place.title,
-                            selected: model.place.parent == place && !model.showingSettings && !(place == .tasks && pinnedOpen),
+                            selected: model.place.parent == place && !model.showingSettings && !favoriteShown,
                             count: count(place),
                             live: place == .capture && model.capture != .idle
                                 || place == .meetings && model.live.live != nil
@@ -443,16 +450,8 @@ struct Sidebar: View {
                             model.go(place)
                         }
                     }
-                    ForEach(model.work.views.filter { favorites.contains($0.id) }) { view in
-                        SidebarItem(
-                            icon: "star",
-                            title: view.name,
-                            selected: model.place.parent == .tasks && model.workFocus.tab == .view(view.id)
-                                && !model.showingSettings
-                        ) {
-                            model.go(.tasks)
-                            model.workFocus.switchTab(.view(view.id))
-                        }
+                    ForEach(favorites, id: \.self) { favorite in
+                        favoriteRow(favorite)
                     }
                     gap
                     SidebarItem(
@@ -482,6 +481,51 @@ struct Sidebar: View {
         .keepsWindowToolbar()
     }
 
+    private func favoriteOpen(_ favorite: WorkFavorite) -> Bool {
+        guard !model.showingSettings else { return false }
+        switch favorite.kind {
+        case .task:
+            return model.place == .tasks && model.workFocus.opened(in: .tasks) == favorite.targetId
+                && model.workRows([favorite.targetId]).first != nil
+        case .project:
+            return model.place == .projects && model.projects.selectedProjectId == favorite.targetId
+                && model.work.projects.contains { $0.id == favorite.targetId }
+        case .view:
+            return model.place.parent == .tasks && model.workFocus.tab == .view(favorite.targetId)
+                && model.work.views.contains { $0.id == favorite.targetId }
+        case .unknown:
+            return false
+        }
+    }
+
+    @ViewBuilder
+    private func favoriteRow(_ favorite: WorkFavorite) -> some View {
+        let focus = model.workFocus
+        switch favorite.kind {
+        case .task:
+            if let row = model.workRows([favorite.targetId]).first {
+                SidebarItem(icon: "star", title: row.title, selected: favoriteOpen(favorite)) {
+                    model.openTask(row.id)
+                }
+            }
+        case .project:
+            if let project = model.work.projects.first(where: { $0.id == favorite.targetId }) {
+                SidebarItem(icon: "star", title: project.title, selected: favoriteOpen(favorite)) {
+                    model.openProject(project.id)
+                }
+            }
+        case .view:
+            if let view = model.work.views.first(where: { $0.id == favorite.targetId }) {
+                SidebarItem(icon: "star", title: view.name, selected: favoriteOpen(favorite)) {
+                    model.go(.tasks)
+                    focus.switchTab(.view(view.id))
+                }
+            }
+        case .unknown:
+            EmptyView()
+        }
+    }
+
     /// The small live number beside a row: what needs the reader there.
     private func count(_ place: Place) -> SidebarCount? {
         switch place {
@@ -493,7 +537,9 @@ struct Sidebar: View {
         case .tasks:
             SidebarCount(value: model.work.counts.map { $0.mineOverdue + $0.mineDueToday } ?? 0,
                          meaning: "due today or late")
-        case .capture, .library, .meetings, .scratchpad, .calendar, .today, .projects:
+        case .inbox:
+            SidebarCount(value: model.work.unread, meaning: "unread")
+        case .capture, .library, .meetings, .scratchpad, .calendar, .today, .projects, .archive, .loops:
             nil
         }
     }
