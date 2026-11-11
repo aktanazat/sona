@@ -229,11 +229,16 @@ pub struct ExternalWorkComment {
     pub edited_at_ms: Option<i64>,
     pub resolved_at_ms: Option<i64>,
     pub deleted: bool,
+    /// The `sona://task/<id>?comment=<id>` address the app's Copy link gives,
+    /// on a task's comment.
+    pub link: Option<String>,
     pub replies: Vec<ExternalWorkComment>,
 }
 
 pub(super) fn project_comment(comment: WorkComment) -> ExternalWorkComment {
     let id = comment.item_id;
+    let link = matches!(comment.subject, WorkCommentSubject::Task)
+        .then(|| format!("sona://task/{id}?comment={}", comment.id));
     ExternalWorkComment {
         id: comment.id,
         on: match comment.subject {
@@ -253,6 +258,7 @@ pub(super) fn project_comment(comment: WorkComment) -> ExternalWorkComment {
         edited_at_ms: comment.edited_at_ms,
         resolved_at_ms: comment.resolved_at_ms,
         deleted: comment.deleted,
+        link,
         replies: comment.replies.into_iter().map(project_comment).collect(),
     }
 }
@@ -969,10 +975,15 @@ fn comment_text(text: &mut String, comment: &ExternalWorkComment, indent: &str) 
     };
     let _ = writeln!(
         text,
-        "{indent}{}  {who}  {}{notes}  id {}",
+        "{indent}{}  {who}  {}{notes}  id {}{}",
         local_time(comment.created_at_ms),
         if comment.deleted { "deleted" } else { "" },
-        comment.id
+        comment.id,
+        comment
+            .link
+            .as_deref()
+            .map(|link| format!("  {link}"))
+            .unwrap_or_default()
     );
     for line in comment.body.as_deref().unwrap_or_default().lines() {
         let _ = writeln!(text, "{indent}  {line}");

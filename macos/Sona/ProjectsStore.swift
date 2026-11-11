@@ -1362,6 +1362,21 @@ final class ProjectsStore {
         await loadDetails([milestone.projectId])
     }
 
+    /// Deletes a milestone for good, the delete `work milestone-delete`
+    /// makes. Its tasks stay in the project with no milestone.
+    func deleteMilestone(_ milestone: PlanningMilestone) async {
+        do {
+            try await write { () async throws -> Void in
+                try await self.core.request("planning_milestone_delete",
+                                            PlanningOperationParams(operationId: UUID().uuidString, id: milestone.id))
+            }
+        } catch {
+            mutationError = error.localizedDescription
+        }
+        await refresh()
+        await loadDetails([milestone.projectId])
+    }
+
     func reorderMilestones(projectId: String, ids: [String]) async {
         if let detail = details[projectId] {
             var changed = detail

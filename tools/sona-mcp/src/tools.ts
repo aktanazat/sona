@@ -2744,7 +2744,7 @@ export const TOOLS: readonly ToolDefinition[] = [
     name: "sona_comment_list",
     title: "Read comments in Sona",
     description:
-      "Read the comment threads on a task, a project, a milestone, a meeting or a note, oldest first: name exactly one of task, project (with milestone for one of its milestones), meeting or note. Each comment carries its id, author (me, sona or an agent by name), Markdown body, when it was written, edited and resolved, and its replies. A deleted comment keeps its place with body null while it has replies. Pass next_cursor back as cursor for the next page.",
+      "Read the comment threads on a task, a project, a milestone, a meeting or a note, oldest first: name exactly one of task, project (with milestone for one of its milestones), meeting or note. Each comment carries its id, author (me, sona or an agent by name), Markdown body, when it was written, edited and resolved, and its replies. A task's comment also carries link, the sona:// address the app's Copy link gives, which opens the task scrolled to that comment. A deleted comment keeps its place with body null while it has replies. Pass next_cursor back as cursor for the next page.",
     inputSchema: {
       type: "object",
       properties: {
@@ -2778,7 +2778,7 @@ export const TOOLS: readonly ToolDefinition[] = [
   {
     name: "sona_comment_save",
     title: "Comment in Sona",
-    description: `Without id, add a comment to a task, a project (with milestone, one of its milestones), a meeting or a note: name exactly one of task, project, meeting or note. With reply_to, answer in that comment's thread (a reply to a reply joins the thread's first comment). With id, change the body of a comment you wrote; leave out what it is on and reply_to. The comment is shown as yours. Use it to say what you are doing on a task you claimed, what you found and what is left. A meeting the user keeps on this Mac answers not_found. dry_run:true shows it without writing. ${COMMENT_WRITES} Agents may comment whether their changes apply or wait for the user.`,
+    description: `Without id, add a comment to a task, a project (with milestone, one of its milestones), a meeting or a note: name exactly one of task, project, meeting or note. With reply_to, answer in that comment's thread (a reply to a reply joins the thread's first comment). With id, change the body of a comment you wrote; leave out what it is on and reply_to. The comment is shown as yours. Use it to say what you are doing on a task you claimed, what you found and what is left. The answer's comment carries link on a task, the sona:// address to hand the user. A meeting the user keeps on this Mac answers not_found. dry_run:true shows it without writing. ${COMMENT_WRITES} Agents may comment whether their changes apply or wait for the user.`,
     mutates: "changes",
     inputSchema: {
       type: "object",

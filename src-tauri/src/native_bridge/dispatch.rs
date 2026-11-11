@@ -6211,6 +6211,20 @@ pub(super) async fn call(
             })
             .await?
         }
+        "planning_milestone_delete" => {
+            let mut args = Args::parse(params)?;
+            let operation_id: String = args.take("operationId")?;
+            let id: String = args.take("id")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::planning::work::catalog_milestone_delete(
+                    &handle,
+                    &operation_id,
+                    &id,
+                ))
+            })
+            .await?
+        }
         "planning_milestone_reorder" => {
             let mut args = Args::parse(params)?;
             let operation_id = args.take("operationId")?;

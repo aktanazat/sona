@@ -2103,7 +2103,6 @@ private struct RepeatMenu: View {
     let rule: String?
     let shown: Binding<Bool>
     @Environment(AppModel.self) private var model
-    private static let rules = ["every day", "every weekday", "every monday", "every month"]
 
     var body: some View {
         let kept = row.repeat.flatMap { $0.of > 0 ? ", kept \($0.kept) of \($0.of)" : nil } ?? ""
@@ -2114,19 +2113,8 @@ private struct RepeatMenu: View {
         }
         .buttonStyle(.plain)
         .popover(isPresented: shown, arrowEdge: .bottom) {
-            VStack(alignment: .leading, spacing: 0) {
-                PropertyChoices(choices: Self.rules.map { every in
-                    PropertyChoice(id: every, title: Recurrence.display(every), on: every == rule) { set(every) }
-                } + (rule == nil ? [] : [PropertyChoice(id: "none", title: "Don't repeat", on: false) { set(nil) }])) {
-                    shown.wrappedValue = false
-                }
-                Hairline().padding(.bottom, 8)
-                RepeatRuleField { every in
-                    set(every)
-                    shown.wrappedValue = false
-                }
-            }
-            .environment(model)
+            RepeatChoices(rule: rule, set: set) { shown.wrappedValue = false }
+                .environment(model)
         }
         .accessibilityLabel("Repeats")
     }
@@ -2134,6 +2122,30 @@ private struct RepeatMenu: View {
     private func set(_ every: String?) {
         let task = row.id
         model.changeWork { model.work.update([task], WorkPatch(recurrence: every.map { .set($0) } ?? .clear)) }
+    }
+}
+
+/// The common repeats, Don't repeat when one is set, and a field for one
+/// typed in words: the task inspector's repeat list and the template
+/// editor's.
+struct RepeatChoices: View {
+    let rule: String?
+    let set: (String?) -> Void
+    let done: () -> Void
+    private static let rules = ["every day", "every weekday", "every monday", "every month"]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            PropertyChoices(choices: Self.rules.map { every in
+                PropertyChoice(id: every, title: Recurrence.display(every), on: every == rule) { set(every) }
+            } + (rule == nil ? [] : [PropertyChoice(id: "none", title: "Don't repeat", on: false) { set(nil) }]),
+            done: done)
+            Hairline().padding(.bottom, 8)
+            RepeatRuleField { every in
+                set(every)
+                done()
+            }
+        }
     }
 }
 

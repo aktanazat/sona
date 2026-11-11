@@ -55,6 +55,7 @@ struct ProjectsView: View {
     @State private var discussedMilestone: PlanningMilestone?
     @State private var titleDraft: String?
     @State private var convertingMilestone: PlanningMilestone?
+    @State private var deletingMilestone: PlanningMilestone?
     @State private var templatingProject: PlanningProject?
     @State private var pickingUpdateDay = false
     @FocusState private var keysFocused: Bool
@@ -122,6 +123,14 @@ struct ProjectsView: View {
             Button("Cancel", role: .cancel) {}
         } message: { milestone in
             Text("“\(milestone.title)” becomes a project and takes its tasks with it.")
+        }
+        .alert("Delete this milestone?", isPresented: Binding(get: { deletingMilestone != nil },
+                                                              set: { if !$0 { deletingMilestone = nil } }),
+               presenting: deletingMilestone) { milestone in
+            Button("Delete", role: .destructive) { Task { await store.deleteMilestone(milestone) } }
+            Button("Cancel", role: .cancel) {}
+        } message: { milestone in
+            Text("“\(milestone.title)” and its comments are deleted for good. Its tasks stay in the project.")
         }
         .transaction {
             if reduceMotion { $0.animation = nil; $0.disablesAnimations = true }
@@ -1033,6 +1042,7 @@ struct ProjectsView: View {
             Button("Comments…") { discussedMilestone = milestone }
             Divider()
             Button("Convert to project…") { convertingMilestone = milestone }
+            Button("Delete milestone…", role: .destructive) { deletingMilestone = milestone }
         }
     }
 

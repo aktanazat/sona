@@ -379,14 +379,16 @@ private struct TemplateSettingsRow: View {
     }
 }
 
-/// A template's title, details, priority, owner, project and sub-tasks,
-/// changed in place; due day and labels keep their own controls.
+/// A template's title, details, priority, owner, project, labels, repeat
+/// and sub-tasks, changed in place; the due day keeps its own control.
 private struct TemplateFieldsEditor: View {
     let template: WorkTemplate
     let close: () -> Void
     @Environment(AppModel.self) private var model
     @State private var fields = WorkTemplateFields()
     @State private var subtasks = ""
+    @State private var pickingLabels = false
+    @State private var pickingRepeat = false
 
     var body: some View {
         let work = model.work
@@ -416,6 +418,30 @@ private struct TemplateFieldsEditor: View {
                     Text(project.title).tag(String?.some(project.id))
                 }
             }
+            LabeledContent("Labels") {
+                Button(labelTitle(work.labels)) { pickingLabels = true }
+                    .buttonStyle(.compact)
+                    .popover(isPresented: $pickingLabels, arrowEdge: .bottom) {
+                        ChoiceList(prompt: "Labels…", keepsOpen: true, compact: true) { text in
+                            WorkChoices.filtered(
+                                WorkChoices.labels(work.labels, text: text) { fields.labelIds.contains($0) } toggle: { label in
+                                    toggleLabel(label)
+                                } create: { name in
+                                    fields.labelIds.append(work.makeLabel(named: name))
+                                }, by: text, kind: .labels)
+                        } close: { pickingLabels = false }
+                            .padding(.vertical, Space.xs)
+                            .environment(model)
+                    }
+            }
+            LabeledContent("Repeats") {
+                Button(fields.recurrence.map(Recurrence.display) ?? "Doesn't repeat") { pickingRepeat = true }
+                    .buttonStyle(.compact)
+                    .popover(isPresented: $pickingRepeat, arrowEdge: .bottom) {
+                        RepeatChoices(rule: fields.recurrence) { fields.recurrence = $0 } done: { pickingRepeat = false }
+                            .environment(model)
+                    }
+            }
             VStack(alignment: .leading, spacing: Space.xs) {
                 Text("Sub-tasks, one a line").metaText()
                 TextEditor(text: $subtasks)
@@ -443,6 +469,23 @@ private struct TemplateFieldsEditor: View {
 
     private func text(_ path: WritableKeyPath<WorkTemplateFields, String?>) -> Binding<String> {
         Binding(get: { fields[keyPath: path] ?? "" }, set: { fields[keyPath: path] = $0.isEmpty ? nil : $0 })
+    }
+
+    private func labelTitle(_ all: [WorkLabel]) -> String {
+        let names = fields.labelIds.compactMap { id in all.first { $0.id == id }?.name }
+        return switch names.count {
+        case 0: "No labels"
+        case 1, 2: names.joined(separator: ", ")
+        default: "\(names.count) labels"
+        }
+    }
+
+    private func toggleLabel(_ id: String) {
+        if fields.labelIds.contains(id) {
+            fields.labelIds.removeAll { $0 == id }
+        } else {
+            fields.labelIds = WorkChoices.adding(id, to: fields.labelIds, among: model.work.labels)
+        }
     }
 
     private func save() {
