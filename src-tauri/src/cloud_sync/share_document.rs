@@ -10,13 +10,11 @@
 //! there. Bounds here count UTF-8 bytes and the viewer counts UTF-16 units; a
 //! string is never fewer bytes than units, so what passes here passes there.
 
-use std::collections::HashMap;
-
 use serde::Serialize;
 
+use crate::meeting::review_text::{self, readable_artifact};
 use crate::meeting::types::{
-    CitedArtifactText, GeneratedMeetingArtifacts, MeetingArtifactRevision, MeetingArtifactState,
-    MeetingReviewSnapshot, SpeakerId,
+    CitedArtifactText, GeneratedMeetingArtifacts, MeetingArtifactState, MeetingReviewSnapshot,
 };
 
 use super::types::CloudBrowserShareInclude;
@@ -142,18 +140,6 @@ fn encode_document(
     Ok((title, bytes))
 }
 
-/// The notes the review page reads: the newest current revision, else the
-/// newest out-of-date one, which the document then flags.
-fn readable_artifact(artifacts: &[MeetingArtifactRevision]) -> Option<&MeetingArtifactRevision> {
-    let newest = |state: MeetingArtifactState| {
-        artifacts
-            .iter()
-            .filter(|artifact| artifact.state == state && artifact.content.is_some())
-            .max_by_key(|artifact| artifact.generated_at_utc_ms)
-    };
-    newest(MeetingArtifactState::Current).or_else(|| newest(MeetingArtifactState::OutOfDate))
-}
-
 /// The generated notes, in the order and under the labels the review page
 /// uses.
 fn generated_sections(content: &GeneratedMeetingArtifacts, sections: &mut Vec<Section>) {
@@ -199,44 +185,15 @@ fn generated_sections(content: &GeneratedMeetingArtifacts, sections: &mut Vec<Se
 /// Consecutive lines of one speaker read as one turn, as they do on the
 /// review page, which keeps a long meeting inside the viewer's block count.
 fn transcript(review: &MeetingReviewSnapshot) -> Vec<Block> {
-    let speakers = review
-        .speakers
-        .iter()
-        .map(|speaker| (speaker.speaker_id, speaker.display_name.as_str()))
-        .collect::<HashMap<_, _>>();
-    let mut turns: Vec<(SpeakerId, u64, String)> = Vec::new();
-    for segment in review.transcript.iter().filter(|segment| !segment.removed) {
-        let text = segment
-            .replacement_text
-            .as_deref()
-            .unwrap_or(&segment.base.text)
-            .trim();
-        if text.is_empty() {
-            continue;
-        }
-        match turns.last_mut() {
-            Some((speaker, _, turn))
-                if *speaker == segment.assigned_speaker_id
-                    && turn.len() + 1 + text.len() <= MAX_BLOCK_TEXT_BYTES =>
-            {
-                turn.push(' ');
-                turn.push_str(text);
-            }
-            _ => turns.push((
-                segment.assigned_speaker_id,
-                segment.base.start_offset_ns,
-                text.to_owned(),
-            )),
-        }
-    }
-    turns
+    let speakers = review_text::speaker_names(review);
+    review_text::transcript_turns(review, MAX_BLOCK_TEXT_BYTES)
         .into_iter()
-        .flat_map(|(speaker, start, text)| {
+        .flat_map(|turn| {
             let name = speakers
-                .get(&speaker)
+                .get(&turn.speaker_id)
                 .and_then(|name| meta(name))
                 .unwrap_or_else(|| UNKNOWN_SPEAKER.to_owned());
-            items(&text, Some(name), Some(clock(start)))
+            items(&turn.text, Some(name), Some(clock(turn.start_offset_ns)))
         })
         .collect()
 }
@@ -272,24 +229,16 @@ fn items(text: &str, meta: Option<String>, time: Option<String>) -> Vec<Block> {
 /// Paragraphs are separated by blank lines; single line breaks stay inside
 /// the paragraph, and the viewer keeps them.
 fn paragraphs(text: &str) -> Vec<Block> {
-    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
-    let mut blocks = Vec::new();
-    let mut paragraph: Vec<&str> = Vec::new();
-    for line in normalized.split('\n').chain(std::iter::once("")) {
-        if !line.trim().is_empty() {
-            paragraph.push(line.trim_end());
-            continue;
-        }
-        if paragraph.is_empty() {
-            continue;
-        }
-        let joined = paragraph.join("\n");
-        blocks.extend(pieces(&joined).map(|piece| Block::Paragraph {
-            text: piece.to_owned(),
-        }));
-        paragraph.clear();
-    }
-    blocks
+    review_text::paragraphs(text)
+        .iter()
+        .flat_map(|paragraph| {
+            pieces(paragraph)
+                .map(|piece| Block::Paragraph {
+                    text: piece.to_owned(),
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
 }
 
 /// `text` trimmed and cut into pieces the viewer accepts, at whitespace where
@@ -360,11 +309,11 @@ mod tests {
     use super::*;
     use crate::meeting::types::{
         AllowedMeetingAction, CaptureCompleteness, DiarizationStatus, EffectiveTranscriptSegment,
-        ManualNote, ManualNoteId, MeetingActionItem, MeetingArtifactId, MeetingDiarizationSnapshot,
-        MeetingOutlineTopic, MeetingPhase, MeetingSessionId, MeetingSessionSnapshot,
-        MeetingSpeaker, ProcessingFailure, ProcessingStatus, SourceKind, SourceTrackId,
-        SpeakerAssignmentKind, StorageAvailability, TranscriptRevisionId, TranscriptSegment,
-        TranscriptSegmentId,
+        ManualNote, ManualNoteId, MeetingActionItem, MeetingArtifactId, MeetingArtifactRevision,
+        MeetingDiarizationSnapshot, MeetingOutlineTopic, MeetingPhase, MeetingSessionId,
+        MeetingSessionSnapshot, MeetingSpeaker, ProcessingFailure, ProcessingStatus, SourceKind,
+        SourceTrackId, SpeakerAssignmentKind, SpeakerId, StorageAvailability, TranscriptRevisionId,
+        TranscriptSegment, TranscriptSegmentId,
     };
 
     const SECOND: u64 = 1_000_000_000;
