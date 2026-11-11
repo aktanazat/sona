@@ -267,6 +267,9 @@ struct ItemRow: View {
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel("\(progress.done) of \(progress.total) sub-tasks done")
             }
+            if row.attachmentCount > 0 {
+                AttachmentCount(count: row.attachmentCount)
+            }
             if let repeating = row.repeat {
                 HStack(spacing: 3) {
                     Image(systemName: "repeat").font(.system(size: 9, weight: .medium))
@@ -773,5 +776,23 @@ struct UndoToast: View {
                     .elevation(.medium)
             }
             .transition(reduceMotion ? .opacity : .opacity.combined(with: .offset(y: 8)))
+    }
+}
+
+struct AttachmentCount: View {
+    let count: Int
+
+    var body: some View {
+        let line = count == 1 ? "1 attachment" : "\(count) attachments"
+        HStack(spacing: 3) {
+            Image(systemName: "paperclip").font(.system(size: 9, weight: .medium))
+            Text(verbatim: "\(count)")
+        }
+        .font(TypeScale.label(11))
+        .monospacedDigit()
+        .foregroundStyle(Theme.inkTertiary)
+        .help(line)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(line)
     }
 }

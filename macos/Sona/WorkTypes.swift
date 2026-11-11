@@ -225,6 +225,7 @@ struct WorkItemRow: Codable, Identifiable, Equatable {
     var atRisk: Bool
     var timeBlock: WorkTimeBlock?
     var `repeat`: WorkRepeat?
+    var attachmentCount: Int
 
     var item: WorkItem {
         WorkItem(
@@ -278,6 +279,27 @@ struct WorkComment: Codable, Identifiable, Equatable {
     var resolvedAtMs: Int64?
     var deleted: Bool
     var replies: [WorkComment]
+}
+
+enum WorkAttachmentKind: String, Codable, Hashable { case file, image, link }
+
+struct WorkAttachment: Codable, Identifiable, Equatable {
+    var id: String
+    var itemId: String
+    var kind: WorkAttachmentKind
+    var title: String
+    var subtitle: String?
+    var url: String?
+    var path: String?
+    var originalName: String?
+    var mime: String?
+    var size: Int64?
+    var sha256: String?
+    var createdAtMs: Int64
+    var createdBy: WorkCommentAuthor
+
+    var fileURL: URL? { path.map { URL(fileURLWithPath: $0) } }
+    var linkURL: URL? { url.flatMap(URL.init(string:)) }
 }
 
 struct WorkTimeBlock: Codable, Equatable {
@@ -558,6 +580,7 @@ enum WorkActor: String, Codable, Hashable { case me, sona, agent }
 enum WorkActivityKind: String, Codable, Hashable {
     case created, status, priority, owner, due, project, title, details, labels, archived, restored
     case duplicate, accepted, declined, snoozed, relation, kept, recurrence, cycle, block, parent, comment
+    case attachment
     case unknown
 
     init(from decoder: Decoder) throws {
@@ -667,6 +690,7 @@ struct WorkItemDetail: Decodable, Equatable {
     var parent: WorkItemRef?
     var subTasks: [WorkItem]
     var comments: [WorkComment]
+    var attachments: [WorkAttachment]
 }
 
 /// The `work-changed` event: the items one committed change touched, or

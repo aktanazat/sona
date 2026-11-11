@@ -614,6 +614,9 @@ final class WorkKeys {
                 return true
             case "b":
                 return model.toggleWorkLayout()
+            case "v":
+                guard let opened else { return false }
+                return model.attachPasteboard(to: opened)
             default:
                 return false
             }

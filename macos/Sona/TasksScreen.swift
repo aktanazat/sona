@@ -598,6 +598,9 @@ private struct TaskCard: View {
                     if shows.contains(TaskProperty.labels.rawValue) {
                         ForEach(labels.prefix(2)) { LabelPill(label: $0) }
                     }
+                    if row.attachmentCount > 0 {
+                        AttachmentCount(count: row.attachmentCount)
+                    }
                 }
             }
             if shows.contains(TaskProperty.meeting.rawValue), let meeting = row.sourceMeetingTitle {
@@ -631,5 +634,6 @@ private struct TaskCard: View {
         (shows.contains(TaskProperty.priority.rawValue) && row.priority != 0)
             || (shows.contains(TaskProperty.due.rawValue) && row.dueAtMs != nil)
             || (shows.contains(TaskProperty.labels.rawValue) && !labels.isEmpty)
+            || row.attachmentCount > 0
     }
 }

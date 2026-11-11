@@ -16,6 +16,9 @@ struct TaskPeek: View {
                 Text("#\(row.number)")
                     .font(TypeScale.mono(12))
                     .foregroundStyle(Theme.inkTertiary)
+                if row.attachmentCount > 0 {
+                    AttachmentCount(count: row.attachmentCount)
+                }
                 Spacer(minLength: 8)
                 TaskKeyButton(title: "Open", keys: "return") { model.perform(.open, on: [row.id]) }
                 WorkBarButton(icon: "xmark", help: "Close  Space") { focus.peeking = false }

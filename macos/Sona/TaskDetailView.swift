@@ -62,6 +62,7 @@ struct TaskDetailView: View {
                     }
                     .frame(width: width <= 1060 ? 280 : 320)
                 }
+                .modifier(AttachmentDrop(itemId: row.id, number: row.number))
             } else if store.items == nil {
                 TaskSkeleton(rows: 4)
             } else {
@@ -153,6 +154,8 @@ private struct DetailMain: View {
                 .padding(.top, 10)
             DetailSource(row: row)
             DetailSubtasks(row: row, subTasks: detail?.subTasks, place: place)
+                .padding(.top, 32)
+            DetailAttachments(row: row, attachments: detail?.attachments)
                 .padding(.top, 32)
             if row.status == .triage {
                 DetailSuggestions(suggestions: detail?.suggestions ?? model.work.suggestions[row.id] ?? [])
@@ -1846,6 +1849,10 @@ enum WorkActivityText {
             return "made it a sub-task of \(task(to, model: model))"
         case .comment:
             return "commented"
+        case .attachment:
+            if let added = entry.to { return "attached “\(added)”" }
+            if let removed = entry.from { return "removed “\(removed)”" }
+            return "changed an attachment"
         case .unknown:
             return "changed the task"
         }

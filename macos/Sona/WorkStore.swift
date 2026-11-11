@@ -120,24 +120,73 @@ final class WorkStore {
     }
 
     func addComment(on itemId: String, body: String, replyTo: String? = nil) async -> Bool {
-        await comment(on: itemId, "work_comment_add", CommentAddParams(
+        await write(on: itemId, "work_comment_add", CommentAddParams(
             operationId: Self.newId(), itemId: itemId, body: body, replyTo: replyTo))
     }
 
     func editComment(_ id: String, on itemId: String, body: String) async -> Bool {
-        await comment(on: itemId, "work_comment_edit", CommentEditParams(operationId: Self.newId(), id: id, body: body))
+        await write(on: itemId, "work_comment_edit", CommentEditParams(operationId: Self.newId(), id: id, body: body))
     }
 
     func deleteComment(_ id: String, on itemId: String) async -> Bool {
-        await comment(on: itemId, "work_comment_delete", OperationIdParams(operationId: Self.newId(), id: id))
+        await write(on: itemId, "work_comment_delete", OperationIdParams(operationId: Self.newId(), id: id))
     }
 
     func resolveComment(_ id: String, on itemId: String, resolved: Bool) async -> Bool {
-        await comment(on: itemId, "work_comment_resolve", CommentResolveParams(
+        await write(on: itemId, "work_comment_resolve", CommentResolveParams(
             operationId: Self.newId(), id: id, resolved: resolved))
     }
 
-    private func comment<P: Encodable>(on itemId: String, _ method: String, _ params: P) async -> Bool {
+    func attach(_ sources: [WorkAttachmentSource], to itemId: String) async -> Int {
+        let had = Set(detail.map { $0.item.id == itemId ? $0.attachments.map(\.id) : [] } ?? [])
+        var failure: String?
+        var repeats = 0
+        for source in sources {
+            do {
+                let made: WorkAttachment = try await core.request(
+                    source.method, source.params(itemId: itemId, operationId: Self.newId()))
+                if had.contains(made.id) { repeats += 1 }
+            } catch {
+                failure = error.localizedDescription
+            }
+        }
+        mutationError = failure
+        await loadDetail(itemId)
+        return repeats
+    }
+
+    func renameAttachment(_ attachment: WorkAttachment, to title: String) async -> Bool {
+        await write(on: attachment.itemId, "work_attachment_rename", AttachmentRenameParams(
+            operationId: Self.newId(), id: attachment.id, title: title))
+    }
+
+    func detach(_ attachment: WorkAttachment) async -> Bool {
+        let kept: WorkAttachmentSource?
+        if let url = attachment.linkURL, attachment.kind == .link {
+            kept = .link(url.absoluteString, title: attachment.title)
+        } else if let file = attachment.fileURL {
+            let folder = FileManager.default.temporaryDirectory
+                .appending(path: "sona-detached/\(Self.newId())", directoryHint: .isDirectory)
+            let copy = folder.appending(path: attachment.originalName ?? file.lastPathComponent)
+            do {
+                try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                try FileManager.default.copyItem(at: file, to: copy)
+                kept = .file(copy, title: attachment.title)
+            } catch {
+                kept = nil
+            }
+        } else {
+            kept = nil
+        }
+        let done = await write(on: attachment.itemId, "work_attachment_detach", OperationIdParams(
+            operationId: Self.newId(), id: attachment.id))
+        if done, let kept {
+            _ = remember("Removed \(attachment.title)", .reattach(attachment.itemId, kept))
+        }
+        return done
+    }
+
+    private func write<P: Encodable>(on itemId: String, _ method: String, _ params: P) async -> Bool {
         do {
             try await core.request(method, params)
             mutationError = nil
@@ -551,6 +600,13 @@ final class WorkStore {
             }
         case let .unbook(id):
             unbook(id)
+        case let .reattach(itemId, source):
+            Task {
+                _ = await attach([source], to: itemId)
+                if case let .file(copy, _) = source {
+                    try? FileManager.default.removeItem(at: copy.deletingLastPathComponent())
+                }
+            }
         }
     }
 
@@ -697,6 +753,7 @@ final class WorkStore {
         case restore([String])
         case delegate([(id: String, agent: String?)])
         case unbook(String)
+        case reattach(String, WorkAttachmentSource)
     }
 
     private func load() async {
@@ -939,7 +996,8 @@ final class WorkStore {
             sourceSpeaker: old?.sourceSpeaker, sourceAtMs: old?.sourceAtMs,
             blockedByOpenCount: old?.blockedByOpenCount ?? 0, raisedIn: old?.raisedIn ?? 0,
             source: old?.source ?? .person, followUpAtMs: old?.followUpAtMs,
-            atRisk: item.status.isOpen && (old?.atRisk ?? false), timeBlock: old?.timeBlock, repeat: old?.repeat)
+            atRisk: item.status.isOpen && (old?.atRisk ?? false), timeBlock: old?.timeBlock, repeat: old?.repeat,
+            attachmentCount: old?.attachmentCount ?? 0)
     }
 
     private func patched(_ row: inout WorkItemRow, _ patch: WorkPatch, at now: Int64) {
@@ -1224,3 +1282,43 @@ private struct WatchParams: Encodable {
     let personId: String?
 }
 private struct HitParams: Encodable { let hitId: String }
+private struct AttachmentRenameParams: Encodable {
+    let operationId: String
+    let id: String
+    let title: String
+}
+private struct AttachParams: Encodable {
+    let operationId: String
+    let itemId: String
+    var path: String?
+    var data: String?
+    var fileName: String?
+    var url: String?
+    var title: String?
+}
+
+enum WorkAttachmentSource {
+    case file(URL, title: String? = nil)
+    case data(Data, fileName: String)
+    case link(String, title: String? = nil)
+
+    static let linkSchemes: Set<String> = ["http", "https", "mailto", "sona"]
+
+    fileprivate var method: String {
+        switch self {
+        case .file, .data: "work_attachment_attach_file"
+        case .link: "work_attachment_attach_link"
+        }
+    }
+
+    fileprivate func params(itemId: String, operationId: String) -> AttachParams {
+        switch self {
+        case let .file(url, title):
+            AttachParams(operationId: operationId, itemId: itemId, path: url.path(percentEncoded: false), title: title)
+        case let .data(data, fileName):
+            AttachParams(operationId: operationId, itemId: itemId, data: data.base64EncodedString(), fileName: fileName)
+        case let .link(url, title):
+            AttachParams(operationId: operationId, itemId: itemId, url: url, title: title)
+        }
+    }
+}
