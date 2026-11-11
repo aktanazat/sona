@@ -6,9 +6,9 @@ use crate::planning;
 use crate::query::external::{ExternalError, ExternalErrorCode};
 use crate::query::QUERY_SCHEMA_VERSION;
 use crate::scratchpad::links::{self, ScratchSourceKind, ScratchSourceRef};
-use crate::scratchpad::{self, ScratchNote};
+use crate::scratchpad::{self, ScratchNote, ScratchpadError};
 use clap::{ArgGroup, Args};
-use rusqlite::OptionalExtension as _;
+use rusqlite::{Connection, OptionalExtension as _};
 use serde::Serialize;
 use std::fmt::Write as _;
 use tauri::Manager;
@@ -149,10 +149,47 @@ pub struct ExternalNoteChange {
     pub linked: Option<ExternalNoteSource>,
 }
 
-/// What the ledger holds for an operation id.
-enum Receipt {
-    New,
+/// What the ledger holds for an operation id: nothing yet, so `T` is what
+/// the write made; the note an earlier run with the same request named; or
+/// a different request under that id.
+enum Receipt<T> {
+    New(T),
     Replay(String),
+    Conflict,
+}
+
+fn receipt_in(
+    conn: &Connection,
+    operation_id: &str,
+    command: &str,
+    request: &str,
+) -> rusqlite::Result<Receipt<()>> {
+    let found: Option<(String, String, String)> = conn
+        .query_row(
+            "SELECT command, request_json, response_json FROM planning_operations WHERE operation_id = ?1",
+            [operation_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    Ok(match found {
+        None => Receipt::New(()),
+        Some((stored, asked, note_id)) if stored == command && asked == request => {
+            Receipt::Replay(note_id)
+        }
+        Some(_) => Receipt::Conflict,
+    })
+}
+
+fn conflict(operation_id: &str) -> ExternalError {
+    ExternalError::invalid(format!(
+        "Operation id {operation_id} was already used for a different change. Pass a new --operation-id, or leave it out."
+    ))
+}
+
+fn request_json(request: &impl Serialize) -> Result<String, ExternalError> {
+    serde_json::to_string(request).map_err(|_| {
+        ExternalError::new(ExternalErrorCode::Failed, "The change could not be named.")
+    })
 }
 
 impl Tracker<'_> {
@@ -162,73 +199,82 @@ impl Tracker<'_> {
             .ok_or_else(|| ExternalError::new(ExternalErrorCode::NotFound, format!("No note {id}.")))
     }
 
+    fn replayed(&self, note_id: &str) -> Result<ScratchNote, ExternalError> {
+        let id = Uuid::parse_str(note_id).map_err(|_| {
+            ExternalError::new(ExternalErrorCode::Failed, "The earlier run names no note.")
+        })?;
+        self.note(&id)
+    }
+
     fn receipt(
         &self,
         operation_id: &str,
         command: &str,
         request: &str,
-    ) -> Result<Receipt, ExternalError> {
-        let found: Option<(String, String, String)> = planning::history(self.history, |conn| {
-            Ok(conn
-                .query_row(
-                    "SELECT command, request_json, response_json FROM planning_operations WHERE operation_id = ?1",
-                    [operation_id],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                )
-                .optional()?)
-        })
-        .map_err(|message| refusal(self.history, message))?;
-        match found {
-            None => Ok(Receipt::New),
-            Some((stored, asked, note_id)) if stored == command && asked == request => {
-                Ok(Receipt::Replay(note_id))
-            }
-            Some(_) => Err(ExternalError::invalid(format!(
-                "Operation id {operation_id} was already used for a different change. Pass a new --operation-id, or leave it out."
-            ))),
-        }
-    }
-
-    fn file_receipt(
-        &self,
-        operation_id: &str,
-        command: &str,
-        request: &str,
-        note_id: &str,
-    ) -> Result<(), ExternalError> {
+    ) -> Result<Receipt<()>, ExternalError> {
         planning::history(self.history, |conn| {
-            conn.execute(
-                "INSERT INTO planning_operations (operation_id, command, request_json, response_json, created_at_ms) VALUES (?1, ?2, ?3, ?4, ?5)",
-                rusqlite::params![operation_id, command, request, note_id, now_ms()],
-            )?;
-            Ok(())
+            Ok(receipt_in(conn, operation_id, command, request)?)
         })
         .map_err(|message| refusal(self.history, message))
     }
 
-    /// Runs `write` once per operation id: a second run with the same id
+    /// Runs `write` and files its receipt, naming the note it returns, in
+    /// one transaction that takes the write lock first, unless a run with
+    /// the same operation id got there before: then that run's receipt
+    /// answers and nothing is written.
+    fn write_once<T>(
+        &self,
+        operation_id: &str,
+        command: &str,
+        request: &str,
+        failure: &str,
+        write: impl FnOnce(&Connection) -> Result<(String, T), ScratchpadError>,
+    ) -> Result<Receipt<T>, ExternalError> {
+        scratchpad::immediate(self.history, failure, |tx| {
+            match receipt_in(tx, operation_id, command, request)? {
+                Receipt::New(()) => {}
+                Receipt::Replay(note_id) => return Ok(Receipt::Replay(note_id)),
+                Receipt::Conflict => return Ok(Receipt::Conflict),
+            }
+            let (note_id, value) = write(tx)?;
+            tx.execute(
+                "INSERT INTO planning_operations (operation_id, command, request_json, response_json, created_at_ms) VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![operation_id, command, request, note_id, now_ms()],
+            )?;
+            Ok(Receipt::New(value))
+        })
+        .map_err(|message| refusal(self.history, message))
+    }
+
+    /// Runs `change` once per operation id: a second run with the same id
     /// and request answers with the note the first one wrote.
     fn once(
         &self,
         write: &WriteArgs,
         command: &str,
         request: &impl Serialize,
-        change: impl FnOnce() -> Result<ScratchNote, String>,
+        failure: &str,
+        change: impl FnOnce(&Connection) -> Result<ScratchNote, ScratchpadError>,
     ) -> Result<(String, ScratchNote, bool), ExternalError> {
         let operation_id = write.fresh_operation_id();
-        let request = serde_json::to_string(request).map_err(|_| {
-            ExternalError::new(ExternalErrorCode::Failed, "The change could not be named.")
-        })?;
-        if let Receipt::Replay(note_id) = self.receipt(&operation_id, command, &request)? {
-            let id = Uuid::parse_str(&note_id).map_err(|_| {
-                ExternalError::new(ExternalErrorCode::Failed, "The earlier run names no note.")
-            })?;
-            return Ok((operation_id, self.note(&id)?, true));
+        let request = request_json(request)?;
+        match self.receipt(&operation_id, command, &request)? {
+            Receipt::New(()) => {}
+            Receipt::Replay(note_id) => return Ok((operation_id, self.replayed(&note_id)?, true)),
+            Receipt::Conflict => return Err(conflict(&operation_id)),
         }
         self.applies("writing notes")?;
-        let note = change().map_err(|message| refusal(self.history, message))?;
-        self.file_receipt(&operation_id, command, &request, &note.id)?;
-        Ok((operation_id, note, false))
+        let written = self.write_once(&operation_id, command, &request, failure, |tx| {
+            change(tx).map(|note| (note.id.clone(), note))
+        })?;
+        match written {
+            Receipt::New(note) => {
+                scratchpad::emit_changed(self.app, &note.id, false);
+                Ok((operation_id, note, false))
+            }
+            Receipt::Replay(note_id) => Ok((operation_id, self.replayed(&note_id)?, true)),
+            Receipt::Conflict => Err(conflict(&operation_id)),
+        }
     }
 
     fn note_change(
@@ -265,10 +311,13 @@ impl Tracker<'_> {
             }
             return Ok(answer);
         }
-        let (operation_id, note, replayed) =
-            self.once(&args.write, "cli_note_create", &body, || {
-                scratchpad::scratchpad_create(self.app.clone(), self.app.state(), body.clone())
-            })?;
+        let (operation_id, note, replayed) = self.once(
+            &args.write,
+            "cli_note_create",
+            &body,
+            "The note could not be saved.",
+            |tx| scratchpad::create_note_in(tx, &body, now_ms()),
+        )?;
         Ok(Self::note_change(
             NoteAction::Created,
             false,
@@ -296,14 +345,8 @@ impl Tracker<'_> {
             &args.write,
             "cli_note_edit",
             &(&note.id, &args.body),
-            || {
-                scratchpad::scratchpad_update_body(
-                    self.app.clone(),
-                    self.app.state(),
-                    note.id.clone(),
-                    args.body.clone(),
-                )
-            },
+            "The note could not be saved.",
+            |tx| scratchpad::update_body_in(tx, &note.id, &args.body, now_ms()),
         )?;
         Ok(Self::note_change(
             NoteAction::Edited,
@@ -334,15 +377,13 @@ impl Tracker<'_> {
                 unchanged,
             ));
         }
-        let (operation_id, note, replayed) =
-            self.once(&args.write, "cli_note_pin", &(&note.id, pinned), || {
-                scratchpad::scratchpad_set_pinned(
-                    self.app.clone(),
-                    self.app.state(),
-                    note.id.clone(),
-                    pinned,
-                )
-            })?;
+        let (operation_id, note, replayed) = self.once(
+            &args.write,
+            "cli_note_pin",
+            &(&note.id, pinned),
+            "The pin could not be changed.",
+            |tx| scratchpad::set_pinned_with_connection(tx, &note.id, pinned),
+        )?;
         Ok(Self::note_change(
             action,
             false,
@@ -387,28 +428,45 @@ impl Tracker<'_> {
             })));
         }
         let operation_id = args.write.fresh_operation_id();
-        let request = serde_json::to_string(&(&note.id, &source)).map_err(|_| {
-            ExternalError::new(ExternalErrorCode::Failed, "The change could not be named.")
-        })?;
-        let replayed = matches!(
-            self.receipt(&operation_id, "cli_note_link", &request)?,
-            Receipt::Replay(_)
-        );
+        let request = request_json(&(&note.id, &source))?;
+        let mut replayed = match self.receipt(&operation_id, "cli_note_link", &request)? {
+            Receipt::New(()) => false,
+            Receipt::Replay(_) => true,
+            Receipt::Conflict => return Err(conflict(&operation_id)),
+        };
         let memory = if replayed {
             memory
         } else {
             self.applies("writing notes")?;
-            let memory = links::scratchpad_link(
-                self.app.clone(),
-                self.app.state(),
-                self.app.state(),
-                note.id.clone(),
-                source.clone(),
-            )
-            .await
-            .map_err(|message| refusal(self.history, message))?;
-            self.file_receipt(&operation_id, "cli_note_link", &request, &note.id)?;
-            memory
+            let (resolved, store) =
+                links::resolve_link(self.history, self.meetings, &note.id, &source)
+                    .await
+                    .map_err(|message| refusal(self.history, message))?;
+            let written = self.write_once(
+                &operation_id,
+                "cli_note_link",
+                &request,
+                "The source could not be linked.",
+                |tx| links::link_in(tx, &note.id, resolved).map(|()| (note.id.clone(), ())),
+            )?;
+            match written {
+                Receipt::New(()) => {
+                    scratchpad::emit_changed(self.app, &note.id, false);
+                    links::read_memory(self.history, store.as_deref(), &note.id, |_| false)
+                        .map_err(|message| refusal(self.history, message))?
+                        .ok_or_else(|| {
+                            ExternalError::new(
+                                ExternalErrorCode::NotFound,
+                                format!("No note {}.", note.id),
+                            )
+                        })?
+                }
+                Receipt::Replay(_) => {
+                    replayed = true;
+                    memory
+                }
+                Receipt::Conflict => return Err(conflict(&operation_id)),
+            }
         };
         linked.title = memory
             .sources

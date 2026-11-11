@@ -386,12 +386,17 @@ pub(crate) fn attach_file(
 }
 
 /// Moves `staged` to where `attachment` keeps its file, unless a file is
-/// already there.
-pub(crate) fn place(staged: &Staged, attachment: &WorkAttachment) -> Result<()> {
+/// already there or the attachment is gone.
+pub(crate) fn place(conn: &Connection, staged: &Staged, attachment: &WorkAttachment) -> Result<()> {
     let Some(path) = attachment.path.as_deref().map(Path::new) else {
         return Ok(());
     };
-    if path.exists() {
+    let attached: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM planning_task_attachments WHERE id = ?1)",
+        [&attachment.id],
+        |row| row.get(0),
+    )?;
+    if !attached || path.exists() {
         return Ok(());
     }
     if let Some(folder) = path.parent() {
@@ -592,10 +597,23 @@ mod tests {
         let staged = stage_bytes(root.path(), b"payload", "../../evil.sh").expect("staged");
         let attached =
             attach_file(&conn, root.path(), &task, &staged, UNNAMED, ME, AT).expect("attached");
-        place(&staged, &attached).expect("placed");
+        place(&conn, &staged, &attached).expect("placed");
         let path = Path::new(attached.path.as_deref().expect("a stored file"));
         assert_eq!(path.parent(), Some(root.path().join(&task).as_path()));
         assert!(path.is_file());
+    }
+
+    #[test]
+    fn an_attach_answered_after_a_detach_leaves_no_file() {
+        let (conn, task) = tracker();
+        let root = tempfile::tempdir().expect("a scratch folder");
+        let staged = stage_bytes(root.path(), b"payload", "notes.txt").expect("staged");
+        let attached =
+            attach_file(&conn, root.path(), &task, &staged, UNNAMED, ME, AT).expect("attached");
+        detach(&conn, root.path(), &attached.id, Some(&task), ME, AT + 1).expect("detached");
+        place(&conn, &staged, &attached).expect("nothing to place");
+        drop(staged);
+        assert!(!Path::new(attached.path.as_deref().expect("a stored file")).exists());
     }
 
     #[test]

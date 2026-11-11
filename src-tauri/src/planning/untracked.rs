@@ -12,7 +12,7 @@ use super::store::{self, Refusal};
 use super::types::{EvidenceSourceKind, EvidenceTargetKind, PlanningTask, Project};
 use super::work::sync::{self, MeetingReader};
 use super::work::types::{WorkActivityKind, WorkActor, WorkPatch, WorkStatus};
-use super::work::{self, items, Done, Effects};
+use super::work::{self, items, Change, Done, Effects};
 use crate::managers::history::HistoryManager;
 use crate::meeting::loop_types::{
     MeetingLoopId, MeetingLoopKind, MeetingLoopRow, MeetingLoopStatus,
@@ -82,20 +82,42 @@ pub async fn planning_track_action(
     project_id: String,
     operation_id: String,
 ) -> Result<PlanningTask, String> {
+    track_action_as(
+        &app,
+        &history_state,
+        &meetings,
+        WorkActor::Me,
+        &operation_id,
+        &loop_id,
+        &project_id,
+    )
+    .await
+}
+
+/// [`planning_track_action`] made by `actor`.
+pub(crate) async fn track_action_as(
+    app: &AppHandle,
+    history: &HistoryManager,
+    meetings: &MeetingSessionManager,
+    actor: WorkActor,
+    operation_id: &str,
+    loop_id: &str,
+    project_id: &str,
+) -> Result<PlanningTask, String> {
+    let change = Change::now(operation_id, actor);
     let user_name = meetings.user_name();
-    let done = work::with_both(&history_state, &meetings, |history, meeting_conn| {
+    let done = work::with_both(history, meetings, |history, meeting_conn| {
         track(
             history,
             meeting_conn,
             user_name.as_deref(),
-            &loop_id,
-            &project_id,
-            &operation_id,
-            chrono::Utc::now().timestamp_millis(),
+            loop_id,
+            project_id,
+            change,
         )
     })
     .await?;
-    work::announce(&app, &meetings, &done.effects).await;
+    work::announce(app, meetings, &done.effects).await;
     Ok(done.value)
 }
 
@@ -111,18 +133,17 @@ pub async fn planning_dismiss_action(
     loop_id: String,
     operation_id: String,
 ) -> Result<(), String> {
-    let done = work::with_both(&history_state, &meetings, |history, meeting_conn| {
-        dismiss(
-            history,
-            meeting_conn,
-            &loop_id,
-            &operation_id,
-            chrono::Utc::now().timestamp_millis(),
-        )
-    })
+    set_aside_as(
+        &app,
+        &history_state,
+        &meetings,
+        WorkActor::Me,
+        &operation_id,
+        &loop_id,
+        true,
+    )
     .await?;
-    work::announce(&app, &meetings, &done.effects).await;
-    Ok(done.value)
+    Ok(())
 }
 
 /// Asks about a commitment again after it was set aside as not work: its
@@ -136,18 +157,42 @@ pub async fn planning_restore_action(
     loop_id: String,
     operation_id: String,
 ) -> Result<(), String> {
-    let done = work::with_both(&history_state, &meetings, |history, meeting_conn| {
-        restore(
-            history,
-            meeting_conn,
-            &loop_id,
-            &operation_id,
-            chrono::Utc::now().timestamp_millis(),
-        )
+    set_aside_as(
+        &app,
+        &history_state,
+        &meetings,
+        WorkActor::Me,
+        &operation_id,
+        &loop_id,
+        false,
+    )
+    .await?;
+    Ok(())
+}
+
+/// [`planning_dismiss_action`], or [`planning_restore_action`] when
+/// `dismissed` is false, made by `actor`. Returns the ids of the tasks it
+/// changed.
+pub(crate) async fn set_aside_as(
+    app: &AppHandle,
+    history: &HistoryManager,
+    meetings: &MeetingSessionManager,
+    actor: WorkActor,
+    operation_id: &str,
+    loop_id: &str,
+    dismissed: bool,
+) -> Result<Vec<String>, String> {
+    let change = Change::now(operation_id, actor);
+    let done = work::with_both(history, meetings, |history, meeting_conn| {
+        if dismissed {
+            dismiss(history, meeting_conn, loop_id, change)
+        } else {
+            restore(history, meeting_conn, loop_id, change)
+        }
     })
     .await?;
-    work::announce(&app, &meetings, &done.effects).await;
-    Ok(done.value)
+    work::announce(app, meetings, &done.effects).await;
+    Ok(done.effects.items)
 }
 
 /// Home's "not tracked" count: the commitments across finished meetings that
@@ -236,9 +281,13 @@ fn track(
     user_name: Option<&str>,
     loop_id: &str,
     project_id: &str,
-    operation_id: &str,
-    now_ms: i64,
+    change: Change<'_>,
 ) -> StorageResult<Done<PlanningTask>> {
+    let Change {
+        operation_id,
+        actor,
+        at_ms: now_ms,
+    } = change;
     let loop_id = sources::canonical_source_id(EvidenceSourceKind::Loop, loop_id)?;
     let project_id = store::uuid(project_id)?;
     let request = TrackRequest {
@@ -279,7 +328,7 @@ fn track(
             let mut reader = MeetingReader::new(Some(meetings), user_name);
             let patch = sync::acceptance(tx, &mut reader, &item, true, Some(&project_id))?;
             let (after, moved) =
-                sync::accept(tx, Some(meetings), &item, &patch, WorkActor::Me, now_ms)?;
+                sync::accept(tx, Some(meetings), &item, &patch, actor, now_ms)?;
             store::insert_link(
                 tx,
                 &store::SourceLinkDraft {
@@ -308,9 +357,13 @@ fn dismiss(
     history: &mut Connection,
     meetings: &Connection,
     loop_id: &str,
-    operation_id: &str,
-    now_ms: i64,
+    change: Change<'_>,
 ) -> StorageResult<Done<()>> {
+    let Change {
+        operation_id,
+        actor,
+        at_ms: now_ms,
+    } = change;
     let loop_id = sources::canonical_source_id(EvidenceSourceKind::Loop, loop_id)?;
     store::mutate(
         history,
@@ -328,7 +381,7 @@ fn dismiss(
                 .filter(|item| item.status == WorkStatus::Triage)
             {
                 let (after, moved) =
-                    sync::decline(tx, Some(meetings), &item, WorkActor::Me, now_ms)?;
+                    sync::decline(tx, Some(meetings), &item, actor, now_ms)?;
                 effects.item(&after);
                 effects.loops.extend(moved);
             }
@@ -341,9 +394,13 @@ fn restore(
     history: &mut Connection,
     meetings: &Connection,
     loop_id: &str,
-    operation_id: &str,
-    now_ms: i64,
+    change: Change<'_>,
 ) -> StorageResult<Done<()>> {
+    let Change {
+        operation_id,
+        actor,
+        at_ms: now_ms,
+    } = change;
     let loop_id = sources::canonical_source_id(EvidenceSourceKind::Loop, loop_id)?;
     store::mutate(
         history,
@@ -368,7 +425,7 @@ fn restore(
                         ..WorkPatch::default()
                     },
                     WorkActivityKind::Status,
-                    WorkActor::Me,
+                    actor,
                     now_ms,
                 )?;
                 effects.changed(&changed);
@@ -376,7 +433,7 @@ fn restore(
                     tx,
                     Some(meetings),
                     &item.id,
-                    WorkActor::Me,
+                    actor,
                     now_ms,
                 )?);
             }
@@ -423,6 +480,27 @@ mod tests {
     };
     use crate::planning::TaskStatus;
     use uuid::Uuid;
+
+    fn by_agent(operation_id: &str) -> Change<'_> {
+        Change {
+            operation_id,
+            actor: WorkActor::Agent,
+            at_ms: AT,
+        }
+    }
+
+    /// How many entries an agent filed in a task's history, Sona's own left
+    /// out; an entry filed by anyone else fails the test.
+    fn agent_entries(history: &Connection, task_id: &str) -> usize {
+        let actors: Vec<WorkActor> = items::activity(history, task_id)
+            .expect("the task's history")
+            .into_iter()
+            .map(|entry| entry.actor)
+            .filter(|actor| *actor != WorkActor::Sona)
+            .collect();
+        assert!(actors.iter().all(|actor| *actor == WorkActor::Agent), "{actors:?}");
+        actors.len()
+    }
 
     const AT: i64 = 1_700_000_000_000;
 
@@ -543,13 +621,13 @@ mod tests {
                     None,
                     outline,
                     &project.id,
-                    &Uuid::new_v4().to_string(),
-                    AT,
+                    by_agent(&Uuid::new_v4().to_string()),
                 )
                 .expect("track the outline")
                 .value;
                 assert_eq!(task.title, "Send the outline");
                 assert_eq!(task.status, TaskStatus::NotStarted);
+                assert!(agent_entries(&history, &task.id) > 0);
                 let saved = store::records(&history, &project.id).expect("saved records");
                 assert!(saved.evidence.iter().any(|link| link.target_id == task.id
                     && link.source_kind == EvidenceSourceKind::Loop
@@ -565,8 +643,7 @@ mod tests {
                     None,
                     outline,
                     &project.id,
-                    &Uuid::new_v4().to_string(),
-                    AT,
+                    by_agent(&Uuid::new_v4().to_string()),
                 )
                 .err()
                 .expect("a second task for the same promise");
@@ -586,8 +663,7 @@ mod tests {
                     &mut history,
                     connection,
                     venue,
-                    &Uuid::new_v4().to_string(),
-                    AT,
+                    by_agent(&Uuid::new_v4().to_string()),
                 )
                 .expect("set the venue aside");
                 assert!(read(&history, connection, session_id, None)
@@ -599,8 +675,7 @@ mod tests {
                     &mut history,
                     connection,
                     venue,
-                    &Uuid::new_v4().to_string(),
-                    AT,
+                    by_agent(&Uuid::new_v4().to_string()),
                 )
                 .expect("ask about the venue again");
                 assert_eq!(

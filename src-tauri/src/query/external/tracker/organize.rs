@@ -4,8 +4,8 @@
 
 use super::attachments::{project_attachment, ExternalWorkAttachment};
 use super::{
-    day, now_ms, refusal, task_ref, task_ref_of, ExternalWorkRef, TaskRef, Tracker, WorkAnswer,
-    WriteArgs,
+    conversations_closed, day, now_ms, refusal, task_ref, task_ref_of, ExternalWorkRef, Fence,
+    TaskRef, Tracker, WorkAnswer, WriteArgs,
 };
 use crate::meeting::loop_types::{
     MeetingLoopAssignRequest, MeetingLoopId, MeetingLoopReopenRequest, MeetingLoopRow,
@@ -492,7 +492,7 @@ impl Tracker<'_> {
         change.replayed = self.ran(&operation_id)?;
         self.applies("keeping a task as it is")?;
         let started_ms = now_ms();
-        let kept = work::work_keep(self.app.clone(), operation_id.clone(), ids.clone())
+        let kept = work::keep_as(self.app, WorkActor::Agent, &operation_id, &ids)
             .map_err(|message| self.write_refusal(message, &operation_id, "One of these tasks"))?;
         self.credit(&args.write, &ids, started_ms)?;
         change.tasks = kept
@@ -506,9 +506,17 @@ impl Tracker<'_> {
     pub(super) async fn brief(&self, args: &BriefArgs) -> Result<WorkAnswer, ExternalError> {
         let board = self.board().await?;
         let person = board.person(&args.person)?;
-        let brief = follow::person_brief(self.history, self.meetings, person.id.clone())
-            .await
-            .map_err(|message| refusal(self.history, message))?;
+        let Fence::Open(kept_local) = &board.fence else {
+            return Err(conversations_closed());
+        };
+        let brief = follow::person_brief(
+            self.history,
+            self.meetings,
+            person.id.clone(),
+            kept_local.sessions(),
+        )
+        .await
+        .map_err(|message| refusal(self.history, message))?;
         let refs = |ids: Vec<String>| -> Vec<ExternalWorkRef> {
             ids.iter()
                 .filter_map(|id| board.row(id).map(task_ref_of))
@@ -765,16 +773,19 @@ impl Tracker<'_> {
         let operation_id = args.write.fresh_operation_id();
         change.replayed = self.ran(&operation_id)?;
         self.applies("tracking a meeting action")?;
-        let task = untracked_actions::planning_track_action(
-            self.app.clone(),
-            self.app.state(),
-            self.app.state(),
-            row.loop_id.as_str().to_owned(),
-            project,
-            operation_id.clone(),
+        let started_ms = now_ms();
+        let task = untracked_actions::track_action_as(
+            self.app,
+            self.history,
+            self.meetings,
+            WorkActor::Agent,
+            &operation_id,
+            row.loop_id.as_str(),
+            &project,
         )
         .await
         .map_err(|message| self.write_refusal(message, &operation_id, "The action"))?;
+        self.credit(&args.write, std::slice::from_ref(&task.id), started_ms)?;
         if let Some(found) = self.board().await?.row(&task.id) {
             change.tasks.push(task_ref_of(found));
         }
@@ -801,29 +812,24 @@ impl Tracker<'_> {
         }
         let operation_id = args.write.fresh_operation_id();
         change.replayed = self.ran(&operation_id)?;
-        let loop_id = row.loop_id.as_str().to_owned();
-        if dismiss {
-            self.applies("setting a meeting action aside")?;
-            untracked_actions::planning_dismiss_action(
-                self.app.clone(),
-                self.app.state(),
-                self.app.state(),
-                loop_id,
-                operation_id.clone(),
-            )
-            .await
+        self.applies(if dismiss {
+            "setting a meeting action aside"
         } else {
-            self.applies("asking about a meeting action again")?;
-            untracked_actions::planning_restore_action(
-                self.app.clone(),
-                self.app.state(),
-                self.app.state(),
-                loop_id,
-                operation_id.clone(),
-            )
-            .await
-        }
+            "asking about a meeting action again"
+        })?;
+        let started_ms = now_ms();
+        let touched = untracked_actions::set_aside_as(
+            self.app,
+            self.history,
+            self.meetings,
+            WorkActor::Agent,
+            &operation_id,
+            row.loop_id.as_str(),
+            dismiss,
+        )
+        .await
         .map_err(|message| self.write_refusal(message, &operation_id, "The action"))?;
+        self.credit(&args.write, &touched, started_ms)?;
         change.meeting_loop = Some(loop_state(&self.loop_row(&args.loop_id).await?));
         change.operation_id = Some(operation_id);
         Ok(WorkAnswer::Organize(Box::new(change)))

@@ -24,7 +24,7 @@ pub use links::ScratchNoteMemory;
 use crate::managers::history::HistoryManager;
 use anyhow::Result;
 use log::error;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use std::sync::Arc;
@@ -250,6 +250,18 @@ pub(crate) fn create_note_with_connection(
     body: &str,
     now_ms: i64,
 ) -> Result<ScratchNote, ScratchpadError> {
+    let transaction = conn.transaction()?;
+    let note = create_note_in(&transaction, body, now_ms)?;
+    transaction.commit()?;
+    Ok(note)
+}
+
+/// [`create_note_with_connection`] inside a transaction the caller holds.
+pub(crate) fn create_note_in(
+    transaction: &Connection,
+    body: &str,
+    now_ms: i64,
+) -> Result<ScratchNote, ScratchpadError> {
     if body.trim().is_empty() {
         return Err(ScratchpadRefusal::Blank.into());
     }
@@ -261,20 +273,18 @@ pub(crate) fn create_note_with_connection(
         created_at_ms: now_ms,
         updated_at_ms: now_ms,
     };
-    let transaction = conn.transaction()?;
     transaction.execute(
         "INSERT INTO scratch_notes (id, title, body, pinned, created_at_ms, updated_at_ms)
          VALUES (?1, ?2, ?3, 0, ?4, ?4)",
         params![note.id, note.title, note.body, now_ms],
     )?;
     record_version(
-        &transaction,
+        transaction,
         &note.id,
         &note.body,
         now_ms,
         ScratchVersionKind::Edit,
     )?;
-    transaction.commit()?;
     Ok(note)
 }
 
@@ -287,11 +297,23 @@ pub(crate) fn update_body_with_connection(
     body: &str,
     now_ms: i64,
 ) -> Result<ScratchNote, ScratchpadError> {
+    let transaction = conn.transaction()?;
+    let note = update_body_in(&transaction, id, body, now_ms)?;
+    transaction.commit()?;
+    Ok(note)
+}
+
+/// [`update_body_with_connection`] inside a transaction the caller holds.
+pub(crate) fn update_body_in(
+    transaction: &Connection,
+    id: &str,
+    body: &str,
+    now_ms: i64,
+) -> Result<ScratchNote, ScratchpadError> {
     if body.trim().is_empty() {
         return Err(ScratchpadRefusal::Blank.into());
     }
-    let transaction = conn.transaction()?;
-    let Some(mut note) = note_with_connection(&transaction, id)? else {
+    let Some(mut note) = note_with_connection(transaction, id)? else {
         return Err(ScratchpadRefusal::NotFound.into());
     };
     if note.body != body {
@@ -302,9 +324,8 @@ pub(crate) fn update_body_with_connection(
             "UPDATE scratch_notes SET title = ?2, body = ?3, updated_at_ms = ?4 WHERE id = ?1",
             params![id, note.title, note.body, now_ms],
         )?;
-        record_version(&transaction, id, body, now_ms, ScratchVersionKind::Edit)?;
+        record_version(transaction, id, body, now_ms, ScratchVersionKind::Edit)?;
     }
-    transaction.commit()?;
     Ok(note)
 }
 
@@ -467,6 +488,23 @@ fn run<T>(
     }
 }
 
+/// `action` in one transaction that takes the write lock before it reads,
+/// so a check and the write it guards cannot interleave with another
+/// writer's. A failure is told as `failure` says.
+pub(crate) fn immediate<T>(
+    history: &HistoryManager,
+    failure: &str,
+    action: impl FnOnce(&Connection) -> Result<T, ScratchpadError>,
+) -> Result<T, String> {
+    run(history, |conn| {
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let value = action(&transaction)?;
+        transaction.commit()?;
+        Ok(value)
+    })
+    .map_err(|error| failure_sentence(history, error, failure))
+}
+
 /// The sentence the screen shows for a failed call. A refusal names itself;
 /// a storage failure is logged in full and reported as `failure`, or as the
 /// unlock still running when that is what stands in the way.
@@ -489,7 +527,7 @@ fn failure_sentence(history: &HistoryManager, error: ScratchpadError, failure: &
     }
 }
 
-fn emit_changed(app: &AppHandle, note_id: &str, deleted: bool) {
+pub(crate) fn emit_changed(app: &AppHandle, note_id: &str, deleted: bool) {
     let _ = ScratchpadChangedEvent {
         note_id: note_id.to_string(),
         deleted,

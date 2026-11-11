@@ -540,29 +540,46 @@ fn held(row: &rusqlite::Row<'_>) -> rusqlite::Result<Held> {
     Ok((row.get(0)?, row.get(1)?, row.get(2)?))
 }
 
-/// The last finished meeting before `before_ms`: the series' own when the
-/// event's series has met before, otherwise the last one any of these
-/// people was in.
+/// The first of `rows` that names no meeting in `hidden`.
+fn first_shown(
+    rows: impl Iterator<Item = rusqlite::Result<Held>>,
+    hidden: &HashSet<MeetingSessionId>,
+) -> rusqlite::Result<Option<Held>> {
+    for row in rows {
+        let row = row?;
+        let kept = Uuid::parse_str(&row.0)
+            .is_ok_and(|uuid| hidden.contains(&MeetingSessionId::from_uuid(uuid)));
+        if !kept {
+            return Ok(Some(row));
+        }
+    }
+    Ok(None)
+}
+
+/// The last finished meeting before `before_ms` outside `hidden`: the
+/// series' own when the event's series has met before, otherwise the last
+/// one any of these people was in.
 fn last_meeting(
     meetings: &Connection,
     series_key: Option<&str>,
     known: &[HashSet<String>],
     before_ms: i64,
+    hidden: &HashSet<MeetingSessionId>,
 ) -> Result<Option<WorkBriefMeeting>> {
     let mut last = match series_key.map(str::trim).filter(|key| !key.is_empty()) {
-        Some(series_key) => meetings
-            .query_row(
+        Some(series_key) => {
+            let mut statement = meetings.prepare_cached(
                 "SELECT m.id, m.title, COALESCE(m.started_at_utc_ms, m.created_at_utc_ms) AS at
                    FROM meeting_calendar_facts f
                    JOIN meeting_sessions m ON m.id = f.session_id
                   WHERE json_extract(f.event_json, '$.seriesKey') = ?1
                     AND m.ended_at_utc_ms IS NOT NULL AND m.phase != 'deleting'
                     AND COALESCE(m.started_at_utc_ms, m.created_at_utc_ms) < ?2
-                  ORDER BY at DESC, m.id DESC LIMIT 1",
-                params![series_key, before_ms],
-                held,
-            )
-            .optional()?,
+                  ORDER BY at DESC, m.id DESC",
+            )?;
+            let rows = statement.query_map(params![series_key, before_ms], held)?;
+            first_shown(rows, hidden)?
+        }
         None => None,
     };
     if last.is_none() {
@@ -573,13 +590,11 @@ fn last_meeting(
               WHERE l.person_id = ?1 AND l.confidence = 'confirmed'
                 AND m.ended_at_utc_ms IS NOT NULL AND m.phase != 'deleting'
                 AND COALESCE(m.started_at_utc_ms, m.created_at_utc_ms) < ?2
-              ORDER BY at DESC, m.id DESC LIMIT 1",
+              ORDER BY at DESC, m.id DESC",
         )?;
         for id in known.iter().flatten() {
-            let found = statement
-                .query_row(params![id, before_ms], held)
-                .optional()?;
-            if let Some(found) = found {
+            let rows = statement.query_map(params![id, before_ms], held)?;
+            if let Some(found) = first_shown(rows, hidden)? {
                 if last
                     .as_ref()
                     .is_none_or(|kept: &Held| (found.2, &found.0) > (kept.2, &kept.0))
@@ -630,12 +645,14 @@ fn last_meeting(
 }
 
 /// Everything a brief shows. `person_ids` may name a merged person by an
-/// old id; each person counts once, by the id they go by now.
+/// old id; each person counts once, by the id they go by now. No meeting
+/// in `hidden` is named as the last time.
 fn brief(
     history: &Connection,
     meetings: &Connection,
     event: Option<&CalendarEventSummary>,
     person_ids: &[String],
+    hidden: &HashSet<MeetingSessionId>,
     now_ms: i64,
 ) -> Result<WorkBrief> {
     let people = People::read(meetings)?;
@@ -692,6 +709,7 @@ fn brief(
         event.map(|event| event.series_key.as_str()),
         &known,
         event.map_or(now_ms, |event| event.start_utc_ms),
+        hidden,
     )?;
     let title = match event {
         Some(event) => event.title.trim().to_owned(),
@@ -823,7 +841,7 @@ fn upcoming_briefs(
             continue;
         }
         let brief = in_both(store, history, |history, meetings| {
-            brief(history, meetings, Some(&event), &people, now_ms)
+            brief(history, meetings, Some(&event), &people, &HashSet::new(), now_ms)
         })?;
         if let Some(notice) = brief_notice(&event, &brief, now_ms) {
             notices.push((key, notice));
@@ -847,7 +865,7 @@ pub(super) fn probe_inputs(
     Ok(serde_json::json!({
         "morning_due": notice,
         "waiting_follow_ups": waits.len(),
-        "brief": brief(history, meetings, None, &person_ids, now_ms)?,
+        "brief": brief(history, meetings, None, &person_ids, &HashSet::new(), now_ms)?,
     }))
 }
 
@@ -903,18 +921,20 @@ pub(crate) fn start(app: AppHandle, prompts: Arc<dyn PromptPresenter>) {
     });
 }
 
-/// The brief for one person: my open work with them and theirs with me.
+/// The brief for one person: my open work with them and theirs with me,
+/// never naming a meeting in `hidden` as the last time.
 pub(crate) async fn person_brief(
     history: &HistoryManager,
     meetings: &MeetingSessionManager,
     person_id: String,
+    hidden: &HashSet<MeetingSessionId>,
 ) -> Result<WorkBrief, String> {
     let store = meetings
         .store()
         .await
         .map_err(|_| super::super::conversations_closed())?;
     in_both(&store, history, |history, meetings| {
-        brief(history, meetings, None, &[person_id], now_ms())
+        brief(history, meetings, None, &[person_id], hidden, now_ms())
     })
     .map_err(super::super::failure)
 }
@@ -930,7 +950,7 @@ pub async fn work_brief(
     let event_key = match subject {
         WorkBriefSubject::Event { event_key } => event_key,
         WorkBriefSubject::Person { person_id } => {
-            return person_brief(&history_state, &meetings, person_id).await;
+            return person_brief(&history_state, &meetings, person_id, &HashSet::new()).await;
         }
     };
     let store = meetings
@@ -952,7 +972,7 @@ pub async fn work_brief(
     .ok_or("This event is no longer on your calendar.")?;
     let people = attendees(&store, &event).map_err(super::super::failure)?;
     in_both(&store, &history_state, |history, meetings| {
-        brief(history, meetings, Some(&event), &people, now_ms())
+        brief(history, meetings, Some(&event), &people, &HashSet::new(), now_ms())
     })
     .map_err(super::super::failure)
 }
@@ -1391,8 +1411,15 @@ mod tests {
             // PANIC: the fixture's own databases are readable.
             desk.meetings
                 .with_planning_snapshot(|meetings| {
-                    let brief = brief(&desk.history, meetings, Some(event), &people, now)
-                        .expect("the brief");
+                    let brief = brief(
+                        &desk.history,
+                        meetings,
+                        Some(event),
+                        &people,
+                        &HashSet::new(),
+                        now,
+                    )
+                    .expect("the brief");
                     Ok(brief_notice(event, &brief, now))
                 })
                 .expect("the meeting database")
@@ -1407,6 +1434,42 @@ mod tests {
             })
         );
         assert_eq!(notice(&event("venue#1"), &[priya]), None);
+    }
+
+    #[test]
+    fn a_brief_names_the_newest_meeting_not_kept_on_this_mac_as_the_last_time() {
+        let desk = desk();
+        let pricing = workflow_core_tests::meeting(&desk.meetings, "Pricing review", at(-7, 10));
+        let board = workflow_core_tests::meeting(&desk.meetings, "Board prep", at(-2, 10));
+        for meeting in [pricing, board] {
+            workflow_core_tests::link(&desk.meetings, meeting, desk.dana, "manual", "confirmed");
+        }
+        // PANIC: the fixture's own meeting rows can be marked finished.
+        desk.meetings
+            .with_planning_snapshot(|meetings| {
+                meetings.execute(
+                    "UPDATE meeting_sessions SET ended_at_utc_ms = started_at_utc_ms + 3600000",
+                    [],
+                )?;
+                Ok(())
+            })
+            .expect("the meetings finished");
+        let person_ids = [desk.dana.uuid().to_string()];
+        let last_time = |hidden: &[MeetingSessionId]| {
+            let hidden = hidden.iter().copied().collect::<HashSet<_>>();
+            // PANIC: the fixture's own databases are readable.
+            desk.meetings
+                .with_planning_snapshot(|meetings| {
+                    let brief = brief(&desk.history, meetings, None, &person_ids, &hidden, at(0, 10))
+                        .expect("the brief");
+                    Ok(brief.last_time.map(|meeting| meeting.title))
+                })
+                .expect("the meeting database")
+        };
+
+        assert_eq!(last_time(&[]).as_deref(), Some("Board prep"));
+        assert_eq!(last_time(&[board]).as_deref(), Some("Pricing review"));
+        assert_eq!(last_time(&[pricing, board]), None);
     }
 
     #[test]

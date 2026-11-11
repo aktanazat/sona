@@ -9,7 +9,9 @@ use super::types::{
     WorkActivityKind, WorkActor, WorkItem, WorkItemInput, WorkOwner, WorkPatch, WorkQuery,
     WorkStatus,
 };
-use super::{accept, bulk_update, create, list, mark_duplicate, set_archived, update, Change};
+use super::{
+    accept, bulk_update, create, keep, list, mark_duplicate, set_archived, update, Change,
+};
 use super::{live, sync};
 use crate::meeting::ledger::{
     LedgerCommitment, LedgerFirmness, LedgerReceipt, LedgerReceiptState, MeetingLedger,
@@ -759,6 +761,40 @@ fn an_agent_change_is_filed_under_the_agent_on_both_sides() {
     let row = desk.page_row(&loop_id);
     assert_eq!(row.status, MeetingLoopStatus::Done);
     assert_eq!(row.resolved_by, Some(OperationActor::External));
+}
+
+#[test]
+fn work_an_agent_keeps_is_filed_under_the_agent() {
+    let mut desk = desk(&[]);
+    let at = desk.tick();
+    let item = create(
+        &mut desk.history,
+        None,
+        by_me(&operation(), at),
+        &typed("Renew the launch domain"),
+    )
+    .expect("an item typed in")
+    .value;
+
+    let kept_at = desk.tick();
+    keep(
+        &mut desk.history,
+        Change {
+            operation_id: &operation(),
+            actor: WorkActor::Agent,
+            at_ms: kept_at,
+        },
+        &[item.id.clone()],
+    )
+    .expect("kept by an agent");
+
+    let filed = items::activity(&desk.history, &item.id)
+        .expect("the item's history")
+        .into_iter()
+        .filter(|entry| entry.at_ms == kept_at)
+        .map(|entry| (entry.kind, entry.actor))
+        .collect::<Vec<_>>();
+    assert_eq!(filed, [(WorkActivityKind::Kept, WorkActor::Agent)]);
 }
 
 #[test]

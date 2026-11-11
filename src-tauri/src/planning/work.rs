@@ -94,14 +94,14 @@ pub(super) struct Done<T> {
 
 /// Who made a change, under which operation id, and when.
 #[derive(Clone, Copy)]
-struct Change<'a> {
-    operation_id: &'a str,
-    actor: WorkActor,
-    at_ms: i64,
+pub(super) struct Change<'a> {
+    pub(super) operation_id: &'a str,
+    pub(super) actor: WorkActor,
+    pub(super) at_ms: i64,
 }
 
 impl<'a> Change<'a> {
-    fn now(operation_id: &'a str, actor: WorkActor) -> Self {
+    pub(super) fn now(operation_id: &'a str, actor: WorkActor) -> Self {
         Self {
             operation_id,
             actor,
@@ -1234,7 +1234,9 @@ pub(crate) fn attach_file_as(
             attachments::attach_file(tx, root, item_id, &staged, naming, author, at_ms)
         },
     )?;
-    attachments::place(&staged, &attached).map_err(super::failure)?;
+    super::history(&app.state::<Arc<HistoryManager>>(), |history| {
+        attachments::place(history, &staged, &attached)
+    })?;
     Ok(attached)
 }
 
@@ -2074,6 +2076,41 @@ pub fn work_counts(history_state: State<'_, Arc<HistoryManager>>) -> Result<Work
     })
 }
 
+fn keep(
+    history: &mut Connection,
+    change: Change<'_>,
+    ids: &[String],
+) -> StorageResult<Done<Vec<WorkItem>>> {
+    store::mutate(
+        history,
+        change.operation_id,
+        "work_keep",
+        &ids,
+        change.at_ms,
+        |tx| {
+            let mut effects = Effects::default();
+            let mut value = Vec::new();
+            for id in unique(ids)? {
+                let changed = items::keep(tx, &id, change.actor, change.at_ms)?;
+                effects.changed(&changed);
+                value.push(changed.after);
+            }
+            Ok(Done { value, effects })
+        },
+    )
+}
+
+/// [`work_keep`] made by `actor`.
+pub(crate) fn keep_as(
+    app: &AppHandle,
+    actor: WorkActor,
+    operation_id: &str,
+    ids: &[String],
+) -> Result<Vec<WorkItem>, String> {
+    let change = Change::now(operation_id, actor);
+    run_history(app, |history| keep(history, change, ids))
+}
+
 #[tauri::command(async)]
 #[specta::specta]
 pub fn work_keep(
@@ -2081,19 +2118,7 @@ pub fn work_keep(
     operation_id: String,
     ids: Vec<String>,
 ) -> Result<Vec<WorkItem>, String> {
-    let now = now_ms();
-    run_history(&app, |history| {
-        store::mutate(history, &operation_id, "work_keep", &ids, now, |tx| {
-            let mut effects = Effects::default();
-            let mut value = Vec::new();
-            for id in unique(&ids)? {
-                let changed = items::keep(tx, &id, WorkActor::Me, now)?;
-                effects.changed(&changed);
-                value.push(changed.after);
-            }
-            Ok(Done { value, effects })
-        })
-    })
+    keep_as(&app, WorkActor::Me, &operation_id, &ids)
 }
 
 #[tauri::command(async)]
