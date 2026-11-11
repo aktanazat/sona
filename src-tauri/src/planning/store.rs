@@ -36,6 +36,11 @@ pub(crate) enum Refusal {
     AlreadyTracked,
     ParentLoop,
     NotAuthor,
+    NotAttacher,
+    NotAFile,
+    NoFile,
+    TooLarge,
+    BadLink,
 }
 
 impl fmt::Display for Refusal {
@@ -54,6 +59,11 @@ impl fmt::Display for Refusal {
             Self::AlreadyTracked => "loop is already tracked as planner work",
             Self::ParentLoop => "a task cannot sit under itself or its own sub-task",
             Self::NotAuthor => "only the comment's author can change it",
+            Self::NotAttacher => "only whoever attached it can change it",
+            Self::NotAFile => "only a regular file can be attached",
+            Self::NoFile => "no file at that path",
+            Self::TooLarge => "attachment is over the size cap",
+            Self::BadLink => "link scheme is not allowed",
         })
     }
 }

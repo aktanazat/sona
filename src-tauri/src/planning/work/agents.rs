@@ -930,11 +930,12 @@ pub async fn work_delegate(
             prompt: None,
         });
     };
+    let root = super::attachment_root(&app)?;
     let history = app.state::<Arc<HistoryManager>>();
     let meetings = app.state::<Arc<MeetingSessionManager>>();
     let user_name = meetings.user_name();
     let detail = with_meetings(&history, &meetings, |history, meeting_conn| {
-        super::detail(history, meeting_conn, user_name.as_deref(), &id)
+        super::detail(history, meeting_conn, user_name.as_deref(), &root, &id)
     })
     .await?;
     Ok(WorkDelegation {
@@ -1446,7 +1447,8 @@ mod tests {
             .expect("finishing it with a link");
         }
 
-        let evidence = super::super::detail(&history, None, None, &task.id)
+        let evidence =
+            super::super::detail(&history, None, None, std::path::Path::new("/"), &task.id)
             .expect("the task's page")
             .evidence;
         let kept: Vec<_> = evidence

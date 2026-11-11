@@ -313,12 +313,13 @@ pub(crate) fn record(
     kind: WorkActivityKind,
     from: Option<&str>,
     to: Option<&str>,
-) -> Result<()> {
+) -> Result<String> {
+    let id = Uuid::new_v4().to_string();
     conn.execute(
         "INSERT INTO planning_task_activity (id, task_id, at_ms, actor, kind, from_value, to_value)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         params![
-            Uuid::new_v4().to_string(),
+            id,
             task_id,
             now_ms,
             actor.as_str(),
@@ -327,7 +328,7 @@ pub(crate) fn record(
             to
         ],
     )?;
-    Ok(())
+    Ok(id)
 }
 
 /// A new item before it has an id or a number. The owner's person, when
@@ -699,7 +700,8 @@ pub(crate) fn place_in_cycle(
         WorkActivityKind::Cycle,
         from.map(|cycle| cycle.to_string()).as_deref(),
         to.map(|cycle| cycle.to_string()).as_deref(),
-    )
+    )?;
+    Ok(())
 }
 
 /// Hides an item from every list, or brings it back. Its status, and the

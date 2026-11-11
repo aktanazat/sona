@@ -3,6 +3,7 @@
 //! Project screens read the same rows through `store`.
 
 pub(crate) mod agents;
+pub(crate) mod attachments;
 pub(crate) mod ask;
 pub(crate) mod blocks;
 pub(crate) mod capture;
@@ -28,7 +29,8 @@ use self::items::{Changed, DueSpan, NewItem};
 use self::sync::{MeetingReader, People};
 pub use self::types::WorkChanged;
 use self::types::{
-    WorkActivityKind, WorkActor, WorkComment, WorkCommentPage, WorkCounts, WorkDay, WorkDisplay,
+    WorkActivityKind, WorkActor, WorkAttachment, WorkAttachmentFile, WorkComment, WorkCommentPage,
+    WorkCounts, WorkDay, WorkDisplay,
     WorkDoer, WorkItem, WorkItemDetail, WorkItemInput, WorkItemRow, WorkLabel, WorkList,
     WorkOwner, WorkPatch, WorkProgress, WorkProjectChoice, WorkQuery, WorkRelation,
     WorkRelationKind, WorkRepeat, WorkSource, WorkStatus, WorkTimeBlock, WorkView,
@@ -46,6 +48,7 @@ use anyhow::Result as StorageResult;
 use rusqlite::{Connection, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tauri::{AppHandle, Manager, State};
 use tauri_specta::Event;
@@ -379,6 +382,7 @@ struct RowContext {
     blocks: HashMap<String, WorkTimeBlock>,
     repeats: HashMap<String, WorkRepeat>,
     progress: HashMap<String, WorkProgress>,
+    attachments: HashMap<String, u32>,
 }
 
 impl RowContext {
@@ -403,6 +407,7 @@ impl RowContext {
             blocks: blocks::booked(history)?,
             repeats: recur::repeats(history, now_ms())?,
             progress: items::sub_task_progress(history)?,
+            attachments: attachments::counts(history)?,
         })
     }
 
@@ -441,6 +446,7 @@ impl RowContext {
             time_block: self.blocks.get(&item.id).copied(),
             repeat: self.repeats.get(&item.id).cloned(),
             sub_tasks: self.progress.get(&item.id).copied(),
+            attachment_count: self.attachments.get(&item.id).copied().unwrap_or(0),
             item,
         };
         if let Some(source) = match &source_loop_id {
@@ -599,6 +605,7 @@ fn detail(
     history: &Connection,
     meetings: Option<&Connection>,
     user_name: Option<&str>,
+    attachment_root: &Path,
     id: &str,
 ) -> StorageResult<WorkItemDetail> {
     let id = store::uuid(id)?;
@@ -626,6 +633,7 @@ fn detail(
             .transpose()?,
         sub_tasks: items::sub_tasks(history, &id)?,
         comments: comments::all(history, &id)?,
+        attachments: attachments::list(history, attachment_root, &id)?,
         item: context.row(&mut reader, item)?,
         recurrence: items::recurrence(history, &id)?,
         evidence,
@@ -726,13 +734,15 @@ pub async fn work_list(
 #[tauri::command]
 #[specta::specta]
 pub async fn work_item(
+    app: AppHandle,
     history_state: State<'_, Arc<HistoryManager>>,
     meetings: State<'_, Arc<MeetingSessionManager>>,
     id: String,
 ) -> Result<WorkItemDetail, String> {
+    let root = attachment_root(&app)?;
     let user_name = meetings.user_name();
     with_meetings(&history_state, &meetings, |history, meeting_conn| {
-        detail(history, meeting_conn, user_name.as_deref(), &id)
+        detail(history, meeting_conn, user_name.as_deref(), &root, &id)
     })
     .await
 }
@@ -1134,6 +1144,234 @@ pub fn work_comment_resolve(
     resolved: bool,
 ) -> Result<WorkComment, String> {
     comment_resolve_as(&app, WorkActor::Me, &operation_id, &id, resolved)
+}
+
+/// Where attached files are kept: `<root>/<task id>/<id>-<name>`.
+pub(crate) fn attachment_root(app: &AppHandle) -> Result<PathBuf, String> {
+    crate::portable::app_data_dir(app)
+        .map(|dir| dir.join("task-attachments"))
+        .map_err(|_| "Sona's data folder could not be found.".to_owned())
+}
+
+/// What a file attachment comes from: a file on disk, or pasted bytes and
+/// the name they came with.
+pub(crate) enum AttachSource<'a> {
+    Path(&'a Path),
+    Bytes { data: &'a [u8], name: &'a str },
+}
+
+/// One attachment change made by `author`, telling the task's windows.
+fn attachment_change(
+    app: &AppHandle,
+    root: &Path,
+    operation_id: &str,
+    command: &str,
+    request: &impl Serialize,
+    write: impl FnOnce(&Connection, &Path, i64) -> StorageResult<WorkAttachment>,
+) -> Result<WorkAttachment, String> {
+    let at_ms = now_ms();
+    run_history(app, |history| {
+        store::mutate(history, operation_id, command, request, at_ms, |tx| {
+            let value = write(tx, root, at_ms)?;
+            Ok(Done {
+                effects: Effects {
+                    items: vec![value.item_id.clone()],
+                    ..Effects::default()
+                },
+                value,
+            })
+        })
+    })
+}
+
+/// [`work_attachment_attach_file`] made by `author`. The same bytes on the
+/// same task answer the attachment already there.
+pub(crate) fn attach_file_as(
+    app: &AppHandle,
+    author: comments::Author<'_>,
+    operation_id: &str,
+    item_id: &str,
+    source: AttachSource<'_>,
+    naming: attachments::Naming<'_>,
+) -> Result<WorkAttachment, String> {
+    let root = attachment_root(app)?;
+    let staged = match source {
+        AttachSource::Path(path) => attachments::stage_file(&root, path),
+        AttachSource::Bytes { data, name } => attachments::stage_bytes(&root, data, name),
+    }
+    .map_err(super::failure)?;
+    attachment_change(
+        app,
+        &root,
+        operation_id,
+        "work_attachment_attach_file",
+        &(
+            item_id,
+            staged.sha256(),
+            staged.name(),
+            naming,
+            author.actor,
+            author.agent,
+        ),
+        |tx, root, at_ms| {
+            attachments::attach_file(tx, root, item_id, &staged, naming, author, at_ms)
+        },
+    )
+}
+
+/// [`work_attachment_attach_link`] made by `author`.
+pub(crate) fn attach_link_as(
+    app: &AppHandle,
+    author: comments::Author<'_>,
+    operation_id: &str,
+    item_id: &str,
+    url: &str,
+    naming: attachments::Naming<'_>,
+) -> Result<WorkAttachment, String> {
+    let root = attachment_root(app)?;
+    attachment_change(
+        app,
+        &root,
+        operation_id,
+        "work_attachment_attach_link",
+        &(item_id, url, naming, author.actor, author.agent),
+        |tx, root, at_ms| attachments::attach_link(tx, root, item_id, url, naming, author, at_ms),
+    )
+}
+
+/// [`work_attachment_detach`] made by `author`; the file goes once the
+/// row is gone.
+pub(crate) fn detach_as(
+    app: &AppHandle,
+    author: comments::Author<'_>,
+    operation_id: &str,
+    id: &str,
+) -> Result<WorkAttachment, String> {
+    let root = attachment_root(app)?;
+    let removed = attachment_change(
+        app,
+        &root,
+        operation_id,
+        "work_attachment_detach",
+        &(id, author.actor, author.agent),
+        |tx, root, at_ms| attachments::detach(tx, root, id, author, at_ms),
+    )?;
+    attachments::remove_file(&removed);
+    Ok(removed)
+}
+
+/// [`work_attachment_rename`] made by `author`.
+pub(crate) fn rename_attachment_as(
+    app: &AppHandle,
+    author: comments::Author<'_>,
+    operation_id: &str,
+    id: &str,
+    title: &str,
+) -> Result<WorkAttachment, String> {
+    let root = attachment_root(app)?;
+    attachment_change(
+        app,
+        &root,
+        operation_id,
+        "work_attachment_rename",
+        &(id, title, author.actor, author.agent),
+        |tx, root, _| attachments::rename(tx, root, id, title, author),
+    )
+}
+
+/// A task's attachments, oldest first.
+pub(crate) fn attachments_of(app: &AppHandle, item_id: &str) -> Result<Vec<WorkAttachment>, String> {
+    let root = attachment_root(app)?;
+    super::history(&app.state::<Arc<HistoryManager>>(), |history| {
+        attachments::list(history, &root, item_id)
+    })
+}
+
+#[tauri::command(async)]
+#[specta::specta]
+pub fn work_attachments(app: AppHandle, item_id: String) -> Result<Vec<WorkAttachment>, String> {
+    attachments_of(&app, &item_id)
+}
+
+/// Attaches the file at `file.path`, or pasted `file.data` (base64) named
+/// `file.file_name`.
+#[tauri::command(async)]
+#[specta::specta]
+pub fn work_attachment_attach_file(
+    app: AppHandle,
+    operation_id: String,
+    item_id: String,
+    file: WorkAttachmentFile,
+    title: Option<String>,
+    subtitle: Option<String>,
+) -> Result<WorkAttachment, String> {
+    use base64::Engine as _;
+    let bytes;
+    let source = match (&file.path, &file.data, &file.file_name) {
+        (Some(path), None, _) => AttachSource::Path(Path::new(path)),
+        (None, Some(data), Some(name)) => {
+            bytes = base64::engine::general_purpose::STANDARD
+                .decode(data)
+                .map_err(|_| "The pasted file could not be read.".to_owned())?;
+            AttachSource::Bytes { data: &bytes, name }
+        }
+        _ => return Err("Attach a file by its path, or pasted data with its name.".to_owned()),
+    };
+    attach_file_as(
+        &app,
+        ME,
+        &operation_id,
+        &item_id,
+        source,
+        attachments::Naming {
+            title: title.as_deref(),
+            subtitle: subtitle.as_deref(),
+        },
+    )
+}
+
+#[tauri::command(async)]
+#[specta::specta]
+pub fn work_attachment_attach_link(
+    app: AppHandle,
+    operation_id: String,
+    item_id: String,
+    url: String,
+    title: Option<String>,
+    subtitle: Option<String>,
+) -> Result<WorkAttachment, String> {
+    attach_link_as(
+        &app,
+        ME,
+        &operation_id,
+        &item_id,
+        &url,
+        attachments::Naming {
+            title: title.as_deref(),
+            subtitle: subtitle.as_deref(),
+        },
+    )
+}
+
+#[tauri::command(async)]
+#[specta::specta]
+pub fn work_attachment_detach(
+    app: AppHandle,
+    operation_id: String,
+    id: String,
+) -> Result<WorkAttachment, String> {
+    detach_as(&app, ME, &operation_id, &id)
+}
+
+#[tauri::command(async)]
+#[specta::specta]
+pub fn work_attachment_rename(
+    app: AppHandle,
+    operation_id: String,
+    id: String,
+    title: String,
+) -> Result<WorkAttachment, String> {
+    rename_attachment_as(&app, ME, &operation_id, &id, &title)
 }
 
 fn update(

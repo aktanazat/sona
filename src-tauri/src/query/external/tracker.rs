@@ -182,6 +182,13 @@ pub enum WorkVerb {
     /// Make sub-tasks under a task, one per title. Each takes the parent's
     /// project and priority unless told otherwise.
     Subtask(threads::SubtaskArgs),
+    /// Attach a file (copied into Sona) or a link to a task. The same file
+    /// or link on the same task lands once.
+    Attach(attachments::AttachArgs),
+    /// A task's files, images and links, oldest first.
+    Attachments(attachments::AttachmentsArgs),
+    /// Take an attachment off a task; a file's copy is deleted.
+    Detach(attachments::DetachArgs),
 }
 
 #[derive(Args, Clone, Debug, Eq, PartialEq)]
@@ -947,6 +954,9 @@ impl WorkVerb {
             | Self::CommentDelete(threads::CommentDeleteArgs { dry_run: true, .. })
             | Self::CommentResolve(threads::CommentResolveArgs { dry_run: true, .. })
             | Self::Subtask(threads::SubtaskArgs { dry_run: true, .. })
+            | Self::Attachments(_)
+            | Self::Attach(attachments::AttachArgs { dry_run: true, .. })
+            | Self::Detach(attachments::DetachArgs { dry_run: true, .. })
             | Self::Update(UpdateArgs { dry_run: true, .. })
             | Self::Done(DoneArgs { dry_run: true, .. })
             | Self::Accept(AcceptArgs { dry_run: true, .. })
@@ -988,7 +998,9 @@ impl WorkVerb {
             | Self::CommentEdit(_)
             | Self::CommentDelete(_)
             | Self::CommentResolve(_)
-            | Self::Subtask(_) => WRITE_SCOPES,
+            | Self::Subtask(_)
+            | Self::Attach(_)
+            | Self::Detach(_) => WRITE_SCOPES,
         }
     }
 
@@ -1132,6 +1144,8 @@ pub enum WorkAnswer {
     MeetingDetail(Box<catalog::ExternalWorkMeetingDetail>),
     Comments(threads::ExternalWorkComments),
     Comment(Box<threads::ExternalWorkCommentChange>),
+    Attachments(attachments::ExternalWorkAttachments),
+    Attachment(Box<attachments::ExternalWorkAttachmentChange>),
 }
 
 /// What `ask` found: the lines that answer, numbered for --take.
@@ -1226,6 +1240,8 @@ pub struct ExternalWorkItem {
     /// Its sub-tasks done out of all of them, canceled and duplicate ones
     /// left out; none when it has none.
     pub sub_tasks: Option<WorkProgress>,
+    /// Files, images and links on it.
+    pub attachment_count: u32,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -1327,6 +1343,8 @@ pub struct ExternalWorkDetail {
     pub sub_tasks: Vec<ExternalWorkItem>,
     /// Every comment thread, oldest first.
     pub comments: Vec<threads::ExternalWorkComment>,
+    /// Files, images and links, oldest first.
+    pub attachments: Vec<attachments::ExternalWorkAttachment>,
     /// False while the conversations can't be opened: meeting quotes and
     /// suggestions are left out.
     pub conversations_available: bool,
@@ -1734,6 +1752,9 @@ pub(super) async fn answer(
         WorkVerb::CommentDelete(args) => tracker.comment_delete(args).await,
         WorkVerb::CommentResolve(args) => tracker.comment_resolve(args).await,
         WorkVerb::Subtask(args) => tracker.subtask(args).await,
+        WorkVerb::Attach(args) => tracker.attach(args).await,
+        WorkVerb::Attachments(args) => tracker.attachments(args).await,
+        WorkVerb::Detach(args) => tracker.detach(args).await,
     }
 }
 
@@ -2057,7 +2078,7 @@ impl Tracker<'_> {
     async fn show(&self, args: &ShowArgs) -> Result<WorkAnswer, ExternalError> {
         let board = self.board().await?;
         let id = board.task(&args.task)?.item.id.clone();
-        let detail = work::work_item(self.app.state(), self.app.state(), id)
+        let detail = work::work_item(self.app.clone(), self.app.state(), self.app.state(), id)
             .await
             .map_err(|message| refusal(self.history, message))?;
         Ok(WorkAnswer::Detail(Box::new(board.detail(detail))))
@@ -3879,6 +3900,7 @@ impl Board {
             time_block: before.and_then(|row| row.time_block),
             repeat: before.and_then(|row| row.repeat.clone()),
             sub_tasks: before.and_then(|row| row.sub_tasks),
+            attachment_count: before.map_or(0, |row| row.attachment_count),
             item,
         };
         project_task(&row, self)
@@ -3949,6 +3971,11 @@ impl Board {
                 .comments
                 .into_iter()
                 .map(threads::project_comment)
+                .collect(),
+            attachments: detail
+                .attachments
+                .into_iter()
+                .map(attachments::project_attachment)
                 .collect(),
             schema_version: QUERY_SCHEMA_VERSION,
             conversations_available: self.fence.is_open(),
@@ -4043,7 +4070,8 @@ impl Board {
             | WorkActivityKind::Restored
             | WorkActivityKind::Kept
             | WorkActivityKind::Recurrence
-            | WorkActivityKind::Comment => value.to_owned(),
+            | WorkActivityKind::Comment
+            | WorkActivityKind::Attachment => value.to_owned(),
         }
     }
 
@@ -4468,6 +4496,7 @@ fn project_task(row: &WorkItemRow, board: &Board) -> ExternalWorkItem {
             .and_then(|id| board.row(id))
             .map(task_ref_of),
         sub_tasks: row.sub_tasks,
+        attachment_count: row.attachment_count,
     }
 }
 
@@ -4645,6 +4674,7 @@ impl WorkAnswer {
             | Self::Meetings(_)
             | Self::MeetingDetail(_) => catalog::text(self, &mut text),
             Self::Comments(_) | Self::Comment(_) => threads::text(self, &mut text),
+            Self::Attachments(_) | Self::Attachment(_) => attachments::text(self, &mut text),
             Self::Label(change) => {
                 let verb = match (change.deleted, &change.operation_id) {
                     (true, _) => "Deleted",
@@ -4794,7 +4824,9 @@ impl WorkAnswer {
             | Self::Meetings(_)
             | Self::MeetingDetail(_)
             | Self::Comments(_)
-            | Self::Comment(_) => true,
+            | Self::Comment(_)
+            | Self::Attachments(_)
+            | Self::Attachment(_) => true,
         }
     }
 }
@@ -4889,6 +4921,11 @@ fn task_line(text: &mut String, task: &ExternalWorkItem, today: &Today) {
     }
     if let Some(progress) = task.sub_tasks {
         notes.push(format!("{}/{} sub-tasks done", progress.done, progress.total));
+    }
+    match task.attachment_count {
+        0 => {}
+        1 => notes.push("1 attachment".to_owned()),
+        count => notes.push(format!("{count} attachments")),
     }
     if let Some(project) = &task.project {
         notes.push(project.name.clone());
@@ -5073,6 +5110,10 @@ fn detail_text(text: &mut String, detail: &ExternalWorkDetail, today: &Today) {
         text.push_str("\nComments\n");
         threads::threads_text(text, &detail.comments);
     }
+    if !detail.attachments.is_empty() {
+        text.push_str("\nAttachments\n");
+        attachments::attachments_text(text, &detail.attachments);
+    }
     if !detail.activity.is_empty() {
         text.push_str("\nHistory\n");
         for entry in &detail.activity {
@@ -5234,6 +5275,7 @@ fn filters_text(filters: &ExternalWorkFilters) -> String {
     }
 }
 
+mod attachments;
 mod catalog;
 mod threads;
 

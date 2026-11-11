@@ -278,6 +278,7 @@ fn moving_a_task_to_another_cycle_is_a_change() {
         time_block: None,
         repeat: None,
         sub_tasks: None,
+        attachment_count: 0,
     };
     let board = Board {
         rows: vec![row.clone()],

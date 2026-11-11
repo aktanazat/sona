@@ -150,6 +150,7 @@ pub enum WorkActivityKind {
     Block,
     Parent,
     Comment,
+    Attachment,
 }
 
 sql_enum!(WorkActivityKind {
@@ -175,6 +176,7 @@ sql_enum!(WorkActivityKind {
     Block => "block",
     Parent => "parent",
     Comment => "comment",
+    Attachment => "attachment",
 });
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
@@ -270,6 +272,8 @@ pub struct WorkItemRow {
     /// Its sub-tasks done out of all of them, canceled and duplicate ones
     /// left out; none when it has none.
     pub sub_tasks: Option<WorkProgress>,
+    /// Files, images and links attached to it.
+    pub attachment_count: u32,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
@@ -323,6 +327,50 @@ pub struct WorkComment {
 pub struct WorkCommentPage {
     pub threads: Vec<WorkComment>,
     pub next_cursor: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkAttachmentKind {
+    File,
+    Image,
+    Link,
+}
+
+sql_enum!(WorkAttachmentKind {
+    File => "file",
+    Image => "image",
+    Link => "link",
+});
+
+/// A file, image or link on a task. A file or image is a copy Sona keeps
+/// under its own data folder at `path`; a link has `url` instead.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkAttachment {
+    pub id: String,
+    pub item_id: String,
+    pub kind: WorkAttachmentKind,
+    pub title: String,
+    pub subtitle: Option<String>,
+    pub url: Option<String>,
+    pub path: Option<String>,
+    pub original_name: Option<String>,
+    pub mime: Option<String>,
+    pub size: Option<u64>,
+    pub sha256: Option<String>,
+    pub created_at_ms: i64,
+    pub created_by: WorkCommentAuthor,
+}
+
+/// The file to attach: a `path` on this Mac, or pasted `data` in base64
+/// with the `file_name` it came with.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkAttachmentFile {
+    pub path: Option<String>,
+    pub data: Option<String>,
+    pub file_name: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
@@ -801,6 +849,8 @@ pub struct WorkItemDetail {
     pub sub_tasks: Vec<WorkItem>,
     /// Every thread, oldest first.
     pub comments: Vec<WorkComment>,
+    /// Files, images and links, oldest first.
+    pub attachments: Vec<WorkAttachment>,
 }
 
 /// Sent after every committed change to tracker items, with the items it

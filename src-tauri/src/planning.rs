@@ -18,7 +18,7 @@ pub use schema::{
     AGENTS_MIGRATION, CAPTURE_MIGRATION, CATALOG_MIGRATION, CYCLES_MIGRATION, DAY_PLAN_MIGRATION,
     DISMISSED_LOOP_MIGRATION, FOLLOW_MIGRATION, MEETING_NOTE_LINK_MIGRATION, MIGRATION,
     PROJECT_DELETE_KEEPS_TASKS_MIGRATION, QUIET_REVIEW_MIGRATION, REPEAT_MIGRATION,
-    THREADS_MIGRATION, WATCH_MIGRATION, WORK_MIGRATION,
+    ATTACHMENTS_MIGRATION, THREADS_MIGRATION, WATCH_MIGRATION, WORK_MIGRATION,
 };
 pub use types::{
     EvidenceLink, EvidenceSourceKind, EvidenceTargetKind, Milestone, PlanningCalendarPage,
@@ -83,7 +83,7 @@ fn conversations_closed() -> String {
     .to_string()
 }
 
-fn failure(error: anyhow::Error) -> String {
+pub(crate) fn failure(error: anyhow::Error) -> String {
     if error.is::<ConversationsClosed>() {
         return conversations_closed();
     }
@@ -107,6 +107,13 @@ fn failure(error: anyhow::Error) -> String {
             "A task cannot go under itself or one of its own sub-tasks."
         }
         Some(store::Refusal::NotAuthor) => "Only whoever wrote a comment can change it.",
+        Some(store::Refusal::NotAttacher) => "Only whoever attached it can change it.",
+        Some(store::Refusal::NotAFile) => "Attach a file, not a folder.",
+        Some(store::Refusal::NoFile) => "No file is there to attach.",
+        Some(store::Refusal::TooLarge) => "Attachments can be at most 50 MB.",
+        Some(store::Refusal::BadLink) => {
+            "A link must start with http://, https://, mailto: or sona://."
+        }
         None => {
             log::error!("Planning database operation failed");
             "Plans could not be saved or read. Try again."

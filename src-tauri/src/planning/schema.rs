@@ -625,6 +625,55 @@ CREATE TRIGGER planning_task_agents_delete AFTER DELETE ON planning_tasks BEGIN
     DELETE FROM planning_task_proposals WHERE task_id = old.id;
 END;";
 
+/// Files, images and links on a task. A file's bytes live in Sona's data
+/// folder under `stored_name`; the row keeps its hash so the same file
+/// lands once. "attachment" joins what an item's history can say, so the
+/// history table is rebuilt as `THREADS_MIGRATION` did.
+pub const ATTACHMENTS_MIGRATION: &str = "CREATE TABLE planning_task_attachments (
+    id TEXT PRIMARY KEY NOT NULL,
+    task_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK(kind IN ('file', 'image', 'link')),
+    title TEXT NOT NULL CHECK(length(trim(title)) > 0),
+    subtitle TEXT,
+    url TEXT,
+    stored_name TEXT,
+    original_name TEXT,
+    mime TEXT,
+    size INTEGER,
+    sha256 TEXT,
+    created_at_ms INTEGER NOT NULL,
+    created_by_kind TEXT NOT NULL CHECK(created_by_kind IN ('me', 'sona', 'agent')),
+    created_by_name TEXT CHECK(created_by_name IS NULL OR length(trim(created_by_name)) > 0),
+    CHECK((kind = 'link') = (url IS NOT NULL)),
+    CHECK((kind = 'link') = (stored_name IS NULL)),
+    CHECK((kind = 'link') = (sha256 IS NULL))
+);
+CREATE INDEX planning_task_attachments_task ON planning_task_attachments(task_id, created_at_ms, id);
+CREATE UNIQUE INDEX planning_task_attachments_sha256 ON planning_task_attachments(task_id, sha256)
+    WHERE sha256 IS NOT NULL;
+CREATE UNIQUE INDEX planning_task_attachments_url ON planning_task_attachments(task_id, url)
+    WHERE url IS NOT NULL;
+CREATE TRIGGER planning_task_attachments_delete AFTER DELETE ON planning_tasks BEGIN
+    DELETE FROM planning_task_attachments WHERE task_id = old.id;
+END;
+CREATE TABLE planning_task_activity_next (
+    id TEXT PRIMARY KEY NOT NULL,
+    task_id TEXT NOT NULL,
+    at_ms INTEGER NOT NULL,
+    actor TEXT NOT NULL CHECK(actor IN ('me', 'sona', 'agent')),
+    kind TEXT NOT NULL CHECK(kind IN ('created', 'status', 'priority', 'owner', 'due', 'project',
+        'title', 'details', 'labels', 'archived', 'restored', 'duplicate', 'accepted', 'declined',
+        'snoozed', 'relation', 'kept', 'recurrence', 'cycle', 'block', 'parent', 'comment',
+        'attachment')),
+    from_value TEXT,
+    to_value TEXT
+);
+INSERT INTO planning_task_activity_next (rowid, id, task_id, at_ms, actor, kind, from_value, to_value)
+    SELECT rowid, id, task_id, at_ms, actor, kind, from_value, to_value FROM planning_task_activity;
+DROP TABLE planning_task_activity;
+ALTER TABLE planning_task_activity_next RENAME TO planning_task_activity;
+CREATE INDEX planning_task_activity_task ON planning_task_activity(task_id, at_ms, id);";
+
 /// Every planner migration in order, for tests that build the schema without
 /// the rest of the history database.
 #[cfg(test)]
@@ -645,6 +694,7 @@ pub(crate) fn apply_all(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
         WATCH_MIGRATION,
         CATALOG_MIGRATION,
         THREADS_MIGRATION,
+        ATTACHMENTS_MIGRATION,
     ] {
         conn.execute_batch(migration)?;
     }

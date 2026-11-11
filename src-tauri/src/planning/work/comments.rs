@@ -21,7 +21,7 @@ pub(crate) struct Author<'a> {
 }
 
 impl Author<'_> {
-    fn name(&self) -> Option<String> {
+    pub(crate) fn name(&self) -> Option<String> {
         match self.actor {
             WorkActor::Agent => Some(agents::agent_name(self.agent)),
             WorkActor::Me | WorkActor::Sona => None,

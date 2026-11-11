@@ -4974,7 +4974,7 @@ pub(super) async fn call(
         "work_item" => {
             let mut args = Args::parse(params)?;
             let id = args.take("id")?;
-            reply(crate::planning::work::work_item(app.state(), app.state(), id).await)
+            reply(crate::planning::work::work_item(app.clone(), app.state(), app.state(), id).await)
         }
         "work_create" => {
             let mut args = Args::parse(params)?;
@@ -5207,6 +5207,92 @@ pub(super) async fn call(
                     operation_id,
                     id,
                     resolved,
+                ))
+            })
+            .await?
+        }
+        "work_attachments" => {
+            let mut args = Args::parse(params)?;
+            let item_id = args.take("itemId")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::planning::work::work_attachments(
+                    handle.clone(),
+                    item_id,
+                ))
+            })
+            .await?
+        }
+        "work_attachment_attach_file" => {
+            let mut args = Args::parse(params)?;
+            let operation_id = args.take("operationId")?;
+            let item_id = args.take("itemId")?;
+            let file = crate::planning::work::types::WorkAttachmentFile {
+                path: args.take("path")?,
+                data: args.take("data")?,
+                file_name: args.take("fileName")?,
+            };
+            let title = args.take("title")?;
+            let subtitle = args.take("subtitle")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::planning::work::work_attachment_attach_file(
+                    handle.clone(),
+                    operation_id,
+                    item_id,
+                    file,
+                    title,
+                    subtitle,
+                ))
+            })
+            .await?
+        }
+        "work_attachment_attach_link" => {
+            let mut args = Args::parse(params)?;
+            let operation_id = args.take("operationId")?;
+            let item_id = args.take("itemId")?;
+            let url = args.take("url")?;
+            let title = args.take("title")?;
+            let subtitle = args.take("subtitle")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::planning::work::work_attachment_attach_link(
+                    handle.clone(),
+                    operation_id,
+                    item_id,
+                    url,
+                    title,
+                    subtitle,
+                ))
+            })
+            .await?
+        }
+        "work_attachment_detach" => {
+            let mut args = Args::parse(params)?;
+            let operation_id = args.take("operationId")?;
+            let id = args.take("id")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::planning::work::work_attachment_detach(
+                    handle.clone(),
+                    operation_id,
+                    id,
+                ))
+            })
+            .await?
+        }
+        "work_attachment_rename" => {
+            let mut args = Args::parse(params)?;
+            let operation_id = args.take("operationId")?;
+            let id = args.take("id")?;
+            let title = args.take("title")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::planning::work::work_attachment_rename(
+                    handle.clone(),
+                    operation_id,
+                    id,
+                    title,
                 ))
             })
             .await?

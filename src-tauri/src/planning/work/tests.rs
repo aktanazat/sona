@@ -1218,7 +1218,7 @@ fn a_deleted_dictation_takes_its_words_out_of_the_tasks_evidence() {
     )
     .expect("the dictation kept as evidence");
     let evidence = |history: &Connection| {
-        super::detail(history, None, None, &task.id)
+        super::detail(history, None, None, std::path::Path::new("/"), &task.id)
             .expect("the task")
             .evidence
             .into_iter()
