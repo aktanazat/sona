@@ -203,6 +203,11 @@ const COMMENT = {
     "A comment's id, from sona_comment_list or the comments in sona_work_get.",
 } as const;
 
+const ATTACHMENT = {
+  type: "string",
+  description: "An attachment's id, from sona_task_attachments or the attachments in sona_work_get.",
+} as const;
+
 const CATALOG_WRITES =
   "This changes the user's Sona projects and people. It needs Settings > Agents > External access and External mutations, and Agents' changes set to Apply: with access or mutations off Sona refuses with consent_required, and while agents' changes wait for the user it refuses with invalid_request naming the setting. Nothing is proposed for later and there is no dry run. A call that changes nothing answers with operation_id null.";
 
@@ -944,7 +949,7 @@ export const TOOLS: readonly ToolDefinition[] = [
     name: "sona_work_get",
     title: "Read a Sona task",
     description:
-      "Read one task: every field, how often it repeats, the meeting quote it came from with its speaker and a sona://loop link, the tasks it blocks, is blocked by or relates to, the task it sits under (parent) and its sub-tasks with how many are done (sub_tasks), its comment threads with replies, its evidence (meetings, notes, dictation quotes and links), what Sona suggests for it while it waits in triage (owner, due day, project, duplicate) with the reason and quote, and its history, each entry marked as made by the user (me), Sona or an agent.",
+      "Read one task: every field, how often it repeats, the meeting quote it came from with its speaker and a sona://loop link, the tasks it blocks, is blocked by or relates to, the task it sits under (parent) and its sub-tasks with how many are done (sub_tasks), its comment threads with replies, its attachments (files with the path of Sona's copy, and links), its evidence (meetings, notes, dictation quotes and links), what Sona suggests for it while it waits in triage (owner, due day, project, duplicate) with the reason and quote, and its history, each entry marked as made by the user (me), Sona or an agent.",
     inputSchema: {
       type: "object",
       properties: { task: TASK },
@@ -1300,6 +1305,95 @@ export const TOOLS: readonly ToolDefinition[] = [
       ...writing(input, agent),
       "--json",
       "--",
+      text(input, "id", true),
+    ],
+  },
+  {
+    name: "sona_task_attach",
+    title: "Attach a file or link to a Sona task",
+    description: `Attach a file or a link to a task: exactly one of path or url. A file is copied into Sona (at most 50 MB); a link must start with http://, https://, mailto: or sona://. Attaching the same file or link to the same task again answers the one already there with replayed:true. Attach what you made for the task, such as a report, a screenshot or a pull request link; never attach secrets, keys, tokens or credentials. dry_run:true checks the file or link and writes nothing. ${COMMENT_WRITES} Agents may attach whether their changes apply or wait for the user.`,
+    mutates: "changes",
+    inputSchema: {
+      type: "object",
+      properties: {
+        task: TASK,
+        path: {
+          type: "string",
+          description: "The absolute path of a file to copy in. A folder is refused.",
+        },
+        url: {
+          type: "string",
+          description: "A link: http, https, mailto or sona.",
+        },
+        title: {
+          type: "string",
+          description: "Shown instead of the file's name or the link.",
+        },
+        subtitle: { type: "string", description: "A second line under the title." },
+        dry_run: DRY_RUN,
+        operation_id: OPERATION_ID,
+      },
+      required: ["task"],
+      additionalProperties: false,
+    },
+    argv: (input, agent) => {
+      const path = text(input, "path");
+      const url = text(input, "url");
+      if ((path === null) === (url === null)) {
+        throw new SonaInputError("Give exactly one of path or url.");
+      }
+      return [
+        "work",
+        "attach",
+        ...assigned("--title", text(input, "title")),
+        ...assigned("--subtitle", text(input, "subtitle")),
+        ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+        ...writing(input, agent),
+        "--json",
+        "--",
+        text(input, "task", true),
+        path ?? url ?? "",
+      ];
+    },
+  },
+  {
+    name: "sona_task_attachments",
+    title: "Read a Sona task's attachments",
+    description:
+      "Read a task's attachments, oldest first: each one's id, kind (file, image or link), title, subtitle, the link or the absolute path of Sona's copy of the file, its original name, type, size and sha256, when it was attached and by whom (me, sona or an agent by name).",
+    inputSchema: {
+      type: "object",
+      properties: { task: TASK },
+      required: ["task"],
+      additionalProperties: false,
+    },
+    argv: (input) => ["work", "attachments", "--json", "--", text(input, "task", true)],
+  },
+  {
+    name: "sona_task_detach",
+    title: "Remove an attachment from a Sona task",
+    description: `Remove an attachment you attached; Sona's copy of a file is deleted with it. dry_run:true shows the attachment without removing it. ${COMMENT_WRITES}`,
+    mutates: "destroys",
+    optIn: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        task: TASK,
+        id: ATTACHMENT,
+        dry_run: DRY_RUN,
+        operation_id: OPERATION_ID,
+      },
+      required: ["task", "id"],
+      additionalProperties: false,
+    },
+    argv: (input, agent) => [
+      "work",
+      "detach",
+      ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+      ...writing(input, agent),
+      "--json",
+      "--",
+      text(input, "task", true),
       text(input, "id", true),
     ],
   },

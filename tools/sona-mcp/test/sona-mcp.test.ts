@@ -150,6 +150,31 @@ describe("tool arguments", () => {
     expect(update.argv({ tasks: "S-4", parent: "S-1" })).toContain("--parent=S-1");
     expect(update.argv({ tasks: "S-4" }).some((arg) => arg.startsWith("--parent"))).toBe(false);
   });
+
+  test("an attach takes a path or a url, never both, as the last argument", () => {
+    const attach = tool("sona_task_attach");
+
+    expect(
+      attach.argv({ task: "S-1", path: "/tmp/-report.md", title: "-Report", dry_run: true }, "Claude"),
+    ).toEqual([
+      "work",
+      "attach",
+      "--title=-Report",
+      "--dry-run",
+      "--agent=Claude",
+      "--json",
+      "--",
+      "S-1",
+      "/tmp/-report.md",
+    ]);
+    expect(attach.argv({ task: "S-1", url: "https://example.com/pr/1" }).at(-1)).toBe(
+      "https://example.com/pr/1",
+    );
+    expect(() => attach.argv({ task: "S-1" })).toThrow("exactly one of path or url");
+    expect(() =>
+      attach.argv({ task: "S-1", path: "/tmp/a", url: "https://example.com" }),
+    ).toThrow("exactly one of path or url");
+  });
 });
 
 describe("running sona", () => {
@@ -261,6 +286,8 @@ const SONA_WRITES = {
   "comment-delete": true,
   "comment-resolve": true,
   subtask: true,
+  attach: true,
+  detach: true,
 };
 
 /** The verbs with which `sona` takes away what no Sona tool gives back. */
@@ -270,14 +297,18 @@ const SONA_DESTROYS = {
   "milestone-delete": true,
   "person-merge": true,
   "comment-delete": true,
+  detach: true,
 };
 
-/** Each required argument at its first enum value or a placeholder, and
- * task wherever a tool takes one, since a comment save needs task or id. */
+/** Each required argument at its first enum value or a placeholder, task
+ * wherever a tool takes one, since a comment save needs task or id, and path
+ * wherever a tool takes one, since an attach needs path or url. */
 function smallest(tool: ToolDefinition): ToolInput {
   const input: ToolInput = {};
   const names = [...(tool.inputSchema.required ?? [])];
-  if ("task" in tool.inputSchema.properties && !names.includes("task")) names.push("task");
+  for (const optional of ["task", "path"]) {
+    if (optional in tool.inputSchema.properties && !names.includes(optional)) names.push(optional);
+  }
   for (const name of names) {
     const property = tool.inputSchema.properties[name];
     input[name] =
