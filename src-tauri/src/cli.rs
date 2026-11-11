@@ -1,4 +1,7 @@
 use crate::managers::transcription::TextFilter;
+use crate::query::external::share::{
+    ShareArgs, SharePreviewArgs, ShareSiteArgs, SharesArgs, UnshareArgs,
+};
 use crate::query::external::{tracker::WorkCommand, ExternalFormat, ExternalLoopStatus};
 use crate::query::QueryScope;
 use clap::{ArgGroup, Parser, Subcommand};
@@ -320,7 +323,33 @@ pub struct CliArgs {
 pub enum Command {
     /// Read and change tasks in Sona's tracker. Reads need Settings > Agents >
     /// External access; changes also need External mutations.
-    Work(WorkCommand),
+    Work(Box<WorkCommand>),
+    /// Show the page one meeting would share, and optionally save it as a
+    /// draft for him to share from Sona. Saving needs External mutations.
+    SharePreview(SharePreviewArgs),
+    /// Publish one meeting's page to his site. Needs --confirm typed at a
+    /// terminal; --dry-run shows what would go out.
+    Share(ShareArgs),
+    /// List shared pages and their state.
+    Shares(SharesArgs),
+    /// Remove a shared page from his site.
+    Unshare(UnshareArgs),
+    /// Show or set where shared pages are published.
+    ShareSite(ShareSiteArgs),
+}
+
+impl Command {
+    /// Whether the answer prints as one JSON value.
+    pub const fn json(&self) -> bool {
+        match self {
+            Self::Work(work) => work.json,
+            Self::SharePreview(args) => args.json,
+            Self::Share(args) => args.json,
+            Self::Shares(args) => args.json,
+            Self::Unshare(args) => args.json,
+            Self::ShareSite(args) => args.json,
+        }
+    }
 }
 
 #[cfg(test)]

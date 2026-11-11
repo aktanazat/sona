@@ -30,6 +30,7 @@ pub mod privacy;
 pub mod prompts;
 pub mod query;
 pub mod recorder;
+pub mod shared_pages;
 pub mod snippets;
 pub mod templates;
 pub mod transcript_corrections;

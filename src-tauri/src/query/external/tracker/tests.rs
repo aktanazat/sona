@@ -1,4 +1,4 @@
-use super::{Board, Fence, ShowArgs, TaskRef, WorkCommand, WorkVerb};
+use super::{Board, Fence, ShowArgs, TaskRef, WorkVerb};
 use crate::cli::{CliArgs, Command};
 use crate::meeting::processing::MeetingLivePromise;
 use crate::meeting::types::MeetingSessionId;
@@ -21,13 +21,12 @@ const SHARED_MEETING: &str = "1e1a5f0e-0000-4000-8000-000000000002";
 fn shown(argv_task: &str) -> Result<TaskRef, String> {
     match CliArgs::try_parse_from(["sona", "work", "show", argv_task]) {
         Ok(CliArgs {
-            command:
-                Some(Command::Work(WorkCommand {
-                    verb: WorkVerb::Show(ShowArgs { task }),
-                    ..
-                })),
+            command: Some(Command::Work(work)),
             ..
-        }) => Ok(task),
+        }) => match work.verb {
+            WorkVerb::Show(ShowArgs { task }) => Ok(task),
+            other => panic!("`work show` parsed as {other:?}"),
+        },
         Ok(other) => panic!("`work show` parsed as {other:?}"),
         Err(error) => Err(error.to_string()),
     }

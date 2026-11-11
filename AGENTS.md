@@ -318,6 +318,38 @@ them. `list` and `ready` take `--due overdue,today,this-week,next:N,none`;
 In a portable profile only the tracker's history side opens: work from
 meetings, people as owners and `--meeting` filters need the encrypted corpus.
 
+**Shared page verbs:** one meeting's notes as an encrypted page on the user's site
+(`shared_pages/`, `query/external/share.rs`). Text by default, one JSON value
+with `--json`, refusals as JSON on stderr. Reads and every `--dry-run` need
+External access; `--save`, `share --confirm`, `unshare` and setting
+`share-site` also need External mutations. `share` publishes only with
+`--confirm` run at a terminal, after it prints the page's title, sections,
+expiry and site on that terminal and the user types `share` and presses
+Return. Without `--confirm`, or with any other answer, the refusal is
+`confirmation_required`; from a process with no terminal on stdin it is
+`confirmation_requires_terminal` (both exit 2, nothing pushed). Agents
+prepare drafts; the owner shares them from Sona. Meetings kept local are
+`not_found` on every route, a `--draft FILE` and the app's commands
+included; when meetings cannot be opened outside a portable profile, the
+refusal is `unavailable`. Unsharing a `failed` share still pushes its removal.
+
+| Verb                                                                                   | Does                                                                     |
+| -------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| `share-preview <MEETING> [--include S,...] [--speakers names\|numbered] [--expires 1d\|7d\|30d\|never]` | The exact page; `--save [--agent NAME]` keeps it as a draft (**writes**); `--html FILE` |
+| `share <MEETING> [--draft FILE] [same choices] --dry-run`                              | Page counts and the files a push would write; publishes nothing          |
+| `share <MEETING> [--draft FILE] [same choices] --confirm`                              | **Publishes** once `share` is typed back, then waits up to 4 minutes for the page to be live |
+| `shares`                                                                               | Every share with its state; pending ones are checked once                |
+| `unshare <SLUG\|URL> [--dry-run]`                                                      | **Writes.** Removes the page and its files from the site                 |
+| `share-site [--remote URL --base-url URL]`                                             | Where pages are pushed and served; setting it **writes**                 |
+
+Sections for `--include`: `title`, `summary`, `action_items`, `decisions`,
+`notes`, `transcript`, `audio`. Further refusals: `site_not_set_up`,
+`too_large`, `audio_unavailable`, `push_failed`, `locked`,
+`remote_not_sona_site`. The app reaches the same core through the native
+commands `shared_draft`, `shared_draft_save`, `shared_draft_discard`,
+`shared_drafts`, `shared_preview`, `shared_publish`, `shared_list`,
+`shared_revoke`, `shared_site_get` and `shared_site_set`.
+
 **Key design decisions:**
 
 - CLI flags are runtime-only overrides — they do NOT modify persisted settings

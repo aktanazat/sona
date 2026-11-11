@@ -1,5 +1,5 @@
 mod client;
-mod crypto;
+pub(crate) mod crypto;
 mod runtime;
 mod share_document;
 mod share_file;
