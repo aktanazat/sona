@@ -344,11 +344,14 @@ pub(crate) fn reminders(conn: &Connection) -> StorageResult<Vec<WorkReminder>> {
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
-/// Reminders whose time has come and that the app has not notified yet.
+/// Reminders whose time has come and that the app has not notified yet,
+/// leaving out tasks in the bin.
 pub(crate) fn due_reminders(conn: &Connection, now_ms: i64) -> StorageResult<Vec<WorkReminder>> {
     let mut statement = conn.prepare(&format!(
         "SELECT {REMINDER_COLUMNS} FROM planning_task_reminders
-         WHERE notified_at_ms IS NULL AND remind_at_ms <= ?1 ORDER BY remind_at_ms, task_id"
+         WHERE notified_at_ms IS NULL AND remind_at_ms <= ?1
+           AND task_id NOT IN (SELECT id FROM planning_tasks WHERE trashed_at_ms IS NOT NULL)
+         ORDER BY remind_at_ms, task_id"
     ))?;
     let rows = statement.query_map([now_ms], read_reminder)?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -692,6 +695,7 @@ pub(crate) fn label_retire_as(
 #[cfg(test)]
 mod tests {
     use super::super::super::schema;
+    use super::super::bin;
     use super::super::items::{self, NewItem};
     use super::super::types::{WorkActor, WorkOwner, WorkStatus};
     use super::super::{Change, Effects};
@@ -787,5 +791,18 @@ mod tests {
         set_reminder(&conn, &task, Some(AT + 60_000), WorkActor::Me, None, AT).expect("set again");
         assert!(due(&conn, AT).is_empty());
         assert_eq!(due(&conn, AT + 60_000), vec![task]);
+    }
+
+    #[test]
+    fn a_task_in_the_bin_reminds_no_one_until_it_comes_back() {
+        let conn = planner();
+        let task = task(&conn);
+        set_reminder(&conn, &task, Some(AT - 1), WorkActor::Me, None, AT).expect("a reminder");
+
+        bin::trash(&conn, &task, WorkActor::Me, AT).expect("the task in the bin");
+        assert!(due(&conn, AT).is_empty());
+
+        bin::untrash(&conn, &task, WorkActor::Me, AT).expect("the task restored");
+        assert_eq!(due(&conn, AT), vec![task]);
     }
 }

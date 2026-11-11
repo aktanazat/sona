@@ -388,9 +388,14 @@ impl LibraryVerb {
             | Self::HeardPlans(_)
             | Self::Said(_)
             | Self::ScreenText(_)
-            | Self::MeetingSearch(_)
-            | Self::MeetingLedger(_)
-            | Self::MeetingsCsv(_) => READ_SCOPES,
+            | Self::MeetingSearch(_) => READ_SCOPES,
+            Self::MeetingLedger(LedgerArgs { file, .. }) | Self::MeetingsCsv(file) => {
+                if file.out.is_some() {
+                    WRITE_SCOPES
+                } else {
+                    READ_SCOPES
+                }
+            }
             Self::MeetingRename(RenameArgs { change, .. })
             | Self::MeetingDelete(MeetingChangeArgs { change, .. })
             | Self::MeetingRestore(TrashArgs { change, .. })
@@ -1782,6 +1787,7 @@ pub(super) async fn search(
 pub(super) async fn export(
     meetings: &Arc<MeetingSessionManager>,
     args: &ExportArgs,
+    gate: Gate<'_>,
 ) -> Result<ExternalLibraryChange, ExternalError> {
     let (_, review) = meeting(meetings, &args.meeting).await?;
     let session = review.session.session_id;
@@ -1808,6 +1814,7 @@ pub(super) async fn export(
     if dry_run {
         return Ok(answer);
     }
+    gate("exporting a meeting")?;
     let out = args.out.clone();
     let result = meetings
         .export_to(
@@ -1829,9 +1836,11 @@ fn written(
     meeting_id: Option<Uuid>,
     contents: String,
     out: Option<&PathBuf>,
+    gate: Gate<'_>,
 ) -> Result<ExternalDocument, ExternalError> {
     let path = match out {
         Some(path) => {
+            gate("saving a file")?;
             crate::meeting::export::write_atomic(path, contents.as_bytes()).map_err(|_| {
                 ExternalError::new(
                     ExternalErrorCode::Failed,
@@ -1853,6 +1862,7 @@ fn written(
 pub(super) async fn ledger(
     meetings: &Arc<MeetingSessionManager>,
     args: &LedgerArgs,
+    gate: Gate<'_>,
 ) -> Result<ExternalDocument, ExternalError> {
     let (_, review) = meeting(meetings, &args.meeting).await?;
     let session = review.session.session_id;
@@ -1860,12 +1870,13 @@ pub(super) async fn ledger(
         .ledger_html(session)
         .await
         .map_err(command_error(session.uuid()))?;
-    written(Some(session.uuid()), html, args.file.out.as_ref())
+    written(Some(session.uuid()), html, args.file.out.as_ref(), gate)
 }
 
 pub(super) async fn csv(
     meetings: &Arc<MeetingSessionManager>,
     args: &FileArgs,
+    gate: Gate<'_>,
 ) -> Result<ExternalDocument, ExternalError> {
     let store = library(meetings).await?;
     let hidden = kept_local(&store)?.sessions().clone();
@@ -1873,7 +1884,7 @@ pub(super) async fn csv(
         .export_csv_without(hidden)
         .await
         .map_err(|error| ExternalError::from(QueryError::from(error)))?;
-    written(None, csv, args.out.as_ref())
+    written(None, csv, args.out.as_ref(), gate)
 }
 
 impl Tracker<'_> {
@@ -1969,13 +1980,13 @@ impl Tracker<'_> {
                 ExternalLibraryAnswer::Search(search(meetings, args).await?)
             }
             LibraryVerb::MeetingExport(args) => {
-                ExternalLibraryAnswer::Change(export(meetings, args).await?)
+                ExternalLibraryAnswer::Change(export(meetings, args, &gate).await?)
             }
             LibraryVerb::MeetingLedger(args) => {
-                ExternalLibraryAnswer::Document(ledger(meetings, args).await?)
+                ExternalLibraryAnswer::Document(ledger(meetings, args, &gate).await?)
             }
             LibraryVerb::MeetingsCsv(args) => {
-                ExternalLibraryAnswer::Document(csv(meetings, args).await?)
+                ExternalLibraryAnswer::Document(csv(meetings, args, &gate).await?)
             }
         };
         Ok(WorkAnswer::Library(Box::new(answer)))
@@ -2143,8 +2154,9 @@ pub(super) fn text(answer: &ExternalLibraryAnswer, text: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::{
-        csv, delete, folder_membership, folder_new, rename, trash, trash_change, Change,
-        FileArgs, FolderMembershipArgs, FolderNewArgs, MeetingChangeArgs, RenameArgs, TrashArgs,
+        csv, delete, export, folder_membership, folder_new, rename, trash, trash_change, Change,
+        ExportArgs, ExportFormat, FileArgs, FolderMembershipArgs, FolderNewArgs, MeetingChangeArgs,
+        RenameArgs, TrashArgs,
     };
     use crate::meeting::detection::machine::CalendarEventSummary;
     use crate::meeting::series_types::MeetingSeriesRemoteOptOutSetRequest;
@@ -2168,6 +2180,10 @@ mod tests {
 
     fn applies(_: &str) -> Result<(), ExternalError> {
         Ok(())
+    }
+
+    fn waiting(what: &str) -> Result<(), ExternalError> {
+        Err(ExternalError::invalid(format!("{what} waits for the user.")))
     }
 
     struct Corpus {
@@ -2365,10 +2381,51 @@ mod tests {
             assert_eq!(refused.error, ExternalErrorCode::NotFound);
             assert_eq!(title(&corpus, corpus.kept).await, "Board prep");
 
-            let exported = csv(&corpus.meetings, &FileArgs { out: None }).await.unwrap();
+            let exported = csv(&corpus.meetings, &FileArgs { out: None }, &applies).await.unwrap();
             let contents = exported.contents.unwrap();
             assert!(contents.contains("Pricing sync"));
             assert!(!contents.contains("Board prep"));
+        });
+    }
+
+    #[test]
+    fn a_meeting_file_is_written_only_where_agents_changes_apply() {
+        tauri::async_runtime::block_on(async {
+            let corpus = corpus().await;
+            let directory = TempDir::new().unwrap();
+            let path = directory.path().join("meetings.csv");
+            std::fs::write(&path, "the user's own file").unwrap();
+
+            let refused = csv(&corpus.meetings, &FileArgs { out: Some(path.clone()) }, &waiting)
+                .await
+                .unwrap_err();
+            assert_eq!(refused.message, "saving a file waits for the user.");
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "the user's own file");
+
+            let answered = csv(&corpus.meetings, &FileArgs { out: None }, &waiting).await.unwrap();
+            assert!(answered.contents.unwrap().contains("Pricing sync"));
+        });
+    }
+
+    #[test]
+    fn a_meeting_is_exported_only_where_agents_changes_apply() {
+        tauri::async_runtime::block_on(async {
+            let corpus = corpus().await;
+            let directory = TempDir::new().unwrap();
+            let path = directory.path().join("pricing.md");
+            let asked = ExportArgs {
+                meeting: corpus.pricing.uuid().to_string(),
+                format: ExportFormat::Markdown,
+                out: path.clone(),
+                change: write(false),
+            };
+
+            let refused = export(&corpus.meetings, &asked, &waiting).await.unwrap_err();
+            assert_eq!(refused.message, "exporting a meeting waits for the user.");
+            assert!(!path.exists());
+
+            export(&corpus.meetings, &asked, &applies).await.unwrap();
+            assert!(path.exists());
         });
     }
 

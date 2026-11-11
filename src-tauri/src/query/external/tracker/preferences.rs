@@ -27,7 +27,7 @@ use crate::meeting::workflow_types::{
     WorkflowId, WorkflowOutcomeCode, WorkflowOutcomeCounts, WorkflowRunReceipt, WorkflowRunStatus,
     WorkflowRunsRequest, WorkflowSetEnabledRequest, WorkflowsListResult,
 };
-use crate::modes::{self, ModeDefinition};
+use crate::modes::{self, ModeDefinition, RequestedEngine};
 use crate::planning;
 use crate::query::external::{
     beacon, command_error, kept_local, meeting_refusal, session_id, store, visible_meeting,
@@ -36,8 +36,8 @@ use crate::query::external::{
 };
 use crate::query::{KeptLocal, QueryError, QUERY_SCHEMA_VERSION};
 use crate::settings::{
-    self, AppSettings, LLMPrompt, LogLevel, OverlayStyle, SoundTheme, Theme, VocabularyEntry,
-    LOCAL_CLEANUP_PROVIDER_ID,
+    self, AppSettings, LLMPrompt, LogLevel, OverlayStyle, PasteMethod, SoundTheme, Theme,
+    VocabularyEntry, LOCAL_CLEANUP_PROVIDER_ID,
 };
 use clap::{Args, Subcommand, ValueEnum};
 use rusqlite::OptionalExtension as _;
@@ -735,6 +735,24 @@ fn mode_error(error: modes::ModeMutationError) -> String {
     serde_json::to_string(&error).unwrap_or_else(|_| "The mode could not be changed.".to_owned())
 }
 
+/// Saves the mode an agent sent, except where its audio goes and what runs to
+/// paste: an agent cannot move a mode to a cloud engine or a paste script, so
+/// those stay as the user left them, and a new mode starts local.
+fn save_mode(asked: &ModeDefinition, settings: &mut AppSettings) -> Result<(), String> {
+    let saved = settings.modes.iter().find(|mode| mode.id == asked.id);
+    let mut mode = asked.clone();
+    mode.asr.requested_engine =
+        saved.map_or(RequestedEngine::Local, |saved| saved.asr.requested_engine);
+    mode.delivery.external_script_path =
+        saved.and_then(|saved| saved.delivery.external_script_path.clone());
+    if mode.delivery.paste_method == PasteMethod::ExternalScript {
+        mode.delivery.paste_method =
+            saved.map_or_else(PasteMethod::default, |saved| saved.delivery.paste_method);
+    }
+    let revision = settings.modes_revision;
+    modes::apply_upsert_mode(settings, mode, revision).map_err(mode_error)
+}
+
 #[derive(Serialize)]
 struct RunView<'a> {
     workflow_id: &'a WorkflowId,
@@ -920,10 +938,7 @@ impl Tracker<'_> {
                     what: verb.name().to_owned(),
                     request: json!({ "mode": mode }),
                     show: show(|s| json!(modes::mode_settings_snapshot(s))),
-                    apply: apply(move |s| {
-                        let revision = s.modes_revision;
-                        modes::apply_upsert_mode(s, mode.clone(), revision).map_err(mode_error)
-                    }),
+                    apply: apply(move |s| save_mode(&mode, s)),
                 };
                 self.change_settings(&args.change, change, false).await
             }
@@ -2098,5 +2113,31 @@ mod tests {
         let change = reset_change(&args).unwrap();
         assert!((change.apply)(&mut settings).is_err());
         assert_eq!(settings.bindings[&id].current_binding, "f19");
+    }
+
+    #[test]
+    fn an_agent_cannot_send_a_mode_to_the_cloud_or_have_it_run_a_script() {
+        let mut settings = settings::get_default_settings();
+        modes::ensure_mode_settings(&mut settings);
+        let mut asked = settings.modes[0].clone();
+        asked.name = "Dictation, renamed".to_owned();
+        asked.asr.requested_engine = RequestedEngine::DeepgramNova3;
+        asked.delivery.paste_method = PasteMethod::ExternalScript;
+        asked.delivery.external_script_path = Some("/private/var/tmp/paste.sh".to_owned());
+        save_mode(&asked, &mut settings).unwrap();
+
+        let saved = &settings.modes[0];
+        assert_eq!(saved.name, "Dictation, renamed");
+        assert_eq!(saved.asr.requested_engine, RequestedEngine::Local);
+        assert_eq!(saved.delivery.paste_method, PasteMethod::default());
+        assert_eq!(saved.delivery.external_script_path, None);
+
+        asked.id = "agent-made".to_owned();
+        save_mode(&asked, &mut settings).unwrap();
+
+        let made = settings.modes.iter().find(|mode| mode.id == "agent-made").unwrap();
+        assert_eq!(made.asr.requested_engine, RequestedEngine::Local);
+        assert_eq!(made.delivery.paste_method, PasteMethod::default());
+        assert_eq!(made.delivery.external_script_path, None);
     }
 }

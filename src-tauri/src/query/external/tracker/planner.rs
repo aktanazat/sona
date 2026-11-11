@@ -411,7 +411,7 @@ impl Tracker<'_> {
             })));
         }
         self.applies("booking time")?;
-        let operation_id = args.write.operation_id("book", &row.item.id)?;
+        let operation_id = args.write.fresh_operation_id();
         let started_ms = now_ms();
         let block = blocks::work_time_block(self.app.clone(), operation_id.clone(), row.item.id.clone())
             .await
@@ -453,9 +453,7 @@ impl Tracker<'_> {
             })));
         }
         self.applies("taking a booked hour off the calendar")?;
-        let operation_id = args
-            .write
-            .operation_id("unbook", &(&row.item.id, held.map(|block| block.starts_at_ms)))?;
+        let operation_id = args.write.fresh_operation_id();
         let started_ms = now_ms();
         blocks::work_time_block_remove(self.app.clone(), operation_id.clone(), row.item.id.clone())
             .await

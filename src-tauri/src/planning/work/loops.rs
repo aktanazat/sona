@@ -6,6 +6,7 @@ use crate::meeting::store::MeetingStore;
 use crate::meeting::types::MeetingSessionId;
 use crate::planning::store::{self, Refusal};
 use crate::planning::types::ProjectStatus;
+use crate::query::KeptLocal;
 use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension, Row, Transaction};
 use serde::de::DeserializeOwned;
@@ -930,6 +931,13 @@ pub(crate) fn enable(conn: &Connection, id: &str, enabled: bool, now: i64) -> Re
             change_head(conn)?,
         ],
     )?;
+    if !enabled {
+        conn.execute(
+            "UPDATE planning_loop_runs SET status = 'skipped', error = ?2, started_at_ms = ?3, ended_at_ms = ?3
+             WHERE loop_id = ?1 AND status = 'queued'",
+            params![id, "Skipped: the automation was turned off.", now],
+        )?;
+    }
     get(conn, id)
 }
 
@@ -1217,7 +1225,7 @@ fn fired(
         }
         let name: Option<String> = conn
             .query_row(
-                "SELECT name FROM planning_projects WHERE id = ?1",
+                "SELECT title FROM planning_projects WHERE id = ?1",
                 [&change.entity_id],
                 |row| row.get(0),
             )
@@ -1416,24 +1424,32 @@ pub(crate) fn meeting_ended_in(
     Ok(queued)
 }
 
+/// The title and start of a meeting that has ended, for the automations
+/// waiting on one. None for a meeting kept on this Mac, or when the store
+/// cannot say whether it is: a run's reason leaves the Mac.
+fn ended_meeting(
+    store: &MeetingStore,
+    session_id: MeetingSessionId,
+) -> Option<(String, Option<i64>)> {
+    if KeptLocal::read(store).map_or(true, |kept| kept.hides(session_id)) {
+        return None;
+    }
+    let snapshot = store.session_snapshot(session_id).ok()?;
+    Some((snapshot.title, snapshot.started_at_utc_ms))
+}
+
 pub(crate) fn meeting_ended(
     app: &AppHandle,
     history: &HistoryManager,
     store: &MeetingStore,
     session_id: MeetingSessionId,
 ) {
-    let Ok(snapshot) = store.session_snapshot(session_id) else {
+    let Some((title, started_at_ms)) = ended_meeting(store, session_id) else {
         return;
     };
     let meeting_id = session_id.uuid().to_string();
     match history.with_connection(|conn| {
-        meeting_ended_in(
-            conn,
-            &meeting_id,
-            &snapshot.title,
-            snapshot.started_at_utc_ms,
-            now_ms(),
-        )
+        meeting_ended_in(conn, &meeting_id, &title, started_at_ms, now_ms())
     }) {
         Ok(0) => {}
         Ok(_) => wake(app),
@@ -1641,27 +1657,26 @@ pub(crate) fn start(app: AppHandle) {
                 Ok(_) => tasks_changed(&app, Vec::new()),
                 Err(error) => log::warn!("Loops could not check their triggers: {error:#}"),
             }
-            match closed_gate(&app) {
-                Some(reason) => {
+            loop {
+                if let Some(reason) = closed_gate(&app) {
                     match history.with_connection(|conn| skip_waiting(conn, reason, now_ms())) {
                         Ok(0) => {}
                         Ok(_) => tasks_changed(&app, Vec::new()),
                         Err(error) => log::warn!("Paused loop runs could not be marked: {error:#}"),
                     }
+                    break;
                 }
-                None => loop {
-                    match history.with_connection(|conn| claim(conn, now_ms())) {
-                        Ok(Some(claimed)) => {
-                            tasks_changed(&app, Vec::new());
-                            execute(&app, &history, claimed).await;
-                        }
-                        Ok(None) => break,
-                        Err(error) => {
-                            log::warn!("A loop run could not start: {error:#}");
-                            break;
-                        }
+                match history.with_connection(|conn| claim(conn, now_ms())) {
+                    Ok(Some(claimed)) => {
+                        tasks_changed(&app, Vec::new());
+                        execute(&app, &history, claimed).await;
                     }
-                },
+                    Ok(None) => break,
+                    Err(error) => {
+                        log::warn!("A loop run could not start: {error:#}");
+                        break;
+                    }
+                }
             }
             tokio::select! {
                 () = notify.notified() => {}
@@ -1771,6 +1786,10 @@ pub(crate) fn delete_as(app: &AppHandle, operation_id: &str, id: &str) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::meeting::detection::machine::CalendarEventSummary;
+    use crate::meeting::series_types::MeetingSeriesRemoteOptOutSetRequest;
+    use crate::meeting::store::workflow_core_tests::{self, reviewable_meeting};
+    use crate::meeting::types::MeetingOperationId;
     use crate::planning::schema;
     use crate::planning::work::items::{self, NewItem};
     use crate::planning::work::types::{WorkActivityKind, WorkActor, WorkOwner, WorkPatch};
@@ -1842,5 +1861,129 @@ mod tests {
             causes,
             [(format!("S-{} moved to Done", task.number), Some(task.id))]
         );
+    }
+
+    #[test]
+    fn a_project_that_changes_status_queues_a_run_named_for_it() {
+        let mut conn = Connection::open_in_memory().expect("a history database");
+        schema::apply_all(&conn).expect("the planner schema");
+        let watcher = save(
+            &conn,
+            None,
+            &LoopInput {
+                name: "Project moves".to_owned(),
+                prompt: "Say what the project's new status means.".to_owned(),
+                trigger: LoopTrigger::ProjectStatusChanged { to: None },
+                conditions: LoopConditions::default(),
+                tools: Vec::new(),
+            },
+            "you",
+            1,
+        )
+        .expect("a saved loop");
+        let project = store::create_project(
+            &mut conn,
+            "Harbor launch",
+            None,
+            &uuid::Uuid::new_v4().to_string(),
+            2,
+        )
+        .expect("a project");
+        store::update_project(
+            &mut conn,
+            &project.id,
+            project.revision,
+            ProjectStatus::Completed,
+            &uuid::Uuid::new_v4().to_string(),
+            3,
+        )
+        .expect("the project completed");
+
+        let queued = enqueue(&mut conn, 4).expect("a read of the stream");
+        let causes: Vec<_> = runs(&conn, &watcher.id, 10)
+            .expect("the runs")
+            .into_iter()
+            .map(|run| run.cause)
+            .collect();
+
+        assert_eq!(queued, 1);
+        assert_eq!(causes, ["Project Harbor launch moved to Completed"]);
+    }
+
+    #[test]
+    fn a_meeting_kept_on_this_mac_is_never_named_to_an_automation() {
+        let (_directory, meetings) = workflow_core_tests::store();
+        let open = reviewable_meeting(&meetings, "Pricing sync", 1);
+        let kept = reviewable_meeting(&meetings, "Board prep", 1);
+        meetings
+            .remember_calendar_facts(
+                kept,
+                &CalendarEventSummary {
+                    event_key: "board#1".to_owned(),
+                    series_key: "board".to_owned(),
+                    title: "Board prep".to_owned(),
+                    attendee_count: 2,
+                    start_utc_ms: 1,
+                    end_utc_ms: 2,
+                    attendees: Vec::new(),
+                    notes: None,
+                    calendar_name: None,
+                    location: None,
+                    url: None,
+                    place: None,
+                },
+            )
+            .expect("the meeting's series");
+        meetings
+            .set_series_remote_opt_out(
+                &MeetingSeriesRemoteOptOutSetRequest {
+                    operation_id: MeetingOperationId::new(),
+                    series_key: "board".to_owned(),
+                    remote_intelligence_opt_out: true,
+                    expected_revision: 0,
+                },
+                1,
+            )
+            .expect("the series kept on this Mac");
+
+        assert_eq!(
+            ended_meeting(&meetings, open).map(|(title, _)| title).as_deref(),
+            Some("Pricing sync")
+        );
+        assert_eq!(ended_meeting(&meetings, kept), None);
+    }
+
+    #[test]
+    fn an_automation_turned_off_runs_none_of_its_waiting_runs() {
+        let mut conn = Connection::open_in_memory().expect("a history database");
+        schema::apply_all(&conn).expect("the planner schema");
+        let nightly = save(
+            &conn,
+            None,
+            &LoopInput {
+                name: "Wrap up".to_owned(),
+                prompt: "Say what the finished task delivered.".to_owned(),
+                trigger: LoopTrigger::StatusChanged {
+                    to: Some(WorkStatus::Done),
+                },
+                conditions: LoopConditions::default(),
+                tools: Vec::new(),
+            },
+            "you",
+            1,
+        )
+        .expect("a saved loop");
+        run_now(&conn, &nightly.id, &uuid::Uuid::new_v4().to_string(), 2).expect("a waiting run");
+        enable(&conn, &nightly.id, false, 3).expect("the automation turned off");
+
+        let claimed = claim(&mut conn, 4).expect("a look for waiting runs");
+        let statuses: Vec<_> = runs(&conn, &nightly.id, 10)
+            .expect("the runs")
+            .into_iter()
+            .map(|run| run.status.as_str())
+            .collect();
+
+        assert!(claimed.is_none());
+        assert_eq!(statuses, ["skipped"]);
     }
 }

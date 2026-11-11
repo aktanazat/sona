@@ -993,6 +993,16 @@ describe("published tools", () => {
 
     expect(mislabelled).toEqual([]);
   });
+
+  /* A read-only tool is published by default and skips the approval prompt,
+   * so a file it wrote would be replaced without the user being asked. */
+  test("no tool published as read-only writes a file", () => {
+    const writers = TOOLS.filter(
+      (tool) => tool.mutates === undefined && "out" in tool.inputSchema.properties,
+    ).map((tool) => tool.name);
+
+    expect(writers).toEqual([]);
+  });
 });
 
 /** What the SDK itself lets a caller hand to `tools/call` — the owner type,

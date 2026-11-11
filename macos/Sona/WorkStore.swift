@@ -64,6 +64,7 @@ final class WorkStore {
     @ObservationIgnored private var undoSerial = 0
     @ObservationIgnored private var alarm: Task<Void, Never>?
     @ObservationIgnored private var sessionsTicket = 0
+    @ObservationIgnored private var viewsLoaded = false
 
     private static let changeEvents = ["work-changed", "planning-changed-event", CoreEvent.meetingRemoved]
     private static let everything = WorkQuery(includeArchived: true, includeSnoozed: true)
@@ -945,10 +946,11 @@ final class WorkStore {
     }
 
     /// Saved views pinned to the sidebar used to be kept on this Mac; they
-    /// move into the core's favorites once, then the local list goes.
+    /// move into the core's favorites once the saved views have loaded, then
+    /// the local list goes.
     private func adoptPinnedViews() async {
         let key = "tasks.favoriteViews"
-        guard let stored = UserDefaults.standard.string(forKey: key) else { return }
+        guard viewsLoaded, let stored = UserDefaults.standard.string(forKey: key) else { return }
         for id in stored.split(separator: ",").map(String.init)
         where views.contains(where: { $0.id == id }) && !isFavorite(.view, id) {
             do {
@@ -1119,6 +1121,7 @@ final class WorkStore {
                 conversationsAvailable = listed.conversationsAvailable
                 counts = counted
                 views = savedViews
+                viewsLoaded = true
                 cycles = cycleList.cycles
                 cycleSettings = cycleList.settings
                 working = Dictionary(openSessions.map { ($0.itemId, $0) }) { newest, _ in newest }

@@ -4777,6 +4777,24 @@ mod tests {
             (vec!["work", "watches"], reads),
             (vec!["work", "watch", "pricing"], writes),
             (vec!["work", "unwatch", "pricing"], writes),
+            (vec!["work", "meetings-csv"], reads),
+            (
+                vec!["work", "meetings-csv", "--out", "/private/var/tmp/meetings.csv"],
+                writes,
+            ),
+            (vec!["work", "meeting-ledger", MEETING], reads),
+            (
+                vec!["work", "meeting-ledger", MEETING, "--out", "/private/var/tmp/ledger.html"],
+                writes,
+            ),
+            (
+                vec!["work", "meeting-export", MEETING, "--out", "/private/var/tmp/m.md", "--dry-run"],
+                reads,
+            ),
+            (
+                vec!["work", "meeting-export", MEETING, "--out", "/private/var/tmp/m.md"],
+                writes,
+            ),
         ]
         .into_iter()
         .filter(|(argv, expected)| request(argv).required_scopes() != *expected)

@@ -428,7 +428,8 @@ what is already so. A meeting kept on this Mac answers `not_found`, is left
 out of `meetings-csv`, and stays out of `meeting-trash` while it is trashed.
 `heard-plan-edit` refuses a plan already on
 the calendar. `meeting-export` writes the pictures beside the file and needs the
-write settings; `meeting-ledger` and `meetings-csv` only read.
+write settings, as do `meeting-ledger` and `meetings-csv` with `--out`; without
+it they only read.
 
 Not from the command line: writing the notes again, catch me up and rewriting
 with my notes, and importing a recording, all run the notes model or
