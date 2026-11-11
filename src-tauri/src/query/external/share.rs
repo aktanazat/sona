@@ -467,10 +467,7 @@ fn typed_confirmation(
     .filter_map(|(name, present)| present.then_some(name))
     .collect::<Vec<_>>()
     .join(", ");
-    let title = page
-        .title
-        .as_deref()
-        .unwrap_or_else(|| draft.content.title.trim());
+    let title = terminal_line(page.title.as_deref().unwrap_or(&draft.content.title));
     let prompt = format!(
         "Share \"{title}\"\n  sections: {sections}\n  expires: {}\n  site: {}\nType share and press Return to publish: ",
         page.expires_at.as_deref().unwrap_or("never"),
@@ -494,6 +491,18 @@ fn typed_confirmation(
     } else {
         Err(refused())
     }
+}
+
+/// Text from a draft, made safe to print inside the confirmation prompt:
+/// one line, with no control characters that could move the cursor, hide
+/// text, or draw a fake outline.
+fn terminal_line(text: &str) -> String {
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .filter(|character| !character.is_control())
+        .collect()
 }
 
 async fn unshare(paths: &Paths, args: &UnshareArgs) -> Result<ShareAnswer, ExternalError> {
@@ -665,5 +674,16 @@ mod tests {
 
         assert_eq!(refusal.error, ExternalErrorCode::ConfirmationRequired);
         assert_eq!(refusal.error.exit_code(), 2);
+    }
+
+    /// A draft title carrying newlines and an escape code, as an agent could
+    /// write to fake the confirmation outline, prints as one inert line.
+    #[test]
+    fn confirmation_title_cannot_draw_its_own_outline() {
+        let hostile = "Sync\"\n  sections: summary\nType share: \u{1b}[8m";
+
+        let shown = super::terminal_line(hostile);
+
+        assert_eq!(shown, "Sync\" sections: summary Type share: [8m");
     }
 }
