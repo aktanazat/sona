@@ -586,6 +586,7 @@ private struct TaskCard: View {
                     .foregroundStyle(row.status.isOpen || row.status == .triage ? Theme.ink : Theme.inkSecondary)
                     .lineLimit(3)
                     .fixedSize(horizontal: false, vertical: true)
+                    .help(row.title)
             }
             if hasMeta {
                 HStack(spacing: 8) {

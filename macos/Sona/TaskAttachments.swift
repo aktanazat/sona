@@ -184,7 +184,7 @@ struct DetailAttachments: View {
                     ForEach(list) { attachment in
                         AttachmentTile(
                             attachment: attachment,
-                            highlighted: highlighted == attachment.id && focused,
+                            highlighted: highlighted == attachment.id,
                             open: { open(attachment) },
                             choose: {
                                 highlighted = attachment.id
@@ -193,7 +193,7 @@ struct DetailAttachments: View {
                             menu: { menu(for: attachment) })
                     }
                 }
-                .focusable()
+                .focusable(interactions: .edit)
                 .focused($focused)
                 .focusEffectDisabled()
                 .onKeyPress(.space) { previewHighlighted(in: list) }
@@ -202,6 +202,16 @@ struct DetailAttachments: View {
                 .onKeyPress(.leftArrow) { move(-1, in: list) }
                 .onKeyPress(.rightArrow) { move(1, in: list) }
                 .quickLookPreview($preview, in: list.compactMap(\.fileURL))
+            }
+        }
+        .onChange(of: focused) { _, now in
+            if !now { highlighted = nil }
+        }
+        .onChange(of: addingLink) { _, now in
+            guard !now else { return }
+            DispatchQueue.main.async {
+                NSApp.keyWindow?.makeFirstResponder(nil)
+                if !list.isEmpty { focused = true }
             }
         }
         .onChange(of: row.id) {

@@ -1496,63 +1496,75 @@ struct DetailHeading: View {
 }
 
 /// The properties, each a value that opens its picker: the detail page's
-/// inspector and the peek.
+/// inspector and the peek. Tab or a click focuses one; return or space opens
+/// it, the arrows move between them.
 struct TaskPropertyList: View {
     let row: WorkItemRow
     @Environment(AppModel.self) private var model
+    @FocusState private var focused: PropertyField?
+    @State private var opened: PropertyField?
 
     var body: some View {
         let work = model.work
         let ids = [row.id]
         VStack(alignment: .leading, spacing: 2) {
             PropertyLine(title: "Status") {
-                WorkPickerButton(kind: .status, ids: ids) {
+                WorkPickerButton(kind: .status, ids: ids, presented: shown(.status)) {
                     PropertyValue(text: row.status.label) { TaskStatusIcon(status: row.status) }
                 }
+                .modifier(focus(.status))
             }
             PropertyLine(title: "Priority") {
-                WorkPickerButton(kind: .priority, ids: ids) {
-                    PropertyValue(text: TaskPriority(row.priority).label, faint: row.priority == 0) {
+                WorkPickerButton(kind: .priority, ids: ids, presented: shown(.priority)) {
+                    PropertyValue(text: row.priority == 0 ? "Set priority" : TaskPriority(row.priority).label,
+                                  faint: row.priority == 0) {
                         PriorityIcon(priority: TaskPriority(row.priority))
                     }
                 }
+                .modifier(focus(.priority))
             }
             PropertyLine(title: "Owner") {
-                WorkPickerButton(kind: .owner, ids: ids) {
-                    PropertyValue(text: row.ownerFace.name, faint: !row.ownerIsSelf && row.ownerPersonId == nil) {
+                WorkPickerButton(kind: .owner, ids: ids, presented: shown(.owner)) {
+                    let unowned = !row.ownerIsSelf && row.ownerPersonId == nil
+                    PropertyValue(text: unowned ? "Add owner" : row.ownerFace.name, faint: unowned) {
                         Avatar(face: row.ownerFace, size: 16, revision: model.people.photoRevision)
                     }
                 }
+                .modifier(focus(.owner))
             }
             PropertyLine(title: "Agent") {
-                WorkPickerButton(kind: .delegate, ids: ids) {
+                WorkPickerButton(kind: .delegate, ids: ids, presented: shown(.agent)) {
                     let waiting = row.doer != nil && model.agents.waits(on: row)
-                    PropertyValue(text: row.doer.map { waiting ? "\($0.agent), waiting for you" : $0.agent } ?? "No agent",
+                    PropertyValue(text: row.doer.map { waiting ? "\($0.agent), waiting for you" : $0.agent } ?? "Add agent",
                                   faint: row.doer == nil) {
                         Image(systemName: "sparkle").font(.system(size: 12))
                             .foregroundStyle(waiting ? Theme.live : Theme.inkSecondary)
                     }
                 }
+                .modifier(focus(.agent))
             }
             PropertyLine(title: "Due date") {
-                WorkPickerButton(kind: .due, ids: ids) {
-                    PropertyValue(text: row.dueAtMs.map(PlanningFormat.day) ?? "No due date", faint: row.dueAtMs == nil) {
+                WorkPickerButton(kind: .due, ids: ids, presented: shown(.due)) {
+                    PropertyValue(text: row.dueAtMs.map(PlanningFormat.day) ?? "Add due date", faint: row.dueAtMs == nil) {
                         Image(systemName: "calendar").font(.system(size: 12)).foregroundStyle(Theme.inkSecondary)
                     }
                 }
+                .modifier(focus(.due))
             }
             PropertyLine(title: "Repeats") {
                 RepeatMenu(row: row, rule: row.repeat?.every
-                    ?? work.detail.flatMap({ $0.item.id == row.id ? $0.recurrence : nil }))
+                    ?? work.detail.flatMap({ $0.item.id == row.id ? $0.recurrence : nil }), shown: shown(.repeats))
+                    .modifier(focus(.repeats))
             }
             if row.status.isOpen || row.cycle != nil {
                 PropertyLine(title: "Cycle") {
-                    WorkPickerButton(kind: .cycle, ids: ids) {
-                        PropertyValue(text: row.cycle.map { "Cycle \($0)" } ?? "No cycle", faint: row.cycle == nil) {
+                    WorkPickerButton(kind: .cycle, ids: ids, presented: shown(.cycle)) {
+                        PropertyValue(text: row.cycle.map { "Cycle \($0)" } ?? "Add to cycle", faint: row.cycle == nil) {
                             Image(systemName: "arrow.triangle.2.circlepath").font(.system(size: 12))
                                 .foregroundStyle(Theme.inkSecondary)
                         }
                     }
+                    .modifier(focus(.cycle))
                 }
             }
             if row.status.isOpen {
@@ -1573,42 +1585,48 @@ struct TaskPropertyList: View {
                         }
                         .buttonStyle(.plain)
                         .help("Book the next free hour before it is due  B")
+                        .modifier(focus(.time) { work.book(row.id) })
                     }
                 }
             }
             PropertyLine(title: "Project") {
-                WorkPickerButton(kind: .project, ids: ids) {
-                    PropertyValue(text: row.projectTitle ?? work.projects.first { $0.id == row.projectId }?.title ?? "No project",
+                WorkPickerButton(kind: .project, ids: ids, presented: shown(.project)) {
+                    PropertyValue(text: row.projectTitle ?? work.projects.first { $0.id == row.projectId }?.title ?? "Add to project",
                                   faint: row.projectId == nil) {
                         Image(systemName: "folder").font(.system(size: 12)).foregroundStyle(Theme.inkSecondary)
                     }
                 }
+                .modifier(focus(.project))
             }
             if let projectId = row.projectId {
                 PropertyLine(title: "Milestone") {
-                    MilestoneMenu(row: row, projectId: projectId)
+                    MilestoneMenu(row: row, projectId: projectId, shown: shown(.milestone))
+                        .modifier(focus(.milestone))
                 }
             }
             PropertyLine(title: "Labels") {
-                WorkPickerButton(kind: .labels, ids: ids) {
+                WorkPickerButton(kind: .labels, ids: ids, presented: shown(.labels)) {
                     let labels = row.labelIds.compactMap { id in work.labels.first { $0.id == id } }
                     if labels.isEmpty {
-                        PropertyValue(text: "No labels", faint: true) {
+                        PropertyValue(text: "Add labels", faint: true) {
                             Image(systemName: "tag").font(.system(size: 12)).foregroundStyle(Theme.inkSecondary)
                         }
                     } else {
                         FlowLabels(labels: labels)
                     }
                 }
+                .modifier(focus(.labels))
             }
             PropertyLine(title: "Parent") {
-                WorkPickerButton(kind: .parent, ids: ids) {
+                WorkPickerButton(kind: .parent, ids: ids, presented: shown(.parent)) {
                     let parent = row.parentId.flatMap { model.workRows([$0]).first }
-                    PropertyValue(text: parent.map { "#\($0.number) \($0.title)" } ?? (row.parentId == nil ? "No parent" : "A task"),
+                    PropertyValue(text: parent.map { "#\($0.number) \($0.title)" } ?? (row.parentId == nil ? "Set parent" : "A task"),
                                   faint: row.parentId == nil) {
                         Image(systemName: "arrow.turn.left.up").font(.system(size: 12)).foregroundStyle(Theme.inkSecondary)
                     }
                 }
+                .help(row.parentId.flatMap { model.workRows([$0]).first }.map { "#\($0.number) \($0.title)" } ?? "")
+                .modifier(focus(.parent))
             }
             Hairline().padding(.vertical, 12)
             if let meeting = row.sourceMeetingId {
@@ -1631,39 +1649,95 @@ struct TaskPropertyList: View {
                 Text(PlanningFormat.date(row.updatedAtMs)).metaText(Theme.inkSecondary).padding(.horizontal, 8)
             }
         }
+        .onChange(of: focused) { _, field in model.workFocus.propertyFocused = field != nil }
+        .onDisappear { model.workFocus.propertyFocused = false }
+    }
+
+    private var fields: [PropertyField] {
+        var list: [PropertyField] = [.status, .priority, .owner, .agent, .due, .repeats]
+        if row.status.isOpen || row.cycle != nil { list.append(.cycle) }
+        if row.status.isOpen, row.timeBlock == nil { list.append(.time) }
+        list.append(.project)
+        if row.projectId != nil { list.append(.milestone) }
+        return list + [.labels, .parent]
+    }
+
+    private func shown(_ field: PropertyField) -> Binding<Bool> {
+        Binding(get: { opened == field }, set: { open in
+            opened = open ? field : nil
+            guard !open else { return }
+            DispatchQueue.main.async {
+                NSApp.keyWindow?.makeFirstResponder(nil)
+                focused = field
+            }
+        })
+    }
+
+    private func focus(_ field: PropertyField, activate: (() -> Void)? = nil) -> PropertyFocus {
+        PropertyFocus(field: field, fields: fields, focused: $focused) {
+            if let activate { activate() } else { opened = field }
+        }
+    }
+}
+
+enum PropertyField: Hashable {
+    case status, priority, owner, agent, due, repeats, cycle, time, project, milestone, labels, parent
+}
+
+private struct PropertyFocus: ViewModifier {
+    let field: PropertyField
+    let fields: [PropertyField]
+    var focused: FocusState<PropertyField?>.Binding
+    let activate: () -> Void
+
+    func body(content: Content) -> some View {
+        content
+            .focusable(interactions: .edit)
+            .focused(focused, equals: field)
+            .focusEffectDisabled()
+            .overlay {
+                RoundedRectangle(cornerRadius: Theme.radiusControl)
+                    .strokeBorder(Theme.accent, lineWidth: 2)
+                    .opacity(focused.wrappedValue == field ? 1 : 0)
+                    .allowsHitTesting(false)
+            }
+            .onKeyPress(keys: [.return, .space]) { _ in
+                activate()
+                return .handled
+            }
+            .onKeyPress(.upArrow) { step(-1) }
+            .onKeyPress(.downArrow) { step(1) }
+    }
+
+    private func step(_ delta: Int) -> KeyPress.Result {
+        guard let index = fields.firstIndex(of: field) else { return .ignored }
+        focused.wrappedValue = fields[min(max(index + delta, 0), fields.count - 1)]
+        return .handled
     }
 }
 
 private struct MilestoneMenu: View {
     let row: WorkItemRow
     let projectId: String
+    let shown: Binding<Bool>
     @Environment(AppModel.self) private var model
     @State private var milestones: [PlanningMilestone] = []
 
     var body: some View {
         let current = milestones.first { $0.id == row.milestoneId }
-        Menu {
-            Button("No milestone") { set(nil) }
-            if !milestones.isEmpty { Divider() }
-            ForEach(milestones) { milestone in
-                Button { set(milestone.id) } label: {
-                    if milestone.id == row.milestoneId {
-                        Label(milestone.title, systemImage: "checkmark")
-                    } else {
-                        Text(milestone.title)
-                    }
-                }
-            }
-        } label: {
-            PropertyValue(text: current?.title ?? (row.milestoneId == nil ? "No milestone" : "A milestone"),
+        Button { shown.wrappedValue = true } label: {
+            PropertyValue(text: current?.title ?? (row.milestoneId == nil ? "Add milestone" : "A milestone"),
                           faint: row.milestoneId == nil) {
                 Image(systemName: "flag").font(.system(size: 12)).foregroundStyle(Theme.inkSecondary)
             }
         }
-        .menuStyle(.button)
         .buttonStyle(.plain)
-        .menuIndicator(.hidden)
-        .fixedSize()
+        .popover(isPresented: shown, arrowEdge: .bottom) {
+            PropertyChoices(choices: [PropertyChoice(id: "none", title: "No milestone", on: row.milestoneId == nil) { set(nil) }]
+                + milestones.map { milestone in
+                    PropertyChoice(id: milestone.id, title: milestone.title, on: milestone.id == row.milestoneId) { set(milestone.id) }
+                }) { shown.wrappedValue = false }
+        }
         .task(id: projectId) { milestones = await model.projects.milestones(of: projectId) }
         .accessibilityLabel("Milestone")
     }
@@ -1677,40 +1751,99 @@ private struct MilestoneMenu: View {
 private struct RepeatMenu: View {
     let row: WorkItemRow
     let rule: String?
+    let shown: Binding<Bool>
     @Environment(AppModel.self) private var model
     private static let rules = ["every day", "every weekday", "every monday", "every month"]
 
     var body: some View {
         let kept = row.repeat.flatMap { $0.of > 0 ? ", kept \($0.kept) of \($0.of)" : nil } ?? ""
-        Menu {
-            ForEach(Self.rules, id: \.self) { every in
-                Button { set(every) } label: {
-                    if every == rule {
-                        Label(Recurrence.display(every), systemImage: "checkmark")
-                    } else {
-                        Text(Recurrence.display(every))
-                    }
-                }
-            }
-            if rule != nil {
-                Divider()
-                Button("Don't repeat") { set(nil) }
-            }
-        } label: {
-            PropertyValue(text: rule.map { Recurrence.display($0) + kept } ?? "Doesn't repeat", faint: rule == nil) {
+        Button { shown.wrappedValue = true } label: {
+            PropertyValue(text: rule.map { Recurrence.display($0) + kept } ?? "Set repeat", faint: rule == nil) {
                 Image(systemName: "repeat").font(.system(size: 12)).foregroundStyle(Theme.inkSecondary)
             }
         }
-        .menuStyle(.button)
         .buttonStyle(.plain)
-        .menuIndicator(.hidden)
-        .fixedSize()
+        .popover(isPresented: shown, arrowEdge: .bottom) {
+            PropertyChoices(choices: Self.rules.map { every in
+                PropertyChoice(id: every, title: Recurrence.display(every), on: every == rule) { set(every) }
+            } + (rule == nil ? [] : [PropertyChoice(id: "none", title: "Don't repeat", on: false) { set(nil) }])) {
+                shown.wrappedValue = false
+            }
+        }
         .accessibilityLabel("Repeats")
     }
 
     private func set(_ every: String?) {
         let task = row.id
         model.changeWork { model.work.update([task], WorkPatch(recurrence: every.map { .set($0) } ?? .clear)) }
+    }
+}
+
+private struct PropertyChoice: Identifiable {
+    let id: String
+    let title: String
+    let on: Bool
+    let pick: () -> Void
+}
+
+/// A short list in a popover, for properties with a few fixed answers:
+/// the arrows move, return picks.
+private struct PropertyChoices: View {
+    let choices: [PropertyChoice]
+    let done: () -> Void
+    @State private var index = 0
+    @State private var hovered: String?
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(Array(choices.enumerated()), id: \.element.id) { offset, choice in
+                Button { pick(choice) } label: {
+                    HStack(spacing: 12) {
+                        Text(choice.title).bodyText(13)
+                        Spacer(minLength: 0)
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(Theme.accent)
+                            .opacity(choice.on ? 1 : 0)
+                    }
+                    .padding(.horizontal, 10)
+                    .frame(height: 28)
+                    .background(offset == index || hovered == choice.id ? Theme.controlHover : .clear,
+                                in: RoundedRectangle(cornerRadius: Theme.radiusControl))
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .onHover { hovered = $0 ? choice.id : nil }
+            }
+        }
+        .padding(4)
+        .frame(minWidth: 200)
+        .focusable()
+        .focused($focused)
+        .focusEffectDisabled()
+        .onKeyPress(.upArrow) { move(-1) }
+        .onKeyPress(.downArrow) { move(1) }
+        .onKeyPress(.return) {
+            guard choices.indices.contains(index) else { return .ignored }
+            pick(choices[index])
+            return .handled
+        }
+        .onAppear {
+            index = choices.firstIndex(where: \.on) ?? 0
+            focused = true
+        }
+    }
+
+    private func move(_ delta: Int) -> KeyPress.Result {
+        guard !choices.isEmpty else { return .ignored }
+        index = min(max(index + delta, 0), choices.count - 1)
+        return .handled
+    }
+
+    private func pick(_ choice: PropertyChoice) {
+        choice.pick()
+        done()
     }
 }
 

@@ -291,6 +291,7 @@ final class WorkFocus {
     var highlighted: String?
     private(set) var selection: Set<String> = []
     var peeking = false
+    @ObservationIgnored var propertyFocused = false
     /// The task open on each place's page; Tasks and Triage keep their own.
     private(set) var openedIn: [Place: String] = [:]
     /// The person whose page shows their tasks now; while it does, the task
@@ -546,6 +547,10 @@ final class WorkKeys {
         if model.place == .meetings {
             return LiveCardKeys.handle(event, key: key, flags: flags, model)
         }
+        if flags.isEmpty, key == "/", model.place == .projects {
+            model.toggleSearch()
+            return true
+        }
         guard model.showsTasks else { return false }
         return work(event, key: key, flags: flags, model)
     }
@@ -573,6 +578,10 @@ final class WorkKeys {
         if event.keyCode == 53 {
             relatePressedAt = nil
             return focus.escape(in: place)
+        }
+        if focus.propertyFocused, plain || shift,
+           [.upArrow, .downArrow, .carriageReturn, .enter].contains(event.specialKey) || key == " " {
+            return false
         }
         if let pressed = relatePressedAt {
             relatePressedAt = nil
@@ -655,6 +664,13 @@ final class WorkKeys {
         case "f":
             guard place == .tasks, opened == nil, focus.listing(model.work.views) != nil else { return false }
             focus.filterShown = true
+            return true
+        case "/":
+            if place == .tasks, opened == nil, focus.listing(model.work.views) != nil {
+                focus.filterShown = true
+            } else {
+                model.toggleSearch()
+            }
             return true
         case "x":
             guard opened == nil, let id = focus.highlighted else { return false }
@@ -912,6 +928,58 @@ extension AppModel {
         workFocus.peeking = false
         workFocus.highlighted = id
         workFocus.open(id, in: .tasks)
+    }
+
+    func paletteMatches(_ query: String) -> [PaletteMatch] {
+        guard !query.isEmpty else { return [] }
+        let number = Self.taskNumber(query)
+        let found = (work.items ?? []).filter { row in
+            row.archivedAtMs == nil && (row.number == number || row.title.localizedCaseInsensitiveContains(query))
+        }
+        let tasks = found.sorted { a, b in
+            (a.number == number ? 0 : 1, a.status.isOpen ? 0 : 1, -a.updatedAtMs)
+                < (b.number == number ? 0 : 1, b.status.isOpen ? 0 : 1, -b.updatedAtMs)
+        }
+        .prefix(6)
+        .map { row in
+            PaletteMatch(kind: .task(row.status), id: row.id, title: row.title,
+                         meta: ["#\(row.number)", row.projectTitle].compactMap { $0 }.joined(separator: " · "))
+        }
+        let projects = work.projects.filter { $0.title.localizedCaseInsensitiveContains(query) }.prefix(4).map {
+            PaletteMatch(kind: .project, id: $0.id, title: $0.title, meta: $0.status.label)
+        }
+        let people = work.people.filter { $0.name.localizedCaseInsensitiveContains(query) }.prefix(4).map {
+            PaletteMatch(kind: .person, id: $0.id, title: $0.name)
+        }
+        let labels = work.labels.filter { $0.name.localizedCaseInsensitiveContains(query) }.prefix(4).map { label in
+            let count = (work.items ?? []).filter { $0.archivedAtMs == nil && $0.labelIds.contains(label.id) }.count
+            return PaletteMatch(kind: .label(label.hue), id: label.id, title: label.name,
+                                meta: count == 1 ? "1 task" : "\(count) tasks")
+        }
+        return Array(tasks) + Array(projects) + Array(people) + Array(labels)
+    }
+
+    private static func taskNumber(_ query: String) -> Int64? {
+        var digits = Substring(query.lowercased())
+        if digits.hasPrefix("s-") {
+            digits = digits.dropFirst(2)
+        } else if digits.hasPrefix("#") || digits.hasPrefix("s") {
+            digits = digits.dropFirst()
+        }
+        return Int64(digits)
+    }
+
+    func open(_ match: PaletteMatch) {
+        switch match.kind {
+        case .task: openTask(match.id)
+        case .project: openProject(match.id)
+        case .person: openPerson(match.id)
+        case .label:
+            reveal()
+            go(.tasks)
+            workFocus.open(nil, in: .tasks)
+            editListing { $0.query.labelIds = [match.id] }
+        }
     }
 
     private func paletteKeys(_ action: WorkAction) -> String? {

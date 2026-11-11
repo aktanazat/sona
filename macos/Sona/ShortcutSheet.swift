@@ -24,6 +24,7 @@ struct ShortcutSheet: View {
             ("View", [
                 Entry(title: "New task", keys: ["c"]),
                 Entry(title: "Filter", keys: ["f"]),
+                Entry(title: "Search tasks", keys: ["/"]),
                 Entry(title: "Display options", keys: ["shift+v"]),
                 Entry(title: "List or board", keys: ["cmd+b"]),
                 Entry(title: "Command menu", keys: ["cmd+k"]),

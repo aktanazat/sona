@@ -255,6 +255,7 @@ private struct TriageRow: View {
                         .font(TypeScale.listTitle)
                         .foregroundStyle(Theme.ink)
                         .lineLimit(1)
+                        .help(row.title)
                     Spacer(minLength: 8)
                     ForEach(Array(suggestions.enumerated()), id: \.offset) { _, suggestion in
                         SuggestionChip(suggestion: suggestion, now: now)

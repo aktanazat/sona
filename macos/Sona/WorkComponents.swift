@@ -236,6 +236,7 @@ struct ItemRow: View {
                     .foregroundStyle(row.status.isOpen || row.status == .triage ? Theme.ink : Theme.inkSecondary)
                     .lineLimit(1)
                     .layoutPriority(1)
+                    .help(row.title)
             }
             if row.blockedByOpenCount > 0, row.status.isOpen {
                 Image(systemName: "hand.raised.fill")

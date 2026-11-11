@@ -468,12 +468,9 @@ struct Sidebar: View {
         .keepsWindowToolbar()
     }
 
-    /// The small live number beside a row: open tasks in active projects,
-    /// people waiting to be confirmed.
+    /// The small live number beside a row: what needs the reader there.
     private func count(_ place: Place) -> SidebarCount? {
         switch place {
-        case .projects:
-            SidebarCount(value: model.projects.activeOpenTaskCount, meaning: "open tasks")
         case .people:
             SidebarCount(value: Int(model.people.entries?.reduce(0) { $0 + $1.suggestedCount } ?? 0),
                          meaning: "to confirm")
@@ -482,7 +479,7 @@ struct Sidebar: View {
         case .tasks:
             SidebarCount(value: model.work.counts.map { $0.mineOverdue + $0.mineDueToday } ?? 0,
                          meaning: "due today or late")
-        case .capture, .library, .meetings, .scratchpad, .calendar, .today:
+        case .capture, .library, .meetings, .scratchpad, .calendar, .today, .projects:
             nil
         }
     }

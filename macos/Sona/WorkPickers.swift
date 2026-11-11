@@ -639,15 +639,17 @@ struct WorkChoiceRow: View {
 struct WorkPickerButton<Label: View>: View {
     let kind: WorkPicker.Kind
     let ids: [String]
+    var presented: Binding<Bool>?
     @ViewBuilder let label: () -> Label
-    @State private var shown = false
+    @State private var shownHere = false
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        Button { shown = true } label: { label() }
+        let shown = presented ?? $shownHere
+        Button { shown.wrappedValue = true } label: { label() }
             .buttonStyle(.plain)
-            .popover(isPresented: $shown, arrowEdge: .bottom) {
-                WorkPickerList(picker: WorkPicker(kind: kind, ids: ids), compact: true) { shown = false }
+            .popover(isPresented: shown, arrowEdge: .bottom) {
+                WorkPickerList(picker: WorkPicker(kind: kind, ids: ids), compact: true) { shown.wrappedValue = false }
                     .padding(.vertical, 4)
                     .environment(model)
             }

@@ -911,10 +911,35 @@ struct PaletteAction: Identifiable {
     var shortcut: String? = nil
 }
 
+/// A task, project, person or label whose name or number matches the field.
+struct PaletteMatch: Identifiable {
+    enum Kind {
+        case task(WorkStatus)
+        case project
+        case person
+        case label(Double)
+    }
+
+    let kind: Kind
+    let id: String
+    let title: String
+    var meta: String?
+
+    var key: String {
+        switch kind {
+        case .task: "task:\(id)"
+        case .project: "project:\(id)"
+        case .person: "person:\(id)"
+        case .label: "label:\(id)"
+        }
+    }
+}
+
 /// What a keystroke in the field can land on, in the order the list shows them.
 private enum PaletteRow: Identifiable {
     case action(PaletteAction)
     case hit(QueryRow)
+    case match(PaletteMatch)
     /// A line someone said: return plays it, ⌘return opens its meeting there.
     case heard(SaidMoment)
     /// A meeting picture whose words match: it opens its meeting at the line
@@ -941,6 +966,7 @@ private enum PaletteRow: Identifiable {
         switch self {
         case let .action(action): "action:\(action.id)"
         case let .hit(hit): "hit:\(hit.link)"
+        case let .match(match): "match:\(match.key)"
         case let .heard(moment): "heard:\(moment.id)"
         case let .screen(moment): "screen:\(moment.id)"
         case .playAll: "play-all"
@@ -1130,7 +1156,7 @@ struct CommandPalette: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     VStack(alignment: .leading, spacing: 2) {
-                        ForEach(sections, id: \.label) { section in
+                        ForEach(Array(sections.enumerated()), id: \.offset) { _, section in
                             Text(section.label)
                                 .font(.system(size: 12, weight: .semibold))
                                 .foregroundStyle(Theme.inkTertiary)
@@ -1196,6 +1222,16 @@ struct CommandPalette: View {
         let navigation = actions.filter { $0.group == .navigation }.map(PaletteRow.action)
         let verbs = actions.filter { $0.group == .actions }.map(PaletteRow.action)
         if !task.isEmpty { sections.append((model.workTargets.count > 1 ? "Tasks" : "Task", task, true)) }
+        let matches = model.paletteMatches(trimmed)
+        for (label, picked) in [
+            ("Tasks", matches.filter { if case .task = $0.kind { true } else { false } }),
+            ("Projects", matches.filter { if case .project = $0.kind { true } else { false } }),
+            ("People", matches.filter { if case .person = $0.kind { true } else { false } }),
+            ("Labels", matches.filter { if case .label = $0.kind { true } else { false } }),
+        ] where !picked.isEmpty {
+            sections.append((label, picked.map(PaletteRow.match), true))
+        }
+        let named = Set(matches.compactMap { if case .person = $0.kind { $0.title } else { nil } })
         let settled = if case .pending = lookup { false } else { true }
         if let command, !command.items.isEmpty {
             sections.append(("Change", [.command(command)], settled))
@@ -1204,7 +1240,7 @@ struct CommandPalette: View {
         if !watching.isEmpty { sections.append(("Watch", watching, true)) }
         if !navigation.isEmpty { sections.append(("Navigation", navigation, true)) }
         if !verbs.isEmpty { sections.append(("Actions", verbs, true)) }
-        let hits = lookup.earlier
+        let hits = lookup.earlier.filter { $0.kind != .person || !named.contains($0.title) }
         let live = settled
         if let answer, !answer.lines.isEmpty {
             sections.append(("Answer", answer.lines.map(PaletteRow.answer), live))
@@ -1426,6 +1462,7 @@ struct CommandPalette: View {
         switch row {
         case let .action(action): action.run()
         case let .hit(hit): model.open(link: hit.link)
+        case let .match(match): model.open(match)
         case let .heard(moment): model.open(link: moment.link)
         case let .screen(moment): model.open(link: moment.link)
         case let .ask(question): model.ask(question)
@@ -1658,6 +1695,14 @@ private struct PaletteRowView: View {
                         }
                         .metaText()
                     }
+                case let .match(match):
+                    HStack(spacing: 8) {
+                        Text(match.title).bodyText().lineLimit(1).truncationMode(.tail)
+                        if let meta = match.meta {
+                            Text(meta).metaText().lineLimit(1).layoutPriority(-1)
+                        }
+                    }
+                    .help(match.title)
                 case let .heard(moment):
                     VStack(alignment: .leading, spacing: 3) {
                         Text(quote(moment.text)).bodyText().lineLimit(2)
@@ -1769,6 +1814,22 @@ private struct PaletteRowView: View {
                     .frame(width: 28, height: 28)
                     .background(Theme.inset, in: Circle())
                     .accessibilityHidden(true)
+            }
+        } else if case let .match(match) = row {
+            switch match.kind {
+            case let .task(status):
+                TaskStatusIcon(status: status).frame(width: 20)
+            case .person:
+                Avatar(face: AvatarFace(kind: .person(match.id), name: match.title), size: 18,
+                       revision: model.people.photoRevision)
+                    .frame(width: 20)
+            case let .label(hue):
+                Circle().fill(Theme.label(hue: hue)).frame(width: 8, height: 8).frame(width: 20)
+            case .project:
+                Image(systemName: "folder")
+                    .font(.system(size: 14, weight: .regular))
+                    .foregroundStyle(Theme.inkSecondary)
+                    .frame(width: 20)
             }
         } else {
             Image(systemName: icon)
@@ -1915,6 +1976,7 @@ private struct PaletteRowView: View {
             case .loop: "arrow.triangle.2.circlepath"
             case .receipt: "doc.text"
             }
+        case .match: "arrow.right"
         case .heard: "waveform"
         case .screen: "photo"
         case .playAll: "play.circle"
