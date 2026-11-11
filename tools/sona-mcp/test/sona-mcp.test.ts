@@ -175,6 +175,108 @@ describe("tool arguments", () => {
       attach.argv({ task: "S-1", path: "/tmp/a", url: "https://example.com" }),
     ).toThrow("exactly one of path or url");
   });
+
+  test("an update save without id posts one, with id edits the one named", () => {
+    const save = tool("sona_project_update_save");
+    const update = "06d5d03f-0000-4000-8000-000000000001";
+
+    expect(
+      save.argv({ project: "-Harbor", health: "at-risk", body: "-Venue held." }, "Claude"),
+    ).toEqual([
+      "work",
+      "project-update",
+      "--health=at-risk",
+      "--body=-Venue held.",
+      "--agent=Claude",
+      "--json",
+      "--",
+      "-Harbor",
+    ]);
+    expect(save.argv({ project: "Harbor", health: "on-track", draft: true, dry_run: true })).toEqual([
+      "work",
+      "project-update",
+      "--health=on-track",
+      "--dry-run",
+      "--json",
+      "--",
+      "Harbor",
+    ]);
+    expect(save.argv({ id: update, health: "off-track" })).toEqual([
+      "work",
+      "project-update-edit",
+      "--health=off-track",
+      "--json",
+      "--",
+      update,
+    ]);
+    expect(() => save.argv({ project: "Harbor", health: "on-track" })).toThrow(
+      "exactly one of body or draft",
+    );
+    expect(() =>
+      save.argv({ project: "Harbor", health: "on-track", body: "x", draft: true }),
+    ).toThrow("exactly one of body or draft");
+    expect(() => save.argv({ id: update, project: "Harbor" })).toThrow(SonaInputError);
+  });
+
+  test("a project save clears each planning field with null", () => {
+    const argv = tool("sona_project_save").argv({
+      name: "Harbor",
+      priority: null,
+      start: null,
+      start_resolution: null,
+      target_resolution: "quarter",
+      icon: null,
+      labels: null,
+      links: null,
+    });
+
+    expect(argv).toEqual([
+      "work",
+      "project-save",
+      "--priority=none",
+      "--start=none",
+      "--start-resolution=none",
+      "--target-resolution=quarter",
+      "--icon=none",
+      "--labels=",
+      "--link=none",
+      "--json",
+      "--",
+      "Harbor",
+    ]);
+    expect(
+      tool("sona_project_save").argv({ name: "Harbor", links: ["Spec=https://a.example", "https://b.example"] }),
+    ).toContain("--link=https://b.example");
+  });
+
+  test("a cycle save runs the one verb its arguments name", () => {
+    const save = tool("sona_cycle_save");
+
+    expect(save.argv({ weeks: 3, cooldown_weeks: 1, upcoming: 3, dry_run: true })).toEqual([
+      "work",
+      "cycle-settings",
+      "--weeks=3",
+      "--cooldown=1",
+      "--upcoming=3",
+      "--dry-run",
+      "--json",
+    ]);
+    expect(save.argv({ cycle: "next", name: null })).toEqual([
+      "work",
+      "cycle-save",
+      "--name=none",
+      "--json",
+      "--",
+      "next",
+    ]);
+    expect(save.argv({ start_today: true })).toEqual(["work", "cycle-start-today", "--json"]);
+    expect(save.argv({ cycle: "2", rollover: true }).slice(1, 2)).toEqual(["cycle-rollover"]);
+    expect(() => save.argv({ cycle: "2", rollover: true, name: "Push" })).toThrow(
+      "one kind of change",
+    );
+    expect(() => save.argv({ cycle: "2", weeks: 2 })).toThrow("leave cycle out");
+    expect(() => save.argv({ rollover: true })).toThrow("cycle is required");
+  });
 });
 
 describe("running sona", () => {
@@ -276,6 +378,15 @@ const SONA_WRITES = {
   watch: true,
   unwatch: true,
   "project-save": true,
+  "project-delete": true,
+  "project-update": true,
+  "project-update-edit": true,
+  "project-update-delete": true,
+  "milestone-reorder": true,
+  "cycle-settings": true,
+  "cycle-save": true,
+  "cycle-rollover": true,
+  "cycle-start-today": true,
   "project-archive": true,
   "milestone-save": true,
   "milestone-delete": true,
@@ -295,18 +406,22 @@ const SONA_DESTROYS = {
   "label-delete": true,
   "view-delete": true,
   "milestone-delete": true,
+  "project-delete": true,
+  "project-update-delete": true,
   "person-merge": true,
   "comment-delete": true,
   detach: true,
 };
 
-/** Each required argument at its first enum value or a placeholder, task
- * wherever a tool takes one, since a comment save needs task or id, and path
- * wherever a tool takes one, since an attach needs path or url. */
+/** Each required argument at its first enum value or a placeholder, plus the
+ * optional ones a tool needs one of: task, since a comment save needs task or
+ * id; path, since an attach needs path or url; project, health and body,
+ * since an update save needs project or id; cycle, since a cycle save needs
+ * a cycle or settings. */
 function smallest(tool: ToolDefinition): ToolInput {
   const input: ToolInput = {};
   const names = [...(tool.inputSchema.required ?? [])];
-  for (const optional of ["task", "path"]) {
+  for (const optional of ["task", "path", "project", "health", "body", "cycle"]) {
     if (optional in tool.inputSchema.properties && !names.includes(optional)) names.push(optional);
   }
   for (const name of names) {
@@ -504,6 +619,27 @@ describe("the stdio server", () => {
     }
 
     expect(sona.argv().slice(-4)).toEqual(["--", "S-1", "Book the venue", "--order banners"]);
+  });
+
+  test("filter conditions arrive as one JSON argument, and a malformed one is refused", async () => {
+    const sona = stub({ stdout: "{}" });
+    const filter = [
+      { field: "label", op: "includes_all", values: ["bug", "ui"] },
+      { field: "priority", op: "is", values: [1] },
+    ];
+    const client = await connected();
+    try {
+      await client.callTool({ name: "sona_work_list", arguments: { owner: "me", filter } });
+    } finally {
+      await client.close();
+    }
+
+    expect(sona.argv()).toContain(`--filter=${JSON.stringify(filter)}`);
+
+    const malformed = await errorOf("sona_work_list", {
+      filter: [{ field: "label", op: "is", values: ["bug"], extra: true }],
+    });
+    expect(malformed.code).toBe(ErrorCode.InvalidParams);
   });
 
   test("a tool this server does not have is method-not-found", async () => {

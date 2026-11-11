@@ -445,7 +445,7 @@ claude mcp add sona -- bun /absolute/path/to/sona/tools/sona-mcp/src/index.ts
 | `sona_stats`                      | none                                                         |
 | `sona_events`                     | `after?`, `limit?`                                           |
 | `sona_loop_resolve`               | `loop_id` — writes                                           |
-| `sona_work_list`                  | filters, `ready?`, `limit?`                                  |
+| `sona_work_list`                  | filters, `filter?` (`{field, op, values}` conditions), `ready?`, `limit?` |
 | `sona_work_get`                   | `task`                                                       |
 | `sona_work_counts`                | `limit?`                                                     |
 | `sona_work_create`                | `title`, fields — writes                                     |
@@ -464,25 +464,45 @@ claude mcp add sona -- bun /absolute/path/to/sona/tools/sona-mcp/src/index.ts
 | `sona_work_ask`                   | `question`                                                   |
 | `sona_work_take`                  | `question`, `lines` — writes                                 |
 | `sona_work_say`                   | `words`, `dry_run?` — writes                                 |
-| `sona_project_list`               | `all?`                                                       |
+| `sona_project_list`               | `all?`, `trashed?`                                           |
 | `sona_project_get`                | `project_id`                                                 |
-| `sona_project_save`               | `name`, `project?`, `details?`, `status?`, `lead?`, `members?`, `target?`, `hue?` — writes |
+| `sona_project_detail`             | `project`                                                    |
+| `sona_project_save`               | `name`, `project?`, `details?`, `status?`, `priority?`, `lead?`, `members?`, `start?`, `start_resolution?`, `target?`, `target_resolution?`, `hue?`, `icon?`, `labels?`, `links?`, `dry_run?` — writes |
+| `sona_project_delete`             | `project`, `restore?`, `dry_run?` — writes                   |
 | `sona_project_archive`            | `project`, `restore?` — writes                               |
+| `sona_project_update_list`        | `project`, `limit?`, `cursor?`                               |
+| `sona_project_update_save`        | `project` + `health` + (`body` or `draft:true`), or `id` + `health?` + `body?`; `dry_run?` — writes |
+| `sona_project_update_delete`      | `id`, `dry_run?` — writes                                    |
 | `sona_milestone_list`             | `project`                                                    |
 | `sona_milestone_save`             | `project`, `name`, `milestone?`, `target?`, `details?`, `status?` — writes |
+| `sona_milestone_reorder`          | `project`, `milestones` (every one, in order), `dry_run?` — writes |
 | `sona_milestone_delete`           | `project`, `milestone` — writes                              |
+| `sona_cycle_list`                 | `cycle?`                                                     |
+| `sona_cycle_save`                 | settings (`weeks?`, `start_weekday?`, `cooldown_weeks?`, `upcoming?`), or `cycle` + `name?`/`start?`/`end?`, or `start_today` + `cycle?`, or `cycle` + `rollover`; `dry_run?` — writes |
 | `sona_person_list`                | `query?`                                                     |
 | `sona_person_save`                | `name`, `person?`, `aliases?`, `role?`, `org?`, `email?`, `notes?` — writes |
 | `sona_person_merge`               | `person`, `into` — writes                                    |
 | `sona_meeting_list`               | `since?`, `limit?`                                           |
 | `sona_meeting_get`                | `meeting_id`, `transcript?`                                  |
 
-Archiving, links, labels, views, watches, comment deletes, attachment removal,
-project archiving, milestone deletes and person merges are opt-in tools: set
-`SONA_MCP_TOOLS=all`, or name the ones to add, when registering the server.
-In project, milestone and person saves a `null` field clears it; those writes
-take no `dry_run` and are refused unless Agents' changes is on Apply. Task
-export is CLI-only.
+Archiving, links, cycles, labels, views, watches, comment deletes, attachment
+removal, project archiving, the project bin, update deletes, milestone deletes
+and person merges are opt-in tools: set `SONA_MCP_TOOLS=all`, or name the ones
+to add, when registering the server. In project, milestone, person and cycle
+saves a `null` field clears it. Project, update, milestone, cycle and person
+writes are refused unless Agents' changes is on Apply; project saves, the bin,
+updates, milestone order and cycle writes take `dry_run`, milestone and person
+saves do not. Task export is CLI-only.
+
+`sona_project_detail` returns the latest update, `update_missing`, progress
+(done 100, started 25, over scope), weekly history, the predicted finish and
+each milestone's progress. `sona_project_update_save` posts an update with a
+`health` and a Markdown `body`, or `draft:true` for the body Sona writes from
+what moved since the last one (with `dry_run:true` it only shows the draft);
+with `id` it edits the agent's own update. `sona_project_delete` bins a
+project for 30 days, `restore:true` takes it back. `filter` on
+`sona_work_list` and `sona_work_view_save` is a list of conditions that must
+all hold, such as `{"field":"due","op":"before","values":["today"]}`.
 
 `sona_comment_save` without `id` comments on `task` (or replies in a thread
 with `reply_to`); with `id` it edits a comment the agent wrote. An agent
@@ -499,9 +519,9 @@ code, and `data.code` preserves it. Consent failures also carry
 `invalid_request` and `not_found` to InvalidParams; unavailable storage and
 execution failures to InternalError.
 Tools also declare `readOnlyHint:true`, except loop resolution and the task,
-project, milestone and person writes declare `false`; label, view and
-milestone deletes, comment deletes, attachment removal and person merges also
-declare `destructiveHint:true`.
+project, update, milestone, cycle and person writes declare `false`; label,
+view, milestone and update deletes, the project bin, comment deletes,
+attachment removal and person merges also declare `destructiveHint:true`.
 The hints describe behavior; the CLI consent gate still makes the permission
 decision before any corpus read.
 

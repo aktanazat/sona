@@ -20,29 +20,94 @@ export const STATUSES = ["open", "done"] as const;
 /** Whose side of a loop `sona_action_items` keeps. */
 export const SIDES = ["mine", "waiting"] as const;
 
+/* A task filter condition, as `sona work list --filter` reads it. Sona owns
+ * which fields, operators and values exist; this only keeps the shape. */
+const CONDITION = z
+  .object({
+    field: z.string(),
+    op: z.string(),
+    values: z.array(z.union([z.string(), z.number()])),
+  })
+  .strict();
+
 /* The one shape an argv can be built out of: a flat object of JSON scalars
- * and lists of strings, keyed by field name. Nothing here re-checks a value it
- * can turn into an argument — Sona owns what a scope is and what a limit may
- * be — so the schema stops at "flat", which is the only property this file
- * actually relies on. A list of strings is flat too: each entry becomes one
- * argument. */
+ * and lists of strings, keyed by field name, plus lists of filter conditions.
+ * Nothing here re-checks a value it can turn into an argument — Sona owns
+ * what a scope is and what a limit may be — so the schema stops at "flat",
+ * which is the only property this file actually relies on. A list of strings
+ * is flat too: each entry becomes one argument. A list of conditions becomes
+ * one JSON argument. */
 export const TOOL_INPUT = z.record(
   z.string(),
-  z.union([z.string(), z.number(), z.boolean(), z.null(), z.array(z.string())]),
+  z.union([
+    z.string(),
+    z.number(),
+    z.boolean(),
+    z.null(),
+    z.array(z.string()),
+    z.array(CONDITION),
+  ]),
 );
 
 export type ToolInput = z.infer<typeof TOOL_INPUT>;
 
+/** The JSON schema of one filter condition, as published. */
+const CONDITION_SCHEMA = {
+  type: "object",
+  properties: {
+    field: {
+      type: "string",
+      enum: [
+        "status",
+        "priority",
+        "owner",
+        "project",
+        "milestone",
+        "label",
+        "cycle",
+        "due",
+        "created",
+        "updated",
+      ],
+      description: "The task field the condition reads.",
+    },
+    op: {
+      type: "string",
+      enum: [
+        "is",
+        "is_not",
+        "any_of",
+        "none_of",
+        "includes_all",
+        "includes_any",
+        "before",
+        "after",
+      ],
+      description:
+        "How it compares. before and after take only due, created and updated. For labels, is and includes_all need every value, any_of and includes_any any, is_not and none_of none.",
+    },
+    values: {
+      type: "array",
+      items: { type: ["string", "integer"] },
+      description:
+        "Ids or names; stored statuses (todo, in_progress, ...); priorities 0-4 or urgent, high, medium, low, none; me for the user; none for an empty field; cycle numbers, current or next; days as YYYY-MM-DD, today, tomorrow, yesterday or epoch ms.",
+    },
+  },
+  required: ["field", "op", "values"],
+  additionalProperties: false,
+} as const;
+
 /** One JSON-schema property as this server publishes it: a flat string,
- * integer or boolean field, optionally enumerated and bounded, or a list of
- * strings. Typed so readers get the enum without re-parsing the schema. */
+ * integer or boolean field, optionally enumerated and bounded, a list of
+ * strings, or a list of filter conditions. Typed so readers get the enum
+ * without re-parsing the schema. */
 export interface ToolProperty {
   readonly type: "string" | "integer" | "boolean" | "array";
   readonly description: string;
   readonly enum?: readonly string[];
   readonly minimum?: number;
   readonly maximum?: number;
-  readonly items?: { readonly type: "string" };
+  readonly items?: { readonly type: "string" } | typeof CONDITION_SCHEMA;
   readonly minItems?: number;
 }
 
@@ -159,6 +224,29 @@ function strings(input: ToolInput, key: string): string[] {
   return found;
 }
 
+/** Filter conditions, as the one JSON argument `--filter` reads. */
+function conditions(input: ToolInput): string[] {
+  const value = input.filter;
+  if (value === undefined || value === null) return [];
+  const parsed = z.array(CONDITION).safeParse(value);
+  if (!parsed.success) {
+    throw new SonaInputError("filter must be a list of {field, op, values} conditions.");
+  }
+  return [`--filter=${JSON.stringify(parsed.data)}`];
+}
+
+/** A project's links, one `--link` each; null or an empty list clears them. */
+function links(input: ToolInput): string[] {
+  const value = input.links;
+  if (value === undefined) return [];
+  const parsed = z.array(z.string()).nullable().safeParse(value);
+  if (!parsed.success) {
+    throw new SonaInputError("links must be a list of strings.");
+  }
+  const found = (parsed.data ?? []).filter((link) => link.trim() !== "");
+  return found.length === 0 ? ["--link=none"] : found.map((link) => `--link=${link}`);
+}
+
 const LIMIT = {
   type: "integer",
   minimum: 1,
@@ -210,6 +298,28 @@ const ATTACHMENT = {
 
 const CATALOG_WRITES =
   "This changes the user's Sona projects and people. It needs Settings > Agents > External access and External mutations, and Agents' changes set to Apply: with access or mutations off Sona refuses with consent_required, and while agents' changes wait for the user it refuses with invalid_request naming the setting. Nothing is proposed for later and there is no dry run. A call that changes nothing answers with operation_id null.";
+
+const PLANNING_WRITES =
+  "This changes the user's Sona projects and cycles. It needs Settings > Agents > External access and External mutations, and Agents' changes set to Apply: with access or mutations off Sona refuses with consent_required, and while agents' changes wait for the user it refuses with invalid_request naming the setting. Nothing is proposed for later. dry_run:true shows the result without writing. Repeating an operation_id answers the first result again.";
+
+const FILTER = {
+  type: "array",
+  items: CONDITION_SCHEMA,
+  description:
+    'Conditions that must all hold, on top of the other filters: [{"field":"label","op":"includes_all","values":["bug","ui"]}, {"field":"due","op":"before","values":["today"]}].',
+} as const;
+
+const HEALTH = {
+  type: "string",
+  enum: ["on-track", "at-risk", "off-track"],
+  description: "How the project is going.",
+} as const;
+
+const RESOLUTION = {
+  type: "string",
+  enum: ["day", "month", "quarter", "half-year", "year"],
+  description: "How exactly the day is meant: a quarter shows as Q3. Sona reads day unless told. null clears it.",
+} as const;
 
 const PROJECT = {
   type: "string",
@@ -929,6 +1039,7 @@ export const TOOLS: readonly ToolDefinition[] = [
         },
         archived: { type: "boolean", description: "Include archived work." },
         snoozed: { type: "boolean", description: "Include snoozed work." },
+        filter: FILTER,
         limit: LIMIT,
       },
       additionalProperties: false,
@@ -941,6 +1052,7 @@ export const TOOLS: readonly ToolDefinition[] = [
       ...assigned("--view", text(input, "view")),
       ...(flag(input, "archived") ? ["--archived"] : []),
       ...(flag(input, "snoozed") ? ["--snoozed"] : []),
+      ...conditions(input),
       ...assigned("--limit", count(input, "limit")),
       "--json",
     ],
@@ -1473,10 +1585,10 @@ export const TOOLS: readonly ToolDefinition[] = [
   linking("relate", "Link Sona tasks", "Link two tasks. Linking them again returns the link already there."),
   linking("unrelate", "Unlink Sona tasks", "Remove a link between two tasks."),
   {
-    name: "sona_work_cycles",
+    name: "sona_cycle_list",
     title: "Read Sona cycles",
     description:
-      "Read the tracker's cycles: how many weeks each runs and the weekday it starts, then every cycle with its number, state (past, current or upcoming), first and last day, scope (tasks planned in it and not dropped) and done. With cycle, read that one cycle's scope and done as each of its days ended, and how many tasks were carried over unfinished from earlier cycles. Unfinished work moves to the new cycle by itself when one starts.",
+      "Read the tracker's cycles: how many weeks each runs, the weekday it starts, the cooldown weeks between cycles and how many are planned ahead, then every cycle with its number, name, state (past, current or upcoming), first and last day, scope (tasks planned in it and not dropped), started, done and, once ended, success (done counts 100, started 25, over scope). With cycle, read that one cycle's scope, started and done as each of its days ended, and how many tasks were carried over unfinished from earlier cycles. Unfinished work moves to the new cycle by itself when one starts.",
     optIn: true,
     inputSchema: {
       type: "object",
@@ -1493,6 +1605,105 @@ export const TOOLS: readonly ToolDefinition[] = [
       return cycle === null
         ? ["work", "cycles", "--json"]
         : ["work", "cycle", "--json", "--", cycle];
+    },
+  },
+  {
+    name: "sona_cycle_save",
+    title: "Change Sona cycles",
+    description: `Change how cycles run, or one cycle. One kind of change per call: weeks, start_weekday, cooldown_weeks and upcoming set how every cycle runs (leave cycle out; fields left out stay); name, start and end rename or move one cycle; start_today:true starts the first upcoming cycle, or cycle, today; rollover:true moves cycle's unfinished work into the cycle under way. Answers with every cycle as sona_cycle_list reads them. ${PLANNING_WRITES}`,
+    mutates: "changes",
+    optIn: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        cycle: {
+          type: "string",
+          description: "The cycle to change: current, next, or its number.",
+        },
+        name: {
+          type: "string",
+          description: "The cycle's name. null clears it.",
+        },
+        start: {
+          type: "string",
+          description: "The cycle's first day, YYYY-MM-DD. Only a cycle not yet started moves.",
+        },
+        end: { type: "string", description: "The cycle's last day, YYYY-MM-DD." },
+        start_today: { type: "boolean", description: "Start the cycle today." },
+        rollover: {
+          type: "boolean",
+          description: "Move the cycle's unfinished work into the cycle under way.",
+        },
+        weeks: {
+          type: "integer",
+          minimum: 1,
+          maximum: 8,
+          description: "How many weeks every cycle runs.",
+        },
+        start_weekday: {
+          type: "integer",
+          minimum: 1,
+          maximum: 7,
+          description: "The weekday cycles start on: 1 for Monday through 7 for Sunday.",
+        },
+        cooldown_weeks: {
+          type: "integer",
+          minimum: 0,
+          maximum: 4,
+          description: "Weeks off between cycles.",
+        },
+        upcoming: {
+          type: "integer",
+          minimum: 1,
+          maximum: 15,
+          description: "How many cycles to plan ahead.",
+        },
+        dry_run: DRY_RUN,
+        operation_id: OPERATION_ID,
+      },
+      additionalProperties: false,
+    },
+    argv: (input, agent) => {
+      const cycle = text(input, "cycle");
+      const settings = [
+        ...assigned("--weeks", count(input, "weeks")),
+        ...assigned("--start-weekday", count(input, "start_weekday")),
+        ...assigned("--cooldown", count(input, "cooldown_weeks")),
+        ...assigned("--upcoming", count(input, "upcoming")),
+      ];
+      const edit = [
+        ...nullable("--name", input, "name", "none"),
+        ...assigned("--start", text(input, "start")),
+        ...assigned("--end", text(input, "end")),
+      ];
+      const startToday = flag(input, "start_today");
+      const rollover = flag(input, "rollover");
+      const kinds = [settings.length > 0, edit.length > 0, startToday, rollover];
+      if (kinds.filter(Boolean).length > 1) {
+        throw new SonaInputError(
+          "Pass one kind of change: settings (weeks, start_weekday, cooldown_weeks, upcoming), name/start/end, start_today or rollover.",
+        );
+      }
+      const tail = [
+        ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+        ...writing(input, agent),
+        "--json",
+      ];
+      if (settings.length > 0) {
+        if (cycle !== null) {
+          throw new SonaInputError(
+            "weeks, start_weekday, cooldown_weeks and upcoming apply to every cycle; leave cycle out.",
+          );
+        }
+        return ["work", "cycle-settings", ...settings, ...tail];
+      }
+      if (startToday) {
+        return ["work", "cycle-start-today", ...tail, ...(cycle === null ? [] : ["--", cycle])];
+      }
+      if (cycle === null) throw new SonaInputError("cycle is required.");
+      return rollover
+        ? ["work", "cycle-rollover", ...tail, "--", cycle]
+        : ["work", "cycle-save", ...edit, ...tail, "--", cycle];
     },
   },
   {
@@ -1615,6 +1826,7 @@ export const TOOLS: readonly ToolDefinition[] = [
           enum: ["priority", "due", "updated", "created", "manual"],
           description: "How the app orders it.",
         },
+        filter: FILTER,
         operation_id: OPERATION_ID,
       },
       required: ["name"],
@@ -1629,6 +1841,7 @@ export const TOOLS: readonly ToolDefinition[] = [
       ...assigned("--layout", text(input, "layout")),
       ...assigned("--group-by", text(input, "group_by")),
       ...assigned("--order-by", text(input, "order_by")),
+      ...conditions(input),
       ...writing(input, agent),
       "--json",
       "--",
@@ -1774,11 +1987,16 @@ export const TOOLS: readonly ToolDefinition[] = [
     name: "sona_project_list",
     title: "List Sona projects",
     description:
-      "List the projects the Projects page shows, by name: each one's id, lead, members, status (active, paused or completed), target day, colour, open and done task counts, milestone count, whether it was put away, and revision. all:true includes projects put away.",
+      "List the projects the Projects page shows, by name: each one's id, lead, members, status (backlog, planned, active, paused, completed or canceled), priority, start and target days, colour, icon, labels, links, open and done task counts, milestone count, whether it was put away, and revision. all:true includes projects put away; trashed:true lists only the projects in the bin, deleted less than 30 days ago.",
     inputSchema: {
       type: "object",
       properties: {
         all: { type: "boolean", description: "Include projects that were put away." },
+        trashed: {
+          type: "boolean",
+          description:
+            "List only the projects in the bin, which sona_project_delete restore:true brings back.",
+        },
       },
       additionalProperties: false,
     },
@@ -1786,13 +2004,27 @@ export const TOOLS: readonly ToolDefinition[] = [
       "work",
       "projects",
       ...(flag(input, "all") ? ["--all"] : []),
+      ...(flag(input, "trashed") ? ["--trashed"] : []),
       "--json",
     ],
   },
   {
+    name: "sona_project_detail",
+    title: "Read a Sona project's progress",
+    description:
+      "Read one project from the Projects page: its fields, the latest update with its health, update_missing when an active project has gone a cycle and three days without one, progress (scope, started, done, percent complete with done counting 100 and started 25, weekly history, and the predicted finish with optimistic and pessimistic days, null until there is enough history), and each milestone's progress in order, with next_open on the first one not complete.",
+    inputSchema: {
+      type: "object",
+      properties: { project: PROJECT },
+      required: ["project"],
+      additionalProperties: false,
+    },
+    argv: (input) => ["work", "project", "--json", "--", text(input, "project", true)],
+  },
+  {
     name: "sona_project_save",
     title: "Save a Sona project",
-    description: `Make a project, or change one. Saving a name no project has makes it; saving a name one has changes that one; project renames another project to name. Fields left out stay as they are. ${CATALOG_WRITES}`,
+    description: `Make a project, or change one. Saving a name no project has makes it; saving a name one has changes that one; project renames another project to name. Fields left out stay as they are; null clears one. ${PLANNING_WRITES} A call that changes nothing answers with operation_id null.`,
     mutates: "changes",
     inputSchema: {
       type: "object",
@@ -1808,8 +2040,13 @@ export const TOOLS: readonly ToolDefinition[] = [
         },
         status: {
           type: "string",
-          enum: ["active", "paused", "completed"],
+          enum: ["backlog", "planned", "active", "paused", "completed", "canceled"],
           description: "Where the project stands.",
+        },
+        priority: {
+          type: "string",
+          enum: ["none", "urgent", "high", "medium", "low"],
+          description: "How urgent it is. null clears it.",
         },
         lead: {
           ...PERSON,
@@ -1820,16 +2057,39 @@ export const TOOLS: readonly ToolDefinition[] = [
           description:
             "Every member, comma-separated, each as a name, alias or id from sona_person_list. Replaces the list; an empty string or null clears it.",
         },
+        start: {
+          type: "string",
+          description:
+            "The local day work starts: YYYY-MM-DD, today, tomorrow, or none or null to clear it.",
+        },
+        start_resolution: RESOLUTION,
         target: {
           type: "string",
           description: "The local day it should be done: YYYY-MM-DD, today, tomorrow, or none or null to clear it.",
         },
+        target_resolution: RESOLUTION,
         hue: {
           type: "integer",
           minimum: 0,
           maximum: 360,
           description: "Its colour as degrees on the colour wheel.",
         },
+        icon: {
+          type: "string",
+          description: "A short symbol or emoji. none or null clears it.",
+        },
+        labels: {
+          type: "string",
+          description:
+            "Every label, by name or id from sona_work_labels, comma-separated. Replaces the list; an empty string or null clears it.",
+        },
+        links: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Every link, each TITLE=URL or a bare URL. Replaces the list; an empty list or null clears it.",
+        },
+        dry_run: DRY_RUN,
         operation_id: OPERATION_ID,
       },
       required: ["name"],
@@ -1841,14 +2101,160 @@ export const TOOLS: readonly ToolDefinition[] = [
       ...assigned("--project", text(input, "project")),
       ...nullable("--details", input, "details", ""),
       ...assigned("--status", text(input, "status")),
+      ...nullable("--priority", input, "priority", "none"),
       ...nullable("--lead", input, "lead", "none"),
       ...nullable("--members", input, "members", ""),
+      ...nullable("--start", input, "start", "none"),
+      ...nullable("--start-resolution", input, "start_resolution", "none"),
       ...nullable("--target", input, "target", "none"),
+      ...nullable("--target-resolution", input, "target_resolution", "none"),
       ...assigned("--hue", count(input, "hue")),
+      ...nullable("--icon", input, "icon", "none"),
+      ...nullable("--labels", input, "labels", ""),
+      ...links(input),
+      ...(flag(input, "dry_run") ? ["--dry-run"] : []),
       ...writing(input, agent),
       "--json",
       "--",
       text(input, "name", true),
+    ],
+  },
+  {
+    name: "sona_project_delete",
+    title: "Put a Sona project in the bin",
+    description: `Put a project in the bin, or take it back out with restore:true. It leaves every list; its tasks stay, in no project. Thirty days later Sona deletes it for good with its milestones, links, labels and updates. sona_project_list trashed:true lists the bin. A project already that way is answered unchanged. ${PLANNING_WRITES}`,
+    mutates: "destroys",
+    optIn: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        project: PROJECT,
+        restore: { type: "boolean", description: "Take the project back out of the bin." },
+        dry_run: DRY_RUN,
+        operation_id: OPERATION_ID,
+      },
+      required: ["project"],
+      additionalProperties: false,
+    },
+    argv: (input, agent) => [
+      "work",
+      "project-delete",
+      ...(flag(input, "restore") ? ["--restore"] : []),
+      ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+      ...writing(input, agent),
+      "--json",
+      "--",
+      text(input, "project", true),
+    ],
+  },
+  {
+    name: "sona_project_update_list",
+    title: "Read a Sona project's updates",
+    description:
+      "Read a project's posted updates, newest first: each one's id, health (on_track, at_risk or off_track), Markdown body, percent complete when it was posted, author (me or an agent by name), and when it was posted and edited. Pass next_cursor back as cursor for the next page.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project: PROJECT,
+        limit: {
+          type: "integer",
+          minimum: 1,
+          maximum: 100,
+          description: "How many updates to return. Sona defaults to 20 and caps at 100.",
+        },
+        cursor: { type: "string", description: "next_cursor from the page before." },
+      },
+      required: ["project"],
+      additionalProperties: false,
+    },
+    argv: (input) => [
+      "work",
+      "project-updates",
+      ...assigned("--limit", count(input, "limit")),
+      ...assigned("--cursor", text(input, "cursor")),
+      "--json",
+      "--",
+      text(input, "project", true),
+    ],
+  },
+  {
+    name: "sona_project_update_save",
+    title: "Post a Sona project update",
+    description: `Without id, post an update on project: its health and either a Markdown body or draft:true, which has Sona write it from what moved since the last update (tasks completed and started, milestones reached, the percent change); with dry_run:true it shows that draft without posting. With id, change the health or body of an update you posted; project and draft are then left out. ${PLANNING_WRITES}`,
+    mutates: "changes",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project: PROJECT,
+        id: {
+          type: "string",
+          description: "The update to change, by its id from sona_project_update_list.",
+        },
+        health: HEALTH,
+        body: { type: "string", description: "The update, in Markdown." },
+        draft: { type: "boolean", description: "Post the update Sona drafts instead of a body." },
+        dry_run: DRY_RUN,
+        operation_id: OPERATION_ID,
+      },
+      additionalProperties: false,
+    },
+    argv: (input, agent) => {
+      const id = text(input, "id");
+      const body = assigned("--body", text(input, "body"));
+      const tail = [
+        ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+        ...writing(input, agent),
+        "--json",
+        "--",
+      ];
+      if (id !== null) {
+        if (text(input, "project") !== null || flag(input, "draft")) {
+          throw new SonaInputError("With id, leave project and draft out.");
+        }
+        return [
+          "work",
+          "project-update-edit",
+          ...assigned("--health", text(input, "health")),
+          ...body,
+          ...tail,
+          id,
+        ];
+      }
+      const project = text(input, "project", true);
+      const health = text(input, "health", true);
+      if (body.length > 0 === flag(input, "draft")) {
+        throw new SonaInputError("Pass exactly one of body or draft:true.");
+      }
+      return ["work", "project-update", `--health=${health}`, ...body, ...tail, project];
+    },
+  },
+  {
+    name: "sona_project_update_delete",
+    title: "Delete a Sona project update",
+    description: `Delete an update you posted. No tool brings it back. dry_run:true shows the update without deleting it. ${PLANNING_WRITES}`,
+    mutates: "destroys",
+    optIn: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: {
+          type: "string",
+          description: "The update, by its id from sona_project_update_list.",
+        },
+        dry_run: DRY_RUN,
+        operation_id: OPERATION_ID,
+      },
+      required: ["id"],
+      additionalProperties: false,
+    },
+    argv: (input, agent) => [
+      "work",
+      "project-update-delete",
+      ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+      ...writing(input, agent),
+      "--json",
+      "--",
+      text(input, "id", true),
     ],
   },
   {
@@ -1881,7 +2287,7 @@ export const TOOLS: readonly ToolDefinition[] = [
     name: "sona_milestone_list",
     title: "List a Sona project's milestones",
     description:
-      "List one project's milestones: each one's id, name, details, status, target day, open and done task counts, and revision.",
+      "List one project's milestones in their order: each one's id, name, details, status, target day, open and done task counts, and revision.",
     inputSchema: {
       type: "object",
       properties: { project: PROJECT },
@@ -1889,6 +2295,38 @@ export const TOOLS: readonly ToolDefinition[] = [
       additionalProperties: false,
     },
     argv: (input) => ["work", "milestones", "--json", "--", text(input, "project", true)],
+  },
+  {
+    name: "sona_milestone_reorder",
+    title: "Order a Sona project's milestones",
+    description: `Put a project's milestones in a new order. milestones names every one of them, by name or id from sona_milestone_list, first to last. ${PLANNING_WRITES}`,
+    mutates: "changes",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project: PROJECT,
+        milestones: {
+          type: "array",
+          items: { type: "string" },
+          minItems: 1,
+          description: "Every milestone of the project, first to last.",
+        },
+        dry_run: DRY_RUN,
+        operation_id: OPERATION_ID,
+      },
+      required: ["project", "milestones"],
+      additionalProperties: false,
+    },
+    argv: (input, agent) => [
+      "work",
+      "milestone-reorder",
+      ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+      ...writing(input, agent),
+      "--json",
+      "--",
+      text(input, "project", true),
+      ...strings(input, "milestones"),
+    ],
   },
   {
     name: "sona_milestone_save",

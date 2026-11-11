@@ -172,7 +172,7 @@ its number or its id. Fifteen are published by default:
 
 | Tool               | Arguments                                                        | Runs                                       |
 | ------------------ | ---------------------------------------------------------------- | ------------------------------------------ |
-| `sona_work_list`   | filters (`status?`, `side?`, `owner?`, `label?`, …), `ready?`    | `sona work list` or `sona work ready`      |
+| `sona_work_list`   | filters (`status?`, `side?`, `owner?`, `label?`, …), `filter?`, `ready?`, `limit?` | `sona work list` or `sona work ready` |
 | `sona_work_get`    | `task`                                                           | `sona work show`                           |
 | `sona_work_counts` | `limit?`                                                         | `sona work mine`                           |
 | `sona_work_create` | `title`, fields (`priority?`, `owner?`, `due?`, `labels?`, …)    | `sona work create` — **writes**            |
@@ -197,6 +197,15 @@ handshake, so Sona shows which agent made it.
 
 `sona_work_list` with `ready:true` returns Todo tasks nothing open blocks, and
 `due` narrows any list to due windows such as `overdue,today` or `next:14`.
+`filter` is a list of conditions that must all hold, passed to `--filter` as
+one JSON argument: `[{"field":"label","op":"includes_all","values":["bug","ui"]}]`.
+Fields are `status`, `priority`, `owner`, `project`, `milestone`, `label`,
+`cycle`, `due`, `created` and `updated`; ops are `is`, `is_not`, `any_of`,
+`none_of`, `includes_all`, `includes_any`, `before` and `after` (dated fields
+only). Values are ids or names, `me`, `none`, cycle numbers or
+`current`/`next`, and days as `YYYY-MM-DD`, `today`, `tomorrow`, `yesterday` or
+epoch ms. `sona_work_view_save` stores a `filter` with the view. `ready:true`
+takes no `filter`, and the list has no sort or cursor: Sona orders it.
 `sona_work_claim` moves one Todo or Backlog task to In progress and shows the
 agent on it; it refuses a task another agent works or one already in
 progress, so two agents cannot both start it. The task's owner stays who it
@@ -237,12 +246,13 @@ dictations that say it, numbered; `sona_work_take` makes Triage tasks of
 chosen lines. `sona_work_say` changes tasks from plain words ("push
 everything not urgent to monday"); run it with `dry_run:true` first.
 
-Eighteen more are opt-in: `sona_work_archive`, `sona_work_restore`,
-`sona_work_relate`, `sona_work_unrelate`, `sona_work_cycles`, `sona_work_labels`,
-`sona_work_label_save`, `sona_work_label_delete`, `sona_work_views`,
-`sona_work_view_save`, `sona_work_view_delete`, `sona_work_watches`,
-`sona_work_watch`, `sona_comment_delete`, `sona_task_detach`,
-`sona_project_archive`, `sona_milestone_delete` and `sona_person_merge`.
+Twenty-one more are opt-in: `sona_work_archive`, `sona_work_restore`,
+`sona_work_relate`, `sona_work_unrelate`, `sona_cycle_list`, `sona_cycle_save`,
+`sona_work_labels`, `sona_work_label_save`, `sona_work_label_delete`,
+`sona_work_views`, `sona_work_view_save`, `sona_work_view_delete`,
+`sona_work_watches`, `sona_work_watch`, `sona_comment_delete`,
+`sona_task_detach`, `sona_project_archive`, `sona_project_delete`,
+`sona_project_update_delete`, `sona_milestone_delete` and `sona_person_merge`.
 Publish them with
 `SONA_MCP_TOOLS`: `all` for every tool, or a comma-separated list of names
 beside the default ones. A name that matches no tool stops the server at
@@ -259,26 +269,54 @@ These run the same `sona work <verb> --json` catalog the Projects and People
 pages show. A project, milestone or person is named by its name, any name it
 goes by, or its id.
 
-| Tool                    | Arguments                                                              | Runs                                     |
-| ----------------------- | ---------------------------------------------------------------------- | ---------------------------------------- |
-| `sona_project_list`     | `all?`                                                                 | `sona work projects [--all]`             |
-| `sona_project_save`     | `name`, `project?`, `details?`, `status?`, `lead?`, `members?`, `target?`, `hue?` | `sona work project-save` — **writes** |
-| `sona_project_archive`  | `project`, `restore?`                                                  | `sona work project-archive` — **writes** |
-| `sona_milestone_list`   | `project`                                                              | `sona work milestones`                   |
-| `sona_milestone_save`   | `project`, `name`, `milestone?`, `target?`, `details?`, `status?`      | `sona work milestone-save` — **writes**  |
-| `sona_milestone_delete` | `project`, `milestone`                                                 | `sona work milestone-delete` — **writes** |
-| `sona_person_list`      | `query?`                                                               | `sona work people [--query …]`           |
-| `sona_person_save`      | `name`, `person?`, `aliases?`, `role?`, `org?`, `email?`, `notes?`     | `sona work person-save` — **writes**     |
-| `sona_person_merge`     | `person`, `into`                                                       | `sona work person-merge` — **writes**    |
-| `sona_meeting_list`     | `since?`, `limit?`                                                     | `sona work meetings`                     |
-| `sona_meeting_get`      | `meeting_id`, `transcript?`                                            | `sona work meeting`                      |
+| Tool                         | Arguments                                                              | Runs                                     |
+| ---------------------------- | ---------------------------------------------------------------------- | ---------------------------------------- |
+| `sona_project_list`          | `all?`, `trashed?`                                                     | `sona work projects [--all] [--trashed]` |
+| `sona_project_detail`        | `project`                                                              | `sona work project`                      |
+| `sona_project_save`          | `name`, `project?`, `details?`, `status?`, `priority?`, `lead?`, `members?`, `start?`, `start_resolution?`, `target?`, `target_resolution?`, `hue?`, `icon?`, `labels?`, `links?`, `dry_run?` | `sona work project-save` — **writes** |
+| `sona_project_delete`        | `project`, `restore?`, `dry_run?`                                      | `sona work project-delete` — **writes**  |
+| `sona_project_archive`       | `project`, `restore?`                                                  | `sona work project-archive` — **writes** |
+| `sona_project_update_list`   | `project`, `limit?`, `cursor?`                                         | `sona work project-updates`              |
+| `sona_project_update_save`   | `project` + `health` + (`body` or `draft:true`), or `id` + `health?` + `body?`; `dry_run?` | `sona work project-update` or `project-update-edit` — **writes** |
+| `sona_project_update_delete` | `id`, `dry_run?`                                                       | `sona work project-update-delete` — **writes** |
+| `sona_milestone_list`        | `project`                                                              | `sona work milestones`                   |
+| `sona_milestone_save`        | `project`, `name`, `milestone?`, `target?`, `details?`, `status?`      | `sona work milestone-save` — **writes**  |
+| `sona_milestone_reorder`     | `project`, `milestones` (every one, in order), `dry_run?`              | `sona work milestone-reorder` — **writes** |
+| `sona_milestone_delete`      | `project`, `milestone`                                                 | `sona work milestone-delete` — **writes** |
+| `sona_cycle_list`            | `cycle?`                                                               | `sona work cycles` or `sona work cycle`  |
+| `sona_cycle_save`            | settings (`weeks?`, `start_weekday?`, `cooldown_weeks?`, `upcoming?`), or `cycle` + (`name?`, `start?`, `end?`), or `start_today` + `cycle?`, or `cycle` + `rollover`; `dry_run?` | `sona work cycle-settings`, `cycle-save`, `cycle-start-today` or `cycle-rollover` — **writes** |
+| `sona_person_list`           | `query?`                                                               | `sona work people [--query …]`           |
+| `sona_person_save`           | `name`, `person?`, `aliases?`, `role?`, `org?`, `email?`, `notes?`     | `sona work person-save` — **writes**     |
+| `sona_person_merge`          | `person`, `into`                                                       | `sona work person-merge` — **writes**    |
+| `sona_meeting_list`          | `since?`, `limit?`                                                     | `sona work meetings`                     |
+| `sona_meeting_get`           | `meeting_id`, `transcript?`                                            | `sona work meeting`                      |
 
 A save makes the thing when nothing goes by that name and changes it when
 something does; `project`, `milestone` or `person` renames that one to `name`.
-Fields left out stay as they are; `null` clears one. These writes take
-`operation_id` but no `dry_run`, and they need both grants and **Agents'
-changes** on Apply: while agents' changes wait for the user they are refused,
-never proposed.
+Fields left out stay as they are; `null` clears one. Every write takes
+`operation_id` and needs both grants and **Agents' changes** on Apply: while
+agents' changes wait for the user they are refused, never proposed. Project
+saves, the bin, updates, milestone order and cycle writes also take
+`dry_run`; milestone and person saves, archiving, milestone deletes and
+merges do not.
+
+`sona_project_detail` reads a project with its latest update, whether an
+update is due (`update_missing`), its progress (done counts 100, started 25,
+over scope), weekly history, the predicted finish with optimistic and
+pessimistic days, and each milestone's progress with `next_open` on the first
+not complete. `sona_project_update_save` posts an update with a `health`
+(`on-track`, `at-risk`, `off-track`) and a Markdown `body`, or with
+`draft:true` Sona writes the body from what moved since the last update;
+`draft:true` with `dry_run:true` shows that draft without posting. With `id`
+it edits an update the agent posted. `sona_project_delete` puts a project in
+the bin, where it stays 30 days before Sona deletes it with its milestones,
+links, labels and updates; its tasks stay, in no project. `restore:true` takes
+it back out, and `sona_project_list` with `trashed:true` lists the bin.
+`sona_project_save` takes six statuses (`backlog`, `planned`, `active`,
+`paused`, `completed`, `canceled`), `links` as `TITLE=URL` or bare URLs, and
+a resolution (`day`, `month`, `quarter`, `half-year`, `year`) for its start
+and target days. `sona_cycle_save` does one kind of change per call; settings
+apply to every cycle and take no `cycle`.
 
 Work raised in a meeting kept on this Mac never appears. While the
 conversations can't be opened, all work from meetings is left out and the
