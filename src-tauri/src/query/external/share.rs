@@ -433,7 +433,7 @@ async fn share(
     let record = shared_pages::publish(paths, store.as_deref(), &draft, audio.as_deref())
         .map_err(refusal)?;
     if file_audio.is_none() {
-        shared_pages::discard_draft(paths, &draft.meeting_id).map_err(refusal)?;
+        shared_pages::forget_published_draft(paths, &draft.meeting_id);
     }
     shared_pages::settle(paths, &record.slug, ShareState::Live)
         .await
