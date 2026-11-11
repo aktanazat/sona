@@ -6,9 +6,9 @@ import SwiftUI
 /// The places a window shows. Library opens from Home and Calendar from
 /// Projects, so the sidebar lists only the rest.
 enum Place: Int, CaseIterable, Identifiable {
-    case capture, library, meetings, people, scratchpad, projects, calendar, tasks, triage, today
+    case capture, library, meetings, people, scratchpad, projects, calendar, tasks, triage, today, shared
 
-    static let sidebar: [Place] = [.capture, .tasks, .triage, .meetings, .people, .scratchpad, .projects]
+    static let sidebar: [Place] = [.capture, .tasks, .triage, .meetings, .people, .scratchpad, .projects, .shared]
 
     var id: Int { rawValue }
 
@@ -18,7 +18,7 @@ enum Place: Int, CaseIterable, Identifiable {
         case .library: .capture
         case .calendar: .projects
         case .today: .tasks
-        case .capture, .meetings, .people, .scratchpad, .projects, .tasks, .triage: self
+        case .capture, .meetings, .people, .scratchpad, .projects, .tasks, .triage, .shared: self
         }
     }
 
@@ -34,6 +34,7 @@ enum Place: Int, CaseIterable, Identifiable {
         case .tasks: "Tasks"
         case .triage: "Triage"
         case .today: "Today"
+        case .shared: "Shared"
         }
     }
 
@@ -49,6 +50,7 @@ enum Place: Int, CaseIterable, Identifiable {
         case .tasks: "checklist"
         case .triage: "tray"
         case .today: "sun.max"
+        case .shared: "link"
         }
     }
 }
@@ -93,6 +95,8 @@ enum Sheet: Identifiable, Hashable {
     case nudge(String)
     /// What is open with the people of a meeting, or with one person.
     case workBrief(WorkBriefSubject)
+    /// The page a meeting would share, by meeting id.
+    case share(String)
 
     var id: Self { self }
 }
@@ -319,6 +323,7 @@ final class AppModel {
     let pairing: AgentPairingStore
     let chat: ChatStore
     let cloudSync: CloudSyncStore
+    let shared: SharedPagesStore
     let connections: ConnectionsStore
     let privacy: PrivacyStore
     let imports: ImportStore
@@ -386,6 +391,7 @@ final class AppModel {
         pairing = AgentPairingStore(core: core)
         chat = ChatStore(core: core)
         cloudSync = CloudSyncStore(core: core)
+        shared = SharedPagesStore(core: core)
         connections = ConnectionsStore(core: core)
         privacy = PrivacyStore(core: core)
         imports = ImportStore(core: core)
@@ -973,6 +979,7 @@ final class AppModel {
         Task { await workflows.start() }
         Task { await agents.start() }
         Task { await cloudSync.start() }
+        Task { await shared.start() }
         Task { await privacy.start() }
         Task { await imports.start() }
         Task { await documents.start() }

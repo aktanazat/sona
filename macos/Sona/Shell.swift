@@ -81,6 +81,8 @@ struct Shell: View {
                 NudgeSheet(id: id).environment(model)
             case let .workBrief(subject):
                 WorkBriefSheet(subject: subject).environment(model)
+            case let .share(meetingId):
+                ShareSheet(meetingId: meetingId).environment(model)
             }
         }
     }
@@ -169,6 +171,8 @@ struct Shell: View {
                 TriageScreen()
             case .today:
                 MorningPlanView()
+            case .shared:
+                SharedPagesView()
             }
         }
     }
@@ -479,6 +483,8 @@ struct Sidebar: View {
                          meaning: "to confirm")
         case .triage:
             SidebarCount(value: model.work.counts?.triage ?? 0, meaning: "to triage")
+        case .shared:
+            SidebarCount(value: model.shared.drafts.count, meaning: "drafts to check")
         case .tasks:
             SidebarCount(value: model.work.counts.map { $0.mineOverdue + $0.mineDueToday } ?? 0,
                          meaning: "due today or late")
