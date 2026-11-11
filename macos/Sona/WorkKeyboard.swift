@@ -933,8 +933,11 @@ extension AppModel {
     func paletteMatches(_ query: String) -> [PaletteMatch] {
         guard !query.isEmpty else { return [] }
         let number = Self.taskNumber(query)
-        let found = (work.items ?? []).filter { row in
-            row.archivedAtMs == nil && (row.number == number || row.title.localizedCaseInsensitiveContains(query))
+        var found: [WorkItemRow] = []
+        for row in work.items ?? [] where row.archivedAtMs == nil {
+            if row.number == number || row.title.localizedCaseInsensitiveContains(query) {
+                found.append(row)
+            }
         }
         let tasks = found.sorted { a, b in
             (a.number == number ? 0 : 1, a.status.isOpen ? 0 : 1, -a.updatedAtMs)
