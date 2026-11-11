@@ -477,7 +477,7 @@ pub struct WorkItemInput {
 
 /// Reads a present `null` as `Some(None)`, so a patch can tell "clear this"
 /// from a key it left out.
-fn nullable<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+pub(crate) fn nullable<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
 where
     D: Deserializer<'de>,
     T: Deserialize<'de>,
@@ -599,6 +599,9 @@ pub struct WorkQuery {
     pub include_archived: bool,
     pub include_snoozed: bool,
     pub cycle: Option<WorkCycleRef>,
+    /// Conditions on any field, all of which must hold, beside the filters
+    /// above.
+    pub filters: Vec<super::filter::WorkCondition>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
@@ -773,13 +776,22 @@ pub struct WorkList {
     pub cycles: Vec<WorkCycle>,
 }
 
-/// How long a cycle runs and the weekday each starts on, 1 for Monday
-/// through 7 for Sunday.
+/// How long a cycle runs, 1 to 8 weeks, the weekday each starts on, 1 for
+/// Monday through 7 for Sunday, the weeks of cooldown after each, and how
+/// many cycles after the one under way are made ahead, 1 to 15.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkCycleSettings {
     pub weeks: u8,
     pub start_weekday: u8,
+    #[serde(default)]
+    pub cooldown_weeks: u8,
+    #[serde(default = "one_upcoming")]
+    pub upcoming: u8,
+}
+
+const fn one_upcoming() -> u8 {
+    1
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
@@ -791,19 +803,24 @@ pub enum WorkCycleState {
 }
 
 /// A cycle from the local midnight `start_day` begins to the one `end_day`
-/// begins; its scope is every task planned in it that was not dropped, and
-/// `done` the ones finished.
+/// begins; its scope is every task planned in it that was not dropped,
+/// `started` the ones under way and `done` the ones finished.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkCycle {
     pub number: i64,
+    pub name: Option<String>,
     pub start_day: String,
     pub end_day: String,
     pub starts_at_ms: i64,
     pub ends_at_ms: i64,
     pub state: WorkCycleState,
     pub scope: u32,
+    pub started: u32,
     pub done: u32,
+    /// Done counted fully and started a quarter, out of the scope; for a
+    /// past cycle, as it stood when it ended. None while the scope is empty.
+    pub success: Option<u8>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
@@ -813,12 +830,14 @@ pub struct WorkCycles {
     pub cycles: Vec<WorkCycle>,
 }
 
-/// Scope and done as each day of a cycle ended, through today.
+/// Scope, started and done as each day of a cycle ended, through today;
+/// frozen once the cycle ends.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkCycleDay {
     pub day: String,
     pub scope: u32,
+    pub started: u32,
     pub done: u32,
 }
 

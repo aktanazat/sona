@@ -30,8 +30,9 @@ use crate::planning::work::agents::{self, AgentChange};
 use crate::planning::work::ask::WorkAnswerLine;
 use crate::planning::work::capture::{WorkCaptureSource, WorkTakenLine};
 use crate::planning::work::command::WorkCommandChange;
+use crate::planning::work::filter::WorkCondition;
 use crate::planning::work::types::{
-    WorkActivity, WorkActivityKind, WorkActor, WorkCycle, WorkCycleRef, WorkCycleState,
+    WorkActivity, WorkActivityKind, WorkActor, WorkCycle, WorkCycleRef, WorkCycleState, WorkCycles,
     WorkDirection, WorkDisplay, WorkDue, WorkFieldSuggestion, WorkGroupBy, WorkItem,
     WorkItemDetail, WorkItemInput, WorkItemRow, WorkLabel, WorkLayout, WorkList, WorkOrderBy,
     WorkOwner, WorkPatch, WorkPersonChoice, WorkProgress, WorkProjectChoice, WorkProposal,
@@ -189,6 +190,32 @@ pub enum WorkVerb {
     Attachments(attachments::AttachmentsArgs),
     /// Take an attachment off a task; a file's copy is deleted.
     Detach(attachments::DetachArgs),
+    /// One project: its fields, latest update, whether an update is due,
+    /// progress by week, a predicted finish, and its milestones' progress.
+    Project(roadmap::ProjectArgs),
+    /// Post an update on a project with its health; without --body Sona
+    /// drafts it from what moved since the last one.
+    ProjectUpdate(roadmap::ProjectUpdateArgs),
+    /// A project's updates, newest first.
+    ProjectUpdates(roadmap::ProjectUpdatesArgs),
+    /// Change an update you posted: its health or body.
+    ProjectUpdateEdit(roadmap::ProjectUpdateEditArgs),
+    /// Delete an update you posted.
+    ProjectUpdateDelete(roadmap::ProjectUpdateDeleteArgs),
+    /// A plain draft of what moved since the project's last update. Nothing is posted.
+    ProjectUpdateDraft(roadmap::ProjectArgs),
+    /// Put a project in the bin for 30 days, or take it out with --restore.
+    ProjectDelete(roadmap::ProjectDeleteArgs),
+    /// Put a project's milestones in order: name every one, first to last.
+    MilestoneReorder(roadmap::MilestoneReorderArgs),
+    /// Change how cycles run: length, start day, cooldown, how many ahead.
+    CycleSettings(roadmap::CycleSettingsArgs),
+    /// Rename a cycle, or move the days of one not yet over.
+    CycleSave(roadmap::CycleSaveArgs),
+    /// Move a cycle's unfinished work into the cycle under way, or the next.
+    CycleRollover(roadmap::CycleRolloverArgs),
+    /// Start the next cycle today; the one under way ends and its unfinished work moves in.
+    CycleStartToday(roadmap::CycleStartTodayArgs),
 }
 
 #[derive(Args, Clone, Debug, Eq, PartialEq)]
@@ -544,6 +571,30 @@ pub struct Filters {
     /// Include snoozed work.
     #[arg(long)]
     pub snoozed: bool,
+    /// Conditions as JSON, one object or a list: {"field":"label","op":
+    /// "includes_all","values":["bug","ui"]}. Fields: status, priority,
+    /// owner, project, milestone, label, cycle, due, created, updated. Ops:
+    /// is, is_not, any_of, none_of, includes_all, includes_any, before,
+    /// after. Values are ids, names Sona stores, `me`, `none`, cycle
+    /// numbers or current/next, and days as YYYY-MM-DD/today/tomorrow.
+    #[arg(long, value_parser = conditions, value_name = "JSON")]
+    pub filter: Option<ConditionsArg>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConditionsArg(Vec<WorkCondition>);
+
+fn conditions(value: &str) -> Result<ConditionsArg, String> {
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(WorkCondition),
+        Many(Vec<WorkCondition>),
+    }
+    match serde_json::from_str(value).map_err(|error| format!("Not a filter: {error}"))? {
+        OneOrMany::One(condition) => Ok(ConditionsArg(vec![condition])),
+        OneOrMany::Many(conditions) => Ok(ConditionsArg(conditions)),
+    }
 }
 
 /// What a new task starts with, or what an update sets.
@@ -965,7 +1016,22 @@ impl WorkVerb {
             | Self::Restore(TasksArgs { dry_run: true, .. })
             | Self::Snooze(SnoozeArgs { dry_run: true, .. })
             | Self::Say(SayArgs { dry_run: true, .. })
-            | Self::Watches => READ_SCOPES,
+            | Self::Watches
+            | Self::Project(_)
+            | Self::ProjectUpdates(_)
+            | Self::ProjectUpdateDraft(_)
+            | Self::ProjectUpdate(roadmap::ProjectUpdateArgs { dry_run: true, .. })
+            | Self::ProjectUpdateEdit(roadmap::ProjectUpdateEditArgs { dry_run: true, .. })
+            | Self::ProjectUpdateDelete(roadmap::ProjectUpdateDeleteArgs { dry_run: true, .. })
+            | Self::ProjectDelete(roadmap::ProjectDeleteArgs { dry_run: true, .. })
+            | Self::ProjectSave(catalog::ProjectSaveArgs { dry_run: true, .. })
+            | Self::MilestoneReorder(roadmap::MilestoneReorderArgs { dry_run: true, .. })
+            | Self::CycleSettings(roadmap::CycleSettingsArgs { dry_run: true, .. })
+            | Self::CycleSave(roadmap::CycleSaveArgs { dry_run: true, .. })
+            | Self::CycleRollover(roadmap::CycleRolloverArgs { dry_run: true, .. })
+            | Self::CycleStartToday(roadmap::CycleStartTodayArgs { dry_run: true, .. }) => {
+                READ_SCOPES
+            }
             Self::Ask(AskArgs { take, .. }) if take.is_empty() => READ_SCOPES,
             Self::Export(_)
             | Self::Create(_)
@@ -1000,6 +1066,15 @@ impl WorkVerb {
             | Self::CommentResolve(_)
             | Self::Subtask(_)
             | Self::Attach(_)
+            | Self::ProjectUpdate(_)
+            | Self::ProjectUpdateEdit(_)
+            | Self::ProjectUpdateDelete(_)
+            | Self::ProjectDelete(_)
+            | Self::MilestoneReorder(_)
+            | Self::CycleSettings(_)
+            | Self::CycleSave(_)
+            | Self::CycleRollover(_)
+            | Self::CycleStartToday(_)
             | Self::Detach(_) => WRITE_SCOPES,
         }
     }
@@ -1050,6 +1125,25 @@ impl WorkVerb {
                 "A milestone needs a name."
             }
             Self::PersonSave(args) if args.name.trim().is_empty() => "A person needs a name.",
+            Self::ProjectUpdate(args)
+                if args.body.as_deref().is_some_and(|body| body.trim().is_empty()) =>
+            {
+                "--body cannot be empty; leave it out to have Sona draft it."
+            }
+            Self::ProjectUpdateEdit(args) if args.health.is_none() && args.body.is_none() => {
+                "Name a change: --health or --body."
+            }
+            Self::ProjectUpdateEdit(args)
+                if args.body.as_deref().is_some_and(|body| body.trim().is_empty()) =>
+            {
+                "--body cannot be empty."
+            }
+            Self::CycleSettings(args) if !args.changes_something() => {
+                "Name a change: --weeks, --start-weekday, --cooldown or --upcoming."
+            }
+            Self::CycleSave(args) if args.name.is_none() && args.start.is_none() && args.end.is_none() => {
+                "Name a change: --name, --start or --end."
+            }
             Self::Ask(args) if args.take.contains(&0) => "Answer lines count from 1.",
             Self::Watch(args) if args.topic.join(" ").trim().is_empty() => {
                 "Name a word or phrase to watch."
@@ -1146,6 +1240,12 @@ pub enum WorkAnswer {
     Comment(Box<threads::ExternalWorkCommentChange>),
     Attachments(attachments::ExternalWorkAttachments),
     Attachment(Box<attachments::ExternalWorkAttachmentChange>),
+    ProjectDetail(Box<roadmap::ExternalWorkProjectDetail>),
+    ProjectUpdates(roadmap::ExternalWorkProjectUpdates),
+    ProjectUpdate(Box<roadmap::ExternalWorkProjectUpdateChange>),
+    ProjectDraft(roadmap::ExternalWorkProjectDraft),
+    MilestoneOrder(roadmap::ExternalWorkMilestoneOrder),
+    CycleChange(Box<roadmap::ExternalWorkCycleChange>),
 }
 
 /// What `ask` found: the lines that answer, numbered for --take.
@@ -1593,6 +1693,7 @@ pub struct ExternalWorkFilters {
     pub include_archived: bool,
     pub include_snoozed: bool,
     pub cycle: Option<WorkCycleRef>,
+    pub conditions: Vec<WorkCondition>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1638,19 +1739,28 @@ pub struct ExternalWorkCycles {
     pub weeks: u8,
     /// The weekday each starts on, 1 for Monday through 7 for Sunday.
     pub start_weekday: u8,
+    /// Weeks off between one cycle and the next.
+    pub cooldown_weeks: u8,
+    /// How many cycles are made ahead.
+    pub upcoming: u8,
     pub cycles: Vec<ExternalWorkCycle>,
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub struct ExternalWorkCycle {
     pub number: i64,
+    pub name: Option<String>,
     pub state: WorkCycleState,
     /// The local days it runs, YYYY-MM-DD, both included.
     pub first_day: String,
     pub last_day: String,
     /// Tasks planned in it and not dropped.
     pub scope: u32,
+    pub started: u32,
     pub done: u32,
+    /// Done counts fully and started a quarter, out of scope; as it closed
+    /// for a past cycle.
+    pub success: Option<u8>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1659,7 +1769,8 @@ pub struct ExternalWorkCycleProgress {
     pub cycle: ExternalWorkCycle,
     /// Tasks moved in unfinished from earlier cycles.
     pub carried_over: u32,
-    /// Scope and done as each day ended, through today.
+    /// Scope, started and done as each day ended, through today; frozen
+    /// once the cycle ended.
     pub days: Vec<ExternalWorkCycleDay>,
 }
 
@@ -1667,6 +1778,7 @@ pub struct ExternalWorkCycleProgress {
 pub struct ExternalWorkCycleDay {
     pub day: String,
     pub scope: u32,
+    pub started: u32,
     pub done: u32,
 }
 
@@ -1755,6 +1867,18 @@ pub(super) async fn answer(
         WorkVerb::Attach(args) => tracker.attach(args).await,
         WorkVerb::Attachments(args) => tracker.attachments(args).await,
         WorkVerb::Detach(args) => tracker.detach(args).await,
+        WorkVerb::Project(args) => tracker.project(args).await,
+        WorkVerb::ProjectUpdate(args) => tracker.project_update(args),
+        WorkVerb::ProjectUpdates(args) => tracker.project_updates(args),
+        WorkVerb::ProjectUpdateEdit(args) => tracker.project_update_edit(args),
+        WorkVerb::ProjectUpdateDelete(args) => tracker.project_update_delete(args),
+        WorkVerb::ProjectUpdateDraft(args) => tracker.project_update_draft(args),
+        WorkVerb::ProjectDelete(args) => tracker.project_delete(args).await,
+        WorkVerb::MilestoneReorder(args) => tracker.milestone_reorder(args),
+        WorkVerb::CycleSettings(args) => tracker.cycle_settings(args),
+        WorkVerb::CycleSave(args) => tracker.cycle_save(args),
+        WorkVerb::CycleRollover(args) => tracker.cycle_rollover(args),
+        WorkVerb::CycleStartToday(args) => tracker.cycle_start_today(args),
     }
 }
 
@@ -2810,12 +2934,7 @@ impl Tracker<'_> {
     fn cycles(&self) -> Result<WorkAnswer, ExternalError> {
         let listing = work::cycles::work_cycles(self.app.clone())
             .map_err(|message| refusal(self.history, message))?;
-        Ok(WorkAnswer::Cycles(ExternalWorkCycles {
-            schema_version: QUERY_SCHEMA_VERSION,
-            weeks: listing.settings.weeks,
-            start_weekday: listing.settings.start_weekday,
-            cycles: listing.cycles.iter().map(project_cycle).collect(),
-        }))
+        Ok(WorkAnswer::Cycles(external_cycles(&listing)))
     }
 
     fn cycle(&self, args: &CycleArgs) -> Result<WorkAnswer, ExternalError> {
@@ -2834,6 +2953,7 @@ impl Tracker<'_> {
                 .map(|day| ExternalWorkCycleDay {
                     day: day.day,
                     scope: day.scope,
+                    started: day.started,
                     done: day.done,
                 })
                 .collect(),
@@ -4203,6 +4323,7 @@ fn project_view(view: &WorkView) -> ExternalWorkView {
             include_archived: query.include_archived,
             include_snoozed: query.include_snoozed,
             cycle: query.cycle,
+            conditions: query.filters.clone(),
         },
         layout: view.display.layout,
         group_by: view.display.group_by,
@@ -4313,7 +4434,7 @@ fn named_cycle(cycles: &[WorkCycle], named: WorkCycleRef) -> Result<i64, Externa
         WorkCycleRef::Next => current.and_then(|current| {
             cycles
                 .iter()
-                .find(|cycle| cycle.starts_at_ms == current.ends_at_ms)
+                .find(|cycle| cycle.starts_at_ms >= current.ends_at_ms)
         }),
         WorkCycleRef::Number { number } => cycles.iter().find(|cycle| cycle.number == number),
         WorkCycleRef::None => None,
@@ -4326,6 +4447,17 @@ fn named_cycle(cycles: &[WorkCycle], named: WorkCycleRef) -> Result<i64, Externa
     })
 }
 
+fn external_cycles(listing: &WorkCycles) -> ExternalWorkCycles {
+    ExternalWorkCycles {
+        schema_version: QUERY_SCHEMA_VERSION,
+        weeks: listing.settings.weeks,
+        start_weekday: listing.settings.start_weekday,
+        cooldown_weeks: listing.settings.cooldown_weeks,
+        upcoming: listing.settings.upcoming,
+        cycles: listing.cycles.iter().map(project_cycle).collect(),
+    }
+}
+
 fn project_cycle(cycle: &WorkCycle) -> ExternalWorkCycle {
     let last_day = NaiveDate::parse_from_str(&cycle.end_day, "%Y-%m-%d")
         .ok()
@@ -4336,11 +4468,14 @@ fn project_cycle(cycle: &WorkCycle) -> ExternalWorkCycle {
         );
     ExternalWorkCycle {
         number: cycle.number,
+        name: cycle.name.clone(),
         state: cycle.state,
         first_day: cycle.start_day.clone(),
         last_day,
         scope: cycle.scope,
+        started: cycle.started,
         done: cycle.done,
+        success: cycle.success,
     }
 }
 
@@ -4360,6 +4495,9 @@ impl Filters {
         }
         if self.snoozed {
             query.include_snoozed = true;
+        }
+        if let Some(ConditionsArg(conditions)) = &self.filter {
+            query.filters.extend(conditions.iter().cloned());
         }
         self.scope.narrow(board, query)
     }
@@ -4673,6 +4811,12 @@ impl WorkAnswer {
             | Self::Person(_)
             | Self::Meetings(_)
             | Self::MeetingDetail(_) => catalog::text(self, &mut text),
+            Self::ProjectDetail(_)
+            | Self::ProjectUpdates(_)
+            | Self::ProjectUpdate(_)
+            | Self::ProjectDraft(_)
+            | Self::MilestoneOrder(_)
+            | Self::CycleChange(_) => roadmap::text(self, &mut text),
             Self::Comments(_) | Self::Comment(_) => threads::text(self, &mut text),
             Self::Attachments(_) | Self::Attachment(_) => attachments::text(self, &mut text),
             Self::Label(change) => {
@@ -4822,6 +4966,12 @@ impl WorkAnswer {
             | Self::People(_)
             | Self::Person(_)
             | Self::Meetings(_)
+            | Self::ProjectDetail(_)
+            | Self::ProjectUpdates(_)
+            | Self::ProjectUpdate(_)
+            | Self::ProjectDraft(_)
+            | Self::MilestoneOrder(_)
+            | Self::CycleChange(_)
             | Self::MeetingDetail(_)
             | Self::Comments(_)
             | Self::Comment(_)
@@ -5268,6 +5418,14 @@ fn filters_text(filters: &ExternalWorkFilters) -> String {
     if filters.include_archived {
         parts.push("with archived".to_owned());
     }
+    for condition in &filters.conditions {
+        parts.push(format!(
+            "{} {} {}",
+            condition.field.word(),
+            condition.op.word(),
+            condition.values.join(", ")
+        ));
+    }
     if parts.is_empty() {
         "everything".to_owned()
     } else {
@@ -5277,6 +5435,7 @@ fn filters_text(filters: &ExternalWorkFilters) -> String {
 
 mod attachments;
 mod catalog;
+mod roadmap;
 mod threads;
 
 #[cfg(test)]

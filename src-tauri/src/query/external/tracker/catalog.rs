@@ -2,18 +2,20 @@
 //! meetings feed: what an organizer agent needs to keep the tracker tidy.
 
 use super::{
-    conversations_closed, day_or_none, day_text, pick, Board, DayArg, Tracker, WorkAnswer,
-    WorkPersonChoice, WriteArgs,
+    conversations_closed, day_or_none, day_text, pick, Board, DayArg, Priority, Tracker,
+    WorkAnswer, WorkPersonChoice, WriteArgs,
 };
 use crate::meeting::people_types::{PersonListEntry, PersonMergeRequest};
 use crate::meeting::store::PersonProfileEdit;
 use crate::meeting::types::{MeetingPhase, ProcessingStatus};
 use crate::planning;
-use crate::planning::catalog::{MilestoneEdit, ProjectEdit};
+use crate::planning::catalog::{LinkEdit, MilestoneEdit, ProjectEdit};
 use crate::planning::store as plans;
 use crate::planning::work;
 use crate::planning::work::types::WorkStatus;
-use crate::planning::{Milestone, Project, ProjectStatus, TaskStatus};
+use crate::planning::{
+    DateResolution, Milestone, Project, ProjectLink, ProjectStatus, TaskStatus,
+};
 use crate::query::external::{
     meeting_detail, meeting_summaries, session_id, store, transcript, ExternalError,
     ExternalErrorCode, ExternalMeetingDetail, ExternalTranscript,
@@ -27,19 +29,79 @@ use uuid::Uuid;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub enum ProjectState {
+    Backlog,
+    Planned,
+    #[value(alias = "started")]
     Active,
     Paused,
     Completed,
+    Canceled,
 }
 
 impl From<ProjectState> for ProjectStatus {
     fn from(state: ProjectState) -> Self {
         match state {
+            ProjectState::Backlog => Self::Backlog,
+            ProjectState::Planned => Self::Planned,
             ProjectState::Active => Self::Active,
             ProjectState::Paused => Self::Paused,
             ProjectState::Completed => Self::Completed,
+            ProjectState::Canceled => Self::Canceled,
         }
     }
+}
+
+/// How exactly a project's start or target day is meant, or none to clear it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum ResolutionArg {
+    Day,
+    Month,
+    Quarter,
+    #[value(alias = "halfYear")]
+    HalfYear,
+    Year,
+    None,
+}
+
+impl ResolutionArg {
+    const fn resolution(self) -> Option<DateResolution> {
+        match self {
+            Self::Day => Some(DateResolution::Day),
+            Self::Month => Some(DateResolution::Month),
+            Self::Quarter => Some(DateResolution::Quarter),
+            Self::HalfYear => Some(DateResolution::HalfYear),
+            Self::Year => Some(DateResolution::Year),
+            Self::None => None,
+        }
+    }
+}
+
+/// A link to keep on a project: `TITLE=URL`, a bare URL, or none.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LinkArg {
+    Clear,
+    Link(LinkEdit),
+}
+
+pub fn link_arg(value: &str) -> Result<LinkArg, String> {
+    let value = value.trim();
+    if cleared(value) {
+        return Ok(LinkArg::Clear);
+    }
+    let bare = ["http://", "https://", "mailto:", "sona://"]
+        .iter()
+        .any(|scheme| value.to_lowercase().starts_with(scheme));
+    let (title, url) = match value.split_once('=') {
+        Some((title, url)) if !bare => (Some(title.trim().to_owned()), url.trim().to_owned()),
+        _ => (None, value.to_owned()),
+    };
+    if url.is_empty() {
+        return Err("expected TITLE=URL, a URL, or none".to_owned());
+    }
+    Ok(LinkArg::Link(LinkEdit {
+        title: title.filter(|title| !title.is_empty()),
+        url,
+    }))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -85,6 +147,9 @@ pub struct ProjectsArgs {
     /// Include projects that were put away.
     #[arg(long)]
     pub all: bool,
+    /// Only the projects in the bin, deleted less than 30 days ago.
+    #[arg(long)]
+    pub trashed: bool,
 }
 
 #[derive(Args, Clone, Debug, Eq, PartialEq)]
@@ -110,6 +175,30 @@ pub struct ProjectSaveArgs {
     /// The project's colour, as a hue in degrees (0 to 360).
     #[arg(long, value_parser = clap::value_parser!(u16).range(0..=360))]
     pub hue: Option<u16>,
+    #[arg(long, value_enum)]
+    pub priority: Option<Priority>,
+    /// YYYY-MM-DD, today, tomorrow or none.
+    #[arg(long, value_parser = day_or_none, value_name = "DAY")]
+    pub start: Option<DayArg>,
+    /// How exactly --start is meant; day unless told.
+    #[arg(long, value_enum, value_name = "RESOLUTION")]
+    pub start_resolution: Option<ResolutionArg>,
+    /// How exactly --target is meant; day unless told.
+    #[arg(long, value_enum, value_name = "RESOLUTION")]
+    pub target_resolution: Option<ResolutionArg>,
+    /// A short symbol or emoji, or none.
+    #[arg(long)]
+    pub icon: Option<String>,
+    /// Comma-separated labels; an empty value or none clears them.
+    #[arg(long, value_delimiter = ',', value_name = "LABELS")]
+    pub labels: Option<Vec<String>>,
+    /// A link, TITLE=URL or a URL; repeat for more. The links given replace
+    /// the project's links; none clears them.
+    #[arg(long = "link", value_parser = link_arg, value_name = "LINK")]
+    pub links: Vec<LinkArg>,
+    /// Show the project as it would be saved; nothing changes.
+    #[arg(long)]
+    pub dry_run: bool,
     #[command(flatten)]
     pub write: WriteArgs,
 }
@@ -226,12 +315,22 @@ pub struct ExternalWorkProject {
     pub name: String,
     pub details: Option<String>,
     pub status: ProjectStatus,
+    pub priority: Priority,
+    pub icon: Option<String>,
     pub lead: Option<ExternalWorkPersonRef>,
     pub members: Vec<ExternalWorkPersonRef>,
+    pub start: Option<String>,
+    pub start_at_ms: Option<i64>,
+    pub start_resolution: Option<DateResolution>,
     pub target: Option<String>,
     pub target_at_ms: Option<i64>,
+    pub target_resolution: Option<DateResolution>,
     pub hue: Option<u16>,
+    pub labels: Vec<String>,
+    pub links: Vec<ProjectLink>,
     pub archived: bool,
+    /// When it went to the bin; it is purged 30 days later.
+    pub trashed_at_ms: Option<i64>,
     pub open_tasks: u32,
     pub done_tasks: u32,
     pub milestones: u32,
@@ -247,6 +346,7 @@ pub struct ExternalWorkProjects {
 #[derive(Clone, Debug, Serialize)]
 pub struct ExternalWorkProjectChange {
     pub schema_version: u32,
+    pub dry_run: bool,
     pub operation_id: Option<String>,
     pub created: bool,
     pub project: ExternalWorkProject,
@@ -357,7 +457,7 @@ fn words(values: &[String]) -> Vec<String> {
     kept
 }
 
-fn cleared(value: &str) -> bool {
+pub(super) fn cleared(value: &str) -> bool {
     let value = value.trim();
     value.is_empty() || value.eq_ignore_ascii_case("none")
 }
@@ -375,7 +475,7 @@ impl Tracker<'_> {
             .map_err(|message| super::refusal(self.history, message))
     }
 
-    fn project_row(&self, project: &Project, board: &Board) -> ExternalWorkProject {
+    pub(super) fn project_row(&self, project: &Project, board: &Board) -> ExternalWorkProject {
         let person = |id: &String| {
             board
                 .people
@@ -404,21 +504,36 @@ impl Tracker<'_> {
             Ok(plans::records(conn, &project.id)?.milestones.len())
         })
         .unwrap_or_default();
+        let labels = self.all_labels().unwrap_or_default();
         ExternalWorkProject {
             id: project.id.clone(),
             name: project.title.clone(),
             details: project.description.clone(),
             status: project.status,
+            priority: Priority::of(project.priority),
+            icon: project.icon.clone(),
             lead: project.lead_person_id.as_ref().and_then(person),
             members: project
                 .member_person_ids
                 .iter()
                 .filter_map(person)
                 .collect(),
+            start: target_text(project.start_at_ms),
+            start_at_ms: project.start_at_ms,
+            start_resolution: project.start_resolution,
             target: target_text(project.target_at_ms),
             target_at_ms: project.target_at_ms,
+            target_resolution: project.target_resolution,
             hue: project.hue,
+            labels: project
+                .label_ids
+                .iter()
+                .filter_map(|id| labels.iter().find(|label| &label.id == id))
+                .map(|label| label.name.clone())
+                .collect(),
+            links: project.links.clone(),
             archived: project.archived_at_ms.is_some(),
+            trashed_at_ms: project.trashed_at_ms,
             open_tasks: open,
             done_tasks: done,
             milestones: u32::try_from(milestones).unwrap_or(u32::MAX),
@@ -426,7 +541,7 @@ impl Tracker<'_> {
         }
     }
 
-    fn pick_project<'a>(
+    pub(super) fn pick_project<'a>(
         value: &str,
         projects: &'a [Project],
     ) -> Result<&'a Project, ExternalError> {
@@ -451,7 +566,13 @@ impl Tracker<'_> {
     pub(super) async fn projects(&self, args: &ProjectsArgs) -> Result<WorkAnswer, ExternalError> {
         let board = self.board().await?;
         let mut projects = self.every_project()?;
-        projects.retain(|project| args.all || project.archived_at_ms.is_none());
+        projects.retain(|project| {
+            if args.trashed {
+                project.trashed_at_ms.is_some()
+            } else {
+                project.trashed_at_ms.is_none() && (args.all || project.archived_at_ms.is_none())
+            }
+        });
         projects.sort_by_key(|project| project.title.to_lowercase());
         Ok(WorkAnswer::Projects(ExternalWorkProjects {
             schema_version: QUERY_SCHEMA_VERSION,
@@ -503,6 +624,39 @@ impl Tracker<'_> {
             }
             None => None,
         };
+        let label_ids = match &args.labels {
+            Some(values) => {
+                let names = words(values);
+                let mut ids = Vec::new();
+                if !names.iter().any(|name| cleared(name)) {
+                    let labels = self.all_labels()?;
+                    for name in names {
+                        let label = pick(
+                            "label",
+                            &name,
+                            &labels,
+                            |label| &label.id,
+                            |label| &label.name,
+                        )
+                        .map_err(|refusal| refusal.hint("List them with: sona work labels"))?;
+                        if !ids.contains(&label.id) {
+                            ids.push(label.id.clone());
+                        }
+                    }
+                }
+                Some(ids)
+            }
+            None => None,
+        };
+        let links = (!args.links.is_empty()).then(|| {
+            args.links
+                .iter()
+                .filter_map(|link| match link {
+                    LinkArg::Clear => None,
+                    LinkArg::Link(link) => Some(link.clone()),
+                })
+                .collect::<Vec<_>>()
+        });
         let edit = ProjectEdit {
             title: (existing.is_none() || args.project.is_some()).then(|| name.to_owned()),
             description: args.details.clone(),
@@ -512,11 +666,23 @@ impl Tracker<'_> {
             target_at_ms: args.target.map(DayArg::ms).transpose()?,
             hue: args.hue,
             archived: None,
+            priority: args.priority.map(Priority::value),
+            start_at_ms: args.start.map(DayArg::ms).transpose()?,
+            start_resolution: args.start_resolution.map(ResolutionArg::resolution),
+            target_resolution: args.target_resolution.map(ResolutionArg::resolution),
+            icon: args
+                .icon
+                .as_deref()
+                .map(|icon| if cleared(icon) { String::new() } else { icon.trim().to_owned() }),
+            label_ids,
+            links,
+            trashed: None,
         };
         if let Some(current) = existing {
             if !changes_project(current, &edit) {
                 return Ok(WorkAnswer::Project(ExternalWorkProjectChange {
                     schema_version: QUERY_SCHEMA_VERSION,
+                    dry_run: args.dry_run,
                     operation_id: None,
                     created: false,
                     project: self.project_row(current, &board),
@@ -524,21 +690,32 @@ impl Tracker<'_> {
             }
         }
         let operation_id = match existing {
-            Some(current) => args
-                .write
-                .operation_id("project-save", &(&current.id, current.revision, &edit))?,
-            None => args.write.fresh_operation_id(),
+            Some(current) => Some(
+                args.write
+                    .operation_id("project-save", &(&current.id, current.revision, &edit))?,
+            ),
+            None => args.write.operation_id.map(|id| id.to_string()),
         };
+        let id = existing.map(|project| project.id.clone());
+        if args.dry_run {
+            let project = self.rehearse(|conn| {
+                planning::catalog::save_project(conn, id.as_deref(), &edit, super::now_ms())
+            })?;
+            return Ok(WorkAnswer::Project(ExternalWorkProjectChange {
+                schema_version: QUERY_SCHEMA_VERSION,
+                dry_run: true,
+                operation_id,
+                created: existing.is_none(),
+                project: self.project_row(&project, &board),
+            }));
+        }
+        let operation_id = operation_id.unwrap_or_else(|| args.write.fresh_operation_id());
         self.applies("saving a project")?;
-        let project = work::catalog_project_save(
-            self.app,
-            &operation_id,
-            existing.map(|project| project.id.clone()),
-            &edit,
-        )
-        .map_err(|message| self.write_refusal(message, &operation_id, "The project"))?;
+        let project = work::catalog_project_save(self.app, &operation_id, id, &edit)
+            .map_err(|message| self.write_refusal(message, &operation_id, "The project"))?;
         Ok(WorkAnswer::Project(ExternalWorkProjectChange {
             schema_version: QUERY_SCHEMA_VERSION,
+            dry_run: false,
             operation_id: Some(operation_id),
             created: existing.is_none(),
             project: self.project_row(&project, &board),
@@ -571,6 +748,7 @@ impl Tracker<'_> {
             .map_err(|message| self.write_refusal(message, &operation_id, "The project"))?;
             return Ok(WorkAnswer::Project(ExternalWorkProjectChange {
                 schema_version: QUERY_SCHEMA_VERSION,
+                dry_run: false,
                 operation_id: Some(operation_id),
                 created: false,
                 project: self.project_row(&project, &board),
@@ -578,6 +756,7 @@ impl Tracker<'_> {
         }
         Ok(WorkAnswer::Project(ExternalWorkProjectChange {
             schema_version: QUERY_SCHEMA_VERSION,
+            dry_run: false,
             operation_id: None,
             created: false,
             project: self.project_row(current, &board),
@@ -1091,7 +1270,7 @@ fn saved_person<'a>(
     })
 }
 
-fn pick_milestone<'a>(
+pub(super) fn pick_milestone<'a>(
     value: &str,
     milestones: &'a [Milestone],
 ) -> Result<&'a Milestone, ExternalError> {
@@ -1130,6 +1309,30 @@ fn changes_project(current: &Project, edit: &ProjectEdit) -> bool {
         || edit
             .archived
             .is_some_and(|archived| archived != current.archived_at_ms.is_some())
+        || edit.priority.is_some_and(|priority| priority != current.priority)
+        || edit
+            .start_at_ms
+            .is_some_and(|start| start != current.start_at_ms)
+        || edit
+            .start_resolution
+            .is_some_and(|resolution| resolution != current.start_resolution)
+        || edit
+            .target_resolution
+            .is_some_and(|resolution| resolution != current.target_resolution)
+        || text(&edit.icon, &current.icon)
+        || edit.label_ids.as_ref().is_some_and(|ids| {
+            let (mut want, mut have) = (ids.clone(), current.label_ids.clone());
+            want.sort();
+            have.sort();
+            want != have
+        })
+        || edit.links.as_ref().is_some_and(|links| {
+            links.len() != current.links.len()
+                || links.iter().zip(&current.links).any(|(new, old)| {
+                    new.url.trim() != old.url
+                        || new.title.as_deref().map(str::trim) != old.title.as_deref()
+                })
+        })
 }
 
 fn changes_milestone(current: &Milestone, edit: &MilestoneEdit) -> bool {
@@ -1174,7 +1377,17 @@ pub(super) fn text(answer: &WorkAnswer, text: &mut String) {
                 (false, None) => "Unchanged",
                 (false, Some(_)) => "Saved",
             };
+            if change.dry_run {
+                text.push_str("Dry run. ");
+            }
             let _ = writeln!(text, "{verb} project {}.", change.project.name);
+            if let Some(trashed) = change.project.trashed_at_ms {
+                let _ = writeln!(
+                    text,
+                    "In the bin; deleted for good on {}.",
+                    super::day_text(Some(trashed + planning::catalog::BIN_MS))
+                );
+            }
         }
         WorkAnswer::Milestones(milestones) => {
             if milestones.milestones.is_empty() {

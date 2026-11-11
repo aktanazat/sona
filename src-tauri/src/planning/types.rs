@@ -2,12 +2,38 @@ use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ValueRef};
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
+/// Where a project stands. `active` is Linear's "started"; the command line
+/// and the bridge read either word.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
 #[serde(rename_all = "snake_case")]
 pub enum ProjectStatus {
+    Backlog,
+    Planned,
+    #[serde(alias = "started")]
     Active,
     Paused,
     Completed,
+    Canceled,
+}
+
+/// How finely a project's start or target date is meant: the day itself,
+/// or the month, quarter, half-year or year it falls in.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub enum DateResolution {
+    Day,
+    Month,
+    Quarter,
+    HalfYear,
+    Year,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub enum ProjectHealth {
+    OnTrack,
+    AtRisk,
+    OffTrack,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
@@ -68,9 +94,24 @@ macro_rules! sql_enum {
 pub(super) use sql_enum;
 
 sql_enum!(ProjectStatus {
+    Backlog => "backlog",
+    Planned => "planned",
     Active => "active",
     Paused => "paused",
     Completed => "completed",
+    Canceled => "canceled",
+});
+sql_enum!(DateResolution {
+    Day => "day",
+    Month => "month",
+    Quarter => "quarter",
+    HalfYear => "halfYear",
+    Year => "year",
+});
+sql_enum!(ProjectHealth {
+    OnTrack => "onTrack",
+    AtRisk => "atRisk",
+    OffTrack => "offTrack",
 });
 sql_enum!(TaskStatus {
     NotStarted => "not_started",
@@ -106,6 +147,99 @@ pub struct Project {
     pub target_at_ms: Option<i64>,
     pub hue: Option<u16>,
     pub archived_at_ms: Option<i64>,
+    /// 0 none, 1 urgent, 2 high, 3 medium, 4 low, as tasks count it.
+    pub priority: u8,
+    pub start_at_ms: Option<i64>,
+    pub start_resolution: Option<DateResolution>,
+    pub target_resolution: Option<DateResolution>,
+    pub icon: Option<String>,
+    pub label_ids: Vec<String>,
+    pub links: Vec<ProjectLink>,
+    /// Set while the project sits in the bin; it is purged 30 days later.
+    pub trashed_at_ms: Option<i64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectLink {
+    pub id: String,
+    pub title: Option<String>,
+    pub url: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectUpdateAuthor {
+    pub kind: super::work::types::WorkActor,
+    pub name: Option<String>,
+}
+
+/// A note on how a project is going, with its health and the project's
+/// progress when it was written.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectUpdate {
+    pub id: String,
+    pub project_id: String,
+    pub health: ProjectHealth,
+    /// Markdown; none once deleted.
+    pub body: Option<String>,
+    pub progress: u8,
+    pub author: ProjectUpdateAuthor,
+    pub created_at_ms: i64,
+    pub edited_at_ms: Option<i64>,
+    pub deleted: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectUpdatePage {
+    pub updates: Vec<ProjectUpdate>,
+    pub next_cursor: Option<String>,
+}
+
+/// Tasks counted at the end of one week, Monday to Monday local time.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectWeek {
+    pub week_start_ms: i64,
+    pub scope: u32,
+    pub started: u32,
+    pub done: u32,
+}
+
+/// When the project would finish at its recent pace, and 40% either way.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectPrediction {
+    pub expected_at_ms: i64,
+    pub optimistic_at_ms: i64,
+    pub pessimistic_at_ms: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectProgress {
+    pub scope: u32,
+    pub started: u32,
+    pub done: u32,
+    /// Done counts fully and started a quarter, out of the scope.
+    pub percent: u8,
+    pub weeks: Vec<ProjectWeek>,
+    /// None until a week has passed with work done, or with nothing left.
+    pub prediction: Option<ProjectPrediction>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct MilestoneProgress {
+    pub milestone_id: String,
+    pub scope: u32,
+    pub started: u32,
+    pub done: u32,
+    pub percent: u8,
+    /// The first milestone, in order, not yet complete: the current focus.
+    pub next_open: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
@@ -120,6 +254,8 @@ pub struct Milestone {
     pub revision: i64,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
+    /// Its place among the project's milestones; none sorts by due day after.
+    pub position: Option<i64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
@@ -210,6 +346,13 @@ pub struct ProjectDetail {
     pub tasks: Vec<PlanningTask>,
     pub evidence: Vec<EvidenceLink>,
     pub pulse: ProjectPulse,
+    pub latest_update: Option<ProjectUpdate>,
+    /// The project is active and its last update is older than one cycle
+    /// and three days.
+    pub update_missing: bool,
+    pub progress: ProjectProgress,
+    /// In the order of `milestones`.
+    pub milestone_progress: Vec<MilestoneProgress>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]

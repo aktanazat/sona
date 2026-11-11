@@ -767,7 +767,8 @@ pub(super) fn accept(
             for link in &mut records.evidence {
                 link.available = true;
             }
-            store::detail(records, meetings, now_ms)
+            let outlook = super::progress::outlook(tx, &records.project, now_ms)?;
+            store::detail(records, outlook, meetings, now_ms)
         },
     )
 }

@@ -1,6 +1,6 @@
 use super::types::{
     EvidenceLink, EvidenceSourceKind, EvidenceTargetKind, Milestone, MilestonePulse,
-    PlanningCalendarItem, PlanningCalendarKind, PlanningTask, Project, ProjectDetail,
+    PlanningCalendarItem, PlanningCalendarKind, PlanningTask, Project, ProjectDetail, ProjectLink,
     ProjectOwnerCount, ProjectPulse, ProjectStatus, ProjectSummary, TaskStatus,
 };
 use super::work::items::{self as work_items, NewItem};
@@ -15,9 +15,13 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use uuid::Uuid;
 
-const PROJECT_COLUMNS: &str = "id, title, description, status, revision, created_at_ms, updated_at_ms, lead_person_id, target_at_ms, hue, archived_at_ms";
+const PROJECT_COLUMNS: &str = "id, title, description, status, revision, created_at_ms, updated_at_ms, lead_person_id, target_at_ms, hue, archived_at_ms, priority, start_at_ms, start_resolution, target_resolution, icon, trashed_at_ms";
+const PROJECT_COLUMN_COUNT: usize = 17;
 const MILESTONE_COLUMNS: &str =
-    "id, project_id, title, due_at_ms, status, revision, created_at_ms, updated_at_ms, description";
+    "id, project_id, title, due_at_ms, status, revision, created_at_ms, updated_at_ms, description, position";
+/// Milestones in the order the owner set, then by due day.
+pub(crate) const MILESTONE_ORDER: &str =
+    "position IS NULL, position, due_at_ms IS NULL, due_at_ms, created_at_ms, id";
 const TASK_COLUMNS: &str = "id, project_id, milestone_id, title, details, due_at_ms, owner_person_id, owner_is_self, status, revision, created_at_ms, updated_at_ms";
 const EVIDENCE_COLUMNS: &str = "id, target_kind, target_id, source_kind, source_id, at_ms, revision, created_at_ms, meeting_note_id, end_ms, caption";
 
@@ -170,6 +174,14 @@ fn read_project(row: &Row<'_>) -> rusqlite::Result<Project> {
         target_at_ms: row.get(8)?,
         hue: row.get(9)?,
         archived_at_ms: row.get(10)?,
+        priority: row.get(11)?,
+        start_at_ms: row.get(12)?,
+        start_resolution: row.get(13)?,
+        target_resolution: row.get(14)?,
+        icon: row.get(15)?,
+        label_ids: Vec::new(),
+        links: Vec::new(),
+        trashed_at_ms: row.get(16)?,
     })
 }
 
@@ -184,6 +196,7 @@ fn read_milestone(row: &Row<'_>) -> rusqlite::Result<Milestone> {
         created_at_ms: row.get(6)?,
         updated_at_ms: row.get(7)?,
         description: row.get(8)?,
+        position: row.get(9)?,
     })
 }
 
@@ -232,8 +245,40 @@ fn attach_members(conn: &Connection, projects: &mut [&mut Project]) -> Result<()
         let (project_id, person_id) = row?;
         by_project.entry(project_id).or_default().push(person_id);
     }
+    let mut labels = conn.prepare(
+        "SELECT pl.project_id, pl.label_id FROM planning_project_labels pl
+         JOIN planning_labels l ON l.id = pl.label_id
+         ORDER BY pl.project_id, lower(l.name), l.id",
+    )?;
+    let mut labels_by_project: HashMap<String, Vec<String>> = HashMap::new();
+    for row in labels.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))? {
+        let (project_id, label_id) = row?;
+        labels_by_project
+            .entry(project_id)
+            .or_default()
+            .push(label_id);
+    }
+    let mut links = conn.prepare(
+        "SELECT project_id, id, title, url FROM planning_project_links ORDER BY project_id, position, id",
+    )?;
+    let mut links_by_project: HashMap<String, Vec<ProjectLink>> = HashMap::new();
+    for row in links.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            ProjectLink {
+                id: row.get(1)?,
+                title: row.get(2)?,
+                url: row.get(3)?,
+            },
+        ))
+    })? {
+        let (project_id, link) = row?;
+        links_by_project.entry(project_id).or_default().push(link);
+    }
     for project in projects {
         project.member_person_ids = by_project.remove(&project.id).unwrap_or_default();
+        project.label_ids = labels_by_project.remove(&project.id).unwrap_or_default();
+        project.links = links_by_project.remove(&project.id).unwrap_or_default();
     }
     Ok(())
 }
@@ -275,7 +320,13 @@ pub(crate) fn task(conn: &Connection, id: &str) -> Result<PlanningTask> {
     .ok_or_else(|| Refusal::NotFound.into())
 }
 
-pub(crate) fn projects(conn: &Connection) -> Result<Vec<ProjectSummary>> {
+/// Live projects by last change, or with `trashed` the bin, newest deletion first.
+pub(crate) fn projects(conn: &Connection, trashed: bool) -> Result<Vec<ProjectSummary>> {
+    let shelf = if trashed {
+        "p.trashed_at_ms IS NOT NULL ORDER BY p.trashed_at_ms DESC, p.id"
+    } else {
+        "p.archived_at_ms IS NULL AND p.trashed_at_ms IS NULL ORDER BY p.updated_at_ms DESC, p.id"
+    };
     let mut statement = conn.prepare(&format!(
         "SELECT {PROJECT_COLUMNS},
             (SELECT count(*) FROM planning_tasks t WHERE t.project_id = p.id AND t.archived_at_ms IS NULL
@@ -288,15 +339,14 @@ pub(crate) fn projects(conn: &Connection) -> Result<Vec<ProjectSummary>> {
                 UNION ALL
                 SELECT due_at_ms FROM planning_milestones WHERE project_id = p.id AND status IN ('not_started', 'in_progress')
             ))
-         FROM planning_projects p WHERE p.archived_at_ms IS NULL
-         ORDER BY p.updated_at_ms DESC, p.id"
+         FROM planning_projects p WHERE {shelf}"
     ))?;
     let rows = statement.query_map([], |row| {
         Ok(ProjectSummary {
             project: read_project(row)?,
-            open_task_count: row.get(11)?,
-            completed_task_count: row.get(12)?,
-            next_due_at_ms: row.get(13)?,
+            open_task_count: row.get(PROJECT_COLUMN_COUNT)?,
+            completed_task_count: row.get(PROJECT_COLUMN_COUNT + 1)?,
+            next_due_at_ms: row.get(PROJECT_COLUMN_COUNT + 2)?,
         })
     })?;
     let mut summaries = rows.collect::<rusqlite::Result<Vec<_>>>()?;
@@ -310,7 +360,7 @@ pub(crate) fn projects(conn: &Connection) -> Result<Vec<ProjectSummary>> {
     Ok(summaries)
 }
 
-/// Every project, put away or not, for the command line.
+/// Every project, put away, in the bin or not, for the command line.
 pub(crate) fn all_projects(conn: &Connection) -> Result<Vec<Project>> {
     let mut statement = conn.prepare(&format!(
         "SELECT {PROJECT_COLUMNS} FROM planning_projects ORDER BY lower(title), id"
@@ -327,7 +377,8 @@ pub(crate) fn all_projects(conn: &Connection) -> Result<Vec<Project>> {
 pub(crate) fn projects_by_activity(conn: &Connection) -> Result<Vec<Project>> {
     let mut statement = conn.prepare(&format!(
         "SELECT {PROJECT_COLUMNS} FROM planning_projects p
-         WHERE p.status != 'completed' AND p.archived_at_ms IS NULL
+         WHERE p.status NOT IN ('completed', 'canceled') AND p.archived_at_ms IS NULL
+           AND p.trashed_at_ms IS NULL
          ORDER BY max(
              p.updated_at_ms,
              coalesce((SELECT max(t.updated_at_ms) FROM planning_tasks t WHERE t.project_id = p.id), 0),
@@ -355,7 +406,7 @@ pub(crate) fn records(conn: &Connection, id: &str) -> Result<ProjectRecords> {
     let project = project(conn, id)?;
     let mut statement = conn.prepare(&format!(
         "SELECT {MILESTONE_COLUMNS} FROM planning_milestones WHERE project_id = ?1
-         ORDER BY due_at_ms IS NULL, due_at_ms, created_at_ms, id"
+         ORDER BY {MILESTONE_ORDER}"
     ))?;
     let milestones = statement
         .query_map([id], read_milestone)?
@@ -399,11 +450,12 @@ pub(crate) fn task_evidence(conn: &Connection, task_id: &str) -> Result<Vec<Evid
     Ok(evidence)
 }
 
-/// The page for one project: rows the caller has resolved, and their pulse as
-/// of `now_ms`. Meeting times come from `meetings` in one query; without it the
-/// rows must hold no meeting evidence.
+/// The page for one project: rows the caller has resolved, what `outlook`
+/// read beside them, and their pulse as of `now_ms`. Meeting times come from
+/// `meetings` in one query; without it the rows must hold no meeting evidence.
 pub(crate) fn detail(
     records: ProjectRecords,
+    outlook: super::progress::Outlook,
     meetings: Option<&Connection>,
     now_ms: i64,
 ) -> Result<ProjectDetail> {
@@ -414,12 +466,17 @@ pub(crate) fn detail(
     let today_ms = crate::analytics::local_days_start_utc_ms(now, 1)?;
     let week_ms = crate::analytics::local_days_start_utc_ms(now, 7)?;
     let pulse = pulse(&records, meetings, today_ms, week_ms)?;
+    let milestone_progress = super::progress::milestones(&records.milestones, &records.tasks);
     Ok(ProjectDetail {
         project: records.project,
         milestones: records.milestones,
         tasks: records.tasks,
         evidence: records.evidence,
         pulse,
+        latest_update: outlook.latest_update,
+        update_missing: outlook.update_missing,
+        progress: outlook.progress,
+        milestone_progress,
     })
 }
 
@@ -933,7 +990,10 @@ mod tests {
             [&done.id],
         )?;
 
-        let detail = detail(records(&conn, &project.id)?, None, now.timestamp_millis())?;
+        let records = records(&conn, &project.id)?;
+        let outlook =
+            super::super::progress::outlook(&conn, &records.project, now.timestamp_millis())?;
+        let detail = detail(records, outlook, None, now.timestamp_millis())?;
 
         assert_eq!(
             detail.pulse,

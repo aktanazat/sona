@@ -10,11 +10,13 @@ pub(crate) mod capture;
 pub(crate) mod command;
 pub(crate) mod comments;
 pub(crate) mod cycles;
+pub(crate) mod filter;
 pub(crate) mod follow;
 mod hygiene;
 pub(crate) mod items;
 pub(crate) mod live;
 pub(crate) mod parse;
+pub(crate) mod plans;
 #[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
 mod probe;
 pub(crate) mod recur;
@@ -569,6 +571,19 @@ fn list(
         .cycle
         .map(|cycle| cycles::want(history, cycle, now_ms))
         .transpose()?;
+    let filters = filter::ready(
+        history,
+        &query.filters,
+        |id| {
+            context
+                .people
+                .with_merged(&[id.to_owned()])
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        },
+        now_ms,
+    )?;
     let mut reader = MeetingReader::new(meetings, user_name);
     let mut rows = Vec::new();
     let mut suggestions = BTreeMap::new();
@@ -577,6 +592,7 @@ fn list(
             || raised.as_ref().is_some_and(|ids| !ids.contains(&item.id))
             || cycle.is_some_and(|cycle| !cycle.holds(item))
             || search.as_deref().is_some_and(|search| !found(item, search))
+            || !filter::holds(&filters, item)
         {
             continue;
         }

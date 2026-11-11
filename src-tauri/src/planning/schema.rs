@@ -674,6 +674,103 @@ DROP TABLE planning_task_activity;
 ALTER TABLE planning_task_activity_next RENAME TO planning_task_activity;
 CREATE INDEX planning_task_activity_task ON planning_task_activity(task_id, at_ms, id);";
 
+/// Projects as Linear plans them: the six statuses, a priority, start and
+/// target dates read to a day, month, quarter, half-year or year, labels,
+/// links, an icon and a 30-day bin; updates with a health; milestones in an
+/// order; cycles of up to eight weeks with a cooldown, pre-made upcoming
+/// cycles, a name, and each day's counts frozen once the cycle ends. The
+/// project table is rebuilt to widen its status, every row and rowid kept.
+pub const PLANNING_MIGRATION: &str = "DROP TRIGGER planning_project_delete;
+CREATE TABLE planning_projects_next (
+    id TEXT PRIMARY KEY NOT NULL,
+    title TEXT NOT NULL CHECK(length(trim(title)) > 0),
+    description TEXT,
+    status TEXT NOT NULL CHECK(status IN ('backlog', 'planned', 'active', 'paused', 'completed', 'canceled')),
+    revision INTEGER NOT NULL CHECK(revision > 0),
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL,
+    lead_person_id TEXT,
+    target_at_ms INTEGER,
+    hue INTEGER CHECK(hue IS NULL OR (hue >= 0 AND hue <= 360)),
+    archived_at_ms INTEGER,
+    priority INTEGER NOT NULL DEFAULT 0 CHECK(priority BETWEEN 0 AND 4),
+    start_at_ms INTEGER,
+    start_resolution TEXT CHECK(start_resolution IN ('day', 'month', 'quarter', 'halfYear', 'year')),
+    target_resolution TEXT CHECK(target_resolution IN ('day', 'month', 'quarter', 'halfYear', 'year')),
+    icon TEXT CHECK(icon IS NULL OR length(trim(icon)) > 0),
+    trashed_at_ms INTEGER
+);
+INSERT INTO planning_projects_next (rowid, id, title, description, status, revision, created_at_ms,
+        updated_at_ms, lead_person_id, target_at_ms, hue, archived_at_ms, target_resolution)
+    SELECT rowid, id, title, description, status, revision, created_at_ms, updated_at_ms,
+        lead_person_id, target_at_ms, hue, archived_at_ms,
+        CASE WHEN target_at_ms IS NULL THEN NULL ELSE 'day' END
+    FROM planning_projects;
+DROP TABLE planning_projects;
+ALTER TABLE planning_projects_next RENAME TO planning_projects;
+CREATE TRIGGER planning_project_delete AFTER DELETE ON planning_projects BEGIN
+    UPDATE planning_tasks SET project_id = NULL, milestone_id = NULL, revision = revision + 1
+        WHERE project_id = old.id;
+    DELETE FROM planning_milestones WHERE project_id = old.id;
+    DELETE FROM planning_evidence_links WHERE target_kind = 'project' AND target_id = old.id;
+    DELETE FROM planning_project_members WHERE project_id = old.id;
+    DELETE FROM planning_quiet_review WHERE project_id = old.id;
+    DELETE FROM planning_project_links WHERE project_id = old.id;
+    DELETE FROM planning_project_labels WHERE project_id = old.id;
+    DELETE FROM planning_project_updates WHERE project_id = old.id;
+END;
+CREATE TABLE planning_project_links (
+    id TEXT PRIMARY KEY NOT NULL,
+    project_id TEXT NOT NULL,
+    position INTEGER NOT NULL,
+    title TEXT CHECK(title IS NULL OR length(trim(title)) > 0),
+    url TEXT NOT NULL CHECK(length(trim(url)) > 0)
+);
+CREATE INDEX planning_project_links_project ON planning_project_links(project_id, position);
+CREATE TABLE planning_project_labels (
+    project_id TEXT NOT NULL,
+    label_id TEXT NOT NULL,
+    PRIMARY KEY (project_id, label_id)
+);
+CREATE INDEX planning_project_labels_label ON planning_project_labels(label_id);
+CREATE TRIGGER planning_project_labels_delete AFTER DELETE ON planning_labels BEGIN
+    DELETE FROM planning_project_labels WHERE label_id = old.id;
+END;
+CREATE TABLE planning_project_updates (
+    id TEXT PRIMARY KEY NOT NULL,
+    project_id TEXT NOT NULL,
+    health TEXT NOT NULL CHECK(health IN ('onTrack', 'atRisk', 'offTrack')),
+    body TEXT NOT NULL,
+    progress INTEGER NOT NULL CHECK(progress BETWEEN 0 AND 100),
+    author_kind TEXT NOT NULL CHECK(author_kind IN ('me', 'sona', 'agent')),
+    author_name TEXT CHECK(author_name IS NULL OR length(trim(author_name)) > 0),
+    created_at_ms INTEGER NOT NULL,
+    edited_at_ms INTEGER,
+    deleted_at_ms INTEGER
+);
+CREATE INDEX planning_project_updates_project ON planning_project_updates(project_id, created_at_ms, id);
+ALTER TABLE planning_milestones ADD COLUMN position INTEGER;
+CREATE TABLE planning_cycle_settings_next (
+    id INTEGER PRIMARY KEY CHECK(id = 1),
+    weeks INTEGER NOT NULL CHECK(weeks BETWEEN 1 AND 8),
+    start_weekday INTEGER NOT NULL CHECK(start_weekday BETWEEN 1 AND 7),
+    cooldown_weeks INTEGER NOT NULL DEFAULT 0 CHECK(cooldown_weeks BETWEEN 0 AND 4),
+    upcoming INTEGER NOT NULL DEFAULT 1 CHECK(upcoming BETWEEN 1 AND 15)
+);
+INSERT INTO planning_cycle_settings_next (id, weeks, start_weekday)
+    SELECT id, weeks, start_weekday FROM planning_cycle_settings;
+DROP TABLE planning_cycle_settings;
+ALTER TABLE planning_cycle_settings_next RENAME TO planning_cycle_settings;
+ALTER TABLE planning_cycles ADD COLUMN name TEXT CHECK(name IS NULL OR length(trim(name)) > 0);
+CREATE TABLE planning_cycle_days (
+    number INTEGER NOT NULL,
+    day TEXT NOT NULL CHECK(length(day) = 10),
+    scope INTEGER NOT NULL,
+    started INTEGER NOT NULL,
+    done INTEGER NOT NULL,
+    PRIMARY KEY (number, day)
+);";
+
 /// Every planner migration in order, for tests that build the schema without
 /// the rest of the history database.
 #[cfg(test)]
@@ -695,6 +792,7 @@ pub(crate) fn apply_all(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
         CATALOG_MIGRATION,
         THREADS_MIGRATION,
         ATTACHMENTS_MIGRATION,
+        PLANNING_MIGRATION,
     ] {
         conn.execute_batch(migration)?;
     }

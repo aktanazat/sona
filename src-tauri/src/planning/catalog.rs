@@ -2,14 +2,26 @@
 //! screens show beyond a title and a status.
 
 use super::store::{self, Refusal};
-use super::types::{Milestone, Project, ProjectStatus, TaskStatus};
+use super::types::{DateResolution, Milestone, Project, ProjectStatus, TaskStatus};
+use super::work::attachments;
 use anyhow::Result;
 use rusqlite::{params, Connection};
 use serde::Serialize;
 use uuid::Uuid;
 
+/// How long a project stays in the bin before it is gone.
+pub(crate) const BIN_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+
+/// A link a project keeps among its resources.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct LinkEdit {
+    pub title: Option<String>,
+    pub url: String,
+}
+
 /// What a project is set to. A field left `None` keeps what the project has;
-/// an empty description or lead clears it.
+/// an empty description, lead or icon clears it, and `Some(None)` clears a
+/// date or its resolution. Lists replace the project's whole list.
 #[derive(Clone, Debug, Default, Serialize)]
 pub(crate) struct ProjectEdit {
     pub title: Option<String>,
@@ -20,6 +32,29 @@ pub(crate) struct ProjectEdit {
     pub target_at_ms: Option<Option<i64>>,
     pub hue: Option<u16>,
     pub archived: Option<bool>,
+    pub priority: Option<u8>,
+    pub start_at_ms: Option<Option<i64>>,
+    pub start_resolution: Option<Option<DateResolution>>,
+    pub target_resolution: Option<Option<DateResolution>>,
+    pub icon: Option<String>,
+    pub label_ids: Option<Vec<String>>,
+    pub links: Option<Vec<LinkEdit>>,
+    pub trashed: Option<bool>,
+}
+
+/// A date and how finely it is meant: a date with no resolution reads as a
+/// day, and clearing the date clears its resolution.
+fn dated(
+    at: Option<Option<i64>>,
+    resolution: Option<Option<DateResolution>>,
+    current: (Option<i64>, Option<DateResolution>),
+) -> (Option<i64>, Option<DateResolution>) {
+    let at = at.unwrap_or(current.0);
+    let resolution = resolution.unwrap_or(current.1);
+    match at {
+        Some(at) => (Some(at), Some(resolution.unwrap_or(DateResolution::Day))),
+        None => (None, None),
+    }
 }
 
 fn present(value: &str) -> Option<String> {
@@ -66,14 +101,44 @@ pub(crate) fn save_project(
         Some(lead) => present(lead),
         None => current.as_ref().and_then(|c| c.lead_person_id.clone()),
     };
-    let target = match edit.target_at_ms {
-        Some(target) => target,
-        None => current.as_ref().and_then(|c| c.target_at_ms),
-    };
+    let (target, target_resolution) = dated(
+        edit.target_at_ms,
+        edit.target_resolution,
+        current
+            .as_ref()
+            .map_or((None, None), |c| (c.target_at_ms, c.target_resolution)),
+    );
+    let (start, start_resolution) = dated(
+        edit.start_at_ms,
+        edit.start_resolution,
+        current
+            .as_ref()
+            .map_or((None, None), |c| (c.start_at_ms, c.start_resolution)),
+    );
+    if matches!((start, target), (Some(start), Some(target)) if start > target) {
+        return Err(Refusal::Invalid.into());
+    }
     let hue = edit.hue.or_else(|| current.as_ref().and_then(|c| c.hue));
     if hue.is_some_and(|hue| hue > 360) {
         return Err(Refusal::Invalid.into());
     }
+    let priority = edit
+        .priority
+        .or_else(|| current.as_ref().map(|c| c.priority))
+        .unwrap_or(0);
+    if priority > 4 {
+        return Err(Refusal::Invalid.into());
+    }
+    let icon = match &edit.icon {
+        Some(icon) => present(icon),
+        None => current.as_ref().and_then(|c| c.icon.clone()),
+    };
+    let trashed_at = match (edit.trashed, current.as_ref().and_then(|c| c.trashed_at_ms)) {
+        (Some(true), Some(at)) => Some(at),
+        (Some(true), None) => Some(now_ms),
+        (Some(false), _) => None,
+        (None, at) => at,
+    };
     let archived_at = match (
         edit.archived,
         current.as_ref().and_then(|c| c.archived_at_ms),
@@ -88,8 +153,10 @@ pub(crate) fn save_project(
             conn.execute(
                 "UPDATE planning_projects
                     SET title = ?2, description = ?3, status = ?4, lead_person_id = ?5,
-                        target_at_ms = ?6, hue = ?7, archived_at_ms = ?8,
-                        revision = revision + 1, updated_at_ms = ?9
+                        target_at_ms = ?6, hue = ?7, archived_at_ms = ?8, priority = ?9,
+                        start_at_ms = ?10, start_resolution = ?11, target_resolution = ?12,
+                        icon = ?13, trashed_at_ms = ?14,
+                        revision = revision + 1, updated_at_ms = ?15
                   WHERE id = ?1",
                 params![
                     current.id,
@@ -100,6 +167,12 @@ pub(crate) fn save_project(
                     target,
                     hue,
                     archived_at,
+                    priority,
+                    start,
+                    start_resolution.map(DateResolution::as_str),
+                    target_resolution.map(DateResolution::as_str),
+                    icon,
+                    trashed_at,
                     now_ms
                 ],
             )?;
@@ -110,8 +183,9 @@ pub(crate) fn save_project(
             conn.execute(
                 "INSERT INTO planning_projects
                     (id, title, description, status, revision, created_at_ms, updated_at_ms,
-                     lead_person_id, target_at_ms, hue, archived_at_ms)
-                 VALUES (?1, ?2, ?3, ?4, 1, ?5, ?5, ?6, ?7, ?8, ?9)",
+                     lead_person_id, target_at_ms, hue, archived_at_ms, priority, start_at_ms,
+                     start_resolution, target_resolution, icon, trashed_at_ms)
+                 VALUES (?1, ?2, ?3, ?4, 1, ?5, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
                 params![
                     id,
                     title,
@@ -121,7 +195,13 @@ pub(crate) fn save_project(
                     lead,
                     target,
                     hue,
-                    archived_at
+                    archived_at,
+                    priority,
+                    start,
+                    start_resolution.map(DateResolution::as_str),
+                    target_resolution.map(DateResolution::as_str),
+                    icon,
+                    trashed_at
                 ],
             )?;
             id
@@ -140,7 +220,104 @@ pub(crate) fn save_project(
             )?;
         }
     }
+    if let Some(labels) = &edit.label_ids {
+        conn.execute(
+            "DELETE FROM planning_project_labels WHERE project_id = ?1",
+            [&id],
+        )?;
+        for label_id in labels {
+            let known: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM planning_labels WHERE id = ?1)",
+                [label_id],
+                |row| row.get(0),
+            )?;
+            if !known {
+                return Err(Refusal::NotFound.into());
+            }
+            conn.execute(
+                "INSERT OR IGNORE INTO planning_project_labels (project_id, label_id)
+                 VALUES (?1, ?2)",
+                params![id, label_id],
+            )?;
+        }
+    }
+    if let Some(links) = &edit.links {
+        conn.execute(
+            "DELETE FROM planning_project_links WHERE project_id = ?1",
+            [&id],
+        )?;
+        for (position, link) in links.iter().enumerate() {
+            conn.execute(
+                "INSERT INTO planning_project_links (id, project_id, position, title, url)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    Uuid::new_v4().to_string(),
+                    id,
+                    i64::try_from(position)?,
+                    link.title.as_deref().and_then(present),
+                    attachments::link(&link.url)?
+                ],
+            )?;
+        }
+    }
     store::project(conn, &id)
+}
+
+/// Deletes for good every project in the bin for 30 days or more; their
+/// tasks stay, in no project. Returns the projects purged.
+pub(crate) fn purge_bin(conn: &Connection, now_ms: i64) -> Result<Vec<String>> {
+    let mut statement = conn.prepare(
+        "SELECT id FROM planning_projects WHERE trashed_at_ms IS NOT NULL AND trashed_at_ms <= ?1
+         ORDER BY id",
+    )?;
+    let gone = statement
+        .query_map([now_ms - BIN_MS], |row| row.get(0))?
+        .collect::<rusqlite::Result<Vec<String>>>()?;
+    for id in &gone {
+        conn.execute("DELETE FROM planning_projects WHERE id = ?1", [id])?;
+    }
+    Ok(gone)
+}
+
+/// Puts a project's milestones in the order given; every one must be named
+/// once.
+pub(crate) fn reorder_milestones(
+    conn: &Connection,
+    project_id: &str,
+    order: &[String],
+    now_ms: i64,
+) -> Result<Vec<Milestone>> {
+    let project_id = store::uuid(project_id)?;
+    store::project(conn, &project_id)?;
+    let mut statement =
+        conn.prepare("SELECT id FROM planning_milestones WHERE project_id = ?1 ORDER BY id")?;
+    let mut have = statement
+        .query_map([&project_id], |row| row.get(0))?
+        .collect::<rusqlite::Result<Vec<String>>>()?;
+    let mut wanted = order
+        .iter()
+        .map(|id| store::uuid(id))
+        .collect::<Result<Vec<_>>>()?;
+    let named = wanted.clone();
+    wanted.sort();
+    have.sort();
+    if wanted != have {
+        return Err(Refusal::InvalidMembership.into());
+    }
+    for (position, id) in named.iter().enumerate() {
+        conn.execute(
+            "UPDATE planning_milestones SET position = ?2,
+                revision = revision + CASE WHEN position IS ?2 THEN 0 ELSE 1 END,
+                updated_at_ms = CASE WHEN position IS ?2 THEN updated_at_ms ELSE ?3 END
+             WHERE id = ?1",
+            params![id, i64::try_from(position)? + 1, now_ms],
+        )?;
+    }
+    conn.execute(
+        "UPDATE planning_projects SET updated_at_ms = ?2 WHERE id = ?1",
+        params![project_id, now_ms],
+    )?;
+    Ok(super::progress::milestone_progress(conn, &project_id)?.0)
 }
 
 /// What a milestone is set to; `None` keeps, an empty description clears.
@@ -217,8 +394,9 @@ pub(crate) fn save_milestone(
             conn.execute(
                 "INSERT INTO planning_milestones
                     (id, project_id, title, due_at_ms, status, revision, created_at_ms,
-                     updated_at_ms, description)
-                 VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?6, ?7)",
+                     updated_at_ms, description, position)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?6, ?7,
+                    (SELECT coalesce(max(position), 0) + 1 FROM planning_milestones WHERE project_id = ?2))",
                 params![
                     id,
                     project_id,
@@ -422,7 +600,7 @@ mod tests {
     }
 
     fn counts(conn: &Connection) -> (i64, i64) {
-        let rows = store::projects(conn).expect("the project list");
+        let rows = store::projects(conn, false).expect("the project list");
         (rows[0].open_task_count, rows[0].completed_task_count)
     }
 }

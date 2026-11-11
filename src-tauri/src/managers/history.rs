@@ -284,6 +284,7 @@ pub(crate) static MIGRATIONS: &[M] = &[
     M::up(crate::planning::CATALOG_MIGRATION),
     M::up(crate::planning::THREADS_MIGRATION),
     M::up(crate::planning::ATTACHMENTS_MIGRATION),
+    M::up(crate::planning::PLANNING_MIGRATION),
 ];
 
 const MAX_HISTORY_PAGE_SIZE: usize = 100;
@@ -1050,7 +1051,12 @@ impl HistoryManager {
             debug!("Database version before migration: {}", version_before);
 
             // Apply any pending migrations
-            migrations.to_latest(conn)?;
+            let foreign_keys: bool =
+                conn.pragma_query_value(None, "foreign_keys", |row| row.get(0))?;
+            conn.pragma_update(None, "foreign_keys", false)?;
+            let migrated = migrations.to_latest(conn);
+            conn.pragma_update(None, "foreign_keys", foreign_keys)?;
+            migrated?;
 
             // Get version after migration
             let version_after: i32 =

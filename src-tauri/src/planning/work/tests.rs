@@ -303,6 +303,8 @@ impl Desk {
 #[test]
 fn the_tracker_migration_keeps_every_task_and_the_commitment_it_tracks() {
     let conn = Connection::open_in_memory().expect("history");
+    conn.pragma_update(None, "foreign_keys", false)
+        .expect("the migration runner turns foreign keys off");
     for migration in [
         schema::MIGRATION,
         schema::QUIET_REVIEW_MIGRATION,
@@ -341,6 +343,11 @@ fn the_tracker_migration_keeps_every_task_and_the_commitment_it_tracks() {
         schema::CAPTURE_MIGRATION,
         schema::REPEAT_MIGRATION,
         schema::CYCLES_MIGRATION,
+        schema::WATCH_MIGRATION,
+        schema::CATALOG_MIGRATION,
+        schema::THREADS_MIGRATION,
+        schema::ATTACHMENTS_MIGRATION,
+        schema::PLANNING_MIGRATION,
     ] {
         conn.execute_batch(migration)
             .expect("a later planner migration");
