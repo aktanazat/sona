@@ -15,8 +15,8 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use uuid::Uuid;
 
-const PROJECT_COLUMNS: &str = "id, title, description, status, revision, created_at_ms, updated_at_ms, lead_person_id, target_at_ms, hue, archived_at_ms, priority, start_at_ms, start_resolution, target_resolution, icon, trashed_at_ms";
-const PROJECT_COLUMN_COUNT: usize = 17;
+const PROJECT_COLUMNS: &str = "id, title, description, status, revision, created_at_ms, updated_at_ms, lead_person_id, target_at_ms, hue, archived_at_ms, priority, start_at_ms, start_resolution, target_resolution, icon, trashed_at_ms, lead_is_self, members_include_self";
+const PROJECT_COLUMN_COUNT: usize = 19;
 const MILESTONE_COLUMNS: &str =
     "id, project_id, title, due_at_ms, status, revision, created_at_ms, updated_at_ms, description, position";
 /// Milestones in the order the owner set, then by due day.
@@ -170,7 +170,9 @@ fn read_project(row: &Row<'_>) -> rusqlite::Result<Project> {
         created_at_ms: row.get(5)?,
         updated_at_ms: row.get(6)?,
         lead_person_id: row.get(7)?,
+        lead_is_self: row.get(17)?,
         member_person_ids: Vec::new(),
+        members_include_self: row.get(18)?,
         target_at_ms: row.get(8)?,
         hue: row.get(9)?,
         archived_at_ms: row.get(10)?,

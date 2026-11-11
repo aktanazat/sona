@@ -30,7 +30,7 @@ use crate::planning::work::agents::{self, AgentChange};
 use crate::planning::work::ask::WorkAnswerLine;
 use crate::planning::work::capture::{self, WorkCaptureSource, WorkTakenLine};
 use crate::planning::work::command::WorkCommandChange;
-use crate::planning::work::filter::WorkCondition;
+use crate::planning::work::filter::{WorkCondition, WorkFilterField, WorkFilterOp};
 use crate::planning::work::types::{
     WorkActivity, WorkActivityKind, WorkActor, WorkCycle, WorkCycleRef, WorkCycleState, WorkCycles,
     WorkDirection, WorkDisplay, WorkDue, WorkFieldSuggestion, WorkGroupBy, WorkItem,
@@ -108,14 +108,49 @@ pub enum WorkVerb {
     Done(DoneArgs),
     /// Accept triage items into Todo with Sona's suggested owner, due day and project.
     Accept(AcceptArgs),
-    /// Decline triage items: canceled, and their meeting commitments set aside.
-    Decline(TasksArgs),
+    /// Decline triage items: canceled, and their meeting commitments set
+    /// aside. --reason is kept in each task's history.
+    Decline(routines::DeclineArgs),
     /// Mark a task a duplicate of another; its quotes and links move there.
     Duplicate(DuplicateArgs),
     /// Hide tasks from every list. Their status stays.
     Archive(TasksArgs),
-    /// Bring archived tasks back.
+    /// Bring archived tasks back, or deleted ones out of the bin.
     Restore(TasksArgs),
+    /// Move tasks to the bin: hidden everywhere, restorable for 30 days, then
+    /// deleted for good.
+    Delete(TasksArgs),
+    /// Deleted tasks still in the bin, with the days left before each is
+    /// purged.
+    Bin,
+    /// The archive: archived tasks and deleted ones still in the bin.
+    ArchiveList,
+    /// A task's earlier descriptions, newest first.
+    DescriptionVersions(lifecycle::VersionsArgs),
+    /// One earlier description in full.
+    DescriptionVersion(lifecycle::VersionArgs),
+    /// Put an earlier description back. It waits for the user unless
+    /// agents' changes apply.
+    DescriptionRestore(lifecycle::VersionRestoreArgs),
+    /// Add a task, a project (--project) or a saved view (--view) to
+    /// favorites.
+    Favorite(lifecycle::FavoriteArgs),
+    /// Take a task, project or view out of favorites.
+    Unfavorite(lifecycle::FavoriteArgs),
+    /// The user's favorites, in the order added.
+    Favorites,
+    /// Subscribe the user to tasks: what others change on them reaches the
+    /// inbox.
+    Subscribe(TasksArgs),
+    /// Unsubscribe the user from tasks.
+    Unsubscribe(TasksArgs),
+    /// The tasks the user is subscribed to.
+    Subscriptions,
+    /// The inbox: status changes, comments, mentions and assignments others
+    /// made on subscribed tasks, with the unread count.
+    Inbox(lifecycle::InboxArgs),
+    /// Mark notifications read or unread, archive them, or snooze them.
+    InboxMark(lifecycle::InboxMarkArgs),
     /// Hide tasks from lists and ready until a day; none wakes them.
     Snooze(SnoozeArgs),
     /// Link two tasks: S-1 blocks S-2, S-1 blocked-by S-2, or S-1 related S-2.
@@ -128,6 +163,51 @@ pub enum WorkVerb {
     LabelSave(LabelSaveArgs),
     /// Delete a label. Its tasks lose only that label.
     LabelDelete(LabelDeleteArgs),
+    /// Put a label in a group, or none to take it out of one. A task keeps
+    /// one label per group: adding another from it replaces the first.
+    LabelGroup(routines::LabelGroupArgs),
+    /// Retire a label: its tasks keep it, pickers leave it out. --restore
+    /// brings it back.
+    LabelRetire(routines::LabelRetireArgs),
+    /// List task templates.
+    Templates,
+    /// Save a task template: its fields and sub-tasks. Changes the one
+    /// with that name, or --template.
+    TemplateSave(routines::TemplateSaveArgs),
+    /// Delete a task template. Tasks made from it stay.
+    TemplateDelete(routines::TemplateDeleteArgs),
+    /// Make a task and its sub-tasks from a template.
+    TemplateUse(routines::TemplateUseArgs),
+    /// List automations: saved prompts Sona's agent runs on a schedule or
+    /// when work changes.
+    #[command(name = "automation-list")]
+    LoopList,
+    /// Show an automation with its versions and its runs.
+    #[command(name = "automation-show")]
+    LoopShow(agent_loops::LoopShowArgs),
+    /// Save an automation: its prompt, trigger, conditions and tools.
+    /// Changes the one with that name, or --automation.
+    #[command(name = "automation-save")]
+    LoopSave(agent_loops::LoopSaveArgs),
+    /// Queue a run of an automation now; the running app starts it.
+    #[command(name = "automation-run")]
+    LoopRun(agent_loops::LoopArgs),
+    /// Turn an automation on.
+    #[command(name = "automation-enable")]
+    LoopEnable(agent_loops::LoopArgs),
+    /// Turn an automation off. Its versions and runs stay.
+    #[command(name = "automation-disable")]
+    LoopDisable(agent_loops::LoopArgs),
+    /// Bring back an earlier version of an automation, as a new version.
+    #[command(name = "automation-restore-version")]
+    LoopRestoreVersion(agent_loops::LoopRestoreArgs),
+    /// Delete an automation with its versions and runs.
+    #[command(name = "automation-delete")]
+    LoopDelete(agent_loops::LoopArgs),
+    /// Set when Sona reminds you of a task, or none to clear it.
+    Remind(routines::RemindArgs),
+    /// List reminders; --due lists those whose time has come.
+    Reminders(routines::RemindersArgs),
     /// List saved views.
     Views,
     /// Save a view: named filters that the app and `list --view` use.
@@ -159,6 +239,9 @@ pub enum WorkVerb {
     ProjectArchive(catalog::ProjectArchiveArgs),
     /// A project's milestones, with target days and task counts.
     Milestones(catalog::MilestonesArgs),
+    /// Projects on a time axis from start to target day, with the
+    /// milestones that fall in the days shown.
+    Timeline(timeline::TimelineArgs),
     /// Make a milestone, or change one.
     MilestoneSave(catalog::MilestoneSaveArgs),
     /// Delete a milestone. Its tasks stay in the project.
@@ -169,6 +252,26 @@ pub enum WorkVerb {
     PersonSave(catalog::PersonSaveArgs),
     /// Fold one person into another: their tasks, quotes and speaker links move.
     PersonMerge(catalog::PersonMergeArgs),
+    /// One person's page in one read: summary, meetings, open items, documents, contact.
+    Person(people::PersonArgs),
+    /// Link a person to a meeting, confirm a link Sona suggested, or take them off it.
+    PersonLink(people::PersonLinkArgs),
+    /// Move some of a person's meetings, other names, emails or documents to another person.
+    PersonSplit(people::PersonSplitArgs),
+    /// Delete a person, with their meeting links and saved voice.
+    PersonDelete(people::PersonDeleteArgs),
+    /// Set a person's photo from a PNG or JPEG, or take it off.
+    PersonPhoto(people::PersonPhotoArgs),
+    /// Take the contact card off a person.
+    PersonContactRemove(people::PersonContactRemoveArgs),
+    /// When you first met a person, in which meeting, and who introduced you.
+    FirstMet(people::PersonArgs),
+    /// Answer who introduced you to a person: yes takes the introducer Sona heard, no turns it down.
+    FirstMetAnswer(people::FirstMetArgs),
+    /// Companies, from the organizations people carry.
+    Companies(people::CompaniesArgs),
+    /// One company: its people, meetings and open items.
+    Company(people::CompanyArgs),
     /// Meetings, newest first, with when, how long, whether processed, and who was in them.
     Meetings(catalog::MeetingsArgs),
     /// One meeting: summary, commitments, and with --transcript who said what.
@@ -238,6 +341,17 @@ pub enum WorkVerb {
     LoopReopen(organize::LoopArgs),
     /// Set who owns a meeting loop, or none.
     LoopOwner(organize::LoopOwnerArgs),
+    /// Say who a meeting's speaker is: a person, a new person, or unknown
+    /// again with --undo. The voice itself is never remembered: saving a
+    /// voice profile stays a step the user takes in the app.
+    SpeakerAssign(speakers::SpeakerAssignArgs),
+    /// What voice matching suggests for a meeting's speakers, where else it
+    /// heard each unnamed voice, and the names it gave by itself.
+    SpeakerVoices(voices::SpeakerVoicesArgs),
+    /// Take voice matching's suggestion for a waiting speaker.
+    SpeakerConfirm(voices::SpeakerVoiceArgs),
+    /// Give a speaker voice matching named by itself back the name it had.
+    SpeakerVoiceUndo(voices::SpeakerVoiceArgs),
     /// Track an action a meeting left with no task as a task in a project.
     ActionTrack(organize::ActionTrackArgs),
     /// Set an untracked meeting action aside as not work.
@@ -252,8 +366,85 @@ pub enum WorkVerb {
     NotePin(notes::NotePinArgs),
     /// Link a meeting, a person or another note to a note.
     NoteLink(notes::NoteLinkArgs),
+    /// Take a linked meeting, person or note off a note.
+    NoteUnlink(notes::NoteLinkArgs),
+    /// Delete a note and its versions.
+    NoteDelete(notes::NoteDeleteArgs),
+    /// Put one of a note's saved versions back as its body.
+    NoteRestore(notes::NoteRestoreArgs),
+    /// The subjects notes gather under.
+    Subjects,
+    /// Make a note subject.
+    SubjectNew(subjects::SubjectNewArgs),
+    /// Add a note to a subject, make it the current one, or take it off.
+    SubjectNote(subjects::SubjectNoteArgs),
+    /// Read typed or spoken words as task fields, writing nothing.
+    Parse(planner::ParseArgs),
+    /// Book the next free working hour for a task in the "Sona" calendar.
+    Book(planner::BookArgs),
+    /// Take a task's booked hour off the calendar.
+    Unbook(planner::BookArgs),
+    /// Mark a task waiting on someone as asked about today.
+    Nudged(planner::BookArgs),
+    /// Make a Triage task from a line a watch heard.
+    WatchTask(planner::WatchTaskArgs),
+    /// The links Sona suggests between meetings, notes and work.
+    LinkSuggestions(planner::LinkSuggestionsArgs),
+    /// Accept a suggested link.
+    LinkAccept(planner::LinkDecideArgs),
+    /// Dismiss a suggested link.
+    LinkDismiss(planner::LinkDecideArgs),
+    /// What Sona suggests for tasks in Triage: project, labels, owner and similar tasks, each with its reason.
+    TriageSuggestions(triage_hints::TriageSuggestionsArgs),
+    /// Accept a Triage suggestion; it changes the task like any other update.
+    SuggestionAccept(triage_hints::SuggestionDecideArgs),
+    /// Dismiss a Triage suggestion; it stays dismissed.
+    SuggestionDismiss(triage_hints::SuggestionDecideArgs),
+    /// Tasks, milestones and meetings by day, as the planner calendar shows them.
+    Calendar(planner::CalendarArgs),
+    /// Dictation and meeting totals by day.
+    Trend(planner::TrendArgs),
+    /// Home's Today strip: meetings today, what is processing, speakers
+    /// nobody named, promises not tracked, and what the user owes.
+    Today,
+    /// Make a project, its milestones and tasks from a Plan with Sona draft.
+    PlanAccept(planner::PlanAcceptArgs),
     /// Rename a task's attachment.
     AttachmentRename(organize::AttachmentRenameArgs),
+    /// Change one task with an ordered list of field changes, all or none.
+    Save(save::SaveArgs),
+    /// What changed on tasks, projects, comments and agent sessions since a
+    /// cursor, oldest first, each with the fields' earlier values.
+    Changes(save::ChangesArgs),
+    /// Start an agent session on a task: the agent's run, which the user
+    /// watches and can stop. The agent becomes the task's delegate.
+    SessionStart(sessions::SessionStartArgs),
+    /// Write to a session you run: a thought, an action, a question for the
+    /// user, or the response or error that ends it.
+    SessionActivity(sessions::SessionActivityArgs),
+    /// Replace a session's plan: its checklist of steps.
+    SessionPlan(sessions::SessionPlanArgs),
+    /// Tell Sona the session's agent is still working. The answer says
+    /// whether the user asked it to stop.
+    SessionHeartbeat(sessions::SessionWriteArgs),
+    /// Ask the agent running a session to stop.
+    SessionStop(sessions::SessionWriteArgs),
+    /// Answer the agent running a session: text, or a choice its question offered.
+    SessionReply(sessions::SessionReplyArgs),
+    #[command(flatten)]
+    Settings(preferences::SettingsVerb),
+    #[command(flatten)]
+    Sources(sources::SourcesVerb),
+    #[command(flatten)]
+    Library(library::LibraryVerb),
+    #[command(flatten)]
+    Transcript(transcript::TranscriptVerb),
+    #[command(flatten)]
+    Dictations(dictations::DictationVerb),
+    /// One session: state, plan, question, and every activity.
+    Session(sessions::SessionShowArgs),
+    /// Agent sessions, newest first: one task's or every task's.
+    Sessions(sessions::SessionsArgs),
 }
 
 #[derive(Args, Clone, Debug, Eq, PartialEq)]
@@ -279,6 +470,15 @@ pub struct ListArgs {
     /// Only open work nobody has touched for 30 days.
     #[arg(long)]
     pub stale: bool,
+    /// Only tasks delegated to this agent; any for every delegated task,
+    /// none for tasks no agent works.
+    #[arg(long, value_name = "AGENT")]
+    pub delegate: Option<String>,
+    /// Filter in plain words: "high priority bugs due this week that are
+    /// mine". Prints what the words were read as and the words it did not
+    /// understand.
+    #[arg(long = "where", value_name = "WORDS")]
+    pub where_words: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -473,6 +673,9 @@ pub struct RelateArgs {
     pub link: LinkKind,
     #[arg(value_parser = task_ref, value_name = "OTHER")]
     pub other: TaskRef,
+    /// Show the link as it would be made or removed; nothing changes.
+    #[arg(long)]
+    pub dry_run: bool,
     #[command(flatten)]
     pub write: WriteArgs,
 }
@@ -487,6 +690,9 @@ pub struct LabelSaveArgs {
     /// Color: degrees on the color wheel, 0 to 360.
     #[arg(long, value_parser = clap::value_parser!(u16).range(0..=360))]
     pub hue: Option<u16>,
+    /// Show the label as it would be saved; nothing changes.
+    #[arg(long)]
+    pub dry_run: bool,
     #[command(flatten)]
     pub write: WriteArgs,
 }
@@ -495,6 +701,9 @@ pub struct LabelSaveArgs {
 pub struct LabelDeleteArgs {
     /// The label's name or id.
     pub label: String,
+    /// Show the label that would be deleted; nothing changes.
+    #[arg(long)]
+    pub dry_run: bool,
     #[command(flatten)]
     pub write: WriteArgs,
 }
@@ -514,6 +723,15 @@ pub struct ViewSaveArgs {
     pub group_by: Option<GroupArg>,
     #[arg(long, value_enum)]
     pub order_by: Option<OrderArg>,
+    /// Show groups that hold no tasks: true or false.
+    #[arg(long, value_name = "BOOL")]
+    pub show_empty_groups: Option<bool>,
+    /// The properties each row shows, in order, comma-separated.
+    #[arg(long, value_enum, value_delimiter = ',', value_name = "PROPERTY")]
+    pub properties: Option<Vec<planner::PropertyArg>>,
+    /// Show the view as it would be saved; nothing changes.
+    #[arg(long)]
+    pub dry_run: bool,
     #[command(flatten)]
     pub write: WriteArgs,
 }
@@ -522,6 +740,9 @@ pub struct ViewSaveArgs {
 pub struct ViewDeleteArgs {
     /// The view's name or id.
     pub view: String,
+    /// Show the view that would be deleted; nothing changes.
+    #[arg(long)]
+    pub dry_run: bool,
     #[command(flatten)]
     pub write: WriteArgs,
 }
@@ -646,10 +867,11 @@ pub struct Filters {
     pub snoozed: bool,
     /// Conditions as JSON, one object or a list: {"field":"label","op":
     /// "includes_all","values":["bug","ui"]}. Fields: status, priority,
-    /// owner, project, milestone, label, cycle, due, created, updated. Ops:
-    /// is, is_not, any_of, none_of, includes_all, includes_any, before,
-    /// after. Values are ids, names Sona stores, `me`, `none`, cycle
-    /// numbers or current/next, and days as YYYY-MM-DD/today/tomorrow.
+    /// owner, delegate, project, milestone, label, cycle, due, created,
+    /// updated. Ops: is, is_not, any_of, none_of, includes_all,
+    /// includes_any, before, after. Values are ids, names Sona stores,
+    /// agent names, `me`, `none`, cycle numbers or current/next, and days as
+    /// YYYY-MM-DD/today/tomorrow.
     #[arg(long, value_parser = conditions, value_name = "JSON")]
     pub filter: Option<ConditionsArg>,
 }
@@ -1069,7 +1291,26 @@ impl WorkVerb {
     /// Which grants this verb needs. A dry run only reads.
     pub(super) const fn required_scopes(&self) -> &'static [ExternalScope] {
         match self {
+            Self::Settings(verb) => verb.required_scopes(),
+            Self::Sources(verb) => verb.required_scopes(),
+            Self::Library(verb) => verb.required_scopes(),
+            Self::Transcript(verb) => verb.required_scopes(),
+            Self::Dictations(verb) => verb.required_scopes(),
             Self::List(_)
+            | Self::Bin
+            | Self::ArchiveList
+            | Self::DescriptionVersions(_)
+            | Self::DescriptionVersion(_)
+            | Self::Favorites
+            | Self::Subscriptions
+            | Self::Inbox(_)
+            | Self::Delete(TasksArgs { dry_run: true, .. })
+            | Self::DescriptionRestore(lifecycle::VersionRestoreArgs { dry_run: true, .. })
+            | Self::Favorite(lifecycle::FavoriteArgs { dry_run: true, .. })
+            | Self::Unfavorite(lifecycle::FavoriteArgs { dry_run: true, .. })
+            | Self::Subscribe(TasksArgs { dry_run: true, .. })
+            | Self::Unsubscribe(TasksArgs { dry_run: true, .. })
+            | Self::InboxMark(lifecycle::InboxMarkArgs { dry_run: true, .. })
             | Self::Ready(_)
             | Self::Mine(_)
             | Self::Counts
@@ -1081,7 +1322,13 @@ impl WorkVerb {
             | Self::FollowUp(_)
             | Self::Projects(_)
             | Self::Milestones(_)
+            | Self::Timeline(_)
             | Self::People(_)
+            | Self::Person(_)
+            | Self::Companies(_)
+            | Self::Company(_)
+            | Self::SpeakerVoices(_)
+            | Self::FirstMet(_)
             | Self::Meetings(_)
             | Self::Meeting(_)
             | Self::Comments(_)
@@ -1108,7 +1355,23 @@ impl WorkVerb {
             | Self::Update(UpdateArgs { dry_run: true, .. })
             | Self::Done(DoneArgs { dry_run: true, .. })
             | Self::Accept(AcceptArgs { dry_run: true, .. })
-            | Self::Decline(TasksArgs { dry_run: true, .. })
+            | Self::Decline(routines::DeclineArgs { dry_run: true, .. })
+            | Self::Templates
+            | Self::LoopList
+            | Self::LoopShow(_)
+            | Self::LoopSave(agent_loops::LoopSaveArgs { dry_run: true, .. })
+            | Self::LoopRun(agent_loops::LoopArgs { dry_run: true, .. })
+            | Self::LoopEnable(agent_loops::LoopArgs { dry_run: true, .. })
+            | Self::LoopDisable(agent_loops::LoopArgs { dry_run: true, .. })
+            | Self::LoopRestoreVersion(agent_loops::LoopRestoreArgs { dry_run: true, .. })
+            | Self::LoopDelete(agent_loops::LoopArgs { dry_run: true, .. })
+            | Self::Reminders(_)
+            | Self::LabelGroup(routines::LabelGroupArgs { dry_run: true, .. })
+            | Self::LabelRetire(routines::LabelRetireArgs { dry_run: true, .. })
+            | Self::TemplateSave(routines::TemplateSaveArgs { dry_run: true, .. })
+            | Self::TemplateDelete(routines::TemplateDeleteArgs { dry_run: true, .. })
+            | Self::TemplateUse(routines::TemplateUseArgs { dry_run: true, .. })
+            | Self::Remind(routines::RemindArgs { dry_run: true, .. })
             | Self::Archive(TasksArgs { dry_run: true, .. })
             | Self::Restore(TasksArgs { dry_run: true, .. })
             | Self::Snooze(SnoozeArgs { dry_run: true, .. })
@@ -1122,6 +1385,9 @@ impl WorkVerb {
             | Self::ProjectUpdateDelete(roadmap::ProjectUpdateDeleteArgs { dry_run: true, .. })
             | Self::ProjectDelete(roadmap::ProjectDeleteArgs { dry_run: true, .. })
             | Self::ProjectSave(catalog::ProjectSaveArgs { dry_run: true, .. })
+            | Self::ProjectArchive(catalog::ProjectArchiveArgs { dry_run: true, .. })
+            | Self::MilestoneSave(catalog::MilestoneSaveArgs { dry_run: true, .. })
+            | Self::MilestoneDelete(catalog::MilestoneDeleteArgs { dry_run: true, .. })
             | Self::MilestoneReorder(roadmap::MilestoneReorderArgs { dry_run: true, .. })
             | Self::CycleSettings(roadmap::CycleSettingsArgs { dry_run: true, .. })
             | Self::CycleSave(roadmap::CycleSaveArgs { dry_run: true, .. })
@@ -1137,6 +1403,17 @@ impl WorkVerb {
             | Self::TalkingPointDone(organize::TalkingPointDoneArgs { dry_run: true, .. })
             | Self::LoopReopen(organize::LoopArgs { dry_run: true, .. })
             | Self::LoopOwner(organize::LoopOwnerArgs { dry_run: true, .. })
+            | Self::SpeakerAssign(speakers::SpeakerAssignArgs { dry_run: true, .. })
+            | Self::PersonLink(people::PersonLinkArgs { dry_run: true, .. })
+            | Self::PersonMerge(catalog::PersonMergeArgs { dry_run: true, .. })
+            | Self::PersonSave(catalog::PersonSaveArgs { dry_run: true, .. })
+            | Self::PersonSplit(people::PersonSplitArgs { dry_run: true, .. })
+            | Self::PersonDelete(people::PersonDeleteArgs { dry_run: true, .. })
+            | Self::PersonPhoto(people::PersonPhotoArgs { dry_run: true, .. })
+            | Self::PersonContactRemove(people::PersonContactRemoveArgs { dry_run: true, .. })
+            | Self::FirstMetAnswer(people::FirstMetArgs { dry_run: true, .. })
+            | Self::SpeakerConfirm(voices::SpeakerVoiceArgs { dry_run: true, .. })
+            | Self::SpeakerVoiceUndo(voices::SpeakerVoiceArgs { dry_run: true, .. })
             | Self::ActionTrack(organize::ActionTrackArgs { dry_run: true, .. })
             | Self::ActionDismiss(organize::LoopArgs { dry_run: true, .. })
             | Self::ActionRestore(organize::LoopArgs { dry_run: true, .. })
@@ -1144,7 +1421,44 @@ impl WorkVerb {
             | Self::NoteEdit(notes::NoteEditArgs { dry_run: true, .. })
             | Self::NotePin(notes::NotePinArgs { dry_run: true, .. })
             | Self::NoteLink(notes::NoteLinkArgs { dry_run: true, .. })
-            | Self::AttachmentRename(organize::AttachmentRenameArgs { dry_run: true, .. }) => {
+            | Self::NoteUnlink(notes::NoteLinkArgs { dry_run: true, .. })
+            | Self::NoteDelete(notes::NoteDeleteArgs { dry_run: true, .. })
+            | Self::NoteRestore(notes::NoteRestoreArgs { dry_run: true, .. })
+            | Self::Subjects
+            | Self::SubjectNew(subjects::SubjectNewArgs { dry_run: true, .. })
+            | Self::SubjectNote(subjects::SubjectNoteArgs { dry_run: true, .. })
+            | Self::Parse(_)
+            | Self::Book(planner::BookArgs { dry_run: true, .. })
+            | Self::Unbook(planner::BookArgs { dry_run: true, .. })
+            | Self::Nudged(planner::BookArgs { dry_run: true, .. })
+            | Self::WatchTask(planner::WatchTaskArgs { dry_run: true, .. })
+            | Self::Relate(RelateArgs { dry_run: true, .. })
+            | Self::Unrelate(RelateArgs { dry_run: true, .. })
+            | Self::LabelSave(LabelSaveArgs { dry_run: true, .. })
+            | Self::LabelDelete(LabelDeleteArgs { dry_run: true, .. })
+            | Self::ViewSave(ViewSaveArgs { dry_run: true, .. })
+            | Self::ViewDelete(ViewDeleteArgs { dry_run: true, .. })
+            | Self::LinkSuggestions(_)
+            | Self::LinkAccept(planner::LinkDecideArgs { dry_run: true, .. })
+            | Self::LinkDismiss(planner::LinkDecideArgs { dry_run: true, .. })
+            | Self::TriageSuggestions(_)
+            | Self::SuggestionAccept(triage_hints::SuggestionDecideArgs { dry_run: true, .. })
+            | Self::SuggestionDismiss(triage_hints::SuggestionDecideArgs { dry_run: true, .. })
+            | Self::Calendar(_)
+            | Self::Trend(_)
+            | Self::Today
+            | Self::PlanAccept(planner::PlanAcceptArgs { dry_run: true, .. })
+            | Self::AttachmentRename(organize::AttachmentRenameArgs { dry_run: true, .. })
+            | Self::Save(save::SaveArgs { dry_run: true, .. })
+            | Self::Changes(_)
+            | Self::SessionStart(sessions::SessionStartArgs { dry_run: true, .. })
+            | Self::SessionActivity(sessions::SessionActivityArgs { dry_run: true, .. })
+            | Self::SessionPlan(sessions::SessionPlanArgs { dry_run: true, .. })
+            | Self::SessionHeartbeat(sessions::SessionWriteArgs { dry_run: true, .. })
+            | Self::SessionStop(sessions::SessionWriteArgs { dry_run: true, .. })
+            | Self::SessionReply(sessions::SessionReplyArgs { dry_run: true, .. })
+            | Self::Session(_)
+            | Self::Sessions(_) => {
                 READ_SCOPES
             }
             Self::Ask(AskArgs { take, .. }) if take.is_empty() => READ_SCOPES,
@@ -1158,17 +1472,42 @@ impl WorkVerb {
             | Self::Duplicate(_)
             | Self::Archive(_)
             | Self::Restore(_)
+            | Self::Delete(_)
+            | Self::DescriptionRestore(_)
+            | Self::Favorite(_)
+            | Self::Unfavorite(_)
+            | Self::Subscribe(_)
+            | Self::Unsubscribe(_)
+            | Self::InboxMark(_)
             | Self::Snooze(_)
             | Self::Relate(_)
             | Self::Unrelate(_)
             | Self::LabelSave(_)
             | Self::LabelDelete(_)
+            | Self::LabelGroup(_)
+            | Self::LabelRetire(_)
+            | Self::TemplateSave(_)
+            | Self::TemplateDelete(_)
+            | Self::TemplateUse(_)
+            | Self::LoopSave(_)
+            | Self::LoopRun(_)
+            | Self::LoopEnable(_)
+            | Self::LoopDisable(_)
+            | Self::LoopRestoreVersion(_)
+            | Self::LoopDelete(_)
+            | Self::Remind(_)
             | Self::ProjectSave(_)
             | Self::ProjectArchive(_)
             | Self::MilestoneSave(_)
             | Self::MilestoneDelete(_)
             | Self::PersonSave(_)
             | Self::PersonMerge(_)
+            | Self::PersonLink(_)
+            | Self::PersonSplit(_)
+            | Self::PersonDelete(_)
+            | Self::PersonPhoto(_)
+            | Self::PersonContactRemove(_)
+            | Self::FirstMetAnswer(_)
             | Self::ViewSave(_)
             | Self::ViewDelete(_)
             | Self::Ask(_)
@@ -1198,6 +1537,9 @@ impl WorkVerb {
             | Self::TalkingPointDone(_)
             | Self::LoopReopen(_)
             | Self::LoopOwner(_)
+            | Self::SpeakerAssign(_)
+            | Self::SpeakerConfirm(_)
+            | Self::SpeakerVoiceUndo(_)
             | Self::ActionTrack(_)
             | Self::ActionDismiss(_)
             | Self::ActionRestore(_)
@@ -1205,7 +1547,28 @@ impl WorkVerb {
             | Self::NoteEdit(_)
             | Self::NotePin(_)
             | Self::NoteLink(_)
-            | Self::AttachmentRename(_) => WRITE_SCOPES,
+            | Self::NoteUnlink(_)
+            | Self::NoteDelete(_)
+            | Self::NoteRestore(_)
+            | Self::SubjectNew(_)
+            | Self::SubjectNote(_)
+            | Self::Book(_)
+            | Self::Unbook(_)
+            | Self::Nudged(_)
+            | Self::WatchTask(_)
+            | Self::LinkAccept(_)
+            | Self::LinkDismiss(_)
+            | Self::SuggestionAccept(_)
+            | Self::SuggestionDismiss(_)
+            | Self::PlanAccept(_)
+            | Self::AttachmentRename(_)
+            | Self::Save(_)
+            | Self::SessionStart(_)
+            | Self::SessionActivity(_)
+            | Self::SessionPlan(_)
+            | Self::SessionHeartbeat(_)
+            | Self::SessionStop(_)
+            | Self::SessionReply(_) => WRITE_SCOPES,
         }
     }
 
@@ -1221,6 +1584,12 @@ impl WorkVerb {
                     .is_some_and(|url| agents::evidence_link(url.trim()).is_none()) =>
             {
                 "--source-url must be an http, https or file address."
+            }
+            Self::SpeakerAssign(args) if args.new.as_deref().is_some_and(|name| name.trim().is_empty()) => {
+                "--new needs the person's name."
+            }
+            Self::PersonSplit(args) if args.new.as_deref().is_some_and(|name| name.trim().is_empty()) => {
+                "--new needs the new person's name."
             }
             Self::NoteNew(args) if args.body.join(" ").trim().is_empty() => {
                 "A note needs some text."
@@ -1295,6 +1664,10 @@ impl WorkVerb {
             Self::Watch(args) if args.topic.join(" ").trim().is_empty() => {
                 "Name a word or phrase to watch."
             }
+            Self::Sources(verb) => return verb.check(),
+            Self::Library(verb) => return verb.check(),
+            Self::Transcript(verb) => return verb.check(),
+            Self::Dictations(verb) => return verb.check(),
             _ => return Ok(()),
         };
         Err(ExternalError::invalid(refusal))
@@ -1359,6 +1732,7 @@ impl WriteArgs {
 #[serde(untagged)]
 pub enum WorkAnswer {
     Page(ExternalWorkPage),
+    Timeline(timeline::ExternalWorkTimeline),
     Mine(ExternalWorkMine),
     Counts(ExternalWorkCountsPage),
     Detail(Box<ExternalWorkDetail>),
@@ -1367,6 +1741,15 @@ pub enum WorkAnswer {
     Relation(ExternalWorkRelationChange),
     Labels(ExternalWorkLabels),
     Label(ExternalWorkLabelChange),
+    LabelEdit(routines::ExternalWorkLabelEdit),
+    Templates(routines::ExternalWorkTemplates),
+    Template(Box<routines::ExternalWorkTemplateChange>),
+    Reminders(routines::ExternalWorkReminders),
+    Reminder(Box<routines::ExternalWorkReminderChange>),
+    AgentLoops(agent_loops::ExternalAgentLoops),
+    AgentLoop(Box<agent_loops::ExternalAgentLoop>),
+    AgentLoopChange(Box<agent_loops::ExternalAgentLoopChange>),
+    AgentLoopRun(Box<agent_loops::ExternalAgentLoopRun>),
     Views(ExternalWorkViews),
     View(Box<ExternalWorkViewChange>),
     Export(ExternalWorkExport),
@@ -1394,9 +1777,34 @@ pub enum WorkAnswer {
     MilestoneOrder(roadmap::ExternalWorkMilestoneOrder),
     CycleChange(Box<roadmap::ExternalWorkCycleChange>),
     Organize(Box<organize::ExternalOrganizeChange>),
+    Speaker(Box<speakers::ExternalSpeakerChange>),
+    PersonPage(Box<people::ExternalPersonPage>),
+    Companies(people::ExternalCompanies),
+    Company(Box<people::ExternalCompany>),
+    FirstMet(Box<people::ExternalFirstMet>),
+    PeopleChange(Box<people::ExternalPeopleChange>),
+    SpeakerVoices(Box<voices::ExternalSpeakerVoices>),
+    VoiceChange(Box<voices::ExternalVoiceChange>),
+    Sources(Box<sources::ExternalSourcesAnswer>),
+    Library(Box<library::ExternalLibraryAnswer>),
+    Transcript(Box<transcript::ExternalTranscriptAnswer>),
+    Dictations(Box<dictations::ExternalDictationAnswer>),
     Day(organize::ExternalWorkDay),
     Brief(Box<organize::ExternalWorkBrief>),
     Note(Box<notes::ExternalNoteChange>),
+    Subjects(Box<subjects::ExternalSubjects>),
+    Planner(Box<planner::PlannerAnswer>),
+    TriageHints(Box<triage_hints::TriageHintsAnswer>),
+    Settings(Box<preferences::ExternalSettings>),
+    Changes(save::ExternalWorkChanges),
+    Sessions(sessions::ExternalWorkSessions),
+    Session(Box<sessions::ExternalWorkSessionChange>),
+    Lifecycle(Box<lifecycle::ExternalLifecycleChange>),
+    Archive(lifecycle::ExternalWorkArchive),
+    Versions(lifecycle::ExternalWorkVersions),
+    Favorites(lifecycle::ExternalWorkFavorites),
+    Subscriptions(lifecycle::ExternalWorkSubscriptions),
+    Inbox(lifecycle::ExternalWorkInbox),
 }
 
 /// What `ask` found: the lines that answer, numbered for --take.
@@ -1541,6 +1949,9 @@ pub struct ExternalWorkPage {
     /// False while the conversations can't be opened: work from meetings is
     /// left out.
     pub conversations_available: bool,
+    /// What `--where` was read as.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub read_as: Option<words::ExternalWorkWhere>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -1627,6 +2038,7 @@ pub struct ExternalWorkRef {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct ExternalWorkSuggestion {
+    pub suggestion_id: String,
     pub field: WorkSuggestionField,
     /// The suggestion as a person reads it: a name, a day, a title.
     pub value: String,
@@ -1648,6 +2060,8 @@ pub struct ExternalWorkActivity {
     pub to: Option<String>,
     /// The agent behind an agent's change, when it gave its name.
     pub agent: Option<String>,
+    /// Why, when one was given: a decline's reason.
+    pub reason: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -1775,6 +2189,7 @@ pub enum CommitmentEffect {
 #[derive(Clone, Debug, Serialize)]
 pub struct ExternalWorkRelationChange {
     pub schema_version: u32,
+    pub dry_run: bool,
     pub operation_id: String,
     pub removed: bool,
     pub relation: ExternalWorkRelation,
@@ -1800,11 +2215,16 @@ pub struct ExternalWorkLabel {
     pub name: String,
     pub hue: f64,
     pub revision: i64,
+    /// The label group it sits in.
+    pub group: Option<String>,
+    /// Set once retired: its tasks keep it, pickers leave it out.
+    pub retired_at_ms: Option<i64>,
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub struct ExternalWorkLabelChange {
     pub schema_version: u32,
+    pub dry_run: bool,
     /// Absent when the label already read this way.
     pub operation_id: Option<String>,
     pub deleted: bool,
@@ -1825,6 +2245,8 @@ pub struct ExternalWorkView {
     pub layout: WorkLayout,
     pub group_by: WorkGroupBy,
     pub order_by: WorkOrderBy,
+    pub show_empty_groups: bool,
+    pub properties: Vec<String>,
     pub revision: i64,
 }
 
@@ -1850,6 +2272,7 @@ pub struct ExternalWorkFilters {
 #[derive(Clone, Debug, Serialize)]
 pub struct ExternalWorkViewChange {
     pub schema_version: u32,
+    pub dry_run: bool,
     pub operation_id: String,
     pub deleted: bool,
     pub view: ExternalWorkView,
@@ -1939,6 +2362,7 @@ pub(super) async fn answer(
     app: &AppHandle,
     meetings: &Arc<MeetingSessionManager>,
     history: &HistoryManager,
+    calendar: &dyn crate::meeting::detection::calendar::CalendarSource,
 ) -> Result<WorkAnswer, ExternalError> {
     let tracker = Tracker {
         app,
@@ -1971,27 +2395,75 @@ pub(super) async fn answer(
         }
         WorkVerb::Decline(args) => {
             tracker
-                .triage(&args.tasks, Decision::Decline, args.dry_run, &args.write)
+                .triage(
+                    &args.tasks,
+                    Decision::Decline {
+                        reason: args.reason.as_deref(),
+                    },
+                    args.dry_run,
+                    &args.write,
+                )
                 .await
         }
         WorkVerb::Duplicate(args) => tracker.duplicate(args).await,
         WorkVerb::Archive(args) => tracker.archive(args, true).await,
-        WorkVerb::Restore(args) => tracker.archive(args, false).await,
+        WorkVerb::Restore(args) => tracker.restore(args).await,
+        WorkVerb::Delete(args) => tracker.delete(args).await,
+        WorkVerb::Bin => tracker.archive_list(true).await,
+        WorkVerb::ArchiveList => tracker.archive_list(false).await,
+        WorkVerb::DescriptionVersions(args) => tracker.description_versions(args).await,
+        WorkVerb::DescriptionVersion(args) => tracker.description_version(args).await,
+        WorkVerb::DescriptionRestore(args) => tracker.description_restore(args).await,
+        WorkVerb::Favorite(args) => tracker.favorite(args, true).await,
+        WorkVerb::Unfavorite(args) => tracker.favorite(args, false).await,
+        WorkVerb::Favorites => tracker.favorites().await,
+        WorkVerb::Subscribe(args) => tracker.subscribe(args, true).await,
+        WorkVerb::Unsubscribe(args) => tracker.subscribe(args, false).await,
+        WorkVerb::Subscriptions => tracker.subscriptions().await,
+        WorkVerb::Inbox(args) => tracker.inbox(args).await,
+        WorkVerb::InboxMark(args) => tracker.inbox_mark(args).await,
         WorkVerb::Snooze(args) => tracker.snooze(args).await,
         WorkVerb::Relate(args) => tracker.relate(args).await,
         WorkVerb::Unrelate(args) => tracker.unrelate(args).await,
         WorkVerb::Labels => tracker.labels(),
         WorkVerb::LabelSave(args) => tracker.label_save(args),
         WorkVerb::LabelDelete(args) => tracker.label_delete(args),
+        WorkVerb::LabelGroup(args) => tracker.label_group(args),
+        WorkVerb::LabelRetire(args) => tracker.label_retire(args),
+        WorkVerb::Templates => tracker.templates().await,
+        WorkVerb::TemplateSave(args) => tracker.template_save(args).await,
+        WorkVerb::TemplateDelete(args) => tracker.template_delete(args).await,
+        WorkVerb::TemplateUse(args) => tracker.template_use(args).await,
+        WorkVerb::LoopList => tracker.loop_list(),
+        WorkVerb::LoopShow(args) => tracker.loop_show(args),
+        WorkVerb::LoopSave(args) => tracker.loop_save(args).await,
+        WorkVerb::LoopRun(args) => tracker.loop_run(args),
+        WorkVerb::LoopEnable(args) => tracker.loop_enable(args, true),
+        WorkVerb::LoopDisable(args) => tracker.loop_enable(args, false),
+        WorkVerb::LoopRestoreVersion(args) => tracker.loop_restore(args),
+        WorkVerb::LoopDelete(args) => tracker.loop_delete(args),
+        WorkVerb::Remind(args) => tracker.remind(args).await,
+        WorkVerb::Reminders(args) => tracker.reminders(args).await,
         WorkVerb::Projects(args) => tracker.projects(args).await,
         WorkVerb::ProjectSave(args) => tracker.project_save(args).await,
         WorkVerb::ProjectArchive(args) => tracker.project_archive(args).await,
         WorkVerb::Milestones(args) => tracker.milestones(args).await,
+        WorkVerb::Timeline(args) => tracker.timeline(args).await,
         WorkVerb::MilestoneSave(args) => tracker.milestone_save(args).await,
         WorkVerb::MilestoneDelete(args) => tracker.milestone_delete(args).await,
         WorkVerb::People(args) => tracker.people(args).await,
         WorkVerb::PersonSave(args) => tracker.person_save(args).await,
         WorkVerb::PersonMerge(args) => tracker.person_merge(args).await,
+        WorkVerb::Person(args) => tracker.person_page(args).await,
+        WorkVerb::PersonLink(args) => tracker.person_link(args).await,
+        WorkVerb::PersonSplit(args) => tracker.person_split(args).await,
+        WorkVerb::PersonDelete(args) => tracker.person_delete(args).await,
+        WorkVerb::PersonPhoto(args) => tracker.person_photo(args).await,
+        WorkVerb::PersonContactRemove(args) => tracker.person_contact_remove(args).await,
+        WorkVerb::FirstMet(args) => tracker.first_met(args).await,
+        WorkVerb::FirstMetAnswer(args) => tracker.first_met_answer(args).await,
+        WorkVerb::Companies(args) => tracker.companies(args).await,
+        WorkVerb::Company(args) => tracker.company(args).await,
         WorkVerb::Meetings(args) => tracker.meetings(args).await,
         WorkVerb::Meeting(args) => tracker.meeting(args).await,
         WorkVerb::Views => tracker.views(),
@@ -2039,13 +2511,69 @@ pub(super) async fn answer(
         WorkVerb::TalkingPointDone(args) => tracker.talking_point_done(args),
         WorkVerb::LoopReopen(args) => tracker.loop_reopen(args).await,
         WorkVerb::LoopOwner(args) => tracker.loop_owner(args).await,
+        WorkVerb::SpeakerAssign(args) => tracker.speaker_assign(args).await,
+        WorkVerb::SpeakerVoices(args) => tracker.speaker_voices(args).await,
+        WorkVerb::SpeakerConfirm(args) => tracker.speaker_confirm(args).await,
+        WorkVerb::SpeakerVoiceUndo(args) => tracker.speaker_voice_undo(args).await,
         WorkVerb::ActionTrack(args) => tracker.action_track(args).await,
         WorkVerb::ActionDismiss(args) => tracker.action_set_aside(args, true).await,
         WorkVerb::ActionRestore(args) => tracker.action_set_aside(args, false).await,
         WorkVerb::NoteNew(args) => tracker.note_new(args),
+        WorkVerb::Settings(verb) => tracker.settings_verb(verb).await,
+        WorkVerb::Sources(verb) => tracker.sources(verb).await,
+        WorkVerb::Library(verb) => tracker.library(verb).await,
+        WorkVerb::Transcript(verb) => tracker.transcript(verb).await,
+        WorkVerb::Dictations(verb) => tracker.dictations(verb).await,
         WorkVerb::NoteEdit(args) => tracker.note_edit(args),
         WorkVerb::NotePin(args) => tracker.note_pin(args),
         WorkVerb::NoteLink(args) => tracker.note_link(args).await,
+        WorkVerb::NoteUnlink(args) => tracker.note_unlink(args).await,
+        WorkVerb::NoteDelete(args) => tracker.note_delete(args).await,
+        WorkVerb::NoteRestore(args) => tracker.note_restore(args),
+        WorkVerb::Subjects => tracker.subjects(),
+        WorkVerb::SubjectNew(args) => tracker.subject_new(args),
+        WorkVerb::SubjectNote(args) => tracker.subject_note(args),
+        WorkVerb::Parse(args) => tracker.parse(args).await,
+        WorkVerb::Book(args) => tracker.book(args).await,
+        WorkVerb::Unbook(args) => tracker.unbook(args).await,
+        WorkVerb::Nudged(args) => tracker.nudged(args).await,
+        WorkVerb::WatchTask(args) => tracker.watch_task(args).await,
+        WorkVerb::LinkSuggestions(args) => tracker.link_suggestions(args).await,
+        WorkVerb::LinkAccept(args) => {
+            tracker
+                .link_decide(args, planner::LinkAction::Accepted)
+                .await
+        }
+        WorkVerb::LinkDismiss(args) => {
+            tracker
+                .link_decide(args, planner::LinkAction::Dismissed)
+                .await
+        }
+        WorkVerb::TriageSuggestions(args) => tracker.triage_suggestions(args).await,
+        WorkVerb::SuggestionAccept(args) => {
+            tracker
+                .suggestion_decide(args, triage_hints::SuggestionAction::Accepted)
+                .await
+        }
+        WorkVerb::SuggestionDismiss(args) => {
+            tracker
+                .suggestion_decide(args, triage_hints::SuggestionAction::Dismissed)
+                .await
+        }
+        WorkVerb::Calendar(args) => tracker.calendar(args).await,
+        WorkVerb::Trend(args) => tracker.trend(args).await,
+        WorkVerb::Today => tracker.today(calendar).await,
+        WorkVerb::PlanAccept(args) => tracker.plan_accept(args).await,
+        WorkVerb::Save(args) => tracker.save(args).await,
+        WorkVerb::Changes(args) => tracker.changes(args).await,
+        WorkVerb::SessionStart(args) => tracker.session_start(args).await,
+        WorkVerb::SessionActivity(args) => tracker.session_activity(args).await,
+        WorkVerb::SessionPlan(args) => tracker.session_plan(args).await,
+        WorkVerb::SessionHeartbeat(args) => tracker.session_heartbeat(args).await,
+        WorkVerb::SessionStop(args) => tracker.session_stop(args).await,
+        WorkVerb::SessionReply(args) => tracker.session_reply(args).await,
+        WorkVerb::Session(args) => tracker.session_show(args).await,
+        WorkVerb::Sessions(args) => tracker.sessions(args).await,
         WorkVerb::AttachmentRename(args) => tracker.attachment_rename(args).await,
     }
 }
@@ -2227,9 +2755,9 @@ fn external_line(number: usize, line: &WorkAnswerLine) -> ExternalWorkLine {
 }
 
 #[derive(Clone, Copy)]
-enum Decision {
+enum Decision<'r> {
     Accept { apply_suggestions: bool },
-    Decline,
+    Decline { reason: Option<&'r str> },
 }
 
 struct Tracker<'a> {
@@ -2315,6 +2843,10 @@ impl Tracker<'_> {
 
     async fn list(&self, args: &ListArgs) -> Result<WorkAnswer, ExternalError> {
         let board = self.board().await?;
+        let read_as = match &args.where_words {
+            Some(text) => Some(self.where_words(text).await?),
+            None => None,
+        };
         let base = match &args.view {
             Some(view) => self.view_named(view)?.query,
             None => WorkQuery {
@@ -2322,7 +2854,28 @@ impl Tracker<'_> {
                 ..WorkQuery::default()
             },
         };
-        let query = args.filters.narrow(&board, base)?;
+        let mut query = args.filters.narrow(&board, base)?;
+        if let Some(read_as) = &read_as {
+            if args.view.is_none()
+                && args.filters.status.is_empty()
+                && read_as.names(WorkFilterField::Status)
+            {
+                query.statuses = None;
+            }
+            query.filters.extend(read_as.conditions());
+        }
+        if let Some(delegate) = args.delegate.as_deref().map(str::trim) {
+            let (op, value) = if delegate.eq_ignore_ascii_case("any") {
+                (WorkFilterOp::IsNot, "none")
+            } else {
+                (WorkFilterOp::Is, delegate)
+            };
+            query.filters.push(WorkCondition {
+                field: WorkFilterField::Delegate,
+                op,
+                values: vec![value.to_owned()],
+            });
+        }
         let mut rows = self.listed(&board.fence, query).await?.items;
         if !args.source.is_empty() {
             rows.retain(|row| {
@@ -2335,7 +2888,9 @@ impl Tracker<'_> {
             let cutoff = now_ms() - STALE_AFTER_MS;
             rows.retain(|row| row.item.status.is_open() && row.item.updated_at_ms < cutoff);
         }
-        Ok(WorkAnswer::Page(page(rows, args.limit, &board)))
+        let mut listed = page(rows, args.limit, &board);
+        listed.read_as = read_as;
+        Ok(WorkAnswer::Page(listed))
     }
 
     async fn ready(&self, args: &ReadyArgs) -> Result<WorkAnswer, ExternalError> {
@@ -2839,14 +3394,14 @@ impl Tracker<'_> {
     async fn triage(
         &self,
         tasks: &[TaskRef],
-        decision: Decision,
+        decision: Decision<'_>,
         dry_run: bool,
         write: &WriteArgs,
     ) -> Result<WorkAnswer, ExternalError> {
         let board = self.board().await?;
         let action = match decision {
             Decision::Accept { .. } => WorkAction::Accepted,
-            Decision::Decline => WorkAction::Declined,
+            Decision::Decline { .. } => WorkAction::Declined,
         };
         let mut waiting = Vec::new();
         let mut skipped = Vec::new();
@@ -2876,7 +3431,9 @@ impl Tracker<'_> {
                 Decision::Accept { apply_suggestions } => {
                     write.operation_id("accept", &(&revisions, apply_suggestions))?
                 }
-                Decision::Decline => write.operation_id("decline", &revisions)?,
+                Decision::Decline { reason } => {
+                    write.operation_id("decline", &(&revisions, reason))?
+                }
             })
         };
         if dry_run {
@@ -2887,7 +3444,7 @@ impl Tracker<'_> {
                         Decision::Accept { apply_suggestions } => {
                             (board.acceptance(row, apply_suggestions), None)
                         }
-                        Decision::Decline => (
+                        Decision::Decline { .. } => (
                             WorkPatch {
                                 status: Some(WorkStatus::Canceled),
                                 ..WorkPatch::default()
@@ -2922,7 +3479,7 @@ impl Tracker<'_> {
         };
         self.applies(match decision {
             Decision::Accept { .. } => "accepting triage",
-            Decision::Decline => "declining triage",
+            Decision::Decline { .. } => "declining triage",
         })?;
         let ids: Vec<String> = waiting.iter().map(|row| row.item.id.clone()).collect();
         let started_ms = now_ms();
@@ -2937,8 +3494,9 @@ impl Tracker<'_> {
                 )
                 .await
             }
-            Decision::Decline => {
-                work::triage_decline_as(self.app, WorkActor::Agent, &operation_id, &ids).await
+            Decision::Decline { reason } => {
+                work::triage_decline_as(self.app, WorkActor::Agent, &operation_id, &ids, reason)
+                    .await
             }
         }
         .map_err(|message| self.write_refusal(message, &operation_id, "One of these items"))?;
@@ -3077,23 +3635,38 @@ impl Tracker<'_> {
         let board = self.board().await?;
         let (from, to, kind) = board.link(args)?;
         let operation_id = args.write.fresh_operation_id();
-        let started_ms = now_ms();
-        let relation = work::relation_add_as(
-            self.app,
-            WorkActor::Agent,
-            &operation_id,
-            &from.item.id,
-            &to.item.id,
-            kind,
-        )
-        .map_err(|message| self.write_refusal(message, &operation_id, "The link"))?;
-        self.credit(
-            &args.write,
-            &[from.item.id.clone(), to.item.id.clone()],
-            started_ms,
-        )?;
+        let relation = if args.dry_run {
+            self.rehearse(|conn| {
+                items::add_relation(
+                    conn,
+                    &from.item.id,
+                    &to.item.id,
+                    kind,
+                    WorkActor::Agent,
+                    now_ms(),
+                )
+            })?
+        } else {
+            let started_ms = now_ms();
+            let relation = work::relation_add_as(
+                self.app,
+                WorkActor::Agent,
+                &operation_id,
+                &from.item.id,
+                &to.item.id,
+                kind,
+            )
+            .map_err(|message| self.write_refusal(message, &operation_id, "The link"))?;
+            self.credit(
+                &args.write,
+                &[from.item.id.clone(), to.item.id.clone()],
+                started_ms,
+            )?;
+            relation
+        };
         Ok(WorkAnswer::Relation(ExternalWorkRelationChange {
             schema_version: QUERY_SCHEMA_VERSION,
+            dry_run: args.dry_run,
             operation_id,
             removed: false,
             relation: relation_between(&relation, from, to),
@@ -3126,16 +3699,23 @@ impl Tracker<'_> {
                 )
             })?;
         let operation_id = args.write.operation_id("unrelate", &found.id)?;
-        let started_ms = now_ms();
-        work::relation_remove_as(self.app, WorkActor::Agent, &operation_id, &found.id)
-            .map_err(|message| self.write_refusal(message, &operation_id, "The link"))?;
-        self.credit(
-            &args.write,
-            &[from.item.id.clone(), to.item.id.clone()],
-            started_ms,
-        )?;
+        if args.dry_run {
+            self.rehearse(|conn| {
+                items::remove_relation(conn, &found.id, WorkActor::Agent, now_ms())
+            })?;
+        } else {
+            let started_ms = now_ms();
+            work::relation_remove_as(self.app, WorkActor::Agent, &operation_id, &found.id)
+                .map_err(|message| self.write_refusal(message, &operation_id, "The link"))?;
+            self.credit(
+                &args.write,
+                &[from.item.id.clone(), to.item.id.clone()],
+                started_ms,
+            )?;
+        }
         Ok(WorkAnswer::Relation(ExternalWorkRelationChange {
             schema_version: QUERY_SCHEMA_VERSION,
+            dry_run: args.dry_run,
             operation_id,
             removed: true,
             relation: relation_between(&found, from, to),
@@ -3226,6 +3806,7 @@ impl Tracker<'_> {
                 if label.name == name && label.hue.to_bits() == hue.to_bits() {
                     return Ok(WorkAnswer::Label(ExternalWorkLabelChange {
                         schema_version: QUERY_SCHEMA_VERSION,
+                        dry_run: args.dry_run,
                         operation_id: None,
                         deleted: false,
                         label: project_label(label.clone()),
@@ -3242,17 +3823,22 @@ impl Tracker<'_> {
                 args.write.fresh_operation_id(),
             ),
         };
-        self.applies("saving a label")?;
-        let label = work::work_label_save(
-            self.app.clone(),
-            operation_id.clone(),
-            id,
-            name.to_owned(),
-            hue,
-        )
-        .map_err(|message| self.write_refusal(message, &operation_id, "The label"))?;
+        let label = if args.dry_run {
+            self.rehearse(|conn| items::save_label(conn, id.as_deref(), name, hue, now_ms()))?
+        } else {
+            self.applies("saving a label")?;
+            work::work_label_save(
+                self.app.clone(),
+                operation_id.clone(),
+                id,
+                name.to_owned(),
+                hue,
+            )
+            .map_err(|message| self.write_refusal(message, &operation_id, "The label"))?
+        };
         Ok(WorkAnswer::Label(ExternalWorkLabelChange {
             schema_version: QUERY_SCHEMA_VERSION,
+            dry_run: args.dry_run,
             operation_id: Some(operation_id),
             deleted: false,
             label: project_label(label),
@@ -3270,12 +3856,17 @@ impl Tracker<'_> {
         )
         .map_err(|refusal| refusal.hint("List them with: sona work labels"))?
         .clone();
-        self.applies("deleting a label")?;
         let operation_id = args.write.operation_id("label-delete", &label.id)?;
-        work::work_label_delete(self.app.clone(), operation_id.clone(), label.id.clone())
-            .map_err(|message| self.write_refusal(message, &operation_id, "The label"))?;
+        if args.dry_run {
+            self.rehearse(|conn| items::delete_label(conn, &label.id))?;
+        } else {
+            self.applies("deleting a label")?;
+            work::work_label_delete(self.app.clone(), operation_id.clone(), label.id.clone())
+                .map_err(|message| self.write_refusal(message, &operation_id, "The label"))?;
+        }
         Ok(WorkAnswer::Label(ExternalWorkLabelChange {
             schema_version: QUERY_SCHEMA_VERSION,
+            dry_run: args.dry_run,
             operation_id: Some(operation_id),
             deleted: true,
             label: project_label(label),
@@ -3342,6 +3933,15 @@ impl Tracker<'_> {
                 OrderArg::Manual => WorkOrderBy::Manual,
             };
         }
+        if let Some(show) = args.show_empty_groups {
+            display.show_empty_groups = show;
+        }
+        if let Some(properties) = &args.properties {
+            display.properties = properties
+                .iter()
+                .map(|property| property.as_str().to_owned())
+                .collect();
+        }
         let (id, operation_id) = match existing {
             Some(view) => (
                 Some(view.id.clone()),
@@ -3352,17 +3952,24 @@ impl Tracker<'_> {
             ),
             None => (None, args.write.fresh_operation_id()),
         };
-        let view = work::work_view_save(
-            self.app.clone(),
-            operation_id.clone(),
-            id,
-            name.to_owned(),
-            query,
-            display,
-        )
-        .map_err(|message| self.write_refusal(message, &operation_id, "The view"))?;
+        let view = if args.dry_run {
+            self.rehearse(|conn| {
+                items::save_view(conn, id.as_deref(), name, &query, &display, now_ms())
+            })?
+        } else {
+            work::work_view_save(
+                self.app.clone(),
+                operation_id.clone(),
+                id,
+                name.to_owned(),
+                query,
+                display,
+            )
+            .map_err(|message| self.write_refusal(message, &operation_id, "The view"))?
+        };
         Ok(WorkAnswer::View(Box::new(ExternalWorkViewChange {
             schema_version: QUERY_SCHEMA_VERSION,
+            dry_run: args.dry_run,
             operation_id,
             deleted: false,
             view: project_view(&view),
@@ -3372,10 +3979,15 @@ impl Tracker<'_> {
     fn view_delete(&self, args: &ViewDeleteArgs) -> Result<WorkAnswer, ExternalError> {
         let view = self.view_named(&args.view)?;
         let operation_id = args.write.operation_id("view-delete", &view.id)?;
-        work::work_view_delete(self.app.clone(), operation_id.clone(), view.id.clone())
-            .map_err(|message| self.write_refusal(message, &operation_id, "The view"))?;
+        if args.dry_run {
+            self.rehearse(|conn| items::delete_view(conn, &view.id))?;
+        } else {
+            work::work_view_delete(self.app.clone(), operation_id.clone(), view.id.clone())
+                .map_err(|message| self.write_refusal(message, &operation_id, "The view"))?;
+        }
         Ok(WorkAnswer::View(Box::new(ExternalWorkViewChange {
             schema_version: QUERY_SCHEMA_VERSION,
+            dry_run: args.dry_run,
             operation_id,
             deleted: true,
             view: project_view(&view),
@@ -3520,13 +4132,10 @@ impl Fence {
     }
 
     fn hides_suggestion(&self, suggestion: &WorkFieldSuggestion) -> bool {
-        suggestion
-            .meeting_id
-            .as_deref()
-            .is_some_and(|meeting_id| match self {
-                Self::Open(kept_local) => kept_local.hides_meeting(meeting_id),
-                Self::Closed => true,
-            })
+        suggestion.draws_on(|meeting_id| match self {
+            Self::Open(kept_local) => kept_local.hides_meeting(meeting_id),
+            Self::Closed => true,
+        })
     }
 
     fn hides_evidence(&self, evidence: &planning::EvidenceLink) -> bool {
@@ -3612,6 +4221,7 @@ fn page(mut rows: Vec<WorkItemRow>, limit: Option<usize>, board: &Board) -> Exte
         total,
         has_more: total > limit,
         conversations_available: board.fence.is_open(),
+        read_as: None,
     }
 }
 
@@ -3878,6 +4488,12 @@ impl Board {
                     "List them with: sona work labels; make one with: sona work label-save NAME",
                 )
             })?;
+            if label.retired_at_ms.is_some() {
+                return Err(ExternalError::invalid(format!(
+                    "The label {:?} is retired. Bring it back with: sona work label-retire {:?} --restore",
+                    label.name, label.name
+                )));
+            }
             if !ids.contains(&label.id) {
                 ids.push(label.id.clone());
             }
@@ -4132,7 +4748,7 @@ impl Board {
             field(
                 "labels",
                 self.labels_text(&item.label_ids),
-                self.labels_text(label_ids),
+                self.labels_text(&self.one_per_group(label_ids, &item.label_ids)),
             );
         }
         if let Some(snoozed) = patch.snoozed_until_ms {
@@ -4157,6 +4773,15 @@ impl Board {
             );
         }
         changes
+    }
+
+    fn one_per_group(&self, ids: &[String], kept: &[String]) -> Vec<String> {
+        items::keep_one_per_group(ids, kept, |id| {
+            self.labels
+                .iter()
+                .find(|label| label.id == id)
+                .and_then(|label| label.group.clone())
+        })
     }
 
     fn labels_text(&self, ids: &[String]) -> String {
@@ -4348,9 +4973,13 @@ impl Board {
             (WorkSuggestionField::Project, WorkSuggestionValue::Id(id)) => {
                 (self.project_name(id), Some(id.clone()), None)
             }
+            (WorkSuggestionField::Label, WorkSuggestionValue::Id(id)) => {
+                (self.label_name(id), Some(id.clone()), None)
+            }
             (_, WorkSuggestionValue::Id(id)) => (self.task_text(id), Some(id.clone()), None),
         };
         ExternalWorkSuggestion {
+            suggestion_id: suggestion.id.clone(),
             field: suggestion.field,
             value,
             id,
@@ -4425,6 +5054,7 @@ impl Board {
             from: read(&entry.from),
             to: read(&entry.to),
             agent: entry.agent.clone(),
+            reason: entry.reason.clone(),
         }
     }
 
@@ -4547,6 +5177,8 @@ fn project_view(view: &WorkView) -> ExternalWorkView {
         layout: view.display.layout,
         group_by: view.display.group_by,
         order_by: view.display.order_by,
+        show_empty_groups: view.display.show_empty_groups,
+        properties: view.display.properties.clone(),
         revision: view.revision,
     }
 }
@@ -4780,6 +5412,8 @@ fn project_label(label: WorkLabel) -> ExternalWorkLabel {
         name: label.name,
         hue: label.hue,
         revision: label.revision,
+        group: label.group,
+        retired_at_ms: label.retired_at_ms,
     }
 }
 
@@ -4968,6 +5602,9 @@ impl WorkAnswer {
         let mut text = String::new();
         match self {
             Self::Page(page) => {
+                if let Some(read_as) = &page.read_as {
+                    words::text(read_as, &mut text);
+                }
                 if page.entries.is_empty() {
                     text.push_str("No tasks match.\n");
                 }
@@ -5001,6 +5638,9 @@ impl WorkAnswer {
                     WorkRelationKind::Blocks => "blocks",
                     WorkRelationKind::Related => "is related to",
                 };
+                if change.dry_run {
+                    text.push_str("Dry run. ");
+                }
                 let _ = writeln!(
                     text,
                     "{} {} {link} {} {}.",
@@ -5019,7 +5659,7 @@ impl WorkAnswer {
                     text.push_str("No labels yet. Make one with: sona work label-save NAME\n");
                 }
                 for label in &labels.labels {
-                    let _ = writeln!(text, "{}  (hue {})", label.name, label.hue);
+                    let _ = writeln!(text, "{}", routines::label_text(label));
                 }
             }
             Self::Projects(_)
@@ -5030,6 +5670,7 @@ impl WorkAnswer {
             | Self::Person(_)
             | Self::Meetings(_)
             | Self::MeetingDetail(_) => catalog::text(self, &mut text),
+            Self::Timeline(timeline) => timeline::text(timeline, &mut text),
             Self::ProjectDetail(_)
             | Self::ProjectUpdates(_)
             | Self::ProjectUpdate(_)
@@ -5039,13 +5680,48 @@ impl WorkAnswer {
             Self::Comments(_) | Self::Comment(_) => threads::text(self, &mut text),
             Self::Attachments(_) | Self::Attachment(_) => attachments::text(self, &mut text),
             Self::Organize(_) | Self::Day(_) | Self::Brief(_) => organize::text(self, &mut text),
+            Self::Speaker(_) => speakers::text(self, &mut text),
+            Self::PersonPage(_)
+            | Self::Companies(_)
+            | Self::Company(_)
+            | Self::FirstMet(_)
+            | Self::PeopleChange(_) => people::text(self, &mut text),
+            Self::SpeakerVoices(_) | Self::VoiceChange(_) => voices::text(self, &mut text),
+            Self::Sources(answer) => sources::text(answer, &mut text),
+            Self::Library(answer) => library::text(answer, &mut text),
+            Self::Transcript(answer) => transcript::text(answer, &mut text),
+            Self::Dictations(answer) => dictations::text(answer, &mut text),
+            Self::Settings(_) => preferences::text(self, &mut text),
             Self::Note(_) => notes::text(self, &mut text),
+            Self::Subjects(_) => subjects::text(self, &mut text),
+            Self::Planner(_) => planner::text(self, &mut text),
+            Self::TriageHints(_) => triage_hints::text(self, &mut text),
+            Self::Changes(_) => save::text(self, &mut text),
+            Self::Sessions(_) | Self::Session(_) => sessions::text(self, &mut text),
+            Self::Lifecycle(_)
+            | Self::Archive(_)
+            | Self::Versions(_)
+            | Self::Favorites(_)
+            | Self::Subscriptions(_)
+            | Self::Inbox(_) => lifecycle::text(self, &mut text),
+            Self::LabelEdit(_)
+            | Self::Templates(_)
+            | Self::Template(_)
+            | Self::Reminders(_)
+            | Self::Reminder(_) => routines::text(self, &mut text),
+            Self::AgentLoops(_)
+            | Self::AgentLoop(_)
+            | Self::AgentLoopChange(_)
+            | Self::AgentLoopRun(_) => agent_loops::text(self, &mut text),
             Self::Label(change) => {
                 let verb = match (change.deleted, &change.operation_id) {
                     (true, _) => "Deleted",
                     (false, None) => "Unchanged",
                     (false, Some(_)) => "Saved",
                 };
+                if change.dry_run {
+                    text.push_str("Dry run. ");
+                }
                 let _ = writeln!(
                     text,
                     "{verb} label {} (hue {}).",
@@ -5061,6 +5737,9 @@ impl WorkAnswer {
                 }
             }
             Self::View(change) => {
+                if change.dry_run {
+                    text.push_str("Dry run. ");
+                }
                 let _ = writeln!(
                     text,
                     "{} view {}  · {}",
@@ -5168,11 +5847,24 @@ impl WorkAnswer {
             Self::Counts(counts) => counts.conversations_available,
             Self::Detail(detail) => detail.conversations_available,
             Self::Export(export) => export.conversations_available,
+            Self::TriageHints(answer) => match answer.as_ref() {
+                triage_hints::TriageHintsAnswer::Suggestions(list) => list.conversations_available,
+                triage_hints::TriageHintsAnswer::Decision(_) => true,
+            },
             Self::Change(_)
             | Self::Preview(_)
             | Self::Relation(_)
             | Self::Labels(_)
             | Self::Label(_)
+            | Self::LabelEdit(_)
+            | Self::Templates(_)
+            | Self::Template(_)
+            | Self::Reminders(_)
+            | Self::Reminder(_)
+            | Self::AgentLoops(_)
+            | Self::AgentLoop(_)
+            | Self::AgentLoopChange(_)
+            | Self::AgentLoopRun(_)
             | Self::Views(_)
             | Self::View(_)
             | Self::FollowUp(_)
@@ -5183,6 +5875,7 @@ impl WorkAnswer {
             | Self::Projects(_)
             | Self::Project(_)
             | Self::Milestones(_)
+            | Self::Timeline(_)
             | Self::Milestone(_)
             | Self::People(_)
             | Self::Person(_)
@@ -5199,9 +5892,33 @@ impl WorkAnswer {
             | Self::Attachments(_)
             | Self::Attachment(_)
             | Self::Organize(_)
+            | Self::Speaker(_)
+            | Self::PersonPage(_)
+            | Self::Companies(_)
+            | Self::Company(_)
+            | Self::FirstMet(_)
+            | Self::PeopleChange(_)
+            | Self::SpeakerVoices(_)
+            | Self::VoiceChange(_)
+            | Self::Sources(_)
+            | Self::Library(_)
+            | Self::Transcript(_)
+            | Self::Dictations(_)
             | Self::Day(_)
             | Self::Brief(_)
-            | Self::Note(_) => true,
+            | Self::Note(_)
+            | Self::Subjects(_)
+            | Self::Planner(_)
+            | Self::Settings(_)
+            | Self::Changes(_)
+            | Self::Sessions(_)
+            | Self::Session(_)
+            | Self::Lifecycle(_)
+            | Self::Archive(_)
+            | Self::Versions(_)
+            | Self::Favorites(_)
+            | Self::Subscriptions(_)
+            | Self::Inbox(_) => true,
         }
     }
 }
@@ -5446,12 +6163,7 @@ fn detail_text(text: &mut String, detail: &ExternalWorkDetail, today: &Today) {
     if !detail.suggestions.is_empty() {
         text.push_str("\nSuggested\n");
         for suggestion in &detail.suggestions {
-            let field = match suggestion.field {
-                WorkSuggestionField::Owner => "owner",
-                WorkSuggestionField::Due => "due",
-                WorkSuggestionField::Project => "project",
-                WorkSuggestionField::Duplicate => "duplicate of",
-            };
+            let field = triage_hints::field_text(suggestion.field);
             let _ = writeln!(
                 text,
                 "  {field}: {} ({})",
@@ -5501,13 +6213,20 @@ fn detail_text(text: &mut String, detail: &ExternalWorkDetail, today: &Today) {
                 .ok()
                 .and_then(|value| value.as_str().map(str::to_owned))
                 .unwrap_or_default();
-            let change = match (&entry.from, &entry.to) {
-                (Some(from), Some(to)) => format!("{kind}: {from} → {to}"),
-                (None, Some(to)) => format!("{kind}: {to}"),
-                (Some(from), None) => format!("{kind}: removed {from}"),
-                (None, None) => kind,
+            let change = match (entry.kind, entry.from.as_deref(), entry.to.as_deref()) {
+                (WorkActivityKind::Archived, _, Some(work::bin::BIN)) => "deleted".to_owned(),
+                (WorkActivityKind::Restored, Some(work::bin::BIN), _) => {
+                    "restored from Recently deleted".to_owned()
+                }
+                (_, Some(from), Some(to)) => format!("{kind}: {from} → {to}"),
+                (_, None, Some(to)) => format!("{kind}: {to}"),
+                (_, Some(from), None) => format!("{kind}: removed {from}"),
+                (_, None, None) => kind,
             };
             let _ = writeln!(text, "  {}  {actor}  {change}", local_time(entry.at_ms));
+            if let Some(reason) = &entry.reason {
+                let _ = writeln!(text, "      reason: {reason}");
+            }
         }
     }
     let _ = writeln!(text, "\nid {} · revision {}", task.id, task.revision);
@@ -5660,10 +6379,28 @@ fn filters_text(filters: &ExternalWorkFilters) -> String {
 
 mod attachments;
 mod catalog;
+mod preferences;
+mod lifecycle;
 mod notes;
 mod organize;
+mod people;
 mod roadmap;
+mod save;
+mod speakers;
+mod voices;
+mod sources;
+mod library;
+mod transcript;
+mod dictations;
+mod sessions;
+mod routines;
+mod agent_loops;
 mod threads;
+mod planner;
+mod triage_hints;
+mod subjects;
+mod timeline;
+mod words;
 
 #[cfg(test)]
 mod tests;

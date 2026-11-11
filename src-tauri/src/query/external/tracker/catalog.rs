@@ -2,17 +2,20 @@
 //! meetings feed: what an organizer agent needs to keep the tracker tidy.
 
 use super::{
-    conversations_closed, day_or_none, day_text, pick, Board, DayArg, Priority, Tracker,
+    conversations_closed, day_or_none, day_text, now_ms, pick, Board, DayArg, Priority, Tracker,
     WorkAnswer, WorkPersonChoice, WriteArgs,
 };
-use crate::meeting::people_types::{PersonListEntry, PersonMergeRequest};
+use crate::meeting::people_types::{
+    PersonId, PersonListEntry, PersonMergeRequest, VoiceProfileMergeResolution,
+};
+use crate::meeting::session::{map_store_error, MeetingSessionManager};
 use crate::meeting::store::PersonProfileEdit;
-use crate::meeting::types::{MeetingPhase, ProcessingStatus};
+use crate::meeting::types::{MeetingCommandError, MeetingPhase, ProcessingStatus};
 use crate::planning;
 use crate::planning::catalog::{LinkEdit, MilestoneEdit, ProjectEdit};
 use crate::planning::store as plans;
 use crate::planning::work;
-use crate::planning::work::types::WorkStatus;
+use crate::planning::work::types::{WorkOwner, WorkStatus};
 use crate::planning::{
     DateResolution, Milestone, Project, ProjectLink, ProjectStatus, TaskStatus,
 };
@@ -25,6 +28,7 @@ use chrono::NaiveDate;
 use clap::{Args, ValueEnum};
 use serde::Serialize;
 use std::fmt::Write as _;
+use std::sync::Arc;
 use uuid::Uuid;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -163,10 +167,10 @@ pub struct ProjectSaveArgs {
     pub details: Option<String>,
     #[arg(long, value_enum)]
     pub status: Option<ProjectState>,
-    /// A person from the People page, or "none".
+    /// me, a person from the People page, or nobody.
     #[arg(long, value_name = "PERSON")]
     pub lead: Option<String>,
-    /// Comma-separated people; an empty value clears the list.
+    /// Comma-separated people, me among them for you; an empty value clears the list.
     #[arg(long, value_delimiter = ',', value_name = "PEOPLE")]
     pub members: Option<Vec<String>>,
     /// YYYY-MM-DD, today, tomorrow or none.
@@ -209,6 +213,9 @@ pub struct ProjectArchiveArgs {
     /// Bring a put-away project back.
     #[arg(long)]
     pub restore: bool,
+    /// Show the project as it would be left; nothing changes.
+    #[arg(long)]
+    pub dry_run: bool,
     #[command(flatten)]
     pub write: WriteArgs,
 }
@@ -233,6 +240,9 @@ pub struct MilestoneSaveArgs {
     pub details: Option<String>,
     #[arg(long, value_enum)]
     pub status: Option<MilestoneState>,
+    /// Show the milestone as it would be saved; nothing changes.
+    #[arg(long)]
+    pub dry_run: bool,
     #[command(flatten)]
     pub write: WriteArgs,
 }
@@ -241,6 +251,9 @@ pub struct MilestoneSaveArgs {
 pub struct MilestoneDeleteArgs {
     pub project: String,
     pub milestone: String,
+    /// Show the milestone that would be deleted; nothing changes.
+    #[arg(long)]
+    pub dry_run: bool,
     #[command(flatten)]
     pub write: WriteArgs,
 }
@@ -271,6 +284,9 @@ pub struct PersonSaveArgs {
     pub email: Option<Vec<String>>,
     #[arg(long)]
     pub notes: Option<String>,
+    /// Show the person as they would be saved; nothing changes.
+    #[arg(long)]
+    pub dry_run: bool,
     #[command(flatten)]
     pub write: WriteArgs,
 }
@@ -282,8 +298,33 @@ pub struct PersonMergeArgs {
     /// The person who keeps everything.
     #[arg(long, value_name = "PERSON")]
     pub into: String,
+    /// When both have a saved voice, which one stays: `into` keeps the voice
+    /// of the person who keeps everything and deletes the other, `from` keeps
+    /// the folded person's voice and deletes the other, `both` combines them.
+    #[arg(long, value_enum, value_name = "WHICH")]
+    pub voice: Option<MergeVoice>,
+    /// Show the person as the merge would leave them; nothing changes.
+    #[arg(long)]
+    pub dry_run: bool,
     #[command(flatten)]
     pub write: WriteArgs,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum MergeVoice {
+    Into,
+    From,
+    Both,
+}
+
+impl MergeVoice {
+    const fn resolution(self) -> VoiceProfileMergeResolution {
+        match self {
+            Self::Into => VoiceProfileMergeResolution::DiscardSource,
+            Self::From => VoiceProfileMergeResolution::ReplaceTargetWithSource,
+            Self::Both => VoiceProfileMergeResolution::CombineCompatible,
+        }
+    }
 }
 
 #[derive(Args, Clone, Debug, Eq, PartialEq)]
@@ -293,6 +334,15 @@ pub struct MeetingsArgs {
     pub since: Option<SinceArg>,
     #[arg(long)]
     pub limit: Option<usize>,
+    /// Only meetings whose title contains this, ignoring case.
+    #[arg(long, value_name = "TEXT")]
+    pub title: Option<String>,
+    /// Only meetings in this state.
+    #[arg(long, value_enum, value_name = "STATUS")]
+    pub status: Option<super::library::MeetingStatus>,
+    /// Only meetings filed in this folder, by name or id, from `folders`.
+    #[arg(long, value_name = "FOLDER")]
+    pub folder: Option<String>,
 }
 
 #[derive(Args, Clone, Debug, Eq, PartialEq)]
@@ -318,7 +368,9 @@ pub struct ExternalWorkProject {
     pub priority: Priority,
     pub icon: Option<String>,
     pub lead: Option<ExternalWorkPersonRef>,
+    pub lead_is_self: bool,
     pub members: Vec<ExternalWorkPersonRef>,
+    pub members_include_self: bool,
     pub start: Option<String>,
     pub start_at_ms: Option<i64>,
     pub start_resolution: Option<DateResolution>,
@@ -375,6 +427,7 @@ pub struct ExternalWorkMilestones {
 #[derive(Clone, Debug, Serialize)]
 pub struct ExternalWorkMilestoneChange {
     pub schema_version: u32,
+    pub dry_run: bool,
     pub operation_id: Option<String>,
     pub created: bool,
     pub deleted: bool,
@@ -405,6 +458,7 @@ pub struct ExternalWorkPeople {
 #[derive(Clone, Debug, Serialize)]
 pub struct ExternalWorkPersonChange {
     pub schema_version: u32,
+    pub dry_run: bool,
     pub operation_id: Option<String>,
     pub created: bool,
     /// Set when the person was merged away: who they were folded into.
@@ -439,6 +493,9 @@ pub struct ExternalWorkMeetingDetail {
     #[serde(flatten)]
     pub meeting: ExternalMeetingDetail,
     pub people: Vec<String>,
+    /// Each speaker by the name the transcript shows, with the id
+    /// `speaker-assign` takes and whether they still need a name.
+    pub meeting_speakers: Vec<super::speakers::ExternalWorkSpeaker>,
     pub transcript: Option<ExternalTranscript>,
 }
 
@@ -469,8 +526,44 @@ fn is_open(status: WorkStatus) -> bool {
     )
 }
 
+impl Board {
+    fn project_people(&self, args: &ProjectSaveArgs) -> Result<ProjectEdit, ExternalError> {
+        let lead = match &args.lead {
+            Some(value) if cleared(value) => Some(WorkOwner::Nobody),
+            Some(value) => Some(self.owner(value)?),
+            None => None,
+        };
+        let (member_person_ids, members_include_self) = match &args.members {
+            Some(values) => {
+                let mut ids = Vec::new();
+                let mut include_self = false;
+                for value in words(values) {
+                    match self.owner(&value)? {
+                        WorkOwner::Myself => include_self = true,
+                        WorkOwner::Nobody => {}
+                        WorkOwner::Person { person_id } => {
+                            if !ids.contains(&person_id) {
+                                ids.push(person_id);
+                            }
+                        }
+                    }
+                }
+                ids.sort();
+                (Some(ids), Some(include_self))
+            }
+            None => (None, None),
+        };
+        Ok(ProjectEdit {
+            lead,
+            member_person_ids,
+            members_include_self,
+            ..ProjectEdit::default()
+        })
+    }
+}
+
 impl Tracker<'_> {
-    fn every_project(&self) -> Result<Vec<Project>, ExternalError> {
+    pub(super) fn every_project(&self) -> Result<Vec<Project>, ExternalError> {
         planning::history(self.history, |conn| plans::all_projects(conn))
             .map_err(|message| super::refusal(self.history, message))
     }
@@ -513,11 +606,13 @@ impl Tracker<'_> {
             priority: Priority::of(project.priority),
             icon: project.icon.clone(),
             lead: project.lead_person_id.as_ref().and_then(person),
+            lead_is_self: project.lead_is_self,
             members: project
                 .member_person_ids
                 .iter()
                 .filter_map(person)
                 .collect(),
+            members_include_self: project.members_include_self,
             start: target_text(project.start_at_ms),
             start_at_ms: project.start_at_ms,
             start_resolution: project.start_resolution,
@@ -605,25 +700,7 @@ impl Tracker<'_> {
                 taken.title
             )));
         }
-        let lead = match &args.lead {
-            Some(value) if cleared(value) => Some(String::new()),
-            Some(value) => Some(board.person(value)?.id.clone()),
-            None => None,
-        };
-        let members = match &args.members {
-            Some(values) => {
-                let mut ids = Vec::new();
-                for value in words(values) {
-                    let id = board.person(&value)?.id.clone();
-                    if !ids.contains(&id) {
-                        ids.push(id);
-                    }
-                }
-                ids.sort();
-                Some(ids)
-            }
-            None => None,
-        };
+        let people = board.project_people(args)?;
         let label_ids = match &args.labels {
             Some(values) => {
                 let names = words(values);
@@ -661,8 +738,9 @@ impl Tracker<'_> {
             title: (existing.is_none() || args.project.is_some()).then(|| name.to_owned()),
             description: args.details.clone(),
             status: args.status.map(Into::into),
-            lead_person_id: lead,
-            member_person_ids: members,
+            lead: people.lead,
+            member_person_ids: people.member_person_ids,
+            members_include_self: people.members_include_self,
             target_at_ms: args.target.map(DayArg::ms).transpose()?,
             hue: args.hue,
             archived: None,
@@ -738,17 +816,18 @@ impl Tracker<'_> {
             let operation_id = args
                 .write
                 .operation_id("project-archive", &(&current.id, current.revision, archive))?;
-            self.applies("putting a project away")?;
-            let project = work::catalog_project_save(
-                self.app,
-                &operation_id,
-                Some(current.id.clone()),
-                &edit,
-            )
-            .map_err(|message| self.write_refusal(message, &operation_id, "The project"))?;
+            let project = if args.dry_run {
+                self.rehearse(|conn| {
+                    planning::catalog::save_project(conn, Some(&current.id), &edit, now_ms())
+                })?
+            } else {
+                self.applies("putting a project away")?;
+                work::catalog_project_save(self.app, &operation_id, Some(current.id.clone()), &edit)
+                    .map_err(|message| self.write_refusal(message, &operation_id, "The project"))?
+            };
             return Ok(WorkAnswer::Project(ExternalWorkProjectChange {
                 schema_version: QUERY_SCHEMA_VERSION,
-                dry_run: false,
+                dry_run: args.dry_run,
                 operation_id: Some(operation_id),
                 created: false,
                 project: self.project_row(&project, &board),
@@ -756,14 +835,14 @@ impl Tracker<'_> {
         }
         Ok(WorkAnswer::Project(ExternalWorkProjectChange {
             schema_version: QUERY_SCHEMA_VERSION,
-            dry_run: false,
+            dry_run: args.dry_run,
             operation_id: None,
             created: false,
             project: self.project_row(current, &board),
         }))
     }
 
-    fn milestone_row(milestone: &Milestone, board: &Board) -> ExternalWorkMilestone {
+    pub(super) fn milestone_row(milestone: &Milestone, board: &Board) -> ExternalWorkMilestone {
         let (mut open, mut done) = (0, 0);
         for row in &board.rows {
             let item = &row.item;
@@ -791,7 +870,7 @@ impl Tracker<'_> {
         }
     }
 
-    fn milestones_of(&self, project: &Project) -> Result<Vec<Milestone>, ExternalError> {
+    pub(super) fn milestones_of(&self, project: &Project) -> Result<Vec<Milestone>, ExternalError> {
         planning::history(self.history, |conn| {
             Ok(plans::records(conn, &project.id)?.milestones)
         })
@@ -849,17 +928,19 @@ impl Tracker<'_> {
             due_at_ms: args.target.map(DayArg::ms).transpose()?,
             status: args.status.map(Into::into),
         };
+        let project_ref = ExternalWorkPersonRef {
+            id: project.id.clone(),
+            name: project.title.clone(),
+        };
         if let Some(current) = existing {
             if !changes_milestone(current, &edit) {
                 return Ok(WorkAnswer::Milestone(ExternalWorkMilestoneChange {
                     schema_version: QUERY_SCHEMA_VERSION,
+                    dry_run: args.dry_run,
                     operation_id: None,
                     created: false,
                     deleted: false,
-                    project: ExternalWorkPersonRef {
-                        id: project.id.clone(),
-                        name: project.title.clone(),
-                    },
+                    project: project_ref,
                     milestone: Self::milestone_row(current, &board),
                 }));
             }
@@ -870,24 +951,23 @@ impl Tracker<'_> {
                 .operation_id("milestone-save", &(&current.id, current.revision, &edit))?,
             None => args.write.fresh_operation_id(),
         };
-        self.applies("saving a milestone")?;
-        let milestone = work::catalog_milestone_save(
-            self.app,
-            &operation_id,
-            &project.id,
-            existing.map(|milestone| milestone.id.clone()),
-            &edit,
-        )
-        .map_err(|message| self.write_refusal(message, &operation_id, "The milestone"))?;
+        let id = existing.map(|milestone| milestone.id.clone());
+        let milestone = if args.dry_run {
+            self.rehearse(|conn| {
+                planning::catalog::save_milestone(conn, &project.id, id.as_deref(), &edit, now_ms())
+            })?
+        } else {
+            self.applies("saving a milestone")?;
+            work::catalog_milestone_save(self.app, &operation_id, &project.id, id, &edit)
+                .map_err(|message| self.write_refusal(message, &operation_id, "The milestone"))?
+        };
         Ok(WorkAnswer::Milestone(ExternalWorkMilestoneChange {
             schema_version: QUERY_SCHEMA_VERSION,
+            dry_run: args.dry_run,
             operation_id: Some(operation_id),
             created: existing.is_none(),
             deleted: false,
-            project: ExternalWorkPersonRef {
-                id: project.id.clone(),
-                name: project.title.clone(),
-            },
+            project: project_ref,
             milestone: Self::milestone_row(&milestone, &board),
         }))
     }
@@ -904,11 +984,18 @@ impl Tracker<'_> {
         let operation_id = args
             .write
             .operation_id("milestone-delete", &(&milestone.id, milestone.revision))?;
-        self.applies("deleting a milestone")?;
-        work::catalog_milestone_delete(self.app, &operation_id, &milestone.id)
-            .map_err(|message| self.write_refusal(message, &operation_id, "The milestone"))?;
+        if args.dry_run {
+            self.rehearse(|conn| {
+                planning::catalog::delete_milestone(conn, &milestone.id, now_ms())
+            })?;
+        } else {
+            self.applies("deleting a milestone")?;
+            work::catalog_milestone_delete(self.app, &operation_id, &milestone.id)
+                .map_err(|message| self.write_refusal(message, &operation_id, "The milestone"))?;
+        }
         Ok(WorkAnswer::Milestone(ExternalWorkMilestoneChange {
             schema_version: QUERY_SCHEMA_VERSION,
+            dry_run: args.dry_run,
             operation_id: Some(operation_id),
             created: false,
             deleted: true,
@@ -1075,9 +1162,35 @@ impl Tracker<'_> {
             None => args.write.fresh_operation_id(),
         };
         let store = store(self.meetings).await?;
+        let created = existing.is_none();
+        if args.dry_run {
+            let person_id = existing
+                .map(|person| parse_person(&person.id))
+                .transpose()?;
+            let (saved, changed) = store
+                .person_profile_preview(person_id, name.to_owned(), edit, now_ms())
+                .map_err(|error| {
+                    ExternalError::invalid(format!(
+                        "The person could not be saved ({:?}).",
+                        map_store_error(error)
+                    ))
+                })?;
+            let sources = match existing {
+                Some(person) => self.person_sources(&store, &person.id)?,
+                None => Vec::new(),
+            };
+            return Ok(WorkAnswer::Person(ExternalWorkPersonChange {
+                schema_version: QUERY_SCHEMA_VERSION,
+                dry_run: true,
+                operation_id: changed.then_some(operation_id),
+                created,
+                merged_from: None,
+                moved_tasks: 0,
+                person: Self::person_row(&board, &sources, &saved),
+            }));
+        }
         let before = store.people_list().map_err(QueryError::from)?;
         self.applies("saving a person")?;
-        let created = existing.is_none();
         match existing {
             Some(person) => {
                 self.meetings
@@ -1102,6 +1215,7 @@ impl Tracker<'_> {
         let changed = created || after.revision != before.revision;
         Ok(WorkAnswer::Person(ExternalWorkPersonChange {
             schema_version: QUERY_SCHEMA_VERSION,
+            dry_run: false,
             operation_id: changed.then_some(operation_id),
             created,
             merged_from: None,
@@ -1139,34 +1253,28 @@ impl Tracker<'_> {
         let operation_id = args
             .write
             .operation_id("person-merge", &(&from.id, &into.id))?;
-        self.applies("merging people")?;
-        let revision = store.people_list().map_err(QueryError::from)?.revision;
-        self.meetings
-            .person_merge(PersonMergeRequest {
-                source_person_id: parse_person(&from.id)?,
-                target_person_id: parse_person(&into.id)?,
-                expected_revision: revision,
-                voice_profile_resolution: None,
-            })
-            .await
-        .map_err(|error| {
-            ExternalError::invalid(format!(
-                "The merge was refused ({error:?}). When both people have a voice profile, merge them on Sona's People page to choose which one to keep."
-            ))
-        })?;
-        work::catalog_person_repoint(self.app, &operation_id, &from.id, &into.id)
-            .map_err(|message| self.write_refusal(message, &operation_id, "The tracker"))?;
-        let after = store.people_list().map_err(QueryError::from)?;
-        let kept = after
-            .entries
-            .iter()
-            .find(|entry| entry.person.id.uuid().to_string() == into.id)
-            .ok_or_else(|| {
-                ExternalError::new(ExternalErrorCode::Failed, "The merge did not finish.")
-            })?;
-        let sources = self.person_sources(&store, &into.id)?;
+        if !args.dry_run {
+            self.applies("merging people")?;
+        }
+        let kept = merge_people(
+            self.meetings,
+            parse_person(&from.id)?,
+            parse_person(&into.id)?,
+            args.voice,
+            args.dry_run,
+        )
+        .await?;
+        let mut sources = self.person_sources(&store, &into.id)?;
+        if args.dry_run {
+            sources.extend(self.person_sources(&store, &from.id)?);
+        } else {
+            work::catalog_person_repoint(self.app, &operation_id, &from.id, &into.id)
+                .map_err(|message| self.write_refusal(message, &operation_id, "The tracker"))?;
+        }
+        let kept = &kept;
         Ok(WorkAnswer::Person(ExternalWorkPersonChange {
             schema_version: QUERY_SCHEMA_VERSION,
+            dry_run: args.dry_run,
             operation_id: Some(operation_id),
             created: false,
             merged_from: Some(from.name.clone()),
@@ -1188,7 +1296,16 @@ impl Tracker<'_> {
             .limit
             .unwrap_or(super::DEFAULT_LIMIT)
             .clamp(1, super::MAX_LIMIT);
-        let (entries, has_more) = meeting_summaries(&store, since_ms, None, limit)?;
+        let filter = crate::meeting::types::MeetingListFilter {
+            status: args.status.map(Into::into).unwrap_or_default(),
+            title_query: args.title.clone().unwrap_or_default(),
+            folder_id: match &args.folder {
+                Some(folder) => Some(super::library::folder(self.meetings, folder).await?.folder_id),
+                None => None,
+            },
+            ..Default::default()
+        };
+        let (entries, has_more) = meeting_summaries(&store, since_ms, None, limit, &filter)?;
         let mut meetings = Vec::with_capacity(entries.len());
         for entry in entries {
             let people = meeting_people(&store, entry.session_id)?;
@@ -1225,6 +1342,7 @@ impl Tracker<'_> {
         Ok(WorkAnswer::MeetingDetail(Box::new(
             ExternalWorkMeetingDetail {
                 people: meeting_people(&store, id)?,
+                meeting_speakers: super::speakers::listed(self.meetings, &store, id).await?,
                 meeting,
                 transcript,
             },
@@ -1294,14 +1412,17 @@ fn changes_project(current: &Project, edit: &ProjectEdit) -> bool {
         .is_some_and(|title| title != &current.title)
         || text(&edit.description, &current.description)
         || edit.status.is_some_and(|status| status != current.status)
-        || edit.lead_person_id.as_ref().is_some_and(|lead| {
-            lead.as_str() != current.lead_person_id.as_deref().unwrap_or_default()
+        || edit.lead.as_ref().is_some_and(|lead| {
+            *lead != WorkOwner::of(current.lead_is_self, current.lead_person_id.as_deref())
         })
         || edit.member_person_ids.as_ref().is_some_and(|members| {
             let mut now = current.member_person_ids.clone();
             now.sort();
             &now != members
         })
+        || edit
+            .members_include_self
+            .is_some_and(|include| include != current.members_include_self)
         || edit
             .target_at_ms
             .is_some_and(|target| target != current.target_at_ms)
@@ -1359,7 +1480,9 @@ pub(super) fn text(answer: &WorkAnswer, text: &mut String) {
                     "{}  · {:?} · {} open, {} done",
                     project.name, project.status, project.open_tasks, project.done_tasks
                 );
-                if let Some(lead) = &project.lead {
+                if project.lead_is_self {
+                    text.push_str(" · lead you");
+                } else if let Some(lead) = &project.lead {
                     let _ = write!(text, " · lead {}", lead.name);
                 }
                 if let Some(target) = &project.target {
@@ -1412,6 +1535,9 @@ pub(super) fn text(answer: &WorkAnswer, text: &mut String) {
                 (false, false, None) => "Unchanged",
                 (false, false, Some(_)) => "Saved",
             };
+            if change.dry_run {
+                text.push_str("Dry run. ");
+            }
             let _ = writeln!(
                 text,
                 "{verb} milestone {} in {}.",
@@ -1438,17 +1564,35 @@ pub(super) fn text(answer: &WorkAnswer, text: &mut String) {
         }
         WorkAnswer::Person(change) => {
             if let Some(from) = &change.merged_from {
+                let (verb, moved) = if change.dry_run {
+                    ("Would merge", "would move")
+                } else {
+                    ("Merged", "moved")
+                };
                 let _ = writeln!(
                     text,
-                    "Merged {from} into {}; {} tasks moved.",
+                    "{verb} {from} into {}; {} tasks {moved}.",
                     change.person.name, change.moved_tasks
                 );
+                if change.dry_run {
+                    let person = &change.person;
+                    if !person.aliases.is_empty() {
+                        let _ = writeln!(text, "  Also: {}", person.aliases.join(", "));
+                    }
+                    if !person.emails.is_empty() {
+                        let _ = writeln!(text, "  Email: {}", person.emails.join(", "));
+                    }
+                    let _ = writeln!(text, "  Meetings: {}", person.meetings);
+                }
             } else {
                 let verb = match (change.created, &change.operation_id) {
                     (true, _) => "Added",
                     (false, None) => "Unchanged",
                     (false, Some(_)) => "Saved",
                 };
+                if change.dry_run {
+                    text.push_str("Dry run. ");
+                }
                 let _ = writeln!(text, "{verb} {}.", change.person.name);
             }
         }
@@ -1485,6 +1629,7 @@ pub(super) fn text(answer: &WorkAnswer, text: &mut String) {
             if !detail.people.is_empty() {
                 let _ = writeln!(text, "People: {}", detail.people.join(", "));
             }
+            super::speakers::listed_text(&detail.meeting_speakers, text);
             if let Some(summary) = &meeting.summary {
                 let _ = writeln!(text, "\n{summary}");
             }
@@ -1509,5 +1654,230 @@ pub(super) fn text(answer: &WorkAnswer, text: &mut String) {
             }
         }
         _ => {}
+    }
+}
+
+
+pub(super) async fn merge_people(
+    meetings: &Arc<MeetingSessionManager>,
+    from: PersonId,
+    into: PersonId,
+    voice: Option<MergeVoice>,
+    dry_run: bool,
+) -> Result<PersonListEntry, ExternalError> {
+    let store = store(meetings).await?;
+    let voice = voice.map(MergeVoice::resolution);
+    if dry_run {
+        return store
+            .person_merge_preview(from, into, voice, now_ms())
+            .map_err(|error| merge_refusal(map_store_error(error)));
+    }
+    let revision = store.people_list().map_err(QueryError::from)?.revision;
+    meetings
+        .person_merge(PersonMergeRequest {
+            source_person_id: from,
+            target_person_id: into,
+            expected_revision: revision,
+            voice_profile_resolution: voice,
+        })
+        .await
+        .map_err(merge_refusal)?;
+    store
+        .people_list()
+        .map_err(QueryError::from)?
+        .entries
+        .into_iter()
+        .find(|entry| entry.person.id == into)
+        .ok_or_else(|| ExternalError::new(ExternalErrorCode::Failed, "The merge did not finish."))
+}
+
+fn merge_refusal(error: MeetingCommandError) -> ExternalError {
+    match error {
+        MeetingCommandError::ProfileMergeResolutionRequired => ExternalError::invalid(
+            "A saved voice is involved. Pass --voice into, from or both to choose which one stays.",
+        ),
+        MeetingCommandError::ProfileModelIncompatible => ExternalError::invalid(
+            "The two saved voices cannot be combined. Pass --voice into or from to keep one.",
+        ),
+        error => ExternalError::invalid(format!("The merge was refused ({error:?}).")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{Fence, WorkCommand, WorkVerb};
+    use super::*;
+    use crate::cli::{CliArgs, Command};
+    use crate::planning::schema;
+    use crate::query::KeptLocal;
+    use clap::Parser;
+    use rusqlite::Connection;
+    use std::collections::{BTreeMap, HashMap, HashSet};
+
+    fn project_save(argv: &[&str]) -> ProjectSaveArgs {
+        let argv = ["sona", "work", "project-save", "Harbor"].iter().chain(argv);
+        match CliArgs::try_parse_from(argv) {
+            Ok(CliArgs {
+                command:
+                    Some(Command::Work(WorkCommand {
+                        verb: WorkVerb::ProjectSave(args),
+                        ..
+                    })),
+                ..
+            }) => args,
+            other => panic!("`work project-save` parsed as {other:?}"),
+        }
+    }
+
+    /// The user is nobody on the People page, so `me` leads or joins a
+    /// project as the user, and `nobody` takes the user off as lead.
+    #[test]
+    fn me_leads_and_joins_a_project_and_nobody_clears_the_lead() {
+        let conn = Connection::open_in_memory().expect("a history database");
+        schema::apply_all(&conn).expect("the planner schema");
+        let board = Board {
+            rows: Vec::new(),
+            labels: Vec::new(),
+            projects: Vec::new(),
+            people: vec![WorkPersonChoice {
+                id: "dana".to_owned(),
+                name: "Dana Reyes".to_owned(),
+                aliases: Vec::new(),
+            }],
+            suggestions: BTreeMap::new(),
+            focus: Vec::new(),
+            repeats: HashMap::new(),
+            fence: Fence::Open(KeptLocal(HashSet::new())),
+            cycles: Vec::new(),
+        };
+        let edit = |argv: &[&str]| {
+            let mut edit = board
+                .project_people(&project_save(argv))
+                .expect("the people resolve");
+            edit.title = Some("Harbor".to_owned());
+            edit
+        };
+        let save = |id: Option<&str>, edit: &ProjectEdit| {
+            planning::catalog::save_project(&conn, id, edit, 1).expect("the project saves")
+        };
+
+        let dry = project_save(&["--lead", "me", "--members", "me,Dana", "--dry-run"]);
+        assert!(dry.dry_run);
+        let rehearsal = conn.unchecked_transaction().expect("a rehearsal");
+        save(None, &edit(&["--lead", "me", "--members", "me,Dana"]));
+        drop(rehearsal);
+        assert!(plans::all_projects(&conn).expect("the projects").is_empty());
+
+        let mine = edit(&["--lead", "me", "--members", "me,Dana"]);
+        let project = save(None, &mine);
+        assert!(project.lead_is_self);
+        assert_eq!(project.lead_person_id, None);
+        assert!(project.members_include_self);
+        assert_eq!(project.member_person_ids, ["dana"]);
+        assert!(!changes_project(&project, &mine));
+
+        let project = save(Some(&project.id), &edit(&["--lead", "Dana"]));
+        assert!(!project.lead_is_self);
+        assert_eq!(project.lead_person_id.as_deref(), Some("dana"));
+
+        let project = save(Some(&project.id), &edit(&["--lead", "me"]));
+        assert!(project.lead_is_self);
+        assert_eq!(project.lead_person_id, None);
+
+        let project = save(Some(&project.id), &edit(&["--lead", "nobody"]));
+        assert!(!project.lead_is_self);
+        assert_eq!(project.lead_person_id, None);
+        assert!(project.members_include_self);
+        assert_eq!(project.member_person_ids, ["dana"]);
+    }
+
+    fn scopes(argv: &[&str]) -> &'static [crate::query::external::ExternalScope] {
+        match CliArgs::try_parse_from(["sona", "work"].iter().chain(argv)) {
+            Ok(CliArgs {
+                command: Some(Command::Work(WorkCommand { verb, .. })),
+                ..
+            }) => verb.required_scopes(),
+            other => panic!("`work {argv:?}` parsed as {other:?}"),
+        }
+    }
+
+    /// A dry run of putting a project away or saving a person needs only
+    /// read access, shows the result and keeps nothing; the real run keeps it.
+    #[test]
+    fn a_dry_run_archive_or_person_save_keeps_nothing_until_the_real_run() {
+        use super::super::roadmap::rehearsed;
+        use crate::meeting::store::workflow_core_tests;
+        use crate::planning::store as plans;
+        use crate::query::external::{READ_SCOPES, WRITE_SCOPES};
+
+        assert_eq!(
+            scopes(&["project-archive", "Harbor", "--dry-run"]),
+            READ_SCOPES
+        );
+        assert_eq!(
+            scopes(&["person-save", "Dana Reyes", "--dry-run"]),
+            READ_SCOPES
+        );
+        assert_eq!(scopes(&["project-archive", "Harbor"]), WRITE_SCOPES);
+        assert_eq!(scopes(&["person-save", "Dana Reyes"]), WRITE_SCOPES);
+
+        let mut conn = Connection::open_in_memory().expect("a history database");
+        schema::apply_all(&conn).expect("the planner schema");
+        let harbor = ProjectEdit {
+            title: Some("Harbor".to_owned()),
+            ..ProjectEdit::default()
+        };
+        let project = planning::catalog::save_project(&conn, None, &harbor, 1).expect("Harbor");
+        let put_away = ProjectEdit {
+            archived: Some(true),
+            ..ProjectEdit::default()
+        };
+        let shown = rehearsed(&mut conn, |tx| {
+            planning::catalog::save_project(tx, Some(&project.id), &put_away, 2)
+        })
+        .expect("a rehearsed archive");
+        assert!(shown.archived_at_ms.is_some());
+        let kept = plans::project(&conn, &project.id).expect("Harbor after the dry run");
+        assert_eq!(kept.archived_at_ms, None);
+        planning::catalog::save_project(&conn, Some(&project.id), &put_away, 3).expect("archive");
+        let kept = plans::project(&conn, &project.id).expect("Harbor after the real run");
+        assert!(kept.archived_at_ms.is_some());
+
+        let (_directory, store) = workflow_core_tests::store();
+        let (shown, changed) = store
+            .person_profile_preview(
+                None,
+                "Dana Reyes".to_owned(),
+                PersonProfileEdit::default(),
+                1,
+            )
+            .expect("a previewed person");
+        assert!(changed);
+        assert_eq!(shown.person.display_name, "Dana Reyes");
+        assert!(store.people_list().expect("people").entries.is_empty());
+        let made = store
+            .create_person_profile("Dana Reyes".to_owned(), PersonProfileEdit::default(), 2)
+            .expect("Dana");
+        let dana = made.person.expect("Dana's profile").id;
+        let lead = PersonProfileEdit {
+            role: Some("Lead".to_owned()),
+            ..PersonProfileEdit::default()
+        };
+        let role = |store: &crate::meeting::store::MeetingStore| {
+            store.people_list().expect("people").entries[0]
+                .person
+                .role
+                .clone()
+        };
+        let (shown, changed) = store
+            .person_profile_preview(Some(dana), String::new(), lead.clone(), 3)
+            .expect("a previewed role");
+        assert!(changed);
+        assert_eq!(shown.person.role.as_deref(), Some("Lead"));
+        assert_eq!(role(&store), None);
+        store
+            .update_person_profile(dana, lead, 4)
+            .expect("Dana's role");
+        assert_eq!(role(&store).as_deref(), Some("Lead"));
     }
 }

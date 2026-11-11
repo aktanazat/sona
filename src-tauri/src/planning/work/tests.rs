@@ -12,7 +12,7 @@ use super::types::{
 use super::{
     accept, bulk_update, create, keep, list, mark_duplicate, set_archived, update, Change,
 };
-use super::{live, sync};
+use super::{bin, inbox, live, sync};
 use crate::meeting::ledger::{
     LedgerCommitment, LedgerFirmness, LedgerReceipt, LedgerReceiptState, MeetingLedger,
 };
@@ -350,6 +350,14 @@ fn the_tracker_migration_keeps_every_task_and_the_commitment_it_tracks() {
         schema::THREADS_MIGRATION,
         schema::ATTACHMENTS_MIGRATION,
         schema::PLANNING_MIGRATION,
+        schema::ROUTINES_MIGRATION,
+        schema::LIFECYCLE_MIGRATION,
+        super::sessions::SESSIONS_MIGRATION,
+        super::changes::CHANGES_MIGRATION,
+        crate::planning::catalog::SELF_LEAD_MIGRATION,
+        super::changes::PROJECT_LEAD_CHANGES_MIGRATION,
+        super::loops::LOOPS_MIGRATION,
+        super::triage_hints::DISMISSED_HINTS_MIGRATION,
     ] {
         conn.execute_batch(migration)
             .expect("a later planner migration");
@@ -466,11 +474,25 @@ fn the_repeat_migration_keeps_every_history_entry_and_waiting_change() {
     ))
     .expect("history and a waiting change");
     let history = |conn: &Connection| {
-        items::activity(conn, "plants")
-            .expect("the task's history")
-            .into_iter()
-            .map(|entry| (entry.kind, entry.actor, entry.agent))
-            .collect::<Vec<_>>()
+        conn.prepare(
+            "SELECT activity.id, activity.kind, activity.actor, agents.agent
+             FROM planning_task_activity activity
+             LEFT JOIN planning_activity_agents agents ON agents.activity_id = activity.id
+             WHERE activity.task_id = 'plants'
+             ORDER BY activity.at_ms, activity.id",
+        )
+        .expect("the task's history")
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        })
+        .expect("the task's history")
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .expect("the task's history")
     };
     let waiting = |conn: &Connection| {
         super::agents::item_proposals(conn, "plants")
@@ -1407,4 +1429,123 @@ fn unidentified_ownership_saved_keeps_manual_owners_after_new_notes() {
     .expect("a typed task without a speaker quote")
     .value;
     assert_eq!(typed.owner(), WorkOwner::Myself);
+}
+
+#[test]
+fn restoring_from_the_bin_brings_back_whether_the_task_was_archived() {
+    let mut desk = desk(&[]);
+    let at = desk.tick();
+    let open = create(
+        &mut desk.history,
+        None,
+        by_me(&operation(), at),
+        &typed("Book the venue"),
+    )
+    .expect("an open task")
+    .value;
+    let shelved = create(
+        &mut desk.history,
+        None,
+        by_me(&operation(), at),
+        &typed("Order the cake"),
+    )
+    .expect("a task to archive")
+    .value;
+    let at = desk.tick();
+    set_archived(
+        &mut desk.history,
+        by_me(&operation(), at),
+        std::slice::from_ref(&shelved.id),
+        true,
+    )
+    .expect("archived");
+
+    let at = desk.tick();
+    for id in [&open.id, &shelved.id] {
+        bin::trash(&desk.history, id, WorkActor::Me, at).expect("deleted");
+    }
+    assert!(items::items(&desk.history, true)
+        .expect("every list")
+        .is_empty());
+    assert_eq!(bin::binned(&desk.history, at).expect("the bin").len(), 2);
+
+    let at = desk.tick();
+    let restored = [&open.id, &shelved.id].map(|id| {
+        bin::untrash(&desk.history, id, WorkActor::Me, at)
+            .expect("restored")
+            .after
+            .archived_at_ms
+            .is_some()
+    });
+    assert_eq!(restored, [false, true]);
+
+    let at = desk.tick();
+    bin::trash(&desk.history, &open.id, WorkActor::Me, at).expect("deleted again");
+    let later = at + crate::planning::catalog::BIN_MS;
+    assert!(bin::untrash(&desk.history, &open.id, WorkActor::Me, later).is_err());
+    assert_eq!(
+        bin::purge(&desk.history, later).expect("the purge"),
+        [open.id.clone()]
+    );
+}
+
+#[test]
+fn the_inbox_hears_what_others_change_on_the_users_tasks_and_not_the_user() {
+    fn by_agent(operation_id: &str, at_ms: i64) -> Change<'_> {
+        Change {
+            operation_id,
+            actor: WorkActor::Agent,
+            at_ms,
+        }
+    }
+    let mut desk = desk(&[]);
+    let at = desk.tick();
+    let mine = create(
+        &mut desk.history,
+        None,
+        by_agent(&operation(), at),
+        &WorkItemInput {
+            owner: Some(WorkOwner::Myself),
+            ..typed("Book the venue")
+        },
+    )
+    .expect("a task an agent gave the user")
+    .value;
+    assert!(inbox::subscribed(&desk.history, &mine.id).expect("subscribed"));
+
+    let at = desk.tick();
+    let started = update(
+        &mut desk.history,
+        None,
+        by_me(&operation(), at),
+        &mine.id,
+        mine.revision,
+        &status(WorkStatus::InProgress),
+    )
+    .expect("the user starts it")
+    .value;
+    let at = desk.tick();
+    update(
+        &mut desk.history,
+        None,
+        by_agent(&operation(), at),
+        &mine.id,
+        started.revision,
+        &status(WorkStatus::Done),
+    )
+    .expect("an agent finishes it");
+
+    let now = desk.tick();
+    let heard = inbox::notifications(&desk.history, inbox::Shown::default(), now)
+        .expect("the inbox")
+        .into_iter()
+        .map(|notice| (notice.kind, notice.to))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        heard,
+        [
+            (inbox::NotificationKind::Status, Some("done".to_owned())),
+            (inbox::NotificationKind::Assigned, Some("self".to_owned())),
+        ]
+    );
 }

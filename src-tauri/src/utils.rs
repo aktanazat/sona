@@ -115,13 +115,14 @@ pub fn cancel_current_operation(app: &AppHandle) {
 /// the screen. Planner approval asks while holding the meeting and history
 /// databases, so this never waits on the meeting lifecycle actor.
 pub fn capture_running(app: &AppHandle) -> bool {
-    let audio = app.state::<Arc<AudioRecordingManager>>();
-    let meetings = app.state::<Arc<MeetingSessionManager>>();
-    let screen = app.state::<Arc<ScreenRecorderManager>>();
-    audio.is_recording()
-        || audio.capture_lease_is_active()
-        || meetings.is_capture_active()
-        || screen.is_capture_active()
+    app.try_state::<Arc<AudioRecordingManager>>()
+        .is_some_and(|audio| audio.is_recording() || audio.capture_lease_is_active())
+        || app
+            .try_state::<Arc<MeetingSessionManager>>()
+            .is_some_and(|meetings| meetings.is_capture_active())
+        || app
+            .try_state::<Arc<ScreenRecorderManager>>()
+            .is_some_and(|screen| screen.is_capture_active())
 }
 
 /// Check if using the Wayland display server protocol

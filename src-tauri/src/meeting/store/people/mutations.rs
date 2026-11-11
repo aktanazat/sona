@@ -8,12 +8,13 @@ pub(in crate::meeting::store) use derivation::{
 
 pub(in crate::meeting::store) use self::linking::upsert_link_in;
 use self::linking::{confidence_from_db, repoint_meeting_links_in, source_from_db};
+use super::queries::people_list_in;
 use super::{
     bump_people_revision_in, merge_unique_case_insensitive, normalized, normalized_email,
     person_by_id_in, require_people_revision_in, SCHEMA_VERSION,
 };
 use crate::meeting::people_types::{
-    PeopleMutationResult, Person, PersonId, PersonLinkConfidence, PersonLinkSource,
+    PeopleMutationResult, Person, PersonId, PersonLinkConfidence, PersonLinkSource, PersonListEntry,
     PersonSplitRequest, PersonSplitTarget, PersonSummary, VoiceProfileMergeResolution,
 };
 use crate::meeting::store::documents::bump_document_revision_in;
@@ -26,7 +27,7 @@ use crate::meeting::store::voice_identity::{
 };
 use crate::meeting::store::{MeetingStore, StoreError};
 use crate::meeting::types::MeetingSessionId;
-use rusqlite::{params, OptionalExtension, TransactionBehavior};
+use rusqlite::{params, OptionalExtension, Transaction, TransactionBehavior};
 use std::collections::HashSet;
 
 impl MeetingStore {
@@ -81,81 +82,45 @@ impl MeetingStore {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         require_people_revision_in(&transaction, expected_revision)?;
-        let source = person_by_id_in(&transaction, source_id)?;
-        let mut target = person_by_id_in(&transaction, target_id)?;
-        prepare_person_merge_in(&transaction, source_id, target_id)?;
-        merge_unique_case_insensitive(
-            &mut target.aliases,
-            std::iter::once(source.display_name).chain(source.aliases),
-        );
-        merge_unique_case_insensitive(&mut target.calendar_emails, source.calendar_emails);
-        transaction.execute(
-            "UPDATE persons
-                SET aliases_json = ?1, calendar_emails_json = ?2, updated_at_utc_ms = ?3
-              WHERE id = ?4",
-            params![
-                encode_strings(&target.aliases)?,
-                encode_strings(&target.calendar_emails)?,
-                now_utc_ms,
-                target_id.uuid().to_string()
-            ],
-        )?;
-        repoint_meeting_links_in(&transaction, source_id, target_id, now_utc_ms)?;
-        transaction.execute(
-            "INSERT OR IGNORE INTO document_person_links(document_id, person_id, created_at_utc_ms)
-             SELECT document_id, ?1, created_at_utc_ms
-               FROM document_person_links WHERE person_id = ?2",
-            params![target_id.uuid().to_string(), source_id.uuid().to_string()],
-        )?;
-        merge_voice_profiles_in(
+        merge_persons_in(
             &transaction,
             source_id,
             target_id,
             voice_profile_resolution,
             now_utc_ms,
         )?;
-        transaction.execute(
-            "UPDATE meeting_voice_speaker_resolutions SET resolved_person_id = ?1
-              WHERE resolved_person_id = ?2 AND is_current = 1",
-            params![target_id.uuid().to_string(), source_id.uuid().to_string()],
-        )?;
-        transaction.execute(
-            "UPDATE meeting_voice_names SET person_id = ?1 WHERE person_id = ?2",
-            params![target_id.uuid().to_string(), source_id.uuid().to_string()],
-        )?;
-        merge_person_corrections_in(&transaction, source_id, target_id)?;
-        transaction.execute(
-            "INSERT OR IGNORE INTO person_avatars (person_id, png, updated_at_utc_ms, provenance_json, original)
-             SELECT ?1, png, updated_at_utc_ms, provenance_json, original
-               FROM person_avatars WHERE person_id = ?2",
-            params![target_id.uuid().to_string(), source_id.uuid().to_string()],
-        )?;
-        transaction.execute(
-            "INSERT OR IGNORE INTO person_contact_cards (person_id, card_json, updated_at_utc_ms)
-             SELECT ?1, card_json, updated_at_utc_ms
-               FROM person_contact_cards WHERE person_id = ?2",
-            params![target_id.uuid().to_string(), source_id.uuid().to_string()],
-        )?;
-        transaction.execute(
-            "UPDATE meeting_loop_states SET owner_person_id = ?1 WHERE owner_person_id = ?2",
-            params![target_id.uuid().to_string(), source_id.uuid().to_string()],
-        )?;
-        transaction.execute(
-            "UPDATE person_merge_redirects SET target_person_id = ?1 WHERE target_person_id = ?2",
-            params![target_id.uuid().to_string(), source_id.uuid().to_string()],
-        )?;
-        transaction.execute(
-            "INSERT INTO person_merge_redirects (source_person_id, target_person_id) VALUES (?1, ?2)",
-            params![source_id.uuid().to_string(), target_id.uuid().to_string()],
-        )?;
-        transaction.execute(
-            "DELETE FROM persons WHERE id = ?1",
-            [source_id.uuid().to_string()],
-        )?;
         let revision = bump_people_revision_in(&transaction)?;
         let target = person_by_id_in(&transaction, target_id)?;
         transaction.commit()?;
         Ok(mutation_result(revision, Some(target), true))
+    }
+
+    pub(crate) fn person_merge_preview(
+        &self,
+        source_id: PersonId,
+        target_id: PersonId,
+        voice_profile_resolution: Option<VoiceProfileMergeResolution>,
+        now_utc_ms: i64,
+    ) -> Result<PersonListEntry, StoreError> {
+        if source_id == target_id {
+            return Err(StoreError::Invalid);
+        }
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        merge_persons_in(
+            &transaction,
+            source_id,
+            target_id,
+            voice_profile_resolution,
+            now_utc_ms,
+        )?;
+        let kept = people_list_in(&transaction, &HashSet::new())?
+            .entries
+            .into_iter()
+            .find(|entry| entry.person.id == target_id)
+            .ok_or(StoreError::PersonNotFound);
+        transaction.rollback()?;
+        kept
     }
 
     pub(crate) fn split_person(
@@ -532,6 +497,87 @@ fn selected_keys(
         }
     }
     Ok(keys)
+}
+
+fn merge_persons_in(
+    transaction: &Transaction<'_>,
+    source_id: PersonId,
+    target_id: PersonId,
+    voice_profile_resolution: Option<VoiceProfileMergeResolution>,
+    now_utc_ms: i64,
+) -> Result<(), StoreError> {
+    let source = person_by_id_in(transaction, source_id)?;
+    let mut target = person_by_id_in(transaction, target_id)?;
+    prepare_person_merge_in(transaction, source_id, target_id)?;
+    merge_unique_case_insensitive(
+        &mut target.aliases,
+        std::iter::once(source.display_name).chain(source.aliases),
+    );
+    merge_unique_case_insensitive(&mut target.calendar_emails, source.calendar_emails);
+    transaction.execute(
+        "UPDATE persons
+            SET aliases_json = ?1, calendar_emails_json = ?2, updated_at_utc_ms = ?3
+          WHERE id = ?4",
+        params![
+            encode_strings(&target.aliases)?,
+            encode_strings(&target.calendar_emails)?,
+            now_utc_ms,
+            target_id.uuid().to_string()
+        ],
+    )?;
+    repoint_meeting_links_in(transaction, source_id, target_id, now_utc_ms)?;
+    transaction.execute(
+        "INSERT OR IGNORE INTO document_person_links(document_id, person_id, created_at_utc_ms)
+         SELECT document_id, ?1, created_at_utc_ms
+           FROM document_person_links WHERE person_id = ?2",
+        params![target_id.uuid().to_string(), source_id.uuid().to_string()],
+    )?;
+    merge_voice_profiles_in(
+        transaction,
+        source_id,
+        target_id,
+        voice_profile_resolution,
+        now_utc_ms,
+    )?;
+    transaction.execute(
+        "UPDATE meeting_voice_speaker_resolutions SET resolved_person_id = ?1
+          WHERE resolved_person_id = ?2 AND is_current = 1",
+        params![target_id.uuid().to_string(), source_id.uuid().to_string()],
+    )?;
+    transaction.execute(
+        "UPDATE meeting_voice_names SET person_id = ?1 WHERE person_id = ?2",
+        params![target_id.uuid().to_string(), source_id.uuid().to_string()],
+    )?;
+    merge_person_corrections_in(transaction, source_id, target_id)?;
+    transaction.execute(
+        "INSERT OR IGNORE INTO person_avatars (person_id, png, updated_at_utc_ms, provenance_json, original)
+         SELECT ?1, png, updated_at_utc_ms, provenance_json, original
+           FROM person_avatars WHERE person_id = ?2",
+        params![target_id.uuid().to_string(), source_id.uuid().to_string()],
+    )?;
+    transaction.execute(
+        "INSERT OR IGNORE INTO person_contact_cards (person_id, card_json, updated_at_utc_ms)
+         SELECT ?1, card_json, updated_at_utc_ms
+           FROM person_contact_cards WHERE person_id = ?2",
+        params![target_id.uuid().to_string(), source_id.uuid().to_string()],
+    )?;
+    transaction.execute(
+        "UPDATE meeting_loop_states SET owner_person_id = ?1 WHERE owner_person_id = ?2",
+        params![target_id.uuid().to_string(), source_id.uuid().to_string()],
+    )?;
+    transaction.execute(
+        "UPDATE person_merge_redirects SET target_person_id = ?1 WHERE target_person_id = ?2",
+        params![target_id.uuid().to_string(), source_id.uuid().to_string()],
+    )?;
+    transaction.execute(
+        "INSERT INTO person_merge_redirects (source_person_id, target_person_id) VALUES (?1, ?2)",
+        params![source_id.uuid().to_string(), target_id.uuid().to_string()],
+    )?;
+    transaction.execute(
+        "DELETE FROM persons WHERE id = ?1",
+        [source_id.uuid().to_string()],
+    )?;
+    Ok(())
 }
 
 pub(super) fn mutation_result(

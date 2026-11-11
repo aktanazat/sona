@@ -127,7 +127,7 @@ pub(crate) fn repeat_change(
 pub(crate) fn items(conn: &Connection, include_archived: bool) -> Result<Vec<WorkItem>> {
     let mut statement = conn.prepare(&format!(
         "SELECT {ITEM_COLUMNS} FROM planning_tasks t
-         WHERE ?1 OR t.archived_at_ms IS NULL
+         WHERE (?1 OR t.archived_at_ms IS NULL) AND t.trashed_at_ms IS NULL
          ORDER BY t.number"
     ))?;
     let rows = statement.query_map([include_archived], read_item)?;
@@ -275,13 +275,11 @@ fn existing_milestone(conn: &Connection, id: &str, project_id: Option<&str>) -> 
     Ok(id)
 }
 
-fn existing_labels(conn: &Connection, ids: &[String]) -> Result<Vec<String>> {
-    let mut labels = ids
+fn existing_labels(conn: &Connection, ids: &[String], kept: &[String]) -> Result<Vec<String>> {
+    let labels = ids
         .iter()
         .map(|id| store::uuid(id))
         .collect::<Result<Vec<_>>>()?;
-    labels.sort();
-    labels.dedup();
     let mut statement =
         conn.prepare_cached("SELECT EXISTS(SELECT 1 FROM planning_labels WHERE id = ?1)")?;
     for id in &labels {
@@ -289,16 +287,67 @@ fn existing_labels(conn: &Connection, ids: &[String]) -> Result<Vec<String>> {
             return Err(Refusal::NotFound.into());
         }
     }
+    let mut labels = one_per_group(conn, &labels, kept)?;
+    labels.sort();
+    labels.dedup();
     Ok(labels)
+}
+
+pub(crate) fn one_per_group(
+    conn: &Connection,
+    ids: &[String],
+    kept: &[String],
+) -> Result<Vec<String>> {
+    let mut group_of =
+        conn.prepare_cached("SELECT group_name FROM planning_labels WHERE id = ?1")?;
+    let mut groups = Vec::with_capacity(ids.len());
+    for id in ids {
+        let group: Option<String> = group_of
+            .query_row([id], |row| row.get(0))
+            .optional()?
+            .flatten();
+        groups.push((id, group));
+    }
+    Ok(keep_one_per_group(ids, kept, |id| {
+        groups
+            .iter()
+            .find(|(other, _)| *other == id)
+            .and_then(|(_, group)| group.clone())
+    }))
+}
+
+pub(crate) fn keep_one_per_group(
+    ids: &[String],
+    kept: &[String],
+    group_of: impl Fn(&str) -> Option<String>,
+) -> Vec<String> {
+    let ordered = ids
+        .iter()
+        .filter(|id| kept.contains(id))
+        .chain(ids.iter().filter(|id| !kept.contains(id)));
+    let mut chosen: Vec<(Option<String>, &String)> = Vec::with_capacity(ids.len());
+    for id in ordered {
+        let group = group_of(id);
+        if group.is_some() {
+            chosen.retain(|(other, _)| *other != group);
+        }
+        chosen.push((group, id));
+    }
+    ids.iter()
+        .filter(|id| chosen.iter().any(|(_, chosen)| chosen == id))
+        .cloned()
+        .collect()
 }
 
 fn write_labels(conn: &Connection, task_id: &str, label_ids: &[String]) -> Result<()> {
     conn.execute(
-        "DELETE FROM planning_task_labels WHERE task_id = ?1",
-        [task_id],
+        "DELETE FROM planning_task_labels
+         WHERE task_id = ?1 AND label_id NOT IN (SELECT value FROM json_each(?2))",
+        rusqlite::params![task_id, serde_json::to_string(label_ids)?],
     )?;
-    let mut statement = conn
-        .prepare_cached("INSERT INTO planning_task_labels (task_id, label_id) VALUES (?1, ?2)")?;
+    let mut statement = conn.prepare_cached(
+        "INSERT OR IGNORE INTO planning_task_labels (task_id, label_id) VALUES (?1, ?2)",
+    )?;
     for label_id in label_ids {
         statement.execute([task_id, label_id])?;
     }
@@ -327,6 +376,18 @@ pub(crate) fn record(
             from,
             to
         ],
+    )?;
+    super::inbox::on_activity(
+        conn,
+        &super::inbox::Entry {
+            task_id,
+            activity_id: &id,
+            actor,
+            kind,
+            from,
+            to,
+        },
+        now_ms,
     )?;
     Ok(id)
 }
@@ -364,7 +425,7 @@ pub(crate) fn insert(
         .milestone_id
         .map(|id| existing_milestone(conn, id, project_id.as_deref()))
         .transpose()?;
-    let label_ids = existing_labels(conn, new.label_ids)?;
+    let label_ids = existing_labels(conn, new.label_ids, &[])?;
     let title = clean_title(new.title)?;
     let recurrence = new
         .recurrence
@@ -506,7 +567,7 @@ pub(crate) fn apply(
         next.due_at_ms = due_at_ms;
     }
     if let Some(label_ids) = &patch.label_ids {
-        next.label_ids = existing_labels(conn, label_ids)?;
+        next.label_ids = existing_labels(conn, label_ids, &before.label_ids)?;
     }
     if let Some(snoozed_until_ms) = patch.snoozed_until_ms {
         next.snoozed_until_ms = snoozed_until_ms;
@@ -634,7 +695,15 @@ pub(crate) fn apply(
         )?;
     }
     if next.details != before.details {
-        note(WorkActivityKind::Details, None, None)?;
+        let activity = note(WorkActivityKind::Details, None, None)?;
+        super::versions::saved(
+            conn,
+            &before,
+            next.details.as_deref(),
+            &activity,
+            actor,
+            now_ms,
+        )?;
     }
     if next.label_ids != before.label_ids {
         note(
@@ -873,9 +942,11 @@ pub(crate) fn status_before_close(conn: &Connection, id: &str) -> Result<WorkSta
 
 pub(crate) fn activity(conn: &Connection, task_id: &str) -> Result<Vec<WorkActivity>> {
     let mut statement = conn.prepare(
-        "SELECT a.id, a.task_id, a.at_ms, a.actor, a.kind, a.from_value, a.to_value, n.agent
+        "SELECT a.id, a.task_id, a.at_ms, a.actor, a.kind, a.from_value, a.to_value, n.agent,
+                r.reason
          FROM planning_task_activity a
          LEFT JOIN planning_activity_agents n ON n.activity_id = a.id
+         LEFT JOIN planning_activity_reasons r ON r.activity_id = a.id
          WHERE a.task_id = ?1 ORDER BY a.at_ms, a.rowid",
     )?;
     let rows = statement.query_map([task_id], |row| {
@@ -888,6 +959,7 @@ pub(crate) fn activity(conn: &Connection, task_id: &str) -> Result<Vec<WorkActiv
             from: row.get(5)?,
             to: row.get(6)?,
             agent: row.get(7)?,
+            reason: row.get(8)?,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -1055,18 +1127,23 @@ pub(crate) fn remove_relation(
     Ok(relation)
 }
 
-fn read_label(row: &Row<'_>) -> rusqlite::Result<WorkLabel> {
+pub(crate) const LABEL_COLUMNS: &str = "id, name, hue, revision, group_name, retired_at_ms";
+
+pub(crate) fn read_label(row: &Row<'_>) -> rusqlite::Result<WorkLabel> {
     Ok(WorkLabel {
         id: row.get(0)?,
         name: row.get(1)?,
         hue: row.get(2)?,
         revision: row.get(3)?,
+        group: row.get(4)?,
+        retired_at_ms: row.get(5)?,
     })
 }
 
 pub(crate) fn labels(conn: &Connection) -> Result<Vec<WorkLabel>> {
-    let mut statement = conn
-        .prepare("SELECT id, name, hue, revision FROM planning_labels ORDER BY lower(name), id")?;
+    let mut statement = conn.prepare(&format!(
+        "SELECT {LABEL_COLUMNS} FROM planning_labels ORDER BY lower(name), id"
+    ))?;
     let rows = statement.query_map([], read_label)?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
@@ -1104,7 +1181,7 @@ pub(crate) fn save_label(
         params![id, name, hue, now_ms],
     )?;
     Ok(conn.query_row(
-        "SELECT id, name, hue, revision FROM planning_labels WHERE id = ?1",
+        &format!("SELECT {LABEL_COLUMNS} FROM planning_labels WHERE id = ?1"),
         [&id],
         read_label,
     )?)

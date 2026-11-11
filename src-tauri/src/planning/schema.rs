@@ -771,6 +771,92 @@ CREATE TABLE planning_cycle_days (
     PRIMARY KEY (number, day)
 );";
 
+/// Task templates, one reminder per task with when it was handed to the
+/// app to notify, the reason given when triage was declined, and label
+/// groups with labels retired from pickers but kept on their tasks.
+pub const ROUTINES_MIGRATION: &str = "CREATE TABLE planning_task_templates (
+    id TEXT PRIMARY KEY NOT NULL,
+    name TEXT NOT NULL CHECK(length(trim(name)) > 0),
+    fields TEXT NOT NULL,
+    revision INTEGER NOT NULL CHECK(revision > 0),
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX planning_task_templates_name ON planning_task_templates(lower(name));
+CREATE TABLE planning_task_reminders (
+    task_id TEXT PRIMARY KEY NOT NULL,
+    remind_at_ms INTEGER NOT NULL,
+    set_at_ms INTEGER NOT NULL,
+    actor TEXT NOT NULL CHECK(actor IN ('me', 'sona', 'agent')),
+    agent TEXT CHECK(agent IS NULL OR length(trim(agent)) > 0),
+    notified_at_ms INTEGER
+);
+CREATE INDEX planning_task_reminders_due ON planning_task_reminders(notified_at_ms, remind_at_ms);
+CREATE TRIGGER planning_task_reminders_delete AFTER DELETE ON planning_tasks BEGIN
+    DELETE FROM planning_task_reminders WHERE task_id = old.id;
+END;
+CREATE TABLE planning_activity_reasons (
+    activity_id TEXT PRIMARY KEY NOT NULL,
+    reason TEXT NOT NULL CHECK(length(trim(reason)) > 0)
+);
+ALTER TABLE planning_labels ADD COLUMN group_name TEXT CHECK(group_name IS NULL OR length(trim(group_name)) > 0);
+ALTER TABLE planning_labels ADD COLUMN retired_at_ms INTEGER;";
+
+/// A task's 30-day bin, its description's earlier versions, favorite tasks,
+/// projects and views, the tasks the user is subscribed to, and the inbox
+/// of what others changed on them. A binned task is archived too, so every
+/// list that leaves archived work out leaves it out.
+pub const LIFECYCLE_MIGRATION: &str = "ALTER TABLE planning_tasks ADD COLUMN trashed_at_ms INTEGER;
+CREATE INDEX planning_tasks_trashed ON planning_tasks(trashed_at_ms) WHERE trashed_at_ms IS NOT NULL;
+CREATE TABLE planning_task_versions (
+    id TEXT PRIMARY KEY NOT NULL,
+    task_id TEXT NOT NULL,
+    body TEXT,
+    actor TEXT CHECK(actor IS NULL OR actor IN ('me', 'sona', 'agent')),
+    activity_id TEXT,
+    created_at_ms INTEGER NOT NULL
+);
+CREATE INDEX planning_task_versions_task ON planning_task_versions(task_id, created_at_ms);
+CREATE TABLE planning_favorites (
+    kind TEXT NOT NULL CHECK(kind IN ('task', 'project', 'view')),
+    target_id TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (kind, target_id)
+);
+CREATE TABLE planning_task_subscriptions (
+    task_id TEXT PRIMARY KEY NOT NULL,
+    reason TEXT NOT NULL CHECK(reason IN ('subscribed', 'created', 'assigned', 'mentioned')),
+    created_at_ms INTEGER NOT NULL
+);
+CREATE TABLE planning_notifications (
+    id TEXT PRIMARY KEY NOT NULL,
+    task_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK(kind IN ('status', 'comment', 'mention', 'assigned')),
+    actor TEXT NOT NULL CHECK(actor IN ('sona', 'agent')),
+    activity_id TEXT,
+    comment_id TEXT,
+    from_value TEXT,
+    to_value TEXT,
+    created_at_ms INTEGER NOT NULL,
+    read_at_ms INTEGER,
+    snoozed_until_ms INTEGER,
+    archived_at_ms INTEGER
+);
+CREATE INDEX planning_notifications_created ON planning_notifications(created_at_ms);
+CREATE INDEX planning_notifications_task ON planning_notifications(task_id);
+CREATE TRIGGER planning_task_lifecycle_delete AFTER DELETE ON planning_tasks BEGIN
+    DELETE FROM planning_task_versions WHERE task_id = old.id;
+    DELETE FROM planning_task_subscriptions WHERE task_id = old.id;
+    DELETE FROM planning_notifications WHERE task_id = old.id;
+    DELETE FROM planning_favorites WHERE kind = 'task' AND target_id = old.id;
+END;
+CREATE TRIGGER planning_favorite_project_delete AFTER DELETE ON planning_projects BEGIN
+    DELETE FROM planning_favorites WHERE kind = 'project' AND target_id = old.id;
+END;
+CREATE TRIGGER planning_favorite_view_delete AFTER DELETE ON planning_views BEGIN
+    DELETE FROM planning_favorites WHERE kind = 'view' AND target_id = old.id;
+END;";
+
 /// Every planner migration in order, for tests that build the schema without
 /// the rest of the history database.
 #[cfg(test)]
@@ -793,6 +879,14 @@ pub(crate) fn apply_all(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
         THREADS_MIGRATION,
         ATTACHMENTS_MIGRATION,
         PLANNING_MIGRATION,
+        ROUTINES_MIGRATION,
+        LIFECYCLE_MIGRATION,
+        crate::planning::work::sessions::SESSIONS_MIGRATION,
+        crate::planning::work::changes::CHANGES_MIGRATION,
+        crate::planning::catalog::SELF_LEAD_MIGRATION,
+        crate::planning::work::changes::PROJECT_LEAD_CHANGES_MIGRATION,
+        crate::planning::work::loops::LOOPS_MIGRATION,
+        crate::planning::work::triage_hints::DISMISSED_HINTS_MIGRATION,
     ] {
         conn.execute_batch(migration)?;
     }

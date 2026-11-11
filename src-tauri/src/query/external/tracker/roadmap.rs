@@ -426,6 +426,15 @@ fn missing_update(id: &Uuid) -> ExternalError {
     )
 }
 
+/// Runs `change` in a transaction that is never committed.
+pub(super) fn rehearsed<T>(
+    conn: &mut Connection,
+    change: impl FnOnce(&Connection) -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    let tx = conn.transaction()?;
+    change(&tx)
+}
+
 impl Tracker<'_> {
     fn update_author(write: &WriteArgs) -> Author<'_> {
         Author {
@@ -440,11 +449,8 @@ impl Tracker<'_> {
         &self,
         change: impl FnOnce(&Connection) -> anyhow::Result<T>,
     ) -> Result<T, ExternalError> {
-        planning::history(self.history, |conn| {
-            let tx = conn.transaction()?;
-            change(&tx)
-        })
-        .map_err(|message| refusal(self.history, message))
+        planning::history(self.history, |conn| rehearsed(conn, change))
+            .map_err(|message| refusal(self.history, message))
     }
 
     fn project_named(&self, value: &str) -> Result<Project, ExternalError> {

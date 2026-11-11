@@ -3,6 +3,7 @@
 
 use super::store::{self, Refusal};
 use super::types::{DateResolution, Milestone, Project, ProjectStatus, TaskStatus};
+use super::work::types::WorkOwner;
 use super::work::attachments;
 use anyhow::Result;
 use rusqlite::{params, Connection};
@@ -12,6 +13,11 @@ use uuid::Uuid;
 /// How long a project stays in the bin before it is gone.
 pub(crate) const BIN_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 
+pub(crate) const SELF_LEAD_MIGRATION: &str = "ALTER TABLE planning_projects ADD COLUMN lead_is_self INTEGER NOT NULL DEFAULT 0
+    CHECK(lead_is_self IN (0, 1) AND (lead_is_self = 0 OR lead_person_id IS NULL));
+ALTER TABLE planning_projects ADD COLUMN members_include_self INTEGER NOT NULL DEFAULT 0
+    CHECK(members_include_self IN (0, 1));";
+
 /// A link a project keeps among its resources.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct LinkEdit {
@@ -20,15 +26,16 @@ pub struct LinkEdit {
 }
 
 /// What a project is set to. A field left `None` keeps what the project has;
-/// an empty description, lead or icon clears it, and `Some(None)` clears a
+/// an empty description or icon clears it, and `Some(None)` clears a
 /// date or its resolution. Lists replace the project's whole list.
 #[derive(Clone, Debug, Default, Serialize)]
 pub(crate) struct ProjectEdit {
     pub title: Option<String>,
     pub description: Option<String>,
     pub status: Option<ProjectStatus>,
-    pub lead_person_id: Option<String>,
+    pub lead: Option<WorkOwner>,
     pub member_person_ids: Option<Vec<String>>,
+    pub members_include_self: Option<bool>,
     pub target_at_ms: Option<Option<i64>>,
     pub hue: Option<u16>,
     pub archived: Option<bool>,
@@ -97,10 +104,18 @@ pub(crate) fn save_project(
         .status
         .or_else(|| current.as_ref().map(|c| c.status))
         .unwrap_or(ProjectStatus::Active);
-    let lead = match &edit.lead_person_id {
-        Some(lead) => present(lead),
-        None => current.as_ref().and_then(|c| c.lead_person_id.clone()),
+    let (lead_is_self, lead) = match &edit.lead {
+        Some(WorkOwner::Myself) => (true, None),
+        Some(WorkOwner::Person { person_id }) => (false, present(person_id)),
+        Some(WorkOwner::Nobody) => (false, None),
+        None => current.as_ref().map_or((false, None), |c| {
+            (c.lead_is_self, c.lead_person_id.clone())
+        }),
     };
+    let members_include_self = edit
+        .members_include_self
+        .or_else(|| current.as_ref().map(|c| c.members_include_self))
+        .unwrap_or(false);
     let (target, target_resolution) = dated(
         edit.target_at_ms,
         edit.target_resolution,
@@ -155,7 +170,8 @@ pub(crate) fn save_project(
                     SET title = ?2, description = ?3, status = ?4, lead_person_id = ?5,
                         target_at_ms = ?6, hue = ?7, archived_at_ms = ?8, priority = ?9,
                         start_at_ms = ?10, start_resolution = ?11, target_resolution = ?12,
-                        icon = ?13, trashed_at_ms = ?14,
+                        icon = ?13, trashed_at_ms = ?14, lead_is_self = ?16,
+                        members_include_self = ?17,
                         revision = revision + 1, updated_at_ms = ?15
                   WHERE id = ?1",
                 params![
@@ -173,7 +189,9 @@ pub(crate) fn save_project(
                     target_resolution.map(DateResolution::as_str),
                     icon,
                     trashed_at,
-                    now_ms
+                    now_ms,
+                    lead_is_self,
+                    members_include_self
                 ],
             )?;
             current.id.clone()
@@ -184,8 +202,10 @@ pub(crate) fn save_project(
                 "INSERT INTO planning_projects
                     (id, title, description, status, revision, created_at_ms, updated_at_ms,
                      lead_person_id, target_at_ms, hue, archived_at_ms, priority, start_at_ms,
-                     start_resolution, target_resolution, icon, trashed_at_ms)
-                 VALUES (?1, ?2, ?3, ?4, 1, ?5, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                     start_resolution, target_resolution, icon, trashed_at_ms, lead_is_self,
+                     members_include_self)
+                 VALUES (?1, ?2, ?3, ?4, 1, ?5, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
+                     ?16, ?17)",
                 params![
                     id,
                     title,
@@ -201,7 +221,9 @@ pub(crate) fn save_project(
                     start_resolution.map(DateResolution::as_str),
                     target_resolution.map(DateResolution::as_str),
                     icon,
-                    trashed_at
+                    trashed_at,
+                    lead_is_self,
+                    members_include_self
                 ],
             )?;
             id
@@ -530,7 +552,9 @@ mod tests {
             None,
             &ProjectEdit {
                 title: Some("Harbor".to_owned()),
-                lead_person_id: Some(danny.to_owned()),
+                lead: Some(WorkOwner::Person {
+                    person_id: danny.to_owned(),
+                }),
                 member_person_ids: Some(vec![danny.to_owned(), daniel.to_owned()]),
                 ..ProjectEdit::default()
             },

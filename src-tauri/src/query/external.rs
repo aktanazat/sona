@@ -1672,7 +1672,7 @@ pub async fn answer(
         } => export_meetings(meetings, directory, session_ids)
             .await
             .map(ExternalResponse::ExportMeetings),
-        ExternalRequest::Work(verb) => tracker::answer(verb, app, meetings, history)
+        ExternalRequest::Work(verb) => tracker::answer(verb, app, meetings, history, calendar)
             .await
             .map(ExternalResponse::Work),
     }
@@ -1984,7 +1984,13 @@ pub(crate) fn meetings_page(
     before_utc_ms: Option<i64>,
     limit: usize,
 ) -> Result<ExternalMeetingsPage, ExternalError> {
-    let (entries, has_more) = meeting_summaries(store, since_utc_ms, before_utc_ms, limit)?;
+    let (entries, has_more) = meeting_summaries(
+        store,
+        since_utc_ms,
+        before_utc_ms,
+        limit,
+        &MeetingListFilter::default(),
+    )?;
     Ok(ExternalMeetingsPage {
         schema_version: QUERY_SCHEMA_VERSION,
         entries: entries.into_iter().map(meeting_row).collect(),
@@ -1998,6 +2004,7 @@ fn meeting_summaries(
     since_utc_ms: Option<i64>,
     before_utc_ms: Option<i64>,
     limit: usize,
+    filter: &MeetingListFilter,
 ) -> Result<(Vec<MeetingHistorySummary>, bool), ExternalError> {
     let kept_local = kept_local(store)?;
     let mut entries = Vec::with_capacity(limit);
@@ -2009,7 +2016,7 @@ fn meeting_summaries(
     let mut before = before_utc_ms;
     let has_more = 'pages: loop {
         let page = store
-            .list_sessions(before, limit + 1, &MeetingListFilter::default())
+            .list_sessions(before, limit + 1, filter)
             .map_err(QueryError::from)?;
         for entry in page.entries {
             if since_utc_ms.is_some_and(|since| entry.created_at_utc_ms < since) {

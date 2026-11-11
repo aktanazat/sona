@@ -56,6 +56,7 @@ use crate::secrets::{SecretManager, SecretResolveError};
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -3935,6 +3936,41 @@ impl MeetingSessionManager {
         &self,
         request: MeetingExportRequest,
     ) -> Result<MeetingExportResult, MeetingCommandError> {
+        let app = self.app.clone();
+        self.export_to(request, |format| async move {
+            let app = app.ok_or(MeetingCommandError::ExportFailed)?;
+            let (filter_name, extension, file_name) = match format {
+                MeetingExportFormat::Json => ("JSON", "json", "meeting.json"),
+                MeetingExportFormat::Markdown => ("Markdown", "md", "meeting.md"),
+            };
+            let selected = tauri::async_runtime::spawn_blocking(move || {
+                app.dialog()
+                    .file()
+                    .add_filter(filter_name, &[extension])
+                    .set_file_name(file_name)
+                    .blocking_save_file()
+                    .map(|path| path.into_path().map_err(|_| ()))
+            })
+            .await
+            .map_err(|_| MeetingCommandError::ExportFailed)?;
+            selected
+                .ok_or(MeetingCommandError::ExportCancelled)?
+                .map_err(|_| MeetingCommandError::ExportFailed)
+        })
+        .await
+    }
+
+    /// Exports to the file `destination` names once the export is rendered,
+    /// so a refused export never asks where to write.
+    pub(crate) async fn export_to<Destination, Chosen>(
+        &self,
+        request: MeetingExportRequest,
+        destination: Destination,
+    ) -> Result<MeetingExportResult, MeetingCommandError>
+    where
+        Destination: FnOnce(MeetingExportFormat) -> Chosen,
+        Chosen: Future<Output = Result<PathBuf, MeetingCommandError>>,
+    {
         let store = self.store().await?;
         if let Some(result) = store
             .export_result_for_operation(request.operation_id)
@@ -3970,24 +4006,7 @@ impl MeetingSessionManager {
             },
         )
         .map_err(|_| MeetingCommandError::ExportFailed)?;
-        let app = self.app.clone().ok_or(MeetingCommandError::ExportFailed)?;
-        let (filter_name, extension, file_name) = match request.format {
-            MeetingExportFormat::Json => ("JSON", "json", "meeting.json"),
-            MeetingExportFormat::Markdown => ("Markdown", "md", "meeting.md"),
-        };
-        let selected = tauri::async_runtime::spawn_blocking(move || {
-            app.dialog()
-                .file()
-                .add_filter(filter_name, &[extension])
-                .set_file_name(file_name)
-                .blocking_save_file()
-                .map(|path| path.into_path().map_err(|_| ()))
-        })
-        .await
-        .map_err(|_| MeetingCommandError::ExportFailed)?;
-        let path = selected
-            .ok_or(MeetingCommandError::ExportCancelled)?
-            .map_err(|_| MeetingCommandError::ExportFailed)?;
+        let path = destination(request.format).await?;
         let images_store = Arc::clone(&store);
         let images_session_id = request.session_id;
         let images = review.snapshots;
@@ -4029,6 +4048,34 @@ impl MeetingSessionManager {
     /// counts on the page move while the model's reading of the conversation
     /// stays where it was.
     pub async fn produce_ledger_html(
+        &self,
+        session_id: MeetingSessionId,
+    ) -> Result<String, MeetingCommandError> {
+        let contents = self.ledger_html(session_id).await?.into_bytes();
+        let app = self.app.clone().ok_or(MeetingCommandError::ExportFailed)?;
+        let selected = tauri::async_runtime::spawn_blocking(move || {
+            app.dialog()
+                .file()
+                .add_filter("HTML", &["html"])
+                .set_file_name("meeting-ledger.html")
+                .blocking_save_file()
+                .map(|path| path.into_path().map_err(|_| ()))
+        })
+        .await
+        .map_err(|_| MeetingCommandError::ExportFailed)?;
+        let path = selected
+            .ok_or(MeetingCommandError::ExportCancelled)?
+            .map_err(|_| MeetingCommandError::ExportFailed)?;
+        let written = path.display().to_string();
+        tauri::async_runtime::spawn_blocking(move || export::write_atomic(&path, &contents))
+            .await
+            .map_err(|_| MeetingCommandError::ExportFailed)?
+            .map_err(|_| MeetingCommandError::ExportFailed)?;
+        Ok(written)
+    }
+
+    /// The ledger page `produce_ledger_html` writes, as HTML.
+    pub(crate) async fn ledger_html(
         &self,
         session_id: MeetingSessionId,
     ) -> Result<String, MeetingCommandError> {
@@ -4095,30 +4142,7 @@ impl MeetingSessionManager {
             speaker_names: &speaker_names,
             segment_speakers: &segment_speakers,
         });
-        let contents = ledger::render_html(&page)
-            .map_err(|_| MeetingCommandError::ExportFailed)?
-            .into_bytes();
-
-        let app = self.app.clone().ok_or(MeetingCommandError::ExportFailed)?;
-        let selected = tauri::async_runtime::spawn_blocking(move || {
-            app.dialog()
-                .file()
-                .add_filter("HTML", &["html"])
-                .set_file_name("meeting-ledger.html")
-                .blocking_save_file()
-                .map(|path| path.into_path().map_err(|_| ()))
-        })
-        .await
-        .map_err(|_| MeetingCommandError::ExportFailed)?;
-        let path = selected
-            .ok_or(MeetingCommandError::ExportCancelled)?
-            .map_err(|_| MeetingCommandError::ExportFailed)?;
-        let written = path.display().to_string();
-        tauri::async_runtime::spawn_blocking(move || export::write_atomic(&path, &contents))
-            .await
-            .map_err(|_| MeetingCommandError::ExportFailed)?
-            .map_err(|_| MeetingCommandError::ExportFailed)?;
-        Ok(written)
+        ledger::render_html(&page).map_err(|_| MeetingCommandError::ExportFailed)
     }
 
     pub async fn question_forget(

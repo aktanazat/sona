@@ -998,7 +998,8 @@ fn tick(app: &AppHandle, now_ms: i64) -> Result<Advanced> {
         changed
             .moved
             .extend(blocks::assess(&tx, busy.as_deref(), now_ms)?);
-        let purged = crate::planning::catalog::purge_bin(&tx, now_ms)?;
+        let mut purged = crate::planning::catalog::purge_bin(&tx, now_ms)?;
+        purged.extend(super::bin::purge(&tx, now_ms)?);
         tx.commit()?;
         Ok((changed, purged))
     })?;

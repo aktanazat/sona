@@ -200,10 +200,11 @@ pub(crate) async fn set_aside_as(
 pub(crate) async fn tally(
     history: &HistoryManager,
     meetings: &MeetingSessionManager,
+    hidden: &(dyn Fn(MeetingSessionId) -> bool + Sync),
 ) -> Result<TodayTally, String> {
     let user_name = meetings.user_name();
     super::with_sources(history, meetings, |history, meetings| {
-        tally_in(history, meetings, user_name.as_deref())
+        tally_in(history, meetings, user_name.as_deref(), hidden)
     })
     .await
 }
@@ -212,11 +213,12 @@ fn tally_in(
     history: &Connection,
     meetings: &Connection,
     user_name: Option<&str>,
+    hidden: &dyn Fn(MeetingSessionId) -> bool,
 ) -> StorageResult<TodayTally> {
     let finished = finished_meeting_ids(meetings)
         .map_err(|_| anyhow::anyhow!("finished meetings could not be read"))?;
     let mut tally = TodayTally::default();
-    for session_id in finished {
+    for session_id in finished.into_iter().filter(|id| !hidden(*id)) {
         let waiting = untracked_in(history, meetings, session_id, user_name)?.len();
         if waiting == 0 {
             continue;
@@ -381,7 +383,7 @@ fn dismiss(
                 .filter(|item| item.status == WorkStatus::Triage)
             {
                 let (after, moved) =
-                    sync::decline(tx, Some(meetings), &item, actor, now_ms)?;
+                    sync::decline(tx, Some(meetings), &item, None, actor, now_ms)?;
                 effects.item(&after);
                 effects.loops.extend(moved);
             }

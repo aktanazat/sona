@@ -1,7 +1,7 @@
 //! `sona work` verbs that write notes: make one, change its body, pin it,
 //! link a meeting, a person or another note to it. Only notes are written.
 
-use super::{now_ms, refusal, Tracker, WorkAnswer, WriteArgs};
+use super::{now_ms, refusal, Fence, Tracker, WorkAnswer, WriteArgs};
 use crate::planning;
 use crate::query::external::{ExternalError, ExternalErrorCode};
 use crate::query::QUERY_SCHEMA_VERSION;
@@ -93,6 +93,33 @@ impl NoteLinkArgs {
     }
 }
 
+#[derive(Args, Clone, Debug, Eq, PartialEq)]
+pub struct NoteDeleteArgs {
+    /// The note's id, from `sona --notes`.
+    #[arg(value_name = "NOTE_ID")]
+    pub note: Uuid,
+    /// Print what would be deleted and delete nothing.
+    #[arg(long)]
+    pub dry_run: bool,
+    #[command(flatten)]
+    pub write: WriteArgs,
+}
+
+#[derive(Args, Clone, Debug, Eq, PartialEq)]
+pub struct NoteRestoreArgs {
+    /// The note's id, from `sona --notes`.
+    #[arg(value_name = "NOTE_ID")]
+    pub note: Uuid,
+    /// The version's id, from `sona --note-versions NOTE_ID`.
+    #[arg(value_name = "VERSION_ID")]
+    pub version: i64,
+    /// Print the body it would put back and write nothing.
+    #[arg(long)]
+    pub dry_run: bool,
+    #[command(flatten)]
+    pub write: WriteArgs,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NoteAction {
@@ -101,6 +128,9 @@ pub enum NoteAction {
     Pinned,
     Unpinned,
     Linked,
+    Unlinked,
+    Deleted,
+    Restored,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -152,13 +182,13 @@ pub struct ExternalNoteChange {
 /// What the ledger holds for an operation id: nothing yet, so `T` is what
 /// the write made; the note an earlier run with the same request named; or
 /// a different request under that id.
-enum Receipt<T> {
+pub(super) enum Receipt<T> {
     New(T),
     Replay(String),
     Conflict,
 }
 
-fn receipt_in(
+pub(super) fn receipt_in(
     conn: &Connection,
     operation_id: &str,
     command: &str,
@@ -180,13 +210,13 @@ fn receipt_in(
     })
 }
 
-fn conflict(operation_id: &str) -> ExternalError {
+pub(super) fn conflict(operation_id: &str) -> ExternalError {
     ExternalError::invalid(format!(
         "Operation id {operation_id} was already used for a different change. Pass a new --operation-id, or leave it out."
     ))
 }
 
-fn request_json(request: &impl Serialize) -> Result<String, ExternalError> {
+pub(super) fn request_json(request: &impl Serialize) -> Result<String, ExternalError> {
     serde_json::to_string(request).map_err(|_| {
         ExternalError::new(ExternalErrorCode::Failed, "The change could not be named.")
     })
@@ -206,7 +236,7 @@ impl Tracker<'_> {
         self.note(&id)
     }
 
-    fn receipt(
+    pub(super) fn receipt(
         &self,
         operation_id: &str,
         command: &str,
@@ -484,6 +514,211 @@ impl Tracker<'_> {
             linked: Some(linked),
         })))
     }
+
+    pub(super) fn file_receipt(
+        &self,
+        operation_id: &str,
+        command: &str,
+        request: &str,
+        note_id: &str,
+    ) -> Result<(), ExternalError> {
+        planning::history(self.history, |conn| {
+            conn.execute(
+                "INSERT OR IGNORE INTO planning_operations (operation_id, command, request_json, response_json, created_at_ms) VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![operation_id, command, request, note_id, now_ms()],
+            )?;
+            Ok(())
+        })
+        .map_err(|message| refusal(self.history, message))
+    }
+
+    pub(super) async fn note_delete(
+        &self,
+        args: &NoteDeleteArgs,
+    ) -> Result<WorkAnswer, ExternalError> {
+        let operation_id = args.write.operation_id("note-delete", &args.note)?;
+        let request = request_json(&args.note)?;
+        match self.receipt(&operation_id, "cli_note_delete", &request)? {
+            Receipt::New(()) => {}
+            Receipt::Replay(_) => {
+                return Ok(Self::note_change(
+                    NoteAction::Deleted,
+                    false,
+                    Some(operation_id),
+                    None,
+                    true,
+                ))
+            }
+            Receipt::Conflict => return Err(conflict(&operation_id)),
+        }
+        let note = self.note(&args.note)?;
+        if args.dry_run {
+            return Ok(Self::note_change(
+                NoteAction::Deleted,
+                true,
+                Some(operation_id),
+                Some(note),
+                false,
+            ));
+        }
+        self.applies("deleting notes")?;
+        scratchpad::scratchpad_delete(
+            self.app.clone(),
+            self.app.state(),
+            self.app.state(),
+            note.id.clone(),
+        )
+        .await
+        .map_err(|message| refusal(self.history, message))?;
+        self.file_receipt(&operation_id, "cli_note_delete", &request, &note.id)?;
+        Ok(Self::note_change(
+            NoteAction::Deleted,
+            false,
+            Some(operation_id),
+            Some(note),
+            false,
+        ))
+    }
+
+    pub(super) fn note_restore(&self, args: &NoteRestoreArgs) -> Result<WorkAnswer, ExternalError> {
+        let note = self.note(&args.note)?;
+        let versions = scratchpad::scratchpad_versions(self.app.state(), note.id.clone())
+            .map_err(|message| refusal(self.history, message))?;
+        let body = versions
+            .into_iter()
+            .find(|version| version.id == args.version)
+            .map(|version| version.body)
+            .ok_or_else(|| {
+                ExternalError::new(
+                    ExternalErrorCode::NotFound,
+                    format!("Note {} has no version {}.", note.id, args.version),
+                )
+                .hint("List them with: sona --note-versions NOTE_ID")
+            })?;
+        let same = note.body == body;
+        if args.dry_run || same {
+            return Ok(WorkAnswer::Note(Box::new(ExternalNoteChange {
+                schema_version: QUERY_SCHEMA_VERSION,
+                action: NoteAction::Restored,
+                dry_run: args.dry_run,
+                operation_id: args.write.operation_id.map(|id| id.to_string()),
+                replayed: same,
+                note: Some(project_note(note)),
+                would_write: args.dry_run.then_some(body),
+                linked: None,
+            })));
+        }
+        let operation_id = args.write.fresh_operation_id();
+        let request = request_json(&(&note.id, args.version))?;
+        match self.receipt(&operation_id, "cli_note_restore", &request)? {
+            Receipt::New(()) => {}
+            Receipt::Replay(note_id) => {
+                return Ok(Self::note_change(
+                    NoteAction::Restored,
+                    false,
+                    Some(operation_id),
+                    Some(self.replayed(&note_id)?),
+                    true,
+                ))
+            }
+            Receipt::Conflict => return Err(conflict(&operation_id)),
+        }
+        self.applies("writing notes")?;
+        let restored = scratchpad::scratchpad_restore_version(
+            self.app.clone(),
+            self.app.state(),
+            note.id.clone(),
+            args.version,
+        )
+        .map_err(|message| refusal(self.history, message))?;
+        self.file_receipt(&operation_id, "cli_note_restore", &request, &restored.id)?;
+        Ok(Self::note_change(
+            NoteAction::Restored,
+            false,
+            Some(operation_id),
+            Some(restored),
+            false,
+        ))
+    }
+
+    pub(super) async fn note_unlink(
+        &self,
+        args: &NoteLinkArgs,
+    ) -> Result<WorkAnswer, ExternalError> {
+        let note = self.note(&args.note)?;
+        let source = args.source();
+        if source.kind == ScratchSourceKind::Meeting
+            && Fence::read(self.meetings).await?.hides_meeting(&source.id)
+        {
+            return Err(ExternalError::new(
+                ExternalErrorCode::NotFound,
+                format!("No meeting {} is linked to this note.", source.id),
+            ));
+        }
+        let memory = links::scratchpad_memory(self.app.state(), self.app.state(), note.id.clone())
+            .await
+            .map_err(|message| refusal(self.history, message))?
+            .ok_or_else(|| {
+                ExternalError::new(ExternalErrorCode::NotFound, format!("No note {}.", note.id))
+            })?;
+        let present = memory
+            .sources
+            .iter()
+            .find(|found| found.kind == source.kind && found.id == source.id)
+            .map(|found| found.title.clone());
+        let request = request_json(&(&note.id, &source))?;
+        let unlinked = ExternalNoteSource {
+            kind: source.kind,
+            id: source.id.clone(),
+            title: present.clone(),
+        };
+        let answer = |dry_run: bool,
+                      operation_id: Option<String>,
+                      note: ScratchNote,
+                      replayed: bool,
+                      unlinked: ExternalNoteSource| {
+            WorkAnswer::Note(Box::new(ExternalNoteChange {
+                schema_version: QUERY_SCHEMA_VERSION,
+                action: NoteAction::Unlinked,
+                dry_run,
+                operation_id,
+                replayed,
+                note: Some(project_note(note)),
+                would_write: None,
+                linked: Some(unlinked),
+            }))
+        };
+        if args.dry_run || present.is_none() {
+            return Ok(answer(
+                args.dry_run,
+                args.write.operation_id.map(|id| id.to_string()),
+                note,
+                present.is_none(),
+                unlinked,
+            ));
+        }
+        let operation_id = args.write.fresh_operation_id();
+        match self.receipt(&operation_id, "cli_note_unlink", &request)? {
+            Receipt::New(()) => {}
+            Receipt::Replay(_) => {
+                return Ok(answer(false, Some(operation_id), note, true, unlinked))
+            }
+            Receipt::Conflict => return Err(conflict(&operation_id)),
+        }
+        self.applies("writing notes")?;
+        links::scratchpad_unlink(
+            self.app.clone(),
+            self.app.state(),
+            self.app.state(),
+            note.id.clone(),
+            source,
+        )
+        .await
+        .map_err(|message| refusal(self.history, message))?;
+        self.file_receipt(&operation_id, "cli_note_unlink", &request, &note.id)?;
+        let now = self.note(&args.note)?;
+        Ok(answer(false, Some(operation_id), now, false, unlinked))
+    }
 }
 
 pub(super) fn text(answer: &WorkAnswer, text: &mut String) {
@@ -501,6 +736,12 @@ pub(super) fn text(answer: &WorkAnswer, text: &mut String) {
         (NoteAction::Unpinned, true) => "Would unpin the note",
         (NoteAction::Linked, false) => "Linked to the note",
         (NoteAction::Linked, true) => "Would link to the note",
+        (NoteAction::Unlinked, false) => "Took off the note",
+        (NoteAction::Unlinked, true) => "Would take off the note",
+        (NoteAction::Deleted, false) => "Deleted the note",
+        (NoteAction::Deleted, true) => "Would delete the note",
+        (NoteAction::Restored, false) => "Put the version back",
+        (NoteAction::Restored, true) => "Would put this version back",
     };
     let _ = writeln!(
         text,

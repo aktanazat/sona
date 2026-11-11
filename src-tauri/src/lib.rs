@@ -399,6 +399,7 @@ fn start_meeting_detection(
 
     planning::work::follow::start(app_handle.clone(), Arc::clone(&native_prompts));
     planning::work::cycles::start(app_handle.clone());
+    planning::work::loops::start(app_handle.clone());
     app_handle.manage(planning::work::watch::WatchNotices(Arc::clone(
         &native_prompts,
     )));
@@ -2107,6 +2108,7 @@ pub fn run(cli_args: CliArgs) {
             planning::work::plans::planning_project_update_delete,
             planning::work::plans::planning_project_update_draft,
             planning::work::plans::planning_project_save,
+            planning::work::plans::planning_milestone_save,
             planning::work::plans::planning_milestone_reorder,
             planning::work::blocks::work_time_block,
             planning::work::blocks::work_time_block_remove,
@@ -2119,6 +2121,7 @@ pub fn run(cli_args: CliArgs) {
             planning::work::agents::work_proposals_accept,
             planning::work::agents::work_proposals_reject,
             planning::work::parse::work_parse,
+            planning::work::words::work_where,
             planning::work::capture::work_capture,
             planning::work::capture::work_take_lines,
             planning::work::ask::work_ask,

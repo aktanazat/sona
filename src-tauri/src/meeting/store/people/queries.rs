@@ -231,20 +231,38 @@ impl MeetingStore {
         &self,
         slug: &str,
     ) -> Result<OrganizationDetailResult, StoreError> {
+        self.organization_detail_without(slug, &HashSet::new())
+    }
+
+    /// An organization's page for a reader the `hidden` meetings are kept
+    /// from: they are not among its meetings and their loops are left out.
+    pub(crate) fn organization_detail_without(
+        &self,
+        slug: &str,
+        hidden: &HashSet<MeetingSessionId>,
+    ) -> Result<OrganizationDetailResult, StoreError> {
         let user_name = self.user_name();
         let mut connection = self.connection()?;
         let transaction = connection.transaction()?;
-        let result = organization_detail_in(&transaction, slug, user_name.as_deref())?;
+        let result = organization_detail_in(&transaction, slug, hidden, user_name.as_deref())?;
         transaction.commit()?;
         Ok(result)
     }
 
     /// Every organization its people carry, with the counts its page shows.
     pub(crate) fn companies_list(&self) -> Result<CompaniesListResult, StoreError> {
+        self.companies_list_without(&HashSet::new())
+    }
+
+    /// The companies list for a reader the `hidden` meetings are kept from.
+    pub(crate) fn companies_list_without(
+        &self,
+        hidden: &HashSet<MeetingSessionId>,
+    ) -> Result<CompaniesListResult, StoreError> {
         let user_name = self.user_name();
         let mut connection = self.connection()?;
         let transaction = connection.transaction()?;
-        let result = companies_list_in(&transaction, user_name.as_deref())?;
+        let result = companies_list_in(&transaction, hidden, user_name.as_deref())?;
         transaction.commit()?;
         Ok(result)
     }
@@ -299,7 +317,7 @@ fn hidden_json(hidden: &HashSet<MeetingSessionId>) -> String {
     .to_string()
 }
 
-fn people_list_in(
+pub(super) fn people_list_in(
     connection: &Connection,
     hidden: &HashSet<MeetingSessionId>,
 ) -> Result<PeopleListResult, StoreError> {
@@ -454,10 +472,11 @@ const ORGANIZATION_PAGE_ROWS: usize = 25;
 fn organization_detail_in(
     connection: &Connection,
     slug: &str,
+    hidden: &HashSet<MeetingSessionId>,
     user_name: Option<&str>,
 ) -> Result<OrganizationDetailResult, StoreError> {
     let slug = organization_slug(slug);
-    let list = people_list_in(connection, &HashSet::new())?;
+    let list = people_list_in(connection, hidden)?;
     let people = list
         .entries
         .into_iter()
@@ -480,6 +499,8 @@ fn organization_detail_in(
     for entry in &people {
         let mut facts = facts_for_person_in(connection, &entry.person, user_name)?;
         gate_continuity_facts_in(connection, &mut facts)?;
+        facts.meetings.retain(|meeting| !hidden.contains(&meeting.id));
+        facts.open_loops.retain(|open| !hidden.contains(&open.meeting_id));
         for meeting in facts.meetings {
             // Two people from one organization in one meeting is the ordinary
             // case, and the meeting happened once.
@@ -523,6 +544,7 @@ fn organization_detail_in(
 /// meeting or an open item that several people share counted once.
 fn companies_list_in(
     connection: &Connection,
+    hidden: &HashSet<MeetingSessionId>,
     user_name: Option<&str>,
 ) -> Result<CompaniesListResult, StoreError> {
     struct Tally {
@@ -532,7 +554,7 @@ fn companies_list_in(
         last: Option<i64>,
         loops: HashSet<String>,
     }
-    let list = people_list_in(connection, &HashSet::new())?;
+    let list = people_list_in(connection, hidden)?;
     let mut tallies: HashMap<String, Tally> = HashMap::new();
     for entry in &list.entries {
         let Some(name) = entry.person.organization.as_deref() else {
@@ -544,6 +566,8 @@ fn companies_list_in(
         }
         let mut facts = facts_for_person_in(connection, &entry.person, user_name)?;
         gate_continuity_facts_in(connection, &mut facts)?;
+        facts.meetings.retain(|meeting| !hidden.contains(&meeting.id));
+        facts.open_loops.retain(|open| !hidden.contains(&open.meeting_id));
         let tally = tallies.entry(slug).or_insert_with(|| Tally {
             name: name.to_owned(),
             people: 0,

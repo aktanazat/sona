@@ -90,7 +90,7 @@ impl Default for PrepPreferences {
 }
 
 impl PrepPreferences {
-    fn validate(&self) -> Result<(), String> {
+    pub(crate) fn validate(&self) -> Result<(), String> {
         self.about_me.validate()?;
         if !(1..=60).contains(&self.alert_minutes) {
             return Err("Choose a reminder between 1 and 60 minutes before a meeting.".into());

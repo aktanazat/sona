@@ -4,27 +4,37 @@
 
 pub(crate) mod agents;
 pub(crate) mod attachments;
+pub(crate) mod bin;
 pub(crate) mod ask;
 pub(crate) mod blocks;
 pub(crate) mod capture;
+pub(crate) mod changes;
 pub(crate) mod command;
 pub(crate) mod comments;
 pub(crate) mod cycles;
 pub(crate) mod filter;
+pub(crate) mod favorites;
 pub(crate) mod follow;
 mod hygiene;
+pub(crate) mod inbox;
 pub(crate) mod items;
 pub(crate) mod live;
+pub(crate) mod loops;
 pub(crate) mod parse;
 pub(crate) mod plans;
 #[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
 mod probe;
 pub(crate) mod recur;
+pub(crate) mod routines;
+pub(crate) mod sessions;
 pub(crate) mod sync;
 #[cfg(test)]
 mod tests;
+pub(crate) mod triage_hints;
+pub(crate) mod versions;
 pub mod types;
 pub(crate) mod watch;
+pub(crate) mod words;
 
 use self::follow::FollowUps;
 use self::items::{Changed, DueSpan, NewItem};
@@ -257,6 +267,7 @@ pub(crate) fn take_in(app: Option<&AppHandle>, store: &MeetingStore, session_id:
         Ok(_) => {}
         Err(error) => log::warn!("Meeting commitments could not reach triage: {error:#}"),
     }
+    loops::meeting_ended(app, &history, store, session_id);
 }
 
 /// Moves the tracker after a loop moved in its meeting, and returns the
@@ -592,7 +603,11 @@ fn list(
             || raised.as_ref().is_some_and(|ids| !ids.contains(&item.id))
             || cycle.is_some_and(|cycle| !cycle.holds(item))
             || search.as_deref().is_some_and(|search| !found(item, search))
-            || !filter::holds(&filters, item)
+            || !filter::holds(
+                &filters,
+                item,
+                context.doers.get(&item.id).map(|doer| doer.agent.as_str()),
+            )
         {
             continue;
         }
@@ -1036,12 +1051,22 @@ pub(crate) fn comment_add_as(
     body: &str,
     reply_to: Option<&str>,
 ) -> Result<WorkComment, String> {
+    let user_name = app
+        .try_state::<Arc<MeetingSessionManager>>()
+        .and_then(|meetings| meetings.user_name());
+    let actor = author.actor;
     comment_change(
         app,
         operation_id,
         "work_comment_add",
         &(item_id, body, reply_to, author.actor, author.agent),
-        |tx, at_ms| comments::add(tx, item_id, reply_to, author, body, at_ms),
+        |tx, at_ms| {
+            let comment = comments::add(tx, item_id, reply_to, author, body, at_ms)?;
+            if inbox::mentions_user(body, user_name.as_deref()) {
+                inbox::mentioned(tx, &comment.item_id, &comment.id, actor, at_ms)?;
+            }
+            Ok(comment)
+        },
     )
 }
 
@@ -1645,12 +1670,13 @@ fn decline(
     meetings: Option<&Connection>,
     change: Change<'_>,
     ids: &[String],
+    reason: Option<&str>,
 ) -> StorageResult<Done<Vec<WorkItem>>> {
     store::mutate(
         history,
         change.operation_id,
         "work_triage_decline",
-        &ids,
+        &(ids, reason),
         change.at_ms,
         |tx| {
             let mut effects = Effects::default();
@@ -1658,7 +1684,7 @@ fn decline(
             for id in unique(ids)? {
                 let item = items::item(tx, &id)?;
                 let (after, moved) =
-                    sync::decline(tx, meetings, &item, change.actor, change.at_ms)?;
+                    sync::decline(tx, meetings, &item, reason, change.actor, change.at_ms)?;
                 effects.item(&after);
                 effects.loops.extend(moved);
                 value.push(after);
@@ -1674,10 +1700,11 @@ pub(crate) async fn triage_decline_as(
     actor: WorkActor,
     operation_id: &str,
     ids: &[String],
+    reason: Option<&str>,
 ) -> Result<Vec<WorkItem>, String> {
     let change = Change::now(operation_id, actor);
     run_with_meetings(app, |history, meetings| {
-        decline(history, meetings, change, ids)
+        decline(history, meetings, change, ids, reason)
     })
     .await
 }
@@ -1688,8 +1715,9 @@ pub async fn work_triage_decline(
     app: AppHandle,
     operation_id: String,
     ids: Vec<String>,
+    reason: Option<String>,
 ) -> Result<Vec<WorkItem>, String> {
-    triage_decline_as(&app, WorkActor::Me, &operation_id, &ids).await
+    triage_decline_as(&app, WorkActor::Me, &operation_id, &ids, reason.as_deref()).await
 }
 
 /// Folds `id` into `of_id`: its sources move to the item it repeats.

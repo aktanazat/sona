@@ -6,6 +6,7 @@
 use super::super::sources;
 use super::super::store::{self, Refusal};
 use super::items;
+use super::routines;
 use super::sync::People;
 use super::types::{WorkItem, WorkOwner, WorkSource};
 use super::{in_both, now_ms, run_history, with_both, Done, Effects};
@@ -351,6 +352,21 @@ fn follow_notice(waits: &[Reminder], people: &People) -> Option<Notice> {
             ),
         }),
     }
+}
+
+fn reminder_notices(history: &Connection, now_ms: i64) -> Result<Vec<(String, Notice)>> {
+    routines::due_reminders(history, now_ms)?
+        .into_iter()
+        .map(|reminder| {
+            let item = items::item(history, &reminder.item_id)?;
+            let notice = Notice {
+                id: request_id(WorkReminderKind::Due, Some(&item.id)),
+                title: item.title,
+                body: "Reminder".to_owned(),
+            };
+            Ok((item.id, notice))
+        })
+        .collect()
 }
 
 /// Remembers reminders as shown, and forgets ones shown long ago.
@@ -875,10 +891,11 @@ pub(super) fn probe_inputs(
 fn tick(app: &AppHandle, prompts: &dyn PromptPresenter, now_ms: i64) -> Result<()> {
     let history = app.state::<Arc<HistoryManager>>();
     let store = app.state::<Arc<MeetingSessionManager>>().open_store();
-    let (sent, (due, waits)) = history.with_connection(|conn| {
+    let (sent, (due, waits), reminded) = history.with_connection(|conn| {
         let sent = sent(conn)?;
         let pending = pending(conn, &sent, now_ms)?;
-        Ok((sent, pending))
+        let reminded = reminder_notices(conn, now_ms)?;
+        Ok((sent, pending, reminded))
     })?;
     let mut shown = Vec::new();
     let mut show = |notice: &Notice, keys: Vec<String>| {
@@ -906,6 +923,15 @@ fn tick(app: &AppHandle, prompts: &dyn PromptPresenter, now_ms: i64) -> Result<(
     }
     if !shown.is_empty() {
         history.with_connection(|conn| record(conn, &shown, now_ms))?;
+    }
+    let reminded: Vec<String> = reminded
+        .into_iter()
+        .filter(|(_, notice)| prompts.present_follow_up(&notice.id, &notice.title, &notice.body))
+        .map(|(item_id, _)| item_id)
+        .collect();
+    if !reminded.is_empty() {
+        routines::reminders_notified(app, &Uuid::new_v4().to_string(), &reminded)
+            .map_err(anyhow::Error::msg)?;
     }
     Ok(())
 }
@@ -1519,5 +1545,47 @@ mod tests {
                 Some(WorkSource::Agent),
             ]
         );
+    }
+
+    #[test]
+    fn a_due_reminder_is_posted_once_under_an_id_that_opens_its_task() {
+        let mut desk = desk();
+        let due = desk.task("Call the harbor master", WorkOwner::Myself, None, at(0, 9));
+        let later = desk.task("Renew the berth permit", WorkOwner::Myself, None, at(0, 9));
+        for (item, remind_at_ms) in [(&due, at(0, 10)), (&later, at(1, 10))] {
+            desk.history
+                .execute(
+                    "INSERT INTO planning_task_reminders (task_id, remind_at_ms, set_at_ms, actor)
+                     VALUES (?1, ?2, ?3, 'me')",
+                    params![item.id, remind_at_ms, at(0, 9)],
+                )
+                .expect("a reminder set");
+        }
+
+        let notices = reminder_notices(&desk.history, at(0, 11)).expect("the due reminders");
+        assert_eq!(
+            notices
+                .iter()
+                .map(|(item_id, notice)| (item_id.as_str(), notice.title.as_str(), opened(&notice.id)))
+                .collect::<Vec<_>>(),
+            [(
+                due.id.as_str(),
+                "Call the harbor master",
+                Some(WorkReminderOpened {
+                    kind: WorkReminderKind::Due,
+                    id: Some(due.id.clone()),
+                })
+            )]
+        );
+
+        desk.history
+            .execute(
+                "UPDATE planning_task_reminders SET notified_at_ms = ?2 WHERE task_id = ?1",
+                params![due.id, at(0, 11)],
+            )
+            .expect("the reminder marked shown");
+        assert!(reminder_notices(&desk.history, at(0, 12))
+            .expect("the due reminders")
+            .is_empty());
     }
 }

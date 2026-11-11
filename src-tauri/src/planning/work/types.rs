@@ -610,11 +610,13 @@ pub enum WorkSuggestionField {
     Owner,
     Due,
     Project,
+    Label,
     Duplicate,
+    Related,
 }
 
-/// A suggestion's value: an owner, a due time in epoch ms, or a project or
-/// item id, as `field` says.
+/// A suggestion's value: an owner, a due time in epoch ms, or a project,
+/// label or task id, as `field` says.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
 #[serde(untagged)]
 pub enum WorkSuggestionValue {
@@ -626,6 +628,7 @@ pub enum WorkSuggestionValue {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkFieldSuggestion {
+    pub id: String,
     pub field: WorkSuggestionField,
     pub value: WorkSuggestionValue,
     pub reason: String,
@@ -633,6 +636,8 @@ pub struct WorkFieldSuggestion {
     /// Offset into the meeting the suggestion was read from.
     pub at_ms: Option<i64>,
     pub meeting_id: Option<String>,
+    #[serde(skip)]
+    pub drawn_from: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
@@ -647,6 +652,8 @@ pub struct WorkActivity {
     pub to: Option<String>,
     /// The agent behind an `agent` entry, when it gave its name.
     pub agent: Option<String>,
+    /// Why, when one was given: a declined triage item's reason.
+    pub reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
@@ -666,6 +673,10 @@ pub struct WorkLabel {
     /// Degrees on the color wheel, 0 to 360.
     pub hue: f64,
     pub revision: i64,
+    /// The label group it sits in, when it is in one.
+    pub group: Option<String>,
+    /// Set once retired: kept on its tasks, left out of pickers.
+    pub retired_at_ms: Option<i64>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]

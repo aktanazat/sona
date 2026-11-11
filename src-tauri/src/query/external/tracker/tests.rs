@@ -9,7 +9,8 @@ use crate::planning::work::capture::{attach, WorkCaptureSource};
 use crate::planning::work::items::{self, NewItem};
 use crate::planning::work::live;
 use crate::planning::work::types::{
-    WorkActor, WorkDirection, WorkItem, WorkItemRow, WorkOwner, WorkPatch, WorkSource, WorkStatus,
+    WorkActivityKind, WorkActor, WorkDirection, WorkItem, WorkItemRow, WorkLabel, WorkOwner,
+    WorkPatch, WorkSource, WorkStatus,
 };
 use crate::query::KeptLocal;
 use clap::Parser;
@@ -253,15 +254,9 @@ fn the_fence_leaves_out_work_any_kept_meeting_raised_and_all_of_it_while_closed(
     );
 }
 
-/// `work update --cycle` moves a task to another cycle; naming the cycle it
-/// is already in leaves it alone.
-#[test]
-fn moving_a_task_to_another_cycle_is_a_change() {
-    let row = WorkItemRow {
-        item: WorkItem {
-            cycle: Some(4),
-            ..task()
-        },
+pub(super) fn row(item: WorkItem) -> WorkItemRow {
+    WorkItemRow {
+        item,
         project_title: None,
         owner_name: None,
         doer: None,
@@ -279,10 +274,13 @@ fn moving_a_task_to_another_cycle_is_a_change() {
         repeat: None,
         sub_tasks: None,
         attachment_count: 0,
-    };
-    let board = Board {
-        rows: vec![row.clone()],
-        labels: Vec::new(),
+    }
+}
+
+pub(super) fn board(rows: Vec<WorkItemRow>, labels: Vec<WorkLabel>) -> Board {
+    Board {
+        rows,
+        labels,
         projects: Vec::new(),
         people: Vec::new(),
         suggestions: BTreeMap::new(),
@@ -290,7 +288,18 @@ fn moving_a_task_to_another_cycle_is_a_change() {
         repeats: HashMap::new(),
         fence: Fence::Closed,
         cycles: Vec::new(),
-    };
+    }
+}
+
+/// `work update --cycle` moves a task to another cycle; naming the cycle it
+/// is already in leaves it alone.
+#[test]
+fn moving_a_task_to_another_cycle_is_a_change() {
+    let row = row(WorkItem {
+        cycle: Some(4),
+        ..task()
+    });
+    let board = board(vec![row.clone()], Vec::new());
     let changes = |cycle| {
         let patch = WorkPatch {
             cycle: Some(cycle),
@@ -312,6 +321,70 @@ fn moving_a_task_to_another_cycle_is_a_change() {
         [("cycle", "4".to_owned(), "none".to_owned())]
     );
     assert_eq!(changes(Some(4)), []);
+}
+
+#[test]
+fn adding_a_second_label_from_a_group_replaces_the_first_in_the_dry_run_too() {
+    let history = Connection::open_in_memory().expect("an in-memory history database");
+    schema::apply_all(&history).expect("the planner schema");
+    let label = |name: &str, group: Option<&str>| {
+        let id = items::save_label(&history, None, name, 0.0, 0)
+            .expect("a label")
+            .id;
+        history
+            .execute(
+                "UPDATE planning_labels SET group_name = ?2 WHERE id = ?1",
+                rusqlite::params![id, group],
+            )
+            .expect("grouped");
+        id
+    };
+    let high = label("p-high", Some("Size"));
+    let low = label("p-low", Some("Size"));
+    let bug = label("bug", None);
+    let id = filed(&history, "Call the venue", None);
+    let write = |label_ids: Vec<String>| {
+        items::apply(
+            &history,
+            &id,
+            &WorkPatch {
+                label_ids: Some(label_ids),
+                ..WorkPatch::default()
+            },
+            WorkActivityKind::Status,
+            WorkActor::Me,
+            0,
+        )
+        .expect("labels changed")
+        .after
+    };
+    let before = row(write(vec![high.clone(), bug.clone()]));
+    let board = board(
+        vec![before.clone()],
+        items::labels(&history).expect("the labels"),
+    );
+    let adding = vec![high, bug, low];
+
+    let previewed = board
+        .planned(
+            &before,
+            &WorkPatch {
+                label_ids: Some(adding.clone()),
+                ..WorkPatch::default()
+            },
+            None,
+        )
+        .fields
+        .into_iter()
+        .map(|change| (change.field, change.from, change.to))
+        .collect::<Vec<_>>();
+    let written = write(adding);
+
+    assert_eq!(
+        previewed,
+        [("labels", "bug, p-high".to_owned(), "bug, p-low".to_owned())]
+    );
+    assert_eq!(board.labels_text(&written.label_ids), "bug, p-low");
 }
 
 fn choice(id: &str, name: &str, aliases: &[&str]) -> WorkPersonChoice {

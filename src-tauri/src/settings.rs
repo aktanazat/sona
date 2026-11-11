@@ -3440,15 +3440,17 @@ pub fn change_dictation_languages_setting(
     app: AppHandle,
     languages: Vec<String>,
 ) -> Result<(), String> {
-    let languages = normalize_dictation_languages(languages);
-    update_settings(&app, |settings| {
-        settings.selected_language = match languages.as_slice() {
-            [language] => language.clone(),
-            _ => default_selected_language(),
-        };
-        settings.dictation_languages = languages;
-    })?;
+    update_settings(&app, |settings| apply_dictation_languages(settings, languages))?;
     Ok(())
+}
+
+pub(crate) fn apply_dictation_languages(settings: &mut AppSettings, languages: Vec<String>) {
+    let languages = normalize_dictation_languages(languages);
+    settings.selected_language = match languages.as_slice() {
+        [language] => language.clone(),
+        _ => default_selected_language(),
+    };
+    settings.dictation_languages = languages;
 }
 
 fn normalize_dictation_languages(languages: Vec<String>) -> Vec<String> {
@@ -3742,12 +3744,22 @@ fn try_update_settings_inner<Rt: tauri::Runtime, R, E>(
         let persisted = write_settings_locked(app, &mut settings);
         (result, revision, settings, persisted)
     };
-    // The store's own memory took the mutation whether or not the disk did, and
-    // that memory is what the next read returns - so the runtime is brought
-    // into line with it before the failure is reported. A caller that hears
-    // the write did not land must not also be left with an app running on a
-    // value it can no longer read back.
-    crate::modes::refresh_clipboard_context_watcher(&settings);
+    follow_settings(app, &settings);
+    if let Err(error) = &persisted {
+        // The caller may only be able to say *that* the write failed, so the
+        // reason is recorded here once, where it still exists.
+        warn!("Failed to persist settings: {error}");
+    }
+    Ok((result, revision, persisted))
+}
+
+// The store's own memory took the mutation whether or not the disk did, and
+// that memory is what the next read returns - so the runtime is brought
+// into line with it before the failure is reported. A caller that hears
+// the write did not land must not also be left with an app running on a
+// value it can no longer read back.
+fn follow_settings<Rt: tauri::Runtime>(app: &AppHandle<Rt>, settings: &AppSettings) {
+    crate::modes::refresh_clipboard_context_watcher(settings);
     if let Some(runtime) = app.try_state::<Arc<crate::meeting::detection::DetectionRuntime>>() {
         runtime.set_enabled(settings.detection_enabled);
     }
@@ -3768,12 +3780,35 @@ fn try_update_settings_inner<Rt: tauri::Runtime, R, E>(
     // and the overlay material. Those paths announce twice, and a second read
     // is what they cost.
     let _ = app.emit("settings-changed", serde_json::json!({ "setting": null }));
-    if let Err(error) = &persisted {
-        // The caller may only be able to say *that* the write failed, so the
-        // reason is recorded here once, where it still exists.
-        warn!("Failed to persist settings: {error}");
-    }
-    Ok((result, revision, persisted))
+}
+
+/// `sona work` wrote the settings file from its own process. Reads the file
+/// again in place of this process's copy and answers the settings before and
+/// after. Nothing is read while a save of this process's own is owed: the file
+/// lacks that save, and reading it would lose it.
+pub(crate) fn reload_after_external_write<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> Option<(AppSettings, AppSettings)> {
+    let (before, after) = {
+        let _settings_lock = lock_settings_store();
+        let owed = app
+            .try_state::<Arc<SettingsSaveOwed>>()
+            .is_some_and(|owed| owed.0.load(Ordering::Relaxed));
+        if owed {
+            warn!("Settings written by sona work were not read: a save of Sona's own is owed");
+            return None;
+        }
+        let before = get_settings_locked(app);
+        let file = SettingsFile::open(app).ok()?;
+        if let Err(error) = file.store.reload_ignore_defaults() {
+            warn!("Settings written by sona work could not be read: {error}");
+            return None;
+        }
+        forget_cached_settings(app);
+        (before, get_settings_locked(app))
+    };
+    follow_settings(app, &after);
+    Some((before, after))
 }
 
 /// [`try_update_settings_committed`] for a caller that also keeps the

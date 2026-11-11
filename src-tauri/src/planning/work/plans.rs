@@ -4,11 +4,11 @@
 use super::super::catalog::{self, LinkEdit, ProjectEdit};
 use super::super::types::{
     DateResolution, Milestone, Project, ProjectHealth, ProjectStatus, ProjectUpdate,
-    ProjectUpdatePage,
+    ProjectUpdatePage, TaskStatus,
 };
 use super::super::updates;
 use super::comments::Author;
-use super::types::{nullable, WorkActor};
+use super::types::{nullable, WorkActor, WorkOwner};
 use super::{now_ms, run_history, store, Done, Effects};
 use crate::managers::history::HistoryManager;
 use anyhow::Result;
@@ -204,7 +204,8 @@ pub struct ProjectLinkInput {
 
 /// A project's fields to set. A key left out keeps its value; `null`
 /// clears a lead, description, icon, date or resolution. Lists replace the
-/// whole list.
+/// whole list. `leadIsSelf: true` makes the user the lead in place of a
+/// person; `membersIncludeSelf` sets whether the user is a member.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, Type)]
 #[serde(default, rename_all = "camelCase")]
 pub struct ProjectSaveInput {
@@ -215,7 +216,9 @@ pub struct ProjectSaveInput {
     pub priority: Option<u8>,
     #[serde(deserialize_with = "nullable")]
     pub lead_person_id: Option<Option<String>>,
+    pub lead_is_self: Option<bool>,
     pub member_person_ids: Option<Vec<String>>,
+    pub members_include_self: Option<bool>,
     #[serde(deserialize_with = "nullable")]
     pub start_at_ms: Option<Option<i64>>,
     #[serde(deserialize_with = "nullable")]
@@ -234,14 +237,27 @@ pub struct ProjectSaveInput {
 }
 
 impl ProjectSaveInput {
-    fn edit(self) -> ProjectEdit {
+    fn edit(self) -> Result<ProjectEdit, String> {
         let cleared = |value: Option<Option<String>>| value.map(Option::unwrap_or_default);
-        ProjectEdit {
+        let person = self
+            .lead_person_id
+            .map(|id| id.filter(|id| !id.trim().is_empty()));
+        let lead = match (self.lead_is_self, person) {
+            (Some(true), Some(Some(_))) => {
+                return Err(crate::planning::failure(store::Refusal::Invalid.into()));
+            }
+            (Some(true), _) => Some(WorkOwner::Myself),
+            (_, Some(Some(person_id))) => Some(WorkOwner::Person { person_id }),
+            (_, Some(None)) => Some(WorkOwner::Nobody),
+            (_, None) => None,
+        };
+        Ok(ProjectEdit {
             title: self.title,
             description: cleared(self.description),
             status: self.status,
-            lead_person_id: cleared(self.lead_person_id),
+            lead,
             member_person_ids: self.member_person_ids,
+            members_include_self: self.members_include_self,
             target_at_ms: self.target_at_ms,
             hue: self.hue,
             archived: self.archived,
@@ -261,7 +277,7 @@ impl ProjectSaveInput {
                     .collect()
             }),
             trashed: self.trashed,
-        }
+        })
     }
 }
 
@@ -275,7 +291,44 @@ pub fn planning_project_save(
     id: Option<String>,
     input: ProjectSaveInput,
 ) -> Result<Project, String> {
-    super::catalog_project_save(&app, &operation_id, id, &input.edit())
+    super::catalog_project_save(&app, &operation_id, id, &input.edit()?)
+}
+
+/// A milestone's fields to set. A key left out keeps its value; `null`
+/// clears the due date.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, Type)]
+#[serde(default, rename_all = "camelCase")]
+pub struct MilestoneSaveInput {
+    pub title: Option<String>,
+    pub description: Option<String>,
+    #[serde(deserialize_with = "nullable")]
+    pub due_at_ms: Option<Option<i64>>,
+    pub status: Option<TaskStatus>,
+}
+
+/// Makes a milestone in a project, or with `id` changes one: the same save
+/// `work milestone-save` makes.
+#[tauri::command(async)]
+#[specta::specta]
+pub fn planning_milestone_save(
+    app: AppHandle,
+    operation_id: String,
+    project_id: String,
+    id: Option<String>,
+    input: MilestoneSaveInput,
+) -> Result<Milestone, String> {
+    super::catalog_milestone_save(
+        &app,
+        &operation_id,
+        &project_id,
+        id,
+        &catalog::MilestoneEdit {
+            title: input.title,
+            description: input.description,
+            due_at_ms: input.due_at_ms,
+            status: input.status,
+        },
+    )
 }
 
 #[tauri::command(async)]

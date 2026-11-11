@@ -97,6 +97,7 @@ chrono = "0.4"
 # in the build as chrono's own way of reading `Local`; named here so the card
 # can print the zone rather than only its offset.
 iana-time-zone = "0.1"
+jiff = "0.2"
 rusqlite = { version = "0.37", features = ["bundled-sqlcipher"] }
 tar = "0.4.44"
 flate2 = "1.0"
