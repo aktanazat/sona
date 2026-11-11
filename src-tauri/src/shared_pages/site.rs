@@ -14,6 +14,7 @@ const VIEWER_CSS: &str = include_str!("../../../share-site/viewer.css");
 const INDEX_HTML: &str = include_str!("../../../share-site/index.html");
 const NOT_FOUND_HTML: &str = include_str!("../../../share-site/404.html");
 const PAGES_YML: &str = include_str!("../../../share-site/pages.yml");
+const CARD_PNG: &[u8] = include_bytes!("../../../share-site/card.png");
 
 /// The root file that marks a repository as one Sona writes. A remote whose
 /// `main` lacks it is someone else's, and is never pushed over.
@@ -33,9 +34,29 @@ pub(crate) fn is_slug(name: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
 }
 
-fn asset_name(stem: &str, extension: &str, contents: &str) -> String {
-    let digest = hex::encode(Sha256::digest(contents.as_bytes()));
+fn asset_name(stem: &str, extension: &str, contents: &[u8]) -> String {
+    let digest = hex::encode(Sha256::digest(contents));
     format!("{stem}.{}.{extension}", &digest[..12])
+}
+
+/// An attribute value in the page head: base URLs and hosts cannot carry a
+/// `"` or `&`, but escape them before they reach the HTML either way.
+fn attribute(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+}
+
+/// The host a description names, out of the site's base URL.
+fn site_host(base_url: &str) -> &str {
+    base_url
+        .split("://")
+        .nth(1)
+        .unwrap_or(base_url)
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(base_url)
 }
 
 fn fill(head: &str, boot: &str) -> String {
@@ -44,13 +65,17 @@ fn fill(head: &str, boot: &str) -> String {
         .replacen("{{BOOT}}", boot, 1)
 }
 
-/// A slug's `index.html`.
-pub(crate) fn published_page() -> String {
-    let css = asset_name("viewer", "css", VIEWER_CSS);
-    let js = asset_name("viewer", "js", VIEWER_JS);
+/// A slug's `index.html`; `base_url` is the address the site serves at,
+/// which the link-preview tags need for an absolute image URL.
+pub(crate) fn published_page(base_url: &str) -> String {
+    let css = asset_name("viewer", "css", VIEWER_CSS.as_bytes());
+    let js = asset_name("viewer", "js", VIEWER_JS.as_bytes());
+    let card = asset_name("card", "png", CARD_PNG);
+    let image = attribute(&format!("{}/assets/{card}", base_url.trim_end_matches('/')));
+    let host = attribute(site_host(base_url));
     fill(
         &format!(
-            "<meta http-equiv=\"Content-Security-Policy\" content=\"{PUBLISHED_CSP}\">\n<link rel=\"stylesheet\" href=\"../assets/{css}\">"
+            "<meta http-equiv=\"Content-Security-Policy\" content=\"{PUBLISHED_CSP}\">\n<meta property=\"og:title\" content=\"Meeting notes\">\n<meta property=\"og:description\" content=\"Shared privately from {host}. Opens in your browser with the key in the link.\">\n<meta property=\"og:type\" content=\"website\">\n<meta property=\"og:image\" content=\"{image}\">\n<meta name=\"twitter:card\" content=\"summary_large_image\">\n<link rel=\"stylesheet\" href=\"../assets/{css}\">"
         ),
         &format!("<script type=\"module\" src=\"../assets/{js}\"></script>"),
     )
@@ -99,7 +124,12 @@ pub(crate) struct Written {
 /// Rewrites `root` (a working tree; `.git` is left alone) as the whole tree
 /// Sona publishes: fresh site files, every unexpired share kept with its
 /// page pointing at the current assets, expired ones dropped, then `change`.
-pub(crate) fn write_tree(root: &Path, change: &Change<'_>, now_unix: i64) -> io::Result<Written> {
+pub(crate) fn write_tree(
+    root: &Path,
+    base_url: &str,
+    change: &Change<'_>,
+    now_unix: i64,
+) -> io::Result<Written> {
     let (Change::Remove(touched) | Change::Add { slug: touched, .. }) = change;
     let mut kept = Vec::new();
     for entry in fs::read_dir(root)? {
@@ -129,14 +159,15 @@ pub(crate) fn write_tree(root: &Path, change: &Change<'_>, now_unix: i64) -> io:
     fs::write(root.join("404.html"), NOT_FOUND_HTML)?;
     fs::write(root.join(MARKER), MARKER_TEXT)?;
     fs::write(
-        assets.join(asset_name("viewer", "js", VIEWER_JS)),
+        assets.join(asset_name("viewer", "js", VIEWER_JS.as_bytes())),
         VIEWER_JS,
     )?;
     fs::write(
-        assets.join(asset_name("viewer", "css", VIEWER_CSS)),
+        assets.join(asset_name("viewer", "css", VIEWER_CSS.as_bytes())),
         VIEWER_CSS,
     )?;
-    let page = published_page();
+    fs::write(assets.join(asset_name("card", "png", CARD_PNG)), CARD_PNG)?;
+    let page = published_page(base_url);
     for share in &kept {
         fs::write(share.join("index.html"), &page)?;
     }
@@ -161,8 +192,9 @@ pub(crate) fn site_file_names() -> Vec<String> {
         ".github/workflows/pages.yml".to_owned(),
         "index.html".to_owned(),
         "404.html".to_owned(),
-        format!("assets/{}", asset_name("viewer", "js", VIEWER_JS)),
-        format!("assets/{}", asset_name("viewer", "css", VIEWER_CSS)),
+        format!("assets/{}", asset_name("viewer", "js", VIEWER_JS.as_bytes())),
+        format!("assets/{}", asset_name("viewer", "css", VIEWER_CSS.as_bytes())),
+        format!("assets/{}", asset_name("card", "png", CARD_PNG)),
     ]
 }
 

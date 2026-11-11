@@ -1982,6 +1982,7 @@ pub fn run(cli_args: CliArgs) {
             commands::shared_pages::shared_draft,
             commands::shared_pages::shared_draft_save,
             commands::shared_pages::shared_draft_discard,
+            commands::shared_pages::shared_draft_recap,
             commands::shared_pages::shared_drafts,
             commands::shared_pages::shared_preview,
             commands::shared_pages::shared_publish,

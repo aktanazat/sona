@@ -4076,6 +4076,11 @@ pub(super) async fn call(
             let request = args.take("request")?;
             reply(crate::commands::shared_pages::shared_draft_discard(app.clone(), request).await)
         }
+        "shared_draft_recap" => {
+            let mut args = Args::parse(params)?;
+            let request = args.take("request")?;
+            reply(crate::commands::shared_pages::shared_draft_recap(app.state(), request).await)
+        }
         "shared_drafts" => reply(crate::commands::shared_pages::shared_drafts(app.clone()).await),
         "shared_preview" => {
             let mut args = Args::parse(params)?;

@@ -17,8 +17,8 @@ use super::{store, ExternalError, ExternalErrorCode, ExternalScope, READ_SCOPES,
 use crate::meeting::session::MeetingSessionManager;
 use crate::meeting::store::MeetingStore;
 use crate::shared_pages::{
-    self, Code, Draft, DryRun, ExpiresInDays, Include, Page, PageSummary, Paths, ShareRecord,
-    ShareState, SharedPagesError, SiteSettings, SpeakerMode,
+    self, Code, Draft, DryRun, ExpiresInDays, Include, Page, PageSummary, Paths, ShareCheck,
+    ShareRecord, ShareState, SharedPagesError, SiteSettings, SpeakerMode,
 };
 
 /// What goes on the page, beside the draft's own choices.
@@ -34,6 +34,9 @@ pub struct ShareChoices {
     /// When the page stops working: 1d, 7d, 30d or never.
     #[arg(long, value_name = "WHEN")]
     pub expires: Option<String>,
+    /// Share the page for one person only; the action items keep only his.
+    #[arg(long = "for", value_name = "NAME")]
+    pub for_person: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -44,11 +47,17 @@ pub enum SpeakerChoice {
 
 #[derive(Args, Clone, Debug, Eq, PartialEq)]
 pub struct SharePreviewArgs {
-    /// The meeting's id.
-    #[arg(value_name = "MEETING")]
-    pub meeting: String,
+    /// The meeting's id; leave out with --draft.
+    #[arg(value_name = "MEETING", required_unless_present = "draft")]
+    pub meeting: Option<String>,
+    /// Preview a draft file; audio comes from audio.m4a beside it.
+    #[arg(long, value_name = "FILE")]
+    pub draft: Option<PathBuf>,
     #[command(flatten)]
     pub choices: ShareChoices,
+    /// Rewrite the summary for someone who was not in the meeting.
+    #[arg(long)]
+    pub recap: bool,
     /// Keep this draft in Sona, to check and share from there.
     #[arg(long)]
     pub save: bool,
@@ -172,6 +181,7 @@ struct Choices {
     include: Option<Include>,
     speakers: Option<SpeakerMode>,
     expires: Option<Option<ExpiresInDays>>,
+    for_person: Option<String>,
 }
 
 impl Choices {
@@ -184,6 +194,9 @@ impl Choices {
         }
         if let Some(expires) = self.expires {
             draft.expires_in_days = expires;
+        }
+        if let Some(person) = &self.for_person {
+            draft.for_person = Some(person.clone());
         }
     }
 }
@@ -207,6 +220,14 @@ fn parse_choices(choices: &ShareChoices) -> Result<Choices, ExternalError> {
         })
         .transpose()
         .map_err(ExternalError::invalid)?;
+    let for_person = choices
+        .for_person
+        .as_deref()
+        .map(|name| name.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|name| !name.is_empty());
+    if choices.for_person.is_some() && for_person.is_none() {
+        return Err(ExternalError::invalid("--for needs a person's name."));
+    }
     Ok(Choices {
         include,
         speakers: choices.speakers.map(|choice| match choice {
@@ -214,6 +235,7 @@ fn parse_choices(choices: &ShareChoices) -> Result<Choices, ExternalError> {
             SpeakerChoice::Numbered => SpeakerMode::Numbered,
         }),
         expires,
+        for_person,
     })
 }
 
@@ -222,6 +244,7 @@ fn parse_choices(choices: &ShareChoices) -> Result<Choices, ExternalError> {
 pub struct SharePreviewAnswer {
     pub meeting_id: String,
     pub page: Page,
+    pub checks: Vec<ShareCheck>,
     pub summary: PageSummary,
     pub saved: bool,
     pub prepared_by: Option<String>,
@@ -235,6 +258,7 @@ pub struct ShareDryRunAnswer {
     pub dry_run: bool,
     pub meeting_id: String,
     pub audio_pending: bool,
+    pub checks: Vec<ShareCheck>,
     #[serde(flatten)]
     pub plan: DryRun,
 }
@@ -252,7 +276,7 @@ pub struct UnshareDryRunAnswer {
 pub enum ShareAnswer {
     Preview(Box<SharePreviewAnswer>),
     DryRun(Box<ShareDryRunAnswer>),
-    Share(ShareRecord),
+    Share(Box<ShareRecord>),
     Shares(Vec<ShareRecord>),
     UnshareDryRun(Box<UnshareDryRunAnswer>),
     Site(Option<SiteSettings>),
@@ -331,8 +355,47 @@ async fn preview(
     args: &SharePreviewArgs,
 ) -> Result<ShareAnswer, ExternalError> {
     let choices = parse_choices(&args.choices)?;
-    let (mut draft, store) = meeting_draft(paths, meetings, &args.meeting).await?;
+    let (mut draft, store, file_audio) = match &args.draft {
+        Some(file) => {
+            let draft = read_draft(file)?;
+            if args
+                .meeting
+                .as_deref()
+                .is_some_and(|meeting| meeting.trim() != draft.meeting_id)
+            {
+                return Err(ExternalError::invalid(
+                    "The draft file is for a different meeting.",
+                ));
+            }
+            let audio = file.parent().unwrap_or(Path::new(".")).join("audio.m4a");
+            let store = meetings.store().await.ok();
+            (draft, store, Some(audio))
+        }
+        None => {
+            let meeting = args.meeting.as_deref().unwrap_or_default();
+            let (draft, store) = meeting_draft(paths, meetings, meeting).await?;
+            (draft, Some(store), None)
+        }
+    };
     choices.apply(&mut draft);
+    if args.recap {
+        let store = store.clone().ok_or_else(|| {
+            ExternalError::new(
+                ExternalErrorCode::Unavailable,
+                "Meetings are not open, so the summary cannot be rewritten.",
+            )
+        })?;
+        let meetings = Arc::clone(meetings);
+        let shown = draft.clone();
+        let paragraphs = tauri::async_runtime::spawn_blocking(move || {
+            shared_pages::recap(&store, meetings.processing(), &shown)
+        })
+        .await
+        .map_err(|_| ExternalError::new(ExternalErrorCode::Failed, "The recap did not run."))?
+        .map_err(refusal)?;
+        draft.content.summary = paragraphs;
+        draft.include.summary = true;
+    }
     let audio = if args.save {
         draft.prepared_by = args
             .agent
@@ -340,10 +403,29 @@ async fn preview(
             .map(str::trim)
             .filter(|name| !name.is_empty())
             .map(str::to_owned);
-        shared_pages::save_draft(paths, Some(&store), &draft).map_err(refusal)?;
-        shared_pages::draft_audio(paths, Some(&store), &draft).map_err(refusal)?
+        if let Some(file) = file_audio
+            .as_deref()
+            .filter(|file| draft.include.audio && file.is_file())
+        {
+            let dir = paths.draft_dir(&draft.meeting_id).map_err(refusal)?;
+            std::fs::create_dir_all(&dir)
+                .and_then(|()| std::fs::copy(file, shared_pages::draft_audio_path(&dir)).map(|_| ()))
+                .map_err(|error| {
+                    ExternalError::new(
+                        ExternalErrorCode::Failed,
+                        format!("The draft's audio could not be kept: {error}"),
+                    )
+                })?;
+        }
+        shared_pages::save_draft(paths, store.as_deref(), &draft).map_err(refusal)?;
+        shared_pages::draft_audio(paths, store.as_deref(), &draft).map_err(refusal)?
     } else {
-        exported_audio(paths, &draft)
+        match &file_audio {
+            Some(path) => {
+                Some(path.clone()).filter(|path| draft.include.audio && path.is_file())
+            }
+            None => exported_audio(paths, &draft),
+        }
     };
     let (built, audio_pending) = page_now(&draft, audio.as_deref())?;
     let html_path = match &args.html {
@@ -358,8 +440,13 @@ async fn preview(
         }
         None => None,
     };
+    let people = match store.as_deref() {
+        Some(store) => shared_pages::people_names(store).map_err(refusal)?,
+        None => Vec::new(),
+    };
     Ok(ShareAnswer::Preview(Box::new(SharePreviewAnswer {
         meeting_id: draft.meeting_id.clone(),
+        checks: shared_pages::check_page(built.page(), &draft.content.speakers, &people),
         summary: built.summary(),
         page: built.into_page(),
         saved: args.save,
@@ -388,11 +475,7 @@ async fn share(
                 ));
             }
             let audio = file.parent().unwrap_or(Path::new(".")).join("audio.m4a");
-            let store = if args.dry_run {
-                None
-            } else {
-                meetings.store().await.ok()
-            };
+            let store = meetings.store().await.ok();
             (draft, store, Some(audio))
         }
         None => {
@@ -416,10 +499,15 @@ async fn share(
         } else {
             page_now(&draft, audio.as_deref())?
         };
+        let people = match store.as_deref() {
+            Some(store) => shared_pages::people_names(store).map_err(refusal)?,
+            None => Vec::new(),
+        };
         return Ok(ShareAnswer::DryRun(Box::new(ShareDryRunAnswer {
             dry_run: true,
             meeting_id: draft.meeting_id.clone(),
             audio_pending,
+            checks: shared_pages::check_page(built.page(), &draft.content.speakers, &people),
             plan: shared_pages::dry_run(&built),
         })));
     }
@@ -433,11 +521,15 @@ async fn share(
     let record = shared_pages::publish(paths, store.as_deref(), &draft, audio.as_deref())
         .map_err(refusal)?;
     if file_audio.is_none() {
-        shared_pages::forget_published_draft(paths, &draft.meeting_id);
+        if record.for_person.is_some() {
+            shared_pages::reset_published_draft(paths, &draft.meeting_id);
+        } else {
+            shared_pages::forget_published_draft(paths, &draft.meeting_id);
+        }
     }
     shared_pages::settle(paths, &record.slug, ShareState::Live)
         .await
-        .map(ShareAnswer::Share)
+        .map(|record| ShareAnswer::Share(Box::new(record)))
         .map_err(refusal)
 }
 
@@ -468,8 +560,9 @@ fn typed_confirmation(
     .collect::<Vec<_>>()
     .join(", ");
     let title = terminal_line(page.title.as_deref().unwrap_or(&draft.content.title));
+    let for_person = terminal_line(page.for_person.as_deref().unwrap_or("everyone"));
     let prompt = format!(
-        "Share \"{title}\"\n  sections: {sections}\n  expires: {}\n  site: {}\nType share and press Return to publish: ",
+        "Share \"{title}\"\n  for: {for_person}\n  sections: {sections}\n  expires: {}\n  site: {}\nType share and press Return to publish: ",
         page.expires_at.as_deref().unwrap_or("never"),
         site.base_url
     );
@@ -521,11 +614,11 @@ async fn unshare(paths: &Paths, args: &UnshareArgs) -> Result<ShareAnswer, Exter
     }
     let removing = shared_pages::revoke(paths, &slug).map_err(refusal)?;
     if removing.state != ShareState::Removing {
-        return Ok(ShareAnswer::Share(removing));
+        return Ok(ShareAnswer::Share(Box::new(removing)));
     }
     shared_pages::settle(paths, &slug, ShareState::Removed)
         .await
-        .map(ShareAnswer::Share)
+        .map(|record| ShareAnswer::Share(Box::new(record)))
         .map_err(refusal)
 }
 
@@ -542,14 +635,16 @@ fn refusal(error: SharedPagesError) -> ExternalError {
     let code = match error.code {
         Code::SiteNotSetUp => ExternalErrorCode::SiteNotSetUp,
         Code::MeetingNotFound | Code::NotFound => ExternalErrorCode::NotFound,
-        Code::Unavailable => ExternalErrorCode::Unavailable,
+        Code::Unavailable | Code::NoStore => ExternalErrorCode::Unavailable,
         Code::TooLarge => ExternalErrorCode::TooLarge,
         Code::AudioUnavailable => ExternalErrorCode::AudioUnavailable,
         Code::PushFailed => ExternalErrorCode::PushFailed,
         Code::Locked => ExternalErrorCode::Locked,
         Code::RemoteNotSonaSite => ExternalErrorCode::RemoteNotSonaSite,
-        Code::InvalidDraft => ExternalErrorCode::InvalidRequest,
+        Code::InvalidDraft | Code::NoItemsForPerson => ExternalErrorCode::InvalidRequest,
         Code::Failed => ExternalErrorCode::Failed,
+        Code::NoEngine => ExternalErrorCode::NoEngine,
+        Code::Recording => ExternalErrorCode::Recording,
     };
     ExternalError::new(code, error.message)
 }
@@ -565,6 +660,9 @@ impl ShareAnswer {
                     preview.page.title.as_deref().unwrap_or("Meeting notes")
                 );
                 write_summary(&mut text, &preview.summary);
+                if !preview.checks.is_empty() {
+                    let _ = writeln!(text, "checks: {} to review", preview.checks.len());
+                }
                 if preview.audio_pending {
                     text.push_str("audio: exported when the draft is saved or shared\n");
                 }
@@ -578,6 +676,9 @@ impl ShareAnswer {
             Self::DryRun(plan) => {
                 text.push_str("dry run: nothing was published\n");
                 write_summary(&mut text, &plan.plan.page);
+                if !plan.checks.is_empty() {
+                    let _ = writeln!(text, "checks: {} to review", plan.checks.len());
+                }
                 if plan.audio_pending {
                     text.push_str("audio: exported when shared\n");
                 }
@@ -639,6 +740,9 @@ fn write_record(text: &mut String, record: &ShareRecord) {
     let _ = writeln!(text, "{state}  {}  {}", record.title, record.slug);
     if let Some(url) = &record.url {
         let _ = writeln!(text, "{url}");
+    }
+    if let Some(person) = &record.for_person {
+        let _ = writeln!(text, "for {person}");
     }
     let _ = writeln!(
         text,
