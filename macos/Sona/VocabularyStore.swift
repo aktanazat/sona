@@ -67,6 +67,9 @@ final class VocabularyStore {
     @ObservationIgnored private var syncedEmoji: [EmojiReplacement] = []
     @ObservationIgnored private var syncedRewrites: [TextReplacementRule] = []
     @ObservationIgnored private var syncedSamples: [PersonaSample] = []
+    @ObservationIgnored private var pendingEntries: [VocabularyEntry]?
+    @ObservationIgnored private var pendingEmoji: [EmojiReplacement]?
+    @ObservationIgnored private var pendingRewrites: [TextReplacementRule]?
     @ObservationIgnored private var settingsLoaded = false
     @ObservationIgnored private var listsLoaded = false
 
@@ -401,6 +404,7 @@ final class VocabularyStore {
         )
         entries = VocabularyDraft.mergeAppliedCsv(entries, list)
         syncedEntries = list
+        pendingEntries = nil
         savedEntryCount = list.count
     }
 
@@ -649,20 +653,18 @@ final class VocabularyStore {
             )
             let savedSnippets: [SnippetRecord] = try await core.request("list_snippets")
             let savedRewrites: [TextReplacementRule] = try await core.request("get_text_replacements")
-            entries = VocabularyDraft.resolveRefresh(
+            (entries, syncedEntries, pendingEntries) = VocabularyDraft.resolveRefresh(
                 current: entries,
-                previousSaved: syncedEntries,
-                incomingSaved: savedEntries
+                synced: syncedEntries,
+                incoming: savedEntries
             )
-            syncedEntries = savedEntries
             snippets = savedSnippets
             snippetDrafts = snippetDrafts.filter { id, _ in savedSnippets.contains { $0.id == id } }
-            rewrites = VocabularyDraft.resolveRefresh(
+            (rewrites, syncedRewrites, pendingRewrites) = VocabularyDraft.resolveRefresh(
                 current: rewrites,
-                previousSaved: syncedRewrites,
-                incomingSaved: savedRewrites
+                synced: syncedRewrites,
+                incoming: savedRewrites
             )
-            syncedRewrites = savedRewrites
             error = nil
             retry = nil
         } catch {
@@ -707,18 +709,16 @@ final class VocabularyStore {
     private func apply(_ settings: VocabularySettingsSnapshot) {
         let savedWords = settings.customWords ?? []
         let savedEmoji = settings.emojiReplacements ?? []
-        entries = VocabularyDraft.resolveRefresh(
+        (entries, syncedEntries, pendingEntries) = VocabularyDraft.resolveRefresh(
             current: entries,
-            previousSaved: syncedEntries,
-            incomingSaved: savedWords
+            synced: syncedEntries,
+            incoming: savedWords
         )
-        syncedEntries = savedWords
-        emoji = VocabularyDraft.resolveRefresh(
+        (emoji, syncedEmoji, pendingEmoji) = VocabularyDraft.resolveRefresh(
             current: emoji,
-            previousSaved: syncedEmoji,
-            incomingSaved: savedEmoji
+            synced: syncedEmoji,
+            incoming: savedEmoji
         )
-        syncedEmoji = savedEmoji
         savedEntryCount = savedWords.count
         spokenEditsEnabled = settings.spokenEditsEnabled ?? false
         emojiEnabled = settings.emojiReplacementsEnabled ?? false
@@ -728,7 +728,7 @@ final class VocabularyStore {
 
     /// `settings-changed` carries no useful payload, and the CLI writes
     /// snippets, rewrites and samples behind this page, so every list is read
-    /// again. A refresh keeps every row edited since the last save.
+    /// again. A refresh never moves a row while one is being edited.
     private func settingsChanged() {
         Task {
             await loadSettings()
@@ -739,7 +739,8 @@ final class VocabularyStore {
 
     // MARK: Writes
 
-    private func writeEntries(_ next: [VocabularyEntry]) {
+    private func writeEntries(_ edited: [VocabularyEntry]) {
+        let next = VocabularyDraft.resolveSave(edited, synced: syncedEntries, pending: pendingEntries)
         write({ [weak self] in
             guard let self else {
                 return
@@ -750,13 +751,15 @@ final class VocabularyStore {
             )
             entries = saved
             syncedEntries = saved
+            pendingEntries = nil
             savedEntryCount = saved.count
         }, retry: { [weak self] in
             self?.writeEntries(next)
         })
     }
 
-    private func writeEmoji(_ next: [EmojiReplacement]) {
+    private func writeEmoji(_ edited: [EmojiReplacement]) {
+        let next = VocabularyDraft.resolveSave(edited, synced: syncedEmoji, pending: pendingEmoji)
         write({ [weak self] in
             guard let self else {
                 return
@@ -767,12 +770,14 @@ final class VocabularyStore {
             )
             emoji = saved
             syncedEmoji = saved
+            pendingEmoji = nil
         }, retry: { [weak self] in
             self?.writeEmoji(next)
         })
     }
 
-    private func writeRewrites(_ next: [TextReplacementRule]) {
+    private func writeRewrites(_ edited: [TextReplacementRule]) {
+        let next = VocabularyDraft.resolveSave(edited, synced: syncedRewrites, pending: pendingRewrites)
         write({ [weak self] in
             guard let self else {
                 return
@@ -782,6 +787,7 @@ final class VocabularyStore {
                 TextReplacementsRequest(rules: next)
             )
             syncedRewrites = rewrites
+            pendingRewrites = nil
         }, retry: { [weak self] in
             self?.writeRewrites(next)
         })

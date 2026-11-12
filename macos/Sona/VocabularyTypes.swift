@@ -276,22 +276,31 @@ enum VocabularyDraft {
     }
 
     /// A settings refresh may replace the local list outright only while
-    /// nothing local has diverged since the last synced snapshot. Mid-edit, a
-    /// row changed here is kept as typed; every other row follows the saved
-    /// list, so outside changes and removals land and outside additions are
-    /// appended, and the whole-list save that ends the edit keeps them.
+    /// nothing local has diverged since the last synced snapshot. Mid-edit,
+    /// the list stays as it is, because every edit, focus and save addresses a
+    /// row by its position and an outside removal would move the row under
+    /// the cursor. The newest saved list waits in `pending` for `resolveSave`.
     static func resolveRefresh<T: VocabularyPair>(
         current: [T],
-        previousSaved: [T],
-        incomingSaved: [T]
-    ) -> [T] {
-        if samePairs(current, previousSaved) {
-            return incomingSaved
+        synced: [T],
+        incoming: [T]
+    ) -> (rows: [T], synced: [T], pending: [T]?) {
+        samePairs(current, synced)
+            ? (incoming, incoming, nil)
+            : (current, synced, incoming)
+    }
+
+    /// The whole-list save that ends an edit keeps the rows changed here and
+    /// lets every other row follow what was saved from outside meanwhile:
+    /// outside changes and removals land, outside additions are appended.
+    static func resolveSave<T: VocabularyPair>(_ next: [T], synced: [T], pending: [T]?) -> [T] {
+        guard let pending else {
+            return next
         }
         return merge(
-            current: current,
-            previousSaved: previousSaved,
-            incomingSaved: incomingSaved,
+            current: next,
+            previousSaved: synced,
+            incomingSaved: pending,
             key: { VocabularyKey.spoken($0.spoken) },
             same: { pairKey($0) == pairKey($1) }
         )
