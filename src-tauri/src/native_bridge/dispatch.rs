@@ -6108,11 +6108,7 @@ pub(super) async fn call(
             .await?
         }
         "planning_project_templates" => {
-            let handle = app.clone();
-            off_main_thread(move || {
-                reply(crate::planning::work::project_templates::templates_read(&handle))
-            })
-            .await?
+            reply(crate::planning::work::project_templates::templates_read(app).await)
         }
         "planning_project_template_save" => {
             let mut args = Args::parse(params)?;

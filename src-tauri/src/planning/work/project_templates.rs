@@ -58,6 +58,9 @@ pub struct ProjectTemplateTask {
     #[serde(default)]
     pub priority: u8,
     pub milestone: Option<String>,
+    /// The task it sits under, by its place in the template's tasks.
+    #[serde(default)]
+    pub parent: Option<usize>,
     /// The meetings and meeting commitments the task was saved from.
     #[serde(default)]
     pub drawn_from: Vec<ProjectTemplateSource>,
@@ -92,6 +95,33 @@ pub struct ProjectTemplateFields {
     pub milestones: Vec<ProjectTemplateMilestone>,
     #[serde(default)]
     pub tasks: Vec<ProjectTemplateTask>,
+}
+
+impl ProjectTemplateFields {
+    /// Leaves out each task drawn from a source `hides` holds back; a
+    /// sub-task of one left out becomes a task of its own.
+    fn leave_out(&mut self, hides: &dyn Fn(EvidenceSourceKind, &str) -> bool) {
+        let mut places = Vec::with_capacity(self.tasks.len());
+        let mut kept = 0;
+        for task in &self.tasks {
+            if task.drawn_from_any(hides) {
+                places.push(None);
+            } else {
+                places.push(Some(kept));
+                kept += 1;
+            }
+        }
+        let mut tasks = Vec::with_capacity(kept);
+        for (mut task, place) in std::mem::take(&mut self.tasks).into_iter().zip(&places) {
+            if place.is_some() {
+                task.parent = task
+                    .parent
+                    .and_then(|parent| places.get(parent).copied().flatten());
+                tasks.push(task);
+            }
+        }
+        self.tasks = tasks;
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
@@ -216,8 +246,8 @@ fn drawn_from(conn: &Connection, task: &WorkItem) -> Result<Vec<ProjectTemplateS
 /// What a template of the project holds. Milestone offsets count from its
 /// start day, or from the day it was made when it has none. Tasks waiting
 /// in triage, canceled, duplicate and binned are left out, and so is each
-/// drawn from a source `hides` holds back; sub-tasks come along as tasks of
-/// their own.
+/// drawn from a source `hides` holds back; a sub-task stays under its
+/// parent when the template holds that too.
 pub(crate) fn fields_of(
     conn: &Connection,
     project_id: &str,
@@ -254,7 +284,7 @@ pub(crate) fn fields_of(
     let ids = statement
         .query_map([&project.id], |row| row.get(0))?
         .collect::<rusqlite::Result<Vec<String>>>()?;
-    let mut tasks = Vec::with_capacity(ids.len());
+    let mut kept = Vec::with_capacity(ids.len());
     for id in &ids {
         let item = items::item(conn, id)?;
         let task = ProjectTemplateTask {
@@ -269,11 +299,24 @@ pub(crate) fn fields_of(
             label_ids: item.label_ids,
             estimate: item.estimate,
             priority: item.priority,
+            parent: None,
         };
         if !task.drawn_from_any(hides) {
-            tasks.push(task);
+            kept.push((id.as_str(), item.parent_id, task));
         }
     }
+    let places: HashMap<&str, usize> = kept
+        .iter()
+        .enumerate()
+        .map(|(place, (id, ..))| (*id, place))
+        .collect();
+    let tasks = kept
+        .into_iter()
+        .map(|(_, parent_id, task)| ProjectTemplateTask {
+            parent: parent_id.and_then(|parent_id| places.get(parent_id.as_str()).copied()),
+            ..task
+        })
+        .collect();
     Ok(ProjectTemplateFields {
         description: project.description.clone(),
         lead: lead(project),
@@ -285,7 +328,8 @@ pub(crate) fn fields_of(
 }
 
 /// Refuses a blank title, two milestones of one title, an estimate past
-/// the scale, or a task under a milestone the template does not make.
+/// the scale, a task under a milestone the template does not make, or one
+/// under a task it does not hold.
 fn cleaned(fields: &ProjectTemplateFields) -> Result<ProjectTemplateFields> {
     let mut milestones: Vec<ProjectTemplateMilestone> = Vec::with_capacity(fields.milestones.len());
     for milestone in &fields.milestones {
@@ -306,7 +350,10 @@ fn cleaned(fields: &ProjectTemplateFields) -> Result<ProjectTemplateFields> {
         .tasks
         .iter()
         .map(|task| {
-            if task.estimate.is_some_and(|points| points > MAX_ESTIMATE) || task.priority > 4 {
+            if task.estimate.is_some_and(|points| points > MAX_ESTIMATE)
+                || task.priority > 4
+                || task.parent.is_some_and(|parent| parent >= fields.tasks.len())
+            {
                 return Err(Refusal::Invalid.into());
             }
             let milestone = match trimmed(task.milestone.as_deref()) {
@@ -334,6 +381,7 @@ fn cleaned(fields: &ProjectTemplateFields) -> Result<ProjectTemplateFields> {
                 estimate: task.estimate,
                 priority: task.priority,
                 milestone,
+                parent: task.parent,
                 drawn_from: task.drawn_from.clone(),
             })
         })
@@ -450,9 +498,10 @@ fn present_people(
 /// day of `start_at_ms`: its description, lead and members as
 /// [`present_people`] finds them, each milestone due its offset after that
 /// day, and each task, not started and owned by nobody, in its milestone
-/// with its labels and estimate. A task drawn from a source `hides` holds
-/// back is left out, and so are labels since deleted, retired or kept to
-/// projects.
+/// and under its parent, with its labels and estimate. A task drawn from a
+/// source `hides` holds back is left out, and so are labels since deleted,
+/// retired or kept to projects; a sub-task of a task left out becomes a
+/// task of its own.
 fn make_project(
     tx: &Connection,
     meetings: Option<&Connection>,
@@ -464,7 +513,8 @@ fn make_project(
     effects: &mut Effects,
 ) -> Result<ProjectFromTemplate> {
     let start = items::local_today(start_at_ms)?;
-    let template = template(tx, &store::uuid(template_id)?)?;
+    let mut template = template(tx, &store::uuid(template_id)?)?;
+    template.fields.leave_out(hides);
     let fields = &template.fields;
     let (lead, member_person_ids) = present_people(meetings, fields)?;
     let project = catalog::save_project(
@@ -503,7 +553,7 @@ fn make_project(
         )?);
     }
     let mut tasks = Vec::with_capacity(fields.tasks.len());
-    for task in fields.tasks.iter().filter(|task| !task.drawn_from_any(hides)) {
+    for task in &fields.tasks {
         let milestone_id = task.milestone.as_deref().and_then(|title| {
             milestones
                 .iter()
@@ -548,6 +598,22 @@ fn make_project(
         };
         effects.item(&made);
         tasks.push(made);
+    }
+    for (place, task) in fields.tasks.iter().enumerate() {
+        if let Some(parent) = task.parent {
+            tasks[place] = items::apply(
+                tx,
+                &tasks[place].id,
+                &WorkPatch {
+                    parent_id: Some(Some(tasks[parent].id.clone())),
+                    ..WorkPatch::default()
+                },
+                WorkActivityKind::Status,
+                change.actor,
+                change.at_ms,
+            )?
+            .after;
+        }
     }
     Ok(ProjectFromTemplate {
         project: store::project(tx, &project.id)?,
@@ -594,9 +660,17 @@ fn kept_back(kept: Option<&KeptLocal>, kind: EvidenceSourceKind, source_id: &str
     }
 }
 
-/// Every project template. The app's `planning_project_templates`.
-pub(crate) fn templates_read(app: &AppHandle) -> Result<Vec<ProjectTemplate>, String> {
-    crate::planning::history(&app.state::<Arc<HistoryManager>>(), |conn| templates(conn))
+/// Every project template, without the tasks a project made from it would
+/// leave out. The app's `planning_project_templates`.
+pub(crate) async fn templates_read(app: &AppHandle) -> Result<Vec<ProjectTemplate>, String> {
+    let kept = kept_local(app).await;
+    let hides = |kind, source_id: &str| kept_back(kept.as_ref(), kind, source_id);
+    let mut saved =
+        crate::planning::history(&app.state::<Arc<HistoryManager>>(), |conn| templates(conn))?;
+    for template in &mut saved {
+        template.fields.leave_out(&hides);
+    }
+    Ok(saved)
 }
 
 /// Saves a project as the template called `name`. The app's
@@ -877,5 +951,102 @@ mod tests {
         .expect("a project from the template");
         let titles: Vec<&str> = made.tasks.iter().map(|task| task.title.as_str()).collect();
         assert_eq!(titles, ["Book the venue"]);
+    }
+
+    /// A sub-task lands under its parent even when it comes first and a task
+    /// before both is left out.
+    #[test]
+    fn a_project_from_a_template_keeps_each_sub_task_under_its_parent() {
+        let conn = Connection::open_in_memory().expect("an in-memory history database");
+        schema::apply_all(&conn).expect("the planner schema");
+        let source = catalog::save_project(
+            &conn,
+            None,
+            &ProjectEdit {
+                title: Some("Offsite source".to_owned()),
+                ..ProjectEdit::default()
+            },
+            AT,
+        )
+        .expect("the source project");
+        let travel = catalog::save_milestone(
+            &conn,
+            &source.id,
+            None,
+            &MilestoneEdit {
+                title: Some("Travel".to_owned()),
+                description: None,
+                due_at_ms: None,
+                status: None,
+            },
+            AT,
+        )
+        .expect("a milestone");
+        items::insert(
+            &conn,
+            &NewItem {
+                title: "Send the acquisition deck",
+                details: None,
+                status: WorkStatus::NotStarted,
+                priority: 0,
+                project_id: Some(&source.id),
+                milestone_id: None,
+                owner: &WorkOwner::Nobody,
+                due_at_ms: None,
+                label_ids: &[],
+                source_loop_id: Some("a6f47cca-0000-4000-8000-000000000001:loop:0123456789abcdef"),
+                recurrence: None,
+            },
+            WorkActor::Me,
+            AT,
+        )
+        .expect("a task from a meeting");
+        let flights = task(&conn, "Book the flights", WorkStatus::NotStarted, &source.id, &travel.id, &[]);
+        let plan = task(&conn, "Plan the trip", WorkStatus::NotStarted, &source.id, &travel.id, &[]);
+        items::apply(
+            &conn,
+            &flights,
+            &WorkPatch {
+                parent_id: Some(Some(plan)),
+                ..WorkPatch::default()
+            },
+            WorkActivityKind::Status,
+            WorkActor::Me,
+            AT,
+        )
+        .expect("a sub-task");
+
+        let template = save_from_project(&conn, "Offsite", &source.id, &|_, _| false, AT).expect("a template");
+        let closed = |kind: EvidenceSourceKind, _: &str| {
+            matches!(kind, EvidenceSourceKind::Meeting | EvidenceSourceKind::Loop)
+        };
+        let made = make_project(
+            &conn,
+            None,
+            &closed,
+            Change {
+                operation_id: "op",
+                actor: WorkActor::Me,
+                at_ms: AT,
+            },
+            &template.id,
+            "Autumn offsite",
+            midnight(2027, 9, 6),
+            &mut Effects::default(),
+        )
+        .expect("a project from the template");
+
+        let made_plan = made
+            .tasks
+            .iter()
+            .find(|task| task.title == "Plan the trip")
+            .expect("the parent made");
+        assert_eq!(made_plan.parent_id, None);
+        let under: Vec<String> = items::sub_tasks(&conn, &made_plan.id)
+            .expect("its sub-tasks")
+            .into_iter()
+            .map(|task| task.title)
+            .collect();
+        assert_eq!(under, ["Book the flights"]);
     }
 }
