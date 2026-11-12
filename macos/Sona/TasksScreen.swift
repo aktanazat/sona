@@ -336,7 +336,7 @@ struct TaskListingRow: View {
     }
 }
 
-/// I owe, Waiting on, All, then each saved view.
+/// I owe, Waiting on, the cycle, All, then one menu holding the saved views.
 private struct TaskTabs: View {
     @Environment(AppModel.self) private var model
 
@@ -350,8 +350,8 @@ private struct TaskTabs: View {
                     tab(.cycle, title: model.work.currentCycle.map { "Cycle \($0.number)" } ?? "Cycles", count: nil)
                 }
                 tab(.all, title: "All", count: nil)
-                ForEach(model.work.views) { view in
-                    tab(.view(view.id), title: view.name, count: nil, edited: model.workFocus.viewDrafts[view.id] != nil)
+                if !model.work.views.isEmpty {
+                    views
                 }
             }
         }
@@ -359,19 +359,53 @@ private struct TaskTabs: View {
         .scrollBounceBehavior(.basedOnSize)
     }
 
-    private func tab(_ tab: TasksTab, title: String, count: Int?, edited: Bool = false) -> some View {
-        WorkTab(title: title, count: count, edited: edited, on: model.workFocus.tab == tab) {
+    /// The saved views behind one tab that names the view showing.
+    private var views: some View {
+        let focus = model.workFocus
+        let saved = model.work.views
+        let current = saved.first { focus.tab == .view($0.id) }
+        return Menu {
+            ForEach(saved) { view in
+                Toggle(isOn: Binding(get: { focus.tab == .view(view.id) },
+                                     set: { _ in focus.switchTab(.view(view.id)) })) {
+                    Text(focus.viewDrafts[view.id] != nil ? "\(view.name) (edited)" : view.name)
+                }
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Text(current?.name ?? "Views")
+                if let current, focus.viewDrafts[current.id] != nil {
+                    Circle().fill(Theme.accent).frame(width: 5, height: 5)
+                }
+                Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(Theme.inkTertiary)
+            }
+            .fixedSize()
+            .font(current != nil ? TypeScale.listTitle : TypeScale.list)
+            .foregroundStyle(current != nil ? Theme.ink : Theme.inkSecondary)
+            .padding(.horizontal, 10)
+            .frame(height: 28)
+            .background(current != nil ? Theme.control : .clear, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
+            .contentShape(Rectangle())
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .accessibilityLabel(current.map { "Saved view, \($0.name)" } ?? "Saved views")
+    }
+
+    private func tab(_ tab: TasksTab, title: String, count: Int?) -> some View {
+        WorkTab(title: title, count: count, on: model.workFocus.tab == tab) {
             model.workFocus.switchTab(tab)
         }
     }
 }
 
-/// A tab over a task list: its title, its count unless zero, and a dot
-/// while its view holds unsaved edits.
+/// A tab over a task list: its title and its count unless zero.
 struct WorkTab: View {
     let title: String
     var count: Int?
-    var edited = false
     let on: Bool
     let select: () -> Void
 
@@ -381,9 +415,6 @@ struct WorkTab: View {
                 Text(title)
                 if let count, count > 0 {
                     Text("\(count)").monospacedDigit().foregroundStyle(Theme.inkTertiary)
-                }
-                if edited {
-                    Circle().fill(Theme.accent).frame(width: 5, height: 5)
                 }
             }
             .fixedSize()
@@ -395,7 +426,7 @@ struct WorkTab: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(edited ? "\(title), edited" : title)
+        .accessibilityLabel(title)
         .accessibilityAddTraits(on ? .isSelected : [])
     }
 }

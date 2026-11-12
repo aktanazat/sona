@@ -105,9 +105,9 @@ struct PeopleScreen: View {
 
 // MARK: - The list
 
-/// Everybody Sona knows: the numbers first, then what still needs you, the
-/// people, and the companies they are at. J and K move along the people,
-/// Space peeks at one and Return opens their page.
+/// Everybody Sona knows: what still needs you, the people, and the
+/// companies they are at. J and K move along the people, Space peeks at one
+/// and Return opens their page.
 struct PeopleListView: View {
     let store: PeopleStore
     var openMeeting: (String) -> Void = { _ in }
@@ -145,8 +145,6 @@ struct PeopleListView: View {
                 Card { CardLine("Name a speaker in a meeting, or turn on your calendar, and they appear here.") }
                     .padding(.bottom, 28)
             } else {
-                PeopleListStats(entries: store.entries, companies: store.companies)
-                    .padding(.bottom, 28)
                 PeopleInboxSection(store: store, openMeeting: openMeeting)
                 PageSection("Everyone") {
                     if let entries = store.entries {
@@ -181,30 +179,6 @@ struct PeopleListView: View {
     private var subtitle: String {
         guard let entries = store.entries else { return "Reading the people Sona knows" }
         return entries.isEmpty ? "The people you meet, what you talked about, and what you owe each other" : ""
-    }
-}
-
-/// The people in four numbers. Until the list answers, each tile holds its
-/// place with nothing in it.
-struct PeopleListStats: View {
-    let entries: [PersonListEntry]?
-    let companies: [CompanySummary]?
-
-    var body: some View {
-        HStack(spacing: 10) {
-            NumberTile(entries.map { "\($0.count)" } ?? " ", label: "People")
-            NumberTile(companies.map { "\($0.count)" } ?? " ", label: "Companies")
-            NumberTile(entries.map { "\(Self.metThisWeek($0))" } ?? " ", label: "Met this week")
-            NumberTile(entries.map { "\($0.reduce(0) { $0 + $1.suggestedCount })" } ?? " ", label: "To confirm")
-        }
-    }
-
-    private static func metThisWeek(_ entries: [PersonListEntry], now: Date = .now) -> Int {
-        let start = now.addingTimeInterval(-7 * 86_400)
-        return entries.filter { entry in
-            let last = entry.lastMeeting?.at ?? entry.lastMeetingAtUtcMs.map(PeopleFormat.date)
-            return last.map { $0 >= start } ?? false
-        }.count
     }
 }
 

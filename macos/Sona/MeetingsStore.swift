@@ -970,8 +970,7 @@ final class MeetingsStore {
         _ sessionId: MeetingSessionId,
         atMilliseconds: UInt64? = nil,
         segmentId: TranscriptSegmentId? = nil,
-        noteId: MeetingNoteId? = nil,
-        outcome: LedgerOutcome? = nil
+        noteId: MeetingNoteId? = nil
     ) {
         leaveOpenMeeting()
         openSessionId = sessionId
@@ -986,9 +985,9 @@ final class MeetingsStore {
         setAside = []
         people = []
         receipt = nil
-        chosenTab = if outcome != nil { .ledger } else if noteId != nil { .review } else { nil }
+        chosenTab = noteId != nil ? .review : nil
         tab = chosenTab ?? .transcript
-        ledgerOutcome = outcome
+        ledgerOutcome = nil
         focusedNoteId = noteId
         transcriptQuery = ""
         transcriptSpeaker = nil

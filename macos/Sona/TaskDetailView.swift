@@ -1044,6 +1044,7 @@ private struct EvidenceLine: View {
 private struct TaskRelations: View {
     let row: WorkItemRow
     let place: Place
+    let showsAdd: Bool
     @Environment(AppModel.self) private var model
     @State private var adding: RelationAdd?
 
@@ -1061,28 +1062,30 @@ private struct TaskRelations: View {
                 }
             }
         }
-        PropertyLine(title: entries.isEmpty ? "Relations" : "") {
-            Menu {
-                ForEach(RelationAdd.allCases) { kind in
-                    Button(kind.title) { adding = kind }
+        if showsAdd || !entries.isEmpty {
+            PropertyLine(title: entries.isEmpty ? "Relations" : "") {
+                Menu {
+                    ForEach(RelationAdd.allCases) { kind in
+                        Button(kind.title) { adding = kind }
+                    }
+                } label: {
+                    PropertyValue(text: "Add relation", faint: true) {
+                        Image(systemName: "arrow.left.arrow.right").font(.system(size: 12)).foregroundStyle(Theme.inkSecondary)
+                    }
                 }
-            } label: {
-                PropertyValue(text: "Add relation", faint: true) {
-                    Image(systemName: "arrow.left.arrow.right").font(.system(size: 12)).foregroundStyle(Theme.inkSecondary)
+                .menuStyle(.button)
+                .buttonStyle(.plain)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("Blocks, blocked by or related to another task")
+                .accessibilityLabel("Add a relation")
+                .popover(item: $adding, arrowEdge: .leading) { kind in
+                    WorkPickerList(picker: WorkPicker(kind: kind.picker, ids: [row.id]), compact: true) {
+                        adding = nil
+                    }
+                    .padding(.vertical, 4)
+                    .environment(model)
                 }
-            }
-            .menuStyle(.button)
-            .buttonStyle(.plain)
-            .menuIndicator(.hidden)
-            .fixedSize()
-            .help("Blocks, blocked by or related to another task")
-            .accessibilityLabel("Add a relation")
-            .popover(item: $adding, arrowEdge: .leading) { kind in
-                WorkPickerList(picker: WorkPicker(kind: kind.picker, ids: [row.id]), compact: true) {
-                    adding = nil
-                }
-                .padding(.vertical, 4)
-                .environment(model)
             }
         }
     }
@@ -1798,13 +1801,18 @@ struct DetailHeading: View {
 /// The properties, each a value that opens its picker: the detail page's
 /// inspector and the peek. Tab or a click focuses one; return or space opens
 /// it, the arrows move between them. Given the page's place, the relations
-/// follow, opening there.
+/// follow, opening there. The rarer properties show once set; the rest wait
+/// behind one "more" line.
 struct TaskPropertyList: View {
     let row: WorkItemRow
     var place: Place?
     @Environment(AppModel.self) private var model
     @FocusState private var focused: PropertyField?
     @State private var opened: PropertyField?
+    @State private var showAll = false
+    /// Rare properties touched on this task stay put, so clearing one keeps
+    /// its line and its focus until the task changes.
+    @State private var kept: Set<PropertyField> = []
 
     var body: some View {
         let work = model.work
@@ -1825,13 +1833,15 @@ struct TaskPropertyList: View {
                 }
                 .modifier(focus(.priority))
             }
-            PropertyLine(title: "Estimate") {
-                WorkPickerButton(kind: .estimate, ids: ids, presented: shown(.estimate)) {
-                    PropertyValue(text: row.estimate.map(TaskEstimate.title) ?? "Set estimate", faint: row.estimate == nil) {
-                        Image(systemName: "triangle").font(.system(size: 12)).foregroundStyle(Theme.inkSecondary)
+            if visible(.estimate) {
+                PropertyLine(title: "Estimate") {
+                    WorkPickerButton(kind: .estimate, ids: ids, presented: shown(.estimate)) {
+                        PropertyValue(text: row.estimate.map(TaskEstimate.title) ?? "Set estimate", faint: row.estimate == nil) {
+                            Image(systemName: "triangle").font(.system(size: 12)).foregroundStyle(Theme.inkSecondary)
+                        }
                     }
+                    .modifier(focus(.estimate))
                 }
-                .modifier(focus(.estimate))
             }
             PropertyLine(title: "Owner") {
                 WorkPickerButton(kind: .owner, ids: ids, presented: shown(.owner)) {
@@ -1842,31 +1852,35 @@ struct TaskPropertyList: View {
                 }
                 .modifier(focus(.owner))
             }
-            PropertyLine(title: "For") {
-                WorkPickerButton(kind: .forPerson, ids: ids, presented: shown(.forPerson)) {
-                    let name = row.forPersonId.map { id in work.people.first { $0.id == id }?.name ?? "Someone" }
-                    PropertyValue(text: name ?? "Add who it’s for", faint: name == nil) {
-                        if let id = row.forPersonId, let name {
-                            Avatar(face: AvatarFace(kind: .person(id), name: name), size: 16, revision: model.people.photoRevision)
-                        } else {
-                            Image(systemName: "person.crop.circle.badge.checkmark").font(.system(size: 12))
-                                .foregroundStyle(Theme.inkSecondary)
+            if visible(.forPerson) {
+                PropertyLine(title: "For") {
+                    WorkPickerButton(kind: .forPerson, ids: ids, presented: shown(.forPerson)) {
+                        let name = row.forPersonId.map { id in work.people.first { $0.id == id }?.name ?? "Someone" }
+                        PropertyValue(text: name ?? "Add who it’s for", faint: name == nil) {
+                            if let id = row.forPersonId, let name {
+                                Avatar(face: AvatarFace(kind: .person(id), name: name), size: 16, revision: model.people.photoRevision)
+                            } else {
+                                Image(systemName: "person.crop.circle.badge.checkmark").font(.system(size: 12))
+                                    .foregroundStyle(Theme.inkSecondary)
+                            }
                         }
                     }
+                    .help("The person this work is owed to")
+                    .modifier(focus(.forPerson))
                 }
-                .help("The person this work is owed to")
-                .modifier(focus(.forPerson))
             }
-            PropertyLine(title: "Agent") {
-                WorkPickerButton(kind: .delegate, ids: ids, presented: shown(.agent)) {
-                    let waiting = row.doer != nil && model.agents.waits(on: row)
-                    PropertyValue(text: row.doer.map { waiting ? "\($0.agent), waiting for you" : $0.agent } ?? "Add agent",
-                                  faint: row.doer == nil) {
-                        Image(systemName: "sparkle").font(.system(size: 12))
-                            .foregroundStyle(waiting ? Theme.live : Theme.inkSecondary)
+            if visible(.agent) {
+                PropertyLine(title: "Agent") {
+                    WorkPickerButton(kind: .delegate, ids: ids, presented: shown(.agent)) {
+                        let waiting = row.doer != nil && model.agents.waits(on: row)
+                        PropertyValue(text: row.doer.map { waiting ? "\($0.agent), waiting for you" : $0.agent } ?? "Add agent",
+                                      faint: row.doer == nil) {
+                            Image(systemName: "sparkle").font(.system(size: 12))
+                                .foregroundStyle(waiting ? Theme.live : Theme.inkSecondary)
+                        }
                     }
+                    .modifier(focus(.agent))
                 }
-                .modifier(focus(.agent))
             }
             PropertyLine(title: "Due date") {
                 WorkPickerButton(kind: .due, ids: ids, presented: shown(.due)) {
@@ -1877,27 +1891,29 @@ struct TaskPropertyList: View {
                 }
                 .modifier(focus(.due))
             }
-            PropertyLine(title: "Reminder") {
-                let reminder = model.routines.reminders[row.id]
-                Button { opened = .reminder } label: {
-                    PropertyValue(text: reminder.map(ReminderPicker.label) ?? "Add reminder", faint: reminder == nil) {
-                        Image(systemName: reminder == nil ? "bell" : "bell.fill").font(.system(size: 12))
-                            .foregroundStyle(Theme.inkSecondary)
+            if visible(.reminder) {
+                PropertyLine(title: "Reminder") {
+                    let reminder = model.routines.reminders[row.id]
+                    Button { opened = .reminder } label: {
+                        PropertyValue(text: reminder.map(ReminderPicker.label) ?? "Add reminder", faint: reminder == nil) {
+                            Image(systemName: reminder == nil ? "bell" : "bell.fill").font(.system(size: 12))
+                                .foregroundStyle(Theme.inkSecondary)
+                        }
                     }
+                    .buttonStyle(.plain)
+                    .popover(isPresented: shown(.reminder), arrowEdge: .leading) {
+                        ReminderPicker(itemId: row.id, reminder: reminder) { opened = nil }
+                            .environment(model)
+                    }
+                    .modifier(focus(.reminder))
                 }
-                .buttonStyle(.plain)
-                .popover(isPresented: shown(.reminder), arrowEdge: .leading) {
-                    ReminderPicker(itemId: row.id, reminder: reminder) { opened = nil }
-                        .environment(model)
-                }
-                .modifier(focus(.reminder))
             }
             PropertyLine(title: "Repeats") {
                 RepeatMenu(row: row, rule: row.repeat?.every
                     ?? work.detail.flatMap({ $0.item.id == row.id ? $0.recurrence : nil }), shown: shown(.repeats))
                     .modifier(focus(.repeats))
             }
-            if row.status.isOpen || row.cycle != nil {
+            if (row.status.isOpen || row.cycle != nil) && visible(.cycle) {
                 PropertyLine(title: "Cycle") {
                     WorkPickerButton(kind: .cycle, ids: ids, presented: shown(.cycle)) {
                         PropertyValue(text: row.cycle.map { "Cycle \($0)" } ?? "Add to cycle", faint: row.cycle == nil) {
@@ -1908,7 +1924,7 @@ struct TaskPropertyList: View {
                     .modifier(focus(.cycle))
                 }
             }
-            if row.status.isOpen {
+            if row.status.isOpen && visible(.time) {
                 PropertyLine(title: "Time") {
                     if let block = row.timeBlock {
                         PropertyValue(text: TaskBlockText.when(block)) {
@@ -1958,19 +1974,29 @@ struct TaskPropertyList: View {
                 }
                 .modifier(focus(.labels))
             }
-            PropertyLine(title: "Parent") {
-                WorkPickerButton(kind: .parent, ids: ids, presented: shown(.parent)) {
-                    let parent = row.parentId.flatMap { model.workRows([$0]).first }
-                    PropertyValue(text: parent.map { "#\($0.number) \($0.title)" } ?? (row.parentId == nil ? "Set parent" : "A task"),
-                                  faint: row.parentId == nil) {
-                        Image(systemName: "arrow.turn.left.up").font(.system(size: 12)).foregroundStyle(Theme.inkSecondary)
+            if visible(.parent) {
+                PropertyLine(title: "Parent") {
+                    WorkPickerButton(kind: .parent, ids: ids, presented: shown(.parent)) {
+                        let parent = row.parentId.flatMap { model.workRows([$0]).first }
+                        PropertyValue(text: parent.map { "#\($0.number) \($0.title)" } ?? (row.parentId == nil ? "Set parent" : "A task"),
+                                      faint: row.parentId == nil) {
+                            Image(systemName: "arrow.turn.left.up").font(.system(size: 12)).foregroundStyle(Theme.inkSecondary)
+                        }
                     }
+                    .help(row.parentId.flatMap { model.workRows([$0]).first }.map { "#\($0.number) \($0.title)" } ?? "")
+                    .modifier(focus(.parent))
                 }
-                .help(row.parentId.flatMap { model.workRows([$0]).first }.map { "#\($0.number) \($0.title)" } ?? "")
-                .modifier(focus(.parent))
             }
             if let place {
-                TaskRelations(row: row, place: place)
+                TaskRelations(row: row, place: place, showsAdd: showAll)
+            }
+            if showAll || place != nil || Self.rare.contains(where: { !visible($0) && (row.status.isOpen || ($0 != .time && $0 != .cycle)) }) {
+                Button { showAll.toggle() } label: {
+                    Text(showAll ? "Fewer properties" : "More properties").metaText(Theme.inkSecondary)
+                }
+                .buttonStyle(.plain)
+                .padding(.horizontal, 8)
+                .padding(.top, 6)
             }
             Hairline().padding(.vertical, 12)
             if let meeting = row.sourceMeetingId {
@@ -1998,6 +2024,10 @@ struct TaskPropertyList: View {
                 }
             }
         }
+        .onChange(of: row.id) {
+            kept = []
+            showAll = false
+        }
         .onChange(of: focused) { _, field in model.workFocus.propertyFocused = field != nil }
         .onDisappear { model.workFocus.propertyFocused = false }
     }
@@ -2008,12 +2038,32 @@ struct TaskPropertyList: View {
         if row.status.isOpen, row.timeBlock == nil { list.append(.time) }
         list.append(.project)
         if row.projectId != nil { list.append(.milestone) }
-        return list + [.labels, .parent]
+        return (list + [.labels, .parent]).filter(visible)
+    }
+
+    private static let rare: [PropertyField] = [.estimate, .forPerson, .agent, .reminder, .cycle, .time, .parent]
+
+    private func visible(_ field: PropertyField) -> Bool {
+        !Self.rare.contains(field) || showAll || kept.contains(field) || focused == field || isSet(field)
+    }
+
+    private func isSet(_ field: PropertyField) -> Bool {
+        switch field {
+        case .estimate: row.estimate != nil
+        case .forPerson: row.forPersonId != nil
+        case .agent: row.doer != nil
+        case .reminder: model.routines.reminders[row.id] != nil
+        case .cycle: row.cycle != nil
+        case .time: row.timeBlock != nil || row.atRisk
+        case .parent: row.parentId != nil
+        case .status, .priority, .owner, .due, .repeats, .project, .milestone, .labels: true
+        }
     }
 
     private func shown(_ field: PropertyField) -> Binding<Bool> {
         Binding(get: { opened == field }, set: { open in
             opened = open ? field : nil
+            if open { kept.insert(field) }
             guard !open else { return }
             DispatchQueue.main.async {
                 NSApp.keyWindow?.makeFirstResponder(nil)
@@ -2024,6 +2074,7 @@ struct TaskPropertyList: View {
 
     private func focus(_ field: PropertyField, activate: (() -> Void)? = nil) -> PropertyFocus {
         PropertyFocus(field: field, fields: fields, focused: $focused) {
+            kept.insert(field)
             if let activate { activate() } else { opened = field }
         }
     }

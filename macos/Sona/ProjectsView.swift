@@ -210,7 +210,7 @@ struct ProjectsView: View {
 
     private var headerTitle: some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
-            PageHeading(title: "Projects")
+            ProjectsTabs()
             if let total = store.projects?.count, total > 0 {
                 let filtered = store.filter.isActive || !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 Text(filtered ? "\(visibleProjects.count) of \(total)" : "\(total)").metaText().monospacedDigit()
@@ -630,9 +630,6 @@ struct ProjectsView: View {
             }
         } actions: {
             if let detail {
-                Button("Review links", systemImage: "link") { reviewProject = detail.project }
-                    .buttonStyle(.secondary)
-                    .disabled(store.mutating)
                 Button("Talk to Sona", systemImage: "bubble.left") { discussProject(detail.project) }
                     .buttonStyle(.secondary)
                 let starred = model.work.isFavorite(.project, detail.project.id)
@@ -642,29 +639,21 @@ struct ProjectsView: View {
                     .buttonStyle(.icon)
                     .accessibilityLabel(starred ? "Remove from favorites" : "Add to favorites")
                     .help(starred ? "Remove from favorites" : "Add to favorites")
-                Button {
-                    Task { await store.loadDetail(id) }
-                } label: { Image(systemName: "arrow.clockwise") }
-                    .buttonStyle(.icon)
-                    .accessibilityLabel("Refresh project")
-                    .help("Refresh project")
-                    .disabled(store.detailLoading)
-                Button {
-                    templatingProject = detail.project
-                } label: { Image(systemName: "square.on.square") }
-                    .buttonStyle(.icon)
-                    .accessibilityLabel("Save as template")
-                    .help("Save as template")
-                    .disabled(store.mutating)
-                Button {
-                    Task { await store.binProject(detail.project) }
-                } label: { Image(systemName: "trash") }
-                    .buttonStyle(.icon)
-                    .accessibilityLabel("Delete project")
-                    .help("Delete project. It stays in Recently deleted for 30 days.")
-                    .disabled(store.mutating)
                 Menu {
+                    Button("Review links", systemImage: "link") { reviewProject = detail.project }
+                        .disabled(store.mutating)
+                    Button("Save as template", systemImage: "square.on.square") { templatingProject = detail.project }
+                        .disabled(store.mutating)
+                    Button("Refresh", systemImage: "arrow.clockwise") { Task { await store.loadDetail(id) } }
+                        .disabled(store.detailLoading)
+                    Divider()
                     ProjectDependencyMenu(store: store, project: detail.project)
+                    Divider()
+                    Button("Delete project", systemImage: "trash", role: .destructive) {
+                        Task { await store.binProject(detail.project) }
+                    }
+                    .disabled(store.mutating)
+                    .help("It stays in Recently deleted for 30 days.")
                 } label: { Image(systemName: "ellipsis") }
                     .menuStyle(.borderlessButton)
                     .menuIndicator(.hidden)
