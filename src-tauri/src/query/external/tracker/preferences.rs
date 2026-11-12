@@ -1378,8 +1378,10 @@ impl Tracker<'_> {
                 return Ok(WorkAnswer::Settings(Box::new(answer)));
             }
         }
-        let ready = async {
+        if operation_id.is_some() {
             self.applies("changing Sona's settings")?;
+        }
+        let ready = async {
             if clears_briefs {
                 self.meetings
                     .store()
@@ -2220,10 +2222,13 @@ async fn settle_settings<Rt: tauri::Runtime>(
 ) -> Result<ExternalSettings, ExternalError> {
     let current = settings::get_settings(app);
     let before = (change.show)(&current);
-    let mut preview = current;
+    let mut preview = current.clone();
     (change.apply)(&mut preview).map_err(ExternalError::invalid)?;
     let after = (change.show)(&preview);
-    let unchanged = before == after;
+    let unchanged = matches!(
+        (serde_json::to_value(&current), serde_json::to_value(&preview)),
+        (Ok(was), Ok(will)) if was == will
+    );
     let Some(operation_id) = operation_id else {
         return Ok(ExternalSettings {
             schema_version: QUERY_SCHEMA_VERSION,
@@ -2765,5 +2770,47 @@ mod tests {
         let mut shown = String::new();
         text(&WorkAnswer::Settings(Box::new(answer)), &mut shown);
         assert_eq!(shown, "Nothing changed: push-to-talk is already true.\n");
+    }
+
+    #[test]
+    fn a_reset_changes_a_rule_whose_text_differs_even_at_the_same_count() {
+        let data_dir = TempDir::new().unwrap();
+        let mut context = tauri::test::mock_context(tauri::test::noop_assets());
+        context.config_mut().identifier = data_dir.path().to_string_lossy().into_owned();
+        let app = tauri::test::mock_builder()
+            .plugin(tauri_plugin_store::Builder::default().build())
+            .build(context)
+            .unwrap();
+        let handle = app.handle();
+        settings::update_settings(handle, |settings| {
+            settings.replacements_rules = settings::default_replacement_rules();
+            settings.replacements_rules[0].written = "edited".to_owned();
+        })
+        .unwrap();
+        let args = SettingResetArgs {
+            target: ResetTarget::Replacements,
+            id: None,
+            change: Change {
+                dry_run: false,
+                write: WriteArgs {
+                    operation_id: None,
+                    agent: None,
+                },
+            },
+        };
+        let answer = tauri::async_runtime::block_on(settle_settings(
+            handle,
+            &args.change,
+            Some("edited-rule".to_owned()),
+            reset_change(&args).unwrap(),
+            async { Ok::<_, ExternalError>(()) },
+        ))
+        .unwrap();
+
+        assert!(!answer.unchanged);
+        assert_eq!(
+            settings::get_settings(handle).replacements_rules,
+            settings::default_replacement_rules()
+        );
     }
 }
