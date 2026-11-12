@@ -118,6 +118,9 @@ pub struct MeetingLivePromise {
     pub owner_name: Option<String>,
     /// The owner was picked by hand, so later readings leave it alone.
     pub owner_set: bool,
+    /// The task or its date was changed by hand, so later readings leave
+    /// both alone.
+    pub edited: bool,
     pub due_at_ms: Option<i64>,
     /// The words that said when, as heard.
     pub due_words: Option<String>,
@@ -224,6 +227,29 @@ impl LiveTranscript {
         Some(())
     }
 
+    /// New words and date for one promise, typed by hand. `None` when the
+    /// card has no such promise or the words are blank or too long.
+    pub(crate) fn edit_live_promise(
+        &self,
+        promise_id: &str,
+        what: &str,
+        due_at_ms: Option<i64>,
+    ) -> Option<()> {
+        let what = bounded(what, MAX_WHAT_CHARS)?;
+        let mut card = self.card();
+        let promise = card
+            .promises
+            .iter_mut()
+            .find(|promise| promise.id == promise_id)?;
+        if promise.due_at_ms != due_at_ms {
+            promise.due_words = None;
+        }
+        promise.what = what;
+        promise.due_at_ms = due_at_ms;
+        promise.edited = true;
+        Some(())
+    }
+
     /// Every promise heard, for filing at the stop.
     pub(crate) fn live_promises(&self) -> Vec<MeetingLivePromise> {
         self.card().promises.clone()
@@ -319,6 +345,7 @@ pub(crate) fn hang_up(
                 &promises,
             );
         }
+        super::live_doc::hang_up(&service, &store, session_id, &live);
     });
 }
 
@@ -553,6 +580,7 @@ fn checked(
         owner,
         owner_name,
         owner_set: false,
+        edited: false,
         due_at_ms,
         due_words: due_at_ms.and(due_words),
         quote,
@@ -604,7 +632,7 @@ fn merge(promises: &mut Vec<MeetingLivePromise>, promise: MeetingLivePromise) ->
         return true;
     };
     let mut changed = false;
-    if kept.due_at_ms.is_none() && promise.due_at_ms.is_some() {
+    if !kept.edited && kept.due_at_ms.is_none() && promise.due_at_ms.is_some() {
         kept.due_at_ms = promise.due_at_ms;
         kept.due_words = promise.due_words;
         changed = true;
@@ -656,7 +684,7 @@ fn bounded(text: &str, max_chars: usize) -> Option<String> {
 }
 
 #[cfg(test)]
-mod probe;
+pub(super) mod probe;
 
 #[cfg(test)]
 mod tests {

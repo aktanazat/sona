@@ -1162,6 +1162,7 @@ fn a_promise_heard_live_becomes_the_item_its_commitment_tracks() {
         quote: "I will send the pricing deck".to_owned(),
         start_offset_ns: 0,
         end_offset_ns: 1_000_000_000,
+        edited: false,
     };
     let at = desk.tick();
     // PANIC: filing into the fixture's own meeting cannot fail.

@@ -42,6 +42,7 @@ mod heard_plans_tests;
 pub(crate) mod learning;
 #[cfg(test)]
 mod learning_tests;
+mod live_docs;
 pub(crate) mod loops;
 #[cfg(test)]
 pub(crate) mod loops_tests;
@@ -1620,6 +1621,7 @@ static MIGRATIONS: &[M] = &[
         WHERE session.phase != 'deleting' AND session.current_transcript_revision_id IS NOT NULL;",
     ),
     M::up(include_str!("store/people/profiles.sql")),
+    M::up(include_str!("store/live_docs.sql")),
 ];
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StoreError {

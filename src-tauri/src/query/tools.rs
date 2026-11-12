@@ -66,6 +66,7 @@ use crate::meeting::types::{
 };
 use crate::meeting::upcoming::upcoming_window;
 use crate::meeting::upcoming_types::MeetingUpcomingRow;
+use crate::planning::work::live::WorkFollowUpLine;
 use chrono::{DateTime, Local, SecondsFormat, TimeZone};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -257,7 +258,17 @@ async fn answer(
                 .map_err(|_| HISTORY_UNREADABLE.to_string())?;
             Ok(recent_dictations(&store, entries, limit))
         }
-        Request::Meeting { session_id } => meeting_result(&store, folder, session_id),
+        Request::Meeting { session_id } => {
+            let board = crate::planning::work::live::meeting_follow_up(
+                history,
+                meetings,
+                session_id.uuid().to_string(),
+            )
+            .await
+            .map(|follow_up| follow_up.lines)
+            .unwrap_or_default();
+            meeting_result(&store, folder, session_id, &board)
+        }
         Request::Transcript {
             session_id,
             offset,
@@ -940,6 +951,7 @@ fn meeting_result(
     store: &MeetingStore,
     folder: Option<&FolderScope>,
     session_id: MeetingSessionId,
+    board: &[WorkFollowUpLine],
 ) -> Result<Outcome, String> {
     let snapshot = review(store, folder, session_id)?;
     let artifacts = current_artifacts(&snapshot);
@@ -1065,6 +1077,28 @@ fn meeting_result(
             .collect(),
     );
     value.insert(
+        "live_doc".to_string(),
+        store
+            .live_doc_points(session_id)
+            .map_err(store_refusal)?
+            .into_iter()
+            .map(|point| json!(point.text))
+            .collect(),
+    );
+    value.insert(
+        "board".to_string(),
+        board
+            .iter()
+            .map(|line| {
+                json!({
+                    "what": line.title,
+                    "owner": line.owner_name,
+                    "due": line.due_at_ms.map(when),
+                })
+            })
+            .collect(),
+    );
+    value.insert(
         "decisions".to_string(),
         Value::Array(artifacts.map_or_else(Vec::new, |content| cited(&content.decisions))),
     );
@@ -1111,6 +1145,8 @@ fn meeting_result(
 /// what answers "where did we land", which is what a meeting is opened for.
 const MEETING_CUTS: &[&str] = &[
     "/notes",
+    "/live_doc",
+    "/board",
     "/summary",
     "/risks",
     "/key_questions",
@@ -2136,7 +2172,7 @@ mod tests {
         let corpus = corpus();
 
         let (value, sources) =
-            result_json(meeting_result(&corpus.store, None, corpus.allowed).unwrap());
+            result_json(meeting_result(&corpus.store, None, corpus.allowed, &[]).unwrap());
 
         assert_eq!(value["title"], "Design review");
         assert_eq!(value["when"], when(WHEN - DAY));
@@ -2177,15 +2213,48 @@ mod tests {
         assert_eq!(sources[0].snippet, "Dana's tier question stayed open.");
 
         assert_eq!(
-            meeting_result(&corpus.store, None, corpus.excluded).unwrap_err(),
+            meeting_result(&corpus.store, None, corpus.excluded, &[]).unwrap_err(),
             no_meeting(corpus.excluded),
             "the refusal reads like not found"
         );
         let unknown = MeetingSessionId::new();
         assert_eq!(
-            meeting_result(&corpus.store, None, unknown).unwrap_err(),
+            meeting_result(&corpus.store, None, unknown, &[]).unwrap_err(),
             no_meeting(unknown),
             "an unknown meeting is refused with the same sentence"
+        );
+    }
+
+    #[test]
+    fn a_meeting_shows_chat_the_doc_kept_from_its_call_and_who_owes_what() {
+        use crate::meeting::live_doc_types::MeetingLiveDocPoint;
+        let (_directory, store) = store();
+        let session_id = reviewable_meeting(&store, "Launch sync", WHEN);
+        store
+            .save_live_doc_points(
+                session_id,
+                &[MeetingLiveDocPoint {
+                    id: "p1".to_string(),
+                    text: "Beta ships Monday".to_string(),
+                    edited: true,
+                    start_offset_ns: None,
+                }],
+            )
+            .unwrap();
+        let board = [WorkFollowUpLine {
+            item_id: "t1".to_string(),
+            owner_name: "Dana".to_string(),
+            title: "Redo the screenshots".to_string(),
+            due_at_ms: Some(WHEN + DAY),
+            quote: None,
+        }];
+
+        let (value, _) = result_json(meeting_result(&store, None, session_id, &board).unwrap());
+
+        assert_eq!(value["live_doc"], json!(["Beta ships Monday"]));
+        assert_eq!(
+            value["board"],
+            json!([{"what": "Redo the screenshots", "owner": "Dana", "due": when(WHEN + DAY)}])
         );
     }
 
@@ -2215,7 +2284,7 @@ mod tests {
 
         let result = finish(
             &call("meeting", Value::Null),
-            meeting_result(&store, None, session_id).unwrap(),
+            meeting_result(&store, None, session_id, &[]).unwrap(),
         );
 
         assert!(result.ok);
@@ -2743,11 +2812,11 @@ mod tests {
         let scope = FolderScope::read(&store, filed(&store, "Clients", inside)).unwrap();
         let folder = Some(&scope);
         let only_inside = [inside.uuid().to_string()];
-        let (unscoped, _) = result_json(meeting_result(&store, None, outside).unwrap());
+        let (unscoped, _) = result_json(meeting_result(&store, None, outside, &[]).unwrap());
         assert_eq!(unscoped["title"], "Pricing sync");
 
         assert_eq!(
-            meeting_result(&store, folder, outside).unwrap_err(),
+            meeting_result(&store, folder, outside, &[]).unwrap_err(),
             no_meeting(outside),
             "the outside meeting is refused as if it did not exist"
         );
@@ -2755,7 +2824,7 @@ mod tests {
             transcript_result(&store, folder, outside, 0, 80).unwrap_err(),
             no_meeting(outside)
         );
-        let (value, _) = result_json(meeting_result(&store, folder, inside).unwrap());
+        let (value, _) = result_json(meeting_result(&store, folder, inside, &[]).unwrap());
         assert_eq!(value["title"], "Design review");
 
         let (value, _) = result_json(recent_meetings(&store, folder, WHEN - 30 * DAY, 10).unwrap());

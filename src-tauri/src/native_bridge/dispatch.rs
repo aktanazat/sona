@@ -11,7 +11,7 @@ use tauri_specta::Event as _;
 use super::{encode_plain, off_main_thread, on_main_thread, reply, Args, Fault};
 
 /// Every typed event the core emits, by the name the bindings export.
-pub(super) const TYPED_EVENTS: [&str; 51] = [
+pub(super) const TYPED_EVENTS: [&str; 52] = [
     crate::chat_voice::ChatVoiceEvent::NAME,
     crate::upstream_import::UpstreamImportProgressEvent::NAME,
     crate::agent_bridge::AgentBridgeUpdateEvent::NAME,
@@ -39,6 +39,7 @@ pub(super) const TYPED_EVENTS: [&str; 51] = [
     crate::meeting::types::MeetingRemovedEvent::NAME,
     crate::meeting::types::MeetingHeardPlansChangedEvent::NAME,
     crate::meeting::types::MeetingLiveCardChangedEvent::NAME,
+    crate::meeting::types::MeetingLiveDocChangedEvent::NAME,
     crate::cloud_sync::types::CloudSyncChangedEvent::NAME,
     crate::meeting::types::MeetingNavigationRequestedEvent::NAME,
     crate::meeting::types::MeetingProcessingProgressEvent::NAME,
@@ -3762,6 +3763,45 @@ pub(super) async fn call(
                     session_id,
                     promise_id,
                     owner,
+                )
+                .await,
+            )
+        }
+        "meeting_live_card_edit" => {
+            let mut args = Args::parse(params)?;
+            let session_id = args.take("sessionId")?;
+            let promise_id = args.take("promiseId")?;
+            let what = args.take("what")?;
+            let due_at_ms = args.take("dueAtMs")?;
+            reply(crate::commands::live_card::meeting_live_card_edit(
+                app.state(),
+                session_id,
+                promise_id,
+                what,
+                due_at_ms,
+            ))
+        }
+        "meeting_live_doc" => {
+            let mut args = Args::parse(params)?;
+            let session_id = args.take("sessionId")?;
+            reply(crate::commands::live_doc::meeting_live_doc(app.state(), session_id).await)
+        }
+        "meeting_live_doc_start" => {
+            let mut args = Args::parse(params)?;
+            let session_id = args.take("sessionId")?;
+            reply(crate::commands::live_doc::meeting_live_doc_start(app.state(), session_id).await)
+        }
+        "meeting_live_doc_edit" => {
+            let mut args = Args::parse(params)?;
+            let session_id = args.take("sessionId")?;
+            let point_id = args.take("pointId")?;
+            let text = args.take("text")?;
+            reply(
+                crate::commands::live_doc::meeting_live_doc_edit(
+                    app.state(),
+                    session_id,
+                    point_id,
+                    text,
                 )
                 .await,
             )

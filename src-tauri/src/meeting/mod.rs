@@ -29,6 +29,7 @@ pub mod keep_awake;
 pub mod learning;
 pub mod learning_types;
 pub mod ledger;
+pub mod live_doc_types;
 #[cfg(test)]
 mod ledger_evals;
 pub(crate) mod local_generator;

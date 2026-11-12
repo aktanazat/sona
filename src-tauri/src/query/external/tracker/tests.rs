@@ -205,6 +205,7 @@ fn heard_live(history: &Connection, meeting: &str, what: &str) -> String {
         quote: format!("I will {what}"),
         start_offset_ns: 0,
         end_offset_ns: 1_000_000_000,
+        edited: false,
     };
     // PANIC: a fixture that cannot open its database is a broken test.
     let meetings = Connection::open_in_memory().expect("a meeting database");

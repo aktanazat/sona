@@ -262,6 +262,8 @@ pub enum MeetingLiveHelpKind {
     Say,
     /// An answer to a question typed about the call.
     Ask,
+    /// The whole meeting so far, to share before it ends.
+    Recap,
 }
 
 /// Why a live-help request produced what it did. `NothingFound` is an

@@ -66,6 +66,8 @@ use tauri::{AppHandle, Emitter};
 use tauri_plugin_dialog::DialogExt;
 use uuid::Uuid;
 
+mod live_doc;
+
 pub(super) const MEETING_EVENT_SCHEMA_VERSION: u32 = 1;
 const DEFAULT_RECORD_MAX_PAYLOAD_BYTES: u32 = 4 * 1024 * 1024;
 const DEFAULT_CHECKPOINT_INTERVAL_MS: u32 = 1_000;

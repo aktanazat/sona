@@ -290,9 +290,19 @@ pub async fn work_follow_up(
     meetings: State<'_, Arc<MeetingSessionManager>>,
     meeting_id: String,
 ) -> Result<WorkFollowUp, String> {
+    meeting_follow_up(&history_state, &meetings, meeting_id).await
+}
+
+/// [`work_follow_up`], for chat about the meeting: the board of its call as
+/// the tasks stand now.
+pub(crate) async fn meeting_follow_up(
+    history: &HistoryManager,
+    meetings: &MeetingSessionManager,
+    meeting_id: String,
+) -> Result<WorkFollowUp, String> {
     let user_name = meetings.user_name();
     let now = now_ms();
-    with_meetings(&history_state, &meetings, |history, meeting_conn| {
+    with_meetings(history, meetings, |history, meeting_conn| {
         let title = match meeting_conn {
             Some(meetings) => meeting_title(meetings, &meeting_id)?,
             None => None,

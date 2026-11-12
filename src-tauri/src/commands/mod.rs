@@ -14,6 +14,7 @@ pub mod history;
 pub mod hud;
 pub mod learning;
 pub mod live_card;
+pub mod live_doc;
 pub mod local_cleanup;
 pub mod loops;
 pub mod media_import;

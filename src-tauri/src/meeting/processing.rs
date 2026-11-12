@@ -7,6 +7,7 @@ mod complete_reading;
 pub(crate) use complete_reading::probe as notes_probe;
 mod live_card;
 pub(crate) use live_card::{hang_up as live_card_hang_up, MeetingLiveCard, MeetingLivePromise};
+pub(crate) mod live_doc;
 mod progress;
 
 use progress::{RunProgress, TrackSpan};
@@ -4041,6 +4042,8 @@ pub(crate) struct LiveTranscript {
     voices: Mutex<Vec<HeardVoice>>,
     /// The promises heard so far, and what is still to be read for them.
     card: Mutex<live_card::Card>,
+    /// The doc asked for during the call, and the asks heard.
+    doc: Mutex<live_doc::Doc>,
 }
 
 impl LiveTranscript {
@@ -4051,6 +4054,7 @@ impl LiveTranscript {
             recall: Mutex::new(RecallMemory::default()),
             voices: Mutex::new(Vec::new()),
             card: Mutex::new(live_card::Card::default()),
+            doc: Mutex::new(live_doc::Doc::default()),
         }
     }
 
@@ -4318,8 +4322,16 @@ fn run_live_pass_worker(
         }
         match service.live_pass(&store, session_id, &live) {
             Ok(()) => {
+                if live_doc::hear(&service, &store, session_id, &live) {
+                    let (service, store, live) =
+                        (Arc::clone(&service), Arc::clone(&store), Arc::clone(&live));
+                    std::thread::spawn(move || service.read_live_doc_now(&store, session_id, &live));
+                }
                 if live_card::tick(&service, &store, session_id, &live, live_card::Moment::Pass) {
                     service.emit_current(&store, "meeting:live-card-changed", session_id);
+                }
+                if live_doc::tick(&service, &store, session_id, &live, live_doc::Moment::Pass) {
+                    service.emit_current(&store, "meeting:live-doc-changed", session_id);
                 }
             }
             Err(error) => {
@@ -5864,7 +5876,10 @@ fn live_help_evidence(
             .filter_map(|line| line.citation.end_offset_ns)
             .max()
             .map(|newest_end| newest_end.saturating_sub(LIVE_HELP_RECENT_WINDOW_NS)),
-        MeetingLiveHelpKind::Questions | MeetingLiveHelpKind::Say | MeetingLiveHelpKind::Ask => {
+        MeetingLiveHelpKind::Questions
+        | MeetingLiveHelpKind::Say
+        | MeetingLiveHelpKind::Ask
+        | MeetingLiveHelpKind::Recap => {
             None
         }
     };
@@ -5941,6 +5956,7 @@ fn live_help_bounds(kind: MeetingLiveHelpKind) -> LiveHelpBounds {
         /* A call that has not touched the question is answered with nothing,
          * and that is an answer, so only this kind has no floor. */
         MeetingLiveHelpKind::Ask => ("answer", 0, 3),
+        MeetingLiveHelpKind::Recap => ("recap", 1, 8),
     };
     LiveHelpBounds {
         key,
@@ -5972,6 +5988,9 @@ fn live_help_prompt(kind: MeetingLiveHelpKind) -> String {
         ),
         MeetingLiveHelpKind::Ask => format!(
             "Answer \"question\" using only these lines, in at most {max_points} points. If the lines do not answer it, return {{\"{key}\":[]}}: an empty list means the call has not covered it, which is a valid answer. Never guess."
+        ),
+        MeetingLiveHelpKind::Recap => format!(
+            "Recap this meeting so far for someone who was not in it, in at least one and at most {max_points} points, oldest first: what was decided, who will do what by when, and what is still open. Report only what was actually said. Never return an empty list: if the lines hold only small talk, one point says so."
         ),
     };
     let question = if kind == MeetingLiveHelpKind::Ask {
