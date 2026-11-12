@@ -688,7 +688,9 @@ pub(super) fn operation(
 /// A derived id names the change by the meeting's revision, but importing a
 /// `.sona` file brings back a revision the meeting already had, with the
 /// receipts made from it. Such a receipt replays a change the meeting no
-/// longer shows, so the change gets a new id instead.
+/// longer shows, so the change gets a new id instead. A twin request that
+/// read the meeting before the first one landed finds the meeting past that
+/// revision, and replays it.
 pub(super) fn meeting_operation(
     store: &MeetingStore,
     write: &WriteArgs,
@@ -700,14 +702,19 @@ pub(super) fn meeting_operation(
     if write.operation_id.is_some() {
         return Ok((id, operation_id));
     }
-    let stale = store
+    let Some(receipt) = store
         .operation_receipt(operation_id)
         .map_err(|error| ExternalError::from(QueryError::from(error)))?
-        .is_some_and(|receipt| {
-            receipt.result == OperationResult::Committed
-                && receipt.new_revision != Some(revision)
+    else {
+        return Ok((id, operation_id));
+    };
+    let undone = receipt.result == OperationResult::Committed
+        && receipt.session_id.is_some_and(|session| {
+            store
+                .session_snapshot(session)
+                .is_ok_and(|snapshot| snapshot.revision == revision)
         });
-    if !stale {
+    if !undone {
         return Ok((id, operation_id));
     }
     Ok(fresh_operation())
@@ -2358,13 +2365,15 @@ pub(super) fn text(answer: &ExternalLibraryAnswer, text: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::{
-        csv, delete, export, folder_membership, folder_new, rename, trash, trash_change, Change,
-        ExportArgs, ExportFormat, FileArgs, FolderMembershipArgs, FolderNewArgs, MeetingChangeArgs,
-        RenameArgs, TrashArgs,
+        csv, delete, export, folder_membership, folder_new, meeting_operation, receipt_replayed,
+        rename, trash, trash_change, Change, ExportArgs, ExportFormat, FileArgs,
+        FolderMembershipArgs, FolderNewArgs, MeetingChangeArgs, RenameArgs, TrashArgs,
     };
     use crate::meeting::detection::machine::CalendarEventSummary;
     use crate::meeting::series_types::MeetingSeriesRemoteOptOutSetRequest;
-    use crate::meeting::session::{MeetingMutationRequest, MeetingSessionManager, NoCaptureSources};
+    use crate::meeting::session::{
+        MeetingMutationRequest, MeetingSessionManager, MeetingTitleSetRequest, NoCaptureSources,
+    };
     use crate::meeting::store::workflow_core_tests::reviewable_meeting;
     use crate::meeting::store::{MeetingStore, StoreMutation, StoreTransition};
     use crate::meeting::types::{
@@ -2722,6 +2731,42 @@ mod tests {
 
             delete(&corpus.meetings, &args, &applies).await.unwrap();
             assert!(store.session_snapshot(meeting).is_err());
+        });
+    }
+
+    #[test]
+    fn a_twin_change_that_read_the_meeting_first_replays_the_one_that_landed() {
+        tauri::async_runtime::block_on(async {
+            let corpus = corpus().await;
+            let store = corpus.meetings.store().await.unwrap();
+            let meeting = trashable(&store, "Roadmap review");
+            let revision = store.session_snapshot(meeting).unwrap().revision;
+            let title = "Roadmap review, final";
+            rename(&corpus.meetings, &renaming(meeting, title, false), &applies)
+                .await
+                .unwrap();
+
+            let (_, twin) = meeting_operation(
+                &store,
+                &write(false).write,
+                "meeting-rename",
+                &(meeting.uuid(), revision, title),
+                revision,
+            )
+            .unwrap();
+            let landed = corpus
+                .meetings
+                .title_set(MeetingTitleSetRequest {
+                    operation_id: twin,
+                    session_id: meeting,
+                    expected_revision: revision,
+                    title: title.to_owned(),
+                })
+                .await
+                .unwrap();
+            receipt_replayed(&landed.receipt, revision).unwrap();
+            assert_eq!(landed.receipt.new_revision, Some(revision + 1));
+            assert_eq!(store.session_snapshot(meeting).unwrap().revision, revision + 1);
         });
     }
 
