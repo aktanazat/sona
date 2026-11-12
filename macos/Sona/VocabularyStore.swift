@@ -682,17 +682,20 @@ final class VocabularyStore {
     }
 
     /// A sample being typed is kept: the saved list replaces the editor's
-    /// only while the editor still matches what was last saved, and samples
-    /// saved from outside meanwhile are appended so the next save keeps them.
+    /// only while the editor still matches what was last saved; mid-edit,
+    /// every untouched sample follows the saved list.
     private func refreshSamples() async {
         do {
             let saved: [PersonaSample] = try await core.request("get_persona_samples")
-            if samples == syncedSamples {
-                samples = saved
-            } else {
-                let known = Set((syncedSamples + samples).map(\.id))
-                samples += saved.filter { !known.contains($0.id) }
-            }
+            samples = samples == syncedSamples
+                ? saved
+                : VocabularyDraft.merge(
+                    current: samples,
+                    previousSaved: syncedSamples,
+                    incomingSaved: saved,
+                    key: \.id,
+                    same: ==
+                )
             syncedSamples = saved
             samplesUnreadable = false
         } catch {
