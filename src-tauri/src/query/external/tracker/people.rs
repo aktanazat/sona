@@ -26,13 +26,14 @@ use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
 use clap::{Args, ValueEnum};
 use image::imageops::FilterType;
-use image::ImageFormat;
+use image::metadata::Orientation;
+use image::{DynamicImage, ImageDecoder as _, ImageFormat};
 use rusqlite::OptionalExtension as _;
 use serde::{Deserialize, Serialize};
 use std::fmt::Write as _;
 use std::future::Future;
 use std::io::Cursor;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -852,7 +853,12 @@ fn portrait(bytes: &[u8]) -> Result<Vec<u8>, ExternalError> {
     if !matches!(format, ImageFormat::Png | ImageFormat::Jpeg) {
         return Err(unreadable());
     }
-    let picture = image::load_from_memory_with_format(bytes, format).map_err(|_| unreadable())?;
+    let mut decoder = image::ImageReader::with_format(Cursor::new(bytes), format)
+        .into_decoder()
+        .map_err(|_| unreadable())?;
+    let orientation = decoder.orientation().unwrap_or(Orientation::NoTransforms);
+    let mut picture = DynamicImage::from_decoder(decoder).map_err(|_| unreadable())?;
+    picture.apply_orientation(orientation);
     let edge = picture.width().min(picture.height());
     if edge == 0 {
         return Err(unreadable());
@@ -875,6 +881,24 @@ fn portrait(bytes: &[u8]) -> Result<Vec<u8>, ExternalError> {
     Ok(png.into_inner())
 }
 
+/// A photo file as the store keeps it, and the bytes it came from.
+pub(super) struct PhotoFile {
+    pub original: Vec<u8>,
+    pub png: Vec<u8>,
+}
+
+/// Reads a PNG or JPEG of at most 10 MB and makes its portrait.
+pub(super) fn photo_file(path: &Path) -> Result<PhotoFile, ExternalError> {
+    let unreadable = || ExternalError::invalid(format!("{} cannot be read.", path.display()));
+    let size = std::fs::metadata(path).map_err(|_| unreadable())?.len();
+    if size > PHOTO_MAX_BYTES {
+        return Err(ExternalError::invalid("The photo must be 10 MB or smaller."));
+    }
+    let original = std::fs::read(path).map_err(|_| unreadable())?;
+    let png = portrait(&original)?;
+    Ok(PhotoFile { original, png })
+}
+
 pub(super) async fn plan_photo(
     meetings: &Arc<MeetingSessionManager>,
     args: &PersonPhotoArgs,
@@ -890,15 +914,8 @@ pub(super) async fn plan_photo(
         .map(|avatar| avatar.png_base64);
     let (request, action, already, key) = match &args.file {
         Some(path) => {
-            let size = std::fs::metadata(path)
-                .map_err(|_| ExternalError::invalid(format!("{} cannot be read.", path.display())))?
-                .len();
-            if size > PHOTO_MAX_BYTES {
-                return Err(ExternalError::invalid("The photo must be 10 MB or smaller."));
-            }
-            let original = std::fs::read(path)
-                .map_err(|_| ExternalError::invalid(format!("{} cannot be read.", path.display())))?;
-            let png = STANDARD.encode(portrait(&original)?);
+            let photo = photo_file(path)?;
+            let png = STANDARD.encode(&photo.png);
             let file_name = path
                 .file_name()
                 .and_then(|name| name.to_str())
@@ -916,7 +933,7 @@ pub(super) async fn plan_photo(
                         file_name,
                         confirmed_at_utc_ms: now_ms,
                     }),
-                    original_base64: Some(STANDARD.encode(&original)),
+                    original_base64: Some(STANDARD.encode(&photo.original)),
                 },
                 PeopleAction::PhotoSet,
                 already,
@@ -1826,5 +1843,39 @@ mod tests {
                 .collect::<Vec<_>>(),
             [("Harbor", true, false), ("Pier", false, true)]
         );
+    }
+
+    #[test]
+    fn a_sideways_phone_photo_is_kept_upright() {
+        use image::codecs::jpeg::JpegEncoder;
+        use image::{ExtendedColorType, ImageEncoder as _, Rgb, RgbImage};
+
+        // TIFF header and one IFD entry: Orientation (0x0112) = 6, rotate 90° clockwise.
+        const ROTATE_CLOCKWISE: [u8; 26] = [
+            b'I', b'I', 0x2A, 0, 8, 0, 0, 0, 1, 0, 0x12, 0x01, 3, 0, 1, 0, 0, 0, 6, 0, 0, 0, 0,
+            0, 0, 0,
+        ];
+        let wide = RgbImage::from_fn(60, 30, |x, _| {
+            if x < 30 {
+                Rgb([255, 0, 0])
+            } else {
+                Rgb([0, 0, 255])
+            }
+        });
+        let mut jpeg = Vec::new();
+        let mut encoder = JpegEncoder::new_with_quality(&mut jpeg, 95);
+        encoder.set_exif_metadata(ROTATE_CLOCKWISE.to_vec()).unwrap();
+        encoder
+            .write_image(wide.as_raw(), 60, 30, ExtendedColorType::Rgb8)
+            .unwrap();
+
+        let kept = image::load_from_memory(&super::portrait(&jpeg).unwrap())
+            .unwrap()
+            .to_rgb8();
+
+        assert_eq!(kept.dimensions(), (30, 30));
+        let (top, bottom) = (kept.get_pixel(15, 2), kept.get_pixel(15, 27));
+        assert!(top[0] > 200 && top[2] < 60, "top {top:?}");
+        assert!(bottom[2] > 200 && bottom[0] < 60, "bottom {bottom:?}");
     }
 }

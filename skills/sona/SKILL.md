@@ -713,7 +713,7 @@ the change. Version retention still applies when a link is opened later.
 ## Sona's settings
 
 ```bash
-sona work settings                                  # dictation, sounds, microphones, cleanup, modes, prompts, vocabulary, writing samples, shortcuts, trackers, prep, data and log folders
+sona work settings                                  # dictation, sounds, microphones, cleanup, modes, prompts, vocabulary, writing samples, shortcuts, trackers, prep, your photo, data and log folders
 sona work setting theme dark --dry-run
 sona work setting push-to-talk false
 sona work setting hud-pill-position top             # the pill between dictations moves at once
@@ -724,6 +724,7 @@ sona work setting dictation-prompt <PROMPT_ID>      # use a prompt
 sona work setting keyword-trackers '[{"name":"Pricing","patterns":["price","discount"]}]'
 sona work setting-reset shortcut <SHORTCUT_ID>
 sona work setting-reset replacements                # back to the starter library
+sona work profile-photo --file ~/Pictures/me.jpg    # your own photo, cropped square; or --remove
 sona work mode-save --mode-json '<MODE_JSON>'      # one entry of settings --json modes.modes
 sona work mode-delete <MODE_ID>
 sona work mode-rule-remove <MODE_ID> --app com.apple.mail   # or --website example.com [--match subdomains]

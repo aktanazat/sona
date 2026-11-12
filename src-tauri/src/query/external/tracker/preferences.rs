@@ -7,7 +7,7 @@
 //! Consent, privacy, secrets and the agent gates themselves are not here.
 
 use super::meeting_review::{agent_maybes, plan_kept, without_kept_place};
-use super::{now_ms, refusal, Tracker, WorkAnswer, WriteArgs};
+use super::{now_ms, people, refusal, Tracker, WorkAnswer, WriteArgs};
 use crate::analytics::{DashboardTrendRange, DashboardTrendRequest};
 use crate::commands::audio::CustomSounds;
 use crate::commands::vocabulary::{self, VocabularyScope};
@@ -44,6 +44,8 @@ use crate::settings::{
     LogLevel, OverlayStyle, PasteMethod, PersonaSample, SoundTheme, Theme, VocabularyEntry,
     LOCAL_CLEANUP_PROVIDER_ID,
 };
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine as _;
 use clap::{ArgGroup, Args, Subcommand, ValueEnum};
 use rusqlite::OptionalExtension as _;
 use serde::Serialize;
@@ -60,13 +62,15 @@ const LIVE: &str = "A running Sona reads the change within a second and follows 
 pub enum SettingsVerb {
     /// Sona's settings an agent may read: dictation, sounds, appearance,
     /// cleanup, modes, prompts, vocabulary, writing samples, shortcuts,
-    /// trackers, prep, and where Sona keeps its data and log.
+    /// trackers, prep, your photo, and where Sona keeps its data and log.
     Settings,
     /// Change one setting, as its switch or picker in Settings does.
     Setting(SettingArgs),
     /// Put a shortcut back to its default key, or the text replacements back
     /// to the starter library.
     SettingReset(SettingResetArgs),
+    /// Set your own photo from a PNG or JPEG, or take it off.
+    ProfilePhoto(ProfilePhotoArgs),
     /// Make or change a mode from its full definition, as JSON.
     ModeSave(ModeSaveArgs),
     /// Delete a mode. The default mode stays.
@@ -221,6 +225,18 @@ pub struct SettingArgs {
     /// selected one.
     #[arg(long)]
     pub provider: Option<String>,
+    #[command(flatten)]
+    pub change: Change,
+}
+
+#[derive(Args, Clone, Debug, Eq, PartialEq)]
+pub struct ProfilePhotoArgs {
+    /// A PNG or JPEG. Cropped to its middle square, at most 512 pixels across.
+    #[arg(long, value_name = "PATH", required_unless_present = "remove", conflicts_with = "remove")]
+    pub file: Option<PathBuf>,
+    /// Take the photo off.
+    #[arg(long)]
+    pub remove: bool,
     #[command(flatten)]
     pub change: Change,
 }
@@ -561,6 +577,7 @@ impl SettingsVerb {
             | Self::Connections => None,
             Self::Setting(SettingArgs { change, .. })
             | Self::SettingReset(SettingResetArgs { change, .. })
+            | Self::ProfilePhoto(ProfilePhotoArgs { change, .. })
             | Self::ModeSave(ModeSaveArgs { change, .. })
             | Self::ModeDelete(ModeDeleteArgs { change, .. })
             | Self::ModeReorder(ModeReorderArgs { change, .. })
@@ -582,6 +599,7 @@ impl SettingsVerb {
             Self::Settings => "settings",
             Self::Setting(_) => "setting",
             Self::SettingReset(_) => "setting-reset",
+            Self::ProfilePhoto(_) => "profile-photo",
             Self::ModeSave(_) => "mode-save",
             Self::ModeDelete(_) => "mode-delete",
             Self::ModeReorder(_) => "mode-reorder",
@@ -1116,6 +1134,7 @@ struct SettingsView<'a> {
     project_digest_day: DigestDay,
     keyword_trackers: &'a [KeywordTracker],
     meeting_prep: &'a PrepPreferences,
+    profile_photo: bool,
     about: AboutView,
 }
 
@@ -1123,6 +1142,7 @@ fn settings_view(
     settings: &AppSettings,
     microphones: Vec<String>,
     custom_sounds: CustomSounds,
+    profile_photo: bool,
     about: AboutView,
 ) -> SettingsView<'_> {
     let mut shortcuts: Vec<ShortcutView<'_>> = settings
@@ -1197,6 +1217,7 @@ fn settings_view(
         project_digest_day: settings.work_digest_day,
         keyword_trackers: &settings.trackers_list,
         meeting_prep: &settings.meeting_prep,
+        profile_photo,
         about,
     }
 }
@@ -1224,9 +1245,11 @@ impl Tracker<'_> {
                     log_dir: crate::commands::get_log_dir_path(self.app.clone()).ok(),
                     portable: crate::commands::is_portable(),
                 };
+                let profile_photo = crate::portable::app_data_dir(self.app)
+                    .is_ok_and(|dir| crate::profile_photo::path(&dir).is_file());
                 Ok(read(
                     verb.name(),
-                    &settings_view(&settings, microphones, custom_sounds, about),
+                    &settings_view(&settings, microphones, custom_sounds, profile_photo, about),
                 ))
             }
             SettingsVerb::Setting(args) => {
@@ -1238,6 +1261,7 @@ impl Tracker<'_> {
                 let change = reset_change(args)?;
                 self.change_settings(&args.change, change, false).await
             }
+            SettingsVerb::ProfilePhoto(args) => self.profile_photo(args).await,
             SettingsVerb::ModeSave(args) => {
                 let mode: ModeDefinition = parsed("--mode-json", &args.mode_json)
                     .map_err(ExternalError::invalid)?;
@@ -1474,13 +1498,21 @@ impl Tracker<'_> {
         }
         self.applies(plan.doing)?;
         let operation = args.operation_id.unwrap_or_else(Uuid::new_v4);
+        let operation_id = operation.to_string();
+        let command = ledger(plan.what);
+        let request = plan.request.to_string();
+        // The answer is filed after the write, so a ledger that cannot be
+        // read refuses the change before anything is written.
+        if let Some(earlier) = self.settings_replay(&operation_id, &command, &request)? {
+            return Ok(WorkAnswer::Settings(Box::new(earlier)));
+        }
         let value = write(MeetingOperationId::from_uuid(operation)).await?;
         beacon::leave_settings(self.app);
         let answer = ExternalSettings {
             schema_version: QUERY_SCHEMA_VERSION,
             what: plan.what.to_owned(),
             dry_run: false,
-            operation_id: Some(operation.to_string()),
+            operation_id: Some(operation_id.clone()),
             replayed: false,
             unchanged: false,
             agent: Some(args.agent()),
@@ -1488,12 +1520,7 @@ impl Tracker<'_> {
             value: json!(value),
             live: Some(LIVE),
         };
-        self.settings_record(
-            &operation.to_string(),
-            &ledger(plan.what),
-            &plan.request.to_string(),
-            &answer,
-        )?;
+        self.settings_record(&operation_id, &command, &request, &answer)?;
         Ok(WorkAnswer::Settings(Box::new(answer)))
     }
 
@@ -1536,6 +1563,41 @@ impl Tracker<'_> {
             value: earlier["value"].clone(),
             live: earlier["live"].as_str().map(|_| LIVE),
         }))
+    }
+
+    /// Sets or removes the user's own photo, the file the app keeps in its
+    /// data folder.
+    async fn profile_photo(&self, args: &ProfilePhotoArgs) -> Result<WorkAnswer, ExternalError> {
+        let png = args
+            .file
+            .as_deref()
+            .map(people::photo_file)
+            .transpose()?
+            .map(|photo| STANDARD.encode(photo.png));
+        let picture = png
+            .as_deref()
+            .map(|png| Uuid::new_v5(&Uuid::NAMESPACE_OID, png.as_bytes()));
+        let request = json!({ "photo": picture });
+        let data_dir = crate::portable::app_data_dir(self.app).map_err(|error| {
+            ExternalError::new(
+                ExternalErrorCode::Failed,
+                format!("Sona could not find its data folder: {error}"),
+            )
+        })?;
+        let plan = StoreChange {
+            what: "profile-photo",
+            doing: "changing your photo",
+            change: &args.change,
+            before: json!({ "photo": crate::profile_photo::path(&data_dir).is_file() }),
+            after: json!({ "photo": png.is_some() }),
+            request,
+        };
+        self.store_change(plan, |_| async move {
+            let saved = crate::profile_photo::write(&data_dir, png.as_deref())
+                .map_err(|message| ExternalError::new(ExternalErrorCode::Failed, message))?;
+            Ok(json!({ "photo": saved.png.is_some() }))
+        })
+        .await
     }
 
     async fn workflows(&self, args: &WorkflowsArgs) -> Result<WorkAnswer, ExternalError> {
@@ -2812,5 +2874,21 @@ mod tests {
             settings::get_settings(handle).replacements_rules,
             settings::default_replacement_rules()
         );
+    }
+
+    #[test]
+    fn a_wide_photo_file_is_kept_as_a_square_profile_photo() {
+        let folder = TempDir::new().unwrap();
+        let file = folder.path().join("me.jpg");
+        image::RgbImage::from_pixel(900, 600, image::Rgb([200, 120, 40]))
+            .save_with_format(&file, image::ImageFormat::Jpeg)
+            .unwrap();
+
+        let photo = people::photo_file(&file).unwrap();
+        let saved =
+            crate::profile_photo::write(folder.path(), Some(&STANDARD.encode(photo.png))).unwrap();
+
+        let kept = image::load_from_memory(&STANDARD.decode(saved.png.unwrap()).unwrap()).unwrap();
+        assert_eq!((kept.width(), kept.height()), (512, 512));
     }
 }

@@ -373,6 +373,8 @@ The MCP column says whether an agent over MCP can do it; `—` means no tool.
 | Workflows: list, runs, enable | `workflows_list`, `workflow_runs`, `workflow_set_enabled` | `work workflows [--runs]`, `work workflow-enable ID [--off]` | `sona_workflows`, `sona_workflow_enable` | both |
 | Workflows: runs per day | `workflow_run_trend` | `work workflows --trend` | `sona_workflows` (`trend`) | both |
 | Meeting prep preferences | `meeting_prep_preferences_get`, `meeting_prep_preferences_set` | `work settings`, `work setting meeting-prep JSON` | `sona_settings`, `sona_setting` | both (the mail and web research switches stay UI-only by design: consent) |
+| Profile: name, email, role, company, context | `meeting_prep_preferences_get`, `meeting_prep_preferences_set` (`about_me`) | `work settings` (`meeting_prep.about_me`), `work setting meeting-prep JSON` | `sona_settings`, `sona_setting` | both |
+| Profile photo: set from a file, remove | `profile_photo_get`, `profile_photo_set` | `work settings` (`profile_photo`), `work profile-photo --file PATH\|--remove` | — | both (the CLI crops a PNG or JPEG to its middle square, at most 512 pixels across) |
 | Keyword trackers; series template and digest | `list_keyword_trackers`, `save_keyword_trackers`, `meeting_series_template_set`, `meeting_series_digest_set` | `work setting keyword-trackers JSON`, `work series MEETING_ID`, `work series-template MEETING_ID TEMPLATE`, `work series-digest MEETING_ID [--off]` | `sona_setting`, `sona_series`, `sona_series_template`, `sona_series_digest` | both |
 | Notes templates: list, save, delete | `meeting_custom_templates_list`, `meeting_custom_template_save`, `meeting_custom_template_delete` | `work meeting-templates`, `work meeting-template-save NAME --section S… [--purpose T] [--template ID]`, `work meeting-template-delete TEMPLATE` | `sona_meeting_templates`, `sona_meeting_template_save` *(opt-in)*, `sona_meeting_template_delete` *(opt-in, destructive)* | both |
 | Meeting series automations: what each series does, what ran after a meeting | `meeting_automation_roster`, `meeting_automation_runs` | `work series-automations`, `work series-automation-runs MEETING` | `sona_series_automations`, `sona_series_automation_runs` | both (reads; a webhook shows its host only, series kept on this Mac are left out); turning one on stays UI-only by design: it asks for Reminders, runs a Shortcut or sends a webhook |
@@ -543,12 +545,12 @@ and line.
 
 | status | main tables | inventory rows below | total |
 |---|---|---|---|
-| both | 243 | 23 | 266 |
+| both | 245 | 23 | 268 |
 | CLI only | 20 | 0 | 20 |
 | missing | 0 | 0 | 0 |
 | UI-only by design | 28 | 34 | 62 |
 | window-bound | 34 | 25 | 59 |
-| total | 325 | 82 | 407 |
+| total | 327 | 82 | 409 |
 
 Rows are grouped: one row can cover several buttons that call the same
 method. The inventories beside this file list every button.
