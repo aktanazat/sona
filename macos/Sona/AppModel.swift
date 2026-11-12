@@ -360,6 +360,7 @@ final class AppModel {
     let workFocus = WorkFocus()
     let rituals: RitualStore
     let heard: LiveCardStore
+    let liveDoc: LiveDocStore
 
     @ObservationIgnored let core = Core()
     @ObservationIgnored let workKeys = WorkKeys()
@@ -434,6 +435,8 @@ final class AppModel {
         loops = LoopsStore(core: core)
         rituals = RitualStore(core: core)
         heard = LiveCardStore(core: core)
+        liveDoc = LiveDocStore(core: core)
+        liveDoc.onAsk = { [weak self] ask in self?.voiceAsk(ask) }
 
         for name in [
             CoreEvent.activity, CoreEvent.streamText, CoreEvent.streamPhase, CoreEvent.micLevel,

@@ -321,6 +321,16 @@ final class MeetingLiveStore {
     private(set) var helpQuestion = ""
     private(set) var helpQuestionShown: String?
     @ObservationIgnored private var helpGeneration = 0
+    /// Asks said out loud while an answer was still coming, oldest first.
+    /// The next one runs when the user closes the answer on screen.
+    private(set) var spokenAsks: [SpokenAsk] = []
+    /// A question this call has not covered, waiting for the first yes to
+    /// look for it in past meetings and dictations.
+    private(set) var lookupOffer: String?
+    private(set) var lookup: WorkAnswer?
+    private(set) var lookupLoading = false
+    private(set) var lookupError: String?
+    private static let lookupAllowedKey = "liveLookupAllowed"
 
     // MARK: The unfinished, the imported and the week ahead
 
@@ -1075,6 +1085,7 @@ final class MeetingLiveStore {
         notesState = .idle
         notesLoading = false
         notesError = nil
+        spokenAsks = []
         dismissLiveHelp()
         helpQuestion = ""
         recallTask?.cancel()
@@ -1344,6 +1355,20 @@ final class MeetingLiveStore {
 
     func setHelpQuestion(_ text: String) { helpQuestion = text }
 
+    /// An ask said out loud: answered now, or, while an answer is still
+    /// coming, kept until the user closes that answer. The typed question
+    /// is left as the user wrote it.
+    func askOutLoud(_ kind: MeetingLiveHelpKind, question: String?) {
+        spokenAsks.append(SpokenAsk(kind: kind, question: question))
+        if !helpLoading { runSpokenAsk() }
+    }
+
+    private func runSpokenAsk() {
+        guard !helpLoading, !spokenAsks.isEmpty else { return }
+        let next = spokenAsks.removeFirst()
+        runLiveHelp(next.kind, question: next.question)
+    }
+
     var canAskLiveHelp: Bool {
         let question = helpQuestion.trimmingCharacters(in: .whitespacesAndNewlines)
         // Matches LIVE_HELP_QUESTION_MAX_CHARS in the core.
@@ -1371,6 +1396,7 @@ final class MeetingLiveStore {
         liveHelp = nil
         helpError = nil
         helpLoading = true
+        clearLookup()
         Task {
             do {
                 let result: MeetingLiveHelp = try await core.request(
@@ -1384,6 +1410,9 @@ final class MeetingLiveStore {
                 }
                 liveHelp = result
                 helpLoading = false
+                if kind == .ask, result.state == .nothingFound, let question {
+                    offerLookup(question)
+                }
             } catch {
                 guard live?.session.sessionId == sessionId, helpGeneration == generation else { return }
                 helpError = reason(error)
@@ -1399,6 +1428,51 @@ final class MeetingLiveStore {
         helpLoading = false
         helpError = nil
         helpQuestionShown = nil
+        clearLookup()
+        runSpokenAsk()
+    }
+
+    /// Look in past meetings and dictations for what this call has not
+    /// covered: at once once the user has said yes, otherwise after asking.
+    /// The search runs on this Mac and asks no model.
+    private func offerLookup(_ question: String) {
+        if UserDefaults.standard.bool(forKey: Self.lookupAllowedKey) {
+            lookUp(question)
+        } else {
+            lookupOffer = question
+        }
+    }
+
+    func allowLookup() {
+        guard let question = lookupOffer else { return }
+        UserDefaults.standard.set(true, forKey: Self.lookupAllowedKey)
+        lookupOffer = nil
+        lookUp(question)
+    }
+
+    func declineLookup() { lookupOffer = nil }
+
+    private func lookUp(_ question: String) {
+        let generation = helpGeneration
+        lookupLoading = true
+        Task {
+            do {
+                let answer: WorkAnswer = try await core.request("work_ask", ["question": question])
+                guard helpGeneration == generation else { return }
+                lookup = answer
+            } catch {
+                guard helpGeneration == generation else { return }
+                lookupError = "Your past meetings could not be searched."
+            }
+            lookupLoading = false
+        }
+    }
+
+    private func clearLookup() {
+        lookupOffer = nil
+        lookup = nil
+        lookupLoading = false
+        lookupError = nil
     }
 
     func setNote(_ text: String) {

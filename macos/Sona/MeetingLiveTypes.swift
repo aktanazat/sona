@@ -452,7 +452,7 @@ extension MeetingProvisionalSegment {
 // MARK: - Help during a call
 
 enum MeetingLiveHelpKind: String, Decodable {
-    case recent, questions, say, ask
+    case recent, questions, say, ask, recap
 
     var label: String {
         switch self {
@@ -460,6 +460,7 @@ enum MeetingLiveHelpKind: String, Decodable {
         case .questions: "Questions to ask"
         case .say: "Something to say"
         case .ask: "Ask about this call"
+        case .recap: "Recap so far"
         }
     }
 }
