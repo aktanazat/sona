@@ -132,19 +132,7 @@ private struct DigestTaskLine: View {
     }
 }
 
-/// The settings subset the digest reads. `settings-changed` carries
-/// nothing, so the whole read happens again.
-private struct DigestAppSettings: Decodable {
-    let workDigestEnabled: Bool?
-    let workDigestDay: DigestDay?
-}
-
-private struct DigestSettingParams: Encodable {
-    let enabled: Bool
-    let day: DigestDay
-}
-
-enum DigestDay: String, Codable, CaseIterable {
+enum DigestDay: String, Codable, CaseIterable, Sendable {
     case monday, tuesday, wednesday, thursday, friday, saturday, sunday
 
     var label: String { rawValue.capitalized }
@@ -154,8 +142,6 @@ enum DigestDay: String, Codable, CaseIterable {
 /// which day.
 struct ProjectDigestSettings: View {
     @Environment(AppModel.self) private var model
-    @State private var enabled = true
-    @State private var day = DigestDay.monday
     @State private var error: String?
 
     var body: some View {
@@ -165,37 +151,24 @@ struct ProjectDigestSettings: View {
                 ToggleRow(
                     title: "Weekly project digest",
                     detail: "At 9 in the morning, the inbox gets each project's status, latest update, what got done that week and what's at risk.",
-                    isOn: Binding(get: { enabled }, set: { on in Task { await save(on, day) } }))
+                    isOn: Binding(get: { model.agents.digestEnabled },
+                                  set: { on in Task { await save(on, model.agents.digestDay) } }))
                 ChoiceRow(
                     title: "Day",
                     choices: DigestDay.allCases,
                     label: \.label,
-                    selection: Binding(get: { day }, set: { picked in Task { await save(enabled, picked) } }))
-                    .disabled(!enabled)
+                    selection: Binding(get: { model.agents.digestDay },
+                                       set: { picked in Task { await save(model.agents.digestEnabled, picked) } }))
+                    .disabled(!model.agents.digestEnabled)
             }
-        }
-        .task { await load() }
-    }
-
-    private func load() async {
-        do {
-            let settings: DigestAppSettings = try await model.core.request("get_app_settings")
-            enabled = settings.workDigestEnabled ?? true
-            day = settings.workDigestDay ?? .monday
-            error = nil
-        } catch {
-            self.error = "Couldn't load the digest setting."
         }
     }
 
     private func save(_ on: Bool, _ picked: DigestDay) async {
-        let previous = (enabled, day)
-        (enabled, day) = (on, picked)
         do {
-            try await model.core.request("change_work_digest_setting", DigestSettingParams(enabled: on, day: picked))
+            try await model.agents.setDigest(on, picked)
             error = nil
         } catch {
-            (enabled, day) = previous
             self.error = "Couldn't save the digest setting."
         }
     }

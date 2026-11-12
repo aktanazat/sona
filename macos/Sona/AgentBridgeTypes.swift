@@ -281,6 +281,8 @@ struct AgentBridgeAppSettings: Decodable, Sendable {
     let workAgentChanges: WorkAutonomy?
     let workSonaChanges: WorkAutonomy?
     let workCloseParents: Bool?
+    let workDigestEnabled: Bool?
+    let workDigestDay: DigestDay?
 }
 
 /// How this slice draws what the bridge hands it.

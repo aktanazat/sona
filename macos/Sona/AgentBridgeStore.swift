@@ -32,6 +32,9 @@ final class AgentBridgeStore {
     private(set) var sonaChanges = WorkAutonomy.suggest
     /// Whether a task closes itself once its sub-tasks are done.
     private(set) var closeParents = false
+    /// Whether the weekly project digest reaches the inbox, and on which day.
+    private(set) var digestEnabled = true
+    private(set) var digestDay = DigestDay.monday
     private(set) var autonomyBusy = false
     /// The tasks a session waits on the user's approval for, by the name the
     /// session gave each. Set only when it changes, so task lists redraw then
@@ -277,6 +280,21 @@ final class AgentBridgeStore {
         }
     }
 
+    /// Throws so the digest's own section can say what failed beside its
+    /// controls.
+    func setDigest(_ enabled: Bool, _ day: DigestDay) async throws {
+        let previous = (digestEnabled, digestDay)
+        (digestEnabled, digestDay) = (enabled, day)
+        do {
+            try await core.request(
+                "change_work_digest_setting", ["enabled": JSONValue.bool(enabled), "day": .string(day.rawValue)])
+        } catch {
+            (digestEnabled, digestDay) = previous
+            throw error
+        }
+        await loadSettings()
+    }
+
     private func setAutonomy(
         _ method: String, _ autonomy: WorkAutonomy, keyPath: ReferenceWritableKeyPath<AgentBridgeStore, WorkAutonomy>
     ) async {
@@ -311,8 +329,8 @@ final class AgentBridgeStore {
         }
     }
 
-    /// The bridge policy subset of the app's settings. `settings-changed`
-    /// carries nothing, so the whole read happens again.
+    /// The bridge policy and work subset of the app's settings.
+    /// `settings-changed` carries nothing, so the whole read happens again.
     private func loadSettings() async {
         do {
             let settings: AgentBridgeAppSettings = try await core.request("get_app_settings")
@@ -322,6 +340,8 @@ final class AgentBridgeStore {
             agentChanges = settings.workAgentChanges ?? .suggest
             sonaChanges = settings.workSonaChanges ?? .suggest
             closeParents = settings.workCloseParents ?? false
+            digestEnabled = settings.workDigestEnabled ?? true
+            digestDay = settings.workDigestDay ?? .monday
             error = nil
         } catch {
             self.error = "Couldn't load agent connection details: \(Self.reason(error))"

@@ -211,8 +211,9 @@ struct ProjectsView: View {
     private var headerTitle: some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             PageHeading(title: "Projects")
-            if let count = store.projects?.count, count > 0 {
-                Text("\(count)").metaText().monospacedDigit()
+            if let total = store.projects?.count, total > 0 {
+                let filtered = store.filter.isActive || !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                Text(filtered ? "\(visibleProjects.count) of \(total)" : "\(total)").metaText().monospacedDigit()
             }
         }
     }
