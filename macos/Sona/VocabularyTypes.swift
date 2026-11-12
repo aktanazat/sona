@@ -278,13 +278,19 @@ enum VocabularyDraft {
     /// A settings refresh may replace the local list only while nothing local
     /// has diverged since the last synced snapshot; otherwise the person is
     /// mid-edit and an unrelated refresh would discard the row under the
-    /// cursor.
+    /// cursor. Rows saved from outside in the meantime are appended, so the
+    /// whole-list save that ends the edit keeps them; rows removed from
+    /// outside come back with that save.
     static func resolveRefresh<T: VocabularyPair>(
         current: [T],
         previousSaved: [T],
         incomingSaved: [T]
     ) -> [T] {
-        samePairs(current, previousSaved) ? incomingSaved : current
+        if samePairs(current, previousSaved) {
+            return incomingSaved
+        }
+        let known = Set((previousSaved + current).map(pairKey))
+        return current + incomingSaved.filter { !known.contains(pairKey($0)) }
     }
 
     /// The core adds the CSV rows to the saved list and answers with that

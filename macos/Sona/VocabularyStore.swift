@@ -65,6 +65,8 @@ final class VocabularyStore {
     @ObservationIgnored private let core: Core
     @ObservationIgnored private var syncedEntries: [VocabularyEntry] = []
     @ObservationIgnored private var syncedEmoji: [EmojiReplacement] = []
+    @ObservationIgnored private var syncedRewrites: [TextReplacementRule] = []
+    @ObservationIgnored private var syncedSamples: [PersonaSample] = []
     @ObservationIgnored private var settingsLoaded = false
     @ObservationIgnored private var listsLoaded = false
 
@@ -447,6 +449,7 @@ final class VocabularyStore {
                 return
             }
             rewrites = try await core.request("reset_text_replacements")
+            syncedRewrites = rewrites
         }, retry: { [weak self] in
             self?.restoreDefaultRewrites()
         })
@@ -594,6 +597,7 @@ final class VocabularyStore {
                 "save_persona_samples",
                 PersonaSamplesRequest(samples: next)
             )
+            syncedSamples = samples
         }, retry: { [weak self] in
             self?.commitSamples()
         })
@@ -609,6 +613,7 @@ final class VocabularyStore {
                 "save_persona_samples",
                 PersonaSamplesRequest(samples: next)
             )
+            syncedSamples = samples
         }, retry: { [weak self] in
             self?.removeSample(id: id)
         })
@@ -651,8 +656,13 @@ final class VocabularyStore {
             )
             syncedEntries = savedEntries
             snippets = savedSnippets
-            snippetDrafts = [:]
-            rewrites = savedRewrites
+            snippetDrafts = snippetDrafts.filter { id, _ in savedSnippets.contains { $0.id == id } }
+            rewrites = VocabularyDraft.resolveRefresh(
+                current: rewrites,
+                previousSaved: syncedRewrites,
+                incomingSaved: savedRewrites
+            )
+            syncedRewrites = savedRewrites
             error = nil
             retry = nil
         } catch {
@@ -667,14 +677,28 @@ final class VocabularyStore {
 
     private func loadSamples() async {
         samplesLoading = true
+        await refreshSamples()
+        samplesLoading = false
+    }
+
+    /// A sample being typed is kept: the saved list replaces the editor's
+    /// only while the editor still matches what was last saved, and samples
+    /// saved from outside meanwhile are appended so the next save keeps them.
+    private func refreshSamples() async {
         do {
-            samples = try await core.request("get_persona_samples")
+            let saved: [PersonaSample] = try await core.request("get_persona_samples")
+            if samples == syncedSamples {
+                samples = saved
+            } else {
+                let known = Set((syncedSamples + samples).map(\.id))
+                samples += saved.filter { !known.contains($0.id) }
+            }
+            syncedSamples = saved
             samplesUnreadable = false
         } catch {
             samplesUnreadable = true
             self.error = error.localizedDescription
         }
-        samplesLoading = false
     }
 
     private func apply(_ settings: VocabularySettingsSnapshot) {
@@ -699,10 +723,15 @@ final class VocabularyStore {
         replacementsEnabled = settings.replacementsEnabled ?? true
     }
 
-    /// `settings-changed` carries no useful payload, so the whole snapshot is
-    /// re-read. A refresh never discards the row under the cursor.
+    /// `settings-changed` carries no useful payload, and the CLI writes
+    /// snippets, rewrites and samples behind this page, so every list is read
+    /// again. A refresh keeps every row edited since the last save.
     private func settingsChanged() {
-        Task { await loadSettings() }
+        Task {
+            await loadSettings()
+            await loadLists()
+            await refreshSamples()
+        }
     }
 
     // MARK: Writes
@@ -749,6 +778,7 @@ final class VocabularyStore {
                 "save_text_replacements",
                 TextReplacementsRequest(rules: next)
             )
+            syncedRewrites = rewrites
         }, retry: { [weak self] in
             self?.writeRewrites(next)
         })
