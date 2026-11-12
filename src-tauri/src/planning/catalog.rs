@@ -109,6 +109,97 @@ BEGIN
         CAST(old.due_at_ms AS TEXT), CAST(new.due_at_ms AS TEXT), new.updated_at_ms);
 END;";
 
+/// Dependencies and initiatives join a project's history: a dependency
+/// added or removed is in both projects' histories, each naming the other,
+/// and a project going into, between or out of initiatives names them,
+/// deleting an initiative included. The rebuild runs with the legacy rename
+/// so SQLite neither rewrites nor re-checks the triggers that write to the
+/// history; they name it, and find it again once it is renamed.
+pub(crate) const DEPENDENCY_INITIATIVE_HISTORY_MIGRATION: &str = "PRAGMA legacy_alter_table = ON;
+CREATE TABLE planning_project_activity_next (
+    id TEXT PRIMARY KEY NOT NULL,
+    project_id TEXT NOT NULL REFERENCES planning_projects(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL CHECK(kind IN ('title', 'status', 'statusName', 'lead', 'members',
+        'startDate', 'targetDate', 'priority', 'milestoneAdded', 'milestoneRemoved',
+        'milestoneTarget', 'blockedByAdded', 'blockedByRemoved', 'blockingAdded',
+        'blockingRemoved', 'initiative')),
+    subject TEXT,
+    from_value TEXT,
+    to_value TEXT,
+    at_ms INTEGER NOT NULL
+);
+INSERT INTO planning_project_activity_next
+    (rowid, id, project_id, kind, subject, from_value, to_value, at_ms)
+    SELECT rowid, id, project_id, kind, subject, from_value, to_value, at_ms
+    FROM planning_project_activity;
+DROP TABLE planning_project_activity;
+ALTER TABLE planning_project_activity_next RENAME TO planning_project_activity;
+PRAGMA legacy_alter_table = OFF;
+CREATE INDEX planning_project_activity_project ON planning_project_activity(project_id, at_ms);
+CREATE TRIGGER planning_project_activity_dependency_add AFTER INSERT
+    ON planning_project_dependencies
+BEGIN
+    INSERT INTO planning_project_activity (id, project_id, kind, subject, at_ms)
+    SELECT lower(hex(randomblob(16))), blocked.id, 'blockedByAdded', blocker.title,
+        new.created_at_ms
+    FROM planning_projects blocked, planning_projects blocker
+    WHERE blocked.id = new.blocked_id AND blocker.id = new.blocker_id;
+    INSERT INTO planning_project_activity (id, project_id, kind, subject, at_ms)
+    SELECT lower(hex(randomblob(16))), blocker.id, 'blockingAdded', blocked.title,
+        new.created_at_ms
+    FROM planning_projects blocked, planning_projects blocker
+    WHERE blocked.id = new.blocked_id AND blocker.id = new.blocker_id;
+END;
+CREATE TRIGGER planning_project_activity_dependency_remove AFTER DELETE
+    ON planning_project_dependencies
+BEGIN
+    INSERT INTO planning_project_activity (id, project_id, kind, subject, at_ms)
+    SELECT lower(hex(randomblob(16))), blocked.id, 'blockedByRemoved', blocker.title,
+        CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)
+    FROM planning_projects blocked, planning_projects blocker
+    WHERE blocked.id = old.blocked_id AND blocker.id = old.blocker_id;
+    INSERT INTO planning_project_activity (id, project_id, kind, subject, at_ms)
+    SELECT lower(hex(randomblob(16))), blocker.id, 'blockingRemoved', blocked.title,
+        CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)
+    FROM planning_projects blocked, planning_projects blocker
+    WHERE blocked.id = old.blocked_id AND blocker.id = old.blocker_id;
+END;
+CREATE TRIGGER planning_project_activity_initiative_add AFTER INSERT
+    ON planning_initiative_projects
+BEGIN
+    INSERT INTO planning_project_activity (id, project_id, kind, to_value, at_ms)
+    SELECT lower(hex(randomblob(16))), p.id, 'initiative', i.name, new.added_at_ms
+    FROM planning_projects p, planning_initiatives i
+    WHERE p.id = new.project_id AND i.id = new.initiative_id;
+END;
+CREATE TRIGGER planning_project_activity_initiative_move AFTER UPDATE OF initiative_id
+    ON planning_initiative_projects
+WHEN old.initiative_id IS NOT new.initiative_id
+BEGIN
+    INSERT INTO planning_project_activity (id, project_id, kind, from_value, to_value, at_ms)
+    SELECT lower(hex(randomblob(16))), p.id, 'initiative',
+        (SELECT name FROM planning_initiatives WHERE id = old.initiative_id),
+        (SELECT name FROM planning_initiatives WHERE id = new.initiative_id), new.added_at_ms
+    FROM planning_projects p WHERE p.id = new.project_id;
+END;
+CREATE TRIGGER planning_project_activity_initiative_remove AFTER DELETE
+    ON planning_initiative_projects
+BEGIN
+    INSERT INTO planning_project_activity (id, project_id, kind, from_value, at_ms)
+    SELECT lower(hex(randomblob(16))), p.id, 'initiative', i.name,
+        CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)
+    FROM planning_projects p, planning_initiatives i
+    WHERE p.id = old.project_id AND i.id = old.initiative_id;
+END;
+CREATE TRIGGER planning_project_activity_initiative_delete BEFORE DELETE ON planning_initiatives
+BEGIN
+    INSERT INTO planning_project_activity (id, project_id, kind, from_value, at_ms)
+    SELECT lower(hex(randomblob(16))), p.id, 'initiative', old.name,
+        CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)
+    FROM planning_initiative_projects ip JOIN planning_projects p ON p.id = ip.project_id
+    WHERE ip.initiative_id = old.id;
+END;";
+
 /// A link a project keeps among its resources.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct LinkEdit {
@@ -349,8 +440,8 @@ pub(crate) fn delete_status_name(conn: &Connection, id: &str, now_ms: i64) -> Re
     Ok(projects)
 }
 
-/// What changed on a project, newest first: its properties, its members
-/// and its milestones.
+/// What changed on a project, newest first: its properties, its members,
+/// its milestones, its dependencies and its initiative.
 pub(crate) fn history(
     conn: &Connection,
     project_id: &str,
@@ -893,7 +984,9 @@ pub(crate) fn repoint_person(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::planning::dependencies;
     use crate::planning::schema;
+    use crate::planning::work::initiatives::{self, InitiativeSaveInput};
     use crate::planning::work::items::{self, NewItem};
     use crate::planning::work::types::{WorkActor, WorkOwner, WorkStatus};
 
@@ -1134,5 +1227,89 @@ mod tests {
             .map(|change| change.subject)
             .collect();
         assert_eq!(removed, [Some("Beta".to_owned())]);
+    }
+
+    /// A dependency is in both projects' histories, each naming the other,
+    /// and a project's moves into, between and out of initiatives name
+    /// them, a deleted initiative included.
+    #[test]
+    fn a_projects_history_lists_its_dependencies_and_initiatives() {
+        fn dependency_changes(changes: &[ProjectActivity]) -> Vec<(&str, Option<&str>)> {
+            changes
+                .iter()
+                .rev()
+                .filter(|change| change.kind.starts_with("block"))
+                .map(|change| (change.kind.as_str(), change.subject.as_deref()))
+                .collect()
+        }
+        fn initiative_changes(changes: &[ProjectActivity]) -> Vec<(Option<&str>, Option<&str>)> {
+            changes
+                .iter()
+                .rev()
+                .filter(|change| change.kind == "initiative")
+                .map(|change| (change.from_value.as_deref(), change.to_value.as_deref()))
+                .collect()
+        }
+        let conn = Connection::open_in_memory().expect("a history database");
+        schema::apply_all(&conn).expect("the planner schema");
+        let project = |title: &str| {
+            save_project(
+                &conn,
+                None,
+                &ProjectEdit {
+                    title: Some(title.to_owned()),
+                    ..ProjectEdit::default()
+                },
+                1,
+            )
+            .expect("a project")
+            .id
+        };
+        let initiative = |name: &str| {
+            initiatives::save(
+                &conn,
+                None,
+                &InitiativeSaveInput {
+                    name: Some(name.to_owned()),
+                    ..InitiativeSaveInput::default()
+                },
+                2,
+            )
+            .expect("an initiative")
+            .id
+        };
+        let (pilot, harbor) = (project("Pilot"), project("Harbor"));
+        let (launch, growth) = (initiative("Launch"), initiative("Growth"));
+
+        let link = dependencies::add(&conn, &pilot, &harbor, 3).expect("harbor waits on pilot");
+        initiatives::add_project(&conn, &launch, &harbor, 4).expect("harbor joins launch");
+        initiatives::add_project(&conn, &growth, &harbor, 5).expect("harbor moves to growth");
+        dependencies::remove(&conn, &link.id).expect("the link removed");
+        initiatives::delete(&conn, &growth).expect("growth deleted");
+
+        let harbor_changes = history(&conn, &harbor, 20).expect("harbor's history");
+        let pilot_changes = history(&conn, &pilot, 20).expect("pilot's history");
+        assert_eq!(
+            dependency_changes(&harbor_changes),
+            [
+                ("blockedByAdded", Some("Pilot")),
+                ("blockedByRemoved", Some("Pilot")),
+            ]
+        );
+        assert_eq!(
+            dependency_changes(&pilot_changes),
+            [
+                ("blockingAdded", Some("Harbor")),
+                ("blockingRemoved", Some("Harbor")),
+            ]
+        );
+        assert_eq!(
+            initiative_changes(&harbor_changes),
+            [
+                (None, Some("Launch")),
+                (Some("Launch"), Some("Growth")),
+                (Some("Growth"), None),
+            ]
+        );
     }
 }

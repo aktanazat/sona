@@ -191,16 +191,17 @@ pub struct ProjectStatusName {
     pub position: i64,
 }
 
-/// One change to a project's properties or milestones, as its history
-/// lists it. Dates are epoch milliseconds and people are ids or `me`,
-/// written as text.
+/// One change to a project's properties, milestones, dependencies or
+/// initiative, as its history lists it. Dates are epoch milliseconds and
+/// people are ids or `me`, written as text.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectActivity {
     pub id: String,
     pub project_id: String,
     pub kind: String,
-    /// The milestone a milestone change is about.
+    /// The milestone a milestone change is about, or the other project a
+    /// dependency change is about.
     pub subject: Option<String>,
     pub from_value: Option<String>,
     pub to_value: Option<String>,

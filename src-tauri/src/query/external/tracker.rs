@@ -307,7 +307,7 @@ pub enum WorkVerb {
     /// Delete a custom project status. Its projects keep their built-in status.
     ProjectStatusDelete(catalog::ProjectStatusDeleteArgs),
     /// A project's changes, newest first: its name, status, lead, members,
-    /// dates, priority and milestones.
+    /// dates, priority, milestones, dependencies and initiative.
     ProjectHistory(catalog::ProjectHistoryArgs),
     /// People, with the other names they go by and their open work.
     People(catalog::PeopleArgs),

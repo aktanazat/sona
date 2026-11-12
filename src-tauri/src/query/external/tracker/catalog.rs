@@ -592,9 +592,13 @@ pub struct ExternalWorkProjectStatusChange {
 #[derive(Clone, Debug, Serialize)]
 pub struct ExternalWorkProjectChangeEntry {
     /// title, status, statusName, lead, members, startDate, targetDate,
-    /// priority, milestoneAdded, milestoneRemoved or milestoneTarget.
+    /// priority, milestoneAdded, milestoneRemoved, milestoneTarget,
+    /// blockedByAdded, blockedByRemoved, blockingAdded, blockingRemoved or
+    /// initiative. An initiative change goes from one initiative's name to
+    /// another's; a side left out is no initiative.
     pub kind: String,
-    /// The milestone a milestone change is about.
+    /// The milestone a milestone change is about, or the other project a
+    /// dependency change is about.
     pub subject: Option<String>,
     pub from: Option<String>,
     pub to: Option<String>,
@@ -2189,6 +2193,17 @@ pub(super) fn admin_text(answer: &ProjectAdminAnswer, text: &mut String) {
                 let _ = writeln!(text, "{} has no recorded changes yet.", history.project.name);
             }
             for change in &history.changes {
+                let link = match change.kind.as_str() {
+                    "blockedByAdded" => Some("blocked by"),
+                    "blockedByRemoved" => Some("no longer blocked by"),
+                    "blockingAdded" => Some("blocking"),
+                    "blockingRemoved" => Some("no longer blocking"),
+                    _ => None,
+                };
+                if let (Some(link), Some(other)) = (link, &change.subject) {
+                    let _ = writeln!(text, "{}  {link} {other:?}", change.at);
+                    continue;
+                }
                 let _ = write!(text, "{}  {}", change.at, change.kind);
                 if let Some(subject) = &change.subject {
                     let _ = write!(text, " {subject:?}");

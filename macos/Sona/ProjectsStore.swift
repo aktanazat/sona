@@ -192,13 +192,17 @@ struct PlanningProjectDependency: Decodable, Identifiable, Equatable {
     }
 }
 
-/// One change to a project's properties or milestones. Days are epoch
-/// milliseconds and people are ids or `me`, written as text; `subject` is
-/// the milestone's title for the milestone kinds.
+/// One change to a project's properties, milestones, dependencies or
+/// initiative. Days are epoch milliseconds and people are ids or `me`,
+/// written as text; `subject` is the milestone's title for the milestone
+/// kinds and the other project's title for the dependency kinds, and an
+/// initiative change goes from one initiative's name to another's.
 struct PlanningProjectActivity: Decodable, Identifiable, Equatable {
     enum Kind: String, Decodable {
         case title, status, statusName, lead, members, startDate, targetDate, priority
         case milestoneAdded, milestoneRemoved, milestoneTarget
+        case blockedByAdded, blockedByRemoved, blockingAdded, blockingRemoved
+        case initiative
         case unknown
 
         init(from decoder: Decoder) throws {

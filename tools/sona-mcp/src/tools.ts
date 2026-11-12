@@ -4182,7 +4182,7 @@ export const TOOLS: readonly ToolDefinition[] = [
     name: "sona_project_history",
     title: "Read a Sona project's history",
     description:
-      "Read what changed on a project, newest first: each entry's kind (title, status, statusName, lead, members, startDate, targetDate, priority, milestoneAdded, milestoneRemoved, milestoneTarget, milestoneConverted), from and to with names resolved, and at_ms.",
+      "Read what changed on a project, newest first: each entry's kind (title, status, statusName, lead, members, startDate, targetDate, priority, milestoneAdded, milestoneRemoved, milestoneTarget, blockedByAdded, blockedByRemoved, blockingAdded, blockingRemoved, initiative), its subject (the milestone, or the other project for a dependency), from and to with names resolved, and at_ms.",
     inputSchema: {
       type: "object",
       properties: {

@@ -815,6 +815,21 @@ struct ProjectUpdatesView: View {
             case (_?, nil): return "\(subject) no longer has a due date"
             case (nil, nil): return nil
             }
+        case .blockedByAdded:
+            return change.subject.map { "Blocked by \($0)" }
+        case .blockedByRemoved:
+            return change.subject.map { "No longer blocked by \($0)" }
+        case .blockingAdded:
+            return change.subject.map { "Blocking \($0)" }
+        case .blockingRemoved:
+            return change.subject.map { "No longer blocking \($0)" }
+        case .initiative:
+            switch (from, to) {
+            case let (from?, to?): return "Moved from initiative \(from) to \(to)"
+            case let (nil, to?): return "Added to initiative \(to)"
+            case let (from?, nil): return "Removed from initiative \(from)"
+            case (nil, nil): return nil
+            }
         case .unknown:
             return nil
         }
@@ -858,6 +873,9 @@ struct ProjectUpdatesView: View {
         case .startDate, .targetDate: "calendar"
         case .priority: "chart.bar"
         case .milestoneAdded, .milestoneRemoved, .milestoneTarget: "diamond"
+        case .blockedByAdded, .blockedByRemoved: "arrow.right.to.line"
+        case .blockingAdded, .blockingRemoved: "arrow.left.to.line"
+        case .initiative: "scope"
         case .unknown: "circle"
         }
     }
