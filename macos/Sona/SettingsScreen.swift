@@ -12,6 +12,8 @@ struct SettingsScreen: View {
     @ViewBuilder
     private var tab: some View {
         switch model.settingsPlace {
+        case .profile:
+            ProfileSettingsView()
         case .essentials:
             EssentialsView(store: model.settings) {
                 MeetingDetectionEssentials(store: model.meetingSettings)

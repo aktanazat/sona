@@ -351,7 +351,7 @@ private struct SessionActivityLine: View {
         case .prompt:
             Text(promptLine).bodyText(13).fixedSize(horizontal: false, vertical: true)
         case .stop:
-            Text("\(activity.author.display) asked \(agent) to stop").bodyText(13, Theme.inkSecondary)
+            Text("\(activity.author.display(me: model.myName)) asked \(agent) to stop").bodyText(13, Theme.inkSecondary)
         case .unknown:
             Text(activity.body ?? "Something this version of Sona cannot show")
                 .bodyText(13, Theme.inkTertiary)
@@ -360,7 +360,7 @@ private struct SessionActivityLine: View {
     }
 
     private var promptLine: String {
-        let who = activity.author.display
+        let who = activity.author.display(me: model.myName)
         switch (activity.body, picked ?? activity.value) {
         case let (body?, choice?): return "\(who) picked “\(choice)”: \(body)"
         case let (nil, choice?): return "\(who) picked “\(choice)”"

@@ -1445,6 +1445,7 @@ private struct CommentThread: View {
     let itemId: String
     let files: [WorkAttachment]
     let flashed: String?
+    @Environment(AppModel.self) private var model
     @State private var replying = false
     @State private var expanded = false
 
@@ -1458,7 +1459,7 @@ private struct CommentThread: View {
                             .font(.system(size: 12))
                             .foregroundStyle(Theme.inkTertiary)
                             .frame(width: 16)
-                        Text("Resolved thread from \(thread.author.display)").bodyText(13, Theme.inkSecondary)
+                        Text("Resolved thread from \(thread.author.display(me: model.myName))").bodyText(13, Theme.inkSecondary)
                         if !thread.replies.isEmpty {
                             Text(thread.replies.count == 1 ? "1 reply" : "\(thread.replies.count) replies").metaText()
                         }
@@ -1530,7 +1531,7 @@ private struct CommentEntry: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
                 ActorMark(actor: comment.author.kind)
-                Text(comment.author.display).font(TypeScale.label(13)).foregroundStyle(Theme.ink)
+                Text(comment.author.display(me: model.myName)).font(TypeScale.label(13)).foregroundStyle(Theme.ink)
                 Text(TaskDates.ago(comment.createdAtMs, now: TaskDates.now()))
                     .metaText()
                     .help(PlanningFormat.date(comment.createdAtMs))

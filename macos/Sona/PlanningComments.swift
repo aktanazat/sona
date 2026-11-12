@@ -205,6 +205,7 @@ private struct PlanningCommentEntry: View {
     let comment: WorkComment
     let thread: WorkComment
     let reply: () -> Void
+    @Environment(AppModel.self) private var model
     @State private var editing = false
     @State private var hovering = false
     @State private var failure: String?
@@ -218,7 +219,7 @@ private struct PlanningCommentEntry: View {
                     .font(.system(size: 11))
                     .foregroundStyle(Theme.inkTertiary)
                     .frame(width: 16)
-                Text(comment.author.display).font(TypeScale.label(13)).foregroundStyle(Theme.ink)
+                Text(comment.author.display(me: model.myName)).font(TypeScale.label(13)).foregroundStyle(Theme.ink)
                 Text(TaskDates.ago(comment.createdAtMs, now: TaskDates.now()))
                     .metaText()
                     .help(PlanningFormat.date(comment.createdAtMs))

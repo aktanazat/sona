@@ -283,9 +283,10 @@ struct WorkCommentAuthor: Codable, Equatable {
     var kind: WorkActor
     var name: String?
 
-    var display: String {
+    /// `me` is the profile name, when the user gave one.
+    func display(me: String?) -> String {
         switch kind {
-        case .me: "Aktan"
+        case .me: me ?? "You"
         case .sona: "Sona"
         case .agent: name ?? "Agent"
         }

@@ -354,6 +354,7 @@ private struct AttachmentTile<Menu: View>: View {
     let open: () -> Void
     let choose: () -> Void
     @ViewBuilder let menu: () -> Menu
+    @Environment(AppModel.self) private var model
     @State private var hovering = false
 
     var body: some View {
@@ -411,7 +412,7 @@ private struct AttachmentTile<Menu: View>: View {
     }
 
     private var meta: String {
-        let who = attachment.createdBy.display
+        let who = attachment.createdBy.display(me: model.myName)
         let what: String?
         if attachment.kind == .link {
             what = attachment.linkURL.flatMap { $0.host() ?? ($0.scheme == "mailto" ? "Email" : nil) }
@@ -428,7 +429,7 @@ private struct AttachmentTile<Menu: View>: View {
     private var help: String {
         let source = attachment.url ?? attachment.originalName ?? attachment.title
         let keys = attachment.kind == .link ? "Double-click to open" : "Space to preview, double-click to open"
-        let lines = [attachment.subtitle, source, "Added by \(attachment.createdBy.display), \(PlanningFormat.date(attachment.createdAtMs))", keys]
+        let lines = [attachment.subtitle, source, "Added by \(attachment.createdBy.display(me: model.myName)), \(PlanningFormat.date(attachment.createdAtMs))", keys]
         return lines.compactMap { $0 }.joined(separator: "\n")
     }
 }

@@ -798,12 +798,7 @@ struct Avatar: View {
     var body: some View {
         switch face.kind {
         case .me:
-            Image(systemName: "person.fill")
-                .font(.system(size: size * 0.5))
-                .foregroundStyle(Theme.onAccent)
-                .frame(width: size, height: size)
-                .background { MonogramFill(color: Theme.accentFill) }
-                .clipShape(Circle())
+            SelfPortrait(size: size)
                 .help(face.name)
                 .accessibilityLabel(face.name)
         case let .person(id):

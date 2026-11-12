@@ -68,7 +68,7 @@ enum Place: Int, CaseIterable, Identifiable {
 
 /// Settings' pages, in the order its list shows them.
 enum SettingsPlace: Int, CaseIterable, Identifiable {
-    case essentials, dictation, models, modes, vocabulary, prompts, workflows, meetings
+    case profile, essentials, dictation, models, modes, vocabulary, prompts, workflows, meetings
     case agents, sync, privacy, importing, documents, about, debug
     case connections, tasks
 
@@ -76,6 +76,7 @@ enum SettingsPlace: Int, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
+        case .profile: "Profile"
         case .essentials: "Essentials"
         case .dictation: "Dictation"
         case .models: "Models"
@@ -252,6 +253,11 @@ final class AppModel {
     var homeAnchor: String?
     var settingsPlace: SettingsPlace = .essentials
     var showingSettings = false
+    /// The user's name from their profile, when they gave one.
+    var myName: String? {
+        let name = prep.preferences?.aboutMe.name.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return name.isEmpty ? nil : name
+    }
     var paletteShown = false {
         didSet { if !paletteShown { workFocus.picker = nil } }
     }
@@ -323,6 +329,7 @@ final class AppModel {
     let live: MeetingLiveStore
     let meetingSettings: MeetingSettingsStore
     let prep: MeetingPrepStore
+    let profilePhoto: ProfilePhotoStore
     let personPhotos: PersonPhotoStore
     let people: PeopleStore
     let scratchpad: ScratchpadStore
@@ -395,6 +402,7 @@ final class AppModel {
         live = MeetingLiveStore(core: core)
         meetingSettings = MeetingSettingsStore(core: core)
         prep = MeetingPrepStore(core: core)
+        profilePhoto = ProfilePhotoStore(core: core)
         let photos = PersonPhotoStore(core: core)
         personPhotos = photos
         people = PeopleStore(core: core, photos: photos)
@@ -1351,6 +1359,10 @@ final class AppModel {
                 Task { await loadModels() }
             case CoreEvent.settingsChanged, CoreEvent.modesChanged:
                 call { try await self.loadPill() }
+                Task {
+                    await profilePhoto.load()
+                    if prep.preferences != nil { await prep.loadPreferences() }
+                }
             case CoreEvent.dictationDurationWarning:
                 let event: DictationDurationWarningEvent = try Core.payload(line)
                 pillWarningSeconds = event.remainingSeconds

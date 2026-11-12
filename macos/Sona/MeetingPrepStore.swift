@@ -3,6 +3,7 @@ import Observation
 
 struct MeetingAboutMe: Codable, Equatable {
     var name: String
+    var email: String
     var role: String
     var company: String
     var context: String
@@ -165,24 +166,32 @@ final class MeetingPrepStore {
         }
     }
 
+    /// Saves the meeting settings. The profile has its own page and is
+    /// written by `saveAboutMe`, so this keeps whatever profile was saved.
     func save(_ value: MeetingPrepPreferences) async {
         guard !saving else { return }
         saving = true
         savedNotice = nil
         defer { saving = false }
-        if await write({ _ in value }) {
+        let saved = await write { current in
+            var next = value
+            if let current { next.aboutMe = current.aboutMe }
+            return next
+        }
+        if saved {
             savedNotice = "Saved. Your next notes and drafts will use this context."
         }
     }
 
-    /// Saves the About me fields as soon as one is left, over the preferences
-    /// last saved; the rest of the form still waits for its Save button.
-    func saveAboutMe(_ aboutMe: MeetingAboutMe) async {
+    /// Saves the profile over the preferences last saved. Answers whether
+    /// the saved profile is now `aboutMe`.
+    func saveAboutMe(_ aboutMe: MeetingAboutMe) async -> Bool {
         _ = await write { saved in
             guard var next = saved, next.aboutMe != aboutMe else { return nil }
             next.aboutMe = aboutMe
             return next
         }
+        return preferences?.aboutMe == aboutMe
     }
 
     /// Writes what `change` makes of the saved preferences, once every write

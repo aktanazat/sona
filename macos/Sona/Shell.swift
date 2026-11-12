@@ -479,6 +479,8 @@ struct Sidebar: View {
                 .padding(.bottom, Space.m)
             }
             .scrollIndicators(.never)
+            SidebarProfileRow()
+                .padding(.bottom, Space.m)
         }
         .padding(.horizontal, Space.m)
         .frame(width: Theme.sidebarWidth)
