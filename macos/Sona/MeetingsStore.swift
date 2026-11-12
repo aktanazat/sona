@@ -479,13 +479,15 @@ final class MeetingsStore {
         return phase == .processing || update.progress.stage == .people ? update : nil
     }
 
-    /// Coalesces a burst of events into one list read.
+    /// Coalesces a burst of events into one read of the list and of the
+    /// totals the header shows.
     private func reloadListSoon() {
         listTask?.cancel()
         listTask = Task { [weak self] in
             try? await Task.sleep(for: MeetingsStore.eventSettle)
             guard !Task.isCancelled else { return }
             await self?.loadPage()
+            await self?.loadTrend()
         }
     }
 
