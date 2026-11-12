@@ -11,17 +11,28 @@ struct ScratchNote: Decodable, Identifiable, Equatable {
     let createdAtMs: Int64
     var updatedAtMs: Int64
 
-    /// The words after the ones the title took, on one line, for a list row.
+    /// The words after the ones the title took, on one line, for a list row,
+    /// as a reader sees them: no markdown marks and none of Sona's own links.
     /// Empty when the title already says everything.
     var preview: String {
         var lines = body.split(whereSeparator: \.isNewline)
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
         let titleStem = title.trimmingCharacters(in: CharacterSet(charactersIn: "…"))
-        if let first = lines.first, first.hasPrefix(titleStem) {
+        if let first = lines.first, first.hasPrefix(titleStem) || Self.plain(first).hasPrefix(titleStem) {
             lines.removeFirst()
         }
-        return lines.joined(separator: " ")
+        return lines.map(Self.plain).filter { !$0.isEmpty }.joined(separator: " ")
+    }
+
+    private static func plain(_ line: String) -> String {
+        let text = line
+            .replacing(/\[([^\]]*)\]\([^)]*\)/) { String($0.output.1) }
+            .replacing(/sona:\/\/\S+/, with: "")
+            .replacing(/^\s*(?:#{1,6}\s+|>\s*|(?:[-*+•]|\d+[.)])\s+(?:\[[ xX]\]\s+)?)/, with: "")
+            .replacing(/\*\*|__|`/, with: "")
+            .trimmingCharacters(in: .whitespaces)
+        return text.allSatisfy { $0.isPunctuation || $0.isSymbol || $0.isWhitespace } ? "" : text
     }
 }
 

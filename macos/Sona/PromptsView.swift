@@ -107,7 +107,7 @@ struct PromptsView: View {
     // MARK: - Saved prompts
 
     @ViewBuilder private var savedLibrary: some View {
-        PageSection("Prompts") {
+        PageSection("Saved") {
             Card {
                 if store.loading && store.prompts.isEmpty {
                     CardLine("Reading your prompts…")

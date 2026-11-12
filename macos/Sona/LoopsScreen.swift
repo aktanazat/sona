@@ -48,8 +48,9 @@ struct LoopsScreen: View {
             VStack(alignment: .trailing, spacing: 2) {
                 Text(loop.nextRunText).metaText(Theme.inkSecondary)
                 if let run = loop.lastRun {
-                    Text("\(run.status.label), \(loopDate(run.queuedAtMs).formatted(date: .abbreviated, time: .shortened))")
+                    Text("\(run.status.label) \(FeedClock.ago(run.queuedAtMs))")
                         .metaText(run.status == .failed ? Theme.live : Theme.inkTertiary)
+                        .help(loopDate(run.queuedAtMs).formatted(date: .abbreviated, time: .shortened))
                 } else {
                     Text("Never run").metaText()
                 }

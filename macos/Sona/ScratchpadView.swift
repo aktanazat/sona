@@ -211,7 +211,11 @@ private struct ScratchNoteEditorPage: View {
                     .accessibilityAddTraits(.isHeader)
                     .pageHeadline()
                 Text(status).metaText(Theme.inkSecondary)
-                Text(store.memory?.interpretation == true ? "AI interpretation" : (store.memory?.passages.isEmpty == false ? "Passage note" : "Explicit note")).metaText()
+                if store.memory?.interpretation == true {
+                    Text("AI interpretation").metaText()
+                } else if store.memory?.passages.isEmpty == false {
+                    Text("From a meeting passage").metaText()
+                }
             }
             .padding(.bottom, 20)
             ErrorNote(store.error)
@@ -1075,7 +1079,9 @@ private struct ScratchSynthesisReview: View {
                     .disabled(saving || bodyText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
             ErrorNote(error)
-            Text(initial.authorship == "interpretation" ? "AI interpretation" : "Explicit note").metaText()
+            if initial.authorship == "interpretation" {
+                Text("AI interpretation").metaText()
+            }
             TextEditor(text: $bodyText).font(TypeScale.body()).foregroundStyle(Theme.ink)
                 .scrollContentBackground(.hidden).frame(minHeight: 180)
                 .accessibilityLabel("New note")
