@@ -48,8 +48,7 @@ enum TaskProperty: String, CaseIterable, Identifiable {
         }
     }
 
-    /// The number stays one Display choice away; the task page shows it.
-    static let standard: [String] = [priority, labels, project, owner, due].map(\.rawValue)
+    static let standard: [String] = [number, priority, labels, project, owner, due].map(\.rawValue)
 }
 
 /// Where a task falls in My work, in the order the list shows them, after
