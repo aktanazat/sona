@@ -38,7 +38,10 @@ private struct TriageList: View {
                                  byMeeting: split.map { $0 == .meeting } ?? true)
         VStack(spacing: 0) {
             WorkBar {
-                TriageSplits(rows: waiting)
+                HStack(spacing: 12) {
+                    InboxTabs()
+                    TriageSplits(rows: waiting)
+                }
             } trailing: {
                 let targets = model.workTargets
                 if !targets.isEmpty {
@@ -139,7 +142,7 @@ private struct TriageSplits: View {
         let counts = Dictionary(grouping: rows, by: \.source).mapValues(\.count)
         ScrollView(.horizontal) {
             HStack(spacing: 2) {
-                WorkTab(title: "Triage", count: rows.count, on: focus.triageSplit == nil) { focus.split(nil) }
+                WorkTab(title: "All", count: rows.count, on: focus.triageSplit == nil) { focus.split(nil) }
                 ForEach(WorkSource.allCases, id: \.self) { source in
                     WorkTab(title: source.tab, count: counts[source], on: focus.triageSplit == source) {
                         focus.split(source)

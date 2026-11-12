@@ -62,7 +62,10 @@ struct PlannerCalendarView: View {
             }
         }
         .pageBar {
-            PageHeading(title: "Calendar")
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                ProjectsTabs()
+                Text("Calendar").metaText()
+            }
         } trailing: {
             HStack(spacing: 10) { calendarControls }
         }

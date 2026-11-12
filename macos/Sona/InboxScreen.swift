@@ -88,6 +88,35 @@ enum InboxSnooze: CaseIterable {
     }
 }
 
+/// Inbox's three faces as the start of its bar, Triage among them: what
+/// meetings promised waits there for a yes or no.
+struct InboxTabs: View {
+    @Environment(AppModel.self) private var model
+
+    private enum Face: Hashable { case inbox, triage, snoozed }
+
+    var body: some View {
+        let focus = model.workFocus
+        let onTriage = model.place == .triage
+        let waiting = onTriage ? 0 : model.work.counts?.triage ?? 0
+        let face: Face = onTriage ? .triage : focus.inboxSnoozed ? .snoozed : .inbox
+        SegmentedSwitch(
+            items: [SwitchItem(id: Face.inbox, title: "Inbox", icon: "bell"),
+                    SwitchItem(id: Face.triage, title: waiting > 0 ? "Triage \(waiting)" : "Triage", icon: "tray")]
+                + (onTriage ? [] : [SwitchItem(id: Face.snoozed, title: "Snoozed", icon: "moon.zzz")]),
+            selection: face
+        ) { picked in
+            switch picked {
+            case .triage:
+                model.go(.triage)
+            case .inbox, .snoozed:
+                focus.inboxSnoozed = picked == .snoozed
+                model.go(.inbox)
+            }
+        }
+    }
+}
+
 private struct InboxList: View {
     @Environment(AppModel.self) private var model
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -98,11 +127,7 @@ private struct InboxList: View {
         let shown = model.inboxShown
         VStack(spacing: 0) {
             WorkBar {
-                SegmentedSwitch(
-                    items: [SwitchItem(id: false, title: "Inbox", icon: "bell"),
-                            SwitchItem(id: true, title: "Snoozed", icon: "moon.zzz")],
-                    selection: focus.inboxSnoozed
-                ) { focus.inboxSnoozed = $0 }
+                InboxTabs()
             } trailing: {
                 Button("Clear read") { model.clearReadNotices() }
                     .buttonStyle(QuietButton(compact: true))
@@ -113,7 +138,11 @@ private struct InboxList: View {
                     .disabled(store.unread == 0)
                     .help("Mark all read  ⌥U")
             }
-            if shown.isEmpty {
+            if shown.isEmpty, !focus.inboxSnoozed, let waiting = store.counts?.triage, waiting > 0 {
+                TaskEmpty(line: "Nothing new. \(waiting) waiting in Triage.") {
+                    TaskKeyButton(title: "Triage", keys: "g i") { model.go(.triage) }
+                }
+            } else if shown.isEmpty {
                 TaskEmpty(line: focus.inboxSnoozed
                     ? "Nothing snoozed."
                     : "Nothing new. Agents' changes, reminders, automation runs and the weekly project digest land here.")

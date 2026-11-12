@@ -1,5 +1,16 @@
 import SwiftUI
 
+/// Projects and the goals above them, as the start of either place's bar.
+struct ProjectsTabs: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        SegmentedSwitch(items: [SwitchItem(id: Place.projects, title: "Projects", icon: "folder"),
+                                SwitchItem(id: Place.initiatives, title: "Initiatives", icon: "scope")],
+                        selection: model.place == .initiatives ? Place.initiatives : Place.projects) { model.go($0) }
+    }
+}
+
 /// Initiatives: goals one level above projects, each with its projects'
 /// progress, and one initiative's page.
 struct InitiativesScreen: View {
@@ -23,11 +34,6 @@ struct InitiativesScreen: View {
 
     private var list: some View {
         Page {
-            PageTitle("Initiatives", subtitle: "Goals above projects. Each one holds projects and adds up their progress.") {
-                Button("New initiative") { newName = "" }
-                    .buttonStyle(.secondary)
-                    .disabled(newName != nil)
-            }
             ErrorNote(store.mutationError)
             if let name = newName {
                 Card {
@@ -53,6 +59,13 @@ struct InitiativesScreen: View {
                     row(initiative)
                 }
             }
+        }
+        .pageBar {
+            ProjectsTabs()
+        } trailing: {
+            Button("New initiative") { newName = "" }
+                .buttonStyle(.secondary)
+                .disabled(newName != nil)
         }
     }
 

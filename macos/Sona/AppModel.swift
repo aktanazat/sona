@@ -3,22 +3,25 @@ import Foundation
 import Observation
 import SwiftUI
 
-/// The places a window shows. Library opens from Home and Calendar from
-/// Projects, so the sidebar lists only the rest.
+/// The places a window shows. Library and Activity open from Home, Calendar
+/// and Initiatives from Projects, Triage from Inbox, so the sidebar lists
+/// only the rest; Automations sits at its foot beside Settings.
 enum Place: Int, CaseIterable, Identifiable {
     case capture, library, meetings, people, scratchpad, projects, calendar, tasks, triage, today, inbox, archive, loops, initiatives
+    case activity
 
-    static let sidebar: [Place] = [.capture, .inbox, .tasks, .triage, .meetings, .people, .scratchpad, .projects, .initiatives, .loops]
+    static let sidebar: [Place] = [.capture, .inbox, .tasks, .meetings, .scratchpad, .people, .projects]
 
     var id: Int { rawValue }
 
     /// The sidebar row that stays lit while this place shows.
     var parent: Place {
         switch self {
-        case .library: .capture
-        case .calendar: .projects
+        case .library, .activity: .capture
+        case .calendar, .initiatives: .projects
+        case .triage: .inbox
         case .today, .archive: .tasks
-        case .capture, .meetings, .people, .scratchpad, .projects, .tasks, .triage, .inbox, .loops, .initiatives: self
+        case .capture, .meetings, .people, .scratchpad, .projects, .tasks, .inbox, .loops: self
         }
     }
 
@@ -26,6 +29,7 @@ enum Place: Int, CaseIterable, Identifiable {
         switch self {
         case .capture: "Home"
         case .library: "Library"
+        case .activity: "Activity"
         case .meetings: "Meetings"
         case .people: "People"
         case .scratchpad: "Notes"
@@ -45,6 +49,7 @@ enum Place: Int, CaseIterable, Identifiable {
         switch self {
         case .capture: "house"
         case .library: "books.vertical"
+        case .activity: "chart.bar"
         case .meetings: "video"
         case .people: "person.2"
         case .scratchpad: "square.and.pencil"
@@ -243,6 +248,8 @@ extension CoreEvent {
 @Observable
 final class AppModel {
     var place: Place = .capture
+    /// A Home section to bring into view once Home shows, set from another tab.
+    var homeAnchor: String?
     var settingsPlace: SettingsPlace = .essentials
     var showingSettings = false
     var paletteShown = false {

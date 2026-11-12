@@ -115,6 +115,8 @@ struct Shell: View {
             case .capture:
                 CaptureScreen()
                     .overlay(alignment: .bottomLeading) { UndoToast() }
+            case .activity:
+                ActivityScreen()
             case .library:
                 LibraryScreen(
                     store: model.library,
@@ -184,13 +186,14 @@ struct Shell: View {
     }
 }
 
-/// Home's two faces, the overview and every dictation, as the start of
-/// Home's bar.
+/// Home's three faces, the overview, the numbers and every dictation, as the
+/// start of Home's bar.
 struct HomeTabs: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
         SegmentedSwitch(items: [SwitchItem(id: Place.capture, title: "Overview", icon: "house"),
+                                SwitchItem(id: Place.activity, title: "Activity", icon: "chart.bar"),
                                 SwitchItem(id: Place.library, title: "Library", icon: "books.vertical")],
                         selection: model.place) { model.go($0) }
     }
@@ -269,11 +272,15 @@ struct MeetingsPlace: View {
         let live = model.live
         let meetings = model.meetings
         return Page {
-            PageTitle("Meetings", subtitle: subtitle) {
+            PageTitle("Meetings", subtitle: "") {
                 HStack(spacing: 8) {
                     Menu {
+                        Button("Import recording…") { live.importMeeting() }
+                            .disabled(live.importing)
                         Button("Export all as CSV…") { meetings.exportAllCsv() }
                             .disabled(meetings.busy)
+                        Divider()
+                        Button("Deleted meetings") { meetings.openTrash() }
                     } label: {
                         Image(systemName: "ellipsis")
                     }
@@ -281,21 +288,8 @@ struct MeetingsPlace: View {
                     .buttonStyle(.icon)
                     .menuIndicator(.hidden)
                     .fixedSize()
-                    .help("Meeting library options")
+                    .help("Import, export and deleted meetings")
                     .accessibilityLabel("Meeting library options")
-                    Button { meetings.openTrash() } label: {
-                        Image(systemName: "trash")
-                    }
-                    .buttonStyle(.icon)
-                    .help("Deleted meetings")
-                    .accessibilityLabel("Deleted")
-                    Button { live.importMeeting() } label: {
-                        Image(systemName: "square.and.arrow.down")
-                    }
-                    .buttonStyle(.icon)
-                    .help("Import recording")
-                    .accessibilityLabel("Import recording")
-                    .disabled(live.importing)
                     Button(live.starting ? "Starting…" : "Record…") { live.startManual() }
                         .buttonStyle(.primary)
                         .disabled(live.starting || live.pending != nil)
@@ -373,15 +367,6 @@ struct MeetingsPlace: View {
         }
         .task { await live.loadUpcoming() }
         .task { await live.watchEngine() }
-    }
-
-    /// What Sona has recorded in total, once the trend says.
-    private var subtitle: String {
-        guard let allTime = model.meetings.trend?.allTime, allTime.meetings > 0 else {
-            return ""
-        }
-        let meetings = allTime.meetings == 1 ? "1 meeting" : "\(allTime.meetings) meetings"
-        return "\(meetings) recorded · \(allTime.capturedSpoken) captured"
     }
 }
 
@@ -468,6 +453,13 @@ struct Sidebar: View {
                             draggedFavorite = nil
                             return true
                         }
+                    SidebarItem(
+                        icon: Place.loops.icon,
+                        title: Place.loops.title,
+                        selected: model.place == .loops && !model.showingSettings && !favoriteShown
+                    ) {
+                        model.go(.loops)
+                    }
                     SidebarItem(
                         icon: "gearshape",
                         title: "Settings",
@@ -661,14 +653,13 @@ struct Sidebar: View {
         case .people:
             SidebarCount(value: Int(model.people.entries?.reduce(0) { $0 + $1.suggestedCount } ?? 0),
                          meaning: "to confirm")
-        case .triage:
-            SidebarCount(value: model.work.counts?.triage ?? 0, meaning: "to triage")
         case .tasks:
             SidebarCount(value: model.work.counts.map { $0.mineOverdue + $0.mineDueToday } ?? 0,
                          meaning: "due today or late")
         case .inbox:
-            SidebarCount(value: model.work.unread, meaning: "unread")
-        case .capture, .library, .meetings, .scratchpad, .calendar, .today, .projects, .archive, .loops, .initiatives:
+            SidebarCount(value: model.work.unread + (model.work.counts?.triage ?? 0), meaning: "unread or to triage")
+        case .capture, .library, .activity, .meetings, .scratchpad, .calendar, .today, .projects, .archive, .loops,
+             .initiatives, .triage:
             nil
         }
     }

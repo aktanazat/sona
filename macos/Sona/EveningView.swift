@@ -154,9 +154,15 @@ private struct EveningLinesSection: View {
         if let lines = evening.lines {
             PageSection("End of day") {
                 Card {
-                    ForEach(Array(lines.lines.enumerated()), id: \.offset) { _, line in
-                        CardRow { Text(line).bodyText(14) }
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(Array(lines.lines.enumerated()), id: \.offset) { _, line in
+                            Text(line).bodyText(14)
+                        }
                     }
+                    .padding(.horizontal, 16)
+                    .padding(.top, 14)
+                    .padding(.bottom, 4)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     CardRow {
                         Text("Written \(FeedClock.date(lines.writtenAtUtcMs).time)").metaText()
                     } trailing: {
