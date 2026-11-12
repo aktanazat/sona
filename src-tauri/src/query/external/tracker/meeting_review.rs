@@ -748,11 +748,17 @@ async fn context(
         args.lon.map(|Degrees(degrees)| degrees),
         args.no_place,
     ))?;
+    let already = current.kind == kind && current.location == location;
     if made_before(history, &answer.operation_id, CONTEXT, &request)? {
-        answer.replayed = true;
-        return Ok(answer);
+        if already || args.change.write.operation_id.is_some() {
+            answer.replayed = true;
+            return Ok(answer);
+        }
+        // An import brought back the revision this derived id names, and with
+        // it the kind and place the change had replaced.
+        answer.operation_id = Uuid::new_v4().to_string();
     }
-    answer.replayed = current.kind == kind && current.location == location;
+    answer.replayed = already;
     if dry_run || answer.replayed {
         return Ok(answer);
     }
