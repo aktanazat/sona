@@ -12,6 +12,7 @@ pub(super) use mutations::{
     link_document_mentions_in, person_for_named_speaker_in, recompute_organizations_in,
     upsert_link_in,
 };
+pub(crate) use avatars::validated_png;
 pub(crate) use profiles::PersonProfileEdit;
 pub(super) use queries::{
     calendar_context_in, confirmed_person_ids_in, continuity_summary_in, owed_to_in,

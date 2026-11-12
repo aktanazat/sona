@@ -43,6 +43,7 @@ mod overlay;
 mod paste_tx;
 mod planning;
 pub mod portable;
+mod profile_photo;
 mod prompt_renderer;
 pub mod query;
 pub mod recorder;

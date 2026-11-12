@@ -3816,6 +3816,20 @@ pub(super) async fn call(
                 .await,
             )
         }
+        "profile_photo_get" => reply(
+            crate::portable::app_data_dir(app)
+                .map_err(|error| error.to_string())
+                .and_then(|dir| crate::profile_photo::read(&dir)),
+        ),
+        "profile_photo_set" => {
+            let mut args = Args::parse(params)?;
+            let png: Option<String> = args.take("png")?;
+            reply(
+                crate::portable::app_data_dir(app)
+                    .map_err(|error| error.to_string())
+                    .and_then(|dir| crate::profile_photo::write(&dir, png.as_deref())),
+            )
+        }
         "meeting_mail_context_check" => {
             reply(crate::meeting::prep::meeting_mail_context_check(app.clone()).await)
         }

@@ -56,7 +56,7 @@ mod open_windows;
 #[cfg(test)]
 mod open_windows_tests;
 mod people;
-pub(crate) use people::PersonProfileEdit;
+pub(crate) use people::{validated_png, PersonProfileEdit};
 mod prep;
 pub(crate) mod privacy_inventory;
 pub(crate) mod processing_speed;
