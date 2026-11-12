@@ -763,7 +763,8 @@ sona work sync [--meeting <MEETING_ID>]             # cloud sync status, each me
 `sona work setting --help` lists every key and the values it takes. Each
 write takes `--dry-run`, `--agent`, `--operation-id` and `--json`, needs
 outside changes allowed, and obeys the Apply or Suggest setting. The answer
-shows the value before and after. A running Sona reads the settings file again
+shows the value before and after; asking for the value a setting already has
+writes nothing and answers `unchanged:true`. A running Sona reads the settings file again
 within a second and follows the change as it does one made in Settings: the
 theme, window material, overlay, the pill between dictations, shortcuts, modes,
 tray language, log level and quiet speech change at once. A change made in

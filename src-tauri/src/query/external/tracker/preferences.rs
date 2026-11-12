@@ -613,6 +613,8 @@ pub struct ExternalSettings {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub operation_id: Option<String>,
     pub replayed: bool,
+    /// The settings already were as asked, so nothing was written.
+    pub unchanged: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1361,7 +1363,7 @@ impl Tracker<'_> {
     }
 
     /// Runs `change` once per operation id, on the settings file, and leaves
-    /// the stamp a running Sona follows.
+    /// the stamp a running Sona follows when the file changed.
     pub(super) async fn change_settings(
         &self,
         args: &Change,
@@ -1376,56 +1378,32 @@ impl Tracker<'_> {
                 return Ok(WorkAnswer::Settings(Box::new(answer)));
             }
         }
-        let current = settings::get_settings(self.app);
-        let before = (change.show)(&current);
-        let mut preview = current;
-        (change.apply)(&mut preview).map_err(ExternalError::invalid)?;
-        let after = (change.show)(&preview);
-        let Some(operation_id) = operation_id else {
-            return Ok(WorkAnswer::Settings(Box::new(ExternalSettings {
-                schema_version: QUERY_SCHEMA_VERSION,
-                what: change.what,
-                dry_run: true,
-                operation_id: args.write.operation_id.map(|id| id.to_string()),
-                replayed: false,
-                agent: args.write.agent.as_ref().map(|_| args.write.agent()),
-                before: Some(before),
-                value: after,
-                live: None,
-            })));
+        let ready = async {
+            self.applies("changing Sona's settings")?;
+            if clears_briefs {
+                self.meetings
+                    .store()
+                    .await
+                    .map_err(|_| {
+                        refusal(self.history, planning::CONVERSATIONS_CLOSED.to_owned())
+                    })?
+                    .clear_briefs()
+                    .map_err(|_| {
+                        ExternalError::new(
+                            ExternalErrorCode::Failed,
+                            "The saved meeting briefs could not be cleared.",
+                        )
+                    })?;
+            }
+            Ok::<_, ExternalError>(())
         };
-        self.applies("changing Sona's settings")?;
-        if clears_briefs {
-            self.meetings
-                .store()
-                .await
-                .map_err(|_| refusal(self.history, planning::CONVERSATIONS_CLOSED.to_owned()))?
-                .clear_briefs()
-                .map_err(|_| {
-                    ExternalError::new(
-                        ExternalErrorCode::Failed,
-                        "The saved meeting briefs could not be cleared.",
-                    )
-                })?;
+        let answer = settle_settings(self.app, args, operation_id.clone(), change, ready).await?;
+        if let Some(operation_id) = &operation_id {
+            if !answer.unchanged {
+                beacon::leave_settings(self.app);
+            }
+            self.settings_record(operation_id, &command, &request, &answer)?;
         }
-        let after = settings::try_update_settings(self.app, |settings| {
-            (change.apply)(settings)?;
-            Ok::<_, String>((change.show)(settings))
-        })
-        .map_err(|message| ExternalError::new(ExternalErrorCode::Failed, message))?;
-        beacon::leave_settings(self.app);
-        let answer = ExternalSettings {
-            schema_version: QUERY_SCHEMA_VERSION,
-            what: change.what,
-            dry_run: false,
-            operation_id: Some(operation_id.clone()),
-            replayed: false,
-            agent: Some(args.write.agent()),
-            before: Some(before),
-            value: after,
-            live: Some(LIVE),
-        };
-        self.settings_record(&operation_id, &command, &request, &answer)?;
         Ok(WorkAnswer::Settings(Box::new(answer)))
     }
 
@@ -1485,6 +1463,7 @@ impl Tracker<'_> {
                 dry_run: true,
                 operation_id: args.operation_id.map(|id| id.to_string()),
                 replayed: false,
+                unchanged: false,
                 agent: args.agent.as_ref().map(|_| args.agent()),
                 before: Some(plan.before),
                 value: plan.after,
@@ -1501,6 +1480,7 @@ impl Tracker<'_> {
             dry_run: false,
             operation_id: Some(operation.to_string()),
             replayed: false,
+            unchanged: false,
             agent: Some(args.agent()),
             before: Some(plan.before),
             value: json!(value),
@@ -1548,6 +1528,7 @@ impl Tracker<'_> {
             dry_run: false,
             operation_id: Some(operation_id.to_owned()),
             replayed: true,
+            unchanged: earlier["unchanged"].as_bool().unwrap_or(false),
             agent: earlier["agent"].as_str().map(str::to_owned),
             before: Some(earlier["before"].clone()),
             value: earlier["value"].clone(),
@@ -2227,6 +2208,61 @@ fn reset_change(args: &SettingResetArgs) -> Result<SettingsChange<'_>, ExternalE
     })
 }
 
+/// Makes `change` to the settings file unless it would leave them as they
+/// are. `operation_id` is `None` for a dry run, and `ready` runs only before
+/// a write.
+async fn settle_settings<Rt: tauri::Runtime>(
+    app: &tauri::AppHandle<Rt>,
+    args: &Change,
+    operation_id: Option<String>,
+    change: SettingsChange<'_>,
+    ready: impl Future<Output = Result<(), ExternalError>>,
+) -> Result<ExternalSettings, ExternalError> {
+    let current = settings::get_settings(app);
+    let before = (change.show)(&current);
+    let mut preview = current;
+    (change.apply)(&mut preview).map_err(ExternalError::invalid)?;
+    let after = (change.show)(&preview);
+    let unchanged = before == after;
+    let Some(operation_id) = operation_id else {
+        return Ok(ExternalSettings {
+            schema_version: QUERY_SCHEMA_VERSION,
+            what: change.what,
+            dry_run: true,
+            operation_id: args.write.operation_id.map(|id| id.to_string()),
+            replayed: false,
+            unchanged,
+            agent: args.write.agent.as_ref().map(|_| args.write.agent()),
+            before: Some(before),
+            value: after,
+            live: None,
+        });
+    };
+    let (value, live) = if unchanged {
+        (after, None)
+    } else {
+        ready.await?;
+        let after = settings::try_update_settings(app, |settings| {
+            (change.apply)(settings)?;
+            Ok::<_, String>((change.show)(settings))
+        })
+        .map_err(|message| ExternalError::new(ExternalErrorCode::Failed, message))?;
+        (after, Some(LIVE))
+    };
+    Ok(ExternalSettings {
+        schema_version: QUERY_SCHEMA_VERSION,
+        what: change.what,
+        dry_run: false,
+        operation_id: Some(operation_id),
+        replayed: false,
+        unchanged,
+        agent: Some(args.write.agent()),
+        before: Some(before),
+        value,
+        live,
+    })
+}
+
 pub(super) fn read(what: &str, value: &impl Serialize) -> WorkAnswer {
     WorkAnswer::Settings(Box::new(ExternalSettings {
         schema_version: QUERY_SCHEMA_VERSION,
@@ -2234,6 +2270,7 @@ pub(super) fn read(what: &str, value: &impl Serialize) -> WorkAnswer {
         dry_run: false,
         operation_id: None,
         replayed: false,
+        unchanged: false,
         agent: None,
         before: None,
         value: json!(value),
@@ -2273,6 +2310,21 @@ pub(super) fn text(answer: &WorkAnswer, text: &mut String) {
         text.push_str("Already done by an earlier run with this operation id.\n");
     }
     match &answer.before {
+        Some(_) if answer.unchanged => {
+            let lead = if answer.dry_run { "Nothing would change" } else { "Nothing changed" };
+            match &answer.value {
+                Value::Object(_) | Value::Array(_) => {
+                    let _ = writeln!(text, "{lead}: {} is already as asked.", answer.what);
+                    write_value(text, 0, "value", &answer.value);
+                }
+                Value::String(scalar) => {
+                    let _ = writeln!(text, "{lead}: {} is already {scalar}.", answer.what);
+                }
+                other => {
+                    let _ = writeln!(text, "{lead}: {} is already {other}.", answer.what);
+                }
+            }
+        }
         Some(before) => {
             let verb = if answer.dry_run { "Would change" } else { "Changed" };
             let _ = writeln!(text, "{verb} {}.", answer.what);
@@ -2672,5 +2724,46 @@ mod tests {
         assert_eq!(made.asr.requested_engine, RequestedEngine::Local);
         assert_eq!(made.delivery.paste_method, PasteMethod::default());
         assert_eq!(made.delivery.external_script_path, None);
+    }
+
+    #[test]
+    fn a_setting_asked_for_the_value_it_has_writes_nothing() {
+        let data_dir = TempDir::new().unwrap();
+        let mut context = tauri::test::mock_context(tauri::test::noop_assets());
+        context.config_mut().identifier = data_dir.path().to_string_lossy().into_owned();
+        let app = tauri::test::mock_builder()
+            .plugin(tauri_plugin_store::Builder::default().build())
+            .build(context)
+            .unwrap();
+        let handle = app.handle();
+        settings::update_settings(handle, |settings| settings.push_to_talk = true).unwrap();
+        let revision = settings::get_settings(handle).settings_revision;
+        let args = SettingArgs {
+            key: SettingKey::PushToTalk,
+            value: "on".to_owned(),
+            provider: None,
+            change: Change {
+                dry_run: false,
+                write: WriteArgs {
+                    operation_id: None,
+                    agent: None,
+                },
+            },
+        };
+        let answer = tauri::async_runtime::block_on(settle_settings(
+            handle,
+            &args.change,
+            Some("same-value".to_owned()),
+            setting_change(&args),
+            async { Ok::<_, ExternalError>(()) },
+        ))
+        .unwrap();
+
+        assert_eq!(settings::get_settings(handle).settings_revision, revision);
+        assert!(answer.unchanged);
+        assert_eq!(answer.live, None);
+        let mut shown = String::new();
+        text(&WorkAnswer::Settings(Box::new(answer)), &mut shown);
+        assert_eq!(shown, "Nothing changed: push-to-talk is already true.\n");
     }
 }
