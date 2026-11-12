@@ -35,6 +35,9 @@ final class AgentBridgeStore {
     /// Whether the weekly project digest reaches the inbox, and on which day.
     private(set) var digestEnabled = true
     private(set) var digestDay = DigestDay.monday
+    /// Whether the last settings read failed, so the values above are
+    /// defaults rather than what the file holds.
+    private(set) var settingsUnread = false
     private(set) var autonomyBusy = false
     /// The tasks a session waits on the user's approval for, by the name the
     /// session gave each. Set only when it changes, so task lists redraw then
@@ -343,7 +346,9 @@ final class AgentBridgeStore {
             digestEnabled = settings.workDigestEnabled ?? true
             digestDay = settings.workDigestDay ?? .monday
             error = nil
+            settingsUnread = false
         } catch {
+            settingsUnread = true
             self.error = "Couldn't load agent connection details: \(Self.reason(error))"
         }
     }

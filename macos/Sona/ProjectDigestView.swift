@@ -146,7 +146,7 @@ struct ProjectDigestSettings: View {
 
     var body: some View {
         PageSection("Weekly digest") {
-            ErrorNote(error)
+            ErrorNote(error ?? (model.agents.settingsUnread ? "Couldn't load the digest setting." : nil))
             Card {
                 ToggleRow(
                     title: "Weekly project digest",
@@ -161,6 +161,7 @@ struct ProjectDigestSettings: View {
                                        set: { picked in Task { await save(model.agents.digestEnabled, picked) } }))
                     .disabled(!model.agents.digestEnabled)
             }
+            .disabled(model.agents.settingsUnread)
         }
     }
 
