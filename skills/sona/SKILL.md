@@ -244,7 +244,7 @@ sona work project-unrelate "Beta launch" blocked-by "Venue pilot"
 sona work project-dependencies ["Beta launch"]   # broken: the blocker ends after the blocked project starts
 sona work projects --link broken                 # also blocked or blocking: projects on that side of a dependency
 sona work project-template-save "Launch kit" --project "Q1 launch" [--dry-run]   # milestones kept as days after its start
-sona work project-template-list
+sona work project-template-list   # a sub-task reads "under <task>"
 sona work project-new "Q2 launch" --template "Launch kit" --start 2026-04-01 [--dry-run]   # milestones dated from the start
 sona work project-template-delete "Launch kit"   # projects made from it stay
 sona work initiative-new "Spring launch" --owner me --target 2027-03-31 [--dry-run]   # a goal above projects

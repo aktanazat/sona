@@ -76,6 +76,8 @@ pub struct ExternalProjectTemplateTask {
     pub estimate: Option<u8>,
     pub priority: Priority,
     pub milestone: Option<String>,
+    /// The place in `tasks` of the task this one sits under.
+    pub parent: Option<usize>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -125,7 +127,8 @@ pub struct ExternalWorkProjectNew {
 }
 
 fn external(template: &ProjectTemplate, board: &Board) -> ExternalProjectTemplate {
-    let fields = &template.fields;
+    let mut fields = template.fields.clone();
+    fields.leave_out(&|kind, id| board.fence.hides_source(kind, id));
     let mut members: Vec<String> = fields
         .member_person_ids
         .iter()
@@ -152,7 +155,6 @@ fn external(template: &ProjectTemplate, board: &Board) -> ExternalProjectTemplat
         tasks: fields
             .tasks
             .iter()
-            .filter(|task| !task.drawn_from_any(&|kind, id| board.fence.hides_source(kind, id)))
             .map(|task| ExternalProjectTemplateTask {
                 title: task.title.clone(),
                 details: task.details.clone(),
@@ -160,6 +162,7 @@ fn external(template: &ProjectTemplate, board: &Board) -> ExternalProjectTemplat
                 estimate: task.estimate,
                 priority: Priority::of(task.priority),
                 milestone: task.milestone.clone(),
+                parent: task.parent,
             })
             .collect(),
         revision: template.revision,
@@ -360,6 +363,9 @@ fn template_text(text: &mut String, template: &ExternalProjectTemplate) {
     }
     for task in &template.tasks {
         let mut extra = Vec::new();
+        if let Some(parent) = task.parent.and_then(|place| template.tasks.get(place)) {
+            extra.push(format!("under {}", parent.title));
+        }
         if let Some(milestone) = &task.milestone {
             extra.push(milestone.clone());
         }

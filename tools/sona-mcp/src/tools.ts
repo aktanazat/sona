@@ -5027,7 +5027,7 @@ export const TOOLS: readonly ToolDefinition[] = [
     name: "sona_project_template_list",
     title: "List Sona project templates",
     description:
-      "List project templates by name: each one's id, details, lead, members, milestones (name, details, offset_days after the project's start, none when it has no target day), tasks (title, details, label names, priority, estimate, milestone name) and revision. A task drawn from a meeting kept on this Mac is left out.",
+      "List project templates by name: each one's id, details, lead, members, milestones (name, details, offset_days after the project's start, none when it has no target day), tasks (title, details, label names, priority, estimate, milestone name, parent: the place in tasks of the task it sits under) and revision. A task drawn from a meeting kept on this Mac is left out.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     argv: () => ["work", "project-template-list", "--json"],
   },

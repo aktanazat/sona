@@ -100,7 +100,7 @@ pub struct ProjectTemplateFields {
 impl ProjectTemplateFields {
     /// Leaves out each task drawn from a source `hides` holds back; a
     /// sub-task of one left out becomes a task of its own.
-    fn leave_out(&mut self, hides: &dyn Fn(EvidenceSourceKind, &str) -> bool) {
+    pub(crate) fn leave_out(&mut self, hides: &dyn Fn(EvidenceSourceKind, &str) -> bool) {
         let mut places = Vec::with_capacity(self.tasks.len());
         let mut kept = 0;
         for task in &self.tasks {
