@@ -2,7 +2,9 @@
 //! the words of one line, and the corrections Sona keeps for how a person's
 //! words are heard, each through the same step the transcript screen takes.
 
-use super::library::{file_made, made_before, operation, receipt_replayed, told, Change, Gate};
+use super::library::{
+    file_made, made_before, meeting_operation, operation, receipt_replayed, told, Change, Gate,
+};
 use super::speakers::{listed, pick_speaker};
 use super::{Tracker, WorkAnswer, READ_SCOPES, WRITE_SCOPES};
 use crate::managers::history::HistoryManager;
@@ -353,10 +355,12 @@ pub(super) async fn speaker_rename(
     let name = args.name.trim().to_owned();
     let speakers = listed(meetings, &store, session).await?;
     let found = pick_speaker(&speakers, &args.speaker, &args.meeting)?;
-    let (id, operation_id) = operation(
+    let (id, operation_id) = meeting_operation(
+        &store,
         &args.change.write,
         "speaker-rename",
         &(session.uuid(), found.speaker_id, revision, &name),
+        revision,
     )?;
     let dry_run = args.change.dry_run;
     let mut answer = change(
@@ -414,10 +418,12 @@ pub(super) async fn speaker_merge(
             "A speaker cannot be merged into themselves.",
         ));
     }
-    let (id, operation_id) = operation(
+    let (id, operation_id) = meeting_operation(
+        &store,
         &args.change.write,
         "speaker-merge",
         &(session.uuid(), source, target, revision),
+        revision,
     )?;
     let mut answer = change(summary, dry_run, id);
     answer.meeting_id = Some(session.uuid());
@@ -455,7 +461,7 @@ pub(super) async fn line_edit(
     args: &LineEditArgs,
     gate: Gate<'_>,
 ) -> Result<ExternalTranscriptChange, ExternalError> {
-    let (_, review) = meeting(meetings, &args.meeting).await?;
+    let (store, review) = meeting(meetings, &args.meeting).await?;
     let session = review.session.session_id;
     let revision = review.session.revision;
     let text = args.text.trim().to_owned();
@@ -464,10 +470,12 @@ pub(super) async fn line_edit(
         .iter()
         .find(|segment| segment.base.segment_id.uuid() == args.line && !segment.removed)
         .ok_or_else(|| missing_line(args.line, &args.meeting))?;
-    let (id, operation_id) = operation(
+    let (id, operation_id) = meeting_operation(
+        &store,
         &args.change.write,
         "line-edit",
         &(session.uuid(), args.line, revision, &text),
+        revision,
     )?;
     let dry_run = args.change.dry_run;
     let mut answer = change(

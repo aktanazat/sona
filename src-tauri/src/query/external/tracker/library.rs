@@ -685,6 +685,39 @@ pub(super) fn operation(
     Ok((id, MeetingOperationId::from_uuid(uuid)))
 }
 
+/// A derived id names the change by the meeting's revision, but importing a
+/// `.sona` file brings back a revision the meeting already had, with the
+/// receipts made from it. Such a receipt replays a change the meeting no
+/// longer shows, so the change gets a new id instead.
+pub(super) fn meeting_operation(
+    store: &MeetingStore,
+    write: &WriteArgs,
+    verb: &str,
+    key: &impl Serialize,
+    revision: u64,
+) -> Result<(String, MeetingOperationId), ExternalError> {
+    let (id, operation_id) = operation(write, verb, key)?;
+    if write.operation_id.is_some() {
+        return Ok((id, operation_id));
+    }
+    let stale = store
+        .operation_receipt(operation_id)
+        .map_err(|error| ExternalError::from(QueryError::from(error)))?
+        .is_some_and(|receipt| {
+            receipt.result == OperationResult::Committed
+                && receipt.new_revision != Some(revision)
+        });
+    if !stale {
+        return Ok((id, operation_id));
+    }
+    Ok(fresh_operation())
+}
+
+fn fresh_operation() -> (String, MeetingOperationId) {
+    let fresh = Uuid::new_v4();
+    (fresh.to_string(), MeetingOperationId::from_uuid(fresh))
+}
+
 pub(super) async fn library(
     meetings: &Arc<MeetingSessionManager>,
 ) -> Result<Arc<MeetingStore>, ExternalError> {
@@ -1029,14 +1062,16 @@ pub(super) async fn rename(
     args: &RenameArgs,
     gate: Gate<'_>,
 ) -> Result<ExternalLibraryChange, ExternalError> {
-    let (_, review) = meeting(meetings, &args.meeting).await?;
+    let (store, review) = meeting(meetings, &args.meeting).await?;
     let session = review.session.session_id;
     let revision = review.session.revision;
     let title = args.title.trim().to_owned();
-    let (id, operation_id) = operation(
+    let (id, operation_id) = meeting_operation(
+        &store,
         &args.change.write,
         "meeting-rename",
         &(session.uuid(), revision, &title),
+        revision,
     )?;
     let dry_run = args.change.dry_run;
     let mut answer = change(
@@ -1071,13 +1106,15 @@ pub(super) async fn delete(
     if let Some(replayed) = delete_replay(meetings, args).await? {
         return Ok(replayed);
     }
-    let (_, review) = meeting(meetings, &args.meeting).await?;
+    let (store, review) = meeting(meetings, &args.meeting).await?;
     let session = review.session.session_id;
     let revision = review.session.revision;
-    let (id, operation_id) = operation(
+    let (id, operation_id) = meeting_operation(
+        &store,
         &args.change.write,
         "meeting-delete",
         &(session.uuid(), revision),
+        revision,
     )?;
     let dry_run = args.change.dry_run;
     let mut answer = change(
@@ -1432,14 +1469,16 @@ pub(super) async fn note_add(
     args: &NoteAddArgs,
     gate: Gate<'_>,
 ) -> Result<ExternalLibraryChange, ExternalError> {
-    let (_, review) = meeting(meetings, &args.meeting).await?;
+    let (store, review) = meeting(meetings, &args.meeting).await?;
     let session = review.session.session_id;
     let revision = review.session.revision;
     let body = args.body.trim().to_owned();
-    let (id, operation_id) = operation(
+    let (id, operation_id) = meeting_operation(
+        &store,
         &args.change.write,
         "meeting-note-add",
         &(session.uuid(), revision, &body, args.at),
+        revision,
     )?;
     let dry_run = args.change.dry_run;
     let mut answer = change(
@@ -1478,7 +1517,7 @@ pub(super) async fn note_edit(
     args: &NoteEditArgs,
     gate: Gate<'_>,
 ) -> Result<ExternalLibraryChange, ExternalError> {
-    let (_, review) = meeting(meetings, &args.meeting).await?;
+    let (store, review) = meeting(meetings, &args.meeting).await?;
     let session = review.session.session_id;
     let revision = review.session.revision;
     let note = review
@@ -1487,10 +1526,12 @@ pub(super) async fn note_edit(
         .find(|note| note.note_id.uuid() == args.note)
         .ok_or_else(|| missing_note(args.note))?;
     let body = args.body.trim().to_owned();
-    let (id, operation_id) = operation(
+    let (id, operation_id) = meeting_operation(
+        &store,
         &args.change.write,
         "meeting-note-edit",
         &(session.uuid(), args.note, note.revision, &body),
+        revision,
     )?;
     let dry_run = args.change.dry_run;
     let mut answer = change(
@@ -1527,7 +1568,7 @@ pub(super) async fn note_delete(
     args: &NoteArgs,
     gate: Gate<'_>,
 ) -> Result<ExternalLibraryChange, ExternalError> {
-    let (_, review) = meeting(meetings, &args.meeting).await?;
+    let (store, review) = meeting(meetings, &args.meeting).await?;
     let session = review.session.session_id;
     let revision = review.session.revision;
     let note = review
@@ -1535,10 +1576,12 @@ pub(super) async fn note_delete(
         .iter()
         .find(|note| note.note_id.uuid() == args.note)
         .ok_or_else(|| missing_note(args.note))?;
-    let (id, operation_id) = operation(
+    let (id, operation_id) = meeting_operation(
+        &store,
         &args.change.write,
         "meeting-note-delete",
         &(session.uuid(), args.note, note.revision),
+        revision,
     )?;
     let dry_run = args.change.dry_run;
     let mut answer = change(
@@ -1926,15 +1969,20 @@ pub(super) async fn export(
     args: &ExportArgs,
     gate: Gate<'_>,
 ) -> Result<ExternalLibraryChange, ExternalError> {
-    let (_, review) = meeting(meetings, &args.meeting).await?;
+    let (store, review) = meeting(meetings, &args.meeting).await?;
     let session = review.session.session_id;
     let revision = review.session.revision;
     let format = MeetingExportFormat::from(args.format);
-    let (id, operation_id) = operation(
-        &args.change.write,
-        "meeting-export",
-        &(session.uuid(), revision, format, &args.out),
-    )?;
+    // An export leaves the revision where it was, so an id derived from it
+    // would replay the earlier export and write no file.
+    let (id, operation_id) = match args.change.write.operation_id {
+        Some(_) => operation(
+            &args.change.write,
+            "meeting-export",
+            &(session.uuid(), revision, format, &args.out),
+        )?,
+        None => fresh_operation(),
+    };
     let dry_run = args.change.dry_run;
     let mut answer = change(
         told(dry_run, "Exported the meeting", "Would export the meeting"),
@@ -1952,6 +2000,10 @@ pub(super) async fn export(
         return Ok(answer);
     }
     gate("exporting a meeting")?;
+    let earlier = store
+        .operation_receipt(operation_id)
+        .map_err(|error| ExternalError::from(QueryError::from(error)))?
+        .is_some();
     let out = args.out.clone();
     let result = meetings
         .export_to(
@@ -1965,7 +2017,7 @@ pub(super) async fn export(
         )
         .await
         .map_err(command_error(session.uuid()))?;
-    answer.replayed = receipt_replayed(&result.receipt, revision)?;
+    answer.replayed = receipt_replayed(&result.receipt, revision)? || earlier;
     Ok(answer)
 }
 
@@ -2650,6 +2702,26 @@ mod tests {
             assert!(again.replayed);
             assert_eq!(again.operation_id, first.operation_id);
             assert_eq!(again.trash_id, first.trash_id);
+        });
+    }
+
+    #[test]
+    fn a_meeting_imported_back_at_the_same_revision_can_be_deleted_again() {
+        tauri::async_runtime::block_on(async {
+            let corpus = corpus().await;
+            let store = corpus.meetings.store().await.unwrap();
+            let meeting = trashable(&store, "Roadmap review");
+            let bundle = store.export_cloud_meeting_bundle(meeting).unwrap();
+            let args = MeetingChangeArgs {
+                meeting: meeting.uuid().to_string(),
+                change: write(false),
+            };
+            delete(&corpus.meetings, &args, &applies).await.unwrap();
+            corpus.meetings.import_cloud_bundle(bundle).await.unwrap();
+            assert!(store.session_snapshot(meeting).is_ok());
+
+            delete(&corpus.meetings, &args, &applies).await.unwrap();
+            assert!(store.session_snapshot(meeting).is_err());
         });
     }
 

@@ -5,8 +5,8 @@
 //! the names a call offered, and a marked copy of a PDF added to it.
 
 use super::library::{
-    change, changed, file_made, library, made_before, meeting, operation, receipt_replayed, told,
-    Change, ExternalLibraryChange, Gate, MeetingRef,
+    change, changed, file_made, library, made_before, meeting, meeting_operation,
+    receipt_replayed, told, Change, ExternalLibraryChange, Gate, MeetingRef,
 };
 use super::meeting_settings::day;
 use super::notes::request_json;
@@ -562,10 +562,12 @@ async fn question_forget(
         revision,
         ..
     } = review.session;
-    let (id, operation_id) = operation(
+    let (id, operation_id) = meeting_operation(
+        &store,
         &args.change.write,
         "meeting-question-forget",
         &(session.uuid(), args.question, revision),
+        revision,
     )?;
     let dry_run = args.change.dry_run;
     let mut answer = change(
