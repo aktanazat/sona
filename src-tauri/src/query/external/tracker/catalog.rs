@@ -682,6 +682,8 @@ pub struct ExternalWorkMeetingDetail {
     #[serde(flatten)]
     pub meeting: ExternalMeetingDetail,
     pub people: Vec<String>,
+    /// The folders the meeting is filed in, by name.
+    pub folders: Vec<String>,
     /// Each speaker by the name the transcript shows, with the id
     /// `speaker-assign` takes and whether they still need a name.
     pub meeting_speakers: Vec<super::speakers::ExternalWorkSpeaker>,
@@ -1578,6 +1580,7 @@ impl Tracker<'_> {
         Ok(WorkAnswer::MeetingDetail(Box::new(
             ExternalWorkMeetingDetail {
                 people: meeting_people(&store, id)?,
+                folders: meeting_folders(&store, id)?,
                 meeting_speakers: super::speakers::listed(self.meetings, &store, id).await?,
                 meeting,
                 transcript,
@@ -1605,6 +1608,20 @@ fn meeting_people(
     names.sort();
     names.dedup();
     Ok(names)
+}
+
+fn meeting_folders(
+    store: &crate::meeting::store::MeetingStore,
+    id: crate::meeting::types::MeetingSessionId,
+) -> Result<Vec<String>, ExternalError> {
+    let filed = store.meeting_folder_ids(id).map_err(QueryError::from)?;
+    Ok(store
+        .meeting_folders()
+        .map_err(QueryError::from)?
+        .into_iter()
+        .filter(|folder| filed.contains(&folder.folder_id))
+        .map(|folder| folder.name)
+        .collect())
 }
 
 fn saved_person<'a>(
@@ -2386,6 +2403,9 @@ pub(super) fn text(answer: &WorkAnswer, text: &mut String) {
             let _ = writeln!(text, "{}  ({})", meeting.title, meeting.id);
             if !detail.people.is_empty() {
                 let _ = writeln!(text, "People: {}", detail.people.join(", "));
+            }
+            if !detail.folders.is_empty() {
+                let _ = writeln!(text, "Folders: {}", detail.folders.join(", "));
             }
             super::speakers::listed_text(&detail.meeting_speakers, text);
             if let Some(summary) = &meeting.summary {

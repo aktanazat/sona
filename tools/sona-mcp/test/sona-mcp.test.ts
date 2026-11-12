@@ -1044,6 +1044,16 @@ const SONA_WRITES = {
   "correction-remove": true,
   "dictation-save": true,
   "dictation-delete": true,
+  "folder-defaults": true,
+  "meeting-template-save": true,
+  "meeting-template-delete": true,
+  "meeting-question-forget": true,
+  "meeting-link-remove": true,
+  "meeting-context": true,
+  "call-name-dismiss": true,
+  "doc-marked-copy": true,
+  "note-passage": true,
+  "subject-delete": true,
 };
 
 /** The verbs with which `sona` takes away what no Sona tool gives back. */
@@ -1089,6 +1099,10 @@ const SONA_DESTROYS = {
   "speaker-merge": true,
   "correction-remove": true,
   "dictation-delete": true,
+  "meeting-template-delete": true,
+  "meeting-question-forget": true,
+  "meeting-link-remove": true,
+  "subject-delete": true,
 };
 
 /** Each required argument at its first enum value or a placeholder, plus the

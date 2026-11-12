@@ -6,13 +6,14 @@
 //! again and follows the new values as it does a change made in its window.
 //! Consent, privacy, secrets and the agent gates themselves are not here.
 
+use super::meeting_review::{agent_maybes, plan_kept, without_kept_place};
 use super::{now_ms, refusal, Tracker, WorkAnswer, WriteArgs};
 use crate::analytics::{DashboardTrendRange, DashboardTrendRequest};
 use crate::commands::audio::CustomSounds;
 use crate::commands::vocabulary::{self, VocabularyScope};
 use crate::integrations::types::{Connection, ConnectionPreferences, SendScope, SendState};
 use crate::meeting::analytics::{KeywordTracker, MeetingNotesTemplate};
-use crate::meeting::evening::{FilingTarget, UnfiledRecording};
+use crate::meeting::evening::{FilingTarget, MeetingMaybeChange, UnfiledRecording};
 use crate::meeting::prep::PrepPreferences;
 use crate::meeting::prompt_types::{
     normalized_prompt, PromptOutput, PromptTarget, PromptTargetRef, SavedPromptDeleteRequest,
@@ -23,7 +24,7 @@ use crate::meeting::series_types::{
 };
 use crate::meeting::store::{MeetingStore, StoreError};
 use crate::meeting::types::{
-    MeetingCommandError, MeetingOperationId, MeetingTemplateId, SavedPromptId,
+    MeetingCommandError, MeetingOperationId, MeetingSessionId, MeetingTemplateId, SavedPromptId,
 };
 use crate::meeting::workflow_types::{
     WorkflowId, WorkflowOutcomeCode, WorkflowOutcomeCounts, WorkflowRunReceipt, WorkflowRunStatus,
@@ -409,8 +410,21 @@ pub enum SeriesTemplateChoice {
     Interview,
     SalesCall,
     Standup,
-    /// Clear the series' choice.
+    /// Clear the choice.
     None,
+}
+
+impl SeriesTemplateChoice {
+    pub(super) const fn notes_template(self) -> Option<MeetingNotesTemplate> {
+        match self {
+            Self::General => Some(MeetingNotesTemplate::General),
+            Self::OneOnOne => Some(MeetingNotesTemplate::OneOnOne),
+            Self::Interview => Some(MeetingNotesTemplate::Interview),
+            Self::SalesCall => Some(MeetingNotesTemplate::SalesCall),
+            Self::Standup => Some(MeetingNotesTemplate::Standup),
+            Self::None => None,
+        }
+    }
 }
 
 #[derive(Args, Clone, Debug, Eq, PartialEq)]
@@ -446,8 +460,82 @@ pub struct FilingArgs {
     /// Turn the suggestion down for good.
     #[arg(long)]
     pub decline: bool,
+    /// For a meeting maybe: keep the recording under this title instead
+    /// of the plan's.
+    #[arg(long, value_name = "TITLE", conflicts_with = "decline")]
+    pub title: Option<String>,
+    /// For a meeting maybe: one of its people to link, by name or id.
+    /// Repeat it; the maybe's other people are not linked.
+    #[arg(long = "person", value_name = "PERSON", conflicts_with_all = ["decline", "no_people"])]
+    pub people: Vec<String>,
+    /// For a meeting maybe: link none of its people.
+    #[arg(long, conflicts_with = "decline")]
+    pub no_people: bool,
+    /// For a meeting maybe: keep it without the place it found.
+    #[arg(long, conflicts_with = "decline")]
+    pub no_place: bool,
     #[command(flatten)]
     pub change: Change,
+}
+
+impl FilingArgs {
+    fn edits(&self) -> bool {
+        self.title.is_some() || !self.people.is_empty() || self.no_people || self.no_place
+    }
+
+    /// The meeting maybe as the caller keeps it: as it was shown to them,
+    /// with what they changed. A place they were not shown is not saved.
+    fn maybe_change(
+        &self,
+        target: &FilingTarget,
+    ) -> Result<Option<MeetingMaybeChange>, ExternalError> {
+        let FilingTarget::Meeting {
+            title,
+            people,
+            location,
+            ..
+        } = target
+        else {
+            return if self.edits() {
+                Err(ExternalError::invalid(
+                    "Only a meeting maybe takes --title, --person, --no-people or --no-place.",
+                ))
+            } else {
+                Ok(None)
+            };
+        };
+        let linked = if self.no_people {
+            Vec::new()
+        } else if self.people.is_empty() {
+            people.iter().map(|person| person.person_id).collect()
+        } else {
+            self.people
+                .iter()
+                .map(|value| {
+                    let value = value.trim();
+                    let by_id = Uuid::parse_str(value).ok();
+                    people
+                        .iter()
+                        .find(|person| match by_id {
+                            Some(id) => person.person_id.uuid() == id,
+                            None => person.name.trim().eq_ignore_ascii_case(value),
+                        })
+                        .map(|person| person.person_id)
+                        .ok_or_else(|| {
+                            ExternalError::invalid(format!(
+                                "{value:?} is not one of this maybe's people."
+                            ))
+                            .hint("See them with: sona work context-suggestions MEETING")
+                        })
+                })
+                .collect::<Result<_, _>>()?
+        };
+        Ok(Some(MeetingMaybeChange {
+            title: self.title.clone().unwrap_or_else(|| title.clone()),
+            people: linked,
+            place: location.is_some() && !self.no_place,
+        }))
+    }
 }
 
 impl SettingsVerb {
@@ -1280,12 +1368,20 @@ impl Tracker<'_> {
         change: SettingsChange<'_>,
         clears_briefs: bool,
     ) -> Result<WorkAnswer, ExternalError> {
+        let command = format!("cli_setting_{}", change.what);
+        let request = change.request.to_string();
+        let operation_id = (!args.dry_run).then(|| args.write.fresh_operation_id());
+        if let Some(operation_id) = &operation_id {
+            if let Some(answer) = self.settings_replay(operation_id, &command, &request)? {
+                return Ok(WorkAnswer::Settings(Box::new(answer)));
+            }
+        }
         let current = settings::get_settings(self.app);
         let before = (change.show)(&current);
         let mut preview = current;
         (change.apply)(&mut preview).map_err(ExternalError::invalid)?;
         let after = (change.show)(&preview);
-        if args.dry_run {
+        let Some(operation_id) = operation_id else {
             return Ok(WorkAnswer::Settings(Box::new(ExternalSettings {
                 schema_version: QUERY_SCHEMA_VERSION,
                 what: change.what,
@@ -1297,13 +1393,7 @@ impl Tracker<'_> {
                 value: after,
                 live: None,
             })));
-        }
-        let operation_id = args.write.fresh_operation_id();
-        let command = format!("cli_setting_{}", change.what);
-        let request = change.request.to_string();
-        if let Some(answer) = self.settings_replay(&operation_id, &command, &request)? {
-            return Ok(WorkAnswer::Settings(Box::new(answer)));
-        }
+        };
         self.applies("changing Sona's settings")?;
         if clears_briefs {
             self.meetings
@@ -1705,14 +1795,7 @@ impl Tracker<'_> {
     }
 
     async fn series_template(&self, args: &SeriesTemplateArgs) -> Result<WorkAnswer, ExternalError> {
-        let template = args.template.and_then(|choice| match choice {
-            SeriesTemplateChoice::General => Some(MeetingNotesTemplate::General),
-            SeriesTemplateChoice::OneOnOne => Some(MeetingNotesTemplate::OneOnOne),
-            SeriesTemplateChoice::Interview => Some(MeetingNotesTemplate::Interview),
-            SeriesTemplateChoice::SalesCall => Some(MeetingNotesTemplate::SalesCall),
-            SeriesTemplateChoice::Standup => Some(MeetingNotesTemplate::Standup),
-            SeriesTemplateChoice::None => None,
-        });
+        let template = args.template.and_then(SeriesTemplateChoice::notes_template);
         let custom = args.custom.map(MeetingTemplateId::from_uuid);
         let request = json!({ "meeting": args.meeting, "template": template, "custom": custom });
         if let Some(done) = self.settings_replayed("series-template", &args.change, &request)? {
@@ -1788,43 +1871,89 @@ impl Tracker<'_> {
 
     async fn filing_decide(&self, args: &FilingArgs) -> Result<WorkAnswer, ExternalError> {
         let accept = !args.decline;
-        let request = json!({ "suggestion": args.suggestion, "accept": accept });
+        let mut request = json!({ "suggestion": args.suggestion, "accept": accept });
+        if args.edits() {
+            request["edit"] = json!({
+                "title": args.title,
+                "people": args.people,
+                "no_people": args.no_people,
+                "no_place": args.no_place,
+            });
+        }
         if let Some(done) = self.settings_replayed("filing", &args.change, &request)? {
             return Ok(done);
         }
         let card = self.evening_card().await?;
-        let (recording, suggestion) = card
-            .unfiled
-            .iter()
-            .find_map(|recording| {
-                recording
-                    .suggestions
-                    .iter()
-                    .find(|suggestion| suggestion.id == args.suggestion)
-                    .map(|suggestion| (recording, suggestion))
-            })
-            .ok_or_else(|| {
-                ExternalError::new(
-                    ExternalErrorCode::NotFound,
-                    format!("No filing suggestion {} is waiting.", args.suggestion),
-                )
-            })?;
+        let shown = card.unfiled.iter().find_map(|recording| {
+            recording
+                .suggestions
+                .iter()
+                .find(|suggestion| suggestion.id == args.suggestion)
+                .map(|suggestion| Waiting {
+                    meeting_id: recording.session_id,
+                    title: recording.title.clone(),
+                    suggestion: json!(suggestion),
+                    target: suggestion.target.clone(),
+                })
+        });
+        let waiting = match shown {
+            Some(waiting) => waiting,
+            None => self.waiting_maybe(&args.suggestion).await?,
+        };
+        let edit = args.maybe_change(&waiting.target)?;
+        let mut after = json!({ "suggestion": args.suggestion, "filed": accept });
+        if let Some(edit) = edit.as_ref().filter(|_| args.edits()) {
+            after["kept_as"] = json!(edit);
+        }
         let plan = StoreChange {
             what: "filing",
             doing: "filing recordings",
             change: &args.change,
-            before: json!({ "meeting_id": recording.session_id, "title": recording.title, "suggestion": suggestion }),
-            after: json!({ "suggestion": args.suggestion, "filed": accept }),
+            before: json!({ "meeting_id": waiting.meeting_id, "title": waiting.title, "suggestion": waiting.suggestion }),
+            after,
             request,
         };
         self.store_change(plan, |_| async move {
             self.meetings
-                .decide_filing(self.app, &args.suggestion, accept, None)
+                .decide_filing(self.app, &args.suggestion, accept, edit)
                 .await
                 .map_err(ExternalError::invalid)?;
             self.evening_card().await
         })
         .await
+    }
+
+    /// A maybe waiting on a recording the evening card does not show, as
+    /// the meeting page offers it, unless it draws on a meeting kept on
+    /// this Mac.
+    async fn waiting_maybe(&self, id: &str) -> Result<Waiting, ExternalError> {
+        let missing = || {
+            ExternalError::new(
+                ExternalErrorCode::NotFound,
+                format!("No filing suggestion {id} is waiting."),
+            )
+        };
+        let store = store(self.meetings).await?;
+        let hidden = kept_local(&store)?;
+        let mut pending = match store.pending_filing(id) {
+            Ok(pending) => pending,
+            Err(StoreError::NotFound) => return Err(missing()),
+            Err(error) => return Err(store_failed(error)),
+        };
+        if hidden.hides(pending.session_id) || plan_kept(&store, &hidden, &pending.target)? {
+            return Err(missing());
+        }
+        without_kept_place(&store, &hidden, pending.session_id, &mut pending.target)?;
+        let title = store
+            .session_snapshot(pending.session_id)
+            .map_err(|error| meeting_refusal(pending.session_id, error))?
+            .title;
+        Ok(Waiting {
+            meeting_id: pending.session_id,
+            title,
+            suggestion: json!({ "id": id, "target": pending.target }),
+            target: pending.target,
+        })
     }
 }
 
@@ -1835,6 +1964,15 @@ struct StoreChange<'a> {
     request: Value,
     before: Value,
     after: Value,
+}
+
+/// A filing suggestion waiting on a recording, with what the ledger keeps
+/// of it.
+struct Waiting {
+    meeting_id: MeetingSessionId,
+    title: String,
+    suggestion: Value,
+    target: FilingTarget,
 }
 
 fn ledger(what: &str) -> String {
@@ -1867,8 +2005,8 @@ struct EveningView {
 }
 
 /// The evening card without what a meeting kept on this Mac said: lines
-/// drawn from one, its recordings, and suggestions to make a recording the
-/// plan heard in one.
+/// drawn from one, its recordings, suggestions to make a recording the plan
+/// heard in one, and a place only such a meeting saved.
 fn evening_view(
     store: &MeetingStore,
     hidden: &KeptLocal,
@@ -1886,19 +2024,8 @@ fn evening_view(
         if hidden.hides(recording.session_id) {
             continue;
         }
-        let mut suggestions = Vec::new();
-        for suggestion in recording.suggestions {
-            let from_hidden = match &suggestion.target {
-                FilingTarget::Meeting { plan_id, .. } => {
-                    hidden.hides(store.heard_plan(*plan_id).map_err(store_failed)?.session_id)
-                }
-                _ => false,
-            };
-            if !from_hidden {
-                suggestions.push(suggestion);
-            }
-        }
-        recording.suggestions = suggestions;
+        recording.suggestions =
+            agent_maybes(store, hidden, recording.session_id, recording.suggestions)?;
         shown.push(recording);
     }
     Ok(EveningView {
@@ -2267,6 +2394,137 @@ mod tests {
             assert!(card.lines_left_out);
             let shown: Vec<_> = card.unfiled.iter().map(|recording| recording.session_id).collect();
             assert_eq!(shown, [open]);
+        });
+    }
+
+    #[test]
+    fn an_agent_is_neither_shown_nor_filed_a_place_only_a_meeting_kept_on_this_mac_saved() {
+        use crate::meeting::context::{
+            ConversationContextUpdate, ConversationKind, ConversationLocation,
+        };
+        use crate::meeting::evening::FilingSuggestion;
+        use crate::meeting::heard_plan_types::{HeardPlanDraft, HeardPlanWindow};
+        use crate::meeting::store::workflow_core_tests::{recorded_meeting, transcript_segments};
+        use crate::meeting::types::{ArtifactCitation, TranscriptSegmentId};
+
+        tauri::async_runtime::block_on(async {
+            let (_directory, store, open, _) = library().await;
+            let offsite = recorded_meeting(&store, "Offsite", NOW - 2 * DAY);
+            store
+                .remember_calendar_facts(
+                    offsite,
+                    &CalendarEventSummary {
+                        event_key: format!("board#{}", NOW - 2 * DAY),
+                        series_key: "board".to_owned(),
+                        title: "Offsite".to_owned(),
+                        attendee_count: 2,
+                        start_utc_ms: NOW - 2 * DAY,
+                        end_utc_ms: NOW - 2 * DAY + DAY / 24,
+                        attendees: Vec::new(),
+                        notes: None,
+                        calendar_name: None,
+                        location: None,
+                        url: None,
+                        place: None,
+                    },
+                )
+                .unwrap();
+            let zetta = ConversationLocation {
+                name: "Hotel Zetta".to_owned(),
+                latitude: 37.7786,
+                longitude: -122.4056,
+            };
+            store
+                .update_conversation_context(ConversationContextUpdate {
+                    session_id: offsite,
+                    expected_revision: store.conversation_context(offsite).unwrap().revision,
+                    kind: ConversationKind::InPerson,
+                    location: Some(zetta.clone()),
+                })
+                .unwrap();
+            let quote = "Let's have lunch at Zetta tomorrow.";
+            transcript_segments(&store, open, &[quote]);
+            let (revision, _) = store.heard_plans_unread(open).unwrap().unwrap();
+            store
+                .replace_heard_plans(
+                    open,
+                    revision,
+                    &[HeardPlanDraft {
+                        title: "Lunch".to_owned(),
+                        when_text: "tomorrow".to_owned(),
+                        window: Some(HeardPlanWindow {
+                            start_utc_ms: NOW + DAY,
+                            end_utc_ms: NOW + DAY + DAY / 24,
+                            all_day: false,
+                        }),
+                        people: Vec::new(),
+                        place: Some("Zetta".to_owned()),
+                        quote: quote.to_owned(),
+                        citation: ArtifactCitation {
+                            segment_id: TranscriptSegmentId::new(),
+                            start_offset_ns: 0,
+                            end_offset_ns: 1,
+                        },
+                    }],
+                    NOW,
+                )
+                .unwrap();
+            let started = NOW + DAY + 60_000;
+            let lunch = recorded_meeting(&store, "New recording", started);
+            let place = |suggestions: &[FilingSuggestion]| {
+                suggestions
+                    .iter()
+                    .find_map(|suggestion| match &suggestion.target {
+                        FilingTarget::Meeting { location, .. } => Some(location.clone()),
+                        _ => None,
+                    })
+            };
+
+            let offered = store
+                .context_suggestions(lunch, &[], None, started + 60_000)
+                .unwrap();
+            assert_eq!(place(&offered), Some(Some(zetta)));
+
+            let card = evening_view(
+                &store,
+                &kept_local(&store).unwrap(),
+                "2025-12-30".to_owned(),
+                None,
+                true,
+                vec![UnfiledRecording {
+                    session_id: lunch,
+                    title: "New recording".to_owned(),
+                    started_at_utc_ms: started,
+                    ended_at_utc_ms: None,
+                    suggestions: offered,
+                }],
+            )
+            .unwrap();
+            let shown = &card.unfiled[0].suggestions;
+            let maybe = shown
+                .iter()
+                .find(|suggestion| matches!(suggestion.target, FilingTarget::Meeting { .. }))
+                .unwrap();
+            let filing = FilingArgs {
+                suggestion: maybe.id.clone(),
+                decline: false,
+                title: None,
+                people: Vec::new(),
+                no_people: false,
+                no_place: false,
+                change: Change {
+                    dry_run: false,
+                    write: WriteArgs {
+                        operation_id: None,
+                        agent: None,
+                    },
+                },
+            };
+            let kept_as = filing.maybe_change(&maybe.target).unwrap();
+            assert_eq!(
+                (place(shown), kept_as.map(|change| change.place)),
+                (Some(None), Some(false))
+            );
         });
     }
 

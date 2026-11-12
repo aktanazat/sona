@@ -40,7 +40,24 @@ pub struct ExternalRoster {
     pub app: Option<String>,
     /// As the call showed them, sorted. Never linked to a person here.
     pub names: Vec<String>,
+    /// Speakers nobody named whose voice matched a name the call showed, as
+    /// the transcript offers them: "Speaker 2 may be Dana".
+    pub suggestions: Vec<ExternalCallNameSuggestion>,
     pub link: String,
+}
+
+/// A name the call showed while one of the meeting's speakers talked.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ExternalCallNameSuggestion {
+    pub speaker_id: Uuid,
+    /// The speaker's name in the transcript now.
+    pub speaker: String,
+    /// The name the call showed.
+    pub name: String,
+    /// How long the call marked that name as speaking while this speaker talked.
+    pub overlap_ms: u64,
+    /// How long this speaker talked in all.
+    pub speech_ms: u64,
 }
 
 /// Another recording within 100 m of the meeting's place.
@@ -107,11 +124,28 @@ pub(crate) fn roster(
     let status = store
         .call_name_status(session_id)
         .map_err(|error| meeting_refusal(session_id, error))?;
+    let speakers = store
+        .speaker_display_names(session_id)
+        .map_err(|error| meeting_refusal(session_id, error))?;
     Ok(ExternalRoster {
         schema_version: QUERY_SCHEMA_VERSION,
         meeting_id: session_id.uuid(),
         app: status.target.map(|target| target.label),
         names: status.roster,
+        suggestions: status
+            .suggestions
+            .into_iter()
+            .map(|suggestion| ExternalCallNameSuggestion {
+                speaker_id: suggestion.speaker_id.uuid(),
+                speaker: speakers
+                    .get(&suggestion.speaker_id)
+                    .cloned()
+                    .unwrap_or_else(|| "Unknown".to_owned()),
+                name: suggestion.display_name,
+                overlap_ms: suggestion.overlap_ns / 1_000_000,
+                speech_ms: suggestion.speech_ns / 1_000_000,
+            })
+            .collect(),
         link: meeting_link(session_id),
     })
 }

@@ -1,9 +1,12 @@
-use super::links::{describe, insert_source, ResolvedSource, ScratchSourceKind, ScratchSourceRef};
+use super::links::{
+    describe, insert_source, ResolvedSource, ScratchSource, ScratchSourceKind, ScratchSourceRef,
+};
 use super::{emit_changed, failure_sentence, now_ms, run, ScratchNote};
 use crate::managers::history::HistoryManager;
 use crate::meeting::session::MeetingSessionManager;
 use crate::meeting::store::note_evidence::{NoteEvidenceError, NoteEvidenceInput};
-use crate::meeting::types::MeetingSessionId;
+use crate::meeting::store::MeetingStore;
+use crate::meeting::types::{MeetingReviewSnapshot, MeetingSessionId};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use specta::Type;
@@ -81,9 +84,6 @@ pub async fn scratchpad_capture_passage(
     person_id: Option<String>,
     body: String,
 ) -> Result<ScratchNote, String> {
-    if excerpt.trim().is_empty() {
-        return Err("Choose a passage.".to_string());
-    }
     let session_id = Uuid::parse_str(&meeting_id)
         .map(MeetingSessionId::from_uuid)
         .map_err(|_| "This conversation is unavailable.".to_string())?;
@@ -94,8 +94,47 @@ pub async fn scratchpad_capture_passage(
     let snapshot = store
         .review_snapshot(session_id)
         .map_err(|_| "This conversation is unavailable.".to_string())?;
-    let source = describe(
-        &history,
+    passage(&history, store, snapshot, segment_id, &excerpt, person_id, body)?
+        .save(&app, &history, super::Author::Me)
+}
+
+/// A passage of a meeting's transcript, checked and worded as the note that
+/// keeps it. Finding one writes nothing.
+pub(crate) struct Passage {
+    store: Arc<MeetingStore>,
+    session_id: MeetingSessionId,
+    revision: u64,
+    title: String,
+    meeting_id: String,
+    segment_id: String,
+    meeting: ScratchSource,
+    person: Option<ScratchSource>,
+    person_id: Option<String>,
+    start_ms: i64,
+    end_ms: i64,
+    wording: &'static str,
+    captured: String,
+    body: String,
+}
+
+/// Finds `excerpt` in the line `segment_id` of the meeting `snapshot` shows,
+/// raw or corrected. A blank `body` becomes a line naming where it is.
+pub(crate) fn passage(
+    history: &HistoryManager,
+    store: Arc<MeetingStore>,
+    snapshot: MeetingReviewSnapshot,
+    segment_id: String,
+    excerpt: &str,
+    person_id: Option<String>,
+    body: String,
+) -> Result<Passage, String> {
+    if excerpt.trim().is_empty() {
+        return Err("Choose a passage.".to_string());
+    }
+    let session_id = snapshot.session.session_id;
+    let meeting_id = session_id.uuid().to_string();
+    let meeting = describe(
+        history,
         &store,
         &ScratchSourceRef {
             kind: ScratchSourceKind::Meeting,
@@ -113,14 +152,14 @@ pub async fn scratchpad_capture_passage(
         .replacement_text
         .as_deref()
         .unwrap_or(&segment.base.text);
-    if !corrected.contains(&excerpt) && !segment.base.text.contains(&excerpt) {
+    if !corrected.contains(excerpt) && !segment.base.text.contains(excerpt) {
         return Err("The passage changed. Select it again.".to_string());
     }
     let person = person_id
         .as_ref()
         .map(|id| {
             describe(
-                &history,
+                history,
                 &store,
                 &ScratchSourceRef {
                     kind: ScratchSourceKind::Person,
@@ -139,7 +178,7 @@ pub async fn scratchpad_capture_passage(
     } else {
         body
     };
-    let (wording, label) = if segment.base.text.contains(&excerpt) {
+    let (wording, label) = if segment.base.text.contains(excerpt) {
         ("raw", "Direct quote from raw transcript")
     } else {
         ("corrected", "Selected corrected wording")
@@ -148,30 +187,63 @@ pub async fn scratchpad_capture_passage(
         "{label}\n{excerpt}\n\nRaw transcript\n{}\n\nCorrected transcript\n{corrected}",
         segment.base.text
     );
-    let capture = NoteEvidenceInput {
+    Ok(Passage {
+        store,
         session_id,
-        input_revision: snapshot.session.revision,
-        title: &snapshot.session.title,
-        text: &captured,
-    };
-    let note_id = Uuid::new_v4();
-    let note = store.capture_note_evidence(note_id, &[capture], || {
-        run(&history, |conn| {
-            let transaction = conn.transaction()?;
-            let now = now_ms();
-            let note = ScratchNote { id: note_id.to_string(), title: super::derive_title(&body), body, pinned: false, created_at_ms: now, updated_at_ms: now };
-            transaction.execute("INSERT INTO scratch_notes (id, title, body, pinned, created_at_ms, updated_at_ms) VALUES (?1, ?2, ?3, 0, ?4, ?4)", params![note.id, note.title, note.body, now])?;
-            super::record_version(&transaction, &note.id, &note.body, now, super::ScratchVersionKind::Edit, super::Author::Me)?;
-            insert_source(&transaction, &note.id, &ResolvedSource { source, evidence: None })?;
-            if let Some(source) = person { insert_source(&transaction, &note.id, &ResolvedSource { source, evidence: None })?; }
-            transaction.execute("INSERT INTO scratch_note_passages (note_id, meeting_id, segment_id, start_ms, end_ms, person_id, wording) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)", params![note.id, meeting_id, segment_id, start_ms, end_ms, person_id, wording])?;
-            transaction.commit()?;
-            Ok(note)
-        })
-    }).map_err(|error| match error {
-        NoteEvidenceError::Persist(error) => failure_sentence(&history, error, "The passage could not be saved."),
-        NoteEvidenceError::Store(_) => "The passage changed or was deleted. Select it again.".to_string(),
-    })?;
-    emit_changed(&app, &note.id, false);
-    Ok(note)
+        revision: snapshot.session.revision,
+        title: snapshot.session.title,
+        meeting_id,
+        segment_id,
+        meeting,
+        person,
+        person_id,
+        start_ms,
+        end_ms,
+        wording,
+        captured,
+        body,
+    })
+}
+
+impl Passage {
+    /// The note's text as it will be saved.
+    pub(crate) fn body(&self) -> &str {
+        &self.body
+    }
+
+    /// Saves the passage as a new note linked to its meeting, and to the
+    /// person when one was named.
+    pub(crate) fn save(
+        self,
+        app: &AppHandle,
+        history: &HistoryManager,
+        author: super::Author<'_>,
+    ) -> Result<ScratchNote, String> {
+        let capture = NoteEvidenceInput {
+            session_id: self.session_id,
+            input_revision: self.revision,
+            title: &self.title,
+            text: &self.captured,
+        };
+        let note_id = Uuid::new_v4();
+        let note = self.store.capture_note_evidence(note_id, &[capture], || {
+            run(history, |conn| {
+                let transaction = conn.transaction()?;
+                let now = now_ms();
+                let note = ScratchNote { id: note_id.to_string(), title: super::derive_title(&self.body), body: self.body, pinned: false, created_at_ms: now, updated_at_ms: now };
+                transaction.execute("INSERT INTO scratch_notes (id, title, body, pinned, created_at_ms, updated_at_ms) VALUES (?1, ?2, ?3, 0, ?4, ?4)", params![note.id, note.title, note.body, now])?;
+                super::record_version(&transaction, &note.id, &note.body, now, super::ScratchVersionKind::Edit, author)?;
+                insert_source(&transaction, &note.id, &ResolvedSource { source: self.meeting, evidence: None })?;
+                if let Some(source) = self.person { insert_source(&transaction, &note.id, &ResolvedSource { source, evidence: None })?; }
+                transaction.execute("INSERT INTO scratch_note_passages (note_id, meeting_id, segment_id, start_ms, end_ms, person_id, wording) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)", params![note.id, self.meeting_id, self.segment_id, self.start_ms, self.end_ms, self.person_id, self.wording])?;
+                transaction.commit()?;
+                Ok(note)
+            })
+        }).map_err(|error| match error {
+            NoteEvidenceError::Persist(error) => failure_sentence(history, error, "The passage could not be saved."),
+            NoteEvidenceError::Store(_) => "The passage changed or was deleted. Select it again.".to_string(),
+        })?;
+        emit_changed(app, &note.id, false);
+        Ok(note)
+    }
 }

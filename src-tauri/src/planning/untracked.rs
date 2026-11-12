@@ -209,24 +209,51 @@ pub(crate) async fn tally(
     .await
 }
 
+/// The commitments still waiting to be tracked in every finished meeting
+/// `hidden` does not leave out, newest meeting first, skipping meetings
+/// with none.
+pub(crate) async fn untracked_everywhere(
+    history: &HistoryManager,
+    meetings: &MeetingSessionManager,
+    hidden: &(dyn Fn(MeetingSessionId) -> bool + Sync),
+) -> Result<Vec<(MeetingSessionId, Vec<MeetingLoopRow>)>, String> {
+    let user_name = meetings.user_name();
+    super::with_sources(history, meetings, |history, meetings| {
+        waiting_in(history, meetings, user_name.as_deref(), hidden)
+    })
+    .await
+}
+
 fn tally_in(
     history: &Connection,
     meetings: &Connection,
     user_name: Option<&str>,
     hidden: &dyn Fn(MeetingSessionId) -> bool,
 ) -> StorageResult<TodayTally> {
-    let finished = finished_meeting_ids(meetings)
-        .map_err(|_| anyhow::anyhow!("finished meetings could not be read"))?;
     let mut tally = TodayTally::default();
-    for session_id in finished.into_iter().filter(|id| !hidden(*id)) {
-        let waiting = untracked_in(history, meetings, session_id, user_name)?.len();
-        if waiting == 0 {
-            continue;
-        }
-        tally.count = tally.count.saturating_add(u32::try_from(waiting)?);
+    for (session_id, waiting) in waiting_in(history, meetings, user_name, hidden)? {
+        tally.count = tally.count.saturating_add(u32::try_from(waiting.len())?);
         tally.meeting_id.get_or_insert(session_id);
     }
     Ok(tally)
+}
+
+fn waiting_in(
+    history: &Connection,
+    meetings: &Connection,
+    user_name: Option<&str>,
+    hidden: &dyn Fn(MeetingSessionId) -> bool,
+) -> StorageResult<Vec<(MeetingSessionId, Vec<MeetingLoopRow>)>> {
+    let finished = finished_meeting_ids(meetings)
+        .map_err(|_| anyhow::anyhow!("finished meetings could not be read"))?;
+    let mut waiting = Vec::new();
+    for session_id in finished.into_iter().filter(|id| !hidden(*id)) {
+        let actions = untracked_in(history, meetings, session_id, user_name)?;
+        if !actions.is_empty() {
+            waiting.push((session_id, actions));
+        }
+    }
+    Ok(waiting)
 }
 
 fn read(

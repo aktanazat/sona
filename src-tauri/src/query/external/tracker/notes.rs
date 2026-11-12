@@ -2,6 +2,8 @@
 //! link a meeting, a person or another note to it, or file it as a document
 //! of a task, a project or a cycle. Only notes and those links are written.
 
+use super::library::meeting;
+use super::transcript::missing_line;
 use super::{
     cycle_ref, named_cycle, now_ms, refusal, task_ref, Fence, Tracker, WorkAnswer, WriteArgs,
 };
@@ -11,7 +13,7 @@ use crate::query::external::{ExternalError, ExternalErrorCode};
 use crate::query::QUERY_SCHEMA_VERSION;
 use crate::scratchpad::documents::{self, ScratchDocumentKind, ScratchDocumentOf};
 use crate::scratchpad::links::{self, ScratchSourceKind, ScratchSourceRef};
-use crate::scratchpad::{self, Author, ScratchNote, ScratchpadError};
+use crate::scratchpad::{self, passages, Author, ScratchNote, ScratchpadError};
 use clap::{ArgGroup, Args};
 use rusqlite::{Connection, OptionalExtension as _};
 use serde::Serialize;
@@ -132,6 +134,30 @@ pub struct NoteRestoreArgs {
     #[arg(value_name = "VERSION_ID")]
     pub version: i64,
     /// Print the body it would put back and write nothing.
+    #[arg(long)]
+    pub dry_run: bool,
+    #[command(flatten)]
+    pub write: WriteArgs,
+}
+
+#[derive(Args, Clone, Debug, Eq, PartialEq)]
+pub struct NotePassageArgs {
+    /// The meeting's id, from `meetings`.
+    #[arg(value_name = "MEETING")]
+    pub meeting: String,
+    /// The line's segment_id, from `sona --transcript MEETING --json`.
+    #[arg(value_name = "LINE")]
+    pub line: Uuid,
+    /// The words to keep, as the line reads them, raw or corrected.
+    #[arg(long, value_name = "WORDS")]
+    pub excerpt: String,
+    /// Link the person who said them too, by name or id.
+    #[arg(long, value_name = "PERSON")]
+    pub person: Option<String>,
+    /// The note's text. Left out, the note says where the passage is.
+    #[arg(long, value_name = "TEXT")]
+    pub body: Option<String>,
+    /// Print what would be written and write nothing.
     #[arg(long)]
     pub dry_run: bool,
     #[command(flatten)]
@@ -393,6 +419,102 @@ impl Tracker<'_> {
             change.document_of = document;
         }
         Ok(answer)
+    }
+
+    /// Keeps a passage of a meeting's transcript as a new note linked to the
+    /// meeting, the way the transcript's "Save passage" does.
+    pub(super) async fn note_passage(
+        &self,
+        args: &NotePassageArgs,
+    ) -> Result<WorkAnswer, ExternalError> {
+        let (store, review) = meeting(self.meetings, &args.meeting).await?;
+        let meeting_id = review.session.session_id.uuid();
+        let title = review.session.title.clone();
+        let linked = |title| ExternalNoteSource {
+            kind: ScratchSourceKind::Meeting,
+            id: meeting_id.to_string(),
+            title,
+        };
+        let operation_id = args.write.fresh_operation_id();
+        let request = request_json(&(
+            meeting_id,
+            args.line,
+            &args.excerpt,
+            &args.person,
+            &args.body,
+        ))?;
+        let created = |note, replayed| {
+            let mut answer = Self::note_change(
+                NoteAction::Created,
+                false,
+                Some(operation_id.clone()),
+                Some(note),
+                replayed,
+            );
+            if let WorkAnswer::Note(change) = &mut answer {
+                change.linked = Some(linked(Some(title.clone())));
+            }
+            answer
+        };
+        match self.receipt(&operation_id, "cli_note_passage", &request)? {
+            Receipt::New(()) => {}
+            Receipt::Replay(note_id) => return Ok(created(self.replayed(&note_id)?, true)),
+            Receipt::Conflict => return Err(conflict(&operation_id)),
+        }
+        let line = review
+            .transcript
+            .iter()
+            .find(|line| line.base.segment_id.uuid() == args.line && !line.removed)
+            .ok_or_else(|| missing_line(args.line, &args.meeting))?;
+        let corrected = line.replacement_text.as_deref().unwrap_or(&line.base.text);
+        if !line.base.text.contains(&args.excerpt) && !corrected.contains(&args.excerpt) {
+            return Err(ExternalError::invalid(format!(
+                "Line {} does not say {:?}.",
+                args.line, args.excerpt
+            ))
+            .hint(&format!(
+                "Copy the words from: sona --transcript {} --json",
+                args.meeting
+            )));
+        }
+        let person = match &args.person {
+            Some(value) => Some(self.person_named(value).await?.uuid().to_string()),
+            None => None,
+        };
+        let passage = passages::passage(
+            self.history,
+            store,
+            review,
+            args.line.to_string(),
+            &args.excerpt,
+            person,
+            args.body.clone().unwrap_or_default(),
+        )
+        .map_err(|message| refusal(self.history, message))?;
+        if args.dry_run {
+            let mut answer = Self::note_change(
+                NoteAction::Created,
+                true,
+                args.write.operation_id.map(|id| id.to_string()),
+                None,
+                false,
+            );
+            if let WorkAnswer::Note(change) = &mut answer {
+                change.would_write = Some(passage.body().to_owned());
+                change.linked = Some(linked(None));
+            }
+            return Ok(answer);
+        }
+        self.applies("writing notes")?;
+        let note = passage
+            .save(
+                self.app,
+                self.history,
+                Author::Agent(args.write.agent.as_deref()),
+            )
+            .map_err(|message| refusal(self.history, message))?;
+        self.file_receipt(&operation_id, "cli_note_passage", &request, &note.id)?;
+        Ok(created(note, false))
     }
 
     /// The task `--task` or the project `--project` names.

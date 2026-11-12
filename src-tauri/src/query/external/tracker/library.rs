@@ -2,16 +2,20 @@
 //! trash, notes and action items, screen pictures, heard plans, searches and
 //! exports, each through the same function the app's own screen calls.
 
+use super::preferences::SeriesTemplateChoice;
 use super::{
     conversations_closed, now_ms, refusal, Tracker, WorkAnswer, WriteArgs, READ_SCOPES,
     WRITE_SCOPES,
 };
 use crate::managers::history::HistoryManager;
+use crate::meeting::analytics::MeetingNotesTemplate;
 use crate::meeting::folder_types::{
-    MeetingFolder, MeetingFolderCreateRequest, MeetingFolderDeleteRequest,
-    MeetingFolderMembershipRequest, MeetingFolderRenameRequest,
+    MeetingFolder, MeetingFolderCreateRequest, MeetingFolderDefaultsSetRequest,
+    MeetingFolderDeleteRequest, MeetingFolderMembershipRequest, MeetingFolderRenameRequest,
+    MAX_FOLDER_PROMPTS,
 };
 use crate::meeting::heard_plan_types::{HeardPlan, HeardPlanEdit};
+use crate::meeting::prompt_types::PromptTarget;
 use crate::meeting::session::{
     MeetingActionItemDoneRequest, MeetingMutationRequest, MeetingNoteCreateRequest,
     MeetingNoteDeleteRequest, MeetingNoteUpdateRequest, MeetingSessionManager,
@@ -23,7 +27,7 @@ use crate::meeting::types::{
     HeardPlanId, ManualNoteId, MeetingCommandError, MeetingCommandKind, MeetingDeletionJobId,
     MeetingExportFormat, MeetingExportRequest, MeetingOperationId, MeetingReviewSnapshot,
     MeetingSearchHit, MeetingSearchRequest, MeetingStatusFilter, MeetingTrashEntry,
-    OperationReceipt, OperationResult, SaidMoment,
+    OperationReceipt, OperationResult, SaidMoment, SavedPromptId,
 };
 use crate::planning;
 use crate::query::external::{
@@ -32,7 +36,7 @@ use crate::query::external::{
 };
 use crate::query::{QueryError, QUERY_SCHEMA_VERSION};
 use chrono::{Local, NaiveDateTime, TimeZone};
-use clap::{Args, Subcommand, ValueEnum};
+use clap::{ArgGroup, Args, Subcommand, ValueEnum};
 use rusqlite::OptionalExtension as _;
 use serde::Serialize;
 use std::fmt::Write as _;
@@ -134,6 +138,28 @@ pub struct FolderRenameArgs {
     pub folder: String,
     #[arg(value_name = "NAME")]
     pub name: String,
+    #[command(flatten)]
+    pub change: Change,
+}
+
+#[derive(Args, Clone, Debug, Eq, PartialEq)]
+#[command(group(ArgGroup::new("defaults").required(true).multiple(true).args(["template", "prompts", "no_prompts"])))]
+pub struct FolderDefaultsArgs {
+    /// The folder, by name or id, from `folders`.
+    #[arg(value_name = "FOLDER")]
+    pub folder: String,
+    /// The notes template a meeting filed here is written with when neither
+    /// the meeting nor its series chose one; none clears it.
+    #[arg(long, value_enum, value_name = "TEMPLATE")]
+    pub template: Option<SeriesTemplateChoice>,
+    /// A saved meeting prompt, by name or id, to run on every meeting filed
+    /// here once its notes are ready. Repeat it for up to five, in order;
+    /// they replace the folder's prompts.
+    #[arg(long = "prompt", value_name = "PROMPT", conflicts_with = "no_prompts")]
+    pub prompts: Vec<String>,
+    /// Run no saved prompts on the meetings filed here.
+    #[arg(long)]
+    pub no_prompts: bool,
     #[command(flatten)]
     pub change: Change,
 }
@@ -336,6 +362,9 @@ pub enum LibraryVerb {
     FolderNew(FolderNewArgs),
     /// Rename a folder.
     FolderRename(FolderRenameArgs),
+    /// Choose a folder's notes template and the saved prompts that run on
+    /// the meetings filed in it. What is left out stays as it is.
+    FolderDefaults(FolderDefaultsArgs),
     /// Delete a folder. Its meetings stay, unfiled.
     FolderDelete(FolderArgs),
     /// File a meeting in a folder.
@@ -402,6 +431,7 @@ impl LibraryVerb {
             | Self::MeetingDeleteForever(TrashArgs { change, .. })
             | Self::FolderNew(FolderNewArgs { change, .. })
             | Self::FolderRename(FolderRenameArgs { change, .. })
+            | Self::FolderDefaults(FolderDefaultsArgs { change, .. })
             | Self::FolderDelete(FolderArgs { change, .. })
             | Self::FolderAdd(FolderMembershipArgs { change, .. })
             | Self::FolderRemove(FolderMembershipArgs { change, .. })
@@ -457,6 +487,11 @@ pub struct ExternalFolder {
     pub id: Uuid,
     pub name: String,
     pub meeting_count: u32,
+    /// The notes template its meetings are written with when neither the
+    /// meeting nor its series chose one.
+    pub template: Option<MeetingNotesTemplate>,
+    /// The saved prompts that run on its meetings, in order.
+    pub prompt_ids: Vec<Uuid>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -576,6 +611,8 @@ pub struct ExternalLibraryChange {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trash_id: Option<Uuid>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub template_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
 }
 
@@ -614,7 +651,7 @@ pub(super) fn told(dry_run: bool, done: &str, would: &str) -> String {
     (if dry_run { would } else { done }).to_owned()
 }
 
-fn change(summary: String, dry_run: bool, operation_id: String) -> ExternalLibraryChange {
+pub(super) fn change(summary: String, dry_run: bool, operation_id: String) -> ExternalLibraryChange {
     ExternalLibraryChange {
         schema_version: QUERY_SCHEMA_VERSION,
         summary,
@@ -627,8 +664,13 @@ fn change(summary: String, dry_run: bool, operation_id: String) -> ExternalLibra
         snapshot_id: None,
         plan_id: None,
         trash_id: None,
+        template_id: None,
         path: None,
     }
+}
+
+pub(super) fn changed(change: ExternalLibraryChange) -> WorkAnswer {
+    WorkAnswer::Library(Box::new(ExternalLibraryAnswer::Change(change)))
 }
 
 pub(super) fn operation(
@@ -643,12 +685,14 @@ pub(super) fn operation(
     Ok((id, MeetingOperationId::from_uuid(uuid)))
 }
 
-async fn library(meetings: &Arc<MeetingSessionManager>) -> Result<Arc<MeetingStore>, ExternalError> {
+pub(super) async fn library(
+    meetings: &Arc<MeetingSessionManager>,
+) -> Result<Arc<MeetingStore>, ExternalError> {
     store(meetings).await.map_err(|_| conversations_closed())
 }
 
 /// The meeting, refused as absent when it is kept on this Mac.
-async fn meeting(
+pub(super) async fn meeting(
     meetings: &Arc<MeetingSessionManager>,
     value: &str,
 ) -> Result<(Arc<MeetingStore>, MeetingReviewSnapshot), ExternalError> {
@@ -1142,6 +1186,99 @@ pub(super) async fn folder_rename(
         .map_err(folder_error(folder_id))?;
     answer.replayed = receipt_replayed(&result.receipt, revision)?;
     Ok(answer)
+}
+
+pub(super) async fn folder_defaults(
+    meetings: &Arc<MeetingSessionManager>,
+    args: &FolderDefaultsArgs,
+    gate: Gate<'_>,
+) -> Result<ExternalLibraryChange, ExternalError> {
+    let found = folder(meetings, &args.folder).await?;
+    let template = args
+        .template
+        .map_or(found.template, SeriesTemplateChoice::notes_template);
+    let prompt_ids = if args.no_prompts {
+        Vec::new()
+    } else if args.prompts.is_empty() {
+        found.prompt_ids.clone()
+    } else {
+        meeting_prompts(meetings, &args.prompts).await?
+    };
+    let revision = folder_revision(meetings).await?;
+    let folder_id = found.folder_id.uuid();
+    let (id, operation_id) = operation(
+        &args.change.write,
+        "folder-defaults",
+        &(folder_id, template, &prompt_ids, revision),
+    )?;
+    let dry_run = args.change.dry_run;
+    let mut answer = change(
+        told(
+            dry_run,
+            "Changed what the folder does",
+            "Would change what the folder does",
+        ),
+        dry_run,
+        id,
+    );
+    answer.folder_id = Some(folder_id);
+    answer.replayed = found.template == template && found.prompt_ids == prompt_ids;
+    if dry_run || answer.replayed {
+        return Ok(answer);
+    }
+    gate("changing a folder")?;
+    let result = meetings
+        .folder_set_defaults(MeetingFolderDefaultsSetRequest {
+            operation_id,
+            folder_id: found.folder_id,
+            template,
+            prompt_ids,
+            expected_revision: revision,
+        })
+        .await
+        .map_err(folder_error(folder_id))?;
+    answer.replayed = receipt_replayed(&result.receipt, revision)?;
+    Ok(answer)
+}
+
+/// Saved meeting prompts by name or id, in the order given, each once.
+async fn meeting_prompts(
+    meetings: &Arc<MeetingSessionManager>,
+    values: &[String],
+) -> Result<Vec<SavedPromptId>, ExternalError> {
+    let saved = meetings
+        .saved_prompts()
+        .await
+        .map_err(|error| ExternalError::from(QueryError::from(error)))?
+        .prompts;
+    let mut picked: Vec<SavedPromptId> = Vec::new();
+    for value in values {
+        let value = value.trim();
+        let by_id = Uuid::parse_str(value).ok();
+        let prompt = saved
+            .iter()
+            .filter(|prompt| prompt.target == PromptTarget::Meeting)
+            .find(|prompt| match by_id {
+                Some(id) => prompt.prompt_id.uuid() == id,
+                None => prompt.name.trim().eq_ignore_ascii_case(value),
+            })
+            .ok_or_else(|| {
+                ExternalError::new(
+                    ExternalErrorCode::NotFound,
+                    format!("No meeting prompt {value:?}."),
+                )
+                .hint("List them with: sona work saved-prompts")
+            })?;
+        if !picked.contains(&prompt.prompt_id) {
+            picked.push(prompt.prompt_id);
+        }
+    }
+    if picked.len() > MAX_FOLDER_PROMPTS {
+        return Err(ExternalError::invalid(format!(
+            "A folder runs at most {MAX_FOLDER_PROMPTS} saved prompts."
+        )));
+    }
+    Ok(picked)
 }
 
 pub(super) async fn folder_delete(
@@ -1920,6 +2057,8 @@ impl Tracker<'_> {
                             id: folder.folder_id.uuid(),
                             name: folder.name,
                             meeting_count: folder.meeting_count,
+                            template: folder.template,
+                            prompt_ids: folder.prompt_ids.iter().map(|id| id.uuid()).collect(),
                         })
                         .collect(),
                 })
@@ -1929,6 +2068,9 @@ impl Tracker<'_> {
             }
             LibraryVerb::FolderRename(args) => {
                 ExternalLibraryAnswer::Change(folder_rename(meetings, args, &gate).await?)
+            }
+            LibraryVerb::FolderDefaults(args) => {
+                ExternalLibraryAnswer::Change(folder_defaults(meetings, args, &gate).await?)
             }
             LibraryVerb::FolderDelete(args) => {
                 ExternalLibraryAnswer::Change(folder_delete(meetings, args, &gate).await?)
@@ -2010,6 +2152,16 @@ pub(super) fn text(answer: &ExternalLibraryAnswer, text: &mut String) {
                     "{}  ({} meetings)  {}",
                     folder.name, folder.meeting_count, folder.id
                 );
+                if let Some(template) = folder.template {
+                    let _ = writeln!(text, "  notes template: {}", template.label());
+                }
+                match folder.prompt_ids.len() {
+                    0 => {}
+                    1 => text.push_str("  runs 1 saved prompt\n"),
+                    count => {
+                        let _ = writeln!(text, "  runs {count} saved prompts");
+                    }
+                }
             }
         }
         ExternalLibraryAnswer::Notes(notes) => {

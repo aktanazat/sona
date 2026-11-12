@@ -46,6 +46,25 @@ pub struct SubjectNoteArgs {
     pub write: WriteArgs,
 }
 
+#[derive(Args, Clone, Debug, Eq, PartialEq)]
+pub struct SubjectArgs {
+    /// The subject's id, from `sona work subjects`.
+    #[arg(value_name = "SUBJECT_ID")]
+    pub subject: Uuid,
+}
+
+#[derive(Args, Clone, Debug, Eq, PartialEq)]
+pub struct SubjectDeleteArgs {
+    /// The subject's id, from `sona work subjects`. Its notes stay.
+    #[arg(value_name = "SUBJECT_ID")]
+    pub subject: Uuid,
+    /// Print what would be deleted and delete nothing.
+    #[arg(long)]
+    pub dry_run: bool,
+    #[command(flatten)]
+    pub write: WriteArgs,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct ExternalSubject {
     pub id: String,
@@ -54,6 +73,16 @@ pub struct ExternalSubject {
     pub created_at_ms: i64,
     /// The notes under it, newest first; absent in a list.
     pub note_ids: Option<Vec<String>>,
+    /// The same notes with their titles; only from `subject`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notes: Option<Vec<ExternalSubjectNote>>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ExternalSubjectNote {
+    pub id: String,
+    pub title: String,
+    pub updated_at_ms: i64,
 }
 
 fn project_subject(subject: ScratchSubject, page: Option<&ScratchSubjectPage>) -> ExternalSubject {
@@ -63,6 +92,7 @@ fn project_subject(subject: ScratchSubject, page: Option<&ScratchSubjectPage>) -
         current_note_id: subject.current_note_id,
         created_at_ms: subject.created_at_ms,
         note_ids: page.map(|page| page.history.iter().map(|note| note.id.clone()).collect()),
+        notes: None,
     }
 }
 
@@ -70,10 +100,12 @@ fn project_subject(subject: ScratchSubject, page: Option<&ScratchSubjectPage>) -
 #[serde(rename_all = "snake_case")]
 pub enum SubjectAction {
     Listed,
+    Shown,
     Created,
     Added,
     MadeCurrent,
     Removed,
+    Deleted,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -142,6 +174,7 @@ impl Tracker<'_> {
                     current_note_id: None,
                     created_at_ms: 0,
                     note_ids: Some(Vec::new()),
+                    notes: None,
                 }],
             ));
         }
@@ -218,6 +251,76 @@ impl Tracker<'_> {
             vec![project_subject(changed.subject.clone(), Some(&changed))],
         ))
     }
+
+    pub(super) fn subject_show(&self, args: &SubjectArgs) -> Result<WorkAnswer, ExternalError> {
+        let page = self.subject_page(&args.subject.to_string())?;
+        let mut shown = project_subject(page.subject.clone(), Some(&page));
+        shown.notes = Some(
+            page.history
+                .into_iter()
+                .map(|note| ExternalSubjectNote {
+                    id: note.id,
+                    title: note.title,
+                    updated_at_ms: note.updated_at_ms,
+                })
+                .collect(),
+        );
+        Ok(answer(
+            SubjectAction::Shown,
+            false,
+            None,
+            false,
+            vec![shown],
+        ))
+    }
+
+    pub(super) fn subject_delete(
+        &self,
+        args: &SubjectDeleteArgs,
+    ) -> Result<WorkAnswer, ExternalError> {
+        let operation_id = args.write.operation_id("subject-delete", &args.subject)?;
+        let request = request_json(&args.subject)?;
+        match self.receipt(&operation_id, "cli_subject_delete", &request)? {
+            Receipt::New(()) => {}
+            Receipt::Replay(_) => {
+                return Ok(answer(
+                    SubjectAction::Deleted,
+                    false,
+                    Some(operation_id),
+                    true,
+                    Vec::new(),
+                ))
+            }
+            Receipt::Conflict => return Err(conflict(&operation_id)),
+        }
+        let page = self.subject_page(&args.subject.to_string())?;
+        let shown = vec![project_subject(page.subject.clone(), Some(&page))];
+        if args.dry_run {
+            return Ok(answer(
+                SubjectAction::Deleted,
+                true,
+                Some(operation_id),
+                false,
+                shown,
+            ));
+        }
+        self.applies("deleting subjects")?;
+        subjects::scratchpad_subject_delete(self.app.state(), page.subject.id.clone())
+            .map_err(|message| refusal(self.history, message))?;
+        self.file_receipt(
+            &operation_id,
+            "cli_subject_delete",
+            &request,
+            &page.subject.id,
+        )?;
+        Ok(answer(
+            SubjectAction::Deleted,
+            false,
+            Some(operation_id),
+            false,
+            shown,
+        ))
+    }
 }
 
 pub(super) fn text(answer: &WorkAnswer, text: &mut String) {
@@ -225,19 +328,24 @@ pub(super) fn text(answer: &WorkAnswer, text: &mut String) {
         return;
     };
     let verb = match (page.action, page.dry_run, page.replayed) {
-        (SubjectAction::Listed, _, _) => None,
+        (SubjectAction::Listed | SubjectAction::Shown, _, _) => None,
         (SubjectAction::Created, true, _) => Some("Would make the subject"),
         (SubjectAction::Created, false, _) => Some("Made the subject"),
         (SubjectAction::Added, true, _) => Some("Would add the note to"),
         (SubjectAction::MadeCurrent, true, _) => Some("Would make the note current for"),
         (SubjectAction::Removed, true, _) => Some("Would take the note off"),
+        (SubjectAction::Deleted, true, _) => Some("Would delete the subject"),
         (_, false, true) => Some("Already so for"),
         (SubjectAction::Added, false, false) => Some("Added the note to"),
         (SubjectAction::MadeCurrent, false, false) => Some("Made the note current for"),
         (SubjectAction::Removed, false, false) => Some("Took the note off"),
+        (SubjectAction::Deleted, false, false) => Some("Deleted the subject"),
     };
-    if verb.is_none() && page.subjects.is_empty() {
+    if page.action == SubjectAction::Listed && page.subjects.is_empty() {
         text.push_str("No subjects yet. Make one with: sona work subject-new TITLE\n");
+    }
+    if page.action == SubjectAction::Deleted && page.subjects.is_empty() {
+        text.push_str("Deleted the subject (already so)\n");
     }
     for subject in &page.subjects {
         if let Some(verb) = verb {
@@ -254,5 +362,8 @@ pub(super) fn text(answer: &WorkAnswer, text: &mut String) {
             let _ = write!(text, "  {} notes", notes.len());
         }
         text.push('\n');
+        for note in subject.notes.iter().flatten() {
+            let _ = writeln!(text, "  {}  {}", note.id, note.title);
+        }
     }
 }

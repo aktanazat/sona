@@ -3535,6 +3535,12 @@ fn text_response(response: &ExternalResponse) -> String {
             for name in &roster.names {
                 let _ = writeln!(text, "{name}");
             }
+            for suggestion in &roster.suggestions {
+                let _ = writeln!(text, "{} may be {}", suggestion.speaker, suggestion.name);
+            }
+            if !roster.suggestions.is_empty() {
+                text.push_str("Use a name with: sona work speaker-rename MEETING SPEAKER NAME\nTurn one down with: sona work call-name-dismiss MEETING SPEAKER\n");
+            }
             let _ = writeln!(text, "\n{}", roster.link);
         }
         ExternalResponse::Place(page) => match &page.place {

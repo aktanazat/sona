@@ -111,11 +111,11 @@ const CONDITION_SCHEMA = {
 } as const;
 
 /** One JSON-schema property as this server publishes it: a flat string,
- * integer or boolean field, optionally enumerated and bounded, a list of
- * strings, or a list of filter conditions. Typed so readers get the enum
- * without re-parsing the schema. */
+ * number, integer or boolean field, optionally enumerated and bounded, a
+ * list of strings, or a list of filter conditions. Typed so readers get the
+ * enum without re-parsing the schema. */
 export interface ToolProperty {
-  readonly type: "string" | "integer" | "boolean" | "array";
+  readonly type: "string" | "number" | "integer" | "boolean" | "array";
   readonly description: string;
   readonly enum?: readonly string[];
   readonly minimum?: number;
@@ -1287,8 +1287,9 @@ function settingsWrite(verb: string, input: ToolInput, agent: string | undefined
   ];
 }
 
-const APPLIED_WRITES =
-  "It needs Settings > Agents > External access and External mutations, and Agents' changes set to Apply: with access or mutations off Sona refuses with consent_required, and while agents' changes wait for the user it refuses with invalid_request naming the setting. dry_run:true shows the result without writing. Repeating an operation_id, or asking for what is already so, answers replayed:true.";
+const GATED_WRITES =
+  "It needs Settings > Agents > External access and External mutations, and Agents' changes set to Apply: with access or mutations off Sona refuses with consent_required, and while agents' changes wait for the user it refuses with invalid_request naming the setting. dry_run:true shows the result without writing.";
+const APPLIED_WRITES = `${GATED_WRITES} Repeating an operation_id, or asking for what is already so, answers replayed:true.`;
 const LIBRARY_WRITES = `A meeting kept on this Mac answers not_found. ${APPLIED_WRITES}`;
 
 const FOLDER = { type: "string", description: "The folder, by name or by id from sona_meeting_folders." } as const;
@@ -1384,12 +1385,27 @@ function meetingRead(
 const none = (): string[] => [];
 const meetingOnly = (input: ToolInput): string[] => [text(input, "meeting_id", true)];
 
+/** An optional list, one `--flag=value` argument per entry. */
+function each(name: string, input: ToolInput, key: string): string[] {
+  const value = input[key];
+  return value === undefined || value === null ? [] : strings(input, key).map((entry) => `${name}=${entry}`);
+}
+
+/** A coordinate in degrees, as `--lat` and `--lon` take it. Sona bounds it. */
+function degrees(name: string, input: ToolInput, key: string): string[] {
+  const value = input[key];
+  if (value === undefined || value === null) return [];
+  const parsed = z.number().safeParse(value);
+  if (!parsed.success) throw new SonaInputError(`${key} must be a number of degrees.`);
+  return [`${name}=${parsed.data}`];
+}
+
 function meetingLibraryTools(): ToolDefinition[] {
   return [
     meetingRead(
       "sona_meeting_folders",
       "List Sona's meeting folders",
-      "List the folders meetings are filed in, as the meetings list's folder chips show them: each one's id, name and how many meetings it holds.",
+      "List the folders meetings are filed in, as the meetings list's folder chips show them: each one's id, name and how many meetings it holds, and the notes template and saved prompts (prompt_ids) it gives the meetings filed in it.",
       "folders",
       {},
       [],
@@ -1822,6 +1838,258 @@ function meetingLibraryTools(): ToolDefinition[] {
       none,
       (input) => [dictationId(input)],
       APPLIED_WRITES,
+    ),
+    meetingRead(
+      "sona_dictation_receipts",
+      "Read how a Sona dictation was made",
+      "List the runs one dictation went through, oldest first, as its receipt in the Library shows them: when each ran, the mode and model, the context it drew on, its length and word count, and each delivery attempt. The words themselves are left out; sona_dictations has them. A retry names the run it read again. It needs Settings > Agents > External access, the same grant sona_dictations needs.",
+      "dictation-receipts",
+      { dictation_id: DICTATION_ID },
+      ["dictation_id"],
+      none,
+      (input) => [dictationId(input)],
+    ),
+    meetingWrite(
+      "sona_meeting_folder_defaults",
+      "Set what a Sona meeting folder does",
+      "Set a folder's notes template, used for a meeting filed in it when neither the meeting nor its series chose one, and the saved prompts run on each meeting filed in it once its notes are ready. prompts replace the folder's prompts, at most five, in the order given; no_prompts clears them; template none clears the template. Name at least one of template, prompts or no_prompts.",
+      "changes",
+      "folder-defaults",
+      {
+        folder: FOLDER,
+        template: {
+          type: "string",
+          enum: ["general", "one-on-one", "interview", "sales-call", "standup", "none"],
+          description: "A built-in notes template, or none to clear the folder's.",
+        },
+        prompts: {
+          type: "array",
+          items: { type: "string" },
+          description: "Saved meeting prompts, by name or id from sona_saved_prompts, in the order they run.",
+        },
+        no_prompts: { type: "boolean", description: "Run no saved prompts on the folder's meetings." },
+      },
+      ["folder"],
+      (input) => [
+        ...assigned("--template", text(input, "template")),
+        ...each("--prompt", input, "prompts"),
+        ...(flag(input, "no_prompts") ? ["--no-prompts"] : []),
+      ],
+      (input) => [text(input, "folder", true)],
+      APPLIED_WRITES,
+    ),
+    meetingRead(
+      "sona_meeting_templates",
+      "List the user's Sona notes templates",
+      "List the user's own notes templates: each one's id, name, purpose and sections. sona_series_template's custom takes these ids.",
+      "meeting-templates",
+      {},
+      [],
+      none,
+      none,
+    ),
+    meetingWrite(
+      "sona_meeting_template_save",
+      "Write a Sona notes template",
+      "Write one of the user's notes templates, as the template editor does: the template with this name is rewritten, or the one template names when name renames it, and otherwise a new one is made. A name is one line of at most 60 characters; Sona keeps at most 50 templates.",
+      "changes",
+      "meeting-template-save",
+      {
+        name: { type: "string", description: "The template's name." },
+        sections: {
+          type: "array",
+          items: { type: "string" },
+          description: "The headings the notes are arranged under, in order, one to eight: \"TITLE\", or \"TITLE: what goes under it\".",
+        },
+        purpose: { type: "string", description: "What the template is for; the notes never show it. Left out, a rewrite keeps its purpose." },
+        template: { type: "string", description: "The template to rewrite, by name or id from sona_meeting_templates, when name renames it." },
+      },
+      ["name", "sections"],
+      (input) => [
+        ...each("--section", input, "sections"),
+        ...assigned("--purpose", text(input, "purpose")),
+        ...assigned("--template", text(input, "template")),
+      ],
+      (input) => [text(input, "name", true)],
+      APPLIED_WRITES,
+    ),
+    meetingWrite(
+      "sona_meeting_template_delete",
+      "Delete a Sona notes template",
+      "Delete one of the user's notes templates. Where it was chosen, the built-in template chosen with it is used. Nothing brings it back.",
+      "destroys",
+      "meeting-template-delete",
+      { template: { type: "string", description: "The template, by name or id from sona_meeting_templates." } },
+      ["template"],
+      none,
+      (input) => [text(input, "template", true)],
+      `${GATED_WRITES} Repeating an operation_id answers replayed:true; without one, a repeat once it is gone answers not_found.`,
+    ),
+    meetingRead(
+      "sona_series_automations",
+      "List what Sona's meeting series do after a meeting",
+      "List the calendar series and what each one does once a meeting's notes are ready: write Reminders, run a Shortcut, send a webhook (shown by its host only) or run a saved prompt, each with whether it is on. These are not sona_automation_list's agent automations. Series kept on this Mac are left out, and series_left_out says when one was. Setting them up stays in the app.",
+      "series-automations",
+      {},
+      [],
+      none,
+      none,
+    ),
+    meetingRead(
+      "sona_series_automation_runs",
+      "Read what ran after a Sona meeting",
+      "List what one meeting's series automations did once its notes were ready: each run's kind, state, failure, a one-line detail, how many things it made, and when it started and finished.",
+      "series-automation-runs",
+      { meeting_id: MEETING_ID },
+      ["meeting_id"],
+      none,
+      meetingOnly,
+    ),
+    meetingRead(
+      "sona_meeting_analytics",
+      "Read how a Sona meeting's conversation went",
+      "Read how a meeting's conversation went, as its page's analytics show it: each speaker's share of the talking, turns and longest monologue, how often the speakers switched, and how many times each keyword tracker was heard, with the lines. Reading it may work the numbers out first, as opening the page does.",
+      "meeting-analytics",
+      { meeting_id: MEETING_ID },
+      ["meeting_id"],
+      none,
+      meetingOnly,
+    ),
+    meetingRead(
+      "sona_meeting_people",
+      "Read what came before a Sona meeting with each person",
+      "List the people in a meeting and what came before it with each, as its page's people show them: how many meetings came before, the last one, and the top open item. Meetings kept on this Mac are left out of the count, the last one and the open item.",
+      "meeting-people",
+      { meeting_id: MEETING_ID },
+      ["meeting_id"],
+      none,
+      meetingOnly,
+    ),
+    meetingRead(
+      "sona_meeting_questions",
+      "Read the questions asked of a Sona meeting",
+      "List the questions asked of a meeting, each with its id, answer, state and the lines it cites. A question that reads a meeting kept on this Mac is left out, and left_out says so.",
+      "meeting-questions",
+      { meeting_id: MEETING_ID },
+      ["meeting_id"],
+      none,
+      meetingOnly,
+    ),
+    meetingWrite(
+      "sona_meeting_question_forget",
+      "Forget a question asked of a Sona meeting",
+      "Forget a question asked of a meeting, and its answer. Nothing brings it back.",
+      "destroys",
+      "meeting-question-forget",
+      {
+        meeting_id: MEETING_ID,
+        question_id: { type: "string", description: "The question's id from sona_meeting_questions." },
+      },
+      ["meeting_id", "question_id"],
+      none,
+      (input) => [text(input, "meeting_id", true), text(input, "question_id", true)],
+    ),
+    meetingRead(
+      "sona_meeting_links",
+      "List the links kept from a Sona meeting",
+      "List the links kept from the windows that were in front while a meeting recorded, as its page shows them, each with its id.",
+      "meeting-links",
+      { meeting_id: MEETING_ID },
+      ["meeting_id"],
+      none,
+      meetingOnly,
+    ),
+    meetingWrite(
+      "sona_meeting_link_remove",
+      "Remove a link from a Sona meeting",
+      "Remove one of a meeting's links. Nothing brings it back.",
+      "destroys",
+      "meeting-link-remove",
+      {
+        meeting_id: MEETING_ID,
+        link_id: { type: "string", description: "The link's id from sona_meeting_links." },
+      },
+      ["meeting_id", "link_id"],
+      none,
+      (input) => [text(input, "meeting_id", true), text(input, "link_id", true)],
+    ),
+    meetingWrite(
+      "sona_meeting_context",
+      "Say what kind of Sona meeting it was, or where",
+      "Set what kind of conversation a meeting was, where it happened, or both, as the kind and place on its page do. A place needs its name, lat and lon; no_place takes the place off. Name at least one of kind, place or no_place.",
+      "changes",
+      "meeting-context",
+      {
+        meeting_id: MEETING_ID,
+        kind: {
+          type: "string",
+          enum: ["unspecified", "huddle", "online-call", "in-person", "note-session", "imported"],
+          description: "What kind of conversation it was; unspecified is a plain conversation.",
+        },
+        place: { type: "string", description: "Where it happened, by name. Give lat and lon with it." },
+        lat: { type: "number", minimum: -90, maximum: 90, description: "The place's latitude in degrees." },
+        lon: { type: "number", minimum: -180, maximum: 180, description: "The place's longitude in degrees." },
+        no_place: { type: "boolean", description: "Take the place off the meeting." },
+      },
+      ["meeting_id"],
+      (input) => [
+        ...assigned("--kind", text(input, "kind")),
+        ...assigned("--place", text(input, "place")),
+        ...degrees("--lat", input, "lat"),
+        ...degrees("--lon", input, "lon"),
+        ...(flag(input, "no_place") ? ["--no-place"] : []),
+      ],
+      meetingOnly,
+    ),
+    meetingRead(
+      "sona_context_suggestions",
+      "Read what a Sona recording may be",
+      "List the maybes waiting on one recording: the event, person, project, kind, place or earlier plan it may be, each with the id sona_filing takes. Maybes drawn on a meeting kept on this Mac are left out, and so is a place only such a meeting saved. Reading them may work out new ones first, as opening the recording does.",
+      "context-suggestions",
+      { meeting_id: MEETING_ID },
+      ["meeting_id"],
+      none,
+      meetingOnly,
+    ),
+    meetingRead(
+      "sona_untracked_actions",
+      "List meeting commitments no Sona task tracks",
+      "List commitments from finished meetings that no task tracks yet and nobody set aside, by meeting: each one's loop_id for sona_planning_track_action, what it says, who owes it, the words it came from and when. meeting_id narrows it to one meeting. Meetings kept on this Mac are left out.",
+      "untracked",
+      { meeting_id: MEETING_ID },
+      [],
+      none,
+      (input) => {
+        const meeting = text(input, "meeting_id");
+        return meeting === null ? [] : [meeting];
+      },
+    ),
+    meetingWrite(
+      "sona_call_name_dismiss",
+      "Turn down a name a call offered in Sona",
+      "Turn down the name a call offered for one of a meeting's speakers, so the meeting's page stops offering it. When the call offers no name for that speaker, it answers replayed:true.",
+      "changes",
+      "call-name-dismiss",
+      { meeting_id: MEETING_ID, speaker: SPEAKER },
+      ["meeting_id", "speaker"],
+      none,
+      (input) => [text(input, "meeting_id", true), text(input, "speaker", true)],
+    ),
+    meetingWrite(
+      "sona_document_marked_copy",
+      "Save a marked copy of a PDF in a Sona meeting",
+      "Save a copy of a PDF added to a meeting with each passage that differs from what was said marked, and a note beside it saying who said what, when, in which meeting, as the document's marked copy in the app does. Only a PDF with differences in sona_documents can be marked; a difference with no page is left unmarked.",
+      "changes",
+      "doc-marked-copy",
+      {
+        document_id: { type: "string", description: "The PDF's id from sona_documents with meeting_id." },
+        meeting_id: MEETING_ID,
+        out: { ...OUT, description: "Absolute path of the .pdf to write; Sona replaces it whole." },
+      },
+      ["document_id", "meeting_id", "out"],
+      (input) => [`--meeting=${text(input, "meeting_id", true)}`, `--out=${text(input, "out", true)}`],
+      (input) => [text(input, "document_id", true)],
+      `A meeting kept on this Mac answers not_found. ${GATED_WRITES} Each call saves the file again.`,
     ),
   ];
 }
@@ -5209,7 +5477,7 @@ export const TOOLS: readonly ToolDefinition[] = [
     name: "sona_meeting_get",
     title: "Read a Sona meeting with its commitments",
     description:
-      "Read one meeting: its summary, the commitments it left with who owes them, its speakers under meeting_speakers with the speaker_id sona_speaker_assign takes and needs_name for the ones nobody has named, and with transcript:true every line with who said it.",
+      "Read one meeting: its summary, the commitments it left with who owes them, the folders it is in, its speakers under meeting_speakers with the speaker_id sona_speaker_assign takes and needs_name for the ones nobody has named, and with transcript:true every line with who said it.",
     inputSchema: {
       type: "object",
       properties: {
@@ -5889,6 +6157,79 @@ export const TOOLS: readonly ToolDefinition[] = [
         text(input, "note_id", true),
       ];
     },
+  },
+  {
+    name: "sona_scratchpad_passage",
+    title: "Keep a Sona meeting passage as a note",
+    description: `Keep words from one transcript line as a new note linked to the meeting, and with person to whoever said them, as the transcript's Save passage does. A meeting kept on this Mac answers not_found. ${NOTE_WRITES}`,
+    mutates: "changes",
+    optIn: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        meeting_id: MEETING_ID,
+        line_id: LINE_ID,
+        excerpt: { type: "string", description: "The words to keep, as the line reads them, raw or corrected." },
+        person: { ...PERSON, description: "Link the person who said them too, by name or id from sona_person_list." },
+        body: { type: "string", description: "The note's text. Left out, the note says where the passage is." },
+        dry_run: DRY_RUN,
+        operation_id: { ...OPERATION_ID, description: NOTE_OPERATION },
+      },
+      required: ["meeting_id", "line_id", "excerpt"],
+      additionalProperties: false,
+    },
+    argv: (input, agent) => [
+      "work",
+      "note-passage",
+      `--excerpt=${text(input, "excerpt", true)}`,
+      ...assigned("--person", text(input, "person")),
+      ...assigned("--body", text(input, "body")),
+      ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+      ...writing(input, agent),
+      "--json",
+      "--",
+      text(input, "meeting_id", true),
+      text(input, "line_id", true),
+    ],
+  },
+  {
+    name: "sona_scratchpad_subject",
+    title: "Read a Sona note subject",
+    description: "Read one subject: its current note and every note under it, newest first, each with its id and title.",
+    optIn: true,
+    inputSchema: {
+      type: "object",
+      properties: { subject_id: { type: "string", description: "A subject's id from sona_scratchpad_subjects." } },
+      required: ["subject_id"],
+      additionalProperties: false,
+    },
+    argv: (input) => ["work", "subject", "--json", "--", text(input, "subject_id", true)],
+  },
+  {
+    name: "sona_scratchpad_subject_delete",
+    title: "Delete a Sona note subject",
+    description: `Delete a subject. Its notes stay, no longer gathered under it; nothing brings the subject back. Repeating the call answers replayed:true. ${NOTE_WRITES}`,
+    mutates: "destroys",
+    optIn: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        subject_id: { type: "string", description: "A subject's id from sona_scratchpad_subjects." },
+        dry_run: DRY_RUN,
+        operation_id: OPERATION_ID,
+      },
+      required: ["subject_id"],
+      additionalProperties: false,
+    },
+    argv: (input, agent) => [
+      "work",
+      "subject-delete",
+      ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+      ...writing(input, agent),
+      "--json",
+      "--",
+      text(input, "subject_id", true),
+    ],
   },
   {
     name: "sona_work_parse",
@@ -7291,20 +7632,28 @@ export const TOOLS: readonly ToolDefinition[] = [
     name: "sona_evening",
     title: "Read today's evening card",
     description:
-      "Today's evening card: the lines Sona wrote about the day, and recordings waiting to be filed, each with suggestions of where it may belong. Lines drawn on a meeting kept on this Mac are left out, and lines_left_out says so.",
+      "Today's evening card: the lines Sona wrote about the day, and recordings waiting to be filed, each with suggestions of where it may belong. Lines drawn on a meeting kept on this Mac are left out, and lines_left_out says so. Suggestions leave out a place only such a meeting saved.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     argv: () => ["work", "evening", "--json"],
   },
   {
     name: "sona_filing",
     title: "File a recording from the evening card",
-    description: `File a recording where one suggestion from sona_evening says, or turn the suggestion down for good with decline. ${SETTINGS_STORE_WRITES}`,
+    description: `File a recording where one suggestion from sona_evening or sona_context_suggestions says, or turn the suggestion down for good with decline. For a suggestion that it is an earlier plan's meeting, title, people, no_people and no_place change what it is kept as, and a place the suggestion was read without is not saved. ${SETTINGS_STORE_WRITES}`,
     mutates: "changes",
     inputSchema: {
       type: "object",
       properties: {
-        suggestion: { type: "string", description: "The suggestion's id, from sona_evening." },
+        suggestion: { type: "string", description: "The suggestion's id, from sona_evening or sona_context_suggestions." },
         decline: { type: "boolean", description: "Turn the suggestion down for good." },
+        title: { type: "string", description: "For a meeting maybe: keep the recording under this title instead of the plan's." },
+        people: {
+          type: "array",
+          items: { type: "string" },
+          description: "For a meeting maybe: the people to link, by name or id as sona_context_suggestions lists them; the maybe's others are not linked.",
+        },
+        no_people: { type: "boolean", description: "For a meeting maybe: link none of its people." },
+        no_place: { type: "boolean", description: "For a meeting maybe: keep it without the place it found." },
         dry_run: DRY_RUN,
         operation_id: SETTINGS_OPERATION_ID,
       },
@@ -7314,6 +7663,10 @@ export const TOOLS: readonly ToolDefinition[] = [
     argv: (input, agent) => [
       ...settingsWrite("filing", input, agent),
       ...(flag(input, "decline") ? ["--decline"] : []),
+      ...assigned("--title", text(input, "title")),
+      ...each("--person", input, "people"),
+      ...(flag(input, "no_people") ? ["--no-people"] : []),
+      ...(flag(input, "no_place") ? ["--no-place"] : []),
       "--",
       text(input, "suggestion", true),
     ],

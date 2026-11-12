@@ -101,10 +101,22 @@ impl MeetingStore {
         &self,
         meeting_id: MeetingSessionId,
     ) -> Result<MeetingPeopleContextResult, StoreError> {
+        self.meeting_people_context_without(meeting_id, &HashSet::new())
+    }
+
+    /// The people in a meeting for a reader the `hidden` meetings are kept
+    /// from: they count among nobody's earlier meetings, and none is anyone's
+    /// last meeting or the source of an open item.
+    pub(crate) fn meeting_people_context_without(
+        &self,
+        meeting_id: MeetingSessionId,
+        hidden: &HashSet<MeetingSessionId>,
+    ) -> Result<MeetingPeopleContextResult, StoreError> {
         let user_name = self.user_name();
         let mut connection = self.connection()?;
         let transaction = connection.transaction()?;
-        let result = meeting_people_context_in(&transaction, meeting_id, user_name.as_deref())?;
+        let result =
+            meeting_people_context_in(&transaction, meeting_id, hidden, user_name.as_deref())?;
         transaction.commit()?;
         Ok(result)
     }
@@ -615,6 +627,7 @@ fn companies_list_in(
 fn meeting_people_context_in(
     connection: &Connection,
     meeting_id: MeetingSessionId,
+    hidden: &HashSet<MeetingSessionId>,
     user_name: Option<&str>,
 ) -> Result<MeetingPeopleContextResult, StoreError> {
     let revision = people_revision_in(connection)?;
@@ -640,6 +653,12 @@ fn meeting_people_context_in(
         let person = person_by_id_in(connection, person_id)?;
         let mut facts = facts_for_person_in(connection, &person, user_name)?;
         gate_continuity_facts_in(connection, &mut facts)?;
+        facts
+            .meetings
+            .retain(|meeting| !hidden.contains(&meeting.id));
+        facts
+            .open_loops
+            .retain(|open| !hidden.contains(&open.meeting_id));
         // The facts list runs newest first with a fixed tie-break, so the
         // meetings before this one are the ones after it in that list. A
         // later meeting must not pass for an earlier one: the oldest of

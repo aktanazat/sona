@@ -269,16 +269,26 @@ The MCP column says whether an agent over MCP can do it; `—` means no tool.
 | List meetings, time window | `meeting_list` | `work meetings [--since --limit]`, `sona --meetings --last --from --to` | `sona_meeting_list`, `sona_meetings` | both |
 | Title search, status filter, folder chips | `meeting_list` | `work meetings --title --status --folder` | `sona_meeting_list` (`title`, `status`, `folder`) | both |
 | Open a meeting: notes, ledger, transcript | `meeting_get` | `work meeting ID [--transcript]`, `sona --meeting ID`, `sona --transcript ID` | `sona_meeting_get`, `sona_meeting`, `sona_transcript` | both |
+| How the conversation went: talk share, turns, longest monologue, keyword tracker hits | `get_meeting_analytics` | `work meeting-analytics MEETING` | `sona_meeting_analytics` | both |
+| People in a meeting and what came before with each | `meeting_people_context` | `work meeting-people MEETING` | `sona_meeting_people` | both (meetings kept on this Mac are left out of the count, the last one and the open item) |
+| Questions asked of a meeting: read, forget | `meeting_get` (`questions`), `meeting_question_forget` | `work meeting-questions MEETING`, `work meeting-question-forget MEETING QUESTION_ID` | `sona_meeting_questions`, `sona_meeting_question_forget` *(opt-in, destructive)* | both (a question that reads a meeting kept on this Mac is left out) |
+| Links kept from the windows in front while recording: list, remove | `meeting_open_windows`, `meeting_open_window_remove` | `work meeting-links MEETING`, `work meeting-link-remove MEETING LINK_ID` | `sona_meeting_links`, `sona_meeting_link_remove` *(opt-in, destructive)* | both (links kept on the meeting; a window offered while recording stays in the app) |
 | Wrap up, write the follow-up | `meeting_wrap`, `meeting_follow_up_draft`, `work_follow_up` | `work follow-up MEETING` | `sona_work_follow_up` | both |
 | Post the follow-up to a connection | `work_follow_up_post` | — | — | UI-only by design: sends in the owner's name to Slack, and the core allows it only on his keypress |
 | Ledger loops: read, done, drop | `meeting_loops`, `meeting_loop_resolve` | `sona --loops`, `sona --loop-resolve LOOP_ID` | `sona_action_items`, `sona_loop_resolve` | both |
 | Loop reopen, loop owner | `meeting_loop_reopen`, `meeting_loop_assign` | `work loop-reopen LOOP_ID`, `work loop-owner LOOP_ID --owner PERSON\|none` | `sona_meeting_loop_reopen`, `sona_meeting_loop_assign` *(opt-in)* | both |
 | Live card Accept / Decline | `work_triage_accept`, `work_triage_decline` | `work accept`, `work decline` | `sona_work_triage` | both |
 | Untracked action: Track, Dismiss, Restore | `planning_track_action`, `planning_dismiss_action`, `planning_restore_action` | `work action-track LOOP_ID --project P`, `work action-dismiss LOOP_ID`, `work action-restore LOOP_ID` | `sona_planning_track_action`, `sona_planning_dismiss_action`, `sona_planning_restore_action` *(opt-in)* | both |
+| Untracked actions: list | `meeting_untracked_actions` | `work untracked [MEETING]` | `sona_untracked_actions` | both (meetings kept on this Mac are left out) |
 | Who was in the call; place; bookmarks; heard plans | `meeting_call_name_status`, `conversation_place_review`, `meeting_heard_plans` | `sona --roster ID`, `--place ID`, `--bookmarks`, `--plans` | `sona_roster`, `sona_place`, `sona_bookmarks`, `sona_plans` | both |
+| Turn down a name the call offered | `meeting_call_name_dismiss` | `work call-name-dismiss MEETING SPEAKER` | `sona_call_name_dismiss` *(opt-in)* | both |
+| A meeting's kind and place | `conversation_context_update` | `work meeting-context MEETING [--kind K] [--place NAME --lat N --lon N \| --no-place]` | `sona_meeting_context` *(opt-in)* | both |
+| What a recording may be: read, keep, change, turn down | `context_suggestions`, `context_suggestion_decide` | `work context-suggestions MEETING`, `work filing ID [--decline] [--title T] [--person P]… [--no-people] [--no-place]` | `sona_context_suggestions`, `sona_filing` | both (maybes drawn on a meeting kept on this Mac are left out, and so is a place only such a meeting saved, which filing then does not save) |
 | Upcoming meetings | `meeting_upcoming_events` | `sona --upcoming` | `sona_upcoming` | both |
 | Rename a meeting | `meeting_title_set` | `work meeting-rename` | `sona_meeting_rename` *(opt-in)* | both |
 | Folders: create, rename, delete, add a meeting | `meeting_folder_create`, `meeting_folder_rename`, `meeting_folder_delete`, `meeting_folder_add_meeting` | `work folders`, `work folder-new`, `work folder-rename`, `work folder-delete`, `work folder-add`, `work folder-remove` | `sona_meeting_folders`, `sona_meeting_folder_new`/`_rename`/`_delete`, `sona_meeting_file`/`unfile` *(writes opt-in)* | both |
+| Folder defaults: the notes template and saved prompts a folder gives its meetings | `meeting_folder_set_defaults` | `work folder-defaults FOLDER [--template T] [--prompt P]… [--no-prompts]`; `work folders` shows `template` and `prompt_ids` | `sona_meeting_folder_defaults` *(opt-in)*, `sona_meeting_folders` | both |
+| Folders a meeting is in | `meeting_folders_for_session` | `work meeting ID` (`folders`) | `sona_meeting_get` (`folders`) | both |
 | Delete, trash, restore, delete forever | `meeting_delete`, `meeting_trash_list`, `meeting_trash_restore`, `meeting_trash_delete_forever` | `work meeting-delete`, `work meeting-trash`, `work meeting-restore ENTRY`, `work meeting-delete-forever ENTRY` | `sona_meeting_delete` *(opt-in, destructive)*, `sona_meeting_trash`, `sona_meeting_restore` *(opt-in)*, `sona_meeting_delete_forever` *(opt-in, destructive)* | both (a meeting kept on this Mac stays out of the trash list and answers not_found) |
 | Export Markdown/JSON, all as CSV, ledger HTML | `meeting_export`, `meeting_export_all_csv`, `produce_ledger_html` | `work meeting-export --format --out`, `work meetings-csv [--out]`, `work meeting-ledger [--out]` | `sona_meeting_export` *(opt-in)*, `sona_meetings_csv`, `sona_meeting_ledger` | both |
 | Write the notes again, catch me up, rewrite with my notes | `meeting_artifacts_regenerate`, `meeting_catch_up`, `reenhance_meeting_with_notes` | — | — | window-bound: runs the notes model through the app's meeting processing |
@@ -286,6 +296,7 @@ The MCP column says whether an agent over MCP can do it; `—` means no tool.
 | Meeting notes and my notes; action item done | `meeting_note_create`, `meeting_note_update`, `meeting_note_delete`, `save_meeting_user_notes`, `set_action_item_done` | `work meeting-notes`, `work meeting-note-add`/`-edit`/`-delete`, `work my-notes`, `work action-done [--undo]` | `sona_meeting_notes`, `sona_meeting_note_add`/`_edit`/`_delete`, `sona_meeting_my_notes`, `sona_meeting_action_done` *(writes opt-in)* | both |
 | Ask about one meeting or one folder | `sona_query_pack` | `work ask-pack QUESTION [--folder F]` returns the same evidence pack; the model answer runs in the app's agent panel (window-bound), so the calling agent answers from the pack. One meeting: the app's "ask about this meeting" sends the same unscoped pack, and `work meeting ID --transcript` reads that meeting whole | `sona_ask_pack` | both |
 | Documents: add, list, delete | `doc_ingest`, `doc_list`, `doc_delete` | `work docs [--person P \| --meeting ID]`, `work doc-add PATH [--meeting ID]`, `work doc-delete ID` | `sona_documents`, `sona_document_add` *(opt-in)*, `sona_document_delete` *(opt-in)* | both |
+| Save a marked copy of a meeting's PDF | `doc_marked_copy` | `work doc-marked-copy DOCUMENT_ID --meeting MEETING --out FILE.pdf` | `sona_document_marked_copy` *(opt-in)* | both (marks each difference that has a page, with the app's note) |
 | Import a recording or transcript into the library | `meeting_import_recording`, `meeting_import_transcript` | — (`sona -f WAV` transcribes without saving) | — | window-bound: import hands the meeting to the app's transcription and notes processing, which a one-shot CLI would cut off |
 | Share links: create, revoke | `cloud_share_create`, `cloud_share_revoke` | — | — | window-bound: a share is sealed with the sync keys and uploaded by the app's cloud sync runtime, which the CLI process does not run |
 | One meeting's sync state and its share links | `cloud_sync_meeting_status_get`, `cloud_share_list` | `work sync --meeting ID` | `sona_sync` (`meeting_id`) | both (kind, expiry and state of each share, never its link; a meeting kept on this Mac answers not_found) |
@@ -304,14 +315,17 @@ The MCP column says whether an agent over MCP can do it; `—` means no tool.
 | Notes: delete, restore a version | `scratchpad_delete`, `scratchpad_restore_version` | `work note-delete ID`, `work note-restore ID VERSION` | `sona_scratchpad_delete` *(opt-in, destructive)*, `sona_scratchpad_restore_version` *(opt-in)* | both |
 | Notes: link a meeting, person or note as a source | `scratchpad_link` | `work note-link ID --meeting\|--person\|--note ID\|--cycle N` | `sona_scratchpad_link` *(opt-in)* | both |
 | Notes: unlink a source, subjects | `scratchpad_unlink`, `scratchpad_subjects`, `scratchpad_subject_create`, `scratchpad_subject_note` | `work note-unlink ID --meeting\|--person\|--note ID`, `work subjects`, `work subject-new TITLE`, `work subject-note SUBJECT NOTE [--current\|--remove]` | `sona_scratchpad_unlink`, `sona_scratchpad_subjects`, `sona_scratchpad_subject_create`, `sona_scratchpad_subject_note` *(opt-in)* | both |
+| Notes: save a transcript passage | `scratchpad_capture_passage` | `work note-passage MEETING LINE --excerpt WORDS [--person P] [--body T]` | `sona_scratchpad_passage` *(opt-in)* | both |
+| Notes: one subject's page, delete a subject | `scratchpad_subject`, `scratchpad_subject_delete` | `work subject SUBJECT_ID`, `work subject-delete SUBJECT_ID` | `sona_scratchpad_subject`, `sona_scratchpad_subject_delete` *(opt-in, destructive)* | both (deleting a subject keeps its notes) |
 | Notes: synthesis | `scratchpad_synthesize` | — | — | window-bound: runs the local model inside the app |
 | Palette corpus search; events | `sona_query_search`, `sona_query_events` | `sona --query T [--scope]`, `sona --events` | `sona_search`, `sona_events` | both |
 | One search over tasks and meeting text; a task matches its title, details or comments; meetings kept on this Mac, and tasks drawn from them, stay out of agent results | `sona_query_search` (scope `all` or `tasks`; the palette lists task hits its own list missed) | `sona --query T [--scope tasks]`; `work list --search T` also reads comments | `sona_search` (`scope`: `all` or `tasks`), `sona_work_list` (`search`) | both |
 | Said lines, on-screen text, in-meeting search | `meeting_said_search`, `meeting_snapshot_text_search`, `meeting_search` | `work said`, `work screen-text`, `work meeting-search` | `sona_said_search`, `sona_screen_text_search`, `sona_meeting_search` | both |
 | Dictation history: search, totals | `search_history_entries`, `get_history_stats` | `sona --query T --scope dictations`, `sona --stats` | `sona_search`, `sona_stats` | both |
 | Dictation history: list, save, delete | `get_history_entries`, `toggle_history_entry_saved`, `delete_history_entry` | `work dictations [--search T] [--before ID]`, `work dictation-save ID [--unsave]`, `work dictation-delete ID` | `sona_dictations`, `sona_dictation_save` *(opt-in)*, `sona_dictation_delete` *(opt-in, destructive)* | both (reading needs the same External access grant as `--query --scope dictations`) |
+| Dictation history: a dictation's receipt | `get_history_run_receipts` | `work dictation-receipts ID` | `sona_dictation_receipts` | both (no words; the same External access grant as `work dictations`) |
 | Dictation history: process again, transcribe again | `reprocess_history_entry`, `retry_history_entry_transcription` | — | — | window-bound: both rerun the app's speech and cleanup models on the recording, which the CLI process does not load |
-| Evening digest settings; evening card; filing | `change_meeting_digest_enabled_setting`, `change_meeting_digest_minute_of_day_setting`, `home_evening`, `home_evening_write`, `filing_decide` | `work setting evening-digest true\|false`, `work setting evening-digest-time HH:MM`, `work evening`, `work filing ID [--decline]` | `sona_setting`, `sona_evening`, `sona_filing` | both (setting and its time, card, filing; the card leaves out lines, recordings and suggestions from a meeting kept on this Mac); writing the lines now is window-bound: the local AI model runs inside the app |
+| Evening digest settings; evening card; filing | `change_meeting_digest_enabled_setting`, `change_meeting_digest_minute_of_day_setting`, `home_evening`, `home_evening_write`, `filing_decide` | `work setting evening-digest true\|false`, `work setting evening-digest-time HH:MM`, `work evening`, `work filing ID [--decline]` | `sona_setting`, `sona_evening`, `sona_filing` | both (setting and its time, card, filing; the card leaves out lines, recordings and suggestions from a meeting kept on this Mac, and a place only such a meeting saved); writing the lines now is window-bound: the local AI model runs inside the app |
 | Close a task when its sub-tasks are done (off by default) | `change_work_close_parents_setting` (Settings › Agents › Changes to your tasks) | `work setting auto-close-parents true\|false` | `sona_setting` (`auto-close-parents`) | both |
 | Weekly project digest in the inbox: each planned, active or paused project's status, latest update, tasks done that week and risks (on by default, Monday 9:00; work from meetings kept on this Mac left out) | Inbox row "Weekly project digest", Return or Space opens it beside the list (`work_inbox`); Settings › Tasks › Weekly digest (`change_work_digest_setting`) | `work digest [--dry-run]`, `work inbox`; `work setting project-digest true\|false`, `work setting project-digest-day monday…sunday` | `sona_work_digest` (`dry_run`) *(opt-in)*, `sona_work_inbox`; `sona_setting` (`project-digest`, `project-digest-day`) | both |
 | Recording and meeting retention | `update_recording_retention_period`, `meeting_retention_set` | — | — | UI-only by design: privacy retention |
@@ -360,6 +374,8 @@ The MCP column says whether an agent over MCP can do it; `—` means no tool.
 | Workflows: runs per day | `workflow_run_trend` | `work workflows --trend` | `sona_workflows` (`trend`) | both |
 | Meeting prep preferences | `meeting_prep_preferences_get`, `meeting_prep_preferences_set` | `work settings`, `work setting meeting-prep JSON` | `sona_settings`, `sona_setting` | both (the mail and web research switches stay UI-only by design: consent) |
 | Keyword trackers; series template and digest | `list_keyword_trackers`, `save_keyword_trackers`, `meeting_series_template_set`, `meeting_series_digest_set` | `work setting keyword-trackers JSON`, `work series MEETING_ID`, `work series-template MEETING_ID TEMPLATE`, `work series-digest MEETING_ID [--off]` | `sona_setting`, `sona_series`, `sona_series_template`, `sona_series_digest` | both |
+| Notes templates: list, save, delete | `meeting_custom_templates_list`, `meeting_custom_template_save`, `meeting_custom_template_delete` | `work meeting-templates`, `work meeting-template-save NAME --section S… [--purpose T] [--template ID]`, `work meeting-template-delete TEMPLATE` | `sona_meeting_templates`, `sona_meeting_template_save` *(opt-in)*, `sona_meeting_template_delete` *(opt-in, destructive)* | both |
+| Meeting series automations: what each series does, what ran after a meeting | `meeting_automation_roster`, `meeting_automation_runs` | `work series-automations`, `work series-automation-runs MEETING` | `sona_series_automations`, `sona_series_automation_runs` | both (reads; a webhook shows its host only, series kept on this Mac are left out); turning one on stays UI-only by design: it asks for Reminders, runs a Shortcut or sends a webhook |
 | Learn or forget my voice | `voice_user_learn`, `voice_user_forget` | — | — | UI-only by design: biometric consent |
 | Web research key | `meeting_web_research_key_set`, `meeting_web_research_key_remove` | — | — | UI-only by design: secret |
 | Agents: external access, mutations, autonomy, folders, permission rules, replies | `set_agent_bridge_master`, `change_work_agent_changes_setting`, `authorize_agent_bridge_project`, `create_agent_bridge_permission_rule`, `confirm_agent_bridge_reply` | — | — | UI-only by design: the gate the CLI itself sits behind |
@@ -418,10 +434,12 @@ Meetings. The core keeps its loop names (`work_loop*`, `planning_loop*`).
 
 ## Missing
 
-None. Checked 2026-11-11: every `work` verb this table names is in
-`sona work --help`, and every MCP tool it names is in `TOOLS` in
-`tools/sona-mcp/src/tools.ts`. The `missing` rows in the inventories beside
-this file are their state when they were written; this table is current.
+None. Checked 2026-11-11 in three ways: every `missing` row in the
+inventories beside this file was tied by its bridge method to a row in these
+tables or in "Inventory rows the tables above don't name" below; every `work`
+verb named here is in `sona work --help`; every MCP tool named here is in
+`TOOLS` in `tools/sona-mcp/src/tools.ts`. The inventories keep their original
+`missing` labels as the starting state.
 
 MCP gaps where the CLI already has the verb: `work snooze` (reachable as
 `sona_work_update` `snooze_until`), `work project-update-draft` (draft
@@ -429,16 +447,108 @@ without posting), and every top-level `sona` dictation or file flag.
 Planning tools for cycles, labels, views, watches, deletes and archive are
 opt-in only.
 
+## Inventory rows the tables above don't name
+
+Each `missing` row in the two older inventories was tied to a row above by its
+bridge method. These are the rows no table above names, each with the verb that
+covers it or the reason it stays in the app. The location is the inventory file
+and line.
+
+| UI action | bridge method | CLI and MCP, or reason | status |
+|---|---|---|---|
+| open chat sheet (load status, history, settings, models) (chat-settings-rest:18) | agent_panel_status, agent_chat_history_list, get_app_settings, agent_panel_models | chat runtime and relay live in the app (README Chat rows 322-324); the settings part is `work settings` | window-bound |
+| mode picker Ask / Configure / Plan (chat-settings-rest:19) | none (sets workspace sent with each turn) | per-turn chat state, nothing stored | window-bound |
+| Send in Configure (settings change by talking) (chat-settings-rest:21) | agent_panel_send_turn (workspace sona_config) | remote chat turn (README 322); the changes it proposes are applied by UI-only apply_change; the same settings can be set directly with `work setting KEY VALUE` | window-bound |
+| notice Retry (re-read panel) (chat-settings-rest:25) | agent_panel_test_connection + agent_panel_status | live relay test (README 360) | window-bound |
+| folder scope "Remove" (chat-settings-rest:28) | none (clears folder_id for next turn) | per-turn scope state; scoping itself is `work ask-pack --folder F` (`sona_ask_pack.folder`), leaving it out = removed | window-bound |
+| "Talk to Sona" about project (seeds draft) (chat-settings-rest:30) | none until Send | navigation + draft text, nothing stored until Send | window-bound |
+| status polling of a running turn (chat-settings-rest:50) | agent_panel_status | chat runtime state | window-bound |
+| initial load defaults/settings/accelerators/laptop (chat-settings-rest:99) | get_default_settings, get_app_settings, get_available_accelerators, is_laptop | `work settings` (`sona_settings`) for current values; compute devices via `sona --list-devices`; is_laptop and get_default_settings are UI rendering helpers (clamshell section visibility, Reset values of stop-line sliders), not stored data | both |
+| microphone list load (chat-settings-rest:100) | get_available_microphones | `work settings` dictation.microphones (input_devices), `sona_settings` | both |
+| channel count load (chat-settings-rest:101) | get_microphone_channels | probes a live audio device's channels; README 341 puts channel choice window-bound | window-bound |
+| Sound volume slider (chat-settings-rest:112) | change_audio_feedback_volume_setting | `work setting audio-feedback-volume 0..1`, `sona_setting` | both |
+| Quiet speech toggle (chat-settings-rest:119) | change_quiet_speech_enabled_setting | `work setting quiet-speech true\|false` (follow_settings also updates the recorder) | both |
+| Command mode toggle (chat-settings-rest:121) | change_command_mode_enabled_setting | `work setting command-mode true\|false` (follow_settings re-registers shortcuts) | both |
+| Learn destination corrections toggle (chat-settings-rest:125) | change_learn_destination_corrections_setting | privacy opt-in: lets Sona read the destination app's text through Accessibility; corrections.rs: "No reads from the destination occur unless the user enabled this source. Importing settings does not import that consent" | UI-only by design |
+| Model unload timeout picker (chat-settings-rest:127) | set_model_unload_timeout | transcription model lifecycle (when the speech model leaves memory) | UI-only by design: recording, transcription or meeting processing, outside this work |
+| Keyboard implementation picker (chat-settings-rest:129) | change_keyboard_implementation_setting | swaps the live keyboard hook backend: unregisters and re-registers every shortcut (README 343 live keyboard) | window-bound |
+| HUD pill Show now (chat-settings-rest:133) | show_hud_pill_now | shows an on-screen window now, nothing stored | window-bound |
+| Transcribe accelerator/GPU picker (chat-settings-rest:136) | change_transcribe_gpu_device, change_transcribe_accelerator_setting | transcription engine device choice | UI-only by design: recording, transcription or meeting processing, outside this work |
+| ORT accelerator picker (chat-settings-rest:137) | change_ort_accelerator_setting | transcription engine device choice | UI-only by design: recording, transcription or meeting processing, outside this work |
+| Always-on microphone toggle (chat-settings-rest:138) | update_microphone_mode | live capture: stops/starts the cpal stream (AudioRecordingManager::update_mode) | UI-only by design: recording, transcription or meeting processing, outside this work |
+| Lazy stream close toggle (chat-settings-rest:139) | change_lazy_stream_close_setting | recording stream lifecycle | UI-only by design: recording, transcription or meeting processing, outside this work |
+| Clamshell mic Reset (chat-settings-rest:140) | set_clamshell_microphone | microphone choice from live devices (README 341 precedent); also recording input under the stop line | window-bound |
+| Clamshell microphone picker (chat-settings-rest:141) | set_clamshell_microphone | same as 140 | window-bound |
+| Sound theme picker (chat-settings-rest:142) | change_sound_theme_setting (+check_custom_sounds) | `work setting sound-theme marimba\|pop\|custom`, `sona_setting` (the custom-files check is row 102) | both |
+| initial load (chat-settings-rest:166) | get_modes, get_app_settings, get_available_models | `work settings` modes (modes, active_mode_id, revision, rules) + `sona --list-models`; `sona_settings` | both |
+| Retry load (chat-settings-rest:168) | get_modes, get_app_settings, get_available_models | same as 166 | both |
+| LLM catalog auto-load (chat-settings-rest:196) | discover_post_process_model_catalog | credential: discover_post_process_model_catalog resolves the provider API key from the keychain (SecretManager) and is provider-consent gated; manual model id stays possible via `work setting cleanup-model ID` | UI-only by design |
+| Catalog Refresh (chat-settings-rest:200) | discover_post_process_model_catalog | same as 196 | UI-only by design |
+| Cancel download (chat-settings-rest:230) | cancel_download | the app's model manager downloads in-process (README 339) | window-bound |
+| Initial load settings (chat-settings-rest:240) | get_app_settings | `work settings` cleanup (enabled, provider, providers, base_url, model) | both |
+| Auto-discover model catalog (chat-settings-rest:241) | discover_post_process_model_catalog | same as 196 | UI-only by design |
+| Apple Intelligence availability check (chat-settings-rest:242) | check_apple_intelligence_available | runtime OS capability probe on this Mac, no stored data | window-bound |
+| Local cleanup status load (chat-settings-rest:243) | get_local_cleanup_status | state of the app's local cleanup manager incl. download progress (README 347) | window-bound |
+| Post-process enable toggle (chat-settings-rest:244) | change_post_process_enabled_setting | `work setting cleanup true\|false` writes post_process_enabled, `sona_setting` | both |
+| Cancel local cleanup download (chat-settings-rest:246) | cancel_local_cleanup_download | in-process download (README 347) | window-bound |
+| Refresh models (chat-settings-rest:255) | discover_post_process_model_catalog | same as 196 | UI-only by design |
+| Initial load settings/lists (chat-settings-rest:269) | get_app_settings, list_vocabulary_entries, list_snippets, get_text_replacements | `work settings` (vocabulary words, snippets, rewrites, emoji); `sona_settings` | both |
+| Import review Preview again (chat-settings-rest:278) | preview_vocabulary_csv | `work vocabulary-csv FILE --dry-run` (`sona_vocabulary_csv` dry_run) prints the preview without writing | both |
+| Initial load prompts (chat-settings-rest:294) | saved_prompt_list | `work saved-prompts` (`sona_saved_prompts`), same meetings.saved_prompts() read | both |
+| Load dictation prompts (chat-settings-rest:295) | get_app_settings | `work settings` cleanup.dictation_prompts + selected_prompt | both |
+| Initial load web connection / Read again (chat-settings-rest:323) | meeting_web_research_connection | returns the keychain secret state of the Brave key (token, README 357) | UI-only by design |
+| Initial load user voice (chat-settings-rest:324) | voice_user_status | biometric voice profile (README 356) | UI-only by design |
+| initial load status/sessions/requests/pending (chat-settings-rest:337) | get_agent_bridge_status / _sessions / _requests / _pending_messages | security: the gate the CLI sits behind and its permission queues (README 358) | UI-only by design |
+| initial load settings (chat-settings-rest:338) | get_app_settings | the pane's settings are the agent gates `work settings` deliberately omits (preferences.rs header) | UI-only by design |
+| Create preview (chat-settings-rest:353) | create_agent_bridge_reply_preview | consent: the preview step of confirm_agent_bridge_reply (README 358) | UI-only by design |
+| initial load settings (chat-settings-rest:358) | get_app_settings | pane shows agent_panel_enabled + pairing (security/token, README 359) | UI-only by design |
+| expiry/include pickers (chat-settings-rest:385) | (local) | draft state of the Export .sona dialog, nothing stored | window-bound |
+| initial load (chat-settings-rest:401) | get_app_settings / get_app_dir_path / get_log_dir_path / is_portable | `work settings` (version, app data folder, log folder, portable); `sona_settings` | both |
+| initial load (chat-settings-rest:411) | get_app_settings / get_default_settings | `work settings` appearance.log_level, debug_mode; defaults only feed Reset of the stop-line sliders (415, 416) | both |
+| recording buffer slider/Reset (chat-settings-rest:415) | change_extra_recording_buffer_setting | recording: extra audio kept after stop | UI-only by design: recording, transcription or meeting processing, outside this work |
+| threshold slider/Reset (chat-settings-rest:416) | change_word_correction_threshold_setting | text engine: fuzzy vocabulary-correction threshold | UI-only by design: recording, transcription or meeting processing, outside this work |
+| keyboard diagnostic Retry (chat-settings-rest:417) | run_keyboard_diagnostic | watches the live keyboard for 3-30 s (secure_input::run_keyboard_diagnostic) | window-bound |
+| folder "Template and prompts", then save (meetings-notes-search:46) | meeting_folder_set_defaults, saved_prompt_list | `work folder-defaults FOLDER` sets them; the prompt list is `work saved-prompts` / `sona_saved_prompts` | both |
+| filing sheet toggle a folder (meetings-notes-search:50) | meeting_folder_add_meeting / meeting_folder_remove_meeting | `work folder-add --folder F MEETING`, `work folder-remove --folder F MEETING`; MCP sona_meeting_file / sona_meeting_unfile | both |
+| "Send to" review sheet preview (meetings-notes-search:72) | connections_preview_notes | a preview step inside the send-to-connection flow, which README marks UI-only by design (sends in the owner's name). The meeting content is already readable through `work meeting` / `meeting-export` | UI-only by design |
+| "Cancel the remote run" (meetings-notes-search:84) | meeting_remote_cancel | cancels an in-flight remote notes-processing run (MeetingSessionManager::remote_cancel). That is meeting processing | UI-only by design: recording, transcription or meeting processing, outside this work |
+| voice identity status (meetings-notes-search:110) | voice_identity_status | `work speaker-voices MEETING` ("what voice matching suggests…, where else it heard each unnamed voice, and the names it gave by itself") = suggestions, same_voice, named_by_voice. Unnamed speakers show in `work meeting` / `work today`. MCP sona_speaker_voices | both |
+| recording tail "Cut the last N min…" and confirm "Cut" / "Put them back" (meetings-notes-search:116) | meeting_segments_set_removed | marks transcript/recording segments removed (meeting_segments_set_removed). That changes the recording and transcript | UI-only by design: recording, transcription or meeting processing, outside this work |
+| recording tail read (meetings-notes-search:117) | meeting_recording_tail | only read for the tail-cut feature above | UI-only by design: recording, transcription or meeting processing, outside this work |
+| relisten "Accept" / "Skip" / "Accept all shown" (meetings-notes-search:126) | transcript_relisten_decide | relisten is named in the stop line (transcription) | UI-only by design: recording, transcription or meeting processing, outside this work |
+| relisten offer read / "Review" / "Try again" / Done (meetings-notes-search:127) | transcript_relisten_offer | relisten, same as above | UI-only by design: recording, transcription or meeting processing, outside this work |
+| my notes autosave / read (meetings-notes-search:142) | get_meeting_user_notes / save_meeting_user_notes | read: `work meeting-notes MEETING` (ExternalMeetingNotes.my_notes via user_notes_get). Write: `work my-notes MEETING TEXT`. MCP sona_meeting_notes / sona_meeting_my_notes | both |
+| "Add a document…" list / marked copy "Save a marked copy…" (meetings-notes-search:145) | doc_marked_copy / doc_meeting_list | `work docs --meeting M` lists them; `work doc-marked-copy` saves the marked copy | both |
+| live card owner menu "Me" / person / "No owner" (meetings-notes-search:161) | meeting_live_card_owner | only during live capture ("picked by hand while the meeting records"). After stop the promises are Triage tasks, editable with `work update --owner` / `work accept` | window-bound |
+| meeting "Export .sona file" (meetings-notes-search:199) | cloud sync export (CloudSyncStore) | goes through cloud_share_create → CloudSyncRuntime::share_create, which signs with the sync identity and queues an upload. Same as the README row "Share links: create, list, revoke" (window-bound: sealed with sync keys by the app's cloud sync runtime) | window-bound |
+| note share list / Refresh (meetings-notes-search:204) | cloud_note_share_list | same precedent as README "Share links: create, list, revoke" (window-bound). Note: note_share_list itself reads only the local cloud store, so if that README row is ever reopened, this read could move to GAP with it | window-bound |
+| note share create / browser link (meetings-notes-search:205) | cloud_note_share_create / cloud_browser_share_link | create publishes a note share. cloud_browser_share_link decrypts and returns the capability URL (secret link material). README: "Create a public browser share — UI-only by design: publishes a link" | UI-only by design |
+| run import (meetings-notes-search:213) | import_chosen_media_file (native_bridge/mod.rs:351) | README row "Import a recording or transcript" is window-bound: it hands the file to the app's transcription and processing. Also inside the transcription stop line | window-bound |
+| import job list (meetings-notes-search:215) | list_audio_import_jobs | MediaImportManager::list_jobs is the running app's in-memory queue, not stored data | window-bound |
+| recovery Finish (meetings-notes-search:234) | meeting_recovery_finalize | recovery is named in the stop line | UI-only by design: recording, transcription or meeting processing, outside this work |
+| recovery Discard and confirm (meetings-notes-search:235) | meeting_discard | discard is named in the stop line | UI-only by design: recording, transcription or meeting processing, outside this work |
+| recovery list (meetings-notes-search:236) | meeting_recovery_list | recovery | UI-only by design: recording, transcription or meeting processing, outside this work |
+| next-meeting text engine (meetings-notes-search:253) | meeting_text_engine_for_next_meeting | the text engine is named in the stop line | UI-only by design: recording, transcription or meeting processing, outside this work |
+| snapshot list, status, open image, "Try again", Done (meetings-notes-search:265) | meeting_snapshot_list / meeting_snapshot_status / meeting_snapshot_image | list: `work snapshots MEETING` / sona_meeting_snapshots. Images on disk: `work meeting-export MEETING --out FILE` ("The meeting's screen pictures go beside it"). Delete: `work snapshot-delete`. Status (MeetingSnapshotStatus: live watch state, screen-recording grant, automatic setting) and Try again are live capture / permission, so window-bound. Viewing the image is a window | both |
+| context read / "Try again" (meetings-notes-search:276) | conversation_context | `work meeting ID --json` carries `context` (ExternalMeetingDetail.context = MeetingStore::conversation_context: kind, origin, apps, calendar name/location, location). MCP sona_meeting_get. Also `sona --place ID` | both |
+| phone thought source / photo (meetings-notes-search:288) | phone_thought_source_get / phone_thought_photo_get | CloudSyncRuntime::phone_thought_source decrypts with secrets.cloud_sync_keys() (keychain credential). Same reasoning as the README rows that keep keychain-token actions UI-only. The photo is image viewing | UI-only by design |
+| "Review connections", then "Write note" / "Review with AI" (meetings-notes-search:319) | scratchpad_prepare_synthesis / scratchpad_review_sources / scratchpad_review_candidates | Write note = scratchpad_prepare_synthesis, which runs local_text_generator. README "Notes: synthesis" is window-bound (local model in the app). The candidate and source reads are plain reads already available: `sona --notes`, `work meetings --since`, `sona --note ID`, `work meeting ID --transcript` | window-bound |
+| synthesis "Accept as new note" / "Reject" / Differences (meetings-notes-search:320) | scratchpad_accept_synthesis | accepts a draft the in-app model wrote (ScratchSynthesisDraft). Without the window-bound draft step there is nothing to accept. A hand-made equivalent is `note-new` + `note-link` | window-bound |
+| storage status (meetings-notes-search:360) | history_storage_status | HistoryStorageStatus only says whether dictation history is encrypted at rest, read from the running app's in-memory state. A security status. Borderline: it is a read, not a toggle | UI-only by design |
+| history limit field (meetings-notes-search:361) | update_history_limit | update_history_limit changes the setting, then runs cleanup_old_entries, which deletes older dictations right away. README "Recording and meeting retention" is UI-only by design (privacy retention) | UI-only by design |
+| automation roster / per-series automation / runs (meetings-notes-search:370) | meeting_automation_roster / meeting_series_automation_set / meeting_automation_runs | reading is `work series-automations` / `series-automation-runs`; turning one on can ask for the Reminders permission, run a Shortcut or post a webhook | UI-only by design |
+| series remote roster (meetings-notes-search:373) | meeting_series_remote_roster | lists each series' remote_intelligence_opt_out ("keep on this Mac"). That is a privacy choice about whether meeting content leaves the Mac, and it touches meeting processing | UI-only by design |
+
 ## Count of rows per status
 
-| status | rows |
-|---|---|
-| both | 218 |
-| CLI only | 20 |
-| missing | 0 |
-| UI-only by design | 28 |
-| window-bound | 34 |
-| total | 300 |
+| status | main tables | inventory rows below | total |
+|---|---|---|---|
+| both | 243 | 23 | 266 |
+| CLI only | 20 | 0 | 20 |
+| missing | 0 | 0 | 0 |
+| UI-only by design | 28 | 34 | 62 |
+| window-bound | 34 | 25 | 59 |
+| total | 325 | 82 | 407 |
 
 Rows are grouped: one row can cover several buttons that call the same
 method. The inventories beside this file list every button.

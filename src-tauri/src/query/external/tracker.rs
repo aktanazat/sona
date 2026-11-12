@@ -435,12 +435,19 @@ pub enum WorkVerb {
     NoteDelete(notes::NoteDeleteArgs),
     /// Put one of a note's saved versions back as its body.
     NoteRestore(notes::NoteRestoreArgs),
+    /// Save a passage of a meeting's transcript as a note, the way the
+    /// transcript's "Save passage" does.
+    NotePassage(notes::NotePassageArgs),
     /// The subjects notes gather under.
     Subjects,
     /// Make a note subject.
     SubjectNew(subjects::SubjectNewArgs),
     /// Add a note to a subject, make it the current one, or take it off.
     SubjectNote(subjects::SubjectNoteArgs),
+    /// One subject: its notes, newest first, and which one is current.
+    Subject(subjects::SubjectArgs),
+    /// Delete a subject. Its notes stay.
+    SubjectDelete(subjects::SubjectDeleteArgs),
     /// Read typed or spoken words as task fields, writing nothing.
     Parse(planner::ParseArgs),
     /// Book the next free working hour for a task in the "Sona" calendar.
@@ -510,6 +517,10 @@ pub enum WorkVerb {
     Dictations(dictations::DictationVerb),
     #[command(flatten)]
     Cloud(cloud::CloudVerb),
+    #[command(flatten)]
+    MeetingReview(meeting_review::MeetingReviewVerb),
+    #[command(flatten)]
+    MeetingSettings(meeting_settings::MeetingSettingsVerb),
     /// One session: state, plan, question, and every activity.
     Session(sessions::SessionShowArgs),
     /// Agent sessions, newest first: one task's or every task's.
@@ -1657,6 +1668,8 @@ impl WorkVerb {
             Self::Transcript(verb) => verb.required_scopes(),
             Self::Dictations(verb) => verb.required_scopes(),
             Self::Cloud(verb) => verb.required_scopes(),
+            Self::MeetingReview(verb) => verb.required_scopes(),
+            Self::MeetingSettings(verb) => verb.required_scopes(),
             Self::List(_)
             | Self::Bin
             | Self::ArchiveList
@@ -1820,9 +1833,12 @@ impl WorkVerb {
             | Self::NoteUnlink(notes::NoteLinkArgs { dry_run: true, .. })
             | Self::NoteDelete(notes::NoteDeleteArgs { dry_run: true, .. })
             | Self::NoteRestore(notes::NoteRestoreArgs { dry_run: true, .. })
+            | Self::NotePassage(notes::NotePassageArgs { dry_run: true, .. })
             | Self::Subjects
             | Self::SubjectNew(subjects::SubjectNewArgs { dry_run: true, .. })
             | Self::SubjectNote(subjects::SubjectNoteArgs { dry_run: true, .. })
+            | Self::Subject(_)
+            | Self::SubjectDelete(subjects::SubjectDeleteArgs { dry_run: true, .. })
             | Self::Parse(_)
             | Self::Book(planner::BookArgs { dry_run: true, .. })
             | Self::Unbook(planner::BookArgs { dry_run: true, .. })
@@ -1970,8 +1986,10 @@ impl WorkVerb {
             | Self::NoteUnlink(_)
             | Self::NoteDelete(_)
             | Self::NoteRestore(_)
+            | Self::NotePassage(_)
             | Self::SubjectNew(_)
             | Self::SubjectNote(_)
+            | Self::SubjectDelete(_)
             | Self::Book(_)
             | Self::Unbook(_)
             | Self::Nudged(_)
@@ -2223,6 +2241,8 @@ pub enum WorkAnswer {
     Library(Box<library::ExternalLibraryAnswer>),
     Transcript(Box<transcript::ExternalTranscriptAnswer>),
     Dictations(Box<dictations::ExternalDictationAnswer>),
+    MeetingReview(Box<meeting_review::ExternalMeetingReviewAnswer>),
+    MeetingSettings(Box<meeting_settings::ExternalMeetingSettingsAnswer>),
     Day(organize::ExternalWorkDay),
     Brief(Box<organize::ExternalWorkBrief>),
     Note(Box<notes::ExternalNoteChange>),
@@ -3070,15 +3090,20 @@ pub(super) async fn answer(
         WorkVerb::Transcript(verb) => tracker.transcript(verb).await,
         WorkVerb::Dictations(verb) => tracker.dictations(verb).await,
         WorkVerb::Cloud(verb) => tracker.cloud(verb).await,
+        WorkVerb::MeetingReview(verb) => tracker.meeting_review(verb).await,
+        WorkVerb::MeetingSettings(verb) => tracker.meeting_settings(verb).await,
         WorkVerb::NoteEdit(args) => tracker.note_edit(args),
         WorkVerb::NotePin(args) => tracker.note_pin(args),
         WorkVerb::NoteLink(args) => tracker.note_link(args).await,
         WorkVerb::NoteUnlink(args) => tracker.note_unlink(args).await,
         WorkVerb::NoteDelete(args) => tracker.note_delete(args).await,
         WorkVerb::NoteRestore(args) => tracker.note_restore(args),
+        WorkVerb::NotePassage(args) => tracker.note_passage(args).await,
         WorkVerb::Subjects => tracker.subjects(),
         WorkVerb::SubjectNew(args) => tracker.subject_new(args),
         WorkVerb::SubjectNote(args) => tracker.subject_note(args),
+        WorkVerb::Subject(args) => tracker.subject_show(args),
+        WorkVerb::SubjectDelete(args) => tracker.subject_delete(args),
         WorkVerb::Parse(args) => tracker.parse(args).await,
         WorkVerb::Book(args) => tracker.book(args).await,
         WorkVerb::Unbook(args) => tracker.unbook(args).await,
@@ -6648,6 +6673,8 @@ impl WorkAnswer {
             Self::Library(answer) => library::text(answer, &mut text),
             Self::Transcript(answer) => transcript::text(answer, &mut text),
             Self::Dictations(answer) => dictations::text(answer, &mut text),
+            Self::MeetingReview(answer) => meeting_review::text(answer, &mut text),
+            Self::MeetingSettings(answer) => meeting_settings::text(answer, &mut text),
             Self::Settings(_) => preferences::text(self, &mut text),
             Self::Note(_) => notes::text(self, &mut text),
             Self::Subjects(_) => subjects::text(self, &mut text),
@@ -6894,6 +6921,8 @@ impl WorkAnswer {
             | Self::Library(_)
             | Self::Transcript(_)
             | Self::Dictations(_)
+            | Self::MeetingReview(_)
+            | Self::MeetingSettings(_)
             | Self::Day(_)
             | Self::Brief(_)
             | Self::Note(_)
@@ -7428,6 +7457,8 @@ mod sources;
 mod library;
 mod transcript;
 mod dictations;
+mod meeting_review;
+mod meeting_settings;
 mod sessions;
 mod routines;
 mod agent_loops;

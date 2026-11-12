@@ -381,6 +381,7 @@ sona work correction-remove "Dana Reyes" <CORRECTION_ID>
 sona work dictations [--search "pricing"] [--limit 20] [--before <ID>]   # dictation history, newest first
 sona work dictation-save <ID> [--unsave]
 sona work dictation-delete <ID>               # the entry and its recording; cannot be undone
+sona work dictation-receipts <ID>             # each run it went through: mode, model, context, delivery; no words
 sona work action-track <LOOP_ID> --project "Q1 launch"   # a meeting action with no task
 sona work action-dismiss <LOOP_ID>             # not work; action-restore asks again
 sona work attachment-rename S-12 <ATTACHMENT_ID> --title "Signed contract"
@@ -396,9 +397,12 @@ sona work note-link <NOTE_ID> --meeting <MEETING_ID>   # or --person ID, --note 
 sona work note-unlink <NOTE_ID> --meeting <MEETING_ID> # takes a source off the note
 sona work note-delete <NOTE_ID>                # the note and its versions; cannot be undone
 sona work note-restore <NOTE_ID> <VERSION_ID>  # versions: sona --note-versions <NOTE_ID>
+sona work note-passage <MEETING_ID> <SEGMENT_ID> --excerpt "keep the free tier" [--person "Dana Reyes"] [--body "…"]   # the transcript's Save passage
 sona work subjects                             # read-only
 sona work subject-new "Pricing"
 sona work subject-note <SUBJECT_ID> <NOTE_ID> [--current | --remove]
+sona work subject <SUBJECT_ID>                 # its current note and every note under it
+sona work subject-delete <SUBJECT_ID>          # the subject only; its notes stay
 sona work source-link S-12 --meeting <MEETING_ID> [--at 95]   # or --note ID, --loop ID; a project by name
 sona work ask-pack "what did Dana say about pricing" [--folder "Sales"]
 sona work docs [--person "Dana Reyes" | --meeting <MEETING_ID>]
@@ -491,6 +495,7 @@ sona work folder-new "Q3"
 sona work folder-rename "Q3" "Q3 deals"
 sona work folder-delete "Q3 deals"                    # meetings stay, the folder goes
 sona work folder-add <MEETING_ID> --folder "Q3"        # folder-remove takes it out
+sona work folder-defaults "Q3" --template one-on-one --prompt "Risks"   # --no-prompts or --template none clears; folders shows them
 sona work meeting-notes <MEETING_ID>                    # notes, my notes, typed notes, numbered action items
 sona work meeting-note-add <MEETING_ID> "Follow up on SSO" [--at 95]
 sona work meeting-note-edit <MEETING_ID> <NOTE_ID> "Follow up on SSO by Friday"
@@ -508,6 +513,20 @@ sona work meeting-search <MEETING_ID> "renewal"
 sona work meeting-export <MEETING_ID> --format json --out /abs/path/meeting.json
 sona work meeting-ledger <MEETING_ID> [--out /abs/path/ledger.html]
 sona work meetings-csv [--out /abs/path/meetings.csv]
+sona work meeting-analytics <MEETING_ID>               # talk share, turns, longest monologue, tracker hits
+sona work meeting-people <MEETING_ID>                  # what came before with each person in it
+sona work meeting-questions <MEETING_ID>               # meeting-question-forget <MEETING_ID> <QUESTION_ID> forgets one
+sona work meeting-links <MEETING_ID>                   # meeting-link-remove <MEETING_ID> <LINK_ID> removes one
+sona work meeting-context <MEETING_ID> --kind in-person --place "Blue Bottle" --lat 37.78 --lon -122.41   # or --no-place
+sona work context-suggestions <MEETING_ID>             # what the recording may be; filing decides one
+sona work untracked [<MEETING_ID>]                     # commitments no task tracks; action-track takes the loop_id
+sona work call-name-dismiss <MEETING_ID> "Speaker 2"   # turn down the name the call offered
+sona work doc-marked-copy <DOCUMENT_ID> --meeting <MEETING_ID> --out /abs/path/marked.pdf
+sona work meeting-templates                            # the user's notes templates; series-template --custom takes the ids
+sona work meeting-template-save "Board prep" --section "Decisions: what was agreed" --section "Risks" [--purpose "…"] [--template <TEMPLATE_ID>]
+sona work meeting-template-delete "Board prep"
+sona work series-automations                           # what each series does once notes are ready; a webhook shows its host only
+sona work series-automation-runs <MEETING_ID>
 ```
 
 A folder is named by its name or its id from `folders`. Every change takes
@@ -518,13 +537,22 @@ out of `meetings-csv`, and stays out of `meeting-trash` while it is trashed.
 `heard-plan-edit` refuses a plan already on
 the calendar. `meeting-export` writes the pictures beside the file and needs the
 write settings, as do `meeting-ledger` and `meetings-csv` with `--out`; without
-it they only read.
+it they only read. Repeating `meeting-template-delete` with its
+`--operation-id` answers `replayed:true`; without one, it answers `not_found`
+once the template is gone. `doc-marked-copy` marks each difference
+`docs --meeting` lists that has a page, and writes the file again on every
+call.
+`context-suggestions` may work out new maybes first, as opening the
+recording does. It and `evening` leave out maybes drawn on a meeting kept
+on this Mac, and a place only such a meeting saved: `filing` then keeps
+the recording without that place.
 
 Not from the command line: writing the notes again, catch me up and rewriting
 with my notes, and importing a recording, all run the notes model or
 transcription inside the app. Share links need the app's sync. Posting a
 follow-up or sending notes to a connection sends in the user's name, so only the
-user does it.
+user does it. Turning a series automation on or off stays in the app too: it
+asks for Reminders, runs a Shortcut or sends a webhook.
 
 ## Before talking to someone
 
@@ -727,7 +755,7 @@ sona work series <MEETING_ID>                       # its series' template and d
 sona work series-template <MEETING_ID> one-on-one    # or none, or --custom <TEMPLATE_ID>
 sona work series-digest <MEETING_ID> [--off]
 sona work evening                                   # today's lines and recordings waiting to be filed
-sona work filing <SUGGESTION_ID> [--decline]
+sona work filing <SUGGESTION_ID> [--decline]        # a meeting maybe also takes --title, --person (repeat), --no-people, --no-place
 sona work connections                               # connections, send rules, recent sends; no tokens
 sona work sync [--meeting <MEETING_ID>]             # cloud sync status, each meeting's sync state, shares; no keys
 ```
@@ -955,7 +983,7 @@ claude mcp add sona -- bun /absolute/path/to/sona/tools/sona-mcp/src/index.ts
 | `sona_series`                     | `meeting_id`                                                 |
 | `sona_series_template`            | `meeting_id`, `template?` or `custom?`, `dry_run?` — writes  |
 | `sona_series_digest`              | `meeting_id`, `off?`, `dry_run?` — writes                    |
-| `sona_filing`                     | `suggestion`, `decline?`, `dry_run?` — writes                |
+| `sona_filing`                     | `suggestion`, `decline?` or `title?`, `people?` or `no_people?`, `no_place?`; `dry_run?` — writes |
 | `sona_automation_list`            | none — automations, not meeting commitments                  |
 | `sona_automation_show`            | `automation`                                                 |
 | `sona_automation_save`            | `name`, `automation?`, `prompt?`, `schedule?` + `first_run?`, `timezone?`, `days?` or `on?`, `to?`, `label?`; `if_label?`, `if_project?`, `if_status?`, `tools?` (lists, `[]` clears), `dry_run?` — writes |
@@ -1013,6 +1041,23 @@ claude mcp add sona -- bun /absolute/path/to/sona/tools/sona-mcp/src/index.ts
 | `sona_meeting_list`               | `since?`, `limit?`, `title?`, `status?` (ready, processing, failed), `folder?` |
 | `sona_meeting_get`                | `meeting_id`, `transcript?`                                  |
 | `sona_meeting_folders`            | none                                                         |
+| `sona_meeting_folder_defaults` *(opt-in)* | `folder`, `template?`, `prompts?` or `no_prompts?`, `dry_run?` — writes |
+| `sona_meeting_templates`          | none                                                         |
+| `sona_meeting_template_save` *(opt-in)* | `name`, `sections`, `purpose?`, `template?`, `dry_run?` — writes |
+| `sona_meeting_template_delete` *(opt-in)* | `template`, `dry_run?` — writes, takes away          |
+| `sona_series_automations`         | none — meeting series, not automations                       |
+| `sona_series_automation_runs`     | `meeting_id`                                                 |
+| `sona_meeting_analytics`, `sona_meeting_people`, `sona_meeting_questions`, `sona_meeting_links`, `sona_context_suggestions` | `meeting_id` |
+| `sona_meeting_question_forget` *(opt-in)* | `meeting_id`, `question_id`, `dry_run?` — writes, takes away |
+| `sona_meeting_link_remove` *(opt-in)* | `meeting_id`, `link_id`, `dry_run?` — writes, takes away   |
+| `sona_meeting_context` *(opt-in)* | `meeting_id`, `kind?`, `place?` + `lat?` + `lon?` or `no_place?`, `dry_run?` — writes |
+| `sona_untracked_actions`          | `meeting_id?`                                                |
+| `sona_call_name_dismiss` *(opt-in)* | `meeting_id`, `speaker`, `dry_run?` — writes               |
+| `sona_document_marked_copy` *(opt-in)* | `document_id`, `meeting_id`, `out`, `dry_run?` — writes |
+| `sona_dictation_receipts`         | `dictation_id`                                               |
+| `sona_scratchpad_passage` *(opt-in)* | `meeting_id`, `line_id`, `excerpt`, `person?`, `body?`, `dry_run?` — writes |
+| `sona_scratchpad_subject` *(opt-in)* | `subject_id`                                              |
+| `sona_scratchpad_subject_delete` *(opt-in)* | `subject_id`, `dry_run?` — writes, takes away      |
 | `sona_meeting_trash`              | none                                                         |
 | `sona_meeting_notes`              | `meeting_id`                                                 |
 | `sona_meeting_snapshots`          | `meeting_id`                                                 |

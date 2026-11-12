@@ -19,7 +19,7 @@ use super::people::{
 };
 use super::voice_identity::{known_voices_in, names_user};
 use super::workflows::calendar_facts_in;
-use super::{decode_json, encode_json, id, session_row, MeetingStore, StoreError};
+use super::{decode_json, encode_json, id, parse_uuid, session_row, MeetingStore, StoreError};
 use crate::meeting::context::{
     ConversationContext, ConversationContextUpdate, ConversationLocation,
 };
@@ -176,6 +176,19 @@ impl MeetingStore {
         transaction.commit()?;
         Ok(prep)
     }
+
+    /// The place a meeting maybe on `session_id` finds under the words of
+    /// `place`, for a reader the `hidden` recordings are kept from: none of
+    /// their places is read.
+    pub(crate) fn saved_place_without(
+        &self,
+        session_id: MeetingSessionId,
+        place: &str,
+        hidden: &HashSet<MeetingSessionId>,
+    ) -> Result<Option<ConversationLocation>, StoreError> {
+        let connection = self.connection()?;
+        saved_place_in(&connection, session_id, place, hidden)
+    }
 }
 
 /// Offers what a recording with nothing on its calendar may be: the plans
@@ -232,7 +245,7 @@ pub(super) fn offer_meeting_maybes_in(
         }
         let location = match &plan.place {
             Some(place) if context.location.is_none() => {
-                saved_place_in(connection, session_id, place)?
+                saved_place_in(connection, session_id, place, &HashSet::new())?
             }
             _ => None,
         };
@@ -508,11 +521,12 @@ fn listed_people(
 
 /// The place another recording saved under every word of `place` that says
 /// which place it is: the latest such recording's, when all of them saved the
-/// same place.
+/// same place. A recording in `hidden` is not read.
 fn saved_place_in(
     connection: &Connection,
     session_id: MeetingSessionId,
     place: &str,
+    hidden: &HashSet<MeetingSessionId>,
 ) -> Result<Option<ConversationLocation>, StoreError> {
     let naming = words(place)
         .filter(|word| {
@@ -525,7 +539,7 @@ fn saved_place_in(
         return Ok(None);
     }
     let mut statement = connection.prepare(
-        "SELECT context.location_json
+        "SELECT session.id, context.location_json
            FROM conversation_context context
            JOIN meeting_sessions session ON session.id = context.session_id
           WHERE session.id != ?1 AND session.phase != 'deleting'
@@ -535,7 +549,11 @@ fn saved_place_in(
     let mut rows = statement.query(params![id(session_id)])?;
     let mut found: Option<ConversationLocation> = None;
     while let Some(row) = rows.next()? {
-        let saved: ConversationLocation = decode_json(&row.get::<_, String>(0)?)?;
+        let saved_by = MeetingSessionId::from_uuid(parse_uuid(&row.get::<_, String>(0)?)?);
+        if hidden.contains(&saved_by) {
+            continue;
+        }
+        let saved: ConversationLocation = decode_json(&row.get::<_, String>(1)?)?;
         let name = words(&saved.name).collect::<HashSet<_>>();
         if !saved.is_valid() || !naming.iter().all(|word| name.contains(word)) {
             continue;

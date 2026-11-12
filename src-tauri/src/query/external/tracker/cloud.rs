@@ -5,12 +5,13 @@ use crate::cloud_sync::{
 };
 use crate::commands::cloud_sync::service_status;
 use crate::meeting::cloud_bundle::CloudMeetingBundleV1;
-use crate::meeting::types::MeetingListFilter;
 use crate::meeting::session::MeetingSessionManager;
+use crate::meeting::store::{MeetingStore, StoreError};
+use crate::meeting::types::{MeetingListFilter, MeetingSessionId};
 use crate::settings::CloudSyncSettings;
 use crate::query::external::{
-    kept_local, session_id, store, visible_meeting, ExternalError, ExternalErrorCode,
-    ExternalScope, READ_SCOPES, WRITE_SCOPES,
+    kept_local, meeting_refusal, session_id, store, visible_meeting, ExternalError,
+    ExternalErrorCode, ExternalScope, READ_SCOPES, WRITE_SCOPES,
 };
 use crate::query::{QueryError, QUERY_SCHEMA_VERSION};
 use clap::{Args, Subcommand};
@@ -147,9 +148,21 @@ async fn sync_meeting(
     let session = session_id(meeting)?;
     let store = store(meetings).await?;
     visible_meeting(&store, session)?;
+    store
+        .session_snapshot(session)
+        .map_err(|error| meeting_refusal(session, error))?;
     let status = meeting_status_in(&store, paused, session).map_err(|error| sync_failed(&error))?;
     let shares = meeting_shares_in(&store, session).map_err(|error| sync_failed(&error))?;
     Ok(json!({ "meeting": status, "shares": shares }))
+}
+
+fn already_here(store: &MeetingStore, session: MeetingSessionId) -> Result<bool, ExternalError> {
+    visible_meeting(store, session)?;
+    match store.session_snapshot(session) {
+        Ok(_) => Ok(true),
+        Err(StoreError::NotFound) => Ok(false),
+        Err(error) => Err(QueryError::from(error).into()),
+    }
 }
 
 impl Tracker<'_> {
@@ -185,7 +198,7 @@ impl Tracker<'_> {
         let shared = SharedMeeting::of(&bundle);
         let session = bundle.session.session_id;
         let store = store(self.meetings).await?;
-        let already_here = store.session_snapshot(session).is_ok();
+        let already_here = already_here(&store, session)?;
         if args.dry_run {
             return Ok(WorkAnswer::Settings(Box::new(ExternalSettings {
                 schema_version: QUERY_SCHEMA_VERSION,
@@ -229,12 +242,12 @@ impl Tracker<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{sync_meeting, sync_overview};
+    use super::{already_here, sync_meeting, sync_overview};
     use crate::meeting::detection::machine::CalendarEventSummary;
     use crate::meeting::series_types::MeetingSeriesRemoteOptOutSetRequest;
     use crate::meeting::session::{MeetingSessionManager, NoCaptureSources};
     use crate::meeting::store::workflow_core_tests::reviewable_meeting;
-    use crate::meeting::types::MeetingOperationId;
+    use crate::meeting::types::{MeetingOperationId, MeetingSessionId};
     use crate::query::external::ExternalErrorCode;
     use crate::secrets::{MemorySecretBackend, SecretManager};
     use crate::settings::CloudSyncSettings;
@@ -311,6 +324,18 @@ mod tests {
             assert!(sync_meeting(&meetings, false, &shared.uuid().to_string())
                 .await
                 .is_ok());
+
+            let unknown = MeetingSessionId::new();
+            let missing = sync_meeting(&meetings, false, &unknown.uuid().to_string())
+                .await
+                .unwrap_err();
+            assert_eq!(missing.error, ExternalErrorCode::NotFound);
+            assert_eq!(missing.message, format!("No meeting {} in this corpus.", unknown.uuid()));
+
+            let kept_import = already_here(&store, kept).unwrap_err();
+            assert_eq!(kept_import.error, ExternalErrorCode::NotFound);
+            assert!(already_here(&store, shared).unwrap());
+            assert!(!already_here(&store, unknown).unwrap());
         });
     }
 }

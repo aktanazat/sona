@@ -4,8 +4,8 @@
 
 use super::library::{file_made, made_before, told, Change, Gate};
 use super::{Tracker, WorkAnswer, READ_SCOPES, WRITE_SCOPES};
-use crate::managers::history::{HistoryEntry, HistoryManager};
-use crate::query::external::{ExternalError, ExternalErrorCode, ExternalScope};
+use crate::managers::history::{HistoryEntry, HistoryManager, HistoryRunReceipt};
+use crate::query::external::{label, ExternalError, ExternalErrorCode, ExternalScope};
 use crate::query::QUERY_SCHEMA_VERSION;
 use clap::{Args, Subcommand};
 use serde::Serialize;
@@ -48,6 +48,13 @@ pub struct DictationDeleteArgs {
     pub change: Change,
 }
 
+#[derive(Args, Clone, Debug, Eq, PartialEq)]
+pub struct DictationReceiptsArgs {
+    /// The entry's id, from `dictations`.
+    #[arg(value_name = "ID")]
+    pub id: i64,
+}
+
 #[derive(Subcommand, Clone, Debug, Eq, PartialEq)]
 pub enum DictationVerb {
     /// Dictation history, newest first, as the Library screen lists it.
@@ -56,12 +63,15 @@ pub enum DictationVerb {
     DictationSave(DictationSaveArgs),
     /// Delete a dictation entry and its recording.
     DictationDelete(DictationDeleteArgs),
+    /// The runs a dictation went through: mode, model, words and delivery,
+    /// without its text.
+    DictationReceipts(DictationReceiptsArgs),
 }
 
 impl DictationVerb {
     pub(super) const fn required_scopes(&self) -> &'static [ExternalScope] {
         match self {
-            Self::Dictations(_) => READ_SCOPES,
+            Self::Dictations(_) | Self::DictationReceipts(_) => READ_SCOPES,
             Self::DictationSave(DictationSaveArgs { change, .. })
             | Self::DictationDelete(DictationDeleteArgs { change, .. }) => {
                 if change.dry_run {
@@ -120,10 +130,19 @@ pub struct ExternalDictationChange {
 }
 
 #[derive(Clone, Debug, Serialize)]
+pub struct ExternalDictationReceipts {
+    pub schema_version: u32,
+    pub dictation_id: i64,
+    /// Oldest run first. A retry names the run it read again.
+    pub receipts: Vec<HistoryRunReceipt>,
+}
+
+#[derive(Clone, Debug, Serialize)]
 #[serde(untagged)]
 pub enum ExternalDictationAnswer {
     Entries(ExternalDictations),
     Change(ExternalDictationChange),
+    Receipts(ExternalDictationReceipts),
 }
 
 fn unreadable(history: &HistoryManager) -> ExternalError {
@@ -190,6 +209,22 @@ pub(super) async fn list(
         schema_version: QUERY_SCHEMA_VERSION,
         entries: page.entries.into_iter().map(shown).collect(),
         next_before,
+    })
+}
+
+async fn receipts(
+    history: &HistoryManager,
+    args: &DictationReceiptsArgs,
+) -> Result<ExternalDictationReceipts, ExternalError> {
+    history.ensure_storage_unlocked().await;
+    entry(history, args.id).await?;
+    Ok(ExternalDictationReceipts {
+        schema_version: QUERY_SCHEMA_VERSION,
+        dictation_id: args.id,
+        receipts: history
+            .get_run_receipts(args.id)
+            .await
+            .map_err(|_| unreadable(history))?,
     })
 }
 
@@ -294,6 +329,9 @@ impl Tracker<'_> {
             DictationVerb::DictationDelete(args) => {
                 ExternalDictationAnswer::Change(delete(self.history, args, &gate).await?)
             }
+            DictationVerb::DictationReceipts(args) => {
+                ExternalDictationAnswer::Receipts(receipts(self.history, args).await?)
+            }
         };
         Ok(WorkAnswer::Dictations(Box::new(answer)))
     }
@@ -330,6 +368,29 @@ pub(super) fn text(answer: &ExternalDictationAnswer, text: &mut String) {
                     ""
                 }
             );
+        }
+        ExternalDictationAnswer::Receipts(list) => {
+            if list.receipts.is_empty() {
+                text.push_str("No runs recorded for this dictation.\n");
+            }
+            for receipt in &list.receipts {
+                let _ = write!(text, "run {}", receipt.run_id);
+                if let Some(retry_of) = receipt.retry_of_run_id {
+                    let _ = write!(text, " (retry of run {retry_of})");
+                }
+                let _ = write!(text, "  mode {}", receipt.mode.mode_id);
+                if let Some(model) = &receipt.mode.model_id {
+                    let _ = write!(text, "  model {model}");
+                }
+                if let Some(words) = receipt.word_count {
+                    let _ = write!(text, "  {words} words");
+                }
+                let delivery = receipt.delivery_attempts.last().map_or_else(
+                    || "not delivered".to_owned(),
+                    |attempt| label(&attempt.delivery.outcome).replace('_', " "),
+                );
+                let _ = writeln!(text, "  {delivery}");
+            }
         }
     }
 }

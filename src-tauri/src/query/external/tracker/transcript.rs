@@ -440,7 +440,7 @@ pub(super) async fn speaker_merge(
     Ok(answer)
 }
 
-fn missing_line(line: Uuid, meeting: &str) -> ExternalError {
+pub(super) fn missing_line(line: Uuid, meeting: &str) -> ExternalError {
     ExternalError::new(
         ExternalErrorCode::NotFound,
         format!("No line {line} in this meeting."),
@@ -766,7 +766,7 @@ pub(super) async fn correction_remove(
 }
 
 impl Tracker<'_> {
-    async fn person_named(&self, value: &str) -> Result<PersonId, ExternalError> {
+    pub(super) async fn person_named(&self, value: &str) -> Result<PersonId, ExternalError> {
         let board = self.board().await?;
         person_id(&board.person(value)?.id)
     }
