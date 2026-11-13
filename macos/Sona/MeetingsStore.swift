@@ -51,6 +51,36 @@ struct TranscriptTurn: Identifiable {
     var time: String { segments[0].base.startOffsetNs.meetingOffsetClock }
 }
 
+extension TranscriptTurn {
+    /// `turns` cut wherever a change came between two lines of one turn,
+    /// so each change sits among the words heard by its moment.
+    static func cut(_ turns: [TranscriptTurn], at changes: [MeetingLiveChange]) -> [TranscriptTurn] {
+        let moments = changes.compactMap(\.callNs).sorted()
+        guard !moments.isEmpty else { return turns }
+        var next = 0
+        var pieces: [TranscriptTurn] = []
+        for turn in turns {
+            var open: [TranscriptEffectiveSegment] = []
+            for segment in turn.segments {
+                var changed = false
+                while next < moments.count, moments[next] < segment.base.startOffsetNs {
+                    changed = true
+                    next += 1
+                }
+                if changed, let first = open.first {
+                    pieces.append(TranscriptTurn(id: first.base.segmentId, speakerId: turn.speakerId, segments: open))
+                    open = []
+                }
+                open.append(segment)
+            }
+            if let first = open.first {
+                pieces.append(TranscriptTurn(id: first.base.segmentId, speakerId: turn.speakerId, segments: open))
+            }
+        }
+        return pieces
+    }
+}
+
 /// A citation press: which segment to land on, and a count so pressing the
 /// same citation twice moves the reader twice.
 struct SegmentJump: Equatable {

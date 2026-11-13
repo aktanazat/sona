@@ -172,6 +172,7 @@ struct MeetingLiveView: View {
                             ? store.bookmarkCounts?.counts : nil,
                         action: { store.bookmark($0) })
                     if session.phase.isActive {
+                        LiveShareLinkButton(sessionId: session.sessionId)
                         Button("Stop") { store.stop() }
                             .buttonStyle(.primary)
                             .disabled(!session.allows(.stop) || store.pending != nil)
@@ -249,14 +250,21 @@ struct MeetingLiveView: View {
 
     @ViewBuilder
     private var transcript: some View {
+        let changes = model.liveDoc.watching == session?.sessionId ? model.liveDoc.doc?.changes ?? [] : []
         PageSection("Transcript") {
             if store.showsProvisional {
                 VStack(alignment: .leading, spacing: 8) {
-                    ForEach(store.provisional) { segment in
-                        line(
-                            at: segment.startOffsetNs, segment.text,
-                            speaker: segment.speakerLabel, ink: ink(segment),
-                            anchor: "live-\(segment.segmentId)")
+                    ForEach(TimelineEntry.merged(
+                        store.provisional, at: \.startOffsetNs, id: { "live-\($0.segmentId)" }, changes)
+                    ) { entry in
+                        switch entry.row {
+                        case .line(let segment):
+                            line(
+                                at: segment.startOffsetNs, segment.text,
+                                speaker: segment.speakerLabel, ink: ink(segment), anchor: entry.id)
+                        case .change(let change):
+                            ChangeRow(change: change)
+                        }
                     }
                     Text("Provisional words and speaker labels")
                         .metaText(Theme.inkSecondary)
@@ -267,11 +275,17 @@ struct MeetingLiveView: View {
                     .bodyText(14, Theme.inkSecondary)
             } else {
                 VStack(alignment: .leading, spacing: 8) {
-                    ForEach(store.lines, id: \.base.segmentId) { segment in
-                        line(
-                            at: segment.base.startOffsetNs, segment.text,
-                            speaker: store.speakerLabel(segment), ink: ink(segment),
-                            anchor: "stored-\(segment.base.segmentId)")
+                    ForEach(TimelineEntry.merged(
+                        store.lines, at: \.base.startOffsetNs, id: { "stored-\($0.base.segmentId)" }, changes)
+                    ) { entry in
+                        switch entry.row {
+                        case .line(let segment):
+                            line(
+                                at: segment.base.startOffsetNs, segment.text,
+                                speaker: store.speakerLabel(segment), ink: ink(segment), anchor: entry.id)
+                        case .change(let change):
+                            ChangeRow(change: change)
+                        }
                     }
                 }
             }

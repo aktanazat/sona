@@ -122,6 +122,8 @@ final class LiveCardStore {
 
     @ObservationIgnored private let core: Core
     @ObservationIgnored private var ownerEdits = 0
+    /// Told when a change by hand was kept, so its mark shows.
+    @ObservationIgnored var onEdited: () -> Void = {}
 
     private static let routeKey = "followUpRoute"
 
@@ -178,6 +180,7 @@ final class LiveCardStore {
                     "meeting_live_card_owner",
                     LiveOwnerParams(sessionId: sessionId, promiseId: promise.id, owner: owner))
                 if ownerEdits == 1, watching == sessionId { card = result }
+                onEdited()
             } catch {
                 if let before, let at = card?.promises.firstIndex(where: { $0.id == promise.id }) {
                     card?.promises[at] = before
@@ -206,6 +209,7 @@ final class LiveCardStore {
                     "meeting_live_card_edit",
                     LiveEditParams(sessionId: sessionId, promiseId: promise.id, what: what, dueAtMs: dueAtMs))
                 if ownerEdits == 1, watching == sessionId { card = result }
+                onEdited()
             } catch {
                 if let before, let at = card?.promises.firstIndex(where: { $0.id == promise.id }) {
                     card?.promises[at] = before
@@ -511,6 +515,7 @@ struct LiveCardSection: View {
 
     var body: some View {
         let heard = model.heard
+        let doc = model.liveDoc.watching == sessionId ? model.liveDoc.doc : nil
         let promises = (heard.watching == sessionId ? heard.card?.promises ?? [] : [])
             .enumerated()
             .sorted { ($0.element.dueAtMs ?? .max, $0.offset) < ($1.element.dueAtMs ?? .max, $1.offset) }
@@ -527,6 +532,9 @@ struct LiveCardSection: View {
                                 PromiseOwnerMenu(promise: promise, showsDay: false)
                                 PromiseDueButton(promise: promise)
                                 Spacer(minLength: 0)
+                                if let mark = doc?.lastChange(to: promise.id) {
+                                    ChangeMark(change: mark)
+                                }
                             }
                             Text("“\(promise.quote)”").metaText().lineLimit(2)
                         }

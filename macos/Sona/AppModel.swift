@@ -437,6 +437,7 @@ final class AppModel {
         heard = LiveCardStore(core: core)
         liveDoc = LiveDocStore(core: core)
         liveDoc.onAsk = { [weak self] ask in self?.voiceAsk(ask) }
+        heard.onEdited = { [weak self] in Task { await self?.liveDoc.load() } }
 
         for name in [
             CoreEvent.activity, CoreEvent.streamText, CoreEvent.streamPhase, CoreEvent.micLevel,
