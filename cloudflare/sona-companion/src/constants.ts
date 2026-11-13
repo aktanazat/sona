@@ -7,6 +7,7 @@ export const UPLOAD_TTL_MS = 24 * 60 * 60 * 1000;
 export const JOB_LEASE_MS = 60 * 1000;
 export const JOB_RETRY_MS = 5 * 60 * 1000;
 export const CHANGE_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+export const LIVE_ROOM_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 export const MAX_REMOTE_BYTES = 8 * 1024 * 1024 * 1024;
 export const MAX_CHUNK_BYTES = 4 * 1024 * 1024;
@@ -20,6 +21,9 @@ export const MAX_JSON_BYTES = 1024 * 1024;
 export const MAX_CHANGE_PAGE = 100;
 export const MAX_SNAPSHOT_PAGE = 100;
 export const MAINTENANCE_PAGE_SIZE = 8;
+export const MAX_LIVE_GUESTS = 50;
+export const MAX_LIVE_HOST_FRAME_BYTES = 1000 * 1000;
+export const MAX_LIVE_GUEST_FRAME_BYTES = 16 * 1024;
 
 export type ApiErrorCode =
   | "invalid_request"
