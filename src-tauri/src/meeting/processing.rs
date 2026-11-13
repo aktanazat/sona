@@ -4606,6 +4606,14 @@ impl FrameConsumer for SpeechChunker {
     ) -> Result<Option<AudioChunk>, ProcessingFailure> {
         if self.start_offset_ns.is_none() {
             if !voice {
+                // The carried overlap continues a sentence cut mid-word; after
+                // a pause the sentence is over, and a chunk dated from the
+                // overlap read old words again and joined them to new ones.
+                self.silence_frames = self.silence_frames.saturating_add(1);
+                if self.silence_frames >= ASR_SILENCE_FRAMES {
+                    self.carry.clear();
+                    self.carry_start_offset_ns = None;
+                }
                 return Ok(None);
             }
             if let Some(carry_start) = self.carry_start_offset_ns.take() {
@@ -8053,6 +8061,21 @@ pub(crate) mod tests {
             chunks[1].samples.len(),
             ASR_OVERLAP_SAMPLES + 11 * VAD_FRAME_SAMPLES
         );
+    }
+
+    #[test]
+    fn speech_after_a_pause_past_a_forced_cut_starts_its_own_chunk() {
+        let mut chunker = SpeechChunker::new(Box::new(EnergyVad));
+        let mut offset_ns = 0;
+        let mut chunks = feed(&mut chunker, true, 50, &mut offset_ns);
+        chunks.extend(chunker.finish(true));
+        chunks.extend(feed(&mut chunker, false, ASR_SILENCE_FRAMES, &mut offset_ns));
+        let resumed_at = offset_ns;
+        chunks.extend(feed(&mut chunker, true, 20, &mut offset_ns));
+        chunks.extend(feed(&mut chunker, false, ASR_SILENCE_FRAMES, &mut offset_ns));
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[1].start_offset_ns, resumed_at);
+        assert_eq!(chunks[1].samples.len(), 30 * VAD_FRAME_SAMPLES);
     }
 
     #[test]
