@@ -8,6 +8,7 @@ use crate::meeting::analytics::MeetingProvisionalSegment;
 use crate::meeting::live_doc_types::{MeetingLiveChange, MeetingLiveTarget};
 use crate::meeting::store::{LiveRoom, MeetingStore, StoreError};
 use crate::meeting::types::{MeetingSessionId, SourceKind, SourceTrackId};
+use crate::query::KeptLocal;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -39,7 +40,7 @@ pub(crate) enum SharePhase {
     Closing,
     /// The last readings are in.
     Ended,
-    /// The meeting was deleted: the room is emptied.
+    /// The meeting was deleted or kept on this Mac: the room is emptied.
     Withdrawn,
 }
 
@@ -90,7 +91,8 @@ impl LiveTranscript {
         }
     }
 
-    /// The meeting was deleted: its room is emptied.
+    /// The meeting was deleted or kept on this Mac: its room is emptied,
+    /// and the meeting is not shared again in this capture.
     pub(crate) fn withdraw_share(&self) {
         self.share().phase = SharePhase::Withdrawn;
     }
@@ -310,9 +312,16 @@ impl SharedMeeting {
         self.service.shared_rooms().watch(self.session_id)
     }
 
-    /// The state teammates see in `phase`, as JSON.
+    /// The state teammates see in `phase`, as JSON. A meeting whose series
+    /// was kept on this Mac after its link was made, or whose series cannot
+    /// be read, is withdrawn.
     pub(crate) fn state(&self, phase: SharePhase) -> Result<Vec<u8>, serde_json::Error> {
         if phase == SharePhase::Withdrawn {
+            return Ok(REMOVED.to_vec());
+        }
+        let kept = KeptLocal::read(&self.store).map_or(true, |kept| kept.hides(self.session_id));
+        if kept {
+            self.live.withdraw_share();
             return Ok(REMOVED.to_vec());
         }
         let title = self

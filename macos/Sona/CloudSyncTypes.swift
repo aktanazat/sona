@@ -28,6 +28,7 @@ enum CloudSyncErrorKind: String, Decodable {
     case integrityFailure = "integrity_failure"
     case conflict
     case unsupportedProtocol = "unsupported_protocol"
+    case keptOnThisMac = "kept_on_this_mac"
     case transient
 
     /// What a reader can do about it, in the words the old panel used.
@@ -42,6 +43,7 @@ enum CloudSyncErrorKind: String, Decodable {
         case .integrityFailure: "The cloud operation could not be verified."
         case .conflict: "This meeting has a sync conflict."
         case .unsupportedProtocol: "This device does not support the version of cloud sync in use."
+        case .keptOnThisMac: "This meeting was kept on this Mac, so it can't be shared in this call."
         case .transient: "Cloud sync is temporarily unavailable."
         }
     }

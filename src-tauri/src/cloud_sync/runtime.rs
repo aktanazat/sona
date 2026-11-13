@@ -827,6 +827,7 @@ pub(crate) enum CloudRuntimeError {
     Conflict,
     UnsupportedProtocol,
     MemoryIndexTooLarge,
+    KeptOnThisMac,
     Deferred,
     Client(CloudClientError),
     Storage,
@@ -846,6 +847,7 @@ impl CloudRuntimeError {
             Self::MemoryIndexTooLarge => CloudSyncErrorKind::MemoryIndexTooLarge,
             Self::Conflict => CloudSyncErrorKind::Conflict,
             Self::UnsupportedProtocol => CloudSyncErrorKind::UnsupportedProtocol,
+            Self::KeptOnThisMac => CloudSyncErrorKind::KeptOnThisMac,
             Self::Deferred | Self::Randomness => CloudSyncErrorKind::Transient,
             Self::Client(error) => match error.api_error().map(|api| api.code) {
                 Some(CloudErrorCode::Unauthorized | CloudErrorCode::RevokedDevice) => {
@@ -879,6 +881,7 @@ impl fmt::Display for CloudRuntimeError {
             CloudSyncErrorKind::IntegrityFailure => "cloud sync integrity validation failed",
             CloudSyncErrorKind::Conflict => "cloud sync has a conflict",
             CloudSyncErrorKind::UnsupportedProtocol => "cloud sync protocol is unsupported",
+            CloudSyncErrorKind::KeptOnThisMac => "the meeting's series is kept on this Mac",
             CloudSyncErrorKind::Transient => "cloud sync is temporarily unavailable",
         };
         formatter.write_str(message)

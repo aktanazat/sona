@@ -507,3 +507,45 @@ fn the_page_shows_a_sentence_cut_in_two_as_one_line() {
         "a piece joins the line it runs on from, whatever its punctuation or speaker guess, and never across a pause or another track"
     );
 }
+
+#[test]
+fn a_link_stops_showing_the_meeting_once_its_series_is_kept_on_this_mac() {
+    use crate::meeting::detection::machine::CalendarEventSummary;
+    use crate::meeting::series_types::MeetingSeriesRemoteOptOutSetRequest;
+    use crate::meeting::types::MeetingOperationId;
+    use super::super::live_share::REMOVED;
+
+    let (_directory, store, session_id, live, shared) = shared_meeting();
+    let started = Local::now().timestamp_millis();
+    let event = CalendarEventSummary {
+        event_key: "harbor-sync#1".to_owned(),
+        series_key: "harbor-sync".to_owned(),
+        title: "Harbor map sync".to_owned(),
+        attendee_count: 2,
+        start_utc_ms: started,
+        end_utc_ms: started + 1_800_000,
+        attendees: Vec::new(),
+        notes: None,
+        calendar_name: None,
+        location: None,
+        url: None,
+        place: None,
+    };
+    store.remember_calendar_facts(session_id, &event).unwrap();
+    assert_ne!(shared.state(SharePhase::Live).unwrap(), REMOVED);
+
+    store
+        .set_series_remote_opt_out(
+            &MeetingSeriesRemoteOptOutSetRequest {
+                operation_id: MeetingOperationId::new(),
+                series_key: event.series_key.clone(),
+                remote_intelligence_opt_out: true,
+                expected_revision: 0,
+            },
+            3,
+        )
+        .unwrap();
+
+    assert_eq!(shared.state(SharePhase::Live).unwrap(), REMOVED);
+    assert_eq!(live.share_phase(), SharePhase::Withdrawn);
+}
