@@ -291,6 +291,16 @@ final class PeopleStore {
         }
     }
 
+    /// The emails calendar invites match this person by, as a whole list.
+    func setEmails(_ calendarEmails: [String]) {
+        guard case let .person(personId) = route else { return }
+        struct Params: Encodable { let personId: String; let calendarEmails: [String] }
+        write { _, core in
+            try await core.request(
+                "person_emails_set", Params(personId: personId, calendarEmails: calendarEmails))
+        }
+    }
+
     func choosePhotoSource() {
         guard !busy, case let .person(personId) = route,
               let person = detail?.person, person.id == personId else { return }

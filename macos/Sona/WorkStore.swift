@@ -25,15 +25,34 @@ final class WorkStore {
     /// Every cycle, oldest first, and how long they run.
     private(set) var cycles: [WorkCycle] = []
     private(set) var cycleSettings: WorkCycleSettings?
+    /// The tasks a cycle usually finishes, from the last three that ended.
+    private(set) var cycleCapacity: Int?
     private(set) var loading = false
     private(set) var listError: String?
     private(set) var mutationError: String?
     private(set) var detail: WorkItemDetail?
     private(set) var detailError: String?
+    private(set) var working: [String: WorkSession] = [:]
+    private(set) var sessions: [String: [WorkSession]] = [:]
+    private(set) var sessionsError: String?
     /// The words Sona listens for, oldest first.
     private(set) var watches: [WorkWatch] = []
     /// What `undo` would take back.
     private(set) var undoTitle: String?
+    /// Starred tasks, projects, saved views and people, each at its place in
+    /// its folder or at the top.
+    private(set) var favorites: [WorkFavorite] = []
+    /// The favorites folders, at their places at the top.
+    private(set) var favoriteFolders: [WorkFavoriteFolder] = []
+    /// The tasks the inbox follows, by item id.
+    private(set) var subscriptions: [String: WorkSubscription] = [:]
+    /// Every notice not archived, snoozed ones too, newest first.
+    private(set) var notifications: [WorkNotification] = []
+    /// Archived and deleted tasks, once the archive page has asked.
+    private(set) var archive: WorkArchiveList?
+    private(set) var archiveError: String?
+    /// Tasks in Recently deleted by id, so a notice about one can still name it.
+    private(set) var binned: [String: WorkBinned] = [:]
     /// The moment the lists are drawn at. It moves when work changes and on
     /// its own when a snooze ends, a wait comes due or the day turns, so
     /// work comes back on time with nobody touching the window.
@@ -49,6 +68,8 @@ final class WorkStore {
     @ObservationIgnored private var undoStack: [Undo] = []
     @ObservationIgnored private var undoSerial = 0
     @ObservationIgnored private var alarm: Task<Void, Never>?
+    @ObservationIgnored private var sessionsTicket = 0
+    @ObservationIgnored private var viewsLoaded = false
 
     private static let changeEvents = ["work-changed", "planning-changed-event", CoreEvent.meetingRemoved]
     private static let everything = WorkQuery(includeArchived: true, includeSnoozed: true)
@@ -69,6 +90,7 @@ final class WorkStore {
     func start() async {
         await refresh()
         await loadWatches()
+        await adoptPinnedViews()
     }
 
     /// Reads everything again. A call while a read runs asks that read to go
@@ -101,11 +123,186 @@ final class WorkStore {
             }
             detail = result
             detailError = nil
+            fold(result.item)
         } catch {
             guard detailId == id else { return }
             detail = nil
             detailError = error.localizedDescription
         }
+    }
+
+    /// A change written elsewhere can reach the item's own read before the
+    /// list's; the newer row wins so every view of the task agrees.
+    private func fold(_ fresh: WorkItemRow) {
+        guard var rows = items, let index = rows.firstIndex(where: { $0.id == fresh.id }),
+              rows[index].revision < fresh.revision else { return }
+        rows[index] = fresh
+        items = rows
+        keepTime()
+    }
+
+    /// Posts a comment, then puts `files` on it. False when the comment was
+    /// not saved; a file that fails leaves its reason in `mutationError`.
+    func addComment(on itemId: String, body: String, replyTo: String? = nil, files: [URL] = []) async -> Bool {
+        let comment: WorkComment
+        do {
+            comment = try await core.request("work_comment_add", CommentAddParams(
+                operationId: Self.newId(), itemId: itemId, body: body, replyTo: replyTo))
+            mutationError = nil
+        } catch {
+            mutationError = error.localizedDescription
+            return false
+        }
+        if files.isEmpty {
+            await loadDetail(itemId)
+        } else {
+            _ = await attach(files.map { .file($0) }, to: itemId, comment: comment.id)
+        }
+        return true
+    }
+
+    func editComment(_ id: String, on itemId: String, body: String) async -> Bool {
+        await write(on: itemId, "work_comment_edit", CommentEditParams(operationId: Self.newId(), id: id, body: body))
+    }
+
+    func deleteComment(_ id: String, on itemId: String) async -> Bool {
+        await write(on: itemId, "work_comment_delete", OperationIdParams(operationId: Self.newId(), id: id))
+    }
+
+    func resolveComment(_ id: String, on itemId: String, resolved: Bool) async -> Bool {
+        await write(on: itemId, "work_comment_resolve", CommentResolveParams(
+            operationId: Self.newId(), id: id, resolved: resolved))
+    }
+
+    func attach(_ sources: [WorkAttachmentSource], to itemId: String, comment commentId: String? = nil) async -> Int {
+        let had = Set(detail.map { $0.item.id == itemId ? $0.attachments.map(\.id) : [] } ?? [])
+        var failure: String?
+        var repeats = 0
+        for source in sources {
+            do {
+                var params = source.params(itemId: itemId, operationId: Self.newId())
+                params.commentId = commentId
+                let made: WorkAttachment = try await core.request(source.method, params)
+                if had.contains(made.id) { repeats += 1 }
+            } catch {
+                failure = error.localizedDescription
+            }
+        }
+        mutationError = failure
+        await loadDetail(itemId)
+        return repeats
+    }
+
+    func renameAttachment(_ attachment: WorkAttachment, to title: String) async -> Bool {
+        await write(on: attachment.itemId, "work_attachment_rename", AttachmentRenameParams(
+            operationId: Self.newId(), id: attachment.id, title: title))
+    }
+
+    func detach(_ attachment: WorkAttachment) async -> Bool {
+        let kept: WorkAttachmentSource?
+        if let url = attachment.linkURL, attachment.kind == .link {
+            kept = .link(url.absoluteString, title: attachment.title, subtitle: attachment.subtitle)
+        } else if let file = attachment.fileURL {
+            let folder = FileManager.default.temporaryDirectory
+                .appending(path: "sona-detached/\(Self.newId())", directoryHint: .isDirectory)
+            let copy = folder.appending(path: attachment.originalName ?? file.lastPathComponent)
+            do {
+                try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                try FileManager.default.copyItem(at: file, to: copy)
+                kept = .file(copy, title: attachment.title)
+            } catch {
+                kept = nil
+            }
+        } else {
+            kept = nil
+        }
+        let done = await write(on: attachment.itemId, "work_attachment_detach", OperationIdParams(
+            operationId: Self.newId(), id: attachment.id))
+        if done, let kept {
+            _ = remember("Removed \(attachment.title)", .reattach(attachment.itemId, kept))
+        }
+        return done
+    }
+
+    private func write<P: Encodable>(on itemId: String, _ method: String, _ params: P) async -> Bool {
+        do {
+            try await core.request(method, params)
+            mutationError = nil
+            await loadDetail(itemId)
+            return true
+        } catch {
+            mutationError = error.localizedDescription
+            return false
+        }
+    }
+
+    func loadSessions(_ itemId: String) async {
+        sessionsTicket += 1
+        let ticket = sessionsTicket
+        do {
+            let listed: [WorkSession] = try await core.request("work_sessions", SessionsParams(itemId: itemId, open: false))
+            var full: [WorkSession] = []
+            for session in listed {
+                full.append(try await core.request("work_session", IdParams(id: session.id)))
+            }
+            guard ticket == sessionsTicket else { return }
+            sessions = [itemId: full]
+            sessionsError = nil
+        } catch {
+            guard ticket == sessionsTicket else { return }
+            sessionsError = error.localizedDescription
+        }
+    }
+
+    func stopSession(_ id: String) async -> Bool {
+        await sessionWrite("work_session_stop", OperationIdParams(operationId: Self.newId(), id: id))
+    }
+
+    func replySession(_ id: String, body: String?, value: String?) async -> Bool {
+        await sessionWrite("work_session_reply", SessionReplyParams(
+            operationId: Self.newId(), id: id, body: body, value: value))
+    }
+
+    private func sessionWrite<P: Encodable>(_ method: String, _ params: P) async -> Bool {
+        do {
+            let session: WorkSession = try await core.request(method, params)
+            sessionsTicket += 1
+            mutationError = nil
+            if var list = sessions[session.itemId], let at = list.firstIndex(where: { $0.id == session.id }) {
+                list[at] = session
+                sessions[session.itemId] = list
+            }
+            if working[session.itemId]?.id == session.id {
+                working[session.itemId] = session.isOpen ? session : nil
+            }
+            return true
+        } catch {
+            mutationError = error.localizedDescription
+            return false
+        }
+    }
+
+    /// New tasks under `parentId`, one per title, in the parent's project.
+    /// `made` runs once they exist.
+    func createSubtasks(under parentId: String, titles: [String], made: @escaping @MainActor () -> Void = {}) {
+        let titles = titles.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        guard let parent = rows([parentId]).first, !titles.isEmpty else { return }
+        let inputs = titles.map { WorkItemInput(title: $0, projectId: parent.projectId) }
+        enqueue {
+            do {
+                let _: [WorkItem] = try await self.core.request("work_subtask_create", SubtaskParams(
+                    operationId: Self.newId(), parentId: parentId, inputs: inputs))
+                made()
+            } catch {
+                self.mutationError = error.localizedDescription
+            }
+            self.reloadWhenIdle = true
+        }
+    }
+
+    func setParent(of id: String, to parentId: String?) {
+        guard id != parentId else { return }
+        update([id], WorkPatch(parentId: parentId.map { .set($0) } ?? .clear))
     }
 
     // MARK: Changes
@@ -159,6 +356,26 @@ final class WorkStore {
         }
     }
 
+    /// Moves tasks in the manual order, keeping their order among themselves.
+    func move(_ ids: [String], to place: WorkPlace) {
+        let moving = rows(ids).sorted { ($0.sortOrder, $0.number) < ($1.sortOrder, $1.number) }
+        guard !moving.isEmpty else { return }
+        let ids = moving.map(\.id)
+        let moved = Set(ids)
+        let others = (items ?? []).filter { !moved.contains($0.id) }.map(\.sortOrder)
+        let slot = Dictionary(uniqueKeysWithValues: ids.enumerated().map { ($1, Double($0)) })
+        change(ids, undo: nil, { row in
+            let index = slot[row.id] ?? 0
+            switch place {
+            case .top: row.sortOrder = (others.min() ?? 0) - Double(ids.count) + index
+            case .bottom: row.sortOrder = (others.max() ?? 0) + 1 + index
+            case .before, .after: break
+            }
+        }) { operationId, _ in
+            try await self.core.request("work_move", MoveParams(operationId: operationId, ids: ids, place: place))
+        }
+    }
+
     /// Books the next free hour before the task is due in the Sona
     /// calendar. The row stops reading at risk at once; the hour shows
     /// when the calendar answers.
@@ -188,6 +405,7 @@ final class WorkStore {
                     "work_cycle_settings_save", CycleSettingsParams(operationId: Self.newId(), settings: settings))
                 self.cycleSettings = saved.settings
                 self.cycles = saved.cycles
+                self.cycleCapacity = saved.capacity
             } catch {
                 self.cycleSettings = before
                 self.mutationError = error.localizedDescription
@@ -196,17 +414,73 @@ final class WorkStore {
         }
     }
 
-    /// Scope and done as each day of a cycle ended, read from history.
+    /// Names a cycle; an empty name goes back to its number.
+    func renameCycle(_ number: Int64, to name: String) {
+        changeCycles("work_cycle_save", CycleSaveParams(
+            operationId: Self.newId(), number: number, name: name.trimmingCharacters(in: .whitespacesAndNewlines)))
+    }
+
+    /// Moves a cycle's unfinished work into the cycle under way, or the next.
+    func rolloverCycle(_ number: Int64) {
+        changeCycles("work_cycle_rollover", CycleNumberParams(operationId: Self.newId(), number: number))
+    }
+
+    /// Starts a cycle today, ending the one before it now.
+    func startCycleToday(_ number: Int64) {
+        changeCycles("work_cycle_start_today", CycleNumberParams(operationId: Self.newId(), number: number))
+    }
+
+    /// Moves a cycle's days; `lastDay` is the last day it runs. The core
+    /// keeps a cycle under way on its start and off its neighbours.
+    func moveCycle(_ number: Int64, firstDay: Date?, lastDay: Date) {
+        let calendar = Calendar.current
+        let end = calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: lastDay)) ?? lastDay
+        changeCycles("work_cycle_save", CycleMoveParams(
+            operationId: Self.newId(), number: number,
+            startDay: firstDay.map(CycleFormat.dayText), endDay: CycleFormat.dayText(end)))
+    }
+
+    /// Every cycle as an iCalendar file's text.
+    func cycleCalendar() async throws -> String {
+        try await core.request("work_cycle_calendar")
+    }
+
+    /// The newest changes across tasks, projects, cycles, views, labels,
+    /// notes, meetings and comments, oldest first.
+    func recentChanges(limit: Int = 60) async throws -> WorkChangePage {
+        try await core.request("work_changes", RecentChangesParams(limit: limit, latest: true))
+    }
+
+    private func changeCycles<P: Encodable & Sendable>(_ method: String, _ params: P) {
+        enqueue {
+            do {
+                let saved: WorkCycles = try await self.core.request(method, params)
+                self.cycleSettings = saved.settings
+                self.cycles = saved.cycles
+                self.cycleCapacity = saved.capacity
+            } catch {
+                self.mutationError = error.localizedDescription
+            }
+            self.reloadWhenIdle = true
+        }
+    }
+
+    /// Scope, started and done as each day of a cycle ended, frozen once it closed.
     func progress(of number: Int64) async throws -> WorkCycleProgress {
         try await core.request("work_cycle", CycleParams(number: number))
     }
 
+    /// Lead time and triage time over the last `days`, for the tasks `query` keeps.
+    func insights(_ query: WorkQuery, days: Int) async throws -> WorkInsights {
+        try await core.request("work_insights", InsightsParams(query: query, days: days))
+    }
+
     var currentCycle: WorkCycle? { cycles.first { $0.state == .current } }
 
-    /// The cycle after the current one.
+    /// The first cycle after the current one, past any cooldown.
     var nextCycle: WorkCycle? {
         guard let current = currentCycle else { return nil }
-        return cycles.first { $0.startsAtMs == current.endsAtMs }
+        return cycles.filter { $0.startsAtMs >= current.endsAtMs }.min { $0.startsAtMs < $1.startsAtMs }
     }
 
     func accept(_ ids: [String], applySuggestions: Bool) {
@@ -230,7 +504,8 @@ final class WorkStore {
         }
     }
 
-    func decline(_ ids: [String]) {
+    func decline(_ ids: [String], reason: String? = nil) {
+        let reason = reason?.trimmingCharacters(in: .whitespacesAndNewlines)
         let before = rows(ids).filter { $0.status == .triage }
         guard !before.isEmpty else { return }
         let undo = remember(
@@ -240,7 +515,8 @@ final class WorkStore {
             row.status = .canceled
             row.statusChangedAtMs = now
         }) { operationId, rows in
-            try await self.core.request("work_triage_decline", IdsParams(operationId: operationId, ids: rows.map(\.id)))
+            try await self.core.request("work_triage_decline", DeclineParams(
+                operationId: operationId, ids: rows.map(\.id), reason: reason?.isEmpty == false ? reason : nil))
         }
     }
 
@@ -259,6 +535,20 @@ final class WorkStore {
                 operationId: operationId, id: id, ofId: other))
             return [item]
         }
+    }
+
+    func acceptSuggestion(_ suggestion: WorkFieldSuggestion, on id: String) async {
+        await decide("work_suggestion_accept", suggestion, on: id)
+    }
+
+    func dismissSuggestion(_ suggestion: WorkFieldSuggestion, on id: String) async {
+        await decide("work_suggestion_dismiss", suggestion, on: id)
+    }
+
+    private func decide(_ method: String, _ suggestion: WorkFieldSuggestion, on id: String) async {
+        suggestions[id]?.removeAll { $0.id == suggestion.id }
+        _ = await write(on: id, method, SuggestionParams(operationId: Self.newId(), id: id, suggestionId: suggestion.id))
+        await refresh()
     }
 
     func addRelation(from: String, to: String, kind: WorkRelationKind) {
@@ -361,7 +651,8 @@ final class WorkStore {
     func saveLabel(id: String?, name: String, hue: Double) -> String {
         let id = id ?? Self.newId()
         let before = labels.first { $0.id == id }
-        place(WorkLabel(id: id, name: name, hue: hue, revision: before?.revision ?? 0))
+        place(WorkLabel(id: id, name: name, hue: hue, revision: before?.revision ?? 0,
+                        group: before?.group, retiredAtMs: before?.retiredAtMs, scope: before?.scope ?? .all))
         enqueue {
             do {
                 let saved: WorkLabel = try await self.core.request("work_label_save", LabelParams(
@@ -386,6 +677,44 @@ final class WorkStore {
             } catch {
                 self.mutationError = error.localizedDescription
                 self.reloadWhenIdle = true
+            }
+        }
+    }
+
+    func groupLabel(_ id: String, into group: String?) {
+        guard var shown = labels.first(where: { $0.id == id }) else { return }
+        let name = group?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let value = name?.isEmpty == false ? name : nil
+        guard value != shown.group else { return }
+        let before = shown
+        shown.group = value
+        changeLabel(before, to: shown, "work_label_group", LabelGroupParams(operationId: Self.newId(), id: id, group: value))
+    }
+
+    func retireLabel(_ id: String, _ retired: Bool) {
+        guard var shown = labels.first(where: { $0.id == id }), shown.retired != retired else { return }
+        let before = shown
+        shown.retiredAtMs = retired ? ProjectsStore.milliseconds(.now) : nil
+        changeLabel(before, to: shown, "work_label_retire", LabelRetireParams(operationId: Self.newId(), id: id, retired: retired))
+    }
+
+    /// Keeps a label to tasks or to projects, or lets it go on both.
+    func scopeLabel(_ id: String, _ scope: WorkLabelScope) {
+        guard var shown = labels.first(where: { $0.id == id }), shown.scope != scope else { return }
+        let before = shown
+        shown.scope = scope
+        changeLabel(before, to: shown, "work_label_scope", LabelScopeParams(operationId: Self.newId(), id: id, scope: scope))
+    }
+
+    private func changeLabel<P: Encodable>(_ before: WorkLabel, to shown: WorkLabel, _ method: String, _ params: P) {
+        place(shown)
+        enqueue {
+            do {
+                let saved: WorkLabel = try await self.core.request(method, params)
+                self.place(saved)
+            } catch {
+                self.place(before)
+                self.mutationError = error.localizedDescription
             }
         }
     }
@@ -489,6 +818,17 @@ final class WorkStore {
             }
         case let .unbook(id):
             unbook(id)
+        case let .undelete(ids):
+            undelete(ids)
+        case let .delete(ids):
+            bin(rows(ids), undo: nil)
+        case let .reattach(itemId, source):
+            Task {
+                _ = await attach([source], to: itemId)
+                if case let .file(copy, _) = source {
+                    try? FileManager.default.removeItem(at: copy.deletingLastPathComponent())
+                }
+            }
         }
     }
 
@@ -505,6 +845,310 @@ final class WorkStore {
             }
             self.reloadWhenIdle = true
         }
+    }
+
+    // MARK: Bin, favorites, inbox
+
+    /// Notices awake now and not archived, newest first.
+    var inbox: [WorkNotification] {
+        notifications.filter { ($0.snoozedUntilMs ?? 0) <= now }
+    }
+
+    var snoozedNotices: [WorkNotification] {
+        notifications.filter { ($0.snoozedUntilMs ?? 0) > now }
+    }
+
+    var unread: Int { inbox.filter { $0.readAtMs == nil }.count }
+
+    /// Moves tasks to Recently deleted; the toast can bring them back.
+    func delete(_ ids: [String]) {
+        let gone = rows(ids)
+        guard let first = gone.first else { return }
+        let title = gone.count == 1
+            ? "Moved \(first.title) to Recently deleted" : "Moved \(gone.count) tasks to Recently deleted"
+        bin(gone, undo: remember(title, .undelete(gone.map(\.id))))
+    }
+
+    private func bin(_ gone: [WorkItemRow], undo: Int?) {
+        guard !gone.isEmpty else { return }
+        let ids = gone.map(\.id)
+        let wanted = Set(ids)
+        items = items?.filter { !wanted.contains($0.id) }
+        enqueue {
+            do {
+                let _: [WorkItem] = try await self.core.request(
+                    "work_delete", IdsParams(operationId: Self.newId(), ids: ids))
+            } catch {
+                let shown = Set((self.items ?? []).map(\.id))
+                self.items = (self.items ?? []) + gone.filter { !shown.contains($0.id) }
+                self.forget(undo)
+                self.mutationError = error.localizedDescription
+            }
+            self.reloadWhenIdle = true
+        }
+    }
+
+    func undelete(_ ids: [String]) {
+        guard !ids.isEmpty else { return }
+        enqueue {
+            do {
+                let _: [WorkItem] = try await self.core.request(
+                    "work_undelete", IdsParams(operationId: Self.newId(), ids: ids))
+            } catch {
+                self.mutationError = error.localizedDescription
+            }
+            self.reloadWhenIdle = true
+        }
+    }
+
+    func loadArchive() async {
+        do {
+            archive = try await core.request("work_archive_list")
+            archiveError = nil
+        } catch {
+            archiveError = error.localizedDescription
+        }
+    }
+
+    /// Brings a task back from Recently deleted, or out of the archive.
+    func restoreFromArchive(_ id: String) {
+        guard var shown = archive else { return }
+        if let binned = shown.deleted.first(where: { $0.id == id }) {
+            shown.deleted.removeAll { $0.id == id }
+            archive = shown
+            if var rows = items, !rows.contains(where: { $0.id == id }) {
+                rows.append(row(for: binned.item, beside: nil))
+                items = rows
+            }
+            _ = remember("Restored \(binned.item.title)", .delete([id]))
+            undelete([id])
+        } else {
+            shown.archived.removeAll { $0.id == id }
+            archive = shown
+            restore([id])
+        }
+    }
+
+    func isFavorite(_ kind: WorkFavoriteKind, _ id: String) -> Bool {
+        favorites.contains { $0.kind == kind && $0.targetId == id }
+    }
+
+    /// The folders and loose favorites at the top, in the sidebar's order.
+    var favoriteTop: [WorkFavoriteEntry] {
+        (favoriteFolders.map { ($0.position, WorkFavoriteEntry.folder(id: $0.id)) }
+            + favorites.filter { $0.folderId == nil }.map { ($0.position, $0.entry) })
+            .sorted { $0.0 < $1.0 }
+            .map(\.1)
+    }
+
+    func favorites(in folder: String) -> [WorkFavorite] {
+        favorites.filter { $0.folderId == folder }.sorted { $0.position < $1.position }
+    }
+
+    func setFavorite(_ kind: WorkFavoriteKind, _ id: String, _ on: Bool) {
+        guard isFavorite(kind, id) != on else { return }
+        let before = favorites
+        if on {
+            let last = (favoriteFolders.map(\.position) + favorites.filter { $0.folderId == nil }.map(\.position)).max()
+            favorites.append(WorkFavorite(kind: kind, targetId: id, folderId: nil, position: (last ?? -1) + 1,
+                                          createdAtMs: TaskDates.now()))
+        } else {
+            favorites.removeAll { $0.kind == kind && $0.targetId == id }
+        }
+        Task {
+            do {
+                let _: Bool = try await core.request(
+                    "work_favorite_set", FavoriteParams(operationId: Self.newId(), kind: kind, id: id, on: on))
+            } catch {
+                favorites = before
+                mutationError = error.localizedDescription
+            }
+        }
+    }
+
+    /// Moves a favorite into a folder or to the top, or a folder among the
+    /// top, at `index` there counted without it, or last.
+    func moveFavorite(_ entry: WorkFavoriteEntry, into folder: String?, at index: Int?) {
+        if case .folder = entry, folder != nil { return }
+        let before = folder.map { favorites(in: $0).map(\.entry) } ?? favoriteTop
+        var after = before.filter { $0 != entry }
+        let at = min(index ?? after.count, after.count)
+        after.insert(entry, at: at)
+        guard after != before else { return }
+        let (keptFavorites, keptFolders) = (favorites, favoriteFolders)
+        placeFavorites(after, in: folder)
+        Task {
+            do {
+                let _: Bool = try await core.request("work_favorite_move", FavoriteMoveParams(
+                    operationId: Self.newId(), entry: entry, into: folder, index: at))
+            } catch {
+                (favorites, favoriteFolders) = (keptFavorites, keptFolders)
+                mutationError = error.localizedDescription
+            }
+        }
+    }
+
+    /// Makes a folder where `entry` sits at the top, or last, and moves `entry` into it.
+    @discardableResult
+    func createFavoriteFolder(_ name: String, holding entry: WorkFavoriteEntry? = nil) async -> WorkFavoriteFolder? {
+        let at = entry.flatMap { favoriteTop.firstIndex(of: $0) }
+        do {
+            let folder: WorkFavoriteFolder = try await core.request("work_favorite_folder_save", FavoriteFolderParams(
+                operationId: Self.newId(), id: nil, name: name, index: at))
+            var top = favoriteTop
+            favoriteFolders.append(folder)
+            top.insert(.folder(id: folder.id), at: min(at ?? top.count, top.count))
+            placeFavorites(top, in: nil)
+            if let entry { moveFavorite(entry, into: folder.id, at: nil) }
+            return folder
+        } catch {
+            mutationError = error.localizedDescription
+            return nil
+        }
+    }
+
+    func renameFavoriteFolder(_ id: String, _ name: String) {
+        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, let at = favoriteFolders.firstIndex(where: { $0.id == id }),
+              favoriteFolders[at].name != name else { return }
+        let before = favoriteFolders
+        favoriteFolders[at].name = name
+        Task {
+            do {
+                let _: WorkFavoriteFolder = try await core.request("work_favorite_folder_save", FavoriteFolderParams(
+                    operationId: Self.newId(), id: id, name: name, index: nil))
+            } catch {
+                favoriteFolders = before
+                mutationError = error.localizedDescription
+            }
+        }
+    }
+
+    /// Deletes a folder. Its favorites stay, at the top where it was.
+    func deleteFavoriteFolder(_ id: String) {
+        let (keptFavorites, keptFolders) = (favorites, favoriteFolders)
+        let top = favoriteTop.flatMap { entry in
+            entry == .folder(id: id) ? favorites(in: id).map(\.entry) : [entry]
+        }
+        placeFavorites(top, in: nil)
+        favoriteFolders.removeAll { $0.id == id }
+        Task {
+            do {
+                try await core.request("work_favorite_folder_delete", FavoriteFolderDeleteParams(
+                    operationId: Self.newId(), id: id))
+            } catch {
+                (favorites, favoriteFolders) = (keptFavorites, keptFolders)
+                mutationError = error.localizedDescription
+            }
+        }
+    }
+
+    /// Writes `entries` as the whole order of a folder, or of the top, as the
+    /// core does.
+    private func placeFavorites(_ entries: [WorkFavoriteEntry], in folder: String?) {
+        for (position, entry) in entries.enumerated() {
+            switch entry {
+            case let .favorite(kind, id):
+                guard let at = favorites.firstIndex(where: { $0.kind == kind && $0.targetId == id }) else { continue }
+                favorites[at].folderId = folder
+                favorites[at].position = position
+            case let .folder(id):
+                guard let at = favoriteFolders.firstIndex(where: { $0.id == id }) else { continue }
+                favoriteFolders[at].position = position
+            }
+        }
+    }
+
+    func subscribe(_ id: String, _ on: Bool) {
+        let before = subscriptions[id]
+        guard (before != nil) != on else { return }
+        subscriptions[id] = on ? WorkSubscription(itemId: id, reason: .subscribed, createdAtMs: TaskDates.now()) : nil
+        Task {
+            do {
+                let _: [String] = try await core.request(
+                    "work_subscribe", SubscribeParams(operationId: Self.newId(), ids: [id], on: on))
+            } catch {
+                subscriptions[id] = before
+                mutationError = error.localizedDescription
+            }
+        }
+    }
+
+    /// Marks notices read or unread, archives them or snoozes them until
+    /// `until`.
+    func mark(_ ids: [String], _ mark: WorkInboxMark, until: Int64? = nil) {
+        let wanted = Set(ids)
+        guard notifications.contains(where: { wanted.contains($0.id) }) else { return }
+        let before = notifications
+        let now = TaskDates.now()
+        for index in notifications.indices where wanted.contains(notifications[index].id) {
+            switch mark {
+            case .read: notifications[index].readAtMs = notifications[index].readAtMs ?? now
+            case .unread: notifications[index].readAtMs = nil
+            case .archive: notifications[index].archivedAtMs = now
+            case .unarchive: notifications[index].archivedAtMs = nil
+            case .snooze: notifications[index].snoozedUntilMs = until
+            }
+        }
+        notifications.removeAll { $0.archivedAtMs != nil }
+        keepTime()
+        Task {
+            do {
+                let _: [WorkNotification] = try await core.request(
+                    "work_inbox_mark",
+                    InboxMarkParams(operationId: Self.newId(), ids: Array(wanted), mark: mark, untilMs: until))
+            } catch {
+                notifications = before
+                mutationError = error.localizedDescription
+            }
+        }
+    }
+
+    func markAllRead() {
+        mark(inbox.filter { $0.readAtMs == nil }.map(\.id), .read)
+    }
+
+    func descriptionVersions(_ id: String) async -> [WorkDescriptionVersion] {
+        do {
+            return try await core.request("work_description_versions", IdParams(id: id))
+        } catch {
+            mutationError = error.localizedDescription
+            return []
+        }
+    }
+
+    /// Puts an earlier description back; undo returns the one replaced.
+    func restoreDescription(_ version: WorkDescriptionVersion) {
+        guard let row = rows([version.itemId]).first, row.details != version.body else { return }
+        let undo = remember(
+            "Restored an earlier description",
+            .patches([(ids: [row.id], patch: WorkPatch(details: Self.clearable(row.details)))]))
+        change([row.id], undo: undo, { $0.details = version.body }) { operationId, rows in
+            guard let row = rows.first else { return [] }
+            let item: WorkItem = try await self.core.request("work_description_restore", DescriptionRestoreParams(
+                operationId: operationId, id: row.id, expectedRevision: row.revision, versionId: version.id))
+            return [item]
+        }
+    }
+
+    /// Saved views pinned to the sidebar used to be kept on this Mac; they
+    /// move into the core's favorites once the saved views have loaded, then
+    /// the local list goes.
+    private func adoptPinnedViews() async {
+        let key = "tasks.favoriteViews"
+        guard viewsLoaded, let stored = UserDefaults.standard.string(forKey: key) else { return }
+        for id in stored.split(separator: ",").map(String.init)
+        where views.contains(where: { $0.id == id }) && !isFavorite(.view, id) {
+            do {
+                let _: Bool = try await core.request(
+                    "work_favorite_set", FavoriteParams(operationId: Self.newId(), kind: .view, id: id, on: true))
+            } catch {
+                mutationError = error.localizedDescription
+                return
+            }
+        }
+        UserDefaults.standard.removeObject(forKey: key)
+        await loadLifecycle()
     }
 
     // MARK: Ask, say, watch
@@ -635,6 +1279,9 @@ final class WorkStore {
         case restore([String])
         case delegate([(id: String, agent: String?)])
         case unbook(String)
+        case reattach(String, WorkAttachmentSource)
+        case undelete([String])
+        case delete([String])
     }
 
     private func load() async {
@@ -645,7 +1292,8 @@ final class WorkStore {
             async let tally: WorkCounts = core.request("work_counts")
             async let saved: [WorkView] = core.request("work_views")
             async let cycled: WorkCycles = core.request("work_cycles")
-            let (listed, counted, savedViews, cycleList) = try await (list, tally, saved, cycled)
+            async let open: [WorkSession] = core.request("work_sessions", SessionsParams(itemId: nil, open: true))
+            let (listed, counted, savedViews, cycleList, openSessions) = try await (list, tally, saved, cycled, open)
             if pending > 0 {
                 reloadWhenIdle = true
             } else {
@@ -659,14 +1307,47 @@ final class WorkStore {
                 conversationsAvailable = listed.conversationsAvailable
                 counts = counted
                 views = savedViews
+                viewsLoaded = true
                 cycles = cycleList.cycles
                 cycleSettings = cycleList.settings
+                cycleCapacity = cycleList.capacity
+                working = Dictionary(openSessions.map { ($0.itemId, $0) }) { newest, _ in newest }
                 listError = nil
             }
         } catch {
             listError = error.localizedDescription
         }
-        if let detailId { await loadDetail(detailId) }
+        await loadLifecycle()
+        if let detailId {
+            await loadDetail(detailId)
+            await loadSessions(detailId)
+        }
+    }
+
+    /// The inbox, subscriptions and favorites, apart from the list so a core
+    /// without them still lists tasks.
+    private func loadLifecycle() async {
+        let core = core
+        do {
+            async let starred: WorkFavorites = core.request("work_favorites")
+            async let followed: [WorkSubscription] = core.request("work_subscriptions")
+            async let heard: WorkInbox = core.request("work_inbox", InboxParams(snoozed: true))
+            async let trashed: [WorkBinned] = core.request("work_bin")
+            let (starredList, followedList, inboxRead, binList) = try await (starred, followed, heard, trashed)
+            if pending > 0 {
+                reloadWhenIdle = true
+            } else {
+                favorites = starredList.favorites
+                favoriteFolders = starredList.folders
+                subscriptions = Dictionary(followedList.map { ($0.itemId, $0) }) { first, _ in first }
+                notifications = inboxRead.notifications
+                binned = Dictionary(binList.map { ($0.id, $0) }) { first, _ in first }
+                keepTime()
+            }
+        } catch {
+            listError = listError ?? error.localizedDescription
+        }
+        if archive != nil { await loadArchive() }
     }
 
     private func send(_ patch: WorkPatch, to ids: [String], undo: Int?) {
@@ -814,6 +1495,7 @@ final class WorkStore {
         let now = TaskDates.now()
         self.now = now
         let moments = (items ?? []).flatMap { [$0.snoozedUntilMs, $0.followUpAtMs] }.compactMap { $0 }
+            + notifications.compactMap(\.snoozedUntilMs)
         let wake = min(moments.filter { $0 > now }.min() ?? .max, TaskDates.day(1, hour: 0))
         alarm?.cancel()
         alarm = Task { [weak self] in
@@ -869,14 +1551,16 @@ final class WorkStore {
             dueAtMs: item.dueAtMs, labelIds: item.labelIds, sourceLoopId: item.sourceLoopId,
             duplicateOfId: item.duplicateOfId, snoozedUntilMs: item.snoozedUntilMs, archivedAtMs: item.archivedAtMs,
             statusChangedAtMs: item.statusChangedAtMs, createdAtMs: item.createdAtMs, updatedAtMs: item.updatedAtMs,
-            revision: item.revision, sortOrder: item.sortOrder, cycle: item.cycle,
+            revision: item.revision, sortOrder: item.sortOrder, cycle: item.cycle, parentId: item.parentId,
+            subTasks: old?.subTasks,
             projectTitle: projectTitle(item.projectId),
             ownerName: personName(item.ownerPersonId), doer: old?.doer, sourceMeetingId: old?.sourceMeetingId,
             sourceMeetingTitle: old?.sourceMeetingTitle, sourceQuote: old?.sourceQuote,
             sourceSpeaker: old?.sourceSpeaker, sourceAtMs: old?.sourceAtMs,
             blockedByOpenCount: old?.blockedByOpenCount ?? 0, raisedIn: old?.raisedIn ?? 0,
             source: old?.source ?? .person, followUpAtMs: old?.followUpAtMs,
-            atRisk: item.status.isOpen && (old?.atRisk ?? false), timeBlock: old?.timeBlock, repeat: old?.repeat)
+            atRisk: item.status.isOpen && (old?.atRisk ?? false), timeBlock: old?.timeBlock, repeat: old?.repeat,
+            attachmentCount: old?.attachmentCount ?? 0)
     }
 
     private func patched(_ row: inout WorkItemRow, _ patch: WorkPatch, at now: Int64) {
@@ -898,6 +1582,7 @@ final class WorkStore {
         if let labelIds = patch.labelIds { row.labelIds = labelIds }
         if let wake = patch.snoozedUntilMs { row.snoozedUntilMs = wake.value }
         if let cycle = patch.cycle { row.cycle = cycle.value }
+        if let parent = patch.parentId { row.parentId = parent.value }
         row.updatedAtMs = now
     }
 
@@ -908,7 +1593,7 @@ final class WorkStore {
         case let .project(id):
             row.projectId = id
             row.projectTitle = projectTitle(id)
-        case .item: break
+        case .label, .item: break
         }
     }
 
@@ -966,6 +1651,7 @@ final class WorkStore {
         if patch.labelIds != nil { inverse.labelIds = row.labelIds }
         if patch.snoozedUntilMs != nil { inverse.snoozedUntilMs = clearable(row.snoozedUntilMs) }
         if patch.cycle != nil { inverse.cycle = clearable(row.cycle) }
+        if patch.parentId != nil { inverse.parentId = clearable(row.parentId) }
         return inverse
     }
 
@@ -1006,6 +1692,10 @@ final class WorkStore {
         case .snoozed: patch.snoozedUntilMs = clearable(to.flatMap { Int64($0) })
         case .recurrence: patch.recurrence = clearable(to)
         case .cycle: patch.cycle = clearable(to.flatMap { Int64($0) })
+        case .parent: patch.parentId = clearable(to)
+        case .estimate: patch.estimate = clearable(to.flatMap { Int($0) })
+        case .forPerson: patch.forPersonId = clearable(to)
+        case .unknown: break
         }
     }
 
@@ -1025,6 +1715,9 @@ final class WorkStore {
         if let cycle = patch.cycle {
             return cycle.value.map { "Moved \(noun) to cycle \($0)" } ?? "Took \(noun) out of its cycle"
         }
+        if let parent = patch.parentId {
+            return parent.value == nil ? "Took \(noun) out of its parent" : "Moved \(noun) under a parent"
+        }
         if patch.title != nil { return "Renamed \(noun)" }
         return "Changed \(noun)"
     }
@@ -1043,9 +1736,25 @@ private extension WorkPatchValue {
 private struct QueryParams: Encodable { let query: WorkQuery }
 private struct IdParams: Encodable { let id: String }
 private struct CycleParams: Encodable { let number: Int64 }
+private struct InsightsParams: Encodable { let query: WorkQuery; let days: Int }
 private struct CycleSettingsParams: Encodable {
     let operationId: String
     let settings: WorkCycleSettings
+}
+private struct CycleSaveParams: Encodable, Sendable {
+    let operationId: String
+    let number: Int64
+    let name: String
+}
+private struct CycleMoveParams: Encodable, Sendable {
+    let operationId: String
+    let number: Int64
+    let startDay: String?
+    let endDay: String
+}
+private struct CycleNumberParams: Encodable, Sendable {
+    let operationId: String
+    let number: Int64
 }
 private struct CreateParams: Encodable {
     let operationId: String
@@ -1066,6 +1775,31 @@ private struct IdsParams: Encodable {
     let operationId: String
     let ids: [String]
 }
+private struct MoveParams: Encodable {
+    let operationId: String
+    let ids: [String]
+    let place: WorkPlace
+}
+private struct DeclineParams: Encodable {
+    let operationId: String
+    let ids: [String]
+    let reason: String?
+}
+private struct LabelGroupParams: Encodable {
+    let operationId: String
+    let id: String
+    let group: String?
+}
+private struct LabelRetireParams: Encodable {
+    let operationId: String
+    let id: String
+    let retired: Bool
+}
+private struct LabelScopeParams: Encodable {
+    let operationId: String
+    let id: String
+    let scope: WorkLabelScope
+}
 private struct AcceptParams: Encodable {
     let operationId: String
     let ids: [String]
@@ -1076,6 +1810,11 @@ private struct DuplicateParams: Encodable {
     let id: String
     let ofId: String
 }
+private struct SuggestionParams: Encodable {
+    let operationId: String
+    let id: String
+    let suggestionId: String
+}
 private struct RelationParams: Encodable {
     let operationId: String
     let fromId: String
@@ -1085,6 +1824,37 @@ private struct RelationParams: Encodable {
 private struct OperationIdParams: Encodable {
     let operationId: String
     let id: String
+}
+private struct SessionsParams: Encodable {
+    let itemId: String?
+    let open: Bool
+}
+private struct SessionReplyParams: Encodable {
+    let operationId: String
+    let id: String
+    let body: String?
+    let value: String?
+}
+private struct CommentAddParams: Encodable {
+    let operationId: String
+    let itemId: String
+    let body: String
+    let replyTo: String?
+}
+private struct CommentEditParams: Encodable {
+    let operationId: String
+    let id: String
+    let body: String
+}
+private struct CommentResolveParams: Encodable {
+    let operationId: String
+    let id: String
+    let resolved: Bool
+}
+private struct SubtaskParams: Encodable {
+    let operationId: String
+    let parentId: String
+    let inputs: [WorkItemInput]
 }
 private struct LabelParams: Encodable {
     let operationId: String
@@ -1133,3 +1903,85 @@ private struct WatchParams: Encodable {
     let personId: String?
 }
 private struct HitParams: Encodable { let hitId: String }
+private struct FavoriteParams: Encodable {
+    let operationId: String
+    let kind: WorkFavoriteKind
+    let id: String
+    let on: Bool
+}
+private struct FavoriteMoveParams: Encodable {
+    let operationId: String
+    let entry: WorkFavoriteEntry
+    let into: String?
+    let index: Int?
+}
+private struct FavoriteFolderParams: Encodable {
+    let operationId: String
+    let id: String?
+    let name: String?
+    let index: Int?
+}
+private struct FavoriteFolderDeleteParams: Encodable {
+    let operationId: String
+    let id: String
+}
+private struct SubscribeParams: Encodable {
+    let operationId: String
+    let ids: [String]
+    let on: Bool
+}
+private struct InboxParams: Encodable { let snoozed: Bool }
+private struct InboxMarkParams: Encodable {
+    let operationId: String
+    let ids: [String]
+    let mark: WorkInboxMark
+    let untilMs: Int64?
+}
+private struct DescriptionRestoreParams: Encodable {
+    let operationId: String
+    let id: String
+    let expectedRevision: Int64
+    let versionId: String
+}
+private struct AttachmentRenameParams: Encodable {
+    let operationId: String
+    let id: String
+    let title: String
+}
+private struct AttachParams: Encodable {
+    let operationId: String
+    let itemId: String
+    var path: String?
+    var data: String?
+    var fileName: String?
+    var url: String?
+    var title: String?
+    var subtitle: String?
+    var commentId: String?
+}
+
+enum WorkAttachmentSource {
+    case file(URL, title: String? = nil)
+    case data(Data, fileName: String)
+    case link(String, title: String? = nil, subtitle: String? = nil)
+
+    static let linkSchemes: Set<String> = ["http", "https", "mailto", "sona"]
+
+    fileprivate var method: String {
+        switch self {
+        case .file, .data: "work_attachment_attach_file"
+        case .link: "work_attachment_attach_link"
+        }
+    }
+
+    fileprivate func params(itemId: String, operationId: String) -> AttachParams {
+        switch self {
+        case let .file(url, title):
+            AttachParams(operationId: operationId, itemId: itemId, path: url.path(percentEncoded: false), title: title)
+        case let .data(data, fileName):
+            AttachParams(operationId: operationId, itemId: itemId, data: data.base64EncodedString(), fileName: fileName)
+        case let .link(url, title, subtitle):
+            AttachParams(operationId: operationId, itemId: itemId, url: url, title: title, subtitle: subtitle)
+        }
+    }
+}

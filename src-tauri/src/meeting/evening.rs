@@ -544,7 +544,10 @@ impl MeetingSessionManager {
         session_id: MeetingSessionId,
         event_key: String,
     ) -> Result<(), String> {
-        let detection = Arc::clone(&app.state::<Arc<DetectionRuntime>>());
+        let Some(detection) = app.try_state::<Arc<DetectionRuntime>>() else {
+            return Err("Filing under a calendar event works only in the Sona app.".to_string());
+        };
+        let detection = Arc::clone(&detection);
         let event = tauri::async_runtime::spawn_blocking(move || {
             detection.calendar_event_by_key(&event_key)
         })

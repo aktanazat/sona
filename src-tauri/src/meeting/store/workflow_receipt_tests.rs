@@ -4,7 +4,7 @@ use crate::analytics::{DashboardTrendRange, DashboardTrendRequest};
 use crate::meeting::detection::machine::{
     CalendarAttendee, CalendarEventSummary, ParticipationStatus,
 };
-use crate::meeting::types::{DeletionCause, MeetingOperationId};
+use crate::meeting::types::{DeletionCause, MeetingOperationId, MeetingSessionId};
 use crate::meeting::workflow_types::{
     WorkflowEventKind, WorkflowId, WorkflowOutcomeCode, WorkflowRunStatus,
 };
@@ -114,6 +114,42 @@ fn vocabulary_requires_repetition_across_meetings_and_excludes_known_terms() {
         .unwrap()
         .entries
         .is_empty());
+}
+
+#[test]
+fn heard_words_take_nothing_from_hidden_meetings() {
+    let (_directory, store) = store();
+    let first = meeting(&store, "First", 1);
+    let second = meeting(&store, "Second", 2);
+    let third = meeting(&store, "Third", 3);
+    transcript(&store, first, "North Star shipped. North Star worked.");
+    transcript(&store, second, "North Star returned.");
+    transcript(&store, third, "North Star again.");
+    store
+        .record_and_run_workflow_event(
+            event(
+                WorkflowEventKind::MeetingFinalized,
+                serde_json::json!({
+                    "session_id": third.uuid().to_string(),
+                    "known_vocabulary": []
+                }),
+                "heard-words-finalized",
+            ),
+            &inputs(),
+        )
+        .unwrap();
+    let heard = |hidden: &[MeetingSessionId]| {
+        store
+            .vocabulary_candidates_without(&[], &hidden.iter().copied().collect())
+            .unwrap()
+            .entries
+            .into_iter()
+            .find(|candidate| candidate.text == "North Star")
+            .map(|candidate| (candidate.occurrences, candidate.meetings_count))
+    };
+    assert_eq!(heard(&[]), Some((4, 3)));
+    assert_eq!(heard(&[third]), Some((3, 2)));
+    assert_eq!(heard(&[first]), None);
 }
 
 #[test]

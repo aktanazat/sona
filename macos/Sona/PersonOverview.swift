@@ -187,17 +187,17 @@ struct PersonStats: View, Equatable {
                 talkShare
                 open
             }
-            HStack(spacing: 0) {
-                together
-                landed.ruled()
-                count(figures.notes, label: "Notes") { show(.history, .notes) }.ruled()
-                count(figures.tasks, label: "Open tasks") { show(.work, nil) }.ruled()
-                count(figures.words, label: "Their words") { show(.history, .contributions) }.ruled()
-                count(figures.documents, label: "Documents") { show(.profile, nil) }.ruled()
+            let strip = strip
+            if !strip.isEmpty {
+                HStack(spacing: 0) {
+                    ForEach(Array(strip.enumerated()), id: \.element) { index, tile in
+                        if index == 0 { stripTile(tile) } else { stripTile(tile).ruled() }
+                    }
+                }
+                .background(Theme.surface)
+                .clipShape(RoundedRectangle(cornerRadius: Theme.radiusCard))
+                .overlay(RoundedRectangle(cornerRadius: Theme.radiusCard).strokeBorder(Theme.border, lineWidth: 1))
             }
-            .background(Theme.surface)
-            .clipShape(RoundedRectangle(cornerRadius: Theme.radiusCard))
-            .overlay(RoundedRectangle(cornerRadius: Theme.radiusCard).strokeBorder(Theme.border, lineWidth: 1))
         }
         .animation(reduceMotion ? nil : .easeOut(duration: 0.2), value: figures)
     }
@@ -206,6 +206,35 @@ struct PersonStats: View, Equatable {
     /// a press to the page, and a new copy of one never changes a tile.
     nonisolated static func == (lhs: PersonStats, rhs: PersonStats) -> Bool {
         lhs.figures == rhs.figures
+    }
+
+    private enum StripTile: Hashable {
+        case together, landed, notes, tasks, words, documents
+    }
+
+    /// The smaller numbers, leaving out the ones that are known to be none.
+    private var strip: [StripTile] {
+        let known = figures.meetings != nil
+        var tiles: [StripTile] = []
+        if !known || figures.recordedMs != nil { tiles.append(.together) }
+        if !known || (figures.outcomes.map { $0.landed + $0.open + $0.dropped } ?? 0) > 0 { tiles.append(.landed) }
+        let counts: [(StripTile, PersonFigures.Count)] = [
+            (.notes, figures.notes), (.tasks, figures.tasks), (.words, figures.words), (.documents, figures.documents),
+        ]
+        tiles += counts.filter { $0.1 != .value(0) }.map(\.0)
+        return tiles
+    }
+
+    @ViewBuilder
+    private func stripTile(_ tile: StripTile) -> some View {
+        switch tile {
+        case .together: together
+        case .landed: landed
+        case .notes: count(figures.notes, label: "Notes") { show(.history, .notes) }
+        case .tasks: count(figures.tasks, label: "Open tasks") { show(.work, nil) }
+        case .words: count(figures.words, label: "Their words") { show(.history, .contributions) }
+        case .documents: count(figures.documents, label: "Documents") { show(.profile, nil) }
+        }
     }
 
     private var meetings: some View {

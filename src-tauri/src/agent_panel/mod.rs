@@ -1120,7 +1120,7 @@ impl<R: tauri::Runtime> AgentPanelManager<R> {
 
         let mut results = Vec::with_capacity(calls.len());
         for call in &calls {
-            results.push(self.run_tool(call, folder_id).await);
+            results.push(lookup(&self.app, call, folder_id).await);
         }
         let idempotency_key = match relay::new_idempotency_key() {
             Ok(key) => key,
@@ -1179,35 +1179,6 @@ impl<R: tauri::Runtime> AgentPanelManager<R> {
         }
         self.emit_turn(invalidation_id, Some(turn_id.to_string()), Some(turn_state));
         Ok(turn_state == AgentPanelTurnStateV1::Submitting)
-    }
-
-    /// One lookup against the corpus this Mac holds. The handles are the
-    /// app's managed state; a process without them (a headless run that never
-    /// built a meeting manager) answers every call with one line of error, so
-    /// the model reads that and stops asking.
-    async fn run_tool(&self, call: &ToolCall, folder_id: Option<MeetingFolderId>) -> ToolResult {
-        let meetings = self.app.try_state::<Arc<MeetingSessionManager>>();
-        let history = self.app.try_state::<Arc<HistoryManager>>();
-        let calendar = self.app.try_state::<Arc<dyn CalendarSource>>();
-        match (meetings, history, calendar) {
-            (Some(meetings), Some(history), Some(calendar)) => {
-                tools::run(
-                    meetings.inner(),
-                    history.inner(),
-                    calendar.inner(),
-                    call,
-                    folder_id,
-                )
-                .await
-            }
-            _ => ToolResult {
-                id: call.id.clone(),
-                tool: call.tool.clone(),
-                ok: false,
-                result: "Sona tools are not available in this process".to_string(),
-                sources: Vec::new(),
-            },
-        }
     }
 
     pub(crate) async fn cancel_turn(
@@ -2632,8 +2603,29 @@ pub(crate) async fn run_chat_turn(
         Some(manager) => manager.model_alias(&client, false).await,
         None => SONA_MODEL_ALIAS.to_string(),
     };
+    let response =
+        settle_turn(app, &client, &idempotency_key, &turn, &model_alias, deadline).await?;
+    match response {
+        SonaAgentResponseV1::Text { message, .. } => Ok(message),
+        /* Unreachable through `validate`, which refuses a proposal from the
+         * chat workspace and lookups on a turn that sent no grant. Written
+         * out rather than unwrapped. */
+        SonaAgentResponseV1::Proposal { .. } | SonaAgentResponseV1::ToolCalls { .. } => {
+            Err(ChatTurnError::Failed)
+        }
+    }
+}
+
+async fn settle_turn(
+    app: &AppHandle,
+    client: &RelayClient,
+    idempotency_key: &str,
+    turn: &PanelTurnV1,
+    model_alias: &str,
+    deadline: Duration,
+) -> Result<SonaAgentResponseV1, ChatTurnError> {
     let mut job = relay::retry_rate_limited(
-        || client.submit_turn(&idempotency_key, &turn, &model_alias),
+        || client.submit_turn(idempotency_key, turn, model_alias),
         tokio::time::sleep,
         |_| {},
         || true,
@@ -2644,13 +2636,13 @@ pub(crate) async fn run_chat_turn(
     while !job.state.is_terminal() {
         if started.elapsed() >= deadline {
             let _ = client
-                .cancel_job(&job.id, AgentPanelWorkspaceV1::SonaChat, &model_alias)
+                .cancel_job(&job.id, AgentPanelWorkspaceV1::SonaChat, model_alias)
                 .await;
             return Err(ChatTurnError::Unreachable);
         }
         tokio::time::sleep(POLL_INTERVAL).await;
         job = relay::retry_rate_limited(
-            || client.get_job(&job.id, AgentPanelWorkspaceV1::SonaChat, &model_alias),
+            || client.get_job(&job.id, AgentPanelWorkspaceV1::SonaChat, model_alias),
             tokio::time::sleep,
             |_| {},
             || true,
@@ -2679,20 +2671,146 @@ pub(crate) async fn run_chat_turn(
     }
     let response = job.response.ok_or(ChatTurnError::Failed)?;
     response
-        .validate(&turn, &SonaAllowedValuesV1::default())
+        .validate(turn, &SonaAllowedValuesV1::default())
         .map_err(|_| ChatTurnError::Failed)?;
     let _ = crate::settings::set_agent_panel_last_successful_connection_at(
         app,
         chrono::Utc::now().timestamp_millis(),
     );
-    match response {
-        SonaAgentResponseV1::Text { message, .. } => Ok(message),
-        /* Unreachable through `validate`, which refuses a proposal from the
-         * chat workspace and lookups on a turn that sent no grant. Written
-         * out rather than unwrapped. */
-        SonaAgentResponseV1::Proposal { .. } | SonaAgentResponseV1::ToolCalls { .. } => {
-            Err(ChatTurnError::Failed)
+    Ok(response)
+}
+
+pub(crate) struct LoopTurn {
+    pub(crate) answer: Result<String, ChatTurnError>,
+    pub(crate) refused: Vec<String>,
+}
+
+pub(crate) async fn run_loop_turn(
+    app: &AppHandle,
+    message: &str,
+    allowed: &[&str],
+    deadline: Duration,
+) -> LoopTurn {
+    let mut refused = Vec::new();
+    let answer = loop_turn(app, message, allowed, deadline, &mut refused).await;
+    LoopTurn { answer, refused }
+}
+
+async fn loop_turn(
+    app: &AppHandle,
+    message: &str,
+    allowed: &[&str],
+    deadline: Duration,
+    refused: &mut Vec<String>,
+) -> Result<String, ChatTurnError> {
+    let _activity = crate::planning::quiet::foreground_activity();
+    let nonce_cache = app.try_state::<AgentPanelManager>().map_or_else(
+        || Arc::new(ResponseNonceCache::default()),
+        |manager| manager.nonce_cache.clone(),
+    );
+    let client = RelayClient::from_settings(app, nonce_cache)
+        .await
+        .map_err(chat_turn_error)?;
+    let model_alias = match app.try_state::<AgentPanelManager>() {
+        Some(manager) => manager.model_alias(&client, false).await,
+        None => SONA_MODEL_ALIAS.to_string(),
+    };
+    let conversation = relay::new_idempotency_key().map_err(chat_turn_error)?;
+    let started = Instant::now();
+    let mut context_pack: Option<String> = None;
+    let mut round = 0;
+    loop {
+        let idempotency_key = relay::new_idempotency_key().map_err(chat_turn_error)?;
+        let turn = PanelTurnV1::Chat(SonaChatTurnV2 {
+            model_selection: None,
+            screenshot: None,
+            protocol_version: SONA_CHAT_TURN_VERSION.to_string(),
+            conversation_id: format!("loop-{conversation}"),
+            turn_id: format!("turn-{conversation}"),
+            user_message: message.to_string(),
+            recent_turns: Vec::new(),
+            context_pack: context_pack.clone(),
+            tools_allowed: !allowed.is_empty(),
+            locale: crate::settings::get_settings(app).app_language,
+            app_version: env!("CARGO_PKG_VERSION").to_string(),
+            reply_is_json: false,
+        });
+        turn.validate().map_err(|_| ChatTurnError::Failed)?;
+        let left = deadline.saturating_sub(started.elapsed());
+        let calls =
+            match settle_turn(app, &client, &idempotency_key, &turn, &model_alias, left).await? {
+                SonaAgentResponseV1::Text { message, .. } => return Ok(message),
+                SonaAgentResponseV1::Proposal { .. } => return Err(ChatTurnError::Failed),
+                SonaAgentResponseV1::ToolCalls { calls, .. } => calls,
+            };
+        round += 1;
+        if round > MAX_TOOL_ROUNDS {
+            return Err(ChatTurnError::Failed);
         }
+        let results = loop_lookups(app, &calls, allowed, refused).await;
+        context_pack = Some(append_tool_block(
+            context_pack.as_deref().unwrap_or_default(),
+            round,
+            &calls,
+            &results,
+        ));
+    }
+}
+
+async fn loop_lookups<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    calls: &[ToolCall],
+    allowed: &[&str],
+    refused: &mut Vec<String>,
+) -> Vec<ToolResult> {
+    let mut results = Vec::with_capacity(calls.len());
+    for call in calls {
+        if allowed.contains(&call.tool.as_str()) {
+            results.push(lookup(app, call, None).await);
+        } else {
+            refused.push(call.tool.clone());
+            results.push(ToolResult {
+                id: call.id.clone(),
+                tool: call.tool.clone(),
+                ok: false,
+                result: format!("{} is not allowed in this automation", call.tool),
+                sources: Vec::new(),
+            });
+        }
+    }
+    results
+}
+
+/// One lookup against the corpus this Mac holds. The handles are the
+/// app's managed state; a process without them (a headless run that never
+/// built a meeting manager) answers every call with one line of error, so
+/// the model reads that and stops asking.
+async fn lookup<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    call: &ToolCall,
+    folder_id: Option<MeetingFolderId>,
+) -> ToolResult {
+    let meetings = app.try_state::<Arc<MeetingSessionManager>>();
+    let history = app.try_state::<Arc<HistoryManager>>();
+    let calendar = app.try_state::<Arc<dyn CalendarSource>>();
+    match (meetings, history, calendar) {
+        (Some(meetings), Some(history), Some(calendar)) => {
+            tools::run(
+                meetings.inner(),
+                history.inner(),
+                calendar.inner(),
+                call,
+                folder_id,
+            )
+            .await
+        }
+        _ => ToolResult {
+            id: call.id.clone(),
+            tool: call.tool.clone(),
+            ok: false,
+            result: "Sona tools are not available in this process".to_string(),
+            sources: Vec::new(),
+        },
     }
 }
 
@@ -3816,5 +3934,31 @@ mod tests {
                 "{error:?} is not a workspace mismatch"
             );
         }
+    }
+
+    #[test]
+    fn a_loop_refuses_a_lookup_outside_its_allowlist() {
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("test app");
+        let calls = ["search", "person"].map(|tool| ToolCall {
+            id: format!("call-{tool}"),
+            tool: tool.to_string(),
+            args: serde_json::json!({ "query": "Ada" }),
+        });
+        let mut refused = Vec::new();
+        let results = tauri::async_runtime::block_on(loop_lookups(
+            app.handle(),
+            &calls,
+            &["search"],
+            &mut refused,
+        ));
+        assert_eq!(refused, ["person"]);
+        assert_eq!(results[1].result, "person is not allowed in this automation");
+        assert!(!results[1].ok);
+        assert_eq!(
+            results[0].result,
+            "Sona tools are not available in this process"
+        );
     }
 }

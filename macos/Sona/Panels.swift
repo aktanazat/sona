@@ -911,10 +911,35 @@ struct PaletteAction: Identifiable {
     var shortcut: String? = nil
 }
 
+/// A task, project, person or label whose name or number matches the field.
+struct PaletteMatch: Identifiable {
+    enum Kind {
+        case task(WorkStatus)
+        case project
+        case person
+        case label(Double)
+    }
+
+    let kind: Kind
+    let id: String
+    let title: String
+    var meta: String?
+
+    var key: String {
+        switch kind {
+        case .task: "task:\(id)"
+        case .project: "project:\(id)"
+        case .person: "person:\(id)"
+        case .label: "label:\(id)"
+        }
+    }
+}
+
 /// What a keystroke in the field can land on, in the order the list shows them.
 private enum PaletteRow: Identifiable {
     case action(PaletteAction)
     case hit(QueryRow)
+    case match(PaletteMatch)
     /// A line someone said: return plays it, ⌘return opens its meeting there.
     case heard(SaidMoment)
     /// A meeting picture whose words match: it opens its meeting at the line
@@ -941,6 +966,7 @@ private enum PaletteRow: Identifiable {
         switch self {
         case let .action(action): "action:\(action.id)"
         case let .hit(hit): "hit:\(hit.link)"
+        case let .match(match): "match:\(match.key)"
         case let .heard(moment): "heard:\(moment.id)"
         case let .screen(moment): "screen:\(moment.id)"
         case .playAll: "play-all"
@@ -998,7 +1024,8 @@ private enum Lookup {
 
 /// ⌘K. A floating panel: one field, the places and verbs that match, the
 /// lines said in meetings that match, the meeting pictures whose words match,
-/// then the meetings, people, dictations and loops the query plane found, and
+/// then the meetings, tasks (those matched by their comments or across fields
+/// the list above missed), people, dictations and loops the query plane found, and
 /// the ask row when the agent is allowed to hear the question. The corpus
 /// rows are never filtered by the letters typed: the plane matched them,
 /// sometimes by meaning, and a title need not share one letter with the
@@ -1025,6 +1052,7 @@ struct CommandPalette: View {
     @State private var picked: [WorkAnswerLine] = []
     /// Answer lines already made into tasks from this palette.
     @State private var taken: Set<String> = []
+    @State private var listHeight: CGFloat = 0
     @FocusState private var focused: Bool
 
     /// A single letter matches half the corpus, so it is not a query yet.
@@ -1035,7 +1063,7 @@ struct CommandPalette: View {
     /// few enough that the meetings stay in view.
     private static let heardLimit = 4
     private static let kinds: [(kind: QueryRowKind, label: String)] = [
-        (.meeting, "Meetings"), (.person, "People"), (.note, "Notes"),
+        (.meeting, "Meetings"), (.task, "Tasks"), (.person, "People"), (.note, "Notes"),
         (.dictation, "Dictations"), (.loop, "Loops"),
     ]
 
@@ -1130,7 +1158,7 @@ struct CommandPalette: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     VStack(alignment: .leading, spacing: 2) {
-                        ForEach(sections, id: \.label) { section in
+                        ForEach(Array(sections.enumerated()), id: \.offset) { _, section in
                             Text(section.label)
                                 .font(.system(size: 12, weight: .semibold))
                                 .foregroundStyle(Theme.inkTertiary)
@@ -1158,9 +1186,10 @@ struct CommandPalette: View {
                         footnote
                     }
                     .padding(.bottom, 8)
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { listHeight = $0 }
                 }
                 .scrollIndicators(.never)
-                .frame(maxHeight: 420)
+                .frame(height: min(listHeight, 420))
                 .onChange(of: selection) { _, index in
                     if rows.indices.contains(index) {
                         proxy.scrollTo(rows[index].id)
@@ -1196,6 +1225,17 @@ struct CommandPalette: View {
         let navigation = actions.filter { $0.group == .navigation }.map(PaletteRow.action)
         let verbs = actions.filter { $0.group == .actions }.map(PaletteRow.action)
         if !task.isEmpty { sections.append((model.workTargets.count > 1 ? "Tasks" : "Task", task, true)) }
+        let matches = model.paletteMatches(trimmed)
+        for (label, picked) in [
+            ("Tasks", matches.filter { if case .task = $0.kind { true } else { false } }),
+            ("Projects", matches.filter { if case .project = $0.kind { true } else { false } }),
+            ("People", matches.filter { if case .person = $0.kind { true } else { false } }),
+            ("Labels", matches.filter { if case .label = $0.kind { true } else { false } }),
+        ] where !picked.isEmpty {
+            sections.append((label, picked.map(PaletteRow.match), true))
+        }
+        let named = Set(matches.compactMap { if case .person = $0.kind { $0.title } else { nil } })
+        let listed = Set(matches.compactMap { if case .task = $0.kind { $0.id } else { nil } })
         let settled = if case .pending = lookup { false } else { true }
         if let command, !command.items.isEmpty {
             sections.append(("Change", [.command(command)], settled))
@@ -1204,7 +1244,13 @@ struct CommandPalette: View {
         if !watching.isEmpty { sections.append(("Watch", watching, true)) }
         if !navigation.isEmpty { sections.append(("Navigation", navigation, true)) }
         if !verbs.isEmpty { sections.append(("Actions", verbs, true)) }
-        let hits = lookup.earlier
+        let hits = lookup.earlier.filter {
+            switch $0.kind {
+            case .person: !named.contains($0.title)
+            case .task: !listed.contains($0.id)
+            default: true
+            }
+        }
         let live = settled
         if let answer, !answer.lines.isEmpty {
             sections.append(("Answer", answer.lines.map(PaletteRow.answer), live))
@@ -1218,7 +1264,7 @@ struct CommandPalette: View {
         }
         for (kind, label) in Self.kinds {
             let rows = hits.filter { $0.kind == kind }.map(PaletteRow.hit)
-            if !rows.isEmpty { sections.append((label, rows, live)) }
+            if !rows.isEmpty { sections.append((kind == .task && !listed.isEmpty ? "More tasks" : label, rows, live)) }
         }
         if case let .answered(answer) = lookup, answer.next != nil, !answer.loadingMore, !answer.moreFailed {
             sections.append(("More", [.more], true))
@@ -1426,6 +1472,7 @@ struct CommandPalette: View {
         switch row {
         case let .action(action): action.run()
         case let .hit(hit): model.open(link: hit.link)
+        case let .match(match): model.open(match)
         case let .heard(moment): model.open(link: moment.link)
         case let .screen(moment): model.open(link: moment.link)
         case let .ask(question): model.ask(question)
@@ -1658,6 +1705,14 @@ private struct PaletteRowView: View {
                         }
                         .metaText()
                     }
+                case let .match(match):
+                    HStack(spacing: 8) {
+                        Text(match.title).bodyText().lineLimit(1).truncationMode(.tail)
+                        if let meta = match.meta {
+                            Text(meta).metaText().lineLimit(1).layoutPriority(-1)
+                        }
+                    }
+                    .help(match.title)
                 case let .heard(moment):
                     VStack(alignment: .leading, spacing: 3) {
                         Text(quote(moment.text)).bodyText().lineLimit(2)
@@ -1769,6 +1824,22 @@ private struct PaletteRowView: View {
                     .frame(width: 28, height: 28)
                     .background(Theme.inset, in: Circle())
                     .accessibilityHidden(true)
+            }
+        } else if case let .match(match) = row {
+            switch match.kind {
+            case let .task(status):
+                TaskStatusIcon(status: status).frame(width: 20)
+            case .person:
+                Avatar(face: AvatarFace(kind: .person(match.id), name: match.title), size: 18,
+                       revision: model.people.photoRevision)
+                    .frame(width: 20)
+            case let .label(hue):
+                Circle().fill(Theme.label(hue: hue)).frame(width: 8, height: 8).frame(width: 20)
+            case .project:
+                Image(systemName: "folder")
+                    .font(.system(size: 14, weight: .regular))
+                    .foregroundStyle(Theme.inkSecondary)
+                    .frame(width: 20)
             }
         } else {
             Image(systemName: icon)
@@ -1910,11 +1981,13 @@ private struct PaletteRowView: View {
             case .meeting: "video"
             case .dictation: "waveform"
             case .note: "square.and.pencil"
+            case .task: "checkmark.circle"
             case .person: "person"
             case .series: "calendar"
             case .loop: "arrow.triangle.2.circlepath"
             case .receipt: "doc.text"
             }
+        case .match: "arrow.right"
         case .heard: "waveform"
         case .screen: "photo"
         case .playAll: "play.circle"

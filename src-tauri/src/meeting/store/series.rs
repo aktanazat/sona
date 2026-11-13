@@ -35,7 +35,8 @@ use crate::meeting::series_types::{
 };
 use crate::meeting::template_types::MeetingTemplateId;
 use crate::meeting::types::{
-    GeneratedMeetingArtifacts, MeetingCommandKind, MeetingOperationId, MeetingSessionId,
+    GeneratedMeetingArtifacts, MeetingCommandKind, MeetingDeletionJobId, MeetingOperationId,
+    MeetingSessionId,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::{HashMap, HashSet};
@@ -142,6 +143,41 @@ impl MeetingStore {
             .collect::<Result<Vec<_>, _>>()?;
         ids.iter()
             .map(|session| parse_uuid(session).map(MeetingSessionId::from_uuid))
+            .collect()
+    }
+
+    /// Every meeting the store still holds. A meeting missing from it can no
+    /// longer say whether its series was kept on this Mac.
+    pub(crate) fn session_ids(&self) -> Result<HashSet<MeetingSessionId>, StoreError> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare("SELECT id FROM meeting_sessions")?;
+        let ids = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        ids.iter()
+            .map(|session| parse_uuid(session).map(MeetingSessionId::from_uuid))
+            .collect()
+    }
+
+    /// The trashed meetings a reader outside the app must not see: those
+    /// whose series is kept on this Mac, and those trashed before the trash
+    /// kept the meeting's calendar event, since nothing says which they were.
+    pub(crate) fn kept_local_trash(&self) -> Result<HashSet<MeetingDeletionJobId>, StoreError> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT r.job_id FROM meeting_deletion_receipts r
+              WHERE r.restore_bundle_json IS NOT NULL
+                AND (json_type(r.restore_bundle_json, '$.calendar_event') IS NULL
+                     OR EXISTS (SELECT 1 FROM meeting_series_preferences p
+                                 WHERE p.remote_intelligence_opt_out = 1
+                                   AND p.series_key = json_extract(r.restore_bundle_json,
+                                       '$.calendar_event.event.seriesKey')))",
+        )?;
+        let ids = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        ids.iter()
+            .map(|job| parse_uuid(job).map(MeetingDeletionJobId::from_uuid))
             .collect()
     }
 

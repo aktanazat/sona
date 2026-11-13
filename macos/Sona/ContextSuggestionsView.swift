@@ -2,12 +2,11 @@ import SwiftUI
 
 /// What may be true of this recording and is not written yet: an event near
 /// its start, the place its invite pins, the kind of conversation it heard,
-/// a plan it may be. Nothing changes until he takes one.
+/// a plan it may be. Nothing changes until he takes one, and nothing is
+/// offered while the recording runs: Sona asks nothing during a call.
 struct ContextSuggestionsView: View {
     let sessionId: MeetingSessionId
     let revision: Int
-    /// Grows as a running capture hears more; each change reads again.
-    var heard = 0
     /// Shows the running capture's words at an offset, on the live screen.
     var showLive: ((Int64) -> Void)?
     @Environment(AppModel.self) private var model
@@ -39,7 +38,9 @@ struct ContextSuggestionsView: View {
             if let failure { Text(failure).metaText(Theme.live) }
         }
         .padding(.bottom, suggestions.isEmpty && failure == nil ? 0 : 16)
-        .task(id: "\(sessionId):\(revision):\(heard)") { await load() }
+        .task(id: model.live.recording(sessionId) ? "\(sessionId):recording" : "\(sessionId):\(revision)") {
+            await load()
+        }
         .sheet(item: $changing) { suggestion in
             if case let .meeting(title, people, _, location) = suggestion.target {
                 MeetingMaybeSheet(title: title, people: people, location: location) { change in
@@ -68,6 +69,11 @@ struct ContextSuggestionsView: View {
     }
 
     private func load() async {
+        guard !model.live.recording(sessionId) else {
+            suggestions = []
+            failure = nil
+            return
+        }
         do {
             let result: [FilingSuggestion] = try await model.core.request(
                 "context_suggestions", ["sessionId": sessionId])
@@ -78,6 +84,13 @@ struct ContextSuggestionsView: View {
             guard !Task.isCancelled else { return }
             failure = "Suggestions could not be read."
         }
+    }
+}
+
+extension MeetingLiveStore {
+    /// True while `sessionId` records, on the live screen or the panel.
+    func recording(_ sessionId: MeetingSessionId) -> Bool {
+        [live?.session, active?.snapshot].contains { $0?.sessionId == sessionId && $0?.phase.isActive == true }
     }
 }
 

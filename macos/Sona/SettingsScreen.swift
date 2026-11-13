@@ -12,6 +12,8 @@ struct SettingsScreen: View {
     @ViewBuilder
     private var tab: some View {
         switch model.settingsPlace {
+        case .profile:
+            ProfileSettingsView()
         case .essentials:
             EssentialsView(store: model.settings) {
                 MeetingDetectionEssentials(store: model.meetingSettings)
@@ -70,6 +72,8 @@ struct SettingsScreen: View {
             }
         case .connections:
             ConnectionsView(store: model.connections)
+        case .tasks:
+            TasksSettingsView()
         case .privacy:
             PrivacyView(store: model.privacy)
         case .importing:

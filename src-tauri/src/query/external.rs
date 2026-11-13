@@ -78,6 +78,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use uuid::Uuid;
 
+mod beacon;
+pub(crate) use beacon::watch as watch_external_writes;
 pub mod share;
 pub mod tracker;
 
@@ -1293,6 +1295,8 @@ pub struct ExternalNoteVersion {
     pub saved_at_ms: i64,
     pub words: usize,
     pub bytes: usize,
+    pub actor: crate::planning::work::types::WorkActor,
+    pub agent: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1618,8 +1622,8 @@ pub async fn answer(
         ExternalRequest::Note { id } => {
             let store = store(meetings).await?;
             let kept_local = kept_local(&store)?;
-            let memory = scratchpad::read_note_with_sources(history, &store, id, |meeting_id| {
-                kept_local.hides_meeting(meeting_id)
+            let memory = scratchpad::read_note_with_sources(history, &store, id, |kind, source_id| {
+                evidence_kept_local(kind, source_id, &kept_local)
             })
             .map_err(|message| note_read_error(history, message))?
             .ok_or_else(|| missing_note(id))?;
@@ -1645,8 +1649,8 @@ pub async fn answer(
             let mut entries = Vec::with_capacity(page.entries.len());
             for row in page.entries {
                 let memory =
-                    scratchpad::read_note_with_sources(history, &store, &row.id, |meeting_id| {
-                        kept_local.hides_meeting(meeting_id)
+                    scratchpad::read_note_with_sources(history, &store, &row.id, |kind, source_id| {
+                        evidence_kept_local(kind, source_id, &kept_local)
                     })
                     .map_err(|message| note_read_error(history, message))?
                     .ok_or_else(|| missing_note(&row.id))?;
@@ -1677,6 +1681,8 @@ pub async fn answer(
                     saved_at_ms: version.saved_at_ms,
                     words: version.body.split_whitespace().count(),
                     bytes: version.body.len(),
+                    actor: version.actor,
+                    agent: version.agent,
                 })
                 .collect();
             Ok(ExternalResponse::NoteVersions(ExternalNoteVersions {
@@ -1714,7 +1720,7 @@ pub async fn answer(
         } => export_meetings(meetings, directory, session_ids)
             .await
             .map(ExternalResponse::ExportMeetings),
-        ExternalRequest::Work(verb) => tracker::answer(verb, app, meetings, history)
+        ExternalRequest::Work(verb) => tracker::answer(verb, app, meetings, history, calendar)
             .await
             .map(ExternalResponse::Work),
         ExternalRequest::Share(verb) => share::answer(verb, app, meetings)
@@ -2029,6 +2035,28 @@ pub(crate) fn meetings_page(
     before_utc_ms: Option<i64>,
     limit: usize,
 ) -> Result<ExternalMeetingsPage, ExternalError> {
+    let (entries, has_more) = meeting_summaries(
+        store,
+        since_utc_ms,
+        before_utc_ms,
+        limit,
+        &MeetingListFilter::default(),
+    )?;
+    Ok(ExternalMeetingsPage {
+        schema_version: QUERY_SCHEMA_VERSION,
+        entries: entries.into_iter().map(meeting_row).collect(),
+        has_more,
+    })
+}
+
+/// The newest `limit` meetings this reader may see, and whether more follow.
+fn meeting_summaries(
+    store: &MeetingStore,
+    since_utc_ms: Option<i64>,
+    before_utc_ms: Option<i64>,
+    limit: usize,
+    filter: &MeetingListFilter,
+) -> Result<(Vec<MeetingHistorySummary>, bool), ExternalError> {
     let kept_local = kept_local(store)?;
     let mut entries = Vec::with_capacity(limit);
     // The store's cursor is the upper bound, so `--to` is already applied. The
@@ -2039,7 +2067,7 @@ pub(crate) fn meetings_page(
     let mut before = before_utc_ms;
     let has_more = 'pages: loop {
         let page = store
-            .list_sessions(before, limit + 1, &MeetingListFilter::default())
+            .list_sessions(before, limit + 1, filter)
             .map_err(QueryError::from)?;
         for entry in page.entries {
             if since_utc_ms.is_some_and(|since| entry.created_at_utc_ms < since) {
@@ -2058,11 +2086,7 @@ pub(crate) fn meetings_page(
             break false;
         }
     };
-    Ok(ExternalMeetingsPage {
-        schema_version: QUERY_SCHEMA_VERSION,
-        entries: entries.into_iter().map(meeting_row).collect(),
-        has_more,
-    })
+    Ok((entries, has_more))
 }
 
 fn meeting_row(summary: MeetingHistorySummary) -> ExternalMeetingRow {
@@ -2736,7 +2760,11 @@ fn project_detail(detail: planning::ProjectDetail) -> ExternalProjectDetail {
     }
 }
 
-fn evidence_kept_local(kind: EvidenceSourceKind, source_id: &str, kept_local: &KeptLocal) -> bool {
+pub(crate) fn evidence_kept_local(
+    kind: EvidenceSourceKind,
+    source_id: &str,
+    kept_local: &KeptLocal,
+) -> bool {
     match kind {
         EvidenceSourceKind::Meeting => kept_local.hides_meeting(source_id),
         EvidenceSourceKind::Loop => MeetingLoopId(source_id.to_owned())
@@ -3554,6 +3582,12 @@ fn text_response(response: &ExternalResponse) -> String {
             for name in &roster.names {
                 let _ = writeln!(text, "{name}");
             }
+            for suggestion in &roster.suggestions {
+                let _ = writeln!(text, "{} may be {}", suggestion.speaker, suggestion.name);
+            }
+            if !roster.suggestions.is_empty() {
+                text.push_str("Use a name with: sona work speaker-rename MEETING SPEAKER NAME\nTurn one down with: sona work call-name-dismiss MEETING SPEAKER\n");
+            }
             let _ = writeln!(text, "\n{}", roster.link);
         }
         ExternalResponse::Place(page) => match &page.place {
@@ -4059,6 +4093,8 @@ fn terminal_safe(text: String) -> String {
 pub fn run_cli(app: &tauri::AppHandle, args: &CliArgs) -> i32 {
     use tauri::Manager;
 
+    crate::planning::work::agents::arrived_from_command_line();
+
     let outcome = ExternalRequest::from_args(args)
         .and_then(|request| {
             AllowedRequest::new(
@@ -4070,13 +4106,18 @@ pub fn run_cli(app: &tauri::AppHandle, args: &CliArgs) -> i32 {
             let meetings = app.state::<Arc<MeetingSessionManager>>();
             let history = app.state::<Arc<HistoryManager>>();
             let calendar = crate::meeting::detection::calendar::platform_calendar();
-            tauri::async_runtime::block_on(answer(
+            let response = tauri::async_runtime::block_on(answer(
                 &allowed,
                 app,
                 &meetings,
                 &history,
                 calendar.as_ref(),
-            ))
+            ))?;
+            if matches!(allowed.request(), ExternalRequest::Work(verb) if verb.required_scopes() == WRITE_SCOPES)
+            {
+                beacon::leave(app);
+            }
+            Ok(response)
         });
     let format = match &args.command {
         Some(command) if command.json() => ExternalFormat::Json,
@@ -4800,6 +4841,24 @@ mod tests {
             (vec!["work", "watches"], reads),
             (vec!["work", "watch", "pricing"], writes),
             (vec!["work", "unwatch", "pricing"], writes),
+            (vec!["work", "meetings-csv"], reads),
+            (
+                vec!["work", "meetings-csv", "--out", "/private/var/tmp/meetings.csv"],
+                writes,
+            ),
+            (vec!["work", "meeting-ledger", MEETING], reads),
+            (
+                vec!["work", "meeting-ledger", MEETING, "--out", "/private/var/tmp/ledger.html"],
+                writes,
+            ),
+            (
+                vec!["work", "meeting-export", MEETING, "--out", "/private/var/tmp/m.md", "--dry-run"],
+                reads,
+            ),
+            (
+                vec!["work", "meeting-export", MEETING, "--out", "/private/var/tmp/m.md"],
+                writes,
+            ),
         ]
         .into_iter()
         .filter(|(argv, expected)| request(argv).required_scopes() != *expected)

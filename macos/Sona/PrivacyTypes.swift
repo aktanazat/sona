@@ -919,6 +919,7 @@ enum QueryScope: String, Codable, CaseIterable, Hashable {
     case people
     case loops
     case notes
+    case tasks
 
     var label: String {
         switch self {
@@ -928,6 +929,7 @@ enum QueryScope: String, Codable, CaseIterable, Hashable {
         case .people: "People"
         case .loops: "Loops"
         case .notes: "Notes"
+        case .tasks: "Tasks"
         }
     }
 }
@@ -940,6 +942,7 @@ enum QueryRowKind: String, Decodable {
     case loop
     case receipt
     case note
+    case task
 
     var word: String {
         switch self {
@@ -950,6 +953,7 @@ enum QueryRowKind: String, Decodable {
         case .loop: "Loop"
         case .receipt: "Receipt"
         case .note: "Note"
+        case .task: "Task"
         }
     }
 }

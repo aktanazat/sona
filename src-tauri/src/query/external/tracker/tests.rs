@@ -1,4 +1,7 @@
-use super::{Board, Fence, ShowArgs, TaskRef, WorkVerb};
+use super::{
+    cursor, page, pick_person, project_task, Board, Fence, OrderArg, PageArgs, ShowArgs,
+    TaskField, TaskRef, WorkPersonChoice, WorkVerb,
+};
 use crate::cli::{CliArgs, Command};
 use crate::meeting::processing::MeetingLivePromise;
 use crate::meeting::types::MeetingSessionId;
@@ -7,12 +10,13 @@ use crate::planning::work::capture::{attach, WorkCaptureSource};
 use crate::planning::work::items::{self, NewItem};
 use crate::planning::work::live;
 use crate::planning::work::types::{
-    WorkActor, WorkDirection, WorkItem, WorkItemRow, WorkOwner, WorkPatch, WorkSource, WorkStatus,
+    WorkActivityKind, WorkActor, WorkDirection, WorkItem, WorkItemRow, WorkLabel, WorkOwner,
+    WorkPatch, WorkSource, WorkStatus,
 };
 use crate::query::KeptLocal;
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use rusqlite::Connection;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use uuid::Uuid;
 
 const KEPT_MEETING: &str = "1e1a5f0e-0000-4000-8000-000000000001";
@@ -71,6 +75,33 @@ fn a_task_is_named_by_handle_number_or_id() {
     );
 }
 
+/// An agent with read access only can rehearse claiming, marking a duplicate,
+/// taking answer lines and watching a phrase; the real run still needs write
+/// access.
+#[test]
+fn a_dry_run_of_a_claim_duplicate_take_or_watch_needs_only_read_access() {
+    use crate::query::external::{READ_SCOPES, WRITE_SCOPES};
+    let scopes = |argv: &[&str]| match CliArgs::try_parse_from(["sona", "work"].iter().chain(argv)) {
+        Ok(CliArgs {
+            command: Some(Command::Work(work)),
+            ..
+        }) => work.verb.required_scopes(),
+        other => panic!("`work {argv:?}` parsed as {other:?}"),
+    };
+    let writes: [&[&str]; 5] = [
+        &["claim", "S-1", "--agent", "Codex"],
+        &["duplicate", "S-1", "--of", "S-2"],
+        &["ask", "pricing", "--take", "1"],
+        &["watch", "pricing"],
+        &["unwatch", "pricing"],
+    ];
+    for argv in writes {
+        assert_eq!(scopes(argv), WRITE_SCOPES, "{argv:?}");
+        let rehearsed = [argv, &["--dry-run"]].concat();
+        assert_eq!(scopes(&rehearsed), READ_SCOPES, "{rehearsed:?}");
+    }
+}
+
 /// A saved view shows its due windows as --due takes them, so an agent can
 /// copy one into a list; a window of no days is refused, not read as none.
 #[test]
@@ -95,7 +126,7 @@ fn a_due_window_reads_back_as_the_flag_it_came_from() {
     assert_eq!(not_refused, Vec::<&str>::new(), "these name no window");
 }
 
-fn task() -> WorkItem {
+pub(super) fn task() -> WorkItem {
     WorkItem {
         id: Uuid::new_v4().to_string(),
         number: 1,
@@ -120,6 +151,10 @@ fn task() -> WorkItem {
         revision: 1,
         sort_order: 0.0,
         cycle: None,
+        parent_id: None,
+        estimate: None,
+        completed_at_ms: None,
+        for_person_id: None,
     }
 }
 
@@ -169,6 +204,7 @@ fn heard_live(history: &Connection, meeting: &str, what: &str) -> String {
         quote: format!("I will {what}"),
         start_offset_ns: 0,
         end_offset_ns: 1_000_000_000,
+        edited: false,
     };
     // PANIC: a fixture that cannot open its database is a broken test.
     let meetings = Connection::open_in_memory().expect("a meeting database");
@@ -249,15 +285,9 @@ fn the_fence_leaves_out_work_any_kept_meeting_raised_and_all_of_it_while_closed(
     );
 }
 
-/// `work update --cycle` moves a task to another cycle; naming the cycle it
-/// is already in leaves it alone.
-#[test]
-fn moving_a_task_to_another_cycle_is_a_change() {
-    let row = WorkItemRow {
-        item: WorkItem {
-            cycle: Some(4),
-            ..task()
-        },
+pub(super) fn row(item: WorkItem) -> WorkItemRow {
+    WorkItemRow {
+        item,
         project_title: None,
         owner_name: None,
         doer: None,
@@ -273,10 +303,15 @@ fn moving_a_task_to_another_cycle_is_a_change() {
         at_risk: false,
         time_block: None,
         repeat: None,
-    };
-    let board = Board {
-        rows: vec![row.clone()],
-        labels: Vec::new(),
+        sub_tasks: None,
+        attachment_count: 0,
+    }
+}
+
+pub(super) fn board(rows: Vec<WorkItemRow>, labels: Vec<WorkLabel>) -> Board {
+    Board {
+        rows,
+        labels,
         projects: Vec::new(),
         people: Vec::new(),
         suggestions: BTreeMap::new(),
@@ -284,7 +319,18 @@ fn moving_a_task_to_another_cycle_is_a_change() {
         repeats: HashMap::new(),
         fence: Fence::Closed,
         cycles: Vec::new(),
-    };
+    }
+}
+
+/// `work update --cycle` moves a task to another cycle; naming the cycle it
+/// is already in leaves it alone.
+#[test]
+fn moving_a_task_to_another_cycle_is_a_change() {
+    let row = row(WorkItem {
+        cycle: Some(4),
+        ..task()
+    });
+    let board = board(vec![row.clone()], Vec::new());
     let changes = |cycle| {
         let patch = WorkPatch {
             cycle: Some(cycle),
@@ -306,4 +352,169 @@ fn moving_a_task_to_another_cycle_is_a_change() {
         [("cycle", "4".to_owned(), "none".to_owned())]
     );
     assert_eq!(changes(Some(4)), []);
+}
+
+#[test]
+fn adding_a_second_label_from_a_group_replaces_the_first_in_the_dry_run_too() {
+    let history = Connection::open_in_memory().expect("an in-memory history database");
+    schema::apply_all(&history).expect("the planner schema");
+    let label = |name: &str, group: Option<&str>| {
+        let id = items::save_label(&history, None, name, 0.0, 0)
+            .expect("a label")
+            .id;
+        history
+            .execute(
+                "UPDATE planning_labels SET group_name = ?2 WHERE id = ?1",
+                rusqlite::params![id, group],
+            )
+            .expect("grouped");
+        id
+    };
+    let high = label("p-high", Some("Size"));
+    let low = label("p-low", Some("Size"));
+    let bug = label("bug", None);
+    let id = filed(&history, "Call the venue", None);
+    let write = |label_ids: Vec<String>| {
+        items::apply(
+            &history,
+            &id,
+            &WorkPatch {
+                label_ids: Some(label_ids),
+                ..WorkPatch::default()
+            },
+            WorkActivityKind::Status,
+            WorkActor::Me,
+            0,
+        )
+        .expect("labels changed")
+        .after
+    };
+    let before = row(write(vec![high.clone(), bug.clone()]));
+    let board = board(
+        vec![before.clone()],
+        items::labels(&history).expect("the labels"),
+    );
+    let adding = vec![high, bug, low];
+
+    let previewed = board
+        .planned(
+            &before,
+            &WorkPatch {
+                label_ids: Some(adding.clone()),
+                ..WorkPatch::default()
+            },
+            None,
+        )
+        .fields
+        .into_iter()
+        .map(|change| (change.field, change.from, change.to))
+        .collect::<Vec<_>>();
+    let written = write(adding);
+
+    assert_eq!(
+        previewed,
+        [("labels", "bug, p-high".to_owned(), "bug, p-low".to_owned())]
+    );
+    assert_eq!(board.labels_text(&written.label_ids), "bug, p-low");
+}
+
+fn choice(id: &str, name: &str, aliases: &[&str]) -> WorkPersonChoice {
+    WorkPersonChoice {
+        id: id.to_owned(),
+        name: name.to_owned(),
+        aliases: aliases.iter().map(|alias| (*alias).to_owned()).collect(),
+    }
+}
+
+/// A transcript keeps hearing "Danny" for Daniel. The alias saved on the
+/// person finds them wherever an owner is named; a part of a name that two
+/// people share still refuses to guess.
+#[test]
+fn a_person_is_found_by_an_alias_and_a_shared_part_of_a_name_is_refused() {
+    let people = [
+        choice("p1", "Daniel Okafor", &["Danny", "Dan O"]),
+        choice("p2", "Dana Reyes", &[]),
+    ];
+    let found = |value: &str| pick_person(value, &people).map(|person| person.id.as_str());
+
+    assert_eq!(found("danny").ok(), Some("p1"));
+    assert_eq!(found("Dan O").ok(), Some("p1"));
+    assert_eq!(found("Reyes").ok(), Some("p2"));
+    assert_eq!(found("p2").ok(), Some("p2"));
+    assert!(found("Dan").is_err(), "both Daniel and Dana contain it");
+    assert!(found("Priya").is_err());
+}
+
+/// An agent reading a long list a page at a time, passing each page's
+/// next_cursor back, gets every task once, in the order one long page has.
+#[test]
+fn paging_with_the_cursor_reads_every_task_once_in_order() {
+    let shapes = [
+        (0, Some(3_000), 5, 2.0),
+        (2, None, 5, 1.0),
+        (1, Some(1_000), 3, 2.0),
+        (2, Some(3_000), 9, -1.0),
+        (0, None, 1, 0.5),
+        (3, Some(1_000), 5, 2.0),
+        (2, None, 7, 1.0),
+    ];
+    let rows: Vec<WorkItemRow> = shapes
+        .iter()
+        .zip(1..)
+        .map(|(&(priority, due_at_ms, at, sort_order), number)| {
+            row(WorkItem {
+                number,
+                priority,
+                due_at_ms,
+                created_at_ms: at,
+                updated_at_ms: at,
+                sort_order,
+                ..task()
+            })
+        })
+        .collect();
+    let board = board(rows.clone(), Vec::new());
+    for order in OrderArg::value_variants() {
+        let paging = |limit, cursor| PageArgs {
+            limit: Some(limit),
+            order_by: Some(*order),
+            cursor,
+            fields: Vec::new(),
+        };
+        let numbers = |listed: &super::ExternalWorkPage| -> Vec<i64> {
+            listed.entries.tasks.iter().map(|task| task.number).collect()
+        };
+        let whole = numbers(&page(rows.clone(), &paging(100, None), &board).expect("one page"));
+        let mut paged = Vec::new();
+        let mut after = None;
+        for _ in 0..rows.len() {
+            let listed = page(rows.clone(), &paging(2, after), &board).expect("a page");
+            paged.extend(numbers(&listed));
+            match listed.next_cursor {
+                Some(text) => after = Some(cursor(&text).expect("the cursor reads back")),
+                None => break,
+            }
+        }
+        assert_eq!(paged, whole, "{order:?}");
+    }
+}
+
+/// --fields offers exactly the keys a task has in JSON, so every field can
+/// be asked for and no offered name trims a task down to nothing.
+#[test]
+fn the_fields_a_list_offers_are_the_keys_of_a_task() {
+    let board = board(vec![row(task())], Vec::new());
+    let shown = serde_json::to_value(project_task(&board.rows[0], &board)).expect("a task");
+    let keys: BTreeSet<String> = shown
+        .as_object()
+        .expect("a task is an object")
+        .keys()
+        .cloned()
+        .collect();
+    let offered: BTreeSet<String> = TaskField::value_variants()
+        .iter()
+        .filter_map(ValueEnum::to_possible_value)
+        .map(|value| value.get_name().to_owned())
+        .collect();
+    assert_eq!(offered, keys);
 }

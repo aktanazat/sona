@@ -59,6 +59,7 @@ pub(crate) struct MeetingReader<'a> {
     conn: Option<&'a Connection>,
     user_name: Option<&'a str>,
     meetings: HashMap<MeetingSessionId, Option<ReadMeeting>>,
+    pub(super) hints: Option<super::triage_hints::Pool>,
 }
 
 impl<'a> MeetingReader<'a> {
@@ -67,6 +68,7 @@ impl<'a> MeetingReader<'a> {
             conn,
             user_name,
             meetings: HashMap::new(),
+            hints: None,
         }
     }
 
@@ -140,13 +142,16 @@ pub(crate) struct People {
 
 impl People {
     pub(crate) fn read(meetings: &Connection) -> Result<Self> {
-        let mut statement = meetings
-            .prepare("SELECT id, display_name FROM persons ORDER BY lower(display_name), id")?;
+        let mut statement = meetings.prepare(
+            "SELECT id, display_name, aliases_json FROM persons ORDER BY lower(display_name), id",
+        )?;
         let choices = statement
             .query_map([], |row| {
+                let aliases: String = row.get(2)?;
                 Ok(WorkPersonChoice {
                     id: row.get(0)?,
                     name: row.get(1)?,
+                    aliases: serde_json::from_str(&aliases).unwrap_or_default(),
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -288,7 +293,7 @@ fn followed_status(
 /// commitments that moved with them.
 #[derive(Default)]
 pub(crate) struct Followed {
-    pub items: Vec<WorkItem>,
+    pub changed: Vec<items::Changed>,
     pub loops: Vec<MeetingLoopId>,
 }
 
@@ -312,7 +317,7 @@ pub(crate) fn follow_loop_in(
     let changed = items::follow(history, &root.id, status, now_ms)?;
     Ok(Followed {
         loops: settle(history, Some(meetings), &root.id, WorkActor::Sona, now_ms)?,
-        items: vec![changed.after],
+        changed: vec![changed],
     })
 }
 
@@ -355,7 +360,7 @@ pub(crate) fn reconcile(
         }
         if moved_at.is_some_and(|at| at > root.status_changed_at_ms) {
             let more = follow_loop_in(history, meetings, &loop_id, now_ms)?;
-            followed.items.extend(more.items);
+            followed.changed.extend(more.changed);
             followed.loops.extend(more.loops);
         } else {
             followed.loops.extend(settle(
@@ -523,7 +528,10 @@ fn local_noon_ms(day: NaiveDate) -> Result<i64> {
 
 fn person_named(meetings: &Connection, name: &str) -> Result<Option<(String, String)>> {
     let mut statement = meetings.prepare_cached(
-        "SELECT id, display_name FROM persons WHERE lower(display_name) = lower(?1) LIMIT 2",
+        "SELECT id, display_name FROM persons
+          WHERE lower(display_name) = lower(?1)
+             OR EXISTS (SELECT 1 FROM json_each(aliases_json) WHERE lower(value) = lower(?1))
+          LIMIT 2",
     )?;
     let matches = statement
         .query_map([name.trim()], |row| Ok((row.get(0)?, row.get(1)?)))?
@@ -662,9 +670,9 @@ fn same_as<'a>(all: &'a [WorkItem], item: &WorkItem) -> Option<&'a WorkItem> {
     })
 }
 
-/// What Sona suggests for a triage item's empty fields, read off the
-/// meeting that raised it, and the item it may duplicate. Items past triage
-/// get none.
+/// What Sona suggests for a triage item: its empty fields, read off the
+/// meeting that raised it and past tasks like it, its labels, and the items
+/// it may duplicate or relate to. Items past triage get none.
 pub(crate) fn suggestions(
     history: &Connection,
     reader: &mut MeetingReader<'_>,
@@ -676,15 +684,19 @@ pub(crate) fn suggestions(
     }
     let mut suggestions = fill_suggestions(history, reader, item)?;
     if let Some(original) = same_as(all, item) {
+        let value = WorkSuggestionValue::Id(original.id.clone());
         suggestions.push(WorkFieldSuggestion {
+            id: super::triage_hints::id(&item.id, WorkSuggestionField::Duplicate, &value),
             field: WorkSuggestionField::Duplicate,
-            value: WorkSuggestionValue::Id(original.id.clone()),
+            value,
             reason: format!("Same words as #{}", original.number),
             quote: None,
             at_ms: None,
             meeting_id: None,
+            drawn_from: Vec::new(),
         });
     }
+    super::triage_hints::extend(history, reader, item, &mut suggestions)?;
     Ok(suggestions)
 }
 
@@ -710,13 +722,15 @@ pub(crate) fn fill_suggestions(
         return Ok(Vec::new());
     };
     let meeting_id = meeting.session_id.uuid().to_string();
-    let suggestion = |field, value, reason| WorkFieldSuggestion {
+    let suggestion = |field, value: WorkSuggestionValue, reason| WorkFieldSuggestion {
+        id: super::triage_hints::id(&item.id, field, &value),
         field,
         value,
         reason,
         quote: row.quote.clone().filter(|_| retained),
         at_ms: i64::try_from(row.at_ms).ok().filter(|_| retained),
         meeting_id: Some(meeting_id.clone()),
+        drawn_from: Vec::new(),
     };
     let mut suggestions = Vec::new();
     if item.owner() == WorkOwner::Nobody {
@@ -766,7 +780,9 @@ pub(crate) fn acceptance(
         ..WorkPatch::default()
     };
     if apply_suggestions {
-        for suggestion in fill_suggestions(history, reader, item)? {
+        let mut suggested = fill_suggestions(history, reader, item)?;
+        super::triage_hints::extend(history, reader, item, &mut suggested)?;
+        for suggestion in suggested {
             match (suggestion.field, suggestion.value) {
                 (WorkSuggestionField::Owner, WorkSuggestionValue::Owner(owner)) => {
                     patch.owner = Some(owner);
@@ -813,11 +829,13 @@ pub(crate) fn accept(
 }
 
 /// Declines one triage item: canceled, its commitment dropped in the
-/// meeting and remembered as not work.
+/// meeting and remembered as not work. A reason is kept on the history
+/// entry the decline wrote.
 pub(crate) fn decline(
     history: &Connection,
     meetings: Option<&Connection>,
     item: &WorkItem,
+    reason: Option<&str>,
     actor: WorkActor,
     now_ms: i64,
 ) -> Result<(WorkItem, Vec<MeetingLoopId>)> {
@@ -835,6 +853,14 @@ pub(crate) fn decline(
         actor,
         now_ms,
     )?;
+    if let Some(reason) = reason.map(str::trim).filter(|reason| !reason.is_empty()) {
+        history.execute(
+            "INSERT INTO planning_activity_reasons (activity_id, reason)
+             SELECT id, ?2 FROM planning_task_activity
+             WHERE task_id = ?1 AND kind = 'declined' ORDER BY at_ms DESC, rowid DESC LIMIT 1",
+            params![item.id, reason],
+        )?;
+    }
     let moved = settle(history, meetings, &item.id, actor, now_ms)?;
     if let Some(loop_id) = &item.source_loop_id {
         history.execute(

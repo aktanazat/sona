@@ -62,7 +62,7 @@ struct PlannerCalendarView: View {
             }
         }
         .pageBar {
-            PageHeading(title: "Calendar")
+            ProjectsTabs()
         } trailing: {
             HStack(spacing: 10) { calendarControls }
         }
@@ -97,6 +97,9 @@ struct PlannerCalendarView: View {
                 showProjects()
             case .board:
                 layout = .board
+                showProjects()
+            case .timeline:
+                layout = .timeline
                 showProjects()
             case .calendar:
                 break

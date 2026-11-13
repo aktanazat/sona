@@ -4,10 +4,16 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-08-22",
   "workers_dev": true,
+  "routes": [{ "pattern": "meet.aktan.us", "custom_domain": true }],
   "vars": {
     "AUDIENCE": "sona-companion",
+    "PAGE_ORIGIN": "https://meet.aktan.us",
     "WORKER_VERSION": "40e9316e",
   },
+  "durable_objects": {
+    "bindings": [{ "name": "LIVE_ROOMS", "class_name": "LiveRoom" }],
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["LiveRoom"] }],
   "d1_databases": [
     {
       "binding": "DB",

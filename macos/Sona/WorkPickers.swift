@@ -19,6 +19,7 @@ struct WorkChoice: Identifiable {
     var key: String?
     /// Leaves the picker open: the choice swaps the list for its next step.
     var staysOpen = false
+    var inner: [WorkChoice]?
     let run: @MainActor () -> Void
 }
 
@@ -35,10 +36,22 @@ enum WorkChoices {
         case .due: "Due date, or type one…"
         case .labels: "Change labels…"
         case .project: "Move to project…"
+        case .milestone: "Set milestone…"
         case .duplicate: "Duplicate of…"
         case .snooze: "Snooze until, or type a date…"
+        case .remind: "Remind me at, or type a time…"
+        case .decline: "Why decline? Optional…"
         case .delegate: "Delegate to…"
         case .cycle: "Move to cycle…"
+        case .blockedBy: "Blocked by which task…"
+        case .blocks: "Blocks which task…"
+        case .related: "Related to which task…"
+        case .parent: "Parent task…"
+        case .estimate: "Set estimate…"
+        case .forPerson: "Who is it for…"
+        case .recent: "Recent tasks…"
+        case .person: "Go to person…"
+        case .label: "Go to label…"
         }
     }
 
@@ -85,12 +98,26 @@ enum WorkChoices {
                 let value: WorkPatchValue<String> = project.map { .set($0) } ?? .clear
                 model.changeWork { work.update(ids, WorkPatch(projectId: value)) }
             }
+        case .milestone:
+            milestones(model.workFocus.milestones) { milestone in rows.allSatisfy { $0.milestoneId == milestone } } pick: { milestone in
+                let value: WorkPatchValue<String> = milestone.map { .set($0) } ?? .clear
+                model.changeWork { work.update(ids, WorkPatch(milestoneId: value)) }
+            }
         case .duplicate:
             duplicates(of: ids, text: text, model: model)
         case .snooze:
             snoozes(text, pickDay: pickDay) { moment in
                 model.leave(ids) { work.update(ids, WorkPatch(snoozedUntilMs: .set(moment))) }
             }
+        case .remind:
+            reminds(text, set: rows.contains { model.routines.reminders[$0.id] != nil }) { moment in
+                model.remind(ids, at: moment)
+            }
+        case .decline:
+            [WorkChoice(id: "decline", title: text.isEmpty ? "Decline" : "Decline: \(text)", mark: .symbol("xmark.circle"),
+                        detail: text.isEmpty ? "No reason" : nil) {
+                model.leave(ids) { work.decline(ids, reason: text) }
+            }]
         case .delegate:
             delegates(rows) { agent in
                 model.changeWork { work.delegate(ids, to: agent) }
@@ -100,6 +127,38 @@ enum WorkChoices {
                 let value: WorkPatchValue<Int64> = number.map { .set($0) } ?? .clear
                 model.changeWork { work.update(ids, WorkPatch(cycle: value)) }
             }
+        case .blockedBy, .blocks, .related:
+            relations(picker.kind, of: ids, text: text, model: model)
+        case .parent:
+            parents(of: ids, text: text, model: model)
+        case .estimate:
+            estimates { points in rows.allSatisfy { $0.estimate == points } } pick: { points in
+                let value: WorkPatchValue<Int> = points.map { .set($0) } ?? .clear
+                model.changeWork { work.update(ids, WorkPatch(estimate: value)) }
+            }
+        case .forPerson:
+            forPeople(work.people) { person in rows.allSatisfy { $0.forPersonId == person } } pick: { person in
+                let value: WorkPatchValue<String> = person.map { .set($0) } ?? .clear
+                model.changeWork { work.update(ids, WorkPatch(forPersonId: value)) }
+            }
+        case .recent:
+            model.workRows(model.workFocus.recent).map { row in
+                WorkChoice(id: row.id, title: row.title, mark: .status(row.status), detail: TaskCopy.handle(row)) {
+                    model.openTask(row.id)
+                }
+            }
+        case .person:
+            work.people.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }.map { person in
+                WorkChoice(id: person.id, title: person.name, mark: .face(AvatarFace(kind: .person(person.id), name: person.name))) {
+                    model.openPerson(person.id)
+                }
+            }
+        case .label:
+            work.labels.filter { !$0.retired }.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }.map { label in
+                WorkChoice(id: label.id, title: label.name, mark: .label(label.hue), detail: label.group) {
+                    model.open(PaletteMatch(kind: .label(label.hue), id: label.id, title: label.name))
+                }
+            }
         }
         return filtered(choices, by: text, kind: picker.kind)
     }
@@ -107,8 +166,12 @@ enum WorkChoices {
     /// Typed letters narrow a list of names; dates and tasks read the text
     /// themselves.
     static func filtered(_ choices: [WorkChoice], by text: String, kind: WorkPicker.Kind) -> [WorkChoice] {
-        guard !text.isEmpty, kind != .due, kind != .snooze, kind != .duplicate else { return choices }
+        guard !text.isEmpty, kind != .due, kind != .snooze, kind != .remind, kind != .decline, !picksTask(kind) else { return choices }
         return choices.filter { $0.id == newLabel || $0.title.localizedCaseInsensitiveContains(text) }
+    }
+
+    static func picksTask(_ kind: WorkPicker.Kind) -> Bool {
+        [.duplicate, .blockedBy, .blocks, .related, .parent].contains(kind)
     }
 
     static let newLabel = "new-label"
@@ -133,6 +196,23 @@ enum WorkChoices {
             WorkChoice(id: "\(priority.rawValue)", title: priority.label, mark: .priority(priority),
                        checked: checked(priority.rawValue), key: "\(priority.rawValue)") { pick(priority.rawValue) }
         }
+    }
+
+    static func estimates(checked: (Int?) -> Bool, pick: @escaping @MainActor (Int?) -> Void) -> [WorkChoice] {
+        TaskEstimate.points.map { points in
+            WorkChoice(id: "\(points)", title: TaskEstimate.title(points), mark: .symbol("triangle"),
+                       checked: checked(points), key: points < 10 ? "\(points)" : nil) { pick(points) }
+        } + [WorkChoice(id: "none", title: "No estimate", mark: .symbol("minus"), checked: checked(nil), key: "0") { pick(nil) }]
+    }
+
+    static func forPeople(
+        _ people: [WorkPersonChoice], checked: (String?) -> Bool, pick: @escaping @MainActor (String?) -> Void
+    ) -> [WorkChoice] {
+        people.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }.map { person in
+            WorkChoice(id: person.id, title: person.name, mark: .face(AvatarFace(kind: .person(person.id), name: person.name)),
+                       checked: checked(person.id)) { pick(person.id) }
+        } + [WorkChoice(id: "nobody", title: "No one", mark: .face(AvatarFace(kind: .unassigned, name: "No one")),
+                        checked: checked(nil)) { pick(nil) }]
     }
 
     static func owners(
@@ -178,10 +258,26 @@ enum WorkChoices {
         _ labels: [WorkLabel], text: String, checked: (String) -> Bool, toggle: @escaping @MainActor (String) -> Void,
         create: (@MainActor (String) -> Void)? = nil
     ) -> [WorkChoice] {
-        var choices = labels.map { label in
-            WorkChoice(id: label.id, title: label.name, mark: .label(label.hue), checked: checked(label.id)) {
+        let on = Set(labels.map(\.id).filter(checked))
+        let shown = labels.filter { (!$0.retired && $0.scope != .projects) || on.contains($0.id) }
+        let choice = { (label: WorkLabel) in
+            WorkChoice(id: label.id, title: label.name, mark: .label(label.hue), detail: text.isEmpty ? nil : label.group,
+                       checked: on.contains(label.id)) {
                 toggle(label.id)
             }
+        }
+        var choices: [WorkChoice]
+        if text.isEmpty {
+            let groups = Dictionary(grouping: shown.filter { $0.group != nil }) { $0.group ?? "" }
+            choices = groups.map { name, members in
+                let current = members.filter { on.contains($0.id) }
+                return WorkChoice(id: "group:\(name)", title: name, mark: current.first.map { .label($0.hue) } ?? .symbol("circle.dashed"),
+                                  detail: current.isEmpty ? "None" : current.map(\.name).joined(separator: ", "),
+                                  inner: members.map(choice)) {}
+            } + shown.filter { $0.group == nil }.map(choice)
+            choices.sort { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+        } else {
+            choices = shown.map(choice)
         }
         let exists = labels.contains { $0.name.localizedCaseInsensitiveCompare(text) == .orderedSame }
         if !text.isEmpty, !exists {
@@ -190,6 +286,13 @@ enum WorkChoices {
             })
         }
         return choices
+    }
+
+    static func adding(_ label: String, to ids: [String], among labels: [WorkLabel]) -> [String] {
+        guard !ids.contains(label) else { return ids }
+        let group = labels.first { $0.id == label }?.group
+        let siblings = Set(labels.filter { group != nil && $0.group == group }.map(\.id))
+        return ids.filter { !siblings.contains($0) } + [label]
     }
 
     static func projects(
@@ -206,6 +309,57 @@ enum WorkChoices {
         choices.append(WorkChoice(id: "none", title: "No project", mark: .symbol("folder.badge.minus"),
                                   checked: checked(nil)) { pick(nil) })
         return choices
+    }
+
+    static func milestones(
+        _ milestones: [PlanningMilestone], checked: (String?) -> Bool, pick: @escaping @MainActor (String?) -> Void
+    ) -> [WorkChoice] {
+        milestones.map { milestone in
+            WorkChoice(id: milestone.id, title: milestone.title, mark: .symbol("flag"), checked: checked(milestone.id)) {
+                pick(milestone.id)
+            }
+        } + [WorkChoice(id: "none", title: "No milestone", mark: .symbol("flag.slash"), checked: checked(nil)) { pick(nil) }]
+    }
+
+    /// A typed time, "fri 10am", "tomorrow at 3"; later today and the usual
+    /// mornings; and, when a reminder is set, no reminder.
+    static func reminds(_ text: String, set: Bool, pick: @escaping @MainActor (Int64?) -> Void) -> [WorkChoice] {
+        var choices: [WorkChoice] = []
+        if let typed = remindTime(text) {
+            choices.append(WorkChoice(id: "typed", title: TaskDates.label(typed, now: TaskDates.now()),
+                                      mark: .symbol("bell"), detail: at(typed)) { pick(typed) })
+        }
+        if let later = TaskDates.laterToday(), text.isEmpty || "later today".localizedCaseInsensitiveContains(text) {
+            choices.append(WorkChoice(id: "later", title: "Later today", mark: .symbol("bell"),
+                                      detail: PlanningFormat.moment(later).formatted(date: .omitted, time: .shortened)) {
+                pick(later)
+            })
+        }
+        let presets: [(String, Int64)] = [
+            ("Tomorrow", TaskDates.day(1, hour: 9)), ("Next week", TaskDates.next(weekday: 2, hour: 9)),
+            ("In a month", TaskDates.day(30, hour: 9)),
+        ]
+        for (title, moment) in distinct(presets) where text.isEmpty || title.localizedCaseInsensitiveContains(text) {
+            choices.append(WorkChoice(id: title, title: title, mark: .symbol("bell"), detail: at(moment)) { pick(moment) })
+        }
+        if set, text.isEmpty || "no reminder".localizedCaseInsensitiveContains(text) {
+            choices.append(WorkChoice(id: "none", title: "No reminder", mark: .symbol("bell.slash")) { pick(nil) })
+        }
+        return choices
+    }
+
+    /// The moment typed words name, at the hour they name, else 9 am that
+    /// day; nil once it has passed.
+    static func remindTime(_ text: String, now: Date = .now) -> Int64? {
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        guard trimmed.count >= 2,
+              let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.date.rawValue),
+              let date = detector.firstMatch(in: trimmed, range: NSRange(trimmed.startIndex..., in: trimmed))?.date
+        else { return nil }
+        let timed = trimmed.range(of: #"\d\s*(am|pm|a\.m\.|p\.m\.)|\d:\d\d|\bnoon\b|\bat\s+\d"#,
+                                  options: [.regularExpression, .caseInsensitive]) != nil
+        let moment = timed ? Int64(date.timeIntervalSince1970 * 1000) : TaskDates.day(0, hour: 9, from: date)
+        return moment > Int64(now.timeIntervalSince1970 * 1000) ? moment : nil
     }
 
     static func snoozes(
@@ -253,9 +407,11 @@ enum WorkChoices {
         return choices
     }
 
+    /// The agents a task can go to, by the names the core gives them.
+    static let agents = ["Claude Code", "Codex", "OMP", "Grok"]
+
     /// The agents a task can go to, and no agent once one has it.
     private static func delegates(_ rows: [WorkItemRow], pick: @escaping @MainActor (String?) -> Void) -> [WorkChoice] {
-        let agents = ["Claude Code", "Codex", "OMP", "Grok"]
         var choices = agents.enumerated().map { index, agent in
             WorkChoice(id: agent, title: agent, mark: .symbol("sparkle"),
                        checked: !rows.isEmpty && rows.allSatisfy { $0.doer?.agent == agent }, key: "\(index + 1)") {
@@ -299,14 +455,65 @@ enum WorkChoices {
         }
     }
 
+    /// Tasks to link these to, newest first, without the ones already linked
+    /// to the open task. A blocker is the other task for Blocked by and these
+    /// for Blocks.
+    private static func relations(_ kind: WorkPicker.Kind, of ids: [String], text: String, model: AppModel) -> [WorkChoice] {
+        let work = model.work
+        let linked = work.detail.flatMap { detail in
+            ids == [detail.item.id] ? detail.relations.flatMap { [$0.fromId, $0.toId] } : nil
+        } ?? []
+        let taken = Set(ids + linked)
+        let number = text.hasPrefix("#") ? String(text.dropFirst()) : text
+        let pool = (work.items ?? []).filter { row in
+            !taken.contains(row.id) && row.archivedAtMs == nil
+                && (text.isEmpty || row.title.localizedCaseInsensitiveContains(text) || "\(row.number)" == number)
+        }
+        return pool.sorted { $0.updatedAtMs > $1.updatedAtMs }.prefix(30).map { other in
+            WorkChoice(id: other.id, title: other.title, mark: .status(other.status), detail: "#\(other.number)") {
+                for id in ids {
+                    let (from, to) = kind == .blockedBy ? (other.id, id) : (id, other.id)
+                    work.addRelation(from: from, to: to, kind: kind == .related ? .related : .blocks)
+                }
+            }
+        }
+    }
+
+    /// Tasks these can sit under, newest first: never themselves or one of
+    /// their own sub-tasks. "No parent" leads when one has a parent.
+    private static func parents(of ids: [String], text: String, model: AppModel) -> [WorkChoice] {
+        let work = model.work
+        let rows = model.workRows(ids)
+        let mine = Set(ids)
+        let number = text.hasPrefix("#") ? String(text.dropFirst()) : text
+        let pool = (work.items ?? []).filter { row in
+            !mine.contains(row.id) && !mine.contains(row.parentId ?? "") && row.archivedAtMs == nil
+                && row.status != .duplicate
+                && (text.isEmpty || row.title.localizedCaseInsensitiveContains(text) || "\(row.number)" == number)
+        }
+        let current = rows.compactMap(\.parentId)
+        let clear = rows.contains { $0.parentId != nil } && text.isEmpty
+            ? [WorkChoice(id: "no-parent", title: "No parent", mark: .symbol("arrow.uturn.down")) {
+                model.changeWork { work.update(ids, WorkPatch(parentId: .clear)) }
+            }]
+            : []
+        return clear + pool.sorted { $0.updatedAtMs > $1.updatedAtMs }.prefix(30).map { other in
+            WorkChoice(id: other.id, title: other.title, mark: .status(other.status), detail: "#\(other.number)",
+                       checked: current.contains(other.id)) {
+                model.changeWork { work.update(ids, WorkPatch(parentId: .set(other.id))) }
+            }
+        }
+    }
+
     /// On for every task when any lacks it, off for all when all have it.
     /// A patch sets the whole list, so tasks whose lists differ change apart.
     private static func toggle(_ label: String, _ rows: [WorkItemRow], _ model: AppModel) {
         let on = rows.allSatisfy { $0.labelIds.contains(label) }
         let alike = Dictionary(grouping: rows, by: \.labelIds)
+        let all = model.work.labels
         model.changeWork {
             for (labels, members) in alike {
-                let next = on ? labels.filter { $0 != label } : labels.contains(label) ? labels : labels + [label]
+                let next = on ? labels.filter { $0 != label } : adding(label, to: labels, among: all)
                 if next != labels { model.work.update(members.map(\.id), WorkPatch(labelIds: next)) }
             }
         }
@@ -315,6 +522,11 @@ enum WorkChoices {
     /// "Fri, Nov 14".
     static func long(_ milliseconds: Int64) -> String {
         PlanningFormat.moment(milliseconds).formatted(.dateTime.weekday(.abbreviated).month(.abbreviated).day())
+    }
+
+    static func at(_ milliseconds: Int64) -> String {
+        PlanningFormat.moment(milliseconds)
+            .formatted(.dateTime.weekday(.abbreviated).month(.abbreviated).day().hour().minute())
     }
 }
 
@@ -353,7 +565,7 @@ struct WorkPickerList: View {
                 context: compact ? nil : model.workContext(picker.ids),
                 keepsOpen: WorkChoices.keepsOpen(picker.kind),
                 compact: compact,
-                empty: picker.kind == .duplicate ? "No task matches." : "Nothing matches.",
+                empty: WorkChoices.picksTask(picker.kind) ? "No task matches." : "Nothing matches.",
                 make: { WorkChoices.make(picker, query: $0, model: model) { pickingDay = true } },
                 close: close)
         }
@@ -412,10 +624,11 @@ struct ChoiceList: View {
     let close: () -> Void
     @State private var query = ""
     @State private var selection = 0
+    @State private var opened: String?
     @FocusState private var focused: Bool
 
     var body: some View {
-        let choices = make(query)
+        let choices = shown(make(query))
         VStack(spacing: 0) {
             if let context {
                 WorkContextChip(text: context)
@@ -485,7 +698,17 @@ struct ChoiceList: View {
             selection = choices.firstIndex(where: \.checked) ?? 0
             DispatchQueue.main.async { focused = true }
         }
-        .onChange(of: query) { _, _ in selection = 0 }
+        .onChange(of: query) { _, _ in
+            selection = 0
+            opened = nil
+        }
+    }
+
+    private static let back = "back"
+
+    private func shown(_ all: [WorkChoice]) -> [WorkChoice] {
+        guard let opened, let group = all.first(where: { $0.id == opened }), let inner = group.inner else { return all }
+        return [WorkChoice(id: Self.back, title: group.title, mark: .symbol("chevron.left"), staysOpen: true) {}] + inner
     }
 
     private var footer: some View {
@@ -513,9 +736,24 @@ struct ChoiceList: View {
     private func pick(_ choices: [WorkChoice], at index: Int) {
         guard choices.indices.contains(index) else { return }
         let choice = choices[index]
+        if choice.inner != nil {
+            opened = choice.id
+            selection = (choice.inner?.firstIndex(where: \.checked) ?? 0) + 1
+            return
+        }
+        if choice.id == Self.back, let group = opened {
+            closeGroup(group)
+            return
+        }
         if keepsOpen || !choice.checked { choice.run() }
         if choice.id == WorkChoices.newLabel { query = "" }
+        if let group = opened { closeGroup(group) }
         if !keepsOpen && !choice.staysOpen { close() }
+    }
+
+    private func closeGroup(_ group: String) {
+        opened = nil
+        selection = make(query).firstIndex { $0.id == group } ?? 0
     }
 }
 
@@ -543,6 +781,11 @@ struct WorkChoiceRow: View {
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(Theme.accent)
                         .accessibilityLabel("Current")
+                }
+                if choice.inner != nil {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(Theme.inkTertiary)
                 }
                 if let key = choice.key, !compact {
                     KeyCap(key)
@@ -577,15 +820,17 @@ struct WorkChoiceRow: View {
 struct WorkPickerButton<Label: View>: View {
     let kind: WorkPicker.Kind
     let ids: [String]
+    var presented: Binding<Bool>?
     @ViewBuilder let label: () -> Label
-    @State private var shown = false
+    @State private var shownHere = false
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        Button { shown = true } label: { label() }
+        let shown = presented ?? $shownHere
+        Button { shown.wrappedValue = true } label: { label() }
             .buttonStyle(.plain)
-            .popover(isPresented: $shown, arrowEdge: .bottom) {
-                WorkPickerList(picker: WorkPicker(kind: kind, ids: ids), compact: true) { shown = false }
+            .popover(isPresented: shown, arrowEdge: .bottom) {
+                WorkPickerList(picker: WorkPicker(kind: kind, ids: ids), compact: true) { shown.wrappedValue = false }
                     .padding(.vertical, 4)
                     .environment(model)
             }

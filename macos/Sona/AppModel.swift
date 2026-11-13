@@ -3,22 +3,25 @@ import Foundation
 import Observation
 import SwiftUI
 
-/// The places a window shows. Library opens from Home and Calendar from
-/// Projects, so the sidebar lists only the rest.
+/// The places a window shows. Library and Activity open from Home, Calendar
+/// and Initiatives from Projects, Triage from Inbox, so the sidebar lists
+/// only the rest; Automations sits at its foot beside Settings.
 enum Place: Int, CaseIterable, Identifiable {
-    case capture, library, meetings, people, scratchpad, projects, calendar, tasks, triage, today, shared
+    case capture, library, meetings, people, scratchpad, projects, calendar, tasks, triage, today, inbox, archive, loops, initiatives
+    case activity, shared
 
-    static let sidebar: [Place] = [.capture, .tasks, .triage, .meetings, .people, .scratchpad, .projects, .shared]
+    static let sidebar: [Place] = [.capture, .inbox, .tasks, .meetings, .scratchpad, .people, .projects, .shared]
 
     var id: Int { rawValue }
 
     /// The sidebar row that stays lit while this place shows.
     var parent: Place {
         switch self {
-        case .library: .capture
-        case .calendar: .projects
-        case .today: .tasks
-        case .capture, .meetings, .people, .scratchpad, .projects, .tasks, .triage, .shared: self
+        case .library, .activity: .capture
+        case .calendar, .initiatives: .projects
+        case .triage: .inbox
+        case .today, .archive: .tasks
+        case .capture, .meetings, .people, .scratchpad, .projects, .tasks, .inbox, .loops, .shared: self
         }
     }
 
@@ -26,6 +29,7 @@ enum Place: Int, CaseIterable, Identifiable {
         switch self {
         case .capture: "Home"
         case .library: "Library"
+        case .activity: "Activity"
         case .meetings: "Meetings"
         case .people: "People"
         case .scratchpad: "Notes"
@@ -35,6 +39,10 @@ enum Place: Int, CaseIterable, Identifiable {
         case .triage: "Triage"
         case .today: "Today"
         case .shared: "Shared"
+        case .inbox: "Inbox"
+        case .archive: "Archive"
+        case .loops: "Automations"
+        case .initiatives: "Initiatives"
         }
     }
 
@@ -42,6 +50,7 @@ enum Place: Int, CaseIterable, Identifiable {
         switch self {
         case .capture: "house"
         case .library: "books.vertical"
+        case .activity: "chart.bar"
         case .meetings: "video"
         case .people: "person.2"
         case .scratchpad: "square.and.pencil"
@@ -51,20 +60,25 @@ enum Place: Int, CaseIterable, Identifiable {
         case .triage: "tray"
         case .today: "sun.max"
         case .shared: "link"
+        case .inbox: "bell"
+        case .archive: "archivebox"
+        case .loops: "repeat"
+        case .initiatives: "scope"
         }
     }
 }
 
 /// Settings' pages, in the order its list shows them.
 enum SettingsPlace: Int, CaseIterable, Identifiable {
-    case essentials, dictation, models, modes, vocabulary, prompts, workflows, meetings
+    case profile, essentials, dictation, models, modes, vocabulary, prompts, workflows, meetings
     case agents, sync, privacy, importing, documents, about, debug
-    case connections
+    case connections, tasks
 
     var id: Int { rawValue }
 
     var title: String {
         switch self {
+        case .profile: "Profile"
         case .essentials: "Essentials"
         case .dictation: "Dictation"
         case .models: "Models"
@@ -81,6 +95,7 @@ enum SettingsPlace: Int, CaseIterable, Identifiable {
         case .about: "About"
         case .debug: "Debug"
         case .connections: "Connections"
+        case .tasks: "Tasks"
         }
     }
 }
@@ -97,6 +112,7 @@ enum Sheet: Identifiable, Hashable {
     case workBrief(WorkBriefSubject)
     /// The page a meeting would share, by meeting id.
     case share(String)
+    case saveTemplate(String)
 
     var id: Self { self }
 }
@@ -237,8 +253,15 @@ extension CoreEvent {
 @Observable
 final class AppModel {
     var place: Place = .capture
+    /// A Home section to bring into view once Home shows, set from another tab.
+    var homeAnchor: String?
     var settingsPlace: SettingsPlace = .essentials
     var showingSettings = false
+    /// The user's name from their profile, when they gave one.
+    var myName: String? {
+        let name = prep.preferences?.aboutMe.name.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return name.isEmpty ? nil : name
+    }
     var paletteShown = false {
         didSet { if !paletteShown { workFocus.picker = nil } }
     }
@@ -310,10 +333,13 @@ final class AppModel {
     let live: MeetingLiveStore
     let meetingSettings: MeetingSettingsStore
     let prep: MeetingPrepStore
+    let profilePhoto: ProfilePhotoStore
     let personPhotos: PersonPhotoStore
     let people: PeopleStore
     let scratchpad: ScratchpadStore
     let projects: ProjectsStore
+    /// The comment threads on projects, milestones, meetings and notes.
+    let comments: CommentThreads
     let modes: ModesStore
     let providers: ProvidersStore
     let vocabulary: VocabularyStore
@@ -334,9 +360,12 @@ final class AppModel {
     let debug: DebugStore
     let spotlight: SpotlightStore
     let work: WorkStore
+    let routines: RoutinesStore
+    let loops: LoopsStore
     let workFocus = WorkFocus()
     let rituals: RitualStore
     let heard: LiveCardStore
+    let liveDoc: LiveDocStore
 
     @ObservationIgnored let core = Core()
     @ObservationIgnored let workKeys = WorkKeys()
@@ -365,6 +394,8 @@ final class AppModel {
     /// the menu bar mark hands it over when it first appears. Observed, so a
     /// reveal the core asked for before then runs again once it can.
     var presentMainWindow: () -> Void = {}
+    @ObservationIgnored var mainWindowOpen = false
+    private static let reopenWindowKey = "reopenMainWindow"
 
     init() {
         settings = SettingsStore(core: core)
@@ -377,11 +408,14 @@ final class AppModel {
         live = MeetingLiveStore(core: core)
         meetingSettings = MeetingSettingsStore(core: core)
         prep = MeetingPrepStore(core: core)
+        profilePhoto = ProfilePhotoStore(core: core)
         let photos = PersonPhotoStore(core: core)
         personPhotos = photos
         people = PeopleStore(core: core, photos: photos)
         scratchpad = ScratchpadStore(core: core)
-        projects = ProjectsStore(core: core)
+        let comments = CommentThreads(core: core)
+        self.comments = comments
+        projects = ProjectsStore(core: core, comments: comments)
         modes = ModesStore(core: core)
         providers = ProvidersStore(core: core)
         vocabulary = VocabularyStore(core: core)
@@ -403,8 +437,13 @@ final class AppModel {
         windowAttached = WindowAttachedCard(core: core)
         spotlight = SpotlightStore(core: core)
         work = WorkStore(core: core)
+        routines = RoutinesStore(core: core)
+        loops = LoopsStore(core: core)
         rituals = RitualStore(core: core)
         heard = LiveCardStore(core: core)
+        liveDoc = LiveDocStore(core: core)
+        liveDoc.onAsk = { [weak self] ask in self?.voiceAsk(ask) }
+        heard.onEdited = { [weak self] in Task { await self?.liveDoc.load() } }
 
         for name in [
             CoreEvent.activity, CoreEvent.streamText, CoreEvent.streamPhase, CoreEvent.micLevel,
@@ -449,6 +488,7 @@ final class AppModel {
     /// The places and verbs the palette offers before the plane is asked.
     var paletteActions: [PaletteAction] {
         var actions = workPaletteActions + briefPaletteActions
+        if place == .projects { actions += projects.dependencyPaletteActions }
         actions += Place.allCases.map { place in
             PaletteAction(id: "go-\(place.rawValue)", group: .navigation, title: place.title) { [weak self] in
                 self?.go(place)
@@ -504,6 +544,16 @@ final class AppModel {
     func reveal() {
         presentMainWindow()
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    func rememberMainWindow() {
+        UserDefaults.standard.set(mainWindowOpen, forKey: Self.reopenWindowKey)
+    }
+
+    func reopenMainWindow() {
+        guard UserDefaults.standard.bool(forKey: Self.reopenWindowKey) else { return }
+        UserDefaults.standard.removeObject(forKey: Self.reopenWindowKey)
+        reveal()
     }
 
     /// The settings, on the tab last shown, from the app menu or the menu bar.
@@ -676,8 +726,24 @@ final class AppModel {
     }
 
     /// A `sona://` link: the core resolves it and answers with a navigation
-    /// event, which lands in `open(_ target:)` or the meetings store.
+    /// event, which lands in `open(_ target:)` or the meetings store. A task
+    /// link, with or without a comment, and a `sona://new` link open here,
+    /// since a task's page and the new-task sheet live only in this app.
     func open(link: String) {
+        if let task = TaskCopy.task(in: link) {
+            openTask(task)
+            if let comment = TaskCopy.comment(in: link) {
+                workFocus.pageAsk = TaskPageAsk(id: task, part: .comment(comment))
+            }
+            return
+        }
+        if let draft = TaskCopy.draft(in: link, work: work) {
+            reveal()
+            go(.tasks)
+            workFocus.open(nil, in: .tasks)
+            workFocus.composing = draft
+            return
+        }
         Task { await query.open(link: link) }
     }
 
@@ -987,6 +1053,7 @@ final class AppModel {
         Task { await about.start() }
         Task { await debug.start() }
         Task { await spotlight.start() }
+        Task { await routines.start() }
         Task {
             await work.start()
             self.openMorningPlanIfDue()
@@ -1303,6 +1370,10 @@ final class AppModel {
                 Task { await loadModels() }
             case CoreEvent.settingsChanged, CoreEvent.modesChanged:
                 call { try await self.loadPill() }
+                Task {
+                    await profilePhoto.load()
+                    if prep.preferences != nil { await prep.loadPreferences() }
+                }
             case CoreEvent.dictationDurationWarning:
                 let event: DictationDurationWarningEvent = try Core.payload(line)
                 pillWarningSeconds = event.remainingSeconds

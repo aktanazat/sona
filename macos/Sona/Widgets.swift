@@ -228,6 +228,15 @@ struct ProjectStatusIcon: View {
     var body: some View {
         ZStack {
             switch status {
+            case .backlog:
+                Circle().strokeBorder(Theme.inkTertiary, style: StrokeStyle(lineWidth: 1.5, dash: [2, 2]))
+            case .planned:
+                Circle().strokeBorder(Theme.inkSecondary, lineWidth: 1.5)
+            case .canceled:
+                Circle().fill(Theme.inkTertiary)
+                Image(systemName: "xmark")
+                    .font(.system(size: size * 0.45, weight: .heavy))
+                    .foregroundStyle(Theme.onAccent)
             case .active:
                 Circle().strokeBorder(Theme.accent, lineWidth: 1.5)
                 PieShape(fraction: progress)
@@ -789,12 +798,7 @@ struct Avatar: View {
     var body: some View {
         switch face.kind {
         case .me:
-            Image(systemName: "person.fill")
-                .font(.system(size: size * 0.5))
-                .foregroundStyle(Theme.onAccent)
-                .frame(width: size, height: size)
-                .background { MonogramFill(color: Theme.accentFill) }
-                .clipShape(Circle())
+            SelfPortrait(size: size)
                 .help(face.name)
                 .accessibilityLabel(face.name)
         case let .person(id):

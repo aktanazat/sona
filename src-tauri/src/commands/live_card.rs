@@ -31,6 +31,20 @@ pub async fn meeting_live_card_owner(
         .await
 }
 
+/// New words and date for one heard promise, typed while the meeting
+/// records. Later readings leave it alone.
+#[tauri::command]
+#[specta::specta]
+pub fn meeting_live_card_edit(
+    manager: State<'_, Arc<MeetingSessionManager>>,
+    session_id: MeetingSessionId,
+    promise_id: String,
+    what: String,
+    due_at_ms: Option<i64>,
+) -> Result<MeetingLiveCard, MeetingCommandError> {
+    manager.edit_live_card(session_id, &promise_id, &what, due_at_ms)
+}
+
 /// Post a meeting's follow-up to a Slack connection. Only ever on the
 /// operator's keypress; nothing sends it on its own.
 #[tauri::command]

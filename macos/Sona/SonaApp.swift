@@ -13,14 +13,20 @@ struct SonaApp: App {
             Shell().environment(model)
                 // In the Dock and the app switcher only while this window is
                 // open; the rest of the time Sona is its menu bar mark.
-                .onAppear { NSApp.setActivationPolicy(.regular) }
-                .onDisappear { NSApp.setActivationPolicy(.accessory) }
+                .onAppear {
+                    NSApp.setActivationPolicy(.regular)
+                    model.mainWindowOpen = true
+                }
+                .onDisappear {
+                    NSApp.setActivationPolicy(.accessory)
+                    model.mainWindowOpen = false
+                }
         }
         .windowStyle(.hiddenTitleBar)
         .windowToolbarStyle(.unified(showsTitle: false))
         .defaultSize(width: 1240, height: 820)
         // Sona lives in the menu bar: the window opens when something asks for
-        // it, never at launch, and never because it was open at the last quit.
+        // it, and at launch only when it was open at the last quit.
         .defaultLaunchBehavior(.suppressed)
         .restorationBehavior(.disabled)
         .commands {
@@ -207,6 +213,7 @@ final class SonaAppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         model.pauseQuietReview()
+        model.rememberMainWindow()
         model.core.shutdown()
     }
 }
@@ -236,7 +243,10 @@ struct MenuBarMark: View {
                     .lineLimit(1)
             }
         }
-        .onAppear { model.presentMainWindow = { openWindow(id: "main") } }
+        .onAppear {
+            model.presentMainWindow = { openWindow(id: "main") }
+            model.reopenMainWindow()
+        }
         .task(id: model.ready) {
             if model.ready { await model.prep.watchMenu() }
         }

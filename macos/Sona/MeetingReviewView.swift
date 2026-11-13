@@ -33,6 +33,7 @@ struct MeetingReviewView: View {
                         sessionId: snapshot.session.sessionId, revision: snapshot.session.revision)
                     ConversationBookmarksView(core: model.core, store: store,
                         sessionId: snapshot.session.sessionId, revision: snapshot.session.revision)
+                    MeetingDocCard(sessionId: snapshot.session.sessionId)
                     HeardPromisesCard(sessionId: snapshot.session.sessionId)
                     HeardPlansCard(core: model.core, store: store,
                         sessionId: snapshot.session.sessionId, revision: snapshot.session.revision)
@@ -113,6 +114,9 @@ struct MeetingReviewView: View {
         switch store.tab {
         case .review:
             ConversationAfterCaptureView(store: store, snapshot: snapshot, core: model.core)
+            PlanningCommentsView(threads: model.comments,
+                                 subject: PlanningCommentSubject(kind: .meeting, id: snapshot.session.sessionId))
+                .padding(.top, 32)
         case .transcript:
             TranscriptPane(store: store, snapshot: snapshot)
         case .insights:
@@ -624,9 +628,11 @@ struct TranscriptPane: View {
     let store: MeetingsStore
     let snapshot: MeetingReviewSnapshot
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(AppModel.self) private var model
     @State private var editingSegment: TranscriptSegmentId?
     @State private var renaming: MeetingSpeaker?
     @State private var name = ""
+    @State private var doc: LiveDocStore?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 28) {
@@ -657,6 +663,11 @@ struct TranscriptPane: View {
             Button("Cancel", role: .cancel) { renaming = nil }
         }
         .screenTextMarks(snapshot.session.sessionId, transcript: snapshot.transcript.first?.base.transcriptRevisionId)
+        .task(id: snapshot.session.sessionId) {
+            let doc = doc ?? LiveDocStore(core: model.core)
+            self.doc = doc
+            doc.watch(snapshot.session.sessionId)
+        }
     }
 
     /// What the search found outside the words: the title, a note.
@@ -675,23 +686,32 @@ struct TranscriptPane: View {
 
     private var turns: some View {
         ScrollViewReader { proxy in
-            let turns = store.turns
+            let changes = doc?.watching == snapshot.session.sessionId && store.transcriptQuery.isEmpty
+                && store.transcriptSpeaker == nil ? doc?.doc?.changes ?? [] : []
+            let turns = TranscriptTurn.cut(store.turns, at: changes)
             LazyVStack(alignment: .leading, spacing: 16) {
                 if turns.isEmpty {
                     Text(emptyLine).bodyText(14, Theme.inkSecondary)
                 } else {
-                    ForEach(turns) { turn in
-                        TranscriptTurnRow(
-                            store: store,
-                            turn: turn,
-                            speakers: snapshot.speakers,
-                            editing: $editingSegment,
-                            rename: { speaker in
-                                name = speaker.displayName
-                                renaming = speaker
-                            }
-                        )
-                        .id(turn.segments.first?.base.segmentId ?? turn.id)
+                    ForEach(TimelineEntry.merged(
+                        turns, at: { $0.segments.first?.base.startOffsetNs ?? 0 }, id: { "turn-\($0.id)" }, changes)
+                    ) { entry in
+                        switch entry.row {
+                        case .line(let turn):
+                            TranscriptTurnRow(
+                                store: store,
+                                turn: turn,
+                                speakers: snapshot.speakers,
+                                editing: $editingSegment,
+                                rename: { speaker in
+                                    name = speaker.displayName
+                                    renaming = speaker
+                                }
+                            )
+                            .id(turn.segments.first?.base.segmentId ?? turn.id)
+                        case .change(let change):
+                            ChangeRow(change: change)
+                        }
                     }
                 }
             }

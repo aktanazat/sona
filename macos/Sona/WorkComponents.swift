@@ -152,19 +152,29 @@ extension WorkItemRow {
     }
 }
 
-/// "Tomorrow", in red once it has come or gone and the task is still open.
+/// "Tomorrow": red once it has come or gone, orange within the week, while
+/// the task is still open.
 struct TaskDue: View {
     let due: Int64
     let open: Bool
     let now: Int64
 
     var body: some View {
-        let pressing = open && PlanningFormat.days(from: now, to: due) <= 0
         Text(TaskDates.label(due, now: now))
             .font(TypeScale.label(12))
             .monospacedDigit()
-            .foregroundStyle(pressing ? Theme.live : Theme.inkTertiary)
+            .foregroundStyle(Self.tone(due, open: open, now: now) ?? Theme.inkTertiary)
             .lineLimit(1)
+    }
+
+    /// The due date's color when it presses, nil when it does not.
+    static func tone(_ due: Int64, open: Bool, now: Int64) -> Color? {
+        guard open else { return nil }
+        return switch PlanningFormat.days(from: now, to: due) {
+        case ...0: Theme.live
+        case 1...7: Theme.dueSoon
+        default: nil
+        }
     }
 }
 
@@ -209,6 +219,7 @@ struct ItemRow: View {
     let now: Int64
     let revision: UInt64
     var waiting = false
+    var session: WorkSession?
     let toggle: () -> Void
     let rename: (String?) -> Void
 
@@ -236,6 +247,7 @@ struct ItemRow: View {
                     .foregroundStyle(row.status.isOpen || row.status == .triage ? Theme.ink : Theme.inkSecondary)
                     .lineLimit(1)
                     .layoutPriority(1)
+                    .help(row.title)
             }
             if row.blockedByOpenCount > 0, row.status.isOpen {
                 Image(systemName: "hand.raised.fill")
@@ -254,6 +266,21 @@ struct ItemRow: View {
                 .help("Raised in \(row.raisedIn) meetings")
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel("Raised in \(row.raisedIn) meetings")
+            }
+            if let progress = row.subTasks, progress.total > 0 {
+                HStack(spacing: 3) {
+                    Image(systemName: "checklist").font(.system(size: 9, weight: .medium))
+                    Text(verbatim: "\(progress.done)/\(progress.total)")
+                }
+                .font(TypeScale.label(11))
+                .monospacedDigit()
+                .foregroundStyle(progress.done == progress.total ? Theme.accent : Theme.inkTertiary)
+                .help("\(progress.done) of \(progress.total) sub-tasks done")
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("\(progress.done) of \(progress.total) sub-tasks done")
+            }
+            if row.attachmentCount > 0 {
+                AttachmentCount(count: row.attachmentCount)
             }
             if let repeating = row.repeat {
                 HStack(spacing: 3) {
@@ -315,8 +342,8 @@ struct ItemRow: View {
                     .foregroundStyle(Theme.inkTertiary)
                     .frame(width: 40, alignment: .trailing)
             }
-            if let doer = row.doer, row.status.isOpen {
-                TaskDoer(doer: doer, waiting: waiting)
+            if let agent = session?.agent ?? (row.status.isOpen ? row.doer?.agent : nil) {
+                TaskDoer(agent: agent, waiting: waiting, session: session)
             }
             if shows.contains(TaskProperty.owner.rawValue) {
                 Avatar(face: row.ownerFace, size: 20, revision: revision)
@@ -375,15 +402,25 @@ struct AgentName: View {
 /// The agent working a task: its name, or, while its session waits on the
 /// user's approval, "Waiting for you" in red.
 struct TaskDoer: View {
-    let doer: WorkDoer
+    let agent: String
     var waiting = false
+    var session: WorkSession?
 
     var body: some View {
-        let help = waiting ? "\(doer.agent) is waiting for your approval" : "\(doer.agent) is working on it"
-        AgentName(name: waiting ? "Waiting for you" : doer.agent, tint: waiting ? Theme.live : Theme.inkTertiary)
-            .help(help)
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel(help)
+        let live = session.map(SessionLiveness.describe)
+        let help = waiting ? "\(agent) is waiting for your approval" : live?.help ?? "\(agent) is working on it"
+        HStack(spacing: Space.xs) {
+            if let live, !waiting {
+                Image(systemName: "circle.fill")
+                    .font(.system(size: 6))
+                    .foregroundStyle(live.tint)
+                    .symbolEffect(.pulse, options: .repeating, isActive: live.moving)
+            }
+            AgentName(name: waiting ? "Waiting for you" : agent, tint: waiting ? Theme.live : Theme.inkTertiary)
+        }
+        .help(help)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(help)
     }
 }
 
@@ -453,12 +490,7 @@ struct TaskGroupHeader: View {
             .accessibilityHint(collapsed ? "Expand" : "Collapse")
             Spacer(minLength: 8)
             if let reschedule {
-                Button(action: reschedule) {
-                    HStack(spacing: 6) {
-                        Text("Reschedule all")
-                        Shortcut("shift+d")
-                    }
-                }
+                Button("Reschedule all", action: reschedule)
                 .buttonStyle(QuietButton(compact: true))
                 .accessibilityLabel("Reschedule all overdue")
             }
@@ -496,6 +528,14 @@ struct TaskGroupMarkView: View {
         case let .owner(face): Avatar(face: face, size: 16, revision: revision)
         case .project: symbol("folder")
         case .meeting: symbol("waveform")
+        case .cycle: symbol("arrow.triangle.2.circlepath")
+        case .milestone: symbol("flag")
+        case let .label(hue):
+            if let hue {
+                Circle().fill(Theme.label(hue: hue)).frame(width: 8, height: 8).frame(width: 16, height: 16)
+            } else {
+                symbol("tag")
+            }
         case .focus: symbol("scope")
         case let .bucket(bucket): symbol(bucket.symbol)
         case .agent: symbol("sparkle")
@@ -725,15 +765,17 @@ struct UndoToast: View {
             } else if let title = focus.toast {
                 toast {
                     Text(title).bodyText(13).lineLimit(1)
-                    Button {
-                        model.undoWork()
-                    } label: {
-                        HStack(spacing: 6) {
-                            Text("Undo").font(TypeScale.label(13)).foregroundStyle(Theme.accent)
-                            Shortcut("cmd+z")
+                    if focus.toastUndoes {
+                        Button {
+                            model.undoWork()
+                        } label: {
+                            HStack(spacing: 6) {
+                                Text("Undo").font(TypeScale.label(13)).foregroundStyle(Theme.accent)
+                                Shortcut("cmd+z")
+                            }
                         }
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
                 }
             }
         }
@@ -759,5 +801,23 @@ struct UndoToast: View {
                     .elevation(.medium)
             }
             .transition(reduceMotion ? .opacity : .opacity.combined(with: .offset(y: 8)))
+    }
+}
+
+struct AttachmentCount: View {
+    let count: Int
+
+    var body: some View {
+        let line = count == 1 ? "1 attachment" : "\(count) attachments"
+        HStack(spacing: 3) {
+            Image(systemName: "paperclip").font(.system(size: 9, weight: .medium))
+            Text(verbatim: "\(count)")
+        }
+        .font(TypeScale.label(11))
+        .monospacedDigit()
+        .foregroundStyle(Theme.inkTertiary)
+        .help(line)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(line)
     }
 }

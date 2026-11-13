@@ -103,6 +103,7 @@ private struct ProposalTask: View {
             .contentShape(Rectangle())
             .onHover { hovering = $0 }
             .onTapGesture { model.workFocus.open(row.id, in: .triage) }
+            .allowsWindowActivationEvents()
             .help("Open the task")
             ForEach(Array(proposals.enumerated()), id: \.element.id) { index, proposal in
                 ProposalLine(proposal: proposal, keyed: keyed && index == 0, showsAgent: agent == nil)
@@ -170,6 +171,10 @@ enum WorkProposalText {
         case .snoozed: "Snoozed until"
         case .recurrence: "Repeats"
         case .cycle: "Cycle"
+        case .parent: "Parent"
+        case .estimate: "Estimate"
+        case .forPerson: "For"
+        case .unknown: "Change"
         }
     }
 
@@ -183,9 +188,10 @@ enum WorkProposalText {
     static func change(_ proposal: WorkProposal, model: AppModel, now: Int64) -> String {
         let to = value(proposal.field, proposal.to, model: model, now: now)
         switch proposal.field {
-        case .title, .details:
+        case .title, .details, .unknown:
             return to
-        case .status, .priority, .owner, .due, .project, .milestone, .labels, .snoozed, .recurrence, .cycle:
+        case .status, .priority, .owner, .due, .project, .milestone, .labels, .snoozed, .recurrence, .cycle, .parent,
+             .estimate, .forPerson:
             return "\(value(proposal.field, proposal.from, model: model, now: now)) → \(to)"
         }
     }
@@ -227,6 +233,15 @@ enum WorkProposalText {
             return text.map(Recurrence.display) ?? "Doesn't repeat"
         case .cycle:
             return text.map { "Cycle \($0)" } ?? "No cycle"
+        case .parent:
+            return text.map { id in work.items?.first { $0.id == id }.map { "#\($0.number) \($0.title)" } ?? "A task" }
+                ?? "No parent"
+        case .estimate:
+            return text.map { "\($0) pt" } ?? "No estimate"
+        case .forPerson:
+            return text.map { id in work.people.first { $0.id == id }?.name ?? "Someone" } ?? "No one"
+        case .unknown:
+            return text ?? "A change"
         }
     }
 }

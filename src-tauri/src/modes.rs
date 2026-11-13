@@ -821,7 +821,7 @@ fn check_expected_revision(
     Ok(())
 }
 
-fn apply_upsert_mode(
+pub(crate) fn apply_upsert_mode(
     settings: &mut AppSettings,
     mode: ModeDefinition,
     expected_revision: u64,
@@ -847,7 +847,7 @@ fn apply_upsert_mode(
     Ok(())
 }
 
-fn apply_delete_mode(
+pub(crate) fn apply_delete_mode(
     settings: &mut AppSettings,
     mode_id: &str,
     expected_revision: u64,
@@ -875,7 +875,7 @@ fn apply_delete_mode(
     Ok(())
 }
 
-fn apply_reorder_modes(
+pub(crate) fn apply_reorder_modes(
     settings: &mut AppSettings,
     ordered_ids: &[String],
     expected_revision: u64,
@@ -917,7 +917,7 @@ fn apply_reorder_modes(
     Ok(())
 }
 
-fn apply_set_active_mode(settings: &mut AppSettings, mode_id: &str) -> Result<(), String> {
+pub(crate) fn apply_set_active_mode(settings: &mut AppSettings, mode_id: &str) -> Result<(), String> {
     if !settings.modes.iter().any(|mode| mode.id == mode_id) {
         return Err(format!("Mode '{mode_id}' does not exist"));
     }
@@ -928,7 +928,7 @@ fn apply_set_active_mode(settings: &mut AppSettings, mode_id: &str) -> Result<()
 /// "Use" on a library prompt: the active mode's instructions become that
 /// prompt's text, and the mode remembers which one. The selection is kept
 /// too: it is what the first mode is seeded from when modes are created.
-fn apply_use_post_process_prompt(settings: &mut AppSettings, id: &str) -> Result<(), String> {
+pub(crate) fn apply_use_post_process_prompt(settings: &mut AppSettings, id: &str) -> Result<(), String> {
     let prompt = settings
         .post_process_prompts
         .iter()
@@ -978,7 +978,7 @@ fn apply_capture_mode_activation_rule(
     Ok(())
 }
 
-fn apply_remove_mode_activation_rule(
+pub(crate) fn apply_remove_mode_activation_rule(
     settings: &mut AppSettings,
     app_id: &str,
     expected_revision: u64,
@@ -1027,7 +1027,7 @@ fn apply_capture_mode_website_activation_rule(
     Ok(())
 }
 
-fn apply_remove_mode_website_activation_rule(
+pub(crate) fn apply_remove_mode_website_activation_rule(
     settings: &mut AppSettings,
     host: &str,
     match_kind: WebsiteHostMatch,

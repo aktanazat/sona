@@ -4,15 +4,17 @@ import SwiftUI
 /// `MeetingLivePromise`: one promise heard while a meeting records.
 struct MeetingLivePromise: Decodable, Identifiable, Equatable {
     let id: String
-    let what: String
+    var what: String
     var owner: WorkOwner
     var ownerName: String?
     var ownerSet: Bool
-    let dueAtMs: Int64?
-    let dueWords: String?
+    var dueAtMs: Int64?
+    var dueWords: String?
     let quote: String
     let startOffsetNs: Int64
     let endOffsetNs: Int64
+    /// The user changed its words or date, so later readings leave them.
+    var edited: Bool
 }
 
 /// `MeetingLiveCard`: the promises the running capture has heard.
@@ -43,6 +45,13 @@ private struct LiveOwnerParams: Encodable {
     let sessionId: MeetingSessionId
     let promiseId: String
     let owner: WorkOwner
+}
+
+private struct LiveEditParams: Encodable {
+    let sessionId: MeetingSessionId
+    let promiseId: String
+    let what: String
+    let dueAtMs: Int64?
 }
 
 private struct FollowUpPostParams: Encodable {
@@ -113,6 +122,8 @@ final class LiveCardStore {
 
     @ObservationIgnored private let core: Core
     @ObservationIgnored private var ownerEdits = 0
+    /// Told when a change by hand was kept, so its mark shows.
+    @ObservationIgnored var onEdited: () -> Void = {}
 
     private static let routeKey = "followUpRoute"
 
@@ -169,11 +180,41 @@ final class LiveCardStore {
                     "meeting_live_card_owner",
                     LiveOwnerParams(sessionId: sessionId, promiseId: promise.id, owner: owner))
                 if ownerEdits == 1, watching == sessionId { card = result }
+                onEdited()
             } catch {
                 if let before, let at = card?.promises.firstIndex(where: { $0.id == promise.id }) {
                     card?.promises[at] = before
                 }
                 failure = "That owner was not saved."
+            }
+        }
+    }
+
+    /// New words or a new date for a promise on the board, kept against
+    /// later readings.
+    func edit(_ promise: MeetingLivePromise, what: String, dueAtMs: Int64?) {
+        let what = what.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let sessionId = card?.sessionId, !what.isEmpty,
+              what != promise.what || dueAtMs != promise.dueAtMs,
+              let index = card?.promises.firstIndex(where: { $0.id == promise.id }) else { return }
+        let before = card?.promises[index]
+        card?.promises[index].what = what
+        card?.promises[index].dueAtMs = dueAtMs
+        card?.promises[index].edited = true
+        ownerEdits += 1
+        Task {
+            defer { ownerEdits -= 1 }
+            do {
+                let result: MeetingLiveCard = try await core.request(
+                    "meeting_live_card_edit",
+                    LiveEditParams(sessionId: sessionId, promiseId: promise.id, what: what, dueAtMs: dueAtMs))
+                if ownerEdits == 1, watching == sessionId { card = result }
+                onEdited()
+            } catch {
+                if let before, let at = card?.promises.firstIndex(where: { $0.id == promise.id }) {
+                    card?.promises[at] = before
+                }
+                failure = "That change was not saved."
             }
         }
     }
@@ -218,6 +259,11 @@ final class LiveCardStore {
     /// or click.
     func deliver(subject: String, _ connections: [SonaConnection]) {
         guard let text = followUp?.text, !text.isEmpty else { return }
+        send(text, subject: subject, via: route, connections)
+    }
+
+    /// Any text from a meeting, copied, opened in Mail or posted to Slack.
+    func send(_ text: String, subject: String, via route: FollowUpRoute, _ connections: [SonaConnection]) {
         switch route {
         case .copy:
             NSPasteboard.general.clearContents()
@@ -312,9 +358,11 @@ enum LiveCardKeys {
 }
 
 /// Who owes one promise, as a chip that picks them. Picking changes only
-/// the card: the recording keeps going.
+/// the card: the recording keeps going. On the board the date has its own
+/// chip, so the owner chip leaves it out.
 private struct PromiseOwnerMenu: View {
     let promise: MeetingLivePromise
+    var showsDay = true
     @Environment(AppModel.self) private var model
 
     var body: some View {
@@ -329,7 +377,7 @@ private struct PromiseOwnerMenu: View {
             Divider()
             Button("No owner") { model.heard.setOwner(promise, .nobody, name: nil) }
         } label: {
-            Text(PromiseLabel.text(owner: promise.ownerName, dueAtMs: promise.dueAtMs))
+            Text(PromiseLabel.text(owner: promise.ownerName, dueAtMs: showsDay ? promise.dueAtMs : nil))
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(promise.ownerName == nil ? Theme.inkTertiary : Theme.inkSecondary)
                 .lineLimit(1)
@@ -343,6 +391,84 @@ private struct PromiseOwnerMenu: View {
         .background(Theme.control, in: RoundedRectangle(cornerRadius: Theme.radiusKey))
         .help("Who owes this")
         .accessibilityLabel("Owner: \(promise.ownerName ?? "none"). Change")
+    }
+}
+
+/// When a promise is due, as a chip that opens a calendar.
+private struct PromiseDueButton: View {
+    let promise: MeetingLivePromise
+    @Environment(AppModel.self) private var model
+    @State private var open = false
+    @State private var day = Date()
+
+    var body: some View {
+        Button {
+            day = promise.dueAtMs.map { Date(timeIntervalSince1970: TimeInterval($0) / 1000) } ?? Date()
+            open = true
+        } label: {
+            Text(promise.dueAtMs.map(PromiseLabel.day) ?? "No date")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(promise.dueAtMs == nil ? Theme.inkTertiary : Theme.inkSecondary)
+                .lineLimit(1)
+        }
+        .buttonStyle(.plain)
+        .fixedSize()
+        .padding(.horizontal, 6)
+        .frame(height: 18)
+        .background(Theme.control, in: RoundedRectangle(cornerRadius: Theme.radiusKey))
+        .help("When this is due")
+        .accessibilityLabel("Due: \(promise.dueAtMs.map(PromiseLabel.day) ?? "no date"). Change")
+        .popover(isPresented: $open) {
+            VStack(alignment: .leading, spacing: 12) {
+                DatePicker("Due", selection: $day, displayedComponents: .date)
+                    .datePickerStyle(.graphical)
+                    .labelsHidden()
+                HStack {
+                    Button("No date") { save(nil) }.buttonStyle(.quiet)
+                    Spacer()
+                    Button("Set") { save(day) }.buttonStyle(.primary)
+                }
+            }
+            .padding(16)
+        }
+    }
+
+    /// Five in the afternoon local time, the hour the core gives a day heard
+    /// in the call.
+    private func save(_ day: Date?) {
+        open = false
+        let due = day.map { date -> Int64 in
+            let end = Calendar.current.date(bySettingHour: 17, minute: 0, second: 0, of: date) ?? date
+            return Int64(end.timeIntervalSince1970 * 1000)
+        }
+        model.heard.edit(promise, what: promise.what, dueAtMs: due)
+    }
+}
+
+/// One promise's words, edited in place; kept on return or when the field
+/// loses focus.
+private struct PromiseWhatField: View {
+    let promise: MeetingLivePromise
+    @Environment(AppModel.self) private var model
+    @State private var draft = ""
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        TextField("What", text: $draft, axis: .vertical)
+            .textFieldStyle(.plain)
+            .font(TypeScale.body())
+            .foregroundStyle(Theme.ink)
+            .lineLimit(1...3)
+            .focused($focused)
+            .onSubmit(save)
+            .onAppear { draft = promise.what }
+            .onChange(of: promise.what) { if !focused { draft = promise.what } }
+            .onChange(of: focused) { if !focused { save() } }
+            .accessibilityLabel("What is owed")
+    }
+
+    private func save() {
+        model.heard.edit(promise, what: draft, dueAtMs: promise.dueAtMs)
     }
 }
 
@@ -377,8 +503,9 @@ struct LiveCardStrip: View {
     }
 }
 
-/// The promises heard so far, at the head of the live screen's side column,
-/// and the question that reads them back.
+/// The board: who owes what by when, heard so far and edited in place, at
+/// the head of the live screen's side column, and the question that reads
+/// it back. Soonest due first; undated promises after, in the order heard.
 struct LiveCardSection: View {
     let sessionId: MeetingSessionId
     @Environment(AppModel.self) private var model
@@ -388,21 +515,32 @@ struct LiveCardSection: View {
 
     var body: some View {
         let heard = model.heard
-        let promises = heard.watching == sessionId ? heard.card?.promises ?? [] : []
-        PageSection("Promises") {
+        let doc = model.liveDoc.watching == sessionId ? model.liveDoc.doc : nil
+        let promises = (heard.watching == sessionId ? heard.card?.promises ?? [] : [])
+            .enumerated()
+            .sorted { ($0.element.dueAtMs ?? .max, $0.offset) < ($1.element.dueAtMs ?? .max, $1.offset) }
+            .map(\.element)
+        PageSection("Board") {
             if promises.isEmpty {
-                Text("Who owes what shows here as it is said.").metaText(Theme.inkTertiary)
+                Text("Who owes what by when shows here as it is said.").metaText(Theme.inkTertiary)
             } else {
                 Card {
                     ForEach(promises) { promise in
-                        CardRow {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(promise.what).bodyText(14).lineLimit(2)
-                                Text("“\(promise.quote)”").metaText().lineLimit(2)
+                        VStack(alignment: .leading, spacing: 6) {
+                            PromiseWhatField(promise: promise)
+                            HStack(spacing: 6) {
+                                PromiseOwnerMenu(promise: promise, showsDay: false)
+                                PromiseDueButton(promise: promise)
+                                Spacer(minLength: 0)
+                                if let mark = doc?.lastChange(to: promise.id) {
+                                    ChangeMark(change: mark)
+                                }
                             }
-                        } trailing: {
-                            PromiseOwnerMenu(promise: promise)
+                            Text("“\(promise.quote)”").metaText().lineLimit(2)
                         }
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                        .overlay(alignment: .bottom) { Hairline().padding(.horizontal, 16) }
                     }
                 }
                 .animation(Motion.settle(reduced: reduceMotion), value: promises.map(\.id))

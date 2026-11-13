@@ -3,7 +3,7 @@ use super::workflow_core_tests::{reviewable_meeting, store, transcript};
 use super::*;
 use crate::managers::history::MIGRATIONS as HISTORY_MIGRATIONS;
 use crate::scratchpad::links::{insert_source, ResolvedSource, ScratchSource, ScratchSourceKind};
-use crate::scratchpad::{create_note_with_connection, note_with_connection};
+use crate::scratchpad::{derive_title, note_with_connection, ScratchNote};
 
 const DAY_MS: i64 = 86_400_000;
 const PURGE_AT: i64 = 20 * DAY_MS;
@@ -439,9 +439,8 @@ fn history_upgrade_scrubs_conversation_snapshots_and_blocks_new_copies_but_keeps
         })
         .expect("history has the original note-source migration");
     let mut history = history_at(links_version);
-    let note = create_note_with_connection(&mut history, NOTE_BODY, 1).unwrap();
-    let original_note =
-        create_note_with_connection(&mut history, "Original local note words", 2).unwrap();
+    let note = old_note(&history, NOTE_BODY, 1);
+    let original_note = old_note(&history, "Original local note words", 2);
     let meeting_id = Uuid::new_v4().to_string();
     history
         .execute(
@@ -534,4 +533,32 @@ fn history_upgrade_scrubs_conversation_snapshots_and_blocks_new_copies_but_keeps
         (original_note.title, Some(2), Some(original_note.body)),
         "local note evidence keeps its captured version after the source is edited"
     );
+}
+
+/// A note written the way the history at an old schema stores one, without
+/// today's note code, which reads columns that schema does not have yet.
+fn old_note(history: &Connection, body: &str, now_ms: i64) -> ScratchNote {
+    let note = ScratchNote {
+        id: Uuid::new_v4().to_string(),
+        title: derive_title(body),
+        body: body.to_string(),
+        pinned: false,
+        created_at_ms: now_ms,
+        updated_at_ms: now_ms,
+    };
+    history
+        .execute(
+            "INSERT INTO scratch_notes (id, title, body, pinned, created_at_ms, updated_at_ms)
+         VALUES (?1, ?2, ?3, 0, ?4, ?4)",
+            params![note.id, note.title, note.body, now_ms],
+        )
+        .unwrap();
+    history
+        .execute(
+            "INSERT INTO scratch_note_versions (note_id, kind, body, saved_at_ms)
+         VALUES (?1, 'edit', ?2, ?3)",
+            params![note.id, note.body, now_ms],
+        )
+        .unwrap();
+    note
 }

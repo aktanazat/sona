@@ -97,6 +97,9 @@ enum TaskGroupMark: Equatable {
     case owner(AvatarFace)
     case project
     case meeting
+    case cycle
+    case label(Double?)
+    case milestone
     case bucket(TaskBucket)
     case focus
     case agent
@@ -110,6 +113,8 @@ struct TaskGroup: Identifiable, Equatable {
     var rows: [WorkItemRow]
     /// What a task dropped on this group, or added from its header, takes.
     var patch: WorkPatch?
+    /// The label a task dropped here gains, beside the ones it has.
+    var addsLabel: String? = nil
 }
 
 /// Filtering, ordering and grouping, on the rows the store already holds, so
@@ -125,6 +130,129 @@ enum TaskListing {
         let now: Int64
         private let due: [DueSpan]?
         private let cycle: CycleWant?
+        private let conditions: [Condition]
+
+        private enum Value {
+            case none, me, text(String), day(Int64, Int64), at(Int64)
+            /// Cycle scope: the ids that joined their cycle after it began.
+            case planned(Set<String>), added(Set<String>)
+        }
+
+        /// One condition with its values read the way the core reads them.
+        private struct Condition {
+            let field: WorkConditionField
+            let op: WorkConditionOp
+            let values: [Value]
+
+            init(_ condition: WorkCondition, now: Int64, cycles: [WorkCycle]) {
+                field = condition.field
+                op = condition.op
+                values = condition.values.map { [field] raw in
+                    let text = raw.trimmingCharacters(in: .whitespaces).lowercased()
+                    if text == "none", field != .priority { return .none }
+                    switch field {
+                    case .owner where text == "me": return .me
+                    case .cycleScope:
+                        let added = Set(cycles.flatMap { $0.addedAfterStart ?? [] })
+                        return text == "added" ? .added(added) : .planned(added)
+                    case .cycle where text == "current" || text == "next":
+                        let state: WorkCycleState = text == "current" ? .current : .upcoming
+                        return cycles.first { $0.state == state }.map { .text(String($0.number)) } ?? .none
+                    case .priority:
+                        let names = ["none": "0", "no_priority": "0", "urgent": "1", "high": "2", "medium": "3", "low": "4"]
+                        return .text(names[text] ?? text)
+                    case .due, .created, .updated, .completed:
+                        return Self.day(text, now: now)
+                    case .status, .delegate: return .text(text)
+                    case .owner, .cycle, .project, .milestone, .label, .parent, .estimate, .forPerson:
+                        return .text(raw.trimmingCharacters(in: .whitespaces))
+                    }
+                }
+            }
+
+            private static func day(_ text: String, now: Int64) -> Value {
+                if let ms = Int64(text) { return .at(ms) }
+                let calendar = Calendar.current
+                let today = calendar.startOfDay(for: PlanningFormat.moment(now))
+                let parts = text.split(separator: "-").compactMap { Int($0) }
+                let step = text.hasPrefix("next_") ? 1 : text.hasPrefix("last_") ? -1 : 0
+                let monday = calendar.date(byAdding: .day, value: -((calendar.component(.weekday, from: today) + 5) % 7), to: today)
+                let month = calendar.date(from: calendar.dateComponents([.year, .month], from: today))
+                let (start, unit): (Date?, Calendar.Component) = switch text {
+                case "today": (today, .day)
+                case "tomorrow": (calendar.date(byAdding: .day, value: 1, to: today), .day)
+                case "yesterday": (calendar.date(byAdding: .day, value: -1, to: today), .day)
+                case "this_week", "next_week", "last_week":
+                    (monday.flatMap { calendar.date(byAdding: .day, value: 7 * step, to: $0) }, .weekOfYear)
+                case "this_month", "next_month", "last_month":
+                    (month.flatMap { calendar.date(byAdding: .month, value: step, to: $0) }, .month)
+                default: (parts.count == 3
+                    ? calendar.date(from: DateComponents(year: parts[0], month: parts[1], day: parts[2])) : nil, .day)
+                }
+                guard let start, let end = calendar.date(byAdding: unit, value: 1, to: start) else { return .day(0, 0) }
+                return .day(TaskDates.milliseconds(start), TaskDates.milliseconds(end))
+            }
+
+            private func text(_ row: WorkItemRow) -> String? {
+                switch field {
+                case .status: row.status.rawValue
+                case .priority: String(row.priority)
+                case .owner: row.ownerPersonId
+                case .delegate: row.doer?.agent.lowercased()
+                case .project: row.projectId
+                case .milestone: row.milestoneId
+                case .parent: row.parentId
+                case .cycle, .cycleScope: row.cycle.map { String($0) }
+                case .estimate: row.estimate.map { String($0) }
+                case .forPerson: row.forPersonId
+                case .label, .due, .created, .updated, .completed: nil
+                }
+            }
+
+            private func at(_ row: WorkItemRow) -> Int64? {
+                switch field {
+                case .due: row.dueAtMs
+                case .created: row.createdAtMs
+                case .updated: row.updatedAtMs
+                case .completed: row.completedAtMs
+                default: nil
+                }
+            }
+
+            private func hits(_ row: WorkItemRow, _ value: Value) -> Bool {
+                switch (field, value) {
+                case let (.cycleScope, .planned(added)): row.cycle != nil && !added.contains(row.id)
+                case let (.cycleScope, .added(added)): row.cycle != nil && added.contains(row.id)
+                case (_, .planned), (_, .added): false
+                case (.label, .none): row.labelIds.isEmpty
+                case let (.label, .text(id)): row.labelIds.contains(id)
+                case (.owner, .me): row.ownerIsSelf
+                case (_, .me): false
+                case (_, .none): field.dated ? at(row) == nil : text(row) == nil
+                case let (_, .day(start, end)): at(row).map { start <= $0 && $0 < end } ?? false
+                case let (_, .at(ms)): at(row) == ms
+                case let (_, .text(value)): text(row) == value
+                }
+            }
+
+            func holds(_ row: WorkItemRow) -> Bool {
+                switch op {
+                case .is where field == .label, .includesAll: return values.allSatisfy { hits(row, $0) }
+                case .is, .anyOf, .includesAny: return values.contains { hits(row, $0) }
+                case .isNot, .noneOf: return !values.contains { hits(row, $0) }
+                case .before, .after:
+                    guard let at = at(row) else { return false }
+                    return values.contains { value in
+                        switch (op, value) {
+                        case let (.before, .day(start, _)), let (.before, .at(start)): at < start
+                        case let (.after, .day(_, end)): at >= end
+                        case let (.after, .at(ms)): at > ms
+                        default: false
+                        }
+                    }
+                }
+            }
+        }
 
         private enum CycleWant {
             case number(Int64), noCycle, nothing
@@ -154,6 +282,7 @@ enum TaskListing {
             case let .number(number)?: .number(number)
             case .current?, .next?: named.map { .number($0.number) } ?? .nothing
             }
+            conditions = (query.filters ?? []).map { Condition($0, now: now, cycles: cycles) }
         }
 
         func matches(_ row: WorkItemRow) -> Bool {
@@ -170,6 +299,7 @@ enum TaskListing {
             }
             if let due, !due.contains(where: { $0.holds(row) }) { return false }
             if let cycle, !cycle.holds(row) { return false }
+            if !conditions.allSatisfy({ $0.holds(row) }) { return false }
             if let meeting = query.sourceMeetingId, row.sourceMeetingId != meeting { return false }
             if let search = query.search?.trimmingCharacters(in: .whitespaces), !search.isEmpty {
                 let number = search.hasPrefix("#") ? String(search.dropFirst()) : search
@@ -236,6 +366,11 @@ enum TaskListing {
                 return left.updatedAtMs != right.updatedAtMs ? left.updatedAtMs > right.updatedAtMs : left.number > right.number
             case .created:
                 return left.createdAtMs != right.createdAtMs ? left.createdAtMs > right.createdAtMs : left.number > right.number
+            case .status:
+                let (a, b) = (statusRank[left.status] ?? 0, statusRank[right.status] ?? 0)
+                if a != b { return a < b }
+                let (p, q) = (TaskPriority(left.priority).rank, TaskPriority(right.priority).rank)
+                return p != q ? p < q : left.number < right.number
             case .manual:
                 return left.sortOrder != right.sortOrder ? left.sortOrder < right.sortOrder : left.number < right.number
             }
@@ -252,11 +387,26 @@ enum TaskListing {
         }
     }
 
+    private static let statusRank = Dictionary(uniqueKeysWithValues: statusOrder.enumerated().map { ($1, $0) })
+
     static func groups(
         _ rows: [WorkItemRow], display: WorkDisplay, now: Int64,
-        projects: [WorkProjectChoice], people: [WorkPersonChoice]
+        projects: [WorkProjectChoice], people: [WorkPersonChoice], cycles: [WorkCycle] = [],
+        labels: [String: WorkLabel] = [:], milestones: [PlanningMilestone] = []
     ) -> [TaskGroup] {
-        let rows = ordered(rows, by: display.orderBy)
+        let shown = display.showSubTasks ? rows : rows.filter { $0.parentId == nil }
+        return grouped(ordered(shown, by: display.orderBy), display: display, now: now, projects: projects,
+                       people: people, cycles: cycles, labels: labels, milestones: milestones)
+    }
+
+    /// Ordered rows split by `display.groupBy`; the board's swimlanes pass a
+    /// display grouped by its second grouping.
+    static func grouped(
+        _ rows: [WorkItemRow], display: WorkDisplay, now: Int64,
+        projects: [WorkProjectChoice], people: [WorkPersonChoice], cycles: [WorkCycle],
+        labels: [String: WorkLabel], milestones: [PlanningMilestone]
+    ) -> [TaskGroup] {
+        let showEmpty = display.showEmptyGroups
         switch display.groupBy {
         case .none:
             return [TaskGroup(id: "all", title: "All", mark: .none, rows: rows)]
@@ -338,6 +488,57 @@ enum TaskListing {
                 }
             if let loose = keyed[""] {
                 groups.append(TaskGroup(id: "meeting:none", title: "Not from a meeting", mark: .meeting, rows: loose))
+            }
+            return groups
+        case .cycle:
+            let keyed = Dictionary(grouping: rows) { $0.cycle ?? -1 }
+            let listed = showEmpty
+                ? Set(cycles.filter { $0.state != .past }.map(\.number)).union(keyed.keys.filter { $0 >= 0 })
+                : Set(keyed.keys.filter { $0 >= 0 })
+            var groups = listed.sorted().map { number in
+                let name = cycles.first { $0.number == number }?.name
+                return TaskGroup(id: "cycle:\(number)", title: name.map { "Cycle \(number): \($0)" } ?? "Cycle \(number)",
+                                 mark: .cycle, rows: keyed[number] ?? [], patch: WorkPatch(cycle: .set(number)))
+            }
+            if keyed[-1] != nil || showEmpty {
+                groups.append(TaskGroup(id: "cycle:none", title: "No cycle", mark: .cycle, rows: keyed[-1] ?? [],
+                                        patch: WorkPatch(cycle: .clear)))
+            }
+            return groups
+        case .label:
+            let used = Set(rows.flatMap(\.labelIds))
+            let ids = showEmpty ? used.union(labels.keys) : used
+            var groups = ids
+                .map { id in (id: id, name: labels[id]?.name ?? "Label") }
+                .sorted(by: byName)
+                .map { id, name in
+                    TaskGroup(id: "label:\(id)", title: name, mark: .label(labels[id]?.hue),
+                              rows: rows.filter { $0.labelIds.contains(id) }, patch: WorkPatch(labelIds: [id]),
+                              addsLabel: id)
+                }
+            let bare = rows.filter(\.labelIds.isEmpty)
+            if !bare.isEmpty || showEmpty {
+                groups.append(TaskGroup(id: "label:none", title: "No labels", mark: .label(nil), rows: bare,
+                                        patch: WorkPatch(labelIds: [])))
+            }
+            return groups
+        case .milestone:
+            let keyed = Dictionary(grouping: rows) { $0.milestoneId ?? "" }
+            let byId = Dictionary(milestones.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+            let present = keyed.keys.filter { !$0.isEmpty }
+            let shownIds = Set(showEmpty ? present + milestones.filter { $0.status != .done }.map(\.id) : present)
+            var groups = shownIds
+                .map { id in (id: id, name: byId[id]?.title ?? "Milestone") }
+                .sorted(by: byName)
+                .map { id, title in
+                    var patch = WorkPatch(milestoneId: .set(id))
+                    if let project = byId[id]?.projectId { patch.projectId = .set(project) }
+                    return TaskGroup(id: "milestone:\(id)", title: title, mark: .milestone, rows: keyed[id] ?? [],
+                                     patch: patch)
+                }
+            if keyed[""] != nil || showEmpty {
+                groups.append(TaskGroup(id: "milestone:none", title: "No milestone", mark: .milestone,
+                                        rows: keyed[""] ?? [], patch: WorkPatch(milestoneId: .clear)))
             }
             return groups
         }

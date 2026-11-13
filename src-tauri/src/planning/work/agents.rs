@@ -8,7 +8,7 @@ use super::sync::{self, MeetingReader};
 use super::types::{
     WorkActivityKind, WorkActor, WorkDelegation, WorkDoer, WorkItem, WorkItemDetail, WorkItemInput,
     WorkOwner, WorkPatch, WorkProposal, WorkProposalField, WorkStatus, WorkSuggestionField,
-    WorkSuggestionValue,
+    WorkSuggestionValue, WorkVia,
 };
 use super::{
     edit, now_ms, run_history, run_with_meetings, unique, with_meetings, Change, Done, Effects,
@@ -24,12 +24,64 @@ use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tauri::{AppHandle, Manager};
 use uuid::Uuid;
 
 /// What Sona calls an agent that gave no name.
 pub(crate) const UNNAMED: &str = "Agent";
+
+/// Lets each agent entry and proposal say how the agent reached Sona.
+pub const VIA_MIGRATION: &str = "ALTER TABLE planning_activity_agents ADD COLUMN via TEXT CHECK (via IN ('mcp', 'cli'));
+ALTER TABLE planning_task_proposals ADD COLUMN via TEXT CHECK (via IN ('mcp', 'cli'));";
+
+/// Lets an agent propose an estimate and the person work is for. The
+/// proposal table is rebuilt to widen its fields, every row and rowid kept.
+pub const ESTIMATE_FOR_PROPOSALS_MIGRATION: &str = "DROP TRIGGER planning_task_agents_delete;
+CREATE TABLE planning_task_proposals_next (
+    id TEXT PRIMARY KEY NOT NULL,
+    task_id TEXT NOT NULL,
+    agent TEXT NOT NULL CHECK(length(trim(agent)) > 0),
+    field TEXT NOT NULL CHECK(field IN ('title', 'details', 'status', 'priority', 'owner', 'due',
+        'project', 'milestone', 'labels', 'snoozed', 'recurrence', 'cycle', 'parent', 'estimate',
+        'for_person')),
+    from_value TEXT,
+    patch_json TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(state IN ('open', 'accepted', 'rejected')),
+    created_at_ms INTEGER NOT NULL,
+    decided_at_ms INTEGER,
+    via TEXT CHECK (via IN ('mcp', 'cli')),
+    CHECK((state = 'open') = (decided_at_ms IS NULL))
+);
+INSERT INTO planning_task_proposals_next (rowid, id, task_id, agent, field, from_value, patch_json,
+        state, created_at_ms, decided_at_ms, via)
+    SELECT rowid, id, task_id, agent, field, from_value, patch_json, state, created_at_ms,
+        decided_at_ms, via FROM planning_task_proposals;
+DROP TABLE planning_task_proposals;
+ALTER TABLE planning_task_proposals_next RENAME TO planning_task_proposals;
+CREATE INDEX planning_task_proposals_task ON planning_task_proposals(task_id, state, created_at_ms);
+CREATE TRIGGER planning_task_agents_delete AFTER DELETE ON planning_tasks BEGIN
+    DELETE FROM planning_task_doers WHERE task_id = old.id;
+    DELETE FROM planning_task_proposals WHERE task_id = old.id;
+END;";
+
+static VIA: OnceLock<WorkVia> = OnceLock::new();
+
+/// Marks this process as the command line, run by the MCP server when it
+/// says so in `SONA_VIA`.
+pub(crate) fn arrived_from_command_line() {
+    let via = if std::env::var_os("SONA_VIA").is_some_and(|via| via == "mcp") {
+        WorkVia::Mcp
+    } else {
+        WorkVia::Cli
+    };
+    let _ = VIA.set(via);
+}
+
+/// How agents reach Sona in this process: none inside the app.
+pub(crate) fn via() -> Option<WorkVia> {
+    VIA.get().copied()
+}
 
 /// How a delegation prompt begins, before the item's handle: a watched
 /// session whose prompt carries it is working that item.
@@ -142,14 +194,24 @@ fn set_doer(
 }
 
 /// Names `agent` on the history entries agents wrote for an item since
-/// `since_ms` that name no agent yet.
-fn credit(conn: &Connection, task_id: &str, since_ms: i64, agent: &str) -> StorageResult<()> {
+/// `since_ms` that name no agent yet, with the relations they made to it
+/// from other items.
+pub(crate) fn credit(
+    conn: &Connection,
+    task_id: &str,
+    since_ms: i64,
+    agent: &str,
+    via: Option<WorkVia>,
+) -> StorageResult<()> {
     conn.execute(
-        "INSERT INTO planning_activity_agents (activity_id, agent)
-         SELECT a.id, ?3 FROM planning_task_activity a
-         WHERE a.task_id = ?1 AND a.at_ms >= ?2 AND a.actor = 'agent'
+        "INSERT INTO planning_activity_agents (activity_id, agent, via)
+         SELECT a.id, ?3, ?4 FROM planning_task_activity a
+         WHERE (a.task_id = ?1
+                OR (a.kind = 'relation'
+                    AND (a.to_value LIKE '%:' || ?1 OR a.from_value LIKE '%:' || ?1)))
+           AND a.at_ms >= ?2 AND a.actor = 'agent'
            AND NOT EXISTS (SELECT 1 FROM planning_activity_agents n WHERE n.activity_id = a.id)",
-        params![task_id, since_ms, agent],
+        params![task_id, since_ms, agent, via.map(WorkVia::as_str)],
     )?;
     Ok(())
 }
@@ -165,7 +227,7 @@ pub(crate) fn credit_since(
     crate::planning::history(&app.state::<Arc<HistoryManager>>(), |conn| {
         let tx = conn.transaction()?;
         for id in ids {
-            credit(&tx, id, since_ms, agent)?;
+            credit(&tx, id, since_ms, agent, via())?;
         }
         tx.commit()?;
         Ok(())
@@ -247,6 +309,9 @@ fn proposed(field: WorkProposalField, patch: &WorkPatch) -> Option<String> {
             .map(|until| until.to_string()),
         WorkProposalField::Recurrence => patch.recurrence.clone().flatten(),
         WorkProposalField::Cycle => patch.cycle.flatten().map(|cycle| cycle.to_string()),
+        WorkProposalField::Parent => patch.parent_id.clone().flatten(),
+        WorkProposalField::Estimate => patch.estimate.flatten().map(|points| points.to_string()),
+        WorkProposalField::ForPerson => patch.for_person_id.clone().flatten(),
     }
 }
 
@@ -408,6 +473,36 @@ fn field_changes(
             },
         );
     }
+    if let Some(parent_id) = &patch.parent_id {
+        add(
+            WorkProposalField::Parent,
+            item.parent_id.clone(),
+            WorkPatch {
+                parent_id: Some(parent_id.clone()),
+                ..WorkPatch::default()
+            },
+        );
+    }
+    if let Some(estimate) = patch.estimate {
+        add(
+            WorkProposalField::Estimate,
+            item.estimate.map(|points| points.to_string()),
+            WorkPatch {
+                estimate: Some(estimate),
+                ..WorkPatch::default()
+            },
+        );
+    }
+    if let Some(for_person_id) = &patch.for_person_id {
+        add(
+            WorkProposalField::ForPerson,
+            item.for_person_id.clone(),
+            WorkPatch {
+                for_person_id: Some(for_person_id.clone()),
+                ..WorkPatch::default()
+            },
+        );
+    }
     changes
 }
 
@@ -428,8 +523,8 @@ fn propose(
     let id = Uuid::new_v4().to_string();
     conn.execute(
         "INSERT INTO planning_task_proposals
-             (id, task_id, agent, field, from_value, patch_json, state, created_at_ms)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'open', ?7)",
+             (id, task_id, agent, field, from_value, patch_json, state, created_at_ms, via)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'open', ?7, ?8)",
         params![
             id,
             task_id,
@@ -437,7 +532,8 @@ fn propose(
             change.field.as_str(),
             change.from,
             serde_json::to_string(&change.patch)?,
-            now_ms
+            now_ms,
+            via().map(WorkVia::as_str)
         ],
     )?;
     Ok(WorkProposal {
@@ -503,7 +599,7 @@ fn agent_edit(
         before
     } else {
         let item = edit(tx, meetings, change, id, &direct, effects)?;
-        credit(tx, id, change.at_ms, agent.name)?;
+        credit(tx, id, change.at_ms, agent.name, via())?;
         item
     };
     let proposed = waiting
@@ -514,6 +610,28 @@ fn agent_edit(
         effects.item(&item);
     }
     Ok(AgentChange { item, proposed })
+}
+
+/// Leaves every field `patch` would change on the item `task` names, `S-12`
+/// or an id, waiting for the user whatever Settings > Agents says: an
+/// automation only suggests. `None` when no item has that number.
+pub(super) fn suggest(
+    tx: &Connection,
+    meetings: Option<&Connection>,
+    change: Change<'_>,
+    agent: &str,
+    task: &str,
+    patch: &WorkPatch,
+    effects: &mut Effects,
+) -> StorageResult<Option<AgentChange>> {
+    let Some(id) = named_item(tx, task)? else {
+        return Ok(None);
+    };
+    let agent = Agent {
+        name: agent,
+        autonomy: WorkAutonomy::Suggest,
+    };
+    agent_edit(tx, meetings, change, agent, &id, patch, effects).map(Some)
 }
 
 /// One agent's change to one item it read at `expected_revision`, and the
@@ -669,6 +787,34 @@ pub(crate) async fn create_as(
     Ok(item)
 }
 
+/// An agent's new sub-tasks, in triage while agents' changes wait for the
+/// user, as [`create_as`] does.
+pub(crate) async fn subtask_create_as(
+    app: &AppHandle,
+    agent: &str,
+    operation_id: &str,
+    parent_id: &str,
+    inputs: &[WorkItemInput],
+) -> Result<Vec<WorkItem>, String> {
+    let inputs: Vec<WorkItemInput> = match autonomy(app) {
+        WorkAutonomy::Apply => inputs.to_vec(),
+        WorkAutonomy::Suggest => inputs
+            .iter()
+            .map(|input| WorkItemInput {
+                status: Some(WorkStatus::Triage),
+                ..input.clone()
+            })
+            .collect(),
+    };
+    let items =
+        super::subtask_create_as(app, WorkActor::Agent, operation_id, parent_id, &inputs).await?;
+    let ids: Vec<String> = items.iter().map(|item| item.id.clone()).collect();
+    if let Some(since) = items.iter().map(|item| item.created_at_ms).min() {
+        credit_since(app, &ids, since, agent)?;
+    }
+    Ok(items)
+}
+
 /// Puts an agent on an item: a Todo or Backlog item moves to In progress
 /// with the agent on it, its owner unchanged. An item the agent already
 /// works in progress stays as it is. One another agent works, or one in
@@ -712,7 +858,7 @@ fn claim(
                         ..WorkPatch::default()
                     };
                     let item = edit(tx, meetings, change, &id, &started, &mut effects)?;
-                    credit(tx, &id, change.at_ms, agent)?;
+                    credit(tx, &id, change.at_ms, agent, via())?;
                     item
                 }
                 WorkStatus::InProgress if works_it => item,
@@ -891,11 +1037,12 @@ pub async fn work_delegate(
             prompt: None,
         });
     };
+    let root = super::attachment_root(&app)?;
     let history = app.state::<Arc<HistoryManager>>();
     let meetings = app.state::<Arc<MeetingSessionManager>>();
     let user_name = meetings.user_name();
     let detail = with_meetings(&history, &meetings, |history, meeting_conn| {
-        super::detail(history, meeting_conn, user_name.as_deref(), &id)
+        super::detail(history, meeting_conn, user_name.as_deref(), &root, &id)
     })
     .await?;
     Ok(WorkDelegation {
@@ -957,7 +1104,12 @@ fn accept(
                     &patch,
                     &mut effects,
                 )?;
-                credit(tx, &proposal.item_id, change.at_ms, &proposal.agent)?;
+                let via: Option<WorkVia> = tx.query_row(
+                    "SELECT via FROM planning_task_proposals WHERE id = ?1",
+                    [&proposal.id],
+                    |row| row.get(0),
+                )?;
+                credit(tx, &proposal.item_id, change.at_ms, &proposal.agent, via)?;
                 decide(tx, &proposal.id, "accepted", change.at_ms)?;
                 value.retain(|other| other.id != item.id);
                 value.push(item);
@@ -1306,6 +1458,67 @@ mod tests {
     }
 
     #[test]
+    fn an_agents_estimate_and_for_wait_for_the_user_then_land() {
+        let mut history = history();
+        let task = todo(&mut history, "Price the renewal");
+        let dana = "6f1c2a4e-8b3d-4f7a-9c21-5d0e7b3a1f42";
+        // PANIC: a fixture that cannot open its database is a broken test.
+        let meetings = Connection::open_in_memory().expect("an in-memory meetings database");
+        meetings
+            .execute_batch(&format!(
+                "CREATE TABLE persons (id TEXT PRIMARY KEY, display_name TEXT);
+                 CREATE TABLE person_merge_redirects (source_person_id TEXT, target_person_id TEXT);
+                 INSERT INTO persons VALUES ('{dana}', 'Dana');"
+            ))
+            .expect("a person");
+        let sized = WorkPatch {
+            estimate: Some(Some(5)),
+            for_person_id: Some(Some(dana.to_owned())),
+            ..WorkPatch::default()
+        };
+        let proposed = update(
+            &mut history,
+            Some(&meetings),
+            by(WorkActor::Agent, &operation(), AT + 1_000),
+            CLAUDE,
+            ItemChange {
+                id: &task.id,
+                expected_revision: task.revision,
+                patch: &sized,
+                link: None,
+            },
+        )
+        .expect("the agent's change")
+        .value
+        .proposed;
+        assert_eq!(items::item(&history, &task.id).expect("the task"), task);
+        assert_eq!(
+            proposed
+                .iter()
+                .map(|proposal| (proposal.field.as_str(), proposal.to.as_deref()))
+                .collect::<Vec<_>>(),
+            [("estimate", Some("5")), ("for_person", Some(dana))]
+        );
+
+        let ids: Vec<String> = proposed.into_iter().map(|proposal| proposal.id).collect();
+        let landed = accept(
+            &mut history,
+            Some(&meetings),
+            by(WorkActor::Agent, &operation(), AT + 2_000),
+            &ids,
+        )
+        .expect("accepting them")
+        .value;
+        assert_eq!(
+            landed
+                .iter()
+                .map(|item| (item.estimate, item.for_person_id.as_deref()))
+                .collect::<Vec<_>>(),
+            [(Some(5), Some(dana))]
+        );
+    }
+
+    #[test]
     fn a_repeat_is_kept_in_the_parsers_words_and_stopping_it_keeps_the_due_day() {
         let mut history = history();
         let task = todo(&mut history, "Water the plants");
@@ -1407,7 +1620,8 @@ mod tests {
             .expect("finishing it with a link");
         }
 
-        let evidence = super::super::detail(&history, None, None, &task.id)
+        let evidence =
+            super::super::detail(&history, None, None, std::path::Path::new("/"), &task.id)
             .expect("the task's page")
             .evidence;
         let kept: Vec<_> = evidence

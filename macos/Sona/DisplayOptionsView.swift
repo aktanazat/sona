@@ -8,7 +8,7 @@ struct DisplayOptionsView: View {
 
     var body: some View {
         let focus = model.workFocus
-        let draft = focus.listing(model.work.views)
+        let draft = model.listing
         let shows = Set(draft?.display.properties ?? focus.myProperties)
         VStack(alignment: .leading, spacing: 12) {
             if let display = draft?.display {
@@ -40,14 +40,45 @@ struct DisplayOptionsView: View {
                         get: { display.orderBy },
                         set: { order in model.editListing { $0.display.orderBy = order } }
                     )) {
-                        ForEach(WorkOrderBy.allCases.filter { $0 != .manual || display.orderBy == .manual }, id: \.self) {
-                            Text(Self.title($0)).tag($0)
-                        }
+                        ForEach(WorkOrderBy.allCases, id: \.self) { Text(Self.title($0)).tag($0) }
                     }
                     .pickerStyle(.menu)
                     .controlSize(.large)
                     .labelsHidden()
                     .fixedSize()
+                }
+                if display.layout == .board {
+                    line("Swimlanes") {
+                        Picker("Swimlanes", selection: Binding(
+                            get: { display.subGroupBy },
+                            set: { lanes in model.editListing { $0.display.subGroupBy = lanes } }
+                        )) {
+                            ForEach(WorkGroupBy.allCases.filter { $0 != display.groupBy }, id: \.self) {
+                                Text($0 == .none ? "No swimlanes" : Self.title($0)).tag($0)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .controlSize(.large)
+                        .labelsHidden()
+                        .fixedSize()
+                    }
+                    if !display.hiddenColumns.isEmpty {
+                        line("Hidden columns") {
+                            Button(display.hiddenColumns.count == 1 ? "Show 1" : "Show \(display.hiddenColumns.count)") {
+                                model.editListing { $0.display.hiddenColumns = [] }
+                            }
+                            .controlSize(.small)
+                        }
+                    }
+                }
+                line("Sub-tasks") {
+                    Toggle("Sub-tasks", isOn: Binding(
+                        get: { display.showSubTasks },
+                        set: { on in model.editListing { $0.display.showSubTasks = on } }
+                    ))
+                    .toggleStyle(.switch)
+                    .controlSize(.mini)
+                    .labelsHidden()
                 }
                 line("Empty groups") {
                     Toggle("Empty groups", isOn: Binding(
@@ -101,7 +132,7 @@ struct DisplayOptionsView: View {
         var next = shows
         if next.contains(property.rawValue) { next.remove(property.rawValue) } else { next.insert(property.rawValue) }
         let ordered = TaskProperty.allCases.map(\.rawValue).filter(next.contains)
-        if model.workFocus.listing(model.work.views) == nil {
+        if model.listing == nil {
             model.workFocus.myProperties = ordered
         } else {
             model.editListing { $0.display.properties = ordered }
@@ -116,6 +147,9 @@ struct DisplayOptionsView: View {
         case .meeting: "Meeting"
         case .due: "Due date"
         case .priority: "Priority"
+        case .cycle: "Cycle"
+        case .label: "Label"
+        case .milestone: "Milestone"
         case .none: "No grouping"
         }
     }
@@ -126,6 +160,7 @@ struct DisplayOptionsView: View {
         case .due: "Due date"
         case .updated: "Last updated"
         case .created: "Created"
+        case .status: "Status"
         case .manual: "Manual"
         }
     }

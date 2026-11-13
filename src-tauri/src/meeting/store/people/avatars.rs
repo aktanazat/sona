@@ -152,7 +152,7 @@ fn avatar_result_in(
     })
 }
 
-fn validated_png(encoded: &str) -> Result<Vec<u8>, StoreError> {
+pub(crate) fn validated_png(encoded: &str) -> Result<Vec<u8>, StoreError> {
     if encoded.len() > MAX_AVATAR_BYTES.div_ceil(3) * 4 {
         return Err(StoreError::Invalid);
     }

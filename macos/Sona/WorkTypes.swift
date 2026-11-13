@@ -88,13 +88,17 @@ struct WorkPatch: Equatable {
     var snoozedUntilMs: WorkPatchValue<Int64>?
     var recurrence: WorkPatchValue<String>?
     var cycle: WorkPatchValue<Int64>?
+    var parentId: WorkPatchValue<String>?
+    var estimate: WorkPatchValue<Int>?
+    var forPersonId: WorkPatchValue<String>?
 
     init(
         title: String? = nil, details: WorkPatchValue<String>? = nil, status: WorkStatus? = nil,
         priority: Int? = nil, projectId: WorkPatchValue<String>? = nil, milestoneId: WorkPatchValue<String>? = nil,
         owner: WorkOwner? = nil, dueAtMs: WorkPatchValue<Int64>? = nil, labelIds: [String]? = nil,
         snoozedUntilMs: WorkPatchValue<Int64>? = nil, recurrence: WorkPatchValue<String>? = nil,
-        cycle: WorkPatchValue<Int64>? = nil
+        cycle: WorkPatchValue<Int64>? = nil, parentId: WorkPatchValue<String>? = nil,
+        estimate: WorkPatchValue<Int>? = nil, forPersonId: WorkPatchValue<String>? = nil
     ) {
         self.title = title
         self.details = details
@@ -108,13 +112,16 @@ struct WorkPatch: Equatable {
         self.snoozedUntilMs = snoozedUntilMs
         self.recurrence = recurrence
         self.cycle = cycle
+        self.parentId = parentId
+        self.estimate = estimate
+        self.forPersonId = forPersonId
     }
 }
 
 extension WorkPatch: Encodable {
     private enum Key: String, CodingKey {
         case title, details, status, priority, projectId, milestoneId, owner, dueAtMs, labelIds, snoozedUntilMs
-        case recurrence, cycle
+        case recurrence, cycle, parentId, estimate, forPersonId
     }
 
     func encode(to encoder: Encoder) throws {
@@ -131,6 +138,9 @@ extension WorkPatch: Encodable {
         try Self.encode(snoozedUntilMs, .snoozedUntilMs, in: &container)
         try Self.encode(recurrence, .recurrence, in: &container)
         try Self.encode(cycle, .cycle, in: &container)
+        try Self.encode(parentId, .parentId, in: &container)
+        try Self.encode(estimate, .estimate, in: &container)
+        try Self.encode(forPersonId, .forPersonId, in: &container)
     }
 
     private static func encode<T: Encodable & Equatable>(
@@ -169,6 +179,13 @@ struct WorkItem: Codable, Identifiable, Equatable {
     var sortOrder: Double
     /// The number of the cycle it is planned in.
     var cycle: Int64?
+    var parentId: String?
+    /// Points of effort, 0 to 64.
+    var estimate: Int?
+    /// When it was marked done; nil while it is not done.
+    var completedAtMs: Int64?
+    /// The person the work is for, who is owed it.
+    var forPersonId: String?
 }
 
 /// An item with the names its row shows; the core sends the item's fields
@@ -197,6 +214,11 @@ struct WorkItemRow: Codable, Identifiable, Equatable {
     var revision: Int64
     var sortOrder: Double
     var cycle: Int64?
+    var parentId: String?
+    var estimate: Int?
+    var completedAtMs: Int64?
+    var forPersonId: String?
+    var subTasks: WorkProgress?
     var projectTitle: String?
     var ownerName: String?
     /// The agent working the item; none when the user is.
@@ -219,6 +241,7 @@ struct WorkItemRow: Codable, Identifiable, Equatable {
     var atRisk: Bool
     var timeBlock: WorkTimeBlock?
     var `repeat`: WorkRepeat?
+    var attachmentCount: Int
 
     var item: WorkItem {
         WorkItem(
@@ -227,13 +250,85 @@ struct WorkItemRow: Codable, Identifiable, Equatable {
             direction: direction, dueAtMs: dueAtMs, labelIds: labelIds, sourceLoopId: sourceLoopId,
             duplicateOfId: duplicateOfId, snoozedUntilMs: snoozedUntilMs, archivedAtMs: archivedAtMs,
             statusChangedAtMs: statusChangedAtMs, createdAtMs: createdAtMs, updatedAtMs: updatedAtMs,
-            revision: revision, sortOrder: sortOrder, cycle: cycle)
+            revision: revision, sortOrder: sortOrder, cycle: cycle, parentId: parentId,
+            estimate: estimate, completedAtMs: completedAtMs, forPersonId: forPersonId)
     }
 
     var owner: WorkOwner {
         if ownerIsSelf { return .myself }
         return ownerPersonId.map { .person($0) } ?? .nobody
     }
+}
+
+/// Estimate points offered, on Linear's exponential scale.
+enum TaskEstimate {
+    static let points = [1, 2, 4, 8, 16]
+
+    static func title(_ points: Int) -> String { points == 1 ? "1 point" : "\(points) points" }
+}
+
+struct WorkProgress: Codable, Equatable {
+    var done: Int
+    var total: Int
+}
+
+struct WorkItemRef: Codable, Equatable {
+    var id: String
+    var number: Int64
+    var title: String
+    var status: WorkStatus
+}
+
+struct WorkCommentAuthor: Codable, Equatable {
+    var kind: WorkActor
+    var name: String?
+
+    /// `me` is the profile name, when the user gave one.
+    func display(me: String?) -> String {
+        switch kind {
+        case .me: me ?? "You"
+        case .sona: "Sona"
+        case .agent: name ?? "Agent"
+        }
+    }
+}
+
+struct WorkComment: Codable, Identifiable, Equatable {
+    var id: String
+    var itemId: String
+    var parentId: String?
+    var author: WorkCommentAuthor
+    var body: String?
+    var createdAtMs: Int64
+    var editedAtMs: Int64?
+    var resolvedAtMs: Int64?
+    var deleted: Bool
+    var replies: [WorkComment]
+}
+
+enum WorkAttachmentKind: String, Codable, Hashable { case file, image, link }
+
+struct WorkAttachment: Codable, Identifiable, Equatable {
+    var id: String
+    var itemId: String
+    var kind: WorkAttachmentKind
+    var title: String
+    var subtitle: String?
+    var url: String?
+    var path: String?
+    var originalName: String?
+    var mime: String?
+    var size: Int64?
+    var sha256: String?
+    var createdAtMs: Int64
+    var createdBy: WorkCommentAuthor
+    /// Key-value facts an integration keeps on it.
+    var metadata: [String: String]
+    /// The comment it was added with; nil for one on the task itself.
+    var commentId: String?
+
+    var fileURL: URL? { path.map { URL(fileURLWithPath: $0) } }
+    var linkURL: URL? { url.flatMap(URL.init(string:)) }
 }
 
 struct WorkTimeBlock: Codable, Equatable {
@@ -278,11 +373,17 @@ enum WorkCycleRef: Codable, Hashable {
     }
 }
 
-/// How long cycles run and the weekday they start, 1 for Monday through 7
-/// for Sunday.
+/// How long cycles run, the weekday they start (1 for Monday through 7 for
+/// Sunday), the weeks of rest between them, how many are kept ahead, and
+/// whether started or done work with no cycle joins one by itself. The core
+/// resets a field left out, so every save sends them all.
 struct WorkCycleSettings: Codable, Equatable {
     var weeks: Int
     var startWeekday: Int
+    var cooldownWeeks: Int
+    var upcoming: Int
+    var autoAddStarted: Bool
+    var autoAddCompleted: Bool
 }
 
 enum WorkCycleState: String, Codable, Hashable { case past, current, upcoming }
@@ -291,34 +392,54 @@ enum WorkCycleState: String, Codable, Hashable { case past, current, upcoming }
 /// after it.
 struct WorkCycle: Codable, Identifiable, Equatable {
     var number: Int64
+    var name: String?
     var startDay: String
     var endDay: String
     var startsAtMs: Int64
     var endsAtMs: Int64
     var state: WorkCycleState
     var scope: Int
+    var started: Int
     var done: Int
+    /// Done at 100 and started at 25 over scope, set once the cycle ends.
+    var success: Int?
+    /// Tasks in it that joined after it began, by id; rolled-over work
+    /// counts as planned. Nil from a core too old to send it.
+    var addedAfterStart: [String]?
 
     var id: Int64 { number }
+    var title: String { name ?? "Cycle \(number)" }
 }
 
 struct WorkCycles: Codable, Equatable {
     var settings: WorkCycleSettings
     var cycles: [WorkCycle]
+    /// The tasks a cycle usually finishes: the mean done of the last three
+    /// ended cycles. Nil until that mean reaches one task.
+    var capacity: Int?
 }
 
 struct WorkCycleDay: Codable, Equatable, Identifiable {
     var day: String
     var scope: Int
+    var started: Int
     var done: Int
 
     var id: String { day }
+}
+
+/// Where an even pace would have the done count by a day's end.
+struct WorkCycleTarget: Codable, Equatable {
+    var day: String
+    var done: Double
 }
 
 struct WorkCycleProgress: Codable, Equatable {
     var cycle: WorkCycle
     var days: [WorkCycleDay]
     var carriedOver: Int
+    /// Every day of the cycle, flat on weekends.
+    var target: [WorkCycleTarget]
 }
 
 /// The agent working an item, by the name it goes by, since it took it.
@@ -328,7 +449,13 @@ struct WorkDoer: Codable, Equatable {
 }
 
 enum WorkProposalField: String, Codable, Hashable {
-    case title, details, status, priority, owner, due, project, milestone, labels, snoozed, recurrence, cycle
+    case title, details, status, priority, owner, due, project, milestone, labels, snoozed, recurrence, cycle, parent, estimate
+    case forPerson = "for_person"
+    case unknown
+
+    init(from decoder: Decoder) throws {
+        self = Self(rawValue: try decoder.singleValueContainer().decode(String.self)) ?? .unknown
+    }
 }
 
 /// One field an agent would change, waiting for the user. `from` is the
@@ -424,12 +551,15 @@ struct WorkQuery: Codable, Equatable, Hashable {
     var includeArchived = false
     var includeSnoozed = false
     var cycle: WorkCycleRef?
+    /// Field conditions that must all hold, on top of the fields above.
+    var filters: [WorkCondition]?
 
     init(
         statuses: [WorkStatus]? = nil, direction: WorkDirection? = nil, ownerPersonIds: [String]? = nil,
         projectIds: [String]? = nil, labelIds: [String]? = nil, priorities: [Int]? = nil,
         dueBeforeMs: Int64? = nil, due: [WorkDue]? = nil, sourceMeetingId: String? = nil, search: String? = nil,
-        includeArchived: Bool = false, includeSnoozed: Bool = false, cycle: WorkCycleRef? = nil
+        includeArchived: Bool = false, includeSnoozed: Bool = false, cycle: WorkCycleRef? = nil,
+        filters: [WorkCondition]? = nil
     ) {
         self.statuses = statuses
         self.direction = direction
@@ -444,12 +574,67 @@ struct WorkQuery: Codable, Equatable, Hashable {
         self.includeArchived = includeArchived
         self.includeSnoozed = includeSnoozed
         self.cycle = cycle
+        self.filters = filters
     }
 }
 
+enum WorkConditionField: String, Codable, CaseIterable, Hashable, Identifiable {
+    case status, priority, owner, delegate, project, milestone, label, parent, cycle
+    case cycleScope = "cycle_scope"
+    case due, created, updated, estimate
+    case forPerson = "for"
+    case completed
+
+    var id: Self { self }
+    var label: String {
+        switch self {
+        case .delegate: "Agent"
+        case .cycleScope: "Cycle scope"
+        case .forPerson: "For"
+        default: rawValue.prefix(1).uppercased() + rawValue.dropFirst()
+        }
+    }
+    var dated: Bool { self == .due || self == .created || self == .updated || self == .completed }
+    var operators: [WorkConditionOp] {
+        dated ? [.before, .after, .is, .isNot]
+            : self == .label ? [.includesAll, .includesAny, .noneOf]
+            : self == .cycleScope ? [.is, .isNot]
+            : [.is, .isNot, .anyOf, .noneOf]
+    }
+}
+
+enum WorkConditionOp: String, Codable, CaseIterable, Hashable, Identifiable {
+    case `is`, isNot = "is_not", anyOf = "any_of", noneOf = "none_of"
+    case includesAll = "includes_all", includesAny = "includes_any", before, after
+
+    var id: Self { self }
+    var label: String {
+        switch self {
+        case .is: "is"
+        case .isNot: "is not"
+        case .anyOf: "is any of"
+        case .noneOf: "is none of"
+        case .includesAll: "includes all of"
+        case .includesAny: "includes any of"
+        case .before: "before"
+        case .after: "after"
+        }
+    }
+}
+
+struct WorkCondition: Codable, Equatable, Hashable, Identifiable {
+    var field: WorkConditionField
+    var op: WorkConditionOp
+    var values: [String]
+
+    var id: String { "\(field.rawValue) \(op.rawValue) \(values.joined(separator: ","))" }
+}
+
 enum WorkLayout: String, Codable, Hashable { case list, board }
-enum WorkGroupBy: String, Codable, CaseIterable, Hashable { case status, owner, project, meeting, due, priority, none }
-enum WorkOrderBy: String, Codable, CaseIterable, Hashable { case priority, due, updated, created, manual }
+enum WorkGroupBy: String, Codable, CaseIterable, Hashable {
+    case status, owner, project, meeting, due, priority, cycle, label, milestone, none
+}
+enum WorkOrderBy: String, Codable, CaseIterable, Hashable { case priority, due, updated, created, status, manual }
 
 struct WorkDisplay: Codable, Equatable, Hashable {
     var layout: WorkLayout
@@ -457,16 +642,46 @@ struct WorkDisplay: Codable, Equatable, Hashable {
     var orderBy: WorkOrderBy
     var showEmptyGroups: Bool
     var properties: [String]
+    var showSubTasks: Bool
+    /// The board's swimlanes; `.none` keeps one row of columns.
+    var subGroupBy: WorkGroupBy
+    /// Board columns left out, by `TaskGroup.id`.
+    var hiddenColumns: [String]
 
     init(
         layout: WorkLayout = .list, groupBy: WorkGroupBy = .status, orderBy: WorkOrderBy = .priority,
-        showEmptyGroups: Bool = false, properties: [String] = []
+        showEmptyGroups: Bool = false, properties: [String] = [], showSubTasks: Bool = true,
+        subGroupBy: WorkGroupBy = .none, hiddenColumns: [String] = []
     ) {
         self.layout = layout
         self.groupBy = groupBy
         self.orderBy = orderBy
         self.showEmptyGroups = showEmptyGroups
         self.properties = properties
+        self.showSubTasks = showSubTasks
+        self.subGroupBy = subGroupBy
+        self.hiddenColumns = hiddenColumns
+    }
+}
+
+/// Where tasks go in the manual order.
+enum WorkPlace: Encodable, Equatable {
+    case top, bottom, before(String), after(String)
+
+    private enum Key: String, CodingKey { case at, id }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: Key.self)
+        switch self {
+        case .top: try container.encode("top", forKey: .at)
+        case .bottom: try container.encode("bottom", forKey: .at)
+        case let .before(id):
+            try container.encode("before", forKey: .at)
+            try container.encode(id, forKey: .id)
+        case let .after(id):
+            try container.encode("after", forKey: .at)
+            try container.encode(id, forKey: .id)
+        }
     }
 }
 
@@ -484,6 +699,40 @@ struct WorkLabel: Codable, Identifiable, Equatable {
     /// Degrees on the color wheel, 0 to 360.
     var hue: Double
     var revision: Int64
+    var group: String?
+    var retiredAtMs: Int64?
+    var scope: WorkLabelScope = .all
+
+    var retired: Bool { retiredAtMs != nil }
+}
+
+extension WorkLabel {
+    /// A core from before label scopes sends none; its labels go anywhere.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        hue = try container.decode(Double.self, forKey: .hue)
+        revision = try container.decode(Int64.self, forKey: .revision)
+        group = try container.decodeIfPresent(String.self, forKey: .group)
+        retiredAtMs = try container.decodeIfPresent(Int64.self, forKey: .retiredAtMs)
+        scope = try container.decodeIfPresent(WorkLabelScope.self, forKey: .scope) ?? .all
+    }
+}
+
+/// Where a label can go: on tasks and projects, or on only one of them.
+enum WorkLabelScope: String, Codable, CaseIterable, Identifiable {
+    case all, tasks, projects
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .all: "Tasks and projects"
+        case .tasks: "Tasks only"
+        case .projects: "Projects only"
+        }
+    }
 }
 
 struct WorkCounts: Codable, Equatable {
@@ -508,7 +757,14 @@ enum WorkActor: String, Codable, Hashable { case me, sona, agent }
 
 enum WorkActivityKind: String, Codable, Hashable {
     case created, status, priority, owner, due, project, title, details, labels, archived, restored
-    case duplicate, accepted, declined, snoozed, relation, kept, recurrence, cycle, block
+    case duplicate, accepted, declined, snoozed, relation, kept, recurrence, cycle, block, parent, comment
+    case attachment, estimate
+    case forPerson = "for_person"
+    case unknown
+
+    init(from decoder: Decoder) throws {
+        self = Self(rawValue: try decoder.singleValueContainer().decode(String.self)) ?? .unknown
+    }
 }
 
 /// One change in an item's history. `from` and `to` hold raw values: a
@@ -525,6 +781,9 @@ struct WorkActivity: Codable, Identifiable, Equatable {
     var to: String?
     /// The agent behind an `agent` entry, when it gave its name.
     var agent: String?
+    /// How that agent reached Sona: "mcp" or "cli", when recorded.
+    var via: String?
+    var reason: String?
 }
 
 enum WorkRelationKind: String, Codable, Hashable { case blocks, related }
@@ -536,16 +795,18 @@ struct WorkRelation: Codable, Identifiable, Equatable {
     var kind: WorkRelationKind
 }
 
-enum WorkSuggestionField: String, Codable, Hashable { case owner, due, project, duplicate }
+enum WorkSuggestionField: String, Codable, Hashable { case owner, due, project, label, duplicate, related }
 
 enum WorkSuggestionValue: Equatable {
     case owner(WorkOwner)
     case due(Int64)
     case project(String)
+    case label(String)
     case item(String)
 }
 
 struct WorkFieldSuggestion: Equatable {
+    var id: String
     var field: WorkSuggestionField
     var value: WorkSuggestionValue
     var reason: String
@@ -556,16 +817,18 @@ struct WorkFieldSuggestion: Equatable {
 }
 
 extension WorkFieldSuggestion: Decodable {
-    private enum Key: String, CodingKey { case field, value, reason, quote, atMs, meetingId }
+    private enum Key: String, CodingKey { case id, field, value, reason, quote, atMs, meetingId }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: Key.self)
+        id = try container.decode(String.self, forKey: .id)
         field = try container.decode(WorkSuggestionField.self, forKey: .field)
         switch field {
         case .owner: value = .owner(try container.decode(WorkOwner.self, forKey: .value))
         case .due: value = .due(try container.decode(Int64.self, forKey: .value))
         case .project: value = .project(try container.decode(String.self, forKey: .value))
-        case .duplicate: value = .item(try container.decode(String.self, forKey: .value))
+        case .label: value = .label(try container.decode(String.self, forKey: .value))
+        case .duplicate, .related: value = .item(try container.decode(String.self, forKey: .value))
         }
         reason = try container.decode(String.self, forKey: .reason)
         quote = try container.decodeIfPresent(String.self, forKey: .quote)
@@ -610,6 +873,10 @@ struct WorkItemDetail: Decodable, Equatable {
     /// meeting, its meeting evidence and its people are not read.
     var conversationsAvailable: Bool
     var proposals: [WorkProposal]
+    var parent: WorkItemRef?
+    var subTasks: [WorkItem]
+    var comments: [WorkComment]
+    var attachments: [WorkAttachment]
 }
 
 /// The `work-changed` event: the items one committed change touched, or

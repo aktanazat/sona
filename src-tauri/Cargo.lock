@@ -6074,6 +6074,7 @@ dependencies = [
  "image",
  "indexmap 2.14.0",
  "isolang",
+ "jiff",
  "keyring",
  "libc",
  "libloading 0.8.9",

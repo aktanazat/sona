@@ -10,7 +10,7 @@
     <script type="module" src="/viewer.js"></script>
   </head>
   <body>
-    <main class="viewer-shell">
+    <main id="share-view" class="viewer-shell" hidden>
       <header class="viewer-header">
         <p class="eyebrow">Sona encrypted share</p>
         <h1 id="share-title">Opening share</h1>
@@ -29,6 +29,89 @@
       </aside>
 
       <article id="markdown-content" class="markdown-content" hidden></article>
+    </main>
+
+    <main id="live-view" class="viewer-shell live-shell" hidden>
+      <div class="live-main">
+        <header class="viewer-header">
+          <h1 id="live-title">Live doc</h1>
+          <p class="live-status">
+            <span id="live-status" aria-live="polite">Connecting</span
+            ><span id="live-clock"></span>
+          </p>
+        </header>
+
+        <form id="live-name-form" class="live-name" hidden>
+          <label for="live-name-input">Your name</label>
+          <div class="live-row">
+            <input
+              id="live-name-input"
+              class="live-input"
+              type="text"
+              autocomplete="nickname"
+              maxlength="40"
+              required
+              aria-describedby="live-name-hint"
+            />
+            <button type="submit" class="live-button">Save</button>
+          </div>
+          <p id="live-name-hint" class="live-hint">Shown next to your edits</p>
+        </form>
+
+        <p id="live-editor" class="live-editor" hidden>
+          <span id="live-editor-name"></span>
+          <button id="live-rename" type="button" class="live-quiet">
+            Change name
+          </button>
+        </p>
+
+        <div id="live-layout" class="live-layout" hidden>
+          <section class="live-section" aria-labelledby="live-points-heading">
+            <h2 id="live-points-heading">Doc</h2>
+            <p id="live-points-empty" class="live-empty"></p>
+            <ul id="live-points" class="live-items"></ul>
+            <form id="live-add" class="live-add" hidden>
+              <fieldset id="live-add-fields" class="live-add-fields">
+                <div class="live-grow" data-value="">
+                  <textarea
+                    id="live-add-input"
+                    class="live-field"
+                    rows="1"
+                    maxlength="280"
+                    placeholder="Add a point"
+                    aria-label="Add a point"
+                    enterkeyhint="done"
+                  ></textarea>
+                </div>
+                <button type="submit" class="live-quiet">Add</button>
+              </fieldset>
+              <p id="live-add-note" class="live-hint" aria-live="polite"></p>
+            </form>
+          </section>
+
+          <section class="live-section" aria-labelledby="live-cards-heading">
+            <h2 id="live-cards-heading">Board</h2>
+            <p id="live-cards-empty" class="live-empty"></p>
+            <ul id="live-cards" class="live-items"></ul>
+          </section>
+        </div>
+      </div>
+
+      <section
+        id="live-timeline"
+        class="live-timeline"
+        aria-labelledby="live-timeline-heading"
+        hidden
+      >
+        <h2 id="live-timeline-heading">Timeline</h2>
+        <p id="live-timeline-empty" class="live-empty"></p>
+        <ol
+          id="live-timeline-list"
+          class="live-entries"
+          tabindex="0"
+          aria-labelledby="live-timeline-heading"
+        ></ol>
+      </section>
     </main>
   </body>
 </html>

@@ -472,6 +472,23 @@ impl CloudClient {
         .await
     }
 
+    /// Make the room a recording meeting's link opens.
+    pub(crate) async fn create_live_room(
+        &self,
+        credentials: &CloudCredentials<'_>,
+        idempotency_key: &IdempotencyKey,
+        payload: &LiveRoomPlan,
+    ) -> Result<LiveRoomCreatedResponse, CloudClientError> {
+        self.authenticated_json(
+            credentials,
+            Method::POST,
+            &["v1", "live"],
+            Vec::new(),
+            AuthenticatedPayload::mutation(json_body(payload)?, JSON_CONTENT_TYPE, idempotency_key),
+        )
+        .await
+    }
+
     pub(crate) async fn revoke_share(
         &self,
         credentials: &CloudCredentials<'_>,
@@ -871,6 +888,17 @@ pub(crate) struct ShareUploadPlan {
     pub(crate) writer_signature: String,
 }
 
+/// A live room to make: who may feed it and who may join it, as digests
+/// of their tokens.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct LiveRoomPlan {
+    pub(crate) version: u32,
+    pub(crate) room_id: String,
+    pub(crate) host_verifier: String,
+    pub(crate) join_verifier: String,
+}
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TombstoneRequest {
@@ -990,6 +1018,14 @@ pub(crate) struct UploadCancelledResponse {
 pub(crate) struct ShareRevokedResponse {
     pub(crate) share_id: String,
     pub(crate) state: String,
+}
+
+#[derive(Clone, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LiveRoomCreatedResponse {
+    pub(crate) room_id: String,
+    pub(crate) page_url: String,
+    pub(crate) expires_at: u64,
 }
 #[derive(Clone, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]

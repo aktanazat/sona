@@ -25,17 +25,17 @@ use rusqlite::{Connection, TransactionBehavior};
 use std::time::Instant;
 
 /// How often the live pass hands the card new words, in meeting time.
-const PASS_EVERY_S: u64 = 20;
+pub(in crate::meeting::processing) const PASS_EVERY_S: u64 = 20;
 
 #[derive(Clone, Copy)]
-enum Who {
+pub(in crate::meeting::processing) enum Who {
     Me,
     Dana,
     Priya,
 }
 
 /// Second of the call, who spoke, what they said.
-const CALL: &[(u64, Who, &str)] = &[
+pub(in crate::meeting::processing) const CALL: &[(u64, Who, &str)] = &[
     (
         4,
         Who::Me,
@@ -223,7 +223,7 @@ const CALL: &[(u64, Who, &str)] = &[
     (624, Who::Me, "Thanks, talk soon."),
 ];
 
-fn engine() -> MeetingLocalEngine {
+pub(in crate::meeting::processing) fn engine() -> MeetingLocalEngine {
     // PANIC: a probe run without its engine has nothing to report.
     let engine = std::env::var("SONA_PROBE_ENGINE")
         .expect("SONA_PROBE_ENGINE names the meeting engine to read the card with");
@@ -278,7 +278,7 @@ fn keep_transcript(
     store.complete_transcript_revision(session_id, revision)
 }
 
-fn segment(
+pub(in crate::meeting::processing) fn segment(
     second: u64,
     who: Who,
     text: &str,
@@ -590,8 +590,13 @@ fn unidentified_ownership_live_stays_unowned_but_keeps_a_manual_choice() {
         .iter()
         .all(|promise| promise.owner == WorkOwner::Nobody));
     assert!(filed.iter().all(|item| item.owner() == WorkOwner::Nobody));
-    live.set_live_owner(&promises[0].id, WorkOwner::Myself, Some("Me".to_owned()))
-        .expect("a manual owner choice");
+    live.set_live_owner(
+        &Author::Owner,
+        &promises[0].id,
+        WorkOwner::Myself,
+        Some("Me".to_owned()),
+    )
+    .expect("a manual owner choice");
     live.append(LiveSegment {
         track_id: microphone,
         source_kind: SourceKind::Microphone,

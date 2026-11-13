@@ -9,12 +9,14 @@
 //! in the lines it cites; the day those words name is worked out here,
 //! against the moment they were said, never by the model.
 
+use super::live_changes::Author;
 use super::{
     evidence_budget, first_json_value, json_response_schema, LiveSegment, LiveTranscript,
     MeetingProcessingService, MeetingTextGenerationError, MeetingTextGenerator,
 };
 use crate::meeting::analytics::MeetingProvisionalSpeaker;
 use crate::meeting::ledger::{fold, fold_haystack, quote_is_verbatim};
+use crate::meeting::live_doc_types::{MeetingLiveChangeKind, MeetingLiveTarget};
 use crate::meeting::spoken_time::{self, SpokenTime};
 use crate::meeting::store::{MeetingStore, StoreError};
 use crate::meeting::types::{MeetingSessionId, SourceKind};
@@ -118,6 +120,9 @@ pub struct MeetingLivePromise {
     pub owner_name: Option<String>,
     /// The owner was picked by hand, so later readings leave it alone.
     pub owner_set: bool,
+    /// The task or its date was changed by hand, so later readings leave
+    /// both alone.
+    pub edited: bool,
     pub due_at_ms: Option<i64>,
     /// The words that said when, as heard.
     pub due_words: Option<String>,
@@ -209,6 +214,7 @@ impl LiveTranscript {
     /// such promise.
     pub(crate) fn set_live_owner(
         &self,
+        author: &Author,
         promise_id: &str,
         owner: WorkOwner,
         owner_name: Option<String>,
@@ -221,6 +227,47 @@ impl LiveTranscript {
         promise.owner = owner;
         promise.owner_name = owner_name;
         promise.owner_set = true;
+        let what = promise.what.clone();
+        drop(card);
+        self.record_change(
+            author,
+            MeetingLiveTarget::Card,
+            promise_id,
+            MeetingLiveChangeKind::Edited,
+            &what,
+        );
+        Some(())
+    }
+
+    /// New words and date for one promise, typed by hand. `None` when the
+    /// card has no such promise or the words are blank or too long.
+    pub(crate) fn edit_live_promise(
+        &self,
+        author: &Author,
+        promise_id: &str,
+        what: &str,
+        due_at_ms: Option<i64>,
+    ) -> Option<()> {
+        let what = bounded(what, MAX_WHAT_CHARS)?;
+        let mut card = self.card();
+        let promise = card
+            .promises
+            .iter_mut()
+            .find(|promise| promise.id == promise_id)?;
+        if promise.due_at_ms != due_at_ms {
+            promise.due_words = None;
+        }
+        promise.what.clone_from(&what);
+        promise.due_at_ms = due_at_ms;
+        promise.edited = true;
+        drop(card);
+        self.record_change(
+            author,
+            MeetingLiveTarget::Card,
+            promise_id,
+            MeetingLiveChangeKind::Edited,
+            &what,
+        );
         Some(())
     }
 
@@ -276,8 +323,20 @@ pub(super) fn tick(
                 let mut card = live.card();
                 card.waiting
                     .retain(|index| !request.answers.contains(index));
+                let mut heard_now = Vec::new();
                 for promise in kept {
-                    changed |= merge(&mut card.promises, promise);
+                    let (index, kind) = match merge(&mut card.promises, promise) {
+                        Merged::Added => (card.promises.len() - 1, MeetingLiveChangeKind::Added),
+                        Merged::Filled(index) => (index, MeetingLiveChangeKind::Edited),
+                        Merged::Kept => continue,
+                    };
+                    changed = true;
+                    let promise = &card.promises[index];
+                    heard_now.push((promise.id.clone(), promise.what.clone(), kind));
+                }
+                drop(card);
+                for (id, what, kind) in heard_now {
+                    live.record_change(&Author::Sona, MeetingLiveTarget::Card, &id, kind, &what);
                 }
             }
             Asked::Unanswered => {
@@ -319,6 +378,9 @@ pub(crate) fn hang_up(
                 &promises,
             );
         }
+        super::live_doc::hang_up(&service, &store, session_id, &live);
+        super::live_changes::save(&store, session_id, &live);
+        live.end_share();
     });
 }
 
@@ -553,6 +615,7 @@ fn checked(
         owner,
         owner_name,
         owner_set: false,
+        edited: false,
         due_at_ms,
         due_words: due_at_ms.and(due_words),
         quote,
@@ -589,32 +652,47 @@ fn owner(said: &str, lines: &[Copied], people: &[WorkPersonChoice]) -> (WorkOwne
     }
 }
 
+/// What hearing a promise did to the card.
+enum Merged {
+    /// The card did not have it.
+    Added,
+    /// It filled in the due date or the owner the promise at this place
+    /// on the card lacked.
+    Filled(usize),
+    Kept,
+}
+
 /// Keep `promise` unless the card has it: the same quote, or the same
 /// moment said again by the same owner. A promise heard again fills in the
-/// due date or the owner it lacked. Returns whether the card changed.
-fn merge(promises: &mut Vec<MeetingLivePromise>, promise: MeetingLivePromise) -> bool {
-    let same = promises.iter_mut().find(|kept| {
+/// due date or the owner it lacked.
+fn merge(promises: &mut Vec<MeetingLivePromise>, promise: MeetingLivePromise) -> Merged {
+    let same = promises.iter().position(|kept| {
         fold(&kept.quote) == fold(&promise.quote)
             || (kept.start_offset_ns < promise.end_offset_ns
                 && promise.start_offset_ns < kept.end_offset_ns
                 && (kept.owner == promise.owner || kept.owner_set))
     });
-    let Some(kept) = same else {
+    let Some(index) = same else {
         promises.push(promise);
-        return true;
+        return Merged::Added;
     };
-    let mut changed = false;
-    if kept.due_at_ms.is_none() && promise.due_at_ms.is_some() {
+    let kept = &mut promises[index];
+    let mut filled = false;
+    if !kept.edited && kept.due_at_ms.is_none() && promise.due_at_ms.is_some() {
         kept.due_at_ms = promise.due_at_ms;
         kept.due_words = promise.due_words;
-        changed = true;
+        filled = true;
     }
     if !kept.owner_set && kept.owner == WorkOwner::Nobody && promise.owner != WorkOwner::Nobody {
         kept.owner = promise.owner;
         kept.owner_name = promise.owner_name;
-        changed = true;
+        filled = true;
     }
-    changed
+    if filled {
+        Merged::Filled(index)
+    } else {
+        Merged::Kept
+    }
 }
 
 /// The local time a line was said, from when the meeting began.
@@ -656,15 +734,18 @@ fn bounded(text: &str, max_chars: usize) -> Option<String> {
 }
 
 #[cfg(test)]
-mod probe;
+pub(super) mod probe;
 
 #[cfg(test)]
 mod tests {
     use super::super::ReplyShape;
     use super::*;
+    use crate::meeting::live_doc_types::MeetingLiveAuthor;
     use crate::meeting::store::workflow_core_tests;
     use std::borrow::Cow;
+    use std::collections::VecDeque;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
 
     /// An engine that hears no promises and counts how often it is asked.
     struct Asked(AtomicUsize);
@@ -726,5 +807,99 @@ mod tests {
         }
 
         assert_eq!(engine.0.load(Ordering::SeqCst), 10);
+    }
+
+    /// An engine that hears the scripted promises, one reply a request.
+    struct Scripted(Mutex<VecDeque<&'static str>>);
+
+    impl MeetingTextGenerator for Scripted {
+        fn is_available(&self) -> bool {
+            true
+        }
+
+        fn model_id(&self) -> &'static str {
+            "apple-intelligence"
+        }
+
+        fn model_version(&self) -> Cow<'static, str> {
+            Cow::Borrowed("scripted-v1")
+        }
+
+        fn max_input_bytes(&self) -> usize {
+            64 * 1024
+        }
+
+        fn generate(
+            &self,
+            _system_prompt: &str,
+            _evidence: &str,
+            _max_tokens: i32,
+            _shape: ReplyShape,
+        ) -> Result<String, MeetingTextGenerationError> {
+            // PANIC: a poisoned fixture lock means an earlier assertion already failed.
+            let mut replies = self.0.lock().unwrap();
+            Ok(replies
+                .pop_front()
+                .unwrap_or(r#"{"promises":[]}"#)
+                .to_string())
+        }
+    }
+
+    #[test]
+    fn a_date_sona_fills_in_later_is_marked_as_its_change() {
+        let (_directory, store) = workflow_core_tests::store();
+        let session_id = workflow_core_tests::reviewable_meeting(
+            &store,
+            "Launch sync",
+            Local::now().timestamp_millis(),
+        );
+        let (microphone, _) = workflow_core_tests::recording_tracks(&store, session_id);
+        let engine = Arc::new(Scripted(Mutex::new(VecDeque::from([
+            r#"{"promises":[{"what":"Call the supplier","quote":"call the supplier","lines":["L1"]}]}"#,
+            r#"{"promises":[{"what":"Call the supplier","when":"tomorrow","quote":"call the supplier","lines":["L2"]}]}"#,
+        ]))));
+        let service = MeetingProcessingService::new(None);
+        service.set_text_generators(engine.clone(), engine.clone());
+        let live = LiveTranscript::new();
+        let said = |second: u64, text: &str| LiveSegment {
+            track_id: microphone,
+            source_kind: SourceKind::Microphone,
+            speaker: MeetingProvisionalSpeaker::Unknown,
+            start_offset_ns: second * 1_000_000_000,
+            end_offset_ns: (second + 5) * 1_000_000_000,
+            text: text.to_string(),
+        };
+
+        live.append(said(10, "I'll call the supplier."));
+        tick(&service, &store, session_id, &live, Moment::Pass);
+        let promise = live.live_promises()[0].id.clone();
+        live.set_live_owner(
+            &Author::Owner,
+            &promise,
+            WorkOwner::Nobody,
+            Some("Sam".to_string()),
+        )
+        .unwrap();
+        live.append(said(80, "I will call the supplier tomorrow."));
+        tick(&service, &store, session_id, &live, Moment::Pass);
+
+        assert!(
+            live.live_promises()[0].due_at_ms.is_some(),
+            "the date said later fills in"
+        );
+        let marks: Vec<(MeetingLiveAuthor, MeetingLiveChangeKind)> = live
+            .live_changes()
+            .into_iter()
+            .map(|change| (change.by, change.kind))
+            .collect();
+        assert_eq!(
+            marks,
+            [
+                (MeetingLiveAuthor::Sona, MeetingLiveChangeKind::Added),
+                (MeetingLiveAuthor::Owner, MeetingLiveChangeKind::Edited),
+                (MeetingLiveAuthor::Sona, MeetingLiveChangeKind::Edited),
+            ],
+            "what Sona fills in on a card is marked as its change"
+        );
     }
 }

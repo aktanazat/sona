@@ -1221,6 +1221,34 @@ pub enum WorkAutonomy {
     Apply,
 }
 
+/// The day the weekly project digest reaches the inbox, on this Mac's clock.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum DigestDay {
+    #[default]
+    Monday,
+    Tuesday,
+    Wednesday,
+    Thursday,
+    Friday,
+    Saturday,
+    Sunday,
+}
+
+impl DigestDay {
+    pub const fn weekday(self) -> chrono::Weekday {
+        match self {
+            Self::Monday => chrono::Weekday::Mon,
+            Self::Tuesday => chrono::Weekday::Tue,
+            Self::Wednesday => chrono::Weekday::Wed,
+            Self::Thursday => chrono::Weekday::Thu,
+            Self::Friday => chrono::Weekday::Fri,
+            Self::Saturday => chrono::Weekday::Sat,
+            Self::Sunday => chrono::Weekday::Sun,
+        }
+    }
+}
+
 /* still useful for composing the initial JSON in the store ------------- */
 /// The container-level `serde(default)` (backed by the `Default` impl below)
 /// guarantees every field — including ones added in the future — falls back to
@@ -1649,6 +1677,19 @@ pub struct AppSettings {
     /// filled in as it adds the task, or wait in triage as suggestions.
     #[serde(default)]
     pub work_sona_changes: WorkAutonomy,
+    /// Whether a task closes as done once its sub-tasks are all closed and
+    /// at least one is done. Off by default.
+    #[serde(default)]
+    pub work_close_parents: bool,
+    /// Whether a digest of the user's projects reaches the inbox each week.
+    #[serde(default = "default_work_digest_enabled")]
+    pub work_digest_enabled: bool,
+    #[serde(default)]
+    pub work_digest_day: DigestDay,
+}
+
+fn default_work_digest_enabled() -> bool {
+    true
 }
 
 fn default_count_words_per_app() -> bool {
@@ -2338,6 +2379,9 @@ pub fn get_default_settings() -> AppSettings {
         meeting_open_windows_enabled: default_meeting_open_windows_enabled(),
         work_agent_changes: WorkAutonomy::Suggest,
         work_sona_changes: WorkAutonomy::Suggest,
+        work_close_parents: false,
+        work_digest_enabled: default_work_digest_enabled(),
+        work_digest_day: DigestDay::Monday,
     };
     settings.modes = default_modes(&settings);
     ensure_mode_settings(&mut settings);
@@ -3411,6 +3455,29 @@ pub fn change_work_sona_changes_setting(
 
 #[tauri::command]
 #[specta::specta]
+pub fn change_work_close_parents_setting(app: AppHandle, enabled: bool) -> Result<(), String> {
+    update_settings(&app, |settings| {
+        settings.work_close_parents = enabled;
+    })?;
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn change_work_digest_setting(
+    app: AppHandle,
+    enabled: bool,
+    day: DigestDay,
+) -> Result<(), String> {
+    update_settings(&app, |settings| {
+        settings.work_digest_enabled = enabled;
+        settings.work_digest_day = day;
+    })?;
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
 pub fn change_meeting_remote_intelligence_enabled_setting(
     app: AppHandle,
     enabled: bool,
@@ -3440,15 +3507,17 @@ pub fn change_dictation_languages_setting(
     app: AppHandle,
     languages: Vec<String>,
 ) -> Result<(), String> {
-    let languages = normalize_dictation_languages(languages);
-    update_settings(&app, |settings| {
-        settings.selected_language = match languages.as_slice() {
-            [language] => language.clone(),
-            _ => default_selected_language(),
-        };
-        settings.dictation_languages = languages;
-    })?;
+    update_settings(&app, |settings| apply_dictation_languages(settings, languages))?;
     Ok(())
+}
+
+pub(crate) fn apply_dictation_languages(settings: &mut AppSettings, languages: Vec<String>) {
+    let languages = normalize_dictation_languages(languages);
+    settings.selected_language = match languages.as_slice() {
+        [language] => language.clone(),
+        _ => default_selected_language(),
+    };
+    settings.dictation_languages = languages;
 }
 
 fn normalize_dictation_languages(languages: Vec<String>) -> Vec<String> {
@@ -3742,12 +3811,22 @@ fn try_update_settings_inner<Rt: tauri::Runtime, R, E>(
         let persisted = write_settings_locked(app, &mut settings);
         (result, revision, settings, persisted)
     };
-    // The store's own memory took the mutation whether or not the disk did, and
-    // that memory is what the next read returns - so the runtime is brought
-    // into line with it before the failure is reported. A caller that hears
-    // the write did not land must not also be left with an app running on a
-    // value it can no longer read back.
-    crate::modes::refresh_clipboard_context_watcher(&settings);
+    follow_settings(app, &settings);
+    if let Err(error) = &persisted {
+        // The caller may only be able to say *that* the write failed, so the
+        // reason is recorded here once, where it still exists.
+        warn!("Failed to persist settings: {error}");
+    }
+    Ok((result, revision, persisted))
+}
+
+// The store's own memory took the mutation whether or not the disk did, and
+// that memory is what the next read returns - so the runtime is brought
+// into line with it before the failure is reported. A caller that hears
+// the write did not land must not also be left with an app running on a
+// value it can no longer read back.
+fn follow_settings<Rt: tauri::Runtime>(app: &AppHandle<Rt>, settings: &AppSettings) {
+    crate::modes::refresh_clipboard_context_watcher(settings);
     if let Some(runtime) = app.try_state::<Arc<crate::meeting::detection::DetectionRuntime>>() {
         runtime.set_enabled(settings.detection_enabled);
     }
@@ -3768,12 +3847,35 @@ fn try_update_settings_inner<Rt: tauri::Runtime, R, E>(
     // and the overlay material. Those paths announce twice, and a second read
     // is what they cost.
     let _ = app.emit("settings-changed", serde_json::json!({ "setting": null }));
-    if let Err(error) = &persisted {
-        // The caller may only be able to say *that* the write failed, so the
-        // reason is recorded here once, where it still exists.
-        warn!("Failed to persist settings: {error}");
-    }
-    Ok((result, revision, persisted))
+}
+
+/// `sona work` wrote the settings file from its own process. Reads the file
+/// again in place of this process's copy and answers the settings before and
+/// after. Nothing is read while a save of this process's own is owed: the file
+/// lacks that save, and reading it would lose it.
+pub(crate) fn reload_after_external_write<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> Option<(AppSettings, AppSettings)> {
+    let (before, after) = {
+        let _settings_lock = lock_settings_store();
+        let owed = app
+            .try_state::<Arc<SettingsSaveOwed>>()
+            .is_some_and(|owed| owed.0.load(Ordering::Relaxed));
+        if owed {
+            warn!("Settings written by sona work were not read: a save of Sona's own is owed");
+            return None;
+        }
+        let before = get_settings_locked(app);
+        let file = SettingsFile::open(app).ok()?;
+        if let Err(error) = file.store.reload_ignore_defaults() {
+            warn!("Settings written by sona work could not be read: {error}");
+            return None;
+        }
+        forget_cached_settings(app);
+        (before, get_settings_locked(app))
+    };
+    follow_settings(app, &after);
+    Some((before, after))
 }
 
 /// [`try_update_settings_committed`] for a caller that also keeps the

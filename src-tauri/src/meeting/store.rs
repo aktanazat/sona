@@ -42,6 +42,8 @@ mod heard_plans_tests;
 pub(crate) mod learning;
 #[cfg(test)]
 mod learning_tests;
+mod live_changes;
+mod live_docs;
 pub(crate) mod loops;
 #[cfg(test)]
 pub(crate) mod loops_tests;
@@ -56,6 +58,7 @@ mod open_windows;
 #[cfg(test)]
 mod open_windows_tests;
 mod people;
+pub(crate) use people::{validated_png, PersonProfileEdit};
 mod prep;
 pub(crate) mod privacy_inventory;
 pub(crate) mod processing_speed;
@@ -1618,6 +1621,9 @@ static MIGRATIONS: &[M] = &[
         LEFT JOIN voice_speaker_matches matched ON matched.speaker_id = speaker.speaker_id
         WHERE session.phase != 'deleting' AND session.current_transcript_revision_id IS NOT NULL;",
     ),
+    M::up(include_str!("store/people/profiles.sql")),
+    M::up(include_str!("store/live_docs.sql")),
+    M::up(include_str!("store/live_changes.sql")),
 ];
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StoreError {
@@ -2196,6 +2202,48 @@ struct LocalMeetingRestoreV2 {
     /// so only this Mac's undo needs to know it was deleted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     audio_purged_at_utc_ms: Option<i64>,
+    /// The calendar event the meeting was filed under, so a restore keeps it
+    /// and a meeting kept on this Mac stays kept while it is in the trash.
+    /// Written even when there is none: an absent field marks a bundle from
+    /// before the trash kept it.
+    #[serde(default)]
+    calendar_event: Option<TrashedCalendarEvent>,
+}
+
+#[derive(Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TrashedCalendarEvent {
+    event_key: String,
+    event: serde_json::Value,
+    found_under_way: bool,
+}
+
+fn trashed_calendar_event_in(
+    connection: &Connection,
+    session_id: MeetingSessionId,
+) -> Result<Option<TrashedCalendarEvent>, StoreError> {
+    connection
+        .query_row(
+            "SELECT event_key, event_json, found_under_way FROM meeting_calendar_facts
+              WHERE session_id = ?1",
+            params![id(session_id)],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, bool>(2)?,
+                ))
+            },
+        )
+        .optional()?
+        .map(|(event_key, event_json, found_under_way)| {
+            Ok(TrashedCalendarEvent {
+                event_key,
+                event: decode_json(&event_json)?,
+                found_under_way,
+            })
+        })
+        .transpose()
 }
 
 #[derive(serde::Deserialize)]
@@ -6603,11 +6651,13 @@ impl MeetingStore {
             match export_cloud_meeting_bundle_in(&transaction, session_id).and_then(|bundle| {
                 bundle.validate()?;
                 let bookmarks = conversation_review::export_bookmarks_in(&transaction, session_id)?;
+                let calendar_event = trashed_calendar_event_in(&transaction, session_id)?;
                 encode_json(&LocalMeetingRestoreV2 {
                     format_version: 2,
                     meeting: bundle,
                     bookmarks,
                     audio_purged_at_utc_ms: current.audio_purged_at_utc_ms,
+                    calendar_event,
                 })
             }) {
                 Ok(bundle_json) => Some(bundle_json),
@@ -6864,15 +6914,16 @@ impl MeetingStore {
         {
             return Err(StoreError::NotFound);
         }
-        let (bundle, bookmarks, audio_purged_at_utc_ms) =
+        let (bundle, bookmarks, audio_purged_at_utc_ms, calendar_event) =
             match decode_json::<LocalMeetingRestore>(&bundle_json)? {
                 LocalMeetingRestore::V2(restore) if restore.format_version == 2 => (
                     restore.meeting,
                     restore.bookmarks,
                     restore.audio_purged_at_utc_ms,
+                    restore.calendar_event,
                 ),
                 LocalMeetingRestore::V2(_) => return Err(StoreError::Invalid),
-                LocalMeetingRestore::Legacy(bundle) => (bundle, Vec::new(), None),
+                LocalMeetingRestore::Legacy(bundle) => (bundle, Vec::new(), None, None),
             };
         let session_id = bundle.session.session_id;
         {
@@ -6903,6 +6954,19 @@ impl MeetingStore {
             fs::rename(&trash, &live)?;
         }
         self.import_cloud_meeting_bundle(&bundle)?;
+        if let Some(event) = &calendar_event {
+            self.connection()?.execute(
+                "INSERT INTO meeting_calendar_facts(session_id, event_key, event_json, found_under_way)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(session_id) DO NOTHING",
+                params![
+                    id(session_id),
+                    event.event_key,
+                    event.event.to_string(),
+                    event.found_under_way
+                ],
+            )?;
+        }
         if let Some(purged_at) = audio_purged_at_utc_ms {
             self.connection()?.execute(
                 "UPDATE meeting_sessions SET audio_purged_at_utc_ms = ?2, audio_purge_pending = 1

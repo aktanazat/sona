@@ -43,6 +43,7 @@ mod overlay;
 mod paste_tx;
 mod planning;
 pub mod portable;
+mod profile_photo;
 mod prompt_renderer;
 pub mod query;
 pub mod recorder;
@@ -400,6 +401,7 @@ fn start_meeting_detection(
 
     planning::work::follow::start(app_handle.clone(), Arc::clone(&native_prompts));
     planning::work::cycles::start(app_handle.clone());
+    planning::work::loops::start(app_handle.clone());
     app_handle.manage(planning::work::watch::WatchNotices(Arc::clone(
         &native_prompts,
     )));
@@ -1931,6 +1933,11 @@ pub fn run(cli_args: CliArgs) {
             commands::heard_plans::meeting_heard_plan_undo_calendar,
             commands::live_card::meeting_live_card,
             commands::live_card::meeting_live_card_owner,
+            commands::live_card::meeting_live_card_edit,
+            commands::live_doc::meeting_live_doc,
+            commands::live_doc::meeting_live_doc_start,
+            commands::live_doc::meeting_live_doc_edit,
+            commands::cloud_sync::meeting_live_share_link,
             commands::live_card::work_follow_up_post,
             planning::work::live::work_follow_up,
             commands::wrap::meeting_wrap,
@@ -2044,9 +2051,13 @@ pub fn run(cli_args: CliArgs) {
             scratchpad::links::scratchpad_memory,
             scratchpad::links::scratchpad_link,
             scratchpad::links::scratchpad_unlink,
+            scratchpad::documents::scratchpad_cycle_notes,
+            scratchpad::documents::scratchpad_link_cycle,
+            scratchpad::documents::scratchpad_unlink_cycle,
             scratchpad::synthesis::scratchpad_synthesize,
             scratchpad::evidence::scratchpad_source_evidence,
             planning::planning_projects,
+            planning::planning_projects_trashed,
             planning::planning_project,
             planning::planning_create_project,
             planning::planning_create_milestone,
@@ -2079,11 +2090,24 @@ pub fn run(cli_args: CliArgs) {
             planning::work::work_bulk_update,
             planning::work::work_archive,
             planning::work::work_restore,
+            planning::work::work_move,
             planning::work::work_triage_accept,
             planning::work::work_triage_decline,
             planning::work::work_mark_duplicate,
             planning::work::work_relation_add,
             planning::work::work_relation_remove,
+            planning::work::work_subtask_create,
+            planning::work::work_set_parent,
+            planning::work::work_comments,
+            planning::work::work_comment_add,
+            planning::work::work_comment_edit,
+            planning::work::work_comment_delete,
+            planning::work::work_comment_resolve,
+            planning::work::work_attachments,
+            planning::work::work_attachment_attach_file,
+            planning::work::work_attachment_attach_link,
+            planning::work::work_attachment_detach,
+            planning::work::work_attachment_rename,
             planning::work::work_labels,
             planning::work::work_label_save,
             planning::work::work_label_delete,
@@ -2096,7 +2120,25 @@ pub fn run(cli_args: CliArgs) {
             planning::work::work_day_plan,
             planning::work::cycles::work_cycles,
             planning::work::cycles::work_cycle,
+            planning::work::cycles::work_cycle_calendar,
             planning::work::cycles::work_cycle_settings_save,
+            planning::work::cycles::work_cycle_save,
+            planning::work::cycles::work_cycle_rollover,
+            planning::work::cycles::work_cycle_start_today,
+            planning::work::insights::work_insights,
+            planning::work::plans::planning_project_updates,
+            planning::work::plans::planning_project_update_add,
+            planning::work::plans::planning_project_update_edit,
+            planning::work::plans::planning_project_update_delete,
+            planning::work::plans::planning_project_update_draft,
+            planning::work::plans::planning_project_save,
+            planning::work::plans::planning_milestone_save,
+            planning::work::plans::planning_milestone_reorder,
+            planning::work::plans::planning_project_status_names,
+            planning::work::plans::planning_project_status_name_save,
+            planning::work::plans::planning_project_status_name_delete,
+            planning::work::plans::planning_project_history,
+            planning::work::plans::planning_milestone_to_project,
             planning::work::blocks::work_time_block,
             planning::work::blocks::work_time_block_remove,
             planning::work::follow::work_brief,
@@ -2108,6 +2150,7 @@ pub fn run(cli_args: CliArgs) {
             planning::work::agents::work_proposals_accept,
             planning::work::agents::work_proposals_reject,
             planning::work::parse::work_parse,
+            planning::work::words::work_where,
             planning::work::capture::work_capture,
             planning::work::capture::work_take_lines,
             planning::work::ask::work_ask,
@@ -2145,6 +2188,7 @@ pub fn run(cli_args: CliArgs) {
             meeting::types::MeetingRemovedEvent,
             meeting::types::MeetingHeardPlansChangedEvent,
             meeting::types::MeetingLiveCardChangedEvent,
+            meeting::types::MeetingLiveDocChangedEvent,
             cloud_sync::types::CloudSyncChangedEvent,
             meeting::types::MeetingNavigationRequestedEvent,
             meeting::types::MeetingProcessingProgressEvent,
@@ -2356,6 +2400,9 @@ pub fn run(cli_args: CliArgs) {
             app.manage(secret_manager.clone());
 
             specta_builder.mount_events(app);
+            if !headless_mode {
+                query::external::watch_external_writes(app.handle().clone());
+            }
 
             // Headless read-only corpus query (`--query` / `--meetings` /
             // `--meeting` / `--transcript` / `--loops` / `--people` /

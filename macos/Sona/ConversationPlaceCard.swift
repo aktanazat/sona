@@ -151,11 +151,13 @@ struct ConversationPlaceCard: View {
                     Label(location.name, systemImage: "mappin.and.ellipse")
                         .font(TypeScale.body(13)).foregroundStyle(Theme.inkSecondary)
                 }
+                .padding(.bottom, 28)
             } else if let failure {
                 HStack(spacing: 12) {
                     Text(failure).metaText(Theme.live)
                     Button("Retry") { Task { await load() } }.buttonStyle(.quiet)
                 }
+                .padding(.bottom, 28)
             }
         }
         .task(id: "\(sessionId):\(revision)") { await load() }
@@ -229,6 +231,7 @@ struct ConversationBookmarksView: View {
             }
             if let failure { Text(failure).metaText(Theme.live) }
         }
+        .padding(.bottom, bookmarks.isEmpty && failure == nil ? 0 : 28)
         .onChange(of: sessionId) { _, _ in filter = nil }
         .task(id: "\(sessionId):\(revision)") {
             do {

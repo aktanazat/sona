@@ -2012,6 +2012,7 @@ impl MeetingCaptureSource for MeetingMicrophoneSource {
             return Err(MeetingCaptureError::InvalidFormat);
         }
         if let Err(error) = self.audio.start_microphone_stream() {
+            log::warn!("Meeting microphone stream did not start: {error:#}");
             self.finish();
             return Err(Self::start_error(error));
         }

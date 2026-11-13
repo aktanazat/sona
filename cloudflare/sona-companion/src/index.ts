@@ -1,5 +1,6 @@
 import {
   CRYPTO_VERSION,
+  LIVE_ROOM_TTL_MS,
   MAX_ACTIVE_SHARES,
   MAX_ACTIVE_UPLOADS,
   MAX_CHANGE_PAGE,
@@ -65,6 +66,7 @@ import {
   logRequest,
   problem,
 } from "./errors";
+import { LIVE_VERIFIER_HEADER } from "./live";
 import { maintenanceQueueMessage, runMaintenance } from "./maintenance";
 import type {
   AuthenticatedRequest,
@@ -113,6 +115,9 @@ type RouteName =
   | "devices_pair"
   | "devices_self"
   | "health"
+  | "live_create"
+  | "live_page"
+  | "live_socket"
   | "object_chunk"
   | "object_delete"
   | "object_manifest"
@@ -209,6 +214,8 @@ function routeFor(pathname: string): Route {
       ids: {},
       queryKeys: ["after", "highWater", "limit"],
     };
+  if (pathname === "/v1/live")
+    return { name: "live_create", ids: {}, queryKeys: [] };
 
   const segments = pathname.split("/");
   if (segments.length === 3 && segments[1] === "s") {
@@ -216,6 +223,25 @@ function routeFor(pathname: string): Route {
       name: "share_page",
       ids: { shareId: routeId(segments[2]) },
       queryKeys: [],
+    };
+  }
+  if (segments.length === 3 && segments[1] === "l") {
+    return {
+      name: "live_page",
+      ids: { roomId: routeId(segments[2]) },
+      queryKeys: [],
+    };
+  }
+  if (
+    segments.length === 5 &&
+    segments[1] === "v1" &&
+    segments[2] === "live" &&
+    segments[4] === "socket"
+  ) {
+    return {
+      name: "live_socket",
+      ids: { roomId: routeId(segments[3]) },
+      queryKeys: ["t"],
     };
   }
   if (
@@ -2523,6 +2549,108 @@ async function revokeShare(
   return jsonResponse(response, 200, now);
 }
 
+function parseLiveRoom(body: Uint8Array) {
+  const value = parseJsonBody(body);
+  assertExactKeys(value, ["version", "roomId", "hostVerifier", "joinVerifier"]);
+  if (
+    requiredInteger(value, "version", PROTOCOL_VERSION, PROTOCOL_VERSION) !==
+    PROTOCOL_VERSION
+  ) {
+    throw problem("unsupported_version");
+  }
+  const hostVerifier = digest(requiredString(value, "hostVerifier", 43));
+  const joinVerifier = digest(requiredString(value, "joinVerifier", 43));
+  if (hostVerifier === joinVerifier) throw problem("invalid_request");
+  return {
+    hostVerifier,
+    joinVerifier,
+    roomId: requiredOpaqueId(value, "roomId"),
+  };
+}
+
+function pageOrigin(request: Request, env: Env): string {
+  return new URL(env.PAGE_ORIGIN ?? request.url).origin;
+}
+
+async function createLiveRoom(
+  request: Request,
+  env: Env,
+  route: Route,
+  body: Uint8Array,
+  now: number,
+): Promise<Response> {
+  requireContentType(request, "application/json");
+  const room = parseLiveRoom(body);
+  const auth = await authenticate(request, env, route, body, true, now);
+  const target = `live:${room.roomId}`;
+  const replay = await existingMutationResponse(
+    env,
+    auth,
+    "create_live_room",
+    target,
+  );
+  if (replay !== null) return replay;
+  const idempotencyKey = auth.idempotencyKey;
+  if (idempotencyKey === undefined) throw problem("invalid_request");
+  const expiresAt = await env.LIVE_ROOMS.getByName(room.roomId).create({
+    expiresAt: now + LIVE_ROOM_TTL_MS,
+    hostVerifier: room.hostVerifier,
+    joinVerifier: room.joinVerifier,
+    vaultId: auth.vaultId,
+  });
+  if (expiresAt === null) throw problem("idempotency_conflict");
+  const response = {
+    room_id: room.roomId,
+    page_url: `${pageOrigin(request, env)}/l/${room.roomId}`,
+    expires_at: expiresAt,
+  };
+  const stored = await env.DB.prepare(
+    "INSERT INTO idempotency_results (vault_id, device_id, idempotency_key, operation, target, body_digest, status, response_json, created_at) VALUES (?, ?, ?, 'create_live_room', ?, ?, 200, ?, ?) ON CONFLICT DO NOTHING",
+  )
+    .bind(
+      auth.vaultId,
+      auth.deviceId,
+      idempotencyKey,
+      target,
+      auth.bodyDigest,
+      JSON.stringify(response),
+      now,
+    )
+    .run();
+  if (changeCount(stored) === 1) return jsonResponse(response, 200, now);
+  const duplicate = await existingMutationResponse(
+    env,
+    auth,
+    "create_live_room",
+    target,
+  );
+  if (duplicate !== null) return duplicate;
+  throw problem("invalid_request");
+}
+
+async function connectLiveRoom(
+  request: Request,
+  env: Env,
+  route: Route,
+): Promise<Response> {
+  const roomId = route.ids.roomId;
+  if (roomId === undefined) throw problem("not_found");
+  const url = new URL(request.url);
+  canonicalQuery(url, route.queryKeys);
+  if (request.headers.get("upgrade")?.toLowerCase() !== "websocket")
+    throw problem("invalid_request");
+  const token = base64UrlDecode(url.searchParams.get("t") ?? "");
+  const verifier = token?.length === 32 ? await sha256Base64Url(token) : "";
+  const response = await env.LIVE_ROOMS.getByName(roomId).fetch(url, {
+    headers: { Upgrade: "websocket", [LIVE_VERIFIER_HEADER]: verifier },
+  });
+  if (response.status === 101) return response;
+  if (response.status === 403)
+    throw new ApiProblem("unauthorized", { status: 403 });
+  if (response.status === 429) throw problem("rate_limited");
+  throw problem("not_found");
+}
+
 function publicRouteQuery(request: Request, route: Route): void {
   canonicalQuery(new URL(request.url), route.queryKeys);
 }
@@ -2539,6 +2667,7 @@ async function serveAsset(
   env: Env,
   viewer: boolean,
   now: number,
+  connectSources = "'self'",
 ): Promise<Response> {
   const assetRequest = viewer
     ? new Request(new URL("/index.html", request.url), { method: "GET" })
@@ -2549,7 +2678,7 @@ async function serveAsset(
   headers.set("Date", new Date(now).toUTCString());
   headers.set(
     "Content-Security-Policy",
-    "default-src 'none'; base-uri 'none'; connect-src 'self'; font-src 'none'; form-action 'none'; frame-ancestors 'none'; frame-src 'none'; img-src 'self' data:; manifest-src 'none'; media-src 'self' blob:; object-src 'none'; script-src 'self'; style-src 'self'; worker-src 'none'",
+    `default-src 'none'; base-uri 'none'; connect-src ${connectSources}; font-src 'none'; form-action 'none'; frame-ancestors 'none'; frame-src 'none'; img-src 'self' data:; manifest-src 'none'; media-src 'self' blob:; object-src 'none'; script-src 'self'; style-src 'self'; worker-src 'none'`,
   );
   headers.set(
     "Permissions-Policy",
@@ -2577,6 +2706,22 @@ async function dispatch(
     methodIs(request, "GET");
     publicRouteQuery(request, route);
     return serveAsset(request, env, true, now);
+  }
+  if (route.name === "live_page") {
+    methodIs(request, "GET");
+    publicRouteQuery(request, route);
+    const socketOrigin = pageOrigin(request, env).replace(/^http/u, "ws");
+    return serveAsset(request, env, true, now, `'self' ${socketOrigin}`);
+  }
+  if (route.name === "live_create") {
+    methodIs(request, "POST");
+    const body = await readLimitedBody(request, MAX_JSON_BYTES, true);
+    return createLiveRoom(request, env, route, body, now);
+  }
+  if (route.name === "live_socket") {
+    methodIs(request, "GET");
+    noRequestBody(request);
+    return connectLiveRoom(request, env, route);
   }
   if (route.name === "share_manifest") {
     publicRouteQuery(request, route);
@@ -2721,3 +2866,4 @@ const worker: ExportedHandler<Env, unknown, { job_id: string }> = {
 };
 
 export default worker;
+export { LiveRoom } from "./live";

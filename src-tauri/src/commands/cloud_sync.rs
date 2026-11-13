@@ -89,6 +89,20 @@ pub async fn cloud_sync_meeting_status_get(
         .map_err(|error| error.kind())
 }
 
+/// The link teammates open to follow and edit a recording meeting's doc
+/// and board.
+#[tauri::command]
+#[specta::specta]
+pub async fn meeting_live_share_link(
+    runtime: State<'_, Arc<CloudSyncRuntime>>,
+    session_id: MeetingSessionId,
+) -> Result<String, CloudSyncErrorKind> {
+    runtime
+        .live_share_link(session_id)
+        .await
+        .map_err(|error| error.kind())
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn cloud_sync_meeting_status_list(
@@ -323,7 +337,7 @@ pub struct CloudSyncServiceStatus {
     pub reason: String,
 }
 
-fn service_status(
+pub(crate) fn service_status(
     settings: &CloudSyncSettings,
     portable_mode: bool,
     operational_error: Option<CloudSyncErrorKind>,

@@ -428,7 +428,7 @@ const ORDINAL_LEAD_INS: &[&str] = &[
     "first", "firstly", "second", "secondly", "third", "thirdly", "next", "finally", "lastly",
 ];
 
-const PRIORITY_PHRASES: &[(&[&str], u8)] = &[
+pub(super) const PRIORITY_PHRASES: &[(&[&str], u8)] = &[
     (&["top", "priority"], 1),
     (&["highest", "priority"], 1),
     (&["urgent", "priority"], 1),
@@ -531,10 +531,10 @@ const THIRD_PARTY_VERBS: &[&str] = &[
 /// One run of text between spaces: `range` all of it, `core` without the
 /// punctuation around it, `key` the core lowercased, apostrophes straight.
 #[derive(Debug)]
-struct Word {
+pub(super) struct Word {
     range: Range<usize>,
-    core: Range<usize>,
-    key: String,
+    pub(super) core: Range<usize>,
+    pub(super) key: String,
 }
 
 const OPENING: &[char] = &['"', '\'', '(', '[', '{', '\u{201c}', '\u{2018}'];
@@ -542,7 +542,7 @@ const CLOSING: &[char] = &[
     '.', ',', ';', ':', '!', '?', '"', '\'', ')', ']', '}', '\u{201d}', '\u{2019}', '\u{2026}',
 ];
 
-fn split_words(text: &str) -> Vec<Word> {
+pub(super) fn split_words(text: &str) -> Vec<Word> {
     let mut words = Vec::new();
     let mut start = None;
     for (at, character) in text.char_indices().chain([(text.len(), ' ')]) {
@@ -573,7 +573,7 @@ fn word(text: &str, range: Range<usize>) -> Word {
 
 /// A name as letters and digits only, lowercased: "Needs review" and
 /// "#needs-review" are the same label.
-fn key(name: &str) -> String {
+pub(super) fn key(name: &str) -> String {
     name.chars()
         .filter(|character| character.is_alphanumeric())
         .flat_map(char::to_lowercase)
@@ -581,7 +581,7 @@ fn key(name: &str) -> String {
 }
 
 /// A spoken name without what is joined to it: "dana" in "dana's".
-fn base_name(key: &str) -> &str {
+pub(super) fn base_name(key: &str) -> &str {
     key.split_once('\'').map_or(key, |(name, _)| name)
 }
 
@@ -608,7 +608,10 @@ pub(crate) fn person_named<'p>(
             .next()
             .is_some_and(|first| key(first) == wanted)
     };
-    only(people.iter().filter(|person| key(&person.name) == wanted))
+    let called = |person: &&WorkPersonChoice| {
+        key(&person.name) == wanted || person.aliases.iter().any(|alias| key(alias) == wanted)
+    };
+    only(people.iter().filter(called))
         .or_else(|| only(people.iter().filter(first_name)))
         .or_else(|| {
             (prefix && wanted.len() >= 2)
@@ -661,6 +664,7 @@ fn label_named(lexicon: &Lexicon, name: &str, create: bool) -> Option<WorkField>
         .iter()
         .find(|label| key(&label.name) == wanted)
     {
+        Some(label) if label.retired_at_ms.is_some() => None,
         Some(label) => Some(WorkField::Label {
             id: Some(label.id.clone()),
             name: label.name.clone(),
@@ -675,7 +679,7 @@ fn label_named(lexicon: &Lexicon, name: &str, create: bool) -> Option<WorkField>
 }
 
 /// The project `name` names, whole or by the one title it starts.
-fn project_named(lexicon: &Lexicon, name: &str) -> Option<WorkField> {
+pub(super) fn project_named(lexicon: &Lexicon, name: &str) -> Option<WorkField> {
     let wanted = key(name);
     if wanted.len() < 2 || !wanted.chars().any(char::is_alphabetic) {
         return None;
@@ -699,7 +703,7 @@ fn project_named(lexicon: &Lexicon, name: &str) -> Option<WorkField> {
         .map(field)
 }
 
-fn weekday_named(key: &str) -> Option<Weekday> {
+pub(super) fn weekday_named(key: &str) -> Option<Weekday> {
     let singular = key
         .strip_suffix('s')
         .filter(|name| name.ends_with("day"))
@@ -1691,6 +1695,9 @@ mod tests {
                 name: "bug".to_owned(),
                 hue: 0.0,
                 revision: 1,
+                group: None,
+                retired_at_ms: None,
+                scope: Default::default(),
             }],
             projects: ["Launch", "Q4 pricing"]
                 .iter()
@@ -1705,6 +1712,7 @@ mod tests {
                 .map(|name| WorkPersonChoice {
                     id: name.to_lowercase(),
                     name: (*name).to_owned(),
+                    aliases: Vec::new(),
                 })
                 .collect(),
         }

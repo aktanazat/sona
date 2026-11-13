@@ -6,11 +6,14 @@ use super::super::schema;
 use super::super::store as planning_store;
 use super::items::{self, NewItem};
 use super::types::{
-    WorkActivityKind, WorkActor, WorkItem, WorkItemInput, WorkOwner, WorkPatch, WorkQuery,
-    WorkStatus,
+    WorkActivityKind, WorkActor, WorkCommentSubject, WorkGroupBy, WorkItem, WorkItemInput,
+    WorkOwner, WorkPatch, WorkPlace, WorkQuery, WorkRelationKind, WorkStatus,
 };
-use super::{accept, bulk_update, create, list, mark_duplicate, set_archived, update, Change};
-use super::{live, sync};
+use super::{
+    accept, bulk_update, close_parents, create, follow_loop_with, keep, list, mark_duplicate,
+    set_archived, update, Change,
+};
+use super::{bin, inbox, live, sync};
 use crate::meeting::ledger::{
     LedgerCommitment, LedgerFirmness, LedgerReceipt, LedgerReceiptState, MeetingLedger,
 };
@@ -22,12 +25,13 @@ use crate::meeting::store::{loops_tests, workflow_core_tests, MeetingStore, Stor
 use crate::meeting::types::{
     MeetingOperationId, MeetingSessionId, OperationActor, OperationResult,
 };
-use crate::planning::types::EvidenceSourceKind;
+use crate::planning::types::{EvidenceSourceKind, EvidenceTargetKind};
 use chrono::{Duration, Local, NaiveDate, TimeZone};
 use rusqlite::{Connection, TransactionBehavior};
 use std::sync::Arc;
 use tempfile::TempDir;
 use uuid::Uuid;
+use std::collections::HashMap;
 
 const AT: i64 = 1_700_000_000_000;
 
@@ -189,7 +193,7 @@ impl Desk {
             let tx = history.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let followed = sync::follow_loop_in(&tx, meetings, loop_id, at)?;
             tx.commit()?;
-            Ok(followed.items)
+            Ok(followed.changed.into_iter().map(|moved| moved.after).collect())
         })
         .expect("the tracker following its commitment")
     }
@@ -302,16 +306,18 @@ impl Desk {
 
 #[test]
 fn the_tracker_migration_keeps_every_task_and_the_commitment_it_tracks() {
-    let conn = Connection::open_in_memory().expect("history");
-    for migration in [
-        schema::MIGRATION,
-        schema::QUIET_REVIEW_MIGRATION,
-        schema::MEETING_NOTE_LINK_MIGRATION,
-        schema::DISMISSED_LOOP_MIGRATION,
-    ] {
-        conn.execute_batch(migration)
-            .expect("an earlier planner migration");
-    }
+    let mut conn = Connection::open_in_memory().expect("history");
+    conn.pragma_update(None, "foreign_keys", false)
+        .expect("the migration runner turns foreign keys off");
+    let all = crate::managers::history::MIGRATIONS.to_vec();
+    let tracker = all
+        .iter()
+        .position(|step| *step == rusqlite_migration::M::up(schema::WORK_MIGRATION))
+        .expect("the tracker migration");
+    let migrations = rusqlite_migration::Migrations::new(all);
+    migrations
+        .to_version(&mut conn, tracker)
+        .expect("every migration before the tracker");
     conn.execute_batch(
         "INSERT INTO planning_projects (id, title, description, status, revision, created_at_ms, updated_at_ms)
             VALUES ('p', 'Launch', NULL, 'active', 1, 1, 1);
@@ -331,20 +337,9 @@ fn the_tracker_migration_keeps_every_task_and_the_commitment_it_tracks() {
     )
     .expect("tasks the planner saved");
 
-    conn.execute_batch(schema::WORK_MIGRATION)
-        .expect("the tracker migration");
-    for migration in [
-        schema::PROJECT_DELETE_KEEPS_TASKS_MIGRATION,
-        schema::DAY_PLAN_MIGRATION,
-        schema::FOLLOW_MIGRATION,
-        schema::AGENTS_MIGRATION,
-        schema::CAPTURE_MIGRATION,
-        schema::REPEAT_MIGRATION,
-        schema::CYCLES_MIGRATION,
-    ] {
-        conn.execute_batch(migration)
-            .expect("a later planner migration");
-    }
+    migrations
+        .to_latest(&mut conn)
+        .expect("the tracker migration and every one after it");
 
     let migrated = items::items(&conn, true).expect("the migrated items");
     let summary = migrated
@@ -457,11 +452,25 @@ fn the_repeat_migration_keeps_every_history_entry_and_waiting_change() {
     ))
     .expect("history and a waiting change");
     let history = |conn: &Connection| {
-        items::activity(conn, "plants")
-            .expect("the task's history")
-            .into_iter()
-            .map(|entry| (entry.kind, entry.actor, entry.agent))
-            .collect::<Vec<_>>()
+        conn.prepare(
+            "SELECT activity.id, activity.kind, activity.actor, agents.agent
+             FROM planning_task_activity activity
+             LEFT JOIN planning_activity_agents agents ON agents.activity_id = activity.id
+             WHERE activity.task_id = 'plants'
+             ORDER BY activity.at_ms, activity.id",
+        )
+        .expect("the task's history")
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        })
+        .expect("the task's history")
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .expect("the task's history")
     };
     let waiting = |conn: &Connection| {
         super::agents::item_proposals(conn, "plants")
@@ -755,6 +764,76 @@ fn an_agent_change_is_filed_under_the_agent_on_both_sides() {
 }
 
 #[test]
+fn work_an_agent_keeps_is_filed_under_the_agent() {
+    let mut desk = desk(&[]);
+    let at = desk.tick();
+    let item = create(
+        &mut desk.history,
+        None,
+        by_me(&operation(), at),
+        &typed("Renew the launch domain"),
+    )
+    .expect("an item typed in")
+    .value;
+
+    let kept_at = desk.tick();
+    keep(
+        &mut desk.history,
+        Change {
+            operation_id: &operation(),
+            actor: WorkActor::Agent,
+            at_ms: kept_at,
+        },
+        &[item.id.clone()],
+    )
+    .expect("kept by an agent");
+
+    let filed = items::activity(&desk.history, &item.id)
+        .expect("the item's history")
+        .into_iter()
+        .filter(|entry| entry.at_ms == kept_at)
+        .map(|entry| (entry.kind, entry.actor))
+        .collect::<Vec<_>>();
+    assert_eq!(filed, [(WorkActivityKind::Kept, WorkActor::Agent)]);
+}
+
+#[test]
+fn the_list_search_reads_a_task_s_comments() {
+    let mut desk = desk(&[]);
+    let at = desk.tick();
+    let made = ["Repaint the railings", "Order the paint"].map(|title| {
+        create(&mut desk.history, None, by_me(&operation(), at), &typed(title))
+            .expect("an item typed in")
+            .value
+    });
+    super::comments::add(
+        &desk.history,
+        WorkCommentSubject::Task,
+        &made[0].id,
+        None,
+        super::comments::Author {
+            actor: WorkActor::Me,
+            agent: None,
+        },
+        "Hold the marine deposit until the paint arrives",
+        at,
+    )
+    .expect("a comment");
+
+    let query = WorkQuery {
+        search: Some("marine deposit".to_owned()),
+        ..WorkQuery::default()
+    };
+    let found = list(&desk.history, None, None, &query, at)
+        .expect("the searched list")
+        .items
+        .into_iter()
+        .map(|row| row.item.id)
+        .collect::<Vec<_>>();
+    assert_eq!(found, [made[0].id.clone()]);
+}
+
+#[test]
 fn a_change_made_while_the_conversations_are_closed_reaches_its_commitment_when_they_open() {
     let mut desk = desk(&["Send the outline"]);
     let (item, loop_id) = desk.accepted();
@@ -793,7 +872,7 @@ fn a_change_made_while_the_conversations_are_closed_reaches_its_commitment_when_
         })
         .expect("the catch-up as the conversations open");
     assert_eq!(caught_up.loops, [loop_id.clone()]);
-    assert!(caught_up.items.is_empty());
+    assert!(caught_up.changed.is_empty());
     let row = desk.page_row(&loop_id);
     assert_eq!(row.status, MeetingLoopStatus::Done);
     assert_eq!(row.resolved_by, Some(OperationActor::User));
@@ -1083,6 +1162,7 @@ fn a_promise_heard_live_becomes_the_item_its_commitment_tracks() {
         quote: "I will send the pricing deck".to_owned(),
         start_offset_ns: 0,
         end_offset_ns: 1_000_000_000,
+        edited: false,
     };
     let at = desk.tick();
     // PANIC: filing into the fixture's own meeting cannot fail.
@@ -1218,7 +1298,7 @@ fn a_deleted_dictation_takes_its_words_out_of_the_tasks_evidence() {
     )
     .expect("the dictation kept as evidence");
     let evidence = |history: &Connection| {
-        super::detail(history, None, None, &task.id)
+        super::detail(history, None, None, std::path::Path::new("/"), &task.id)
             .expect("the task")
             .evidence
             .into_iter()
@@ -1304,6 +1384,75 @@ fn the_follow_up_names_who_made_a_promise_still_in_triage() {
 }
 
 #[test]
+fn a_task_linked_to_a_whole_meeting_is_listed_under_that_meeting() {
+    let (directory, meetings) = workflow_core_tests::store();
+    let meeting = workflow_core_tests::meeting(&meetings, "Slipway inspection", AT);
+    // PANIC: a fixture that cannot open its database is a broken test.
+    let history = Connection::open_in_memory().expect("an in-memory history database");
+    // PANIC: as above, for the planner schema.
+    schema::apply_all(&history).expect("the planner schema");
+    let mut desk = Desk {
+        _directory: directory,
+        meetings,
+        history,
+        meeting,
+        now: AT,
+    };
+    let meeting_id = meeting.uuid().to_string();
+    let listed = desk
+        .both(|history, meetings| {
+            let task = items::insert(
+                history,
+                &NewItem {
+                    title: "Book a follow-up on Slipway inspection",
+                    details: None,
+                    status: WorkStatus::Triage,
+                    priority: 0,
+                    project_id: None,
+                    milestone_id: None,
+                    owner: &WorkOwner::Nobody,
+                    due_at_ms: None,
+                    label_ids: &[],
+                    source_loop_id: None,
+                    recurrence: None,
+                },
+                WorkActor::Agent,
+                AT,
+            )?;
+            planning_store::insert_link(
+                history,
+                &planning_store::SourceLinkDraft {
+                    target_kind: EvidenceTargetKind::Task,
+                    target_id: &task.id,
+                    source_kind: EvidenceSourceKind::Meeting,
+                    source_id: &meeting_id,
+                    at_ms: None,
+                    meeting_note_id: None,
+                },
+                AT,
+            )?;
+            Ok(list(history, Some(meetings), None, &WorkQuery::default(), AT)?)
+        })
+        .expect("the listed tasks");
+
+    let sources = listed
+        .items
+        .iter()
+        .map(|row| {
+            (
+                row.source_meeting_id.as_deref(),
+                row.source_meeting_title.as_deref(),
+                row.source_quote.as_deref(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        sources,
+        [(Some(meeting_id.as_str()), Some("Slipway inspection"), None)]
+    );
+}
+
+#[test]
 fn unidentified_ownership_saved_keeps_manual_owners_after_new_notes() {
     fn unknown_notes(desk: &mut Desk) {
         let meeting = desk.meeting.uuid().to_string();
@@ -1364,4 +1513,620 @@ fn unidentified_ownership_saved_keeps_manual_owners_after_new_notes() {
     .expect("a typed task without a speaker quote")
     .value;
     assert_eq!(typed.owner(), WorkOwner::Myself);
+}
+
+#[test]
+fn restoring_from_the_bin_brings_back_whether_the_task_was_archived() {
+    let mut desk = desk(&[]);
+    let at = desk.tick();
+    let open = create(
+        &mut desk.history,
+        None,
+        by_me(&operation(), at),
+        &typed("Book the venue"),
+    )
+    .expect("an open task")
+    .value;
+    let shelved = create(
+        &mut desk.history,
+        None,
+        by_me(&operation(), at),
+        &typed("Order the cake"),
+    )
+    .expect("a task to archive")
+    .value;
+    let at = desk.tick();
+    set_archived(
+        &mut desk.history,
+        by_me(&operation(), at),
+        std::slice::from_ref(&shelved.id),
+        true,
+    )
+    .expect("archived");
+
+    let at = desk.tick();
+    for id in [&open.id, &shelved.id] {
+        bin::trash(&desk.history, id, WorkActor::Me, at).expect("deleted");
+    }
+    assert!(items::items(&desk.history, true)
+        .expect("every list")
+        .is_empty());
+    assert_eq!(bin::binned(&desk.history, at).expect("the bin").len(), 2);
+
+    let at = desk.tick();
+    let restored = [&open.id, &shelved.id].map(|id| {
+        bin::untrash(&desk.history, id, WorkActor::Me, at)
+            .expect("restored")
+            .after
+            .archived_at_ms
+            .is_some()
+    });
+    assert_eq!(restored, [false, true]);
+
+    let at = desk.tick();
+    bin::trash(&desk.history, &open.id, WorkActor::Me, at).expect("deleted again");
+    let later = at + crate::planning::catalog::BIN_MS;
+    assert!(bin::untrash(&desk.history, &open.id, WorkActor::Me, later).is_err());
+    assert_eq!(
+        bin::purge(&desk.history, later).expect("the purge"),
+        [open.id.clone()]
+    );
+}
+
+#[test]
+fn the_inbox_hears_what_others_change_on_the_users_tasks_and_not_the_user() {
+    fn by_agent(operation_id: &str, at_ms: i64) -> Change<'_> {
+        Change {
+            operation_id,
+            actor: WorkActor::Agent,
+            at_ms,
+        }
+    }
+    let mut desk = desk(&[]);
+    let at = desk.tick();
+    let mine = create(
+        &mut desk.history,
+        None,
+        by_agent(&operation(), at),
+        &WorkItemInput {
+            owner: Some(WorkOwner::Myself),
+            ..typed("Book the venue")
+        },
+    )
+    .expect("a task an agent gave the user")
+    .value;
+    assert!(inbox::subscribed(&desk.history, &mine.id).expect("subscribed"));
+
+    let at = desk.tick();
+    let started = update(
+        &mut desk.history,
+        None,
+        by_me(&operation(), at),
+        &mine.id,
+        mine.revision,
+        &status(WorkStatus::InProgress),
+    )
+    .expect("the user starts it")
+    .value;
+    let at = desk.tick();
+    update(
+        &mut desk.history,
+        None,
+        by_agent(&operation(), at),
+        &mine.id,
+        started.revision,
+        &status(WorkStatus::Done),
+    )
+    .expect("an agent finishes it");
+
+    let now = desk.tick();
+    let heard = inbox::notifications(&desk.history, inbox::Shown::default(), now)
+        .expect("the inbox")
+        .into_iter()
+        .map(|notice| (notice.kind, notice.to))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        heard,
+        [
+            (inbox::NotificationKind::Status, Some("done".to_owned())),
+            (inbox::NotificationKind::Assigned, Some("self".to_owned())),
+        ]
+    );
+}
+
+#[test]
+fn the_inbox_hears_each_field_an_agent_changes_on_a_followed_task_and_not_the_users() {
+    let mut desk = desk(&[]);
+    let at = desk.tick();
+    let mine = create(
+        &mut desk.history,
+        None,
+        by_me(&operation(), at),
+        &typed("Book the venue"),
+    )
+    .expect("a task the user files")
+    .value;
+    let at = desk.tick();
+    let dated = update(
+        &mut desk.history,
+        None,
+        by_me(&operation(), at),
+        &mine.id,
+        mine.revision,
+        &WorkPatch {
+            due_at_ms: Some(Some(at + 86_400_000)),
+            ..WorkPatch::default()
+        },
+    )
+    .expect("the user dates it")
+    .value;
+    let at = desk.tick();
+    update(
+        &mut desk.history,
+        None,
+        Change {
+            operation_id: &operation(),
+            actor: WorkActor::Agent,
+            at_ms: at,
+        },
+        &mine.id,
+        dated.revision,
+        &WorkPatch {
+            priority: Some(1),
+            ..WorkPatch::default()
+        },
+    )
+    .expect("an agent raises it");
+
+    let now = desk.tick();
+    let heard = inbox::notifications(&desk.history, inbox::Shown::default(), now)
+        .expect("the inbox")
+        .into_iter()
+        .map(|notice| (notice.kind, notice.field))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        heard,
+        [(inbox::NotificationKind::Changed, Some("priority".to_owned()))]
+    );
+}
+
+#[test]
+fn writing_a_task_handle_in_the_details_links_that_task_once() {
+    let mut desk = desk(&[]);
+    let made = |desk: &mut Desk, title: &str| {
+        let at = desk.tick();
+        create(&mut desk.history, None, by_me(&operation(), at), &typed(title))
+            .expect("a typed item")
+            .value
+    };
+    let launch = made(&mut desk, "Ship the launch");
+    let outline = made(&mut desk, "Send the outline");
+
+    let mut current = outline;
+    for _ in 0..2 {
+        let at = desk.tick();
+        current = update(
+            &mut desk.history,
+            None,
+            by_me(&operation(), at),
+            &current.id,
+            current.revision,
+            &WorkPatch {
+                details: Some(Some(format!(
+                    "Needs S-{} first; not S-999 or S-{} itself.",
+                    launch.number, current.number
+                ))),
+                ..WorkPatch::default()
+            },
+        )
+        .expect("details saved")
+        .value;
+        desk.history
+            .execute("UPDATE planning_tasks SET details = 'cleared' WHERE id = ?1", [&current.id])
+            .expect("details cleared");
+    }
+
+    let linked = items::relations(&desk.history, &current.id)
+        .expect("the outline's relations")
+        .into_iter()
+        .map(|relation| (relation.from_id, relation.to_id, relation.kind))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        linked,
+        [(current.id.clone(), launch.id.clone(), WorkRelationKind::Related)]
+    );
+}
+
+#[test]
+fn a_parent_closes_once_its_last_open_sub_task_does() {
+    let mut desk = desk(&[]);
+    let made = |desk: &mut Desk, title: &str, parent: Option<&str>| {
+        let at = desk.tick();
+        let item = create(&mut desk.history, None, by_me(&operation(), at), &typed(title))
+            .expect("a typed item")
+            .value;
+        let Some(parent) = parent else { return item };
+        let at = desk.tick();
+        update(
+            &mut desk.history,
+            None,
+            by_me(&operation(), at),
+            &item.id,
+            item.revision,
+            &WorkPatch {
+                parent_id: Some(Some(parent.to_owned())),
+                ..WorkPatch::default()
+            },
+        )
+        .expect("made a sub-task")
+        .value
+    };
+    let launch = made(&mut desk, "Ship the launch", None);
+    let outline = made(&mut desk, "Send the outline", Some(&launch.id));
+    let deck = made(&mut desk, "Draw the deck", Some(&launch.id));
+
+    let finish = |desk: &mut Desk, item: &WorkItem, to: WorkStatus| {
+        let at = desk.tick();
+        let mut done = update(
+            &mut desk.history,
+            None,
+            by_me(&operation(), at),
+            &item.id,
+            item.revision,
+            &status(to),
+        )
+        .expect("sub-task closed");
+        close_parents(&mut desk.history, None, &mut done.effects).expect("parents closed");
+        desk.item(&launch.id).status
+    };
+    assert_eq!(finish(&mut desk, &outline, WorkStatus::Done), launch.status);
+    assert_eq!(finish(&mut desk, &deck, WorkStatus::Canceled), WorkStatus::Done);
+    let closed_by = items::activity(&desk.history, &launch.id)
+        .expect("the launch's history")
+        .last()
+        .map(|entry| entry.actor);
+    assert_eq!(closed_by, Some(WorkActor::Sona));
+}
+
+fn typed_item(desk: &mut Desk, title: &str) -> WorkItem {
+    let at = desk.tick();
+    create(&mut desk.history, None, by_me(&operation(), at), &typed(title))
+        .expect("a typed item")
+        .value
+}
+
+fn sub_task_of(desk: &mut Desk, item: &WorkItem, parent_id: &str) -> WorkItem {
+    let at = desk.tick();
+    update(
+        &mut desk.history,
+        None,
+        by_me(&operation(), at),
+        &item.id,
+        item.revision,
+        &WorkPatch {
+            parent_id: Some(Some(parent_id.to_owned())),
+            ..WorkPatch::default()
+        },
+    )
+    .expect("made a sub-task")
+    .value
+}
+
+/// A launch whose deck is done and whose outline, the meeting's
+/// commitment, is its last open sub-task.
+fn launch_left_open() -> (Desk, WorkItem, WorkItem, MeetingLoopId) {
+    let mut desk = desk(&["Send the outline"]);
+    let (outline, loop_id) = desk.accepted();
+    let launch = typed_item(&mut desk, "Ship the launch");
+    let deck = typed_item(&mut desk, "Draw the deck");
+    let deck = sub_task_of(&mut desk, &deck, &launch.id);
+    let outline = sub_task_of(&mut desk, &outline, &launch.id);
+    let at = desk.tick();
+    // PANIC: the deck was just made a sub-task at this revision.
+    update(
+        &mut desk.history,
+        None,
+        by_me(&operation(), at),
+        &deck.id,
+        deck.revision,
+        &status(WorkStatus::Done),
+    )
+    .expect("the deck done");
+    (desk, launch, outline, loop_id)
+}
+
+#[test]
+fn a_parent_closes_when_resolving_its_commitment_closes_its_last_sub_task() {
+    for close in [true, false] {
+        let (mut desk, launch, _, loop_id) = launch_left_open();
+        let revision = desk.page_row(&loop_id).revision;
+        let at = desk.tick();
+        desk.meetings
+            .resolve_loop(
+                MeetingLoopResolveRequest {
+                    operation_id: MeetingOperationId::new(),
+                    loop_id: loop_id.clone(),
+                    expected_revision: revision,
+                    resolution: MeetingLoopResolution::Done,
+                },
+                OperationActor::User,
+                at,
+            )
+            .expect("the commitment resolved on its page");
+        let at = desk.tick();
+        desk.both(|history, meetings| {
+            let tx = history.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            follow_loop_with(&tx, meetings, &loop_id, close, at)?;
+            tx.commit()?;
+            Ok(())
+        })
+        .expect("the tracker following its commitment");
+        let expected = if close { WorkStatus::Done } else { launch.status };
+        assert_eq!(desk.item(&launch.id).status, expected);
+    }
+}
+
+#[test]
+fn a_parent_closes_when_its_last_sub_task_is_marked_a_duplicate() {
+    for close in [true, false] {
+        let (mut desk, launch, outline, _) = launch_left_open();
+        let original = typed_item(&mut desk, "Send the launch outline");
+        let at = desk.tick();
+        let mut done = desk
+            .both(|history, meetings| {
+                mark_duplicate(
+                    history,
+                    Some(meetings),
+                    by_me(&operation(), at),
+                    &outline.id,
+                    &original.id,
+                )
+            })
+            .expect("the outline folded into the original");
+        if close {
+            close_parents(&mut desk.history, None, &mut done.effects).expect("parents closed");
+        }
+        let expected = if close { WorkStatus::Done } else { launch.status };
+        assert_eq!(desk.item(&launch.id).status, expected);
+    }
+}
+
+#[test]
+fn a_view_saved_before_sub_tasks_swimlanes_and_hidden_columns_reads_with_their_defaults() {
+    let desk = desk(&[]);
+    let saved_before = r#"{"layout":"board","groupBy":"project","orderBy":"priority","showEmptyGroups":false,"properties":["id","priority"]}"#;
+    desk.history
+        .execute(
+            "INSERT INTO planning_views (id, name, query_json, display_json, revision, created_at_ms, updated_at_ms)
+             VALUES ('old', 'Old view', '{}', ?1, 1, 0, 0)",
+            [saved_before],
+        )
+        .expect("a view in the old shape");
+
+    let view = items::views(&desk.history)
+        .expect("the saved views")
+        .remove(0);
+    assert_eq!(view.display.group_by, WorkGroupBy::Project);
+    assert!(view.display.show_sub_tasks);
+    assert_eq!(view.display.sub_group_by, WorkGroupBy::None);
+    assert!(view.display.hidden_columns.is_empty());
+}
+
+#[test]
+fn moving_tasks_puts_them_at_either_end_or_beside_another_in_the_manual_order() {
+    let mut desk = desk(&[]);
+    let mut ids = HashMap::new();
+    for title in ["A", "B", "C", "D"] {
+        let at = desk.tick();
+        let made = create(&mut desk.history, None, by_me(&operation(), at), &typed(title))
+            .expect("a typed task")
+            .value;
+        ids.insert(title, made.id);
+    }
+    let id = |title: &str| ids[title].clone();
+    let order = |history: &Connection| -> String {
+        history
+            .prepare("SELECT title FROM planning_tasks ORDER BY sort_order, number")
+            .expect("the order query")
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("the order")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("the titles")
+            .concat()
+    };
+    let place = |history: &Connection, moving: &[&str], place: WorkPlace| {
+        let moving: Vec<String> = moving.iter().map(|title| id(title)).collect();
+        items::place_manually(history, &moving, &place).expect("the move")
+    };
+
+    place(&desk.history, &["C"], WorkPlace::Top);
+    assert_eq!(order(&desk.history), "CABD");
+    place(&desk.history, &["D", "A"], WorkPlace::Bottom);
+    assert_eq!(order(&desk.history), "CBAD");
+    place(&desk.history, &["D"], WorkPlace::Before(id("B")));
+    assert_eq!(order(&desk.history), "CDBA");
+    let moved = place(&desk.history, &["C"], WorkPlace::After(id("A")));
+    assert_eq!(order(&desk.history), "DBAC");
+    assert_eq!(moved.len(), 1);
+    assert_eq!(moved[0].after.revision, moved[0].before.revision + 1);
+
+    desk.history
+        .execute("UPDATE planning_tasks SET sort_order = 5.0", [])
+        .expect("every task tied");
+    let renumbered = place(&desk.history, &["A"], WorkPlace::Before(id("C")));
+    assert_eq!(order(&desk.history), "BACD");
+    let sorts: Vec<f64> = renumbered.iter().map(|changed| changed.after.sort_order).collect();
+    assert!(sorts.windows(2).all(|pair| pair[0] < pair[1]), "{sorts:?}");
+
+    assert!(items::place_manually(&desk.history, &[id("B")], &WorkPlace::Before(id("B"))).is_err());
+}
+
+/// A task keeps the moment it was finished while it stays done, and loses
+/// it once it opens again.
+#[test]
+fn a_task_keeps_when_it_was_done_until_it_opens_again() {
+    // PANIC: a fixture that cannot open its database is a broken test.
+    let conn = Connection::open_in_memory().expect("an in-memory history database");
+    // PANIC: as above, for the planner schema.
+    schema::apply_all(&conn).expect("the planner schema");
+    // PANIC: a fixture that cannot add its task is a broken test.
+    let task = items::insert(
+        &conn,
+        &NewItem {
+            title: "Send the deck",
+            details: None,
+            status: WorkStatus::NotStarted,
+            priority: 0,
+            project_id: None,
+            milestone_id: None,
+            owner: &WorkOwner::Myself,
+            due_at_ms: None,
+            label_ids: &[],
+            source_loop_id: None,
+            recurrence: None,
+        },
+        WorkActor::Me,
+        on_the_clock(2, 9),
+    )
+    .expect("a task");
+    let change = |patch: &WorkPatch, kind: WorkActivityKind, hour: u32| {
+        // PANIC: each change is one the tracker takes.
+        items::apply(&conn, &task.id, patch, kind, WorkActor::Me, on_the_clock(3, hour))
+            .expect("a change");
+        items::item(&conn, &task.id).expect("the task").completed_at_ms
+    };
+    let estimate = WorkPatch {
+        estimate: Some(Some(3)),
+        ..WorkPatch::default()
+    };
+
+    assert_eq!(
+        [
+            change(&status(WorkStatus::Done), WorkActivityKind::Status, 10),
+            change(&estimate, WorkActivityKind::Estimate, 11),
+            change(&status(WorkStatus::InProgress), WorkActivityKind::Status, 12),
+        ],
+        [Some(on_the_clock(3, 10)), Some(on_the_clock(3, 10)), None]
+    );
+}
+
+/// Work finished before tasks kept when they were done takes the last time
+/// its history shows it done, and its last status change when it has none.
+#[test]
+fn done_work_from_before_takes_when_it_was_done_from_its_history() {
+    // PANIC: a fixture that cannot open its database is a broken test.
+    let mut history = Connection::open_in_memory().expect("a history database");
+    let all = crate::managers::history::MIGRATIONS.to_vec();
+    let columns = all
+        .iter()
+        .position(|step| *step == rusqlite_migration::M::up(schema::TASK_COLUMNS_MIGRATION))
+        .expect("the task columns migration");
+    let migrations = rusqlite_migration::Migrations::new(all);
+    // PANIC: as above, for the schema before the task columns.
+    migrations.to_version(&mut history, columns).expect("the schema before");
+    // PANIC: a fixture that cannot add its rows is a broken test.
+    history
+        .execute_batch(
+            "INSERT INTO planning_tasks (id, number, title, owner_is_self, status, priority,
+                 status_changed_at_ms, sort_order, revision, created_at_ms, updated_at_ms)
+             VALUES ('logged', 1, 'Logged', 1, 'done', 0, 9000, 1, 1, 1000, 9000),
+                    ('unlogged', 2, 'Unlogged', 1, 'done', 0, 7000, 2, 1, 1000, 7000),
+                    ('open', 3, 'Open', 1, 'in_progress', 0, 8000, 3, 1, 1000, 8000);
+             INSERT INTO planning_task_activity (id, task_id, at_ms, actor, kind, from_value, to_value)
+             VALUES ('a1', 'logged', 3000, 'me', 'status', 'not_started', 'done'),
+                    ('a2', 'logged', 4000, 'me', 'status', 'done', 'in_progress'),
+                    ('a3', 'logged', 5000, 'me', 'status', 'in_progress', 'done'),
+                    ('a4', 'logged', 6000, 'me', 'title', 'Old', 'done'),
+                    ('a5', 'open', 2000, 'me', 'status', 'not_started', 'done');",
+        )
+        .expect("tasks from before");
+    // PANIC: as above, for the migration under test.
+    migrations.to_latest(&mut history).expect("the task columns");
+
+    let mut read = history
+        .prepare("SELECT id, completed_at_ms FROM planning_tasks ORDER BY number")
+        .expect("a read");
+    let done: Vec<(String, Option<i64>)> = read
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .expect("the tasks")
+        .collect::<rusqlite::Result<_>>()
+        .expect("each task");
+    assert_eq!(
+        done,
+        [
+            ("logged".to_owned(), Some(5000)),
+            ("unlogged".to_owned(), Some(7000)),
+            ("open".to_owned(), None),
+        ]
+    );
+}
+
+/// The weekly digest tells a project's work done that week, leaves out work
+/// drawn from meetings it cannot read, and posts once per week's key.
+#[test]
+fn the_weekly_digest_leaves_out_meeting_work_and_posts_once_a_week() {
+    let mut desk = desk(&["Send the outline"]);
+    let (tracked, _) = desk.accepted();
+    let at = desk.tick();
+    // PANIC: a project on the fixture's own database.
+    let project =
+        planning_store::insert_project(&desk.history, "Launch", None, at).expect("a project");
+    let booked = create(
+        &mut desk.history,
+        None,
+        by_me(&operation(), at),
+        &WorkItemInput {
+            project_id: Some(project.id.clone()),
+            ..typed("Book the venue")
+        },
+    )
+    .expect("a task typed into the project")
+    .value;
+    for task in [&tracked, &booked] {
+        let at = desk.tick();
+        update(
+            &mut desk.history,
+            None,
+            by_me(&operation(), at),
+            &task.id,
+            task.revision,
+            &WorkPatch {
+                project_id: Some(Some(project.id.clone())),
+                ..status(WorkStatus::Done)
+            },
+        )
+        .expect("the task done in the project");
+    }
+    let now = desk.tick();
+
+    let hidden = super::digest::hidden(&desk.history, None).expect("the hidden tasks");
+    let shown = std::collections::HashSet::new();
+    let digest =
+        super::digest::build(&desk.history, &hidden, &shown, now - super::digest::WEEK_MS, now)
+            .expect("the digest");
+    let done: Vec<(&str, Vec<&str>)> = digest
+        .projects
+        .iter()
+        .map(|told| {
+            let ids = told.done.iter().map(|task| task.id.as_str()).collect();
+            (told.title.as_str(), ids)
+        })
+        .collect();
+    assert_eq!(done, [("Launch", vec![booked.id.as_str()])]);
+
+    let posted = [now, now + 1].map(|at| {
+        inbox::digest_posted(&desk.history, &digest, Some("digest:2023-11-13"), at)
+            .expect("a post")
+            .is_some()
+    });
+    let heard = inbox::notifications(&desk.history, inbox::Shown::default(), now + 1)
+        .expect("the inbox");
+    assert_eq!(posted, [true, false]);
+    assert_eq!(
+        heard
+            .iter()
+            .filter_map(|notice| notice.digest.as_ref())
+            .collect::<Vec<_>>(),
+        [&digest]
+    );
 }

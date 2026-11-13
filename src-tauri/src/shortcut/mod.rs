@@ -1247,32 +1247,40 @@ pub fn change_post_process_base_url_setting(
     base_url: String,
 ) -> Result<(), String> {
     settings::try_update_settings(&app, |settings| {
-        let provider = settings
-            .post_process_provider(&provider_id)
-            .cloned()
-            .ok_or_else(|| format!("Provider '{}' not found", provider_id))?;
-
-        if provider.id != "custom" {
-            return Err(format!(
-                "Provider '{}' does not allow editing the base URL",
-                provider.label
-            ));
-        }
-
-        let mut candidate = provider;
-        candidate.base_url = base_url;
-        candidate.endpoint().map_err(|_| {
-            "Custom provider URLs must use HTTPS or loopback HTTP without credentials, queries, or fragments"
-                .to_string()
-        })?;
-
-        let provider = settings
-            .post_process_provider_mut(&provider_id)
-            .ok_or_else(|| "Provider is no longer configured".to_string())?;
-        provider.base_url = candidate.base_url;
-        settings.post_process_provider_consents.remove(&provider_id);
-        Ok(())
+        apply_post_process_base_url(settings, &provider_id, base_url)
     })
+}
+
+pub(crate) fn apply_post_process_base_url(
+    settings: &mut settings::AppSettings,
+    provider_id: &str,
+    base_url: String,
+) -> Result<(), String> {
+    let provider = settings
+        .post_process_provider(provider_id)
+        .cloned()
+        .ok_or_else(|| format!("Provider '{}' not found", provider_id))?;
+
+    if provider.id != "custom" {
+        return Err(format!(
+            "Provider '{}' does not allow editing the base URL",
+            provider.label
+        ));
+    }
+
+    let mut candidate = provider;
+    candidate.base_url = base_url;
+    candidate.endpoint().map_err(|_| {
+        "Custom provider URLs must use HTTPS or loopback HTTP without credentials, queries, or fragments"
+            .to_string()
+    })?;
+
+    let provider = settings
+        .post_process_provider_mut(provider_id)
+        .ok_or_else(|| "Provider is no longer configured".to_string())?;
+    provider.base_url = candidate.base_url;
+    settings.post_process_provider_consents.remove(provider_id);
+    Ok(())
 }
 
 /// Generic helper to validate provider exists
@@ -1345,42 +1353,51 @@ pub fn update_post_process_prompt(
     name: String,
     prompt: String,
 ) -> Result<(), String> {
-    settings::try_update_settings(&app, |settings| {
-        let existing_prompt = settings
-            .post_process_prompts
-            .iter_mut()
-            .find(|prompt| prompt.id == id)
-            .ok_or_else(|| format!("Prompt with id '{}' not found", id))?;
-        existing_prompt.name = name;
-        existing_prompt.prompt = prompt;
-        Ok(())
-    })
+    settings::try_update_settings(&app, |settings| update_prompt_in(settings, &id, name, prompt))
+}
+
+pub(crate) fn update_prompt_in(
+    settings: &mut settings::AppSettings,
+    id: &str,
+    name: String,
+    prompt: String,
+) -> Result<(), String> {
+    let existing_prompt = settings
+        .post_process_prompts
+        .iter_mut()
+        .find(|prompt| prompt.id == id)
+        .ok_or_else(|| format!("Prompt with id '{}' not found", id))?;
+    existing_prompt.name = name;
+    existing_prompt.prompt = prompt;
+    Ok(())
 }
 
 #[tauri::command]
 #[specta::specta]
 pub fn delete_post_process_prompt(app: AppHandle, id: String) -> Result<(), String> {
-    settings::try_update_settings(&app, |settings| {
-        if settings.post_process_prompts.len() <= 1 {
-            return Err("Cannot delete the last prompt".to_string());
-        }
+    settings::try_update_settings(&app, |settings| delete_prompt_in(settings, &id))
+}
 
-        let original_len = settings.post_process_prompts.len();
-        settings
+pub(crate) fn delete_prompt_in(settings: &mut settings::AppSettings, id: &str) -> Result<(), String> {
+    if settings.post_process_prompts.len() <= 1 {
+        return Err("Cannot delete the last prompt".to_string());
+    }
+
+    let original_len = settings.post_process_prompts.len();
+    settings
+        .post_process_prompts
+        .retain(|prompt| prompt.id != id);
+    if settings.post_process_prompts.len() == original_len {
+        return Err(format!("Prompt with id '{}' not found", id));
+    }
+
+    if settings.post_process_selected_prompt_id.as_deref() == Some(id) {
+        settings.post_process_selected_prompt_id = settings
             .post_process_prompts
-            .retain(|prompt| prompt.id != id);
-        if settings.post_process_prompts.len() == original_len {
-            return Err(format!("Prompt with id '{}' not found", id));
-        }
-
-        if settings.post_process_selected_prompt_id.as_ref() == Some(&id) {
-            settings.post_process_selected_prompt_id = settings
-                .post_process_prompts
-                .first()
-                .map(|prompt| prompt.id.clone());
-        }
-        Ok(())
-    })
+            .first()
+            .map(|prompt| prompt.id.clone());
+    }
+    Ok(())
 }
 
 fn custom_provider_can_fetch_without_secret(provider: &settings::PostProcessProvider) -> bool {

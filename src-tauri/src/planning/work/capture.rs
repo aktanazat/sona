@@ -6,9 +6,11 @@
 use super::items;
 use super::parse::{parse, spoken_tasks, Lexicon, Said, SpokenTask, WorkField};
 use super::types::{WorkActor, WorkItem, WorkItemInput, WorkOwner, WorkStatus};
-use super::{insert_input, run_history, run_with_meetings, Change, Done, Effects};
+use super::{insert_input, run_history, run_with_meetings, with_meetings, Change, Done, Effects};
 use crate::context::{read_front_window, FrontWindow, FrontWindowRead};
+use crate::managers::history::HistoryManager;
 use crate::meeting::open_windows::window_label;
+use crate::meeting::session::MeetingSessionManager;
 use crate::planning::sources;
 use crate::planning::store::{self, Refusal};
 use crate::planning::types::EvidenceSourceKind;
@@ -232,15 +234,63 @@ pub async fn work_take_lines(
     take_lines_as(&app, WorkActor::Me, &operation_id, &lines).await
 }
 
+/// What [`take_lines_as`] makes of one line.
+pub(crate) enum TakenLine {
+    /// The item already following the line's meeting commitment.
+    Followed(WorkItem),
+    /// A new Triage item.
+    New(WorkItemInput),
+}
+
+fn taken_line<Tz: chrono::TimeZone>(
+    history: &Connection,
+    line: &WorkTakenLine,
+    lexicon: &Lexicon,
+    now: &chrono::DateTime<Tz>,
+) -> StorageResult<TakenLine> {
+    let followed = match &line.source {
+        WorkCaptureSource::Loop { loop_id } => items::by_source_loop(history, loop_id)?,
+        _ => None,
+    };
+    Ok(followed.map_or_else(
+        || TakenLine::New(line_input(line, lexicon, now)),
+        TakenLine::Followed,
+    ))
+}
+
+fn takeable(lines: &[WorkTakenLine]) -> Result<(), String> {
+    if lines.is_empty() || lines.iter().any(|line| line.quote.trim().is_empty()) {
+        return Err(crate::planning::failure(Refusal::Invalid.into()));
+    }
+    Ok(())
+}
+
+/// What [`take_lines_as`] would make of `lines`, with nothing written.
+pub(crate) async fn take_lines_preview(
+    app: &AppHandle,
+    lines: &[WorkTakenLine],
+) -> Result<Vec<TakenLine>, String> {
+    takeable(lines)?;
+    let history = app.state::<Arc<HistoryManager>>();
+    let meetings = app.state::<Arc<MeetingSessionManager>>();
+    with_meetings(&history, &meetings, |history, meetings| {
+        let lexicon = Lexicon::read(history, meetings)?;
+        let now = chrono::Local::now();
+        lines
+            .iter()
+            .map(|line| taken_line(history, line, &lexicon, &now))
+            .collect()
+    })
+    .await
+}
+
 pub(crate) async fn take_lines_as(
     app: &AppHandle,
     actor: WorkActor,
     operation_id: &str,
     lines: &[WorkTakenLine],
 ) -> Result<Vec<WorkItem>, String> {
-    if lines.is_empty() || lines.iter().any(|line| line.quote.trim().is_empty()) {
-        return Err(crate::planning::failure(Refusal::Invalid.into()));
-    }
+    takeable(lines)?;
     let change = Change::now(operation_id, actor);
     run_with_meetings(app, |history, meetings| {
         let lexicon = Lexicon::read(history, meetings)?;
@@ -255,19 +305,10 @@ pub(crate) async fn take_lines_as(
                 let mut effects = Effects::default();
                 let mut items = Vec::with_capacity(lines.len());
                 for line in lines {
-                    let followed = match &line.source {
-                        WorkCaptureSource::Loop { loop_id } => items::by_source_loop(tx, loop_id)?,
-                        _ => None,
-                    };
-                    let item = match followed {
-                        Some(item) => item,
-                        None => {
-                            let item = insert_input(
-                                tx,
-                                meetings,
-                                change,
-                                &line_input(line, &lexicon, &now),
-                            )?;
+                    let item = match taken_line(tx, line, &lexicon, &now)? {
+                        TakenLine::Followed(item) => item,
+                        TakenLine::New(input) => {
+                            let item = insert_input(tx, meetings, change, &input)?;
                             attach(tx, &item.id, &line.source, change.at_ms)?;
                             item
                         }

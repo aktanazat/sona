@@ -330,7 +330,7 @@ fn save_review(
                 ScratchReviewAuthorship::Interpretation => ScratchVersionKind::Synthesis,
                 ScratchReviewAuthorship::ExplicitNote => ScratchVersionKind::Edit,
             };
-            record_version(&transaction, &note.id, &note.body, now, kind)?;
+            record_version(&transaction, &note.id, &note.body, now, kind, super::Author::Me)?;
             if draft.authorship == ScratchReviewAuthorship::Interpretation {
                 transaction.execute("INSERT INTO scratch_note_origins (note_id, kind) VALUES (?1, 'interpretation')", params![note.id])?;
             }

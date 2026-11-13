@@ -168,7 +168,7 @@ private struct LibraryActivity: View {
 
     var body: some View {
         if let trend = store.trend, !trend.points.isEmpty {
-            PageSection("Activity") {
+            PageSection("Over time") {
                 Card {
                     VStack(alignment: .leading, spacing: 16) {
                         HStack(alignment: .firstTextBaseline, spacing: 12) {

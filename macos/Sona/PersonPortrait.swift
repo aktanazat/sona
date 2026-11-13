@@ -81,7 +81,9 @@ struct PersonPortrait: View {
         }
     }
 
-    private var initials: String {
+    private var initials: String { Self.initials(name) }
+
+    static func initials(_ name: String) -> String {
         name.split(whereSeparator: \.isWhitespace).prefix(2)
             .compactMap { $0.first(where: \.isLetter) }.map { String($0).uppercased() }.joined()
     }
