@@ -4322,12 +4322,17 @@ impl MeetingSessionManager {
                 return Err(MeetingCommandError::InvalidRequest)
             }
             (_, None) => None,
-        };
+        }
+        .map(str::to_owned);
         let store = self.store().await?;
         let live = self.live_transcript(session_id);
-        self.processing
-            .live_help(&store, session_id, live.as_deref(), kind, question)
-            .map_err(map_processing_error)
+        let processing = Arc::clone(&self.processing);
+        tauri::async_runtime::spawn_blocking(move || {
+            processing.live_help(&store, session_id, live.as_deref(), kind, question.as_deref())
+        })
+        .await
+        .map_err(|_| MeetingCommandError::EngineFailure)?
+        .map_err(map_processing_error)
     }
 
     /// The words the running capture has recognized so far, for the live
