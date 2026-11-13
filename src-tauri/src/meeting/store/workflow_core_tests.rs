@@ -75,6 +75,24 @@ pub(crate) fn reviewable_meeting(
     id
 }
 
+pub(crate) fn recorded_meeting(
+    store: &MeetingStore,
+    title: &str,
+    at_utc_ms: i64,
+) -> MeetingSessionId {
+    let id = reviewable_meeting(store, title, at_utc_ms);
+    // PANIC: a fixture; a setup that fails should fail the test that asked.
+    store
+        .connection()
+        .unwrap()
+        .execute(
+            "UPDATE meeting_sessions SET origin_kind = '\"manual\"' WHERE id = ?1",
+            params![id.uuid().to_string()],
+        )
+        .unwrap();
+    id
+}
+
 pub(crate) fn processing_plan(
     store: &MeetingStore,
     plan: &MeetingRunPlan,

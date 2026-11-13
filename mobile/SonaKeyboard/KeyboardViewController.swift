@@ -9,12 +9,21 @@ private final class KeyboardState: ObservableObject {
     @Published var session = KeyboardSessionState()
     @Published var startURL = DictationLink.url
     @Published var waiting = false
+    /// The message on show at the last key press. Any other message is new, and the word
+    /// strip gives way to it until the next key.
+    @Published var seenMessage: String?
     var warm: Bool { session.isWarm(at: Date()) }
+    var newMessage: String? {
+        guard hasFullAccess, let message = session.message ?? notice, message != seenMessage else { return nil }
+        return message
+    }
 }
 
 @MainActor
 final class KeyboardViewController: UIInputViewController {
     private let state = KeyboardState()
+    private let typing = TypingModel()
+    private var session = TypingSession(corrector: nil)
     private var minimumHeight: NSLayoutConstraint?
     private var signal: KeyboardSignal?
     private var ticker: Task<Void, Never>?
@@ -28,16 +37,22 @@ final class KeyboardViewController: UIInputViewController {
         signal = KeyboardSignal(.state) { [weak self] in
             Task { @MainActor in self?.reload() }
         }
+        session = TypingSession(corrector: TypingCorrector(language: primaryLanguage ?? "en-US"))
+        typing.press = { [weak self] key in self?.press(key) }
+        typing.choose = { [weak self] word in self?.choose(word) }
+        requestSupplementaryLexicon { [weak self] lexicon in
+            let entries = lexicon.entries.map { (shortcut: $0.userInput, text: $0.documentText) }
+            Task { @MainActor in
+                entries.forEach { self?.session.lexicon.add(shortcut: $0.shortcut, text: $0.text) }
+            }
+        }
         let content = KeyboardView(
             state: state,
+            typing: typing,
             microphone: { [weak self] in self?.start() },
             stop: { [weak self] in self?.send(.stop) },
             insert: { [weak self] in self?.insertDraft() },
-            discard: { [weak self] in self?.discardDraft() },
-            nextKeyboard: { [weak self] in self?.advanceToNextInputMode() },
-            space: { [weak self] in self?.textDocumentProxy.insertText(" ") },
-            delete: { [weak self] in self?.textDocumentProxy.deleteBackward() },
-            newLine: { [weak self] in self?.textDocumentProxy.insertText("\n") }
+            discard: { [weak self] in self?.discardDraft() }
         )
         let host = UIHostingController(rootView: content)
         addChild(host)
@@ -57,6 +72,13 @@ final class KeyboardViewController: UIInputViewController {
     override func viewWillLayoutSubviews() {
         super.viewWillLayoutSubviews()
         if let minimumHeight, minimumHeight.constant != wantedHeight { minimumHeight.constant = wantedHeight }
+    }
+
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        typing.hasTyped = false
+        if hasFullAccess { loadVocabulary() }
+        refreshTyping(startingField: true)
     }
 
     override func viewDidAppear(_ animated: Bool) {
@@ -83,12 +105,135 @@ final class KeyboardViewController: UIInputViewController {
     override func textDidChange(_ textInput: (any UITextInput)?) {
         super.textDidChange(textInput)
         reload()
+        refreshTyping(startingField: false)
+    }
+
+    private var textBefore: String { textDocumentProxy.documentContextBeforeInput ?? "" }
+    /// UIKit declares this nonnull, yet some fields hand over nil, and Swift's bridge to a
+    /// non-optional UUID traps on it. The same getter, declared optional, keeps nil as nil.
+    private var documentID: UUID? {
+        unsafeBitCast(textDocumentProxy as AnyObject, to: OptionalDocumentIdentifier.self).documentIdentifier
+    }
+
+    /// Correction is off where the field asks for it, and in fields for passwords, numbers,
+    /// addresses and links, where a dictionary word is rarely what was meant.
+    private var corrects: Bool {
+        let proxy = textDocumentProxy
+        guard proxy.autocorrectionType != .no, proxy.isSecureTextEntry != true else { return false }
+        switch proxy.keyboardType ?? .default {
+        case .URL, .emailAddress, .numberPad, .phonePad, .namePhonePad, .decimalPad, .asciiCapableNumberPad: return false
+        default: return true
+        }
+    }
+
+    private func press(_ key: Key) {
+        typing.hasTyped = true
+        state.notice = nil
+        state.seenMessage = state.session.message
+        switch key {
+        case let .character(text):
+            let character = typing.layer == .letters && typing.shift != .off ? text.uppercased() : text
+            if ".,!?;:)\"".contains(character) {
+                apply(session.end(with: character, before: textBefore, corrects: corrects && cursorEndsWord))
+            } else {
+                apply(session.type(character))
+            }
+            if character == "'" { typing.layer = .letters }
+        case .space, .newLine:
+            let separator = key == .space ? " " : "\n"
+            apply(session.end(with: separator, before: textBefore, corrects: corrects && cursorEndsWord))
+            typing.layer = .letters
+        case .delete:
+            apply(session.backspace(before: textBefore))
+        case .shift:
+            toggleShift()
+            return
+        case let .layer(layer):
+            typing.layer = layer
+            return
+        case .nextKeyboard:
+            advanceToNextInputMode()
+            return
+        }
+        refreshShift()
+        refreshSuggestions()
+    }
+
+    private func choose(_ word: String) {
+        typing.hasTyped = true
+        apply(session.choose(word, before: textBefore))
+        refreshShift()
+        refreshSuggestions()
+    }
+
+    private func apply(_ edit: TypingSession.Edit) {
+        for _ in 0..<edit.deleteCount { textDocumentProxy.deleteBackward() }
+        if !edit.insert.isEmpty { textDocumentProxy.insertText(edit.insert) }
+    }
+
+    /// A word with letters right after the cursor is being edited in the middle, so ending
+    /// it here must not rewrite it.
+    private var cursorEndsWord: Bool {
+        guard let next = textDocumentProxy.documentContextAfterInput?.first else { return true }
+        return !TypingText.isWordCharacter(next)
+    }
+
+    private func toggleShift() {
+        if session.tapShift(at: Date()) {
+            typing.shift = .locked
+        } else {
+            typing.shift = typing.shift == .off ? .once : .off
+        }
+    }
+
+    private func refreshTyping(startingField: Bool) {
+        let proxy = textDocumentProxy
+        typing.returnKey = ReturnKey(proxy.returnKeyType ?? .default)
+        typing.showsNextKeyboard = needsInputModeSwitchKey
+        switch proxy.keyboardType ?? .default {
+        case .emailAddress: typing.extraKeys = ["@", "."]
+        case .URL, .webSearch: typing.extraKeys = ["/", "."]
+        default: typing.extraKeys = []
+        }
+        if startingField {
+            switch proxy.keyboardType ?? .default {
+            case .numberPad, .phonePad, .decimalPad, .asciiCapableNumberPad, .numbersAndPunctuation:
+                typing.layer = .numbers
+            default:
+                typing.layer = .letters
+            }
+        }
+        refreshShift()
+        refreshSuggestions()
+    }
+
+    private func refreshShift() {
+        guard typing.shift != .locked else { return }
+        let before = textBefore
+        let capitalizes = switch textDocumentProxy.autocapitalizationType ?? .sentences {
+        case .allCharacters: true
+        case .words: before.last.map(\.isWhitespace) ?? true
+        case .sentences: TypingText.startsSentence(before: before[...])
+        case .none: false
+        @unknown default: false
+        }
+        typing.shift = capitalizes ? .once : .off
+    }
+
+    private func refreshSuggestions() {
+        typing.suggestions = corrects && cursorEndsWord ? session.suggestions(before: textBefore) : nil
+    }
+
+    private func loadVocabulary() {
+        do {
+            try KeyboardVocabularyStore.shared().load().forEach { session.lexicon.insert($0) }
+        } catch { state.notice = error.localizedDescription }
     }
 
     private func reload() {
         guard visible else { return }
         state.hasFullAccess = hasFullAccess
-        state.startURL = DictationLink.keyboardURL(documentID: textDocumentProxy.documentIdentifier)
+        state.startURL = DictationLink.keyboardURL(documentID: documentID)
         guard hasFullAccess else {
             state.draft = nil
             state.session = KeyboardSessionState()
@@ -111,7 +256,7 @@ final class KeyboardViewController: UIInputViewController {
             case .waiting(let draft):
                 state.draft = draft
                 // Never send a delayed result to a different text field or app.
-                if draft.documentID == textDocumentProxy.documentIdentifier { insertDraft() }
+                if let documentID, draft.documentID == documentID { insertDraft() }
             case .expired:
                 state.draft = nil
                 state.notice = KeyboardDraftError.expired.localizedDescription
@@ -131,7 +276,7 @@ final class KeyboardViewController: UIInputViewController {
         do {
             try KeyboardSessionStore.shared().send(KeyboardCommand(
                 id: UUID(), action: .start, requestID: id,
-                documentID: textDocumentProxy.documentIdentifier, createdAt: Date()
+                documentID: documentID, createdAt: Date()
             ))
         } catch { state.waiting = false; state.notice = error.localizedDescription }
     }
@@ -141,7 +286,7 @@ final class KeyboardViewController: UIInputViewController {
         do {
             try KeyboardSessionStore.shared().send(KeyboardCommand(
                 id: UUID(), action: action, requestID: id,
-                documentID: textDocumentProxy.documentIdentifier, createdAt: Date()
+                documentID: documentID, createdAt: Date()
             ))
         } catch { state.notice = error.localizedDescription }
     }
@@ -167,75 +312,72 @@ final class KeyboardViewController: UIInputViewController {
 
 private struct KeyboardView: View {
     @ObservedObject var state: KeyboardState
+    let typing: TypingModel
     let microphone: () -> Void
     let stop: () -> Void
     let insert: () -> Void
     let discard: () -> Void
-    let nextKeyboard: () -> Void
-    let space: () -> Void
-    let delete: () -> Void
-    let newLine: () -> Void
 
     var body: some View {
-        VStack(spacing: 8) {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                status.frame(maxWidth: .infinity, alignment: .leading)
+                if state.hasFullAccess {
+                    control
+                } else {
+                    Link("keyboard.openApp", destination: DictationLink.url)
+                        .font(.footnote.weight(.semibold))
+                        .frame(minHeight: 44)
+                }
+            }
+            .frame(height: 48)
+            .padding(.horizontal, 8)
+            GeometryReader { proxy in
+                let rowHeight = proxy.size.height / 4
+                VStack(spacing: 0) {
+                    if state.hasFullAccess, let draft = state.draft {
+                        DraftPanel(text: draft.text, insert: insert, discard: discard)
+                            .frame(height: rowHeight * 3)
+                    } else {
+                        KeyRows(model: typing, rows: typing.rows).frame(height: rowHeight * 3)
+                    }
+                    KeyRows(model: typing, rows: [typing.bottomRow(withDelete: state.hasFullAccess && state.draft != nil)])
+                        .frame(height: rowHeight)
+                }
+            }
+            .padding(.horizontal, 2)
+        }
+        .padding(.bottom, 2)
+        .foregroundStyle(Theme.textPrimary).background(Theme.inset).tint(Theme.accent)
+    }
+
+    /// The word strip while a word is being typed, unless a message came after the last key;
+    /// otherwise what the keyboard has to say.
+    @ViewBuilder
+    private var status: some View {
+        if let suggestions = typing.suggestions, state.newMessage == nil {
+            SuggestionStrip(suggestions: suggestions, choose: typing.choose)
+        } else if !state.hasFullAccess, !typing.hasTyped {
+            hint("keyboard.needsFullAccess")
+        } else if state.hasFullAccess, let notice = state.session.message ?? state.notice {
+            Text(notice).font(.caption).foregroundStyle(Theme.textSecondary).lineLimit(3)
+                .accessibilityIdentifier("keyboard-status")
+        } else if state.hasFullAccess, !typing.hasTyped {
+            hint(state.warm ? "keyboard.ready" : "keyboard.cold")
+        } else {
             HStack(spacing: 8) {
                 SonaMark()
                     .frame(width: 26, height: 15)
-                    .foregroundStyle(Theme.textPrimary)
                     .accessibilityHidden(true)
                 Text("keyboard.title")
                     .font(.subheadline.weight(.semibold))
                     .lineLimit(1)
-                Spacer(minLength: 8)
-                if state.hasFullAccess {
-                    control
-                }
             }
-            .frame(minHeight: 44)
-            ScrollView {
-                VStack(alignment: .leading, spacing: 8) {
-                    if !state.hasFullAccess {
-                        Text("keyboard.needsFullAccess").font(.footnote).foregroundStyle(Theme.textSecondary)
-                        Link("keyboard.openApp", destination: DictationLink.url).frame(minHeight: 44)
-                    } else if let draft = state.draft {
-                        Text(draft.text).font(.body).lineLimit(1...3)
-                        Text("keyboard.otherField").font(.footnote).foregroundStyle(Theme.textSecondary)
-                        HStack(spacing: 8) {
-                            Button("keyboard.insert", action: insert)
-                                .buttonStyle(.borderedProminent)
-                                .foregroundStyle(.white)
-                            Button("keyboard.discard", action: discard)
-                                .buttonStyle(.bordered)
-                                .tint(Theme.textSecondary)
-                        }
-                        .buttonBorderShape(.capsule)
-                        .frame(minHeight: 44)
-                    } else if let notice = state.session.message ?? state.notice {
-                        Text(notice).font(.footnote).foregroundStyle(Theme.textSecondary)
-                            .accessibilityIdentifier("keyboard-status")
-                    } else {
-                        Text(state.warm ? "keyboard.ready" : "keyboard.cold").font(.footnote)
-                            .foregroundStyle(Theme.textSecondary)
-                    }
-                }.frame(maxWidth: .infinity, alignment: .leading)
-            }.scrollBounceBehavior(.basedOnSize)
-            HStack(spacing: 8) {
-                Button(action: nextKeyboard) {
-                    Label("keyboard.next", systemImage: "globe").labelStyle(.iconOnly).frame(minWidth: 52, minHeight: 44)
-                }
-                Button(action: space) {
-                    Text("keyboard.space").frame(maxWidth: .infinity, minHeight: 44)
-                }
-                Button(action: delete) {
-                    Label("keyboard.delete", systemImage: "delete.left").labelStyle(.iconOnly).frame(minWidth: 52, minHeight: 44)
-                }
-                Button(action: newLine) {
-                    Label("keyboard.return", systemImage: "return").labelStyle(.iconOnly).frame(minWidth: 52, minHeight: 44)
-                }
-            }.buttonStyle(KeyStyle())
         }
-        .padding(.horizontal, 12).padding(.vertical, 8)
-        .foregroundStyle(Theme.textPrimary).background(Theme.inset).tint(Theme.accent)
+    }
+
+    private func hint(_ text: LocalizedStringKey) -> some View {
+        Text(text).font(.caption).foregroundStyle(Theme.textSecondary).lineLimit(3).minimumScaleFactor(0.8)
     }
 
     @ViewBuilder
@@ -264,13 +406,33 @@ private struct KeyboardView: View {
     }
 }
 
-private struct KeyStyle: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .background(
-                configuration.isPressed ? Theme.border : Theme.surface,
-                in: RoundedRectangle(cornerRadius: Theme.controlRadius, style: .continuous)
-            )
+/// Dictated text that started in another field, shown in place of the letter keys until
+/// it is inserted here or discarded.
+private struct DraftPanel: View {
+    let text: String
+    let insert: () -> Void
+    let discard: () -> Void
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(text).font(.body).lineLimit(1...3)
+                Text("keyboard.otherField").font(.footnote).foregroundStyle(Theme.textSecondary)
+                HStack(spacing: 8) {
+                    Button("keyboard.insert", action: insert)
+                        .buttonStyle(.borderedProminent)
+                        .foregroundStyle(.white)
+                    Button("keyboard.discard", action: discard)
+                        .buttonStyle(.bordered)
+                        .tint(Theme.textSecondary)
+                }
+                .buttonBorderShape(.capsule)
+                .frame(minHeight: 44)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 10)
+        }
+        .scrollBounceBehavior(.basedOnSize)
     }
 }
 
@@ -295,4 +457,9 @@ private struct SonaMark: View {
             )
         }
     }
+}
+
+/// UITextDocumentProxy's own `documentIdentifier` getter with the nullability it has in practice.
+@objc private protocol OptionalDocumentIdentifier {
+    var documentIdentifier: UUID? { get }
 }

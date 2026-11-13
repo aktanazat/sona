@@ -21,6 +21,9 @@ final class LocationOnce: NSObject, @preconcurrency CLLocationManagerDelegate {
         }
     }
 
+    /// True until he answers the permission prompt the first read raises.
+    var asks: Bool { manager.authorizationStatus == .notDetermined }
+
     private func advance() {
         switch manager.authorizationStatus {
         case .notDetermined: manager.requestWhenInUseAuthorization()

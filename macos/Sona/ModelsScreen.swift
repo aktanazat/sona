@@ -3,6 +3,7 @@ import SwiftUI
 /// The speech models on disk and in the catalog.
 struct ModelsTab: View {
     @Environment(AppModel.self) private var model
+    @State private var showingAvailable = false
 
     var body: some View {
         PageTitle("Models", subtitle: "\(model.activeModel?.name ?? "No model") is listening. Speech is transcribed on this Mac by the model below. Language models shape the words afterwards and never hear the audio.") {
@@ -29,8 +30,25 @@ struct ModelsTab: View {
                 } else if model.models.isEmpty {
                     CardLine("No models to show. Rescan the disk, or check the connection and try again.")
                 } else {
-                    ForEach(model.models) { entry in
+                    let onMac = model.models.filter { $0.status != .available || model.modelOperations[$0.id] != nil }
+                    let available = model.models.filter { !onMac.contains($0) }
+                    ForEach(onMac) { entry in
                         ModelRow(entry: entry, operation: model.modelOperations[entry.id])
+                    }
+                    if onMac.isEmpty || showingAvailable {
+                        ForEach(available) { entry in
+                            ModelRow(entry: entry, operation: model.modelOperations[entry.id])
+                        }
+                    }
+                    if !onMac.isEmpty, !available.isEmpty {
+                        CardRow(action: { showingAvailable.toggle() }) {
+                            Text(showingAvailable ? "Show fewer" : "\(available.count) more to download")
+                                .bodyText(13, Theme.inkSecondary)
+                        } trailing: {
+                            Image(systemName: showingAvailable ? "chevron.up" : "chevron.down")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(Theme.inkTertiary)
+                        }
                     }
                 }
             }

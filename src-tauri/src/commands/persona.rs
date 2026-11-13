@@ -34,11 +34,17 @@ pub fn save_persona_samples(
     app: AppHandle,
     samples: Vec<PersonaSample>,
 ) -> Result<Vec<PersonaSample>, String> {
-    let normalized = normalize_persona_samples(samples);
-    settings::update_settings(&app, |settings| {
-        settings.persona_samples = normalized.clone();
-    })?;
-    Ok(normalized)
+    Ok(settings::update_settings(&app, |settings| {
+        save_persona_samples_in(settings, samples)
+    })?)
+}
+
+pub(crate) fn save_persona_samples_in(
+    settings: &mut settings::AppSettings,
+    samples: Vec<PersonaSample>,
+) -> Vec<PersonaSample> {
+    settings.persona_samples = normalize_persona_samples(samples);
+    settings.persona_samples.clone()
 }
 
 #[cfg(test)]

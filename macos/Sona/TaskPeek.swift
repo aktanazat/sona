@@ -16,6 +16,9 @@ struct TaskPeek: View {
                 Text("#\(row.number)")
                     .font(TypeScale.mono(12))
                     .foregroundStyle(Theme.inkTertiary)
+                if row.attachmentCount > 0 {
+                    AttachmentCount(count: row.attachmentCount)
+                }
                 Spacer(minLength: 8)
                 TaskKeyButton(title: "Open", keys: "return") { model.perform(.open, on: [row.id]) }
                 WorkBarButton(icon: "xmark", help: "Close  Space") { focus.peeking = false }
@@ -39,8 +42,8 @@ struct TaskPeek: View {
                     }
                     if !suggestions.isEmpty {
                         HStack(spacing: 6) {
-                            ForEach(Array(suggestions.enumerated()), id: \.offset) { _, suggestion in
-                                SuggestionChip(suggestion: suggestion, now: TaskDates.now())
+                            ForEach(suggestions, id: \.id) { suggestion in
+                                SuggestionChip(itemId: row.id, suggestion: suggestion, now: TaskDates.now())
                             }
                         }
                     }

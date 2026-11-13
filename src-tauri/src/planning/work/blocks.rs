@@ -301,7 +301,8 @@ fn keep_block(
             .map(|(_, block)| block.starts_at_ms.to_string())
             .as_deref(),
         Some(&block.starts_at_ms.to_string()),
-    )
+    )?;
+    Ok(())
 }
 
 async fn calendar_actions_allowed(app: &AppHandle) -> Result<(), String> {

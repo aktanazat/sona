@@ -24,9 +24,7 @@ struct PeopleScreen: View {
         Group {
             switch store.route {
             case .list:
-                Page {
-                    PeopleListView(store: store, openMeeting: openMeeting)
-                }
+                list
             case .person:
                 person
             case .organization:
@@ -34,6 +32,36 @@ struct PeopleScreen: View {
             }
         }
         .onChange(of: store.route, initial: true) { model.workFocus.open(nil, in: .people) }
+    }
+
+    /// The list, and beside it the person Space peeks at.
+    private var list: some View {
+        let focus = model.workFocus
+        return ScrollViewReader { proxy in
+            Page {
+                PeopleListView(store: store, openMeeting: openMeeting)
+            }
+            .onChange(of: focus.personHighlighted) { _, id in
+                if let id { proxy.scrollTo(id) }
+            }
+            .onAppear {
+                if let id = focus.personHighlighted { proxy.scrollTo(id) }
+            }
+        }
+        .onChange(of: store.entries?.map(\.person.id), initial: true) { _, ids in
+            guard let ids, let id = focus.personHighlighted, !ids.contains(id) else { return }
+            focus.personHighlighted = nil
+            focus.peeking = false
+        }
+        .overlay(alignment: .trailing) {
+            if focus.peeking, !store.listFailed, let id = focus.personHighlighted,
+               let entry = store.entries?.first(where: { $0.person.id == id }) {
+                PersonPeek(entry: entry, photoRevision: store.photoRevision)
+                    .transition(reduceMotion ? .opacity : .move(edge: .trailing).combined(with: .opacity))
+            }
+        }
+        .animation(Motion.regular, value: focus.peeking)
+        .onDisappear { focus.peeking = false }
     }
 
     /// A person's page, and over it a task opened from their list. The page
@@ -77,11 +105,19 @@ struct PeopleScreen: View {
 
 // MARK: - The list
 
-/// Everybody Sona knows: the numbers first, then what still needs you, the
-/// people, and the companies they are at.
+/// Everybody Sona knows: what still needs you, the people, and the
+/// companies they are at. J and K move along the people, Space peeks at one
+/// and Return opens their page.
 struct PeopleListView: View {
     let store: PeopleStore
     var openMeeting: (String) -> Void = { _ in }
+    @Environment(AppModel.self) private var model
+
+    static func open(_ personId: String, _ model: AppModel) {
+        model.workFocus.peeking = false
+        model.workFocus.personHighlighted = personId
+        model.people.openPerson(personId)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -109,16 +145,22 @@ struct PeopleListView: View {
                 Card { CardLine("Name a speaker in a meeting, or turn on your calendar, and they appear here.") }
                     .padding(.bottom, 28)
             } else {
-                PeopleListStats(entries: store.entries, companies: store.companies)
-                    .padding(.bottom, 28)
                 PeopleInboxSection(store: store, openMeeting: openMeeting)
                 PageSection("Everyone") {
                     if let entries = store.entries {
                         Card {
                             LazyVStack(spacing: 0) {
                                 ForEach(entries) { entry in
-                                    PersonListRow(entry: entry, photoRevision: store.photoRevision) {
-                                        store.openPerson(entry.person.id)
+                                    PersonListRow(
+                                        entry: entry,
+                                        photoRevision: store.photoRevision,
+                                        highlighted: model.workFocus.personHighlighted == entry.person.id
+                                    ) {
+                                        Self.open(entry.person.id, model)
+                                    }
+                                    .id(entry.person.id)
+                                    .onHover { inside in
+                                        if inside { model.workFocus.hoverPerson(entry.person.id) }
                                     }
                                 }
                             }
@@ -137,30 +179,6 @@ struct PeopleListView: View {
     private var subtitle: String {
         guard let entries = store.entries else { return "Reading the people Sona knows" }
         return entries.isEmpty ? "The people you meet, what you talked about, and what you owe each other" : ""
-    }
-}
-
-/// The people in four numbers. Until the list answers, each tile holds its
-/// place with nothing in it.
-struct PeopleListStats: View {
-    let entries: [PersonListEntry]?
-    let companies: [CompanySummary]?
-
-    var body: some View {
-        HStack(spacing: 10) {
-            NumberTile(entries.map { "\($0.count)" } ?? " ", label: "People")
-            NumberTile(companies.map { "\($0.count)" } ?? " ", label: "Companies")
-            NumberTile(entries.map { "\(Self.metThisWeek($0))" } ?? " ", label: "Met this week")
-            NumberTile(entries.map { "\($0.reduce(0) { $0 + $1.suggestedCount })" } ?? " ", label: "To confirm")
-        }
-    }
-
-    private static func metThisWeek(_ entries: [PersonListEntry], now: Date = .now) -> Int {
-        let start = now.addingTimeInterval(-7 * 86_400)
-        return entries.filter { entry in
-            let last = entry.lastMeeting?.at ?? entry.lastMeetingAtUtcMs.map(PeopleFormat.date)
-            return last.map { $0 >= start } ?? false
-        }.count
     }
 }
 
@@ -239,10 +257,11 @@ struct CompanyRow: View {
 struct PersonListRow: View {
     let entry: PersonListEntry
     var photoRevision: UInt64 = 0
+    var highlighted: Bool?
     let open: () -> Void
 
     var body: some View {
-        CardRow(action: open) {
+        CardRow(action: open, highlighted: highlighted) {
             HStack(spacing: 12) {
                 PersonPortrait(personId: entry.person.id, name: entry.person.displayName, size: 36, revision: photoRevision)
                 VStack(alignment: .leading, spacing: 3) {
@@ -267,8 +286,14 @@ struct PersonListRow: View {
     /// rather than cells of a table.
     private var facts: String {
         var parts: [String] = []
+        if let role = entry.person.role {
+            parts.append(role)
+        }
         if let organization = entry.person.organization {
             parts.append(organization)
+        }
+        if !entry.person.aliases.isEmpty {
+            parts.append("Also \(entry.person.aliases.joined(separator: ", "))")
         }
         if let last = entry.lastMeeting {
             parts.append("Last met \(PeopleFormat.elapsed(last.at))")

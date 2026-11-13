@@ -351,3 +351,72 @@ fn a_page_that_searched_for_nothing_says_so_rather_than_looking_empty() {
         "the token an outside reader parses"
     );
 }
+
+/// A task is found by what its comments say. A reader outside the app never
+/// finds one a meeting kept on this Mac raised; the app's own screens do.
+#[test]
+fn a_task_is_found_by_its_comments_unless_a_kept_meeting_raised_it() {
+    use crate::planning::work::comments::{self, Author};
+    use crate::planning::work::items::{self, NewItem};
+    use crate::planning::work::types::{WorkActor, WorkCommentSubject, WorkOwner, WorkStatus};
+
+    let history = rusqlite::Connection::open_in_memory().expect("a history database");
+    crate::planning::schema::apply_all(&history).expect("the planner schema");
+    let kept = MeetingSessionId::from_uuid(uuid::Uuid::new_v4());
+    let kept_loop = format!("{}:loop:0123456789abcdef", kept.uuid());
+    let filed = |title: &str, source_loop_id: Option<&str>| {
+        let id = items::insert(
+            &history,
+            &NewItem {
+                title,
+                details: None,
+                status: WorkStatus::Triage,
+                priority: 0,
+                project_id: None,
+                milestone_id: None,
+                owner: &WorkOwner::Nobody,
+                due_at_ms: None,
+                label_ids: &[],
+                source_loop_id,
+                recurrence: None,
+            },
+            WorkActor::Me,
+            0,
+        )
+        .expect("a filed task")
+        .id;
+        comments::add(
+            &history,
+            WorkCommentSubject::Task,
+            &id,
+            None,
+            Author {
+                actor: WorkActor::Me,
+                agent: None,
+            },
+            "Hold the marine deposit until the paint arrives",
+            0,
+        )
+        .expect("a comment");
+        id
+    };
+    let typed = filed("Repaint the railings", None);
+    let raised = filed("Send the deck", Some(&kept_loop));
+
+    let found = |kept_local: Option<&KeptLocal>| {
+        let mut rows = task_rows(&history, "marine deposit", kept_local).expect("the task search");
+        rows.sort_by(|a, b| a.title.cmp(&b.title));
+        rows.into_iter()
+            .map(|row| (row.id, row.snippet))
+            .collect::<Vec<_>>()
+    };
+    let said = "Hold the marine deposit until the paint arrives".to_owned();
+    assert_eq!(
+        found(None),
+        [(typed.clone(), said.clone()), (raised, said.clone())]
+    );
+    assert_eq!(
+        found(Some(&KeptLocal(HashSet::from([kept])))),
+        [(typed, said)]
+    );
+}

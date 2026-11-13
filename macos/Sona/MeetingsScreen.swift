@@ -603,7 +603,6 @@ struct MeetingsFeed: View {
                                 entry: entry,
                                 processing: store.processingUpdate(entry.sessionId, phase: entry.phase),
                                 open: { store.open(entry.sessionId) },
-                                openOutcome: { store.open(entry.sessionId, outcome: $0) },
                                 export: { store.export(entry.sessionId, format: $0) },
                                 ledger: { store.exportLedger(entry.sessionId) },
                                 file: { store.openFiling(entry.sessionId, title: entry.title) },
@@ -645,14 +644,14 @@ struct MeetingsGroupHeading: View {
     }
 }
 
-/// One meeting as its own card: what it was and when it started, what Sona
-/// heard, and the facts under that. The menu carries filing, exports, and
-/// deletion.
+/// One meeting as its own card: what it was and when it started, the first
+/// line of what Sona heard, and one gray line of facts. The ledger and the
+/// rest of the summary wait on the meeting's page. The menu carries filing,
+/// exports, and deletion.
 struct MeetingsRow: View {
     let entry: MeetingHistorySummary
     let processing: MeetingProcessingUpdate?
     let open: () -> Void
-    let openOutcome: (LedgerOutcome) -> Void
     let export: (MeetingExportFormat) -> Void
     let ledger: () -> Void
     let file: () -> Void
@@ -667,7 +666,7 @@ struct MeetingsRow: View {
                         Text(entry.title).headlineText()
                     }
                     if let headline = entry.headlineText {
-                        Text(headline).bodyText(14, Theme.inkSecondary).lineLimit(2)
+                        Text(headline).bodyText(14, Theme.inkSecondary).lineLimit(1)
                     }
                     if let processing {
                         MeetingProcessingLine(update: processing)
@@ -684,16 +683,6 @@ struct MeetingsRow: View {
                                 Text(facts).metaText().lineLimit(1)
                             }
                         }
-                        .padding(.top, 2)
-                    }
-                    if let outcomes = entry.ledgerOutcomes, outcomes.total > 0 {
-                        HStack(alignment: .center, spacing: 10) {
-                            OutcomeBar(counts: outcomes) { $0.map(openOutcome) }
-                            if let choices = outcomes.choices {
-                                Text(choices).metaText().lineLimit(1)
-                            }
-                        }
-                        .padding(.top, 2)
                     }
                 }
             } trailing: {
@@ -729,10 +718,14 @@ struct MeetingsRow: View {
         }
     }
 
-    /// The plain facts in one gray line: a partial capture, the length, the
-    /// sources, and who spoke.
+    /// The plain facts in one gray line: how many threads are still open,
+    /// a partial capture, the length, the sources, and who spoke. The
+    /// open count leads so a long list of names never cuts it off.
     private var facts: String {
         var parts: [String] = []
+        if let open = entry.ledgerOutcomes?.open, open > 0 {
+            parts.append(open == 1 ? "1 open thread" : "\(open) open threads")
+        }
         if entry.captureCompleteness == .partial { parts.append("Partial recording") }
         if let duration = entry.durationShort { parts.append(duration) }
         if let sources = entry.sources, !sources.isEmpty {

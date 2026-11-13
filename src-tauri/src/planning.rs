@@ -1,6 +1,9 @@
 //! Owner-authored local plans and references to their original evidence.
 
+pub(crate) mod catalog;
+pub(crate) mod dependencies;
 pub(crate) mod person;
+pub(crate) mod progress;
 mod proposal;
 mod proposal_sources;
 pub(crate) mod quiet;
@@ -10,18 +13,22 @@ pub(crate) mod store;
 pub(crate) mod suggestions;
 mod types;
 pub(crate) mod untracked;
+pub(crate) mod updates;
 pub(crate) mod work;
 
 pub use proposal::{PlanningDraft, PlanningSourceRef};
 pub use schema::{
-    AGENTS_MIGRATION, CAPTURE_MIGRATION, CYCLES_MIGRATION, DAY_PLAN_MIGRATION,
-    DISMISSED_LOOP_MIGRATION, FOLLOW_MIGRATION, MEETING_NOTE_LINK_MIGRATION, MIGRATION,
+    AGENTS_MIGRATION, ATTACHMENTS_MIGRATION, CAPTURE_MIGRATION, CATALOG_MIGRATION,
+    CYCLES_MIGRATION, DAY_PLAN_MIGRATION, DISMISSED_LOOP_MIGRATION, FOLLOW_MIGRATION,
+    LIFECYCLE_MIGRATION, MEETING_NOTE_LINK_MIGRATION, MIGRATION, PLANNING_MIGRATION,
     PROJECT_DELETE_KEEPS_TASKS_MIGRATION, QUIET_REVIEW_MIGRATION, REPEAT_MIGRATION,
-    WATCH_MIGRATION, WORK_MIGRATION,
+    ROUTINES_MIGRATION, THREADS_MIGRATION, WATCH_MIGRATION, WORK_MIGRATION,
 };
 pub use types::{
-    EvidenceLink, EvidenceSourceKind, EvidenceTargetKind, Milestone, PlanningCalendarPage,
-    PlanningTask, Project, ProjectDetail, ProjectStatus, ProjectSummary, TaskStatus,
+    DateResolution, EvidenceLink, EvidenceSourceKind, EvidenceTargetKind, LabelScope, Milestone,
+    PlanningCalendarPage, PlanningTask, Project, ProjectDetail, ProjectHealth,
+    ProjectLink, ProjectProgress, ProjectStatus, ProjectStatusName, ProjectSummary, ProjectUpdate,
+    TaskStatus,
 };
 
 use crate::managers::history::HistoryManager;
@@ -38,6 +45,10 @@ use tauri_specta::Event;
 #[serde(rename_all = "camelCase")]
 pub struct PlanningChangedEvent {
     pub project_id: String,
+}
+
+pub(crate) fn changed_everywhere(app: &AppHandle) {
+    changed(app, String::new());
 }
 
 fn changed(app: &AppHandle, project_id: String) {
@@ -78,7 +89,7 @@ fn conversations_closed() -> String {
     .to_string()
 }
 
-fn failure(error: anyhow::Error) -> String {
+pub(crate) fn failure(error: anyhow::Error) -> String {
     if error.is::<ConversationsClosed>() {
         return conversations_closed();
     }
@@ -98,6 +109,23 @@ fn failure(error: anyhow::Error) -> String {
         Some(store::Refusal::CaptureActive) => "Planning is paused while recording.",
         Some(store::Refusal::SourceChanged) => "A source changed. Prepare the plan again.",
         Some(store::Refusal::AlreadyTracked) => "This action is already tracked.",
+        Some(store::Refusal::ParentLoop) => {
+            "A task cannot go under itself or one of its own sub-tasks."
+        }
+        Some(store::Refusal::NotAuthor) => "Only whoever wrote a comment can change it.",
+        Some(store::Refusal::NotAttacher) => "Only whoever attached it can change it.",
+        Some(store::Refusal::NotAFile) => "Attach a file, not a folder.",
+        Some(store::Refusal::NoFile) => "No file is there to attach.",
+        Some(store::Refusal::TooLarge) => "Attachments can be at most 50 MB.",
+        Some(store::Refusal::BadLink) => {
+            "A link must start with http://, https://, mailto: or sona://."
+        }
+        Some(store::Refusal::LabelScope) => {
+            "This label is kept to tasks or to projects, or still sits on the other kind. Change where it applies first."
+        }
+        Some(store::Refusal::DependencyLoop) => {
+            "A project cannot wait on itself, or on a project that already waits on it."
+        }
         None => {
             log::error!("Planning database operation failed");
             "Plans could not be saved or read. Try again."
@@ -132,7 +160,15 @@ async fn with_sources<T: Send>(
 pub fn planning_projects(
     history_state: State<'_, Arc<HistoryManager>>,
 ) -> Result<Vec<ProjectSummary>, String> {
-    history(&history_state, |conn| store::projects(conn))
+    history(&history_state, |conn| store::projects(conn, false))
+}
+
+#[tauri::command(async)]
+#[specta::specta]
+pub fn planning_projects_trashed(
+    history_state: State<'_, Arc<HistoryManager>>,
+) -> Result<Vec<ProjectSummary>, String> {
+    history(&history_state, |conn| store::projects(conn, true))
 }
 
 #[tauri::command]
@@ -155,7 +191,7 @@ pub(crate) async fn project_detail_without(
 ) -> Result<ProjectDetail, String> {
     let id = store::uuid(&id).map_err(failure)?;
     let now_ms = chrono::Utc::now().timestamp_millis();
-    let (records, local_only) = history(history_state, |conn| {
+    let (records, outlook, local_only) = history(history_state, |conn| {
         let mut records = store::records(conn, &id)?;
         records.evidence.retain(|link| !hides(link));
         let local_only = records
@@ -171,10 +207,11 @@ pub(crate) async fn project_detail_without(
                 sources::resolve_local(conn, link)?;
             }
         }
-        Ok((records, local_only))
+        let outlook = progress::outlook(conn, &records.project, now_ms)?;
+        Ok((records, outlook, local_only))
     })?;
     if local_only {
-        return store::detail(records, None, now_ms).map_err(failure);
+        return store::detail(records, outlook, None, now_ms).map_err(failure);
     }
     with_sources(history_state, meetings, |history_conn, meeting_conn| {
         let mut records = store::records(history_conn, &id)?;
@@ -185,7 +222,8 @@ pub(crate) async fn project_detail_without(
         for link in &mut records.evidence {
             sources::resolve_link(history_conn, meeting_conn, link)?;
         }
-        store::detail(records, Some(meeting_conn), now_ms)
+        let outlook = progress::outlook(history_conn, &records.project, now_ms)?;
+        store::detail(records, outlook, Some(meeting_conn), now_ms)
     })
     .await
 }
@@ -426,7 +464,9 @@ pub async fn planning_link_source(
         })
         .await?
     };
-    changed(&app, project_id);
+    if let Some(project_id) = project_id {
+        changed(&app, project_id);
+    }
     if target_kind == EvidenceTargetKind::Task {
         work::tasks_changed(&app, vec![target_id]);
     }

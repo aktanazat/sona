@@ -51,6 +51,8 @@ final class PersonWorkStore {
     /// Every task they own, in triage, in a project or in none, read the way
     /// the task lists read them.
     private(set) var tasks: [WorkItemRow] = []
+    /// Tasks for them: the work owed to them, whoever owns it.
+    private(set) var owedTasks: [WorkItemRow] = []
     private(set) var loading = false
     private(set) var error: String?
 
@@ -77,6 +79,7 @@ final class PersonWorkStore {
         if self.personId != personId {
             snapshot = nil
             tasks = []
+            owedTasks = []
             error = nil
         }
         self.personId = personId
@@ -106,6 +109,7 @@ final class PersonWorkStore {
         refreshTask = nil
         snapshot = nil
         tasks = []
+        owedTasks = []
         error = nil
         loading = false
     }
@@ -117,10 +121,15 @@ final class PersonWorkStore {
                 "planning_person_work", PersonWorkParams(personId: personId))
             async let owned: WorkList = core.request(
                 "work_list", PersonTasksParams(query: WorkQuery(ownerPersonIds: [personId])))
-            let (result, list) = try await (work, owned)
+            async let owed: WorkList = core.request(
+                "work_list", PersonTasksParams(query: WorkQuery(filters: [
+                    WorkCondition(field: .forPerson, op: .is, values: [personId]),
+                ])))
+            let (result, list, owedList) = try await (work, owned, owed)
             guard active, generation == stamp, !Task.isCancelled else { return }
             snapshot = result
             tasks = list.items
+            owedTasks = owedList.items
             error = nil
         } catch {
             guard active, generation == stamp, !Task.isCancelled else { return }

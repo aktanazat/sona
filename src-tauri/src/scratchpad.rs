@@ -10,6 +10,7 @@
 //! command failure reaches the screen as one plain sentence; the SQLite
 //! message, which can name a path or a bound value, goes to the log.
 
+pub mod documents;
 pub mod evidence;
 pub mod links;
 pub(crate) mod memory_index;
@@ -22,9 +23,10 @@ pub mod synthesis;
 pub use links::ScratchNoteMemory;
 
 use crate::managers::history::HistoryManager;
+use crate::planning::work::types::WorkActor;
 use anyhow::Result;
 use log::error;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use std::sync::Arc;
@@ -37,6 +39,10 @@ pub const MAX_VERSIONS_PER_NOTE: usize = 50;
 
 pub const RECENT_MIGRATION: &str =
     "CREATE INDEX scratch_notes_recent ON scratch_notes(updated_at_ms DESC, id);";
+
+/// Who saved each version. Rows from before say `me`.
+pub const AUTHOR_MIGRATION: &str = "ALTER TABLE scratch_note_versions ADD COLUMN actor TEXT NOT NULL DEFAULT 'me' CHECK(actor IN ('me', 'sona', 'agent'));
+ALTER TABLE scratch_note_versions ADD COLUMN agent TEXT CHECK(agent IS NULL OR (actor = 'agent' AND length(trim(agent)) > 0));";
 
 /// Saves closer together than this fold into the newest version instead of
 /// each becoming one: an autosave fires after every pause in typing, and a
@@ -99,6 +105,30 @@ impl ScratchVersionKind {
     }
 }
 
+/// Who wrote a body: the person in the app, or an agent through the command
+/// line under the name it gave, when it gave one.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Author<'a> {
+    Me,
+    Agent(Option<&'a str>),
+}
+
+impl Author<'_> {
+    fn actor(self) -> WorkActor {
+        match self {
+            Self::Me => WorkActor::Me,
+            Self::Agent(_) => WorkActor::Agent,
+        }
+    }
+
+    fn agent(self) -> Option<String> {
+        match self {
+            Self::Me | Self::Agent(None) => None,
+            Self::Agent(Some(name)) => Some(name.trim().to_owned()).filter(|name| !name.is_empty()),
+        }
+    }
+}
+
 /// One saved state of a note. The newest is the body the note has now.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
 pub struct ScratchNoteVersion {
@@ -107,6 +137,10 @@ pub struct ScratchNoteVersion {
     pub kind: ScratchVersionKind,
     pub body: String,
     pub saved_at_ms: i64,
+    /// `agent` when an agent saved it through the command line or MCP.
+    pub actor: WorkActor,
+    /// The name that agent gave, if it gave one.
+    pub agent: Option<String>,
 }
 
 /// A note was created, rewritten, pinned, restored or deleted, by any caller.
@@ -250,6 +284,19 @@ pub(crate) fn create_note_with_connection(
     body: &str,
     now_ms: i64,
 ) -> Result<ScratchNote, ScratchpadError> {
+    let transaction = conn.transaction()?;
+    let note = create_note_in(&transaction, body, Author::Me, now_ms)?;
+    transaction.commit()?;
+    Ok(note)
+}
+
+/// [`create_note_with_connection`] inside a transaction the caller holds.
+pub(crate) fn create_note_in(
+    transaction: &Connection,
+    body: &str,
+    author: Author<'_>,
+    now_ms: i64,
+) -> Result<ScratchNote, ScratchpadError> {
     if body.trim().is_empty() {
         return Err(ScratchpadRefusal::Blank.into());
     }
@@ -261,20 +308,19 @@ pub(crate) fn create_note_with_connection(
         created_at_ms: now_ms,
         updated_at_ms: now_ms,
     };
-    let transaction = conn.transaction()?;
     transaction.execute(
         "INSERT INTO scratch_notes (id, title, body, pinned, created_at_ms, updated_at_ms)
          VALUES (?1, ?2, ?3, 0, ?4, ?4)",
         params![note.id, note.title, note.body, now_ms],
     )?;
     record_version(
-        &transaction,
+        transaction,
         &note.id,
         &note.body,
         now_ms,
         ScratchVersionKind::Edit,
+        author,
     )?;
-    transaction.commit()?;
     Ok(note)
 }
 
@@ -287,11 +333,24 @@ pub(crate) fn update_body_with_connection(
     body: &str,
     now_ms: i64,
 ) -> Result<ScratchNote, ScratchpadError> {
+    let transaction = conn.transaction()?;
+    let note = update_body_in(&transaction, id, body, Author::Me, now_ms)?;
+    transaction.commit()?;
+    Ok(note)
+}
+
+/// [`update_body_with_connection`] inside a transaction the caller holds.
+pub(crate) fn update_body_in(
+    transaction: &Connection,
+    id: &str,
+    body: &str,
+    author: Author<'_>,
+    now_ms: i64,
+) -> Result<ScratchNote, ScratchpadError> {
     if body.trim().is_empty() {
         return Err(ScratchpadRefusal::Blank.into());
     }
-    let transaction = conn.transaction()?;
-    let Some(mut note) = note_with_connection(&transaction, id)? else {
+    let Some(mut note) = note_with_connection(transaction, id)? else {
         return Err(ScratchpadRefusal::NotFound.into());
     };
     if note.body != body {
@@ -302,9 +361,8 @@ pub(crate) fn update_body_with_connection(
             "UPDATE scratch_notes SET title = ?2, body = ?3, updated_at_ms = ?4 WHERE id = ?1",
             params![id, note.title, note.body, now_ms],
         )?;
-        record_version(&transaction, id, body, now_ms, ScratchVersionKind::Edit)?;
+        record_version(transaction, id, body, now_ms, ScratchVersionKind::Edit, author)?;
     }
-    transaction.commit()?;
     Ok(note)
 }
 
@@ -344,7 +402,7 @@ pub(crate) fn versions_with_connection(
         return Err(ScratchpadRefusal::NotFound.into());
     }
     let mut statement = conn.prepare(
-        "SELECT id, note_id, kind, body, saved_at_ms FROM scratch_note_versions
+        "SELECT id, note_id, kind, body, saved_at_ms, actor, agent FROM scratch_note_versions
          WHERE note_id = ?1 ORDER BY id DESC",
     )?;
     let versions = statement
@@ -355,6 +413,8 @@ pub(crate) fn versions_with_connection(
                 kind: ScratchVersionKind::from_stored(&row.get::<_, String>(2)?),
                 body: row.get(3)?,
                 saved_at_ms: row.get(4)?,
+                actor: row.get(5)?,
+                agent: row.get(6)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -367,6 +427,7 @@ pub(crate) fn restore_version_with_connection(
     conn: &mut Connection,
     note_id: &str,
     version_id: i64,
+    author: Author<'_>,
     now_ms: i64,
 ) -> Result<ScratchNote, ScratchpadError> {
     let transaction = conn.transaction()?;
@@ -397,6 +458,7 @@ pub(crate) fn restore_version_with_connection(
             &note.body,
             now_ms,
             ScratchVersionKind::Restore,
+            author,
         )?;
     }
     transaction.commit()?;
@@ -404,26 +466,31 @@ pub(crate) fn restore_version_with_connection(
 }
 
 /// Writes one saved state, folding it into the newest version when both are
-/// edits closer together than [`VERSION_MERGE_WINDOW_MS`], then drops what is
-/// past [`MAX_VERSIONS_PER_NOTE`], oldest first.
+/// edits by the same author closer together than [`VERSION_MERGE_WINDOW_MS`],
+/// then drops what is past [`MAX_VERSIONS_PER_NOTE`], oldest first.
 fn record_version(
     conn: &Connection,
     note_id: &str,
     body: &str,
     now_ms: i64,
     kind: ScratchVersionKind,
+    author: Author<'_>,
 ) -> Result<()> {
+    let actor = author.actor();
+    let agent = author.agent();
     if kind == ScratchVersionKind::Edit {
-        let newest: Option<(i64, String, i64)> = conn
+        let newest: Option<(i64, String, i64, WorkActor, Option<String>)> = conn
             .query_row(
-                "SELECT id, kind, saved_at_ms FROM scratch_note_versions
+                "SELECT id, kind, saved_at_ms, actor, agent FROM scratch_note_versions
                  WHERE note_id = ?1 ORDER BY id DESC LIMIT 1",
                 params![note_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
             )
             .optional()?;
-        if let Some((version_id, newest_kind, saved_at_ms)) = newest {
+        if let Some((version_id, newest_kind, saved_at_ms, newest_actor, newest_agent)) = newest {
             if ScratchVersionKind::from_stored(&newest_kind) == ScratchVersionKind::Edit
+                && newest_actor == actor
+                && newest_agent == agent
                 && now_ms.saturating_sub(saved_at_ms) < VERSION_MERGE_WINDOW_MS
             {
                 conn.execute(
@@ -435,9 +502,9 @@ fn record_version(
         }
     }
     conn.execute(
-        "INSERT INTO scratch_note_versions (note_id, kind, body, saved_at_ms)
-         VALUES (?1, ?2, ?3, ?4)",
-        params![note_id, kind.as_str(), body, now_ms],
+        "INSERT INTO scratch_note_versions (note_id, kind, body, saved_at_ms, actor, agent)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![note_id, kind.as_str(), body, now_ms, actor.as_str(), agent],
     )?;
     conn.execute(
         "DELETE FROM scratch_note_versions
@@ -467,6 +534,23 @@ fn run<T>(
     }
 }
 
+/// `action` in one transaction that takes the write lock before it reads,
+/// so a check and the write it guards cannot interleave with another
+/// writer's. A failure is told as `failure` says.
+pub(crate) fn immediate<T>(
+    history: &HistoryManager,
+    failure: &str,
+    action: impl FnOnce(&Connection) -> Result<T, ScratchpadError>,
+) -> Result<T, String> {
+    run(history, |conn| {
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let value = action(&transaction)?;
+        transaction.commit()?;
+        Ok(value)
+    })
+    .map_err(|error| failure_sentence(history, error, failure))
+}
+
 /// The sentence the screen shows for a failed call. A refusal names itself;
 /// a storage failure is logged in full and reported as `failure`, or as the
 /// unlock still running when that is what stands in the way.
@@ -489,7 +573,7 @@ fn failure_sentence(history: &HistoryManager, error: ScratchpadError, failure: &
     }
 }
 
-fn emit_changed(app: &AppHandle, note_id: &str, deleted: bool) {
+pub(crate) fn emit_changed(app: &AppHandle, note_id: &str, deleted: bool) {
     let _ = ScratchpadChangedEvent {
         note_id: note_id.to_string(),
         deleted,
@@ -511,9 +595,9 @@ pub(crate) fn read_note_with_sources(
     history: &HistoryManager,
     store: &crate::meeting::store::MeetingStore,
     id: &str,
-    hides_meeting: impl Fn(&str) -> bool,
+    hides: impl Fn(crate::planning::EvidenceSourceKind, &str) -> bool,
 ) -> Result<Option<ScratchNoteMemory>, String> {
-    links::read_memory(history, Some(store), id, hides_meeting)
+    links::read_memory(history, Some(store), id, hides)
 }
 
 pub(crate) fn read_versions(
@@ -744,11 +828,21 @@ pub fn scratchpad_restore_version(
     id: String,
     version_id: i64,
 ) -> Result<ScratchNote, String> {
-    let note = run(&history, |conn| {
-        restore_version_with_connection(conn, &id, version_id, now_ms())
+    restore_version(&app, &history, &id, version_id, Author::Me)
+}
+
+pub(crate) fn restore_version(
+    app: &AppHandle,
+    history: &HistoryManager,
+    id: &str,
+    version_id: i64,
+    author: Author<'_>,
+) -> Result<ScratchNote, String> {
+    let note = run(history, |conn| {
+        restore_version_with_connection(conn, id, version_id, author, now_ms())
     })
-    .map_err(|error| failure_sentence(&history, error, "The version could not be restored."))?;
-    emit_changed(&app, &note.id, false);
+    .map_err(|error| failure_sentence(history, error, "The version could not be restored."))?;
+    emit_changed(app, &note.id, false);
     Ok(note)
 }
 
@@ -898,6 +992,29 @@ mod tests {
     }
 
     #[test]
+    fn an_agent_save_is_its_own_version_named_for_the_agent() {
+        let mut conn = connection();
+        let note = create_note_with_connection(&mut conn, "my first words", 0).expect("create");
+        update_body_in(&conn, &note.id, "my first words, and the agent's", Author::Agent(Some("codex")), MINUTE_MS)
+            .expect("agent save");
+        update_body_in(&conn, &note.id, "my first words, and the agent's, twice", Author::Agent(Some("codex")), 2 * MINUTE_MS)
+            .expect("agent save again");
+
+        let versions = versions_with_connection(&conn, &note.id).expect("versions");
+        let authors: Vec<_> = versions
+            .iter()
+            .map(|version| (version.body.as_str(), version.actor, version.agent.as_deref()))
+            .collect();
+        assert_eq!(
+            authors,
+            vec![
+                ("my first words, and the agent's, twice", WorkActor::Agent, Some("codex")),
+                ("my first words", WorkActor::Me, None),
+            ]
+        );
+    }
+
+    #[test]
     fn notes_list_pinned_first_then_newest_modified() {
         let mut conn = connection();
         let a = create_note_with_connection(&mut conn, "note a body", 1_000).expect("a");
@@ -958,9 +1075,14 @@ mod tests {
             .find(|version| version.body == "the first draft")
             .expect("first version kept");
 
-        let restored =
-            restore_version_with_connection(&mut conn, &note.id, first.id, 21 * MINUTE_MS)
-                .expect("restore");
+        let restored = restore_version_with_connection(
+            &mut conn,
+            &note.id,
+            first.id,
+            Author::Me,
+            21 * MINUTE_MS,
+        )
+        .expect("restore");
         assert_eq!(restored.body, "the first draft");
         assert_eq!(restored.title, "the first draft");
         assert_eq!(restored.updated_at_ms, 21 * MINUTE_MS);
@@ -988,7 +1110,8 @@ mod tests {
         assert_eq!(versions[0].kind, ScratchVersionKind::Edit);
         assert_eq!(versions[1].kind, ScratchVersionKind::Restore);
 
-        let missing = restore_version_with_connection(&mut conn, &note.id, 9_999, 23 * MINUTE_MS);
+        let missing =
+            restore_version_with_connection(&mut conn, &note.id, 9_999, Author::Me, 23 * MINUTE_MS);
         assert_eq!(
             refusal(&missing.expect_err("unknown version refused")),
             Some(ScratchpadRefusal::NotFound)
@@ -1021,6 +1144,39 @@ mod tests {
         assert_eq!(
             refusal(&delete_note_with_connection(&conn, &note.id).expect_err("gone")),
             Some(ScratchpadRefusal::NotFound)
+        );
+    }
+
+    #[test]
+    fn a_task_drawn_from_a_hidden_meeting_leaves_what_a_note_is_a_document_of() {
+        let conn = connection();
+        conn.execute_batch(
+            "INSERT INTO planning_tasks (id, number, title, owner_is_self, status, priority,
+                status_changed_at_ms, sort_order, revision, created_at_ms, updated_at_ms) VALUES
+                ('kept', 1, 'Fire the vendor', 0, 'not_started', 0, 1, 1, 1, 1, 1),
+                ('shared', 2, 'Send the outline', 0, 'not_started', 0, 1, 2, 1, 1, 1);
+             INSERT INTO planning_evidence_links (id, target_kind, target_id, source_kind, source_id,
+                at_ms, revision, created_at_ms) VALUES
+                ('e1', 'task', 'kept', 'meeting', 'board-prep', NULL, 1, 1),
+                ('e2', 'task', 'shared', 'meeting', 'pricing-sync', NULL, 1, 1),
+                ('e3', 'task', 'kept', 'note', 'n', NULL, 1, 2),
+                ('e4', 'task', 'shared', 'note', 'n', NULL, 1, 3);",
+        )
+        .expect("two tasks the note is filed under");
+        let titles = |hides: &dyn Fn(crate::planning::EvidenceSourceKind, &str) -> bool| {
+            documents::documents_of(&conn, "n", hides)
+                .expect("documents")
+                .into_iter()
+                .map(|document| document.title)
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(titles(&|_, _| false), ["Fire the vendor", "Send the outline"]);
+        assert_eq!(
+            titles(&|kind, id| {
+                kind == crate::planning::EvidenceSourceKind::Meeting && id == "board-prep"
+            }),
+            ["Send the outline"]
         );
     }
 }

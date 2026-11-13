@@ -56,6 +56,7 @@ use crate::secrets::{SecretManager, SecretResolveError};
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -64,6 +65,8 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 use tauri_plugin_dialog::DialogExt;
 use uuid::Uuid;
+
+mod live_doc;
 
 pub(super) const MEETING_EVENT_SCHEMA_VERSION: u32 = 1;
 const DEFAULT_RECORD_MAX_PAYLOAD_BYTES: u32 = 4 * 1024 * 1024;
@@ -713,7 +716,7 @@ impl MeetingSessionManager {
     /// it — see [`super::prompts`]. Read-only: the slots inside it are set from
     /// here and from launch, and a second setter would be a second answer to
     /// which engine this app has.
-    pub(crate) fn processing(&self) -> &MeetingProcessingService {
+    pub(crate) fn processing(&self) -> &Arc<MeetingProcessingService> {
         &self.processing
     }
 
@@ -2020,10 +2023,15 @@ impl MeetingSessionManager {
         for source_kind in &plan.requested_sources {
             let probe = source_provider.probe(*source_kind);
             if probe.availability != SourceAvailability::Available {
+                log::warn!("Meeting source {source_kind:?} skipped: {:?}", probe.availability);
                 continue;
             }
-            let Ok(source) = source_provider.acquire(*source_kind) else {
-                continue;
+            let source = match source_provider.acquire(*source_kind) {
+                Ok(source) => source,
+                Err(error) => {
+                    log::warn!("Meeting source {source_kind:?} could not be acquired: {error:?}");
+                    continue;
+                }
             };
             let track_id = SourceTrackId::new();
             let (sink, lane_reader) = PacketSink::new(
@@ -2066,7 +2074,11 @@ impl MeetingSessionManager {
                     .into_iter()
                     .filter_map(|(source_kind, track_id, lane_reader, handle)| {
                         let (report, source) = handle.join().ok()?;
-                        let report = report.ok()?;
+                        let report = report
+                            .inspect_err(|error| {
+                                log::warn!("Meeting source {source_kind:?} did not start: {error:?}");
+                            })
+                            .ok()?;
                         (report.track_id == track_id && report.source_kind == source_kind)
                             .then_some((source_kind, track_id, source, lane_reader, report))
                     })
@@ -2989,6 +3001,7 @@ impl MeetingSessionManager {
             .map_err(map_store_error)?;
 
         self.processing.cancel(request.session_id);
+        self.processing.shared_rooms().withdraw(request.session_id);
 
         let active = {
             let mut actor = self.actor_lock();
@@ -3007,6 +3020,7 @@ impl MeetingSessionManager {
         };
 
         if let Some(mut active) = active {
+            active.live.transcript().withdraw_share();
             drop(active.call_names.take());
             for source in active.sources.values_mut() {
                 let _ = source.source.abort();
@@ -3610,8 +3624,13 @@ impl MeetingSessionManager {
                 page: detail,
             });
         };
-        let outcome = write_relationship_summary(&store, person_id, generator.as_ref())
-            .map_err(map_store_error)?;
+        let summary_store = Arc::clone(&store);
+        let outcome = tauri::async_runtime::spawn_blocking(move || {
+            write_relationship_summary(&summary_store, person_id, generator.as_ref())
+        })
+        .await
+        .map_err(|_| MeetingCommandError::EngineFailure)?
+        .map_err(map_store_error)?;
         let page = match outcome {
             PersonSummaryOutcome::Written => {
                 store.person_detail(person_id).map_err(map_store_error)?
@@ -3935,6 +3954,41 @@ impl MeetingSessionManager {
         &self,
         request: MeetingExportRequest,
     ) -> Result<MeetingExportResult, MeetingCommandError> {
+        let app = self.app.clone();
+        self.export_to(request, |format| async move {
+            let app = app.ok_or(MeetingCommandError::ExportFailed)?;
+            let (filter_name, extension, file_name) = match format {
+                MeetingExportFormat::Json => ("JSON", "json", "meeting.json"),
+                MeetingExportFormat::Markdown => ("Markdown", "md", "meeting.md"),
+            };
+            let selected = tauri::async_runtime::spawn_blocking(move || {
+                app.dialog()
+                    .file()
+                    .add_filter(filter_name, &[extension])
+                    .set_file_name(file_name)
+                    .blocking_save_file()
+                    .map(|path| path.into_path().map_err(|_| ()))
+            })
+            .await
+            .map_err(|_| MeetingCommandError::ExportFailed)?;
+            selected
+                .ok_or(MeetingCommandError::ExportCancelled)?
+                .map_err(|_| MeetingCommandError::ExportFailed)
+        })
+        .await
+    }
+
+    /// Exports to the file `destination` names once the export is rendered,
+    /// so a refused export never asks where to write.
+    pub(crate) async fn export_to<Destination, Chosen>(
+        &self,
+        request: MeetingExportRequest,
+        destination: Destination,
+    ) -> Result<MeetingExportResult, MeetingCommandError>
+    where
+        Destination: FnOnce(MeetingExportFormat) -> Chosen,
+        Chosen: Future<Output = Result<PathBuf, MeetingCommandError>>,
+    {
         let store = self.store().await?;
         if let Some(result) = store
             .export_result_for_operation(request.operation_id)
@@ -3970,24 +4024,7 @@ impl MeetingSessionManager {
             },
         )
         .map_err(|_| MeetingCommandError::ExportFailed)?;
-        let app = self.app.clone().ok_or(MeetingCommandError::ExportFailed)?;
-        let (filter_name, extension, file_name) = match request.format {
-            MeetingExportFormat::Json => ("JSON", "json", "meeting.json"),
-            MeetingExportFormat::Markdown => ("Markdown", "md", "meeting.md"),
-        };
-        let selected = tauri::async_runtime::spawn_blocking(move || {
-            app.dialog()
-                .file()
-                .add_filter(filter_name, &[extension])
-                .set_file_name(file_name)
-                .blocking_save_file()
-                .map(|path| path.into_path().map_err(|_| ()))
-        })
-        .await
-        .map_err(|_| MeetingCommandError::ExportFailed)?;
-        let path = selected
-            .ok_or(MeetingCommandError::ExportCancelled)?
-            .map_err(|_| MeetingCommandError::ExportFailed)?;
+        let path = destination(request.format).await?;
         let images_store = Arc::clone(&store);
         let images_session_id = request.session_id;
         let images = review.snapshots;
@@ -4029,6 +4066,34 @@ impl MeetingSessionManager {
     /// counts on the page move while the model's reading of the conversation
     /// stays where it was.
     pub async fn produce_ledger_html(
+        &self,
+        session_id: MeetingSessionId,
+    ) -> Result<String, MeetingCommandError> {
+        let contents = self.ledger_html(session_id).await?.into_bytes();
+        let app = self.app.clone().ok_or(MeetingCommandError::ExportFailed)?;
+        let selected = tauri::async_runtime::spawn_blocking(move || {
+            app.dialog()
+                .file()
+                .add_filter("HTML", &["html"])
+                .set_file_name("meeting-ledger.html")
+                .blocking_save_file()
+                .map(|path| path.into_path().map_err(|_| ()))
+        })
+        .await
+        .map_err(|_| MeetingCommandError::ExportFailed)?;
+        let path = selected
+            .ok_or(MeetingCommandError::ExportCancelled)?
+            .map_err(|_| MeetingCommandError::ExportFailed)?;
+        let written = path.display().to_string();
+        tauri::async_runtime::spawn_blocking(move || export::write_atomic(&path, &contents))
+            .await
+            .map_err(|_| MeetingCommandError::ExportFailed)?
+            .map_err(|_| MeetingCommandError::ExportFailed)?;
+        Ok(written)
+    }
+
+    /// The ledger page `produce_ledger_html` writes, as HTML.
+    pub(crate) async fn ledger_html(
         &self,
         session_id: MeetingSessionId,
     ) -> Result<String, MeetingCommandError> {
@@ -4095,30 +4160,7 @@ impl MeetingSessionManager {
             speaker_names: &speaker_names,
             segment_speakers: &segment_speakers,
         });
-        let contents = ledger::render_html(&page)
-            .map_err(|_| MeetingCommandError::ExportFailed)?
-            .into_bytes();
-
-        let app = self.app.clone().ok_or(MeetingCommandError::ExportFailed)?;
-        let selected = tauri::async_runtime::spawn_blocking(move || {
-            app.dialog()
-                .file()
-                .add_filter("HTML", &["html"])
-                .set_file_name("meeting-ledger.html")
-                .blocking_save_file()
-                .map(|path| path.into_path().map_err(|_| ()))
-        })
-        .await
-        .map_err(|_| MeetingCommandError::ExportFailed)?;
-        let path = selected
-            .ok_or(MeetingCommandError::ExportCancelled)?
-            .map_err(|_| MeetingCommandError::ExportFailed)?;
-        let written = path.display().to_string();
-        tauri::async_runtime::spawn_blocking(move || export::write_atomic(&path, &contents))
-            .await
-            .map_err(|_| MeetingCommandError::ExportFailed)?
-            .map_err(|_| MeetingCommandError::ExportFailed)?;
-        Ok(written)
+        ledger::render_html(&page).map_err(|_| MeetingCommandError::ExportFailed)
     }
 
     pub async fn question_forget(
@@ -4270,9 +4312,13 @@ impl MeetingSessionManager {
     ) -> Result<MeetingCatchUp, MeetingCommandError> {
         let store = self.store().await?;
         let live = self.live_transcript(session_id);
-        self.processing
-            .catch_up(&store, session_id, live.as_deref())
-            .map_err(map_processing_error)
+        let processing = Arc::clone(&self.processing);
+        tauri::async_runtime::spawn_blocking(move || {
+            processing.catch_up(&store, session_id, live.as_deref())
+        })
+        .await
+        .map_err(|_| MeetingCommandError::EngineFailure)?
+        .map_err(map_processing_error)
     }
 
     /// Live help for a meeting while it records. A question goes with `Ask`
@@ -4296,12 +4342,17 @@ impl MeetingSessionManager {
                 return Err(MeetingCommandError::InvalidRequest)
             }
             (_, None) => None,
-        };
+        }
+        .map(str::to_owned);
         let store = self.store().await?;
         let live = self.live_transcript(session_id);
-        self.processing
-            .live_help(&store, session_id, live.as_deref(), kind, question)
-            .map_err(map_processing_error)
+        let processing = Arc::clone(&self.processing);
+        tauri::async_runtime::spawn_blocking(move || {
+            processing.live_help(&store, session_id, live.as_deref(), kind, question.as_deref())
+        })
+        .await
+        .map_err(|_| MeetingCommandError::EngineFailure)?
+        .map_err(map_processing_error)
     }
 
     /// The words the running capture has recognized so far, for the live
@@ -4370,8 +4421,13 @@ impl MeetingSessionManager {
                 )
             }
         };
-        live.set_live_owner(&promise_id, owner, name)
-            .ok_or(MeetingCommandError::NotFound)?;
+        live.set_live_owner(
+            &crate::meeting::processing::live_changes::Author::Owner,
+            &promise_id,
+            owner,
+            name,
+        )
+        .ok_or(MeetingCommandError::NotFound)?;
         Ok(live.live_card(session_id))
     }
 
@@ -8566,6 +8622,122 @@ pub(crate) mod tests {
 
         assert_eq!(draft.source, MeetingFollowUpSource::Generated);
         assert_eq!(draft.message.as_deref(), Some(FOLLOW_UP_MESSAGE));
+    }
+
+    /// Live help, the recap, a saved prompt and a person summary ask the
+    /// engine from a command; asked inline on the command's runtime worker,
+    /// an engine that enters the runtime (Apple Intelligence, a relay) panics
+    /// and takes the core down.
+    #[test]
+    fn live_help_runs_its_engine_off_the_async_runtime() {
+        let busy = Arc::new(AtomicBool::new(false));
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (_directory, manager, session_id, lane) = capturing_meeting(
+            line_engine(&busy, &calls),
+            Arc::new(RuntimeEnteringGenerator),
+        );
+        capture_audio(&lane, &manager, session_id);
+
+        let help = tauri::async_runtime::block_on(manager.live_help(
+            session_id,
+            super::super::analytics::MeetingLiveHelpKind::Recent,
+            None,
+        ));
+
+        assert!(help.is_ok(), "{help:?}");
+    }
+
+    #[test]
+    fn catch_up_runs_its_engine_off_the_async_runtime() {
+        let busy = Arc::new(AtomicBool::new(false));
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (_directory, manager, session_id, lane) = capturing_meeting(
+            line_engine(&busy, &calls),
+            Arc::new(RuntimeEnteringGenerator),
+        );
+        capture_audio(&lane, &manager, session_id);
+
+        let recap = tauri::async_runtime::block_on(manager.catch_up(session_id));
+
+        assert!(recap.is_ok(), "{recap:?}");
+    }
+
+    #[test]
+    fn a_saved_prompt_runs_its_engine_off_the_async_runtime() {
+        let (_directory, manager, _starts, _aborts) = manager();
+        let generator: Arc<dyn super::super::processing::MeetingTextGenerator> =
+            Arc::new(RuntimeEnteringGenerator);
+        manager
+            .processing
+            .set_text_generators(Arc::clone(&generator), generator);
+        let store = tauri::async_runtime::block_on(manager.store()).unwrap();
+        let session_id =
+            crate::meeting::store::workflow_core_tests::reviewable_meeting(&store, "Pricing", 1);
+        let note = ManualNote {
+            note_id: ManualNoteId::new(),
+            session_id,
+            start_offset_ns: None,
+            end_offset_ns: None,
+            body: "We decided to ship the enterprise tier on Friday.".to_string(),
+            revision: 0,
+            created_at_utc_ms: 1,
+            updated_at_utc_ms: 1,
+        };
+        store
+            .create_note(MeetingOperationId::new(), 1, &note, 0)
+            .unwrap();
+        let prompt_id = store
+            .saved_prompts()
+            .unwrap()
+            .prompts
+            .iter()
+            .find(|prompt| prompt.target == crate::meeting::prompt_types::PromptTarget::Meeting)
+            .unwrap()
+            .prompt_id;
+
+        let run = tauri::async_runtime::block_on(manager.run_saved_prompt(
+            crate::meeting::prompt_types::SavedPromptRunRequest {
+                prompt_id,
+                target: crate::meeting::prompt_types::PromptTargetRef::Meeting { session_id },
+            },
+        ))
+        .unwrap();
+
+        assert!(
+            !matches!(
+                run.result,
+                crate::meeting::prompt_types::PromptRunResult::Failed { .. }
+            ),
+            "{:?}",
+            run.result
+        );
+    }
+
+    #[test]
+    fn a_person_summary_runs_its_engine_off_the_async_runtime() {
+        let (_directory, manager, _starts, _aborts) = manager();
+        let generator: Arc<dyn super::super::processing::MeetingTextGenerator> =
+            Arc::new(RuntimeEnteringGenerator);
+        manager
+            .processing
+            .set_text_generators(Arc::clone(&generator), generator);
+        let session_id = meeting_with_artifact(&manager);
+        let store = tauri::async_runtime::block_on(manager.store()).unwrap();
+        let person_id =
+            crate::meeting::store::workflow_core_tests::person(&store, "Priya", &[], &[]);
+        crate::meeting::store::workflow_core_tests::link(
+            &store,
+            session_id,
+            person_id,
+            "calendar",
+            "confirmed",
+        );
+
+        let result =
+            tauri::async_runtime::block_on(manager.person_summary_regenerate(person_id)).unwrap();
+
+        assert_ne!(result.outcome, PersonSummaryOutcome::NoEvidence);
+        assert_ne!(result.outcome, PersonSummaryOutcome::EngineUnavailable);
     }
 
     /// No engine at all is not a failure: the record is the draft, and the

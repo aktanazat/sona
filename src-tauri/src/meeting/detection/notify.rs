@@ -276,12 +276,24 @@ pub(super) struct PanelCapture<T> {
     pub commands: Vec<PanelCommand<T>>,
 }
 
+/// Where a pending entry may be shown.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PanelRoute {
+    /// May take the panel.
+    Panel,
+    /// Kept off every surface while a capture runs, and offered on the panel
+    /// again once it ends: a recording is no time to ask anything.
+    Held,
+    /// Posted as a native notification; never takes the panel again.
+    Notification,
+}
+
 #[derive(Clone, Debug)]
 struct PanelEntry<T> {
     prompt: T,
     priority: u8,
     sequence: u64,
-    panel_eligible: bool,
+    route: PanelRoute,
 }
 
 #[derive(Clone, Debug)]
@@ -313,6 +325,8 @@ impl<T> Default for PanelSlot<T> {
 }
 
 impl<T: Clone> PanelSlot<T> {
+    /// `panel_available` is false while a capture is tracked: the entry is
+    /// held, shown nowhere, until `end_capture` or `release_held`.
     pub fn raise(
         &mut self,
         prompt_id: String,
@@ -328,12 +342,16 @@ impl<T: Clone> PanelSlot<T> {
                 prompt: prompt.clone(),
                 priority,
                 sequence,
-                panel_eligible: panel_available,
+                route: if panel_available {
+                    PanelRoute::Panel
+                } else {
+                    PanelRoute::Held
+                },
             },
         );
 
         if !panel_available {
-            return vec![PanelCommand::PresentFallback { prompt_id, prompt }];
+            return Vec::new();
         }
 
         let Some(owner) = self.owner.as_ref() else {
@@ -393,7 +411,9 @@ impl<T: Clone> PanelSlot<T> {
         commands
     }
 
-    pub fn begin_capture(&mut self, should_fallback: impl Fn(&T) -> bool) -> PanelCapture<T> {
+    /// Holds every pending prompt `should_hold` keeps, without posting it
+    /// anywhere, and discards the rest.
+    pub fn begin_capture(&mut self, should_hold: impl Fn(&T) -> bool) -> PanelCapture<T> {
         self.owner = None;
         let mut pending = self
             .pending
@@ -404,14 +424,12 @@ impl<T: Clone> PanelSlot<T> {
         let mut discarded = Vec::new();
         let mut commands = Vec::new();
         for (_, prompt_id) in pending {
-            let Some(entry) = self.pending.get(&prompt_id) else {
+            let Some(entry) = self.pending.get_mut(&prompt_id) else {
                 continue;
             };
-            if should_fallback(&entry.prompt) {
-                if entry.panel_eligible {
-                    if let Some(command) = self.mark_for_fallback(&prompt_id) {
-                        commands.push(command);
-                    }
+            if should_hold(&entry.prompt) {
+                if entry.route == PanelRoute::Panel {
+                    entry.route = PanelRoute::Held;
                 }
                 continue;
             }
@@ -428,7 +446,23 @@ impl<T: Clone> PanelSlot<T> {
     }
 
     pub fn end_capture(&mut self) -> Vec<PanelCommand<T>> {
-        vec![PanelCommand::HidePanel]
+        let mut commands = vec![PanelCommand::HidePanel];
+        commands.extend(self.release_held());
+        commands
+    }
+
+    /// Puts what a capture held back on the panel's queue, and offers the
+    /// first of it when nothing holds the panel.
+    pub fn release_held(&mut self) -> Option<PanelCommand<T>> {
+        for entry in self.pending.values_mut() {
+            if entry.route == PanelRoute::Held {
+                entry.route = PanelRoute::Panel;
+            }
+        }
+        if self.owner.is_some() {
+            return None;
+        }
+        self.promote_next()
     }
 
     pub fn finish(&mut self, prompt_id: &str) -> PanelFinish<T> {
@@ -465,7 +499,7 @@ impl<T: Clone> PanelSlot<T> {
 
     fn mark_for_fallback(&mut self, prompt_id: &str) -> Option<PanelCommand<T>> {
         let entry = self.pending.get_mut(prompt_id)?;
-        entry.panel_eligible = false;
+        entry.route = PanelRoute::Notification;
         Some(PanelCommand::PresentFallback {
             prompt_id: prompt_id.to_string(),
             prompt: entry.prompt.clone(),
@@ -476,7 +510,7 @@ impl<T: Clone> PanelSlot<T> {
         let (prompt_id, prompt) = self
             .pending
             .iter()
-            .filter(|(_, entry)| entry.panel_eligible)
+            .filter(|(_, entry)| entry.route == PanelRoute::Panel)
             .max_by_key(|(_, entry)| (entry.priority, Reverse(entry.sequence)))
             .map(|(prompt_id, entry)| (prompt_id.clone(), entry.prompt.clone()))?;
         self.owner = Some(PanelOwner {
@@ -1245,33 +1279,21 @@ mod tests {
     }
 
     #[test]
-    fn capture_displaces_acknowledged_and_queued_prompts_to_fallback() {
+    fn capture_holds_acknowledged_and_queued_prompts_without_notifying() {
         let mut slot = PanelSlot::default();
         slot.raise("calendar".to_string(), "calendar", 3, true);
         slot.acknowledge("calendar");
         slot.raise("browser".to_string(), "browser", 1, true);
 
         let capture = slot.begin_capture(|_| true);
-        assert_eq!(
-            capture.commands,
-            vec![
-                PanelCommand::PresentFallback {
-                    prompt_id: "calendar".to_string(),
-                    prompt: "calendar",
-                },
-                PanelCommand::PresentFallback {
-                    prompt_id: "browser".to_string(),
-                    prompt: "browser",
-                },
-                PanelCommand::ShowPanel,
-            ]
-        );
+
+        assert_eq!(capture.commands, vec![PanelCommand::ShowPanel]);
         assert!(capture.discarded.is_empty());
         assert_eq!(slot.owner_id(), None);
     }
 
     #[test]
-    fn capture_discards_rituals_instead_of_notifying_over_recording() {
+    fn capture_discards_rituals_and_holds_prompts() {
         let mut slot = PanelSlot::default();
         slot.raise("prompt".to_string(), "prompt", 10, true);
         slot.raise("wrap".to_string(), "wrap", 1, true);
@@ -1279,14 +1301,55 @@ mod tests {
         let capture = slot.begin_capture(|pending| *pending == "prompt");
 
         assert_eq!(capture.discarded, vec![("wrap".to_string(), "wrap")]);
-        assert!(capture.commands.contains(&PanelCommand::PresentFallback {
-            prompt_id: "prompt".to_string(),
-            prompt: "prompt",
-        }));
-        assert!(!capture.commands.contains(&PanelCommand::PresentFallback {
-            prompt_id: "wrap".to_string(),
-            prompt: "wrap",
-        }));
+        assert_eq!(
+            capture.commands,
+            vec![
+                PanelCommand::WithdrawPrompt {
+                    prompt_id: "wrap".to_string(),
+                },
+                PanelCommand::ShowPanel,
+            ]
+        );
+    }
+
+    #[test]
+    fn a_prompt_raised_during_a_capture_waits_for_it_to_end() {
+        let mut slot = PanelSlot::default();
+        slot.begin_capture(|_| true);
+
+        assert!(slot.raise("app".to_string(), "app", 2, false).is_empty());
+        assert_eq!(slot.owner_id(), None);
+    }
+
+    #[test]
+    fn ending_a_capture_offers_the_best_held_prompt_on_the_panel() {
+        let mut slot = PanelSlot::default();
+        slot.raise("browser".to_string(), "browser", 1, true);
+        slot.begin_capture(|_| true);
+        slot.raise("calendar".to_string(), "calendar", 3, false);
+
+        assert_eq!(
+            slot.end_capture(),
+            vec![
+                PanelCommand::HidePanel,
+                PanelCommand::PresentPanel {
+                    prompt_id: "calendar".to_string(),
+                    prompt: "calendar",
+                },
+            ]
+        );
+        assert_eq!(slot.owner_id(), Some("calendar"));
+    }
+
+    #[test]
+    fn a_prompt_that_fell_back_is_not_offered_again_after_a_capture() {
+        let mut slot = PanelSlot::default();
+        slot.raise("browser".to_string(), "browser", 1, true);
+        slot.raise("calendar".to_string(), "calendar", 3, true);
+        slot.finish("calendar");
+        slot.begin_capture(|_| true);
+
+        assert_eq!(slot.end_capture(), vec![PanelCommand::HidePanel]);
     }
 
     #[test]

@@ -134,6 +134,20 @@
 "keyboard.space" = "Space";
 "keyboard.delete" = "Delete";
 "keyboard.return" = "Return";
+"keyboard.shift" = "Shift";
+"keyboard.capsLock" = "Caps Lock";
+"keyboard.letters" = "Letters";
+"keyboard.numbers" = "Numbers";
+"keyboard.symbols" = "Symbols";
+"keyboard.return.go" = "Go";
+"keyboard.return.search" = "Search";
+"keyboard.return.join" = "Join";
+"keyboard.return.next" = "Next";
+"keyboard.return.route" = "Route";
+"keyboard.return.send" = "Send";
+"keyboard.return.done" = "Done";
+"keyboard.return.emergencyCall" = "Emergency Call";
+"keyboard.return.continue" = "Continue";
 
 "tab.library" = "Notes";
 "keyboard.enable" = "Dictate from the keyboard";

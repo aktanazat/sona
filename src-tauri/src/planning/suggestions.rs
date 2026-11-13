@@ -735,7 +735,7 @@ pub(super) fn accept(
                 id: id.clone(),
                 state: PlanningSuggestionState::Accepted,
                 revision,
-                project_id: Some(project_id),
+                project_id,
                 evidence_link_id: Some(link.id),
             })
         },

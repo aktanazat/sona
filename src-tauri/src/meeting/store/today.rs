@@ -102,38 +102,51 @@ impl MeetingStore {
         &self,
         today: NaiveDate,
         user_name: Option<&str>,
+        hidden: &dyn Fn(MeetingSessionId) -> bool,
     ) -> TodayStoreCounts {
         TodayStoreCounts {
-            processing: TodayCount::read("processing", self.processing_count()),
+            processing: TodayCount::read("processing", self.processing_count(hidden)),
             unknown_speakers: TodayCount::read(
                 "unknown speakers",
-                self.unknown_speakers(user_name),
+                self.unknown_speakers(user_name, hidden),
             ),
-            owed: TodayCount::read("owed", self.owed(today, user_name)),
+            owed: TodayCount::read("owed", self.owed(today, user_name, hidden)),
         }
     }
 
     /// The meetings the list's processing filter shows.
-    fn processing_count(&self) -> Result<u32, StoreError> {
+    fn processing_count(
+        &self,
+        hidden: &dyn Fn(MeetingSessionId) -> bool,
+    ) -> Result<u32, StoreError> {
         let connection = self.connection()?;
-        let count: i64 = connection.query_row(
-            &format!(
-                "SELECT COUNT(*) FROM meeting_sessions m
-                  WHERE m.phase != 'deleting' AND ({})",
-                status_predicate(MeetingStatusFilter::Processing)
-            ),
-            [],
-            |row| row.get(0),
-        )?;
-        u32::try_from(count).map_err(|_| StoreError::Corrupt)
+        let mut statement = connection.prepare(&format!(
+            "SELECT m.id FROM meeting_sessions m
+              WHERE m.phase != 'deleting' AND ({})",
+            status_predicate(MeetingStatusFilter::Processing)
+        ))?;
+        let mut count = 0_u32;
+        for id in statement.query_map([], |row| row.get::<_, String>(0))? {
+            let id = Uuid::parse_str(&id?)
+                .map(MeetingSessionId::from_uuid)
+                .map_err(|_| StoreError::Corrupt)?;
+            if !hidden(id) {
+                count = count.saturating_add(1);
+            }
+        }
+        Ok(count)
     }
 
     /// Speakers no person, "unknown" answer or the user's own name covers
     /// yet, across finished meetings.
-    fn unknown_speakers(&self, user_name: Option<&str>) -> Result<TodayTally, StoreError> {
+    fn unknown_speakers(
+        &self,
+        user_name: Option<&str>,
+        hidden: &dyn Fn(MeetingSessionId) -> bool,
+    ) -> Result<TodayTally, StoreError> {
         let finished = finished_meeting_ids(&*self.connection()?)?;
         let mut tally = TodayTally::default();
-        for session_id in finished {
+        for session_id in finished.into_iter().filter(|id| !hidden(*id)) {
             let unresolved = self.unresolved_active_voice_speaker_ids(session_id, user_name)?;
             if unresolved.is_empty() {
                 continue;
@@ -148,11 +161,19 @@ impl MeetingStore {
 
     /// The open loops the needs-you list holds as the user's own: open loop
     /// rows, theirs, from meetings whose continuity pass finished.
-    fn owed(&self, today: NaiveDate, user_name: Option<&str>) -> Result<TodayOwed, StoreError> {
+    fn owed(
+        &self,
+        today: NaiveDate,
+        user_name: Option<&str>,
+        hidden: &dyn Fn(MeetingSessionId) -> bool,
+    ) -> Result<TodayOwed, StoreError> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction()?;
         let mut owed = TodayOwed::default();
         for meeting in ledger_rows_in(&transaction, user_name)? {
+            if hidden(meeting.session_id) {
+                continue;
+            }
             let mine = meeting
                 .rows
                 .iter()
@@ -236,7 +257,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            store.today_counts(today(), None),
+            store.today_counts(today(), None, &|_| false),
             TodayStoreCounts {
                 processing: TodayCount::Available { value: 1 },
                 unknown_speakers: TodayCount::Available {
@@ -247,6 +268,12 @@ mod tests {
                 },
             }
         );
+        assert_eq!(
+            store
+                .today_counts(today(), None, &|id| id == running)
+                .processing,
+            TodayCount::Available { value: 0 }
+        );
 
         store
             .connection()
@@ -255,7 +282,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            store.today_counts(today(), None),
+            store.today_counts(today(), None, &|_| false),
             TodayStoreCounts {
                 processing: TodayCount::Available { value: 1 },
                 unknown_speakers: TodayCount::Unavailable,

@@ -816,6 +816,7 @@ mod tests {
             people: vec![WorkPersonChoice {
                 id: "dana".to_owned(),
                 name: "Dana Reyes".to_owned(),
+                aliases: Vec::new(),
             }],
         }
     }

@@ -3,6 +3,7 @@ mod contact_cards;
 mod continuity;
 mod contributions;
 mod mutations;
+mod profiles;
 mod queries;
 mod vocabulary;
 
@@ -11,6 +12,8 @@ pub(super) use mutations::{
     link_document_mentions_in, person_for_named_speaker_in, recompute_organizations_in,
     upsert_link_in,
 };
+pub(crate) use avatars::validated_png;
+pub(crate) use profiles::PersonProfileEdit;
 pub(super) use queries::{
     calendar_context_in, confirmed_person_ids_in, continuity_summary_in, owed_to_in,
 };
@@ -60,7 +63,8 @@ pub(super) fn person_by_id_in(
         .query_row(
             "SELECT id, display_name, aliases_json, calendar_emails_json,
                     organization, created_at_utc_ms, updated_at_utc_ms,
-                    summary, summary_generated_at_utc_ms, summary_model_id
+                    summary, summary_generated_at_utc_ms, summary_model_id,
+                    role, notes
                FROM persons WHERE id = ?1",
             [person_id.uuid().to_string()],
             person_from_row,
@@ -73,7 +77,8 @@ pub(super) fn all_people_in(connection: &Connection) -> Result<Vec<Person>, Stor
     let mut statement = connection.prepare(
         "SELECT id, display_name, aliases_json, calendar_emails_json,
                 organization, created_at_utc_ms, updated_at_utc_ms,
-                summary, summary_generated_at_utc_ms, summary_model_id
+                summary, summary_generated_at_utc_ms, summary_model_id,
+                role, notes
            FROM persons ORDER BY display_name COLLATE NOCASE, id",
     )?;
     let people = statement
@@ -138,6 +143,8 @@ fn person_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Person> {
         calendar_emails,
         organization: row.get(4)?,
         summary: person_summary_from_row(row)?,
+        role: row.get(10)?,
+        notes: row.get(11)?,
         created_at_utc_ms: row.get(5)?,
         updated_at_utc_ms: row.get(6)?,
     })

@@ -72,12 +72,13 @@ pub async fn home_today(
         };
     let untracked = TodayCount::read(
         "untracked",
-        crate::planning::untracked::tally(&history, &manager).await,
+        crate::planning::untracked::tally(&history, &manager, &|_| false).await,
     );
     let counts = match manager.store().await {
         Ok(store) => store.today_counts(
             chrono::Local::now().date_naive(),
             manager.user_name().as_deref(),
+            &|_| false,
         ),
         Err(error) => {
             log::warn!("home_today: meeting store unavailable: {error:?}");
@@ -95,7 +96,7 @@ pub async fn home_today(
 
 /// How many events today holds, and the first four distinct confirmed people
 /// in them other than the user.
-fn today_meetings(rows: &[MeetingUpcomingRow]) -> TodayMeetings {
+pub(crate) fn today_meetings(rows: &[MeetingUpcomingRow]) -> TodayMeetings {
     let mut people: Vec<TodayPerson> = Vec::new();
     for attendee in rows.iter().flat_map(|row| &row.attendees) {
         let Some(person_id) = attendee.person_id.filter(|_| !attendee.is_self) else {

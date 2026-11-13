@@ -30,9 +30,12 @@ struct MeetingLiveView: View {
 
     private var session: MeetingSessionSnapshot? { store.live?.session }
 
+    static let boardAnchor = "live-board"
+
     var body: some View {
         GeometryReader { geometry in
             ScrollViewReader { proxy in
+                Group {
                 if let session {
                     if geometry.size.width >= 820 {
                         VStack(alignment: .leading, spacing: 0) {
@@ -51,7 +54,8 @@ struct MeetingLiveView: View {
                                 Hairline(axis: .vertical)
                                 ScrollView {
                                     VStack(alignment: .leading, spacing: 0) {
-                                        LiveCardSection(sessionId: session.sessionId)
+                                        LiveCardSection(sessionId: session.sessionId).id(Self.boardAnchor)
+                                        LiveDocSection(sessionId: session.sessionId)
                                         ownNotes
                                         recalled
                                         help(proxy)
@@ -69,7 +73,8 @@ struct MeetingLiveView: View {
                     } else {
                         Page {
                             captureHeader(session, proxy)
-                            LiveCardSection(sessionId: session.sessionId)
+                            LiveCardSection(sessionId: session.sessionId).id(Self.boardAnchor)
+                            LiveDocSection(sessionId: session.sessionId)
                             ownNotes
                             recalled
                             help(proxy)
@@ -81,6 +86,12 @@ struct MeetingLiveView: View {
                         Text("This meeting is no longer recording.")
                             .bodyText(14, Theme.inkSecondary)
                             .frame(minHeight: Theme.headerHeight)
+                    }
+                }
+                }
+                .onChange(of: model.liveDoc.boardRequests) {
+                    withAnimation(Motion.settle(reduced: reduceMotion)) {
+                        proxy.scrollTo(Self.boardAnchor, anchor: .top)
                     }
                 }
             }
@@ -114,7 +125,7 @@ struct MeetingLiveView: View {
         ErrorNote(store.error)
         warnings
         ContextSuggestionsView(
-            sessionId: session.sessionId, revision: session.revision, heard: store.provisional.count,
+            sessionId: session.sessionId, revision: session.revision,
             showLive: { jump(to: $0, using: proxy) })
         LivePlaceLine(places: store.places, sessionId: session.sessionId, revision: session.revision)
         MeetingSnapshotStrip(sessionId: session.sessionId)
@@ -161,6 +172,7 @@ struct MeetingLiveView: View {
                             ? store.bookmarkCounts?.counts : nil,
                         action: { store.bookmark($0) })
                     if session.phase.isActive {
+                        LiveShareLinkButton(sessionId: session.sessionId)
                         Button("Stop") { store.stop() }
                             .buttonStyle(.primary)
                             .disabled(!session.allows(.stop) || store.pending != nil)
@@ -238,14 +250,21 @@ struct MeetingLiveView: View {
 
     @ViewBuilder
     private var transcript: some View {
+        let changes = model.liveDoc.watching == session?.sessionId ? model.liveDoc.doc?.changes ?? [] : []
         PageSection("Transcript") {
             if store.showsProvisional {
                 VStack(alignment: .leading, spacing: 8) {
-                    ForEach(store.provisional) { segment in
-                        line(
-                            at: segment.startOffsetNs, segment.text,
-                            speaker: segment.speakerLabel, ink: ink(segment),
-                            anchor: "live-\(segment.segmentId)")
+                    ForEach(TimelineEntry.merged(
+                        store.provisional, at: \.startOffsetNs, id: { "live-\($0.segmentId)" }, changes)
+                    ) { entry in
+                        switch entry.row {
+                        case .line(let segment):
+                            line(
+                                at: segment.startOffsetNs, segment.text,
+                                speaker: segment.speakerLabel, ink: ink(segment), anchor: entry.id)
+                        case .change(let change):
+                            ChangeRow(change: change)
+                        }
                     }
                     Text("Provisional words and speaker labels")
                         .metaText(Theme.inkSecondary)
@@ -256,11 +275,17 @@ struct MeetingLiveView: View {
                     .bodyText(14, Theme.inkSecondary)
             } else {
                 VStack(alignment: .leading, spacing: 8) {
-                    ForEach(store.lines, id: \.base.segmentId) { segment in
-                        line(
-                            at: segment.base.startOffsetNs, segment.text,
-                            speaker: store.speakerLabel(segment), ink: ink(segment),
-                            anchor: "stored-\(segment.base.segmentId)")
+                    ForEach(TimelineEntry.merged(
+                        store.lines, at: \.base.startOffsetNs, id: { "stored-\($0.base.segmentId)" }, changes)
+                    ) { entry in
+                        switch entry.row {
+                        case .line(let segment):
+                            line(
+                                at: segment.base.startOffsetNs, segment.text,
+                                speaker: store.speakerLabel(segment), ink: ink(segment), anchor: entry.id)
+                        case .change(let change):
+                            ChangeRow(change: change)
+                        }
                     }
                 }
             }
@@ -387,7 +412,7 @@ struct MeetingLiveView: View {
         PageSection("During the call") {
             Card {
                 ForEach(
-                    Array([MeetingLiveHelpKind.recent, .questions, .say].enumerated()), id: \.offset
+                    Array([MeetingLiveHelpKind.recap, .recent, .questions, .say].enumerated()), id: \.offset
                 ) { index, kind in
                     if index > 0 { Hairline() }
                     CardRow(action: { store.askLiveHelp(kind) }) {
@@ -464,9 +489,56 @@ struct MeetingLiveView: View {
                         Text("Based on the words recognized so far.")
                             .metaText(Theme.inkTertiary)
                     }
+                    if kind == .recap, answer.state == .ready, !answer.items.isEmpty {
+                        RecapShareMenu(text: answer.sharedRecap)
+                    }
+                }
+                lookupAnswer
+                if let next = store.spokenAsks.first {
+                    Text("Next, once you dismiss this: \(next.question ?? "a recap")")
+                        .metaText(Theme.inkTertiary)
                 }
             }
             .padding(16)
+        }
+    }
+
+    /// Past meetings and dictations, for a question this call has not
+    /// covered: an offer the first time, the lines once the user said yes.
+    @ViewBuilder
+    private var lookupAnswer: some View {
+        if let question = store.lookupOffer {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Look for “\(question)” in your past meetings and dictations? The search stays on this Mac.")
+                    .bodyText(13, Theme.inkSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 8) {
+                    Button("Look it up") { store.allowLookup() }.buttonStyle(.compact)
+                    Button("Not now") { store.declineLookup() }.buttonStyle(.quiet)
+                }
+            }
+        } else if store.lookupLoading {
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text("Looking in past meetings…").metaText()
+            }
+        } else if let error = store.lookupError {
+            ErrorNote(error)
+        } else if let lookup = store.lookup {
+            Hairline()
+            Text("From past meetings").sectionLabel()
+            if lookup.lines.isEmpty {
+                Text("Nothing in your past meetings or dictations says that either.")
+                    .bodyText(13, Theme.inkSecondary)
+            }
+            ForEach(lookup.lines.prefix(5)) { line in
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("“\(line.quote)”").bodyText(14).textSelection(.enabled)
+                    Text([line.speaker, line.title, PromiseLabel.day(line.whenUtcMs)]
+                        .compactMap { $0 }.joined(separator: " · "))
+                        .metaText()
+                }
+            }
         }
     }
 

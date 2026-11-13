@@ -49,6 +49,7 @@ extension CoreEvent {
     static let meetingProcessingProgress = "meeting:processing-progress"
     static let meetingHeardPlansChanged = "meeting:heard-plans-changed"
     static let meetingLiveCardChanged = "meeting:live-card-changed"
+    static let meetingLiveDocChanged = "meeting:live-doc-changed"
 }
 
 /// The payload every `meeting:*` event but navigation carries.

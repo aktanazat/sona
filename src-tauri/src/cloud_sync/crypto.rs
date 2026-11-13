@@ -752,6 +752,63 @@ pub fn open_share_payload(
     )
 }
 
+/// What a live room's link root opens: the token a browser joins the room
+/// with, and the key its frames are sealed with.
+pub struct LiveRoomKeys {
+    pub join_token: [u8; AES_GCM_KEY_BYTES],
+    pub frame_key: [u8; AES_GCM_KEY_BYTES],
+}
+
+/// Derive a live room's join token and frame key from its link root, as
+/// the browser does from the link's fragment.
+pub fn derive_live_room_keys(root: &[u8], room_id: &str) -> Result<LiveRoomKeys, CryptoError> {
+    let root = fixed_array::<AES_GCM_KEY_BYTES>(root, "live room root")?;
+    let info =
+        |label| length_prefixed_record(&[RecordField::Text(label), RecordField::Text(room_id)]);
+    Ok(LiveRoomKeys {
+        join_token: derive_aes_gcm_key(&root, b"sona-live-v1", &info("sona-live-join-v1")?)?,
+        frame_key: derive_aes_gcm_key(&root, b"sona-live-v1", &info("sona-live-key-v1")?)?,
+    })
+}
+
+/// The AES-GCM additional authenticated data for one live room frame.
+pub fn live_frame_aad(room_id: &str, kind: &str, seq: u64) -> Result<Vec<u8>, CryptoError> {
+    length_prefixed_record(&[
+        RecordField::Text("sona-live-aad-v1"),
+        RecordField::Text(room_id),
+        RecordField::Text(kind),
+        RecordField::Decimal(seq),
+    ])
+}
+
+/// Seal a live room frame as nonce_12 || ciphertext || tag_16.
+pub fn seal_live_frame(
+    frame_key: &[u8; AES_GCM_KEY_BYTES],
+    room_id: &str,
+    kind: &str,
+    seq: u64,
+    nonce: &[u8; AES_GCM_NONCE_BYTES],
+    plaintext: &[u8],
+) -> Result<Vec<u8>, CryptoError> {
+    let aad = live_frame_aad(room_id, kind, seq)?;
+    prepend_nonce(nonce, aes_gcm_encrypt(frame_key, nonce, &aad, plaintext)?)
+}
+
+/// Open a live room frame sealed as nonce_12 || ciphertext || tag_16.
+pub fn open_live_frame(
+    frame_key: &[u8; AES_GCM_KEY_BYTES],
+    room_id: &str,
+    kind: &str,
+    seq: u64,
+    sealed: &[u8],
+) -> Result<Vec<u8>, CryptoError> {
+    ensure_minimum_aes_gcm_payload(sealed, "live room frame")?;
+    let nonce =
+        fixed_array::<AES_GCM_NONCE_BYTES>(&sealed[..AES_GCM_NONCE_BYTES], "live room nonce")?;
+    let aad = live_frame_aad(room_id, kind, seq)?;
+    aes_gcm_decrypt(frame_key, &nonce, &aad, &sealed[AES_GCM_NONCE_BYTES..])
+}
+
 /// A decoded local recovery code.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RecoveryCode {
@@ -1500,6 +1557,56 @@ mod tests {
             assert_eq!(
                 open_share_payload(&root, &context, &ciphertext[..truncated_bytes]).is_ok(),
                 expected_decrypts
+            );
+        }
+    }
+
+    #[test]
+    fn frozen_live_room_vectors_match_the_page_and_worker() {
+        let fixture = fixture();
+        let live = fixture.field("live_room_aes_gcm_hkdf");
+        let room_id = live.field("room_id").text();
+        let keys = derive_live_room_keys(&live.field("root").base64url(), room_id)
+            .expect("live room keys");
+        assert_eq!(
+            keys.join_token.to_vec(),
+            live.field("join_token").base64url()
+        );
+        assert_eq!(keys.frame_key.to_vec(), live.field("frame_key").base64url());
+        assert_eq!(
+            sha256_base64url(&keys.join_token),
+            live.field("join_verifier").text()
+        );
+        assert_eq!(
+            sha256_base64url(&live.field("host_token").base64url()),
+            live.field("host_verifier").text()
+        );
+
+        for kind in ["state", "edit"] {
+            let vector = live.field(kind);
+            let seq = vector.field("seq").number();
+            let nonce =
+                fixed_array::<AES_GCM_NONCE_BYTES>(&vector.field("nonce").base64url(), "nonce")
+                    .expect("fixture nonce is 12 bytes");
+            let plaintext = vector.field("plaintext").base64url();
+            let sealed = vector.field("box").base64url();
+            assert_eq!(
+                live_frame_aad(room_id, kind, seq).expect("live AAD"),
+                vector.field("aad").base64url()
+            );
+            assert_eq!(
+                seal_live_frame(&keys.frame_key, room_id, kind, seq, &nonce, &plaintext)
+                    .expect("live sealing"),
+                sealed
+            );
+            assert_eq!(
+                open_live_frame(&keys.frame_key, room_id, kind, seq, &sealed)
+                    .expect("live opening"),
+                plaintext
+            );
+            assert!(
+                open_live_frame(&keys.frame_key, room_id, kind, seq + 1, &sealed).is_err(),
+                "a {kind} frame opens only at its own seq"
             );
         }
     }

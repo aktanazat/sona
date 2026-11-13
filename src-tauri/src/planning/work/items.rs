@@ -7,8 +7,8 @@ use super::super::store::{self, Refusal};
 use super::parse;
 use super::types::{
     WorkActivity, WorkActivityKind, WorkActor, WorkCounts, WorkDay, WorkDisplay, WorkDue, WorkItem,
-    WorkLabel, WorkOwner, WorkPatch, WorkQuery, WorkRelation, WorkRelationKind, WorkStatus,
-    WorkView,
+    WorkItemRef, WorkLabel, WorkOwner, WorkPatch, WorkPlace, WorkProgress, WorkQuery, WorkRelation,
+    WorkRelationKind, WorkStatus, WorkView,
 };
 use anyhow::Result;
 use chrono::{Datelike, Days, Local, NaiveDate, TimeZone};
@@ -20,7 +20,11 @@ const ITEM_COLUMNS: &str = "t.id, t.number, t.title, t.details, t.status, t.prio
     t.milestone_id, t.owner_person_id, t.owner_is_self, t.due_at_ms, t.source_loop_id,
     t.duplicate_of, t.snoozed_until_ms, t.archived_at_ms, t.status_changed_at_ms,
     t.created_at_ms, t.updated_at_ms, t.revision, t.sort_order,
-    (SELECT group_concat(label_id) FROM planning_task_labels WHERE task_id = t.id), t.cycle";
+    (SELECT group_concat(label_id) FROM planning_task_labels WHERE task_id = t.id), t.cycle,
+    t.parent_id, t.estimate, t.completed_at_ms, t.for_person_id";
+
+/// The largest estimate, the top of Linear's extended exponential scale.
+pub(crate) const MAX_ESTIMATE: u8 = 64;
 
 fn read_item(row: &Row<'_>) -> rusqlite::Result<WorkItem> {
     let owner_person_id: Option<String> = row.get(8)?;
@@ -54,6 +58,10 @@ fn read_item(row: &Row<'_>) -> rusqlite::Result<WorkItem> {
         revision: row.get(18)?,
         sort_order: row.get(19)?,
         cycle: row.get(21)?,
+        parent_id: row.get(22)?,
+        estimate: row.get(23)?,
+        completed_at_ms: row.get(24)?,
+        for_person_id: row.get(25)?,
     })
 }
 
@@ -125,7 +133,7 @@ pub(crate) fn repeat_change(
 pub(crate) fn items(conn: &Connection, include_archived: bool) -> Result<Vec<WorkItem>> {
     let mut statement = conn.prepare(&format!(
         "SELECT {ITEM_COLUMNS} FROM planning_tasks t
-         WHERE ?1 OR t.archived_at_ms IS NULL
+         WHERE (?1 OR t.archived_at_ms IS NULL) AND t.trashed_at_ms IS NULL
          ORDER BY t.number"
     ))?;
     let rows = statement.query_map([include_archived], read_item)?;
@@ -152,6 +160,108 @@ pub(crate) fn family(conn: &Connection, root_id: &str) -> Result<Vec<WorkItem>> 
     ))?;
     let rows = statement.query_map([root_id], read_item)?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// The task `parent_id` names, once it is sure `id` would not end up under
+/// itself: no task above the parent is `id`.
+fn existing_parent(conn: &Connection, id: &str, parent_id: &str) -> Result<String> {
+    let parent_id = item(conn, &store::uuid(parent_id)?)?.id;
+    let looped: bool = conn.query_row(
+        "WITH RECURSIVE above(id, depth) AS (
+             SELECT ?2, 0
+             UNION
+             SELECT t.parent_id, above.depth + 1 FROM planning_tasks t
+             JOIN above ON t.id = above.id
+             WHERE t.parent_id IS NOT NULL AND above.depth < 10000
+         )
+         SELECT EXISTS(SELECT 1 FROM above WHERE id = ?1)",
+        params![id, parent_id],
+        |row| row.get(0),
+    )?;
+    if looped {
+        return Err(Refusal::ParentLoop.into());
+    }
+    Ok(parent_id)
+}
+
+/// Another task as a detail page names it.
+pub(crate) fn item_ref(conn: &Connection, id: &str) -> Result<WorkItemRef> {
+    let item = item(conn, id)?;
+    Ok(WorkItemRef {
+        id: item.id,
+        number: item.number,
+        title: item.title,
+        status: item.status,
+    })
+}
+
+/// A task's sub-tasks, archived ones left out, in number order.
+pub(crate) fn sub_tasks(conn: &Connection, parent_id: &str) -> Result<Vec<WorkItem>> {
+    let mut statement = conn.prepare(&format!(
+        "SELECT {ITEM_COLUMNS} FROM planning_tasks t
+         WHERE t.parent_id = ?1 AND t.archived_at_ms IS NULL ORDER BY t.number"
+    ))?;
+    let rows = statement.query_map([parent_id], read_item)?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// Each parent's sub-tasks done out of all of them, by the parent's id.
+/// Archived, canceled and duplicate sub-tasks count for neither.
+pub(crate) fn sub_task_progress(conn: &Connection) -> Result<HashMap<String, WorkProgress>> {
+    let mut statement = conn.prepare(
+        "SELECT parent_id, sum(status = 'done'), count(*) FROM planning_tasks
+         WHERE parent_id IS NOT NULL AND archived_at_ms IS NULL
+           AND status NOT IN ('canceled', 'duplicate')
+         GROUP BY parent_id",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get(0)?,
+            WorkProgress {
+                done: row.get(1)?,
+                total: row.get(2)?,
+            },
+        ))
+    })?;
+    Ok(rows.collect::<rusqlite::Result<HashMap<_, _>>>()?)
+}
+
+/// Whether `parent_id` is still open while its progress reads complete:
+/// every live sub-task closed and at least one of them done.
+pub(crate) fn sub_tasks_finished(conn: &Connection, parent_id: &str) -> Result<bool> {
+    let finished = conn
+        .query_row(
+            "SELECT EXISTS (SELECT 1 FROM planning_tasks s
+                    WHERE s.parent_id = p.id AND s.archived_at_ms IS NULL AND s.status = 'done')
+                AND NOT EXISTS (SELECT 1 FROM planning_tasks s
+                    WHERE s.parent_id = p.id AND s.archived_at_ms IS NULL
+                      AND s.status NOT IN ('done', 'canceled', 'duplicate'))
+             FROM planning_tasks p
+             WHERE p.id = ?1 AND p.archived_at_ms IS NULL
+               AND p.status NOT IN ('done', 'canceled', 'duplicate')",
+            [parent_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(finished.unwrap_or(false))
+}
+
+/// The owner a new sub-task takes when none is given: the user when the
+/// parent is theirs, else the one owner every sub-task already shares, else
+/// nobody.
+pub(crate) fn inherited_owner(conn: &Connection, parent: &WorkItem) -> Result<WorkOwner> {
+    if parent.owner_is_self {
+        return Ok(WorkOwner::Myself);
+    }
+    let siblings = sub_tasks(conn, &parent.id)?;
+    let Some(first) = siblings.first().map(WorkItem::owner) else {
+        return Ok(WorkOwner::Nobody);
+    };
+    Ok(if siblings.iter().all(|sibling| sibling.owner() == first) {
+        first
+    } else {
+        WorkOwner::Nobody
+    })
 }
 
 fn clean_title(value: &str) -> Result<&str> {
@@ -191,13 +301,11 @@ fn existing_milestone(conn: &Connection, id: &str, project_id: Option<&str>) -> 
     Ok(id)
 }
 
-fn existing_labels(conn: &Connection, ids: &[String]) -> Result<Vec<String>> {
-    let mut labels = ids
+fn existing_labels(conn: &Connection, ids: &[String], kept: &[String]) -> Result<Vec<String>> {
+    let labels = ids
         .iter()
         .map(|id| store::uuid(id))
         .collect::<Result<Vec<_>>>()?;
-    labels.sort();
-    labels.dedup();
     let mut statement =
         conn.prepare_cached("SELECT EXISTS(SELECT 1 FROM planning_labels WHERE id = ?1)")?;
     for id in &labels {
@@ -205,16 +313,75 @@ fn existing_labels(conn: &Connection, ids: &[String]) -> Result<Vec<String>> {
             return Err(Refusal::NotFound.into());
         }
     }
+    let mut labels = one_per_group(conn, &labels, kept)?;
+    labels.sort();
+    labels.dedup();
     Ok(labels)
+}
+
+pub(crate) fn one_per_group(
+    conn: &Connection,
+    ids: &[String],
+    kept: &[String],
+) -> Result<Vec<String>> {
+    let mut group_of =
+        conn.prepare_cached("SELECT group_name FROM planning_labels WHERE id = ?1")?;
+    let mut groups = Vec::with_capacity(ids.len());
+    for id in ids {
+        let group: Option<String> = group_of
+            .query_row([id], |row| row.get(0))
+            .optional()?
+            .flatten();
+        groups.push((id, group));
+    }
+    Ok(keep_one_per_group(ids, kept, |id| {
+        groups
+            .iter()
+            .find(|(other, _)| *other == id)
+            .and_then(|(_, group)| group.clone())
+    }))
+}
+
+pub(crate) fn keep_one_per_group(
+    ids: &[String],
+    kept: &[String],
+    group_of: impl Fn(&str) -> Option<String>,
+) -> Vec<String> {
+    let ordered = ids
+        .iter()
+        .filter(|id| kept.contains(id))
+        .chain(ids.iter().filter(|id| !kept.contains(id)));
+    let mut chosen: Vec<(Option<String>, &String)> = Vec::with_capacity(ids.len());
+    for id in ordered {
+        let group = group_of(id);
+        if group.is_some() {
+            chosen.retain(|(other, _)| *other != group);
+        }
+        chosen.push((group, id));
+    }
+    ids.iter()
+        .filter(|id| chosen.iter().any(|(_, chosen)| chosen == id))
+        .cloned()
+        .collect()
 }
 
 fn write_labels(conn: &Connection, task_id: &str, label_ids: &[String]) -> Result<()> {
     conn.execute(
-        "DELETE FROM planning_task_labels WHERE task_id = ?1",
-        [task_id],
+        "DELETE FROM planning_task_labels
+         WHERE task_id = ?1 AND label_id NOT IN (SELECT value FROM json_each(?2))",
+        rusqlite::params![task_id, serde_json::to_string(label_ids)?],
     )?;
-    let mut statement = conn
-        .prepare_cached("INSERT INTO planning_task_labels (task_id, label_id) VALUES (?1, ?2)")?;
+    let mut scoped = conn.prepare_cached(
+        "SELECT EXISTS(SELECT 1 FROM planning_labels WHERE id = ?1 AND scope = 'projects')",
+    )?;
+    for label_id in label_ids {
+        if scoped.query_row([label_id], |row| row.get::<_, bool>(0))? {
+            return Err(Refusal::LabelScope.into());
+        }
+    }
+    let mut statement = conn.prepare_cached(
+        "INSERT OR IGNORE INTO planning_task_labels (task_id, label_id) VALUES (?1, ?2)",
+    )?;
     for label_id in label_ids {
         statement.execute([task_id, label_id])?;
     }
@@ -229,12 +396,13 @@ pub(crate) fn record(
     kind: WorkActivityKind,
     from: Option<&str>,
     to: Option<&str>,
-) -> Result<()> {
+) -> Result<String> {
+    let id = Uuid::new_v4().to_string();
     conn.execute(
         "INSERT INTO planning_task_activity (id, task_id, at_ms, actor, kind, from_value, to_value)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         params![
-            Uuid::new_v4().to_string(),
+            id,
             task_id,
             now_ms,
             actor.as_str(),
@@ -243,7 +411,19 @@ pub(crate) fn record(
             to
         ],
     )?;
-    Ok(())
+    super::inbox::on_activity(
+        conn,
+        &super::inbox::Entry {
+            task_id,
+            activity_id: &id,
+            actor,
+            kind,
+            from,
+            to,
+        },
+        now_ms,
+    )?;
+    Ok(id)
 }
 
 /// A new item before it has an id or a number. The owner's person, when
@@ -279,7 +459,7 @@ pub(crate) fn insert(
         .milestone_id
         .map(|id| existing_milestone(conn, id, project_id.as_deref()))
         .transpose()?;
-    let label_ids = existing_labels(conn, new.label_ids)?;
+    let label_ids = existing_labels(conn, new.label_ids, &[])?;
     let title = clean_title(new.title)?;
     let recurrence = new
         .recurrence
@@ -293,17 +473,14 @@ pub(crate) fn insert(
     )?;
     let (owner_is_self, owner_person_id) = owner_columns(new.owner);
     let id = Uuid::new_v4().to_string();
-    let cycle = if new.status.is_open() {
-        super::cycles::fitting(conn, new.status, new.due_at_ms, now_ms)?
-    } else {
-        None
-    };
+    let cycle = super::cycles::fitting(conn, new.status, new.due_at_ms, now_ms)?;
     conn.execute(
         "INSERT INTO planning_tasks (id, number, project_id, milestone_id, title, details,
             due_at_ms, owner_person_id, owner_is_self, status, priority, source_loop_id,
             status_changed_at_ms, sort_order, revision, created_at_ms, updated_at_ms, recurrence,
-            cycle)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13, 1, ?13, ?13, ?14, ?15)",
+            cycle, completed_at_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13, 1, ?13, ?13, ?14, ?15,
+            CASE WHEN ?10 = 'done' THEN ?13 END)",
         params![
             id,
             number,
@@ -343,6 +520,7 @@ pub(crate) fn insert(
             Some(&cycle.to_string()),
         )?;
     }
+    relate_mentions(conn, &id, None, new.details, actor, now_ms)?;
     item(conn, &id)
 }
 
@@ -421,7 +599,7 @@ pub(crate) fn apply(
         next.due_at_ms = due_at_ms;
     }
     if let Some(label_ids) = &patch.label_ids {
-        next.label_ids = existing_labels(conn, label_ids)?;
+        next.label_ids = existing_labels(conn, label_ids, &before.label_ids)?;
     }
     if let Some(snoozed_until_ms) = patch.snoozed_until_ms {
         next.snoozed_until_ms = snoozed_until_ms;
@@ -430,19 +608,38 @@ pub(crate) fn apply(
     match patch.cycle {
         Some(Some(cycle)) => next.cycle = Some(super::cycles::open(conn, cycle, now_ms)?),
         Some(None) => next.cycle = None,
-        None if before.cycle.is_none() && next.status.is_open() => {
-            let started = next.status != before.status && next.status == WorkStatus::InProgress;
-            if started || next.due_at_ms != before.due_at_ms {
-                let status = if started {
-                    next.status
-                } else {
-                    WorkStatus::NotStarted
-                };
-                next.cycle = super::cycles::fitting(conn, status, next.due_at_ms, now_ms)?;
+        None if before.cycle.is_none() => {
+            let moved_on = next.status != before.status
+                && matches!(next.status, WorkStatus::InProgress | WorkStatus::Done);
+            if moved_on {
+                next.cycle = super::cycles::fitting(conn, next.status, next.due_at_ms, now_ms)?;
+            } else if next.status.is_open() && next.due_at_ms != before.due_at_ms {
+                next.cycle =
+                    super::cycles::fitting(conn, WorkStatus::NotStarted, next.due_at_ms, now_ms)?;
             }
         }
         None => {}
     }
+    if let Some(parent_id) = &patch.parent_id {
+        next.parent_id = parent_id
+            .as_deref()
+            .map(|parent_id| existing_parent(conn, id, parent_id))
+            .transpose()?;
+    }
+    if let Some(estimate) = patch.estimate {
+        if estimate.is_some_and(|points| points > MAX_ESTIMATE) {
+            return Err(Refusal::Invalid.into());
+        }
+        next.estimate = estimate;
+    }
+    if let Some(for_person_id) = &patch.for_person_id {
+        next.for_person_id.clone_from(for_person_id);
+    }
+    next.completed_at_ms = match (before.status, next.status) {
+        (WorkStatus::Done, WorkStatus::Done) => before.completed_at_ms,
+        (_, WorkStatus::Done) => Some(now_ms),
+        _ => None,
+    };
     if next == before && repeats.is_none() {
         return Ok(Changed {
             after: before.clone(),
@@ -458,7 +655,8 @@ pub(crate) fn apply(
         "UPDATE planning_tasks SET title = ?2, details = ?3, status = ?4, priority = ?5,
             project_id = ?6, milestone_id = ?7, owner_person_id = ?8, owner_is_self = ?9,
             due_at_ms = ?10, duplicate_of = ?11, snoozed_until_ms = ?12,
-            status_changed_at_ms = ?13, revision = revision + 1, updated_at_ms = ?14, cycle = ?15
+            status_changed_at_ms = ?13, revision = revision + 1, updated_at_ms = ?14, cycle = ?15,
+            parent_id = ?16, estimate = ?17, completed_at_ms = ?18, for_person_id = ?19
          WHERE id = ?1",
         params![
             id,
@@ -475,7 +673,11 @@ pub(crate) fn apply(
             next.snoozed_until_ms,
             status_changed_at_ms,
             now_ms,
-            next.cycle
+            next.cycle,
+            next.parent_id,
+            next.estimate,
+            next.completed_at_ms,
+            next.for_person_id
         ],
     )?;
     if next.label_ids != before.label_ids {
@@ -541,7 +743,23 @@ pub(crate) fn apply(
         )?;
     }
     if next.details != before.details {
-        note(WorkActivityKind::Details, None, None)?;
+        let activity = note(WorkActivityKind::Details, None, None)?;
+        super::versions::saved(
+            conn,
+            &before,
+            next.details.as_deref(),
+            &activity,
+            actor,
+            now_ms,
+        )?;
+        relate_mentions(
+            conn,
+            id,
+            before.details.as_deref(),
+            next.details.as_deref(),
+            actor,
+            now_ms,
+        )?;
     }
     if next.label_ids != before.label_ids {
         note(
@@ -565,6 +783,27 @@ pub(crate) fn apply(
             WorkActivityKind::Cycle,
             before.cycle.map(|cycle| cycle.to_string()),
             next.cycle.map(|cycle| cycle.to_string()),
+        )?;
+    }
+    if next.parent_id != before.parent_id {
+        note(
+            WorkActivityKind::Parent,
+            before.parent_id.clone(),
+            next.parent_id.clone(),
+        )?;
+    }
+    if next.estimate != before.estimate {
+        note(
+            WorkActivityKind::Estimate,
+            before.estimate.map(|points| points.to_string()),
+            next.estimate.map(|points| points.to_string()),
+        )?;
+    }
+    if next.for_person_id != before.for_person_id {
+        note(
+            WorkActivityKind::ForPerson,
+            before.for_person_id.clone(),
+            next.for_person_id.clone(),
         )?;
     }
     if !before.status.is_closed() && matches!(next.status, WorkStatus::Done | WorkStatus::Canceled)
@@ -600,7 +839,8 @@ pub(crate) fn place_in_cycle(
         WorkActivityKind::Cycle,
         from.map(|cycle| cycle.to_string()).as_deref(),
         to.map(|cycle| cycle.to_string()).as_deref(),
-    )
+    )?;
+    Ok(())
 }
 
 /// Hides an item from every list, or brings it back. Its status, and the
@@ -659,6 +899,82 @@ pub(crate) fn keep(conn: &Connection, id: &str, actor: WorkActor, now_ms: i64) -
     })
 }
 
+/// Moves tasks in the manual order every list shares, keeping their order
+/// among themselves. Only the order changes: a move is no edit, so the
+/// tasks keep their last-updated time and get no history entry. When no
+/// gap is left between the neighbors, every task is spaced out again.
+/// Returns each task whose place changed.
+pub(crate) fn place_manually(
+    conn: &Connection,
+    ids: &[String],
+    place: &WorkPlace,
+) -> Result<Vec<Changed>> {
+    let order = conn
+        .prepare("SELECT id, sort_order FROM planning_tasks ORDER BY sort_order, number")?
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let (moving, mut rest): (Vec<_>, Vec<_>) =
+        order.iter().cloned().partition(|(id, _)| ids.contains(id));
+    if moving.is_empty() || ids.iter().any(|id| !moving.iter().any(|(at, _)| at == id)) {
+        return Err(Refusal::NotFound.into());
+    }
+    let at = match place {
+        WorkPlace::Top => 0,
+        WorkPlace::Bottom => rest.len(),
+        WorkPlace::Before(anchor) | WorkPlace::After(anchor) => {
+            let index = rest
+                .iter()
+                .position(|(id, _)| id == anchor)
+                .ok_or(Refusal::Invalid)?;
+            index + usize::from(matches!(place, WorkPlace::After(_)))
+        }
+    };
+    let count = u32::try_from(moving.len()).map_err(|_| Refusal::Invalid)?;
+    let below = at.checked_sub(1).map(|index| rest[index].1);
+    let above = rest.get(at).map(|(_, sort)| *sort);
+    let (low, step) = match (below, above) {
+        (Some(low), Some(high)) => (low, (high - low) / (f64::from(count) + 1.0)),
+        (Some(low), None) => (low, 1.0),
+        (None, Some(high)) => (high - f64::from(count) - 1.0, 1.0),
+        (None, None) => (0.0, 1.0),
+    };
+    let fitted: Vec<f64> = (1..=count).map(|n| low + step * f64::from(n)).collect();
+    let fits = fitted.first().is_some_and(|first| *first > low)
+        && fitted.windows(2).all(|pair| pair[0] < pair[1])
+        && above.is_none_or(|high| fitted.last().is_some_and(|last| *last < high));
+    let moved: Vec<(String, f64)> = moving
+        .into_iter()
+        .zip(fitted)
+        .map(|((id, _), sort)| (id, sort))
+        .collect();
+    rest.splice(at..at, moved.iter().cloned());
+    let placed = if fits {
+        moved
+    } else {
+        (0_u32..)
+            .zip(&rest)
+            .map(|(index, (id, _))| (id.clone(), f64::from(index) * 1024.0))
+            .collect()
+    };
+    let was: HashMap<&str, f64> = order.iter().map(|(id, sort)| (id.as_str(), *sort)).collect();
+    let mut changed = Vec::new();
+    for (id, sort) in placed {
+        if was.get(id.as_str()) == Some(&sort) {
+            continue;
+        }
+        let before = item(conn, &id)?;
+        conn.execute(
+            "UPDATE planning_tasks SET sort_order = ?2, revision = revision + 1 WHERE id = ?1",
+            params![id, sort],
+        )?;
+        changed.push(Changed {
+            after: item(conn, &id)?,
+            before,
+        });
+    }
+    Ok(changed)
+}
+
 /// Marks `id` a duplicate of `of_id`'s original and hands its evidence and
 /// its own duplicates to that original, so every duplicate points at one
 /// item that is not one. Returns the original's id and every item changed.
@@ -684,7 +1000,8 @@ pub(crate) fn mark_duplicate(
         };
         conn.execute(
             "UPDATE planning_tasks SET status = 'duplicate', duplicate_of = ?2,
-                status_changed_at_ms = ?3, revision = revision + 1, updated_at_ms = ?4
+                status_changed_at_ms = ?3, completed_at_ms = NULL, revision = revision + 1,
+                updated_at_ms = ?4
              WHERE id = ?1",
             params![before.id, root, status_changed_at_ms, now_ms],
         )?;
@@ -772,9 +1089,11 @@ pub(crate) fn status_before_close(conn: &Connection, id: &str) -> Result<WorkSta
 
 pub(crate) fn activity(conn: &Connection, task_id: &str) -> Result<Vec<WorkActivity>> {
     let mut statement = conn.prepare(
-        "SELECT a.id, a.task_id, a.at_ms, a.actor, a.kind, a.from_value, a.to_value, n.agent
+        "SELECT a.id, a.task_id, a.at_ms, a.actor, a.kind, a.from_value, a.to_value, n.agent,
+                r.reason, n.via
          FROM planning_task_activity a
          LEFT JOIN planning_activity_agents n ON n.activity_id = a.id
+         LEFT JOIN planning_activity_reasons r ON r.activity_id = a.id
          WHERE a.task_id = ?1 ORDER BY a.at_ms, a.rowid",
     )?;
     let rows = statement.query_map([task_id], |row| {
@@ -787,6 +1106,8 @@ pub(crate) fn activity(conn: &Connection, task_id: &str) -> Result<Vec<WorkActiv
             from: row.get(5)?,
             to: row.get(6)?,
             agent: row.get(7)?,
+            via: row.get(9)?,
+            reason: row.get(8)?,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -913,6 +1234,85 @@ pub(crate) fn add_relation(
     })
 }
 
+/// The task numbers `text` names as `S-12` or `@S-12`, as task pages link
+/// them, each once.
+fn mentioned(text: &str) -> Vec<i64> {
+    let bytes = text.as_bytes();
+    let word = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
+    let mut numbers = Vec::new();
+    let mut at = 0;
+    while let Some(found) = text[at..].find("S-") {
+        let start = at + found;
+        let digits = start + 2;
+        let end = bytes[digits..]
+            .iter()
+            .position(|byte| !byte.is_ascii_digit())
+            .map_or(bytes.len(), |length| digits + length);
+        at = digits;
+        let bounded = (start == 0 || !word(bytes[start - 1]))
+            && (end == bytes.len() || !word(bytes[end]));
+        if end == digits || !bounded {
+            continue;
+        }
+        if let Ok(number) = text[digits..end].parse::<i64>() {
+            if !numbers.contains(&number) {
+                numbers.push(number);
+            }
+        }
+    }
+    numbers
+}
+
+/// Links `task_id` as related to each task `text` mentions that `before`
+/// did not, skipping itself, unknown or deleted numbers, and tasks already
+/// linked to it either way.
+pub(crate) fn relate_mentions(
+    conn: &Connection,
+    task_id: &str,
+    before: Option<&str>,
+    text: Option<&str>,
+    actor: WorkActor,
+    now_ms: i64,
+) -> Result<()> {
+    let Some(text) = text else {
+        return Ok(());
+    };
+    let known = before.map(mentioned).unwrap_or_default();
+    for number in mentioned(text) {
+        if known.contains(&number) {
+            continue;
+        }
+        let other: Option<String> = conn
+            .query_row(
+                "SELECT id FROM planning_tasks
+                 WHERE number = ?1 AND id != ?2 AND trashed_at_ms IS NULL",
+                params![number, task_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(other) = other else {
+            continue;
+        };
+        let linked: bool = conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM planning_task_relations
+                 WHERE (from_id = ?1 AND to_id = ?2) OR (from_id = ?2 AND to_id = ?1))",
+            params![task_id, other],
+            |row| row.get(0),
+        )?;
+        if !linked {
+            add_relation(
+                conn,
+                task_id,
+                &other,
+                WorkRelationKind::Related,
+                actor,
+                now_ms,
+            )?;
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn remove_relation(
     conn: &Connection,
     id: &str,
@@ -954,18 +1354,24 @@ pub(crate) fn remove_relation(
     Ok(relation)
 }
 
-fn read_label(row: &Row<'_>) -> rusqlite::Result<WorkLabel> {
+pub(crate) const LABEL_COLUMNS: &str = "id, name, hue, revision, group_name, retired_at_ms, scope";
+
+pub(crate) fn read_label(row: &Row<'_>) -> rusqlite::Result<WorkLabel> {
     Ok(WorkLabel {
         id: row.get(0)?,
         name: row.get(1)?,
         hue: row.get(2)?,
         revision: row.get(3)?,
+        group: row.get(4)?,
+        retired_at_ms: row.get(5)?,
+        scope: row.get(6)?,
     })
 }
 
 pub(crate) fn labels(conn: &Connection) -> Result<Vec<WorkLabel>> {
-    let mut statement = conn
-        .prepare("SELECT id, name, hue, revision FROM planning_labels ORDER BY lower(name), id")?;
+    let mut statement = conn.prepare(&format!(
+        "SELECT {LABEL_COLUMNS} FROM planning_labels ORDER BY lower(name), id"
+    ))?;
     let rows = statement.query_map([], read_label)?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
@@ -1003,7 +1409,7 @@ pub(crate) fn save_label(
         params![id, name, hue, now_ms],
     )?;
     Ok(conn.query_row(
-        "SELECT id, name, hue, revision FROM planning_labels WHERE id = ?1",
+        &format!("SELECT {LABEL_COLUMNS} FROM planning_labels WHERE id = ?1"),
         [&id],
         read_label,
     )?)

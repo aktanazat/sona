@@ -230,27 +230,22 @@ struct DocumentsView: View {
     }
 }
 
-/// The list on its own, for a screen that already has a title — a person's
-/// page shows their documents under their own heading.
-struct DocumentList: View {
+private struct DocumentList: View {
     let store: DocumentStore
-    var title = "Documents"
 
     var body: some View {
-        PageSection(title) {
-            Card {
-                if store.documents.isEmpty {
-                    CardRow {
-                        Text(store.loadFailed
-                            ? "Documents couldn't be loaded."
-                            : "No documents yet.")
-                            .bodyText(14, store.loadFailed ? Theme.live : Theme.inkSecondary)
-                    }
-                } else {
-                    ForEach(store.documents) { document in
-                        DocumentRow(document: document, busy: store.busy) {
-                            Task { await store.delete(id: document.id) }
-                        }
+        Card {
+            if store.documents.isEmpty {
+                CardRow {
+                    Text(store.loadFailed
+                        ? "Documents couldn't be loaded."
+                        : "No documents yet.")
+                        .bodyText(14, store.loadFailed ? Theme.live : Theme.inkSecondary)
+                }
+            } else {
+                ForEach(store.documents) { document in
+                    DocumentRow(document: document, busy: store.busy) {
+                        Task { await store.delete(id: document.id) }
                     }
                 }
             }

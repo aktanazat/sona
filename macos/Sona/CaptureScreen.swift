@@ -8,6 +8,15 @@ struct CaptureScreen: View {
     var body: some View {
         ScrollViewReader { proxy in
             page(proxy)
+                .onChange(of: model.homeAnchor, initial: true) { _, anchor in
+                    guard let anchor else { return }
+                    model.homeAnchor = nil
+                    Task { @MainActor in
+                        withAnimation(Motion.settle(reduced: reduceMotion)) {
+                            proxy.scrollTo(anchor, anchor: .top)
+                        }
+                    }
+                }
         }
         .onChange(of: model.onboarding.permissions.microphone) { _, _ in
             hidePermissionNoticeIfReady()
@@ -60,7 +69,6 @@ struct CaptureScreen: View {
             OverviewView(
                 store: model.overview,
                 openMeeting: model.openMeeting,
-                openRunLog: { model.showSettings(.workflows) },
                 series: seriesActions,
                 showNeedsYou: {
                     withAnimation(Motion.settle(reduced: reduceMotion)) {
@@ -170,12 +178,12 @@ struct CaptureScreen: View {
                         .disabled(true)
                         Button("Cancel") { model.cancelCapture() }.buttonStyle(.secondary)
                     }
+                    Spacer(minLength: 0)
+                    CaptureModeChipView(store: model.overview, openModes: { model.showSettings(.modes) })
                 }
             }
             .padding(16)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .overlay(alignment: .bottom) { Hairline().padding(.horizontal, 16) }
-            CaptureModeChipView(store: model.overview, openModes: { model.showSettings(.modes) })
         }
     }
 

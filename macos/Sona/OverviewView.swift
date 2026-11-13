@@ -1,10 +1,10 @@
 import AppKit
 import SwiftUI
 
-/// Home under the dictation card, read top to bottom: today's counts, six
-/// widgets, each the head of a place; everything that asks the reader a
-/// question; what is coming; the newest conversations and notes; what Sona did
-/// without being asked; and the dictation numbers in full.
+/// Home under the dictation card, read top to bottom: today's counts, the
+/// end-of-day note, everything that asks the reader a question, and what is
+/// coming. The six widgets, the newest conversations, what Sona did without
+/// being asked and the dictation numbers live one tab over, in Activity.
 ///
 /// The card above it — the state word, the chord, the record control and the
 /// mode — belongs to the capture screen.
@@ -17,8 +17,6 @@ struct OverviewView: View {
     let store: OverviewStore
     /// Opens a retained meeting named by an open loop or a receipt.
     var openMeeting: (String) -> Void = { _ in }
-    /// Opens the full run log the recent list is the head of.
-    var openRunLog: () -> Void = {}
     /// The standing decisions the recurring upcoming rows offer. Meeting
     /// settings owns those three commands, so the integrator hands them in.
     var series: OverviewSeriesActions?
@@ -34,16 +32,40 @@ struct OverviewView: View {
                 OverviewTodayStrip(today: today, showUpcoming: showUpcoming, showNeedsYou: showNeedsYou)
             }
             EveningView()
-            OverviewWidgets(store: store, showNeedsYou: showNeedsYou)
             OverviewNeedsYou(store: store, openMeeting: openMeeting)
                 .id(Self.needsYouAnchor)
             OverviewUpcomingSection(store: store, series: series)
                 .id(Self.upcomingAnchor)
-            OverviewConversations(store: store)
-            FeedRecentView(store: store, openMeeting: openMeeting, seeAll: openRunLog)
-            OverviewStatsCard(store: store)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// Home's second tab: the six numbers, the newest conversations and notes,
+/// what Sona did without being asked, and the dictation numbers in full.
+struct ActivityScreen: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        let store = model.overview
+        Page {
+            VStack(alignment: .leading, spacing: 0) {
+                ErrorNote(store.error)
+                OverviewWidgets(store: store) {
+                    model.homeAnchor = OverviewView.needsYouAnchor
+                    model.go(.capture)
+                }
+                OverviewConversations(store: store)
+                FeedRecentView(store: store, openMeeting: model.openMeeting) { model.showSettings(.workflows) }
+                OverviewStatsCard(store: store)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .pageBar {
+            HomeTabs()
+        } trailing: {
+            EmptyView()
+        }
     }
 }
 
@@ -397,8 +419,8 @@ private struct OverviewWeek {
 
 // MARK: - Capture mode
 
-/// Which mode the next dictation will run in, changeable in place: the last
-/// row of the dictation card.
+/// Which mode the next dictation will run in, changeable in place: the
+/// trailing button of the dictation card's controls.
 ///
 /// Modes left the sidebar: picking one is a capture decision and editing one
 /// is a settings task, so this is the picking half. It reads and writes the
@@ -410,32 +432,26 @@ struct CaptureModeChipView: View {
     @State private var open = false
 
     var body: some View {
-        // Nothing to say before the modes arrive, and a row naming a mode
-        // this install does not have would be worse than no row.
+        // Nothing to say before the modes arrive, and a button naming a mode
+        // this install does not have would be worse than none.
         if let snapshot = store.modes, let active = snapshot.active {
-            CardRow {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Mode").bodyText()
-                    if store.capturing {
-                        Text("switching is off while a dictation is running").metaText()
-                    }
+            Button { open = true } label: {
+                HStack(spacing: 6) {
+                    Text("Mode").foregroundStyle(Theme.inkSecondary)
+                    Text(active.name).lineLimit(1)
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(Theme.inkTertiary)
                 }
-            } trailing: {
-                Button { open = true } label: {
-                    HStack(spacing: 6) {
-                        Text(active.name).lineLimit(1)
-                        Image(systemName: "chevron.up.chevron.down")
-                            .font(.system(size: 9, weight: .semibold))
-                            .foregroundStyle(Theme.inkTertiary)
-                    }
-                }
-                .buttonStyle(.compact)
-                .disabled(store.switchingMode || store.capturing)
-                .popover(isPresented: $open, arrowEdge: .bottom) {
-                    CaptureModePicker(store: store) {
-                        open = false
-                        openModes()
-                    }
+            }
+            .buttonStyle(.compact)
+            .disabled(store.switchingMode || store.capturing)
+            .help(store.capturing ? "Switching is off while a dictation is running" : "Mode for the next dictation")
+            .accessibilityLabel("Mode, \(active.name)")
+            .popover(isPresented: $open, arrowEdge: .bottom) {
+                CaptureModePicker(store: store) {
+                    open = false
+                    openModes()
                 }
             }
         }

@@ -65,7 +65,8 @@ h2 {
   margin: 0;
 }
 
-#status {
+#status,
+.live-status {
   color: color-mix(in srgb, currentColor 68%, transparent);
   margin: 12px 0 0;
 }
@@ -178,6 +179,306 @@ h2 {
 .share-note {
   font-style: italic;
   opacity: 0.8;
+}
+
+.live-shell {
+  max-width: 1120px;
+}
+
+#live-clock {
+  font-variant-numeric: tabular-nums;
+}
+
+.live-name,
+.live-editor {
+  margin: 24px 0 0;
+}
+
+.live-name label {
+  display: block;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.live-row {
+  display: flex;
+  gap: 8px;
+  max-width: 400px;
+}
+
+.live-input {
+  background: transparent;
+  border: 1px solid color-mix(in srgb, currentColor 28%, transparent);
+  border-radius: 4px;
+  color: inherit;
+  flex: 1;
+  font: inherit;
+  min-height: 44px;
+  min-width: 0;
+  padding: 8px 12px;
+}
+
+.live-button {
+  background: #b9296a;
+  border: 0;
+  border-radius: 4px;
+  color: #fff;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 600;
+  min-height: 44px;
+  padding: 0 16px;
+}
+
+.live-quiet,
+.live-remove {
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  color: inherit;
+  cursor: pointer;
+  flex: none;
+  font: inherit;
+  min-height: 44px;
+  padding: 0 8px;
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, currentColor 40%, transparent);
+  text-underline-offset: 3px;
+}
+
+.live-hint,
+.live-empty,
+.live-editor,
+.live-mark,
+.live-card-meta,
+.live-entry-meta {
+  color: color-mix(in srgb, currentColor 68%, transparent);
+}
+
+.live-hint {
+  font-size: 0.85em;
+  margin: 8px 0 0;
+}
+
+.live-editor {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 4px;
+}
+
+.live-layout {
+  margin-top: 32px;
+}
+
+.live-timeline {
+  margin-top: 48px;
+}
+
+.live-section + .live-section {
+  margin-top: 40px;
+}
+
+.live-section h2,
+.live-timeline h2 {
+  margin-bottom: 8px;
+}
+
+.live-empty {
+  margin: 0;
+}
+
+.live-items,
+.live-entries {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.live-item {
+  align-items: flex-start;
+  border-bottom: 1px solid color-mix(in srgb, currentColor 16%, transparent);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 8px;
+  padding: 4px 0;
+}
+
+.live-grow {
+  display: grid;
+  flex: 1 1 240px;
+  margin-inline-start: -8px;
+  min-width: 0;
+}
+
+.live-grow::after {
+  content: attr(data-value) " ";
+  visibility: hidden;
+  white-space: pre-wrap;
+}
+
+.live-grow::after,
+.live-field {
+  border: 0;
+  box-sizing: border-box;
+  font: inherit;
+  grid-area: 1 / 1;
+  line-height: 1.5;
+  min-height: 44px;
+  overflow-wrap: anywhere;
+  padding: 10px 8px;
+}
+
+.live-field {
+  background: transparent;
+  border-radius: 4px;
+  color: inherit;
+  margin: 0;
+  overflow: hidden;
+  resize: none;
+}
+
+.live-field:not([readonly]):hover,
+.live-field:focus-visible {
+  background: color-mix(in srgb, currentColor 5%, transparent);
+}
+
+.live-field::placeholder {
+  color: color-mix(in srgb, currentColor 60%, transparent);
+  opacity: 1;
+}
+
+.live-mark {
+  flex: none;
+  font-size: 0.85em;
+  font-variant-numeric: tabular-nums;
+  padding-top: 12px;
+  white-space: nowrap;
+}
+
+.live-remove {
+  font-size: 0.85em;
+  margin-inline-start: auto;
+}
+
+@media (hover: hover) {
+  .live-item .live-remove {
+    opacity: 0;
+  }
+
+  .live-item:hover .live-remove,
+  .live-item:focus-within .live-remove {
+    opacity: 1;
+  }
+}
+
+.live-card-meta {
+  flex-basis: 100%;
+  font-size: 0.85em;
+  padding-bottom: 8px;
+}
+
+.live-added-text {
+  flex: 1 1 240px;
+  min-width: 0;
+  opacity: 0.64;
+  overflow-wrap: anywhere;
+  padding: 10px 0;
+}
+
+.live-add {
+  margin: 4px 0 0;
+}
+
+.live-add-fields {
+  align-items: flex-start;
+  border: 0;
+  display: flex;
+  gap: 0 8px;
+  margin: 0;
+  min-width: 0;
+  padding: 0;
+}
+
+.live-entry {
+  padding: 8px 0;
+}
+
+.live-entry-change {
+  border-left: 2px solid #da5893;
+  margin: 4px 0;
+  padding: 4px 0 4px 12px;
+}
+
+.live-entry-meta,
+.live-entry-text {
+  display: block;
+}
+
+.live-entry-meta {
+  font-size: 0.85em;
+  font-variant-numeric: tabular-nums;
+}
+
+.live-entry-text {
+  overflow-wrap: anywhere;
+}
+
+.live-shell :is(button, input, .live-entries):focus-visible {
+  outline: 2px solid #b9296a;
+  outline-offset: 3px;
+}
+
+.live-field:focus-visible {
+  outline: 2px solid #b9296a;
+  outline-offset: 0;
+}
+
+@media (max-width: 599px) {
+  .live-grow,
+  .live-added-text {
+    flex-basis: 100%;
+  }
+
+  .live-mark {
+    align-self: center;
+    padding-top: 0;
+  }
+}
+
+@media (min-width: 960px) {
+  .live-shell {
+    align-items: start;
+    column-gap: 64px;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 320px;
+  }
+
+  .live-timeline {
+    display: flex;
+    flex-direction: column;
+    margin-top: 0;
+    max-height: calc(100vh - 2 * clamp(24px, 6vw, 72px));
+    position: sticky;
+    top: clamp(24px, 6vw, 72px);
+  }
+
+  .live-entries {
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+}
+
+@media (prefers-color-scheme: dark) {
+  .live-button {
+    background: #da5893;
+    color: #111113;
+  }
+}
+
+[hidden] {
+  display: none !important;
 }
 
 @media (prefers-reduced-motion: reduce) {

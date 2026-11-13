@@ -57,6 +57,12 @@ struct AgentBridgeView: View {
                     selection: Binding(
                         get: { store.sonaChanges },
                         set: { autonomy in Task { await store.setSonaChanges(autonomy) } }))
+                ToggleRow(
+                    title: "Close a task when its sub-tasks are done",
+                    detail: "Once every sub-task is done or canceled, with at least one done, Sona marks the task done too.",
+                    isOn: Binding(
+                        get: { store.closeParents },
+                        set: { enabled in Task { await store.setCloseParents(enabled) } }))
             }
             .disabled(store.autonomyBusy)
         }

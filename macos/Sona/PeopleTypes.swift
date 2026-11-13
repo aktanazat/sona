@@ -164,6 +164,8 @@ struct Person: Decodable, Identifiable {
     let summary: PersonSummary?
     let createdAtUtcMs: Int64
     let updatedAtUtcMs: Int64
+    var role: String? = nil
+    var notes: String? = nil
 }
 
 struct PersonMeetingSummary: Decodable, Identifiable {

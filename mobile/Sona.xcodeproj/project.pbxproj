@@ -70,6 +70,16 @@
 		CA0000000000000000000038 /* KeyboardSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000038 /* KeyboardSession.swift */; };
 		CC0000000000000000000038 /* KeyboardSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000038 /* KeyboardSession.swift */; };
 		CD0000000000000000000038 /* KeyboardSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000038 /* KeyboardSession.swift */; };
+		CD0000000000000000000039 /* DictationProfile.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000039 /* DictationProfile.swift */; };
+		CD0000000000000000000050 /* TypingCorrector.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000050 /* TypingCorrector.swift */; };
+		CC0000000000000000000050 /* TypingCorrector.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000050 /* TypingCorrector.swift */; };
+		CD0000000000000000000051 /* TypingSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000051 /* TypingSession.swift */; };
+		CC0000000000000000000051 /* TypingSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000051 /* TypingSession.swift */; };
+		CD0000000000000000000052 /* KeyboardKeys.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000052 /* KeyboardKeys.swift */; };
+		CA0000000000000000000053 /* KeyboardVocabulary.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000053 /* KeyboardVocabulary.swift */; };
+		CD0000000000000000000053 /* KeyboardVocabulary.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000053 /* KeyboardVocabulary.swift */; };
+		CC0000000000000000000054 /* TypingSamples.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000054 /* TypingSamples.swift */; };
+		CC0000000000000000000055 /* TypingCorrectorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000055 /* TypingCorrectorTests.swift */; };
 		CA0000000000000000000039 /* DictationProfile.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000039 /* DictationProfile.swift */; };
 		CC0000000000000000000039 /* DictationProfile.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000039 /* DictationProfile.swift */; };
 		CA000000000000000000003A /* PhoneMeeting.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000000000000000000003A /* PhoneMeeting.swift */; };
@@ -202,6 +212,12 @@
 		BB0000000000000000000029 /* SonaKeyboard.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = SonaKeyboard.entitlements; sourceTree = "<group>"; };
 		BB0000000000000000000038 /* KeyboardSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardSession.swift; sourceTree = "<group>"; };
 		BB0000000000000000000039 /* DictationProfile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DictationProfile.swift; sourceTree = "<group>"; };
+		BB0000000000000000000050 /* TypingCorrector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TypingCorrector.swift; sourceTree = "<group>"; };
+		BB0000000000000000000051 /* TypingSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TypingSession.swift; sourceTree = "<group>"; };
+		BB0000000000000000000052 /* KeyboardKeys.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardKeys.swift; sourceTree = "<group>"; };
+		BB0000000000000000000053 /* KeyboardVocabulary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardVocabulary.swift; sourceTree = "<group>"; };
+		BB0000000000000000000054 /* TypingSamples.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TypingSamples.swift; sourceTree = "<group>"; };
+		BB0000000000000000000055 /* TypingCorrectorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TypingCorrectorTests.swift; sourceTree = "<group>"; };
 		BB000000000000000000003A /* PhoneMeeting.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneMeeting.swift; sourceTree = "<group>"; };
 		BB000000000000000000003B /* CallService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallService.swift; sourceTree = "<group>"; };
 		BB000000000000000000003C /* PhoneLibrary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneLibrary.swift; sourceTree = "<group>"; };
@@ -328,6 +344,7 @@
 				BB0000000000000000000028 /* DictationLink.swift */,
 				BB0000000000000000000038 /* KeyboardSession.swift */,
 				BB0000000000000000000039 /* DictationProfile.swift */,
+				BB0000000000000000000053 /* KeyboardVocabulary.swift */,
 				BB000000000000000000003A /* PhoneMeeting.swift */,
 				BB000000000000000000003B /* CallService.swift */,
 				BB0000000000000000000044 /* BoundedRewrite.swift */,
@@ -388,6 +405,8 @@
 				BB0000000000000000000011 /* DeviceRecordingTests.swift */,
 				BB000000000000000000001E /* CallOfferTests.swift */,
 				BB0000000000000000000027 /* KeyboardDraftTests.swift */,
+				BB0000000000000000000054 /* TypingSamples.swift */,
+				BB0000000000000000000055 /* TypingCorrectorTests.swift */,
 				BB0000000000000000000041 /* PhoneParityTests.swift */,
 				BB0000000000000000000045 /* DictationDeliveryTests.swift */,
 				AA0000000000000000000008 /* Fixtures */,
@@ -407,6 +426,9 @@
 			isa = PBXGroup;
 			children = (
 				BB0000000000000000000023 /* KeyboardViewController.swift */,
+				BB0000000000000000000050 /* TypingCorrector.swift */,
+				BB0000000000000000000051 /* TypingSession.swift */,
+				BB0000000000000000000052 /* KeyboardKeys.swift */,
 				BB0000000000000000000025 /* Info.plist */,
 				BB0000000000000000000029 /* SonaKeyboard.entitlements */,
 			);
@@ -635,6 +657,7 @@
 				CA0000000000000000000034 /* BoardScreen.swift in Sources */,
 				CA0000000000000000000038 /* KeyboardSession.swift in Sources */,
 				CA0000000000000000000039 /* DictationProfile.swift in Sources */,
+				CA0000000000000000000053 /* KeyboardVocabulary.swift in Sources */,
 				CA000000000000000000003A /* PhoneMeeting.swift in Sources */,
 				CA000000000000000000003B /* CallService.swift in Sources */,
 				CA000000000000000000003C /* PhoneLibrary.swift in Sources */,
@@ -688,6 +711,10 @@
 				CC0000000000000000000027 /* KeyboardDraftTests.swift in Sources */,
 				CC0000000000000000000038 /* KeyboardSession.swift in Sources */,
 				CC0000000000000000000039 /* DictationProfile.swift in Sources */,
+				CC0000000000000000000050 /* TypingCorrector.swift in Sources */,
+				CC0000000000000000000051 /* TypingSession.swift in Sources */,
+				CC0000000000000000000054 /* TypingSamples.swift in Sources */,
+				CC0000000000000000000055 /* TypingCorrectorTests.swift in Sources */,
 				CC000000000000000000003A /* PhoneMeeting.swift in Sources */,
 				CC0000000000000000000048 /* PortableMemoryIndex.swift in Sources */,
 				CC000000000000000000003B /* CallService.swift in Sources */,
@@ -707,6 +734,11 @@
 				CD0000000000000000000023 /* KeyboardViewController.swift in Sources */,
 				CD0000000000000000000028 /* DictationLink.swift in Sources */,
 				CD0000000000000000000038 /* KeyboardSession.swift in Sources */,
+				CD0000000000000000000039 /* DictationProfile.swift in Sources */,
+				CD0000000000000000000050 /* TypingCorrector.swift in Sources */,
+				CD0000000000000000000051 /* TypingSession.swift in Sources */,
+				CD0000000000000000000052 /* KeyboardKeys.swift in Sources */,
+				CD0000000000000000000053 /* KeyboardVocabulary.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

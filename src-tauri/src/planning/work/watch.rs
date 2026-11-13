@@ -291,6 +291,26 @@ pub(crate) async fn save(
     phrase: &str,
     person_id: Option<String>,
 ) -> Result<WorkWatch, String> {
+    let saved = watching(app, phrase, person_id, true).await?;
+    changed(app);
+    Ok(saved)
+}
+
+/// The watch [`save`] would leave, with nothing kept.
+pub(crate) async fn save_preview(
+    app: &AppHandle,
+    phrase: &str,
+    person_id: Option<String>,
+) -> Result<WorkWatch, String> {
+    watching(app, phrase, person_id, false).await
+}
+
+async fn watching(
+    app: &AppHandle,
+    phrase: &str,
+    person_id: Option<String>,
+    keep: bool,
+) -> Result<WorkWatch, String> {
     let phrase = phrase
         .trim()
         .trim_matches(['"', '\u{201C}', '\u{201D}', '\''])
@@ -300,7 +320,7 @@ pub(crate) async fn save(
     }
     let history = app.state::<Arc<HistoryManager>>();
     let meetings = app.state::<Arc<MeetingSessionManager>>();
-    let saved = with_meetings(&history, &meetings, |history, meetings| {
+    with_meetings(&history, &meetings, |history, meetings| {
         let people = meetings.map(People::read).transpose()?;
         if let Some(person_id) = &person_id {
             let known = people
@@ -310,26 +330,28 @@ pub(crate) async fn save(
                 return Err(Refusal::Invalid.into());
             }
         }
-        history.execute(
+        let tx = history.transaction()?;
+        tx.execute(
             "INSERT INTO planning_watches (id, phrase, person_id, created_at_ms) \
              VALUES (?1, ?2, ?3, ?4) ON CONFLICT DO NOTHING",
             params![Uuid::new_v4().to_string(), phrase, person_id, now_ms()],
         )?;
-        let id: String = history.query_row(
+        let id: String = tx.query_row(
             "SELECT id FROM planning_watches \
              WHERE lower(phrase) = lower(?1) AND coalesce(person_id, '') = coalesce(?2, '')",
             params![phrase, person_id],
             |row| row.get(0),
         )?;
-        let watch = listed(history, meetings, people.as_ref())?
+        let watch = listed(&tx, meetings, people.as_ref())?
             .into_iter()
             .find(|watch| watch.id == id)
             .ok_or(Refusal::NotFound)?;
+        if keep {
+            tx.commit()?;
+        }
         Ok(watch)
     })
-    .await?;
-    changed(app);
-    Ok(saved)
+    .await
 }
 
 /// Stops listening, and forgets what it heard.

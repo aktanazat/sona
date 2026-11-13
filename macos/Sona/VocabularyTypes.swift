@@ -275,16 +275,55 @@ enum VocabularyDraft {
         return true
     }
 
-    /// A settings refresh may replace the local list only while nothing local
-    /// has diverged since the last synced snapshot; otherwise the person is
-    /// mid-edit and an unrelated refresh would discard the row under the
-    /// cursor.
+    /// A settings refresh may replace the local list outright only while
+    /// nothing local has diverged since the last synced snapshot. Mid-edit,
+    /// the list stays as it is, because every edit, focus and save addresses a
+    /// row by its position and an outside removal would move the row under
+    /// the cursor. The newest saved list waits in `pending` for `resolveSave`.
     static func resolveRefresh<T: VocabularyPair>(
         current: [T],
-        previousSaved: [T],
-        incomingSaved: [T]
-    ) -> [T] {
-        samePairs(current, previousSaved) ? incomingSaved : current
+        synced: [T],
+        incoming: [T]
+    ) -> (rows: [T], synced: [T], pending: [T]?) {
+        samePairs(current, synced)
+            ? (incoming, incoming, nil)
+            : (current, synced, incoming)
+    }
+
+    /// The whole-list save that ends an edit keeps the rows changed here and
+    /// lets every other row follow what was saved from outside meanwhile:
+    /// outside changes and removals land, outside additions are appended.
+    static func resolveSave<T: VocabularyPair>(_ next: [T], synced: [T], pending: [T]?) -> [T] {
+        guard let pending else {
+            return next
+        }
+        return merge(
+            current: next,
+            previousSaved: synced,
+            incomingSaved: pending,
+            key: { VocabularyKey.spoken($0.spoken) },
+            same: { pairKey($0) == pairKey($1) }
+        )
+    }
+
+    static func merge<Row, Key: Hashable>(
+        current: [Row],
+        previousSaved: [Row],
+        incomingSaved: [Row],
+        key: (Row) -> Key,
+        same: (Row, Row) -> Bool
+    ) -> [Row] {
+        let before = Dictionary(previousSaved.map { (key($0), $0) }, uniquingKeysWith: { first, _ in first })
+        let after = Dictionary(incomingSaved.map { (key($0), $0) }, uniquingKeysWith: { first, _ in first })
+        var merged: [Row] = current.compactMap { row in
+            guard let saved = before[key(row)], same(saved, row) else {
+                return row
+            }
+            return after[key(row)]
+        }
+        let present = Set(merged.map(key))
+        merged += incomingSaved.filter { before[key($0)] == nil && !present.contains(key($0)) }
+        return merged
     }
 
     /// The core adds the CSV rows to the saved list and answers with that

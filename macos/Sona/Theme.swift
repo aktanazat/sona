@@ -43,6 +43,8 @@ enum Theme {
     static var onInvert: Color { color(.onInvert) }
 
     static var live: Color { color(.live) }
+    /// A due date that falls within the week: orange, a step short of live.
+    static var dueSoon: Color { color(.dueSoon) }
     /// Bookmark marks in a meeting: an open question, a to-do.
     static var markQuestion: Color { color(.markQuestion) }
     static var markTodo: Color { color(.markTodo) }
@@ -130,7 +132,7 @@ enum ThemeRole: Int, CaseIterable {
     case ink, inkSecondary, inkTertiary, inkDisabled
     case accent, accentFill, accentSoft, onAccent
     case invert, onInvert
-    case live, markQuestion, markTodo
+    case live, dueSoon, markQuestion, markTodo
     case statusTriage, statusBacklog, statusTodo, statusInProgress, statusDone, statusCanceled, statusDuplicate
     case priorityUrgent
     case hud, hudInk, hudInkSecondary, hudLive, hudControl, hudBorder
@@ -273,6 +275,7 @@ struct ThemeSeed {
         case .invert: value(.ink)
         case .onInvert: value(isDark ? .page : .surface)
         case .live: legible(LCH(l: isDark ? 64 : 49, c: isDark ? 66 : 74, h: 33), ratio: 4.5)
+        case .dueSoon: legible(LCH(l: isDark ? 72 : 54, c: 72, h: 60), ratio: 4.5)
         case .markQuestion: legible(LCH(l: isDark ? 68 : 58, c: 70, h: 52), ratio: 3)
         case .markTodo: legible(LCH(l: isDark ? 71 : 50, c: 48, h: 152), ratio: 3)
         case .statusTriage: legible(LCH(l: isDark ? 68 : 60, c: 72, h: 50), ratio: 3)

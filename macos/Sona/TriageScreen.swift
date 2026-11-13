@@ -38,7 +38,10 @@ private struct TriageList: View {
                                  byMeeting: split.map { $0 == .meeting } ?? true)
         VStack(spacing: 0) {
             WorkBar {
-                TriageSplits(rows: waiting)
+                HStack(spacing: 12) {
+                    InboxTabs()
+                    TriageSplits(rows: waiting)
+                }
             } trailing: {
                 let targets = model.workTargets
                 if !targets.isEmpty {
@@ -139,7 +142,7 @@ private struct TriageSplits: View {
         let counts = Dictionary(grouping: rows, by: \.source).mapValues(\.count)
         ScrollView(.horizontal) {
             HStack(spacing: 2) {
-                WorkTab(title: "Triage", count: rows.count, on: focus.triageSplit == nil) { focus.split(nil) }
+                WorkTab(title: "All", count: rows.count, on: focus.triageSplit == nil) { focus.split(nil) }
                 ForEach(WorkSource.allCases, id: \.self) { source in
                     WorkTab(title: source.tab, count: counts[source], on: focus.triageSplit == source) {
                         focus.split(source)
@@ -255,9 +258,10 @@ private struct TriageRow: View {
                         .font(TypeScale.listTitle)
                         .foregroundStyle(Theme.ink)
                         .lineLimit(1)
+                        .help(row.title)
                     Spacer(minLength: 8)
-                    ForEach(Array(suggestions.enumerated()), id: \.offset) { _, suggestion in
-                        SuggestionChip(suggestion: suggestion, now: now)
+                    ForEach(suggestions, id: \.id) { suggestion in
+                        SuggestionChip(itemId: row.id, suggestion: suggestion, now: now)
                     }
                     Text(TaskDates.ago(row.createdAtMs, now: now))
                         .metaText()
@@ -287,28 +291,35 @@ private struct TriageRow: View {
     }
 }
 
-/// One of Sona's guesses: what it is, and on hover why it thinks so and
-/// the words it heard.
+/// One of Sona's guesses: what it is, on hover why it thinks so, and on a
+/// click the reason with Use and Dismiss.
 struct SuggestionChip: View {
+    let itemId: String
     let suggestion: WorkFieldSuggestion
     let now: Int64
     @Environment(AppModel.self) private var model
+    @State private var open = false
 
     var body: some View {
         let value = WorkSuggestionText.value(suggestion, model: model, now: now)
-        HStack(spacing: 4) {
-            Image(systemName: WorkSuggestionText.icon(suggestion.field))
-                .font(.system(size: 10, weight: .medium))
-                .foregroundStyle(Theme.accent)
-            Text(value).lineLimit(1)
+        Button { open = true } label: {
+            HStack(spacing: 4) {
+                Image(systemName: WorkSuggestionText.icon(suggestion.field))
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(Theme.accent)
+                Text(value).lineLimit(1)
+            }
+            .font(TypeScale.label(11))
+            .foregroundStyle(Theme.ink)
+            .padding(.horizontal, 6)
+            .frame(height: 20)
+            .background(Theme.accentSoft, in: RoundedRectangle(cornerRadius: Theme.radiusKey))
         }
-        .font(TypeScale.label(11))
-        .foregroundStyle(Theme.ink)
-        .padding(.horizontal, 6)
-        .frame(height: 20)
-        .background(Theme.accentSoft, in: RoundedRectangle(cornerRadius: Theme.radiusKey))
+        .buttonStyle(.plain)
         .help(WorkSuggestionText.why(suggestion))
-        .accessibilityElement(children: .ignore)
+        .popover(isPresented: $open, arrowEdge: .bottom) {
+            SuggestionCard(itemId: itemId, suggestion: suggestion, now: now)
+        }
         .accessibilityLabel("Suggested \(WorkSuggestionText.title(suggestion.field).lowercased()): \(value). \(WorkSuggestionText.why(suggestion))")
     }
 }
@@ -324,6 +335,7 @@ enum WorkSuggestionText {
         case let .owner(.person(id)): work.people.first { $0.id == id }?.name ?? "Someone"
         case let .due(moment): TaskDates.label(moment, now: now)
         case let .project(id): work.projects.first { $0.id == id }?.title ?? "A project"
+        case let .label(id): work.labels.first { $0.id == id }?.name ?? "A label"
         case let .item(id): work.items?.first { $0.id == id }.map { "#\($0.number)" } ?? "Another task"
         }
     }
@@ -333,7 +345,9 @@ enum WorkSuggestionText {
         case .owner: "person.crop.circle"
         case .due: "calendar"
         case .project: "folder"
+        case .label: "tag"
         case .duplicate: "square.on.square"
+        case .related: "link"
         }
     }
 
@@ -342,7 +356,9 @@ enum WorkSuggestionText {
         case .owner: "Owner"
         case .due: "Due date"
         case .project: "Project"
+        case .label: "Label"
         case .duplicate: "Duplicate of"
+        case .related: "Related to"
         }
     }
 

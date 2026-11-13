@@ -1,5 +1,6 @@
 use super::{
-    emit_changed, failure_sentence, note_with_connection, run, ScratchNote, ScratchpadRefusal,
+    emit_changed, failure_sentence, note_with_connection, run, ScratchNote, ScratchpadError,
+    ScratchpadRefusal,
 };
 use crate::managers::history::HistoryManager;
 use crate::meeting::people_types::PersonId;
@@ -7,6 +8,7 @@ use crate::meeting::session::MeetingSessionManager;
 use crate::meeting::store::note_evidence::{NoteEvidenceError, NoteEvidenceRemoval};
 use crate::meeting::store::MeetingStore;
 use crate::meeting::types::{MeetingPhase, MeetingSessionId, MeetingSessionSnapshot};
+use crate::planning::EvidenceSourceKind;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use specta::Type;
@@ -88,6 +90,8 @@ pub struct ScratchNoteMemory {
     pub passages: Vec<super::passages::ScratchPassage>,
     pub interpretation: bool,
     pub connections: Vec<ScratchConnection>,
+    /// The projects, milestones, tasks and cycles this note is a document of.
+    pub documents: Vec<super::documents::ScratchDocumentOf>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
@@ -329,13 +333,14 @@ fn has_non_note_sources(history: &HistoryManager, id: &str) -> Result<bool, Stri
 }
 
 /// A note with what it cites and what it connects to, as a reader who may not
-/// see the meetings `hides_meeting` names has it: those leave the sources
-/// before any passage, connection or related note is drawn from them.
+/// see the sources `hides` holds back has it: the meetings it names leave the
+/// sources before any passage, connection or related note is drawn from them,
+/// and the tasks drawn from any of them leave what the note is a document of.
 pub(crate) fn read_memory(
     history: &HistoryManager,
     store: Option<&MeetingStore>,
     id: &str,
-    hides_meeting: impl Fn(&str) -> bool,
+    hides: impl Fn(EvidenceSourceKind, &str) -> bool,
 ) -> Result<Option<ScratchNoteMemory>, String> {
     let memory = history.with_connection(|conn| {
         let Some(note) = note_with_connection(conn, id)? else { return Ok(None) };
@@ -354,14 +359,18 @@ pub(crate) fn read_memory(
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let passages = super::passages::read(conn, id)?;
         let interpretation = conn.query_row("SELECT EXISTS(SELECT 1 FROM scratch_note_origins WHERE note_id = ?1)", params![id], |row| row.get(0))?;
-        Ok(Some(ScratchNoteMemory { note, sources, related_notes, passages, interpretation, connections: Vec::new(), phone_sources: Vec::new() }))
+        let documents = super::documents::documents_of(conn, id, &hides)?;
+        Ok(Some(ScratchNoteMemory { note, sources, related_notes, passages, interpretation, connections: Vec::new(), phone_sources: Vec::new(), documents }))
     }).map_err(|_| "The note's sources could not be read.".to_string())?;
     let Some(mut memory) = memory else {
         return Ok(None);
     };
     memory
         .sources
-        .retain(|source| source.kind != ScratchSourceKind::Meeting || !hides_meeting(&source.id));
+        .retain(|source| {
+            source.kind != ScratchSourceKind::Meeting
+                || !hides(EvidenceSourceKind::Meeting, &source.id)
+        });
     if store.is_none()
         && memory
             .sources
@@ -492,7 +501,63 @@ pub async fn scratchpad_memory(
     } else {
         None
     };
-    read_memory(&history, store.as_deref(), &id, |_| false)
+    read_memory(&history, store.as_deref(), &id, |_, _| false)
+}
+
+/// What linking `source` to note `id` files, read before the write: the
+/// source as it stands now, and the conversations when reading it needed them.
+pub(crate) async fn resolve_link(
+    history: &HistoryManager,
+    meetings: &MeetingSessionManager,
+    id: &str,
+    source: &ScratchSourceRef,
+) -> Result<(ScratchSource, Option<Arc<MeetingStore>>), String> {
+    if source.kind == ScratchSourceKind::Note && source.id == id {
+        return Err("A note cannot link to itself.".to_string());
+    }
+    let store = if source.kind == ScratchSourceKind::Note && !has_non_note_sources(history, id)? {
+        None
+    } else {
+        Some(
+            meetings
+                .store()
+                .await
+                .map_err(|_| "Conversations are still unlocking.".to_string())?,
+        )
+    };
+    let source = if source.kind == ScratchSourceKind::Note {
+        resolve_note(history, source)?.source
+    } else {
+        describe(
+            history,
+            store
+                .as_deref()
+                .ok_or_else(|| "Conversations are still unlocking.".to_string())?,
+            source,
+        )?
+    };
+    Ok((source, store))
+}
+
+/// Files a source [`resolve_link`] read on note `id`.
+pub(crate) fn link_in(
+    conn: &Connection,
+    id: &str,
+    source: ScratchSource,
+) -> Result<(), ScratchpadError> {
+    if note_with_connection(conn, id)?.is_none() {
+        return Err(ScratchpadRefusal::NotFound.into());
+    }
+    // Explicit links do not copy source text. Only synthesis freezes its evidence.
+    insert_source(
+        conn,
+        id,
+        &ResolvedSource {
+            source,
+            evidence: None,
+        },
+    )?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -504,48 +569,11 @@ pub async fn scratchpad_link(
     id: String,
     source: ScratchSourceRef,
 ) -> Result<ScratchNoteMemory, String> {
-    if source.kind == ScratchSourceKind::Note && source.id == id {
-        return Err("A note cannot link to itself.".to_string());
-    }
-    let store = if source.kind == ScratchSourceKind::Note && !has_non_note_sources(&history, &id)? {
-        None
-    } else {
-        Some(
-            meetings
-                .store()
-                .await
-                .map_err(|_| "Conversations are still unlocking.".to_string())?,
-        )
-    };
-    let source = if source.kind == ScratchSourceKind::Note {
-        resolve_note(&history, &source)?.source
-    } else {
-        describe(
-            &history,
-            store
-                .as_deref()
-                .ok_or_else(|| "Conversations are still unlocking.".to_string())?,
-            &source,
-        )?
-    };
-    run(&history, |conn| {
-        if note_with_connection(conn, &id)?.is_none() {
-            return Err(ScratchpadRefusal::NotFound.into());
-        }
-        // Explicit links do not copy source text. Only synthesis freezes its evidence.
-        insert_source(
-            conn,
-            &id,
-            &ResolvedSource {
-                source,
-                evidence: None,
-            },
-        )?;
-        Ok(())
-    })
-    .map_err(|error| failure_sentence(&history, error, "The source could not be linked."))?;
+    let (source, store) = resolve_link(&history, &meetings, &id, &source).await?;
+    run(&history, |conn| link_in(conn, &id, source))
+        .map_err(|error| failure_sentence(&history, error, "The source could not be linked."))?;
     emit_changed(&app, &id, false);
-    read_memory(&history, store.as_deref(), &id, |_| false)?
+    read_memory(&history, store.as_deref(), &id, |_, _| false)?
         .ok_or_else(|| "This note no longer exists.".to_string())
 }
 

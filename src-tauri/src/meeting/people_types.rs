@@ -79,6 +79,8 @@ pub struct Person {
     pub organization: Option<String>,
     /// Absent until an artifact pass has had an engine to write it with.
     pub summary: Option<PersonSummary>,
+    pub role: Option<String>,
+    pub notes: Option<String>,
     pub created_at_utc_ms: i64,
     pub updated_at_utc_ms: i64,
 }

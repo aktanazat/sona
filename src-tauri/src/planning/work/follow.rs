@@ -5,7 +5,9 @@
 
 use super::super::sources;
 use super::super::store::{self, Refusal};
+use super::inbox;
 use super::items;
+use super::routines;
 use super::sync::People;
 use super::types::{WorkItem, WorkOwner, WorkSource};
 use super::{in_both, now_ms, run_history, with_both, Done, Effects};
@@ -353,6 +355,21 @@ fn follow_notice(waits: &[Reminder], people: &People) -> Option<Notice> {
     }
 }
 
+fn reminder_notices(history: &Connection, now_ms: i64) -> Result<Vec<(String, Notice)>> {
+    routines::due_reminders(history, now_ms)?
+        .into_iter()
+        .map(|reminder| {
+            let item = items::item(history, &reminder.item_id)?;
+            let notice = Notice {
+                id: request_id(WorkReminderKind::Due, Some(&item.id)),
+                title: item.title,
+                body: "Reminder".to_owned(),
+            };
+            Ok((item.id, notice))
+        })
+        .collect()
+}
+
 /// Remembers reminders as shown, and forgets ones shown long ago.
 fn record(history: &mut Connection, keys: &[String], now_ms: i64) -> Result<()> {
     let tx = history.transaction()?;
@@ -368,6 +385,32 @@ fn record(history: &mut Connection, keys: &[String], now_ms: i64) -> Result<()> 
     )?;
     tx.commit()?;
     Ok(())
+}
+
+/// Posts to the inbox what is due to be said: open work I owe that is due
+/// today, once its morning has come, and each reminder whose time came.
+/// Each is posted once however many ticks or restarts offer it again,
+/// whatever the notification centre made of it. Returns the tasks posted.
+fn post_due(history: &mut Connection, due: &[Reminder], now_ms: i64) -> Result<Vec<String>> {
+    let tx = history.transaction()?;
+    let mut posted = Vec::new();
+    for due in due {
+        if let Some(due_at) = due.item.due_at_ms {
+            if inbox::remind(&tx, &due.item.id, inbox::Remind::Due, due_at, now_ms)? {
+                posted.push(due.item.id.clone());
+            }
+        }
+    }
+    for reminder in routines::due_reminders(&tx, now_ms)? {
+        let kind = inbox::Remind::Reminder {
+            set_at_ms: reminder.set_at_ms,
+        };
+        if inbox::remind(&tx, &reminder.item_id, kind, reminder.remind_at_ms, now_ms)? {
+            posted.push(reminder.item_id);
+        }
+    }
+    tx.commit()?;
+    Ok(posted)
 }
 
 fn unreadable(error: StoreError) -> anyhow::Error {
@@ -540,29 +583,46 @@ fn held(row: &rusqlite::Row<'_>) -> rusqlite::Result<Held> {
     Ok((row.get(0)?, row.get(1)?, row.get(2)?))
 }
 
-/// The last finished meeting before `before_ms`: the series' own when the
-/// event's series has met before, otherwise the last one any of these
-/// people was in.
+/// The first of `rows` that names no meeting in `hidden`.
+fn first_shown(
+    rows: impl Iterator<Item = rusqlite::Result<Held>>,
+    hidden: &HashSet<MeetingSessionId>,
+) -> rusqlite::Result<Option<Held>> {
+    for row in rows {
+        let row = row?;
+        let kept = Uuid::parse_str(&row.0)
+            .is_ok_and(|uuid| hidden.contains(&MeetingSessionId::from_uuid(uuid)));
+        if !kept {
+            return Ok(Some(row));
+        }
+    }
+    Ok(None)
+}
+
+/// The last finished meeting before `before_ms` outside `hidden`: the
+/// series' own when the event's series has met before, otherwise the last
+/// one any of these people was in.
 fn last_meeting(
     meetings: &Connection,
     series_key: Option<&str>,
     known: &[HashSet<String>],
     before_ms: i64,
+    hidden: &HashSet<MeetingSessionId>,
 ) -> Result<Option<WorkBriefMeeting>> {
     let mut last = match series_key.map(str::trim).filter(|key| !key.is_empty()) {
-        Some(series_key) => meetings
-            .query_row(
+        Some(series_key) => {
+            let mut statement = meetings.prepare_cached(
                 "SELECT m.id, m.title, COALESCE(m.started_at_utc_ms, m.created_at_utc_ms) AS at
                    FROM meeting_calendar_facts f
                    JOIN meeting_sessions m ON m.id = f.session_id
                   WHERE json_extract(f.event_json, '$.seriesKey') = ?1
                     AND m.ended_at_utc_ms IS NOT NULL AND m.phase != 'deleting'
                     AND COALESCE(m.started_at_utc_ms, m.created_at_utc_ms) < ?2
-                  ORDER BY at DESC, m.id DESC LIMIT 1",
-                params![series_key, before_ms],
-                held,
-            )
-            .optional()?,
+                  ORDER BY at DESC, m.id DESC",
+            )?;
+            let rows = statement.query_map(params![series_key, before_ms], held)?;
+            first_shown(rows, hidden)?
+        }
         None => None,
     };
     if last.is_none() {
@@ -573,13 +633,11 @@ fn last_meeting(
               WHERE l.person_id = ?1 AND l.confidence = 'confirmed'
                 AND m.ended_at_utc_ms IS NOT NULL AND m.phase != 'deleting'
                 AND COALESCE(m.started_at_utc_ms, m.created_at_utc_ms) < ?2
-              ORDER BY at DESC, m.id DESC LIMIT 1",
+              ORDER BY at DESC, m.id DESC",
         )?;
         for id in known.iter().flatten() {
-            let found = statement
-                .query_row(params![id, before_ms], held)
-                .optional()?;
-            if let Some(found) = found {
+            let rows = statement.query_map(params![id, before_ms], held)?;
+            if let Some(found) = first_shown(rows, hidden)? {
                 if last
                     .as_ref()
                     .is_none_or(|kept: &Held| (found.2, &found.0) > (kept.2, &kept.0))
@@ -630,12 +688,14 @@ fn last_meeting(
 }
 
 /// Everything a brief shows. `person_ids` may name a merged person by an
-/// old id; each person counts once, by the id they go by now.
+/// old id; each person counts once, by the id they go by now. No meeting
+/// in `hidden` is named as the last time.
 fn brief(
     history: &Connection,
     meetings: &Connection,
     event: Option<&CalendarEventSummary>,
     person_ids: &[String],
+    hidden: &HashSet<MeetingSessionId>,
     now_ms: i64,
 ) -> Result<WorkBrief> {
     let people = People::read(meetings)?;
@@ -692,6 +752,7 @@ fn brief(
         event.map(|event| event.series_key.as_str()),
         &known,
         event.map_or(now_ms, |event| event.start_utc_ms),
+        hidden,
     )?;
     let title = match event {
         Some(event) => event.title.trim().to_owned(),
@@ -823,7 +884,7 @@ fn upcoming_briefs(
             continue;
         }
         let brief = in_both(store, history, |history, meetings| {
-            brief(history, meetings, Some(&event), &people, now_ms)
+            brief(history, meetings, Some(&event), &people, &HashSet::new(), now_ms)
         })?;
         if let Some(notice) = brief_notice(&event, &brief, now_ms) {
             notices.push((key, notice));
@@ -847,7 +908,7 @@ pub(super) fn probe_inputs(
     Ok(serde_json::json!({
         "morning_due": notice,
         "waiting_follow_ups": waits.len(),
-        "brief": brief(history, meetings, None, &person_ids, now_ms)?,
+        "brief": brief(history, meetings, None, &person_ids, &HashSet::new(), now_ms)?,
     }))
 }
 
@@ -857,11 +918,18 @@ pub(super) fn probe_inputs(
 fn tick(app: &AppHandle, prompts: &dyn PromptPresenter, now_ms: i64) -> Result<()> {
     let history = app.state::<Arc<HistoryManager>>();
     let store = app.state::<Arc<MeetingSessionManager>>().open_store();
-    let (sent, (due, waits)) = history.with_connection(|conn| {
+    let (sent, (due, waits), reminded, posted) = history.with_connection(|conn| {
         let sent = sent(conn)?;
-        let pending = pending(conn, &sent, now_ms)?;
-        Ok((sent, pending))
+        let (mut due, mut waits) = pending(conn, &HashSet::new(), now_ms)?;
+        let posted = post_due(conn, &due, now_ms)?;
+        due.retain(|due| !sent.contains(&due.key));
+        waits.retain(|wait| !sent.contains(&wait.key));
+        let reminded = reminder_notices(conn, now_ms)?;
+        Ok((sent, (due, waits), reminded, posted))
     })?;
+    if !posted.is_empty() {
+        super::tasks_changed(app, posted);
+    }
     let mut shown = Vec::new();
     let mut show = |notice: &Notice, keys: Vec<String>| {
         if prompts.present_follow_up(&notice.id, &notice.title, &notice.body) {
@@ -889,6 +957,18 @@ fn tick(app: &AppHandle, prompts: &dyn PromptPresenter, now_ms: i64) -> Result<(
     if !shown.is_empty() {
         history.with_connection(|conn| record(conn, &shown, now_ms))?;
     }
+    let reminded: Vec<String> = reminded
+        .into_iter()
+        .filter(|(_, notice)| prompts.present_follow_up(&notice.id, &notice.title, &notice.body))
+        .map(|(item_id, _)| item_id)
+        .collect();
+    if !reminded.is_empty() {
+        routines::reminders_notified(app, &Uuid::new_v4().to_string(), &reminded)
+            .map_err(anyhow::Error::msg)?;
+    }
+    if super::digest::post_weekly(app, &history, store.as_deref(), now_ms)? {
+        super::tasks_changed(app, Vec::new());
+    }
     Ok(())
 }
 
@@ -903,6 +983,24 @@ pub(crate) fn start(app: AppHandle, prompts: Arc<dyn PromptPresenter>) {
     });
 }
 
+/// The brief for one person: my open work with them and theirs with me,
+/// never naming a meeting in `hidden` as the last time.
+pub(crate) async fn person_brief(
+    history: &HistoryManager,
+    meetings: &MeetingSessionManager,
+    person_id: String,
+    hidden: &HashSet<MeetingSessionId>,
+) -> Result<WorkBrief, String> {
+    let store = meetings
+        .store()
+        .await
+        .map_err(|_| super::super::conversations_closed())?;
+    in_both(&store, history, |history, meetings| {
+        brief(history, meetings, None, &[person_id], hidden, now_ms())
+    })
+    .map_err(super::super::failure)
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn work_brief(
@@ -911,32 +1009,32 @@ pub async fn work_brief(
     meetings: State<'_, Arc<MeetingSessionManager>>,
     subject: WorkBriefSubject,
 ) -> Result<WorkBrief, String> {
+    let event_key = match subject {
+        WorkBriefSubject::Event { event_key } => event_key,
+        WorkBriefSubject::Person { person_id } => {
+            return person_brief(&history_state, &meetings, person_id, &HashSet::new()).await;
+        }
+    };
     let store = meetings
         .store()
         .await
         .map_err(|_| super::super::conversations_closed())?;
-    let (event, people) = match subject {
-        WorkBriefSubject::Event { event_key } => {
-            let runtime = Arc::clone(&runtime);
-            if !crate::settings::get_settings(runtime.app_handle()).detection_calendar_enabled {
-                return Err("Turn on Use my calendar in Meeting settings.".into());
-            }
-            if runtime.calendar_access() != CalendarAccess::Authorized {
-                return Err("Allow Sona to read Calendar in System Settings.".into());
-            }
-            let event = tauri::async_runtime::spawn_blocking(move || {
-                runtime.calendar_event_by_key(&event_key)
-            })
-            .await
-            .map_err(|_| "The calendar could not be read.")?
-            .ok_or("This event is no longer on your calendar.")?;
-            let people = attendees(&store, &event).map_err(super::super::failure)?;
-            (Some(event), people)
-        }
-        WorkBriefSubject::Person { person_id } => (None, vec![person_id]),
-    };
+    let runtime = Arc::clone(&runtime);
+    if !crate::settings::get_settings(runtime.app_handle()).detection_calendar_enabled {
+        return Err("Turn on Use my calendar in Meeting settings.".into());
+    }
+    if runtime.calendar_access() != CalendarAccess::Authorized {
+        return Err("Allow Sona to read Calendar in System Settings.".into());
+    }
+    let event = tauri::async_runtime::spawn_blocking(move || {
+        runtime.calendar_event_by_key(&event_key)
+    })
+    .await
+    .map_err(|_| "The calendar could not be read.")?
+    .ok_or("This event is no longer on your calendar.")?;
+    let people = attendees(&store, &event).map_err(super::super::failure)?;
     in_both(&store, &history_state, |history, meetings| {
-        brief(history, meetings, event.as_ref(), &people, now_ms())
+        brief(history, meetings, Some(&event), &people, &HashSet::new(), now_ms())
     })
     .map_err(super::super::failure)
 }
@@ -1375,8 +1473,15 @@ mod tests {
             // PANIC: the fixture's own databases are readable.
             desk.meetings
                 .with_planning_snapshot(|meetings| {
-                    let brief = brief(&desk.history, meetings, Some(event), &people, now)
-                        .expect("the brief");
+                    let brief = brief(
+                        &desk.history,
+                        meetings,
+                        Some(event),
+                        &people,
+                        &HashSet::new(),
+                        now,
+                    )
+                    .expect("the brief");
                     Ok(brief_notice(event, &brief, now))
                 })
                 .expect("the meeting database")
@@ -1391,6 +1496,42 @@ mod tests {
             })
         );
         assert_eq!(notice(&event("venue#1"), &[priya]), None);
+    }
+
+    #[test]
+    fn a_brief_names_the_newest_meeting_not_kept_on_this_mac_as_the_last_time() {
+        let desk = desk();
+        let pricing = workflow_core_tests::meeting(&desk.meetings, "Pricing review", at(-7, 10));
+        let board = workflow_core_tests::meeting(&desk.meetings, "Board prep", at(-2, 10));
+        for meeting in [pricing, board] {
+            workflow_core_tests::link(&desk.meetings, meeting, desk.dana, "manual", "confirmed");
+        }
+        // PANIC: the fixture's own meeting rows can be marked finished.
+        desk.meetings
+            .with_planning_snapshot(|meetings| {
+                meetings.execute(
+                    "UPDATE meeting_sessions SET ended_at_utc_ms = started_at_utc_ms + 3600000",
+                    [],
+                )?;
+                Ok(())
+            })
+            .expect("the meetings finished");
+        let person_ids = [desk.dana.uuid().to_string()];
+        let last_time = |hidden: &[MeetingSessionId]| {
+            let hidden = hidden.iter().copied().collect::<HashSet<_>>();
+            // PANIC: the fixture's own databases are readable.
+            desk.meetings
+                .with_planning_snapshot(|meetings| {
+                    let brief = brief(&desk.history, meetings, None, &person_ids, &hidden, at(0, 10))
+                        .expect("the brief");
+                    Ok(brief.last_time.map(|meeting| meeting.title))
+                })
+                .expect("the meeting database")
+        };
+
+        assert_eq!(last_time(&[]).as_deref(), Some("Board prep"));
+        assert_eq!(last_time(&[board]).as_deref(), Some("Pricing review"));
+        assert_eq!(last_time(&[pricing, board]), None);
     }
 
     #[test]
@@ -1438,6 +1579,92 @@ mod tests {
                 Some(WorkSource::Meeting),
                 Some(WorkSource::Dictation),
                 Some(WorkSource::Agent),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_due_reminder_is_posted_once_under_an_id_that_opens_its_task() {
+        let mut desk = desk();
+        let due = desk.task("Call the harbor master", WorkOwner::Myself, None, at(0, 9));
+        let later = desk.task("Renew the berth permit", WorkOwner::Myself, None, at(0, 9));
+        for (item, remind_at_ms) in [(&due, at(0, 10)), (&later, at(1, 10))] {
+            desk.history
+                .execute(
+                    "INSERT INTO planning_task_reminders (task_id, remind_at_ms, set_at_ms, actor)
+                     VALUES (?1, ?2, ?3, 'me')",
+                    params![item.id, remind_at_ms, at(0, 9)],
+                )
+                .expect("a reminder set");
+        }
+
+        let notices = reminder_notices(&desk.history, at(0, 11)).expect("the due reminders");
+        assert_eq!(
+            notices
+                .iter()
+                .map(|(item_id, notice)| (item_id.as_str(), notice.title.as_str(), opened(&notice.id)))
+                .collect::<Vec<_>>(),
+            [(
+                due.id.as_str(),
+                "Call the harbor master",
+                Some(WorkReminderOpened {
+                    kind: WorkReminderKind::Due,
+                    id: Some(due.id.clone()),
+                })
+            )]
+        );
+
+        desk.history
+            .execute(
+                "UPDATE planning_task_reminders SET notified_at_ms = ?2 WHERE task_id = ?1",
+                params![due.id, at(0, 11)],
+            )
+            .expect("the reminder marked shown");
+        assert!(reminder_notices(&desk.history, at(0, 12))
+            .expect("the due reminders")
+            .is_empty());
+    }
+
+    #[test]
+    fn a_due_day_and_a_reminder_each_post_one_inbox_notice_across_restarts() {
+        let mut desk = desk();
+        let directory = TempDir::new().expect("a scratch directory");
+        let path = directory.path().join("history.db");
+        desk.history = Connection::open(&path).expect("a history database on disk");
+        schema::apply_all(&desk.history).expect("the planner schema");
+        let launch = desk.task(
+            "Draft the launch email",
+            WorkOwner::Myself,
+            Some(at(1, 12)),
+            at(0, 10),
+        );
+        let berth = desk.task("Renew the berth permit", WorkOwner::Myself, None, at(0, 10));
+        desk.history
+            .execute(
+                "INSERT INTO planning_task_reminders (task_id, remind_at_ms, set_at_ms, actor)
+                 VALUES (?1, ?2, ?3, 'me')",
+                params![berth.id, at(1, 10), at(0, 10)],
+            )
+            .expect("a reminder set");
+
+        let mut posted = Vec::new();
+        for now in [at(1, 8), at(1, 9), at(1, 11), at(1, 11), at(1, 15)] {
+            desk.history = Connection::open(&path).expect("the database after a restart");
+            let (due, _) = pending(&desk.history, &HashSet::new(), now).expect("the work due");
+            posted.extend(post_due(&mut desk.history, &due, now).expect("the notices posted"));
+        }
+        let kinds: Vec<_> = inbox::notifications(&desk.history, inbox::Shown::default(), at(1, 16))
+            .expect("the inbox")
+            .into_iter()
+            .map(|notice| (notice.kind, notice.item_id))
+            .collect();
+
+        assert_eq!(posted, [launch.id.clone(), berth.id.clone()]);
+        assert_eq!(
+            kinds,
+            [
+                (inbox::NotificationKind::Reminder, Some(berth.id)),
+                (inbox::NotificationKind::Due, Some(launch.id)),
             ]
         );
     }

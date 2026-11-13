@@ -7,6 +7,9 @@ mod complete_reading;
 pub(crate) use complete_reading::probe as notes_probe;
 mod live_card;
 pub(crate) use live_card::{hang_up as live_card_hang_up, MeetingLiveCard, MeetingLivePromise};
+pub(crate) mod live_changes;
+pub(crate) mod live_doc;
+pub(crate) mod live_share;
 mod progress;
 
 use progress::{RunProgress, TrackSpan};
@@ -71,7 +74,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -921,6 +924,9 @@ pub struct MeetingProcessingService {
     /// of which jobs are live; this is how a caller waits for one to finish
     /// without polling it.
     jobs_idle: Arc<Condvar>,
+    /// The rooms of meetings shared by link, so a delete still reaches a
+    /// room after its call ended.
+    shared_rooms: live_share::SharedRooms,
     /// Every progress update published, for the tests that follow a run
     /// through its stages.
     #[cfg(test)]
@@ -1082,6 +1088,7 @@ impl MeetingProcessingService {
             capture_active: Arc::new(AtomicBool::new(false)),
             jobs: Arc::new(Mutex::new(HashMap::new())),
             jobs_idle: Arc::new(Condvar::new()),
+            shared_rooms: live_share::SharedRooms::default(),
             #[cfg(test)]
             published_progress: Arc::new(Mutex::new(Vec::new())),
             #[cfg(test)]
@@ -1452,6 +1459,11 @@ impl MeetingProcessingService {
         {
             job.cancelled.store(true, Ordering::Release);
         }
+    }
+
+    /// The rooms of meetings shared by link.
+    pub(crate) fn shared_rooms(&self) -> &live_share::SharedRooms {
+        &self.shared_rooms
     }
 
     pub fn local_processing_availability(&self) -> SourceAvailability {
@@ -4041,6 +4053,14 @@ pub(crate) struct LiveTranscript {
     voices: Mutex<Vec<HeardVoice>>,
     /// The promises heard so far, and what is still to be read for them.
     card: Mutex<live_card::Card>,
+    /// The doc asked for during the call, and the asks heard.
+    doc: Mutex<live_doc::Doc>,
+    /// Who changed the doc and the card, oldest first.
+    changes: Mutex<Vec<crate::meeting::live_doc_types::MeetingLiveChange>>,
+    /// The end of the newest line heard, from the start of the meeting.
+    heard_ns: AtomicU64,
+    /// The meeting's link for teammates, once asked for.
+    share: Mutex<live_share::Share>,
 }
 
 impl LiveTranscript {
@@ -4051,6 +4071,10 @@ impl LiveTranscript {
             recall: Mutex::new(RecallMemory::default()),
             voices: Mutex::new(Vec::new()),
             card: Mutex::new(live_card::Card::default()),
+            doc: Mutex::new(live_doc::Doc::default()),
+            changes: Mutex::new(Vec::new()),
+            heard_ns: AtomicU64::new(0),
+            share: Mutex::new(live_share::Share::default()),
         }
     }
 
@@ -4061,6 +4085,8 @@ impl LiveTranscript {
     }
 
     fn append(&self, segment: LiveSegment) {
+        self.heard_ns
+            .fetch_max(segment.end_offset_ns, Ordering::Relaxed);
         self.segments
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -4266,6 +4292,7 @@ impl LiveTranscriptWorker {
     }
 
     fn stop(&mut self) {
+        self.live.close_share();
         let (stopped, wake) = &*self.stopped;
         *stopped
             .lock()
@@ -4318,8 +4345,16 @@ fn run_live_pass_worker(
         }
         match service.live_pass(&store, session_id, &live) {
             Ok(()) => {
+                if live_doc::hear(&service, &store, session_id, &live) {
+                    let (service, store, live) =
+                        (Arc::clone(&service), Arc::clone(&store), Arc::clone(&live));
+                    std::thread::spawn(move || service.read_live_doc_now(&store, session_id, &live));
+                }
                 if live_card::tick(&service, &store, session_id, &live, live_card::Moment::Pass) {
                     service.emit_current(&store, "meeting:live-card-changed", session_id);
+                }
+                if live_doc::tick(&service, &store, session_id, &live, live_doc::Moment::Pass) {
+                    service.emit_current(&store, "meeting:live-doc-changed", session_id);
                 }
             }
             Err(error) => {
@@ -4571,6 +4606,14 @@ impl FrameConsumer for SpeechChunker {
     ) -> Result<Option<AudioChunk>, ProcessingFailure> {
         if self.start_offset_ns.is_none() {
             if !voice {
+                // The carried overlap continues a sentence cut mid-word; after
+                // a pause the sentence is over, and a chunk dated from the
+                // overlap read old words again and joined them to new ones.
+                self.silence_frames = self.silence_frames.saturating_add(1);
+                if self.silence_frames >= ASR_SILENCE_FRAMES {
+                    self.carry.clear();
+                    self.carry_start_offset_ns = None;
+                }
                 return Ok(None);
             }
             if let Some(carry_start) = self.carry_start_offset_ns.take() {
@@ -5864,7 +5907,10 @@ fn live_help_evidence(
             .filter_map(|line| line.citation.end_offset_ns)
             .max()
             .map(|newest_end| newest_end.saturating_sub(LIVE_HELP_RECENT_WINDOW_NS)),
-        MeetingLiveHelpKind::Questions | MeetingLiveHelpKind::Say | MeetingLiveHelpKind::Ask => {
+        MeetingLiveHelpKind::Questions
+        | MeetingLiveHelpKind::Say
+        | MeetingLiveHelpKind::Ask
+        | MeetingLiveHelpKind::Recap => {
             None
         }
     };
@@ -5941,6 +5987,7 @@ fn live_help_bounds(kind: MeetingLiveHelpKind) -> LiveHelpBounds {
         /* A call that has not touched the question is answered with nothing,
          * and that is an answer, so only this kind has no floor. */
         MeetingLiveHelpKind::Ask => ("answer", 0, 3),
+        MeetingLiveHelpKind::Recap => ("recap", 1, 8),
     };
     LiveHelpBounds {
         key,
@@ -5972,6 +6019,9 @@ fn live_help_prompt(kind: MeetingLiveHelpKind) -> String {
         ),
         MeetingLiveHelpKind::Ask => format!(
             "Answer \"question\" using only these lines, in at most {max_points} points. If the lines do not answer it, return {{\"{key}\":[]}}: an empty list means the call has not covered it, which is a valid answer. Never guess."
+        ),
+        MeetingLiveHelpKind::Recap => format!(
+            "Recap this meeting so far for someone who was not in it, in at least one and at most {max_points} points, oldest first: what was decided, who will do what by when, and what is still open. Report only what was actually said. Never return an empty list: if the lines hold only small talk, one point says so."
         ),
     };
     let question = if kind == MeetingLiveHelpKind::Ask {
@@ -8011,6 +8061,21 @@ pub(crate) mod tests {
             chunks[1].samples.len(),
             ASR_OVERLAP_SAMPLES + 11 * VAD_FRAME_SAMPLES
         );
+    }
+
+    #[test]
+    fn speech_after_a_pause_past_a_forced_cut_starts_its_own_chunk() {
+        let mut chunker = SpeechChunker::new(Box::new(EnergyVad));
+        let mut offset_ns = 0;
+        let mut chunks = feed(&mut chunker, true, 50, &mut offset_ns);
+        chunks.extend(chunker.finish(true));
+        chunks.extend(feed(&mut chunker, false, ASR_SILENCE_FRAMES, &mut offset_ns));
+        let resumed_at = offset_ns;
+        chunks.extend(feed(&mut chunker, true, 20, &mut offset_ns));
+        chunks.extend(feed(&mut chunker, false, ASR_SILENCE_FRAMES, &mut offset_ns));
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[1].start_offset_ns, resumed_at);
+        assert_eq!(chunks[1].samples.len(), 30 * VAD_FRAME_SAMPLES);
     }
 
     #[test]

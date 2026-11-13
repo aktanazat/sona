@@ -7,7 +7,8 @@ pub(crate) mod types;
 
 pub(crate) use runtime::phone_thoughts::{PhoneThoughtAttachment, PhoneThoughtSource};
 pub(crate) use runtime::{
-    pairing_offer_fingerprint, phone_snapshot_published_at, queue_session_upload, sync_requested,
-    CloudSyncRuntime,
+    meeting_shares_in, meeting_status_in, overview_in, pairing_offer_fingerprint,
+    phone_snapshot_published_at, queue_session_upload, read_share_bundle, sync_requested,
+    CloudRuntimeError, CloudSyncRuntime,
 };
 pub(crate) use types::CloudSyncErrorKind;

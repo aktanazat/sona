@@ -184,6 +184,7 @@ pub(crate) fn import(
             &body,
             input.captured_at_utc_ms,
             ScratchVersionKind::Edit,
+            super::Author::Me,
         )?;
         transaction.execute(
             "INSERT INTO scratch_phone_thoughts (vault_id, object_id, revision_id, note_id,

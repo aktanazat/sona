@@ -1,6 +1,6 @@
 use super::types::{
     EvidenceLink, EvidenceSourceKind, EvidenceTargetKind, Milestone, MilestonePulse,
-    PlanningCalendarItem, PlanningCalendarKind, PlanningTask, Project, ProjectDetail,
+    PlanningCalendarItem, PlanningCalendarKind, PlanningTask, Project, ProjectDetail, ProjectLink,
     ProjectOwnerCount, ProjectPulse, ProjectStatus, ProjectSummary, TaskStatus,
 };
 use super::work::items::{self as work_items, NewItem};
@@ -15,10 +15,13 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use uuid::Uuid;
 
-const PROJECT_COLUMNS: &str =
-    "id, title, description, status, revision, created_at_ms, updated_at_ms";
+const PROJECT_COLUMNS: &str = "id, title, description, status, revision, created_at_ms, updated_at_ms, lead_person_id, target_at_ms, hue, archived_at_ms, priority, start_at_ms, start_resolution, target_resolution, icon, trashed_at_ms, lead_is_self, members_include_self, summary, status_name_id";
+const PROJECT_COLUMN_COUNT: usize = 21;
 const MILESTONE_COLUMNS: &str =
-    "id, project_id, title, due_at_ms, status, revision, created_at_ms, updated_at_ms";
+    "id, project_id, title, due_at_ms, status, revision, created_at_ms, updated_at_ms, description, position";
+/// Milestones in the order the owner set, then by due day.
+pub(crate) const MILESTONE_ORDER: &str =
+    "position IS NULL, position, due_at_ms IS NULL, due_at_ms, created_at_ms, id";
 const TASK_COLUMNS: &str = "id, project_id, milestone_id, title, details, due_at_ms, owner_person_id, owner_is_self, status, revision, created_at_ms, updated_at_ms";
 const EVIDENCE_COLUMNS: &str = "id, target_kind, target_id, source_kind, source_id, at_ms, revision, created_at_ms, meeting_note_id, end_ms, caption";
 
@@ -35,6 +38,15 @@ pub(crate) enum Refusal {
     CaptureActive,
     SourceChanged,
     AlreadyTracked,
+    ParentLoop,
+    NotAuthor,
+    NotAttacher,
+    NotAFile,
+    NoFile,
+    TooLarge,
+    BadLink,
+    LabelScope,
+    DependencyLoop,
 }
 
 impl fmt::Display for Refusal {
@@ -51,6 +63,15 @@ impl fmt::Display for Refusal {
             Self::CaptureActive => "planning is paused while recording",
             Self::SourceChanged => "source changed during review",
             Self::AlreadyTracked => "loop is already tracked as planner work",
+            Self::ParentLoop => "a task cannot sit under itself or its own sub-task",
+            Self::NotAuthor => "only the comment's author can change it",
+            Self::NotAttacher => "only whoever attached it can change it",
+            Self::NotAFile => "only a regular file can be attached",
+            Self::NoFile => "no file at that path",
+            Self::TooLarge => "attachment is over the size cap",
+            Self::BadLink => "link scheme is not allowed",
+            Self::LabelScope => "label is kept to the other kind of item",
+            Self::DependencyLoop => "a project cannot wait on itself or on a project waiting on it",
         })
     }
 }
@@ -152,6 +173,23 @@ fn read_project(row: &Row<'_>) -> rusqlite::Result<Project> {
         revision: row.get(4)?,
         created_at_ms: row.get(5)?,
         updated_at_ms: row.get(6)?,
+        lead_person_id: row.get(7)?,
+        lead_is_self: row.get(17)?,
+        member_person_ids: Vec::new(),
+        members_include_self: row.get(18)?,
+        target_at_ms: row.get(8)?,
+        hue: row.get(9)?,
+        archived_at_ms: row.get(10)?,
+        priority: row.get(11)?,
+        start_at_ms: row.get(12)?,
+        start_resolution: row.get(13)?,
+        target_resolution: row.get(14)?,
+        icon: row.get(15)?,
+        label_ids: Vec::new(),
+        links: Vec::new(),
+        trashed_at_ms: row.get(16)?,
+        summary: row.get(19)?,
+        status_name_id: row.get(20)?,
     })
 }
 
@@ -165,6 +203,8 @@ fn read_milestone(row: &Row<'_>) -> rusqlite::Result<Milestone> {
         revision: row.get(5)?,
         created_at_ms: row.get(6)?,
         updated_at_ms: row.get(7)?,
+        description: row.get(8)?,
+        position: row.get(9)?,
     })
 }
 
@@ -204,14 +244,64 @@ fn read_evidence(row: &Row<'_>) -> rusqlite::Result<EvidenceLink> {
     })
 }
 
+fn attach_members(conn: &Connection, projects: &mut [&mut Project]) -> Result<()> {
+    let mut members = conn.prepare(
+        "SELECT project_id, person_id FROM planning_project_members ORDER BY project_id, person_id",
+    )?;
+    let mut by_project: HashMap<String, Vec<String>> = HashMap::new();
+    for row in members.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))? {
+        let (project_id, person_id) = row?;
+        by_project.entry(project_id).or_default().push(person_id);
+    }
+    let mut labels = conn.prepare(
+        "SELECT pl.project_id, pl.label_id FROM planning_project_labels pl
+         JOIN planning_labels l ON l.id = pl.label_id
+         ORDER BY pl.project_id, lower(l.name), l.id",
+    )?;
+    let mut labels_by_project: HashMap<String, Vec<String>> = HashMap::new();
+    for row in labels.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))? {
+        let (project_id, label_id) = row?;
+        labels_by_project
+            .entry(project_id)
+            .or_default()
+            .push(label_id);
+    }
+    let mut links = conn.prepare(
+        "SELECT project_id, id, title, url FROM planning_project_links ORDER BY project_id, position, id",
+    )?;
+    let mut links_by_project: HashMap<String, Vec<ProjectLink>> = HashMap::new();
+    for row in links.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            ProjectLink {
+                id: row.get(1)?,
+                title: row.get(2)?,
+                url: row.get(3)?,
+            },
+        ))
+    })? {
+        let (project_id, link) = row?;
+        links_by_project.entry(project_id).or_default().push(link);
+    }
+    for project in projects {
+        project.member_person_ids = by_project.remove(&project.id).unwrap_or_default();
+        project.label_ids = labels_by_project.remove(&project.id).unwrap_or_default();
+        project.links = links_by_project.remove(&project.id).unwrap_or_default();
+    }
+    Ok(())
+}
+
 pub(crate) fn project(conn: &Connection, id: &str) -> Result<Project> {
-    conn.query_row(
-        &format!("SELECT {PROJECT_COLUMNS} FROM planning_projects WHERE id = ?1"),
-        [id],
-        read_project,
-    )
-    .optional()?
-    .ok_or_else(|| Refusal::NotFound.into())
+    let mut project = conn
+        .query_row(
+            &format!("SELECT {PROJECT_COLUMNS} FROM planning_projects WHERE id = ?1"),
+            [id],
+            read_project,
+        )
+        .optional()?
+        .ok_or(Refusal::NotFound)?;
+    attach_members(conn, &mut [&mut project])?;
+    Ok(project)
 }
 
 pub(crate) fn milestone(conn: &Connection, id: &str) -> Result<Milestone> {
@@ -238,30 +328,59 @@ pub(crate) fn task(conn: &Connection, id: &str) -> Result<PlanningTask> {
     .ok_or_else(|| Refusal::NotFound.into())
 }
 
-pub(crate) fn projects(conn: &Connection) -> Result<Vec<ProjectSummary>> {
-    let mut statement = conn.prepare(
-        "SELECT p.id, p.title, p.description, p.status, p.revision, p.created_at_ms, p.updated_at_ms,
+/// Live projects by last change, or with `trashed` the bin, newest deletion first.
+pub(crate) fn projects(conn: &Connection, trashed: bool) -> Result<Vec<ProjectSummary>> {
+    let shelf = if trashed {
+        "p.trashed_at_ms IS NOT NULL ORDER BY p.trashed_at_ms DESC, p.id"
+    } else {
+        "p.archived_at_ms IS NULL AND p.trashed_at_ms IS NULL ORDER BY p.updated_at_ms DESC, p.id"
+    };
+    let mut statement = conn.prepare(&format!(
+        "SELECT {PROJECT_COLUMNS},
             (SELECT count(*) FROM planning_tasks t WHERE t.project_id = p.id AND t.archived_at_ms IS NULL
-                AND t.status IN ('triage', 'backlog', 'not_started', 'in_progress')),
+                AND t.status IN ('backlog', 'not_started', 'in_progress')),
             (SELECT count(*) FROM planning_tasks t WHERE t.project_id = p.id AND t.archived_at_ms IS NULL
                 AND t.status = 'done'),
             (SELECT min(due_at_ms) FROM (
                 SELECT due_at_ms FROM planning_tasks WHERE project_id = p.id AND archived_at_ms IS NULL
-                    AND status IN ('triage', 'backlog', 'not_started', 'in_progress')
+                    AND status IN ('backlog', 'not_started', 'in_progress')
                 UNION ALL
                 SELECT due_at_ms FROM planning_milestones WHERE project_id = p.id AND status IN ('not_started', 'in_progress')
-            ))
-         FROM planning_projects p ORDER BY p.updated_at_ms DESC, p.id",
-    )?;
+            )),
+            (SELECT max(u.created_at_ms) FROM planning_project_updates u
+                WHERE u.project_id = p.id AND u.deleted_at_ms IS NULL)
+         FROM planning_projects p WHERE {shelf}"
+    ))?;
     let rows = statement.query_map([], |row| {
         Ok(ProjectSummary {
             project: read_project(row)?,
-            open_task_count: row.get(7)?,
-            completed_task_count: row.get(8)?,
-            next_due_at_ms: row.get(9)?,
+            open_task_count: row.get(PROJECT_COLUMN_COUNT)?,
+            completed_task_count: row.get(PROJECT_COLUMN_COUNT + 1)?,
+            next_due_at_ms: row.get(PROJECT_COLUMN_COUNT + 2)?,
+            latest_update_at_ms: row.get(PROJECT_COLUMN_COUNT + 3)?,
         })
     })?;
-    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    let mut summaries = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    attach_members(
+        conn,
+        &mut summaries
+            .iter_mut()
+            .map(|summary| &mut summary.project)
+            .collect::<Vec<_>>(),
+    )?;
+    Ok(summaries)
+}
+
+/// Every project, put away, in the bin or not, for the command line.
+pub(crate) fn all_projects(conn: &Connection) -> Result<Vec<Project>> {
+    let mut statement = conn.prepare(&format!(
+        "SELECT {PROJECT_COLUMNS} FROM planning_projects ORDER BY lower(title), id"
+    ))?;
+    let mut projects = statement
+        .query_map([], read_project)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    attach_members(conn, &mut projects.iter_mut().collect::<Vec<_>>())?;
+    Ok(projects)
 }
 
 /// Projects still taking work, the one worked in most recently first: a task
@@ -269,7 +388,8 @@ pub(crate) fn projects(conn: &Connection) -> Result<Vec<ProjectSummary>> {
 pub(crate) fn projects_by_activity(conn: &Connection) -> Result<Vec<Project>> {
     let mut statement = conn.prepare(&format!(
         "SELECT {PROJECT_COLUMNS} FROM planning_projects p
-         WHERE p.status != 'completed'
+         WHERE p.status NOT IN ('completed', 'canceled') AND p.archived_at_ms IS NULL
+           AND p.trashed_at_ms IS NULL
          ORDER BY max(
              p.updated_at_ms,
              coalesce((SELECT max(t.updated_at_ms) FROM planning_tasks t WHERE t.project_id = p.id), 0),
@@ -277,7 +397,9 @@ pub(crate) fn projects_by_activity(conn: &Connection) -> Result<Vec<Project>> {
          ) DESC, p.id"
     ))?;
     let rows = statement.query_map([], read_project)?;
-    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    let mut projects = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    attach_members(conn, &mut projects.iter_mut().collect::<Vec<_>>())?;
+    Ok(projects)
 }
 
 /// A project's saved rows. Serializes exactly as `ProjectDetail` did before it
@@ -289,13 +411,16 @@ pub(crate) struct ProjectRecords {
     pub(crate) milestones: Vec<Milestone>,
     pub(crate) tasks: Vec<PlanningTask>,
     pub(crate) evidence: Vec<EvidenceLink>,
+    /// Tasks still in triage: not accepted yet, so not counted as open.
+    #[serde(skip)]
+    pub(crate) triage: HashSet<String>,
 }
 
 pub(crate) fn records(conn: &Connection, id: &str) -> Result<ProjectRecords> {
     let project = project(conn, id)?;
     let mut statement = conn.prepare(&format!(
         "SELECT {MILESTONE_COLUMNS} FROM planning_milestones WHERE project_id = ?1
-         ORDER BY due_at_ms IS NULL, due_at_ms, created_at_ms, id"
+         ORDER BY {MILESTONE_ORDER}"
     ))?;
     let milestones = statement
         .query_map([id], read_milestone)?
@@ -304,9 +429,17 @@ pub(crate) fn records(conn: &Connection, id: &str) -> Result<ProjectRecords> {
         "SELECT {TASK_COLUMNS} FROM planning_tasks WHERE project_id = ?1 AND archived_at_ms IS NULL
          ORDER BY due_at_ms IS NULL, due_at_ms, created_at_ms, id"
     ))?;
-    let tasks = statement
-        .query_map([id], read_task)?
+    let rows = statement
+        .query_map([id], |row| {
+            Ok((read_task(row)?, row.get::<_, WorkStatus>(8)? == WorkStatus::Triage))
+        })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    let triage = rows
+        .iter()
+        .filter(|(_, triage)| *triage)
+        .map(|(task, _)| task.id.clone())
+        .collect();
+    let tasks = rows.into_iter().map(|(task, _)| task).collect();
     let mut statement = conn.prepare(&format!(
         "SELECT {EVIDENCE_COLUMNS} FROM planning_evidence_links WHERE
             (target_kind = 'project' AND target_id = ?1) OR
@@ -323,6 +456,7 @@ pub(crate) fn records(conn: &Connection, id: &str) -> Result<ProjectRecords> {
         milestones,
         tasks,
         evidence,
+        triage,
     })
 }
 
@@ -339,11 +473,12 @@ pub(crate) fn task_evidence(conn: &Connection, task_id: &str) -> Result<Vec<Evid
     Ok(evidence)
 }
 
-/// The page for one project: rows the caller has resolved, and their pulse as
-/// of `now_ms`. Meeting times come from `meetings` in one query; without it the
-/// rows must hold no meeting evidence.
+/// The page for one project: rows the caller has resolved, what `outlook`
+/// read beside them, and their pulse as of `now_ms`. Meeting times come from
+/// `meetings` in one query; without it the rows must hold no meeting evidence.
 pub(crate) fn detail(
     records: ProjectRecords,
+    outlook: super::progress::Outlook,
     meetings: Option<&Connection>,
     now_ms: i64,
 ) -> Result<ProjectDetail> {
@@ -354,12 +489,17 @@ pub(crate) fn detail(
     let today_ms = crate::analytics::local_days_start_utc_ms(now, 1)?;
     let week_ms = crate::analytics::local_days_start_utc_ms(now, 7)?;
     let pulse = pulse(&records, meetings, today_ms, week_ms)?;
+    let milestone_progress = super::progress::milestones(&records.milestones, &records.tasks);
     Ok(ProjectDetail {
         project: records.project,
         milestones: records.milestones,
         tasks: records.tasks,
         evidence: records.evidence,
         pulse,
+        latest_update: outlook.latest_update,
+        update_missing: outlook.update_missing,
+        progress: outlook.progress,
+        milestone_progress,
     })
 }
 
@@ -377,11 +517,12 @@ fn pulse(
     let mut open = 0_usize;
     let mut overdue = 0_usize;
     let mut owned = HashMap::<&str, usize>::new();
+    let open_task = |task: &PlanningTask| is_open(task.status) && !records.triage.contains(&task.id);
     for task in &records.tasks {
         if task.status == TaskStatus::Done {
             done += 1;
         }
-        if !is_open(task.status) {
+        if !open_task(task) {
             continue;
         }
         open += 1;
@@ -395,7 +536,7 @@ fn pulse(
     let next_due_at_ms = records
         .tasks
         .iter()
-        .filter(|task| is_open(task.status))
+        .filter(|task| open_task(task))
         .filter_map(|task| task.due_at_ms)
         .chain(
             records
@@ -697,22 +838,32 @@ pub(crate) fn update_milestone(
     )
 }
 
+/// The project a link target belongs to; a task outside any project has none.
 pub(crate) fn target_project(
     conn: &Connection,
     kind: EvidenceTargetKind,
     id: &str,
-) -> Result<String> {
+) -> Result<Option<String>> {
     match kind {
-        EvidenceTargetKind::Project => Ok(project(conn, id)?.id),
+        EvidenceTargetKind::Project => Ok(Some(project(conn, id)?.id)),
         EvidenceTargetKind::Milestone => {
             let milestone = milestone(conn, id)?;
             project(conn, &milestone.project_id)?;
-            Ok(milestone.project_id)
+            Ok(Some(milestone.project_id))
         }
         EvidenceTargetKind::Task => {
-            let task = task(conn, id)?;
-            project(conn, &task.project_id)?;
-            Ok(task.project_id)
+            let project_id = conn
+                .query_row(
+                    "SELECT project_id FROM planning_tasks WHERE id = ?1",
+                    [id],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .optional()?
+                .ok_or(Refusal::NotFound)?;
+            if let Some(project_id) = &project_id {
+                project(conn, project_id)?;
+            }
+            Ok(project_id)
         }
     }
 }
@@ -836,8 +987,10 @@ pub(crate) fn calendar(
 mod tests {
     use super::*;
 
+    /// A task still in triage is not open work yet: the pulse and the
+    /// Projects list both leave it out, as the project's task list does.
     #[test]
-    fn pulse_counts_work_due_today_as_open_not_overdue() -> Result<()> {
+    fn pulse_counts_work_due_today_as_open_not_overdue_and_leaves_triage_out() -> Result<()> {
         let conn = Connection::open_in_memory()?;
         super::super::schema::apply_all(&conn)?;
         let now = Local::now();
@@ -864,6 +1017,7 @@ mod tests {
         let due_today = task("Book the room", today_ms + 1, None)?;
         let canceled = task("Order banners", today_ms - 3_600_000, None)?;
         let done = task("Draft the outline", today_ms - 3_600_000, None)?;
+        let triage = task("Check the permit", today_ms, Some(&owner))?;
         conn.execute(
             "UPDATE planning_tasks SET status = 'canceled' WHERE id = ?1",
             [&canceled.id],
@@ -872,8 +1026,16 @@ mod tests {
             "UPDATE planning_tasks SET status = 'done' WHERE id = ?1",
             [&done.id],
         )?;
+        conn.execute(
+            "UPDATE planning_tasks SET status = 'triage' WHERE id = ?1",
+            [&triage.id],
+        )?;
+        assert_eq!(projects(&conn, false)?[0].open_task_count, 2);
 
-        let detail = detail(records(&conn, &project.id)?, None, now.timestamp_millis())?;
+        let records = records(&conn, &project.id)?;
+        let outlook =
+            super::super::progress::outlook(&conn, &records.project, now.timestamp_millis())?;
+        let detail = detail(records, outlook, None, now.timestamp_millis())?;
 
         assert_eq!(
             detail.pulse,
@@ -890,6 +1052,55 @@ mod tests {
                 milestones: Vec::new(),
             }
         );
+        Ok(())
+    }
+
+    #[test]
+    fn a_task_outside_any_project_takes_a_note_as_a_source() -> Result<()> {
+        let mut conn = Connection::open_in_memory()?;
+        super::super::schema::apply_all(&conn)?;
+        let project = insert_project(&conn, "Launch", None, 1)?;
+        let task = insert_task(
+            &conn,
+            &TaskDraft {
+                project_id: &project.id,
+                milestone_id: None,
+                title: "Loose end",
+                details: None,
+                due_at_ms: None,
+                owner_person_id: None,
+                owner_is_self: false,
+            },
+            1,
+            |id| Ok(id.to_owned()),
+        )?;
+        conn.execute(
+            "UPDATE planning_tasks SET project_id = NULL WHERE id = ?1",
+            [&task.id],
+        )?;
+        let note = Uuid::new_v4().to_string();
+        link_source(
+            &mut conn,
+            &SourceLinkDraft {
+                target_kind: EvidenceTargetKind::Task,
+                target_id: &task.id,
+                source_kind: EvidenceSourceKind::Note,
+                source_id: &note,
+                at_ms: None,
+                meeting_note_id: None,
+            },
+            &Uuid::new_v4().to_string(),
+            2,
+            |_| Ok(()),
+        )?;
+
+        let linked: i64 = conn.query_row(
+            "SELECT count(*) FROM planning_evidence_links WHERE target_id = ?1 AND source_id = ?2",
+            [&task.id, &note],
+            |row| row.get(0),
+        )?;
+        assert_eq!(linked, 1);
+        assert_eq!(target_project(&conn, EvidenceTargetKind::Task, &task.id)?, None);
         Ok(())
     }
 }

@@ -281,6 +281,42 @@ pub(crate) static MIGRATIONS: &[M] = &[
     M::up(crate::planning::REPEAT_MIGRATION),
     M::up(crate::planning::CYCLES_MIGRATION),
     M::up(crate::planning::WATCH_MIGRATION),
+    M::up(crate::planning::CATALOG_MIGRATION),
+    M::up(crate::planning::THREADS_MIGRATION),
+    M::up(crate::planning::ATTACHMENTS_MIGRATION),
+    M::up(crate::planning::PLANNING_MIGRATION),
+    M::up(crate::planning::ROUTINES_MIGRATION),
+    M::up(crate::planning::LIFECYCLE_MIGRATION),
+    M::up(crate::planning::work::sessions::SESSIONS_MIGRATION),
+    M::up(crate::planning::work::changes::CHANGES_MIGRATION),
+    M::up(crate::planning::catalog::SELF_LEAD_MIGRATION),
+    M::up(crate::planning::work::changes::PROJECT_LEAD_CHANGES_MIGRATION),
+    M::up(crate::planning::work::loops::LOOPS_MIGRATION),
+    M::up(crate::planning::work::triage_hints::DISMISSED_HINTS_MIGRATION),
+    M::up(crate::planning::work::inbox::INBOX_NOTICES_MIGRATION),
+    M::up(crate::planning::work::agents::VIA_MIGRATION),
+    M::up(crate::planning::work::favorites::FAVORITE_FOLDERS_MIGRATION),
+    M::up(crate::planning::work::cycles::AUTO_ADD_MIGRATION),
+    M::up(crate::scratchpad::AUTHOR_MIGRATION),
+    M::up(crate::scratchpad::documents::CYCLE_MIGRATION),
+    M::up(crate::planning::work::comments::SUBJECTS_MIGRATION),
+    M::up(crate::planning::work::comments::NOTE_COMMENTS_MIGRATION),
+    M::up(crate::planning::work::attachments::METADATA_MIGRATION),
+    M::up(crate::planning::schema::TASK_COLUMNS_MIGRATION),
+    M::up(crate::planning::work::changes::COVERAGE_MIGRATION),
+    M::up(crate::planning::work::changes::NOTE_CHANGES_MIGRATION),
+    M::up(crate::planning::catalog::PROJECT_CORE_MIGRATION),
+    M::up(crate::planning::work::changes::PROJECT_FIELDS_CHANGES_MIGRATION),
+    M::up(crate::planning::dependencies::DEPENDENCIES_MIGRATION),
+    M::up(crate::planning::work::inbox::DIGEST_NOTICES_MIGRATION),
+    M::up(crate::planning::work::project_templates::PROJECT_TEMPLATES_MIGRATION),
+    M::up(crate::planning::work::initiatives::INITIATIVES_MIGRATION),
+    M::up(crate::planning::work::changes::INITIATIVE_CHANGES_MIGRATION),
+    M::up(crate::planning::work::changes::TASK_PURGE_SOURCES_MIGRATION),
+    M::up(crate::planning::work::changes::NOTE_PURGE_SOURCES_MIGRATION),
+    M::up(crate::planning::work::agents::ESTIMATE_FOR_PROPOSALS_MIGRATION),
+    M::up(crate::planning::updates::QUOTED_MEETINGS_MIGRATION),
+    M::up(crate::planning::catalog::DEPENDENCY_INITIATIVE_HISTORY_MIGRATION),
 ];
 
 const MAX_HISTORY_PAGE_SIZE: usize = 100;
@@ -1047,7 +1083,12 @@ impl HistoryManager {
             debug!("Database version before migration: {}", version_before);
 
             // Apply any pending migrations
-            migrations.to_latest(conn)?;
+            let foreign_keys: bool =
+                conn.pragma_query_value(None, "foreign_keys", |row| row.get(0))?;
+            conn.pragma_update(None, "foreign_keys", false)?;
+            let migrated = migrations.to_latest(conn);
+            conn.pragma_update(None, "foreign_keys", foreign_keys)?;
+            migrated?;
 
             // Get version after migration
             let version_after: i32 =

@@ -15,12 +15,22 @@ impl MeetingStore {
         &self,
         known_terms: &[String],
     ) -> Result<VocabularyCandidatesResult, StoreError> {
+        self.vocabulary_candidates_without(known_terms, &HashSet::new())
+    }
+
+    /// The heard words for a reader the `hidden` meetings are kept from: no
+    /// word or count comes from them.
+    pub(crate) fn vocabulary_candidates_without(
+        &self,
+        known_terms: &[String],
+        hidden: &HashSet<MeetingSessionId>,
+    ) -> Result<VocabularyCandidatesResult, StoreError> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction()?;
         let revision = people_revision_in(&transaction)?;
         let entries = if workflow_has_successful_run_in(&transaction, WorkflowId::VocabularyMining)?
         {
-            vocabulary_candidates_in(&transaction, known_terms)?
+            candidates_in(&transaction, known_terms, hidden)?
         } else {
             Vec::new()
         };
@@ -38,6 +48,14 @@ pub(in crate::meeting::store) fn vocabulary_candidates_in(
     connection: &Connection,
     known_terms: &[String],
 ) -> Result<Vec<VocabularyCandidate>, StoreError> {
+    candidates_in(connection, known_terms, &HashSet::new())
+}
+
+fn candidates_in(
+    connection: &Connection,
+    known_terms: &[String],
+    hidden: &HashSet<MeetingSessionId>,
+) -> Result<Vec<VocabularyCandidate>, StoreError> {
     let excluded = excluded_terms(connection, known_terms)?;
     let mut statement = connection.prepare(
         "SELECT id FROM meeting_sessions
@@ -54,6 +72,9 @@ pub(in crate::meeting::store) fn vocabulary_candidates_in(
         let session_id = Uuid::parse_str(&session)
             .map(MeetingSessionId::from_uuid)
             .map_err(|_| StoreError::Corrupt)?;
+        if hidden.contains(&session_id) {
+            continue;
+        }
         /* Each turn is its own text: a turn cut off without punctuation
          * still starts the next one fresh, and no run crosses a speaker. */
         for segment in effective_segments_for_session(connection, session_id)? {

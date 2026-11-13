@@ -115,6 +115,30 @@
       "ciphertext": "MDEyMzQ1Njc4OTo7ENN5OEcGAxuWVRk3i3jECOVPHet_mfof6p4"
     }
   },
+  "live_room_aes_gcm_hkdf": {
+    "root": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+    "room_id": "room_0123456789abcdef",
+    "hkdf_salt": "sona-live-v1",
+    "join_token": "-hvFS-_47KIxoHlbiCLfHgdCCfP3OyFIllxMRfjbrek",
+    "join_verifier": "tuRaRqvaBRoOn8b3rYGKsuzbS9G2Kh0JJrFbAsvLOnM",
+    "frame_key": "kUvUf3bgjaJZJcoFUdoc1l-BiAWaPSzUFQoPWIs7w-g",
+    "host_token": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+    "host_verifier": "S7Bvjk46dxXSAdVz0KpCN2LlXavWGiwCJ4-lbMbSlOA",
+    "state": {
+      "seq": 3,
+      "nonce": "QEFCQ0RFRkdISUpL",
+      "aad": "AAAAEHNvbmEtbGl2ZS1hYWQtdjEAAAAVcm9vbV8wMTIzNDU2Nzg5YWJjZGVmAAAABXN0YXRlAAAAATM",
+      "plaintext": "eyJ2IjoxLCJ0aXRsZSI6IkZpeHR1cmUiLCJsaXZlIjp0cnVlLCJoZWFyZF9ucyI6NjUwMDAwMDAwMDAsInBvaW50cyI6W3siaWQiOiJwb2ludF8xIiwidGV4dCI6IkxhdW5jaCBtb3ZlcyB0byBNYXJjaCAxNCIsInNhaWRfbnMiOjkwMDAwMDAwMDAsImVkaXRlZCI6ZmFsc2V9XSwiY2FyZHMiOltdLCJsaW5lcyI6W10sImNoYW5nZXMiOltdfQ",
+      "box": "QEFCQ0RFRkdISUpLFNN5ZWEKn39lGrro0j-mvAvRx2-Umw_ElRwnIOG2BKj10ZTquky5TzcNaEIYOYNjVELHriKGhnDczLbHv4JS1y6daBQ6WOxNQrH9nWdglTLaN45db0I2QbhZxSKDM11Cf8GUnzZOWFK1YSN_cqMwhtYnRbl7eqexqthAPGuTsGARenR8DVd6YAApEnsopsLNM5bZYdSa_X3PjGAM6a7b5NHoUfVbvA4W9tyFZeTgKzmHqibk5M_Rvzl-5vvxEorOR9wgYRurw1Z9jo6hAmxFVq0"
+    },
+    "edit": {
+      "seq": 1,
+      "nonce": "UFFSU1RVVldYWVpb",
+      "aad": "AAAAEHNvbmEtbGl2ZS1hYWQtdjEAAAAVcm9vbV8wMTIzNDU2Nzg5YWJjZGVmAAAABGVkaXQAAAABMQ",
+      "plaintext": "eyJ2IjoxLCJpZCI6ImVkaXRfMDEyMzQ1Njc4OWFiY2RlZiIsIm5hbWUiOiJQcml5YSIsInRhcmdldCI6InBvaW50IiwidGFyZ2V0X2lkIjoicG9pbnRfMSIsInRleHQiOiJMYXVuY2ggbW92ZXMgdG8gTWFyY2ggMjEifQ",
+      "box": "UFFSU1RVVldYWVpbMf6POwGGx8XB4yo0UteIkJ0hFngIMlvUL_l8rMpKGb0Nj3BDb9jhqt1h8TybFgQeSYyRpvmeTgUUnf4g0LujPWUQiAqaXMlIsLwBrHfHzea5ZxYT_tqHEsRSq2aBx1DRqVIfjnF2v4a-VihKVy3UTy3RQ3mHDND9S7Ji3U5BBk6Ow1avs6M37mrDFbY"
+    }
+  },
   "expected_failures": {
     "canonical_request": {
       "mutated_field": "method",

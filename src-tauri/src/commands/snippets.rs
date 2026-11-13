@@ -76,25 +76,40 @@ pub fn list_snippets(app: AppHandle) -> Result<Vec<Snippet>, String> {
 #[tauri::command]
 #[specta::specta]
 pub fn upsert_snippet(app: AppHandle, snippet: Snippet) -> Result<Vec<Snippet>, String> {
-    let snippet = normalize_snippet(snippet)?;
     let now = now_utc_ms();
     settings::try_update_settings(&app, |settings| {
-        upsert_snippet_into(&mut settings.snippets, snippet, now)?;
+        upsert_snippet_in(settings, snippet, now)?;
         Ok::<_, String>(settings.snippets.clone())
     })
+}
+
+pub(crate) fn upsert_snippet_in(
+    settings: &mut settings::AppSettings,
+    snippet: Snippet,
+    now: i64,
+) -> Result<(), String> {
+    upsert_snippet_into(&mut settings.snippets, normalize_snippet(snippet)?, now)
 }
 
 #[tauri::command]
 #[specta::specta]
 pub fn delete_snippet(app: AppHandle, snippet_id: String) -> Result<Vec<Snippet>, String> {
     settings::try_update_settings(&app, |settings| {
-        let before = settings.snippets.len();
-        settings.snippets.retain(|snippet| snippet.id != snippet_id);
-        if settings.snippets.len() == before {
-            return Err(format!("Snippet with id '{snippet_id}' not found"));
-        }
-        Ok(settings.snippets.clone())
+        delete_snippet_in(settings, &snippet_id)?;
+        Ok::<_, String>(settings.snippets.clone())
     })
+}
+
+pub(crate) fn delete_snippet_in(
+    settings: &mut settings::AppSettings,
+    snippet_id: &str,
+) -> Result<(), String> {
+    let before = settings.snippets.len();
+    settings.snippets.retain(|snippet| snippet.id != snippet_id);
+    if settings.snippets.len() == before {
+        return Err(format!("Snippet with id '{snippet_id}' not found"));
+    }
+    Ok(())
 }
 
 /// Toggle one snippet. The master switch is `set_snippets_enabled`.
@@ -107,17 +122,27 @@ pub fn set_snippet_enabled(
 ) -> Result<Vec<Snippet>, String> {
     let now = now_utc_ms();
     settings::try_update_settings(&app, |settings| {
-        let snippet = settings
-            .snippets
-            .iter_mut()
-            .find(|snippet| snippet.id == snippet_id)
-            .ok_or_else(|| format!("Snippet with id '{snippet_id}' not found"))?;
-        if snippet.enabled != enabled {
-            snippet.enabled = enabled;
-            snippet.updated_at = now;
-        }
-        Ok(settings.snippets.clone())
+        set_snippet_enabled_in(settings, &snippet_id, enabled, now)?;
+        Ok::<_, String>(settings.snippets.clone())
     })
+}
+
+pub(crate) fn set_snippet_enabled_in(
+    settings: &mut settings::AppSettings,
+    snippet_id: &str,
+    enabled: bool,
+    now: i64,
+) -> Result<(), String> {
+    let snippet = settings
+        .snippets
+        .iter_mut()
+        .find(|snippet| snippet.id == snippet_id)
+        .ok_or_else(|| format!("Snippet with id '{snippet_id}' not found"))?;
+    if snippet.enabled != enabled {
+        snippet.enabled = enabled;
+        snippet.updated_at = now;
+    }
+    Ok(())
 }
 
 /// The master switch: stops snippet expansion without editing the list.

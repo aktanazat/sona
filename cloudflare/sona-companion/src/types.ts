@@ -5,6 +5,7 @@ import type {
   TombstoneReason,
   UploadState,
 } from "./constants";
+import type { LiveRoom } from "./live";
 
 export interface Env {
   ASSETS: Fetcher;
@@ -12,7 +13,9 @@ export interface Env {
   BOOTSTRAP_SECRET: string;
   CIPHERTEXT: R2Bucket;
   DB: D1Database;
+  LIVE_ROOMS: DurableObjectNamespace<LiveRoom>;
   MAINTENANCE: Queue<MaintenanceMessage>;
+  PAGE_ORIGIN?: string;
   WORKER_VERSION?: string;
 }
 

@@ -3,38 +3,58 @@
 //! Project screens read the same rows through `store`.
 
 pub(crate) mod agents;
+pub(crate) mod attachments;
+pub(crate) mod bin;
 pub(crate) mod ask;
 pub(crate) mod blocks;
 pub(crate) mod capture;
+pub(crate) mod changes;
 pub(crate) mod command;
+pub(crate) mod comments;
 pub(crate) mod cycles;
+pub(crate) mod digest;
+pub(crate) mod filter;
+pub(crate) mod favorites;
 pub(crate) mod follow;
 mod hygiene;
+pub(crate) mod inbox;
+pub(crate) mod initiatives;
+pub(crate) mod insights;
 pub(crate) mod items;
 pub(crate) mod live;
+pub(crate) mod loops;
 pub(crate) mod parse;
+pub(crate) mod plans;
+pub(crate) mod project_templates;
 #[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
 mod probe;
 pub(crate) mod recur;
+pub(crate) mod routines;
+pub(crate) mod sessions;
 pub(crate) mod sync;
 #[cfg(test)]
 mod tests;
+pub(crate) mod triage_hints;
+pub(crate) mod versions;
 pub mod types;
 pub(crate) mod watch;
+pub(crate) mod words;
 
 use self::follow::FollowUps;
 use self::items::{Changed, DueSpan, NewItem};
 use self::sync::{MeetingReader, People};
 pub use self::types::WorkChanged;
 use self::types::{
-    WorkActivityKind, WorkActor, WorkCounts, WorkDay, WorkDisplay, WorkDoer, WorkItem,
-    WorkItemDetail, WorkItemInput, WorkItemRow, WorkLabel, WorkList, WorkOwner, WorkPatch,
-    WorkProjectChoice, WorkQuery, WorkRelation, WorkRelationKind, WorkRepeat, WorkSource,
-    WorkStatus, WorkTimeBlock, WorkView,
+    WorkActivityKind, WorkActor, WorkAttachment, WorkAttachmentFile, WorkComment, WorkCommentPage,
+    WorkCommentSubject, WorkCounts, WorkDay, WorkDisplay,
+    WorkDoer, WorkItem, WorkItemDetail, WorkItemInput, WorkItemRow, WorkLabel, WorkList,
+    WorkOwner, WorkPatch, WorkPlace, WorkProgress, WorkProjectChoice, WorkQuery, WorkRelation,
+    WorkRelationKind, WorkRepeat, WorkSource, WorkStatus, WorkTimeBlock, WorkView,
 };
+use super::catalog;
 use super::sources;
 use super::store::{self, Refusal};
-use super::types::{PlanningTask, TaskStatus};
+use super::types::{Milestone, PlanningTask, Project, TaskStatus};
 use crate::managers::history::HistoryManager;
 use crate::meeting::loop_types::MeetingLoopId;
 use crate::meeting::session::MeetingSessionManager;
@@ -44,6 +64,7 @@ use anyhow::Result as StorageResult;
 use rusqlite::{Connection, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tauri::{AppHandle, Manager, State};
 use tauri_specta::Event;
@@ -59,6 +80,9 @@ pub(super) struct Effects {
     pub(super) items: Vec<String>,
     pub(super) projects: Vec<String>,
     pub(super) loops: Vec<MeetingLoopId>,
+    /// Parents whose sub-task this change closed, for [`close_parents`].
+    #[serde(skip)]
+    pub(super) parents: Vec<String>,
 }
 
 impl Effects {
@@ -76,6 +100,11 @@ impl Effects {
     pub(super) fn changed(&mut self, changed: &Changed) {
         self.item(&changed.before);
         self.item(&changed.after);
+        if !changed.before.status.is_closed() && changed.after.status.is_closed() {
+            if let Some(parent_id) = &changed.after.parent_id {
+                self.parents.push(parent_id.clone());
+            }
+        }
     }
 }
 
@@ -87,14 +116,14 @@ pub(super) struct Done<T> {
 
 /// Who made a change, under which operation id, and when.
 #[derive(Clone, Copy)]
-struct Change<'a> {
-    operation_id: &'a str,
-    actor: WorkActor,
-    at_ms: i64,
+pub(super) struct Change<'a> {
+    pub(super) operation_id: &'a str,
+    pub(super) actor: WorkActor,
+    pub(super) at_ms: i64,
 }
 
 impl<'a> Change<'a> {
-    fn now(operation_id: &'a str, actor: WorkActor) -> Self {
+    pub(super) fn now(operation_id: &'a str, actor: WorkActor) -> Self {
         Self {
             operation_id,
             actor,
@@ -210,7 +239,15 @@ async fn run_with_meetings<T: Send>(
 ) -> Result<T, String> {
     let history = app.state::<Arc<HistoryManager>>();
     let meetings = app.state::<Arc<MeetingSessionManager>>();
-    let done = with_meetings(&history, &meetings, work).await?;
+    let close = crate::settings::get_settings(app).work_close_parents;
+    let done = with_meetings(&history, &meetings, |conn, meeting_conn| {
+        let mut done = work(conn, meeting_conn)?;
+        if close {
+            close_parents(conn, meeting_conn, &mut done.effects)?;
+        }
+        Ok(done)
+    })
+    .await?;
     announce(app, &meetings, &done.effects).await;
     Ok(done.value)
 }
@@ -220,9 +257,85 @@ fn run_history<T>(
     app: &AppHandle,
     work: impl FnOnce(&mut Connection) -> StorageResult<Done<T>>,
 ) -> Result<T, String> {
-    let done = super::history(&app.state::<Arc<HistoryManager>>(), work)?;
+    let close = crate::settings::get_settings(app).work_close_parents;
+    let done = super::history(&app.state::<Arc<HistoryManager>>(), |conn| {
+        let mut done = work(conn)?;
+        if close {
+            close_parents(conn, None, &mut done.effects)?;
+        }
+        Ok(done)
+    })?;
     tell(app, &done.effects);
     Ok(done.value)
+}
+
+/// Closes as done, for Sona, each parent whose last open sub-task this
+/// change closed, and so on up, while Settings asks for it.
+fn close_parents(
+    history: &mut Connection,
+    meetings: Option<&Connection>,
+    effects: &mut Effects,
+) -> StorageResult<()> {
+    if effects.parents.is_empty() {
+        return Ok(());
+    }
+    let tx = history.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    close_parents_in(&tx, meetings, effects)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// [`close_parents`] inside the caller's transaction.
+fn close_parents_in(
+    history: &Connection,
+    meetings: Option<&Connection>,
+    effects: &mut Effects,
+) -> StorageResult<()> {
+    let change = Change::now("", WorkActor::Sona);
+    let done = WorkPatch {
+        status: Some(WorkStatus::Done),
+        ..WorkPatch::default()
+    };
+    while let Some(parent_id) = effects.parents.pop() {
+        if items::sub_tasks_finished(history, &parent_id)? {
+            edit(history, meetings, change, &parent_id, &done, effects)?;
+        }
+    }
+    Ok(())
+}
+
+/// What a loop's tracker items moving changed, with the parents they
+/// finished closed when `close_parents` is set.
+fn followed_effects(
+    history: &Connection,
+    meetings: &Connection,
+    followed: sync::Followed,
+    close_parents: bool,
+) -> StorageResult<Effects> {
+    let mut effects = Effects {
+        loops: followed.loops,
+        ..Effects::default()
+    };
+    for changed in &followed.changed {
+        effects.changed(changed);
+    }
+    if close_parents {
+        close_parents_in(history, Some(meetings), &mut effects)?;
+    }
+    Ok(effects)
+}
+
+/// What `sona --loop-resolve` and a meeting page's resolve do to the
+/// tracker: moves the item behind the loop, then its finished parents.
+fn follow_loop_with(
+    history: &Connection,
+    meetings: &Connection,
+    loop_id: &MeetingLoopId,
+    close_parents: bool,
+    now_ms: i64,
+) -> StorageResult<Effects> {
+    let followed = sync::follow_loop_in(history, meetings, loop_id, now_ms)?;
+    followed_effects(history, meetings, followed, close_parents)
 }
 
 /// Brings a just-processed meeting's open commitments into triage.
@@ -250,6 +363,15 @@ pub(crate) fn take_in(app: Option<&AppHandle>, store: &MeetingStore, session_id:
         Ok(_) => {}
         Err(error) => log::warn!("Meeting commitments could not reach triage: {error:#}"),
     }
+    let kept_here = crate::query::KeptLocal::read(store).map_or(true, |kept| kept.hides(session_id));
+    if !kept_here {
+        if let Err(error) = history.with_connection(|conn| {
+            changes::meeting_taken_in(conn, &session_id.uuid().to_string(), now)
+        }) {
+            log::warn!("A meeting's change could not be recorded: {error:#}");
+        }
+    }
+    loops::meeting_ended(app, &history, store, session_id);
 }
 
 /// Moves the tracker after a loop moved in its meeting, and returns the
@@ -263,19 +385,16 @@ pub(crate) fn follow_loop(
     let Some(history) = app.try_state::<Arc<HistoryManager>>() else {
         return Vec::new();
     };
+    let close = crate::settings::get_settings(app).work_close_parents;
     let now = now_ms();
     match in_both(store, &history, |history, meetings| {
-        sync::follow_loop_in(history, meetings, loop_id, now)
+        follow_loop_with(history, meetings, loop_id, close, now)
     }) {
-        Ok(followed) => {
-            if !followed.items.is_empty() {
-                let mut effects = Effects::default();
-                for item in &followed.items {
-                    effects.item(item);
-                }
+        Ok(effects) => {
+            if !effects.items.is_empty() {
                 tell(app, &effects);
             }
-            followed.loops
+            effects.loops
         }
         Err(error) => {
             log::warn!("The tracker could not follow a meeting loop: {error:#}");
@@ -296,7 +415,8 @@ pub(crate) fn catch_up(app: AppHandle, store: Arc<MeetingStore>) {
             return;
         };
         let user_name = store.user_name();
-        let sona = crate::settings::get_settings(&app).work_sona_changes;
+        let settings = crate::settings::get_settings(&app);
+        let (sona, close) = (settings.work_sona_changes, settings.work_close_parents);
         let now = now_ms();
         let sessions = match in_both(&store, &history, |_, meetings| {
             sync::meetings_since(meetings, now - sync::BACKFILL_MS)
@@ -331,10 +451,12 @@ pub(crate) fn catch_up(app: AppHandle, store: Arc<MeetingStore>) {
             Err(error) => log::warn!("Tracker repeats could not be folded: {error:#}"),
         }
         match in_both(&store, &history, |history, meetings| {
-            sync::reconcile(history, meetings, now)
+            let followed = sync::reconcile(history, meetings, now)?;
+            followed_effects(history, meetings, followed, close)
         }) {
             Ok(followed) => {
-                followed.items.iter().for_each(|item| effects.item(item));
+                effects.items.extend(followed.items);
+                effects.projects.extend(followed.projects);
                 effects.loops = followed.loops;
             }
             Err(error) => {
@@ -376,6 +498,8 @@ struct RowContext {
     risks: std::collections::BTreeSet<String>,
     blocks: HashMap<String, WorkTimeBlock>,
     repeats: HashMap<String, WorkRepeat>,
+    progress: HashMap<String, WorkProgress>,
+    attachments: HashMap<String, u32>,
 }
 
 impl RowContext {
@@ -399,6 +523,8 @@ impl RowContext {
             risks: blocks::risks(history)?,
             blocks: blocks::booked(history)?,
             repeats: recur::repeats(history, now_ms())?,
+            progress: items::sub_task_progress(history)?,
+            attachments: attachments::counts(history)?,
         })
     }
 
@@ -436,6 +562,8 @@ impl RowContext {
             at_risk: self.risks.contains(&item.id),
             time_block: self.blocks.get(&item.id).copied(),
             repeat: self.repeats.get(&item.id).cloned(),
+            sub_tasks: self.progress.get(&item.id).copied(),
+            attachment_count: self.attachments.get(&item.id).copied().unwrap_or(0),
             item,
         };
         if let Some(source) = match &source_loop_id {
@@ -512,7 +640,7 @@ fn wanted(
         && (query.include_snoozed || !items::snoozed(item, now_ms))
 }
 
-fn found(item: &WorkItem, search: &str) -> bool {
+fn found(item: &WorkItem, search: &str, said: Option<&Vec<String>>) -> bool {
     let number = search.strip_prefix('#').unwrap_or(search);
     number
         .parse::<i64>()
@@ -522,6 +650,75 @@ fn found(item: &WorkItem, search: &str) -> bool {
             .details
             .as_deref()
             .is_some_and(|details| details.to_lowercase().contains(search))
+        || said.is_some_and(|said| said.iter().any(|body| body.to_lowercase().contains(search)))
+}
+
+/// Whether a search word names this task by number: `S-12`, `#12` or `12`.
+fn names_number(token: &str, number: i64) -> bool {
+    token
+        .strip_prefix("s-")
+        .or_else(|| token.strip_prefix('#'))
+        .unwrap_or(token)
+        .parse::<i64>()
+        .is_ok_and(|named| named == number)
+}
+
+/// The tasks not archived or deleted whose number, title, details or
+/// comments hold every one of `tokens` (lowercase words), each with the
+/// text that held the most of them, the title only when nothing else did.
+pub(crate) fn search(conn: &Connection, tokens: &[String]) -> StorageResult<Vec<(WorkItem, String)>> {
+    if tokens.is_empty() {
+        return Ok(Vec::new());
+    }
+    let said = comments::bodies(conn)?;
+    let mut found = Vec::new();
+    for item in items::items(conn, false)? {
+        let texts: Vec<&str> = item
+            .details
+            .as_deref()
+            .into_iter()
+            .chain(said.get(&item.id).into_iter().flatten().map(String::as_str))
+            .chain(std::iter::once(item.title.as_str()))
+            .collect();
+        let folded: Vec<String> = texts.iter().map(|text| text.to_lowercase()).collect();
+        let held = |text: &str| tokens.iter().filter(|token| text.contains(token.as_str())).count();
+        if !tokens.iter().all(|token| {
+            names_number(token, item.number) || folded.iter().any(|text| text.contains(token.as_str()))
+        }) {
+            continue;
+        }
+        let best = folded
+            .iter()
+            .enumerate()
+            .max_by_key(|(at, text)| (held(text), std::cmp::Reverse(*at)))
+            .map_or(0, |(at, _)| at);
+        let snippet = texts[best].to_owned();
+        found.push((item, snippet));
+    }
+    Ok(found)
+}
+
+/// The tasks, by id, whose own commitment or evidence names a source
+/// `hides` holds back, whatever the task's row shows of it.
+pub(crate) fn drawing_on(
+    conn: &Connection,
+    hides: impl Fn(super::EvidenceSourceKind, &str) -> bool,
+) -> StorageResult<HashSet<String>> {
+    let mut statement = conn.prepare(
+        "SELECT id, 'loop', source_loop_id FROM planning_tasks WHERE source_loop_id IS NOT NULL
+         UNION ALL
+         SELECT target_id, source_kind, source_id FROM planning_evidence_links
+         WHERE target_kind = 'task' AND source_kind IN ('meeting', 'loop')",
+    )?;
+    let mut rows = statement.query([])?;
+    let mut hidden = HashSet::new();
+    while let Some(row) = rows.next()? {
+        let source_id: String = row.get(2)?;
+        if hides(row.get(1)?, &source_id) {
+            hidden.insert(row.get(0)?);
+        }
+    }
+    Ok(hidden)
 }
 
 fn list(
@@ -545,6 +742,11 @@ fn list(
         .map(str::trim)
         .filter(|search| !search.is_empty())
         .map(str::to_lowercase);
+    let said = if search.is_some() {
+        comments::bodies(history)?
+    } else {
+        HashMap::new()
+    };
     let owners = query
         .owner_person_ids
         .as_deref()
@@ -558,6 +760,19 @@ fn list(
         .cycle
         .map(|cycle| cycles::want(history, cycle, now_ms))
         .transpose()?;
+    let filters = filter::ready(
+        history,
+        &query.filters,
+        |id| {
+            context
+                .people
+                .with_merged(&[id.to_owned()])
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        },
+        now_ms,
+    )?;
     let mut reader = MeetingReader::new(meetings, user_name);
     let mut rows = Vec::new();
     let mut suggestions = BTreeMap::new();
@@ -565,7 +780,14 @@ fn list(
         if !wanted(item, query, owners.as_ref(), due.as_deref(), now_ms)
             || raised.as_ref().is_some_and(|ids| !ids.contains(&item.id))
             || cycle.is_some_and(|cycle| !cycle.holds(item))
-            || search.as_deref().is_some_and(|search| !found(item, search))
+            || search
+                .as_deref()
+                .is_some_and(|search| !found(item, search, said.get(&item.id)))
+            || !filter::holds(
+                &filters,
+                item,
+                context.doers.get(&item.id).map(|doer| doer.agent.as_str()),
+            )
         {
             continue;
         }
@@ -594,6 +816,7 @@ fn detail(
     history: &Connection,
     meetings: Option<&Connection>,
     user_name: Option<&str>,
+    attachment_root: &Path,
     id: &str,
 ) -> StorageResult<WorkItemDetail> {
     let id = store::uuid(id)?;
@@ -614,6 +837,14 @@ fn detail(
         }
     }
     Ok(WorkItemDetail {
+        parent: item
+            .parent_id
+            .as_deref()
+            .map(|parent_id| items::item_ref(history, parent_id))
+            .transpose()?,
+        sub_tasks: items::sub_tasks(history, &id)?,
+        comments: comments::all(history, WorkCommentSubject::Task, &id)?,
+        attachments: attachments::list(history, attachment_root, &id)?,
         item: context.row(&mut reader, item)?,
         recurrence: items::recurrence(history, &id)?,
         evidence,
@@ -668,6 +899,16 @@ fn edit(
             .as_ref()
             .map(|owner| checked_owner(meetings, owner))
             .transpose()?,
+        for_person_id: match &patch.for_person_id {
+            Some(Some(person_id)) => {
+                let meetings = meetings.ok_or(super::ConversationsClosed)?;
+                Some(Some(sources::require_person(
+                    meetings,
+                    &store::uuid(person_id)?,
+                )?))
+            }
+            cleared_or_kept => cleared_or_kept.clone(),
+        },
         ..patch.clone()
     };
     let changed = items::apply(
@@ -714,13 +955,15 @@ pub async fn work_list(
 #[tauri::command]
 #[specta::specta]
 pub async fn work_item(
+    app: AppHandle,
     history_state: State<'_, Arc<HistoryManager>>,
     meetings: State<'_, Arc<MeetingSessionManager>>,
     id: String,
 ) -> Result<WorkItemDetail, String> {
+    let root = attachment_root(&app)?;
     let user_name = meetings.user_name();
     with_meetings(&history_state, &meetings, |history, meeting_conn| {
-        detail(history, meeting_conn, user_name.as_deref(), &id)
+        detail(history, meeting_conn, user_name.as_deref(), &root, &id)
     })
     .await
 }
@@ -804,6 +1047,618 @@ pub async fn work_create(
     input: WorkItemInput,
 ) -> Result<WorkItem, String> {
     create_as(&app, WorkActor::Me, &operation_id, &input).await
+}
+
+/// Puts `inputs` in under `parent_id`. What an input leaves unset comes
+/// from the parent as Linear does it: the project and milestone, the
+/// priority, and an owner by [`items::inherited_owner`].
+fn create_under(
+    history: &mut Connection,
+    meetings: Option<&Connection>,
+    change: Change<'_>,
+    parent_id: &str,
+    inputs: &[WorkItemInput],
+) -> StorageResult<Done<Vec<WorkItem>>> {
+    store::mutate(
+        history,
+        change.operation_id,
+        "work_subtask_create",
+        &(parent_id, inputs),
+        change.at_ms,
+        |tx| {
+            if inputs.is_empty() {
+                return Err(Refusal::Invalid.into());
+            }
+            let parent = items::item(tx, &store::uuid(parent_id)?)?;
+            let mut effects = Effects::default();
+            effects.item(&parent);
+            let mut value = Vec::with_capacity(inputs.len());
+            for input in inputs {
+                let owner = match &input.owner {
+                    Some(owner) => checked_owner(meetings, owner)?,
+                    None => items::inherited_owner(tx, &parent)?,
+                };
+                let (project_id, milestone_id) = match &input.project_id {
+                    Some(project_id) => (Some(project_id.as_str()), input.milestone_id.as_deref()),
+                    None => (
+                        parent.project_id.as_deref(),
+                        input
+                            .milestone_id
+                            .as_deref()
+                            .or(parent.milestone_id.as_deref()),
+                    ),
+                };
+                let item = items::insert(
+                    tx,
+                    &NewItem {
+                        title: &input.title,
+                        details: input.details.as_deref(),
+                        status: input.status.unwrap_or(WorkStatus::NotStarted),
+                        priority: input.priority.unwrap_or(parent.priority),
+                        project_id,
+                        milestone_id,
+                        owner: &owner,
+                        due_at_ms: input.due_at_ms,
+                        label_ids: input.label_ids.as_deref().unwrap_or_default(),
+                        source_loop_id: None,
+                        recurrence: input.recurrence.as_deref(),
+                    },
+                    change.actor,
+                    change.at_ms,
+                )?;
+                let changed = items::apply(
+                    tx,
+                    &item.id,
+                    &WorkPatch {
+                        parent_id: Some(Some(parent.id.clone())),
+                        ..WorkPatch::default()
+                    },
+                    WorkActivityKind::Status,
+                    change.actor,
+                    change.at_ms,
+                )?;
+                effects.item(&changed.after);
+                value.push(changed.after);
+            }
+            Ok(Done { value, effects })
+        },
+    )
+}
+
+/// [`work_subtask_create`] made by `actor`.
+pub(crate) async fn subtask_create_as(
+    app: &AppHandle,
+    actor: WorkActor,
+    operation_id: &str,
+    parent_id: &str,
+    inputs: &[WorkItemInput],
+) -> Result<Vec<WorkItem>, String> {
+    let change = Change::now(operation_id, actor);
+    if inputs
+        .iter()
+        .any(|input| matches!(input.owner, Some(WorkOwner::Person { .. })))
+    {
+        run_with_meetings(app, |history, meetings| {
+            create_under(history, meetings, change, parent_id, inputs)
+        })
+        .await
+    } else {
+        run_history(app, |history| {
+            create_under(history, None, change, parent_id, inputs)
+        })
+    }
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn work_subtask_create(
+    app: AppHandle,
+    operation_id: String,
+    parent_id: String,
+    inputs: Vec<WorkItemInput>,
+) -> Result<Vec<WorkItem>, String> {
+    subtask_create_as(&app, WorkActor::Me, &operation_id, &parent_id, &inputs).await
+}
+
+/// Puts a task under another, or with `None` makes it a task of its own,
+/// whatever revision it is at.
+#[tauri::command(async)]
+#[specta::specta]
+pub fn work_set_parent(
+    app: AppHandle,
+    operation_id: String,
+    id: String,
+    parent_id: Option<String>,
+) -> Result<WorkItem, String> {
+    let change = Change::now(&operation_id, WorkActor::Me);
+    run_history(&app, |history| {
+        store::mutate(
+            history,
+            change.operation_id,
+            "work_set_parent",
+            &(&id, &parent_id),
+            change.at_ms,
+            |tx| {
+                let changed = items::apply(
+                    tx,
+                    &store::uuid(&id)?,
+                    &WorkPatch {
+                        parent_id: Some(parent_id.clone()),
+                        ..WorkPatch::default()
+                    },
+                    WorkActivityKind::Status,
+                    change.actor,
+                    change.at_ms,
+                )?;
+                let mut effects = Effects::default();
+                effects.changed(&changed);
+                for parent in [&changed.before.parent_id, &changed.after.parent_id]
+                    .into_iter()
+                    .flatten()
+                {
+                    if !effects.items.contains(parent) {
+                        effects.items.push(parent.clone());
+                    }
+                }
+                Ok(Done {
+                    value: changed.after,
+                    effects,
+                })
+            },
+        )
+    })
+}
+
+/// One comment change made by `author`, telling the windows that show what
+/// it is on.
+fn comment_change(
+    app: &AppHandle,
+    operation_id: &str,
+    command: &str,
+    request: &impl Serialize,
+    write: impl FnOnce(&Connection, i64) -> StorageResult<WorkComment>,
+) -> Result<WorkComment, String> {
+    let at_ms = now_ms();
+    run_history(app, |history| {
+        store::mutate(history, operation_id, command, request, at_ms, |tx| {
+            let value = write(tx, at_ms)?;
+            let mut effects = Effects::default();
+            match value.subject {
+                WorkCommentSubject::Task => effects.items.push(value.item_id.clone()),
+                WorkCommentSubject::Project => effects.projects.push(value.item_id.clone()),
+                WorkCommentSubject::Milestone => effects
+                    .projects
+                    .push(store::milestone(tx, &value.item_id)?.project_id),
+                WorkCommentSubject::Meeting | WorkCommentSubject::Note => {}
+            }
+            Ok(Done { effects, value })
+        })
+    })
+}
+
+/// [`work_comment_add`] written by `author` on `subject`'s `subject_id`.
+pub(crate) fn comment_add_as(
+    app: &AppHandle,
+    author: comments::Author<'_>,
+    operation_id: &str,
+    subject: WorkCommentSubject,
+    subject_id: &str,
+    body: &str,
+    reply_to: Option<&str>,
+) -> Result<WorkComment, String> {
+    let user_name = app
+        .try_state::<Arc<MeetingSessionManager>>()
+        .and_then(|meetings| meetings.user_name());
+    let actor = author.actor;
+    comment_change(
+        app,
+        operation_id,
+        "work_comment_add",
+        &(subject_id, body, reply_to, author.actor, author.agent, subject),
+        |tx, at_ms| {
+            let comment =
+                comments::add(tx, subject, subject_id, reply_to, author, body, at_ms)?;
+            if subject == WorkCommentSubject::Task
+                && inbox::mentions_user(body, user_name.as_deref())
+            {
+                inbox::mentioned(tx, &comment.item_id, &comment.id, actor, at_ms)?;
+            }
+            Ok(comment)
+        },
+    )
+}
+
+/// [`work_comment_edit`] made by `author`.
+pub(crate) fn comment_edit_as(
+    app: &AppHandle,
+    author: comments::Author<'_>,
+    operation_id: &str,
+    id: &str,
+    body: &str,
+) -> Result<WorkComment, String> {
+    comment_change(
+        app,
+        operation_id,
+        "work_comment_edit",
+        &(id, body, author.actor, author.agent),
+        |tx, at_ms| comments::edit(tx, id, author, body, at_ms),
+    )
+}
+
+/// [`work_comment_delete`] made by `author`.
+pub(crate) fn comment_delete_as(
+    app: &AppHandle,
+    author: comments::Author<'_>,
+    operation_id: &str,
+    id: &str,
+) -> Result<WorkComment, String> {
+    comment_change(
+        app,
+        operation_id,
+        "work_comment_delete",
+        &(id, author.actor, author.agent),
+        |tx, at_ms| comments::delete(tx, id, author, at_ms),
+    )
+}
+
+/// [`work_comment_resolve`] made by `actor`.
+pub(crate) fn comment_resolve_as(
+    app: &AppHandle,
+    actor: WorkActor,
+    operation_id: &str,
+    id: &str,
+    resolved: bool,
+) -> Result<WorkComment, String> {
+    comment_change(
+        app,
+        operation_id,
+        "work_comment_resolve",
+        &(id, resolved, actor),
+        |tx, at_ms| comments::resolve(tx, id, resolved, at_ms),
+    )
+}
+
+const ME: comments::Author<'static> = comments::Author {
+    actor: WorkActor::Me,
+    agent: None,
+};
+
+/// The threads on a task, or with `subject` on a project, a milestone, a
+/// meeting or a note.
+#[tauri::command]
+#[specta::specta]
+pub async fn work_comments(
+    history_state: State<'_, Arc<HistoryManager>>,
+    meetings: State<'_, Arc<MeetingSessionManager>>,
+    item_id: String,
+    subject: Option<WorkCommentSubject>,
+    limit: Option<u32>,
+    cursor: Option<String>,
+) -> Result<WorkCommentPage, String> {
+    let subject = subject.unwrap_or(WorkCommentSubject::Task);
+    let limit = limit.map_or(comments::PAGE, |limit| {
+        usize::try_from(limit).map_or(comments::MAX_PAGE, |limit| {
+            limit.clamp(1, comments::MAX_PAGE)
+        })
+    });
+    let kept_local =
+        subject == WorkCommentSubject::Meeting && meeting_kept_here(&meetings, &item_id).await;
+    let page = super::history(&history_state, |history| {
+        comments::page(history, subject, &item_id, limit, cursor.as_deref())
+    })?;
+    Ok(if kept_local {
+        comments::kept_local(page)
+    } else {
+        page
+    })
+}
+
+/// Whether the meeting `meeting_id` is kept on this Mac. A store that
+/// cannot say counts as kept; an id that names no meeting does not.
+async fn meeting_kept_here(meetings: &MeetingSessionManager, meeting_id: &str) -> bool {
+    let Ok(uuid) = uuid::Uuid::parse_str(meeting_id) else {
+        return false;
+    };
+    let Ok(store) = meetings.store().await else {
+        return true;
+    };
+    crate::query::KeptLocal::read(&store)
+        .map_or(true, |kept| kept.hides(MeetingSessionId::from_uuid(uuid)))
+}
+
+/// A comment on a task, or with `subject` on a project, a milestone, a
+/// meeting or a note.
+#[tauri::command(async)]
+#[specta::specta]
+pub fn work_comment_add(
+    app: AppHandle,
+    operation_id: String,
+    item_id: String,
+    subject: Option<WorkCommentSubject>,
+    body: String,
+    reply_to: Option<String>,
+) -> Result<WorkComment, String> {
+    comment_add_as(
+        &app,
+        ME,
+        &operation_id,
+        subject.unwrap_or(WorkCommentSubject::Task),
+        &item_id,
+        &body,
+        reply_to.as_deref(),
+    )
+}
+
+#[tauri::command(async)]
+#[specta::specta]
+pub fn work_comment_edit(
+    app: AppHandle,
+    operation_id: String,
+    id: String,
+    body: String,
+) -> Result<WorkComment, String> {
+    comment_edit_as(&app, ME, &operation_id, &id, &body)
+}
+
+#[tauri::command(async)]
+#[specta::specta]
+pub fn work_comment_delete(
+    app: AppHandle,
+    operation_id: String,
+    id: String,
+) -> Result<WorkComment, String> {
+    comment_delete_as(&app, ME, &operation_id, &id)
+}
+
+#[tauri::command(async)]
+#[specta::specta]
+pub fn work_comment_resolve(
+    app: AppHandle,
+    operation_id: String,
+    id: String,
+    resolved: bool,
+) -> Result<WorkComment, String> {
+    comment_resolve_as(&app, WorkActor::Me, &operation_id, &id, resolved)
+}
+
+/// Where attached files are kept: `<root>/<task id>/<id>-<name>`.
+pub(crate) fn attachment_root(app: &AppHandle) -> Result<PathBuf, String> {
+    crate::portable::app_data_dir(app)
+        .map(|dir| dir.join("task-attachments"))
+        .map_err(|_| "Sona's data folder could not be found.".to_owned())
+}
+
+/// What a file attachment comes from: a file on disk, or pasted bytes and
+/// the name they came with.
+pub(crate) enum AttachSource<'a> {
+    Path(&'a Path),
+    Bytes { data: &'a [u8], name: &'a str },
+}
+
+/// One attachment change made by `author`, telling the task's windows.
+fn attachment_change(
+    app: &AppHandle,
+    root: &Path,
+    operation_id: &str,
+    command: &str,
+    request: &impl Serialize,
+    write: impl FnOnce(&Connection, &Path, i64) -> StorageResult<WorkAttachment>,
+) -> Result<WorkAttachment, String> {
+    let at_ms = now_ms();
+    run_history(app, |history| {
+        store::mutate(history, operation_id, command, request, at_ms, |tx| {
+            let value = write(tx, root, at_ms)?;
+            Ok(Done {
+                effects: Effects {
+                    items: vec![value.item_id.clone()],
+                    ..Effects::default()
+                },
+                value,
+            })
+        })
+    })
+}
+
+/// [`work_attachment_attach_file`] made by `author`. The same bytes on the
+/// same task answer the attachment already there; the file moves in once
+/// the attachment is saved.
+pub(crate) fn attach_file_as(
+    app: &AppHandle,
+    author: comments::Author<'_>,
+    operation_id: &str,
+    item_id: &str,
+    source: AttachSource<'_>,
+    naming: attachments::Naming<'_>,
+) -> Result<WorkAttachment, String> {
+    let root = attachment_root(app)?;
+    let staged = match source {
+        AttachSource::Path(path) => attachments::stage_file(&root, path),
+        AttachSource::Bytes { data, name } => attachments::stage_bytes(&root, data, name),
+    }
+    .map_err(super::failure)?;
+    let attached = attachment_change(
+        app,
+        &root,
+        operation_id,
+        "work_attachment_attach_file",
+        &(
+            item_id,
+            staged.sha256(),
+            staged.name(),
+            naming,
+            author.actor,
+            author.agent,
+        ),
+        |tx, root, at_ms| {
+            attachments::attach_file(tx, root, item_id, &staged, naming, author, at_ms)
+        },
+    )?;
+    super::history(&app.state::<Arc<HistoryManager>>(), |history| {
+        attachments::place(history, &staged, &attached)
+    })?;
+    Ok(attached)
+}
+
+/// [`work_attachment_attach_link`] made by `author`.
+pub(crate) fn attach_link_as(
+    app: &AppHandle,
+    author: comments::Author<'_>,
+    operation_id: &str,
+    item_id: &str,
+    url: &str,
+    naming: attachments::Naming<'_>,
+) -> Result<WorkAttachment, String> {
+    let root = attachment_root(app)?;
+    attachment_change(
+        app,
+        &root,
+        operation_id,
+        "work_attachment_attach_link",
+        &(item_id, url, naming, author.actor, author.agent),
+        |tx, root, at_ms| attachments::attach_link(tx, root, item_id, url, naming, author, at_ms),
+    )
+}
+
+/// [`work_attachment_detach`] made by `author`, refused as not found when
+/// the attachment is on another task than `on_task`; the file goes once the
+/// row is gone.
+pub(crate) fn detach_as(
+    app: &AppHandle,
+    author: comments::Author<'_>,
+    operation_id: &str,
+    id: &str,
+    on_task: Option<&str>,
+) -> Result<WorkAttachment, String> {
+    let root = attachment_root(app)?;
+    let removed = attachment_change(
+        app,
+        &root,
+        operation_id,
+        "work_attachment_detach",
+        &(id, on_task, author.actor, author.agent),
+        |tx, root, at_ms| attachments::detach(tx, root, id, on_task, author, at_ms),
+    )?;
+    attachments::remove_file(&removed);
+    Ok(removed)
+}
+
+/// [`work_attachment_rename`] made by `author`.
+pub(crate) fn rename_attachment_as(
+    app: &AppHandle,
+    author: comments::Author<'_>,
+    operation_id: &str,
+    id: &str,
+    title: &str,
+) -> Result<WorkAttachment, String> {
+    let root = attachment_root(app)?;
+    attachment_change(
+        app,
+        &root,
+        operation_id,
+        "work_attachment_rename",
+        &(id, title, author.actor, author.agent),
+        |tx, root, _| attachments::rename(tx, root, id, title, author),
+    )
+}
+
+/// A task's attachments, oldest first.
+pub(crate) fn attachments_of(app: &AppHandle, item_id: &str) -> Result<Vec<WorkAttachment>, String> {
+    let root = attachment_root(app)?;
+    super::history(&app.state::<Arc<HistoryManager>>(), |history| {
+        attachments::list(history, &root, item_id)
+    })
+}
+
+#[tauri::command(async)]
+#[specta::specta]
+pub fn work_attachments(app: AppHandle, item_id: String) -> Result<Vec<WorkAttachment>, String> {
+    attachments_of(&app, &item_id)
+}
+
+/// Attaches the file at `file.path`, or pasted `file.data` (base64) named
+/// `file.file_name`; with `comment_id`, to that comment on the task.
+#[tauri::command(async)]
+#[specta::specta]
+pub fn work_attachment_attach_file(
+    app: AppHandle,
+    operation_id: String,
+    item_id: String,
+    file: WorkAttachmentFile,
+    title: Option<String>,
+    subtitle: Option<String>,
+    comment_id: Option<String>,
+) -> Result<WorkAttachment, String> {
+    use base64::Engine as _;
+    let bytes;
+    let source = match (&file.path, &file.data, &file.file_name) {
+        (Some(path), None, _) => AttachSource::Path(Path::new(path)),
+        (None, Some(data), Some(name)) => {
+            bytes = base64::engine::general_purpose::STANDARD
+                .decode(data)
+                .map_err(|_| "The pasted file could not be read.".to_owned())?;
+            AttachSource::Bytes { data: &bytes, name }
+        }
+        _ => return Err("Attach a file by its path, or pasted data with its name.".to_owned()),
+    };
+    attach_file_as(
+        &app,
+        ME,
+        &operation_id,
+        &item_id,
+        source,
+        attachments::Naming {
+            title: title.as_deref(),
+            subtitle: subtitle.as_deref(),
+            metadata: None,
+            comment_id: comment_id.as_deref(),
+        },
+    )
+}
+
+#[tauri::command(async)]
+#[specta::specta]
+pub fn work_attachment_attach_link(
+    app: AppHandle,
+    operation_id: String,
+    item_id: String,
+    url: String,
+    title: Option<String>,
+    subtitle: Option<String>,
+) -> Result<WorkAttachment, String> {
+    attach_link_as(
+        &app,
+        ME,
+        &operation_id,
+        &item_id,
+        &url,
+        attachments::Naming {
+            title: title.as_deref(),
+            subtitle: subtitle.as_deref(),
+            metadata: None,
+            comment_id: None,
+        },
+    )
+}
+
+#[tauri::command(async)]
+#[specta::specta]
+pub fn work_attachment_detach(
+    app: AppHandle,
+    operation_id: String,
+    id: String,
+) -> Result<WorkAttachment, String> {
+    detach_as(&app, ME, &operation_id, &id, None)
+}
+
+#[tauri::command(async)]
+#[specta::specta]
+pub fn work_attachment_rename(
+    app: AppHandle,
+    operation_id: String,
+    id: String,
+    title: String,
+) -> Result<WorkAttachment, String> {
+    rename_attachment_as(&app, ME, &operation_id, &id, &title)
 }
 
 fn update(
@@ -982,6 +1837,39 @@ pub fn work_restore(
     set_archived_as(&app, WorkActor::Me, &operation_id, &ids, false)
 }
 
+/// Moves tasks in the manual order: to the top, to the bottom, or beside
+/// another task. Returns every task whose place changed.
+#[tauri::command(async)]
+#[specta::specta]
+pub fn work_move(
+    app: AppHandle,
+    operation_id: String,
+    ids: Vec<String>,
+    place: WorkPlace,
+) -> Result<Vec<WorkItem>, String> {
+    move_tasks(&app, &operation_id, &ids, &place)
+}
+
+pub(crate) fn move_tasks(
+    app: &AppHandle,
+    operation_id: &str,
+    ids: &[String],
+    place: &WorkPlace,
+) -> Result<Vec<WorkItem>, String> {
+    let now = now_ms();
+    run_history(app, |history| {
+        store::mutate(history, operation_id, "work_move", &(ids, place), now, |tx| {
+            let mut effects = Effects::default();
+            let mut value = Vec::new();
+            for changed in items::place_manually(tx, &unique(ids)?, place)? {
+                effects.changed(&changed);
+                value.push(changed.after);
+            }
+            Ok(Done { value, effects })
+        })
+    })
+}
+
 fn accept(
     history: &mut Connection,
     meetings: Option<&Connection>,
@@ -1054,12 +1942,13 @@ fn decline(
     meetings: Option<&Connection>,
     change: Change<'_>,
     ids: &[String],
+    reason: Option<&str>,
 ) -> StorageResult<Done<Vec<WorkItem>>> {
     store::mutate(
         history,
         change.operation_id,
         "work_triage_decline",
-        &ids,
+        &(ids, reason),
         change.at_ms,
         |tx| {
             let mut effects = Effects::default();
@@ -1067,7 +1956,7 @@ fn decline(
             for id in unique(ids)? {
                 let item = items::item(tx, &id)?;
                 let (after, moved) =
-                    sync::decline(tx, meetings, &item, change.actor, change.at_ms)?;
+                    sync::decline(tx, meetings, &item, reason, change.actor, change.at_ms)?;
                 effects.item(&after);
                 effects.loops.extend(moved);
                 value.push(after);
@@ -1083,10 +1972,11 @@ pub(crate) async fn triage_decline_as(
     actor: WorkActor,
     operation_id: &str,
     ids: &[String],
+    reason: Option<&str>,
 ) -> Result<Vec<WorkItem>, String> {
     let change = Change::now(operation_id, actor);
     run_with_meetings(app, |history, meetings| {
-        decline(history, meetings, change, ids)
+        decline(history, meetings, change, ids, reason)
     })
     .await
 }
@@ -1097,8 +1987,9 @@ pub async fn work_triage_decline(
     app: AppHandle,
     operation_id: String,
     ids: Vec<String>,
+    reason: Option<String>,
 ) -> Result<Vec<WorkItem>, String> {
-    triage_decline_as(&app, WorkActor::Me, &operation_id, &ids).await
+    triage_decline_as(&app, WorkActor::Me, &operation_id, &ids, reason.as_deref()).await
 }
 
 /// Folds `id` into `of_id`: its sources move to the item it repeats.
@@ -1307,6 +2198,263 @@ pub fn work_label_delete(app: AppHandle, operation_id: String, id: String) -> Re
     })
 }
 
+pub(crate) fn catalog_project_save(
+    app: &AppHandle,
+    operation_id: &str,
+    id: Option<String>,
+    edit: &catalog::ProjectEdit,
+) -> Result<Project, String> {
+    let now = now_ms();
+    let project = run_history(app, |history| {
+        store::mutate(
+            history,
+            operation_id,
+            "catalog_project_save",
+            &(&id, edit),
+            now,
+            |tx| {
+                let project = catalog::save_project(tx, id.as_deref(), edit, now)?;
+                Ok(Done {
+                    effects: Effects {
+                        projects: vec![project.id.clone()],
+                        ..Effects::default()
+                    },
+                    value: project,
+                })
+            },
+        )
+    })?;
+    Ok(project)
+}
+
+pub(crate) fn catalog_milestone_save(
+    app: &AppHandle,
+    operation_id: &str,
+    project_id: &str,
+    id: Option<String>,
+    edit: &catalog::MilestoneEdit,
+) -> Result<Milestone, String> {
+    let now = now_ms();
+    run_history(app, |history| {
+        store::mutate(
+            history,
+            operation_id,
+            "catalog_milestone_save",
+            &(project_id, &id, edit),
+            now,
+            |tx| {
+                let milestone = catalog::save_milestone(tx, project_id, id.as_deref(), edit, now)?;
+                Ok(Done {
+                    effects: Effects {
+                        projects: vec![milestone.project_id.clone()],
+                        ..Effects::default()
+                    },
+                    value: milestone,
+                })
+            },
+        )
+    })
+}
+
+pub(crate) fn catalog_milestone_delete(
+    app: &AppHandle,
+    operation_id: &str,
+    id: &str,
+) -> Result<(), String> {
+    let now = now_ms();
+    run_history(app, |history| {
+        store::mutate(
+            history,
+            operation_id,
+            "catalog_milestone_delete",
+            &id,
+            now,
+            |tx| {
+                let milestone = store::milestone(tx, id)?;
+                let items = catalog::delete_milestone(tx, id, now)?;
+                Ok(Done {
+                    effects: Effects {
+                        items,
+                        projects: vec![milestone.project_id],
+                        ..Effects::default()
+                    },
+                    value: (),
+                })
+            },
+        )
+    })
+}
+
+pub(crate) fn catalog_status_name_save(
+    app: &AppHandle,
+    operation_id: &str,
+    id: Option<String>,
+    category: crate::planning::types::ProjectStatus,
+    name: &str,
+) -> Result<crate::planning::types::ProjectStatusName, String> {
+    let now = now_ms();
+    run_history(app, |history| {
+        store::mutate(
+            history,
+            operation_id,
+            "catalog_status_name_save",
+            &(&id, category, name),
+            now,
+            |tx| {
+                let (saved, projects) =
+                    catalog::save_status_name(tx, id.as_deref(), category, name, now)?;
+                Ok(Done {
+                    effects: Effects {
+                        projects,
+                        ..Effects::default()
+                    },
+                    value: saved,
+                })
+            },
+        )
+    })
+}
+
+pub(crate) fn catalog_status_name_delete(
+    app: &AppHandle,
+    operation_id: &str,
+    id: &str,
+) -> Result<(), String> {
+    let now = now_ms();
+    run_history(app, |history| {
+        store::mutate(
+            history,
+            operation_id,
+            "catalog_status_name_delete",
+            &id,
+            now,
+            |tx| {
+                let projects = catalog::delete_status_name(tx, id, now)?;
+                Ok(Done {
+                    effects: Effects {
+                        projects,
+                        ..Effects::default()
+                    },
+                    value: (),
+                })
+            },
+        )
+    })
+}
+
+pub(crate) fn catalog_milestone_to_project(
+    app: &AppHandle,
+    operation_id: &str,
+    id: &str,
+) -> Result<Project, String> {
+    let now = now_ms();
+    run_history(app, |history| {
+        store::mutate(
+            history,
+            operation_id,
+            "catalog_milestone_to_project",
+            &id,
+            now,
+            |tx| {
+                let parent = store::milestone(tx, &store::uuid(id)?)?.project_id;
+                let (project, items) = catalog::milestone_to_project(tx, id, now)?;
+                Ok(Done {
+                    effects: Effects {
+                        items,
+                        projects: vec![parent, project.id.clone()],
+                        ..Effects::default()
+                    },
+                    value: project,
+                })
+            },
+        )
+    })
+}
+
+/// Makes `blocked_id` wait on `blocker_id`.
+pub(crate) fn catalog_dependency_add(
+    app: &AppHandle,
+    operation_id: &str,
+    blocker_id: &str,
+    blocked_id: &str,
+) -> Result<super::dependencies::ProjectDependency, String> {
+    let now = now_ms();
+    run_history(app, |history| {
+        store::mutate(
+            history,
+            operation_id,
+            "catalog_dependency_add",
+            &(blocker_id, blocked_id),
+            now,
+            |tx| {
+                let dependency = super::dependencies::add(tx, blocker_id, blocked_id, now)?;
+                Ok(Done {
+                    effects: Effects {
+                        projects: vec![dependency.blocker_id.clone(), dependency.blocked_id.clone()],
+                        ..Effects::default()
+                    },
+                    value: dependency,
+                })
+            },
+        )
+    })
+}
+
+pub(crate) fn catalog_dependency_remove(
+    app: &AppHandle,
+    operation_id: &str,
+    id: &str,
+) -> Result<super::dependencies::ProjectDependency, String> {
+    let now = now_ms();
+    run_history(app, |history| {
+        store::mutate(
+            history,
+            operation_id,
+            "catalog_dependency_remove",
+            &id,
+            now,
+            |tx| {
+                let dependency = super::dependencies::remove(tx, id)?;
+                Ok(Done {
+                    effects: Effects {
+                        projects: vec![dependency.blocker_id.clone(), dependency.blocked_id.clone()],
+                        ..Effects::default()
+                    },
+                    value: dependency,
+                })
+            },
+        )
+    })
+}
+
+pub(crate) fn catalog_person_repoint(
+    app: &AppHandle,
+    operation_id: &str,
+    from: &str,
+    to: &str,
+) -> Result<(), String> {
+    let now = now_ms();
+    run_history(app, |history| {
+        store::mutate(
+            history,
+            operation_id,
+            "catalog_person_repoint",
+            &(from, to),
+            now,
+            |tx| {
+                let items = catalog::repoint_person(tx, from, to, now)?;
+                Ok(Done {
+                    effects: Effects {
+                        items,
+                        ..Effects::default()
+                    },
+                    value: (),
+                })
+            },
+        )
+    })
+}
+
 #[tauri::command(async)]
 #[specta::specta]
 pub fn work_views(history_state: State<'_, Arc<HistoryManager>>) -> Result<Vec<WorkView>, String> {
@@ -1370,6 +2518,41 @@ pub fn work_counts(history_state: State<'_, Arc<HistoryManager>>) -> Result<Work
     })
 }
 
+fn keep(
+    history: &mut Connection,
+    change: Change<'_>,
+    ids: &[String],
+) -> StorageResult<Done<Vec<WorkItem>>> {
+    store::mutate(
+        history,
+        change.operation_id,
+        "work_keep",
+        &ids,
+        change.at_ms,
+        |tx| {
+            let mut effects = Effects::default();
+            let mut value = Vec::new();
+            for id in unique(ids)? {
+                let changed = items::keep(tx, &id, change.actor, change.at_ms)?;
+                effects.changed(&changed);
+                value.push(changed.after);
+            }
+            Ok(Done { value, effects })
+        },
+    )
+}
+
+/// [`work_keep`] made by `actor`.
+pub(crate) fn keep_as(
+    app: &AppHandle,
+    actor: WorkActor,
+    operation_id: &str,
+    ids: &[String],
+) -> Result<Vec<WorkItem>, String> {
+    let change = Change::now(operation_id, actor);
+    run_history(app, |history| keep(history, change, ids))
+}
+
 #[tauri::command(async)]
 #[specta::specta]
 pub fn work_keep(
@@ -1377,19 +2560,7 @@ pub fn work_keep(
     operation_id: String,
     ids: Vec<String>,
 ) -> Result<Vec<WorkItem>, String> {
-    let now = now_ms();
-    run_history(&app, |history| {
-        store::mutate(history, &operation_id, "work_keep", &ids, now, |tx| {
-            let mut effects = Effects::default();
-            let mut value = Vec::new();
-            for id in unique(&ids)? {
-                let changed = items::keep(tx, &id, WorkActor::Me, now)?;
-                effects.changed(&changed);
-                value.push(changed.after);
-            }
-            Ok(Done { value, effects })
-        })
-    })
+    keep_as(&app, WorkActor::Me, &operation_id, &ids)
 }
 
 #[tauri::command(async)]

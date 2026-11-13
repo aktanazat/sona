@@ -87,16 +87,22 @@ impl MeetingSessionManager {
         // takes the run with it, and it is the same meeting the engine choice
         // below is made about.
         let anchor = scope.anchor();
-        let run = self.processing().run_saved_prompt(
-            &store,
-            PromptGenerationRequest {
-                run_id: PromptRunId::new(),
-                prompt,
-                target: request.target,
-                produced_at_utc_ms: now_utc_ms(),
-                scope,
-            },
-        );
+        let processing = std::sync::Arc::clone(self.processing());
+        let run_store = std::sync::Arc::clone(&store);
+        let run = tauri::async_runtime::spawn_blocking(move || {
+            processing.run_saved_prompt(
+                &run_store,
+                PromptGenerationRequest {
+                    run_id: PromptRunId::new(),
+                    prompt,
+                    target: request.target,
+                    produced_at_utc_ms: now_utc_ms(),
+                    scope,
+                },
+            )
+        })
+        .await
+        .map_err(|_| MeetingCommandError::EngineFailure)?;
         store
             .record_prompt_run(&run, anchor)
             .map_err(map_store_error)?;

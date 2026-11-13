@@ -48,8 +48,17 @@ pub(crate) struct CsvMeeting {
 
 impl super::session::MeetingSessionManager {
     pub async fn export_all_csv(&self) -> Result<String, super::types::MeetingCommandError> {
+        self.export_csv_without(std::collections::HashSet::new())
+            .await
+    }
+
+    /// The CSV of every retained meeting but those in `hidden`.
+    pub(crate) async fn export_csv_without(
+        &self,
+        hidden: std::collections::HashSet<super::types::MeetingSessionId>,
+    ) -> Result<String, super::types::MeetingCommandError> {
         let store = self.store().await?;
-        tauri::async_runtime::spawn_blocking(move || render_csv(&store))
+        tauri::async_runtime::spawn_blocking(move || render_csv(&store, &hidden))
             .await
             .map_err(|_| super::types::MeetingCommandError::ExportFailed)?
     }
@@ -60,13 +69,17 @@ impl super::session::MeetingSessionManager {
 /// on a read error, so an incomplete file cannot look like a complete backup.
 fn render_csv(
     store: &super::store::MeetingStore,
+    hidden: &std::collections::HashSet<super::types::MeetingSessionId>,
 ) -> Result<String, super::types::MeetingCommandError> {
     use super::types::MeetingCommandError;
     use super::workflow_engine::map_store_error;
 
     let meetings = store.csv_meetings().map_err(map_store_error)?;
     let mut writer = csv_writer().map_err(|_| MeetingCommandError::ExportFailed)?;
-    for meeting in meetings {
+    for meeting in meetings
+        .into_iter()
+        .filter(|meeting| !hidden.contains(&meeting.session_id))
+    {
         let review = store
             .review_snapshot(meeting.session_id)
             .map_err(map_store_error)?;
