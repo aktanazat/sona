@@ -28,7 +28,9 @@ use std::time::Duration;
 use uuid::Uuid;
 
 const PROMPT: &str = include_str!("../../../resources/prompts/live_doc.txt");
+const CHECK_PROMPT: &str = include_str!("../../../resources/prompts/live_doc_check.txt");
 const OUTPUT_TOKENS: i32 = 900;
+const CHECK_OUTPUT_TOKENS: i32 = 300;
 pub(crate) const MAX_POINTS: usize = 40;
 pub(crate) const MAX_POINT_CHARS: usize = 280;
 /// Points one reading may add or rewrite.
@@ -42,6 +44,10 @@ const HANG_UP_REQUESTS: usize = 6;
 const MAX_ASK_CHARS: usize = 500;
 /// `{"doc":[],"lines":[]}`, the request around the points and lines.
 const ENVELOPE_BYTES: usize = 22;
+/// `{"notes":[]}`, the check around its notes.
+const NOTES_ENVELOPE_BYTES: usize = 12;
+/// Lines of a point the check sees, besides what a rewrite replaces.
+const CHECKED_LINES: usize = 3;
 /// Words that may come before "Sona" in an ask.
 const OPENERS: &[&str] = &["hey", "hi", "ok", "okay", "so", "and"];
 /// Words that make "Sona" an ask with no pause after the name, as in "Sona
@@ -53,6 +59,7 @@ const COMMANDS: &[&str] = &[
     "how", "which",
 ];
 static RESPONSE_SCHEMA: LazyLock<RootSchema> = LazyLock::new(json_response_schema::<Reply>);
+static CHECK_SCHEMA: LazyLock<RootSchema> = LazyLock::new(json_response_schema::<Verdicts>);
 
 /// What the doc holds for one capture.
 #[derive(Default)]
@@ -114,6 +121,45 @@ struct Written {
     lines: Vec<String>,
 }
 
+/// A written point whose lines and words checked out: the point it
+/// rewrites, if any, its text, the lines it cites, and when the first of
+/// them was said.
+struct Candidate<'a> {
+    rewrites: Option<&'a Known>,
+    text: String,
+    cited: Vec<&'a Given>,
+    first_said: u64,
+}
+
+/// What the check says of each note, by its label.
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct Verdicts {
+    #[schemars(length(max = "MAX_WRITTEN"))]
+    notes: Vec<Verdict>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct Verdict {
+    note: String,
+    keep: bool,
+}
+
+/// A point as the check sees it: its text, and the lines it was written
+/// from, led by the words of the point it rewrites.
+#[derive(Serialize)]
+struct Note<'a> {
+    note: String,
+    text: &'a str,
+    lines: Vec<&'a str>,
+}
+
+#[derive(Serialize)]
+struct Notes<'a> {
+    notes: Vec<Note<'a>>,
+}
+
 #[derive(Serialize)]
 struct Shown<'a> {
     point: String,
@@ -135,14 +181,26 @@ struct Input<'a> {
     lines: Vec<Line<'a>>,
 }
 
-/// One reading: the request text, the point each label names, when each
-/// line was said, and the append position the doc has read through once
-/// it is answered.
+/// One reading: the request text, the point each label names, the lines
+/// it was given, and the append position the doc has read through once it
+/// is answered.
 struct Request {
     input: String,
-    points: HashMap<String, String>,
-    lines: Vec<u64>,
+    points: HashMap<String, Known>,
+    lines: Vec<Given>,
     through: usize,
+}
+
+/// A doc point a reading was shown: its id, and its words then.
+struct Known {
+    id: String,
+    text: String,
+}
+
+/// A line a reading was given: when it was said, and its words.
+struct Given {
+    said_ns: u64,
+    text: String,
 }
 
 /// Why a hand edit was refused.
@@ -335,9 +393,10 @@ fn read(
             Asked::Unanswered => Vec::new(),
             Asked::NotAsked => break,
         };
+        let kept = check(generator.as_ref(), live, candidates(written, &request));
         let mut doc = live.doc();
         doc.read = doc.read.max(request.through);
-        changed |= merge(&mut doc.points, written, &request);
+        changed |= merge(&mut doc.points, kept);
     }
     changed
 }
@@ -516,16 +575,14 @@ fn ask(generator: &dyn MeetingTextGenerator, live: &LiveTranscript, request: &Re
             }
         };
     match first_json_value::<Reply>(answer.trim()) {
-        Ok(reply) => Asked::Answered(
-            reply
-                .add
-                .into_iter()
+        Ok(Reply { add, rewrite }) => Asked::Answered(
+            add.into_iter()
                 .map(|added| Written {
                     point: None,
                     text: added.text,
                     lines: added.lines,
                 })
-                .chain(reply.rewrite.into_iter().map(|rewritten| Written {
+                .chain(rewrite.into_iter().map(|rewritten| Written {
                     point: Some(rewritten.point),
                     text: rewritten.text,
                     lines: rewritten.lines,
@@ -572,7 +629,13 @@ fn next_request(live: &LiveTranscript, moment: Moment, budget: usize) -> Option<
         .enumerate()
         .map(|(index, point)| {
             let label = format!("P{}", index + 1);
-            points.insert(label.clone(), point.id.clone());
+            points.insert(
+                label.clone(),
+                Known {
+                    id: point.id.clone(),
+                    text: point.text.clone(),
+                },
+            );
             Shown {
                 point: label,
                 text: &point.text,
@@ -624,63 +687,221 @@ fn next_request(live: &LiveTranscript, moment: Moment, budget: usize) -> Option<
         points,
         lines: taken
             .iter()
-            .map(|segment| segment.start_offset_ns)
+            .map(|segment| Given {
+                said_ns: segment.start_offset_ns,
+                text: segment.text.clone(),
+            })
             .collect(),
         through,
     })
 }
 
-/// Fold a reading into the doc. A point must cite a line it was given and
-/// say something the doc does not already say; a rewrite must name a point
-/// the reading was shown that the user has not touched or removed since.
-/// Returns whether the doc changed.
-fn merge(points: &mut Vec<MeetingLiveDocPoint>, written: Vec<Written>, request: &Request) -> bool {
-    let mut changed = false;
-    for written in written {
-        let cited: Option<Vec<u64>> = written
-            .lines
-            .iter()
-            .map(|label| {
-                let position = label.trim().strip_prefix('L')?.parse::<usize>().ok()?;
-                request.lines.get(position.checked_sub(1)?).copied()
+/// The points of a reading that cite only lines it was given, fit the
+/// doc, and name no label their lines do not say once a leading one is
+/// set aside; a rewrite must name a point the reading was shown and stay
+/// on its topic.
+fn candidates(written: Vec<Written>, request: &Request) -> Vec<Candidate<'_>> {
+    written
+        .into_iter()
+        .filter_map(|written| {
+            let cited = written
+                .lines
+                .iter()
+                .map(|label| {
+                    let position = label.trim().strip_prefix('L')?.parse::<usize>().ok()?;
+                    request.lines.get(position.checked_sub(1)?)
+                })
+                .collect::<Option<Vec<&Given>>>()?;
+            let first_said = cited.iter().map(|line| line.said_ns).min()?;
+            let text = unlabeled(&written.text).split_whitespace().collect::<Vec<_>>().join(" ");
+            if text.is_empty()
+                || text.chars().count() > MAX_POINT_CHARS
+                || text.chars().any(char::is_control)
+                || names_a_label(&text, &cited)
+            {
+                return None;
+            }
+            let rewrites = match written.point {
+                None => None,
+                Some(label) => {
+                    let known = request.points.get(label.trim())?;
+                    if !same_topic(&known.text, &text) {
+                        return None;
+                    }
+                    Some(known)
+                }
+            };
+            Some(Candidate {
+                rewrites,
+                text,
+                cited,
+                first_said,
             })
-            .collect();
-        let Some(first_said) = cited.and_then(|cited| cited.into_iter().min()) else {
-            continue;
-        };
-        let text = written.text.split_whitespace().collect::<Vec<_>>().join(" ");
-        if text.is_empty()
-            || text.chars().count() > MAX_POINT_CHARS
-            || text.chars().any(char::is_control)
-            || points.iter().any(|point| fold(&point.text) == fold(&text))
-        {
+        })
+        .collect()
+}
+
+/// `text` without a leading label such as "P2: ", which local models put
+/// before a point they add: "P2: Priya will choose the final subject line".
+fn unlabeled(text: &str) -> &str {
+    match text.split_once(':') {
+        Some((head, rest)) if is_label(&head.trim().to_lowercase()) => rest,
+        _ => text,
+    }
+}
+
+/// The second look: a reading's points go back to the model, each with
+/// the lines it was written from, and only the ones it keeps are kept.
+/// Asked to write the doc, Apple's on-device model wrote small talk such
+/// as "Hello?" and "Screen froze momentarily." as points; asked whether a
+/// note is worth keeping, it can say no. A check that gets no answer keeps
+/// nothing.
+fn check<'a>(
+    generator: &dyn MeetingTextGenerator,
+    live: &LiveTranscript,
+    candidates: Vec<Candidate<'a>>,
+) -> Vec<Candidate<'a>> {
+    let budget = evidence_budget(generator, CHECK_PROMPT, CHECK_OUTPUT_TOKENS);
+    let mut batches: Vec<Vec<Candidate<'a>>> = Vec::new();
+    let mut used: usize = 0;
+    for candidate in candidates {
+        let bytes = serde_json::to_string(&note(0, &candidate)).map_or(usize::MAX, |json| json.len() + 1);
+        match batches.last_mut() {
+            Some(batch) if used.saturating_add(bytes) <= budget => batch.push(candidate),
+            _ => {
+                used = NOTES_ENVELOPE_BYTES;
+                batches.push(vec![candidate]);
+            }
+        }
+        used = used.saturating_add(bytes);
+    }
+    batches
+        .into_iter()
+        .flat_map(|batch| {
+            let keep = kept_notes(generator, live, &batch);
+            batch
+                .into_iter()
+                .enumerate()
+                .filter(move |(index, _)| keep.contains(index))
+                .map(|(_, candidate)| candidate)
+        })
+        .collect()
+}
+
+fn note<'a>(index: usize, candidate: &'a Candidate<'_>) -> Note<'a> {
+    Note {
+        note: format!("N{}", index + 1),
+        text: &candidate.text,
+        lines: candidate
+            .rewrites
+            .map(|known| known.text.as_str())
+            .into_iter()
+            .chain(candidate.cited.iter().take(CHECKED_LINES).map(|line| line.text.as_str()))
+            .collect(),
+    }
+}
+
+/// The positions in `batch` the check keeps: named with a keep, and never
+/// with a drop.
+fn kept_notes(
+    generator: &dyn MeetingTextGenerator,
+    live: &LiveTranscript,
+    batch: &[Candidate<'_>],
+) -> HashSet<usize> {
+    let notes = Notes {
+        notes: batch.iter().enumerate().map(|(index, candidate)| note(index, candidate)).collect(),
+    };
+    let Ok(input) = serde_json::to_string(&notes) else {
+        return HashSet::new();
+    };
+    live.doc().requests += 1;
+    let answer = generator.generate_json(CHECK_PROMPT, &input, CHECK_OUTPUT_TOKENS, || &CHECK_SCHEMA);
+    let Ok(Verdicts { notes: verdicts }) = answer
+        .map_err(|error| log::info!("A live doc check got no answer: {error:?}"))
+        .and_then(|answer| first_json_value::<Verdicts>(answer.trim()))
+    else {
+        return HashSet::new();
+    };
+    let position = |verdict: &Verdict| {
+        let number = verdict.note.trim().strip_prefix('N')?.parse::<usize>().ok()?;
+        number.checked_sub(1).filter(|index| *index < batch.len())
+    };
+    let dropped: HashSet<usize> = verdicts.iter().filter(|verdict| !verdict.keep).filter_map(position).collect();
+    verdicts
+        .iter()
+        .filter(|verdict| verdict.keep)
+        .filter_map(position)
+        .filter(|index| !dropped.contains(index))
+        .collect()
+}
+
+/// Fold a reading's kept points into the doc. A point must say something
+/// the doc does not already say; a rewrite must name a point the user has
+/// not touched or removed since the reading was asked. Returns whether
+/// the doc changed.
+fn merge(points: &mut Vec<MeetingLiveDocPoint>, kept: Vec<Candidate<'_>>) -> bool {
+    let mut changed = false;
+    for candidate in kept {
+        if points.iter().any(|point| fold(&point.text) == fold(&candidate.text)) {
             continue;
         }
-        let Some(label) = written.point else {
-            if points.len() < MAX_POINTS {
+        match candidate.rewrites {
+            None if points.len() < MAX_POINTS => {
                 points.push(MeetingLiveDocPoint {
                     id: Uuid::new_v4().to_string(),
-                    text,
+                    text: candidate.text,
                     edited: false,
-                    start_offset_ns: Some(first_said),
+                    start_offset_ns: Some(candidate.first_said),
                 });
                 changed = true;
             }
-            continue;
-        };
-        let Some(point) = request
-            .points
-            .get(label.trim())
-            .and_then(|id| points.iter_mut().find(|point| &point.id == id))
-        else {
-            continue;
-        };
-        if !point.edited {
-            point.text = text;
-            changed = true;
+            None => {}
+            Some(known) => {
+                if let Some(point) = points.iter_mut().find(|point| point.id == known.id && !point.edited) {
+                    point.text = candidate.text;
+                    changed = true;
+                }
+            }
         }
     }
     changed
+}
+
+/// Whether a rewrite is still about the point it replaces: the two share a
+/// word of five letters or more, or a form of one. A reading rewrote "The
+/// tight schedule means we must prioritize key tasks." as "Explain
+/// calendar access first with one sentence behind a flag."
+fn same_topic(before: &str, after: &str) -> bool {
+    let before: Vec<String> = words(before).map(|(word, _)| word).collect();
+    words(after).any(|(word, _)| {
+        word.chars().count() >= 5 && before.iter().any(|said| related(said, &word))
+    })
+}
+
+/// The same word, or two forms of one: "lamp" and "lamps", "fix" and
+/// "fixed", "schedule" and "scheduling".
+fn related(left: &str, right: &str) -> bool {
+    let common = left.chars().zip(right.chars()).take_while(|(left, right)| left == right).count();
+    let shorter = left.chars().count().min(right.chars().count());
+    (common == shorter && common >= 3) || common >= 5
+}
+
+/// Whether `text` names a label, such as "L1" or "P2", that none of the
+/// lines it cites says: the reading writing about its own input, as in
+/// "No new detail from L1.", rather than a "P1 bug" someone talked about.
+fn names_a_label(text: &str, cited: &[&Given]) -> bool {
+    words(text).any(|(word, _)| {
+        is_label(&word)
+            && !cited
+                .iter()
+                .any(|line| words(&line.text).any(|(said, _)| said == word))
+    })
+}
+
+/// "l1" or "p12": a lowercased word that reads as a line or point label.
+fn is_label(word: &str) -> bool {
+    word.strip_prefix(['l', 'p'])
+        .is_some_and(|number| !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit()))
 }
 
 #[cfg(test)]

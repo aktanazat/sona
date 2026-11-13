@@ -9,11 +9,34 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 /// An engine that answers each reading with the next scripted reply and
-/// keeps what it was given.
+/// keeps what it was given. Its check keeps every note but the ones whose
+/// text is in `dropped`.
 #[derive(Default)]
 struct Scripted {
     replies: Mutex<VecDeque<&'static str>>,
+    dropped: Mutex<Vec<&'static str>>,
     given: Mutex<Vec<String>>,
+}
+
+impl Scripted {
+    fn verdicts(&self, evidence: &str) -> String {
+        // PANIC: the check always sends its notes as JSON, and a poisoned
+        // fixture lock means an earlier assertion already failed.
+        let notes: serde_json::Value = serde_json::from_str(evidence).unwrap();
+        // PANIC: as above.
+        let dropped = self.dropped.lock().unwrap();
+        // PANIC: the check's notes are always a list.
+        let verdicts: Vec<serde_json::Value> = notes["notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|note| {
+                let keep = !dropped.iter().any(|text| note["text"] == *text);
+                serde_json::json!({ "note": note["note"], "keep": keep })
+            })
+            .collect();
+        serde_json::json!({ "notes": verdicts }).to_string()
+    }
 }
 
 impl MeetingTextGenerator for Scripted {
@@ -35,11 +58,14 @@ impl MeetingTextGenerator for Scripted {
 
     fn generate(
         &self,
-        _system_prompt: &str,
+        system_prompt: &str,
         evidence: &str,
         _max_tokens: i32,
         _shape: ReplyShape,
     ) -> Result<String, MeetingTextGenerationError> {
+        if system_prompt == CHECK_PROMPT {
+            return Ok(self.verdicts(evidence));
+        }
         // PANIC: a poisoned fixture lock means an earlier assertion already failed.
         self.given.lock().unwrap().push(evidence.to_string());
         Ok(self
@@ -126,6 +152,44 @@ fn a_spoken_start_reads_what_was_said_and_a_hand_edit_outlives_later_readings() 
         ],
         "what the page changed after the stop outlives the stop's reading"
     );
+}
+
+#[test]
+fn a_reading_keeps_only_points_its_lines_say_that_pass_the_check() {
+    let (_directory, store) = workflow_core_tests::store();
+    let session_id =
+        workflow_core_tests::reviewable_meeting(&store, "Pier walk", Local::now().timestamp_millis());
+    let (microphone, call) = workflow_core_tests::recording_tracks(&store, session_id);
+    let engine = Arc::new(Scripted::default());
+    engine.replies.lock().unwrap().extend([
+        r#"{"add":[{"text":"No new detail from L1.","lines":["L1"]},{"text":"Hello?","lines":["L1"]},{"text":"P2: The berth three lamps flicker after dark","lines":["L2"]}],"rewrite":[]}"#,
+        r#"{"add":[],"rewrite":[{"point":"P1","text":"Thanks everyone for joining","lines":["L1"]}]}"#,
+    ]);
+    engine.dropped.lock().unwrap().push("Hello?");
+    let service = MeetingProcessingService::new(None);
+    service.set_text_generators(engine.clone(), engine.clone());
+    let live = LiveTranscript::new();
+
+    live.append(line(call, SourceKind::SystemAudio, 0, "Hello?"));
+    live.append(line(microphone, SourceKind::Microphone, 10, "The lamps on berth three still flicker after dark."));
+    assert!(live.start_doc());
+    service.read_live_doc_now(&store, session_id, &live);
+    let texts: Vec<String> = live.doc_points().into_iter().map(|point| point.text).collect();
+    assert_eq!(
+        texts,
+        ["The berth three lamps flicker after dark"],
+        "a point about a label or one the check drops is not kept; a leading label is set aside"
+    );
+
+    live.append(line(call, SourceKind::SystemAudio, 60, "Okay, thanks everyone, talk soon."));
+    assert!(!tick(&service, &store, session_id, &live, Moment::Pass));
+    let texts: Vec<String> = live.doc_points().into_iter().map(|point| point.text).collect();
+    assert_eq!(
+        texts,
+        ["The berth three lamps flicker after dark"],
+        "a rewrite onto another topic leaves the point as it was"
+    );
+    assert_eq!(engine.given.lock().unwrap().len(), 2, "both readings ran");
 }
 
 #[test]
