@@ -920,6 +920,8 @@ impl CloudSyncRuntime {
             return;
         }
         self.cloud_settings_changed(&settings::get_settings(&self.app).cloud_sync);
+        let rooms_runtime = Arc::clone(self);
+        tauri::async_runtime::spawn(async move { rooms_runtime.rewatch_live_rooms().await });
 
         for event_name in ["meeting:session-changed", "meeting:transcript-changed"] {
             let event_runtime = Arc::clone(self);

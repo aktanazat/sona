@@ -1,5 +1,6 @@
 import {
   CRYPTO_VERSION,
+  LIVE_ROOM_GONE,
   LIVE_ROOM_TTL_MS,
   MAX_ACTIVE_SHARES,
   MAX_ACTIVE_UPLOADS,
@@ -2648,7 +2649,17 @@ async function connectLiveRoom(
   if (response.status === 403)
     throw new ApiProblem("unauthorized", { status: 403 });
   if (response.status === 429) throw problem("rate_limited");
+  if (response.status === 404) return goneLiveRoom();
   throw problem("not_found");
+}
+
+// A page sees a refused upgrade only as a dropped connection, so it learns
+// its room is gone from a socket that closes as it opens.
+function goneLiveRoom(): Response {
+  const pair = new WebSocketPair();
+  pair[1].accept();
+  pair[1].close(LIVE_ROOM_GONE, "The room is gone");
+  return new Response(null, { status: 101, webSocket: pair[0] });
 }
 
 function publicRouteQuery(request: Request, route: Route): void {

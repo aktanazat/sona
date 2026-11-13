@@ -3,12 +3,13 @@ use super::super::ReplyShape;
 use super::*;
 use crate::meeting::analytics::MeetingProvisionalSpeaker;
 use crate::meeting::live_doc_types::MeetingLiveAuthor;
-use crate::meeting::store::workflow_core_tests;
+use crate::meeting::store::{workflow_core_tests, LiveRoom};
 use crate::meeting::types::SourceTrackId;
 use chrono::Local;
 use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
+use zeroize::Zeroizing;
 
 /// An engine that answers each reading with the next scripted reply and
 /// keeps what it was given. Its check keeps every note but the ones whose
@@ -291,6 +292,35 @@ fn shared_meeting() -> (
         live.clone(),
     );
     (directory, store, session_id, live, shared)
+}
+
+#[test]
+fn a_link_keeps_its_first_room_for_a_later_launch_to_empty() {
+    let (_directory, store, session_id, _live, shared) = shared_meeting();
+    let now = Local::now().timestamp_millis();
+    let room = |id: &str| LiveRoom {
+        id: id.to_owned(),
+        socket: format!("wss://companion.example/v1/live/{id}/socket?t=host"),
+        frame_key: Zeroizing::new([7; 32]),
+        expires_at_utc_ms: now + 60_000,
+    };
+    let first = "https://companion.example/l/first#v=1&k=a".to_owned();
+    assert_eq!(
+        shared.keep_link(first.clone(), &room("first")).unwrap(),
+        (first.clone(), true)
+    );
+    assert_eq!(
+        shared
+            .keep_link("https://companion.example/l/second#v=1&k=b".to_owned(), &room("second"))
+            .unwrap(),
+        (first, false)
+    );
+    let kept = store.kept_live_rooms(now).unwrap();
+    assert_eq!(kept.len(), 1);
+    assert_eq!(
+        (kept[0].session_id, kept[0].room.id.as_str(), kept[0].deleted),
+        (session_id, "first", false)
+    );
 }
 
 #[test]

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import pageHtml from "../public/index.html?raw";
 import fixture from "../fixtures/crypto-v1.json";
+import { LIVE_ROOM_GONE } from "../src/constants";
 
 const vectors = fixture.live_room_aes_gcm_hkdf;
 const ROOM = vectors.room_id;
@@ -73,8 +74,8 @@ class FakeSocket extends EventTarget {
     this.sent.push(data);
   }
 
-  close(): void {
-    this.dispatchEvent(new Event("close"));
+  close(code: number): void {
+    this.dispatchEvent(new CloseEvent("close", { code }));
   }
 
   open(): void {
@@ -661,7 +662,7 @@ describe("live doc page", () => {
     expect(localStorage.getItem("sona-live-name")).toBeNull();
   });
 
-  it("empties the page once the host deletes the meeting", async () => {
+  it("empties the page once the host deletes the meeting, even from a later launch", async () => {
     showLivePage(`/l/${ROOM}#v=1&k=${ROOT}`);
     await import("../public/viewer.js?live-removed-test");
     await vi.waitFor(() => expect(FakeSocket.made).toHaveLength(1));
@@ -681,7 +682,9 @@ describe("live doc page", () => {
       ),
     );
 
-    socket.receive(await stateFrame(2, { v: 1, removed: true }, true));
+    socket.receive(
+      await stateFrame(Number.MAX_SAFE_INTEGER, { v: 1, removed: true }, true),
+    );
     await vi.waitFor(() =>
       expect(byId("live-status").textContent).toBe(
         "The host removed this doc.",
@@ -690,6 +693,23 @@ describe("live doc page", () => {
     expect(byId("live-layout").hidden).toBe(true);
     expect(byId("live-timeline").hidden).toBe(true);
     expect(document.title).toBe("Live doc — Sona");
+  });
+
+  it("retries a dropped socket but stops and says the link expired once the room is gone", async () => {
+    showLivePage(`/l/${ROOM}#v=1&k=${ROOT}`);
+    await import("../public/viewer.js?live-gone-test");
+    await vi.waitFor(() => expect(FakeSocket.made).toHaveLength(1));
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    lastSocket().open();
+    lastSocket().close(1001);
+    vi.advanceTimersByTime(1_000);
+    expect(FakeSocket.made).toHaveLength(2);
+
+    lastSocket().open();
+    lastSocket().close(LIVE_ROOM_GONE);
+    expect(byId("live-status").textContent).toBe("This link has expired.");
+    vi.advanceTimersByTime(60_000);
+    expect(FakeSocket.made).toHaveLength(2);
   });
 
   it("pauses editing while the host is away", async () => {

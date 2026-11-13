@@ -5,7 +5,7 @@ use super::{map_store_error, MeetingSessionManager};
 use crate::meeting::live_doc_types::{MeetingLiveDoc, MeetingLiveTarget};
 use crate::meeting::processing::live_changes::{self, Author};
 use crate::meeting::processing::live_doc::{self, EditRefusal};
-use crate::meeting::processing::live_share::SharedMeeting;
+use crate::meeting::processing::live_share::{SharedMeeting, SharedRooms};
 use crate::meeting::processing::MeetingLiveCard;
 use crate::meeting::store::MeetingStore;
 use crate::meeting::types::{MeetingCommandError, MeetingSessionId};
@@ -125,6 +125,11 @@ impl MeetingSessionManager {
             session_id,
             live,
         ))
+    }
+
+    /// The rooms of meetings shared by link, and word of their deletes.
+    pub(crate) fn shared_rooms(&self) -> &SharedRooms {
+        self.processing.shared_rooms()
     }
 }
 

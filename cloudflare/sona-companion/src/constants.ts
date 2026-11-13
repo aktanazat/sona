@@ -8,6 +8,7 @@ export const JOB_LEASE_MS = 60 * 1000;
 export const JOB_RETRY_MS = 5 * 60 * 1000;
 export const CHANGE_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 export const LIVE_ROOM_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+export const LIVE_ROOM_GONE = 4404;
 
 export const MAX_REMOTE_BYTES = 8 * 1024 * 1024 * 1024;
 export const MAX_CHUNK_BYTES = 4 * 1024 * 1024;

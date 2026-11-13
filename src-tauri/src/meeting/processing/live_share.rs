@@ -6,7 +6,7 @@ use super::live_changes::{self, Author};
 use super::{live_doc, LiveTranscript, MeetingProcessingService};
 use crate::meeting::analytics::MeetingProvisionalSegment;
 use crate::meeting::live_doc_types::{MeetingLiveChange, MeetingLiveTarget};
-use crate::meeting::store::MeetingStore;
+use crate::meeting::store::{LiveRoom, MeetingStore, StoreError};
 use crate::meeting::types::{MeetingSessionId, SourceKind, SourceTrackId};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -63,19 +63,6 @@ impl LiveTranscript {
         self.share().link.clone()
     }
 
-    /// Keep `link` unless the meeting has one; returns the one it keeps
-    /// and whether that is `link`.
-    pub(crate) fn keep_share_link(&self, link: String) -> (String, bool) {
-        let mut share = self.share();
-        match &share.link {
-            Some(kept) => (kept.clone(), false),
-            None => {
-                share.link = Some(link.clone());
-                (link, true)
-            }
-        }
-    }
-
     /// Where the link is now. A stop whose last readings never finish
     /// counts as over once [`CLOSING_GRACE`] has passed.
     pub(crate) fn share_phase(&self) -> SharePhase {
@@ -126,6 +113,16 @@ impl SharedRooms {
     pub(crate) fn withdraw(&self, session_id: MeetingSessionId) {
         if let Some(deleted) = self.rooms().remove(&session_id) {
             deleted.notify_one();
+        }
+    }
+
+    /// Word of the meeting's delete, for its room's feed.
+    pub(crate) fn watch(&self, session_id: MeetingSessionId) -> DeleteWatch {
+        let deleted = Arc::clone(self.rooms().entry(session_id).or_default());
+        DeleteWatch {
+            rooms: self.clone(),
+            session_id,
+            deleted,
         }
     }
 }
@@ -290,15 +287,27 @@ impl SharedMeeting {
         &self.live
     }
 
+    /// Keep `link` and its room unless the meeting has a link; returns the
+    /// link it keeps and whether that is `link`. The room is stored first,
+    /// so deleting the meeting in a later launch still empties it, and a
+    /// room the store did not take is never handed out.
+    pub(crate) fn keep_link(
+        &self,
+        link: String,
+        room: &LiveRoom,
+    ) -> Result<(String, bool), StoreError> {
+        let mut share = self.live.share();
+        if let Some(kept) = &share.link {
+            return Ok((kept.clone(), false));
+        }
+        self.store.keep_live_room(self.session_id, room)?;
+        share.link = Some(link.clone());
+        Ok((link, true))
+    }
+
     /// Word of this meeting's delete, for its room's feed.
     pub(crate) fn watch_delete(&self) -> DeleteWatch {
-        let rooms = self.service.shared_rooms().clone();
-        let deleted = Arc::clone(rooms.rooms().entry(self.session_id).or_default());
-        DeleteWatch {
-            rooms,
-            session_id: self.session_id,
-            deleted,
-        }
+        self.service.shared_rooms().watch(self.session_id)
     }
 
     /// The state teammates see in `phase`, as JSON.
