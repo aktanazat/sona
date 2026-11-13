@@ -958,16 +958,31 @@ fn kept_notes(
 /// not touched or removed since the reading was asked. An add that replaces
 /// a point the user touched or removed meanwhile lands as a new point, so
 /// the news it carries is kept. Returns what landed.
+///
+/// An add whose words come in a row in a point says nothing new: shown a
+/// doc that had "We need to confirm the numbers for step three.", Apple's
+/// model added "Confirm the numbers for step three." An add that holds a
+/// point's words in a row says that point and more, so it takes its place,
+/// unless this reading rewrites that point too. Neither holds for a point
+/// someone typed, which is often the question an add answers.
 fn merge(points: &mut Vec<MeetingLiveDocPoint>, kept: Vec<Candidate<'_>>) -> Vec<Edited> {
+    let rewritten: HashSet<&str> = kept
+        .iter()
+        .filter_map(|candidate| candidate.rewrites.or(candidate.replaces))
+        .map(|known| known.id.as_str())
+        .collect();
     let mut landed = Vec::new();
     for candidate in kept {
         if points.iter().any(|point| fold(&point.text) == fold(&candidate.text)) {
             continue;
         }
-        let target = candidate
-            .rewrites
-            .or(candidate.replaces)
-            .and_then(|known| points.iter().position(|point| point.id == known.id && !point.edited));
+        let target = match candidate.rewrites.or(candidate.replaces) {
+            Some(known) => points.iter().position(|point| point.id == known.id && !point.edited),
+            None if points.iter().any(|point| !point.edited && runs_inside(&candidate.text, &point.text)) => continue,
+            None => points.iter().position(|point| {
+                !point.edited && !rewritten.contains(point.id.as_str()) && runs_inside(&point.text, &candidate.text)
+            }),
+        };
         match target {
             Some(index) => {
                 let point = &mut points[index];
@@ -1007,6 +1022,30 @@ fn same_topic(before: &str, after: &str) -> bool {
     words(after).any(|(word, _)| {
         word.chars().count() >= 5 && before.iter().any(|said| related(said, &word))
     })
+}
+
+/// Whether the words of `part` come in a row in `whole` with nothing around
+/// them that turns what they say, as those of "Confirm the numbers for step
+/// three." do in "We need to confirm the numbers for step three." Around
+/// them, "Don't", "or March 28" or "whether we can" says something else,
+/// and so does a question mark on one side only.
+fn runs_inside(part: &str, whole: &str) -> bool {
+    if part.contains('?') != whole.contains('?') {
+        return false;
+    }
+    let part: Vec<String> = words(part).map(|(word, _)| word).collect();
+    let whole: Vec<String> = words(whole).map(|(word, _)| word).collect();
+    !part.is_empty()
+        && whole.windows(part.len()).enumerate().any(|(at, run)| {
+            run == part.as_slice() && !whole[..at].iter().chain(&whole[at + part.len()..]).any(|word| turns(word))
+        })
+}
+
+/// A word that turns what the words beside it say: a "not", a choice, a
+/// condition or a doubt.
+fn turns(word: &str) -> bool {
+    word.ends_with("n't")
+        || ["not", "no", "never", "cannot", "or", "whether", "if", "unless", "maybe", "might"].contains(&word)
 }
 
 /// The same word, or two forms of one: "lamp" and "lamps", "fix" and

@@ -456,6 +456,119 @@ fn a_moved_date_replaces_the_point_it_moves_instead_of_adding_a_second() {
 }
 
 #[test]
+fn a_point_said_again_stays_one_point_and_one_that_says_more_takes_its_place() {
+    let (_directory, store) = workflow_core_tests::store();
+    let session_id =
+        workflow_core_tests::reviewable_meeting(&store, "Launch sync", Local::now().timestamp_millis());
+    let (microphone, _call) = workflow_core_tests::recording_tracks(&store, session_id);
+    let engine = Arc::new(Scripted::default());
+    engine.replies.lock().unwrap().extend([
+        r#"{"add":[{"text":"We need to confirm the numbers for step three.","lines":["L1"]}],"rewrite":[]}"#,
+        r#"{"add":[{"text":"Confirm the numbers for step three.","lines":["L1"]}],"rewrite":[]}"#,
+        r#"{"add":[{"text":"We need to confirm the numbers for step three by Friday.","lines":["L1"]},{"text":"Confirm the numbers for step four.","lines":["L1"]}],"rewrite":[]}"#,
+    ]);
+    let service = MeetingProcessingService::new(None);
+    service.set_text_generators(engine.clone(), engine.clone());
+    let live = LiveTranscript::new();
+    assert!(live.start_doc());
+
+    live.append(line(microphone, SourceKind::Microphone, 250, "Do we have numbers on step three?"));
+    service.read_live_doc_now(&store, session_id, &live);
+    let numbers = live.doc_points()[0].id.clone();
+    live.append(line(microphone, SourceKind::Microphone, 290, "The support inbox was quiet this week too."));
+    service.read_live_doc_now(&store, session_id, &live);
+    let texts: Vec<String> = live.doc_points().into_iter().map(|point| point.text).collect();
+    assert_eq!(
+        texts,
+        ["We need to confirm the numbers for step three."],
+        "a point said again in fewer words is not a second point"
+    );
+
+    live.append(line(microphone, SourceKind::Microphone, 330, "Can we have the step three numbers by Friday, and step four's too?"));
+    service.read_live_doc_now(&store, session_id, &live);
+    let points: Vec<(String, String)> = live.doc_points().into_iter().map(|point| (point.id, point.text)).collect();
+    let texts: Vec<&str> = points.iter().map(|(_, text)| text.as_str()).collect();
+    assert_eq!(
+        texts,
+        ["We need to confirm the numbers for step three by Friday.", "Confirm the numbers for step four."],
+        "a point that says more replaces the one it holds, and one a word apart lands"
+    );
+    assert_eq!(points[0].0, numbers, "the point that says more keeps the place of the one it holds");
+}
+
+#[test]
+fn an_add_that_reverses_settles_or_answers_a_point_lands_beside_it() {
+    let (_directory, store) = workflow_core_tests::store();
+    let session_id =
+        workflow_core_tests::reviewable_meeting(&store, "Beta sync", Local::now().timestamp_millis());
+    let (microphone, _call) = workflow_core_tests::recording_tracks(&store, session_id);
+    let engine = Arc::new(Scripted::default());
+    engine.replies.lock().unwrap().extend([
+        r#"{"add":[{"text":"Don't ship the beta on Friday.","lines":["L1"]},{"text":"Launch on March 21 or March 28.","lines":["L1"]},{"text":"Do we move the demo to Thursday?","lines":["L1"]}],"rewrite":[]}"#,
+        r#"{"add":[{"text":"Ship the beta on Friday.","lines":["L1"]},{"text":"Launch on March 21.","lines":["L1"]},{"text":"Cut the mobile app from the launch.","lines":["L1"]},{"text":"Move the demo to Thursday.","lines":["L1"]}],"rewrite":[]}"#,
+        r#"{"add":[{"text":"Ask legal whether we can ship the beta on Friday.","lines":["L1"]}],"rewrite":[]}"#,
+    ]);
+    let service = MeetingProcessingService::new(None);
+    service.set_text_generators(engine.clone(), engine.clone());
+    let live = LiveTranscript::new();
+    assert!(live.start_doc());
+
+    live.append(line(microphone, SourceKind::Microphone, 60, "Not Friday for the beta, the launch is March 21 or 28, and maybe the demo moves."));
+    service.read_live_doc_now(&store, session_id, &live);
+    live.edit_doc(&Author::Owner, None, "Should we cut the mobile app from the launch").unwrap();
+    live.append(line(microphone, SourceKind::Microphone, 120, "Fine, Friday it is, March 21, the demo is Thursday, and the mobile app is out."));
+    service.read_live_doc_now(&store, session_id, &live);
+    live.append(line(microphone, SourceKind::Microphone, 180, "Can legal clear Friday?"));
+    service.read_live_doc_now(&store, session_id, &live);
+
+    let texts: Vec<String> = live.doc_points().into_iter().map(|point| point.text).collect();
+    assert_eq!(
+        texts,
+        [
+            "Don't ship the beta on Friday.",
+            "Launch on March 21 or March 28.",
+            "Do we move the demo to Thursday?",
+            "Should we cut the mobile app from the launch",
+            "Ship the beta on Friday.",
+            "Launch on March 21.",
+            "Cut the mobile app from the launch.",
+            "Move the demo to Thursday.",
+            "Ask legal whether we can ship the beta on Friday.",
+        ],
+        "a reversal, a settled choice, an answer to a question, and a question about a decision are news"
+    );
+}
+
+#[test]
+fn an_add_that_holds_a_point_the_same_reading_rewrites_lands_on_its_own() {
+    let (_directory, store) = workflow_core_tests::store();
+    let session_id =
+        workflow_core_tests::reviewable_meeting(&store, "Hiring sync", Local::now().timestamp_millis());
+    let (microphone, _call) = workflow_core_tests::recording_tracks(&store, session_id);
+    let engine = Arc::new(Scripted::default());
+    engine.replies.lock().unwrap().extend([
+        r#"{"add":[{"text":"Hire a designer.","lines":["L1"]}],"rewrite":[]}"#,
+        r#"{"add":[{"text":"Hire a designer and a copywriter.","lines":["L1"]}],"rewrite":[{"point":"P1","text":"Hire a contract designer for the mobile app launch.","lines":["L1"]}]}"#,
+    ]);
+    let service = MeetingProcessingService::new(None);
+    service.set_text_generators(engine.clone(), engine.clone());
+    let live = LiveTranscript::new();
+    assert!(live.start_doc());
+
+    live.append(line(microphone, SourceKind::Microphone, 60, "We need a designer."));
+    service.read_live_doc_now(&store, session_id, &live);
+    live.append(line(microphone, SourceKind::Microphone, 120, "A contract designer for the app launch, and a copywriter too."));
+    service.read_live_doc_now(&store, session_id, &live);
+
+    let texts: Vec<String> = live.doc_points().into_iter().map(|point| point.text).collect();
+    assert_eq!(
+        texts,
+        ["Hire a contract designer for the mobile app launch.", "Hire a designer and a copywriter."],
+        "the rewrite keeps its point and the add keeps its news"
+    );
+}
+
+#[test]
 fn the_page_shows_a_sentence_cut_in_two_as_one_line() {
     let (_directory, _store, _session_id, live, shared) = shared_meeting();
     let (microphone, call) = (SourceTrackId::new(), SourceTrackId::new());
