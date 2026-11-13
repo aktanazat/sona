@@ -20,10 +20,9 @@ struct Scripted {
 
 impl Scripted {
     fn verdicts(&self, evidence: &str) -> String {
-        // PANIC: the check always sends its notes as JSON, and a poisoned
-        // fixture lock means an earlier assertion already failed.
+        // PANIC: the check always sends its notes as JSON.
         let notes: serde_json::Value = serde_json::from_str(evidence).unwrap();
-        // PANIC: as above.
+        // PANIC: a poisoned fixture lock means an earlier assertion already failed.
         let dropped = self.dropped.lock().unwrap();
         // PANIC: the check's notes are always a list.
         let verdicts: Vec<serde_json::Value> = notes["notes"]
