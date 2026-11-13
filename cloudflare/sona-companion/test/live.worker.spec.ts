@@ -318,6 +318,23 @@ describe("live rooms", () => {
     expect(host.queued).toEqual([]);
   });
 
+  it("takes a state at the highest count after any earlier final one", async () => {
+    const room = await liveRoom();
+    const host = await connect(room.roomId, room.host);
+    const guest = await connect(room.roomId, room.join);
+    expect(await guest.next()).toBe(presence(true));
+    const closing = stateFrame(40, true);
+    host.socket.send(closing);
+    expect(await guest.next()).toBe(closing);
+
+    const removed = stateFrame(Number.MAX_SAFE_INTEGER, true);
+    host.socket.send(removed);
+    expect(await guest.next()).toBe(removed);
+    const later = await connect(room.roomId, room.join);
+    expect(await later.next()).toBe(presence(true));
+    expect(await later.next()).toBe(removed);
+  });
+
   it("closes a socket whose frame is over its cap", async () => {
     const room = await liveRoom();
     const host = await connect(room.roomId, room.host);

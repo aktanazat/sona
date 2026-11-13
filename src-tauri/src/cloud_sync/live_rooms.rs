@@ -2,13 +2,17 @@
 //! first ask for the link makes the room; from then on the meeting's doc,
 //! board and transcript go to it sealed, at most once a second and only
 //! when they changed, and teammates' sealed edits come back from it.
-//! Deleting the meeting, during the call or after it, empties the room.
-//! The companion never holds the key: it travels in the link's fragment.
+//! Deleting the meeting, during the call or after it, in this launch or a
+//! later one, empties the room. The companion never holds the key: it
+//! travels in the link's fragment.
 
 use super::*;
 use crate::cloud_sync::client::LiveRoomPlan;
 use crate::cloud_sync::crypto::{derive_live_room_keys, open_live_frame, seal_live_frame};
-use crate::meeting::processing::live_share::{DeleteWatch, SharePhase, SharedMeeting, REMOVED};
+use crate::meeting::processing::live_share::{
+    DeleteWatch, SharePhase, SharedMeeting, SharedRooms, REMOVED,
+};
+use crate::meeting::store::LiveRoom;
 use futures_util::{SinkExt, StreamExt};
 use reqwest::Url;
 use tokio_tungstenite::tungstenite::Message;
@@ -17,11 +21,14 @@ use zeroize::Zeroizing;
 const PUBLISH_EVERY: Duration = Duration::from_secs(1);
 const FIRST_RETRY: Duration = Duration::from_secs(1);
 const LAST_RETRY: Duration = Duration::from_secs(30);
-/// How long a meeting that is over keeps trying to hand the room its last
-/// state.
+/// How long a call that ended keeps trying to hand the room its last state.
 const FINAL_TRIES_FOR: Duration = Duration::from_secs(120);
 /// The close code a room gives a host socket another one replaced.
 const REPLACED: u16 = 4000;
+/// The frame count the deleted state goes under: the highest a page reads,
+/// so the room takes it over any state it holds, even one an earlier
+/// launch sent.
+const DELETED_SEQ: u64 = (1 << 53) - 1;
 
 impl CloudSyncRuntime {
     /// The link teammates open to follow and edit a recording meeting's doc
@@ -69,21 +76,31 @@ impl CloudSyncRuntime {
             return Err(CloudRuntimeError::IntegrityFailure);
         }
         let page = room_page(&created.page_url, &room_id)?;
-        let socket = room_socket(&access.state.endpoint, &room_id, host_token.as_ref())?;
+        let room = LiveRoom {
+            socket: room_socket(&access.state.endpoint, &room_id, host_token.as_ref())?,
+            id: room_id,
+            frame_key,
+            expires_at_utc_ms: i64::try_from(created.expires_at)
+                .map_err(|_| CloudRuntimeError::IntegrityFailure)?,
+        };
         let link = format!("{page}#v=1&k={}", base64_url_encode(root.as_ref()));
-        let (link, kept) = meeting.live().keep_share_link(link);
+        let (link, kept) = meeting.keep_link(link, &room).map_err(map_store_error)?;
         if kept {
             log::info!("Made a live room for meeting {session_id:?}");
-            tauri::async_runtime::spawn(feed(
-                Arc::new(meeting),
-                Room {
-                    id: room_id,
-                    socket,
-                    frame_key,
-                },
-            ));
+            tauri::async_runtime::spawn(feed(Arc::clone(&access.store), Arc::new(meeting), room));
         }
         Ok(link)
+    }
+
+    /// Watch again for the deletes of meetings whose rooms earlier launches
+    /// made, and empty the rooms of those deleted while no launch watched.
+    pub(super) async fn rewatch_live_rooms(&self) {
+        let Ok(store) = self.meetings.cloud_store().await else {
+            return;
+        };
+        if let Err(error) = rewatch(&store, self.meetings.shared_rooms()) {
+            log::warn!("The live rooms of earlier launches are not watched: {error:?}");
+        }
     }
 }
 
@@ -105,7 +122,7 @@ fn room_page(page: &str, room_id: &str) -> Result<Url, CloudRuntimeError> {
 
 /// Where the Mac feeds the room: the companion's own address, over a
 /// secure socket, with the token only the Mac holds.
-fn room_socket(endpoint: &str, room_id: &str, host_token: &[u8]) -> Result<Url, CloudRuntimeError> {
+fn room_socket(endpoint: &str, room_id: &str, host_token: &[u8]) -> Result<String, CloudRuntimeError> {
     let mut url = Url::parse(endpoint).map_err(|_| CloudRuntimeError::IntegrityFailure)?;
     url.set_scheme("wss")
         .map_err(|()| CloudRuntimeError::IntegrityFailure)?;
@@ -117,17 +134,11 @@ fn room_socket(endpoint: &str, room_id: &str, host_token: &[u8]) -> Result<Url, 
     url.query_pairs_mut()
         .clear()
         .append_pair("t", &base64_url_encode(host_token));
-    Ok(url)
-}
-
-struct Room {
-    id: String,
-    socket: Url,
-    frame_key: Zeroizing<[u8; 32]>,
+    Ok(url.into())
 }
 
 /// What the room has been sent so far; the frame count runs on across
-/// sockets, so no two frames share one.
+/// sockets, so no two of the meeting's states share one.
 struct Fed {
     seq: u64,
     /// The state last sent on this socket, and whether it was the last.
@@ -142,19 +153,53 @@ enum Served {
     Dropped,
 }
 
-/// Feed the room until it has the meeting's last state. After the call,
-/// wait for the meeting's delete and empty the room then.
-async fn feed(meeting: Arc<SharedMeeting>, room: Room) {
+/// Feed the room until it has the meeting's last state. Unless the room
+/// was emptied during the call, wait for the meeting's delete after it and
+/// empty the room then.
+async fn feed(store: Arc<MeetingStore>, meeting: Arc<SharedMeeting>, room: LiveRoom) {
     let watch = meeting.watch_delete();
     let mut fed = Fed { seq: 0, sent: None };
-    if !deliver(Some(&meeting), &watch, &room, &mut fed).await
-        || meeting.live().share_phase() != SharePhase::Ended
-    {
+    let delivered = deliver(Some(&meeting), &watch, &room, &mut fed).await;
+    if meeting.live().share_phase() == SharePhase::Withdrawn {
+        if delivered {
+            forget(&store, &room);
+        }
         return;
     }
     drop(meeting);
     watch.deleted().await;
-    deliver(None, &watch, &room, &mut fed).await;
+    empty(&store, &watch, &room).await;
+}
+
+/// Watch for the deletes of the meetings whose rooms `store` keeps, and
+/// empty each room once its meeting is deleted.
+fn rewatch(store: &Arc<MeetingStore>, rooms: &SharedRooms) -> Result<(), StoreError> {
+    for kept in store.kept_live_rooms(utc_now_ms())? {
+        let watch = rooms.watch(kept.session_id);
+        let store = Arc::clone(store);
+        tauri::async_runtime::spawn(async move {
+            if !kept.deleted {
+                watch.deleted().await;
+            }
+            empty(&store, &watch, &kept.room).await;
+        });
+    }
+    Ok(())
+}
+
+/// Tell the room its meeting was deleted, and let the room go once it
+/// knows. A room that never hears it before the app quits is told at the
+/// next launch.
+async fn empty(store: &MeetingStore, watch: &DeleteWatch, room: &LiveRoom) {
+    if deliver(None, watch, room, &mut Fed { seq: 0, sent: None }).await {
+        forget(store, room);
+    }
+}
+
+fn forget(store: &MeetingStore, room: &LiveRoom) {
+    if let Err(error) = store.forget_live_room(&room.id) {
+        log::warn!("A live room that knows its meeting was deleted stays kept: {error:?}");
+    }
 }
 
 /// Hand the room states until it has the last one: the meeting's, or with
@@ -162,7 +207,7 @@ async fn feed(meeting: Arc<SharedMeeting>, room: Room) {
 async fn deliver(
     meeting: Option<&Arc<SharedMeeting>>,
     watch: &DeleteWatch,
-    room: &Room,
+    room: &LiveRoom,
     fed: &mut Fed,
 ) -> bool {
     let mut retry = FIRST_RETRY;
@@ -180,22 +225,38 @@ async fn deliver(
             }
             Err(error) => log::debug!("The live room could not be reached: {error}"),
         }
-        if meeting.is_none_or(|meeting| meeting.live().share_phase() != SharePhase::Live) {
-            let since = *over_since.get_or_insert_with(std::time::Instant::now);
-            if since.elapsed() > FINAL_TRIES_FOR {
-                log::warn!("The live room never got the meeting's last state");
-                return false;
-            }
+        let phase = meeting.map_or(SharePhase::Withdrawn, |meeting| meeting.live().share_phase());
+        if !tries_again(phase, &mut over_since, room) {
+            log::warn!("The live room never got the meeting's last state");
+            return false;
         }
         tokio::time::sleep(retry).await;
         retry = (retry * 2).min(LAST_RETRY);
     }
 }
 
+/// Whether to try the room again: always during the call, for
+/// [`FINAL_TRIES_FOR`] once the call's last state first failed to go out,
+/// and until the room expires once the meeting is deleted, so a delete made
+/// offline still empties the room when the Mac is back online.
+fn tries_again(
+    phase: SharePhase,
+    over_since: &mut Option<std::time::Instant>,
+    room: &LiveRoom,
+) -> bool {
+    match phase {
+        SharePhase::Live => true,
+        SharePhase::Closing | SharePhase::Ended => {
+            over_since.get_or_insert_with(std::time::Instant::now).elapsed() <= FINAL_TRIES_FOR
+        }
+        SharePhase::Withdrawn => utc_now_ms() < room.expires_at_utc_ms,
+    }
+}
+
 async fn serve<S>(
     meeting: Option<&Arc<SharedMeeting>>,
     watch: &DeleteWatch,
-    room: &Room,
+    room: &LiveRoom,
     fed: &mut Fed,
     socket: S,
 ) -> Served
@@ -216,13 +277,14 @@ where
                 };
                 let sent = fed.sent.as_ref().map(|(sent, was_last)| (sent.as_slice(), *was_last));
                 if sent != Some((state.as_slice(), last)) {
-                    let Ok(frame) = state_frame(room, fed.seq + 1, &state, last) else {
+                    let seq = if meeting.is_some() { fed.seq + 1 } else { DELETED_SEQ };
+                    let Ok(frame) = state_frame(room, seq, &state, last) else {
                         return Served::Over;
                     };
                     if sink.send(Message::text(frame)).await.is_err() {
                         return Served::Dropped;
                     }
-                    fed.seq += 1;
+                    fed.seq = seq;
                     fed.sent = Some((state, last));
                 }
                 if last {
@@ -296,7 +358,7 @@ struct Incoming {
 }
 
 fn state_frame(
-    room: &Room,
+    room: &LiveRoom,
     seq: u64,
     state: &[u8],
     last: bool,
@@ -315,7 +377,7 @@ fn state_frame(
 
 /// A teammate's edit from the room, opened and applied. Anything else the
 /// room says, or an edit that does not open, is let go.
-async fn hear(meeting: &Arc<SharedMeeting>, room: &Room, text: &str) {
+async fn hear(meeting: &Arc<SharedMeeting>, room: &LiveRoom, text: &str) {
     let Ok(Incoming {
         kind,
         seq: Some(seq),
@@ -337,5 +399,125 @@ async fn hear(meeting: &Arc<SharedMeeting>, room: &Room, text: &str) {
     let applying = Arc::clone(meeting);
     if let Err(error) = tauri::async_runtime::spawn_blocking(move || applying.apply(&edit)).await {
         log::warn!("A live room edit could not be applied: {error}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::meeting::store::workflow_core_tests;
+    use crate::meeting::types::{DeletionCause, MeetingOperationId};
+    use tokio::net::TcpListener;
+
+    /// A room an earlier launch made for the meeting, fed through a local
+    /// socket that stands in for the companion.
+    fn kept_room(store: &MeetingStore, session_id: MeetingSessionId, listener: &TcpListener) -> LiveRoom {
+        let room = LiveRoom {
+            id: "harbor-room".to_owned(),
+            socket: format!(
+                "ws://{}/v1/live/harbor-room/socket?t=host",
+                listener.local_addr().unwrap()
+            ),
+            frame_key: Zeroizing::new([7; 32]),
+            expires_at_utc_ms: utc_now_ms() + 60_000,
+        };
+        store.keep_live_room(session_id, &room).unwrap();
+        room
+    }
+
+    /// The first state the room is sent, opened: its count, whether it is
+    /// the last, and what it says.
+    async fn first_state(listener: &TcpListener, room: &LiveRoom) -> (u64, bool, Vec<u8>) {
+        let (socket, _) = tokio::time::timeout(Duration::from_secs(10), listener.accept())
+            .await
+            .expect("the room is fed")
+            .unwrap();
+        let mut socket = tokio_tungstenite::accept_async(socket).await.unwrap();
+        let Some(Ok(Message::Text(text))) = socket.next().await else {
+            panic!("the room is sent a state first");
+        };
+        while socket.next().await.is_some() {}
+        let frame: serde_json::Value = serde_json::from_str(text.as_str()).unwrap();
+        let seq = frame["seq"].as_u64().unwrap();
+        let sealed = base64_url_decode(frame["box"].as_str().unwrap()).unwrap();
+        (
+            seq,
+            frame["final"].as_bool().unwrap(),
+            open_live_frame(&room.frame_key, &room.id, "state", seq, &sealed).unwrap(),
+        )
+    }
+
+    async fn assert_rooms_let_go(store: &MeetingStore) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while !store.kept_live_rooms(utc_now_ms()).unwrap().is_empty() {
+            assert!(tokio::time::Instant::now() < deadline, "the emptied room stays kept");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    #[test]
+    fn deleting_a_meeting_shared_in_an_earlier_launch_empties_its_room() {
+        let (_directory, store) = workflow_core_tests::store();
+        let session_id =
+            workflow_core_tests::reviewable_meeting(&store, "Harbor map sync", utc_now_ms());
+        tauri::async_runtime::block_on(async {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let room = kept_room(&store, session_id, &listener);
+            let rooms = SharedRooms::default();
+            rewatch(&store, &rooms).unwrap();
+            rooms.withdraw(session_id);
+            assert_eq!(
+                first_state(&listener, &room).await,
+                (9_007_199_254_740_991, true, REMOVED.to_vec())
+            );
+            assert_rooms_let_go(&store).await;
+        });
+    }
+
+    #[test]
+    fn a_meeting_deleted_while_no_launch_watched_has_its_room_emptied_at_the_next() {
+        let (_directory, store) = workflow_core_tests::store();
+        let session_id =
+            workflow_core_tests::reviewable_meeting(&store, "Harbor map sync", utc_now_ms());
+        tauri::async_runtime::block_on(async {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let room = kept_room(&store, session_id, &listener);
+            let revision = store.session_snapshot(session_id).unwrap().revision;
+            store
+                .reserve_deletion(
+                    MeetingOperationId::new(),
+                    utc_now_ms(),
+                    session_id,
+                    revision,
+                    DeletionCause::User,
+                )
+                .unwrap();
+            rewatch(&store, &SharedRooms::default()).unwrap();
+            assert_eq!(
+                first_state(&listener, &room).await,
+                (9_007_199_254_740_991, true, REMOVED.to_vec())
+            );
+            assert_rooms_let_go(&store).await;
+        });
+    }
+
+    #[test]
+    fn a_meeting_deleted_offline_keeps_trying_its_room_until_the_room_expires() {
+        let room = LiveRoom {
+            id: "harbor-room".to_owned(),
+            socket: String::new(),
+            frame_key: Zeroizing::new([7; 32]),
+            expires_at_utc_ms: utc_now_ms() + 60_000,
+        };
+        let failing_since = std::time::Instant::now()
+            .checked_sub(FINAL_TRIES_FOR + Duration::from_secs(1))
+            .unwrap();
+        assert!(!tries_again(SharePhase::Ended, &mut Some(failing_since), &room));
+        assert!(tries_again(SharePhase::Withdrawn, &mut Some(failing_since), &room));
+        let expired = LiveRoom {
+            expires_at_utc_ms: utc_now_ms() - 1,
+            ..room
+        };
+        assert!(!tries_again(SharePhase::Withdrawn, &mut None, &expired));
     }
 }

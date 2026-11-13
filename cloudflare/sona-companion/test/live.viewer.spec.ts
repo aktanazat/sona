@@ -661,7 +661,7 @@ describe("live doc page", () => {
     expect(localStorage.getItem("sona-live-name")).toBeNull();
   });
 
-  it("empties the page once the host deletes the meeting", async () => {
+  it("empties the page once the host deletes the meeting, even from a later launch", async () => {
     showLivePage(`/l/${ROOM}#v=1&k=${ROOT}`);
     await import("../public/viewer.js?live-removed-test");
     await vi.waitFor(() => expect(FakeSocket.made).toHaveLength(1));
@@ -681,7 +681,9 @@ describe("live doc page", () => {
       ),
     );
 
-    socket.receive(await stateFrame(2, { v: 1, removed: true }, true));
+    socket.receive(
+      await stateFrame(Number.MAX_SAFE_INTEGER, { v: 1, removed: true }, true),
+    );
     await vi.waitFor(() =>
       expect(byId("live-status").textContent).toBe(
         "The host removed this doc.",
