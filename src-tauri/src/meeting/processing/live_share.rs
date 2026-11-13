@@ -4,9 +4,10 @@
 
 use super::live_changes::{self, Author};
 use super::{live_doc, LiveTranscript, MeetingProcessingService};
+use crate::meeting::analytics::MeetingProvisionalSegment;
 use crate::meeting::live_doc_types::{MeetingLiveChange, MeetingLiveTarget};
 use crate::meeting::store::MeetingStore;
-use crate::meeting::types::{MeetingSessionId, SourceKind};
+use crate::meeting::types::{MeetingSessionId, SourceKind, SourceTrackId};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -23,6 +24,8 @@ const MAX_NAME_CHARS: usize = 40;
 /// Names that would pass a teammate's change off as the call's own.
 const RESERVED_NAMES: [&str; 3] = ["Sona", "Host", "You"];
 const EDIT_ID_CHARS: std::ops::RangeInclusive<usize> = 16..=64;
+/// Most words half a second of speech holds.
+const REPEATED_WORDS: usize = 4;
 /// What teammates see once the meeting was deleted.
 pub(crate) const REMOVED: &[u8] = br#"{"v":1,"removed":true}"#;
 
@@ -187,6 +190,65 @@ struct Line {
     text: String,
 }
 
+/// The transcript as sentences. The live pass cuts its audio every three
+/// seconds to guess a speaker, and again where a reading ends; it reads each
+/// piece on its own, so the page showed tails like "fixture." or "about the
+/// births." as lines of their own, often punctuated as sentences and under
+/// another speaker guess. A pause always ends a piece, so a piece that starts
+/// before the one before it on the same track stopped is the rest of it,
+/// even when the other track spoke in between.
+fn joined(segments: impl Iterator<Item = MeetingProvisionalSegment>) -> Vec<Line> {
+    let mut lines: Vec<Line> = Vec::new();
+    let mut open: HashMap<SourceTrackId, (usize, u64)> = HashMap::new();
+    for segment in segments {
+        let piece = segment.text.trim();
+        let index = match open.get(&segment.track_id) {
+            Some(&(index, end)) if segment.start_offset_ns <= end => {
+                let line = &mut lines[index];
+                let rest = unrepeated(&line.text, piece);
+                if !rest.is_empty() {
+                    if rest.chars().next().is_some_and(char::is_lowercase) && line.text.ends_with('.') {
+                        line.text.pop();
+                    }
+                    line.text.push(' ');
+                    line.text.push_str(rest);
+                }
+                index
+            }
+            _ => {
+                lines.push(Line {
+                    said_ns: segment.start_offset_ns,
+                    who: match segment.source_kind {
+                        SourceKind::Microphone => "You",
+                        _ => "Call",
+                    },
+                    text: piece.to_string(),
+                });
+                lines.len() - 1
+            }
+        };
+        open.insert(segment.track_id, (index, segment.end_offset_ns));
+    }
+    lines
+}
+
+/// `piece` without the words it repeats from the end of `line`: a cut keeps
+/// its last half second for the next piece, and a speaker window can split
+/// a word that both sides then read, so a joined line read "to the to the"
+/// and "the LED. LED fixtures".
+fn unrepeated<'a>(line: &str, piece: &'a str) -> &'a str {
+    let bare = |word: &str| word.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase();
+    let tail: Vec<String> = line.split_whitespace().map(bare).collect();
+    for count in (1..=REPEATED_WORDS.min(tail.len())).rev() {
+        let mut words = piece.splitn(count + 1, ' ');
+        let head: Vec<String> = words.by_ref().take(count).map(bare).collect();
+        if head == tail[tail.len() - count..] {
+            return words.next().unwrap_or_default().trim_start();
+        }
+    }
+    piece
+}
+
 /// A teammate's edit, as their browser sends it sealed: new words for a
 /// point or a card, a new point when `target_id` is `None`, or the point
 /// gone when the words are blank.
@@ -279,24 +341,16 @@ impl SharedMeeting {
                     edited: promise.edited,
                 })
                 .collect(),
-            lines: self
-                .live
-                .snapshot(self.session_id)
-                .segments
-                .into_iter()
-                .filter(|segment| {
-                    segment.source_kind != SourceKind::Microphone
-                        || live_doc::voice_ask(&segment.text).is_none()
-                })
-                .map(|segment| Line {
-                    said_ns: segment.start_offset_ns,
-                    who: match segment.source_kind {
-                        SourceKind::Microphone => "You",
-                        _ => "Call",
-                    },
-                    text: segment.text,
-                })
-                .collect(),
+            lines: joined(
+                self.live
+                    .snapshot(self.session_id)
+                    .segments
+                    .into_iter()
+                    .filter(|segment| {
+                        segment.source_kind != SourceKind::Microphone
+                            || live_doc::voice_ask(&segment.text).is_none()
+                    }),
+            ),
             changes: self.live.live_changes(),
         };
         loop {

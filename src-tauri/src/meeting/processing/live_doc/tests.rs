@@ -1,4 +1,4 @@
-use super::super::live_share::SharedMeeting;
+use super::super::live_share::{SharePhase, SharedMeeting};
 use super::super::ReplyShape;
 use super::*;
 use crate::meeting::analytics::MeetingProvisionalSpeaker;
@@ -361,4 +361,57 @@ fn a_teammate_cannot_edit_under_the_calls_own_names() {
     }
     assert!(live.doc_points().is_empty());
     assert!(store.live_changes(session_id).unwrap().is_empty());
+}
+
+#[test]
+fn the_page_shows_a_sentence_cut_in_two_as_one_line() {
+    let (_directory, _store, _session_id, live, shared) = shared_meeting();
+    let (microphone, call) = (SourceTrackId::new(), SourceTrackId::new());
+    let first = MeetingProvisionalSpeaker::Cluster { index: 0 };
+    let unknown = MeetingProvisionalSpeaker::Unknown;
+    for (track, kind, speaker, start_ms, end_ms, text) in [
+        (microphone, SourceKind::Microphone, first, 20_000, 23_000, "We should ask the supplier for a cheaper"),
+        (call, SourceKind::SystemAudio, unknown, 21_000, 22_000, "Mm-hmm."),
+        (microphone, SourceKind::Microphone, unknown, 23_000, 25_000, "cheaper fixture."),
+        (microphone, SourceKind::Microphone, first, 30_000, 33_000, "Then the public launch moves to March 14."),
+        (microphone, SourceKind::Microphone, unknown, 33_000, 34_500, "Instead of March 1st."),
+        (microphone, SourceKind::Microphone, first, 36_000, 39_000, "Let's decide next week, once the council answers."),
+        (microphone, SourceKind::Microphone, first, 38_500, 40_000, "council answers about the berths."),
+        (microphone, SourceKind::Microphone, first, 40_500, 42_000, "Let's move on"),
+        (microphone, SourceKind::Microphone, first, 50_000, 53_000, "Okay, next item is the pier lighting."),
+        (microphone, SourceKind::Microphone, first, 60_000, 63_000, "So the lighting budget is"),
+        (call, SourceKind::SystemAudio, unknown, 63_000, 65_000, "Council meets late."),
+        (call, SourceKind::SystemAudio, unknown, 66_000, 67_000, "Agreed."),
+    ] {
+        live.append(LiveSegment {
+            speaker,
+            start_offset_ns: start_ms * 1_000_000,
+            end_offset_ns: end_ms * 1_000_000,
+            ..line(track, kind, 0, text)
+        });
+    }
+
+    let state: serde_json::Value = serde_json::from_slice(&shared.state(SharePhase::Live).unwrap()).unwrap();
+    let lines: Vec<(&str, &str)> = state["lines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|line| (line["who"].as_str().unwrap(), line["text"].as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        lines,
+        [
+            ("You", "The launch moves to March 14."),
+            ("You", "We should ask the supplier for a cheaper fixture."),
+            ("Call", "Mm-hmm."),
+            ("You", "Then the public launch moves to March 14. Instead of March 1st."),
+            ("You", "Let's decide next week, once the council answers about the berths."),
+            ("You", "Let's move on"),
+            ("You", "Okay, next item is the pier lighting."),
+            ("You", "So the lighting budget is"),
+            ("Call", "Council meets late."),
+            ("Call", "Agreed."),
+        ],
+        "a piece joins the line it runs on from, whatever its punctuation or speaker guess, and never across a pause or another track"
+    );
 }
