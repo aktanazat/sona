@@ -18,13 +18,16 @@ struct TaskDetailView: View {
             WorkBar {
                 BackLink(title: back) { close() }
                 if let row {
+                    if let parent = parent(of: row, detail: detail) {
+                        ParentLink(parent: parent, place: place)
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(Theme.inkTertiary)
+                    }
                     Text("#\(row.number)")
                         .font(TypeScale.mono(12))
                         .foregroundStyle(Theme.inkTertiary)
                         .textSelection(.enabled)
-                    if let parent = parent(of: row, detail: detail) {
-                        ParentLink(parent: parent, place: place)
-                    }
                 }
             } trailing: {
                 if let row {
@@ -1404,9 +1407,6 @@ private struct ParentLink: View {
             model.workFocus.open(parent.id, in: place)
         } label: {
             HStack(spacing: 6) {
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(Theme.inkTertiary)
                 TaskStatusIcon(status: parent.status)
                 Text("#\(parent.number)").font(TypeScale.mono(12)).foregroundStyle(Theme.inkTertiary)
                 Text(parent.title).bodyText(13, hovering ? Theme.ink : Theme.inkSecondary).lineLimit(1)
