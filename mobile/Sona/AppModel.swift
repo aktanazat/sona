@@ -177,7 +177,7 @@ final class AppModel: NSObject, ObservableObject {
             startRecording()
         } else if DictationLink.opens(url) {
             keyboardDocumentID = DictationLink.keyboardDocument(url)
-            keyboardReturn = keyboardDocumentID != nil
+            keyboardReturn = DictationLink.fromKeyboard(url)
             guard !keyboardReturn || UserDefaults.standard.bool(forKey: DictationPreferences.keyboardKey) else { return }
             pendingURL = nil
             startDictation()

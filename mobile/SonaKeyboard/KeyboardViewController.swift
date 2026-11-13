@@ -109,6 +109,11 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private var textBefore: String { textDocumentProxy.documentContextBeforeInput ?? "" }
+    /// UIKit declares this nonnull, yet some fields hand over nil, and Swift's bridge to a
+    /// non-optional UUID traps on it. The same getter, declared optional, keeps nil as nil.
+    private var documentID: UUID? {
+        unsafeBitCast(textDocumentProxy as AnyObject, to: OptionalDocumentIdentifier.self).documentIdentifier
+    }
 
     /// Correction is off where the field asks for it, and in fields for passwords, numbers,
     /// addresses and links, where a dictionary word is rarely what was meant.
@@ -228,7 +233,7 @@ final class KeyboardViewController: UIInputViewController {
     private func reload() {
         guard visible else { return }
         state.hasFullAccess = hasFullAccess
-        state.startURL = DictationLink.keyboardURL(documentID: textDocumentProxy.documentIdentifier)
+        state.startURL = DictationLink.keyboardURL(documentID: documentID)
         guard hasFullAccess else {
             state.draft = nil
             state.session = KeyboardSessionState()
@@ -251,7 +256,7 @@ final class KeyboardViewController: UIInputViewController {
             case .waiting(let draft):
                 state.draft = draft
                 // Never send a delayed result to a different text field or app.
-                if draft.documentID == textDocumentProxy.documentIdentifier { insertDraft() }
+                if let documentID, draft.documentID == documentID { insertDraft() }
             case .expired:
                 state.draft = nil
                 state.notice = KeyboardDraftError.expired.localizedDescription
@@ -271,7 +276,7 @@ final class KeyboardViewController: UIInputViewController {
         do {
             try KeyboardSessionStore.shared().send(KeyboardCommand(
                 id: UUID(), action: .start, requestID: id,
-                documentID: textDocumentProxy.documentIdentifier, createdAt: Date()
+                documentID: documentID, createdAt: Date()
             ))
         } catch { state.waiting = false; state.notice = error.localizedDescription }
     }
@@ -281,7 +286,7 @@ final class KeyboardViewController: UIInputViewController {
         do {
             try KeyboardSessionStore.shared().send(KeyboardCommand(
                 id: UUID(), action: action, requestID: id,
-                documentID: textDocumentProxy.documentIdentifier, createdAt: Date()
+                documentID: documentID, createdAt: Date()
             ))
         } catch { state.notice = error.localizedDescription }
     }
@@ -452,4 +457,9 @@ private struct SonaMark: View {
             )
         }
     }
+}
+
+/// UITextDocumentProxy's own `documentIdentifier` getter with the nullability it has in practice.
+@objc private protocol OptionalDocumentIdentifier {
+    var documentIdentifier: UUID? { get }
 }
