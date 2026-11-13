@@ -364,6 +364,68 @@ fn a_teammate_cannot_edit_under_the_calls_own_names() {
 }
 
 #[test]
+fn a_moved_date_replaces_the_point_it_moves_instead_of_adding_a_second() {
+    let (_directory, store) = workflow_core_tests::store();
+    let session_id =
+        workflow_core_tests::reviewable_meeting(&store, "Harbor map sync", Local::now().timestamp_millis());
+    let (microphone, _call) = workflow_core_tests::recording_tracks(&store, session_id);
+    let engine = Arc::new(Scripted::default());
+    engine.replies.lock().unwrap().extend([
+        r#"{"add":[{"text":"The harbour map launch is set for March 14","lines":["L1"]}],"rewrite":[]}"#,
+        r#"{"add":[{"text":"The ferry timetable change goes out with the harbour map","lines":["L2"]},{"text":"The public launch of the harbour map is now set for March 21","lines":["L1"]}],"rewrite":[{"point":"P1","text":"The harbour map launch is confirmed for March 21","lines":["L1"]}]}"#,
+        r#"{"add":[{"text":"The public launch of the harbour map moves to March 25","lines":["L1"]}],"rewrite":[{"point":"P1","text":"The harbour map launch is set for March 25","lines":["L1"]}]}"#,
+        r#"{"add":[{"text":"The public launch of the harbour map moves to March 28","lines":["L1"]}],"rewrite":[{"point":"P1","text":"The harbour map launch is confirmed for March 28","lines":["L1"]}]}"#,
+    ]);
+    engine.dropped.lock().unwrap().extend([
+        "The harbour map launch is confirmed for March 21",
+        "The harbour map launch is confirmed for March 28",
+    ]);
+    let service = MeetingProcessingService::new(None);
+    service.set_text_generators(engine.clone(), engine.clone());
+    let live = LiveTranscript::new();
+    assert!(live.start_doc());
+
+    live.append(line(microphone, SourceKind::Microphone, 57, "The public launch of the harbour map moves to March 14."));
+    service.read_live_doc_now(&store, session_id, &live);
+    let launch = live.doc_points()[0].id.clone();
+    live.append(line(microphone, SourceKind::Microphone, 163, "The public launch of the harbour map moves again to March 21."));
+    live.append(line(microphone, SourceKind::Microphone, 170, "Does the ferry timetable change go out with the harbour map?"));
+    service.read_live_doc_now(&store, session_id, &live);
+
+    let points: Vec<(String, String)> = live.doc_points().into_iter().map(|point| (point.id, point.text)).collect();
+    let texts: Vec<&str> = points.iter().map(|(_, text)| text.as_str()).collect();
+    assert_eq!(
+        texts,
+        ["The public launch of the harbour map is now set for March 21", "The ferry timetable change goes out with the harbour map"],
+        "the doc never holds both dates, and an add that only shares the map's name stays its own point"
+    );
+    assert_eq!(points[0].0, launch, "the new date replaces the launch point rather than adding one");
+
+    live.append(line(microphone, SourceKind::Microphone, 200, "The launch slips once more, to March 25."));
+    service.read_live_doc_now(&store, session_id, &live);
+    let texts: Vec<String> = live.doc_points().into_iter().map(|point| point.text).collect();
+    assert_eq!(
+        texts,
+        ["The harbour map launch is set for March 25", "The ferry timetable change goes out with the harbour map"],
+        "an add that repeats a rewrite the check kept goes"
+    );
+
+    live.edit_doc(&Author::Owner, Some(&launch), "Launch March 25, pending the council").unwrap();
+    live.append(line(microphone, SourceKind::Microphone, 240, "The council wants another week, so the launch moves to March 28."));
+    service.read_live_doc_now(&store, session_id, &live);
+    let texts: Vec<String> = live.doc_points().into_iter().map(|point| point.text).collect();
+    assert_eq!(
+        texts,
+        [
+            "Launch March 25, pending the council",
+            "The ferry timetable change goes out with the harbour map",
+            "The public launch of the harbour map moves to March 28",
+        ],
+        "a point the user wrote stays theirs, and the new date still lands"
+    );
+}
+
+#[test]
 fn the_page_shows_a_sentence_cut_in_two_as_one_line() {
     let (_directory, _store, _session_id, live, shared) = shared_meeting();
     let (microphone, call) = (SourceTrackId::new(), SourceTrackId::new());

@@ -124,10 +124,12 @@ struct Written {
 }
 
 /// A written point whose lines and words checked out: the point it
-/// rewrites, if any, its text, the lines it cites, and when the first of
-/// them was said.
+/// rewrites, if any, the point it replaces when it is an add that says what
+/// a dropped rewrite said, its text, the lines it cites, and when the first
+/// of them was said.
 struct Candidate<'a> {
     rewrites: Option<&'a Known>,
+    replaces: Option<&'a Known>,
     text: String,
     cited: Vec<&'a Given>,
     first_said: u64,
@@ -439,7 +441,12 @@ fn read(
             Asked::Unanswered => Vec::new(),
             Asked::NotAsked => break,
         };
-        let kept = check(generator.as_ref(), live, candidates(written, &request));
+        let candidates = candidates(written, &request);
+        let rewrites: Vec<(&Known, String)> = candidates
+            .iter()
+            .filter_map(|candidate| candidate.rewrites.map(|known| (known, candidate.text.clone())))
+            .collect();
+        let kept = folded(check(generator.as_ref(), live, candidates), rewrites);
         let mut doc = live.doc();
         doc.read = doc.read.max(request.through);
         let landed = merge(&mut doc.points, kept);
@@ -801,12 +808,55 @@ fn candidates(written: Vec<Written>, request: &Request) -> Vec<Candidate<'_>> {
             };
             Some(Candidate {
                 rewrites,
+                replaces: None,
                 text,
                 cited,
                 first_said,
             })
         })
         .collect()
+}
+
+/// One change, not two: a reading may rewrite a point and also add what the
+/// rewrite says. Apple's model, told the harbour map launch moved again to
+/// March 21, rewrote the launch point and also added "The public launch of
+/// the harbour map is now set for March 21"; the check dropped the rewrite,
+/// kept the add, and the doc held both dates. An add that says what a kept
+/// rewrite says goes, and one that says what a dropped rewrite said
+/// replaces that point.
+fn folded<'a>(mut kept: Vec<Candidate<'a>>, rewrites: Vec<(&'a Known, String)>) -> Vec<Candidate<'a>> {
+    let rewritten: Vec<String> =
+        kept.iter().filter(|candidate| candidate.rewrites.is_some()).map(|candidate| candidate.text.clone()).collect();
+    kept.retain(|candidate| {
+        candidate.rewrites.is_some() || !rewritten.iter().any(|said| says_the_same(said, &candidate.text))
+    });
+    let mut dropped: Vec<(&Known, String)> = rewrites
+        .into_iter()
+        .filter(|(known, _)| {
+            !kept
+                .iter()
+                .any(|candidate| candidate.rewrites.is_some_and(|kept| kept.id == known.id))
+        })
+        .collect();
+    for add in kept.iter_mut().filter(|candidate| candidate.rewrites.is_none()) {
+        if let Some(position) = dropped.iter().position(|(_, said)| says_the_same(said, &add.text)) {
+            add.replaces = Some(dropped.swap_remove(position).0);
+        }
+    }
+    kept
+}
+
+/// Whether `other` says what `said` says: it has at least two of the words
+/// of five letters or more in `said`, and at least half of them. "The
+/// ferry timetable change goes out with the harbour map" shares only
+/// "harbour" with "The harbour map launch is confirmed for March 21".
+fn says_the_same(said: &str, other: &str) -> bool {
+    let mut long: Vec<String> = words(said).map(|(word, _)| word).filter(|word| word.chars().count() >= 5).collect();
+    long.sort();
+    long.dedup();
+    let other: Vec<String> = words(other).map(|(word, _)| word).collect();
+    let shared = long.iter().filter(|word| other.iter().any(|heard| related(heard, word))).count();
+    shared >= 2 && shared * 2 >= long.len()
 }
 
 /// `text` without a leading label such as "P2: ", which local models put
@@ -905,15 +955,30 @@ fn kept_notes(
 
 /// Fold a reading's kept points into the doc. A point must say something
 /// the doc does not already say; a rewrite must name a point the user has
-/// not touched or removed since the reading was asked. Returns what landed.
+/// not touched or removed since the reading was asked. An add that replaces
+/// a point the user touched or removed meanwhile lands as a new point, so
+/// the news it carries is kept. Returns what landed.
 fn merge(points: &mut Vec<MeetingLiveDocPoint>, kept: Vec<Candidate<'_>>) -> Vec<Edited> {
     let mut landed = Vec::new();
     for candidate in kept {
         if points.iter().any(|point| fold(&point.text) == fold(&candidate.text)) {
             continue;
         }
-        match candidate.rewrites {
-            None if points.len() < MAX_POINTS => {
+        let target = candidate
+            .rewrites
+            .or(candidate.replaces)
+            .and_then(|known| points.iter().position(|point| point.id == known.id && !point.edited));
+        match target {
+            Some(index) => {
+                let point = &mut points[index];
+                landed.push(Edited {
+                    point_id: point.id.clone(),
+                    kind: MeetingLiveChangeKind::Rewrote,
+                    text: candidate.text.clone(),
+                });
+                point.text = candidate.text;
+            }
+            None if candidate.rewrites.is_none() && points.len() < MAX_POINTS => {
                 let id = Uuid::new_v4().to_string();
                 landed.push(Edited {
                     point_id: id.clone(),
@@ -928,16 +993,6 @@ fn merge(points: &mut Vec<MeetingLiveDocPoint>, kept: Vec<Candidate<'_>>) -> Vec
                 });
             }
             None => {}
-            Some(known) => {
-                if let Some(point) = points.iter_mut().find(|point| point.id == known.id && !point.edited) {
-                    landed.push(Edited {
-                        point_id: point.id.clone(),
-                        kind: MeetingLiveChangeKind::Rewrote,
-                        text: candidate.text.clone(),
-                    });
-                    point.text = candidate.text;
-                }
-            }
         }
     }
     landed

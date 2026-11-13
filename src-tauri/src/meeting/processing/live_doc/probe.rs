@@ -138,7 +138,8 @@ const SMALL_TALK: &[(u64, Who, &str)] = &[
 ];
 
 /// The harbor map call as the scratch app heard it from the display's
-/// speaker: room noise heard as one word before anyone spoke.
+/// speaker: room noise heard as one word before anyone spoke, and the
+/// launch date moved twice.
 const HARBOR: &[(u64, Who, &str)] = &[
     (8, Who::Me, "California."),
     (40, Who::Me, "Yeah."),
@@ -148,6 +149,15 @@ const HARBOR: &[(u64, Who, &str)] = &[
     (53, Who::Me, "Dot B has to wait until the crane is moved off the pier."),
     (57, Who::Me, "Then the public launch of the harbour map moves to March 14 instead of March 1."),
     (64, Who::Me, "Agreed."),
+    (71, Who::Me, "I will send the revised timeline to the city council by Friday."),
+    (124, Who::Me, "Good, the other open item is the pier lighting, the LED fixtures came in at $40,000, which is over budget."),
+    (131, Who::Me, "We decided last month to cap lighting at 30,000, so we should ask the supplier for a cheaper"),
+    (145, Who::Me, "fixture."),
+    (148, Who::Me, "One question is still open, does the ferry timetable change go out with the map, or a week after it?"),
+    (156, Who::Me, "Let's decide that next week, once the council answers"),
+    (159, Who::Me, "about the births."),
+    (163, Who::Me, "One more change: the public launch of the harbour map moves again to March 21 because the country is a market."),
+    (169, Who::Me, "Council meets late."),
 ];
 
 #[ignore = "replays short calls with the meeting engine SONA_PROBE_ENGINE names"]
@@ -196,7 +206,10 @@ fn live_doc_replay_probe() {
         for point in doc.points.iter().skip(kept) {
             println!("  stop    • {}", point.text);
         }
-        println!("  {} points from {} readings", doc.points.len(), doc.model_requests);
+        println!("  {} points from {} readings; the doc at the stop:", doc.points.len(), doc.model_requests);
+        for point in &doc.points {
+            println!("    • {}", point.text);
+        }
     }
 }
 
