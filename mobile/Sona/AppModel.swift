@@ -679,16 +679,23 @@ final class AppModel: NSObject, ObservableObject {
     /// through a failed sync; only the status line says the vault was out of reach.
     func refreshBoard() async {
         guard isPaired, boardState != .syncing else { return }
-        if let current = await reader.current() { dictation.profile = current.dictationProfile ?? .empty }
+        if let current = await reader.current() { adopt(current.dictationProfile ?? .empty) }
         boardState = .syncing
         if board == nil { board = await reader.current() }
         do {
             board = try await reader.sync()
-            dictation.profile = board?.dictationProfile ?? .empty
+            adopt(board?.dictationProfile ?? .empty)
             boardState = .idle
         } catch {
             boardState = .offline
         }
+    }
+
+    /// The keyboard keeps the vocabulary's written forms as typed, so they reach the app
+    /// group whenever the profile arrives from the Mac.
+    private func adopt(_ profile: DictationProfile) {
+        dictation.profile = profile
+        try? KeyboardVocabularyStore.shared().save(profile)
     }
 
     /// Remove a thought and every card written about it, from the vault and the board.
