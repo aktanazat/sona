@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 
 @MainActor
@@ -52,18 +53,45 @@ struct TypingCorrectorTests {
 
 @MainActor
 struct TypingSessionTests {
-    @Test("backspace right after a correction puts the typed word back, and that word is not corrected again")
-    func undoCorrection() throws {
+    @Test(
+        "backspace right after a correction puts the typed word back, and that word is not corrected again",
+        arguments: [("see you tomorow", "see you tomorrow ", "tomorow"), ("so i", "so I ", "i")]
+    )
+    func undoCorrection(typed: String, corrected: String, word: String) throws {
         var session = TypingSession(corrector: try #require(TypingCorrector(language: "en-US")))
-        var text = "see you tomorow"
+        var text = typed
         text.apply(session.end(with: " ", before: text, corrects: true))
-        #expect(text == "see you tomorrow ")
+        #expect(text == corrected)
         text.apply(session.backspace(before: text))
-        #expect(text == "see you tomorow")
+        #expect(text == typed)
         text.apply(session.end(with: " ", before: text, corrects: true))
-        text += "or tomorow"
+        text += "or " + word
         text.apply(session.end(with: ".", before: text, corrects: true))
-        #expect(text == "see you tomorow or tomorow.")
+        #expect(text == typed + " or " + word + ".")
+    }
+
+    @Test("once the cursor moves, backspace and a second space do only their plain job")
+    func movedCursor() throws {
+        var session = TypingSession(corrector: try #require(TypingCorrector(language: "en-US")))
+        _ = session.end(with: " ", before: "see you tomorow", corrects: true)
+        var elsewhere = "I said tomorrow "
+        elsewhere.apply(session.backspace(before: elsewhere))
+        #expect(elsewhere == "I said tomorrow")
+        _ = session.end(with: " ", before: "hello", corrects: true)
+        var otherField = "say "
+        otherField.apply(session.end(with: " ", before: otherField, corrects: true))
+        #expect(otherField == "say  ")
+    }
+
+    @Test("two shift taps within 0.35 seconds lock caps, but not with a letter typed between them")
+    func shiftLock() {
+        var session = TypingSession(corrector: nil)
+        let start = Date()
+        let first = session.tapShift(at: start)
+        _ = session.type("u")
+        let afterLetter = session.tapShift(at: start.addingTimeInterval(0.3))
+        let quickSecond = session.tapShift(at: start.addingTimeInterval(0.5))
+        #expect([first, afterLetter, quickSecond] == [false, false, true])
     }
 
     @Test("a second space after a word ends the sentence")

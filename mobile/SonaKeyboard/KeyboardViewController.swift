@@ -9,7 +9,14 @@ private final class KeyboardState: ObservableObject {
     @Published var session = KeyboardSessionState()
     @Published var startURL = DictationLink.url
     @Published var waiting = false
+    /// The message on show at the last key press. Any other message is new, and the word
+    /// strip gives way to it until the next key.
+    @Published var seenMessage: String?
     var warm: Bool { session.isWarm(at: Date()) }
+    var newMessage: String? {
+        guard hasFullAccess, let message = session.message ?? notice, message != seenMessage else { return nil }
+        return message
+    }
 }
 
 @MainActor
@@ -17,7 +24,6 @@ final class KeyboardViewController: UIInputViewController {
     private let state = KeyboardState()
     private let typing = TypingModel()
     private var session = TypingSession(corrector: nil)
-    private var lastShiftTap: Date?
     private var minimumHeight: NSLayoutConstraint?
     private var signal: KeyboardSignal?
     private var ticker: Task<Void, Never>?
@@ -118,6 +124,7 @@ final class KeyboardViewController: UIInputViewController {
     private func press(_ key: Key) {
         typing.hasTyped = true
         state.notice = nil
+        state.seenMessage = state.session.message
         switch key {
         case let .character(text):
             let character = typing.layer == .letters && typing.shift != .off ? text.uppercased() : text
@@ -167,13 +174,10 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private func toggleShift() {
-        let now = Date()
-        if let lastShiftTap, now.timeIntervalSince(lastShiftTap) < 0.35 {
+        if session.tapShift(at: Date()) {
             typing.shift = .locked
-            self.lastShiftTap = nil
         } else {
             typing.shift = typing.shift == .off ? .once : .off
-            lastShiftTap = now
         }
     }
 
@@ -212,7 +216,7 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private func refreshSuggestions() {
-        typing.suggestions = corrects ? session.suggestions(before: textBefore) : nil
+        typing.suggestions = corrects && cursorEndsWord ? session.suggestions(before: textBefore) : nil
     }
 
     private func loadVocabulary() {
@@ -342,10 +346,11 @@ private struct KeyboardView: View {
         .foregroundStyle(Theme.textPrimary).background(Theme.inset).tint(Theme.accent)
     }
 
-    /// The word strip while a word is being typed; otherwise what the keyboard has to say.
+    /// The word strip while a word is being typed, unless a message came after the last key;
+    /// otherwise what the keyboard has to say.
     @ViewBuilder
     private var status: some View {
-        if let suggestions = typing.suggestions {
+        if let suggestions = typing.suggestions, state.newMessage == nil {
             SuggestionStrip(suggestions: suggestions, choose: typing.choose)
         } else if !state.hasFullAccess, !typing.hasTyped {
             hint("keyboard.needsFullAccess")

@@ -211,6 +211,7 @@ private struct DeleteKey: View {
                 repeating?.cancel()
                 repeating = pressed ? repeatDelete() : nil
             }
+            .onDisappear { repeating?.cancel() }
             .accessibilityElement()
             .accessibilityLabel(Text("keyboard.delete"))
             .accessibilityAddTraits([.isButton, .isKeyboardKey])
