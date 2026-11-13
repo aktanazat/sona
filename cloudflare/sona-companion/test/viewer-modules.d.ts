@@ -44,3 +44,4 @@ declare module "*?live-late-test" {}
 declare module "*?live-unsent-test" {}
 declare module "*?live-reserved-test" {}
 declare module "*?live-removed-test" {}
+declare module "*?live-gone-test" {}

@@ -648,6 +648,9 @@ const LIVE_NAME_KEY = "sona-live-name";
 const LIVE_EDIT_WAIT_MS = 20_000;
 const LIVE_RETRY_LIMIT_MS = 30_000;
 const LIVE_UNREACHABLE_AFTER = 3;
+// The companion closes a socket with this once its room is gone
+// (`src/constants.ts`).
+const LIVE_ROOM_GONE = 4404;
 // The Mac core drops a teammate's edit past these bounds (`live_share.rs`,
 // `live_doc.rs`, `live_card.rs`).
 const MAX_LIVE_NAME_CHARS = 40;
@@ -1061,6 +1064,7 @@ function liveEditable(page) {
 
 function liveStatus(page) {
   if (page.state?.removed) return "The host removed this doc.";
+  if (page.gone) return "This link has expired.";
   if (page.ended) return "The call ended. This doc is read-only.";
   if (page.state !== null && !page.state.live)
     return "The call ended. Sona is finishing the doc.";
@@ -1352,7 +1356,7 @@ function renderLiveTimeline(page, closed) {
 
 function renderLive(page) {
   const { elements, state } = page;
-  const closed = page.ended || (state !== null && !state.live);
+  const closed = page.ended || page.gone || (state !== null && !state.live);
   const editable = liveEditable(page);
   const status = liveStatus(page);
   const title = state === null || state.title === "" ? "Live doc" : state.title;
@@ -1482,9 +1486,14 @@ function connectLive(page) {
   socket.addEventListener("message", (event) =>
     receiveLiveFrame(page, parseLiveFrame(event.data)),
   );
-  socket.addEventListener("close", () => {
+  socket.addEventListener("close", (event) => {
     page.open = false;
     page.hostPresent = null;
+    if (event.code === LIVE_ROOM_GONE) {
+      page.gone = true;
+      renderLive(page);
+      return;
+    }
     page.attempts += 1;
     const delay = Math.min(
       LIVE_RETRY_LIMIT_MS,
@@ -1592,6 +1601,7 @@ async function bootLive() {
     edits: new Map(),
     elements,
     ended: false,
+    gone: false,
     hostPresent: null,
     joinToken: secrets.joinToken,
     key: secrets.key,

@@ -25,6 +25,8 @@ const LAST_RETRY: Duration = Duration::from_secs(30);
 const FINAL_TRIES_FOR: Duration = Duration::from_secs(120);
 /// The close code a room gives a host socket another one replaced.
 const REPLACED: u16 = 4000;
+/// The close code a socket gets once its room is gone.
+const GONE: u16 = 4404;
 /// The frame count the deleted state goes under: the highest a page reads,
 /// so the room takes it over any state it holds, even one an earlier
 /// launch sent.
@@ -148,7 +150,8 @@ struct Fed {
 enum Served {
     /// The room has the last state.
     Delivered,
-    /// Another Mac feeds the room, or the state could not be made.
+    /// Another Mac feeds the room, the room is gone, or the state could
+    /// not be made.
     Over,
     Dropped,
 }
@@ -306,7 +309,7 @@ where
                     }
                 }
                 Some(Ok(Message::Close(frame))) => {
-                    if frame.is_some_and(|frame| u16::from(frame.code) == REPLACED) {
+                    if frame.is_some_and(|frame| matches!(u16::from(frame.code), REPLACED | GONE)) {
                         return Served::Over;
                     }
                     return Served::Dropped;

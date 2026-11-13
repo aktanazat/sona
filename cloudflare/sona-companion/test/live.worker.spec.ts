@@ -7,6 +7,7 @@ import {
 import { afterEach, describe, expect, it } from "vitest";
 
 import fixture from "../fixtures/crypto-v1.json";
+import { LIVE_ROOM_GONE } from "../src/constants";
 import {
   base64UrlDecode,
   base64UrlEncode,
@@ -121,6 +122,10 @@ async function connect(roomId: string, token: Uint8Array): Promise<Peer> {
   };
 }
 
+async function closeCode(roomId: string, token: Uint8Array): Promise<number> {
+  return (await connect(roomId, token)).closed;
+}
+
 function presence(host: boolean): string {
   return JSON.stringify({ type: "presence", host });
 }
@@ -164,7 +169,7 @@ describe("live rooms", () => {
     });
     expect(unsigned.status).toBe(401);
     expect((await createRoom(await makeDevice(), room)).status).toBe(401);
-    expect((await socketRequest(room.roomId, room.host)).status).toBe(404);
+    expect(await closeCode(room.roomId, room.host)).toBe(LIVE_ROOM_GONE);
 
     const device = await makeDevice();
     await bootstrap(device);
@@ -201,12 +206,12 @@ describe("live rooms", () => {
     expect(
       await runDurableObjectAlarm(env.LIVE_ROOMS.getByName(room.roomId)),
     ).toBe(true);
-    expect((await socketRequest(room.roomId, room.join)).status).toBe(404);
+    expect(await closeCode(room.roomId, room.join)).toBe(LIVE_ROOM_GONE);
 
     const replay = await createRoom(device, room, key);
     expect(replay.status).toBe(200);
     expect(await replay.text()).toBe(stored);
-    expect((await socketRequest(room.roomId, room.join)).status).toBe(404);
+    expect(await closeCode(room.roomId, room.join)).toBe(LIVE_ROOM_GONE);
   });
 
   it("opens the host and guest roles for the contract's test vector tokens", async () => {
@@ -236,7 +241,7 @@ describe("live rooms", () => {
     expect(await guest.next()).toBe(presence(true));
   });
 
-  it("refuses a token that matches neither verifier and an unknown room", async () => {
+  it("refuses a token that matches neither verifier and closes a socket to an unknown room as gone", async () => {
     const room = await liveRoom();
     for (const token of [
       randomBytes(32),
@@ -247,8 +252,7 @@ describe("live rooms", () => {
       expect(response.status).toBe(403);
       expect((await jsonBody(response)).code).toBe("unauthorized");
     }
-    const unknown = await socketRequest(testId("room"), room.join);
-    expect(unknown.status).toBe(404);
+    expect(await closeCode(testId("room"), room.join)).toBe(LIVE_ROOM_GONE);
   });
 
   it("gives a guest who connects later the presence, then the newest stored state", async () => {
