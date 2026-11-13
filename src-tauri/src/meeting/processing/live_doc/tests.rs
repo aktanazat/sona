@@ -162,15 +162,15 @@ fn a_reading_keeps_only_points_its_lines_say_that_pass_the_check() {
     let (microphone, call) = workflow_core_tests::recording_tracks(&store, session_id);
     let engine = Arc::new(Scripted::default());
     engine.replies.lock().unwrap().extend([
-        r#"{"add":[{"text":"No new detail from L1.","lines":["L1"]},{"text":"Hello?","lines":["L1"]},{"text":"P2: The berth three lamps flicker after dark","lines":["L2"]}],"rewrite":[]}"#,
+        r#"{"add":[{"text":"No new detail from L1.","lines":["L1"]},{"text":"Screen froze again","lines":["L1"]},{"text":"California.","lines":["L1"]},{"text":"P2: The berth three lamps flicker after dark","lines":["L2"]}],"rewrite":[]}"#,
         r#"{"add":[],"rewrite":[{"point":"P1","text":"Thanks everyone for joining","lines":["L1"]}]}"#,
     ]);
-    engine.dropped.lock().unwrap().push("Hello?");
+    engine.dropped.lock().unwrap().push("Screen froze again");
     let service = MeetingProcessingService::new(None);
     service.set_text_generators(engine.clone(), engine.clone());
     let live = LiveTranscript::new();
 
-    live.append(line(call, SourceKind::SystemAudio, 0, "Hello?"));
+    live.append(line(call, SourceKind::SystemAudio, 0, "California."));
     live.append(line(microphone, SourceKind::Microphone, 10, "The lamps on berth three still flicker after dark."));
     assert!(live.start_doc());
     service.read_live_doc_now(&store, session_id, &live);
@@ -178,7 +178,7 @@ fn a_reading_keeps_only_points_its_lines_say_that_pass_the_check() {
     assert_eq!(
         texts,
         ["The berth three lamps flicker after dark"],
-        "a point about a label or one the check drops is not kept; a leading label is set aside"
+        "a point about a label, of one word, or one the check drops is not kept; a leading label is set aside"
     );
 
     live.append(line(call, SourceKind::SystemAudio, 60, "Okay, thanks everyone, talk soon."));

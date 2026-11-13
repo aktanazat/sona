@@ -137,12 +137,30 @@ const SMALL_TALK: &[(u64, Who, &str)] = &[
     (75, Who::Priya, "Still here."),
 ];
 
+/// The harbor map call as the scratch app heard it from the display's
+/// speaker: room noise heard as one word before anyone spoke.
+const HARBOR: &[(u64, Who, &str)] = &[
+    (8, Who::Me, "California."),
+    (40, Who::Me, "Yeah."),
+    (42, Who::Me, "Thanks for joining."),
+    (43, Who::Me, "Joining, Daniel. Today we need to settle the harbour map launch date and the dock survey."),
+    (50, Who::Me, "The survey of Dock A is booked till Tuesday morning."),
+    (53, Who::Me, "Dot B has to wait until the crane is moved off the pier."),
+    (57, Who::Me, "Then the public launch of the harbour map moves to March 14 instead of March 1."),
+    (64, Who::Me, "Agreed."),
+];
+
 #[ignore = "replays short calls with the meeting engine SONA_PROBE_ENGINE names"]
 #[test]
 fn live_doc_replay_probe() {
     let generator = generator();
     println!("\nsona build {}", env!("SONA_BUILD_COMMIT"));
-    for (name, call) in [("pier lamps", PIER), ("small talk", SMALL_TALK), ("launch sync", CALL)] {
+    for (name, call) in [
+        ("pier lamps", PIER),
+        ("small talk", SMALL_TALK),
+        ("harbor map", HARBOR),
+        ("launch sync", CALL),
+    ] {
         let (_directory, store) = workflow_core_tests::store();
         let began_utc_ms = Local::now().timestamp_millis() - 20 * 60 * 1_000;
         let session_id = workflow_core_tests::reviewable_meeting(&store, name, began_utc_ms);

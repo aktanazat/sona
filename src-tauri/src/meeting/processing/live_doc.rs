@@ -697,9 +697,10 @@ fn next_request(live: &LiveTranscript, moment: Moment, budget: usize) -> Option<
 }
 
 /// The points of a reading that cite only lines it was given, fit the
-/// doc, and name no label their lines do not say once a leading one is
-/// set aside; a rewrite must name a point the reading was shown and stay
-/// on its topic.
+/// doc, say something in two words or more, and name no label their lines
+/// do not say once a leading one is set aside; a rewrite must name a point
+/// the reading was shown and stay on its topic. A replayed call's noise,
+/// heard as "California.", came back as a point of that one word.
 fn candidates(written: Vec<Written>, request: &Request) -> Vec<Candidate<'_>> {
     written
         .into_iter()
@@ -714,7 +715,7 @@ fn candidates(written: Vec<Written>, request: &Request) -> Vec<Candidate<'_>> {
                 .collect::<Option<Vec<&Given>>>()?;
             let first_said = cited.iter().map(|line| line.said_ns).min()?;
             let text = unlabeled(&written.text).split_whitespace().collect::<Vec<_>>().join(" ");
-            if text.is_empty()
+            if words(&text).nth(1).is_none()
                 || text.chars().count() > MAX_POINT_CHARS
                 || text.chars().any(char::is_control)
                 || names_a_label(&text, &cited)
