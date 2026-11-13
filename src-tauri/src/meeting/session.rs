@@ -2023,10 +2023,15 @@ impl MeetingSessionManager {
         for source_kind in &plan.requested_sources {
             let probe = source_provider.probe(*source_kind);
             if probe.availability != SourceAvailability::Available {
+                log::warn!("Meeting source {source_kind:?} skipped: {:?}", probe.availability);
                 continue;
             }
-            let Ok(source) = source_provider.acquire(*source_kind) else {
-                continue;
+            let source = match source_provider.acquire(*source_kind) {
+                Ok(source) => source,
+                Err(error) => {
+                    log::warn!("Meeting source {source_kind:?} could not be acquired: {error:?}");
+                    continue;
+                }
             };
             let track_id = SourceTrackId::new();
             let (sink, lane_reader) = PacketSink::new(
@@ -2069,7 +2074,11 @@ impl MeetingSessionManager {
                     .into_iter()
                     .filter_map(|(source_kind, track_id, lane_reader, handle)| {
                         let (report, source) = handle.join().ok()?;
-                        let report = report.ok()?;
+                        let report = report
+                            .inspect_err(|error| {
+                                log::warn!("Meeting source {source_kind:?} did not start: {error:?}");
+                            })
+                            .ok()?;
                         (report.track_id == track_id && report.source_kind == source_kind)
                             .then_some((source_kind, track_id, source, lane_reader, report))
                     })
