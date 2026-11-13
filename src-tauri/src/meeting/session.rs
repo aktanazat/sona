@@ -716,7 +716,7 @@ impl MeetingSessionManager {
     /// it — see [`super::prompts`]. Read-only: the slots inside it are set from
     /// here and from launch, and a second setter would be a second answer to
     /// which engine this app has.
-    pub(crate) fn processing(&self) -> &MeetingProcessingService {
+    pub(crate) fn processing(&self) -> &Arc<MeetingProcessingService> {
         &self.processing
     }
 
@@ -3622,8 +3622,13 @@ impl MeetingSessionManager {
                 page: detail,
             });
         };
-        let outcome = write_relationship_summary(&store, person_id, generator.as_ref())
-            .map_err(map_store_error)?;
+        let summary_store = Arc::clone(&store);
+        let outcome = tauri::async_runtime::spawn_blocking(move || {
+            write_relationship_summary(&summary_store, person_id, generator.as_ref())
+        })
+        .await
+        .map_err(|_| MeetingCommandError::EngineFailure)?
+        .map_err(map_store_error)?;
         let page = match outcome {
             PersonSummaryOutcome::Written => {
                 store.person_detail(person_id).map_err(map_store_error)?
@@ -4305,9 +4310,13 @@ impl MeetingSessionManager {
     ) -> Result<MeetingCatchUp, MeetingCommandError> {
         let store = self.store().await?;
         let live = self.live_transcript(session_id);
-        self.processing
-            .catch_up(&store, session_id, live.as_deref())
-            .map_err(map_processing_error)
+        let processing = Arc::clone(&self.processing);
+        tauri::async_runtime::spawn_blocking(move || {
+            processing.catch_up(&store, session_id, live.as_deref())
+        })
+        .await
+        .map_err(|_| MeetingCommandError::EngineFailure)?
+        .map_err(map_processing_error)
     }
 
     /// Live help for a meeting while it records. A question goes with `Ask`
@@ -8606,6 +8615,122 @@ pub(crate) mod tests {
 
         assert_eq!(draft.source, MeetingFollowUpSource::Generated);
         assert_eq!(draft.message.as_deref(), Some(FOLLOW_UP_MESSAGE));
+    }
+
+    /// Live help, the recap, a saved prompt and a person summary ask the
+    /// engine from a command; asked inline on the command's runtime worker,
+    /// an engine that enters the runtime (Apple Intelligence, a relay) panics
+    /// and takes the core down.
+    #[test]
+    fn live_help_runs_its_engine_off_the_async_runtime() {
+        let busy = Arc::new(AtomicBool::new(false));
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (_directory, manager, session_id, lane) = capturing_meeting(
+            line_engine(&busy, &calls),
+            Arc::new(RuntimeEnteringGenerator),
+        );
+        capture_audio(&lane, &manager, session_id);
+
+        let help = tauri::async_runtime::block_on(manager.live_help(
+            session_id,
+            super::super::analytics::MeetingLiveHelpKind::Recent,
+            None,
+        ));
+
+        assert!(help.is_ok(), "{help:?}");
+    }
+
+    #[test]
+    fn catch_up_runs_its_engine_off_the_async_runtime() {
+        let busy = Arc::new(AtomicBool::new(false));
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (_directory, manager, session_id, lane) = capturing_meeting(
+            line_engine(&busy, &calls),
+            Arc::new(RuntimeEnteringGenerator),
+        );
+        capture_audio(&lane, &manager, session_id);
+
+        let recap = tauri::async_runtime::block_on(manager.catch_up(session_id));
+
+        assert!(recap.is_ok(), "{recap:?}");
+    }
+
+    #[test]
+    fn a_saved_prompt_runs_its_engine_off_the_async_runtime() {
+        let (_directory, manager, _starts, _aborts) = manager();
+        let generator: Arc<dyn super::super::processing::MeetingTextGenerator> =
+            Arc::new(RuntimeEnteringGenerator);
+        manager
+            .processing
+            .set_text_generators(Arc::clone(&generator), generator);
+        let store = tauri::async_runtime::block_on(manager.store()).unwrap();
+        let session_id =
+            crate::meeting::store::workflow_core_tests::reviewable_meeting(&store, "Pricing", 1);
+        let note = ManualNote {
+            note_id: ManualNoteId::new(),
+            session_id,
+            start_offset_ns: None,
+            end_offset_ns: None,
+            body: "We decided to ship the enterprise tier on Friday.".to_string(),
+            revision: 0,
+            created_at_utc_ms: 1,
+            updated_at_utc_ms: 1,
+        };
+        store
+            .create_note(MeetingOperationId::new(), 1, &note, 0)
+            .unwrap();
+        let prompt_id = store
+            .saved_prompts()
+            .unwrap()
+            .prompts
+            .iter()
+            .find(|prompt| prompt.target == crate::meeting::prompt_types::PromptTarget::Meeting)
+            .unwrap()
+            .prompt_id;
+
+        let run = tauri::async_runtime::block_on(manager.run_saved_prompt(
+            crate::meeting::prompt_types::SavedPromptRunRequest {
+                prompt_id,
+                target: crate::meeting::prompt_types::PromptTargetRef::Meeting { session_id },
+            },
+        ))
+        .unwrap();
+
+        assert!(
+            !matches!(
+                run.result,
+                crate::meeting::prompt_types::PromptRunResult::Failed { .. }
+            ),
+            "{:?}",
+            run.result
+        );
+    }
+
+    #[test]
+    fn a_person_summary_runs_its_engine_off_the_async_runtime() {
+        let (_directory, manager, _starts, _aborts) = manager();
+        let generator: Arc<dyn super::super::processing::MeetingTextGenerator> =
+            Arc::new(RuntimeEnteringGenerator);
+        manager
+            .processing
+            .set_text_generators(Arc::clone(&generator), generator);
+        let session_id = meeting_with_artifact(&manager);
+        let store = tauri::async_runtime::block_on(manager.store()).unwrap();
+        let person_id =
+            crate::meeting::store::workflow_core_tests::person(&store, "Priya", &[], &[]);
+        crate::meeting::store::workflow_core_tests::link(
+            &store,
+            session_id,
+            person_id,
+            "calendar",
+            "confirmed",
+        );
+
+        let result =
+            tauri::async_runtime::block_on(manager.person_summary_regenerate(person_id)).unwrap();
+
+        assert_ne!(result.outcome, PersonSummaryOutcome::NoEvidence);
+        assert_ne!(result.outcome, PersonSummaryOutcome::EngineUnavailable);
     }
 
     /// No engine at all is not a failure: the record is the draft, and the
