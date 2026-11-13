@@ -13,6 +13,7 @@ use crate::meeting::processing::live_share::{
     DeleteWatch, SharePhase, SharedMeeting, SharedRooms, REMOVED,
 };
 use crate::meeting::store::LiveRoom;
+use crate::query::KeptLocal;
 use futures_util::{SinkExt, StreamExt};
 use reqwest::Url;
 use tokio_tungstenite::tungstenite::Message;
@@ -40,11 +41,20 @@ impl CloudSyncRuntime {
         &self,
         session_id: MeetingSessionId,
     ) -> Result<String, CloudRuntimeError> {
+        let store = self
+            .meetings
+            .cloud_store()
+            .await
+            .map_err(|_| CloudRuntimeError::Storage)?;
+        ensure_shareable(&store, session_id)?;
         let meeting = self
             .meetings
             .shared_meeting(session_id)
             .await
             .map_err(|_| CloudRuntimeError::Conflict)?;
+        if meeting.live().share_phase() == SharePhase::Withdrawn {
+            return Err(CloudRuntimeError::KeptOnThisMac);
+        }
         if let Some(link) = meeting.live().share_link() {
             return Ok(link);
         }
@@ -104,6 +114,16 @@ impl CloudSyncRuntime {
             log::warn!("The live rooms of earlier launches are not watched: {error:?}");
         }
     }
+}
+
+/// A meeting whose series is kept on this Mac gets no link, as shared
+/// meeting pages refuse it too.
+fn ensure_shareable(store: &MeetingStore, session_id: MeetingSessionId) -> Result<(), CloudRuntimeError> {
+    let kept = KeptLocal::read(store).map_err(|_| CloudRuntimeError::Storage)?;
+    if kept.hides(session_id) {
+        return Err(CloudRuntimeError::KeptOnThisMac);
+    }
+    Ok(())
 }
 
 /// The room's page from the companion's answer: an https address whose
@@ -334,10 +354,8 @@ async fn next_state(meeting: Option<&Arc<SharedMeeting>>) -> Option<(Vec<u8>, bo
         .await
         .ok()?
         .ok()?;
-    Some((
-        state,
-        matches!(phase, SharePhase::Ended | SharePhase::Withdrawn),
-    ))
+    let last = matches!(phase, SharePhase::Ended | SharePhase::Withdrawn) || state == REMOVED;
+    Some((state, last))
 }
 
 #[derive(Serialize)]
