@@ -2636,16 +2636,19 @@ impl DetectionRuntime {
     }
 
     /// Takes down what a capture that is no longer tracked had up: the panel
-    /// a detection capture held, its recording card, and its status.
+    /// a detection capture held, its recording card, and its status. What the
+    /// capture held back goes back on the panel's queue.
     fn retire_tracked(
         self: &Arc<Self>,
         mut state: std::sync::MutexGuard<'_, RuntimeState>,
         tracked: &TrackedCapture,
     ) {
-        if matches!(tracked.kind, TrackedCaptureKind::Detection { .. }) {
-            let commands = state.panel.end_capture();
-            self.apply_panel_commands(&mut state, commands);
-        }
+        let commands = if matches!(tracked.kind, TrackedCaptureKind::Detection { .. }) {
+            state.panel.end_capture()
+        } else {
+            state.panel.release_held().into_iter().collect()
+        };
+        self.apply_panel_commands(&mut state, commands);
         let card = state.recording_card_id(tracked.session_id);
         drop(state);
         if let Some(ritual_id) = card {

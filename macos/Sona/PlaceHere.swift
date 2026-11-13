@@ -14,6 +14,7 @@ final class PlaceReadings {
 
     private(set) var offers: [MeetingSessionId: Offer] = [:]
     @ObservationIgnored private var asked: Set<MeetingSessionId> = []
+    @ObservationIgnored private var waiting: Set<MeetingSessionId> = []
     @ObservationIgnored private var closed: Set<MeetingSessionId> = []
     @ObservationIgnored private let location = LocationOnce()
     @ObservationIgnored private let core: Core
@@ -23,13 +24,21 @@ final class PlaceReadings {
     }
 
     /// A recording started on this Mac: reads where it is once, unless the
-    /// recording has a place or its invite pins one.
+    /// recording has a place or its invite pins one. A reading that would ask
+    /// for permission waits for `recordingStopped`: nothing asks during a call.
     func recordingStarted(_ sessionId: MeetingSessionId) {
         guard asked.insert(sessionId).inserted else { return }
-        Task {
-            guard await placeUnknown(sessionId), let reading = await location.read() else { return }
-            offer(await placesNear(reading), to: sessionId, fromPhone: false)
+        if location.asks {
+            waiting.insert(sessionId)
+        } else {
+            read(for: sessionId)
         }
+    }
+
+    /// The recording stopped: takes the reading it held back.
+    func recordingStopped(_ sessionId: MeetingSessionId) {
+        guard waiting.remove(sessionId) != nil else { return }
+        read(for: sessionId)
     }
 
     /// A meeting from the phone opened: offers the places near where the
@@ -53,7 +62,15 @@ final class PlaceReadings {
     /// Lets the offer go for good, with any reading still on its way.
     func drop(_ sessionId: MeetingSessionId) {
         closed.insert(sessionId)
+        waiting.remove(sessionId)
         offers[sessionId] = nil
+    }
+
+    private func read(for sessionId: MeetingSessionId) {
+        Task {
+            guard await placeUnknown(sessionId), let reading = await location.read() else { return }
+            offer(await placesNear(reading), to: sessionId, fromPhone: false)
+        }
     }
 
     private func offer(_ places: [ConversationLocation], to sessionId: MeetingSessionId, fromPhone: Bool) {
@@ -135,8 +152,8 @@ struct PlaceOfferRow: View {
     }
 }
 
-/// On the live page: the places near where this recording started, and once
-/// it has a place, the last meeting within 100 m of it.
+/// On the live page: the places near where this recording started, once it
+/// stops, and once it has a place, the last meeting within 100 m of it.
 struct LivePlaceLine: View {
     let places: PlaceReadings
     let sessionId: MeetingSessionId
@@ -145,8 +162,11 @@ struct LivePlaceLine: View {
     @State private var before: ConversationPlaceSession?
 
     var body: some View {
+        let recording = model.live.recording(sessionId)
         VStack(alignment: .leading, spacing: 0) {
-            PlaceOfferRow(places: places, sessionId: sessionId)
+            if !recording {
+                PlaceOfferRow(places: places, sessionId: sessionId)
+            }
             if let before {
                 Button { model.openPast(before.sessionId, segmentId: nil) } label: {
                     Text("Here before: \(before.people.isEmpty ? before.title : before.people.joined(separator: ", "))"
@@ -157,7 +177,10 @@ struct LivePlaceLine: View {
                 .padding(.bottom, 16)
             }
         }
-        .task(id: "\(sessionId):\(revision)") { await load() }
+        .task(id: "\(sessionId):\(revision):\(recording)") {
+            if !recording { places.recordingStopped(sessionId) }
+            await load()
+        }
     }
 
     private func load() async {
@@ -186,6 +209,7 @@ struct ReviewPlaceOffer: View {
                       !Task.isCancelled
                 else { return }
                 if review.location == nil {
+                    if !model.live.recording(sessionId) { places.recordingStopped(sessionId) }
                     await places.phoneRecordingOpened(sessionId)
                 } else {
                     places.drop(sessionId)

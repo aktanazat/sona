@@ -125,7 +125,7 @@ struct MeetingLiveView: View {
         ErrorNote(store.error)
         warnings
         ContextSuggestionsView(
-            sessionId: session.sessionId, revision: session.revision, heard: store.provisional.count,
+            sessionId: session.sessionId, revision: session.revision,
             showLive: { jump(to: $0, using: proxy) })
         LivePlaceLine(places: store.places, sessionId: session.sessionId, revision: session.revision)
         MeetingSnapshotStrip(sessionId: session.sessionId)
