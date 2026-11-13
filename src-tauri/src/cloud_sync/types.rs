@@ -33,6 +33,7 @@ pub enum CloudSyncErrorKind {
     IntegrityFailure,
     Conflict,
     UnsupportedProtocol,
+    KeptOnThisMac,
     Transient,
 }
 
