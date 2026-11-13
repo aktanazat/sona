@@ -252,7 +252,8 @@ fn live_doc_probe() {
         if edited.is_none() && pass_at >= START_AT_S + 60 {
             if let Some(first) = doc.points.first() {
                 println!("\nat {pass_at} s the first point \"{}\" is changed to \"{EDIT}\"", first.text);
-                live.edit_doc(Some(&first.id), EDIT).expect("the edit kept");
+                live.edit_doc(&Author::Owner, Some(&first.id), EDIT)
+                    .expect("the edit kept");
                 edited = Some(first.id.clone());
             }
         }

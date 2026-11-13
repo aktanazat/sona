@@ -42,6 +42,7 @@ mod heard_plans_tests;
 pub(crate) mod learning;
 #[cfg(test)]
 mod learning_tests;
+mod live_changes;
 mod live_docs;
 pub(crate) mod loops;
 #[cfg(test)]
@@ -1622,6 +1623,7 @@ static MIGRATIONS: &[M] = &[
     ),
     M::up(include_str!("store/people/profiles.sql")),
     M::up(include_str!("store/live_docs.sql")),
+    M::up(include_str!("store/live_changes.sql")),
 ];
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StoreError {

@@ -3001,6 +3001,7 @@ impl MeetingSessionManager {
             .map_err(map_store_error)?;
 
         self.processing.cancel(request.session_id);
+        self.processing.shared_rooms().withdraw(request.session_id);
 
         let active = {
             let mut actor = self.actor_lock();
@@ -3019,6 +3020,7 @@ impl MeetingSessionManager {
         };
 
         if let Some(mut active) = active {
+            active.live.transcript().withdraw_share();
             drop(active.call_names.take());
             for source in active.sources.values_mut() {
                 let _ = source.source.abort();
@@ -4419,8 +4421,13 @@ impl MeetingSessionManager {
                 )
             }
         };
-        live.set_live_owner(&promise_id, owner, name)
-            .ok_or(MeetingCommandError::NotFound)?;
+        live.set_live_owner(
+            &crate::meeting::processing::live_changes::Author::Owner,
+            &promise_id,
+            owner,
+            name,
+        )
+        .ok_or(MeetingCommandError::NotFound)?;
         Ok(live.live_card(session_id))
     }
 

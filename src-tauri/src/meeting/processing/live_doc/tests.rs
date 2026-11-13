@@ -1,6 +1,8 @@
+use super::super::live_share::SharedMeeting;
 use super::super::ReplyShape;
 use super::*;
 use crate::meeting::analytics::MeetingProvisionalSpeaker;
+use crate::meeting::live_doc_types::MeetingLiveAuthor;
 use crate::meeting::store::workflow_core_tests;
 use crate::meeting::types::SourceTrackId;
 use chrono::Local;
@@ -124,7 +126,12 @@ fn a_spoken_start_reads_what_was_said_and_a_hand_edit_outlives_later_readings() 
     assert!(!given.contains("for this plan"), "an ask is never read into the doc: {given}");
 
     let first = doc.points[0].id.clone();
-    live.edit_doc(Some(&first), "Beta ships Monday, not Friday").unwrap();
+    live.edit_doc(
+        &Author::Owner,
+        Some(&first),
+        "Beta ships Monday, not Friday",
+    )
+    .unwrap();
     live.append(line(call, SourceKind::SystemAudio, 70, "I'll own the pricing page."));
     tick(&service, &store, session_id, &live, Moment::Pass);
     let texts: Vec<String> = live.doc_points().into_iter().map(|point| point.text).collect();
@@ -135,6 +142,18 @@ fn a_spoken_start_reads_what_was_said_and_a_hand_edit_outlives_later_readings() 
     edit(&mut page, Some(&dana), "Dana owns pricing and the FAQ").unwrap();
     edit(&mut page, Some(&first), "").unwrap();
     store.save_live_doc_points(session_id, &page).unwrap();
+    let mut changes = store.live_changes(session_id).unwrap();
+    live_changes::push(
+        &mut changes,
+        Author::Owner.change(
+            None,
+            MeetingLiveTarget::Point,
+            &dana,
+            MeetingLiveChangeKind::Edited,
+            "Dana owns pricing and the FAQ",
+        ),
+    );
+    store.save_live_changes(session_id, &changes).unwrap();
     live.append(line(call, SourceKind::SystemAudio, 90, "Legal signs off next week."));
     hang_up(&service, &store, session_id, &live);
     let saved: Vec<(String, bool)> = store
@@ -150,6 +169,29 @@ fn a_spoken_start_reads_what_was_said_and_a_hand_edit_outlives_later_readings() 
             ("Legal signs off next week".to_string(), false),
         ],
         "what the page changed after the stop outlives the stop's reading"
+    );
+    live_changes::save(&store, session_id, &live);
+    let marks: Vec<(MeetingLiveAuthor, MeetingLiveChangeKind, String)> = live
+        .live_changes()
+        .into_iter()
+        .filter(|change| change.target_id == dana)
+        .map(|change| (change.by, change.kind, change.text))
+        .collect();
+    assert_eq!(
+        marks,
+        [
+            (
+                MeetingLiveAuthor::Sona,
+                MeetingLiveChangeKind::Added,
+                "Dana owns the pricing page".to_string()
+            ),
+            (
+                MeetingLiveAuthor::Owner,
+                MeetingLiveChangeKind::Edited,
+                "Dana owns pricing and the FAQ".to_string()
+            ),
+        ],
+        "the call ends marked with the page's change, not the stop's rewrite it outlived"
     );
 }
 
@@ -212,4 +254,111 @@ fn only_a_line_that_opens_with_sona_is_an_ask() {
     assert_eq!(read("Sona recap so far").map(|ask| ask.0), Some(MeetingVoiceIntent::Recap));
     assert_eq!(read("So and then Sona, start a doc"), None, "at most two words before the name");
     assert_eq!(read("Sona."), None, "a name alone asks nothing");
+}
+
+/// A new point from a teammate's browser, as the page sends it.
+fn teammate_point(id: &str, name: &str, text: &str) -> Vec<u8> {
+    serde_json::json!({ "v": 1, "id": id, "name": name, "target": "point", "target_id": null, "text": text })
+        .to_string()
+        .into_bytes()
+}
+
+fn shared_meeting() -> (
+    tempfile::TempDir,
+    Arc<MeetingStore>,
+    MeetingSessionId,
+    Arc<LiveTranscript>,
+    SharedMeeting,
+) {
+    let (directory, store) = workflow_core_tests::store();
+    let session_id = workflow_core_tests::reviewable_meeting(
+        &store,
+        "Harbor map sync",
+        Local::now().timestamp_millis(),
+    );
+    let (microphone, _call) = workflow_core_tests::recording_tracks(&store, session_id);
+    let live = Arc::new(LiveTranscript::new());
+    live.append(line(
+        microphone,
+        SourceKind::Microphone,
+        10,
+        "The launch moves to March 14.",
+    ));
+    let shared = SharedMeeting::new(
+        Arc::new(MeetingProcessingService::new(None)),
+        store.clone(),
+        session_id,
+        live.clone(),
+    );
+    (directory, store, session_id, live, shared)
+}
+
+#[test]
+fn a_teammates_edit_sent_twice_is_kept_once_under_their_name_and_call_time() {
+    let (_directory, store, session_id, _live, shared) = shared_meeting();
+    let edit = teammate_point(
+        "Jt2ByXLZUKwIdKUh9hCF2D",
+        " Priya \n Nair ",
+        "Launch stays March 14",
+    );
+
+    assert!(shared.apply(&edit));
+    assert!(
+        !shared.apply(&edit),
+        "the same edit sent again changes nothing"
+    );
+    let texts: Vec<String> = store
+        .live_doc_points(session_id)
+        .unwrap()
+        .into_iter()
+        .map(|point| point.text)
+        .collect();
+    assert_eq!(texts, ["Launch stays March 14"]);
+    let marks: Vec<(MeetingLiveAuthor, Option<String>, Option<u64>)> = store
+        .live_changes(session_id)
+        .unwrap()
+        .into_iter()
+        .map(|change| (change.by, change.name, change.call_ns))
+        .collect();
+    assert_eq!(
+        marks,
+        [(
+            MeetingLiveAuthor::Teammate,
+            Some("Priya Nair".to_string()),
+            Some(15_000_000_000)
+        )],
+        "one change, by the name the teammate gave, as far into the call as was heard"
+    );
+}
+
+#[test]
+fn the_link_takes_no_edit_once_the_call_stops() {
+    let (_directory, store, session_id, live, shared) = shared_meeting();
+
+    live.close_share();
+    assert!(!shared.apply(&teammate_point(
+        "Jt2ByXLZUKwIdKUh9hCF2D",
+        "Priya",
+        "Launch moves to April"
+    )));
+    assert!(live.doc_points().is_empty());
+    assert!(store.live_changes(session_id).unwrap().is_empty());
+}
+
+#[test]
+fn a_teammate_cannot_edit_under_the_calls_own_names() {
+    let (_directory, store, session_id, live, shared) = shared_meeting();
+
+    for name in ["Sona", " host ", "YOU"] {
+        assert!(
+            !shared.apply(&teammate_point(
+                "Jt2ByXLZUKwIdKUh9hCF2D",
+                name,
+                "Launch moves to April"
+            )),
+            "{name}"
+        );
+    }
+    assert!(live.doc_points().is_empty());
+    assert!(store.live_changes(session_id).unwrap().is_empty());
 }

@@ -1936,6 +1936,7 @@ pub fn run(cli_args: CliArgs) {
             commands::live_doc::meeting_live_doc,
             commands::live_doc::meeting_live_doc_start,
             commands::live_doc::meeting_live_doc_edit,
+            commands::cloud_sync::meeting_live_share_link,
             commands::live_card::work_follow_up_post,
             planning::work::live::work_follow_up,
             commands::wrap::meeting_wrap,

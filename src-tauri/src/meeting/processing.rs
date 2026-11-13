@@ -7,7 +7,9 @@ mod complete_reading;
 pub(crate) use complete_reading::probe as notes_probe;
 mod live_card;
 pub(crate) use live_card::{hang_up as live_card_hang_up, MeetingLiveCard, MeetingLivePromise};
+pub(crate) mod live_changes;
 pub(crate) mod live_doc;
+pub(crate) mod live_share;
 mod progress;
 
 use progress::{RunProgress, TrackSpan};
@@ -72,7 +74,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -922,6 +924,9 @@ pub struct MeetingProcessingService {
     /// of which jobs are live; this is how a caller waits for one to finish
     /// without polling it.
     jobs_idle: Arc<Condvar>,
+    /// The rooms of meetings shared by link, so a delete still reaches a
+    /// room after its call ended.
+    shared_rooms: live_share::SharedRooms,
     /// Every progress update published, for the tests that follow a run
     /// through its stages.
     #[cfg(test)]
@@ -1083,6 +1088,7 @@ impl MeetingProcessingService {
             capture_active: Arc::new(AtomicBool::new(false)),
             jobs: Arc::new(Mutex::new(HashMap::new())),
             jobs_idle: Arc::new(Condvar::new()),
+            shared_rooms: live_share::SharedRooms::default(),
             #[cfg(test)]
             published_progress: Arc::new(Mutex::new(Vec::new())),
             #[cfg(test)]
@@ -1453,6 +1459,11 @@ impl MeetingProcessingService {
         {
             job.cancelled.store(true, Ordering::Release);
         }
+    }
+
+    /// The rooms of meetings shared by link.
+    pub(crate) fn shared_rooms(&self) -> &live_share::SharedRooms {
+        &self.shared_rooms
     }
 
     pub fn local_processing_availability(&self) -> SourceAvailability {
@@ -4044,6 +4055,12 @@ pub(crate) struct LiveTranscript {
     card: Mutex<live_card::Card>,
     /// The doc asked for during the call, and the asks heard.
     doc: Mutex<live_doc::Doc>,
+    /// Who changed the doc and the card, oldest first.
+    changes: Mutex<Vec<crate::meeting::live_doc_types::MeetingLiveChange>>,
+    /// The end of the newest line heard, from the start of the meeting.
+    heard_ns: AtomicU64,
+    /// The meeting's link for teammates, once asked for.
+    share: Mutex<live_share::Share>,
 }
 
 impl LiveTranscript {
@@ -4055,6 +4072,9 @@ impl LiveTranscript {
             voices: Mutex::new(Vec::new()),
             card: Mutex::new(live_card::Card::default()),
             doc: Mutex::new(live_doc::Doc::default()),
+            changes: Mutex::new(Vec::new()),
+            heard_ns: AtomicU64::new(0),
+            share: Mutex::new(live_share::Share::default()),
         }
     }
 
@@ -4065,6 +4085,8 @@ impl LiveTranscript {
     }
 
     fn append(&self, segment: LiveSegment) {
+        self.heard_ns
+            .fetch_max(segment.end_offset_ns, Ordering::Relaxed);
         self.segments
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -4270,6 +4292,7 @@ impl LiveTranscriptWorker {
     }
 
     fn stop(&mut self) {
+        self.live.close_share();
         let (stopped, wake) = &*self.stopped;
         *stopped
             .lock()

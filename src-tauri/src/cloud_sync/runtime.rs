@@ -82,6 +82,9 @@ mod dictation_profile;
 mod memory_index;
 pub(crate) use memory_index::phone_snapshot_published_at;
 
+#[path = "live_rooms.rs"]
+mod live_rooms;
+
 #[path = "note_shares.rs"]
 mod note_shares;
 
@@ -1750,14 +1753,20 @@ impl CloudSyncRuntime {
     }
 
     async fn active_access(&self) -> Result<Option<CloudAccess>, CloudRuntimeError> {
-        if self.stopped.load(Ordering::Acquire) || portable::is_portable() {
-            return Ok(None);
-        }
-        let cloud_settings = settings::get_settings(&self.app).cloud_sync;
         if self.meetings.is_capture_active() {
             self.set_operational_error(None);
             return Ok(None);
         }
+        self.vault_access().await
+    }
+
+    /// The vault as it is set up, even while a meeting records: then only
+    /// the recording meeting's own live room is reached through it.
+    async fn vault_access(&self) -> Result<Option<CloudAccess>, CloudRuntimeError> {
+        if self.stopped.load(Ordering::Acquire) || portable::is_portable() {
+            return Ok(None);
+        }
+        let cloud_settings = settings::get_settings(&self.app).cloud_sync;
         if !cloud_settings.enabled || !cloud_settings.has_current_consent() || cloud_settings.paused
         {
             return Ok(None);

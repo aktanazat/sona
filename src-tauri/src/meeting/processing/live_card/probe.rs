@@ -590,8 +590,13 @@ fn unidentified_ownership_live_stays_unowned_but_keeps_a_manual_choice() {
         .iter()
         .all(|promise| promise.owner == WorkOwner::Nobody));
     assert!(filed.iter().all(|item| item.owner() == WorkOwner::Nobody));
-    live.set_live_owner(&promises[0].id, WorkOwner::Myself, Some("Me".to_owned()))
-        .expect("a manual owner choice");
+    live.set_live_owner(
+        &Author::Owner,
+        &promises[0].id,
+        WorkOwner::Myself,
+        Some("Me".to_owned()),
+    )
+    .expect("a manual owner choice");
     live.append(LiveSegment {
         track_id: microphone,
         source_kind: SourceKind::Microphone,

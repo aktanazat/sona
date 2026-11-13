@@ -2,9 +2,11 @@
 //! while it records, the saved doc after.
 
 use super::{map_store_error, MeetingSessionManager};
+use crate::meeting::live_doc_types::{MeetingLiveDoc, MeetingLiveTarget};
+use crate::meeting::processing::live_changes::{self, Author};
 use crate::meeting::processing::live_doc::{self, EditRefusal};
+use crate::meeting::processing::live_share::SharedMeeting;
 use crate::meeting::processing::MeetingLiveCard;
-use crate::meeting::live_doc_types::MeetingLiveDoc;
 use crate::meeting::store::MeetingStore;
 use crate::meeting::types::{MeetingCommandError, MeetingSessionId};
 use std::sync::Arc;
@@ -55,7 +57,7 @@ impl MeetingSessionManager {
     ) -> Result<MeetingLiveDoc, MeetingCommandError> {
         let store = self.store().await?;
         if let Some(live) = self.live_transcript(session_id) {
-            live.edit_doc(point_id.as_deref(), &text)
+            live.edit_doc(&Author::Owner, point_id.as_deref(), &text)
                 .map_err(refused)?;
             let saving = Arc::clone(&live);
             tauri::async_runtime::spawn_blocking(move || {
@@ -67,9 +69,24 @@ impl MeetingSessionManager {
         }
         tauri::async_runtime::spawn_blocking(move || {
             let mut points = store.live_doc_points(session_id).map_err(map_store_error)?;
-            live_doc::edit(&mut points, point_id.as_deref(), &text).map_err(refused)?;
+            let edited =
+                live_doc::edit(&mut points, point_id.as_deref(), &text).map_err(refused)?;
             store
                 .save_live_doc_points(session_id, &points)
+                .map_err(map_store_error)?;
+            let mut changes = store.live_changes(session_id).map_err(map_store_error)?;
+            live_changes::push(
+                &mut changes,
+                Author::Owner.change(
+                    None,
+                    MeetingLiveTarget::Point,
+                    &edited.point_id,
+                    edited.kind,
+                    &edited.text,
+                ),
+            );
+            store
+                .save_live_changes(session_id, &changes)
                 .map_err(map_store_error)?;
             saved(&store, session_id)
         })
@@ -88,9 +105,26 @@ impl MeetingSessionManager {
         let live = self
             .live_transcript(session_id)
             .ok_or(MeetingCommandError::NotFound)?;
-        live.edit_live_promise(promise_id, what, due_at_ms)
+        live.edit_live_promise(&Author::Owner, promise_id, what, due_at_ms)
             .ok_or(MeetingCommandError::InvalidRequest)?;
         Ok(live.live_card(session_id))
+    }
+
+    /// The running capture as its link's room sees it. `NotFound` once
+    /// the meeting has stopped.
+    pub(crate) async fn shared_meeting(
+        &self,
+        session_id: MeetingSessionId,
+    ) -> Result<SharedMeeting, MeetingCommandError> {
+        let live = self
+            .live_transcript(session_id)
+            .ok_or(MeetingCommandError::NotFound)?;
+        Ok(SharedMeeting::new(
+            Arc::clone(&self.processing),
+            self.store().await?,
+            session_id,
+            live,
+        ))
     }
 }
 
@@ -106,6 +140,7 @@ fn saved(
         asks: Vec::new(),
         model_requests: 0,
         live: false,
+        changes: store.live_changes(session_id).map_err(map_store_error)?,
     })
 }
 

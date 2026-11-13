@@ -17,6 +17,56 @@ pub struct MeetingLiveDoc {
     pub model_requests: u32,
     /// Whether the meeting is still recording, so later readings may add.
     pub live: bool,
+    /// Who changed the doc and the board, oldest first.
+    pub changes: Vec<MeetingLiveChange>,
+}
+
+/// One change to a meeting's doc or board: who made it, when, and how far
+/// into the call.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+pub struct MeetingLiveChange {
+    pub id: String,
+    pub by: MeetingLiveAuthor,
+    /// The name a teammate gave the link. Only a teammate's change has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub at_ms: i64,
+    /// How far into the call, by the newest line heard; `None` for a
+    /// change made after the stop.
+    pub call_ns: Option<u64>,
+    pub target: MeetingLiveTarget,
+    pub target_id: String,
+    pub kind: MeetingLiveChangeKind,
+    /// The words after the change, or the words removed.
+    pub text: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum MeetingLiveAuthor {
+    Sona,
+    /// The person recording.
+    Owner,
+    /// Someone with the meeting's link.
+    Teammate,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum MeetingLiveTarget {
+    /// A point in the doc.
+    Point,
+    /// A promise on the board.
+    Card,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum MeetingLiveChangeKind {
+    Added,
+    Rewrote,
+    Edited,
+    Removed,
 }
 
 /// One point in the doc.

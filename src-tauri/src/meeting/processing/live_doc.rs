@@ -10,13 +10,15 @@
 //! not part of the meeting: it is never read into the doc. People on the
 //! far end of a call are on the call audio, so they cannot ask.
 
+use super::live_changes::{self, Author};
 use super::{
     evidence_budget, first_json_value, json_response_schema, LiveSegment, LiveTranscript,
     MeetingProcessingService, MeetingTextGenerationError, MeetingTextGenerator,
 };
 use crate::meeting::ledger::fold;
 use crate::meeting::live_doc_types::{
-    MeetingLiveDoc, MeetingLiveDocPoint, MeetingVoiceAsk, MeetingVoiceIntent,
+    MeetingLiveChangeKind, MeetingLiveDoc, MeetingLiveDocPoint, MeetingLiveTarget, MeetingVoiceAsk,
+    MeetingVoiceIntent,
 };
 use crate::meeting::store::MeetingStore;
 use crate::meeting::types::{MeetingSessionId, SourceKind};
@@ -228,6 +230,7 @@ impl LiveTranscript {
             asks: doc.asks.clone(),
             model_requests: doc.requests,
             live: true,
+            changes: self.live_changes(),
         }
     }
 
@@ -237,11 +240,19 @@ impl LiveTranscript {
         start(&mut self.doc())
     }
 
-    /// A hand edit to the running doc; see [`edit`].
-    pub(crate) fn edit_doc(&self, point_id: Option<&str>, text: &str) -> Result<(), EditRefusal> {
+    /// A hand edit to the running doc by the user or a teammate; see
+    /// [`edit`].
+    pub(crate) fn edit_doc(
+        &self,
+        author: &Author,
+        point_id: Option<&str>,
+        text: &str,
+    ) -> Result<(), EditRefusal> {
         let mut doc = self.doc();
-        edit(&mut doc.points, point_id, text)?;
+        let edited = edit(&mut doc.points, point_id, text)?;
         doc.started = true;
+        drop(doc);
+        edited.record(self, author);
         Ok(())
     }
 
@@ -250,14 +261,33 @@ impl LiveTranscript {
     }
 }
 
+/// What one edit did to one point.
+pub(crate) struct Edited {
+    pub(crate) point_id: String,
+    pub(crate) kind: MeetingLiveChangeKind,
+    pub(crate) text: String,
+}
+
+impl Edited {
+    fn record(&self, live: &LiveTranscript, author: &Author) {
+        live.record_change(
+            author,
+            MeetingLiveTarget::Point,
+            &self.point_id,
+            self.kind,
+            &self.text,
+        );
+    }
+}
+
 /// A hand edit: new text for a point, a new point when `point_id` is
 /// `None`, or the point removed when the text is blank. The point is the
-/// user's from then on.
+/// editor's from then on. Returns what the edit did.
 pub(crate) fn edit(
     points: &mut Vec<MeetingLiveDocPoint>,
     point_id: Option<&str>,
     text: &str,
-) -> Result<(), EditRefusal> {
+) -> Result<Edited, EditRefusal> {
     let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if text.chars().count() > MAX_POINT_CHARS || text.chars().any(char::is_control) {
         return Err(EditRefusal::Invalid);
@@ -269,22 +299,38 @@ pub(crate) fn edit(
                 .position(|point| point.id == point_id)
                 .ok_or(EditRefusal::NotFound)?;
             if text.is_empty() {
-                points.remove(at);
-            } else {
-                points[at].text = text;
-                points[at].edited = true;
+                let removed = points.remove(at);
+                return Ok(Edited {
+                    point_id: removed.id,
+                    kind: MeetingLiveChangeKind::Removed,
+                    text: removed.text,
+                });
             }
+            points[at].text.clone_from(&text);
+            points[at].edited = true;
+            Ok(Edited {
+                point_id: points[at].id.clone(),
+                kind: MeetingLiveChangeKind::Edited,
+                text,
+            })
         }
-        None if text.is_empty() => return Err(EditRefusal::Invalid),
-        None if points.len() >= MAX_POINTS => return Err(EditRefusal::Full),
-        None => points.push(MeetingLiveDocPoint {
-            id: Uuid::new_v4().to_string(),
-            text,
-            edited: true,
-            start_offset_ns: None,
-        }),
+        None if text.is_empty() => Err(EditRefusal::Invalid),
+        None if points.len() >= MAX_POINTS => Err(EditRefusal::Full),
+        None => {
+            let id = Uuid::new_v4().to_string();
+            points.push(MeetingLiveDocPoint {
+                id: id.clone(),
+                text: text.clone(),
+                edited: true,
+                start_offset_ns: None,
+            });
+            Ok(Edited {
+                point_id: id,
+                kind: MeetingLiveChangeKind::Added,
+                text,
+            })
+        }
     }
-    Ok(())
 }
 
 impl MeetingProcessingService {
@@ -396,16 +442,23 @@ fn read(
         let kept = check(generator.as_ref(), live, candidates(written, &request));
         let mut doc = live.doc();
         doc.read = doc.read.max(request.through);
-        changed |= merge(&mut doc.points, kept);
+        let landed = merge(&mut doc.points, kept);
+        drop(doc);
+        changed |= !landed.is_empty();
+        for edited in landed {
+            edited.record(live, &Author::Sona);
+        }
     }
     changed
 }
 
-/// The doc's points into the store, so the meeting's page has them.
+/// The doc's points and the changes into the store, so the meeting's page
+/// has them.
 pub(crate) fn save(store: &MeetingStore, session_id: MeetingSessionId, live: &LiveTranscript) {
     if let Err(error) = store.save_live_doc_points(session_id, &live.doc_points()) {
         log::warn!("Could not keep the live doc of {session_id:?}: {error:?}");
     }
+    live_changes::save(store, session_id, live);
 }
 
 /// The stop: once a reading still under way is done, what the last pass
@@ -425,8 +478,22 @@ pub(super) fn hang_up(
         std::thread::sleep(Duration::from_millis(250));
     }
     let before: HashSet<String> = live.doc_points().into_iter().map(|point| point.id).collect();
+    let recorded: HashSet<String> = live
+        .live_changes()
+        .into_iter()
+        .map(|change| change.id)
+        .collect();
     read(service, store, session_id, live, Moment::HangUp);
     let saved = store.live_doc_points(session_id).unwrap_or_default();
+    let lost: HashSet<&String> = before
+        .iter()
+        .filter(|id| !saved.iter().any(|point| &point.id == *id && !point.edited))
+        .collect();
+    live.forget_changes(|change| {
+        !recorded.contains(&change.id)
+            && change.target == MeetingLiveTarget::Point
+            && lost.contains(&change.target_id)
+    });
     let mut doc = live.doc();
     doc.points = after_stop(saved, std::mem::take(&mut doc.points), &before);
     if let Err(error) = store.save_live_doc_points(session_id, &doc.points) {
@@ -838,34 +905,42 @@ fn kept_notes(
 
 /// Fold a reading's kept points into the doc. A point must say something
 /// the doc does not already say; a rewrite must name a point the user has
-/// not touched or removed since the reading was asked. Returns whether
-/// the doc changed.
-fn merge(points: &mut Vec<MeetingLiveDocPoint>, kept: Vec<Candidate<'_>>) -> bool {
-    let mut changed = false;
+/// not touched or removed since the reading was asked. Returns what landed.
+fn merge(points: &mut Vec<MeetingLiveDocPoint>, kept: Vec<Candidate<'_>>) -> Vec<Edited> {
+    let mut landed = Vec::new();
     for candidate in kept {
         if points.iter().any(|point| fold(&point.text) == fold(&candidate.text)) {
             continue;
         }
         match candidate.rewrites {
             None if points.len() < MAX_POINTS => {
+                let id = Uuid::new_v4().to_string();
+                landed.push(Edited {
+                    point_id: id.clone(),
+                    kind: MeetingLiveChangeKind::Added,
+                    text: candidate.text.clone(),
+                });
                 points.push(MeetingLiveDocPoint {
-                    id: Uuid::new_v4().to_string(),
+                    id,
                     text: candidate.text,
                     edited: false,
                     start_offset_ns: Some(candidate.first_said),
                 });
-                changed = true;
             }
             None => {}
             Some(known) => {
                 if let Some(point) = points.iter_mut().find(|point| point.id == known.id && !point.edited) {
+                    landed.push(Edited {
+                        point_id: point.id.clone(),
+                        kind: MeetingLiveChangeKind::Rewrote,
+                        text: candidate.text.clone(),
+                    });
                     point.text = candidate.text;
-                    changed = true;
                 }
             }
         }
     }
-    changed
+    landed
 }
 
 /// Whether a rewrite is still about the point it replaces: the two share a

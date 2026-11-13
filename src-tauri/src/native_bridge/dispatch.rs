@@ -3806,6 +3806,13 @@ pub(super) async fn call(
                 .await,
             )
         }
+        "meeting_live_share_link" => {
+            let mut args = Args::parse(params)?;
+            let session_id = args.take("sessionId")?;
+            reply(
+                crate::commands::cloud_sync::meeting_live_share_link(app.state(), session_id).await,
+            )
+        }
         "work_follow_up_post" => {
             let mut args = Args::parse(params)?;
             let connection_id = args.take("connectionId")?;
