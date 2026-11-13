@@ -8636,7 +8636,7 @@ pub(crate) mod tests {
             line_engine(&busy, &calls),
             Arc::new(RuntimeEnteringGenerator),
         );
-        capture_audio(&lane, &manager, session_id);
+        capture_audio(&lane, &manager, session_id, 0, 0);
 
         let help = tauri::async_runtime::block_on(manager.live_help(
             session_id,
@@ -8655,7 +8655,7 @@ pub(crate) mod tests {
             line_engine(&busy, &calls),
             Arc::new(RuntimeEnteringGenerator),
         );
-        capture_audio(&lane, &manager, session_id);
+        capture_audio(&lane, &manager, session_id, 0, 0);
 
         let recap = tauri::async_runtime::block_on(manager.catch_up(session_id));
 
@@ -8847,8 +8847,9 @@ pub(crate) mod tests {
         (directory, manager, started.snapshot.session_id, lane)
     }
 
-    /// Push a second and a half of loud audio into the capture lane and wait
-    /// for the ingest worker to commit it.
+    /// Push a second and a half of loud audio into the capture lane, packets
+    /// `first` onward heard from `heard_at_ns`, and wait for the ingest
+    /// worker to commit some of it.
     ///
     /// The wait is the point: a provisional pass reads records that have
     /// landed on disk, never the ring, so a test that reads before the commit
@@ -8857,10 +8858,22 @@ pub(crate) mod tests {
         lane: &Arc<Mutex<Option<PacketSink>>>,
         manager: &MeetingSessionManager,
         session_id: MeetingSessionId,
+        first: u64,
+        heard_at_ns: i64,
     ) {
         const FRAMES: u32 = 4_800;
         const PACKETS: u64 = 15;
         let store = tauri::async_runtime::block_on(manager.store()).unwrap();
+        let durable = || {
+            store
+                .session_snapshot(session_id)
+                .unwrap()
+                .sources
+                .iter()
+                .filter_map(|source| source.last_durable_offset_ns)
+                .max()
+        };
+        let committed = durable();
         let track_id = store.session_snapshot(session_id).unwrap().sources[0]
             .track_id
             .expect("a started microphone track");
@@ -8868,8 +8881,8 @@ pub(crate) mod tests {
         {
             let mut guard = lane.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             let lane = guard.as_mut().expect("the source was handed a lane");
-            for sequence in 0..PACKETS {
-                let offset_ns = i64::try_from(sequence).unwrap() * 100_000_000;
+            for sequence in first..first + PACKETS {
+                let offset_ns = heard_at_ns + i64::try_from(sequence - first).unwrap() * 100_000_000;
                 assert_eq!(
                     lane.try_push_interleaved(
                         CapturedPacket {
@@ -8892,13 +8905,7 @@ pub(crate) mod tests {
             }
         }
         for _ in 0..500 {
-            if store
-                .session_snapshot(session_id)
-                .unwrap()
-                .sources
-                .iter()
-                .any(|source| source.last_durable_offset_ns.is_some())
-            {
+            if durable() != committed {
                 return;
             }
             thread::sleep(Duration::from_millis(10));
@@ -8931,7 +8938,7 @@ pub(crate) mod tests {
                 output: RECAP_OUTPUT.to_string(),
             }),
         );
-        capture_audio(&lane, &manager, session_id);
+        capture_audio(&lane, &manager, session_id, 0, 0);
 
         let recap = tauri::async_runtime::block_on(manager.catch_up(session_id)).unwrap();
 
@@ -8952,6 +8959,76 @@ pub(crate) mod tests {
         );
     }
 
+    /// The timed pass reads speech once it has ended or once no more audio
+    /// comes: read alone, a piece it cut 0.42 s into a sentence came back as
+    /// "Yeah.", and the words said just before a pause still belong on the
+    /// page while the meeting is paused.
+    #[test]
+    fn a_timed_pass_leaves_running_speech_until_no_more_audio_comes() {
+        let busy = Arc::new(AtomicBool::new(false));
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (_directory, manager, session_id, lane) =
+            capturing_meeting(line_engine(&busy, &calls), no_engine());
+        capture_audio(&lane, &manager, session_id, 0, 0);
+        let store = tauri::async_runtime::block_on(manager.store()).unwrap();
+        let live = manager
+            .live_transcript(session_id)
+            .expect("a running capture has a live transcript");
+
+        manager
+            .processing
+            .live_pass(&store, session_id, &live, false)
+            .unwrap();
+        assert_eq!(
+            calls.load(Ordering::Acquire),
+            0,
+            "speech that has not ended is not read while audio still comes"
+        );
+        assert!(live.snapshot(session_id).segments.is_empty());
+
+        manager
+            .processing
+            .live_pass(&store, session_id, &live, false)
+            .unwrap();
+        assert_eq!(
+            live.snapshot(session_id).segments.len(),
+            1,
+            "with no new audio the next timed pass reads it"
+        );
+    }
+
+    /// Speech still running where the records break, at a pause or a gap,
+    /// ends there: read on, the words from before a pause came back as one
+    /// line with the first words after the resume.
+    #[test]
+    fn speech_running_at_a_break_in_the_records_is_read_without_what_follows() {
+        let busy = Arc::new(AtomicBool::new(false));
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (_directory, manager, session_id, lane) =
+            capturing_meeting(line_engine(&busy, &calls), no_engine());
+        capture_audio(&lane, &manager, session_id, 0, 0);
+        let store = tauri::async_runtime::block_on(manager.store()).unwrap();
+        let live = manager
+            .live_transcript(session_id)
+            .expect("a running capture has a live transcript");
+        manager
+            .processing
+            .live_pass(&store, session_id, &live, false)
+            .unwrap();
+        assert!(live.snapshot(session_id).segments.is_empty());
+
+        capture_audio(&lane, &manager, session_id, 15, 4_000_000_000);
+        manager
+            .processing
+            .live_pass(&store, session_id, &live, false)
+            .unwrap();
+        assert_eq!(
+            live.snapshot(session_id).segments.len(),
+            1,
+            "the speech before the break is read, and the speech after it is still running"
+        );
+    }
+
     /// After the stop the stored revision is the meeting, and the provisional
     /// reading is gone. Nothing recognizes audio for a recap any more: the
     /// transcript it reads was written by the post-stop pass.
@@ -8966,7 +9043,7 @@ pub(crate) mod tests {
                 output: RECAP_OUTPUT.to_string(),
             }),
         );
-        capture_audio(&lane, &manager, session_id);
+        capture_audio(&lane, &manager, session_id, 0, 0);
         let revision = tauri::async_runtime::block_on(async {
             manager
                 .store()
@@ -9122,7 +9199,7 @@ pub(crate) mod tests {
                 output: RECAP_OUTPUT.to_string(),
             }),
         );
-        capture_audio(&lane, &manager, session_id);
+        capture_audio(&lane, &manager, session_id, 0, 0);
 
         let recap = tauri::async_runtime::block_on(manager.catch_up(session_id)).unwrap();
 
@@ -9146,7 +9223,7 @@ pub(crate) mod tests {
                 output: RECAP_OUTPUT.to_string(),
             }),
         );
-        capture_audio(&lane, &manager, session_id);
+        capture_audio(&lane, &manager, session_id, 0, 0);
 
         let while_busy = tauri::async_runtime::block_on(manager.catch_up(session_id)).unwrap();
 

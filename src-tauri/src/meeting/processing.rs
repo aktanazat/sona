@@ -3470,7 +3470,7 @@ impl MeetingProcessingService {
         let Some(live) = live else {
             return;
         };
-        if let Err(error) = self.live_pass(store, session_id, live) {
+        if let Err(error) = self.live_pass(store, session_id, live, true) {
             log::debug!("No fresh provisional transcript for {session_id:?}: {error:?}");
         }
     }
@@ -3716,11 +3716,25 @@ impl MeetingProcessingService {
     ///
     /// `Ok(())` covers the skips as well as the work: an engine somebody else
     /// is using, and a capture with nothing new on disk, are both normal.
-    fn live_pass(
+    ///
+    /// `now` is for a reader asking about this moment, a press or the stop:
+    /// speech still running when the records run out is cut there and read
+    /// too, since a recap one utterance short of now is not what anybody
+    /// pressed for. The timed pass leaves it running for a later pass to read
+    /// whole. Read alone, a piece cut 0.42 s into "Then the public launch"
+    /// came back as "Yeah." and one cut 0.69 s into "One more change" as "One
+    /// more chain." A timed pass that finds no new audio, as in a pause, reads
+    /// the running speech as ended, since nothing is coming to end it; a cut
+    /// there kept half a second for the next piece, which read it again after
+    /// the resume as "Moves again". Speech also ends where the records break,
+    /// as in the after-call pass: read on, the words said before a pause came
+    /// back as one line with the first words after the resume.
+    pub(super) fn live_pass(
         &self,
         store: &MeetingStore,
         session_id: MeetingSessionId,
         live: &LiveTranscript,
+        now: bool,
     ) -> Result<(), ProcessingFailure> {
         let engine = self
             .transcript_engine
@@ -3767,11 +3781,15 @@ impl MeetingProcessingService {
                 )),
             };
             let mut recognized = Vec::new();
+            let read_through = cursor.through_sequence;
             let visited = store.visit_durable_track_records(
                 session_id,
                 track.track_id,
                 cursor.through_sequence,
                 |record| {
+                    if cursor.frames.starts_new_span(&record) {
+                        recognized.extend(cursor.chunker.finish(false));
+                    }
                     process_record_frames(
                         &record,
                         &mut cursor.frames,
@@ -3793,12 +3811,13 @@ impl MeetingProcessingService {
             if visited.is_err() {
                 return Err(ProcessingFailure::EngineFailure);
             }
-            // Speech that is still running when the records run out is cut here
-            // rather than held back: a recap that is one utterance short of now
-            // is what a person pressed the button for. The chunker keeps its
-            // overlap, so the next pass resumes mid-sentence rather than
-            // starting from silence.
-            recognized.extend(cursor.chunker.finish(true));
+            // A press cut keeps its overlap, so the next pass resumes
+            // mid-sentence rather than starting from silence.
+            if now {
+                recognized.extend(cursor.chunker.finish(true));
+            } else if cursor.through_sequence == read_through {
+                recognized.extend(cursor.chunker.finish(false));
+            }
             if !recognized.is_empty() {
                 cursor
                     .speakers
@@ -4343,7 +4362,7 @@ fn run_live_pass_worker(
                 return;
             }
         }
-        match service.live_pass(&store, session_id, &live) {
+        match service.live_pass(&store, session_id, &live, false) {
             Ok(()) => {
                 if live_doc::hear(&service, &store, session_id, &live) {
                     let (service, store, live) =

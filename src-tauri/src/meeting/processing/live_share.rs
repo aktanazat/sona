@@ -188,12 +188,13 @@ struct Line {
 }
 
 /// The transcript as sentences. The live pass cuts its audio where its
-/// speaker guess names a new voice, and again where a reading ends; it
-/// reads each piece on its own, so the page showed tails like "fixture." or
-/// "about the births." as lines of their own, often punctuated as sentences
-/// and under another speaker guess. A pause always ends a piece, so a piece
-/// that starts before the one before it on the same track stopped is the
-/// rest of it, even when the other track spoke in between.
+/// speaker guess names a new voice, and again where a press or the stop
+/// reads up to the moment; it reads each piece on its own, so the page
+/// showed tails like "fixture." or "about the births." as lines of their
+/// own, often punctuated as sentences and under another speaker guess. A
+/// pause always ends a piece, so a piece that starts before the one before
+/// it on the same track stopped is the rest of it, even when the other
+/// track spoke in between.
 fn joined(segments: impl Iterator<Item = MeetingProvisionalSegment>) -> Vec<Line> {
     let mut lines: Vec<Line> = Vec::new();
     let mut open: HashMap<SourceTrackId, (usize, u64)> = HashMap::new();
