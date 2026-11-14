@@ -330,30 +330,43 @@ struct SettingsCaptureRows: View {
     let store: SettingsStore
 
     var body: some View {
-        ToggleRow(
-            title: "Always-on microphone",
-            detail: "Keeps the microphone open between dictations for a faster start.",
-            isOn: Binding(
-                get: { store.settings.alwaysOnMicrophone },
-                set: { value in Task { await store.setAlwaysOnMicrophone(value) } }
+        ChoiceRow(
+            title: "Keep the microphone open",
+            detail: "Dictation starts faster. Bluetooth sound may drop while the microphone is open.",
+            choices: MicrophoneHold.allCases,
+            label: \.label,
+            selection: Binding(
+                get: {
+                    store.settings.alwaysOnMicrophone ? .always
+                        : store.settings.lazyStreamClose ? .briefly : .off
+                },
+                set: { hold in
+                    Task {
+                        await store.setAlwaysOnMicrophone(hold == .always)
+                        if hold != .always { await store.setLazyStreamClose(hold == .briefly) }
+                    }
+                }
             )
         )
-        .disabled(store.isBusy("always_on_microphone"))
-        ToggleRow(
-            title: "Keep the microphone open for 30 seconds",
-            detail: "After recording stops. Bluetooth sound quality may drop while it is open.",
-            isOn: Binding(
-                get: { store.settings.lazyStreamClose },
-                set: { value in Task { await store.setLazyStreamClose(value) } }
-            )
-        )
-        .disabled(store.settings.alwaysOnMicrophone || store.isBusy("lazy_stream_close"))
+        .disabled(store.isBusy("always_on_microphone") || store.isBusy("lazy_stream_close"))
         /// A machine with no lid has no clamshell state to pick a microphone
         /// for.
         if store.laptop {
             MicrophoneClamshellRow(store: store)
         }
         SoundThemeRow(store: store)
+    }
+}
+
+private enum MicrophoneHold: CaseIterable {
+    case off, briefly, always
+
+    var label: String {
+        switch self {
+        case .off: "No"
+        case .briefly: "30 seconds after"
+        case .always: "Always"
+        }
     }
 }
 

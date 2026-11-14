@@ -211,24 +211,41 @@ private struct ProfileForm: View {
                 Card {
                     CardRow {
                         VStack(alignment: .leading, spacing: 12) {
-                            TextField("Name", text: $draft.name).textFieldStyle(.roundedBorder)
-                                .focused($focus, equals: .name)
-                                .accessibilityLabel("Your name")
-                            TextField("Email", text: $draft.email).textFieldStyle(.roundedBorder)
-                                .textContentType(.emailAddress)
-                                .focused($focus, equals: .email)
-                                .accessibilityLabel("Your email")
-                            TextField("Role", text: $draft.role).textFieldStyle(.roundedBorder)
-                                .focused($focus, equals: .role)
-                                .accessibilityLabel("Your role")
-                            TextField("Company", text: $draft.company).textFieldStyle(.roundedBorder)
-                                .focused($focus, equals: .company)
-                                .accessibilityLabel("Your company")
-                            TextField("What should Sona know about your work?", text: $draft.context, axis: .vertical)
-                                .lineLimit(3...6).textFieldStyle(.roundedBorder)
-                                .focused($focus, equals: .context)
-                                .accessibilityLabel("Context about your work")
-                            Text("Your name, role, company and context go to your selected meeting model. Your email does not.")
+                            Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 12, verticalSpacing: 12) {
+                                GridRow {
+                                    fieldLabel("Name")
+                                    TextField("Name", text: $draft.name).textFieldStyle(.roundedBorder)
+                                        .focused($focus, equals: .name)
+                                        .accessibilityLabel("Your name")
+                                }
+                                GridRow {
+                                    fieldLabel("Email")
+                                    TextField("Email", text: $draft.email).textFieldStyle(.roundedBorder)
+                                        .textContentType(.emailAddress)
+                                        .focused($focus, equals: .email)
+                                        .accessibilityLabel("Your email")
+                                }
+                                GridRow {
+                                    fieldLabel("Role")
+                                    TextField("Role", text: $draft.role).textFieldStyle(.roundedBorder)
+                                        .focused($focus, equals: .role)
+                                        .accessibilityLabel("Your role")
+                                }
+                                GridRow {
+                                    fieldLabel("Company")
+                                    TextField("Company", text: $draft.company).textFieldStyle(.roundedBorder)
+                                        .focused($focus, equals: .company)
+                                        .accessibilityLabel("Your company")
+                                }
+                                GridRow {
+                                    fieldLabel("Your work")
+                                    TextField("What should Sona know about your work?", text: $draft.context, axis: .vertical)
+                                        .lineLimit(3...6).textFieldStyle(.roundedBorder)
+                                        .focused($focus, equals: .context)
+                                        .accessibilityLabel("Context about your work")
+                                }
+                            }
+                            Text("Sona's AI sees your name, role, company and work notes, not your email.")
                                 .metaText(Theme.inkSecondary)
                         }
                         .onSubmit { focus = nil }
@@ -279,6 +296,11 @@ private struct ProfileForm: View {
             draft = saved
             baseline = saved
         }
+    }
+
+    private func fieldLabel(_ title: String) -> some View {
+        Text(title).bodyText(13, Theme.inkSecondary)
+            .gridColumnAlignment(.trailing)
     }
 
     /// The profile is saved whenever one of its fields is left, on Enter, or

@@ -8,10 +8,10 @@ struct CameraWatermarkSettingsView: View {
             Card {
                 ToggleRow(
                     title: "Show “Recording with Sona” on my video",
-                    detail: "Optional and off by default. The label appears only while Sona records. When recording stops or pauses, your normal video passes through without the label.",
+                    detail: "Shows only while Sona records.",
                     isOn: Binding(get: { camera.enabled }, set: { camera.setEnabled($0) }))
                 VStack(alignment: .leading, spacing: 12) {
-                    Text("Install Sona Camera, approve it in macOS, then select it in your call app's camera menu. This does not turn on your camera. Video starts only when a call app uses Sona Camera.")
+                    Text("Install Sona Camera, approve it in macOS, then pick it as the camera in your call app.")
                         .bodyText(13, Theme.inkSecondary)
                     Text(camera.status).bodyText(14)
                     if let streamStatus = camera.streamStatus {

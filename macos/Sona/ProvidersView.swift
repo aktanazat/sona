@@ -17,9 +17,8 @@ struct ProvidersView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             ErrorNote(store.error)
-            postProcessing
-            offlineCleanup
             api
+            offlineCleanup
             cloudKeys
             promptLibrary
         }
@@ -76,23 +75,6 @@ struct ProvidersView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("Dictation will keep the original words until you download this model or choose another provider.")
-        }
-    }
-
-    // MARK: - Post-processing
-
-    private var postProcessing: some View {
-        PageSection("Post-processing") {
-            Card {
-                ToggleRow(
-                    title: "Post-processing",
-                    detail: "Rewrite the transcript with a language model after transcription.",
-                    isOn: Binding(
-                        get: { store.enabled },
-                        set: { on in Task { await store.setEnabled(on) } }
-                    )
-                )
-            }
         }
     }
 
@@ -155,8 +137,16 @@ struct ProvidersView: View {
     // MARK: - The provider
 
     private var api: some View {
-        PageSection("Provider") {
+        PageSection("AI cleanup") {
             Card {
+                ToggleRow(
+                    title: "Clean up dictations with AI",
+                    detail: "Rewrites your words after transcription. The AI never hears the audio.",
+                    isOn: Binding(
+                        get: { store.enabled },
+                        set: { on in Task { await store.setEnabled(on) } }
+                    )
+                )
                 providerRow
                 if store.isLocalProvider {
                     ProviderFieldRow("Model") {
@@ -169,10 +159,6 @@ struct ProvidersView: View {
                             text: "Apple Intelligence is not available on this device. Requires an Apple Silicon Mac running macOS Tahoe (26.0) or later with Apple Intelligence enabled in System Settings.",
                             tone: Theme.live
                         )
-                    }
-                    ProviderFieldRow("Model") {
-                        Text(store.model.isEmpty ? (store.selectedProvider?.label ?? "") : store.model)
-                            .bodyText(14, Theme.inkSecondary)
                     }
                 } else {
                     if store.isCustomProvider {
@@ -351,7 +337,7 @@ struct ProvidersView: View {
     // MARK: - Prompts
 
     private var promptLibrary: some View {
-        PageSection("Post-processing prompts") {
+        PageSection("Cleanup prompts") {
             Card {
                 if store.prompts.isEmpty {
                     ProviderNoteRow(

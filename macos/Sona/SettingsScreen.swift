@@ -25,9 +25,7 @@ struct SettingsScreen: View {
         case .models:
             Page {
                 ModelsTab()
-                PageSection("Language models") {
-                    ProvidersView(store: model.providers)
-                }
+                ProvidersView(store: model.providers)
             }
         case .modes:
             Page {
