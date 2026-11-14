@@ -198,7 +198,7 @@ impl AudioImportError {
     fn history_off() -> Self {
         Self {
             code: AudioImportFailureCode::HistoryOff,
-            message: "Saved history is off, so this file's words have nowhere to go. Set Dictations to keep above 0 in Library.",
+            message: "Saved history is off, so this file's words have nowhere to go. Set Dictations to keep above 0 in Privacy settings.",
         }
     }
 

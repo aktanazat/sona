@@ -220,7 +220,7 @@ pub async fn delete_history_entry(
 }
 
 /// Saved history at zero keeps no new rows, so a replay has nowhere to go.
-const HISTORY_OFF: &str = "Saved history is off, so the new version has nowhere to go. Set Dictations to keep above 0 in Library.";
+const HISTORY_OFF: &str = "Saved history is off, so the new version has nowhere to go. Set Dictations to keep above 0 in Privacy settings.";
 
 /// Runs a stored recording through an already-frozen plan and saves the result
 /// as a new history row linked back to `source`.
