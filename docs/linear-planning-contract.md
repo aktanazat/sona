@@ -35,8 +35,8 @@ its tasks stay, in no project.
 ## Rules
 
 - Percent complete everywhere (project, milestone, cycle success): done
-  counts 100, started 25, divided by scope (canceled and duplicate tasks
-  are out of scope).
+  divided by scope (canceled and duplicate tasks are out of scope).
+  Started work shows in its own count, never in the percent.
 - `update_missing`: the project is active and its latest update (or its
   creation, when none) is older than one cycle length + 3 days.
 - Auto-draft (`updates::draft`): plain text from tasks since the last
@@ -51,7 +51,7 @@ its tasks stay, in no project.
 - Cycles: `advance` keeps `upcoming` cycles ahead, spaced by the cooldown;
   an ended cycle's daily counts are frozen into `planning_cycle_days` and
   later reads use the frozen copy; unfinished work rolls into the cycle
-  under way. Success = (done*100 + started*25)/scope at close. When the
+  under way. Success = done*100/scope at close. When the
   cycles have stood idle into a cooldown, the next cycle made starts after
   it, never already over.
 - Saving cycle settings that make fewer upcoming cycles, or reshape them,
