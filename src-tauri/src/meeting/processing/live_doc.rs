@@ -869,7 +869,7 @@ fn folded<'a>(mut kept: Vec<Candidate<'a>>, rewrites: Vec<(&'a Known, String)>) 
 /// ferry timetable change goes out with the harbour map" shares only
 /// "harbour" with "The harbour map launch is confirmed for March 21".
 fn says_the_same(said: &str, other: &str) -> bool {
-    let mut long: Vec<String> = words(said).map(|(word, _)| word).filter(|word| word.chars().count() >= 5).collect();
+    let mut long: Vec<String> = words(said).map(|(word, _)| word).filter(|word| is_long(word)).collect();
     long.sort();
     long.dedup();
     let other: Vec<String> = words(other).map(|(word, _)| word).collect();
@@ -1044,7 +1044,7 @@ fn merge(points: &mut Vec<MeetingLiveDocPoint>, kept: Vec<Candidate<'_>>) -> Vec
 fn same_topic(before: &str, after: &str) -> bool {
     let before: Vec<String> = words(before).map(|(word, _)| word).collect();
     words(after).any(|(word, _)| {
-        word.chars().count() >= 5 && before.iter().any(|said| related(said, &word))
+        is_long(&word) && before.iter().any(|said| related(said, &word))
     })
 }
 
@@ -1078,6 +1078,13 @@ fn related(left: &str, right: &str) -> bool {
     let common = left.chars().zip(right.chars()).take_while(|(left, right)| left == right).count();
     let shorter = left.chars().count().min(right.chars().count());
     (common == shorter && common >= 3) || common >= 5
+}
+
+/// A word of five letters or more. A number read whole is not one:
+/// "1,000,500" would pass for a form of "1,000,000", and two points that
+/// name one price can still say different things.
+fn is_long(word: &str) -> bool {
+    word.chars().count() >= 5 && !word.contains(char::is_numeric)
 }
 
 /// Whether `text` names a label, such as "L1" or "P2", that none of the

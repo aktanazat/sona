@@ -578,6 +578,40 @@ fn an_add_that_holds_a_point_the_same_reading_rewrites_lands_on_its_own() {
 }
 
 #[test]
+fn an_add_that_shares_only_a_figure_with_a_rewrite_stays_its_own_point() {
+    let (_directory, store) = workflow_core_tests::store();
+    let session_id =
+        workflow_core_tests::reviewable_meeting(&store, "Budget sync", Local::now().timestamp_millis());
+    let (microphone, _call) = workflow_core_tests::recording_tracks(&store, session_id);
+    let engine = Arc::new(Scripted::default());
+    engine.replies.lock().unwrap().extend([
+        r#"{"add":[{"text":"The lobby budget is $1,000,000.","lines":["L1"]},{"text":"The LED fixtures came in at $40,000.","lines":["L1"]}],"rewrite":[]}"#,
+        r#"{"add":[{"text":"The garage budget is $1,000,500.","lines":["L1"]},{"text":"The cheaper fixture quote is $40,000 too.","lines":["L1"]}],"rewrite":[{"point":"P1","text":"The lobby budget is $1,000,000, approved.","lines":["L1"]},{"point":"P2","text":"The LED fixtures came in at $40,000, installed.","lines":["L1"]}]}"#,
+    ]);
+    let service = MeetingProcessingService::new(None);
+    service.set_text_generators(engine.clone(), engine.clone());
+    let live = LiveTranscript::new();
+    assert!(live.start_doc());
+
+    live.append(line(microphone, SourceKind::Microphone, 60, "The lobby budget is a million. The LED fixtures came in at forty thousand."));
+    service.read_live_doc_now(&store, session_id, &live);
+    live.append(line(microphone, SourceKind::Microphone, 120, "Lobby is approved and the fixtures are in. The garage gets a million and five hundred, and the cheaper fixture quote is forty thousand too."));
+    service.read_live_doc_now(&store, session_id, &live);
+
+    let texts: Vec<String> = live.doc_points().into_iter().map(|point| point.text).collect();
+    assert_eq!(
+        texts,
+        [
+            "The lobby budget is $1,000,000, approved.",
+            "The LED fixtures came in at $40,000, installed.",
+            "The garage budget is $1,000,500.",
+            "The cheaper fixture quote is $40,000 too.",
+        ],
+        "a near figure or the same price says nothing about whether two points say the same"
+    );
+}
+
+#[test]
 fn the_page_shows_a_sentence_cut_in_two_as_one_line() {
     let (_directory, _store, _session_id, live, shared) = shared_meeting();
     let (microphone, call) = (SourceTrackId::new(), SourceTrackId::new());
