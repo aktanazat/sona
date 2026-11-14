@@ -271,6 +271,55 @@ fn a_plan_is_kept_on_the_day_its_words_name_when_said() {
     );
 }
 
+/// A plan named in words that break off mid-phrase ("coffee with the"), or
+/// that name no one and point back at something said before ("decide
+/// that"), has no name to put on a calendar. A plan that names who it is
+/// with keeps a name like "call about it".
+#[test]
+fn a_plan_named_in_words_cut_off_mid_phrase_is_not_kept() {
+    let (_directory, store) = store();
+    let sync = weekly_sync(&store);
+    let cut_off = Named {
+        what: "coffee with the",
+        when: "tomorrow at 10",
+        people: &["Dana"],
+        place: "",
+        quote: SAID[4],
+        lines: &["L5"],
+    };
+    let pointing_back = Named {
+        what: "decide that",
+        when: "Friday at 7",
+        people: &[],
+        place: "",
+        quote: SAID[6],
+        lines: &["L7"],
+    };
+    let with_someone = Named {
+        what: "call about it",
+        when: "Monday at 11",
+        people: &["Priya"],
+        place: "",
+        quote: SAID[7],
+        lines: &["L8"],
+    };
+
+    let plans = read_with(
+        &store,
+        sync,
+        &[PRICING_REVIEW, cut_off, pointing_back, with_someone],
+    )
+    .unwrap();
+
+    assert_eq!(
+        kept(&plans),
+        [
+            ("pricing review", vec!["Nolan"], Some("the office")),
+            ("call about it", vec!["Priya"], None),
+        ]
+    );
+}
+
 #[test]
 fn a_time_refines_the_same_plan_only_in_the_same_exchange() -> Result<(), StoreError> {
     for (overlapping, timed_first) in [(true, false), (true, true), (false, false), (false, true)] {

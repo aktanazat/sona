@@ -59,7 +59,7 @@ use super::voice_identity::{
     map_sortformer_evidence, AudioSpan, AutoIdentityMode, DictationVoiceprint, UserVoiceSample,
     VoiceEvidenceSpan, VoiceIdentityCollector, VoiceMatchCandidate,
 };
-use super::words::{commits, normalized_words, says_words};
+use super::words::{commits, normalized_words, says_words, trails_off};
 use super::workflow_engine::{known_vocabulary, record_meeting_finalized};
 use crate::audio_toolkit::vad::{self, VoiceActivityDetector};
 use crate::managers::transcription::TranscriptionManager;
@@ -7029,14 +7029,17 @@ pub(crate) fn validate_ledger_output(
             .iter()
             .take(MAX_LEDGER_ROWS)
             .map(|item| {
-                Ok(LedgerCommitment {
+                Ok(whole_commitment(LedgerCommitment {
                     who: required_generated_text(&item.who, "commitments.who")?,
                     what: required_generated_text(&item.what, "commitments.what")?,
                     firmness: ledger_firmness(&item.firmness)?,
                     receipt: validate_receipt(&item.receipt, &index, "commitments.receipt")?,
-                })
+                }))
             })
-            .collect::<Result<Vec<_>, Rejection>>()?,
+            .collect::<Result<Vec<_>, Rejection>>()?
+            .into_iter()
+            .flatten()
+            .collect(),
         stances: output
             .stances
             .iter()
@@ -7061,6 +7064,18 @@ pub(crate) fn validate_ledger_output(
             .collect::<Result<Vec<_>, Rejection>>()?,
         receipts: LedgerReceiptState::Verified,
     })
+}
+
+/// A commitment named in words cut off mid-phrase goes by its whole spoken
+/// sentence instead, and drops out when that sentence was cut off too.
+fn whole_commitment(mut commitment: LedgerCommitment) -> Option<LedgerCommitment> {
+    if trails_off(&commitment.what) {
+        if trails_off(&commitment.receipt.quote) {
+            return None;
+        }
+        commitment.what.clone_from(&commitment.receipt.quote);
+    }
+    Some(commitment)
 }
 
 /// A receipt's timestamp is measured, not stated: it comes from the segment the
@@ -11094,6 +11109,44 @@ pub(crate) mod tests {
         assert_ne!(
             ledger.threads[0].receipt.citations,
             ledger.threads[1].receipt.citations
+        );
+    }
+
+    /// A commitment named in words cut off mid-phrase goes by the sentence it
+    /// was said in, and one whose sentence was cut off too is not kept: no
+    /// task is filed under a name like "Send the".
+    #[test]
+    fn a_commitment_named_in_cut_off_words_takes_its_sentence_or_drops_out() {
+        let reference = include_str!("fixtures/ledger_evals/messy_two_party.ledger.json");
+        let evidence = ledger_reference_evidence();
+        let mut value: serde_json::Value =
+            first_json_value(reference).expect("realistic model output");
+        let whole = value["commitments"][1].clone();
+        value["commitments"][0]["what"] = serde_json::json!("Write the");
+        value["commitments"][0]["receipt"]["quote"] =
+            serde_json::json!("I'll write the tier comparison table by Friday.");
+        value["commitments"][1]["what"] = serde_json::json!("Model the");
+        value["commitments"][1]["receipt"]["quote"] = serde_json::json!("I'd want to model the");
+        value["commitments"]
+            .as_array_mut()
+            .expect("the reference commitments are a list")
+            .push(whole);
+        let raw: RawLedgerOutput =
+            first_json_value(&value.to_string()).expect("cut-off model output");
+
+        let ledger = validate_ledger_output(&raw, &evidence).expect("the ledger validates");
+
+        let named: Vec<&str> = ledger
+            .commitments
+            .iter()
+            .map(|commitment| commitment.what.as_str())
+            .collect();
+        assert_eq!(
+            named,
+            [
+                "I'll write the tier comparison table by Friday.",
+                "Model the annual discount before the team price is set"
+            ]
         );
     }
 

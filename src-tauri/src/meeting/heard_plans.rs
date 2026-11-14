@@ -21,6 +21,7 @@ use super::types::{
     ArtifactCitation, MeetingEventPayload, MeetingHeardPlansChangedEvent, MeetingSessionId,
     SpeakerId,
 };
+use super::words::{points_back, trails_off};
 use chrono::{Local, NaiveDate, NaiveDateTime, TimeZone};
 use schemars::{schema::RootSchema, JsonSchema};
 use serde::{Deserialize, Serialize};
@@ -347,7 +348,10 @@ fn clock_on_day(day: HeardPlanWindow, timed: &HeardPlanDraft) -> Option<HeardPla
 /// One plan the engine named, if the lines it cites bear it out: the lines
 /// were in its request, the quote and the words that say when are in them,
 /// and that time was still to come when it was said. The people and place
-/// are kept only as far as those lines name them.
+/// are kept only as far as those lines name them. A plan whose name breaks
+/// off mid-phrase ("Send the"), or that names no one and ends on a word
+/// standing for something said before it ("decide that"), has nothing to
+/// call it by and drops out.
 fn checked(
     heard: Heard,
     request: &[usize],
@@ -370,7 +374,7 @@ fn checked(
     if !quote_is_verbatim(&heard.quote, &haystack) || !quote_is_verbatim(&heard.when, &haystack) {
         return None;
     }
-    let title = bounded(&heard.what, MAX_TITLE_CHARS)?;
+    let title = bounded(&heard.what, MAX_TITLE_CHARS).filter(|title| !trails_off(title))?;
     let mut people = Vec::new();
     for name in &heard.people {
         let Some(name) = bounded(name, MAX_NAME_CHARS) else {
@@ -382,6 +386,9 @@ fn checked(
         {
             people.push(name);
         }
+    }
+    if people.is_empty() && points_back(&title) {
+        return None;
     }
     let place =
         bounded(&heard.place, MAX_PLACE_CHARS).filter(|place| quote_is_verbatim(place, &haystack));
