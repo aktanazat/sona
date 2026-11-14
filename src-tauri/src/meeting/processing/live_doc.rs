@@ -609,16 +609,34 @@ pub(crate) fn voice_ask(text: &str) -> Option<(MeetingVoiceIntent, String)> {
     Some((intent, rest.to_string()))
 }
 
-/// Each word of `text`, lowercased, with the byte offset just past it.
+/// Each word of `text`, lowercased, with the byte offset just past it. An
+/// apostrophe, straight or curly, stays inside its word, and so does a
+/// colon, point or comma between digits: "9:30" is one time, not 9 and 30.
 fn words(text: &str) -> impl Iterator<Item = (String, usize)> + '_ {
-    let in_word = |character: char| character.is_alphanumeric() || character == '\'';
+    let in_word = move |at: usize, character: char| {
+        character.is_alphanumeric()
+            || matches!(character, '\'' | '\u{2019}')
+            || (matches!(character, ':' | '.' | ',')
+                && text[..at].ends_with(|before: char| before.is_ascii_digit())
+                && text[at + 1..].starts_with(|after: char| after.is_ascii_digit()))
+    };
     let mut from = 0;
     std::iter::from_fn(move || {
-        let start = from + text[from..].find(in_word)?;
+        let (start, _) = text[from..]
+            .char_indices()
+            .map(|(at, character)| (from + at, character))
+            .find(|&(at, character)| in_word(at, character))?;
         from = text[start..]
-            .find(|character: char| !in_word(character))
-            .map_or(text.len(), |length| start + length);
-        Some((text[start..from].to_lowercase(), from))
+            .char_indices()
+            .map(|(at, character)| (start + at, character))
+            .find(|&(at, character)| !in_word(at, character))
+            .map_or(text.len(), |(at, _)| at);
+        let word = text[start..from]
+            .chars()
+            .flat_map(char::to_lowercase)
+            .map(|character| if character == '\u{2019}' { '\'' } else { character })
+            .collect();
+        Some((word, from))
     })
 }
 
@@ -851,7 +869,7 @@ fn folded<'a>(mut kept: Vec<Candidate<'a>>, rewrites: Vec<(&'a Known, String)>) 
 /// ferry timetable change goes out with the harbour map" shares only
 /// "harbour" with "The harbour map launch is confirmed for March 21".
 fn says_the_same(said: &str, other: &str) -> bool {
-    let mut long: Vec<String> = words(said).map(|(word, _)| word).filter(|word| word.chars().count() >= 5).collect();
+    let mut long: Vec<String> = words(said).map(|(word, _)| word).filter(|word| is_long(word)).collect();
     long.sort();
     long.dedup();
     let other: Vec<String> = words(other).map(|(word, _)| word).collect();
@@ -958,16 +976,37 @@ fn kept_notes(
 /// not touched or removed since the reading was asked. An add that replaces
 /// a point the user touched or removed meanwhile lands as a new point, so
 /// the news it carries is kept. Returns what landed.
+///
+/// An add whose words come in a row in a point says nothing new: shown a
+/// doc that had "We need to confirm the numbers for step three.", Apple's
+/// model added "Confirm the numbers for step three." An add that holds a
+/// point's words in a row says that point and more, so it takes its place.
+/// Neither holds for a point this reading rewrites, whose old words are on
+/// their way out, or for a point someone typed, which is often the question
+/// an add answers.
 fn merge(points: &mut Vec<MeetingLiveDocPoint>, kept: Vec<Candidate<'_>>) -> Vec<Edited> {
+    let rewritten: HashSet<&str> = kept
+        .iter()
+        .filter_map(|candidate| candidate.rewrites.or(candidate.replaces))
+        .map(|known| known.id.as_str())
+        .collect();
     let mut landed = Vec::new();
     for candidate in kept {
         if points.iter().any(|point| fold(&point.text) == fold(&candidate.text)) {
             continue;
         }
-        let target = candidate
-            .rewrites
-            .or(candidate.replaces)
-            .and_then(|known| points.iter().position(|point| point.id == known.id && !point.edited));
+        let target = match candidate.rewrites.or(candidate.replaces) {
+            Some(known) => points.iter().position(|point| point.id == known.id && !point.edited),
+            None if points.iter().any(|point| {
+                !point.edited && !rewritten.contains(point.id.as_str()) && runs_inside(&candidate.text, &point.text)
+            }) =>
+            {
+                continue
+            }
+            None => points.iter().position(|point| {
+                !point.edited && !rewritten.contains(point.id.as_str()) && runs_inside(&point.text, &candidate.text)
+            }),
+        };
         match target {
             Some(index) => {
                 let point = &mut points[index];
@@ -1005,8 +1044,32 @@ fn merge(points: &mut Vec<MeetingLiveDocPoint>, kept: Vec<Candidate<'_>>) -> Vec
 fn same_topic(before: &str, after: &str) -> bool {
     let before: Vec<String> = words(before).map(|(word, _)| word).collect();
     words(after).any(|(word, _)| {
-        word.chars().count() >= 5 && before.iter().any(|said| related(said, &word))
+        is_long(&word) && before.iter().any(|said| related(said, &word))
     })
+}
+
+/// Whether the words of `part` come in a row in `whole` with nothing around
+/// them that turns what they say, as those of "Confirm the numbers for step
+/// three." do in "We need to confirm the numbers for step three." Around
+/// them, "Don't", "or March 28" or "whether we can" says something else,
+/// and so does a question mark on one side only.
+fn runs_inside(part: &str, whole: &str) -> bool {
+    if part.contains('?') != whole.contains('?') {
+        return false;
+    }
+    let part: Vec<String> = words(part).map(|(word, _)| word).collect();
+    let whole: Vec<String> = words(whole).map(|(word, _)| word).collect();
+    !part.is_empty()
+        && whole.windows(part.len()).enumerate().any(|(at, run)| {
+            run == part.as_slice() && !whole[..at].iter().chain(&whole[at + part.len()..]).any(|word| turns(word))
+        })
+}
+
+/// A word that turns what the words beside it say: a "not", a choice, a
+/// condition or a doubt.
+fn turns(word: &str) -> bool {
+    word.ends_with("n't")
+        || ["not", "no", "never", "cannot", "or", "whether", "if", "unless", "maybe", "might"].contains(&word)
 }
 
 /// The same word, or two forms of one: "lamp" and "lamps", "fix" and
@@ -1015,6 +1078,13 @@ fn related(left: &str, right: &str) -> bool {
     let common = left.chars().zip(right.chars()).take_while(|(left, right)| left == right).count();
     let shorter = left.chars().count().min(right.chars().count());
     (common == shorter && common >= 3) || common >= 5
+}
+
+/// A word of five letters or more. A number read whole is not one:
+/// "1,000,500" would pass for a form of "1,000,000", and two points that
+/// name one price can still say different things.
+fn is_long(word: &str) -> bool {
+    word.chars().count() >= 5 && !word.contains(char::is_numeric)
 }
 
 /// Whether `text` names a label, such as "L1" or "P2", that none of the

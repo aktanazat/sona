@@ -101,12 +101,22 @@ pub(super) fn sample_offset_ns(start_offset_ns: u64, samples: usize) -> u64 {
     )
 }
 
+/// Cut a chunk only where one voice the diarizer names gives way to
+/// another; a window too short to place, or one it could not place, joins
+/// the voice beside it. Read alone, the last 1.68 s of "I will send the
+/// revised timeline to the city council by Friday." came back as "Council
+/// by Friday.", a 0.36 s tail that was mostly the pause ending the chunk as
+/// "Yeah.", and an undecided window cut "the LED fixtures" into "the LED."
+/// and "AD fixtures".
 fn fill_speaker_spans(
     samples: &[f32],
     start_offset_ns: u64,
     spans: &mut Vec<LiveSpeakerSpan>,
     mut diarize: impl FnMut(&[f32], u64, u64) -> Result<DiarizedWindow, DiarizationError>,
 ) {
+    let named = |speaker: MeetingProvisionalSpeaker| {
+        matches!(speaker, MeetingProvisionalSpeaker::Cluster { .. })
+    };
     for start in (0..samples.len()).step_by(LIVE_SPEAKER_WINDOW_SAMPLES) {
         let end = samples.len().min(start + LIVE_SPEAKER_WINDOW_SAMPLES);
         let audio = &samples[start..end];
@@ -131,8 +141,11 @@ fn fill_speaker_spans(
             }
         };
         if let Some(previous) = spans.last_mut() {
-            if previous.speaker == speaker {
+            if previous.speaker == speaker || !named(speaker) || !named(previous.speaker) {
                 previous.samples.end = end;
+                if named(speaker) {
+                    previous.speaker = speaker;
+                }
                 continue;
             }
         }
@@ -264,31 +277,24 @@ mod tests {
     }
 
     #[test]
-    fn enough_context_diarizes_once_and_leaves_a_short_tail_unknown() {
-        let audio = vec![0.1; LIVE_SPEAKER_WINDOW_SAMPLES + 2 * SAMPLE_RATE_HZ];
-        let mut calls = 0;
-        let spans = speaker_spans(&audio, 7_000_000_000, |samples, start, end| {
-            calls += 1;
-            assert_eq!(samples.len(), LIVE_SPEAKER_WINDOW_SAMPLES);
-            assert!(std::ptr::eq(samples.as_ptr(), audio.as_ptr()));
-            assert_eq!(start, 7_000_000_000);
-            assert_eq!(end, 10_000_000_000);
-            Ok(window(
-                start,
-                end,
-                Some(0),
-                SpeakerAssignmentKind::SystemSpeaker,
-            ))
+    fn an_undecided_window_and_a_short_tail_stay_with_the_voice_around_them() {
+        let audio = vec![0.1; 3 * LIVE_SPEAKER_WINDOW_SAMPLES + 2 * SAMPLE_RATE_HZ];
+        let mut guesses = [
+            (Some(0), SpeakerAssignmentKind::SystemSpeaker),
+            (None, SpeakerAssignmentKind::Overlap),
+            (Some(0), SpeakerAssignmentKind::SystemSpeaker),
+        ]
+        .into_iter();
+        let spans = speaker_spans(&audio, 7_000_000_000, |_, start, end| {
+            let (cluster, assignment) = guesses.next().expect("only whole windows are diarized");
+            Ok(window(start, end, cluster, assignment))
         });
-        assert_eq!(calls, 1);
-        assert_eq!(spans.len(), 2);
-        assert_eq!(spans[0].samples, 0..LIVE_SPEAKER_WINDOW_SAMPLES);
+        assert_eq!(spans.len(), 1, "no cut where no other voice was named");
+        assert_eq!(spans[0].samples, 0..audio.len());
         assert_eq!(
             spans[0].speaker,
             MeetingProvisionalSpeaker::Cluster { index: 0 }
         );
-        assert_eq!(spans[1].samples, LIVE_SPEAKER_WINDOW_SAMPLES..audio.len());
-        assert_eq!(spans[1].speaker, MeetingProvisionalSpeaker::Unknown);
     }
 
     #[test]

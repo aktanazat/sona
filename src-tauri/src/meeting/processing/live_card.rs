@@ -360,7 +360,7 @@ pub(crate) fn hang_up(
     live: Arc<LiveTranscript>,
 ) {
     std::thread::spawn(move || {
-        if let Err(error) = service.live_pass(&store, session_id, &live) {
+        if let Err(error) = service.live_pass(&store, session_id, &live, true) {
             log::debug!("The last provisional pass for {session_id:?} read nothing: {error:?}");
         }
         tick(&service, &store, session_id, &live, Moment::HangUp);
