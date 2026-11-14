@@ -1810,20 +1810,14 @@ final class MeetingLiveStore {
         return lines
     }
 
-    /// The audio line, if there is one. A microphone-only meeting the person
-    /// chose is said as a fact, not a fault; a lane that was asked for and is
-    /// not working is the fault, and the line names every lane in that state
-    /// rather than assuming the microphone is fine; anything else missing
-    /// reads off the core's completeness.
+    /// The audio line, if there is one. A meeting asked for with the
+    /// microphone alone has none: that was the choice, not a fault. A lane
+    /// that was asked for and is not working is the fault, and the line names
+    /// every lane in that state rather than assuming the microphone is fine;
+    /// anything else missing reads off the core's completeness.
     private func audioWarning(_ session: MeetingSessionSnapshot) -> MeetingLiveWarning? {
         let microphone = session.sources.first { $0.sourceKind == .microphone }
-        guard let lane = session.sources.first(where: { $0.sourceKind == .systemAudio }) else {
-            return microphone != nil
-                ? MeetingLiveWarning(
-                    text: "Recording the microphone only. The other side of the call is not captured.",
-                    urgent: false)
-                : nil
-        }
+        guard let lane = session.sources.first(where: { $0.sourceKind == .systemAudio }) else { return nil }
         let systemDown = MeetingLiveStore.down(lane)
         let microphoneDown = microphone.map(MeetingLiveStore.down) ?? true
         if systemDown && microphoneDown {

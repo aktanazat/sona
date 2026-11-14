@@ -545,22 +545,19 @@ struct LiveCardSection: View {
                 }
                 .animation(Motion.settle(reduced: reduceMotion), value: promises.map(\.id))
             }
-            HStack(spacing: 8) {
-                TextField("What did we decide on…", text: $topic,
-                          prompt: Text("What did we decide on…").foregroundStyle(Theme.inkTertiary))
-                    .textFieldStyle(.plain)
-                    .font(TypeScale.body())
-                    .foregroundStyle(Theme.ink)
-                    .focused($asking)
-                    .onSubmit(ask)
-                    .padding(.horizontal, 12)
-                    .frame(height: Theme.controlHeight)
-                    .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
-                    .overlay(RoundedRectangle(cornerRadius: Theme.radiusControl)
-                        .strokeBorder(asking ? Theme.accent : Theme.border, lineWidth: 1))
-                    .accessibilityLabel("What did we decide on")
-                Shortcut("d")
-            }
+            TextField("What did we decide on…", text: $topic,
+                      prompt: Text("What did we decide on…").foregroundStyle(Theme.inkTertiary))
+                .textFieldStyle(.plain)
+                .font(TypeScale.body())
+                .foregroundStyle(Theme.ink)
+                .focused($asking)
+                .onSubmit(ask)
+                .padding(.horizontal, 12)
+                .frame(height: Theme.controlHeight)
+                .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
+                .overlay(RoundedRectangle(cornerRadius: Theme.radiusControl)
+                    .strokeBorder(asking ? Theme.accent : Theme.border, lineWidth: 1))
+                .accessibilityLabel("What did we decide on")
             if let failure = heard.failure, heard.watching == sessionId {
                 Text(failure).metaText(Theme.inkSecondary)
             }

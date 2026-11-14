@@ -18,9 +18,8 @@ struct ConversationBookmarkButton: View {
     }
 }
 
-/// Three bookmarks of a kind, each with how many this recording holds. The
-/// count rolls up when one lands; with the counts unread it shows none,
-/// never a zero.
+/// Three bookmarks of a kind, each with how many this recording holds once
+/// it holds one. The count rolls up when one lands.
 struct ConversationTypedBookmarks: View {
     let isRecording: Bool
     let counts: [ConversationBookmarkKind: Int]?
@@ -34,7 +33,7 @@ struct ConversationTypedBookmarks: View {
                 Button { action(kind) } label: {
                     HStack(spacing: 4) {
                         Image(systemName: kind.symbol).foregroundStyle(kind.color)
-                        if let count = counts?[kind, default: 0] {
+                        if let count = counts?[kind], count > 0 {
                             Text("\(count)")
                                 .monospacedDigit()
                                 .contentTransition(.numericText(value: Double(count)))
