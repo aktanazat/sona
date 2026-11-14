@@ -2504,16 +2504,14 @@ fn discard_superseded_decisions(
         .iter()
         .map(|decision| dated_decision(&decision.text))
         .collect();
-    let replacements: Vec<_> = decisions
+    let mut replacements: Vec<_> = decisions
         .iter()
         .enumerate()
         .map(|(index, previous)| {
             let Some(old) = &dated[index] else {
                 return None;
             };
-            if user_marked(&previous.citations)
-                || !cited_dated_decision(previous, old, evidence, None)
-            {
+            if !cited_dated_decision(previous, old, evidence, None) {
                 return None;
             }
             let Some(end) = previous.citations.iter().map(|citation| citation.end_offset_ns).max()
@@ -2530,6 +2528,18 @@ fn discard_superseded_decisions(
             })
         })
         .collect();
+    for index in 0..replacements.len() {
+        let mut latest = replacements[index];
+        while let Some(next) = latest.and_then(|current| replacements[current]) {
+            latest = Some(next);
+        }
+        replacements[index] = latest;
+    }
+    for (index, decision) in decisions.iter().enumerate() {
+        if replacements[index].is_some() && user_marked(&decision.citations) {
+            replacements[index] = None;
+        }
+    }
     discard_superseded_summary_lines(summary, trace, decisions, &dated, &replacements);
     let mut replacements = replacements.into_iter();
     decisions.retain(|_| replacements.next().flatten().is_none());

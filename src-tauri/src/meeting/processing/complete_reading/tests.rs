@@ -415,6 +415,44 @@ mod tests {
     }
 
     #[test]
+    fn a_summary_follows_multiple_dated_revisions_to_the_final_decision() {
+        let final_text = "The public launch of the harbour map moves again to March 28";
+        for marked in [false, true] {
+            let (mut evidence, mut notes) = dated_decisions();
+            evidence.transcript[2].text = final_text.to_string();
+            if marked {
+                evidence.marks.push(NotesMark {
+                    kind: NotesMarkKind::Decision,
+                    at_offset_ns: 12_000_000_000,
+                    label: None,
+                });
+            }
+            notes.decisions[2].text = final_text.to_string();
+            notes.decisions.swap(0, 1);
+            let original = notes.decisions[0].citations[0].clone();
+            let latest = notes.decisions[2].citations[0].clone();
+            notes.summary.text = notes.decisions[0].text.clone();
+            notes.summary.citations = vec![original.clone()];
+            notes.summary_trace = vec![SummaryLineTrace { line: 0, anchor: original }];
+
+            confirm_dated_decisions(&evidence, &mut notes);
+
+            assert_eq!(notes.summary.text, final_text, "marked: {marked}");
+            let decisions: Vec<_> = notes.decisions.iter().map(|item| item.text.as_str()).collect();
+            if marked {
+                assert_eq!(
+                    decisions,
+                    ["The public launch of the harbour map moves again to March 21", final_text]
+                );
+            } else {
+                assert_eq!(decisions, [final_text]);
+            }
+            assert_eq!(notes.summary_trace, [SummaryLineTrace { line: 0, anchor: latest.clone() }]);
+            assert!(notes.summary.citations.contains(&latest));
+        }
+    }
+
+    #[test]
     fn historical_or_untraced_summary_details_are_not_discarded() {
         for (text, traced) in [
             ("The public launch of the harbour map moves to March 14 and later to March 21", true),
