@@ -113,7 +113,7 @@ struct WorkflowRow: View {
         if let run = workflow.lastRun, !run.foundNothing {
             HStack(spacing: 6) {
                 WorkflowStatusGlyph(status: run.status)
-                Text(workflowOutcomeText(run))
+                Text(run.outcomeText)
                     .metaText(Theme.inkSecondary)
                     .lineLimit(1)
                 Text("·").metaText(Theme.inkDisabled)
@@ -141,7 +141,7 @@ struct WorkflowRunRow: View {
             HStack(alignment: .firstTextBaseline, spacing: 10) {
                 WorkflowStatusGlyph(status: receipt.status)
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(workflowOutcomeText(receipt))
+                    Text(receipt.outcomeText)
                         .bodyText(14)
                         .fixedSize(horizontal: false, vertical: true)
                     Text("\(receipt.workflowId.name) · \(promptRelativeTime(receipt.finishedAtUtcMs))")
