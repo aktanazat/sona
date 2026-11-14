@@ -59,7 +59,7 @@ use super::voice_identity::{
     map_sortformer_evidence, AudioSpan, AutoIdentityMode, DictationVoiceprint, UserVoiceSample,
     VoiceEvidenceSpan, VoiceIdentityCollector, VoiceMatchCandidate,
 };
-use super::words::{commits, normalized_words, says_words, trails_off};
+use super::words::{commits, normalized_words, says_words, title_or_quote};
 use super::workflow_engine::{known_vocabulary, record_meeting_finalized};
 use crate::audio_toolkit::vad::{self, VoiceActivityDetector};
 use crate::managers::transcription::TranscriptionManager;
@@ -6666,6 +6666,8 @@ struct RawLedgerCommitment {
 #[serde(deny_unknown_fields)]
 struct RawLedgerStance {
     from: String,
+    #[serde(default, deserialize_with = "ledger::deserialize_stance_target")]
+    #[schemars(with = "Option<String>")]
     to: Option<String>,
     what: String,
     note: Option<String>,
@@ -7069,11 +7071,9 @@ pub(crate) fn validate_ledger_output(
 /// A commitment named in words cut off mid-phrase goes by its whole spoken
 /// sentence instead, and drops out when that sentence was cut off too.
 fn whole_commitment(mut commitment: LedgerCommitment) -> Option<LedgerCommitment> {
-    if trails_off(&commitment.what) {
-        if trails_off(&commitment.receipt.quote) {
-            return None;
-        }
-        commitment.what.clone_from(&commitment.receipt.quote);
+    let what = title_or_quote(&commitment.what, &commitment.receipt.quote)?;
+    if what != commitment.what {
+        commitment.what = what.to_owned();
     }
     Some(commitment)
 }
@@ -11049,6 +11049,15 @@ pub(crate) mod tests {
             serde_json::Value::Null,
             "consumers see an explicit unknown, never an invented counterpart"
         );
+        for target in ["null", "  null  "] {
+            let mut literal: serde_json::Value =
+                first_json_value(reference).expect("the reference reads as a value");
+            literal["stances"][0]["to"] = serde_json::json!(target);
+            let raw: RawLedgerOutput =
+                first_json_value(&literal.to_string()).expect("literal null parses as unknown");
+            let ledger = validate_ledger_output(&raw, &evidence).expect("stance validates");
+            assert_eq!(ledger.stances[0].to, None);
+        }
 
         let mut omitted: serde_json::Value =
             first_json_value(reference).expect("the reference reads as a value");
@@ -11146,6 +11155,48 @@ pub(crate) mod tests {
             [
                 "I'll write the tier comparison table by Friday.",
                 "Model the annual discount before the team price is set"
+            ]
+        );
+    }
+
+    #[test]
+    fn ledger_keeps_complete_quotes_for_uncertain_commitment_names() {
+        let reference = include_str!("fixtures/ledger_evals/messy_two_party.ledger.json");
+        let evidence = ledger_reference_evidence();
+        let mut value: serde_json::Value =
+            first_json_value(reference).expect("realistic model output");
+        let original = value["commitments"][0].clone();
+        let rows = [
+            ("Survey the seabed", "I'll survey the seabed."),
+            ("Book the flatbed", "I'll book the flatbed."),
+            ("Call the insured", "I'll call the insured."),
+            ("Order a hundred", "I'll order a hundred."),
+            ("Send the revised", "I'll send the revised"),
+        ]
+        .into_iter()
+        .map(|(name, quote)| {
+            let mut row = original.clone();
+            row["what"] = serde_json::json!(name);
+            row["receipt"]["quote"] = serde_json::json!(quote);
+            row
+        })
+        .collect();
+        value["commitments"] = serde_json::Value::Array(rows);
+        let raw: RawLedgerOutput =
+            first_json_value(&value.to_string()).expect("model commitments");
+        let ledger = validate_ledger_output(&raw, &evidence).expect("valid ledger");
+        let names: Vec<_> = ledger
+            .commitments
+            .iter()
+            .map(|commitment| commitment.what.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "I'll survey the seabed.",
+                "I'll book the flatbed.",
+                "I'll call the insured.",
+                "I'll order a hundred.",
             ]
         );
     }

@@ -136,7 +136,7 @@ mod scoped {
     use serde::ser::{SerializeMap, SerializeSeq};
     use serde::{de::DeserializeOwned, Deserialize};
     use std::sync::LazyLock;
-    use crate::meeting::words::trails_off;
+    use crate::meeting::words::uncertain_title;
 
     static NOTES_FACTUAL: LazyLock<RootSchema> = LazyLock::new(root_schema::<NativeFactualReply>);
     static NOTES_NARRATIVE: LazyLock<RootSchema> =
@@ -552,6 +552,8 @@ mod scoped {
     #[serde(deny_unknown_fields)]
     struct NativeStance {
         from: String,
+        #[serde(default, deserialize_with = "crate::meeting::ledger::deserialize_stance_target")]
+        #[schemars(with = "Option<String>")]
         to: Option<String>,
         what: String,
         note: Option<String>,
@@ -1588,7 +1590,7 @@ mod scoped {
         fn canonical_ledger(mut reply: NativeLedgerReply) -> Result<String, String> {
             for commitment in &mut reply.commitments {
                 if let Some(deadline) = commitment.due_text.take() {
-                    if !commitment.what.contains(&deadline) && !trails_off(&commitment.what) {
+                    if !commitment.what.contains(&deadline) && !uncertain_title(&commitment.what) {
                         commitment.what.push_str(" — ");
                         commitment.what.push_str(&deadline);
                     }
@@ -2946,7 +2948,7 @@ mod scoped {
                 "actor":{"basis":"first_person_singular","named_person":"Casey"},
                 "due_text":"Tuesday","firmness":"firm","receipt":{"quote":["Q5"]}
             }]}]});
-            let narrative = json!({"headline":"The report is due Monday; the annual price remains 240 dollars.","additional_discussion":[],"stances":[{"from":"Jordan","what":"Keep the annual price at 240 dollars","receipt":{"quote":["Q3"]}}],"source_limitations":[]});
+            let narrative = json!({"headline":"The report is due Monday; the annual price remains 240 dollars.","additional_discussion":[],"stances":[{"from":"Jordan","to":"null","what":"Keep the annual price at 240 dollars","receipt":{"quote":["Q3"]}}],"source_limitations":[]});
             let restored = request
                 .restore_ledger_parts(
                     request
@@ -2955,6 +2957,8 @@ mod scoped {
                     &narrative.to_string(),
                 )
                 .expect("complete native ledger");
+            let canonical: Value = serde_json::from_str(&restored).expect("canonical ledger JSON");
+            assert_eq!(canonical["stances"][0]["to"], Value::Null);
             let ledger: RawLedgerOutput =
                 serde_json::from_str(&restored).expect("canonical ledger");
             assert_eq!(ledger.commitments[0].who, "Casey");

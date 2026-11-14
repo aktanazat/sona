@@ -20,7 +20,7 @@ use crate::meeting::live_doc_types::{MeetingLiveChangeKind, MeetingLiveTarget};
 use crate::meeting::spoken_time::{self, SpokenTime};
 use crate::meeting::store::{MeetingStore, StoreError};
 use crate::meeting::types::{MeetingSessionId, SourceKind};
-use crate::meeting::words::trails_off;
+use crate::meeting::words::title_or_quote;
 use crate::planning::work::parse::person_named;
 use crate::planning::work::sync::People;
 use crate::planning::work::types::{WorkOwner, WorkPersonChoice};
@@ -594,13 +594,7 @@ fn checked(
         return None;
     }
     let what = bounded(&heard.what, MAX_WHAT_CHARS)?;
-    let what = if !trails_off(&what) {
-        what
-    } else if !trails_off(&quote) {
-        quote.clone()
-    } else {
-        return None;
-    };
+    let what = title_or_quote(&what, &quote)?;
     let mut letters = what.chars();
     let what: String = letters
         .next()
@@ -983,5 +977,47 @@ mod tests {
                 "Move dock A to the north side"
             ]
         );
+    }
+
+    macro_rules! promise_title_cases {
+        ($($name:ident: $title:expr, $quote:expr => $expected:expr;)*) => {
+            $(
+                #[test]
+                fn $name() {
+                    let quote = $quote;
+                    let heard = Heard {
+                        what: $title.to_string(),
+                        owner: String::new(),
+                        when: String::new(),
+                        quote: quote.to_string(),
+                        lines: vec!["L1".to_string()],
+                    };
+                    let lines = [Copied {
+                        speaker: "Speaker".to_string(),
+                        text: quote.to_string(),
+                        start_offset_ns: 0,
+                        end_offset_ns: 1_000_000_000,
+                    }];
+                    let title = checked(heard, &lines, &[], 1)
+                        .map(|promise| promise.what);
+                    assert_eq!(title.as_deref(), $expected);
+                }
+            )*
+        };
+    }
+
+    promise_title_cases! {
+        a_promise_to_survey_the_seabed_is_kept:
+            "Survey the seabed", "I'll survey the seabed." => Some("I'll survey the seabed.");
+        a_promise_to_book_the_flatbed_is_kept:
+            "Book the flatbed", "I'll book the flatbed." => Some("I'll book the flatbed.");
+        a_promise_to_call_the_insured_is_kept:
+            "Call the insured", "I'll call the insured." => Some("I'll call the insured.");
+        a_promise_to_order_a_hundred_is_kept:
+            "Order a hundred", "I'll order a hundred." => Some("I'll order a hundred.");
+        a_promise_with_a_genuinely_cut_off_quote_is_not_kept:
+            "Send the revised", "I'll send the revised" => None;
+        a_promise_with_a_complete_revised_quote_is_kept:
+            "Send the revised", "I'll send the revised timeline." => Some("I'll send the revised timeline.");
     }
 }
