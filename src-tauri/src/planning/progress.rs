@@ -62,8 +62,7 @@ impl Counts {
         if self.scope == 0 {
             return 0;
         }
-        let points = u64::from(self.done) * 100 + u64::from(self.started) * 25;
-        u8::try_from(points / u64::from(self.scope)).unwrap_or(100)
+        u8::try_from(u64::from(self.done) * 100 / u64::from(self.scope)).unwrap_or(100)
     }
 
     /// Work left in quarters of a task: a started task has three left.
@@ -323,13 +322,13 @@ mod tests {
     }
 
     #[test]
-    fn started_work_counts_a_quarter() {
+    fn percent_counts_only_done_work() {
         let counts = Counts {
             scope: 10,
             started: 4,
             done: 5,
         };
-        assert_eq!(counts.percent(), 60);
+        assert_eq!(counts.percent(), 50);
     }
 
     #[test]
