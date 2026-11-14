@@ -136,7 +136,7 @@ mod scoped {
     use serde::ser::{SerializeMap, SerializeSeq};
     use serde::{de::DeserializeOwned, Deserialize};
     use std::sync::LazyLock;
-    use crate::meeting::words::trails_off;
+    use crate::meeting::words::uncertain_title;
 
     static NOTES_FACTUAL: LazyLock<RootSchema> = LazyLock::new(root_schema::<NativeFactualReply>);
     static NOTES_NARRATIVE: LazyLock<RootSchema> =
@@ -1588,7 +1588,7 @@ mod scoped {
         fn canonical_ledger(mut reply: NativeLedgerReply) -> Result<String, String> {
             for commitment in &mut reply.commitments {
                 if let Some(deadline) = commitment.due_text.take() {
-                    if !commitment.what.contains(&deadline) && !trails_off(&commitment.what) {
+                    if !commitment.what.contains(&deadline) && !uncertain_title(&commitment.what) {
                         commitment.what.push_str(" — ");
                         commitment.what.push_str(&deadline);
                     }

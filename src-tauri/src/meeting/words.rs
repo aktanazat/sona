@@ -145,21 +145,17 @@ fn plain_words(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// Whether `text` breaks off before it says what it is about, the way words
-/// taken from speech cut short do: it ends on an article or a conjunction
-/// ("Send the"), on an article and the word describing a noun that never
-/// came ("Send the revised"), or runs an article straight into a word that
-/// cannot follow one and on to the next article or the end ("Send the to the
-/// city council").
-pub(crate) fn trails_off(text: &str) -> bool {
-    let words = plain_words(text);
+fn incomplete(words: &[String], uncertain_name: bool) -> bool {
     let determiner = |word: &str| DETERMINERS.contains(&word);
     let joins = |word: &str| CONJUNCTIONS.contains(&word) || NEVER_AFTER_AN_ARTICLE.contains(&word);
-    match words.as_slice() {
+    match words {
         [] => true,
         [.., last] if determiner(last.as_str()) || CONJUNCTIONS.contains(&last.as_str()) => true,
         [.., article, last]
-            if determiner(article.as_str()) && last.len() > 5 && last.ends_with("ed") =>
+            if determiner(article.as_str())
+                && last.len() > 5
+                && last.ends_with("ed")
+                && (uncertain_name || matches!(last.as_str(), "revised" | "updated")) =>
         {
             true
         }
@@ -168,6 +164,20 @@ pub(crate) fn trails_off(text: &str) -> bool {
                 && words.get(at + 1).is_some_and(|next| joins(next.as_str()))
                 && words.get(at + 2).is_none_or(|after| determiner(after.as_str()))
         }),
+    }
+}
+
+pub(crate) fn uncertain_title(text: &str) -> bool {
+    incomplete(&plain_words(text), true)
+}
+
+pub(crate) fn title_or_quote<'a>(title: &'a str, quote: &'a str) -> Option<&'a str> {
+    if !uncertain_title(title) {
+        Some(title)
+    } else if !incomplete(&plain_words(quote), false) {
+        Some(quote)
+    } else {
+        None
     }
 }
 
