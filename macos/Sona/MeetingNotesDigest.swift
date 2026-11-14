@@ -142,16 +142,26 @@ struct MeetingNotesDigest {
         self.covered = covered
 
         let outlineLines = outlineTexts.map { line(0, $0.text, $0.citations) }
-        let sources = decisions + actions.map(\.line) + summary + outlineLines + questions + risks
+        let sources = summary + decisions + actions.map(\.line) + outlineLines + questions + risks
             + [outcome].compactMap { $0 }
         var seen = Set<String>()
         var figures: [Figure] = []
         search: for source in sources {
             for sentence in Self.sentences(source.text) {
                 let matches = sentence.matches(of: Self.figure)
-                guard matches.count == 1 else { continue }
+                var contrastedDates = Set<String.Index>()
+                for (earlier, later) in zip(matches, matches.dropFirst()) {
+                    guard earlier.output.date != nil, later.output.date != nil,
+                          sentence[earlier.range.upperBound..<later.range.lowerBound]
+                            .trimmingCharacters(in: .whitespacesAndNewlines)
+                            .caseInsensitiveCompare("instead of") == .orderedSame
+                    else { continue }
+                    contrastedDates.insert(earlier.range.lowerBound)
+                    contrastedDates.insert(later.range.lowerBound)
+                }
                 for match in matches {
-                    let value = String(match.output).trimmingCharacters(in: .whitespaces)
+                    guard !contrastedDates.contains(match.range.lowerBound) else { continue }
+                    let value = String(match.output.0).trimmingCharacters(in: .whitespaces)
                     guard seen.insert(Self.key(value)).inserted else { continue }
                     figures.append(Figure(
                         id: figures.count,
@@ -181,9 +191,11 @@ struct MeetingNotesDigest {
         [$€£¥] \d[\d,]* (?:\.\d+)? (?:k|m|bn|\s(?:thousand|million|billion))? \b
       | \b \d[\d,]* (?:\.\d+)? (?:k|m|bn|\s(?:thousand|million|billion))? \s? (?:dollars?|usd|euros?|eur|pounds?|gbp|yen) \b
       | \b \d+ (?:\.\d+)? \s? (?:%|percent\b)
-      | \b (?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?) \.? \s \d{1,2} (?:st|nd|rd|th)? \b (?:,?\s\d{4}\b)?
-      | \b \d{1,2} (?:st|nd|rd|th)? \s (?:of\s)? (?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?) \b (?:,?\s\d{4}\b)?
-      | \b \d{4}-\d{2}-\d{2} \b
+      | (?<date>
+            \b (?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?) \.? \s \d{1,2} (?:st|nd|rd|th)? \b (?:,?\s\d{4}\b)?
+          | \b \d{1,2} (?:st|nd|rd|th)? \s (?:of\s)? (?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?) \b (?:,?\s\d{4}\b)?
+          | \b \d{4}-\d{2}-\d{2} \b
+        )
       | \b \d{1,2} (?::\d{2})? \s? (?:am|pm) \b
       | \b \d[\d,]* (?:\.\d+)? [\s-] (?:seconds?|minutes?|mins?|hours?|hrs?|days?|weeks?|months?|quarters?|years?|users?|customers?|people|seats?|accounts?|engineers?|hires?|licenses?|tickets?|deals?) \b
     /#.ignoresCase()
