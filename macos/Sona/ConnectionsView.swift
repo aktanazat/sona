@@ -8,14 +8,14 @@ struct ConnectionsView: View {
 
     var body: some View {
         Page {
-            PageTitle("Connections", subtitle: "Send generated notes to services you choose. Nothing is connected or sent automatically until you turn it on.")
+            PageTitle("Connections", subtitle: "Send generated notes to services you choose.")
             if let error = store.error { Text(error).bodyText(14, Theme.inkSecondary) }
             if let notice = store.notice { Text(notice).bodyText(14, Theme.inkSecondary) }
             PageSection("Services") {
                 Card {
                     if store.loading && store.snapshot == nil { CardLine("Reading connections…") }
                     else if store.snapshot == nil { CardRow { Text("Connections could not be read.").bodyText() } trailing: { Button("Try again") { Task { await store.load() } }.buttonStyle(.quiet) } }
-                    else if store.connections.isEmpty { CardLine("No services connected. Your notes stay in Sona.") }
+                    else if store.connections.isEmpty { CardLine("No services connected.") }
                     ForEach(store.connections) { connection in
                         CardRow {
                             HStack(spacing: 12) {
@@ -38,28 +38,28 @@ struct ConnectionsView: View {
                 Button("Connect a service") { editing = SonaConnection(id: UUID().uuidString.lowercased(), name: "", kind: .slackWebhook, target: "", enabled: false) }
                     .buttonStyle(.primary).disabled(store.snapshot == nil || store.busy)
             }
-            PageSection("Send automatically") {
-                Card {
-                    CardLine("Only future meetings or notes newly added to a folder are sent. Existing notes are never backfilled. Only generated notes leave Sona, not transcripts or your private notes.")
-                    if let snapshot = store.snapshot {
-                        if snapshot.rules.isEmpty { CardLine("No automatic sends. Every send needs your approval.") }
-                        ForEach(snapshot.rules) { rule in
-                            CardRow {
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text(snapshot.connections.first(where: { $0.id == rule.connectionId })?.name ?? "Disconnected service").bodyText()
-                                    Text(snapshot.scopes.first(where: { $0.scope == rule.scope })?.name ?? "Unavailable folder or series").metaText()
+            if let snapshot = store.snapshot, !store.enabled.isEmpty || !snapshot.rules.isEmpty {
+                PageSection("Send automatically") {
+                    if !snapshot.rules.isEmpty {
+                        Card {
+                            ForEach(snapshot.rules) { rule in
+                                CardRow {
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Text(snapshot.connections.first(where: { $0.id == rule.connectionId })?.name ?? "Disconnected service").bodyText()
+                                        Text(snapshot.scopes.first(where: { $0.scope == rule.scope })?.name ?? "Unavailable folder or series").metaText()
+                                    }
+                                } trailing: {
+                                    Button("Stop sending") { Task { await store.removeRule(rule) } }.buttonStyle(.quiet)
                                 }
-                            } trailing: {
-                                Button("Stop sending") { Task { await store.removeRule(rule) } }.buttonStyle(.quiet)
                             }
                         }
                     }
+                    Button("Add an automatic send") { addingRule = true }.buttonStyle(.secondary).disabled(store.enabled.isEmpty || store.busy)
                 }
-                Button("Add an automatic send") { addingRule = true }.buttonStyle(.secondary).disabled(store.enabled.isEmpty || store.busy)
             }
-            PageSection("Actions from chat") {
-                Card {
-                    if let preferences = store.snapshot?.preferences {
+            if let preferences = store.snapshot?.preferences {
+                PageSection("Actions from chat") {
+                    Card {
                         CardRow {
                             VStack(alignment: .leading, spacing: 4) {
                                 Text("Email drafts").bodyText()
@@ -80,14 +80,13 @@ struct ConnectionsView: View {
                                 Task { await store.preferences(email: preferences.emailDraftsEnabled, calendar: value) }
                             })).labelsHidden().toggleStyle(.switch).tint(Theme.accent)
                         }
-                    } else { CardLine("Read connections to change these permissions.") }
+                    }
                 }
             }
-            PageSection("Recent sends") {
-                Card {
-                    if let snapshot = store.snapshot {
-                        if snapshot.receipts.isEmpty { CardLine("Nothing has been sent.") }
-                        ForEach(snapshot.receipts) { receipt in
+            if let receipts = store.snapshot?.receipts, !receipts.isEmpty {
+                PageSection("Recent sends") {
+                    Card {
+                        ForEach(receipts) { receipt in
                             CardRow {
                                 VStack(alignment: .leading, spacing: 4) {
                                     Text(receipt.connectionName).bodyText()
@@ -98,9 +97,8 @@ struct ConnectionsView: View {
                                 if receipt.canUndo { Button("Undo") { Task { await store.undo(receipt) } }.buttonStyle(.quiet) }
                             }
                         }
-                    } else { CardLine("Recent sends are unavailable until the library is read.") }
+                    }
                 }
-                Button("Refresh") { Task { await store.load() } }.buttonStyle(.quiet)
             }
         }
         .disabled(store.busy)

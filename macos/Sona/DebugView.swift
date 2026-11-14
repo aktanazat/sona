@@ -1,24 +1,16 @@
 import SwiftUI
 
-/// The Debug page: instrumentation, sorted into the four things people come
-/// here to debug.
-///
-/// The capture group's microphone and sound rows belong to the settings slice,
-/// which ships them as one set of CardRows. Pass them in through `captureRows`
-/// and they mount at the top of the Capture card, above the recording buffer;
-/// the default renders nothing, so this page stands alone as well.
+/// The Debug page: capture, text delivery, diagnostics and logging.
 struct DebugView: View {
     let store: DebugStore
-    var captureRows: () -> AnyView = { AnyView(EmptyView()) }
 
     var body: some View {
         Page {
-            PageTitle("Debug", subtitle: "Instrumentation. Nothing here changes what Sona transcribes.")
+            PageTitle("Debug", subtitle: "")
             ErrorNote(store.error)
 
             PageSection("Capture") {
                 Card {
-                    captureRows()
                     RecordingBufferRow(store: store)
                 }
             }
@@ -131,10 +123,10 @@ private struct RecordingBufferRow: View {
 
 // MARK: - Text delivery
 
-/// The fuzzy word-correction threshold. A Whisper decoder is handed the
-/// vocabulary as its prompt and never reads this, so for those models the row
-/// says so and both controls go quiet rather than answering a drag with
-/// nothing.
+/// How far a heard word may be from a vocabulary word and still be corrected
+/// to it. A Whisper decoder is handed the vocabulary as its prompt and never
+/// reads this, so for those models the row says so and the control goes quiet
+/// rather than answering a drag with nothing.
 private struct WordCorrectionRow: View {
     let store: DebugStore
     @State private var value = DebugStore.defaultWordCorrectionThreshold
@@ -142,25 +134,28 @@ private struct WordCorrectionRow: View {
     var body: some View {
         CardRow {
             VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 10) {
-                    Text("Word correction threshold")
-                        .bodyText(14, store.promptedModel ? Theme.inkDisabled : Theme.ink)
-                    Text(store.promptedModel ? "Not applied" : String(format: "%.2f", value))
-                        .metaText(Theme.inkSecondary)
-                }
+                Text("Vocabulary matching")
+                    .bodyText(14, store.promptedModel ? Theme.inkDisabled : Theme.ink)
                 if store.promptedModel {
-                    Text("Whisper models receive your vocabulary in the decoder's prompt, so this threshold applies to Parakeet and Moonshine instead.")
+                    Text("Your speech model reads your vocabulary directly, so this has no effect.")
                         .metaText()
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
         } trailing: {
             HStack(spacing: 12) {
-                Slider(value: $value, in: 0...1, step: 0.01) { editing in
+                Slider(value: $value, in: 0...1, step: 0.01) {
+                    Text("Vocabulary matching")
+                } minimumValueLabel: {
+                    Text("Strict").metaText()
+                } maximumValueLabel: {
+                    Text("Loose").metaText()
+                } onEditingChanged: { editing in
                     guard !editing else { return }
                     store.setWordCorrectionThreshold(value)
                 }
-                .frame(width: 160)
+                .labelsHidden()
+                .frame(width: 220)
                 .tint(Theme.accent)
                 .disabled(store.promptedModel)
                 if value != store.defaultThreshold, !store.promptedModel {

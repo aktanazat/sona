@@ -83,7 +83,7 @@ struct PrivacyView: View {
         PageSection("Context for AI cleanup") {
             Card {
                 ChoiceRow(
-                    title: "Global context ceiling",
+                    title: "Read from other apps",
                     detail: store.contextCeiling.sentence,
                     choices: ContextPolicy.allCases,
                     label: \.label,
@@ -92,8 +92,8 @@ struct PrivacyView: View {
                         set: { ceiling in Task { await store.setContextCeiling(ceiling) } }))
                 .disabled(store.ceilingBusy)
                 ToggleRow(
-                    title: "Include browser URLs",
-                    detail: "Allow a frontmost browser page URL to be captured when a mode and the ceiling allow it. A meeting's list of open windows also keeps full page addresses.",
+                    title: "Include browser addresses",
+                    detail: "Lets Sona read the address of the page open in your browser. A meeting's list of open windows also keeps full page addresses.",
                     isOn: Binding(
                         get: { store.urlCaptureEnabled },
                         set: { enabled in Task { await store.setUrlCapture(enabled) } }))
@@ -107,20 +107,32 @@ struct PrivacyView: View {
     @ViewBuilder
     private var diagnosticsSection: some View {
         if let diagnostics = store.diagnostics {
-            PageSection("Context diagnostics") {
+            PageSection("What Sona can read") {
                 Card {
-                    CardRow {
-                        Text("Accessibility").bodyText()
-                    } trailing: {
-                        PrivacyFact(
-                            diagnostics.accessibility.word,
-                            live: diagnostics.accessibility == .denied)
+                    if diagnostics.accessibility == .denied {
+                        CardRow {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Accessibility").bodyText()
+                                Text("Not allowed, so Sona can't read the field you type in, selected text or browser addresses.")
+                                    .metaText()
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        } trailing: {
+                            Button("Open System Settings") { NSWorkspace.shared.open(PermissionsPane.accessibility.url) }
+                                .buttonStyle(.compact)
+                        }
+                    } else {
+                        CardRow {
+                            Text("Accessibility").bodyText()
+                        } trailing: {
+                            PrivacyFact(diagnostics.accessibility.word, live: false)
+                        }
                     }
                     ForEach(Array(diagnostics.sources.enumerated()), id: \.offset) { _, source in
                         CardRow {
                             Text(source.label).bodyText()
                         } trailing: {
-                            PrivacyFact(source.status.word, live: source.status.isRefusal)
+                            PrivacyFact(source.status.word, live: false)
                         }
                     }
                     ActionRow(
@@ -143,7 +155,7 @@ struct PrivacyView: View {
             Card {
                 ToggleRow(
                     title: "External access",
-                    detail: "Let another program on this Mac read the corpus through Sona's query plane.",
+                    detail: "Let another program on this Mac read your meetings and notes through Sona.",
                     isOn: Binding(
                         get: { store.externalQueryEnabled },
                         set: { enabled in Task { await store.setExternalQuery(enabled) } }))
@@ -460,19 +472,31 @@ struct PrivacyView: View {
 // MARK: - What this Mac holds
 
 extension PrivacyView {
+    /// Nothing until the first count lands: ten empty tiles read as broken.
+    @ViewBuilder
     fileprivate func holdingsSection(showStorage: @escaping () -> Void) -> some View {
-        PageSection("On this Mac") {
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 8)], alignment: .leading, spacing: 8) {
-                ForEach(holdingTiles(showStorage: showStorage)) { tile in
-                    HoldingTileView(tile: tile)
+        if store.inventoryFailed {
+            PageSection("On this Mac") {
+                Card {
+                    PrivacyFailureRow("Sona couldn't count what's stored on this Mac.", retry: "Try again") {
+                        Task { await store.refreshInventory() }
+                    }
+                }
+            }
+        } else if let inventory = store.inventory {
+            PageSection("On this Mac") {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 8)], alignment: .leading, spacing: 8) {
+                    ForEach(holdingTiles(inventory, showStorage: showStorage)) { tile in
+                        HoldingTileView(tile: tile)
+                    }
                 }
             }
         }
     }
 
-    private func holdingTiles(showStorage: @escaping () -> Void) -> [HoldingTile] {
-        let meetings = part(\.meetings)
-        let measuredAt = store.inventory?.measuredAtUtcMs ?? 0
+    private func holdingTiles(_ inventory: PrivacyInventory, showStorage: @escaping () -> Void) -> [HoldingTile] {
+        let meetings = inventory.meetings
+        let measuredAt = inventory.measuredAtUtcMs
         return [
             HoldingTile(label: "Recordings", meetings, open: { model.go(.meetings) }) { held in
                 let length = HoldingFormat.length(held.recordings.durationMs)
@@ -481,10 +505,10 @@ extension PrivacyView {
             HoldingTile(label: "Transcripts", meetings, open: { model.go(.meetings) }) { held in
                 HoldingFigure(held.transcripts.formatted())
             },
-            HoldingTile(label: "Dictations", part(\.dictations), open: { model.go(.library) }) { held in
+            HoldingTile(label: "Dictations", inventory.dictations, open: { model.go(.library) }) { held in
                 HoldingFigure(held.count.formatted(), detail: Model.bytes(held.bytes))
             },
-            HoldingTile(label: "Notes", part(\.notes), open: { model.go(.scratchpad) }) { held in
+            HoldingTile(label: "Notes", inventory.notes, open: { model.go(.scratchpad) }) { held in
                 HoldingFigure(held.count.formatted())
             },
             HoldingTile(label: "Voiceprints", meetings, open: { model.go(.people) }) { held in
@@ -498,7 +522,7 @@ extension PrivacyView {
                     (prints.people + prints.speakers).formatted(),
                     detail: detail.isEmpty ? nil : detail.joined(separator: " · "))
             },
-            HoldingTile(label: "Portraits", meetings, open: { model.go(.people) }) { held in
+            HoldingTile(label: "People photos", meetings, open: { model.go(.people) }) { held in
                 let cards = held.contactCards
                 let detail = [
                     Model.bytes(held.portraits.bytes),
@@ -506,37 +530,26 @@ extension PrivacyView {
                 ].compactMap { $0 }
                 return HoldingFigure(held.portraits.count.formatted(), detail: detail.joined(separator: " · "))
             },
-            HoldingTile(label: "Purging", meetings, open: { model.showSettings(.meetings) }) { held in
+            HoldingTile(label: "Meetings deleted soon", meetings, open: { model.showSettings(.meetings) }) { held in
                 HoldingFigure(held.purgingWithinWeek.formatted(), detail: "Next 7 days")
             },
-            HoldingTile(label: "Encrypted", whole, open: showStorage) { inventory in
+            HoldingTile(label: "Encrypted", .available(inventory), open: showStorage) { inventory in
                 inventory.historyEncrypted
                     ? HoldingFigure("Yes")
                     : HoldingFigure("No", detail: "Dictation history", tone: Theme.live)
             },
-            HoldingTile(label: "Backup", whole, open: { model.showSettings(.sync) }) { inventory in
-                let upload = meetings.flatMap(\.value)?.lastCloudUploadAtUtcMs
+            HoldingTile(label: "Backup", .available(inventory), open: { model.showSettings(.sync) }) { inventory in
+                let upload = meetings.value?.lastCloudUploadAtUtcMs
                 return HoldingFigure(
                     inventory.cloudBackup.word,
                     detail: upload.map { "Last \(HoldingFormat.ago($0, now: measuredAt).phrase)" })
             },
-            HoldingTile(label: "Phone", part(\.phoneSnapshot), open: { model.showSettings(.sync) }) { held in
+            HoldingTile(label: "Phone", inventory.phoneSnapshot, open: { model.showSettings(.sync) }) { held in
                 guard let published = held.lastPublishedAtUtcMs else { return HoldingFigure("Never") }
                 let ago = HoldingFormat.ago(published, now: measuredAt)
                 return HoldingFigure(ago.value, unit: ago.unit, detail: "Last snapshot")
             },
         ]
-    }
-
-    /// Nil while the first read is out; a read that failed makes every part
-    /// unreadable rather than zero.
-    private func part<Value>(_ read: (PrivacyInventory) -> Holding<Value>) -> Holding<Value>? {
-        if store.inventoryFailed { return .unavailable(.unavailable) }
-        return store.inventory.map(read)
-    }
-
-    private var whole: Holding<PrivacyInventory>? {
-        part { .available($0) }
     }
 }
 
@@ -578,17 +591,15 @@ private struct HoldingTile: Identifiable {
 
     var id: String { label }
 
-    /// A dash while the first read is out; a dash and the reason when the
-    /// part could not be read; a printed zero only when there is nothing.
+    /// A dash and the reason when the part could not be read; a printed zero
+    /// only when there is nothing.
     init<Value>(
-        label: String, _ holding: Holding<Value>?, open: @escaping () -> Void,
+        label: String, _ holding: Holding<Value>, open: @escaping () -> Void,
         figure: (Value) -> HoldingFigure
     ) {
         self.label = label
         self.open = open
         switch holding {
-        case nil:
-            self.figure = HoldingFigure("–", tone: Theme.inkDisabled)
         case let .unavailable(gap):
             self.figure = HoldingFigure("—", detail: gap.word, tone: Theme.inkDisabled)
         case let .available(value):

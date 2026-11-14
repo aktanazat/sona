@@ -34,13 +34,13 @@ enum ContextPolicy: String, Codable, CaseIterable, Hashable {
         }
     }
 
-    /// What the selected level actually reads, as the ceiling row says it.
+    /// What the selected level actually reads, as its row says it.
     var sentence: String {
         switch self {
         case .none: "Reads nothing from your other apps while you dictate."
-        case .target: "Reads the frontmost app identity."
-        case .targetAndSelection: "Reads the frontmost app identity and selected text when available."
-        case .full: "May also read a permitted browser URL and recently changed clipboard text when available."
+        case .target: "Reads which app you're in."
+        case .targetAndSelection: "Reads which app you're in and any selected text."
+        case .full: "Also reads the browser address, when allowed, and recently copied text."
         }
     }
 }
@@ -54,7 +54,7 @@ enum ContextAccessibilityAccess: String, Decodable {
     var word: String {
         switch self {
         case .granted: "Granted"
-        case .denied: "Denied"
+        case .denied: "Not allowed"
         case .unsupported: "Unsupported"
         }
     }
@@ -79,19 +79,13 @@ enum ContextSourceStatus: String, Decodable {
         case .captured: "Available"
         case .empty: "Empty"
         case .unsupported: "Unsupported"
-        case .permissionDenied: "Permission denied"
-        case .disabled: "Disabled"
-        case .disabledByCeiling: "Blocked by ceiling"
-        case .secureField: "Secure field"
-        case .stale: "Stale"
+        case .permissionDenied: "Needs Accessibility"
+        case .disabled: "Off"
+        case .disabledByCeiling: "Off"
+        case .secureField: "Password field"
+        case .stale: "Out of date"
         case .failed: "Unavailable"
         }
-    }
-
-    /// A source that is off for a reason the reader chose reads quietly; one
-    /// the system refused reads live.
-    var isRefusal: Bool {
-        self == .permissionDenied || self == .failed
     }
 }
 
