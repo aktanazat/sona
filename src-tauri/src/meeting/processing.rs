@@ -6473,11 +6473,9 @@ fn validate_cited_text(
 const MIN_PASTED_LINE_WORDS: usize = 6;
 
 /// The summary and its line-to-segment map, built from one pass over the same
-/// lines so an ordinal can never drift from the text it indexes. A line's
-/// anchor is its earliest cited segment — the moment a reader wants when they
-/// press that line — while the block keeps every citation the model gave, so
-/// nothing the model said about provenance is thrown away. Lines that fail
-/// [`keeps_summary_line`] drop out.
+/// lines so an ordinal can never drift from the text it indexes. A dated
+/// decision opens at a cited segment that says its date, when one does;
+/// otherwise the earliest citation is its anchor. The block keeps every citation.
 fn validate_summary_lines(
     lines: &[RawCitedText],
     evidence: &[MeetingEvidence],
@@ -6495,10 +6493,25 @@ fn validate_summary_lines(
     let mut trace = Vec::with_capacity(lines.len());
     for (ordinal, raw) in lines.into_iter().enumerate() {
         let line = validate_cited_text(raw, evidence, "summary")?;
-        let anchor = line
-            .citations
-            .iter()
-            .min_by_key(|citation| citation.start_offset_ns)
+        let matching_date = (line.citations.len() > 1)
+            .then(|| complete_reading::dated_decision(&line.text))
+            .flatten()
+            .and_then(|dated| {
+                let date = &dated.words[dated.date..dated.date + 2];
+                raw.citations
+                    .iter()
+                    .filter_map(|id| {
+                        let source = evidence.iter().find(|source| source.citation.entity_id == *id)?;
+                        if !says_words(&normalized_words(&source.text), date) {
+                            return None;
+                        }
+                        let id = TranscriptSegmentId::from_uuid(uuid::Uuid::parse_str(id).ok()?);
+                        line.citations.iter().find(|citation| citation.segment_id == id)
+                    })
+                    .min_by_key(|citation| citation.start_offset_ns)
+            });
+        let anchor = matching_date
+            .or_else(|| line.citations.iter().min_by_key(|citation| citation.start_offset_ns))
             .ok_or(ReplyRule::Uncited.on("summary"))?
             .clone();
         if !text.is_empty() {
@@ -8694,6 +8707,85 @@ pub(crate) mod tests {
             _shape: ReplyShape,
         ) -> Result<String, MeetingTextGenerationError> {
             self.answer.clone()
+        }
+    }
+
+    #[test]
+    fn summary_trace_uses_the_cited_source_for_the_final_date() {
+        let (ids, mut evidence) = summary_evidence(2);
+        evidence[0].text = "The launch moves to March 14 instead of March 1.".to_string();
+        evidence[1].text = "The launch moves again to March 21 because the council meets late.".to_string();
+        let lines = vec![RawCitedText {
+            text: "The launch was moved to March 21 because of the council meeting.".to_string(),
+            citations: ids.iter().map(|id| id.uuid().to_string()).collect(),
+        }];
+
+        let (summary, trace) = validate_summary_lines(&lines, &evidence).expect("summary");
+
+        assert_eq!(trace[0].anchor.segment_id, ids[1]);
+        assert_eq!(summary.citations.len(), 2);
+        assert_eq!(evidence[0].text, "The launch moves to March 14 instead of March 1.");
+    }
+
+    #[test]
+    fn summary_preserves_sources_when_a_numeric_comparison_is_not_supported() {
+        for supported in [false, true] {
+            let (ids, mut transcript) = summary_evidence(4);
+            transcript[0].text = if supported {
+                "The LED fixtures came in at over $40,000, which is over budget."
+            } else {
+                "The LED fixtures came in at $40,000, which is over budget."
+            }
+            .to_string();
+            transcript[1].text = "We decided last month to cap lighting at 30,000.".to_string();
+            transcript[2].text = "The launch originally moved to March 14.".to_string();
+            transcript[3].text = "Let's decide the ferry timetable next week.".to_string();
+            let evidence = ArtifactEvidence {
+                transcript,
+                manual_notes: Vec::new(),
+                user_notes: String::new(),
+                marks: Vec::new(),
+                template: crate::meeting::analytics::MeetingNotesTemplate::default().into(),
+            };
+            let line = if supported {
+                "The fixtures cost over $40,000, exceeding the 30,000 cap."
+            } else {
+                "The lighting budget is over $40,000, exceeding the 30,000 cap."
+            };
+            let cited = |text: &str, indexes: &[usize]| serde_json::json!({
+                "text": text,
+                "citations": indexes.iter().map(|&index| ids[index].uuid().to_string()).collect::<Vec<_>>()
+            });
+            let answer = serde_json::json!({
+                "summary": [
+                    cited(line, &[0, 1]),
+                    cited("The launch was originally scheduled for March 14.", &[2]),
+                    cited("The ferry timetable will be decided next week.", &[3])
+                ],
+                "outline": [], "decisions": [], "action_items": [], "key_questions": [],
+                "risks": [], "follow_up_draft": cited("No follow-up was agreed.", &[3])
+            });
+            let mut generator = StubGenerator::new("summary-replay", true);
+            generator.answer = Ok(answer.to_string());
+
+            let notes = complete_reading::notes(
+                &generator, &evidence, &HashMap::new(), "notes", || Ok(())
+            ).expect("notes");
+
+            let lines: Vec<_> = notes.summary.text.lines().collect();
+            if supported {
+                assert_eq!(lines[0], line);
+                assert_eq!(notes.summary_trace[0].anchor.segment_id, ids[0]);
+            } else {
+                assert_eq!(lines[0], format!("\"{}\"", evidence.transcript[0].text));
+                assert_eq!(lines[1], format!("\"{}\"", evidence.transcript[1].text));
+                assert_eq!(notes.summary_trace[0].anchor.segment_id, ids[0]);
+                assert_eq!(notes.summary_trace[1].anchor.segment_id, ids[1]);
+                assert!(!notes.summary.text.contains("over $40,000"));
+            }
+            assert!(notes.summary.text.contains("originally scheduled for March 14"));
+            assert!(notes.summary.text.contains("ferry timetable"));
+            assert_eq!(notes.summary.citations.len(), 4);
         }
     }
 

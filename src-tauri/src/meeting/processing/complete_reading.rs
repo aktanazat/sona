@@ -801,6 +801,44 @@ pub(super) struct LeftOut {
     pub(super) error: ReadingError,
 }
 
+fn repair_summary_comparisons(
+    lines: &mut Vec<RawCitedText>,
+    evidence: &[MeetingEvidence],
+) -> Result<bool, Rejection> {
+    let mut changed = false;
+    let mut index = 0;
+    while index < lines.len() {
+        let line = &lines[index];
+        let mut sources: Vec<_> = evidence
+            .iter()
+            .filter(|source| line.citations.contains(&source.citation.entity_id))
+            .collect();
+        let spoken: Vec<_> = sources.iter().map(|source| source.text.as_str()).collect();
+        if !crate::meeting::said_and_written::unsupported_comparison(&line.text, &spoken) {
+            index += 1;
+            continue;
+        }
+        validate_cited_text(line, evidence, "summary")?;
+        sources.sort_by_key(|source| source.citation.start_offset_ns);
+        sources.dedup_by(|first, second| first.citation.entity_id == second.citation.entity_id);
+        if lines.len() - 1 + sources.len() > MAX_SUMMARY_LINES {
+            return Err(ReplyRule::Count.on("summary"));
+        }
+        let replacements: Vec<_> = sources
+            .iter()
+            .map(|source| RawCitedText {
+                text: format!("\"{}\"", source.text.trim()),
+                citations: vec![source.citation.entity_id.clone()],
+            })
+            .collect();
+        let count = replacements.len();
+        lines.splice(index..=index, replacements);
+        index += count;
+        changed = true;
+    }
+    Ok(changed)
+}
+
 /// One part's notes, read in halves when a reply came back unusable or
 /// rejected, or when the part is longer than `longest`. A piece the full
 /// instructions could not get past the safety filter is read under the short
@@ -846,9 +884,13 @@ fn read_notes_part(
         let mut raw = first_json_value::<RawArtifactOutput>(&output)
             .map_err(|()| ReadingError::Invalid(EngineFailureCause::ReplyNotStructured))?;
         scope.restore_notes(&mut raw)?;
-        let content =
+        let mut content =
             validate_artifact_output(&raw, &evidence.transcript, speakers, &evidence.template)?;
         raw.summary.retain(keeps_summary_line(&evidence.transcript));
+        if repair_summary_comparisons(&mut raw.summary, &evidence.transcript)? {
+            content =
+                validate_artifact_output(&raw, &evidence.transcript, speakers, &evidence.template)?;
+        }
         Ok((raw.summary, content))
     })
 }
@@ -2343,14 +2385,14 @@ fn settles_a_choice(
     }
 }
 
-struct DatedDecision {
-    words: Vec<String>,
+pub(super) struct DatedDecision {
+    pub(super) words: Vec<String>,
     verb: usize,
-    date: usize,
+    pub(super) date: usize,
     again: bool,
 }
 
-fn dated_decision(text: &str) -> Option<DatedDecision> {
+pub(super) fn dated_decision(text: &str) -> Option<DatedDecision> {
     let words = normalized_words(text);
     let (verb, date, again) = words.iter().enumerate().find_map(|(index, word)| {
         if !matches!(

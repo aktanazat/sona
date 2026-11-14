@@ -363,6 +363,62 @@ fn quantities(text: &str) -> Vec<Quantity> {
     found
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Comparison {
+    Greater,
+    Less,
+}
+
+fn compared_quantities(text: &str) -> Vec<(Unit, f64, Option<Comparison>)> {
+    let tokens = tokens(text);
+    let mut found = Vec::new();
+    let mut at = 0;
+    while at < tokens.len() {
+        let Some((unit, value, end)) = quantity_at(&tokens, at) else {
+            at += 1;
+            continue;
+        };
+        let previous = |offset: usize| at.checked_sub(offset).and_then(|index| tokens[index].word());
+        let (comparison, distance) = match (previous(1), previous(2)) {
+            (Some("over" | "above" | "exceeds" | "exceeded" | "exceeding"), _) => {
+                (Some(Comparison::Greater), 2)
+            }
+            (Some("under" | "below"), _) => (Some(Comparison::Less), 2),
+            (Some("than"), Some("more" | "greater")) => (Some(Comparison::Greater), 3),
+            (Some("than"), Some("less" | "fewer")) => (Some(Comparison::Less), 3),
+            _ => (None, 0),
+        };
+        let comparison = if matches!(previous(distance), Some("not" | "never")) {
+            None
+        } else {
+            comparison
+        };
+        found.push((unit, value, comparison));
+        at = end;
+    }
+    found
+}
+
+pub(crate) fn unsupported_comparison(claim: &str, sources: &[&str]) -> bool {
+    let claims = compared_quantities(claim);
+    if !claims.iter().any(|(_, _, comparison)| comparison.is_some()) {
+        return false;
+    }
+    let sources: Vec<_> = sources
+        .iter()
+        .flat_map(|source| compared_quantities(source))
+        .collect();
+    claims.iter().any(|(unit, value, comparison)| {
+        comparison.is_some()
+            && sources.iter().any(|(other_unit, other_value, other_comparison)| {
+                other_unit == unit && same(*other_value, *value) && other_comparison.is_none()
+            })
+            && !sources.iter().any(|(other_unit, other_value, other_comparison)| {
+                other_unit == unit && same(*other_value, *value) && other_comparison == comparison
+            })
+    })
+}
+
 /// The words that name what the last sentence of `text` is about: what a
 /// short answer on the next line is answering.
 fn closing_terms(text: &str) -> HashSet<String> {
