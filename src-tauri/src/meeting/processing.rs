@@ -6666,6 +6666,8 @@ struct RawLedgerCommitment {
 #[serde(deny_unknown_fields)]
 struct RawLedgerStance {
     from: String,
+    #[serde(default, deserialize_with = "ledger::deserialize_stance_target")]
+    #[schemars(with = "Option<String>")]
     to: Option<String>,
     what: String,
     note: Option<String>,
@@ -11047,6 +11049,15 @@ pub(crate) mod tests {
             serde_json::Value::Null,
             "consumers see an explicit unknown, never an invented counterpart"
         );
+        for target in ["null", "  null  "] {
+            let mut literal: serde_json::Value =
+                first_json_value(reference).expect("the reference reads as a value");
+            literal["stances"][0]["to"] = serde_json::json!(target);
+            let raw: RawLedgerOutput =
+                first_json_value(&literal.to_string()).expect("literal null parses as unknown");
+            let ledger = validate_ledger_output(&raw, &evidence).expect("stance validates");
+            assert_eq!(ledger.stances[0].to, None);
+        }
 
         let mut omitted: serde_json::Value =
             first_json_value(reference).expect("the reference reads as a value");

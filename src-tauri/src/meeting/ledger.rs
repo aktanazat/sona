@@ -208,11 +208,19 @@ pub struct LedgerCommitment {
     pub receipt: LedgerReceipt,
 }
 
+pub(super) fn deserialize_stance_target<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<String>::deserialize(deserializer)?.filter(|target| target.trim() != "null"))
+}
+
 /// A position someone took or changed, and the counterpart it was taken up
 /// from when the evidence names one.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
 pub struct LedgerStance {
     pub from: String,
+    #[serde(default, deserialize_with = "deserialize_stance_target")]
     pub to: Option<String>,
     pub what: String,
     pub note: Option<String>,
