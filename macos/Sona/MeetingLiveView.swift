@@ -248,44 +248,26 @@ struct MeetingLiveView: View {
 
     // MARK: The words
 
-    @ViewBuilder
     private var transcript: some View {
-        let changes = model.liveDoc.watching == session?.sessionId ? model.liveDoc.doc?.changes ?? [] : []
         PageSection("Transcript") {
             if store.showsProvisional {
                 VStack(alignment: .leading, spacing: 8) {
-                    ForEach(TimelineEntry.merged(
-                        store.provisional, at: \.startOffsetNs, id: { "live-\($0.segmentId)" }, changes)
-                    ) { entry in
-                        switch entry.row {
-                        case .line(let segment):
-                            line(
-                                at: segment.startOffsetNs, segment.text,
-                                speaker: segment.speakerLabel, ink: ink(segment), anchor: entry.id)
-                        case .change(let change):
-                            ChangeRow(change: change)
-                        }
+                    ForEach(store.provisional, id: \.segmentId) { segment in
+                        line(
+                            at: segment.startOffsetNs, segment.text,
+                            speaker: segment.speakerLabel, ink: ink(segment), anchor: "live-\(segment.segmentId)")
                     }
-                    Text("Provisional words and speaker labels")
-                        .metaText(Theme.inkSecondary)
-                        .padding(.top, 8)
                 }
             } else if store.lines.isEmpty {
                 Text("Words appear here as they are recognized.")
                     .bodyText(14, Theme.inkSecondary)
             } else {
                 VStack(alignment: .leading, spacing: 8) {
-                    ForEach(TimelineEntry.merged(
-                        store.lines, at: \.base.startOffsetNs, id: { "stored-\($0.base.segmentId)" }, changes)
-                    ) { entry in
-                        switch entry.row {
-                        case .line(let segment):
-                            line(
-                                at: segment.base.startOffsetNs, segment.text,
-                                speaker: store.speakerLabel(segment), ink: ink(segment), anchor: entry.id)
-                        case .change(let change):
-                            ChangeRow(change: change)
-                        }
+                    ForEach(store.lines, id: \.base.segmentId) { segment in
+                        line(
+                            at: segment.base.startOffsetNs, segment.text,
+                            speaker: store.speakerLabel(segment), ink: ink(segment),
+                            anchor: "stored-\(segment.base.segmentId)")
                     }
                 }
             }
@@ -436,9 +418,6 @@ struct MeetingLiveView: View {
             }
             if let kind = store.helpKind {
                 helpAnswer(kind, proxy: proxy)
-            } else {
-                Text("Ask about what is being said. Recording keeps going.")
-                    .metaText(Theme.inkTertiary)
             }
         }
     }
@@ -668,7 +647,6 @@ struct MeetingClockText: View {
     let clock: MeetingCaptureClock
     var size: CGFloat = 12
     var color: Color = Theme.inkSecondary
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         if let since = clock.runningSince {
@@ -680,16 +658,14 @@ struct MeetingClockText: View {
         }
     }
 
-    /// The digits roll from one second to the next; with motion reduced,
-    /// they change in place.
+    /// The digits change in place: a roll between seconds, caught part way,
+    /// reads as a digit cut off.
     private func face(_ elapsedNs: Int64) -> some View {
         let reading = elapsedNs.meetingOffsetClock
         return Text(reading)
             .font(TypeScale.mono(size))
             .foregroundStyle(color)
             .monospacedDigit()
-            .contentTransition(reduceMotion ? .identity : .numericText())
-            .animation(reduceMotion ? nil : .smooth(duration: 0.2), value: reading)
             .accessibilityLabel("Elapsed")
             .accessibilityValue(reading)
     }

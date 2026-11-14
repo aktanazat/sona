@@ -56,17 +56,6 @@ struct MeetingLiveChange: Decodable, Identifiable, Equatable {
 
     /// The moment in the call, as the transcript's clock shows it.
     var when: String { callNs?.meetingOffsetClock ?? "After the call" }
-
-    /// "Priya changed a point".
-    var summary: String {
-        let verb = switch kind {
-        case .added: "added"
-        case .rewrote: "rewrote"
-        case .edited: "changed"
-        case .removed: "removed"
-        }
-        return "\(who) \(verb) a \(target == .point ? "point" : "card")"
-    }
 }
 
 /// `MeetingLiveDoc`: the doc a meeting builds on request, what was asked
@@ -86,37 +75,6 @@ struct MeetingLiveDoc: Decodable, Equatable {
     }
 }
 
-/// One row of a timeline: a transcript line or a change to the doc or the
-/// board.
-struct TimelineEntry<Line>: Identifiable {
-    enum Row {
-        case line(Line)
-        case change(MeetingLiveChange)
-    }
-
-    let id: String
-    let row: Row
-
-    /// The lines in order, each change after the lines heard by its moment
-    /// in the call, and the changes made after the call at the end.
-    static func merged(
-        _ lines: [Line], at offset: (Line) -> Int64, id: (Line) -> String,
-        _ changes: [MeetingLiveChange]
-    ) -> [TimelineEntry] {
-        var pending = changes.sorted { ($0.callNs ?? .max, $0.atMs) < ($1.callNs ?? .max, $1.atMs) }[...]
-        var entries: [TimelineEntry] = []
-        for line in lines {
-            while let change = pending.first, let at = change.callNs, at < offset(line) {
-                entries.append(TimelineEntry(id: "change-\(change.id)", row: .change(change)))
-                pending.removeFirst()
-            }
-            entries.append(TimelineEntry(id: id(line), row: .line(line)))
-        }
-        entries += pending.map { TimelineEntry(id: "change-\($0.id)", row: .change($0)) }
-        return entries
-    }
-}
-
 /// Who last changed a point or a card, and when in the call.
 struct ChangeMark: View {
     let change: MeetingLiveChange
@@ -126,36 +84,6 @@ struct ChangeMark: View {
             .metaText(Theme.inkTertiary)
             .lineLimit(1)
             .help(change.by == .sona ? "" : "\(change.who) changed this, so Sona leaves it as it is.")
-    }
-}
-
-/// A change to the doc or the board in a timeline, among the words heard
-/// by then.
-struct ChangeRow: View {
-    let change: MeetingLiveChange
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            HStack(alignment: .firstTextBaseline, spacing: 12) {
-                Label(change.summary, systemImage: change.target == .point ? "list.bullet" : "checklist")
-                    .font(TypeScale.label(12))
-                    .foregroundStyle(Theme.inkSecondary)
-                Spacer(minLength: 12)
-                Text(change.when)
-                    .font(TypeScale.body(12))
-                    .monospacedDigit()
-                    .foregroundStyle(Theme.inkTertiary)
-            }
-            Text(change.text)
-                .strikethrough(change.kind == .removed)
-                .bodyText(13, Theme.inkSecondary)
-                .lineLimit(2)
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 6)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
-        .padding(.horizontal, -8)
     }
 }
 
@@ -393,8 +321,6 @@ struct LiveDocSection: View {
                     }
                 }
                 DocPoints(store: store, doc: doc)
-                Text("Kept current as the call goes on. Your changes stay as you wrote them.")
-                    .metaText(Theme.inkTertiary)
             } else {
                 Button("Start a doc from this call") { store.start() }
                     .buttonStyle(.secondary)
