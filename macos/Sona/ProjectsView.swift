@@ -211,9 +211,9 @@ struct ProjectsView: View {
     private var headerTitle: some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             ProjectsTabs()
-            if let total = store.projects?.count, total > 0 {
-                let filtered = store.filter.isActive || !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                Text(filtered ? "\(visibleProjects.count) of \(total)" : "\(total)").metaText().monospacedDigit()
+            let filtered = store.filter.isActive || !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            if filtered, let total = store.projects?.count, total > 0 {
+                Text("\(visibleProjects.count) of \(total)").metaText().monospacedDigit()
             }
         }
     }
@@ -245,12 +245,6 @@ struct ProjectsView: View {
             Button("Plan with Sona", systemImage: "bubble.left") { planWithSona() }
                 .buttonStyle(.secondary)
         }
-        Button { showBin.toggle() } label: { Image(systemName: "trash") }
-            .buttonStyle(.icon)
-            .background(showBin ? Theme.accentSoft : .clear, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
-            .help(showBin ? "Hide recently deleted" : "Recently deleted")
-            .accessibilityLabel("Recently deleted")
-            .accessibilityAddTraits(showBin ? .isSelected : [])
         Button("New project", systemImage: "plus") { creation = .project }
             .buttonStyle(.primary)
             .help("New project (C)")
@@ -312,6 +306,9 @@ struct ProjectsView: View {
                     .pickerStyle(.inline)
                     .labelsHidden()
                 }
+            }
+            Section {
+                Toggle("Show recently deleted", isOn: $showBin)
             }
             if store.filter.isActive {
                 Button("Clear filters") { store.filter = PlanningListFilter() }
@@ -503,7 +500,7 @@ struct ProjectsView: View {
                 Text("\(percent)%").metaText().monospacedDigit()
             }
             .frame(width: 64, alignment: .trailing)
-            .help("\(summary.completedTaskCount) of \(total) tasks done; started tasks count a quarter")
+            .help("\(summary.completedTaskCount) of \(total) tasks done")
             .accessibilityElement(children: .ignore)
             .accessibilityLabel("\(percent)% complete")
             Group {
@@ -790,29 +787,12 @@ struct ProjectsView: View {
                         }
                     }
                     HStack(spacing: 12) {
-                        ProjectStatusPicker(project: project, progress: fraction) { change in
-                            Task { await store.saveProject(project, change) }
-                        } label: {
-                            HStack(spacing: 6) {
-                                ProjectStatusIcon(status: project.status, progress: fraction)
-                                Text(store.statusTitle(of: project))
-                                    .font(TypeScale.label(12.5))
-                                    .foregroundStyle(Theme.ink)
-                                Image(systemName: "chevron.down")
-                                    .font(.system(size: 8, weight: .bold))
-                                    .foregroundStyle(Theme.inkTertiary)
-                            }
-                            .padding(.horizontal, 10)
-                            .frame(height: Theme.compactHeight)
-                            .background(Theme.control, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
-                        }
                         if let start = project.startAtMs {
                             let verb = start <= now ? "Started" : "Starts"
                             Text("\(verb) \(ProjectDates.text(start, project.startResolution))").metaText()
                         } else {
                             Text("Created \(PlanningFormat.day(project.createdAtMs))").metaText()
                         }
-                        ProjectHealthPill(health: detail.latestUpdate?.health)
                         if detail.updateMissing {
                             Button("Update due") { pageTab = .updates }
                                 .buttonStyle(.quiet)
@@ -831,8 +811,6 @@ struct ProjectsView: View {
             }
             if let update = detail.latestUpdate {
                 ProjectUpdateCard(update: update, now: now)
-            } else {
-                Card { CardLine("No update yet.") }
             }
         }
         .padding(.bottom, 28)
@@ -944,10 +922,8 @@ struct ProjectsView: View {
                     .buttonStyle(.quiet)
                     .disabled(store.mutating)
             }
-            Card {
-                if detail.milestones.isEmpty {
-                    CardLine("No milestones yet.")
-                } else {
+            if !detail.milestones.isEmpty {
+                Card {
                     if !dated.isEmpty {
                         MilestoneTimeline(milestones: dated, start: PlanningFormat.moment(detail.project.createdAtMs),
                                           now: PlanningFormat.moment(now))
@@ -974,9 +950,6 @@ struct ProjectsView: View {
                             }
                     }
                 }
-            }
-            if ordered.count > 1 {
-                Text("Drag a milestone to change its order.").metaText()
             }
         }
         .padding(.bottom, 28)
@@ -1144,26 +1117,27 @@ struct ProjectsView: View {
                 .buttonStyle(.quiet)
                 .disabled(store.mutating || store.detailLoading)
             }
-            Card {
-                if detail.evidence.isEmpty { CardLine("No linked sources.") }
-                ForEach(sourceGroups(detail)) { group in
-                    let link = group.link
-                    CardRow(action: link.available ? { openEvidence(link) } : nil) {
-                        VStack(alignment: .leading, spacing: 5) {
-                            Text(link.available ? (link.title ?? sourceLabel(link.sourceKind)) : "Source unavailable")
-                                .bodyText(14, link.available ? Theme.ink : Theme.inkTertiary)
-                                .fixedSize(horizontal: false, vertical: true)
-                            if !group.targets.isEmpty { Text(group.targets.joined(separator: " · ")).metaText() }
-                            if let at = link.atMs, link.available {
-                                Text(PlanningFormat.passage(at)).metaText()
+            if !detail.evidence.isEmpty {
+                Card {
+                    ForEach(sourceGroups(detail)) { group in
+                        let link = group.link
+                        CardRow(action: link.available ? { openEvidence(link) } : nil) {
+                            VStack(alignment: .leading, spacing: 5) {
+                                Text(link.available ? (link.title ?? sourceLabel(link.sourceKind)) : "Source unavailable")
+                                    .bodyText(14, link.available ? Theme.ink : Theme.inkTertiary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                if !group.targets.isEmpty { Text(group.targets.joined(separator: " · ")).metaText() }
+                                if let at = link.atMs, link.available {
+                                    Text(PlanningFormat.passage(at)).metaText()
+                                }
                             }
-                        }
-                    } trailing: {
-                        if link.available {
-                            Image(systemName: "arrow.up.right")
-                                .font(.system(size: 11))
-                                .foregroundStyle(Theme.inkTertiary)
-                                .accessibilityHidden(true)
+                        } trailing: {
+                            if link.available {
+                                Image(systemName: "arrow.up.right")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(Theme.inkTertiary)
+                                    .accessibilityHidden(true)
+                            }
                         }
                     }
                 }

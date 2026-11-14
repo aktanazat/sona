@@ -156,7 +156,7 @@ struct ProjectPropertiesPanel: View {
             row("Blocked by") { dependencies(project, blockedBy: true) }
             row("Blocking") { dependencies(project, blockedBy: false) }
             row("Labels") { labelsMenu(project) }
-            row("Look") { lookMenu(project) }
+            row("Color") { lookMenu(project) }
             links(project)
         }
         .padding(.vertical, 6)
@@ -468,7 +468,7 @@ struct ProjectPropertiesPanel: View {
                 }
                 .padding(10)
             }
-            TextField("Icon", text: Binding(
+            TextField("Add emoji", text: Binding(
                 get: { project.icon ?? "" },
                 set: { value in
                     let icon = String(value.trimmingCharacters(in: .whitespaces).prefix(2))
@@ -477,9 +477,9 @@ struct ProjectPropertiesPanel: View {
                 }))
                 .textFieldStyle(.plain)
                 .font(TypeScale.label(12.5))
-                .frame(width: 44)
+                .frame(width: 72)
                 .help("An emoji for the project")
-                .accessibilityLabel("Icon")
+                .accessibilityLabel("Emoji")
         }
     }
 
@@ -581,10 +581,10 @@ struct ProjectProgressChart: View {
         let peak = max(weeks.map(\.scope).max() ?? 0, 1)
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 14) {
-                legend("Scope", Theme.inkTertiary, dashed: true)
-                legend("Started", Theme.statusInProgress)
-                legend("Done", Theme.accent)
-                if targetAtMs != nil { legend("Target", Theme.live) }
+                ChartKey(title: "Scope", color: Theme.inkTertiary, dash: [3, 2])
+                ChartKey(title: "Started", color: Theme.statusInProgress)
+                ChartKey(title: "Done", color: Theme.accent)
+                if targetAtMs != nil { ChartKey(title: "Target", color: Theme.live) }
                 Spacer()
                 Text("\(progress.percent)%")
                     .font(TypeScale.label(13).weight(.semibold))
@@ -651,11 +651,18 @@ struct ProjectProgressChart: View {
         let day = { (ms: Int64) in PlanningFormat.moment(ms).formatted(.dateTime.month(.abbreviated).day()) }
         return "Predicted finish \(day(prediction.expectedAtMs)), between \(day(prediction.optimisticAtMs)) and \(day(prediction.pessimisticAtMs))."
     }
+}
 
-    private func legend(_ title: String, _ color: Color, dashed: Bool = false) -> some View {
+/// One line's color and dash beside its name, for a chart's legend.
+struct ChartKey: View {
+    let title: String
+    let color: Color
+    var dash: [CGFloat] = []
+
+    var body: some View {
         HStack(spacing: 5) {
             Capsule()
-                .stroke(color, style: StrokeStyle(lineWidth: 2, dash: dashed ? [3, 2] : []))
+                .stroke(color, style: StrokeStyle(lineWidth: 2, dash: dash))
                 .frame(width: 12, height: 2)
             Text(title).metaText()
         }
