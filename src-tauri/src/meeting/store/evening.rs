@@ -136,8 +136,9 @@ impl MeetingStore {
         day_end_utc_ms: i64,
     ) -> Result<Vec<EveningMeeting>, StoreError> {
         let user_name = self.user_name();
-        let connection = self.connection()?;
-        let mut statement = connection.prepare(&format!(
+        let mut connection = self.reader()?;
+        let transaction = connection.transaction()?;
+        let mut statement = transaction.prepare(&format!(
             "SELECT m.id, m.title, m.started_at_utc_ms, m.ended_at_utc_ms,
                     ({READABLE_ARTIFACT_CONTENT}),
                     CASE WHEN {STRAY} AND {NOT_FILED} THEN 1 ELSE 0 END
@@ -165,7 +166,8 @@ impl MeetingStore {
             )?
             .collect::<Result<Vec<_>, _>>()?;
         drop(statement);
-        rows.into_iter()
+        let meetings = rows
+            .into_iter()
             .map(|(session, title, started, ended, content, not_filed)| {
                 let session_id = MeetingSessionId::from_uuid(parse_uuid(&session)?);
                 let artifacts = content
@@ -173,7 +175,7 @@ impl MeetingStore {
                     .map(decode_json::<GeneratedMeetingArtifacts>)
                     .transpose()?;
                 evening_meeting(
-                    &connection,
+                    &transaction,
                     session_id,
                     title,
                     (started, ended),
@@ -182,7 +184,9 @@ impl MeetingStore {
                     user_name.as_deref(),
                 )
             })
-            .collect()
+            .collect::<Result<Vec<_>, _>>()?;
+        transaction.commit()?;
+        Ok(meetings)
     }
 
     pub(crate) fn evening_lines(

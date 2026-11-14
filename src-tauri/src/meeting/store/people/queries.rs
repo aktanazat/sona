@@ -126,7 +126,7 @@ impl MeetingStore {
         limit: usize,
     ) -> Result<OpenLoopsInboxResult, StoreError> {
         let user_name = self.user_name();
-        let mut connection = self.connection()?;
+        let mut connection = self.reader()?;
         let transaction = connection.transaction()?;
         let revision = people_revision_in(&transaction)?;
         let mut entries = Vec::new();
@@ -185,7 +185,7 @@ impl MeetingStore {
         &self,
         emails: &[String],
     ) -> Result<HashMap<String, PersonId>, StoreError> {
-        let connection = self.connection()?;
+        let connection = self.reader()?;
         let wanted = emails
             .iter()
             .map(|email| normalized_email(email))
