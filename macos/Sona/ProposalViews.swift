@@ -1,7 +1,7 @@
 import SwiftUI
 
-/// The changes agents proposed for the open task, under its title, with
-/// one answer for all of them.
+/// The changes agents proposed for the open task, under its title: one
+/// Accept for all of them, a Reject on each.
 struct ProposalStrip: View {
     let proposals: [WorkProposal]
     @Environment(AppModel.self) private var model
@@ -14,11 +14,11 @@ struct ProposalStrip: View {
                     DetailHeading(title: "Proposed changes")
                     if let agent { AgentName(name: agent) }
                     Spacer(minLength: Space.s)
-                    ProposalAnswers(proposals: proposals, keyed: true)
+                    ProposalAccept(proposals: proposals, keyed: true)
                 }
                 .frame(height: Theme.listRow)
-                ForEach(proposals) { proposal in
-                    ProposalLine(proposal: proposal, showsAgent: agent == nil)
+                ForEach(Array(proposals.enumerated()), id: \.element.id) { index, proposal in
+                    ProposalLine(proposal: proposal, keyed: index == 0, showsAgent: agent == nil)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -84,7 +84,7 @@ private struct ProposalTask: View {
                     .accessibilityAction { model.workFocus.open(row.id, in: .triage) }
                 if let agent { AgentName(name: agent) }
                 Spacer(minLength: Space.s)
-                ProposalAnswers(proposals: proposals, keyed: keyed)
+                ProposalAccept(proposals: proposals, keyed: keyed)
             }
             .padding(.leading, 6)
             .padding(.trailing, 16)
@@ -95,8 +95,8 @@ private struct ProposalTask: View {
             .onTapGesture { model.workFocus.open(row.id, in: .triage) }
             .allowsWindowActivationEvents()
             .help("Open the task")
-            ForEach(proposals) { proposal in
-                ProposalLine(proposal: proposal, showsAgent: agent == nil)
+            ForEach(Array(proposals.enumerated()), id: \.element.id) { index, proposal in
+                ProposalLine(proposal: proposal, keyed: keyed && index == 0, showsAgent: agent == nil)
                     .padding(.leading, 6 + Self.titleInset)
                     .padding(.trailing, 16)
             }
@@ -105,9 +105,8 @@ private struct ProposalTask: View {
     }
 }
 
-/// Accept and Reject for every change listed. Y and N answer a lone
-/// change; ⇧Y accepts several at once.
-private struct ProposalAnswers: View {
+/// Accept for every change listed: Y for a lone change, ⇧Y for several.
+private struct ProposalAccept: View {
     let proposals: [WorkProposal]
     let keyed: Bool
     @Environment(AppModel.self) private var model
@@ -115,22 +114,19 @@ private struct ProposalAnswers: View {
     var body: some View {
         let ids = proposals.map(\.id)
         let one = proposals.count == 1
-        HStack(spacing: Space.s) {
-            TaskKeyButton(title: "Accept", keys: one ? "y" : "shift+y", keysShown: keyed) {
-                model.changeWork { model.work.acceptProposals(ids) }
-            }
-            TaskKeyButton(title: "Reject", keys: one ? "n" : nil, keysShown: keyed) {
-                model.work.rejectProposals(ids)
-            }
+        TaskKeyButton(title: one ? "Accept" : "Accept all", keys: one ? "y" : "shift+y", keysShown: keyed) {
+            model.changeWork { model.work.acceptProposals(ids) }
         }
         .fixedSize()
     }
 }
 
 /// One change an agent proposed: the field, and what it would change from
-/// and to. `showsAgent` names who proposed it where several agents did.
+/// and to, with its Reject. `keyed` shows N on the line that key answers;
+/// `showsAgent` names who proposed it where several agents did.
 struct ProposalLine: View {
     let proposal: WorkProposal
+    var keyed = false
     var showsAgent = false
     @Environment(AppModel.self) private var model
 
@@ -150,6 +146,10 @@ struct ProposalLine: View {
             .accessibilityElement(children: .combine)
             if showsAgent { AgentName(name: proposal.agent) }
             Spacer(minLength: Space.s)
+            TaskKeyButton(title: "Reject", keys: "n", keysShown: keyed) {
+                model.work.rejectProposals([proposal.id])
+            }
+            .fixedSize()
         }
         .frame(height: Theme.listRow)
     }
