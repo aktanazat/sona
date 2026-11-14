@@ -9,7 +9,6 @@ struct Shell: View {
     @Environment(AppModel.self) private var model
     @State private var sharedNote: ScratchNote?
     @State private var paneWidth: CGFloat = 0
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         ZStack {
@@ -37,12 +36,11 @@ struct Shell: View {
                 }
                 if model.paletteShown {
                     CommandPalette()
-                        .transition(reduceMotion ? .opacity : .opacity.combined(with: .scale(scale: 0.98, anchor: .top)))
+                        .transition(.identity)
                 }
             }
         }
         .background(Theme.page.ignoresSafeArea())
-        .animation(.easeOut(duration: reduceMotion ? 0.1 : 0.2), value: model.paletteShown)
         .frame(minWidth: 900, minHeight: 640)
         .sheet(item: Bindable(model).sheet) { sheet in
             switch sheet {
