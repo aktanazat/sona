@@ -148,7 +148,9 @@ struct MeetingNotesDigest {
         var figures: [Figure] = []
         search: for source in sources {
             for sentence in Self.sentences(source.text) {
-                for match in sentence.matches(of: Self.figure) {
+                let matches = sentence.matches(of: Self.figure)
+                guard matches.count == 1 else { continue }
+                for match in matches {
                     let value = String(match.output).trimmingCharacters(in: .whitespaces)
                     guard seen.insert(Self.key(value)).inserted else { continue }
                     figures.append(Figure(
