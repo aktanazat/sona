@@ -249,6 +249,7 @@ struct PrivacyView: View {
                 } else {
                     CardLine("Reading how history is stored…")
                 }
+                LibraryRetentionRows(store: model.library)
             }
         }
     }
@@ -369,7 +370,7 @@ struct PrivacyView: View {
             ? "the oldest dictation that isn't saved"
             : "the \(removals) oldest dictations that aren't saved"
         return "This import goes over Dictations to keep, so Sona will delete \(oldest). "
-            + "To keep everything, cancel and raise Dictations to keep in Library first."
+            + "To keep everything, cancel and raise Dictations to keep under History on this device first."
     }
 
     // MARK: - Identity adoption

@@ -653,8 +653,8 @@ enum LibraryClock {
 
 /// The counted nouns this page states, singular when there is one of them.
 enum LibraryCount {
-    static func recordings(_ count: Int) -> String {
-        "\(count.formatted()) \(count == 1 ? "recording" : "recordings")"
+    static func dictations(_ count: Int) -> String {
+        "\(count.formatted()) \(count == 1 ? "dictation" : "dictations")"
     }
 
     static func words(_ count: Int) -> String {
