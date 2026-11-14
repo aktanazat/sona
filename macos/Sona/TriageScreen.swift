@@ -38,16 +38,14 @@ private struct TriageList: View {
                                  byMeeting: split.map { $0 == .meeting } ?? true)
         VStack(spacing: 0) {
             WorkBar {
-                HStack(spacing: 12) {
-                    InboxTabs()
-                    TriageSplits(rows: waiting)
-                }
+                InboxTabs()
             } trailing: {
                 let targets = model.workTargets
                 if !targets.isEmpty {
                     TriageBarActions(ids: targets)
                 }
             }
+            TriageSplits(rows: waiting)
             if let error = store.listError, store.items != nil {
                 HStack(spacing: 10) {
                     Text(error).metaText(Theme.live).lineLimit(1)
@@ -131,8 +129,8 @@ private struct TriageList: View {
     }
 }
 
-/// Triage, then each place its suggestions come from; ⇥ and ⇧⇥ step
-/// through them.
+/// Triage, then each place its suggestions come from that has any; ⇥ and
+/// ⇧⇥ step through them. Nothing to choose between, no row.
 private struct TriageSplits: View {
     let rows: [WorkItemRow]
     @Environment(AppModel.self) private var model
@@ -140,18 +138,23 @@ private struct TriageSplits: View {
     var body: some View {
         let focus = model.workFocus
         let counts = Dictionary(grouping: rows, by: \.source).mapValues(\.count)
-        ScrollView(.horizontal) {
-            HStack(spacing: 2) {
-                WorkTab(title: "All", count: rows.count, on: focus.triageSplit == nil) { focus.split(nil) }
-                ForEach(WorkSource.allCases, id: \.self) { source in
-                    WorkTab(title: source.tab, count: counts[source], on: focus.triageSplit == source) {
-                        focus.split(source)
+        let sources = WorkSource.allCases.filter { counts[$0] != nil || focus.triageSplit == $0 }
+        if sources.count > 1 || focus.triageSplit != nil {
+            ScrollView(.horizontal) {
+                HStack(spacing: 2) {
+                    WorkTab(title: "All", count: rows.count, on: focus.triageSplit == nil) { focus.split(nil) }
+                    ForEach(sources, id: \.self) { source in
+                        WorkTab(title: source.tab, count: counts[source], on: focus.triageSplit == source) {
+                            focus.split(source)
+                        }
                     }
                 }
+                .padding(.horizontal, 16)
             }
+            .scrollIndicators(.never)
+            .scrollBounceBehavior(.basedOnSize)
+            .frame(height: 40)
         }
-        .scrollIndicators(.never)
-        .scrollBounceBehavior(.basedOnSize)
     }
 }
 
@@ -260,7 +263,7 @@ private struct TriageRow: View {
                         .lineLimit(1)
                         .help(row.title)
                     Spacer(minLength: 8)
-                    ForEach(suggestions, id: \.id) { suggestion in
+                    ForEach(Self.onePerField(suggestions), id: \.id) { suggestion in
                         SuggestionChip(itemId: row.id, suggestion: suggestion, now: now)
                     }
                     Text(TaskDates.ago(row.createdAtMs, now: now))
@@ -289,6 +292,13 @@ private struct TriageRow: View {
         .padding(.horizontal, 8)
         .accessibilityElement(children: .combine)
     }
+
+    /// Sona's first guess for each field; the rest wait in the task.
+    static func onePerField(_ suggestions: [WorkFieldSuggestion]) -> [WorkFieldSuggestion] {
+        suggestions.reduce(into: []) { kept, suggestion in
+            if !kept.contains(where: { $0.field == suggestion.field }) { kept.append(suggestion) }
+        }
+    }
 }
 
 /// One of Sona's guesses: what it is, on hover why it thinks so, and on a
@@ -307,7 +317,7 @@ struct SuggestionChip: View {
                 Image(systemName: WorkSuggestionText.icon(suggestion.field))
                     .font(.system(size: 10, weight: .medium))
                     .foregroundStyle(Theme.accent)
-                Text(value).lineLimit(1)
+                Text(WorkSuggestionText.chip(suggestion, model: model, now: now)).lineLimit(1)
             }
             .font(TypeScale.label(11))
             .foregroundStyle(Theme.ink)
@@ -336,7 +346,17 @@ enum WorkSuggestionText {
         case let .due(moment): TaskDates.label(moment, now: now)
         case let .project(id): work.projects.first { $0.id == id }?.title ?? "A project"
         case let .label(id): work.labels.first { $0.id == id }?.name ?? "A label"
-        case let .item(id): work.items?.first { $0.id == id }.map { "#\($0.number)" } ?? "Another task"
+        case let .item(id): work.items?.first { $0.id == id }?.title ?? "Another task"
+        }
+    }
+
+    /// A chip's words: a task Sona thinks this one repeats or touches is
+    /// said as that, its title left to the card.
+    static func chip(_ suggestion: WorkFieldSuggestion, model: AppModel, now: Int64) -> String {
+        switch suggestion.field {
+        case .duplicate: "Possible duplicate"
+        case .related: "Related task"
+        case .owner, .due, .project, .label: value(suggestion, model: model, now: now)
         }
     }
 
