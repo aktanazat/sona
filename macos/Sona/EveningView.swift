@@ -214,9 +214,9 @@ private struct UnfiledRows: View {
                 }
             } trailing: {
                 HStack(spacing: 12) {
-                    Button("File") { store.decide(suggestion, accept: true) }
+                    Button("Yes") { store.decide(suggestion, accept: true) }
                         .buttonStyle(.compact)
-                    Button("Not this") { store.decide(suggestion, accept: false) }
+                    Button("No") { store.decide(suggestion, accept: false) }
                         .buttonStyle(.quiet)
                 }
                 .disabled(store.deciding.contains(suggestion.id))
