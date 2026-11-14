@@ -4575,8 +4575,19 @@ impl SpeechChunker {
         }
     }
 
+    /// Ends the open chunk. A forced cut keeps its last half second for the
+    /// next chunk, since the words run on past it; an unforced end means
+    /// the speech is over, so it drops that overlap whether or not a chunk
+    /// is open. Kept past a pause, it opened the first piece after the
+    /// resume with the words from before it.
     fn finish(&mut self, forced: bool) -> Option<AudioChunk> {
-        let start_offset_ns = self.start_offset_ns.take()?;
+        let Some(start_offset_ns) = self.start_offset_ns.take() else {
+            if !forced {
+                self.carry.clear();
+                self.carry_start_offset_ns = None;
+            }
+            return None;
+        };
         self.silence_frames = 0;
         let voiced_frames = std::mem::take(&mut self.voiced_frames);
         if !std::mem::take(&mut self.continues_carry) && voiced_frames < ASR_MIN_VOICED_FRAMES {
@@ -8089,6 +8100,25 @@ pub(crate) mod tests {
         let mut chunks = feed(&mut chunker, true, 50, &mut offset_ns);
         chunks.extend(chunker.finish(true));
         chunks.extend(feed(&mut chunker, false, ASR_SILENCE_FRAMES, &mut offset_ns));
+        let resumed_at = offset_ns;
+        chunks.extend(feed(&mut chunker, true, 20, &mut offset_ns));
+        chunks.extend(feed(&mut chunker, false, ASR_SILENCE_FRAMES, &mut offset_ns));
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[1].start_offset_ns, resumed_at);
+        assert_eq!(chunks[1].samples.len(), 30 * VAD_FRAME_SAMPLES);
+    }
+
+    /// A press cut keeps half a second for words that run on, but a pause
+    /// ends them: kept past one, it opened the first piece after the resume,
+    /// dated from before the pause and led by a word said before it.
+    #[test]
+    fn speech_after_a_break_past_a_forced_cut_starts_its_own_chunk() {
+        let mut chunker = SpeechChunker::new(Box::new(EnergyVad));
+        let mut offset_ns = 0;
+        let mut chunks = feed(&mut chunker, true, 50, &mut offset_ns);
+        chunks.extend(chunker.finish(true));
+        chunks.extend(chunker.finish(false));
+        offset_ns += 55_000_000_000;
         let resumed_at = offset_ns;
         chunks.extend(feed(&mut chunker, true, 20, &mut offset_ns));
         chunks.extend(feed(&mut chunker, false, ASR_SILENCE_FRAMES, &mut offset_ns));
