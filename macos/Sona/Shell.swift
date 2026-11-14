@@ -9,7 +9,6 @@ struct Shell: View {
     @Environment(AppModel.self) private var model
     @State private var sharedNote: ScratchNote?
     @State private var paneWidth: CGFloat = 0
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         ZStack {
@@ -37,12 +36,11 @@ struct Shell: View {
                 }
                 if model.paletteShown {
                     CommandPalette()
-                        .transition(reduceMotion ? .opacity : .opacity.combined(with: .scale(scale: 0.98, anchor: .top)))
+                        .transition(.identity)
                 }
             }
         }
         .background(Theme.page.ignoresSafeArea())
-        .animation(.easeOut(duration: reduceMotion ? 0.1 : 0.2), value: model.paletteShown)
         .frame(minWidth: 900, minHeight: 640)
         .sheet(item: Bindable(model).sheet) { sheet in
             switch sheet {
@@ -430,59 +428,71 @@ struct Sidebar: View {
             .frame(height: Theme.headerHeight)
             .padding(.bottom, Space.xs)
 
-            ScrollView {
-                VStack(alignment: .leading, spacing: Space.xxs) {
-                    let favorites = model.work.favorites
-                    let favoriteShown = favorites.contains(where: favoriteOpen)
-                    ForEach(Place.sidebar) { place in
+            ScrollViewReader { scroller in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: Space.xxs) {
+                        let favorites = model.work.favorites
+                        let favoriteShown = favorites.contains(where: favoriteOpen)
+                        ForEach(Place.sidebar) { place in
+                            SidebarItem(
+                                icon: place.icon,
+                                title: place.title,
+                                selected: model.place.parent == place && !model.showingSettings && !favoriteShown,
+                                count: count(place),
+                                live: place == .capture && model.capture != .idle
+                                    || place == .meetings && model.live.live != nil
+                            ) {
+                                model.go(place)
+                            }
+                        }
+                        favoritesSection
+                        gap
+                            .overlay(alignment: .top) {
+                                if endTargeted { Theme.accent.frame(height: 2).allowsHitTesting(false) }
+                            }
+                            .onDrop(of: [.utf8PlainText], isTargeted: $endTargeted) { _ in
+                                guard let dragged = draggedFavorite else { return false }
+                                model.work.moveFavorite(dragged, into: nil, at: nil)
+                                draggedFavorite = nil
+                                return true
+                            }
                         SidebarItem(
-                            icon: place.icon,
-                            title: place.title,
-                            selected: model.place.parent == place && !model.showingSettings && !favoriteShown,
-                            count: count(place),
-                            live: place == .capture && model.capture != .idle
-                                || place == .meetings && model.live.live != nil
+                            icon: Place.loops.icon,
+                            title: Place.loops.title,
+                            selected: model.place == .loops && !model.showingSettings && !favoriteShown
                         ) {
-                            model.go(place)
+                            model.go(.loops)
                         }
-                    }
-                    favoritesSection
-                    gap
-                        .overlay(alignment: .top) {
-                            if endTargeted { Theme.accent.frame(height: 2).allowsHitTesting(false) }
+                        SidebarItem(
+                            icon: "gearshape",
+                            title: "Settings",
+                            selected: false
+                        ) {
+                            model.showSettings(model.showingSettings ? model.settingsPlace : .essentials)
                         }
-                        .onDrop(of: [.utf8PlainText], isTargeted: $endTargeted) { _ in
-                            guard let dragged = draggedFavorite else { return false }
-                            model.work.moveFavorite(dragged, into: nil, at: nil)
-                            draggedFavorite = nil
-                            return true
-                        }
-                    SidebarItem(
-                        icon: Place.loops.icon,
-                        title: Place.loops.title,
-                        selected: model.place == .loops && !model.showingSettings && !favoriteShown
-                    ) {
-                        model.go(.loops)
-                    }
-                    SidebarItem(
-                        icon: "gearshape",
-                        title: "Settings",
-                        selected: false
-                    ) {
-                        model.showSettings(model.showingSettings ? model.settingsPlace : .essentials)
-                    }
-                    .accessibilityAddTraits(model.showingSettings ? .isSelected : [])
-                    if model.showingSettings {
-                        ForEach(SettingsPlace.allCases) { page in
-                            SidebarSubItem(title: page.title, selected: model.settingsPlace == page) {
-                                model.showSettings(page)
+                        .accessibilityAddTraits(model.showingSettings ? .isSelected : [])
+                        .id("settings")
+                        if model.showingSettings {
+                            ForEach(SettingsPlace.allCases.filter { $0 != .profile }) { page in
+                                SidebarSubItem(title: page.title, selected: model.settingsPlace == page) {
+                                    model.showSettings(page)
+                                }
+                                .id(page)
                             }
                         }
                     }
+                    .padding(.bottom, Space.m)
                 }
-                .padding(.bottom, Space.m)
+                .scrollIndicators(.never)
+                .onChange(of: model.showingSettings) { _, showing in
+                    guard showing else { return }
+                    withAnimation { scroller.scrollTo("settings", anchor: .top) }
+                }
+                .onChange(of: model.settingsPlace) { _, page in
+                    guard model.showingSettings else { return }
+                    withAnimation { scroller.scrollTo(page) }
+                }
             }
-            .scrollIndicators(.never)
             SidebarProfileRow()
                 .padding(.bottom, Space.m)
         }

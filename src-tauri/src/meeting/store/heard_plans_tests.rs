@@ -272,6 +272,96 @@ fn a_plan_is_kept_on_the_day_its_words_name_when_said() {
 }
 
 #[test]
+fn a_cut_off_plan_name_uses_its_quote_but_an_unnamed_reference_drops_out() {
+    let (_directory, store) = store();
+    let sync = weekly_sync(&store);
+    let cut_off = Named {
+        what: "coffee with the",
+        when: "tomorrow at 10",
+        people: &["Dana"],
+        place: "",
+        quote: SAID[4],
+        lines: &["L5"],
+    };
+    let pointing_back = Named {
+        what: "decide that",
+        when: "Friday at 7",
+        people: &[],
+        place: "",
+        quote: SAID[6],
+        lines: &["L7"],
+    };
+    let with_someone = Named {
+        what: "call about it",
+        when: "Monday at 11",
+        people: &["Priya"],
+        place: "",
+        quote: SAID[7],
+        lines: &["L8"],
+    };
+
+    let plans = read_with(
+        &store,
+        sync,
+        &[PRICING_REVIEW, cut_off, pointing_back, with_someone],
+    )
+    .unwrap();
+
+    assert_eq!(
+        kept(&plans),
+        [
+            ("pricing review", vec!["Nolan"], Some("the office")),
+            (SAID[4], vec!["Dana"], None),
+            ("call about it", vec!["Priya"], None),
+        ]
+    );
+}
+
+#[test]
+fn a_plan_with_an_uncertain_name_uses_a_complete_quote_without_keeping_a_clipped_one() {
+    let (_directory, store) = store();
+    let sync = reviewable_meeting(&store, "Sync", local(2026, 11, 2, 10, 0));
+    let said = [
+        "Tomorrow at 10, let's meet the insured.",
+        "Tomorrow at 10, let's survey the seabed.",
+        "Tomorrow at 10, let's send the revised",
+    ];
+    transcript_segments(&store, sync, &said);
+    let plans = [
+        Named {
+            what: "Meet the insured",
+            when: "Tomorrow at 10",
+            people: &[],
+            place: "",
+            quote: said[0],
+            lines: &["L1"],
+        },
+        Named {
+            what: "Survey the seabed",
+            when: "Tomorrow at 10",
+            people: &[],
+            place: "",
+            quote: said[1],
+            lines: &["L2"],
+        },
+        Named {
+            what: "Send the revised",
+            when: "Tomorrow at 10",
+            people: &[],
+            place: "",
+            quote: said[2],
+            lines: &["L3"],
+        },
+    ];
+
+    let result = read_with(&store, sync, &plans).expect("plans can be read");
+    assert_eq!(
+        kept(&result),
+        [(said[0], vec![], None), (said[1], vec![], None)]
+    );
+}
+
+#[test]
 fn a_time_refines_the_same_plan_only_in_the_same_exchange() -> Result<(), StoreError> {
     for (overlapping, timed_first) in [(true, false), (true, true), (false, false), (false, true)] {
         let (_directory, store) = store();

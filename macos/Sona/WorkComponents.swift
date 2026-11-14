@@ -229,7 +229,11 @@ struct ItemRow: View {
                 .opacity(selecting || selected || highlighted ? 1 : 0)
                 .padding(.trailing, -4)
             if shows.contains(TaskProperty.priority.rawValue) {
-                PriorityIcon(priority: TaskPriority(row.priority))
+                if TaskPriority(row.priority) == .none {
+                    Color.clear.frame(width: 16, height: 16)
+                } else {
+                    PriorityIcon(priority: TaskPriority(row.priority))
+                }
             }
             if shows.contains(TaskProperty.number.rawValue) {
                 Text(verbatim: "#\(row.number)")
@@ -346,7 +350,11 @@ struct ItemRow: View {
                 TaskDoer(agent: agent, waiting: waiting, session: session)
             }
             if shows.contains(TaskProperty.owner.rawValue) {
-                Avatar(face: row.ownerFace, size: 20, revision: revision)
+                if row.ownerIsSelf || row.ownerPersonId != nil {
+                    Avatar(face: row.ownerFace, size: 20, revision: revision)
+                } else {
+                    Color.clear.frame(width: 20, height: 20)
+                }
             }
         }
         .padding(.leading, 6)
@@ -716,37 +724,6 @@ struct WorkBarButton: View {
         .buttonStyle(IconButton(on: on))
         .help(help)
         .accessibilityLabel(help)
-    }
-}
-
-/// A titled on/off switch for a task screen's bar, as tall and as round as
-/// the bar's other controls; tinted while on.
-struct WorkBarToggle: View {
-    let title: String
-    let icon: String
-    let help: String
-    @Binding var isOn: Bool
-    @State private var hovering = false
-
-    var body: some View {
-        let shape = RoundedRectangle(cornerRadius: Theme.radiusControl)
-        Button { isOn.toggle() } label: {
-            Label(title, systemImage: icon)
-                .labelStyle(.titleAndIcon)
-                .font(TypeScale.label(13))
-                .foregroundStyle(isOn ? Theme.accent : hovering ? Theme.ink : Theme.inkSecondary)
-                .padding(.horizontal, 10)
-                .frame(height: Theme.controlHeight)
-                .background(isOn ? Theme.accentSoft : hovering ? Theme.controlHover : Theme.control, in: shape)
-                .contentShape(shape)
-                .fixedSize()
-        }
-        .buttonStyle(.plain)
-        .onHover { hovering = $0 }
-        .help(help)
-        .accessibilityLabel(title)
-        .accessibilityValue(isOn ? "On" : "Off")
-        .accessibilityAddTraits(.isToggle)
     }
 }
 

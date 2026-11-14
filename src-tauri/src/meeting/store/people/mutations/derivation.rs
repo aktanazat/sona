@@ -218,7 +218,8 @@ impl crate::meeting::store::MeetingStore {
 /// treats an explicit owner as settling the question *because* a person is
 /// somebody else — flipping what the user owes into what they are waiting on.
 /// `Local speaker`, the label the store writes for the microphone of a meeting
-/// recorded here, clears the two-word bar on its own.
+/// recorded here, clears the two-word bar on its own. A first name and a last
+/// initial, `Priya N.`, goes to the one person known by a name it shortens.
 pub(in crate::meeting::store) fn derive_speaker_link_in(
     connection: &Connection,
     meeting_id: MeetingSessionId,
@@ -237,6 +238,9 @@ pub(in crate::meeting::store) fn derive_speaker_link_in(
         return Ok(0);
     }
     let mut matches = find_people_by_name_in(connection, display_name)?;
+    if matches.is_empty() {
+        matches = find_people_by_initial_in(connection, display_name)?;
+    }
     if matches.len() > 1 {
         return Ok(0);
     }
@@ -305,6 +309,9 @@ pub(in crate::meeting::store) fn person_for_named_speaker_in(
                     .is_some_and(|first| normalized(first) == first_name)
             })
             .collect();
+    }
+    if candidates.is_empty() {
+        candidates = find_people_by_initial_in(connection, display_name)?;
     }
     if let Some(current) =
         current.filter(|current| candidates.iter().any(|person| person.id == *current))
@@ -432,6 +439,41 @@ fn find_people_by_name_in(connection: &Connection, name: &str) -> Result<Vec<Per
     Ok(all_people_in(connection)?
         .into_iter()
         .filter(|person| identity_names(person).any(|candidate| normalized(candidate) == name))
+        .collect())
+}
+
+/// The people `First L.` can be short for: a name of theirs whose first word
+/// is that first name and whose last word starts with that letter. Empty for
+/// a name of any other shape.
+fn find_people_by_initial_in(connection: &Connection, name: &str) -> Result<Vec<Person>, StoreError> {
+    let words: Vec<&str> = name.split_whitespace().collect();
+    let [first, initial] = words.as_slice() else {
+        return Ok(Vec::new());
+    };
+    let mut letters = initial.trim_end_matches('.').chars();
+    let (Some(initial), None) = (letters.next(), letters.next()) else {
+        return Ok(Vec::new());
+    };
+    if !initial.is_alphabetic() {
+        return Ok(Vec::new());
+    }
+    let first = normalized(first);
+    let initial: String = initial.to_lowercase().collect();
+    Ok(all_people_in(connection)?
+        .into_iter()
+        .filter(|person| {
+            identity_names(person).any(|candidate| {
+                let words: Vec<&str> = candidate.split_whitespace().collect();
+                match words.as_slice() {
+                    [given, .., last] => {
+                        normalized(given) == first
+                            && last.trim_end_matches('.').chars().count() > 1
+                            && normalized(last).starts_with(&initial)
+                    }
+                    _ => false,
+                }
+            })
+        })
         .collect())
 }
 

@@ -231,8 +231,6 @@ final class MeetingLiveStore {
     private(set) var gate: MeetingSessionSnapshot?
     private(set) var starting = false
     private(set) var refreshing = false
-    /// The gate's one checkbox: the person accepts a partial record.
-    private(set) var acceptPartial = false
     /// Where the next meeting's notes would go, from the core's own choice.
     private(set) var textEngine: MeetingTextEngineChoice?
     private(set) var settings: MeetingStartAppSettings?
@@ -649,7 +647,6 @@ final class MeetingLiveStore {
             title: snapshot.session.title, origin: .suggestion, suggestionId: nil,
             calendarEventKey: nil, sources: snapshot.session.sources.map(\.sourceKind),
             preview: nil)
-        acceptPartial = false
         gate = snapshot.session
     }
 
@@ -883,7 +880,6 @@ final class MeetingLiveStore {
     func offer(_ options: MeetingStartOptions) {
         guard !options.sources.isEmpty else { return }
         self.options = options
-        acceptPartial = false
         Task {
             await act("Starting") {
                 let created: MeetingMutationResult = try await self.core.request(
@@ -899,18 +895,19 @@ final class MeetingLiveStore {
         }
     }
 
-    /// Record, from the gate. The press is the acknowledgement, and the flags
-    /// it sends are the ones the sentence above the button claimed.
+    /// Record, from the gate. The press is the acknowledgement: with a
+    /// source blocked, the button names what is left out, and the press
+    /// accepts a partial record without it.
     func record() {
         guard let session = gate, let options, session.allows(.start),
               session.phase == .preflight, !gateBlocked || canStartPartial else { return }
-        let accepted = acceptPartial ? blockedSources.map(\.sourceKind) : []
+        let partial = gateBlocked
+        let accepted = partial ? blockedSources.map(\.sourceKind) : []
         Task {
             await act("Starting") {
                 await self.capture(
                     session,
-                    consent: options.consent(
-                        acceptedMissingSources: accepted, acceptPartial: self.acceptPartial))
+                    consent: options.consent(acceptedMissingSources: accepted, acceptPartial: partial))
             }
         }
     }
@@ -1016,14 +1013,9 @@ final class MeetingLiveStore {
         }
     }
 
-    func setAcceptPartial(_ accepted: Bool) {
-        acceptPartial = accepted
-    }
-
     private func closeGate() {
         gate = nil
         options = nil
-        acceptPartial = false
     }
 
     /// Offers, countdowns and calendar rows all reach the same start.
@@ -1818,20 +1810,14 @@ final class MeetingLiveStore {
         return lines
     }
 
-    /// The audio line, if there is one. A microphone-only meeting the person
-    /// chose is said as a fact, not a fault; a lane that was asked for and is
-    /// not working is the fault, and the line names every lane in that state
-    /// rather than assuming the microphone is fine; anything else missing
-    /// reads off the core's completeness.
+    /// The audio line, if there is one. A meeting asked for with the
+    /// microphone alone has none: that was the choice, not a fault. A lane
+    /// that was asked for and is not working is the fault, and the line names
+    /// every lane in that state rather than assuming the microphone is fine;
+    /// anything else missing reads off the core's completeness.
     private func audioWarning(_ session: MeetingSessionSnapshot) -> MeetingLiveWarning? {
         let microphone = session.sources.first { $0.sourceKind == .microphone }
-        guard let lane = session.sources.first(where: { $0.sourceKind == .systemAudio }) else {
-            return microphone != nil
-                ? MeetingLiveWarning(
-                    text: "Recording the microphone only. The other side of the call is not captured.",
-                    urgent: false)
-                : nil
-        }
+        guard let lane = session.sources.first(where: { $0.sourceKind == .systemAudio }) else { return nil }
         let systemDown = MeetingLiveStore.down(lane)
         let microphoneDown = microphone.map(MeetingLiveStore.down) ?? true
         if systemDown && microphoneDown {

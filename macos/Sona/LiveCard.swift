@@ -545,22 +545,19 @@ struct LiveCardSection: View {
                 }
                 .animation(Motion.settle(reduced: reduceMotion), value: promises.map(\.id))
             }
-            HStack(spacing: 8) {
-                TextField("What did we decide on…", text: $topic,
-                          prompt: Text("What did we decide on…").foregroundStyle(Theme.inkTertiary))
-                    .textFieldStyle(.plain)
-                    .font(TypeScale.body())
-                    .foregroundStyle(Theme.ink)
-                    .focused($asking)
-                    .onSubmit(ask)
-                    .padding(.horizontal, 12)
-                    .frame(height: Theme.controlHeight)
-                    .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
-                    .overlay(RoundedRectangle(cornerRadius: Theme.radiusControl)
-                        .strokeBorder(asking ? Theme.accent : Theme.border, lineWidth: 1))
-                    .accessibilityLabel("What did we decide on")
-                Shortcut("d")
-            }
+            TextField("What did we decide on…", text: $topic,
+                      prompt: Text("What did we decide on…").foregroundStyle(Theme.inkTertiary))
+                .textFieldStyle(.plain)
+                .font(TypeScale.body())
+                .foregroundStyle(Theme.ink)
+                .focused($asking)
+                .onSubmit(ask)
+                .padding(.horizontal, 12)
+                .frame(height: Theme.controlHeight)
+                .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
+                .overlay(RoundedRectangle(cornerRadius: Theme.radiusControl)
+                    .strokeBorder(asking ? Theme.accent : Theme.border, lineWidth: 1))
+                .accessibilityLabel("What did we decide on")
             if let failure = heard.failure, heard.watching == sessionId {
                 Text(failure).metaText(Theme.inkSecondary)
             }
@@ -575,8 +572,8 @@ struct LiveCardSection: View {
     }
 }
 
-/// A finished meeting's promises: its triage pass, and the follow-up that
-/// says who owes what by when.
+/// A finished meeting's promises: its triage pass, and the way to send who
+/// owes what by when.
 struct HeardPromisesCard: View {
     let sessionId: MeetingSessionId
     @Environment(AppModel.self) private var model
@@ -590,11 +587,13 @@ struct HeardPromisesCard: View {
                 PageSection("Promises") {
                     if !rows.isEmpty {
                         Card {
-                            ForEach(rows) { row in pending(row, highlighted: heard.highlighted == row.id) }
+                            ForEach(rows) { row in
+                                PendingPromiseRow(row: row, highlighted: heard.highlighted == row.id)
+                            }
                         }
                     }
                     if let followUp, !followUp.text.isEmpty {
-                        draft(followUp)
+                        send(followUp)
                     }
                     if let failure = heard.followUpFailure { Text(failure).metaText(Theme.inkSecondary) }
                 }
@@ -608,55 +607,36 @@ struct HeardPromisesCard: View {
         .onDisappear { if heard.pass == sessionId { heard.showPass(nil) } }
     }
 
-    private func pending(_ row: WorkItemRow, highlighted: Bool) -> some View {
-        CardRow(action: { model.heard.highlighted = row.id }) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(row.title).bodyText(14).lineLimit(2)
-                if let quote = row.sourceQuote {
-                    Text("“\(quote)”").metaText().lineLimit(2)
-                }
-            }
-        } trailing: {
-            HStack(spacing: 8) {
-                Chip(PromiseLabel.text(owner: row.ownerIsSelf ? "Me" : row.ownerName, dueAtMs: row.dueAtMs))
-                Button("Accept") { model.perform(.accept, on: [row.id]) }.buttonStyle(.quiet).help("Accept  1")
-                Button("Decline") { model.perform(.decline, on: [row.id]) }.buttonStyle(.quiet).help("Decline  2")
-            }
-        }
-        .background(highlighted ? Theme.wash : .clear)
-    }
-
-    private func draft(_ followUp: WorkFollowUp) -> some View {
+    private func send(_ followUp: WorkFollowUp) -> some View {
         let heard = model.heard
         let slack = model.connections.connections.filter { $0.kind == .slackWebhook || $0.kind == .slackBot }
-        return Card {
-            VStack(alignment: .leading, spacing: 12) {
+        return VStack(alignment: .leading, spacing: 12) {
+            if case .slack = heard.route {
                 Text(followUp.text)
                     .bodyText(13, Theme.inkSecondary)
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
-                HStack(spacing: 8) {
-                    Picker("Send with", selection: Binding(get: { heard.route }, set: { heard.route = $0 })) {
-                        Text("Copy").tag(FollowUpRoute.copy)
-                        Text("Mail").tag(FollowUpRoute.mail)
-                        ForEach(slack) { connection in
-                            Text(connection.name).tag(FollowUpRoute.slack(connection.id))
-                        }
-                    }
-                    .labelsHidden()
-                    .fixedSize()
-                    if let notice = heard.notice { Text(notice).metaText() }
-                    Spacer(minLength: 8)
-                    Button(action: { heard.deliver(subject: subject, model.connections.connections) }) {
-                        HStack(spacing: 6) {
-                            Text(label(heard.route, slack))
-                            Text("⌘↩").opacity(0.7)
-                        }
-                    }
-                    .buttonStyle(.primary)
-                }
             }
-            .padding(16)
+            HStack(spacing: 8) {
+                Picker("Send with", selection: Binding(get: { heard.route }, set: { heard.route = $0 })) {
+                    Text("Copy").tag(FollowUpRoute.copy)
+                    Text("Mail").tag(FollowUpRoute.mail)
+                    ForEach(slack) { connection in
+                        Text(connection.name).tag(FollowUpRoute.slack(connection.id))
+                    }
+                }
+                .labelsHidden()
+                .fixedSize()
+                if let notice = heard.notice { Text(notice).metaText() }
+                Spacer(minLength: 8)
+                Button(action: { heard.deliver(subject: subject, model.connections.connections) }) {
+                    HStack(spacing: 6) {
+                        Text(label(heard.route, slack))
+                        Text("⌘↩").opacity(0.7)
+                    }
+                }
+                .buttonStyle(.primary)
+            }
         }
     }
 
@@ -672,4 +652,40 @@ struct HeardPromisesCard: View {
         case let .slack(id): "Post to \(slack.first { $0.id == id }?.name ?? "Slack")"
         }
     }
+}
+
+/// One promise waiting on a yes or no. The two answers show on the row under
+/// the pointer or the keyboard, so a list of promises reads as a list.
+private struct PendingPromiseRow: View {
+    let row: WorkItemRow
+    let highlighted: Bool
+    @Environment(AppModel.self) private var model
+    @State private var hovering = false
+
+    var body: some View {
+        CardRow(action: { model.heard.highlighted = row.id }) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(row.title).bodyText(14).lineLimit(2)
+                if let quote = row.sourceQuote {
+                    Text("“\(quote)”").metaText().lineLimit(2)
+                }
+            }
+        } trailing: {
+            HStack(spacing: 8) {
+                Chip(PromiseLabel.text(owner: row.ownerIsSelf ? "Me" : row.ownerName, dueAtMs: row.dueAtMs))
+                Button("Accept") { model.perform(.accept, on: [row.id]) }.buttonStyle(.quiet).help("Accept  1")
+                    .opacity(answers ? 1 : 0)
+                    .disabled(!answers)
+                Button("Decline") { model.perform(.decline, on: [row.id]) }.buttonStyle(.quiet).help("Decline  2")
+                    .opacity(answers ? 1 : 0)
+                    .disabled(!answers)
+            }
+        }
+        .background(highlighted ? Theme.wash : .clear)
+        .onHover { hovering = $0 }
+        .accessibilityAction(named: "Accept") { model.perform(.accept, on: [row.id]) }
+        .accessibilityAction(named: "Decline") { model.perform(.decline, on: [row.id]) }
+    }
+
+    private var answers: Bool { hovering || highlighted }
 }

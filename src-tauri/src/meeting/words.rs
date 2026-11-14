@@ -109,3 +109,83 @@ pub(crate) fn commits(words: &[String]) -> bool {
 pub(crate) fn says_words(text: &[String], phrase: &[String]) -> bool {
     !phrase.is_empty() && text.windows(phrase.len()).any(|words| words == phrase)
 }
+
+const DETERMINERS: [&str; 8] = ["a", "an", "the", "my", "your", "our", "their", "its"];
+
+/// Words that stand for something the title never names.
+const POINTERS: [&str; 5] = ["this", "that", "these", "those", "it"];
+
+/// Each waits for the clause it joins.
+const CONJUNCTIONS: [&str; 10] = [
+    "and", "or", "but", "nor", "because", "if", "whether", "until", "unless", "although",
+];
+
+/// Prepositions and the particles that end a phrasal verb ("follow up"):
+/// none of them follows an article, though whole sentences often end on one
+/// ("someone to talk to").
+const NEVER_AFTER_AN_ARTICLE: [&str; 18] = [
+    "to", "of", "for", "with", "from", "at", "into", "onto", "about", "than", "by", "in", "on",
+    "up", "out", "off", "over", "down",
+];
+
+/// The words of `text` in lower case, but for a capital "A" after the first
+/// word: that names something ("dock A") rather than standing as an article.
+fn plain_words(text: &str) -> Vec<String> {
+    text.split_whitespace()
+        .map(|word| word.trim_matches(|character: char| !character.is_alphanumeric()))
+        .filter(|word| !word.is_empty())
+        .enumerate()
+        .map(|(at, word)| {
+            if at > 0 && word == "A" {
+                word.to_owned()
+            } else {
+                word.to_lowercase()
+            }
+        })
+        .collect()
+}
+
+fn incomplete(words: &[String], uncertain_name: bool) -> bool {
+    let determiner = |word: &str| DETERMINERS.contains(&word);
+    let joins = |word: &str| CONJUNCTIONS.contains(&word) || NEVER_AFTER_AN_ARTICLE.contains(&word);
+    match words {
+        [] => true,
+        [.., last] if determiner(last.as_str()) || CONJUNCTIONS.contains(&last.as_str()) => true,
+        [.., article, last]
+            if determiner(article.as_str())
+                && last.len() > 5
+                && last.ends_with("ed")
+                && (uncertain_name || matches!(last.as_str(), "revised" | "updated")) =>
+        {
+            true
+        }
+        _ => words.iter().enumerate().any(|(at, word)| {
+            determiner(word.as_str())
+                && words.get(at + 1).is_some_and(|next| joins(next.as_str()))
+                && words.get(at + 2).is_none_or(|after| determiner(after.as_str()))
+        }),
+    }
+}
+
+pub(crate) fn uncertain_title(text: &str) -> bool {
+    incomplete(&plain_words(text), true)
+}
+
+pub(crate) fn title_or_quote<'a>(title: &'a str, quote: &'a str) -> Option<&'a str> {
+    if !uncertain_title(title) {
+        Some(title)
+    } else if !incomplete(&plain_words(quote), false) {
+        Some(quote)
+    } else {
+        None
+    }
+}
+
+/// Whether `text` ends on a word that stands for something said before it
+/// ("decide that"): whole as speech ("I'll look into it"), but no name for
+/// anything by itself.
+pub(crate) fn points_back(text: &str) -> bool {
+    plain_words(text)
+        .last()
+        .is_some_and(|last| POINTERS.contains(&last.as_str()))
+}

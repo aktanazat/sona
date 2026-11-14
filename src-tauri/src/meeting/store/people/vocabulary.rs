@@ -205,7 +205,7 @@ fn is_title(raw: &str) -> bool {
 
 fn push_run(run: &mut Vec<String>, candidates: &mut Vec<String>) {
     for chunk in run.chunks(3) {
-        if chunk.len() == 1 && is_sentence_word(&chunk[0]) {
+        if chunk.len() == 1 && (is_sentence_word(&chunk[0]) || is_calendar_word(&chunk[0])) {
             continue;
         }
         candidates.push(chunk.join(" "));
@@ -280,6 +280,33 @@ fn is_sentence_word(token: &str) -> bool {
     )
 }
 
+/// Days and months: English capitalizes them, so a capital says nothing
+/// about whether Sona can spell them.
+fn is_calendar_word(token: &str) -> bool {
+    matches!(
+        token.to_ascii_lowercase().as_str(),
+        "monday"
+            | "tuesday"
+            | "wednesday"
+            | "thursday"
+            | "friday"
+            | "saturday"
+            | "sunday"
+            | "january"
+            | "february"
+            | "march"
+            | "april"
+            | "may"
+            | "june"
+            | "july"
+            | "august"
+            | "september"
+            | "october"
+            | "november"
+            | "december"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::candidates_in_text;
@@ -304,5 +331,12 @@ mod tests {
                 "Maya"
             ]
         );
+    }
+
+    #[test]
+    fn day_and_month_names_are_not_words_to_learn() {
+        let text = "We ship on Friday, not Tuesday. The venue is booked for March 21 \
+                    and Maya confirms by Monday. Friday Standup moved.";
+        assert_eq!(candidates_in_text(text), ["Maya", "Friday Standup"]);
     }
 }

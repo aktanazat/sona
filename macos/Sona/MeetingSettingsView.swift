@@ -144,11 +144,9 @@ private struct MeetingDetectionAdvancedRows: View {
         if let settings = store.detectionSettings {
             ToggleRow(
                 title: "Use my calendar",
-                // The one thing about this switch nobody can infer from it:
                 // macOS has no read-only calendar grant, so turning it on asks
                 // for the whole calendar.
-                detail: "Prepares meeting briefs and reminds you before events with two or more attendees. Choose the reminder time below. "
-                    + "macOS asks for full calendar access the first time, because Apple offers no read-only grant.",
+                detail: "Prepares briefs and reminds you before meetings with two or more people. macOS asks for full calendar access.",
                 isOn: Binding(
                     get: { settings.calendarEnabled },
                     set: { on in Task { await store.setCalendarEnabled(on) } }))
@@ -201,11 +199,9 @@ private struct MeetingDetectionStateSection: View {
                             button: "Open System Settings",
                             action: { store.openNotificationSettings() })
                     } else if status.notificationAccess == .notDetermined {
-                        // The one grant the core can still ask for. React kept
-                        // the command and offered it nowhere.
                         ActionRow(
-                            title: "Notifications have not been decided, so a detected meeting cannot raise a prompt.",
-                            button: "Ask macOS",
+                            title: "Allow notifications so Sona can offer to record when a meeting starts.",
+                            button: "Allow",
                             busy: store.accessAsking,
                             action: { Task { await store.requestNotificationAccess() } })
                     } else if store.notificationRefused {
@@ -224,9 +220,7 @@ private struct MeetingDetectionStateSection: View {
                         MeetingSettingsNote("This recording stops when the \(call.displayName) call ends.")
                     }
                     MeetingSettingsNote(
-                        "Recording stops when the event ends, the call ends, the app quits, your Mac sleeps, "
-                            + "or you stop it yourself. Nothing stops it for silence: that would need live "
-                            + "transcription, which only runs after a meeting ends.")
+                        "Recording stops when the event or call ends, the app quits, your Mac sleeps, or you stop it.")
                 }
             }
         }

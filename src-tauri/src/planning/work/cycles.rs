@@ -446,11 +446,8 @@ pub(crate) fn want(conn: &Connection, cycle: WorkCycleRef, now_ms: i64) -> Resul
 }
 
 fn success(counts: Counts) -> Option<u8> {
-    let (scope, started, done) = counts;
-    (scope > 0).then(|| {
-        let points = u64::from(done) * 100 + u64::from(started) * 25;
-        u8::try_from(points / u64::from(scope)).unwrap_or(100)
-    })
+    let (scope, _, done) = counts;
+    (scope > 0).then(|| u8::try_from(u64::from(done) * 100 / u64::from(scope)).unwrap_or(100))
 }
 
 fn shown(

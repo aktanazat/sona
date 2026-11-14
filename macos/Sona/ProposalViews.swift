@@ -1,7 +1,7 @@
 import SwiftUI
 
-/// The changes agents proposed for the open task, under its title. Y and N
-/// answer the first; ⇧Y accepts them all.
+/// The changes agents proposed for the open task, under its title: one
+/// Accept for all of them, a Reject on each.
 struct ProposalStrip: View {
     let proposals: [WorkProposal]
     @Environment(AppModel.self) private var model
@@ -14,12 +14,7 @@ struct ProposalStrip: View {
                     DetailHeading(title: "Proposed changes")
                     if let agent { AgentName(name: agent) }
                     Spacer(minLength: Space.s)
-                    if proposals.count > 1 {
-                        TaskKeyButton(title: "Accept all", keys: "shift+y") {
-                            model.changeWork { model.work.acceptProposals(proposals.map(\.id)) }
-                        }
-                        .fixedSize()
-                    }
+                    ProposalAccept(proposals: proposals, keyed: true)
                 }
                 .frame(height: Theme.listRow)
                 ForEach(Array(proposals.enumerated()), id: \.element.id) { index, proposal in
@@ -89,12 +84,7 @@ private struct ProposalTask: View {
                     .accessibilityAction { model.workFocus.open(row.id, in: .triage) }
                 if let agent { AgentName(name: agent) }
                 Spacer(minLength: Space.s)
-                if proposals.count > 1 {
-                    TaskKeyButton(title: "Accept all", keys: "shift+y", keysShown: keyed) {
-                        model.changeWork { model.work.acceptProposals(proposals.map(\.id)) }
-                    }
-                    .fixedSize()
-                }
+                ProposalAccept(proposals: proposals, keyed: keyed)
             }
             .padding(.leading, 6)
             .padding(.trailing, 16)
@@ -115,9 +105,25 @@ private struct ProposalTask: View {
     }
 }
 
+/// Accept for every change listed: Y for a lone change, ⇧Y for several.
+private struct ProposalAccept: View {
+    let proposals: [WorkProposal]
+    let keyed: Bool
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        let ids = proposals.map(\.id)
+        let one = proposals.count == 1
+        TaskKeyButton(title: one ? "Accept" : "Accept all", keys: one ? "y" : "shift+y", keysShown: keyed) {
+            model.changeWork { model.work.acceptProposals(ids) }
+        }
+        .fixedSize()
+    }
+}
+
 /// One change an agent proposed: the field, and what it would change from
-/// and to, with its answers. `keyed` shows Y and N on the line those keys
-/// answer; `showsAgent` names who proposed it where several agents did.
+/// and to, with its Reject. `keyed` shows N on the line that key answers;
+/// `showsAgent` names who proposed it where several agents did.
 struct ProposalLine: View {
     let proposal: WorkProposal
     var keyed = false
@@ -140,13 +146,8 @@ struct ProposalLine: View {
             .accessibilityElement(children: .combine)
             if showsAgent { AgentName(name: proposal.agent) }
             Spacer(minLength: Space.s)
-            Group {
-                TaskKeyButton(title: "Accept", keys: "y", keysShown: keyed) {
-                    model.changeWork { model.work.acceptProposals([proposal.id]) }
-                }
-                TaskKeyButton(title: "Reject", keys: "n", keysShown: keyed) {
-                    model.work.rejectProposals([proposal.id])
-                }
+            TaskKeyButton(title: "Reject", keys: "n", keysShown: keyed) {
+                model.work.rejectProposals([proposal.id])
             }
             .fixedSize()
         }

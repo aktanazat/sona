@@ -100,7 +100,6 @@ final class LibraryStore {
     /// Unknown until the core answers, so nothing can save a stand-in.
     private(set) var limit: Int?
     private(set) var retention: LibraryRetention = .preserveLimit
-    private(set) var storage: StorageStatus?
     private(set) var savingRetention = false
 
     /// The last thing the core could not do, shown until the next success.
@@ -132,9 +131,8 @@ final class LibraryStore {
         }
         // The startup unlock. A read the core refused while the database was
         // still locked is asked again here, once storage says what it is.
-        core.observe(CoreEvent.historyStorage) { [weak self] line in
+        core.observe(CoreEvent.historyStorage) { [weak self] _ in
             guard let self else { return }
-            self.storage = try? Core.payload(line)
             if self.phase == .error { self.reload() }
             Task { await self.refreshStats() }
             Task { await self.loadTrend() }
@@ -145,16 +143,15 @@ final class LibraryStore {
         }
     }
 
-    /// The first read: the page the reader sees, and the four smaller answers
+    /// The first read: the page the reader sees, and the smaller answers
     /// around it, all in flight together.
     func start() async {
         async let page: Void = fetchPage(cursor: nil)
         async let totals: Void = refreshStats()
         async let settings: Void = loadSettings()
-        async let storageState: Void = loadStorage()
         async let activity: Void = loadTrend()
         async let keptRecordings: Void = loadKept()
-        _ = await (page, totals, settings, storageState, activity, keptRecordings)
+        _ = await (page, totals, settings, activity, keptRecordings)
     }
 
     // MARK: - Reading the log
@@ -666,7 +663,7 @@ final class LibraryStore {
 
     // MARK: - What is kept
 
-    private func loadSettings() async {
+    func loadSettings() async {
         do {
             let settings: LibrarySettings = try await core.request("get_app_settings")
             limit = settings.historyLimit ?? 100
@@ -676,14 +673,10 @@ final class LibraryStore {
         }
     }
 
-    private func loadStorage() async {
-        storage = try? await core.request("history_storage_status")
-    }
-
     /// Why a recording cannot be transcribed again, when it cannot: with saved
     /// history off, the new version has nowhere to go.
     var replayRefusal: String? {
-        limit == 0 ? "Saved history is off. Set Dictations to keep above 0." : nil
+        limit == 0 ? "Saved history is off. Set Dictations to keep above 0 in Privacy settings." : nil
     }
 
     /// How many entries the core keeps. Zero keeps none, which is how the log

@@ -57,7 +57,9 @@ struct ActivityScreen: View {
                 }
                 OverviewConversations(store: store)
                 FeedRecentView(store: store, openMeeting: model.openMeeting) { model.showSettings(.workflows) }
-                OverviewStatsCard(store: store)
+                if !OverviewStatsCard.nothingDictated(store.usage) {
+                    OverviewStatsCard(store: store)
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -118,7 +120,8 @@ struct OverviewTodayStrip: View {
         }
         let counters: [TodayCounter] = [
             TodayCounter(
-                id: "processing", value: today.processing.value, label: "processing",
+                id: "processing", value: today.processing.value,
+                label: today.processing.value == 1 ? "meeting processing" : "meetings processing",
                 name: "Meetings processing",
                 action: {
                     model.meetings.closeReview()
@@ -126,10 +129,14 @@ struct OverviewTodayStrip: View {
                     model.go(.meetings)
                 }),
             TodayCounter(
-                id: "speakers", value: speakers?.count, label: "unnamed", name: "Speakers not named",
+                id: "speakers", value: speakers?.count,
+                label: speakers?.count == 1 ? "speaker to name" : "speakers to name",
+                name: "Speakers not named",
                 action: speakers?.meetingId.map(review)),
             TodayCounter(
-                id: "untracked", value: untracked?.count, label: "untracked", name: "Promises not in a project",
+                id: "untracked", value: untracked?.count,
+                label: untracked?.count == 1 ? "promise not in a project" : "promises not in a project",
+                name: "Promises not in a project",
                 action: untracked?.meetingId.map(review)),
             TodayCounter(
                 id: "owed", value: owed?.count, label: "owed", name: "Promises you owe",
@@ -257,7 +264,9 @@ struct OverviewWidgets: View {
             LazyVGrid(columns: Self.columns, alignment: .leading, spacing: 12) {
                 today(now)
                 recorded(week)
-                dictated(week)
+                if store.trend?.allTime.words != 0 {
+                    dictated(week)
+                }
                 commitments()
                 overdue(now)
                 peopleMet(week)
@@ -325,7 +334,7 @@ struct OverviewWidgets: View {
         return WidgetTile("Dictated this week", icon: "mic", value: store.trend == nil ? "–" : total.formatted(),
                           unit: "words", caption: store.trend.map { "\($0.allTime.words.formatted()) all time" },
                           action: { model.go(.library) }) {
-            if store.trend != nil {
+            if store.trend != nil, total > 0 {
                 Sparkline(days: week.chart { words[$0] ?? 0 } spoken: { "\(Int($0)) words" })
             }
         }
@@ -344,7 +353,7 @@ struct OverviewWidgets: View {
                           value: loops == nil ? "–" : complete ? "\(count)" : "\(count)+",
                           unit: "open",
                           action: count == 0 ? nil : showNeedsYou) {
-            if count > 0, complete {
+            if !mine.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {
                     PersonSplitBar(mine: mine.count, theirs: theirs)
                     if let oldest {
@@ -368,12 +377,10 @@ struct OverviewWidgets: View {
                               if !late.isEmpty { projects.showOverdue() }
                               model.go(.projects)
                           }) {
-            if known, open > 0 {
+            if known, open > 0, let oldest = late.first {
                 VStack(alignment: .leading, spacing: 6) {
                     ShareBar(fraction: Double(late.count) / Double(open), tint: Theme.live)
-                    if let oldest = late.first {
-                        Text(oldest.title).font(TypeScale.body(11)).foregroundStyle(Theme.inkSecondary).lineLimit(1)
-                    }
+                    Text(oldest.title).font(TypeScale.body(11)).foregroundStyle(Theme.inkSecondary).lineLimit(1)
                 }
             }
         }
@@ -429,13 +436,25 @@ private struct OverviewWeek {
 struct CaptureModeChipView: View {
     let store: OverviewStore
     var openModes: () -> Void = {}
-    @State private var open = false
 
     var body: some View {
         // Nothing to say before the modes arrive, and a button naming a mode
         // this install does not have would be worse than none.
         if let snapshot = store.modes, let active = snapshot.active {
-            Button { open = true } label: {
+            Menu {
+                Picker("Mode", selection: Binding(
+                    get: { active },
+                    set: { store.pick($0) }
+                )) {
+                    ForEach(snapshot.modes) { mode in
+                        Text(mode.name).tag(mode)
+                    }
+                }
+                .pickerStyle(.inline)
+                .labelsHidden()
+                Divider()
+                Button("Edit modes in Settings", action: openModes)
+            } label: {
                 HStack(spacing: 6) {
                     Text("Mode").foregroundStyle(Theme.inkSecondary)
                     Text(active.name).lineLimit(1)
@@ -444,87 +463,14 @@ struct CaptureModeChipView: View {
                         .foregroundStyle(Theme.inkTertiary)
                 }
             }
+            .menuStyle(.button)
             .buttonStyle(.compact)
+            .menuIndicator(.hidden)
+            .fixedSize()
             .disabled(store.switchingMode || store.capturing)
             .help(store.capturing ? "Switching is off while a dictation is running" : "Mode for the next dictation")
             .accessibilityLabel("Mode, \(active.name)")
-            .popover(isPresented: $open, arrowEdge: .bottom) {
-                CaptureModePicker(store: store) {
-                    open = false
-                    openModes()
-                }
-            }
         }
-    }
-}
-
-/// The list inside the mode row's popover: every mode, the current one
-/// marked, and one line out to the editor.
-struct CaptureModePicker: View {
-    let store: OverviewStore
-    var openModes: () -> Void = {}
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            Text("Modes").sectionLabel().padding(.horizontal, 14).padding(.top, 12).padding(.bottom, 6)
-            ScrollView {
-                VStack(alignment: .leading, spacing: 0) {
-                    ForEach(store.modes?.modes ?? []) { mode in
-                        CaptureModeRow(
-                            mode: mode,
-                            active: mode.id == store.modes?.active?.id,
-                            busy: store.switchingMode
-                        ) {
-                            store.pick(mode)
-                        }
-                    }
-                }
-            }
-            .frame(maxHeight: 260)
-            Hairline()
-            // Editing a mode is a different task in a different place; this
-            // popover is for picking.
-            Button("Edit modes in Settings", action: openModes)
-                .buttonStyle(.quiet)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
-        }
-        .frame(width: 260)
-        .background(Theme.page)
-    }
-}
-
-private struct CaptureModeRow: View {
-    let mode: CaptureModeChoice
-    let active: Bool
-    let busy: Bool
-    let pick: () -> Void
-    @State private var hovering = false
-
-    var body: some View {
-        Button(action: pick) {
-            HStack(spacing: 8) {
-                // The mark keeps its box when it is not the current mode, so
-                // the names stay on one left edge down the list.
-                Image(systemName: "checkmark")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(active ? Theme.accent : .clear)
-                    .frame(width: 12)
-                Text(mode.name)
-                    .font(TypeScale.body(14))
-                    .foregroundStyle(active ? Theme.ink : Theme.inkSecondary)
-                    .lineLimit(1)
-                Spacer(minLength: 0)
-            }
-            .padding(.horizontal, 14)
-            .frame(height: 30)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(hovering && !busy ? Theme.wash : .clear)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .disabled(busy)
-        .onHover { hovering = $0 }
     }
 }
 
@@ -616,8 +562,17 @@ private struct OverviewLoopRow: View {
     }
 
     private var meta: String {
-        let base = "\(loop.title) · \(FeedClock.ago(loop.raisedAtUtcMs))"
-        return loop.waitingOnStale ? "\(base) · waiting over a week" : base
+        "\(need) · \(loop.title) · \(FeedClock.ago(loop.raisedAtUtcMs))"
+    }
+
+    /// What the reader is being asked for: these are the questions and
+    /// topics a meeting left unsettled.
+    private var need: String {
+        switch loop.direction {
+        case .mine: "Yours to settle"
+        case .waitingOn: loop.waitingOnStale ? "Waiting on them over a week" : "Waiting on them"
+        case .unattributed: "Left open, no owner"
+        }
     }
 }
 
@@ -671,9 +626,8 @@ private struct OverviewUpdateRow: View {
 
 // MARK: - Upcoming
 
-/// What the calendar holds in the next seven days. An empty week under a
-/// granted calendar is a free week; an empty week under anything else is a
-/// missing grant, and the section says something different for each.
+/// What the calendar holds in the next seven days. Drawn only under a
+/// granted calendar: without one, Meetings is where the grant is offered.
 struct OverviewUpcomingSection: View {
     let store: OverviewStore
     /// The standing decisions the recurring rows offer. Absent until the
@@ -682,12 +636,12 @@ struct OverviewUpcomingSection: View {
     var series: OverviewSeriesActions?
 
     var body: some View {
-        if let upcoming = store.upcoming {
+        if let upcoming = store.upcoming, upcoming.access == "authorized" {
             PageSection("Next seven days") {
                 Card {
                     if upcoming.rows.isEmpty {
                         CardRow {
-                            Text(upcoming.emptyLine).metaText()
+                            Text("Nothing in the next seven days.").metaText()
                         }
                     } else {
                         ForEach(upcoming.rows) { row in
@@ -875,6 +829,12 @@ struct OverviewStatsCard: View {
         .padding(.bottom, 28)
     }
 
+    /// A card of zeroes says nothing the reader needs, so Activity leaves it
+    /// out until the first dictation.
+    static func nothingDictated(_ usage: UsageState) -> Bool {
+        if case let .loaded(stats, _) = usage { stats.dictations == 0 } else { false }
+    }
+
     @ViewBuilder
     private var periodControl: some View {
         if store.trend == nil {
@@ -912,15 +872,11 @@ struct OverviewStatsCard: View {
                 Button("Retry", action: store.reloadUsage).buttonStyle(.quiet)
             }
         case let .loaded(stats, _):
-            if stats.dictations == 0 {
-                Text("No dictations yet.").metaText()
-            } else {
-                HStack(alignment: .top, spacing: 16) {
-                    Stat(label: "Words", value: stats.totalWords.formatted())
-                    Stat(label: "Words a minute", value: stats.wordsPerMinuteDictations > 0 ? "\(stats.wordsPerMinute)" : "–")
-                    Stat(label: "Time saved", value: stats.timeSaved)
-                    Stat(label: "Streak", value: UsageStats.days(stats.currentStreakDays))
-                }
+            HStack(alignment: .top, spacing: 16) {
+                Stat(label: "Words", value: stats.totalWords.formatted())
+                Stat(label: "Words a minute", value: stats.wordsPerMinuteDictations > 0 ? "\(stats.wordsPerMinute)" : "–")
+                Stat(label: "Time saved", value: stats.timeSaved)
+                Stat(label: "Streak", value: UsageStats.days(stats.currentStreakDays))
             }
         }
     }
@@ -1357,7 +1313,7 @@ private struct UsageAppRowView: View {
 // MARK: - Conversations and notes
 
 /// The newest conversations and notes as one list, newest first, each
-/// opening where it lives, beside the two ways to start another.
+/// opening where it lives, beside the way to start a note.
 struct OverviewConversations: View {
     @Environment(AppModel.self) private var model
     let store: OverviewStore
@@ -1374,7 +1330,6 @@ struct OverviewConversations: View {
                     Task { await model.scratchpad.newNote() }
                 }
                 .buttonStyle(.compact)
-                Button("Record conversation", action: model.recordMeeting).buttonStyle(.compact)
             }
             Card {
                 if failed {
@@ -1420,7 +1375,7 @@ struct OverviewConversations: View {
             all += meetings.map {
                 OverviewRecentEntry(
                     id: "meeting:\($0.id)", target: $0.id, isNote: false, title: $0.title,
-                    detail: $0.headline?.text ?? ($0.speakerLabels ?? []).joined(separator: ", "),
+                    detail: $0.headline?.text ?? Self.named($0.speakerLabels ?? []).joined(separator: ", "),
                     atMs: $0.createdAtUtcMs)
             }
         }
@@ -1445,6 +1400,15 @@ struct OverviewConversations: View {
         if case .failed = store.recentMeetings { return true }
         if case .failed = store.recentNotes { return true }
         return false
+    }
+
+    /// The labels the core writes itself, "Unknown speaker" and "Speaker 2",
+    /// name nobody, so the row leaves them out.
+    private static func named(_ labels: [String]) -> [String] {
+        labels.filter { label in
+            label != "Unknown speaker"
+                && !(label.hasPrefix("Speaker ") && label.dropFirst("Speaker ".count).allSatisfy(\.isNumber))
+        }
     }
 
     private func open(_ entry: OverviewRecentEntry) {

@@ -138,7 +138,7 @@ struct ConversationContextView: View {
                         Text(context.source).metaText().lineLimit(2)
                     }
                     if partialRecording && context.origin != "import" {
-                        Text("Partial recording").metaText(Theme.live)
+                        Text("Partial recording").metaText()
                     }
                     Spacer(minLength: 8)
                     if let location = context.calendarLocation {

@@ -410,14 +410,6 @@ enum FeedJump: Decodable {
     }
 }
 
-/// What one run counted. Only the fields a sentence or the effect test reads.
-struct FeedCounts: Decodable {
-    let changes: Int
-    let carried: Int
-    let candidates: Int
-    let suggestions: Int
-}
-
 /// One finished workflow run.
 struct FeedReceipt: Decodable, Identifiable {
     let id: String
@@ -427,57 +419,17 @@ struct FeedReceipt: Decodable, Identifiable {
     let finishedAtUtcMs: Int64
     let outcomeSummary: String
     let outcomeCode: String
-    let outcomeCounts: FeedCounts
+    let outcomeCounts: WorkflowOutcomeCounts
 
-    /// What the run did, said the way a person would say it. A code this shell
-    /// does not know yet falls back to the core's own summary rather than to
-    /// the workflow's name, which is the subsystem's word for itself.
     var sentence: String {
-        switch outcomeCode {
-        case "person_links":
-            outcomeCounts.changes == 1 ? "Remembered 1 person" : "Remembered \(outcomeCounts.changes) people"
-        case "briefing": "Prepared your meeting brief"
-        case "continuity":
-            outcomeCounts.carried == 1 ? "Carried 1 open loop forward" : "Carried \(outcomeCounts.carried) open loops forward"
-        case "vocabulary_candidates":
-            outcomeCounts.candidates == 1 ? "Learned a new word" : "Learned \(outcomeCounts.candidates) new words"
-        case "document_links":
-            outcomeCounts.changes == 1 ? "Linked a document" : "Linked \(outcomeCounts.changes) documents"
-        case "learning_suggestions":
-            outcomeCounts.suggestions == 1 ? "Noticed 1 thing" : "Noticed \(outcomeCounts.suggestions) things"
-        case "series_primed": "Prepared a recurring meeting"
-        case "digest_raised": "Summed up the day"
-        case "prompt_recorded": "Started recording"
-        case "prompt_ignored": "Skipped recording a detected meeting"
-        case "auto_record_started": "Started recording automatically"
-        case "auto_record_stopped": "Stopped recording automatically"
-        case "prep_presented": "Prep"
-        case "prep_record_armed": "Record when it starts"
-        case "prep_brief_opened": "Open brief"
-        case "prep_dismissed": "Dismiss"
-        case "wrap_presented": "Wrap"
-        case "wrap_notes_opened": "Open notes"
-        case "wrap_follow_up_copied": "Copied"
-        case "wrap_done": "Done"
-        case "already_processed": "Nothing new to do"
-        case "failed": "Couldn't finish"
-        case "skipped": "Skipped"
-        default: outcomeSummary
-        }
+        workflowOutcomeText(code: outcomeCode, counts: outcomeCounts, summary: outcomeSummary)
     }
 
     /// Whether that sentence names something that happened to the reader's
     /// data. A pass that found nothing still writes a receipt, and the run log
     /// under Settings is where those belong.
     var hasEffect: Bool {
-        switch outcomeCode {
-        case "person_links", "document_links": outcomeCounts.changes > 0
-        case "continuity": outcomeCounts.carried > 0
-        case "vocabulary_candidates": outcomeCounts.candidates > 0
-        case "learning_suggestions": outcomeCounts.suggestions > 0
-        case "already_processed", "skipped": false
-        default: true
-        }
+        !workflowOutcomeIsEmpty(code: outcomeCode, counts: outcomeCounts)
     }
 
     /// The workflow's human name, for the row's meta line.
@@ -677,25 +629,13 @@ enum FeedClock {
 
 // MARK: - Upcoming
 
-/// `meeting_upcoming_events`: the window that was read, what is in it, and
-/// why it might be empty.
+/// `meeting_upcoming_events`: the window that was read and what is in it.
 struct OverviewUpcoming: Decodable {
     let access: String
     var rows: [OverviewUpcomingRow]
     /// The fence every series write from these rows carries. One number for
     /// the whole pane, because one counter fences all three decisions.
     var seriesRevision: Int
-
-    /// What an empty list means. An empty week under `authorized` is a free
-    /// week; anything else is a missing grant.
-    var emptyLine: String {
-        switch access {
-        case "authorized": "Nothing in the next seven days."
-        case "not_determined": "Sona has not asked for your calendar yet. Turn meeting detection on in Settings to list what is coming."
-        case "denied": "Calendar access is off, so upcoming meetings cannot be listed."
-        default: "This Mac has no calendar Sona can read."
-        }
-    }
 
     /// Takes the answer to a series write. Two occurrences of one series can
     /// sit in the same week, so every row with that key is replaced rather

@@ -27,11 +27,11 @@ struct AgentBridgeView: View {
                     ToggleRow(title: agent.label, detail: agent.detail, isOn: enabled(agent))
                         .disabled(!store.bridge.masterEnabled)
                 }
-                if let status = store.status {
+                if let status = statusLabel {
                     CardRow {
                         Text("Status").bodyText()
                     } trailing: {
-                        Text(status.diagnostic.label).metaText()
+                        Text(status).metaText()
                     }
                 }
             }
@@ -69,18 +69,13 @@ struct AgentBridgeView: View {
     }
 
     private var projects: some View {
-        AgentBridgeSection(
-            "Authorized projects",
-            meta: "Sona recognizes a project from its folder without keeping the folder path here."
-        ) {
+        AgentBridgeSection("Authorized projects") {
             Button(store.authorizing ? "Choosing…" : "Authorize folder") { store.authorizeProject() }
                 .buttonStyle(.compact)
                 .disabled(store.authorizing)
         } content: {
-            Card {
-                if store.bridge.allowedProjects.isEmpty {
-                    CardLine("No projects are authorized.")
-                } else {
+            if !store.bridge.allowedProjects.isEmpty {
+                Card {
                     ForEach(store.bridge.allowedProjects) { project in
                         CardRow {
                             AgentBridgeHash(project.canonicalProjectHash)
@@ -130,69 +125,62 @@ struct AgentBridgeView: View {
         }
     }
 
+    @ViewBuilder
     private var activity: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        if !store.sessions.isEmpty {
             PageSection("Sessions") {
                 Card {
-                    if store.sessions.isEmpty {
-                        CardLine("No agent activity yet.")
-                    } else {
-                        ForEach(store.sessions) { session in
-                            CardRow {
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text(session.agent.label).bodyText()
-                                    AgentBridgeHash(session.id)
-                                    AgentBridgeHash(session.canonicalProjectHash)
-                                }
-                            } trailing: {
-                                Text("Seen \(session.lastSeen.time)").metaText()
+                    ForEach(store.sessions) { session in
+                        CardRow {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(session.agent.label).bodyText()
+                                AgentBridgeHash(session.id)
+                                AgentBridgeHash(session.canonicalProjectHash)
                             }
+                        } trailing: {
+                            Text("Seen \(session.lastSeen.time)").metaText()
                         }
                     }
                 }
             }
+        }
+        if !store.requests.isEmpty {
             PageSection("Requests") {
                 Card {
-                    if store.requests.isEmpty {
-                        CardLine("No requests yet.")
-                    } else {
-                        ForEach(store.requests) { request in
-                            AgentBridgeRequestRow(store: store, request: request)
-                        }
+                    ForEach(store.requests) { request in
+                        AgentBridgeRequestRow(store: store, request: request)
                     }
                 }
             }
         }
     }
 
+    @ViewBuilder
     private var queue: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        if !store.replySessions.isEmpty {
             PageSection("Reply preview") {
                 AgentBridgeComposer(store: store)
             }
+        }
+        if !store.pending.isEmpty {
             PageSection("Pending replies") {
                 Card {
-                    if store.pending.isEmpty {
-                        CardLine("No pending replies.")
-                    } else {
-                        ForEach(store.pending) { message in
-                            AgentBridgePendingRow(store: store, message: message)
-                        }
+                    ForEach(store.pending) { message in
+                        AgentBridgePendingRow(store: store, message: message)
                     }
                 }
             }
         }
     }
 
+    @ViewBuilder
     private var rules: some View {
-        AgentBridgeSection(
-            "Permission rules",
-            meta: "One rule per answer you gave: that exact tool call, in that project."
-        ) {
-            Card {
-                if store.bridge.permissionRules.isEmpty {
-                    CardLine("No permission rules.")
-                } else {
+        if !store.bridge.permissionRules.isEmpty {
+            AgentBridgeSection(
+                "Permission rules",
+                meta: "One rule per answer you gave: that exact tool call, in that project."
+            ) {
+                Card {
                     ForEach(store.bridge.permissionRules) { rule in
                         CardRow {
                             VStack(alignment: .leading, spacing: 4) {
@@ -208,6 +196,16 @@ struct AgentBridgeView: View {
                 }
             }
         }
+    }
+
+    /// The runtime reports active as soon as connections are on, even with
+    /// every agent switched off, when nothing is being watched.
+    private var statusLabel: String? {
+        guard let status = store.status else { return nil }
+        if status.diagnostic == .active, !AgentBridgeAgent.allCases.contains(where: store.bridge.isEnabled) {
+            return "No agent turned on"
+        }
+        return status.diagnostic.label
     }
 
     private var master: Binding<Bool> {

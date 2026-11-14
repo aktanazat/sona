@@ -141,6 +141,16 @@ struct WorkflowRunReceipt: Decodable, Identifiable {
             || (startedAtUtcMs == other.startedAtUtcMs && id < other.id)
     }
 
+    var outcomeText: String {
+        workflowOutcomeText(code: outcomeCode, counts: outcomeCounts, summary: outcomeSummary)
+    }
+
+    /// A run that ended well and changed nothing: a row in the log, not a
+    /// line under its switch.
+    var foundNothing: Bool {
+        status == .ok && workflowOutcomeIsEmpty(code: outcomeCode, counts: outcomeCounts)
+    }
+
     /// The stored code, said for a person: what went wrong, whether it comes
     /// back on its own, and what to do if it does not. The code stays as
     /// the detail, since it is what a bug report needs. Nothing retries a
@@ -227,19 +237,23 @@ struct WorkflowRunTrend: Decodable {
 
 /// What a run did, said the way a person would say it. One sentence per
 /// outcome code, counted from the receipt the run wrote — never from the
-/// workflow's name, which is the subsystem's word for itself.
-func workflowOutcomeText(_ receipt: WorkflowRunReceipt) -> String {
-    let counts = receipt.outcomeCounts
-    switch receipt.outcomeCode {
+/// workflow's name, which is the subsystem's word for itself. `summary` is
+/// the core's own sentence, for a code this build does not know.
+func workflowOutcomeText(code: String, counts: WorkflowOutcomeCounts, summary: String) -> String {
+    switch code {
     case "person_links":
-        return counts.changes == 1
-            ? "Remembered 1 person"
-            : "Remembered \(counts.changes) people"
+        switch counts.changes {
+        case 0: return "No one new to remember"
+        case 1: return "Remembered 1 person"
+        default: return "Remembered \(counts.changes) people"
+        }
     case "briefing": return "Prepared your meeting brief"
     case "continuity":
-        return counts.carried == 1
-            ? "Carried 1 open loop forward"
-            : "Carried \(counts.carried) open loops forward"
+        switch counts.carried {
+        case 0: return "Nothing to carry forward"
+        case 1: return "Carried 1 unresolved promise forward"
+        default: return "Carried \(counts.carried) unresolved promises forward"
+        }
     /* The pass finds candidates for the vocabulary; nothing is learned
      * until one is accepted, so the sentence says what was found. */
     case "vocabulary_candidates":
@@ -257,7 +271,11 @@ func workflowOutcomeText(_ receipt: WorkflowRunReceipt) -> String {
         default: return "Linked this document to \(counts.persons) people"
         }
     case "learning_suggestions":
-        return counts.suggestions == 1 ? "Noticed 1 thing" : "Noticed \(counts.suggestions) things"
+        switch counts.suggestions {
+        case 0: return "Nothing new noticed"
+        case 1: return "Noticed 1 thing"
+        default: return "Noticed \(counts.suggestions) things"
+        }
     case "series_primed": return "Prepared a recurring meeting"
     /* D20 narrates a day, not a change: the run writes nothing, so its
      * receipt existing is the whole sentence. */
@@ -279,7 +297,20 @@ func workflowOutcomeText(_ receipt: WorkflowRunReceipt) -> String {
     case "already_processed": return "Nothing new to do"
     case "failed": return "Couldn't finish"
     case "skipped": return "Skipped"
-    default: return receipt.outcomeSummary
+    default: return summary
+    }
+}
+
+/// Whether a run's outcome names nothing that happened to the reader's data.
+func workflowOutcomeIsEmpty(code: String, counts: WorkflowOutcomeCounts) -> Bool {
+    switch code {
+    case "person_links": counts.changes == 0
+    case "continuity": counts.carried == 0
+    case "vocabulary_candidates": counts.candidates == 0
+    case "document_links": counts.persons == 0
+    case "learning_suggestions": counts.suggestions == 0
+    case "already_processed", "skipped": true
+    default: false
     }
 }
 
