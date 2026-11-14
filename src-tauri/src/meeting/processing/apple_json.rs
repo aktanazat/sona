@@ -136,6 +136,7 @@ mod scoped {
     use serde::ser::{SerializeMap, SerializeSeq};
     use serde::{de::DeserializeOwned, Deserialize};
     use std::sync::LazyLock;
+    use crate::meeting::words::trails_off;
 
     static NOTES_FACTUAL: LazyLock<RootSchema> = LazyLock::new(root_schema::<NativeFactualReply>);
     static NOTES_NARRATIVE: LazyLock<RootSchema> =
@@ -224,7 +225,7 @@ mod scoped {
     struct NativeNarrativeReply {
         #[schemars(
             length(min = 1, max = "NATIVE_SUMMARY_LINES"),
-            description = "Distinct concise summary lines, using final outcomes rather than superseded deadlines. Summarize a repeated subject once, not once per citation."
+            description = "Distinct summary lines, each one short sentence in your own words, never copied transcript, a field name or a list of topics. A deadline or figure that changed appears only as its final value. Summarize a repeated subject once, not once per citation."
         )]
         summary: Vec<RawCitedText>,
         outline: Vec<RawOutlineTopic>,
@@ -1587,7 +1588,7 @@ mod scoped {
         fn canonical_ledger(mut reply: NativeLedgerReply) -> Result<String, String> {
             for commitment in &mut reply.commitments {
                 if let Some(deadline) = commitment.due_text.take() {
-                    if !commitment.what.contains(&deadline) {
+                    if !commitment.what.contains(&deadline) && !trails_off(&commitment.what) {
                         commitment.what.push_str(" — ");
                         commitment.what.push_str(&deadline);
                     }
@@ -2416,7 +2417,10 @@ mod scoped {
 
     #[cfg(test)]
     mod tests {
-        use super::super::super::RawLedgerOutput;
+        use super::super::super::{
+            validate_ledger_output, CitationKind, MeetingCitation, MeetingEvidence,
+            MeetingSessionId, RawLedgerOutput,
+        };
         use super::*;
         use serde_json::json;
 
@@ -3197,6 +3201,51 @@ mod scoped {
                     "a second reading cannot replace decisions or promises"
                 );
             }
+        }
+
+        /// A promise the engine names in words cut off mid-phrase takes no
+        /// deadline as a tail ("Send the — Friday"), which would hide the cut:
+        /// it goes by the sentence it was said in.
+        #[test]
+        fn a_promise_named_in_cut_off_words_goes_by_its_sentence() {
+            let said = uuid::Uuid::from_u128(2201).to_string();
+            let sentence =
+                "Agreed, I will send the revised timeline to the city council by Friday.";
+            let request = Request::new(
+                &json!({"transcript":[{"segment_uuid":said,"speaker":"Casey","text":sentence}]})
+                    .to_string(),
+                ReplyShape::MeetingLedger,
+            )
+            .expect("one promise");
+            let registers = json!({"settled_choices":[],"personal_promise_histories":[{"events":[{
+                "status":"promised","what":"Send the",
+                "actor":{"basis":"first_person_singular","named_person":"Casey"},
+                "due_text":"Friday","firmness":"firm","receipt":{"quote":["Q1"]}
+            }]}]});
+            let narrative = json!({"headline":"Casey sends the revised timeline by Friday.","additional_discussion":[],"stances":[],"source_limitations":[]});
+            let restored = request
+                .restore_ledger_parts(
+                    request
+                        .decode_registers(&registers.to_string())
+                        .expect("one promise"),
+                    &narrative.to_string(),
+                )
+                .expect("complete native ledger");
+            let raw: RawLedgerOutput = serde_json::from_str(&restored).expect("canonical ledger");
+            let evidence = [MeetingEvidence {
+                citation: MeetingCitation {
+                    kind: CitationKind::Transcript,
+                    session_id: MeetingSessionId::new(),
+                    entity_id: said,
+                    start_offset_ns: Some(0),
+                    end_offset_ns: Some(5_000_000_000),
+                },
+                text: sentence.to_string(),
+            }];
+
+            let ledger = validate_ledger_output(&raw, &evidence).expect("the ledger validates");
+
+            assert_eq!(ledger.commitments[0].what, sentence);
         }
 
         #[test]

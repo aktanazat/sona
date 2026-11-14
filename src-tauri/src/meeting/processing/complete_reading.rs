@@ -848,6 +848,7 @@ fn read_notes_part(
         scope.restore_notes(&mut raw)?;
         let content =
             validate_artifact_output(&raw, &evidence.transcript, speakers, &evidence.template)?;
+        raw.summary.retain(keeps_summary_line(&evidence.transcript));
         Ok((raw.summary, content))
     })
 }

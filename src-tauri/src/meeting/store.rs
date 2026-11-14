@@ -8873,11 +8873,28 @@ fn derive_completeness(
     // by the first loss; nothing at the seal changes it, so a sealed meeting
     // is as complete as it was live. `Degraded` and `Failed` are not, and
     // neither is `Starting`, which means no audio ever landed.
-    if sources.len() < SourceKind::ALL.len()
-        || sources.iter().any(|source| {
-            source.health != SourceHealth::Healthy || source.last_durable_offset_ns.is_none()
-        })
-    {
+    if sources.iter().any(|source| {
+        source.health != SourceHealth::Healthy || source.last_durable_offset_ns.is_none()
+    }) {
+        return Ok(CaptureCompleteness::Partial);
+    }
+    // A lane the plan asked for that never opened is audio the meeting set
+    // out to record and does not have. A lane it never asked for is not
+    // missing: an import and a microphone-only recording have one lane.
+    let unopened_lanes: i64 = connection.query_row(
+        "SELECT COUNT(*)
+           FROM meeting_sessions s
+           JOIN meeting_run_plans p ON p.plan_id = s.successful_plan_id,
+                json_each(p.canonical_plan_json, '$.requested_sources') requested
+          WHERE s.id = ?1
+            AND NOT EXISTS (
+                SELECT 1 FROM meeting_source_tracks t
+                 WHERE t.session_id = s.id AND t.source_kind = requested.value
+            )",
+        params![id(session_id)],
+        |row| row.get(0),
+    )?;
+    if unopened_lanes > 0 {
         return Ok(CaptureCompleteness::Partial);
     }
     // `gap_count` counts every interval a lane reported, including the one
@@ -12151,6 +12168,15 @@ mod tests {
         store: &Arc<MeetingStore>,
         timestamp_bridge: TimestampBridge,
     ) -> (MeetingSessionId, SourceTrackId, MeetingStoragePlan) {
+        microphone_track_requesting(store, timestamp_bridge, &[SourceKind::Microphone])
+    }
+
+    /// The microphone lane of a meeting whose plan asked for `requested`.
+    fn microphone_track_requesting(
+        store: &Arc<MeetingStore>,
+        timestamp_bridge: TimestampBridge,
+        requested: &[SourceKind],
+    ) -> (MeetingSessionId, SourceTrackId, MeetingStoragePlan) {
         let session_id = MeetingSessionId::new();
         store
             .create_preflight(
@@ -12183,8 +12209,8 @@ mod tests {
             schema_version: 1,
             app_build: "test".to_string(),
             preflight_revision: 0,
-            requested_sources: vec![SourceKind::Microphone],
-            required_sources: vec![SourceKind::Microphone],
+            requested_sources: requested.to_vec(),
+            required_sources: requested.to_vec(),
             accepted_known_missing_sources: Vec::new(),
             degraded_start_policy: DegradedStartPolicy::AbortIfRequiredSourceFails,
             microphone_device_uid: None,
@@ -15616,6 +15642,58 @@ mod tests {
             lane(&store, session_id, SourceKind::Microphone).health,
             SourceHealth::Degraded
         );
+        assert_eq!(
+            store
+                .session_snapshot(session_id)
+                .expect("session snapshot")
+                .capture_completeness,
+            CaptureCompleteness::Partial
+        );
+    }
+
+    /// A meeting whose plan asked for `requested` and whose microphone alone
+    /// recorded, from `start_ns` on.
+    fn microphone_recording(
+        store: &Arc<MeetingStore>,
+        requested: &[SourceKind],
+        start_ns: i64,
+    ) -> MeetingSessionId {
+        let (session_id, track_id, storage) =
+            microphone_track_requesting(store, test_bridge(), requested);
+        store
+            .open_capture_window(session_id, 0)
+            .expect("open capture window");
+        deliver_audio(store, session_id, track_id, storage, start_ns);
+        store
+            .close_open_capture_window(session_id, 1_000_000_000, "stopped")
+            .expect("close capture window");
+        session_id
+    }
+
+    /// A call recorded with the microphone alone read `Partial` with nothing
+    /// lost: the count was of every kind of lane, not of the lanes its plan
+    /// asked for. An import has the same single lane.
+    #[test]
+    fn a_recording_that_asked_only_for_the_microphone_is_complete() {
+        let (_directory, store) = store();
+        let session_id = microphone_recording(&store, &[SourceKind::Microphone], 163_000_000);
+
+        assert_eq!(
+            store
+                .session_snapshot(session_id)
+                .expect("session snapshot")
+                .capture_completeness,
+            CaptureCompleteness::Complete
+        );
+    }
+
+    /// Call audio the plan asked for that never started is half of what the
+    /// meeting set out to record.
+    #[test]
+    fn a_requested_lane_that_never_opened_makes_the_meeting_partial() {
+        let (_directory, store) = store();
+        let session_id = microphone_recording(&store, &SourceKind::ALL, 0);
+
         assert_eq!(
             store
                 .session_snapshot(session_id)
