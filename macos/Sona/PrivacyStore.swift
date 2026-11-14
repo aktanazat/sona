@@ -126,7 +126,7 @@ final class PrivacyStore {
             await loadDiagnostics()
         } catch {
             contextCeiling = previous
-            self.error = "The context ceiling could not be saved. \(error.localizedDescription)"
+            self.error = "Couldn't save what Sona reads from other apps. \(error.localizedDescription)"
         }
     }
 
