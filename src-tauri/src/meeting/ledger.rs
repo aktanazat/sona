@@ -27,7 +27,7 @@
 
 use super::analytics::{MeetingTalkMetrics, Turn};
 use super::types::{ArtifactCitation, SpeakerId, TranscriptSegmentId};
-use super::words::{commits, normalized_words};
+use super::words::normalized_words;
 use crate::query::tools::STOPWORDS;
 use serde::{Deserialize, Serialize};
 use specta::Type;
@@ -174,6 +174,7 @@ impl LedgerFirmness {
 /// The quote a state was read from. `quote` is checked against the transcript
 /// mechanically; `t_ms` and `citations` are derived from the cited segment, so
 /// a model cannot move a receipt in time.
+/// The first citation is the playback anchor; other citations retain context.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
 pub struct LedgerReceipt {
     pub quote: String,
@@ -288,11 +289,10 @@ pub(crate) fn shared_subject(topic: &str, other: &str) -> bool {
     (!topic.is_empty() && topic == other) || topic.intersection(&other).count() >= 2
 }
 
-fn action_receipt(
+fn commitment_anchor(
     commitment: &LedgerCommitment,
-    threads: &[LedgerThread],
     lines: &HashMap<TranscriptSegmentId, SpokenLine>,
-) -> Option<LedgerReceipt> {
+) -> Option<u64> {
     let receipt = &commitment.receipt;
     let [first, last] = receipt.citations.as_slice() else {
         return None;
@@ -305,50 +305,12 @@ fn action_receipt(
     let last_quote = fold(closing);
     if first.start_offset_ns >= last.start_offset_ns
         || fold(&commitment.what) != last_quote
-        || shared_subject(opening, closing)
-        || commits(&normalized_words(opening))
         || !lines.get(&first.segment_id)?.folded.contains(&first_quote)
         || !lines.get(&last.segment_id)?.folded.contains(&last_quote)
     {
         return None;
     }
-    let belongs_elsewhere = threads.iter().any(|thread| {
-        thread.state != LedgerThreadState::Action
-            && thread.receipt.citations.len() > 1
-            && thread
-                .receipt
-                .citations
-                .iter()
-                .any(|citation| citation.segment_id == first.segment_id)
-            && thread
-                .receipt
-                .citations
-                .iter()
-                .all(|citation| citation.segment_id != last.segment_id)
-            && shared_subject(&thread.topic, opening)
-            && !shared_subject(&thread.topic, closing)
-            && {
-                let quote = fold(&thread.receipt.quote);
-                quote.contains(&first_quote)
-                    && fragments(&quote).skip(1).any(|fragment| {
-                        thread.receipt.citations.iter().any(|citation| {
-                            citation.segment_id != first.segment_id
-                                && lines
-                                    .get(&citation.segment_id)
-                                    .is_some_and(|line| line.folded.contains(fragment))
-                        })
-                    })
-            }
-    });
-    if !belongs_elsewhere {
-        return None;
-    }
-    Some(LedgerReceipt {
-        quote: closing.to_owned(),
-        speaker: None,
-        t_ms: last.start_offset_ns / 1_000_000,
-        citations: vec![last.clone()],
-    })
+    Some(last.start_offset_ns / 1_000_000)
 }
 
 /// Each receipt names the person who spoke the cited lines its quote is
@@ -362,16 +324,18 @@ pub(crate) fn attribute_receipts(
     speaker_names: &HashMap<SpeakerId, String>,
 ) {
     for commitment in &mut ledger.commitments {
-        if let Some(receipt) = action_receipt(commitment, &ledger.threads, lines) {
+        if let Some(anchor) = commitment_anchor(commitment, lines) {
             for thread in &mut ledger.threads {
                 if thread.state == LedgerThreadState::Action
-                    && thread.receipt == commitment.receipt
-                    && shared_subject(&thread.topic, &commitment.what)
+                    && thread.receipt.quote == commitment.receipt.quote
+                    && thread.receipt.citations == commitment.receipt.citations
                 {
-                    thread.receipt = receipt.clone();
+                    thread.receipt.citations.swap(0, 1);
+                    thread.receipt.t_ms = anchor;
                 }
             }
-            commitment.receipt = receipt;
+            commitment.receipt.citations.swap(0, 1);
+            commitment.receipt.t_ms = anchor;
         }
     }
     for receipt in receipts_mut(ledger) {
@@ -1181,7 +1145,7 @@ mod tests {
     }
 
     #[test]
-    fn an_action_receipt_leaves_an_unrelated_returning_topic_at_its_own_source() {
+    fn an_action_and_commitment_share_the_current_promise_anchor() {
         let speaker = SpeakerId::new();
         let old = TranscriptSegmentId::from_uuid(
             uuid::Uuid::parse_str("018db477-171a-481b-967a-1a72344736cd").unwrap(),
@@ -1208,11 +1172,11 @@ mod tests {
             quote: format!("{first} ... {later}"),
             speaker: Some("Speaker 1".to_owned()),
             t_ms: 25_876,
-            citations: vec![old_citation, revision_citation],
+            citations: vec![old_citation.clone(), revision_citation],
         };
         let mut subject = ledger(vec![
             LedgerThread {
-                topic: last.to_owned(),
+                topic: "fixture cost".to_owned(),
                 state: LedgerThreadState::Action,
                 substantive: true,
                 receipt: source.clone(),
@@ -1245,46 +1209,57 @@ mod tests {
             })
             .collect();
         let names = HashMap::from([(speaker, "Speaker 1".to_owned())]);
-        let mut unproven_return = subject.clone();
-        unproven_return.threads[1].receipt.quote = first.to_owned();
-        let original = unproven_return.commitments[0].receipt.clone();
-        attribute_receipts(&mut unproven_return, &lines, &names);
-        assert_eq!(unproven_return.commitments[0].receipt, original);
-        assert_eq!(unproven_return.threads[0].receipt, original);
-        attribute_receipts(&mut subject, &lines, &names);
         let expected = LedgerReceipt {
-            quote: last.to_owned(),
+            quote: format!("{first} … {last}"),
             speaker: Some("Speaker 1".to_owned()),
             t_ms: 56_056,
-            citations: vec![promise_citation],
+            citations: vec![promise_citation, old_citation],
         };
+        let mut unproven_return = subject.clone();
+        unproven_return.threads[1].receipt.quote = first.to_owned();
+        let mut paraphrased = subject.clone();
+        paraphrased.commitments[0].what = "Call the supplier".to_owned();
+        let original = paraphrased.commitments[0].receipt.clone();
+        attribute_receipts(&mut paraphrased, &lines, &names);
+        assert_eq!(paraphrased.commitments[0].receipt, original);
+        assert_eq!(paraphrased.threads[0].receipt, original);
+        attribute_receipts(&mut subject, &lines, &names);
+        assert_eq!(subject.threads[0].receipt.t_ms, 56_056);
         assert_eq!(subject.commitments[0].receipt, expected);
         assert_eq!(subject.threads[0].receipt, expected);
+        attribute_receipts(&mut unproven_return, &lines, &names);
+        assert_eq!(unproven_return.commitments[0].receipt, expected);
+        assert_eq!(unproven_return.threads[0].receipt, expected);
         assert_eq!(subject.threads[1].receipt, history);
+        attribute_receipts(&mut subject, &lines, &names);
+        assert_eq!(subject.commitments[0].receipt, expected);
+        assert_eq!(subject.threads[0].receipt, expected);
     }
 
     #[test]
     fn action_receipts_keep_prior_promises_and_related_context() {
-        let speaker = SpeakerId::new();
+        let jordan = SpeakerId::new();
+        let casey = SpeakerId::new();
         let first = TranscriptSegmentId::new();
         let second = TranscriptSegmentId::new();
         let returning = TranscriptSegmentId::new();
-        let current = "I will call the supplier tomorrow and ask for a quote on the smaller fixture.";
-        for (earlier, other_topic) in [
-            ("I will contact the vendor before Friday.", "contact the vendor"),
-            ("Will you call the supplier for a quote?", "supplier quote"),
+        let supplier = "I will call the supplier tomorrow and ask for a quote on the smaller fixture.";
+        for (earlier, current, returned, other_topic) in [
+            ("Casey, please send the quarterly report by Friday.", "I’ll deliver it Monday.", "The quarterly report is now due Monday.", "quarterly report"),
+            ("I will contact the vendor before Friday.", supplier, "The vendor is ready.", "contact the vendor"),
+            ("Will you call the supplier for a quote?", supplier, "The supplier is ready.", "supplier quote"),
         ] {
             let earlier_citation = citation(first, 25_000_000_000, 30_000_000_000);
             let current_citation = citation(second, 56_000_000_000, 60_000_000_000);
             let source = LedgerReceipt {
                 quote: format!("{earlier} … {current}"),
-                speaker: Some("Speaker 1".to_owned()),
+                speaker: None,
                 t_ms: 25_000,
                 citations: vec![earlier_citation.clone(), current_citation],
             };
             let other = LedgerReceipt {
-                quote: format!("{earlier} … {earlier}"),
-                speaker: Some("Speaker 1".to_owned()),
+                quote: format!("{earlier} … {returned}"),
+                speaker: Some("Jordan".to_owned()),
                 t_ms: 25_000,
                 citations: vec![
                     earlier_citation,
@@ -1308,30 +1283,41 @@ mod tests {
                 },
             ]);
             subject.commitments.push(LedgerCommitment {
-                who: "Speaker 1".to_owned(),
+                who: "Casey".to_owned(),
                 what: current.to_owned(),
                 firmness: LedgerFirmness::Firm,
                 receipt: source.clone(),
             });
-            let lines = [(first, earlier), (second, current), (returning, earlier)]
-                .into_iter()
-                .map(|(id, text)| {
-                    (
-                        id,
-                        SpokenLine {
-                            speaker,
-                            folded: fold(text),
-                        },
-                    )
-                })
-                .collect();
+            let lines = [
+                (first, earlier, jordan),
+                (second, current, casey),
+                (returning, returned, jordan),
+            ]
+            .into_iter()
+            .map(|(id, text, speaker)| {
+                (
+                    id,
+                    SpokenLine {
+                        speaker,
+                        folded: fold(text),
+                    },
+                )
+            })
+            .collect();
             attribute_receipts(
                 &mut subject,
                 &lines,
-                &HashMap::from([(speaker, "Speaker 1".to_owned())]),
+                &HashMap::from([
+                    (jordan, "Jordan".to_owned()),
+                    (casey, "Casey".to_owned()),
+                ]),
             );
-            assert_eq!(subject.commitments[0].receipt, source, "{earlier}");
-            assert_eq!(subject.threads[0].receipt, source, "{earlier}");
+            assert_eq!(subject.commitments[0].receipt.quote, source.quote, "{earlier}");
+            let mut expected = source;
+            expected.t_ms = 56_000;
+            expected.citations.swap(0, 1);
+            assert_eq!(subject.commitments[0].receipt, expected, "{earlier}");
+            assert_eq!(subject.threads[0].receipt, expected, "{earlier}");
         }
     }
 
