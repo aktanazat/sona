@@ -101,6 +101,7 @@ struct VocabularyView: View {
             )
             ToggleRow(
                 title: "Expand shortcuts",
+                detail: VocabularyRuleKind.snippet.hint,
                 isOn: Binding(
                     get: { store.snippetsEnabled },
                     set: { store.setSnippetsEnabled($0) }
@@ -108,6 +109,7 @@ struct VocabularyView: View {
             )
             ToggleRow(
                 title: "Apply rewrites",
+                detail: VocabularyRuleKind.replacement.hint,
                 isOn: Binding(
                     get: { store.replacementsEnabled },
                     set: { store.setReplacementsEnabled($0) }
