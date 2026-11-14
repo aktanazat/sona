@@ -962,9 +962,10 @@ fn kept_notes(
 /// An add whose words come in a row in a point says nothing new: shown a
 /// doc that had "We need to confirm the numbers for step three.", Apple's
 /// model added "Confirm the numbers for step three." An add that holds a
-/// point's words in a row says that point and more, so it takes its place,
-/// unless this reading rewrites that point too. Neither holds for a point
-/// someone typed, which is often the question an add answers.
+/// point's words in a row says that point and more, so it takes its place.
+/// Neither holds for a point this reading rewrites, whose old words are on
+/// their way out, or for a point someone typed, which is often the question
+/// an add answers.
 fn merge(points: &mut Vec<MeetingLiveDocPoint>, kept: Vec<Candidate<'_>>) -> Vec<Edited> {
     let rewritten: HashSet<&str> = kept
         .iter()
@@ -978,7 +979,12 @@ fn merge(points: &mut Vec<MeetingLiveDocPoint>, kept: Vec<Candidate<'_>>) -> Vec
         }
         let target = match candidate.rewrites.or(candidate.replaces) {
             Some(known) => points.iter().position(|point| point.id == known.id && !point.edited),
-            None if points.iter().any(|point| !point.edited && runs_inside(&candidate.text, &point.text)) => continue,
+            None if points.iter().any(|point| {
+                !point.edited && !rewritten.contains(point.id.as_str()) && runs_inside(&candidate.text, &point.text)
+            }) =>
+            {
+                continue
+            }
             None => points.iter().position(|point| {
                 !point.edited && !rewritten.contains(point.id.as_str()) && runs_inside(&point.text, &candidate.text)
             }),

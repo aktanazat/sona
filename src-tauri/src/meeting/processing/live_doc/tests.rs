@@ -547,24 +547,29 @@ fn an_add_that_holds_a_point_the_same_reading_rewrites_lands_on_its_own() {
     let (microphone, _call) = workflow_core_tests::recording_tracks(&store, session_id);
     let engine = Arc::new(Scripted::default());
     engine.replies.lock().unwrap().extend([
-        r#"{"add":[{"text":"Hire a designer.","lines":["L1"]}],"rewrite":[]}"#,
-        r#"{"add":[{"text":"Hire a designer and a copywriter.","lines":["L1"]}],"rewrite":[{"point":"P1","text":"Hire a contract designer for the mobile app launch.","lines":["L1"]}]}"#,
+        r#"{"add":[{"text":"Hire a designer.","lines":["L1"]},{"text":"Launch on March 21 and the demo on March 14.","lines":["L1"]}],"rewrite":[]}"#,
+        r#"{"add":[{"text":"Hire a designer and a copywriter.","lines":["L1"]},{"text":"Demo on March 14.","lines":["L1"]}],"rewrite":[{"point":"P1","text":"Hire a contract designer for the mobile app launch.","lines":["L1"]},{"point":"P2","text":"Launch moves to March 28.","lines":["L1"]}]}"#,
     ]);
     let service = MeetingProcessingService::new(None);
     service.set_text_generators(engine.clone(), engine.clone());
     let live = LiveTranscript::new();
     assert!(live.start_doc());
 
-    live.append(line(microphone, SourceKind::Microphone, 60, "We need a designer."));
+    live.append(line(microphone, SourceKind::Microphone, 60, "We need a designer. Launch on March 21, demo on March 14."));
     service.read_live_doc_now(&store, session_id, &live);
-    live.append(line(microphone, SourceKind::Microphone, 120, "A contract designer for the app launch, and a copywriter too."));
+    live.append(line(microphone, SourceKind::Microphone, 120, "A contract designer for the app launch, and a copywriter too. Launch moves to March 28, the demo stays on March 14."));
     service.read_live_doc_now(&store, session_id, &live);
 
     let texts: Vec<String> = live.doc_points().into_iter().map(|point| point.text).collect();
     assert_eq!(
         texts,
-        ["Hire a contract designer for the mobile app launch.", "Hire a designer and a copywriter."],
-        "the rewrite keeps its point and the add keeps its news"
+        [
+            "Hire a contract designer for the mobile app launch.",
+            "Launch moves to March 28.",
+            "Hire a designer and a copywriter.",
+            "Demo on March 14.",
+        ],
+        "a rewrite keeps its point, and an add that holds or is held by that point's old words keeps its news"
     );
 }
 
