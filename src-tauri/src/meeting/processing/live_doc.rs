@@ -609,16 +609,34 @@ pub(crate) fn voice_ask(text: &str) -> Option<(MeetingVoiceIntent, String)> {
     Some((intent, rest.to_string()))
 }
 
-/// Each word of `text`, lowercased, with the byte offset just past it.
+/// Each word of `text`, lowercased, with the byte offset just past it. An
+/// apostrophe, straight or curly, stays inside its word, and so does a
+/// colon, point or comma between digits: "9:30" is one time, not 9 and 30.
 fn words(text: &str) -> impl Iterator<Item = (String, usize)> + '_ {
-    let in_word = |character: char| character.is_alphanumeric() || character == '\'';
+    let in_word = move |at: usize, character: char| {
+        character.is_alphanumeric()
+            || matches!(character, '\'' | '\u{2019}')
+            || (matches!(character, ':' | '.' | ',')
+                && text[..at].ends_with(|before: char| before.is_ascii_digit())
+                && text[at + 1..].starts_with(|after: char| after.is_ascii_digit()))
+    };
     let mut from = 0;
     std::iter::from_fn(move || {
-        let start = from + text[from..].find(in_word)?;
+        let (start, _) = text[from..]
+            .char_indices()
+            .map(|(at, character)| (from + at, character))
+            .find(|&(at, character)| in_word(at, character))?;
         from = text[start..]
-            .find(|character: char| !in_word(character))
-            .map_or(text.len(), |length| start + length);
-        Some((text[start..from].to_lowercase(), from))
+            .char_indices()
+            .map(|(at, character)| (start + at, character))
+            .find(|&(at, character)| !in_word(at, character))
+            .map_or(text.len(), |(at, _)| at);
+        let word = text[start..from]
+            .chars()
+            .flat_map(char::to_lowercase)
+            .map(|character| if character == '\u{2019}' { '\'' } else { character })
+            .collect();
+        Some((word, from))
     })
 }
 

@@ -497,15 +497,15 @@ fn a_point_said_again_stays_one_point_and_one_that_says_more_takes_its_place() {
 }
 
 #[test]
-fn an_add_that_reverses_settles_or_answers_a_point_lands_beside_it() {
+fn an_add_that_reverses_settles_retimes_or_answers_a_point_lands_beside_it() {
     let (_directory, store) = workflow_core_tests::store();
     let session_id =
         workflow_core_tests::reviewable_meeting(&store, "Beta sync", Local::now().timestamp_millis());
     let (microphone, _call) = workflow_core_tests::recording_tracks(&store, session_id);
     let engine = Arc::new(Scripted::default());
     engine.replies.lock().unwrap().extend([
-        r#"{"add":[{"text":"Don't ship the beta on Friday.","lines":["L1"]},{"text":"Launch on March 21 or March 28.","lines":["L1"]},{"text":"Do we move the demo to Thursday?","lines":["L1"]}],"rewrite":[]}"#,
-        r#"{"add":[{"text":"Ship the beta on Friday.","lines":["L1"]},{"text":"Launch on March 21.","lines":["L1"]},{"text":"Cut the mobile app from the launch.","lines":["L1"]},{"text":"Move the demo to Thursday.","lines":["L1"]}],"rewrite":[]}"#,
+        r#"{"add":[{"text":"Don't ship the beta on Friday.","lines":["L1"]},{"text":"Launch on March 21 or March 28.","lines":["L1"]},{"text":"Do we move the demo to Thursday?","lines":["L1"]},{"text":"Don’t move the review to Monday.","lines":["L1"]},{"text":"Standup moves to 9:30.","lines":["L1"]}],"rewrite":[]}"#,
+        r#"{"add":[{"text":"Ship the beta on Friday.","lines":["L1"]},{"text":"Launch on March 21.","lines":["L1"]},{"text":"Cut the mobile app from the launch.","lines":["L1"]},{"text":"Move the demo to Thursday.","lines":["L1"]},{"text":"Move the review to Monday.","lines":["L1"]},{"text":"Standup moves to 9.","lines":["L1"]}],"rewrite":[]}"#,
         r#"{"add":[{"text":"Ask legal whether we can ship the beta on Friday.","lines":["L1"]}],"rewrite":[]}"#,
     ]);
     let service = MeetingProcessingService::new(None);
@@ -513,10 +513,10 @@ fn an_add_that_reverses_settles_or_answers_a_point_lands_beside_it() {
     let live = LiveTranscript::new();
     assert!(live.start_doc());
 
-    live.append(line(microphone, SourceKind::Microphone, 60, "Not Friday for the beta, the launch is March 21 or 28, and maybe the demo moves."));
+    live.append(line(microphone, SourceKind::Microphone, 60, "Not Friday for the beta, the launch is March 21 or 28, maybe the demo moves, the review stays, and standup is 9:30."));
     service.read_live_doc_now(&store, session_id, &live);
     live.edit_doc(&Author::Owner, None, "Should we cut the mobile app from the launch").unwrap();
-    live.append(line(microphone, SourceKind::Microphone, 120, "Fine, Friday it is, March 21, the demo is Thursday, and the mobile app is out."));
+    live.append(line(microphone, SourceKind::Microphone, 120, "Fine, Friday it is, March 21, the demo is Thursday, the review is Monday, standup at 9, and the mobile app is out."));
     service.read_live_doc_now(&store, session_id, &live);
     live.append(line(microphone, SourceKind::Microphone, 180, "Can legal clear Friday?"));
     service.read_live_doc_now(&store, session_id, &live);
@@ -528,14 +528,18 @@ fn an_add_that_reverses_settles_or_answers_a_point_lands_beside_it() {
             "Don't ship the beta on Friday.",
             "Launch on March 21 or March 28.",
             "Do we move the demo to Thursday?",
+            "Don’t move the review to Monday.",
+            "Standup moves to 9:30.",
             "Should we cut the mobile app from the launch",
             "Ship the beta on Friday.",
             "Launch on March 21.",
             "Cut the mobile app from the launch.",
             "Move the demo to Thursday.",
+            "Move the review to Monday.",
+            "Standup moves to 9.",
             "Ask legal whether we can ship the beta on Friday.",
         ],
-        "a reversal, a settled choice, an answer to a question, and a question about a decision are news"
+        "a reversal, with either apostrophe, a settled choice, a new time, an answer to a question, and a question about a decision are news"
     );
 }
 
