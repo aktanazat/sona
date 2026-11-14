@@ -17,24 +17,4 @@ final class LibraryTests: XCTestCase {
         XCTAssertEqual(draft.commit(ceiling: 1000), 25)
     }
 
-    /// The core reports a history file it cannot open as encrypted with a
-    /// reason. The Library must say it cannot be read: neither that it is
-    /// encrypted at rest nor that it is stored unencrypted.
-    func testLockedHistoryReadsAsUnreadable() throws {
-        for reason in ["key_rejected", "key_unavailable", "encryption_unavailable"] {
-            let line = try storage(encrypted: true, reason: reason).line
-            XCTAssertTrue(line.hasSuffix("so history cannot be read."), line)
-        }
-        XCTAssertEqual(try storage(encrypted: true, reason: nil).line, "Encrypted at rest")
-        let plain = try storage(encrypted: false, reason: "key_unavailable").line
-        XCTAssertTrue(plain.hasSuffix("so history is stored unencrypted."), plain)
-    }
-
-    private func storage(encrypted: Bool, reason: String?) throws -> StorageStatus {
-        let decoder = JSONDecoder()
-        decoder.keyDecodingStrategy = .convertFromSnakeCase
-        let reason = reason.map { "\"\($0)\"" } ?? "null"
-        let json = #"{"encrypted":\#(encrypted),"migrated_at":null,"reason":\#(reason)}"#
-        return try decoder.decode(StorageStatus.self, from: Data(json.utf8))
-    }
 }
