@@ -224,7 +224,7 @@ mod scoped {
     struct NativeNarrativeReply {
         #[schemars(
             length(min = 1, max = "NATIVE_SUMMARY_LINES"),
-            description = "Distinct concise summary lines, using final outcomes rather than superseded deadlines. Summarize a repeated subject once, not once per citation."
+            description = "Distinct summary lines, each one short sentence in your own words, never copied transcript, a field name or a list of topics. A deadline or figure that changed appears only as its final value. Summarize a repeated subject once, not once per citation."
         )]
         summary: Vec<RawCitedText>,
         outline: Vec<RawOutlineTopic>,
