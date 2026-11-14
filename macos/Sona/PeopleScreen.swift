@@ -145,7 +145,6 @@ struct PeopleListView: View {
                 Card { CardLine("Name a speaker in a meeting, or turn on your calendar, and they appear here.") }
                     .padding(.bottom, 28)
             } else {
-                PeopleInboxSection(store: store, openMeeting: openMeeting)
                 PageSection("Everyone") {
                     if let entries = store.entries {
                         Card {
@@ -369,25 +368,6 @@ struct PeopleRowsPlaceholder: View {
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Loading")
-    }
-}
-
-/// What is still open across everybody, newest first. A promise whose meeting
-/// is gone still has to be read; it just has nothing to open.
-struct PeopleInboxSection: View {
-    let store: PeopleStore
-    var openMeeting: (String) -> Void = { _ in }
-
-    var body: some View {
-        if !store.inbox.isEmpty {
-            PageSection("Needs you") {
-                Card {
-                    ForEach(store.inbox) { loop in
-                        PersonLoopRow(loop: loop, openMeeting: openMeeting)
-                    }
-                }
-            }
-        }
     }
 }
 

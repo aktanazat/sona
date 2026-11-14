@@ -132,7 +132,7 @@ struct PersonMemorySnapshot: Decodable {
 enum PersonHistoryFilter: String, CaseIterable, Identifiable {
     case all = "All"
     case conversations = "Conversations"
-    case contributions = "Their words"
+    case contributions = "Quotes"
     case notes = "Notes"
     case commitments = "Commitments"
     var id: String { rawValue }

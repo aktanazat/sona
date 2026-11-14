@@ -1215,6 +1215,31 @@ fn speaker_derivation_refuses_the_users_own_microphone_voice() {
     );
 }
 
+/// A call that shows a participant as `Priya N.` is the Priya Nair already
+/// known, not a second Priya; another initial is somebody else.
+#[test]
+fn speaker_derivation_reads_a_last_initial_as_the_person_it_shortens() -> Result<(), StoreError> {
+    let (_directory, store) = store();
+    let review = meeting(&store, "Pricing review", 1);
+    let standup = meeting(&store, "Standup", 2);
+    let connection = store.connection()?;
+
+    speaker(&connection, review, SourceKind::SystemAudio, "Priya Nair");
+    derive_speaker_link_in(&connection, review, "Priya Nair", None, 10)?;
+    for name in ["Priya N.", "Priya K."] {
+        speaker(&connection, standup, SourceKind::SystemAudio, name);
+        derive_speaker_link_in(&connection, standup, name, None, 20)?;
+    }
+
+    let mut names = all_people_in(&connection)?
+        .into_iter()
+        .map(|person| person.display_name)
+        .collect::<Vec<_>>();
+    names.sort();
+    assert_eq!(names, ["Priya K.", "Priya Nair"]);
+    Ok(())
+}
+
 /// A rename back to a label the store wrote, as undoing a rename does, names
 /// nobody: it must not leave a person called `Speaker 2` behind.
 #[test]

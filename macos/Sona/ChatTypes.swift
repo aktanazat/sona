@@ -117,14 +117,6 @@ enum AgentPanelWorkspace: String, Codable, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
-    /// The menu's word for it.
-    var title: String {
-        switch self {
-        case .sonaChat: "Ask"
-        case .sonaConfig: "Configure"
-        }
-    }
-
     /// Which sandbox is listening, said by the field rather than by a label
     /// for a control that is inside the menu.
     var prompt: String {
@@ -217,11 +209,11 @@ enum ChatPhase {
     /// The sentence a phase owes the reader instead of a conversation.
     var notice: String? {
         switch self {
-        case .disabled: "The Sona agent is switched off."
-        case .unpaired: "The Sona agent is not paired with a relay."
-        case .offline: "The Sona agent's relay could not be reached."
-        case .rateLimited: "The relay rate limited Sona. Retrying…"
-        case .error: "The Sona agent is unavailable."
+        case .disabled: "Chat is turned off."
+        case .unpaired: "Chat isn't set up yet."
+        case .offline: "Chat couldn't connect."
+        case .rateLimited: "Too many questions at once. Retrying…"
+        case .error: "Chat isn't working right now."
         case .loading, .ready: nil
         }
     }

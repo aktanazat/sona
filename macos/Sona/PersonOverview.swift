@@ -125,7 +125,6 @@ struct PersonFigures: Equatable {
     /// means it was never measured.
     var talkShare: UInt32?
     var recordedMs: UInt64?
-    var outcomes: LedgerOutcomeCounts?
     var usualGapDays: Int?
     var openMine: Int?
     var openTheirs = 0
@@ -150,7 +149,6 @@ struct PersonFigures: Equatable {
         recentDays = PeopleModel.recentDays(detail.links, now: now)
         talkShare = detail.talkShareAvgPermille
         recordedMs = detail.recordedMs
-        outcomes = detail.ledgerOutcomes
         usualGapDays = PeopleModel.usualGapDays(detail.links)
         let open = detail.openLoops.filter(\.status.outstanding)
         let mine = open.filter { $0.direction == .mine }.count
@@ -187,6 +185,7 @@ struct PersonStats: View, Equatable {
                 talkShare
                 open
             }
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.2), value: figures)
             let strip = strip
             if !strip.isEmpty {
                 HStack(spacing: 0) {
@@ -199,7 +198,6 @@ struct PersonStats: View, Equatable {
                 .overlay(RoundedRectangle(cornerRadius: Theme.radiusCard).strokeBorder(Theme.border, lineWidth: 1))
             }
         }
-        .animation(reduceMotion ? nil : .easeOut(duration: 0.2), value: figures)
     }
 
     /// The tiles redraw when what they say changes. The closures only route
@@ -209,7 +207,7 @@ struct PersonStats: View, Equatable {
     }
 
     private enum StripTile: Hashable {
-        case together, landed, notes, tasks, words, documents
+        case together, notes, tasks, words, documents
     }
 
     /// The smaller numbers, leaving out the ones that are known to be none.
@@ -217,7 +215,6 @@ struct PersonStats: View, Equatable {
         let known = figures.meetings != nil
         var tiles: [StripTile] = []
         if !known || figures.recordedMs != nil { tiles.append(.together) }
-        if !known || (figures.outcomes.map { $0.landed + $0.open + $0.dropped } ?? 0) > 0 { tiles.append(.landed) }
         let counts: [(StripTile, PersonFigures.Count)] = [
             (.notes, figures.notes), (.tasks, figures.tasks), (.words, figures.words), (.documents, figures.documents),
         ]
@@ -229,11 +226,10 @@ struct PersonStats: View, Equatable {
     private func stripTile(_ tile: StripTile) -> some View {
         switch tile {
         case .together: together
-        case .landed: landed
-        case .notes: count(figures.notes, label: "Notes") { show(.history, .notes) }
-        case .tasks: count(figures.tasks, label: "Open tasks") { show(.work, nil) }
-        case .words: count(figures.words, label: "Their words") { show(.history, .contributions) }
-        case .documents: count(figures.documents, label: "Documents") { show(.profile, nil) }
+        case .notes: count(figures.notes, one: "Note", many: "Notes") { show(.history, .notes) }
+        case .tasks: count(figures.tasks, one: "Open task", many: "Open tasks") { show(.work, nil) }
+        case .words: count(figures.words, one: "Quote", many: "Quotes") { show(.history, .contributions) }
+        case .documents: count(figures.documents, one: "Document", many: "Documents") { show(.profile, nil) }
         }
     }
 
@@ -282,7 +278,7 @@ struct PersonStats: View, Equatable {
     private var open: some View {
         let total = figures.openMine.map { $0 + figures.openTheirs }
         return WidgetTile(
-            "Open", icon: "circle.dashed",
+            "Promises", icon: "circle.dashed",
             value: total.map(String.init) ?? " ",
             caption: total.flatMap { $0 > 0 ? "\(figures.openMine ?? 0) yours · \(figures.openTheirs) theirs" : nil },
             action: total == nil ? nil : { show(.catchUp, nil) }
@@ -305,18 +301,6 @@ struct PersonStats: View, Equatable {
         .help("Show conversations")
     }
 
-    /// Threads that landed out of every substantive thread, with no action:
-    /// no list of them exists across meetings to open. Meetings whose threads
-    /// were all small talk have nothing to count, which is not zero landed.
-    private var landed: some View {
-        let total = figures.outcomes.map { $0.landed + $0.open + $0.dropped } ?? 0
-        let outcomes = total > 0 ? figures.outcomes : nil
-        return NumberTile(
-            outcomes.map { "\($0.landed)" } ?? (figures.meetings == nil ? " " : "—"),
-            label: "Landed", unit: outcomes == nil ? nil : "of \(total)",
-            tone: outcomes == nil ? Theme.inkTertiary : Theme.ink, framed: false)
-    }
-
     /// "45 min", "2.5 h", "12 h".
     private static func timeTogether(_ ms: UInt64) -> (value: String, unit: String) {
         let minutes = Int((Double(ms) / 60_000).rounded())
@@ -325,17 +309,22 @@ struct PersonStats: View, Equatable {
         return hours < 10 ? (hours.formatted(.number.precision(.fractionLength(1))), "h") : ("\(Int(hours.rounded()))", "h")
     }
 
-    private func count(_ value: PersonFigures.Count, label: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            switch value {
-            case .unread: NumberTile(" ", label: label, framed: false)
-            case .unknown: NumberTile("—", label: label, tone: Theme.inkTertiary, framed: false)
-            case let .value(count): NumberTile("\(count)", label: label, framed: false)
-            }
+    private func count(
+        _ value: PersonFigures.Count, one: String, many: String, action: @escaping () -> Void
+    ) -> some View {
+        let number: String
+        let label: String
+        switch value {
+        case .unread: (number, label) = (" ", many)
+        case .unknown: (number, label) = ("—", many)
+        case let .value(count): (number, label) = ("\(count)", count == 1 ? one : many)
+        }
+        return Button(action: action) {
+            NumberTile(number, label: label, tone: value == .unknown ? Theme.inkTertiary : Theme.ink, framed: false)
         }
         .buttonStyle(TilePress())
         .disabled(value == .unread)
-        .help("Show \(label.lowercased())")
+        .help("Show \(many.lowercased())")
     }
 }
 
