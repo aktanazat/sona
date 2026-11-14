@@ -363,7 +363,7 @@ private struct TaskTabs: View {
             .frame(height: 28)
             .background(current != nil ? Theme.control : .clear, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
             .contentShape(Rectangle())
-            .accessibilityHidden(true)
+            .accessibilityElement(children: .combine)
         }
         .menuStyle(.button)
         .buttonStyle(.plain)

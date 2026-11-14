@@ -726,7 +726,11 @@ struct MeetingsRow: View {
         if let open = entry.ledgerOutcomes?.open, open > 0 {
             parts.append(open == 1 ? "1 open thread" : "\(open) open threads")
         }
-        if entry.captureCompleteness == .partial { parts.append("Partial recording") }
+        if entry.phase.isActive {
+            parts.append(entry.phase.label)
+        } else if entry.captureCompleteness == .partial {
+            parts.append("Partial recording")
+        }
         if let duration = entry.durationShort { parts.append(duration) }
         if let speakers = entry.speakerLabels, !speakers.isEmpty {
             parts.append(speakers.joined(separator: ", "))

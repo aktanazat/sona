@@ -716,6 +716,10 @@ struct TranscriptPane: View {
         if store.transcriptDeleted {
             return MeetingCommandError.transcriptDeleted.label + " Audio playback and rewriting are unavailable."
         }
+        if snapshot.session.phase == .processing,
+           snapshot.transcript.isEmpty, store.transcriptQuery.isEmpty {
+            return "Transcription is still in progress."
+        }
         return store.transcriptQuery.isEmpty
             ? "Nothing was transcribed for this meeting."
             : "Nothing said matches “\(store.transcriptQuery)”."
