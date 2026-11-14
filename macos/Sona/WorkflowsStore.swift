@@ -141,6 +141,22 @@ struct WorkflowRunReceipt: Decodable, Identifiable {
             || (startedAtUtcMs == other.startedAtUtcMs && id < other.id)
     }
 
+    /// A run that ended well and changed nothing: a row in the log, not a
+    /// line under its switch.
+    var foundNothing: Bool {
+        guard status == .ok else { return false }
+        let counts = outcomeCounts
+        return switch outcomeCode {
+        case "person_links": counts.changes == 0
+        case "continuity": counts.carried == 0
+        case "vocabulary_candidates": counts.candidates == 0
+        case "document_links": counts.persons == 0
+        case "learning_suggestions": counts.suggestions == 0
+        case "already_processed": true
+        default: false
+        }
+    }
+
     /// The stored code, said for a person: what went wrong, whether it comes
     /// back on its own, and what to do if it does not. The code stays as
     /// the detail, since it is what a bug report needs. Nothing retries a
@@ -232,14 +248,18 @@ func workflowOutcomeText(_ receipt: WorkflowRunReceipt) -> String {
     let counts = receipt.outcomeCounts
     switch receipt.outcomeCode {
     case "person_links":
-        return counts.changes == 1
-            ? "Remembered 1 person"
-            : "Remembered \(counts.changes) people"
+        switch counts.changes {
+        case 0: return "No one new to remember"
+        case 1: return "Remembered 1 person"
+        default: return "Remembered \(counts.changes) people"
+        }
     case "briefing": return "Prepared your meeting brief"
     case "continuity":
-        return counts.carried == 1
-            ? "Carried 1 open loop forward"
-            : "Carried \(counts.carried) open loops forward"
+        switch counts.carried {
+        case 0: return "Nothing to carry forward"
+        case 1: return "Carried 1 unresolved promise forward"
+        default: return "Carried \(counts.carried) unresolved promises forward"
+        }
     /* The pass finds candidates for the vocabulary; nothing is learned
      * until one is accepted, so the sentence says what was found. */
     case "vocabulary_candidates":
@@ -257,7 +277,11 @@ func workflowOutcomeText(_ receipt: WorkflowRunReceipt) -> String {
         default: return "Linked this document to \(counts.persons) people"
         }
     case "learning_suggestions":
-        return counts.suggestions == 1 ? "Noticed 1 thing" : "Noticed \(counts.suggestions) things"
+        switch counts.suggestions {
+        case 0: return "Nothing new noticed"
+        case 1: return "Noticed 1 thing"
+        default: return "Noticed \(counts.suggestions) things"
+        }
     case "series_primed": return "Prepared a recurring meeting"
     /* D20 narrates a day, not a change: the run writes nothing, so its
      * receipt existing is the whole sentence. */

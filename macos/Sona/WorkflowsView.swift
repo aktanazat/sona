@@ -12,15 +12,12 @@ struct WorkflowsView: View {
 
     var body: some View {
         Page {
-            PageTitle("Workflows", subtitle: Self.subtitle)
+            PageTitle("Workflows", subtitle: "")
             ErrorNote(store.error)
             catalogue
             runLog
         }
     }
-
-    private static let subtitle =
-        "What Sona does on its own after a meeting, and what each pass did."
 
     @ViewBuilder private var catalogue: some View {
         PageSection("What Sona does on its own") {
@@ -113,7 +110,7 @@ struct WorkflowRow: View {
     }
 
     @ViewBuilder private var lastRun: some View {
-        if let run = workflow.lastRun {
+        if let run = workflow.lastRun, !run.foundNothing {
             HStack(spacing: 6) {
                 WorkflowStatusGlyph(status: run.status)
                 Text(workflowOutcomeText(run))
@@ -122,8 +119,6 @@ struct WorkflowRow: View {
                 Text("·").metaText(Theme.inkDisabled)
                 Text(promptRelativeTime(run.finishedAtUtcMs)).metaText(Theme.inkDisabled)
             }
-        } else {
-            Text("Not run yet").metaText(Theme.inkDisabled)
         }
     }
 
