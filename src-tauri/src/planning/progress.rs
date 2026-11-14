@@ -1,6 +1,6 @@
 //! How far a project and its milestones have come, week by week, when it
 //! would finish at its recent pace, and whether its updates have gone quiet.
-//! Done work counts fully and started work a quarter, as Linear counts it.
+//! Only done work counts toward a percent.
 
 use super::store;
 use super::types::{

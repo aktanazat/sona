@@ -593,7 +593,7 @@ struct HeardPromisesCard: View {
                         }
                     }
                     if let followUp, !followUp.text.isEmpty {
-                        send
+                        send(followUp)
                     }
                     if let failure = heard.followUpFailure { Text(failure).metaText(Theme.inkSecondary) }
                 }
@@ -607,28 +607,36 @@ struct HeardPromisesCard: View {
         .onDisappear { if heard.pass == sessionId { heard.showPass(nil) } }
     }
 
-    private var send: some View {
+    private func send(_ followUp: WorkFollowUp) -> some View {
         let heard = model.heard
         let slack = model.connections.connections.filter { $0.kind == .slackWebhook || $0.kind == .slackBot }
-        return HStack(spacing: 8) {
-            Picker("Send with", selection: Binding(get: { heard.route }, set: { heard.route = $0 })) {
-                Text("Copy").tag(FollowUpRoute.copy)
-                Text("Mail").tag(FollowUpRoute.mail)
-                ForEach(slack) { connection in
-                    Text(connection.name).tag(FollowUpRoute.slack(connection.id))
-                }
+        return VStack(alignment: .leading, spacing: 12) {
+            if case .slack = heard.route {
+                Text(followUp.text)
+                    .bodyText(13, Theme.inkSecondary)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            .labelsHidden()
-            .fixedSize()
-            if let notice = heard.notice { Text(notice).metaText() }
-            Spacer(minLength: 8)
-            Button(action: { heard.deliver(subject: subject, model.connections.connections) }) {
-                HStack(spacing: 6) {
-                    Text(label(heard.route, slack))
-                    Text("⌘↩").opacity(0.7)
+            HStack(spacing: 8) {
+                Picker("Send with", selection: Binding(get: { heard.route }, set: { heard.route = $0 })) {
+                    Text("Copy").tag(FollowUpRoute.copy)
+                    Text("Mail").tag(FollowUpRoute.mail)
+                    ForEach(slack) { connection in
+                        Text(connection.name).tag(FollowUpRoute.slack(connection.id))
+                    }
                 }
+                .labelsHidden()
+                .fixedSize()
+                if let notice = heard.notice { Text(notice).metaText() }
+                Spacer(minLength: 8)
+                Button(action: { heard.deliver(subject: subject, model.connections.connections) }) {
+                    HStack(spacing: 6) {
+                        Text(label(heard.route, slack))
+                        Text("⌘↩").opacity(0.7)
+                    }
+                }
+                .buttonStyle(.primary)
             }
-            .buttonStyle(.primary)
         }
     }
 
