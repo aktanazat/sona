@@ -142,16 +142,13 @@ struct HeardPlanList: View {
                 Image(systemName: plan.status.symbol)
                     .foregroundStyle(Theme.inkSecondary)
                     .accessibilityHidden(true)
-                Text("Plan heard: \(plan.title)").bodyText(14).lineLimit(2)
+                Text(plan.quote.map { "“\($0)”" } ?? plan.title).bodyText(14).lineLimit(3)
                 Spacer(minLength: 8)
                 if let segmentId = plan.citation?.segmentId {
                     PlaySaidButton(store: store, segmentId: segmentId)
                 }
             }
             Text(plan.details).metaText()
-            if let quote = plan.quote {
-                Text("“\(quote)”").bodyText(13, Theme.inkSecondary).lineLimit(3)
-            }
             actions(plan)
         }
     }

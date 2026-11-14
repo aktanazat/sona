@@ -19,26 +19,6 @@ struct MeetingReviewView: View {
         ScrollViewReader { proxy in
             Page(back: PageBack("Meetings") { store.closeReview() }) {
                 if let snapshot = store.snapshot {
-                    ConversationContextView(
-                        sessionId: snapshot.session.sessionId, revision: snapshot.session.revision,
-                        editable: store.editable,
-                        partialRecording: snapshot.session.captureCompleteness == .partial)
-                    if store.editable {
-                        ContextSuggestionsView(
-                            sessionId: snapshot.session.sessionId, revision: snapshot.session.revision)
-                        ReviewPlaceOffer(places: model.live.places,
-                            sessionId: snapshot.session.sessionId, revision: snapshot.session.revision)
-                    }
-                    ConversationPlaceCard(core: model.core, store: store,
-                        sessionId: snapshot.session.sessionId, revision: snapshot.session.revision)
-                    ConversationBookmarksView(core: model.core, store: store,
-                        sessionId: snapshot.session.sessionId, revision: snapshot.session.revision)
-                    MeetingDocCard(sessionId: snapshot.session.sessionId)
-                    HeardPromisesCard(sessionId: snapshot.session.sessionId)
-                    HeardPlansCard(core: model.core, store: store,
-                        sessionId: snapshot.session.sessionId, revision: snapshot.session.revision)
-                    MeetingDocumentsCard(core: model.core, store: store, session: snapshot.session)
-                    MeetingOpenWindowsCard(core: model.core, store: store, session: snapshot.session)
                     pane(snapshot)
                 } else {
                     if let failure = store.reviewFailure {
@@ -113,6 +93,26 @@ struct MeetingReviewView: View {
     private func pane(_ snapshot: MeetingReviewSnapshot) -> some View {
         switch store.tab {
         case .review:
+            ConversationContextView(
+                sessionId: snapshot.session.sessionId, revision: snapshot.session.revision,
+                editable: store.editable,
+                partialRecording: snapshot.session.captureCompleteness == .partial)
+            if store.editable {
+                ContextSuggestionsView(
+                    sessionId: snapshot.session.sessionId, revision: snapshot.session.revision)
+                ReviewPlaceOffer(places: model.live.places,
+                    sessionId: snapshot.session.sessionId, revision: snapshot.session.revision)
+            }
+            ConversationPlaceCard(core: model.core, store: store,
+                sessionId: snapshot.session.sessionId, revision: snapshot.session.revision)
+            ConversationBookmarksView(core: model.core, store: store,
+                sessionId: snapshot.session.sessionId, revision: snapshot.session.revision)
+            MeetingDocCard(sessionId: snapshot.session.sessionId)
+            HeardPromisesCard(sessionId: snapshot.session.sessionId)
+            HeardPlansCard(core: model.core, store: store,
+                sessionId: snapshot.session.sessionId, revision: snapshot.session.revision)
+            MeetingDocumentsCard(core: model.core, store: store, session: snapshot.session)
+            MeetingOpenWindowsCard(core: model.core, store: store, session: snapshot.session)
             ConversationAfterCaptureView(store: store, snapshot: snapshot, core: model.core)
             PlanningCommentsView(threads: model.comments,
                                  subject: PlanningCommentSubject(kind: .meeting, id: snapshot.session.sessionId))
@@ -218,14 +218,7 @@ struct MeetingReviewHeader: View {
                     .fixedSize(horizontal: true, vertical: false)
             }
             .frame(height: 36)
-            HStack(spacing: 6) {
-                Text(facts).metaText(Theme.inkSecondary)
-                if update == nil, let receipt = snapshot.currentArtifact?.receipt {
-                    Text("·").metaText(Theme.inkTertiary)
-                    Text(receipt.line).metaText(Theme.inkTertiary).help(receipt.line)
-                }
-            }
-            .lineLimit(1)
+            Text(facts).metaText(Theme.inkSecondary).lineLimit(1)
             ZStack(alignment: .leading) {
                 Text(" ").metaText().hidden()
                 status
@@ -421,13 +414,11 @@ struct MeetingReviewHeader: View {
     }
 
     /// "Notes failed: the model did not answer · Separating speakers
-    /// failed · 12 lines have no speaker yet". Only the failure's own word
-    /// takes live red.
+    /// failed". Only the failure's own word takes live red.
     private var standing: AttributedString? {
         var parts: [AttributedString] = []
         if let notes { parts.append(notes) }
         if let voices { parts.append(AttributedString(voices)) }
-        if let unattributed { parts.append(AttributedString(unattributed)) }
         guard var line = parts.first else { return nil }
         for part in parts.dropFirst() {
             line.append(AttributedString(" · "))
@@ -473,13 +464,6 @@ struct MeetingReviewHeader: View {
         case .downloading, .running: return "\(separation.label)…"
         case .modelUnavailable, .failed: return separation.label
         }
-    }
-
-    /// The lines Sona heard but could not put a voice to.
-    private var unattributed: String? {
-        let count = snapshot.transcript.filter { $0.speakerAssignment == .unknown && !$0.removed }.count
-        guard count > 0 else { return nil }
-        return count == 1 ? "1 line has no speaker yet" : "\(count) lines have no speaker yet"
     }
 
     private var facts: String {
@@ -628,11 +612,9 @@ struct TranscriptPane: View {
     let store: MeetingsStore
     let snapshot: MeetingReviewSnapshot
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Environment(AppModel.self) private var model
     @State private var editingSegment: TranscriptSegmentId?
     @State private var renaming: MeetingSpeaker?
     @State private var name = ""
-    @State private var doc: LiveDocStore?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 28) {
@@ -663,11 +645,6 @@ struct TranscriptPane: View {
             Button("Cancel", role: .cancel) { renaming = nil }
         }
         .screenTextMarks(snapshot.session.sessionId, transcript: snapshot.transcript.first?.base.transcriptRevisionId)
-        .task(id: snapshot.session.sessionId) {
-            let doc = doc ?? LiveDocStore(core: model.core)
-            self.doc = doc
-            doc.watch(snapshot.session.sessionId)
-        }
     }
 
     /// What the search found outside the words: the title, a note.
@@ -686,32 +663,23 @@ struct TranscriptPane: View {
 
     private var turns: some View {
         ScrollViewReader { proxy in
-            let changes = doc?.watching == snapshot.session.sessionId && store.transcriptQuery.isEmpty
-                && store.transcriptSpeaker == nil ? doc?.doc?.changes ?? [] : []
-            let turns = TranscriptTurn.cut(store.turns, at: changes)
+            let turns = store.turns
             LazyVStack(alignment: .leading, spacing: 16) {
                 if turns.isEmpty {
                     Text(emptyLine).bodyText(14, Theme.inkSecondary)
                 } else {
-                    ForEach(TimelineEntry.merged(
-                        turns, at: { $0.segments.first?.base.startOffsetNs ?? 0 }, id: { "turn-\($0.id)" }, changes)
-                    ) { entry in
-                        switch entry.row {
-                        case .line(let turn):
-                            TranscriptTurnRow(
-                                store: store,
-                                turn: turn,
-                                speakers: snapshot.speakers,
-                                editing: $editingSegment,
-                                rename: { speaker in
-                                    name = speaker.displayName
-                                    renaming = speaker
-                                }
-                            )
-                            .id(turn.segments.first?.base.segmentId ?? turn.id)
-                        case .change(let change):
-                            ChangeRow(change: change)
-                        }
+                    ForEach(turns) { turn in
+                        TranscriptTurnRow(
+                            store: store,
+                            turn: turn,
+                            speakers: snapshot.speakers,
+                            editing: $editingSegment,
+                            rename: { speaker in
+                                name = speaker.displayName
+                                renaming = speaker
+                            }
+                        )
+                        .id(turn.id)
                     }
                 }
             }
@@ -1031,10 +999,9 @@ struct MeetingPeopleBand: View {
     }
 }
 
-/// Who talked and how the room handed over: one bar of everyone's share of
-/// the talk, where a voice's name narrows the transcript to its words, a
-/// timeline of when each voice spoke, and the numbers this meeting can say
-/// something with.
+/// Who talked: one bar of everyone's share of the talk, where a voice's
+/// name narrows the transcript to its words, a timeline of when each voice
+/// spoke, and the turns and the longest run.
 struct MeetingAnalyticsStrip: View {
     let store: MeetingsStore
 
@@ -1052,13 +1019,7 @@ struct MeetingAnalyticsStrip: View {
                     }
                     HStack(alignment: .top, spacing: 16) {
                         Stat(label: "Turns", value: "\(talk.turnCount)")
-                        if let handovers = store.handovers {
-                            Stat(label: "Handovers", value: "\(handovers)")
-                        }
                         longestRun(talk)
-                        if let patience = store.patience {
-                            Stat(label: "Patience", value: patience)
-                        }
                     }
                 }
                 .padding(16)
@@ -1458,7 +1419,7 @@ struct MeetingQuestionsCard: View {
     }
 }
 
-/// The notes a person typed against a moment, and the composer for one more.
+/// The notes a person typed against a moment during the call.
 struct MeetingNotesCard: View {
     let store: MeetingsStore
     let snapshot: MeetingReviewSnapshot
@@ -1466,18 +1427,12 @@ struct MeetingNotesCard: View {
     @State private var draft = ""
 
     var body: some View {
-        PageSection("Notes in the moment") {
-            Card {
-                ForEach(snapshot.notes) { note in
-                    row(note).id("meeting-note:\(note.noteId)")
-                }
-                CardRow {
-                    InputField(prompt: "Add a note", text: newNote)
-                        .onSubmit { store.createNote() }
-                } trailing: {
-                    Button("Add") { store.createNote() }
-                        .buttonStyle(SecondaryButton(compact: true))
-                        .disabled(store.busy || store.newNote.trimmingCharacters(in: .whitespaces).isEmpty)
+        if !snapshot.notes.isEmpty {
+            PageSection("Notes in the moment") {
+                Card {
+                    ForEach(snapshot.notes) { note in
+                        row(note).id("meeting-note:\(note.noteId)")
+                    }
                 }
             }
         }
@@ -1528,10 +1483,6 @@ struct MeetingNotesCard: View {
         editing = nil
         guard !next.isEmpty, next != note.body else { return }
         store.updateNote(note, body: next)
-    }
-
-    private var newNote: Binding<String> {
-        Binding(get: { store.newNote }, set: { store.setNewNote($0) })
     }
 }
 
@@ -1809,7 +1760,9 @@ struct LedgerThreadRow: View {
                     }
                 }
                 Text("“\(thread.receipt.quote)”").bodyText(14, Theme.inkSecondary)
-                Text(attribution).metaText()
+                if let attribution {
+                    Text(attribution).metaText()
+                }
             }
         } trailing: {
             Text(thread.receipt.tMs.meetingMsClock)
@@ -1819,10 +1772,15 @@ struct LedgerThreadRow: View {
         }
     }
 
-    private var attribution: String {
+    /// Who said it and how many lines back it, when that adds to the owner
+    /// beside the topic.
+    private var attribution: String? {
         let who = thread.receipt.speaker ?? store.citedSpeakers(thread.receipt.citations) ?? "Unattributed"
         let citations = thread.receipt.citations.count
-        return citations > 1 ? "\(who) · \(citations) citations" : who
+        var parts: [String] = []
+        if who != thread.owner { parts.append(who) }
+        if citations > 1 { parts.append("\(citations) citations") }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
     private var color: Color {

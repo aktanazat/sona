@@ -719,8 +719,8 @@ struct MeetingsRow: View {
     }
 
     /// The plain facts in one gray line: how many threads are still open,
-    /// a partial capture, the length, the sources, and who spoke. The
-    /// open count leads so a long list of names never cuts it off.
+    /// a partial capture, the length, and who spoke. The open count leads so
+    /// a long list of names never cuts it off.
     private var facts: String {
         var parts: [String] = []
         if let open = entry.ledgerOutcomes?.open, open > 0 {
@@ -728,9 +728,6 @@ struct MeetingsRow: View {
         }
         if entry.captureCompleteness == .partial { parts.append("Partial recording") }
         if let duration = entry.durationShort { parts.append(duration) }
-        if let sources = entry.sources, !sources.isEmpty {
-            parts.append(sources.map(\.label).joined(separator: " + "))
-        }
         if let speakers = entry.speakerLabels, !speakers.isEmpty {
             parts.append(speakers.joined(separator: ", "))
         }

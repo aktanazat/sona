@@ -347,25 +347,27 @@ struct MeetingSnapshotsSection: View {
 
     var body: some View {
         let store = MeetingSnapshotStore.shared(model.core)
-        PageSection("Screen snapshots") {
+        VStack(alignment: .leading, spacing: 0) {
             if store.loading.contains(sessionId) && store.lists[sessionId] == nil {
-                ProgressView("Loading snapshots…").controlSize(.small)
+                PageSection("Screen snapshots") {
+                    ProgressView("Loading snapshots…").controlSize(.small)
+                }
             } else if let error = store.errors[sessionId] {
-                ErrorNote(error)
-                Button("Try again") {
-                    store.errors.removeValue(forKey: sessionId)
-                    Task { await store.reload(sessionId) }
-                }.buttonStyle(.quiet)
+                PageSection("Screen snapshots") {
+                    ErrorNote(error)
+                    Button("Try again") {
+                        store.errors.removeValue(forKey: sessionId)
+                        Task { await store.reload(sessionId) }
+                    }.buttonStyle(.quiet)
+                }
             } else if let snapshots = store.lists[sessionId], !snapshots.isEmpty {
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 200), alignment: .leading)], alignment: .leading, spacing: 16) {
-                    ForEach(snapshots) { snapshot in
-                        SnapshotThumbnail(snapshot: snapshot, width: 200) { selected = snapshot }
+                PageSection("Screen snapshots") {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 200), alignment: .leading)], alignment: .leading, spacing: 16) {
+                        ForEach(snapshots) { snapshot in
+                            SnapshotThumbnail(snapshot: snapshot, width: 200) { selected = snapshot }
+                        }
                     }
                 }
-                Text("Notes are written from what was said, not these images.").metaText()
-            } else {
-                Text("No screen snapshots were taken. Use Snapshot screen during a meeting to save one.")
-                    .bodyText(14, Theme.inkSecondary)
             }
         }
         .task(id: sessionId) { await store.reload(sessionId) }
