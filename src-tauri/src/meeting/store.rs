@@ -2184,6 +2184,9 @@ pub struct MeetingStore {
     root: PathBuf,
     database_path: PathBuf,
     connection: Mutex<Connection>,
+    /// The reads that scan every meeting run here, beside the writer, so a
+    /// long one never holds up a track worker's commit on `connection`.
+    reader: Mutex<Connection>,
     master_key: Arc<MeetingStorageKey>,
     /// Told of every source-health verdict once it is on disk. The verdicts
     /// are written from the track workers, which have no way to reach the
@@ -2271,11 +2274,14 @@ impl MeetingStore {
             .to_latest(&mut connection)
             .map_err(|_| StoreError::Unavailable)?;
         configure_connection(&connection)?;
+        let reader = open_encrypted_connection(&database_path, &master_key)?;
+        reader.execute_batch("PRAGMA query_only = ON;")?;
         set_private_file_permissions(&database_path)?;
         Ok(Arc::new(Self {
             root,
             database_path,
             connection: Mutex::new(connection),
+            reader: Mutex::new(reader),
             master_key: Arc::new(master_key),
             health_listener: OnceLock::new(),
             user_name_source: OnceLock::new(),
@@ -4647,7 +4653,7 @@ impl MeetingStore {
         filter: &MeetingListFilter,
     ) -> Result<PaginatedMeetings, StoreError> {
         let page_size = limit.clamp(1, 100);
-        let connection = self.connection()?;
+        let connection = self.reader()?;
         let window_start_utc_ms = match filter.window.days() {
             None => None,
             Some(days) => {
@@ -4789,7 +4795,7 @@ impl MeetingStore {
         request: DashboardTrendRequest,
         now: DateTime<Local>,
     ) -> Result<MeetingTrendProjection, StoreError> {
-        let mut connection = self.connection()?;
+        let mut connection = self.reader()?;
         Self::trend_projection_with_connection_at(&mut connection, request, now)
     }
 
@@ -7421,6 +7427,10 @@ impl MeetingStore {
 
     fn connection(&self) -> Result<MutexGuard<'_, Connection>, StoreError> {
         self.connection.lock().map_err(|_| StoreError::Unavailable)
+    }
+
+    fn reader(&self) -> Result<MutexGuard<'_, Connection>, StoreError> {
+        self.reader.lock().map_err(|_| StoreError::Unavailable)
     }
 
     pub(crate) fn with_planning_snapshot<T>(
@@ -11999,6 +12009,9 @@ mod tests {
     };
     use crate::secrets::SecretManager;
     use std::borrow::Cow;
+    use std::sync::{mpsc, Barrier};
+    use std::thread;
+    use std::time::Duration;
     use tempfile::TempDir;
 
     struct CapturingLedgerGenerator {
@@ -12919,6 +12932,107 @@ mod tests {
             vec![1],
             "a mark reads what arrived after it and pays for nothing before it"
         );
+    }
+
+    const CORPUS_READ: &str = "corpus read";
+
+    fn hold_the_next_corpus_read(store: &MeetingStore) -> (mpsc::Receiver<()>, Arc<Barrier>) {
+        let (reading, started) = mpsc::channel();
+        let release = Arc::new(Barrier::new(2));
+        for connection in [&store.connection, &store.reader] {
+            let reading = reading.clone();
+            let release = Arc::clone(&release);
+            let mut held = false;
+            connection.lock().unwrap().progress_handler(
+                1,
+                Some(move || {
+                    if !held && thread::current().name() == Some(CORPUS_READ) {
+                        held = true;
+                        let _ = reading.send(());
+                        release.wait();
+                    }
+                    false
+                }),
+            );
+        }
+        (started, release)
+    }
+
+    /// A track's audio reaches the disk while a read across every meeting is
+    /// part-way through. The app asks for these the moment a recording
+    /// starts or resumes; while they held the writer's connection, the
+    /// track's commit waited, its lane filled and the first seconds of the
+    /// meeting were dropped.
+    #[test]
+    fn a_track_commits_while_a_read_across_every_meeting_runs() {
+        let (_directory, store) = store();
+        let bridge = TimestampBridge {
+            native_anchor_value: 0,
+            native_timescale: 1_000_000_000,
+            host_monotonic_anchor_ns: 0,
+            session_offset_ns: 0,
+        };
+        let (session_id, track_id, storage) = microphone_track(&store, bridge);
+        let mut writer = store
+            .open_track_writer(session_id, track_id, storage)
+            .unwrap();
+        let reads: [(&str, fn(&MeetingStore) -> bool); 5] = [
+            ("trends", |store| {
+                store
+                    .trend_projection(DashboardTrendRequest {
+                        range: DashboardTrendRange::Days180,
+                    })
+                    .is_ok()
+            }),
+            ("meeting list", |store| {
+                store
+                    .list_sessions(None, 100, &MeetingListFilter::default())
+                    .is_ok()
+            }),
+            ("evening", |store| store.evening_meetings(0, i64::MAX).is_ok()),
+            ("open loops", |store| store.open_loops_inbox(100).is_ok()),
+            ("calendar people", |store| {
+                store
+                    .person_ids_for_calendar_emails(&["ada@example.com".to_string()])
+                    .is_ok()
+            }),
+        ];
+
+        for (sequence, (name, read)) in (0..).zip(reads) {
+            let (started, release) = hold_the_next_corpus_read(&store);
+            let reading = {
+                let store = Arc::clone(&store);
+                thread::Builder::new()
+                    .name(CORPUS_READ.to_string())
+                    .spawn(move || read(&store))
+                    .unwrap()
+            };
+            started
+                .recv_timeout(Duration::from_secs(10))
+                .unwrap_or_else(|_| panic!("the {name} read ran no query"));
+            let (committed, commit) = mpsc::channel();
+            let writing = thread::spawn(move || {
+                let samples = vec![0.25; usize::try_from(TEST_PACKET_FRAMES).unwrap()];
+                let pushed = writer
+                    .accept(captured_packet(track_id, sequence, None), &samples)
+                    .unwrap();
+                let _ = committed.send(pushed);
+                writer
+            });
+            let in_time = commit.recv_timeout(Duration::from_secs(10));
+            release.wait();
+            writer = writing.join().unwrap();
+            assert!(reading.join().unwrap(), "the {name} read failed");
+            assert_eq!(
+                in_time,
+                Ok(PacketPushResult::Accepted),
+                "the track's commit waited behind the {name} read"
+            );
+        }
+
+        let snapshot = store.review_snapshot(session_id).unwrap();
+        assert!(snapshot.gaps.is_empty());
+        assert_eq!(snapshot.tracks[0].durable_record_count, 5);
     }
 
     #[test]

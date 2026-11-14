@@ -322,6 +322,8 @@ tauri = { version = "2.11.5", features = ["test"] }
 # Test-only tokio features for the local socket servers exercising the
 # resumable HTTP downloader; normal builds keep the leaner feature set.
 tokio = { version = "1.43.0", features = ["macros", "net", "io-util", "sync", "time", "rt-multi-thread"] }
+# Test-only progress handler, to hold a store read part-way through a query.
+rusqlite = { version = "0.37", features = ["hooks"] }
 
 [profile.release]
 lto = true
