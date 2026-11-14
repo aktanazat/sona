@@ -141,20 +141,14 @@ struct WorkflowRunReceipt: Decodable, Identifiable {
             || (startedAtUtcMs == other.startedAtUtcMs && id < other.id)
     }
 
+    var outcomeText: String {
+        workflowOutcomeText(code: outcomeCode, counts: outcomeCounts, summary: outcomeSummary)
+    }
+
     /// A run that ended well and changed nothing: a row in the log, not a
     /// line under its switch.
     var foundNothing: Bool {
-        guard status == .ok else { return false }
-        let counts = outcomeCounts
-        return switch outcomeCode {
-        case "person_links": counts.changes == 0
-        case "continuity": counts.carried == 0
-        case "vocabulary_candidates": counts.candidates == 0
-        case "document_links": counts.persons == 0
-        case "learning_suggestions": counts.suggestions == 0
-        case "already_processed": true
-        default: false
-        }
+        status == .ok && workflowOutcomeIsEmpty(code: outcomeCode, counts: outcomeCounts)
     }
 
     /// The stored code, said for a person: what went wrong, whether it comes
@@ -243,10 +237,10 @@ struct WorkflowRunTrend: Decodable {
 
 /// What a run did, said the way a person would say it. One sentence per
 /// outcome code, counted from the receipt the run wrote — never from the
-/// workflow's name, which is the subsystem's word for itself.
-func workflowOutcomeText(_ receipt: WorkflowRunReceipt) -> String {
-    let counts = receipt.outcomeCounts
-    switch receipt.outcomeCode {
+/// workflow's name, which is the subsystem's word for itself. `summary` is
+/// the core's own sentence, for a code this build does not know.
+func workflowOutcomeText(code: String, counts: WorkflowOutcomeCounts, summary: String) -> String {
+    switch code {
     case "person_links":
         switch counts.changes {
         case 0: return "No one new to remember"
@@ -303,7 +297,20 @@ func workflowOutcomeText(_ receipt: WorkflowRunReceipt) -> String {
     case "already_processed": return "Nothing new to do"
     case "failed": return "Couldn't finish"
     case "skipped": return "Skipped"
-    default: return receipt.outcomeSummary
+    default: return summary
+    }
+}
+
+/// Whether a run's outcome names nothing that happened to the reader's data.
+func workflowOutcomeIsEmpty(code: String, counts: WorkflowOutcomeCounts) -> Bool {
+    switch code {
+    case "person_links": counts.changes == 0
+    case "continuity": counts.carried == 0
+    case "vocabulary_candidates": counts.candidates == 0
+    case "document_links": counts.persons == 0
+    case "learning_suggestions": counts.suggestions == 0
+    case "already_processed", "skipped": true
+    default: false
     }
 }
 
