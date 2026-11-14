@@ -1,6 +1,5 @@
 use super::*;
 pub(super) mod source_scope;
-use crate::query::tools::STOPWORDS;
 use source_scope::{SourceIdentity, SourceIndexes, SourceOccurrences, SourceScope};
 use std::ops::Range;
 
@@ -1811,21 +1810,6 @@ fn same_subject(known: &LedgerThread, thread: &LedgerThread) -> bool {
         && known.topic.trim().to_lowercase() == thread.topic.trim().to_lowercase()
 }
 
-/// Whether two thread topics name one subject: the same words, or two words
-/// that carry a topic in common, as "PDF viewer fix plan" and "PDF viewer
-/// memory allocation" do. One word is not enough: "Release date" and
-/// "Rollout date" are two subjects.
-fn shared_subject(topic: &str, other: &str) -> bool {
-    let words = |text: &str| -> HashSet<String> {
-        normalized_words(text)
-            .into_iter()
-            .filter(|word| STOPWORDS.binary_search(&word.as_str()).is_err())
-            .collect()
-    };
-    let (topic, other) = (words(topic), words(other));
-    (!topic.is_empty() && topic == other) || topic.intersection(&other).count() >= 2
-}
-
 /// The parts' ledgers one after another, a thread with the topic, state and
 /// owner of one before it joined to that one, with the parts' headlines and
 /// the part each thread was first read in.
@@ -2093,7 +2077,7 @@ fn apply_merge(ledger: &mut MeetingLedger, parts: &[usize], reply: &LedgerMergeR
                 )
                 && kept.iter().all(|&other| parts[other] != parts[member])
                 && kept.first().is_none_or(|&first| {
-                    shared_subject(&ledger.threads[first].topic, &thread.topic)
+                    ledger::shared_subject(&ledger.threads[first].topic, &thread.topic)
                 })
             {
                 kept.push(member);
