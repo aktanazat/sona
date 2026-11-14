@@ -640,6 +640,7 @@ struct ActiveSource {
 
 struct TrackWorker {
     stop: Arc<AtomicBool>,
+    save_held: Arc<AtomicBool>,
     handle: Option<JoinHandle<Result<(), StoreError>>>,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2283,6 +2284,7 @@ impl MeetingSessionManager {
             if source.source.pause().is_err() {
                 note_failed_lane(&store, request.session_id, source.track_id, source.epoch);
             }
+            source.worker.save_held();
         }
         active.hold.keep_awake.release();
         drop(actor);
@@ -4984,14 +4986,25 @@ impl TrackWorker {
         meter: TrackMeter,
     ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
+        let save_held = Arc::new(AtomicBool::new(false));
         let worker_stop = Arc::clone(&stop);
+        let worker_save_held = Arc::clone(&save_held);
         let handle = thread::spawn(move || {
-            run_track_worker(store, writer, reader, report, meter, worker_stop)
+            run_track_worker(store, writer, reader, report, meter, worker_stop, worker_save_held)
         });
         Self {
             stop,
+            save_held,
             handle: Some(handle),
         }
+    }
+
+    /// Has the writer save what it holds once the lane runs dry. The writer
+    /// saves a second of audio at a time, so at a pause up to a second of
+    /// the last words stayed off disk: the live pass ended the sentence
+    /// short and, after the resume, read the rest alone as "Yeah.".
+    fn save_held(&self) {
+        self.save_held.store(true, Ordering::Release);
     }
 
     fn stop(&mut self) -> Result<(), StoreError> {
@@ -5011,6 +5024,7 @@ fn run_track_worker(
     report: SourceStartReport,
     mut meter: TrackMeter,
     stop: Arc<AtomicBool>,
+    save_held: Arc<AtomicBool>,
 ) -> Result<(), StoreError> {
     super::capture::run_at_capture_priority();
     let mut bridges = HashMap::new();
@@ -5073,6 +5087,9 @@ fn run_track_worker(
             return writer.seal();
         }
         if !progressed {
+            if save_held.swap(false, Ordering::AcqRel) {
+                writer.checkpoint()?;
+            }
             thread::sleep(Duration::from_millis(5));
         }
     }
@@ -8962,7 +8979,9 @@ pub(crate) mod tests {
     /// The timed pass reads speech once it has ended or once no more audio
     /// comes: read alone, a piece it cut 0.42 s into a sentence came back as
     /// "Yeah.", and the words said just before a pause still belong on the
-    /// page while the meeting is paused.
+    /// page while the meeting is paused, all of them: the writer saves a
+    /// second at a time, and the part it still held at the pause came back
+    /// after the resume as a piece of its own.
     #[test]
     fn a_timed_pass_leaves_running_speech_until_no_more_audio_comes() {
         let busy = Arc::new(AtomicBool::new(false));
@@ -8986,14 +9005,36 @@ pub(crate) mod tests {
         );
         assert!(live.snapshot(session_id).segments.is_empty());
 
-        manager
-            .processing
-            .live_pass(&store, session_id, &live, false)
-            .unwrap();
+        let saved = || store.session_snapshot(session_id).unwrap().sources[0].last_durable_offset_ns;
+        let before_the_pause = saved();
+        tauri::async_runtime::block_on(manager.pause(MeetingMutationRequest {
+            operation_id: MeetingOperationId::new(),
+            session_id,
+            expected_revision: store.session_snapshot(session_id).unwrap().revision,
+        }))
+        .unwrap();
+        for _ in 0..500 {
+            if saved() != before_the_pause {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        for _ in 0..2 {
+            manager
+                .processing
+                .live_pass(&store, session_id, &live, false)
+                .unwrap();
+        }
+        let lengths: Vec<u64> = live
+            .snapshot(session_id)
+            .segments
+            .iter()
+            .map(|segment| segment.end_offset_ns - segment.start_offset_ns)
+            .collect();
         assert_eq!(
-            live.snapshot(session_id).segments.len(),
-            1,
-            "with no new audio the next timed pass reads it"
+            lengths,
+            [1_500_000_000],
+            "with no new audio a timed pass reads it, all the way to the pause"
         );
     }
 
