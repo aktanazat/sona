@@ -250,6 +250,117 @@ mod tests {
         }
     }
 
+    fn dated_decisions() -> (ArtifactEvidence, GeneratedMeetingArtifacts) {
+        let mut evidence = evidence();
+        evidence.transcript.truncate(3);
+        let said = [
+            "Then the public launch of the harbour map moves to March 14 instead of March 1.",
+            "One more change, the public launch of the harbour map moves again, to March 21, because the council meets late.",
+            "We decided last month to cap lighting at 30,000.",
+        ];
+        for (index, (line, text)) in (0u64..).zip(evidence.transcript.iter_mut().zip(said)) {
+            let start = index * 10_000_000_000;
+            line.text = text.to_string();
+            line.citation.start_offset_ns = Some(start);
+            line.citation.end_offset_ns = Some(start + 1_000_000_000);
+        }
+        let cited = |text: &str, index: usize| {
+            let line = &evidence.transcript[index].citation;
+            CitedArtifactText {
+                text: text.to_string(),
+                citations: vec![ArtifactCitation {
+                    segment_id: TranscriptSegmentId::from_uuid(
+                        uuid::Uuid::parse_str(&line.entity_id).expect("segment id"),
+                    ),
+                    start_offset_ns: line.start_offset_ns.expect("start"),
+                    end_offset_ns: line.end_offset_ns.expect("end"),
+                }],
+            }
+        };
+        let notes = GeneratedMeetingArtifacts {
+            summary: cited("The launch was March 14 and is now March 21; lighting cost $40,000.", 1),
+            summary_trace: Vec::new(),
+            outline: Vec::new(),
+            decisions: vec![
+                cited("The public launch of the harbour map moves again to March 21", 1),
+                cited("The public launch of the harbour map moves to March 14", 0),
+                cited("The lighting cap is 30,000", 2),
+            ],
+            action_items: Vec::new(),
+            key_questions: Vec::new(),
+            risks: Vec::new(),
+            follow_up_draft: cited("Thanks.", 1),
+            ledger: None,
+            ledger_failure: None,
+            plain: false,
+            plain_because: None,
+            left_out: Vec::new(),
+        };
+        (evidence, notes)
+    }
+
+    fn confirm_dated_decisions(evidence: &ArtifactEvidence, notes: &mut GeneratedMeetingArtifacts) {
+        let generator = ReplayGenerator {
+            window: None,
+            wire: usize::MAX,
+            reply: 1_024,
+            calls: AtomicUsize::new(0),
+        };
+        confirm_decisions(&generator, evidence, &HashMap::new(), notes, || Ok(()))
+            .expect("decisions are checked");
+    }
+
+    #[test]
+    fn an_explicitly_revised_date_replaces_only_its_earlier_decision() {
+        let (evidence, mut notes) = dated_decisions();
+        let summary = notes.summary.text.clone();
+        confirm_dated_decisions(&evidence, &mut notes);
+        assert_eq!(
+            notes.decisions.iter().map(|item| item.text.as_str()).collect::<Vec<_>>(),
+            [
+                "The public launch of the harbour map moves again to March 21",
+                "The lighting cap is 30,000",
+            ]
+        );
+        assert_eq!(notes.summary.text, summary);
+        assert!(evidence.transcript[0].text.contains("March 14"));
+    }
+
+    #[test]
+    fn a_dated_decision_stays_without_a_supported_later_revision() {
+        for case in ["different subject", "conditional", "earlier", "same date", "marked"] {
+            let (mut evidence, mut notes) = dated_decisions();
+            match case {
+                "different subject" => {
+                    notes.decisions[0].text =
+                        "The public launch of the ferry map moves again to March 21".to_string();
+                }
+                "conditional" => {
+                    evidence.transcript[1].text =
+                        "If the public launch of the harbour map moves again to March 21.".to_string();
+                }
+                "earlier" => {
+                    notes.decisions[0].citations[0].start_offset_ns = 0;
+                    notes.decisions[0].citations[0].end_offset_ns = 1;
+                }
+                "same date" => {
+                    notes.decisions[0].text =
+                        "The public launch of the harbour map moves again to March 14".to_string();
+                    evidence.transcript[1].text =
+                        "The public launch of the harbour map moves again to March 14.".to_string();
+                }
+                "marked" => evidence.marks.push(NotesMark {
+                    kind: NotesMarkKind::Decision,
+                    at_offset_ns: 0,
+                    label: None,
+                }),
+                _ => unreachable!(),
+            }
+            confirm_dated_decisions(&evidence, &mut notes);
+            assert_eq!(notes.decisions.len(), 3, "{case}");
+        }
+    }
+
     fn complete_meeting_contract(generator: ReplayGenerator) {
         let evidence = evidence();
         assert!(

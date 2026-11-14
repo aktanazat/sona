@@ -2343,6 +2343,117 @@ fn settles_a_choice(
     }
 }
 
+struct DatedDecision {
+    words: Vec<String>,
+    verb: usize,
+    date: usize,
+    again: bool,
+}
+
+fn dated_decision(text: &str) -> Option<DatedDecision> {
+    let words = normalized_words(text);
+    let (verb, date, again) = words.iter().enumerate().find_map(|(index, word)| {
+        if !matches!(
+            word.as_str(),
+            "move" | "moves" | "moved" | "shift" | "shifts" | "shifted" | "change" | "changes" | "changed"
+        ) {
+            return None;
+        }
+        match words.get(index + 1).map(String::as_str) {
+            Some("to") => Some((index, index + 2, false)),
+            Some("again") if words.get(index + 2).map(String::as_str) == Some("to") => {
+                Some((index, index + 3, true))
+            }
+            _ => None,
+        }
+    })?;
+    let months = [
+        "january", "february", "march", "april", "may", "june", "july", "august",
+        "september", "october", "november", "december",
+    ];
+    if verb < 2
+        || !words.get(date).is_some_and(|month| months.contains(&month.as_str()))
+        || !words
+            .get(date + 1)
+            .and_then(|day| day.parse::<u8>().ok())
+            .is_some_and(|day| (1..=31).contains(&day))
+    {
+        return None;
+    }
+    Some(DatedDecision {
+        words,
+        verb,
+        date,
+        again,
+    })
+}
+
+fn cited_dated_decision(
+    decision: &CitedArtifactText,
+    dated: &DatedDecision,
+    evidence: &ArtifactEvidence,
+    after: Option<u64>,
+) -> bool {
+    decision.citations.iter().any(|citation| {
+        if after.is_some_and(|end| citation.start_offset_ns <= end) {
+            return false;
+        }
+        let id = citation.segment_id.uuid().to_string();
+        evidence.transcript.iter().any(|line| {
+            if line.citation.entity_id != id {
+                return false;
+            }
+            let words = normalized_words(&line.text);
+            !words.iter().any(|word| {
+                matches!(
+                    word.as_str(),
+                    "if" | "unless" | "might" | "maybe" | "could" | "not" | "never"
+                )
+            }) && says_words(&words, &dated.words[..dated.date + 2])
+        })
+    })
+}
+
+fn discard_superseded_decisions(
+    decisions: &mut Vec<CitedArtifactText>,
+    evidence: &ArtifactEvidence,
+    user_marked: &impl Fn(&[ArtifactCitation]) -> bool,
+) {
+    let dated: Vec<_> = decisions
+        .iter()
+        .map(|decision| dated_decision(&decision.text))
+        .collect();
+    let obsolete: Vec<_> = decisions
+        .iter()
+        .enumerate()
+        .map(|(index, previous)| {
+            let Some(old) = &dated[index] else {
+                return false;
+            };
+            if user_marked(&previous.citations)
+                || !cited_dated_decision(previous, old, evidence, None)
+            {
+                return false;
+            }
+            let Some(end) = previous.citations.iter().map(|citation| citation.end_offset_ns).max()
+            else {
+                return false;
+            };
+            decisions.iter().enumerate().any(|(other, decision)| {
+                let Some(new) = &dated[other] else {
+                    return false;
+                };
+                new.again
+                    && old.words[..=old.verb] == new.words[..=new.verb]
+                    && old.words[old.date..old.date + 2] != new.words[new.date..new.date + 2]
+                    && cited_dated_decision(decision, new, evidence, Some(end))
+            })
+        })
+        .collect();
+    let mut obsolete = obsolete.into_iter();
+    decisions.retain(|_| !obsolete.next().unwrap_or(false));
+}
+
 /// Keeps the decisions the transcript shows being made. A notes decision the
 /// check finds to be a status, a question or a goodbye leaves the decisions,
 /// and a ledger thread filed as decided on one becomes closed. A decision on
@@ -2386,6 +2497,7 @@ pub(super) fn confirm_decisions(
             kept.push(decision);
         }
     }
+    discard_superseded_decisions(&mut kept, evidence, &user_marked);
     notes.decisions = kept;
     let Some(ledger) = &mut notes.ledger else {
         return Ok(());
