@@ -2414,7 +2414,88 @@ fn cited_dated_decision(
     })
 }
 
+fn discard_superseded_summary_lines(
+    summary: &mut CitedArtifactText,
+    trace: &mut Vec<SummaryLineTrace>,
+    decisions: &[CitedArtifactText],
+    dated: &[Option<DatedDecision>],
+    replacements: &[Option<usize>],
+) {
+    let lines: Vec<&str> = summary.text.lines().collect();
+    let stale: Vec<_> = lines
+        .iter()
+        .enumerate()
+        .map(|(line, text)| {
+            let anchor = trace.iter().find(|entry| {
+                usize::try_from(entry.line).ok() == Some(line)
+            })?;
+            let words = normalized_words(text);
+            replacements.iter().enumerate().find_map(|(index, replacement)| {
+                let next = (*replacement)?;
+                let old = dated[index].as_ref()?;
+                let new = dated[next].as_ref()?;
+                let phrase = &old.words[..old.date + 2];
+                let suffix = words.strip_prefix(phrase)?;
+                if !decisions[index]
+                    .citations
+                    .iter()
+                    .any(|citation| citation.segment_id == anchor.anchor.segment_id)
+                    || says_words(&words, &new.words[new.date..new.date + 2])
+                    || suffix.iter().any(|word| {
+                        word.bytes().all(|byte| byte.is_ascii_digit())
+                            || matches!(
+                                word.as_str(),
+                                "and" | "or" | "but" | "while" | "then" | "instead" | "because"
+                            )
+                    })
+                {
+                    return None;
+                }
+                Some(next)
+            })
+        })
+        .collect();
+    if stale.iter().all(Option::is_none) {
+        return;
+    }
+
+    let replace_all = stale.iter().all(Option::is_some);
+    let mut kept = Vec::with_capacity(lines.len());
+    let mut kept_trace = Vec::with_capacity(trace.len());
+    for (line, (text, replacement)) in lines.into_iter().zip(stale).enumerate() {
+        let old_trace = trace
+            .iter()
+            .find(|entry| usize::try_from(entry.line).ok() == Some(line));
+        let anchor = if let Some(index) = replacement {
+            if !replace_all {
+                continue;
+            }
+            let decision = &decisions[index];
+            kept.push(decision.text.as_str());
+            for citation in &decision.citations {
+                if !summary.citations.contains(citation) {
+                    summary.citations.push(citation.clone());
+                }
+            }
+            decision.citations.iter().min_by_key(|citation| citation.start_offset_ns)
+        } else {
+            kept.push(text);
+            old_trace.map(|entry| &entry.anchor)
+        };
+        if let (Ok(line), Some(anchor)) = (u32::try_from(kept.len() - 1), anchor) {
+            kept_trace.push(SummaryLineTrace {
+                line,
+                anchor: anchor.clone(),
+            });
+        }
+    }
+    summary.text = kept.join("\n");
+    *trace = kept_trace;
+}
+
 fn discard_superseded_decisions(
+    summary: &mut CitedArtifactText,
+    trace: &mut Vec<SummaryLineTrace>,
     decisions: &mut Vec<CitedArtifactText>,
     evidence: &ArtifactEvidence,
     user_marked: &impl Fn(&[ArtifactCitation]) -> bool,
@@ -2423,35 +2504,35 @@ fn discard_superseded_decisions(
         .iter()
         .map(|decision| dated_decision(&decision.text))
         .collect();
-    let obsolete: Vec<_> = decisions
+    let replacements: Vec<_> = decisions
         .iter()
         .enumerate()
         .map(|(index, previous)| {
             let Some(old) = &dated[index] else {
-                return false;
+                return None;
             };
             if user_marked(&previous.citations)
                 || !cited_dated_decision(previous, old, evidence, None)
             {
-                return false;
+                return None;
             }
             let Some(end) = previous.citations.iter().map(|citation| citation.end_offset_ns).max()
             else {
-                return false;
+                return None;
             };
-            decisions.iter().enumerate().any(|(other, decision)| {
-                let Some(new) = &dated[other] else {
-                    return false;
-                };
-                new.again
+            decisions.iter().enumerate().find_map(|(other, decision)| {
+                let new = dated[other].as_ref()?;
+                (new.again
                     && old.words[..=old.verb] == new.words[..=new.verb]
                     && old.words[old.date..old.date + 2] != new.words[new.date..new.date + 2]
-                    && cited_dated_decision(decision, new, evidence, Some(end))
+                    && cited_dated_decision(decision, new, evidence, Some(end)))
+                    .then_some(other)
             })
         })
         .collect();
-    let mut obsolete = obsolete.into_iter();
-    decisions.retain(|_| !obsolete.next().unwrap_or(false));
+    discard_superseded_summary_lines(summary, trace, decisions, &dated, &replacements);
+    let mut replacements = replacements.into_iter();
+    decisions.retain(|_| replacements.next().flatten().is_none());
 }
 
 /// Keeps the decisions the transcript shows being made. A notes decision the
@@ -2497,7 +2578,13 @@ pub(super) fn confirm_decisions(
             kept.push(decision);
         }
     }
-    discard_superseded_decisions(&mut kept, evidence, &user_marked);
+    discard_superseded_decisions(
+        &mut notes.summary,
+        &mut notes.summary_trace,
+        &mut kept,
+        evidence,
+        &user_marked,
+    );
     notes.decisions = kept;
     let Some(ledger) = &mut notes.ledger else {
         return Ok(());

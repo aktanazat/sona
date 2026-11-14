@@ -361,6 +361,79 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_superseded_summary_line_leaves_its_other_lines_and_trace() {
+        let (evidence, mut notes) = dated_decisions();
+        let latest = notes.decisions[0].citations[0].clone();
+        let old = notes.decisions[1].citations[0].clone();
+        let lighting = notes.decisions[2].citations[0].clone();
+        notes.summary.text = [
+            "The harbour map launch date moved to March 21.",
+            "The public launch of the harbour map moves to March 14 after initial change",
+            "The LED fixtures cost $40,000.",
+        ].join("\n");
+        notes.summary.citations = vec![latest.clone(), old.clone(), lighting.clone()];
+        notes.summary_trace = vec![
+            SummaryLineTrace { line: 0, anchor: latest.clone() },
+            SummaryLineTrace { line: 1, anchor: old },
+            SummaryLineTrace { line: 2, anchor: lighting.clone() },
+        ];
+
+        confirm_dated_decisions(&evidence, &mut notes);
+
+        assert_eq!(
+            notes.summary.text,
+            "The harbour map launch date moved to March 21.\nThe LED fixtures cost $40,000."
+        );
+        assert_eq!(
+            notes.summary_trace,
+            [
+                SummaryLineTrace { line: 0, anchor: latest },
+                SummaryLineTrace { line: 1, anchor: lighting },
+            ]
+        );
+        assert_eq!(notes.summary.citations.len(), 3);
+    }
+
+    #[test]
+    fn a_single_superseded_summary_line_becomes_the_current_decision() {
+        let (evidence, mut notes) = dated_decisions();
+        let latest = notes.decisions[0].citations[0].clone();
+        let old = notes.decisions[1].citations[0].clone();
+        notes.summary.text = "The public launch of the harbour map moves to March 14".to_string();
+        notes.summary.citations = vec![old.clone()];
+        notes.summary_trace = vec![SummaryLineTrace { line: 0, anchor: old }];
+
+        confirm_dated_decisions(&evidence, &mut notes);
+
+        assert_eq!(
+            notes.summary.text,
+            "The public launch of the harbour map moves again to March 21"
+        );
+        assert_eq!(notes.summary_trace, [SummaryLineTrace { line: 0, anchor: latest.clone() }]);
+        assert!(notes.summary.citations.contains(&latest));
+    }
+
+    #[test]
+    fn historical_or_untraced_summary_details_are_not_discarded() {
+        for (text, traced) in [
+            ("The public launch of the harbour map moves to March 14 and later to March 21", true),
+            ("The public launch of the harbour map moves to March 14 and lighting cost $40,000", true),
+            ("The public launch of the harbour map moves to March 14", false),
+        ] {
+            let (evidence, mut notes) = dated_decisions();
+            let old = notes.decisions[1].citations[0].clone();
+            notes.summary.text = text.to_string();
+            notes.summary_trace = if traced {
+                vec![SummaryLineTrace { line: 0, anchor: old }]
+            } else {
+                Vec::new()
+            };
+            confirm_dated_decisions(&evidence, &mut notes);
+            assert_eq!(notes.summary.text, text);
+        }
+    }
+
     fn complete_meeting_contract(generator: ReplayGenerator) {
         let evidence = evidence();
         assert!(
