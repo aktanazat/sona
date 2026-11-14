@@ -677,25 +677,13 @@ enum FeedClock {
 
 // MARK: - Upcoming
 
-/// `meeting_upcoming_events`: the window that was read, what is in it, and
-/// why it might be empty.
+/// `meeting_upcoming_events`: the window that was read and what is in it.
 struct OverviewUpcoming: Decodable {
     let access: String
     var rows: [OverviewUpcomingRow]
     /// The fence every series write from these rows carries. One number for
     /// the whole pane, because one counter fences all three decisions.
     var seriesRevision: Int
-
-    /// What an empty list means. An empty week under `authorized` is a free
-    /// week; anything else is a missing grant.
-    var emptyLine: String {
-        switch access {
-        case "authorized": "Nothing in the next seven days."
-        case "not_determined": "Sona has not asked for your calendar yet. Turn meeting detection on in Settings to list what is coming."
-        case "denied": "Calendar access is off, so upcoming meetings cannot be listed."
-        default: "This Mac has no calendar Sona can read."
-        }
-    }
 
     /// Takes the answer to a series write. Two occurrences of one series can
     /// sit in the same week, so every row with that key is replaced rather

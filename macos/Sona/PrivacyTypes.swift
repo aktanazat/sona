@@ -273,9 +273,6 @@ struct StorageStatus: Decodable {
         }
         return encrypted ? "\(cause), so history cannot be read." : "\(cause), so history is stored unencrypted."
     }
-
-    /// The one line the Library states.
-    var line: String { sentence ?? word }
 }
 
 // MARK: - What Sona holds
@@ -670,7 +667,7 @@ enum AudioImportFailureCode: String, Decodable {
         case .transcription: "The audio could not be transcribed."
         case .history: "The transcript could not be saved to history."
         case .historyOff:
-            "Saved history is off, so this file's words have nowhere to go. Set Dictations to keep above 0 in Library."
+            "Saved history is off, so this file's words have nowhere to go. Set Dictations to keep above 0 in Privacy settings."
         case .meetingImport: "This recording could not be saved as a meeting."
         }
     }
