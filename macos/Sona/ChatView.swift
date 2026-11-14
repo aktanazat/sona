@@ -325,8 +325,8 @@ struct ChatView: View {
 
 private enum ChatSheetMode: String, CaseIterable, Identifiable {
     case ask = "Ask"
-    case configure = "Configure"
-    case plan = "Plan"
+    case configure = "Change settings"
+    case plan = "Plan a project"
     var id: String { rawValue }
 }
 

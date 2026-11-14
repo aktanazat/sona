@@ -51,8 +51,6 @@ final class PeopleStore {
     /// The companies could not be read. Not the same answer as none.
     private(set) var companiesFailed = false
 
-    /// What is still open across everybody, newest first.
-    private(set) var inbox: [PersonOpenLoop] = []
     /// The meetings a manual link can reach, read a page at a time.
     private(set) var linkPicker = LinkPicker()
     /// Two saved voices from different models cannot be combined. The merge
@@ -75,8 +73,6 @@ final class PeopleStore {
     /// Reads are stamped: an answer for a person the screen has left is
     /// dropped rather than drawn over the one it moved to.
     @ObservationIgnored private var generation: UInt64 = 0
-    /// How many rows the inbox asks for, as the web app asked for them.
-    @ObservationIgnored private let inboxLimit = 5
 
     init(core: Core, photos: PersonPhotoStore) {
         self.core = core
@@ -141,8 +137,7 @@ final class PeopleStore {
         case .list:
             async let list: Void = loadList(stamp)
             async let companies: Void = loadCompanies(stamp)
-            async let inbox: Void = loadInbox(stamp)
-            _ = await (list, companies, inbox)
+            _ = await (list, companies)
         case let .person(personId):
             async let detail: Void = loadDetail(personId, stamp)
             async let list: Void = loadList(stamp)
@@ -213,17 +208,6 @@ final class PeopleStore {
         } catch {
             guard stamp == generation else { return }
             companiesFailed = true
-        }
-    }
-
-    private func loadInbox(_ stamp: UInt64) async {
-        do {
-            let result: PeopleOpenLoopsInbox = try await core.request("open_loops_inbox", ["limit": inboxLimit])
-            guard stamp == generation else { return }
-            inbox = result.entries
-        } catch {
-            guard stamp == generation else { return }
-            inbox = []
         }
     }
 

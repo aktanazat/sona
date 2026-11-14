@@ -18,6 +18,8 @@ struct SettingsScreen: View {
             EssentialsView(store: model.settings) {
                 MeetingDetectionEssentials(store: model.meetingSettings)
             }
+        case .appearance:
+            AppearanceView(store: model.about)
         case .dictation:
             DictationSettingsView(store: model.settings, onOpenModes: { model.showSettings(.modes) }) {
                 SettingsCaptureRows(store: model.settings)
@@ -25,9 +27,7 @@ struct SettingsScreen: View {
         case .models:
             Page {
                 ModelsTab()
-                PageSection("Language models") {
-                    ProvidersView(store: model.providers)
-                }
+                ProvidersView(store: model.providers)
             }
         case .modes:
             Page {
@@ -57,7 +57,7 @@ struct SettingsScreen: View {
             }
         case .agents:
             Page {
-                PageTitle("Agents", subtitle: "Coding agents on this Mac may read meetings you share with them, over a local socket, never the network.") {
+                PageTitle("Agents", subtitle: "Coding agents on this Mac can read meetings you share with them.") {
                     Button(model.agents.loading ? "Refreshing…" : "Refresh") { model.agents.refreshAll() }
                         .buttonStyle(.compact)
                         .disabled(model.agents.loading)
@@ -77,15 +77,13 @@ struct SettingsScreen: View {
         case .privacy:
             PrivacyView(store: model.privacy)
         case .importing:
-            ImportView(store: model.imports, openLink: model.open(link:))
+            ImportView(store: model.imports, cloudSync: model.cloudSync, openLink: model.open(link:))
         case .documents:
             DocumentsView(store: model.documents)
         case .about:
             AboutView(store: model.about)
         case .debug:
-            DebugView(store: model.debug) {
-                AnyView(SettingsCaptureRows(store: model.settings))
-            }
+            DebugView(store: model.debug)
         }
     }
 }

@@ -18,7 +18,7 @@ struct MeetingDisclosureSettingsView: View {
                 if store.settingsRead {
                     ToggleRow(
                         title: "Post a notice when recording starts",
-                        detail: "Off by default. Posts once only when Sona can identify the joined meeting, its empty chat box, and Send. Your draft is never replaced.",
+                        detail: "Posts once in the Zoom chat, never over your draft. Other apps get a copy button.",
                         isOn: Binding(get: { enabled }, set: { enabled = $0; edited = true }))
                     .disabled(store.disclosureSaving)
                     VStack(alignment: .leading, spacing: 12) {
@@ -33,10 +33,8 @@ struct MeetingDisclosureSettingsView: View {
                             .overlay(RoundedRectangle(cornerRadius: Theme.radiusControl).strokeBorder(Theme.border, lineWidth: 1))
                             .accessibilityLabel("Recording notice text")
                             .disabled(store.disclosureSaving)
-                        Text("Automatic posting is limited to a clearly identified English Zoom meeting chat addressed to Everyone. Other apps and unclear chats offer a copy button. A recording notice does not replace the participants' consent.")
-                            .bodyText(13, Theme.inkSecondary)
                         HStack {
-                            Text(!valid ? "Use 1–1,000 characters." : edited ? "Not saved yet. Applies to new recordings." : "Saved. The detected-meeting prompt can turn this off for one meeting.")
+                            Text(!valid ? "Use 1–1,000 characters." : edited ? "Not saved yet. Applies to new recordings." : "")
                                 .bodyText(13, Theme.inkSecondary)
                             Spacer()
                             Button(store.disclosureSaving ? "Saving…" : "Save notice") {

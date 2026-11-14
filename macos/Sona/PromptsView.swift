@@ -114,10 +114,12 @@ struct PromptsView: View {
                 } else if store.prompts.isEmpty {
                     CardLine("No prompts yet.")
                 } else {
+                    let mixed = Set(store.prompts.map(\.target)).count > 1
                     ForEach(store.prompts) { prompt in
                         PromptRow(
                             store: store,
                             prompt: prompt,
+                            showsTarget: mixed,
                             isOpen: expanded.contains(prompt.promptId),
                             toggle: { toggle(prompt.promptId) },
                             edit: { draft = PromptDraft.of(prompt) }
@@ -133,7 +135,7 @@ struct PromptsView: View {
             Card {
                 ChoiceRow(
                     title: "About",
-                    detail: "A prompt is answered only from what Sona already holds about the record you run it on.",
+                    detail: "Sona answers only from what it already knows about the one you pick.",
                     choices: PromptTarget.allCases,
                     label: { $0.label },
                     selection: Binding(get: { targetKind }, set: { kind in
@@ -144,7 +146,9 @@ struct PromptsView: View {
                 CardRow {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(targetKind.plural).bodyText()
-                        Text(recordDetail).metaText()
+                        if let detail = recordDetail {
+                            Text(detail).metaText()
+                        }
                     }
                 } trailing: {
                     Picker("", selection: recordBinding) {
@@ -185,13 +189,11 @@ struct PromptsView: View {
         }
     }
 
-    private var recordDetail: String {
-        let count = store.options(of: targetKind).count
-        if count == 0 {
-            return "Nothing recorded yet to ask about."
+    private var recordDetail: String? {
+        if store.options(of: targetKind).isEmpty {
+            return "None yet."
         }
         return store.target.map { "\($0.title) · \($0.detail)" }
-            ?? promptCounted(count, "record", "records") + " to choose from"
     }
 
     private var recordBinding: Binding<PromptTargetOption?> {
@@ -212,7 +214,7 @@ struct PromptsView: View {
     // MARK: - Dictation prompts
 
     @ViewBuilder private var dictationLibrary: some View {
-        PageSection("Post-processing prompts") {
+        PageSection("Cleanup prompts") {
             Card {
                 if store.dictationLoading && store.dictation.isEmpty {
                     CardLine("Loading prompts…")
@@ -266,11 +268,13 @@ struct PromptTabBar: View {
 }
 
 
-/// One saved prompt: a name and what it is about, and the body one click
-/// away. The page stays the same height however many questions are kept.
+/// One saved prompt: its name, what it is about when the library mixes
+/// kinds, and the body one click away. The page stays the same height
+/// however many questions are kept.
 struct PromptRow: View {
     let store: PromptsStore
     let prompt: SavedPrompt
+    let showsTarget: Bool
     let isOpen: Bool
     let toggle: () -> Void
     let edit: () -> Void
@@ -280,7 +284,9 @@ struct PromptRow: View {
             CardRow(action: toggle) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(prompt.name).bodyText()
-                    Text(fact).metaText()
+                    if showsTarget {
+                        Text(prompt.target.label).metaText()
+                    }
                 }
             } trailing: {
                 Image(systemName: isOpen ? "chevron.up" : "chevron.down")
@@ -318,11 +324,6 @@ struct PromptRow: View {
                 .overlay(alignment: .bottom) { Hairline().padding(.horizontal, 16) }
             }
         }
-    }
-
-    private var fact: String {
-        let updated = promptRelativeTime(prompt.updatedAtUtcMs)
-        return "\(prompt.target.label) · edited \(updated)"
     }
 
     private var runTitle: String {

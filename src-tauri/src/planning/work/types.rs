@@ -945,8 +945,8 @@ pub struct WorkCycle {
     pub scope: u32,
     pub started: u32,
     pub done: u32,
-    /// Done counted fully and started a quarter, out of the scope; for a
-    /// past cycle, as it stood when it ended. None while the scope is empty.
+    /// Done out of the scope; for a past cycle, as it stood when it ended.
+    /// None while the scope is empty.
     pub success: Option<u8>,
     /// The tasks in it that joined after it began, by id: scope added since
     /// the start. Work rolled over from an earlier cycle counts as planned.

@@ -9,6 +9,7 @@ import SwiftUI
 /// jobs Library lists.
 struct ImportView: View {
     let store: ImportStore
+    let cloudSync: CloudSyncStore
     /// Show what a routed file became. The shell owns navigation.
     var openLink: (String) -> Void = { _ in }
 
@@ -16,12 +17,13 @@ struct ImportView: View {
 
     var body: some View {
         Page {
-            PageTitle("Import audio", subtitle: "Recordings and video from this Mac, transcribed into history.")
+            PageTitle("Import", subtitle: "Recordings and video from this Mac, transcribed into history.")
             ErrorNote(store.error)
             routedNotice
             dropZone
             chosenRows
             queue
+            meetingFile
         }
     }
 
@@ -87,6 +89,22 @@ struct ImportView: View {
         case 0: "Import files"
         case 1: "Import file"
         default: "Import \(store.pending) files"
+        }
+    }
+
+    private var meetingFile: some View {
+        PageSection("Shared meetings") {
+            ErrorNote(cloudSync.importError)
+            Card {
+                ActionRow(
+                    title: "Import a .sona file",
+                    detail: cloudSync.importedSessionId.map { "Imported \(cloudSync.title(for: $0))" },
+                    button: "Choose a file",
+                    busy: cloudSync.busy
+                ) {
+                    Task { await cloudSync.importBundle() }
+                }
+            }
         }
     }
 

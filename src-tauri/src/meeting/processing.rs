@@ -59,7 +59,7 @@ use super::voice_identity::{
     map_sortformer_evidence, AudioSpan, AutoIdentityMode, DictationVoiceprint, UserVoiceSample,
     VoiceEvidenceSpan, VoiceIdentityCollector, VoiceMatchCandidate,
 };
-use super::words::{commits, normalized_words, says_words};
+use super::words::{commits, normalized_words, says_words, trails_off};
 use super::workflow_engine::{known_vocabulary, record_meeting_finalized};
 use crate::audio_toolkit::vad::{self, VoiceActivityDetector};
 use crate::managers::transcription::TranscriptionManager;
@@ -5773,7 +5773,7 @@ fn artifact_system_prompt(
         ""
     };
     let mut prompt = format!(
-        "{MEETING_PROMPT}\n\nReturn only JSON with this exact schema. `cited` means the object {{\"text\":string,\"citations\":[segment_uuid]}} and never a bare string: the segment UUIDs belong in the `citations` array, never written inside `text`. Schema: {{\"summary\":[cited],\"outline\":[{{\"title\":cited,\"detail\":cited_or_null}}],\"decisions\":[cited],\"action_items\":[{{\"text\":{{\"text\":string,\"citations\":[segment_uuid]}},\"owner_text\":string_or_null,\"due_text\":string_or_null}}],\"key_questions\":[cited],\"risks\":[cited],\"follow_up_draft\":cited}}. An action item's `text` is a whole `cited` object, written out above because the nesting is easy to misread: its citations go inside that object and never beside it, and an action item carries no `citations` key of its own. Only `cited` objects carry `citations`: an outline topic cites inside its `title` and `detail` objects. Use only the keys named in this schema. Every `cited` object must carry one or more segment UUID citations from transcript evidence. Cite only the segments that state what its text says, at most {MAX_TEXT_CITATIONS} of them, never every segment of a stretch. Each cited text is nonblank and at most 8,000 UTF-8 bytes after trimming; the joined summary is also at most 8,000 UTF-8 bytes. `outline` has at most 32 entries. `decisions`, `action_items`, `key_questions` and `risks` each have at most 64 entries. Non-null `owner_text` and `due_text` are nonblank and at most 512 UTF-8 bytes. `owner_text` names the person explicitly assigned the action or the speaker making a first-person singular commitment. A speaker saying 'we' has not identified an individual owner. Use `null` for unknown owners or due dates, never an empty string. The summary is a list of at least one and at most {MAX_SUMMARY_LINES} standalone lines in reading order, and each line cites the segments that line came from: a reader presses a line to hear that moment, so a citation that belongs to a different line is worse than none. `outline`, `decisions`, `action_items`, `key_questions` and `risks` are each `[]` when the evidence does not support them, but `summary` is never empty: if the meeting is thin, write the one line the material does support. `follow_up_draft` must be cited and nonblank too; if no follow-up was agreed, state that without inventing a task. Do not cite manual notes or the user's profile. Do not add facts, owners, or dates absent from evidence. Leave out greetings, small talk, jokes, farewells and asides. Write what the meeting established, never a narration of who said, asked, mentioned or confirmed something. A decision says what was chosen and, when the transcript says so, who made the call or owns it; a task someone takes on is an action item, not a decision, and a status update or a confirmation that something is unchanged is not a decision either. A question the meeting answered is not a key question. {steering}{notes_rule}"
+        "{MEETING_PROMPT}\n\nReturn only JSON with this exact schema. `cited` means the object {{\"text\":string,\"citations\":[segment_uuid]}} and never a bare string: the segment UUIDs belong in the `citations` array, never written inside `text`. Schema: {{\"summary\":[cited],\"outline\":[{{\"title\":cited,\"detail\":cited_or_null}}],\"decisions\":[cited],\"action_items\":[{{\"text\":{{\"text\":string,\"citations\":[segment_uuid]}},\"owner_text\":string_or_null,\"due_text\":string_or_null}}],\"key_questions\":[cited],\"risks\":[cited],\"follow_up_draft\":cited}}. An action item's `text` is a whole `cited` object, written out above because the nesting is easy to misread: its citations go inside that object and never beside it, and an action item carries no `citations` key of its own. Only `cited` objects carry `citations`: an outline topic cites inside its `title` and `detail` objects. Use only the keys named in this schema. Every `cited` object must carry one or more segment UUID citations from transcript evidence. Cite only the segments that state what its text says, at most {MAX_TEXT_CITATIONS} of them, never every segment of a stretch. Each cited text is nonblank and at most 8,000 UTF-8 bytes after trimming; the joined summary is also at most 8,000 UTF-8 bytes. `outline` has at most 32 entries. `decisions`, `action_items`, `key_questions` and `risks` each have at most 64 entries. Non-null `owner_text` and `due_text` are nonblank and at most 512 UTF-8 bytes. `owner_text` names the person explicitly assigned the action or the speaker making a first-person singular commitment. A speaker saying 'we' has not identified an individual owner. Use `null` for unknown owners or due dates, never an empty string. The summary is a list of at least one and at most {MAX_SUMMARY_LINES} standalone lines in reading order, and each line cites the segments that line came from: a reader presses a line to hear that moment, so a citation that belongs to a different line is worse than none. Each summary line is one short sentence in your own words, never a stretch of the transcript copied out, a field name or a list of topics, and a date or figure that changed during the meeting appears only as its final value. `outline`, `decisions`, `action_items`, `key_questions` and `risks` are each `[]` when the evidence does not support them, but `summary` is never empty: if the meeting is thin, write the one line the material does support. `follow_up_draft` must be cited and nonblank too; if no follow-up was agreed, state that without inventing a task. Do not cite manual notes or the user's profile. Do not add facts, owners, or dates absent from evidence. Leave out greetings, small talk, jokes, farewells and asides. Write what the meeting established, never a narration of who said, asked, mentioned or confirmed something. A decision says what was chosen and, when the transcript says so, who made the call or owns it; a task someone takes on is an action item, not a decision, and a status update or a confirmation that something is unchanged is not a decision either. A question the meeting answered is not a key question. {steering}{notes_rule}"
     );
     if let NotesTemplate::Custom(template) = template {
         prompt.push_str("\n\nThe user's custom template arranges only the outline. The summary, decisions, action items, key questions, risks and follow-up draft retain the schema and all citation, text and list limits above. Use these outline sections in the order given, at most once each, with each title spelled exactly as given. Write each section's detail from the transcript following that section's instructions. Omit sections not covered by the transcript; an empty outline is valid. Each title and non-null detail still needs at least one transcript citation. Section instructions guide emphasis, never supply facts or override this schema.");
@@ -6468,11 +6468,16 @@ fn validate_cited_text(
     Ok(CitedArtifactText { text, citations })
 }
 
+/// Transcript lines shorter than this are too common to show that a summary
+/// line copied them out.
+const MIN_PASTED_LINE_WORDS: usize = 6;
+
 /// The summary and its line-to-segment map, built from one pass over the same
 /// lines so an ordinal can never drift from the text it indexes. A line's
 /// anchor is its earliest cited segment — the moment a reader wants when they
 /// press that line — while the block keeps every citation the model gave, so
-/// nothing the model said about provenance is thrown away.
+/// nothing the model said about provenance is thrown away. Lines that fail
+/// [`keeps_summary_line`] drop out.
 fn validate_summary_lines(
     lines: &[RawCitedText],
     evidence: &[MeetingEvidence],
@@ -6480,10 +6485,15 @@ fn validate_summary_lines(
     if lines.is_empty() || lines.len() > MAX_SUMMARY_LINES {
         return Err(ReplyRule::Count.on("summary"));
     }
+    let keeps = keeps_summary_line(evidence);
+    let lines: Vec<&RawCitedText> = lines.iter().filter(|&line| keeps(line)).collect();
+    if lines.is_empty() {
+        return Err(ReplyRule::Count.on("summary"));
+    }
     let mut text = String::new();
     let mut citations: Vec<ArtifactCitation> = Vec::new();
     let mut trace = Vec::with_capacity(lines.len());
-    for (ordinal, raw) in lines.iter().enumerate() {
+    for (ordinal, raw) in lines.into_iter().enumerate() {
         let line = validate_cited_text(raw, evidence, "summary")?;
         let anchor = line
             .citations
@@ -6518,6 +6528,50 @@ fn validate_summary_lines(
     // The joined block answers to the same length rule the summary always had.
     let text = required_generated_text(&text, "summary")?;
     Ok((CitedArtifactText { text, citations }, trace))
+}
+
+/// Whether a summary line says something of its own: a line that pastes in
+/// a stretch of the transcript or spills a field of the reply is no summary.
+fn keeps_summary_line(evidence: &[MeetingEvidence]) -> impl Fn(&RawCitedText) -> bool {
+    let said: Vec<Vec<String>> = evidence
+        .iter()
+        .map(|line| normalized_words(&line.text))
+        .filter(|words| words.len() >= MIN_PASTED_LINE_WORDS)
+        .collect();
+    move |line| !spills_a_field(&line.text) && !pastes_lines(&normalized_words(&line.text), &said)
+}
+
+/// Whether `words` hold two or more separate transcript lines whole.
+fn pastes_lines(words: &[String], said: &[Vec<String>]) -> bool {
+    let mut spans: Vec<(usize, usize)> = said
+        .iter()
+        .filter_map(|line| {
+            words
+                .windows(line.len())
+                .position(|window| window == line.as_slice())
+                .map(|start| (start, start + line.len()))
+        })
+        .collect();
+    spans.sort_unstable();
+    spans.dedup();
+    let within = |inner: (usize, usize), outer: (usize, usize)| {
+        inner != outer && outer.0 <= inner.0 && inner.1 <= outer.1
+    };
+    spans
+        .iter()
+        .filter(|&&span| !spans.iter().any(|&outer| within(span, outer)))
+        .nth(1)
+        .is_some()
+}
+
+/// Whether a line is a field of the reply spilled as text, such as
+/// "Outline: [Survey of dock A, launch date]".
+fn spills_a_field(text: &str) -> bool {
+    let value = text
+        .split_once(':')
+        .filter(|(label, _)| label.split_whitespace().count() <= 3)
+        .map_or(text, |(_, value)| value);
+    value.trim_start().starts_with(['[', '{'])
 }
 
 /// Every transcript segment the model was shown, keyed by the uuid it was
@@ -6975,14 +7029,17 @@ pub(crate) fn validate_ledger_output(
             .iter()
             .take(MAX_LEDGER_ROWS)
             .map(|item| {
-                Ok(LedgerCommitment {
+                Ok(whole_commitment(LedgerCommitment {
                     who: required_generated_text(&item.who, "commitments.who")?,
                     what: required_generated_text(&item.what, "commitments.what")?,
                     firmness: ledger_firmness(&item.firmness)?,
                     receipt: validate_receipt(&item.receipt, &index, "commitments.receipt")?,
-                })
+                }))
             })
-            .collect::<Result<Vec<_>, Rejection>>()?,
+            .collect::<Result<Vec<_>, Rejection>>()?
+            .into_iter()
+            .flatten()
+            .collect(),
         stances: output
             .stances
             .iter()
@@ -7007,6 +7064,18 @@ pub(crate) fn validate_ledger_output(
             .collect::<Result<Vec<_>, Rejection>>()?,
         receipts: LedgerReceiptState::Verified,
     })
+}
+
+/// A commitment named in words cut off mid-phrase goes by its whole spoken
+/// sentence instead, and drops out when that sentence was cut off too.
+fn whole_commitment(mut commitment: LedgerCommitment) -> Option<LedgerCommitment> {
+    if trails_off(&commitment.what) {
+        if trails_off(&commitment.receipt.quote) {
+            return None;
+        }
+        commitment.what.clone_from(&commitment.receipt.quote);
+    }
+    Some(commitment)
 }
 
 /// A receipt's timestamp is measured, not stated: it comes from the segment the
@@ -8254,6 +8323,50 @@ pub(crate) mod tests {
         assert!(validate_summary_lines(&[], &evidence).is_err());
         assert!(validate_summary_lines(&[uncited], &evidence).is_err());
         assert!(validate_summary_lines(&too_many, &evidence).is_err());
+    }
+
+    /// A line that pastes in a stretch of the transcript, or a field of the
+    /// reply spilled as text, is no summary line: the rest of the summary
+    /// stands without it, and a summary of nothing else is refused.
+    #[test]
+    fn pasted_transcript_and_spilled_fields_leave_the_summary() {
+        let (segment_ids, mut evidence) = summary_evidence(3);
+        let said = [
+            "The public launch of the harbour map moves to March 14 instead of March 1.",
+            "Agreed, I will send the revised timeline to the city council by Friday.",
+            "One more change, the public launch of the harbour map moves again, to March 21, because the council meets late.",
+        ];
+        for (line, text) in evidence.iter_mut().zip(said) {
+            line.text = text.to_string();
+        }
+        let cited = |text: &str, lines: &[usize]| RawCitedText {
+            text: text.to_string(),
+            citations: lines
+                .iter()
+                .map(|&line| segment_ids[line].uuid().to_string())
+                .collect(),
+        };
+        let pasted = || cited(&format!("{} {}", said[0], said[1]), &[0, 1]);
+        let spilled = || cited("Outline: [Launch date changes, revised timeline]", &[0]);
+        let lines = vec![
+            pasted(),
+            spilled(),
+            cited(said[2], &[2]),
+            cited("The revised timeline goes to the city council by Friday.", &[1]),
+        ];
+
+        let (summary, trace) = validate_summary_lines(&lines, &evidence).expect("traced summary");
+
+        assert_eq!(
+            summary.text,
+            format!("{}\nThe revised timeline goes to the city council by Friday.", said[2])
+        );
+        let anchors: Vec<(u32, TranscriptSegmentId)> = trace
+            .iter()
+            .map(|entry| (entry.line, entry.anchor.segment_id))
+            .collect();
+        assert_eq!(anchors, [(0, segment_ids[2]), (1, segment_ids[1])]);
+        assert!(validate_summary_lines(&[pasted(), spilled()], &evidence).is_err());
     }
 
     fn live_line(session_id: MeetingSessionId, minute: u64, text: &str) -> MeetingEvidence {
@@ -10996,6 +11109,44 @@ pub(crate) mod tests {
         assert_ne!(
             ledger.threads[0].receipt.citations,
             ledger.threads[1].receipt.citations
+        );
+    }
+
+    /// A commitment named in words cut off mid-phrase goes by the sentence it
+    /// was said in, and one whose sentence was cut off too is not kept: no
+    /// task is filed under a name like "Send the".
+    #[test]
+    fn a_commitment_named_in_cut_off_words_takes_its_sentence_or_drops_out() {
+        let reference = include_str!("fixtures/ledger_evals/messy_two_party.ledger.json");
+        let evidence = ledger_reference_evidence();
+        let mut value: serde_json::Value =
+            first_json_value(reference).expect("realistic model output");
+        let whole = value["commitments"][1].clone();
+        value["commitments"][0]["what"] = serde_json::json!("Write the");
+        value["commitments"][0]["receipt"]["quote"] =
+            serde_json::json!("I'll write the tier comparison table by Friday.");
+        value["commitments"][1]["what"] = serde_json::json!("Model the");
+        value["commitments"][1]["receipt"]["quote"] = serde_json::json!("I'd want to model the");
+        value["commitments"]
+            .as_array_mut()
+            .expect("the reference commitments are a list")
+            .push(whole);
+        let raw: RawLedgerOutput =
+            first_json_value(&value.to_string()).expect("cut-off model output");
+
+        let ledger = validate_ledger_output(&raw, &evidence).expect("the ledger validates");
+
+        let named: Vec<&str> = ledger
+            .commitments
+            .iter()
+            .map(|commitment| commitment.what.as_str())
+            .collect();
+        assert_eq!(
+            named,
+            [
+                "I'll write the tier comparison table by Friday.",
+                "Model the annual discount before the team price is set"
+            ]
         );
     }
 

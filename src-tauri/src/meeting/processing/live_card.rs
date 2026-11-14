@@ -20,6 +20,7 @@ use crate::meeting::live_doc_types::{MeetingLiveChangeKind, MeetingLiveTarget};
 use crate::meeting::spoken_time::{self, SpokenTime};
 use crate::meeting::store::{MeetingStore, StoreError};
 use crate::meeting::types::{MeetingSessionId, SourceKind};
+use crate::meeting::words::trails_off;
 use crate::planning::work::parse::person_named;
 use crate::planning::work::sync::People;
 use crate::planning::work::types::{WorkOwner, WorkPersonChoice};
@@ -567,7 +568,8 @@ fn cue(text: &str, said_at: Option<NaiveDateTime>) -> bool {
 /// One promise the engine named, if the lines it cites bear it out: the
 /// lines were in its request, and the quote and the words that say when are
 /// in them. The owner is the user only when the user's own line is in the
-/// request, and a name only when the lines say it.
+/// request, and a name only when the lines say it. A name cut off mid-phrase
+/// gives way to the quote, and the promise drops out when both are.
 fn checked(
     heard: Heard,
     lines: &[Copied],
@@ -592,9 +594,13 @@ fn checked(
         return None;
     }
     let what = bounded(&heard.what, MAX_WHAT_CHARS)?;
-    if cut_off(&what) || cut_off(&quote) {
+    let what = if !trails_off(&what) {
+        what
+    } else if !trails_off(&quote) {
+        quote.clone()
+    } else {
         return None;
-    }
+    };
     let mut letters = what.chars();
     let what: String = letters
         .next()
@@ -734,22 +740,6 @@ fn bounded(text: &str, max_chars: usize) -> Option<String> {
         .filter(|character| !character.is_control())
         .collect::<String>();
     (!text.is_empty() && text.chars().count() <= max_chars).then_some(text)
-}
-
-/// Words that never end a whole sentence: an article, a possessive or a
-/// word that needs one after it.
-const DANGLING: &[&str] = &[
-    "a", "an", "the", "to", "of", "for", "and", "or", "with", "my", "your", "our", "their", "at",
-    "by", "from", "into",
-];
-
-/// Whether `text` stops where the speech was cut off, on a word that needs
-/// another after it.
-fn cut_off(text: &str) -> bool {
-    text.split_whitespace()
-        .last()
-        .map(|word| word.trim_matches(|character: char| !character.is_alphanumeric()).to_lowercase())
-        .is_some_and(|word| DANGLING.contains(&word.as_str()))
 }
 
 #[cfg(test)]
@@ -922,44 +912,76 @@ mod tests {
         );
     }
 
+    /// A promise named in words cut off mid-phrase goes by the whole sentence
+    /// it was said in, however long, and one whose sentence was cut off too
+    /// is not kept: no task is filed under a name like "Send the". A whole
+    /// promise that ends on "it" or "can", or names a thing by a capital
+    /// letter ("dock A"), is not cut off and keeps its name.
     #[test]
-    fn a_promise_cut_off_mid_sentence_never_reaches_the_card() {
+    fn a_promise_named_in_cut_off_words_takes_its_sentence_or_drops_out() {
         let (_directory, store) = workflow_core_tests::store();
         let session_id = workflow_core_tests::reviewable_meeting(
             &store,
-            "Launch sync",
+            "Harbour sync",
             Local::now().timestamp_millis(),
         );
         let (microphone, _) = workflow_core_tests::recording_tracks(&store, session_id);
         let engine = Arc::new(Scripted(Mutex::new(VecDeque::from([concat!(
             r#"{"promises":["#,
-            r#"{"what":"Send the to the city council","quote":"I will send the","lines":["L1"]},"#,
-            r#"{"what":"Book the","quote":"book the","lines":["L2"]},"#,
-            r#"{"what":"Call the supplier","quote":"call the supplier","lines":["L3"]}"#,
+            r#"{"what":"Send the","quote":"I will send the","lines":["L1"]},"#,
+            r#"{"what":"Call the","quote":"I'll call the supplier tomorrow","lines":["L2"]},"#,
+            r#"{"what":"Book the dock survey","quote":"book the dock survey","lines":["L3"]},"#,
+            r#"{"what":"Look into it","quote":"I'll look into it","lines":["L4"]},"#,
+            r#"{"what":"Send the deck as soon as I can","quote":"I'll send the deck as soon as I can","lines":["L5"]},"#,
+            r#"{"what":"Write the","quote":"I'll write the harbour authority a letter about moving the launch, the dock survey and the crane schedule before the council meets","lines":["L6"]},"#,
+            r#"{"what":"Book the survey of dock A","quote":"I'll book the survey of dock A","lines":["L7"]},"#,
+            r#"{"what":"Move dock A to the north side","quote":"I'll move dock A to the north side","lines":["L8"]}"#,
             r#"]}"#
         )]))));
         let service = MeetingProcessingService::new(None);
         service.set_text_generators(engine.clone(), engine.clone());
         let live = LiveTranscript::new();
-        let said = |second: u64, text: &str| LiveSegment {
-            track_id: microphone,
-            source_kind: SourceKind::Microphone,
-            speaker: MeetingProvisionalSpeaker::Unknown,
-            start_offset_ns: second * 1_000_000_000,
-            end_offset_ns: (second + 5) * 1_000_000_000,
-            text: text.to_string(),
-        };
+        for (second, text) in [
+            (10, "I will send the"),
+            (20, "I'll call the supplier tomorrow."),
+            (30, "Let me book the dock survey."),
+            (40, "I'll look into it."),
+            (50, "I'll send the deck as soon as I can."),
+            (
+                60,
+                "I'll write the harbour authority a letter about moving the launch, the dock survey and the crane schedule before the council meets.",
+            ),
+            (70, "I'll book the survey of dock A."),
+            (80, "I'll move dock A to the north side."),
+        ] {
+            live.append(LiveSegment {
+                track_id: microphone,
+                source_kind: SourceKind::Microphone,
+                speaker: MeetingProvisionalSpeaker::Unknown,
+                start_offset_ns: second * 1_000_000_000,
+                end_offset_ns: (second + 5) * 1_000_000_000,
+                text: text.to_string(),
+            });
+        }
 
-        live.append(said(10, "I will send the"));
-        live.append(said(20, "I'll book the"));
-        live.append(said(30, "I'll call the supplier."));
         tick(&service, &store, session_id, &live, Moment::Pass);
 
-        let titles: Vec<String> = live
+        let named: Vec<String> = live
             .live_promises()
             .into_iter()
             .map(|promise| promise.what)
             .collect();
-        assert_eq!(titles, ["Call the supplier"]);
+        assert_eq!(
+            named,
+            [
+                "I'll call the supplier tomorrow",
+                "Book the dock survey",
+                "Look into it",
+                "Send the deck as soon as I can",
+                "I'll write the harbour authority a letter about moving the launch, the dock survey and the crane schedule before the council meets",
+                "Book the survey of dock A",
+                "Move dock A to the north side"
+            ]
+        );
     }
 }
