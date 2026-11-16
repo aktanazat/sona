@@ -241,6 +241,111 @@ pub fn is_call_app_bundle_id(bundle_id: &str) -> bool {
         .any(|candidate| bundle_id.eq_ignore_ascii_case(candidate))
 }
 
+/// One process CoreAudio lists as running audio input or output, with the
+/// app macOS holds responsible for it. That owner is how Safari's
+/// `com.apple.WebKit.GPU` process, which holds a Meet tab's microphone,
+/// counts as Safari.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AudioProcess {
+    pub bundle_id: Option<String>,
+    pub owner_bundle_id: Option<String>,
+    pub input: bool,
+    pub output: bool,
+}
+
+/// What one app's processes are doing with audio right now. An app CoreAudio
+/// lists nothing for reads as doing neither.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct AppAudio {
+    pub input: bool,
+    pub output: bool,
+}
+
+/// What `bundle_id`'s processes are doing: its own, its helpers', whose
+/// bundle ids extend the app's, and every process it is responsible for.
+pub fn app_audio(processes: &[AudioProcess], bundle_id: &str) -> AppAudio {
+    processes
+        .iter()
+        .filter(|process| {
+            process
+                .bundle_id
+                .as_deref()
+                .is_some_and(|process_bundle_id| is_app_or_helper(process_bundle_id, bundle_id))
+                || process
+                    .owner_bundle_id
+                    .as_deref()
+                    .is_some_and(|owner| owner.eq_ignore_ascii_case(bundle_id))
+        })
+        .fold(AppAudio::default(), |audio, process| AppAudio {
+            input: audio.input || process.input,
+            output: audio.output || process.output,
+        })
+}
+
+/// True when `process_bundle_id` is `bundle_id`'s own or one of its
+/// helpers'. Compared without case: CoreAudio spells an id as its bundle
+/// does, and the allowlist stores ids lowercased.
+fn is_app_or_helper(process_bundle_id: &str, bundle_id: &str) -> bool {
+    process_bundle_id
+        .get(..bundle_id.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(bundle_id))
+        && matches!(
+            process_bundle_id.as_bytes().get(bundle_id.len()),
+            None | Some(b'.')
+        )
+}
+
+/// The app whose processes hold the microphone, among those that may name a
+/// meeting: an allowlisted meeting app or a browser. A dictation app, Krisp
+/// or Voice Memos holding it names nothing. Call apps are left to
+/// `call_signal`: their calls run in `avconferenced`, which no app owns.
+/// Focus only breaks a tie between two holders.
+pub fn mic_holder<'a>(
+    processes: &[AudioProcess],
+    running: &'a [RunningApp],
+    allowlist: &[String],
+) -> Option<&'a RunningApp> {
+    running
+        .iter()
+        .filter(|app| {
+            (is_browser_bundle_id(&app.bundle_id)
+                || (!is_call_app_bundle_id(&app.bundle_id) && in_allowlist(allowlist, app)))
+                && app_audio(processes, &app.bundle_id).input
+        })
+        .min_by_key(|app| !app.frontmost)
+}
+
+/// `app_signal` for when CoreAudio says which processes hold the
+/// microphone. The holder names the meeting whichever app is in front, so a
+/// glance at Slack during a Meet call in Safari is a call in Safari. With no
+/// holder, a meeting app that is open is only present.
+pub fn holder_signal(
+    processes: &[AudioProcess],
+    running: &[RunningApp],
+    allowlist: &[String],
+) -> AppSignal {
+    if let Some(app) = mic_holder(processes, running, allowlist) {
+        if is_browser_bundle_id(&app.bundle_id) {
+            return AppSignal::Browser {
+                bundle_id: app.bundle_id.clone(),
+                display_name: app.display_name.clone(),
+            };
+        }
+        return AppSignal::Known {
+            bundle_id: app.bundle_id.clone(),
+            display_name: app.display_name.clone(),
+            frontmost: app.frontmost,
+        };
+    }
+    running
+        .iter()
+        .find(|app| !is_call_app_bundle_id(&app.bundle_id) && in_allowlist(allowlist, app))
+        .map_or(AppSignal::Absent, |app| AppSignal::Present {
+            bundle_id: app.bundle_id.clone(),
+            display_name: app.display_name.clone(),
+        })
+}
+
 /// The applications a detection capture narrows its system-audio lane to.
 ///
 /// A meeting app renders its own far end, so recording only that app keeps a
@@ -248,13 +353,35 @@ pub fn is_call_app_bundle_id(bundle_id: &str) -> bool {
 /// and Phone hand the call to `avconferenced`, a daemon ScreenCaptureKit never
 /// lists, so narrowing to the app recorded a whole FaceTime call as silence
 /// while the other side's voice reached Sona only through the microphone.
-/// A call records the whole mix instead.
-pub fn system_audio_route(trigger_bundle_id: Option<&str>) -> Vec<String> {
+/// A call records the whole mix instead. So does a browser, whose pages play
+/// from a WebKit or helper process ScreenCaptureKit lists apart from it, and
+/// an app that was not playing when the capture started.
+pub fn system_audio_route(trigger_bundle_id: Option<&str>, trigger_plays: bool) -> Vec<String> {
     trigger_bundle_id
-        .filter(|bundle_id| !is_call_app_bundle_id(bundle_id))
+        .filter(|bundle_id| {
+            trigger_plays && !is_call_app_bundle_id(bundle_id) && !is_browser_bundle_id(bundle_id)
+        })
         .map(str::to_string)
         .into_iter()
         .collect()
+}
+
+/// A meeting's name from its browser tab: "Meet - Engineering Sync" is
+/// "Engineering Sync". A tab Meet titles with its code alone has no name.
+pub fn meeting_tab_title(title: &str, host: Option<&str>) -> Option<String> {
+    if !host.is_some_and(|host| host.eq_ignore_ascii_case("meet.google.com")) {
+        return None;
+    }
+    let name = ["Meet - ", "Meet \u{2013} ", "Meet \u{2014} "]
+        .iter()
+        .find_map(|prefix| title.strip_prefix(prefix))?
+        .trim();
+    let parts = name.split('-').map(str::len).collect::<Vec<_>>();
+    let code = parts == [3, 4, 3]
+        && name
+            .bytes()
+            .all(|byte| byte == b'-' || byte.is_ascii_lowercase());
+    (!name.is_empty() && !code).then(|| name.to_string())
 }
 
 /// Normalizes an operator-edited auto-record list, and drops every entry the
@@ -827,18 +954,83 @@ mod tests {
     #[test]
     fn a_call_records_the_whole_mix_and_a_meeting_app_only_itself() {
         assert_eq!(
-            system_audio_route(Some("com.apple.facetime")),
+            system_audio_route(Some("com.apple.facetime"), true),
             Vec::<String>::new()
         );
         assert_eq!(
-            system_audio_route(Some("com.apple.mobilephone")),
+            system_audio_route(Some("com.apple.mobilephone"), true),
             Vec::<String>::new()
         );
         assert_eq!(
-            system_audio_route(Some("us.zoom.xos")),
+            system_audio_route(Some("us.zoom.xos"), true),
             vec!["us.zoom.xos".to_string()]
         );
-        assert_eq!(system_audio_route(None), Vec::<String>::new());
+        assert_eq!(
+            system_audio_route(Some("us.zoom.xos"), false),
+            Vec::<String>::new(),
+            "an app playing nothing would record silence"
+        );
+        assert_eq!(
+            system_audio_route(Some("com.apple.safari"), true),
+            Vec::<String>::new(),
+            "a browser's pages play from processes listed apart from it"
+        );
+        assert_eq!(system_audio_route(None, false), Vec::<String>::new());
+    }
+
+    /* A browser call plays from a helper whose bundle id extends the
+     * browser's, spelled as its bundle spells it while the allowlist is
+     * lowercase, or from a process the browser is responsible for. An id
+     * that only starts with the same letters is another app, and counting
+     * its microphone as the meeting's would keep alive a meeting that
+     * ended. */
+    #[test]
+    fn an_app_owns_its_helpers_and_the_processes_it_is_responsible_for() {
+        let process = |bundle_id: &str, owner: Option<&str>| AudioProcess {
+            bundle_id: Some(bundle_id.to_string()),
+            owner_bundle_id: owner.map(str::to_string),
+            input: true,
+            output: false,
+        };
+        let holds = |process: AudioProcess, bundle_id: &str| app_audio(&[process], bundle_id).input;
+
+        assert!(holds(process("us.zoom.xos", None), "us.zoom.xos"));
+        assert!(holds(
+            process("com.google.Chrome.helper", None),
+            "com.google.chrome"
+        ));
+        assert!(holds(
+            process("com.apple.WebKit.GPU", Some("com.apple.Safari")),
+            "com.apple.safari"
+        ));
+        assert!(!holds(
+            process("com.google.chromex", None),
+            "com.google.chrome"
+        ));
+        assert!(!holds(
+            process("com.apple.WebKit.GPU", None),
+            "com.apple.safari"
+        ));
+        assert!(!holds(process("com.google", None), "com.google.chrome"));
+    }
+
+    #[test]
+    fn a_meet_tab_names_its_meeting_and_a_code_names_nothing() {
+        let meet = Some("meet.google.com");
+        assert_eq!(
+            meeting_tab_title("Meet - Engineering Sync", meet).as_deref(),
+            Some("Engineering Sync")
+        );
+        assert_eq!(
+            meeting_tab_title("Meet \u{2013} Engineering Sync", meet).as_deref(),
+            Some("Engineering Sync")
+        );
+        assert_eq!(meeting_tab_title("Meet - zns-vikp-iuc", meet), None);
+        assert_eq!(meeting_tab_title("Google Meet", meet), None);
+        assert_eq!(
+            meeting_tab_title("Meet - Engineering Sync", Some("example.com")),
+            None
+        );
     }
 
     #[test]

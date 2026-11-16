@@ -1046,6 +1046,19 @@ where
     }
 }
 
+/// A log file in the portable profile's `logs` folder, or the app's log
+/// directory.
+fn log_file(file_name: &str) -> TargetKind {
+    let file_name = Some(file_name.to_string());
+    match portable::data_dir() {
+        Some(data_dir) => TargetKind::Folder {
+            path: data_dir.join("logs"),
+            file_name,
+        },
+        None => TargetKind::LogDir { file_name },
+    }
+}
+
 fn is_headless_mode(args: &CliArgs) -> bool {
     args.transcribe_file.is_some()
         || args.list_devices
@@ -2227,48 +2240,53 @@ pub fn run(cli_args: CliArgs) {
                 .max_file_size(500_000)
                 .rotation_strategy(RotationStrategy::KeepOne)
                 .clear_targets()
-                .targets([
-                    // CLI stdout carries only its result. The native core is
-                    // a child process and sends diagnostics to stderr too.
-                    Target::new(TargetKind::Stderr).filter({
-                        let console_filter = console_filter.clone();
-                        move |metadata| console_filter.enabled(metadata)
-                    }),
-                    // File logs respect the user's settings (stored in FILE_LOG_LEVEL atomic).
-                    //
-                    // Headless invocations get their own file, and that is not tidiness.
-                    // Sharing one path with the running app is a data-loss bug: the app
-                    // holds its fd open for a whole session while a CLI process lives a
-                    // couple of hundred milliseconds, so when a CLI write crosses
-                    // `max_file_size` the rotation replaces the *directory entry* and the
-                    // app's fd keeps pointing at the old inode. From that moment the app
-                    // appends to an unlinked file whose bytes are freed when it exits, and
-                    // nothing will ever rotate it again. Measured on a real install: the
-                    // app's fd held 526431 bytes — past the 500_000 cap — while the path
-                    // resolved to a different inode and `find -inum` found no entry for
-                    // the one being written. So any user who ever runs the CLI silently
-                    // detaches their app's logging, and every diagnostic they send after
-                    // that is empty. One writer per file is what prevents it; it also
-                    // stops CLI traffic evicting the app's own history.
-                    Target::new({
-                        let file_name =
-                            Some(if headless_mode { "sona-cli" } else { "sona" }.to_string());
-                        if let Some(data_dir) = portable::data_dir() {
-                            TargetKind::Folder {
-                                path: data_dir.join("logs"),
-                                file_name,
-                            }
-                        } else {
-                            TargetKind::LogDir { file_name }
-                        }
-                    })
-                    .filter(|metadata| {
-                        metadata.target() == "sona::launch" || {
-                            let file_level = FILE_LOG_LEVEL.load(Ordering::Relaxed);
-                            metadata.level() <= level_filter_from_u8(file_level)
-                        }
-                    }),
-                ])
+                .targets(
+                    [
+                        // CLI stdout carries only its result. The native core is
+                        // a child process and sends diagnostics to stderr too.
+                        Target::new(TargetKind::Stderr).filter({
+                            let console_filter = console_filter.clone();
+                            move |metadata| console_filter.enabled(metadata)
+                        }),
+                        // File logs respect the user's settings (stored in FILE_LOG_LEVEL atomic).
+                        //
+                        // Headless invocations get their own file, and that is not tidiness.
+                        // Sharing one path with the running app is a data-loss bug: the app
+                        // holds its fd open for a whole session while a CLI process lives a
+                        // couple of hundred milliseconds, so when a CLI write crosses
+                        // `max_file_size` the rotation replaces the *directory entry* and the
+                        // app's fd keeps pointing at the old inode. From that moment the app
+                        // appends to an unlinked file whose bytes are freed when it exits, and
+                        // nothing will ever rotate it again. Measured on a real install: the
+                        // app's fd held 526431 bytes — past the 500_000 cap — while the path
+                        // resolved to a different inode and `find -inum` found no entry for
+                        // the one being written. So any user who ever runs the CLI silently
+                        // detaches their app's logging, and every diagnostic they send after
+                        // that is empty. One writer per file is what prevents it; it also
+                        // stops CLI traffic evicting the app's own history.
+                        Target::new(log_file(if headless_mode { "sona-cli" } else { "sona" }))
+                            .filter(|metadata| {
+                                metadata.target() == "sona::launch" || {
+                                    let file_level = FILE_LOG_LEVEL.load(Ordering::Relaxed);
+                                    metadata.level() <= level_filter_from_u8(file_level)
+                                }
+                            }),
+                    ]
+                    .into_iter()
+                    // Detection's decisions get a file of their own. The main log
+                    // rolled over within minutes while a meeting was transcribed,
+                    // and these lines are what explain a recording that stopped,
+                    // or did not, the day before. The CLI never runs detection,
+                    // so it opens no such file.
+                    .chain((!headless_mode).then(|| {
+                        Target::new(log_file("sona-detection")).filter(|metadata| {
+                            metadata
+                                .target()
+                                .starts_with("sona_app_lib::meeting::detection")
+                                && metadata.level() <= log::Level::Info
+                        })
+                    })),
+                )
                 .build(),
         );
 

@@ -366,6 +366,36 @@ pub(crate) fn front_window(keep_full_url: bool) -> FrontWindowRead {
     application_window(pid, app_name, bundle_id, keep_full_url)
 }
 
+/// Reads the focused window of the running app `bundle_id`, in front or
+/// not, under `front_window`'s rules and never with the page's full address.
+pub(crate) fn app_window(bundle_id: &str) -> FrontWindowRead {
+    if accessibility_access() != AccessibilityAccess::Granted {
+        return FrontWindowRead::AccessibilityDenied;
+    }
+    let app = objc2::rc::autoreleasepool(|_| {
+        NSWorkspace::sharedWorkspace()
+            .runningApplications()
+            .iter()
+            .find_map(|application| {
+                let identifier = application.bundleIdentifier()?.to_string();
+                identifier.eq_ignore_ascii_case(bundle_id).then(|| {
+                    (
+                        application.processIdentifier(),
+                        application.localizedName().map(|name| name.to_string()),
+                        Some(identifier),
+                    )
+                })
+            })
+    });
+    let Some((pid, app_name, bundle_id)) = app else {
+        return FrontWindowRead::Nothing;
+    };
+    if is_sona_process(pid) {
+        return FrontWindowRead::Nothing;
+    }
+    application_window(pid, app_name, bundle_id, false)
+}
+
 /// The core runs as a helper of the native shell, so the shell's windows
 /// belong to its parent process.
 fn is_sona_process(pid: libc::pid_t) -> bool {

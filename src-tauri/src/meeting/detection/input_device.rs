@@ -30,15 +30,17 @@
 //! call from music, so `machine::call_is_live` — not this module — decides what
 //! the level means.
 //!
-//! A capture a meeting app started reads that app's own processes instead,
-//! through `app_output_signal`. That reading is per process, so sound from
-//! anything else on the Mac cannot keep the meeting alive, and an app no
-//! process is attributed to reads as nothing rather than as quiet.
+//! Which app holds the microphone, and whether a meeting app or browser is
+//! still using it, comes from `InputDeviceState::audio_processes`: CoreAudio's
+//! per-process list, read on each tick rather than listened to. It names the
+//! processes, so another app's sound cannot keep a meeting alive and a
+//! glance at another app cannot rename one.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use super::apps::AudioProcess;
 use super::machine::{MicSignal, OutputSignal};
 
 /// The observed level of the devices detection watches, shared between whatever
@@ -92,6 +94,16 @@ impl InputDeviceState for InputDeviceLevel {
             OutputSignal::Idle
         }
     }
+
+    #[cfg(target_os = "macos")]
+    fn audio_processes(&self) -> Option<Vec<AudioProcess>> {
+        crate::audio_toolkit::audio::core_audio::audio_processes()
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn audio_processes(&self) -> Option<Vec<AudioProcess>> {
+        None
+    }
 }
 
 /// Notified on every observed transition of the default input device.
@@ -110,6 +122,10 @@ pub trait InputDeviceObserver: Send + Sync {
 pub trait InputDeviceState: Send + Sync {
     fn mic_signal(&self) -> MicSignal;
     fn output_signal(&self) -> OutputSignal;
+    /// Every process outside Sona running audio input or output, with the
+    /// app responsible for it. `None` when the platform cannot list them,
+    /// which is not the same as nobody holding the microphone.
+    fn audio_processes(&self) -> Option<Vec<AudioProcess>>;
 }
 
 /// Reports the device as permanently idle. Used on non-macOS targets, where
@@ -124,25 +140,10 @@ impl InputDeviceState for UnavailableInputDevice {
     fn output_signal(&self) -> OutputSignal {
         OutputSignal::Idle
     }
-}
 
-/// What `bundle_id`'s own processes play, its helpers included, or `None`
-/// when CoreAudio attributes no process to the app. Read on each tick rather
-/// than listened to.
-#[cfg(target_os = "macos")]
-pub fn app_output_signal(bundle_id: &str) -> Option<OutputSignal> {
-    crate::audio_toolkit::audio::core_audio::app_is_playing(bundle_id).map(|playing| {
-        if playing {
-            OutputSignal::Active
-        } else {
-            OutputSignal::Idle
-        }
-    })
-}
-
-#[cfg(not(target_os = "macos"))]
-pub fn app_output_signal(_bundle_id: &str) -> Option<OutputSignal> {
-    None
+    fn audio_processes(&self) -> Option<Vec<AudioProcess>> {
+        None
+    }
 }
 
 #[cfg(target_os = "macos")]

@@ -183,7 +183,10 @@ pub async fn meeting_start(
     detection: State<'_, Arc<DetectionRuntime>>,
     request: MeetingStartRequest,
 ) -> Result<MeetingMutationResult, MeetingCommandError> {
-    let result = manager.start(request).await;
+    let composer_app = detection
+        .gate_app(request.session_id)
+        .unwrap_or_else(crate::meeting::session::frontmost_composer_app);
+    let result = manager.start(request, composer_app).await;
     if let Ok(started) = &result {
         if started.snapshot.phase == MeetingPhase::CapturingRecording {
             // The active capture already suppresses new detection offers. A

@@ -1006,11 +1006,11 @@ Owner: session.rs 524-543, acquired at 1726, held inside `CaptureHold` (552) fro
 - The park (M5) and the lease drop together with the hold, park first (550-552), so the two cannot disagree while a capture is live.
 
 #### M7. Detection tracking
-Owner: `meeting/detection.rs` and `detection/machine.rs` (unchanged).
+Owner: `meeting/detection.rs` and `detection/machine.rs`.
 
 **States:**
 - Untracked
-- Tracked(Detection{session, trigger_bundle_id, event_end, sources}); a detection-opened gate is tracked while Preflight or Starting
+- Tracked(Detection{session, trigger, event_end, sources, call_output, holder}); a detection-opened gate is tracked while Preflight or Starting. `trigger` is the meeting app, browser or call app the capture is about, decided once in `detection_start_context`: the app the prompt named, or for a calendar or unknown-source prompt the allowlisted meeting app or browser whose processes hold the microphone. A dictation app never names one.
 - Tracked(Operator(Waiting))
 - Tracked(Operator(Adopted{bundle}))
 - RuntimeState also holds `slept` (`begin_tracked` 742-746 and `end_tracked` 751-756 reset it; a paused phase clears it, 816-818)
@@ -1025,15 +1025,16 @@ Owner: `meeting/detection.rs` and `detection/machine.rs` (unchanged).
 | Detection gate (same session) | Start from the gate | Detection over the started lanes, trigger app and event end kept (only when detection is enabled) | 2470-2476; 763-786 |
 | other or Untracked | Start from the gate | Operator(Waiting) (only when detection is enabled) | 763-786 (777) |
 | Waiting | a call becomes active | Adopted (no event end; mic lane false) | 616-636 |
+| Detection with no trigger | tick: the same allowlisted meeting app or browser has held the microphone for 60 s (`ADOPTION_HOLD_MS`; a voice clip is not a call) | Detection attributed to it, its holder watch armed; the title is set from it while the meeting still has the default title. The system-audio route stays as frozen at preflight | `adopt_holder` |
 | Tracked | tick while Pausing, Paused or Resuming | `slept` cleared; the other stop rules still apply | 816-818 |
 | Tracked | tick: tray session gone, another session, or a non-capture phase | Untracked; `track_ended` hides the panel (Detection) and finishes the recording card | 826, 2627-2656; 2507-2513, 2532-2547 |
 | Tracked | tick: a stop trigger fires | spawn `stop(expected_revision)`. Committed → `track_stopped` ends tracking, then "auto-record stopped" is recorded. Rejected or Failed → stays tracked, nothing recorded; the next tick decides again | 2688-2714; 793-802, 2517-2528 |
 | Tracked | recording card Stop or Forget | Committed → Untracked; refused → stays tracked, card stays | 2352-2402 (2396) |
 | Tracked | operator `meeting_stop` Committed | Untracked | commands/meeting.rs (unchanged) |
 
-**Stop rules, in order** (machine.rs 954-985, unchanged): SleepBoundary, EventEnd (no grace), TriggerAppExited, CallEnded (hang-up grace), InputDeviceIdle. A paused phase clears `slept` first, so SleepBoundary only fires for a sleep while recording.
+**Stop rules, in order** (machine.rs `evaluate_stop`): SleepBoundary, EventEnd (no grace), TriggerAppExited (the attributed app quit), CallEnded (a call app's default output idle for the hang-up grace), HolderReleased (the attributed meeting app's processes ran neither input nor output for the grace; a browser's input alone, since its output is shared by every tab and outlasts a call by about a minute), InputDeviceIdle. No other app quitting, relaunching or taking focus touches a capture. A paused phase clears `slept` first, so SleepBoundary only fires for a sleep while recording.
 
-The tick is every 15 s, or sooner on an input-device edge. It reads the tray session (1279-1282): capture phases count as live, and a detection gate in Preflight or Starting stays tracked.
+The tick is every 15 s, or sooner on an input-device edge, at a countdown's end, or when a released holder's grace ends, so a stop lands at most grace + one tick + countdown (55 s) after the holder lets go. It reads the tray session (1279-1282): capture phases count as live, and a detection gate in Preflight or Starting stays tracked.
 
 #### M10. Screen recorder core (recorder.rs, screen_recorder.swift)
 

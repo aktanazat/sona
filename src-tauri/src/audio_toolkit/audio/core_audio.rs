@@ -1,14 +1,15 @@
 //! CoreAudio property reads, shared by the recorder and meeting detection.
 
+use crate::meeting::detection::apps::AudioProcess;
 use objc2_core_audio::{
     kAudioDevicePropertyDeviceIsRunningSomewhere, kAudioDevicePropertyTransportType,
     kAudioDeviceTransportTypeBluetooth, kAudioDeviceTransportTypeBluetoothLE,
     kAudioHardwarePropertyDefaultOutputDevice, kAudioHardwarePropertyDevices,
     kAudioHardwarePropertyProcessObjectList, kAudioObjectPropertyElementMain,
     kAudioObjectPropertyName, kAudioObjectPropertyScopeGlobal, kAudioObjectSystemObject,
-    kAudioProcessPropertyBundleID, kAudioProcessPropertyIsRunningOutput, kAudioProcessPropertyPID,
-    AudioObjectGetPropertyData, AudioObjectGetPropertyDataSize, AudioObjectID,
-    AudioObjectPropertyAddress,
+    kAudioProcessPropertyBundleID, kAudioProcessPropertyIsRunningInput,
+    kAudioProcessPropertyIsRunningOutput, kAudioProcessPropertyPID, AudioObjectGetPropertyData,
+    AudioObjectGetPropertyDataSize, AudioObjectID, AudioObjectPropertyAddress,
 };
 use objc2_core_foundation::{CFRetained, CFString};
 use std::ptr::NonNull;
@@ -243,39 +244,64 @@ pub(crate) fn other_process_is_playing() -> Option<bool> {
     read_u32(device, kAudioDevicePropertyDeviceIsRunningSomewhere).map(|running| running != 0)
 }
 
-/// Whether the app `bundle_id` names is playing sound through its own
-/// processes, including the helpers a browser or an Electron app plays from,
-/// whose bundle ids extend the app's. `None` when CoreAudio refuses the
-/// per-process list, as releases before macOS 14.2 do, or lists no process
-/// of the app.
-pub(crate) fn app_is_playing(bundle_id: &str) -> Option<bool> {
+/// Every process outside Sona that is running audio input or output, with
+/// the app macOS holds responsible for it. `None` when CoreAudio refuses the
+/// per-process list, as releases before macOS 14.2 do.
+///
+/// The core and its verified native shell are left out, as in
+/// `other_process_is_playing`. A process doing neither says nothing about
+/// who is in a call, so it is left out too.
+pub(crate) fn audio_processes() -> Option<Vec<AudioProcess>> {
     let system = u32::try_from(kAudioObjectSystemObject).ok()?;
-    let mut listed = false;
-    let mut playing = false;
-    for process in object_list(system, kAudioHardwarePropertyProcessObjectList)? {
-        let owned = read_string(process, kAudioProcessPropertyBundleID)
-            .is_some_and(|process_bundle_id| is_app_or_helper(&process_bundle_id, bundle_id));
-        if !owned {
-            continue;
-        }
-        listed = true;
-        playing |= read_u32(process, kAudioProcessPropertyIsRunningOutput)
-            .is_some_and(|running| running != 0);
-    }
-    listed.then_some(playing)
+    let processes = object_list(system, kAudioHardwarePropertyProcessObjectList)?;
+    let own_pid = std::process::id();
+    let shell_pid = crate::native_bridge::native_shell_pid();
+    Some(
+        processes
+            .into_iter()
+            .filter_map(|process| {
+                let running =
+                    |selector| read_u32(process, selector).is_some_and(|value| value != 0);
+                let input = running(kAudioProcessPropertyIsRunningInput);
+                let output = running(kAudioProcessPropertyIsRunningOutput);
+                let pid = read_u32(process, kAudioProcessPropertyPID);
+                let sona = pid.is_some_and(|pid| pid == own_pid || Some(pid) == shell_pid);
+                if sona || !(input || output) {
+                    return None;
+                }
+                Some(AudioProcess {
+                    bundle_id: read_string(process, kAudioProcessPropertyBundleID),
+                    owner_bundle_id: pid.and_then(responsible_bundle_id),
+                    input,
+                    output,
+                })
+            })
+            .collect(),
+    )
 }
 
-/// True when `process_bundle_id` is `bundle_id`'s own or one of its
-/// helpers'. Compared without case: CoreAudio spells an id as its bundle
-/// does, and the allowlist stores ids lowercased.
-fn is_app_or_helper(process_bundle_id: &str, bundle_id: &str) -> bool {
-    process_bundle_id
-        .get(..bundle_id.len())
-        .is_some_and(|head| head.eq_ignore_ascii_case(bundle_id))
-        && matches!(
-            process_bundle_id.as_bytes().get(bundle_id.len()),
-            None | Some(b'.')
-        )
+extern "C" {
+    /// Private libSystem call with no public equivalent: the process macOS
+    /// holds responsible for `pid`. For an XPC helper such as
+    /// `com.apple.WebKit.GPU`, which records and plays for Safari's pages,
+    /// that is the app that launched it.
+    fn responsibility_get_pid_responsible_for_pid(pid: libc::pid_t) -> libc::pid_t;
+}
+
+/// The bundle id of the app responsible for `pid`, given as the bit pattern
+/// CoreAudio stores a `pid_t` in.
+fn responsible_bundle_id(pid: u32) -> Option<String> {
+    let pid = libc::pid_t::from_ne_bytes(pid.to_ne_bytes());
+    // SAFETY: takes a plain process id and returns one, or a negative value.
+    let owner = unsafe { responsibility_get_pid_responsible_for_pid(pid) };
+    if owner <= 0 {
+        return None;
+    }
+    objc2::rc::autoreleasepool(|_| {
+        objc2_app_kit::NSRunningApplication::runningApplicationWithProcessIdentifier(owner)?
+            .bundleIdentifier()
+            .map(|bundle_id| bundle_id.to_string())
+    })
 }
 
 /// Every device CoreAudio lists, or `None` when it refuses the query.
@@ -351,29 +377,4 @@ fn read_string(object_id: AudioObjectID, selector: u32) -> Option<String> {
     // SAFETY: `string` is that owned reference; `CFRetained` releases it on drop.
     let string = unsafe { CFRetained::from_raw(NonNull::new(string.cast_mut())?) };
     Some(string.to_string())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::is_app_or_helper;
-
-    /* A browser call plays from a helper whose bundle id extends the
-     * browser's, spelled as its bundle spells it while the allowlist is
-     * lowercase. An id that only starts with the same letters is another
-     * app, and counting its sound as the meeting's would keep alive a
-     * meeting that ended. */
-    #[test]
-    fn an_app_owns_its_helpers_and_nothing_that_only_shares_its_prefix() {
-        assert!(is_app_or_helper("us.zoom.xos", "us.zoom.xos"));
-        assert!(is_app_or_helper(
-            "com.google.Chrome.helper",
-            "com.google.chrome"
-        ));
-        assert!(!is_app_or_helper("com.google.chromex", "com.google.chrome"));
-        assert!(!is_app_or_helper(
-            "com.apple.WebKit.GPU",
-            "com.apple.safari"
-        ));
-        assert!(!is_app_or_helper("com.google", "com.google.chrome"));
-    }
 }

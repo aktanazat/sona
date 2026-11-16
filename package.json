@@ -25,6 +25,7 @@
     "check:library": "bash scripts/check-library.sh",
     "check:recorder": "bash scripts/check-recorder.sh",
     "check:theme": "bash scripts/check-theme.sh",
+    "check:meeting-live": "bash scripts/check-meeting-live.sh",
     "check:identity": "bun scripts/ci/check-identity.ts"
   },
   "dependencies": {
