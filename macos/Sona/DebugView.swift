@@ -67,7 +67,7 @@ struct DebugView: View {
                 Card {
                     ToggleRow(
                         title: "Debug mode",
-                        detail: "Keeps this page in Settings and raises what the core logs. ⌘⇧D toggles it.",
+                        detail: "Keeps this page in Settings and raises what the core logs.",
                         isOn: Binding(
                             get: { store.debugMode },
                             set: { store.setDebugMode($0) }
