@@ -1082,7 +1082,13 @@ fn meeting_result(
             .live_doc_points(session_id)
             .map_err(store_refusal)?
             .into_iter()
-            .map(|point| json!(point.text))
+            .map(|point| {
+                if point.done {
+                    json!(format!("{} (done)", point.text))
+                } else {
+                    json!(point.text)
+                }
+            })
             .collect(),
     );
     value.insert(
@@ -2237,6 +2243,9 @@ mod tests {
                     id: "p1".to_string(),
                     text: "Beta ships Monday".to_string(),
                     edited: true,
+                    spoken: false,
+                    done: false,
+                    section: None,
                     start_offset_ns: None,
                 }],
             )

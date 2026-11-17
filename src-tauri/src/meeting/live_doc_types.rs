@@ -76,6 +76,16 @@ pub struct MeetingLiveDocPoint {
     pub text: String,
     /// Written or changed by the user. Later readings leave it alone.
     pub edited: bool,
+    /// Written by what the user said to Sona rather than typed, so a later
+    /// spoken ask may still change its words. A hand edit clears it.
+    #[serde(default)]
+    pub spoken: bool,
+    /// Checked off.
+    #[serde(default)]
+    pub done: bool,
+    /// The heading it sits under once the doc is grouped; `None` before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub section: Option<String>,
     /// When it was first said, from the start of the meeting. `None` for a
     /// point the user wrote.
     pub start_offset_ns: Option<u64>,
@@ -90,6 +100,9 @@ pub struct MeetingVoiceAsk {
     /// The words after "Sona", as heard.
     pub words: String,
     pub start_offset_ns: u64,
+    /// What a spoken edit did; `None` for any other ask, and for an edit
+    /// not made yet.
+    pub outcome: Option<MeetingVoiceOutcome>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Type)]
@@ -101,6 +114,26 @@ pub enum MeetingVoiceIntent {
     Board,
     /// "Sona, give me a recap."
     Recap,
+    /// "Sona, add coffee", "check off bread", "group it by aisle": a change
+    /// to the doc, made in place.
+    Edit,
     /// Any other question about the call.
     Ask,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum MeetingVoiceOutcome {
+    Done,
+    /// The ask would have changed or removed words someone typed, which
+    /// stay as they were; anything else it asked was made.
+    KeptTyped,
+    /// The doc already was as asked, or nothing in it matched.
+    Unchanged,
+    /// Some of what was asked was made, and a request for the rest got no
+    /// usable answer.
+    Partial,
+    /// The model could not be reached or gave no usable answer, or the call
+    /// stopped first.
+    Failed,
 }

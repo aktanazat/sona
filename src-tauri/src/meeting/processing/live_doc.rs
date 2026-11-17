@@ -9,6 +9,10 @@
 //! A line on the user's own microphone that opens with "Sona" is an ask,
 //! not part of the meeting: it is never read into the doc. People on the
 //! far end of a call are on the call audio, so they cannot ask.
+//!
+//! An ask that changes the doc, "Sona, add coffee" or "Sona, check off the
+//! bread", is made in place by [`spoken`], which also keeps what it did so
+//! the screen can confirm it in a word.
 
 use super::live_changes::{self, Author};
 use super::{
@@ -24,7 +28,7 @@ use crate::meeting::store::MeetingStore;
 use crate::meeting::types::{MeetingSessionId, SourceKind};
 use schemars::{schema::RootSchema, JsonSchema};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{LazyLock, MutexGuard};
 use std::time::Duration;
 use uuid::Uuid;
@@ -60,6 +64,23 @@ const COMMANDS: &[&str] = &[
     "give", "tell", "find", "look", "search", "pull", "what", "who", "when", "where", "why",
     "how", "which",
 ];
+/// Words that may come before the verb of a spoken edit after a pause:
+/// "Sona, now separate this by aisle". Without a pause only "can you" and
+/// its kin, or "please", may: "And Sona can just drop the old items" is
+/// talk about Sona.
+const EDIT_LEADS: &[&str] = &["please", "now", "also", "then", "and", "just", "actually", "let's", "lets"];
+/// Verbs that open a change to the doc.
+const EDIT_VERBS: &[&str] = &[
+    "add", "remove", "delete", "drop", "rename", "change", "replace", "reword", "group", "sort",
+    "split", "separate", "organize", "organise", "uncheck", "untick",
+];
+/// Words that make an ask a question even with an edit verb in it: "Sona,
+/// can you sort out who owns the pricing page?"
+const QUESTION_WORDS: &[&str] = &["who", "what", "when", "where", "why", "how", "which", "whether"];
+/// Verbs that change the doc only with "off" after them: "check off the
+/// bread", "cross the eggs off". "Sona, check whether Dana sent it" is a
+/// question.
+const OFF_VERBS: &[&str] = &["check", "tick", "cross"];
 static RESPONSE_SCHEMA: LazyLock<RootSchema> = LazyLock::new(json_response_schema::<Reply>);
 static CHECK_SCHEMA: LazyLock<RootSchema> = LazyLock::new(json_response_schema::<Verdicts>);
 
@@ -77,6 +98,14 @@ pub(super) struct Doc {
     asks: Vec<MeetingVoiceAsk>,
     /// A reading is under way, so another would read the same lines.
     reading: bool,
+    /// Spoken edits not made yet, by ask sequence, oldest first.
+    edits: VecDeque<u32>,
+    /// Someone is making the spoken edits, so the next ones wait their
+    /// turn in `edits` rather than land out of order.
+    editing: bool,
+    /// The call is stopping: the meeting's page takes the doc over, so no
+    /// spoken edit lands any more.
+    stopping: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -310,6 +339,7 @@ pub(crate) fn edit(
             }
             points[at].text.clone_from(&text);
             points[at].edited = true;
+            points[at].spoken = false;
             Ok(Edited {
                 point_id: points[at].id.clone(),
                 kind: MeetingLiveChangeKind::Edited,
@@ -324,6 +354,9 @@ pub(crate) fn edit(
                 id: id.clone(),
                 text: text.clone(),
                 edited: true,
+                spoken: false,
+                done: false,
+                section: None,
                 start_offset_ns: None,
             });
             Ok(Edited {
@@ -366,21 +399,31 @@ fn claim(live: &LiveTranscript) -> bool {
     !std::mem::replace(&mut doc.reading, true)
 }
 
+/// What the asks in the newest lines call for.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct Heard {
+    /// An ask started the doc and claimed its reading; the caller runs
+    /// [`MeetingProcessingService::read_live_doc_now`].
+    pub(crate) started: bool,
+    /// Spoken edits wait and this look claimed the making of them; the
+    /// caller runs [`MeetingProcessingService::edit_live_doc_by_voice`].
+    pub(crate) edits: bool,
+}
+
 /// Hear the asks in the lines the pass just added and tell the screens at
-/// once, before any reading. Returns whether an ask started the doc; the
-/// caller then runs [`MeetingProcessingService::read_live_doc_now`], off
-/// the pass so the next asks are heard while it reads.
+/// once, before any reading. The caller runs what [`Heard`] names off the
+/// pass, so the next asks are heard while it reads and edits.
 pub(crate) fn hear(
     service: &MeetingProcessingService,
     store: &MeetingStore,
     session_id: MeetingSessionId,
     live: &LiveTranscript,
-) -> bool {
-    let (heard, started) = hear_asks(live);
-    if heard {
+) -> Heard {
+    let mut heard = Heard::default();
+    if hear_asks(live, &mut heard) {
         service.emit_current(store, "meeting:live-doc-changed", session_id);
     }
-    started
+    heard
 }
 
 /// Read new lines into the doc when it is started, no other reading runs
@@ -478,10 +521,17 @@ pub(super) fn hang_up(
     session_id: MeetingSessionId,
     live: &LiveTranscript,
 ) {
-    if !live.doc().started {
-        return;
+    {
+        let mut doc = live.doc();
+        if !doc.started {
+            return;
+        }
+        doc.stopping = true;
     }
     while !claim(live) {
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    while live.doc().editing {
         std::thread::sleep(Duration::from_millis(250));
     }
     let before: HashSet<String> = live.doc_points().into_iter().map(|point| point.id).collect();
@@ -535,16 +585,16 @@ fn after_stop(
 }
 
 /// The asks in lines the pass added since the last look. An ask to start
-/// the doc starts it and claims its reading. Returns whether any ask was
-/// heard and whether one started the doc.
-fn hear_asks(live: &LiveTranscript) -> (bool, bool) {
+/// the doc starts it and claims its reading, and so does an edit to a doc
+/// not started yet; an edit also waits to be made, and the first one with
+/// nobody making them claims that. Returns whether any ask was heard.
+fn hear_asks(live: &LiveTranscript, claimed: &mut Heard) -> bool {
     let segments = live
         .segments
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut doc = live.doc();
     let mut heard = false;
-    let mut started = false;
     for segment in &segments[doc.heard.min(segments.len())..] {
         if segment.source_kind != SourceKind::Microphone {
             continue;
@@ -552,20 +602,25 @@ fn hear_asks(live: &LiveTranscript) -> (bool, bool) {
         let Some((intent, words)) = voice_ask(&segment.text) else {
             continue;
         };
-        if intent == MeetingVoiceIntent::StartDoc {
-            started |= start(&mut doc);
+        if matches!(intent, MeetingVoiceIntent::StartDoc | MeetingVoiceIntent::Edit) {
+            claimed.started |= start(&mut doc);
         }
         let sequence = u32::try_from(doc.asks.len() + 1).unwrap_or(u32::MAX);
+        if intent == MeetingVoiceIntent::Edit {
+            doc.edits.push_back(sequence);
+            claimed.edits |= !std::mem::replace(&mut doc.editing, true);
+        }
         doc.asks.push(MeetingVoiceAsk {
             sequence,
             intent,
             words,
             start_offset_ns: segment.start_offset_ns,
+            outcome: None,
         });
         heard = true;
     }
     doc.heard = segments.len();
-    (heard, started)
+    heard
 }
 
 /// The ask in a line that opens with "Sona", and the words after it.
@@ -591,11 +646,14 @@ pub(crate) fn voice_ask(text: &str) -> Option<(MeetingVoiceIntent, String)> {
         return None;
     }
     let said: Vec<String> = words.map(|(word, _)| word).collect();
-    if !paused && !said.first().is_some_and(|word| COMMANDS.contains(&word.as_str())) {
+    let edit = is_edit(&said, paused);
+    if !paused && !edit && !said.first().is_some_and(|word| COMMANDS.contains(&word.as_str())) {
         return None;
     }
     let has = |wanted: &[&str]| said.iter().any(|word| wanted.contains(&word.as_str()));
-    let intent = if has(&["doc", "docs", "document"])
+    let intent = if edit {
+        MeetingVoiceIntent::Edit
+    } else if has(&["doc", "docs", "document"])
         || (has(&["take", "start", "keep"]) && has(&["notes"]))
     {
         MeetingVoiceIntent::StartDoc
@@ -607,6 +665,35 @@ pub(crate) fn voice_ask(text: &str) -> Option<(MeetingVoiceIntent, String)> {
         MeetingVoiceIntent::Ask
     };
     Some((intent, rest.to_string()))
+}
+
+/// Whether the words after "Sona" ask to change the doc: an edit verb,
+/// after "can you" and its kin, or after a pause a few words of
+/// politeness, or "make a list" and its kin, which lists the items to add.
+/// No question word may follow, and "sort out" is not a sort.
+fn is_edit(said: &[String], paused: bool) -> bool {
+    let said: Vec<&str> = said.iter().map(String::as_str).collect();
+    if said.iter().any(|word| QUESTION_WORDS.contains(word)) {
+        return false;
+    }
+    let mut at = 0;
+    loop {
+        match said.get(at..).unwrap_or_default() {
+            ["can" | "could" | "would" | "will", "you", ..] => at += 2,
+            ["please", ..] => at += 1,
+            [lead, ..] if paused && EDIT_LEADS.contains(lead) => at += 1,
+            _ => break,
+        }
+    }
+    let mut rest = said[at..].iter().copied();
+    match rest.next() {
+        Some("sort") if rest.clone().next() == Some("out") => false,
+        Some(verb) if EDIT_VERBS.contains(&verb) => true,
+        Some(verb) if OFF_VERBS.contains(&verb) => rest.any(|word| word == "off"),
+        Some("mark") => rest.any(|word| ["done", "complete", "finished", "bought"].contains(&word)),
+        Some("make" | "create" | "write" | "start") => rest.take(3).any(|word| word == "list"),
+        _ => false,
+    }
 }
 
 /// Each word of `text`, lowercased, with the byte offset just past it. An
@@ -1028,6 +1115,9 @@ fn merge(points: &mut Vec<MeetingLiveDocPoint>, kept: Vec<Candidate<'_>>) -> Vec
                     id,
                     text: candidate.text,
                     edited: false,
+                    spoken: false,
+                    done: false,
+                    section: None,
                     start_offset_ns: Some(candidate.first_said),
                 });
             }
@@ -1104,6 +1194,8 @@ fn is_label(word: &str) -> bool {
     word.strip_prefix(['l', 'p'])
         .is_some_and(|number| !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit()))
 }
+
+mod spoken;
 
 #[cfg(test)]
 mod probe;

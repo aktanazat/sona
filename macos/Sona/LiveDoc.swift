@@ -5,12 +5,22 @@ struct MeetingLiveDocPoint: Decodable, Identifiable, Equatable {
     let id: String
     var text: String
     var edited: Bool
+    let done: Bool
+    /// The heading it sits under once the doc is grouped.
+    let section: String?
     let startOffsetNs: Int64?
 }
 
 enum MeetingVoiceIntent: String, Decodable {
     case startDoc = "start_doc"
-    case board, recap, ask
+    case board, recap, edit, ask
+}
+
+/// `MeetingVoiceOutcome`: what a change asked out loud did to the doc.
+enum MeetingVoiceOutcome: String, Decodable {
+    case done
+    case keptTyped = "kept_typed"
+    case unchanged, partial, failed
 }
 
 /// A spoken ask waiting for the answer on screen to be closed.
@@ -25,6 +35,8 @@ struct MeetingVoiceAsk: Decodable, Equatable {
     let intent: MeetingVoiceIntent
     let words: String
     let startOffsetNs: Int64
+    /// Set once a spoken edit is made; nil for any other ask.
+    let outcome: MeetingVoiceOutcome?
 }
 
 /// `MeetingLiveChange`: one change to a meeting's doc or board, by whom,
@@ -177,6 +189,9 @@ final class LiveDocStore {
     private(set) var starting = false
     /// Bumped when the user asks out loud to see the board.
     private(set) var boardRequests = 0
+    /// The newest change asked out loud since this screen first read the
+    /// doc, as the core last reported it.
+    private(set) var spokenEdit: MeetingVoiceAsk?
     /// What a spoken ask turns into, set by whoever owns the live help.
     @ObservationIgnored var onAsk: (MeetingVoiceAsk) -> Void = { _ in }
 
@@ -204,6 +219,7 @@ final class LiveDocStore {
         failure = nil
         starting = false
         handledAsk = nil
+        spokenEdit = nil
         Task { await load() }
     }
 
@@ -276,6 +292,11 @@ final class LiveDocStore {
         let fresh = result.asks.filter { $0.sequence > (handledAsk ?? Int.max) }
         handledAsk = result.asks.last?.sequence ?? handledAsk ?? 0
         doc = result
+        if let edit = fresh.last(where: { $0.intent == .edit }) {
+            spokenEdit = edit
+        } else if let shown = spokenEdit {
+            spokenEdit = result.asks.first { $0.sequence == shown.sequence } ?? shown
+        }
         for ask in fresh {
             if ask.intent == .board { boardRequests += 1 }
             onAsk(ask)
@@ -285,11 +306,12 @@ final class LiveDocStore {
 
 extension AppModel {
     /// What the user said to Sona during the call, answered in the live
-    /// window like a typed ask. A start or a board ask needs nothing here:
-    /// the core starts the doc, and the live window shows the board.
+    /// window like a typed ask. A start, board or edit ask needs nothing
+    /// here: the core starts or changes the doc, and the live window shows
+    /// the board.
     func voiceAsk(_ ask: MeetingVoiceAsk) {
         switch ask.intent {
-        case .startDoc, .board:
+        case .startDoc, .board, .edit:
             break
         case .recap:
             live.askOutLoud(.recap, question: nil)
@@ -322,11 +344,21 @@ private struct DocPointRow: View {
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Text("•").bodyText(14, Theme.inkSecondary).accessibilityHidden(true)
+            Group {
+                if point.done {
+                    Image(systemName: "checkmark")
+                        .font(TypeScale.label(11))
+                        .foregroundStyle(Theme.inkSecondary)
+                        .accessibilityLabel("Done")
+                } else {
+                    Text("•").bodyText(14, Theme.inkSecondary).accessibilityHidden(true)
+                }
+            }
+            .frame(width: 12)
             TextField("Point", text: $draft, axis: .vertical)
                 .textFieldStyle(.plain)
                 .font(TypeScale.body())
-                .foregroundStyle(Theme.ink)
+                .foregroundStyle(point.done ? Theme.inkTertiary : Theme.ink)
                 .focused($focused)
                 .onSubmit { commit(draft) }
                 .accessibilityLabel("Point")
@@ -353,7 +385,16 @@ private struct DocPoints: View {
 
     var body: some View {
         Card {
-            ForEach(doc.points) { point in
+            let grouped = doc.points.contains { $0.section != nil }
+            ForEach(Array(doc.points.enumerated()), id: \.element.id) { index, point in
+                if grouped, index == 0 || doc.points[index - 1].section != point.section {
+                    Text(point.section ?? "Other")
+                        .sectionLabel()
+                        .padding(.horizontal, 16)
+                        .padding(.top, index == 0 ? 10 : 14)
+                        .padding(.bottom, 2)
+                        .accessibilityAddTraits(.isHeader)
+                }
                 DocPointRow(point: point, mark: doc.lastChange(to: point.id)) { store.edit(point, $0) }
                 Hairline().padding(.horizontal, 16)
             }
@@ -369,6 +410,44 @@ private struct DocPoints: View {
                 .padding(.horizontal, 16)
                 .padding(.vertical, 10)
                 .accessibilityLabel("Add a point")
+        }
+    }
+}
+
+/// The word that answers a change asked out loud: shown while it is made,
+/// then for a few seconds once it is.
+private struct SpokenEditNote: View {
+    let ask: MeetingVoiceAsk
+    @State private var shown = true
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if shown {
+                HStack(spacing: 6) {
+                    if ask.outcome == nil { ProgressView().controlSize(.mini) }
+                    Text(words).metaText(ask.outcome == .done ? Theme.ink : Theme.inkSecondary)
+                }
+                .padding(.bottom, 8)
+                .accessibilityElement(children: .combine)
+            }
+        }
+        .task(id: "\(ask.sequence)-\(String(describing: ask.outcome))") {
+            shown = true
+            guard ask.outcome != nil else { return }
+            // A newer ask cancels this wait; it must not hide that ask's note.
+            guard (try? await Task.sleep(for: .seconds(4))) != nil else { return }
+            shown = false
+        }
+    }
+
+    private var words: String {
+        switch ask.outcome {
+        case nil: "Changing the doc…"
+        case .done: "Done"
+        case .keptTyped: "Typed points stay as written."
+        case .unchanged: "Nothing to change."
+        case .partial: "Only part of that went through."
+        case .failed: "That change didn’t go through."
         }
     }
 }
@@ -391,6 +470,9 @@ struct LiveDocSection: View {
                             : "Points show here as they are said.")
                             .metaText(Theme.inkTertiary)
                     }
+                }
+                if let edit = store.spokenEdit {
+                    SpokenEditNote(ask: edit)
                 }
                 DocPoints(store: store, doc: doc)
                 Text("Kept current as the call goes on. Your changes stay as you wrote them.")

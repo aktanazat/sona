@@ -4364,10 +4364,16 @@ fn run_live_pass_worker(
         }
         match service.live_pass(&store, session_id, &live, false) {
             Ok(()) => {
-                if live_doc::hear(&service, &store, session_id, &live) {
+                let heard = live_doc::hear(&service, &store, session_id, &live);
+                if heard.started {
                     let (service, store, live) =
                         (Arc::clone(&service), Arc::clone(&store), Arc::clone(&live));
                     std::thread::spawn(move || service.read_live_doc_now(&store, session_id, &live));
+                }
+                if heard.edits {
+                    let (service, store, live) =
+                        (Arc::clone(&service), Arc::clone(&store), Arc::clone(&live));
+                    std::thread::spawn(move || service.edit_live_doc_by_voice(&store, session_id, &live));
                 }
                 if live_card::tick(&service, &store, session_id, &live, live_card::Moment::Pass) {
                     service.emit_current(&store, "meeting:live-card-changed", session_id);
