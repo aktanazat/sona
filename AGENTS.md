@@ -4,40 +4,29 @@ This file provides guidance to AI coding assistants working with code in this re
 
 ## Development Commands
 
-**Prerequisites:**
+**Prerequisites:** current stable Rust, Bun, CMake, and Xcode 26 with the macOS,
+iOS and watchOS SDKs. [BUILD.md](BUILD.md) has the full list.
 
-- [Rust](https://rustup.rs/) (latest stable)
-- [Bun](https://bun.sh/) package manager
-
-**Core Development:**
+**Core commands:**
 
 ```bash
-# Install dependencies
-bun install
-
-# Run in development mode
-bun run tauri dev
-# If cmake error on macOS:
-CMAKE_POLICY_VERSION_MINIMUM=3.5 bun run tauri dev
-
-# Build for production
-bun run tauri build
-
-# Frontend only development
-bun run dev        # Start the Next dev server on :1420 (the port tauri expects)
-bun run build      # Typecheck + static export of the three window routes to out/
-bun run preview    # Serve the exported out/ directory
+bun install --frozen-lockfile
+bun run build:debug       # debug engine, src-tauri/target/debug/sona
+bun run build             # release engine, src-tauri/target/release/sona
 ```
 
-**Linting and Formatting (run before committing):**
+The Mac app (`macos/Sona.xcodeproj`) and the iPhone app (`mobile/Sona.xcodeproj`)
+build with `xcodebuild`. [BUILD.md](BUILD.md) has the exact commands, including
+the two helpers the Mac app bundles. There is no web dev server.
+
+**Formatting and linting (run before committing):**
 
 ```bash
-bun run lint              # ESLint for frontend
-bun run lint:fix          # ESLint with auto-fix
 bun run format            # Prettier + cargo fmt
 bun run format:check      # Check formatting without changes
-bun run format:frontend   # Prettier only
 bun run format:backend    # cargo fmt only
+bun run lint:backend      # cargo clippy
+bun run lint:anti-slop    # oxlint against tools/oxlint/baseline.json (CI gate)
 ```
 
 **Verifying a change against a running Sona:**
@@ -75,8 +64,8 @@ and cannot be handed the install's forwarded arguments.
 
 ```bash
 bun run test:backend      # cargo test --lib, in a target dir this checkout owns
-bun run tauri dev         # same, for the app
-bun run tauri build
+bun run build:debug       # same, for the engine
+bun run build
 ```
 
 Go through these rather than calling `cargo` directly, and a second checkout —
@@ -86,7 +75,7 @@ and cargo decides that unit is fresh by comparing mtimes, so whichever tree
 has the older files silently inherits the other's compiled artifacts: Rust and
 the Swift bridges both. `scripts/cargo-target-dir.ts` keeps that from
 happening, and `scripts/prepare-agent-hook.ts` builds and stages the sidecar
-in the same directory it resolves, so a `tauri build` never bundles a copy
+in the same directory it resolves, so the Mac app never bundles a copy
 from somewhere else. With `CARGO_TARGET_DIR` unset none of this changes
 anything, because cargo's default `src-tauri/target` is already
 per-checkout; with one set — a cache root on a faster disk is the reason to —
@@ -96,7 +85,7 @@ For detailed platform-specific build setup, see [BUILD.md](BUILD.md).
 
 ## Architecture Overview
 
-Sona is a cross-platform desktop speech-to-text application built with Tauri 2.x (Rust backend + React/TypeScript frontend).
+Sona is a native SwiftUI Mac app (`macos/Sona/`) and iPhone app (`mobile/Sona/`) for dictation and meeting notes. The Mac app starts the Rust engine in `src-tauri/` as `sona-core --native-socket <path>` and talks to it over that Unix socket, one JSON object per line (`native_bridge/`). Tauri remains an engine dependency; it no longer supplies a web interface.
 
 ### Backend Structure (src-tauri/src/)
 
@@ -109,7 +98,10 @@ Sona is a cross-platform desktop speech-to-text application built with Tauri 2.x
 - `audio_toolkit/` - Low-level audio processing:
   - `audio/` - Device enumeration, recording, resampling
   - `vad/` - Voice Activity Detection (Silero VAD)
-- `commands/` - Tauri command handlers for frontend communication
+- `commands/` - Tauri command handlers, called by the Mac app through `native_bridge/`.
+  After adding, removing or re-signing a command, run `bun run generate:native-dispatch`
+  to regenerate `native_bridge/dispatch.rs`; without it the Mac app gets
+  `unknown method`. Params keep the argument names the old webview bindings used.
 - `cli.rs` - CLI argument definitions (clap derive)
 - `shortcut/` - Global keyboard shortcut handling
 - `settings.rs` - Application settings management
@@ -117,48 +109,24 @@ Sona is a cross-platform desktop speech-to-text application built with Tauri 2.x
 - `signal_handle.rs` - `send_transcription_input()` reusable function
 - `utils.rs` - Platform detection helpers
 
-### Frontend Structure (src/)
+### Native apps
 
-- `App.tsx` - Main component with onboarding flow
-- `components/` - React UI components:
-  - `vg/` - **the primitive kit, and the only place primitives live.** Every
-    button, input, select, dialog, popover, menu, switch, slider, tab and
-    tooltip comes from here: shadcn/ui components, Geist-coloured through the
-    `@theme inline` token bridge in `app/globals.css`. `components.json` points
-    the shadcn CLI at it (`"ui": "@/components/vg"`), so `bunx shadcn add …`
-    lands here. Never hand-roll a control, and never start a second kit.
-  - `vg/chart/` - deterministic inline SVG primitives. Import `Bars`,
-    `Sparkline`, and `Ring` from `@/components/vg/chart`; feature code supplies
-    translated aria sentences.
-  - `charts/` - app-level chart composition. Import `ChartCard` from
-    `@/components/charts`; it may compose settings rows and vg primitives.
-  - `audio/AudioPlayer.tsx`, `RouteSkeleton.tsx`, `Toaster.tsx` - app
-    components, not primitives: the transcript scrubber, the shape of a
-    settings page before its chunk arrives, and the app's one toast root. Each
-    owns behaviour specific to this app, which is why it sits outside `vg/` —
-    `vg/` is the only primitives home, and the pre-Geist `ui/` kit it replaced
-    is gone.
-  - `settings/` - Settings UI. `settings/rows.tsx` is its composition layer
-    (SettingsPage, SettingsCard, SettingsSurface, SettingsRow, Notice,
-    `PAGE_COLUMN`); pages compose those, they never restate the surface
-    literals.
-  - `model-selector/` - Model management interface
-  - `onboarding/` - First-run experience
-  - `icons/`, `analytics/`, `cloud-sync/`, `whats-new/` - feature-local components
-- `hooks/useSettings.ts` - Settings state management hook
-- `stores/settingsStore.ts` - Zustand store for settings
-- `bindings.ts` - Auto-generated Tauri type bindings (via tauri-specta)
-- `overlay/` - Recording overlay window entry point
+- `macos/Sona/` - SwiftUI Mac interface; `Core.swift` starts the engine and owns its socket
+- `macos/SonaCamera/` - Camera extension
+- `mobile/Sona/` - iPhone app; `mobile/SonaWatch/`, `mobile/SonaKeyboard/` and
+  `mobile/SonaWidgets/` ship inside its package
+- `cloudflare/sona-companion/` - Paired sync service
+- `tools/sona-mcp/` - MCP server over the engine's command line
 
 ### Key Architecture Patterns
 
 **Manager Pattern:** Core functionality organized into managers (Audio, Model, Transcription) initialized at startup and managed via Tauri state.
 
-**Command-Event Architecture:** Frontend → Backend via Tauri commands; Backend → Frontend via events.
+**Command-Event Architecture:** Mac app → engine via Tauri command names sent over the native socket; engine → Mac app via events on the same socket.
 
 **Pipeline Processing:** Audio → VAD → Whisper/Parakeet → Text output → Clipboard/Paste
 
-**State Flow:** Zustand → Tauri Command → Rust State → Persistence (tauri-plugin-store)
+**State Flow:** Mac app → native socket → Tauri command → Rust State → Persistence (tauri-plugin-store)
 
 ### Technology Stack
 
@@ -174,7 +142,7 @@ Sona is a cross-platform desktop speech-to-text application built with Tauri 2.x
 
 ### Application Flow
 
-1. **Initialization:** App starts minimized to tray, loads settings, initializes managers
+1. **Initialization:** The Mac app starts the engine with `--native-socket <path> --no-tray --start-hidden`; the engine loads settings and initializes managers
 2. **Model Setup:** First-run downloads preferred Whisper model (Small/Medium/Turbo/Large)
 3. **Recording:** Global shortcut triggers audio recording with VAD filtering
 4. **Processing:** Audio sent to Whisper model for transcription
@@ -191,30 +159,14 @@ Settings are stored using Tauri's store plugin with reactive updates:
 
 ### Single Instance Architecture
 
-The app enforces single instance behavior — launching when already running brings the settings window to front rather than creating a new process. Remote control flags (`--toggle-transcription`, etc.) work by launching a second instance that sends args to the running instance via `tauri_plugin_single_instance`, then exits.
+The engine enforces single instance behavior. Remote control flags (`--toggle-transcription`, etc.) work by launching a second instance that sends args to the running instance via `tauri_plugin_single_instance`, then exits.
 
-## Internationalization (i18n)
+## Localization
 
-All user-facing strings must use i18next translations. ESLint enforces this (no hardcoded strings in JSX).
-
-**Adding new text:**
-
-1. Add key to `src/i18n/locales/en/translation.json`
-2. Use in component: `const { t } = useTranslation(); t('key.path')`
-
-**File structure:**
-
-```
-src/i18n/
-├── index.ts           # i18n setup
-├── languages.ts       # Language metadata
-└── locales/
-    ├── en/translation.json  # English (source)
-    ├── de/, es/, fr/, ja/, ru/, zh/, ...
-    └── ...
-```
-
-For translation contribution guidelines, see [CONTRIBUTING_TRANSLATIONS.md](CONTRIBUTING_TRANSLATIONS.md).
+The Mac interface has English copy only. The iPhone and Apple Watch apps use
+native strings files: `mobile/Sona/en.lproj/Localizable.strings` and
+`mobile/SonaWatch/en.lproj/Localizable.strings`. See
+[CONTRIBUTING_TRANSLATIONS.md](CONTRIBUTING_TRANSLATIONS.md).
 
 ## Code Style
 
@@ -225,27 +177,29 @@ For translation contribution guidelines, see [CONTRIBUTING_TRANSLATIONS.md](CONT
 - Handle errors explicitly (avoid unwrap in production)
 - Use descriptive names
 
-**TypeScript/React:**
+**SwiftUI:**
+
+- Use native controls and the existing Mac or phone theme
+- Check light and dark appearance and larger text sizes
+
+**TypeScript (scripts, `tools/sona-mcp/`, `cloudflare/sona-companion/`):**
 
 - Strict TypeScript, avoid `any` types
-- Functional components with hooks
-- Tailwind CSS for styling
-- Path aliases: `@/` → `./src/`
 
 ## CLI Parameters
 
-Sona supports command-line parameters on all platforms for integration with scripts, window managers, and autostart configurations.
+The engine (`sona-core`) takes command-line parameters for scripts and automation. Run directly, it accepts only headless, query and remote-control flags; anything else exits 2 and points to the native app (`lib.rs`). The Mac app owns the window and the menu bar item.
 
 **Implementation:** `cli.rs` (definitions), `main.rs` (parsing), `lib.rs` (applying), `signal_handle.rs` (shared logic)
 
-| Flag                     | Description                                                |
-| ------------------------ | ---------------------------------------------------------- |
-| `--toggle-transcription` | Toggle recording on/off on a running instance              |
-| `--toggle-post-process`  | Toggle recording with post-processing on/off               |
-| `--cancel`               | Cancel the current operation on a running instance         |
-| `--start-hidden`         | Launch without showing the main window (tray icon visible) |
-| `--no-tray`              | Launch without system tray (closing window quits the app)  |
-| `--debug`                | Enable debug mode with verbose (Trace) logging             |
+| Flag                     | Description                                            |
+| ------------------------ | ------------------------------------------------------ |
+| `--toggle-transcription` | Toggle recording on/off on a running instance          |
+| `--toggle-post-process`  | Toggle recording with post-processing on/off           |
+| `--cancel`               | Cancel the current operation on a running instance     |
+| `--start-hidden`         | Start with no window; the Mac app passes it            |
+| `--no-tray`              | Start without the engine's tray; the Mac app passes it |
+| `--debug`                | Enable debug mode with verbose (Trace) logging         |
 
 **Headless corpus verbs (D15):** one JSON value on stdout, one JSON refusal on
 stderr, and nothing else on either. Every verb requires
@@ -368,13 +322,3 @@ PRs go to `aktanazat/sona` with `gh pr create --repo aktanazat/sona` and follow 
 
 - **Translations:** Follow [CONTRIBUTING_TRANSLATIONS.md](CONTRIBUTING_TRANSLATIONS.md).
 - **Full contributor workflow:** [CONTRIBUTING.md](CONTRIBUTING.md).
-
-<!-- BEGIN:nextjs-agent-rules -->
-
-# This is NOT the Next.js you know
-
-This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` (resolved from this file's directory; in monorepos the `next` package may not be visible from the repo root) before writing any code. Heed deprecation notices.
-
-This block is written and re-added by `next dev` — verify at `node_modules/next/dist/server/lib/generate-agent-files.js`. Removing it from a diff only re-creates the uncommitted change; committing it with your work keeps the tree clean.
-
-<!-- END:nextjs-agent-rules -->
