@@ -261,7 +261,8 @@ final class PhoneDictation: ObservableObject {
         phase = .finishing
         finishDeadline?.cancel()
         finishDeadline = nil
-        let corrected = sessionProfile.apply(to: insertableText)
+        let language = DictationPreferences.activeLanguage
+        let corrected = sessionProfile.apply(to: DictationCleanup.clean(insertableText, language: language))
         text = corrected
         onStateChanged?()
         guard error == nil, !corrected.isEmpty, let style = sessionStyle else {
@@ -273,7 +274,6 @@ final class PhoneDictation: ObservableObject {
             return
         }
         let id = sessionID
-        let language = DictationPreferences.activeLanguage
         let prompt = style.prompt
         completion = Task { [weak self] in
             guard let self else { return }
@@ -291,7 +291,7 @@ final class PhoneDictation: ObservableObject {
             guard !Task.isCancelled, sessionID == id else { return }
             switch outcome {
             case .rewritten(let output):
-                text = output
+                text = DictationCleanup.rewritten(output)
                 settle(error: nil)
             case .fallback:
                 settle(error: nil, styleNotice: NSLocalizedString("dictation.styleFailed", comment: ""))

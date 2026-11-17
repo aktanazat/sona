@@ -49,6 +49,46 @@ final class PhoneParityTests {
         #expect(profile.recognitionHints == ["Sona", "my signature"])
     }
 
+    @Test("A rambled dictation loses its hesitations and restarts, and its spoken ordinals become a list")
+    func rambleCleanup() {
+        // Apple's on-device recognizer on a synthesized 26-second ramble.
+        let heard = "So I wanted to. Ah, send a quick note to Dana about the launch. So basically we are moving the beta to Thursday. No wait. Friday, because the, um, the screenshots are not done yet, and there are 3 things left. 1st the pricing page, 2nd the, ah, the FAQ, and 3rd the onboarding email. Um, can you, like, let me know by tomorrow if that works? Thanks."
+        #expect(DictationCleanup.clean(heard, language: "en-US") == """
+            So I wanted to. Send a quick note to Dana about the launch. So basically we are moving the beta to Thursday. No wait. Friday, because the screenshots are not done yet, and there are 3 things left:
+            1. The pricing page
+            2. The FAQ
+            3. The onboarding email
+
+            Can you, like, let me know by tomorrow if that works? Thanks.
+            """)
+        #expect(DictationCleanup.clean("First, fix the login bug. Second, raise the price to 9.99 tonight.", language: "en-US") == """
+            1. Fix the login bug
+            2. Raise the price to 9.99 tonight
+            """)
+    }
+
+    @Test("Words that only look like fillers or lists are left as said")
+    func cleanupLeavesWords() {
+        for (said, language) in [
+            ("Vou comprar um carro amanhã.", "pt-BR"),
+            ("First, check the logs.", "en-US"),
+            ("Second the FAQ, then first the pricing page.", "en-US"),
+            ("I know that that works.", "en-US"),
+            ("Very, very good work on the launch.", "en-US"),
+            ("No, no, that's the old number.", "en-US"),
+            ("First of all, thanks for the quick turnaround. Second, can you send the deck?", "en-US"),
+        ] {
+            #expect(DictationCleanup.clean(said, language: language) == said)
+        }
+    }
+
+    @Test("A style rewrite answered as the cleanup contract's JSON pastes only its words")
+    func rewriteReplyUnwrapped() {
+        #expect(DictationCleanup.rewritten(#"{"transcription": "We ship Friday."}"#) == "We ship Friday.")
+        #expect(DictationCleanup.rewritten(#"{"note": "We ship Friday."}"#) == #"{"note": "We ship Friday."}"#)
+        #expect(DictationCleanup.rewritten("We ship Friday.") == "We ship Friday.")
+    }
+
     @Test("Phone notes display the current transcript with its latest edits and speaker names")
     func currentMeetingProjection() throws {
         let bytes = Data(#"{"format_version":1,"session":{"session_id":"meeting","title":"Planning","created_at_utc_ms":1700000000000,"current_transcript_revision_id":"new","current_diarization_generation_id":"latest"},"artifact_revisions":[{"state":"superseded","generated_at_utc_ms":1,"content":{"summary":{"text":"Old"},"outline":[],"decisions":[],"action_items":[],"key_questions":[],"risks":[],"follow_up_draft":{"text":""}}},{"state":"current","generated_at_utc_ms":2,"content":{"summary":{"text":"Ship on Friday."},"outline":[],"decisions":[],"action_items":[],"key_questions":[],"risks":[],"follow_up_draft":{"text":""}}}],"transcript_segments":[{"segment_id":"old","transcript_revision_id":"old","start_offset_ns":0,"speaker_id":"a","base_text":"Out of date."},{"segment_id":"keep","transcript_revision_id":"new","start_offset_ns":65000000000,"speaker_id":"a","base_text":"Original."},{"segment_id":"remove","transcript_revision_id":"new","start_offset_ns":70000000000,"speaker_id":"a","base_text":"Private."}],"segment_edits":[{"segment_id":"keep","edit_sequence":2,"replacement_text":"Corrected.","removed":false},{"segment_id":"keep","edit_sequence":1,"replacement_text":"Earlier edit.","removed":false},{"segment_id":"remove","edit_sequence":1,"replacement_text":"","removed":true}],"speakers":[{"speaker_id":"a","display_name":"Speaker"},{"speaker_id":"b","display_name":"Ada"}],"diarization_assignments":[{"generation_id":"earlier","segment_id":"keep","speaker_id":"a"},{"generation_id":"latest","segment_id":"keep","speaker_id":"b"}],"user_notes":{"body":"Ask about launch."}}"#.utf8)
