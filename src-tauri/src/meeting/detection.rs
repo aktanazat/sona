@@ -2470,7 +2470,7 @@ impl DetectionRuntime {
                 event_end_utc_ms,
                 pending.calendar_event,
             );
-            runtime.open_capture(context, utc_now_ms()).await;
+            runtime.open_capture(context).await;
         });
     }
 
@@ -2560,7 +2560,7 @@ impl DetectionRuntime {
                             Some(event.end_utc_ms),
                             Some(event),
                         );
-                        self.open_capture(context, utc_now_ms()).await;
+                        self.open_capture(context).await;
                     }
                     None => {
                         let context = self.start_context(
@@ -2569,7 +2569,7 @@ impl DetectionRuntime {
                             None,
                             None,
                         );
-                        self.open_capture(context, utc_now_ms()).await;
+                        self.open_capture(context).await;
                     }
                 }
                 true
@@ -2824,7 +2824,55 @@ impl DetectionRuntime {
         if !policy_from_settings(&settings).enabled {
             return;
         }
-        self.lock().begin_operator_capture(snapshot, utc_now_ms());
+        let mut state = self.lock();
+        state.begin_operator_capture(snapshot, utc_now_ms());
+        if let Some(TrackedCapture {
+            kind: TrackedCaptureKind::Detection { trigger, .. },
+            ..
+        }) = &state.tracked
+        {
+            log::info!(
+                "Meeting capture {} started from the consent gate for {}",
+                snapshot.session_id.uuid(),
+                holder_reading(trigger.as_ref(), None),
+            );
+        }
+    }
+
+    /// Tracks the consent gate a detection start opened, so the start the
+    /// operator makes from it keeps detection's stop rules. The tick drops a
+    /// tracked capture that is not the tray's session, so the gate is tracked
+    /// as that session.
+    fn track_gate(
+        &self,
+        snapshot: &MeetingSessionSnapshot,
+        trigger: Option<machine::AdoptedCall>,
+        event_end_utc_ms: Option<i64>,
+    ) {
+        self.lock().begin_tracked(
+            TrackedCapture::detection(snapshot, trigger, event_end_utc_ms),
+            RecentCapture {
+                session_id: snapshot.session_id.uuid().to_string(),
+                started_utc_ms: utc_now_ms(),
+            },
+        );
+    }
+
+    /// `track_gate` for a consent-panel start that did not reach recording.
+    /// A start a running capture refused leaves that capture as the tray's
+    /// session, and it stays tracked.
+    pub async fn track_gate_if_shown(
+        &self,
+        gate: MeetingSessionId,
+        trigger: Option<machine::AdoptedCall>,
+        event_end_utc_ms: Option<i64>,
+    ) {
+        let Some(snapshot) = self.tray_session().await else {
+            return;
+        };
+        if snapshot.session_id == gate {
+            self.track_gate(&snapshot, trigger, event_end_utc_ms);
+        }
     }
 
     /// Raises the auto-record card into the panel `begin_capture` just took
@@ -2909,11 +2957,7 @@ impl DetectionRuntime {
     /// `async` rather than blocking: this is reached from a notification click,
     /// which lands on the async runtime. A `block_on` there would be a nested
     /// runtime entry — a hang on the one path the operator explicitly asked for.
-    async fn open_capture(
-        &self,
-        context: crate::meeting::session::MeetingDetectionStartContext,
-        now_utc_ms: i64,
-    ) {
+    async fn open_capture(&self, context: crate::meeting::session::MeetingDetectionStartContext) {
         // Re-read rather than trusting the tick's snapshot: an operator can take
         // a while to answer a notification, and opening a meeting for an app that
         // has since quit is a note nobody asked for.
@@ -2962,13 +3006,7 @@ impl DetectionRuntime {
                 log::warn!("Meeting calendar facts could not be saved: {error:?}");
             }
         }
-        self.lock().begin_tracked(
-            TrackedCapture::detection(&snapshot, context.trigger, context.event_end_utc_ms),
-            RecentCapture {
-                session_id: snapshot.session_id.uuid().to_string(),
-                started_utc_ms: now_utc_ms,
-            },
-        );
+        self.track_gate(&snapshot, context.trigger, context.event_end_utc_ms);
         crate::tray::set_meeting_tray_snapshot(&self.app, Some(&snapshot));
         crate::show_meeting_destination(
             &self.app,

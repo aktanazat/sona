@@ -48,6 +48,11 @@ private let maximumBundleIDCharacters = 255
 private let maximumEvidenceTitleCharacters = 160
 private let maximumEvidenceHostCharacters = 253
 private let accessibilityReadTimeoutSeconds: Float = 0.05
+/// The page-search bounds `page_url` in the context reader uses, so both
+/// readers find a browser's page the same way.
+private let webAreaContainerRoles: Set<String> = ["AXSplitGroup", "AXTabGroup", "AXGroup", "AXScrollArea"]
+private let maximumWebAreaSearchDepth = 8
+private let maximumWebAreaSearchElements = 64
 /// The widest interleaved layout this bridge will assemble. ScreenCaptureKit is
 /// configured for two channels; the ceiling is what bounds the scratch buffer
 /// and the buffer list a renegotiated stream can ask for.
@@ -996,6 +1001,38 @@ private func copiedAXAttribute(_ element: AXUIElement, _ attribute: String) -> C
     return value
 }
 
+/// Safari puts the page's address on the window's web area and none on the
+/// window. The search follows page containers only, so the toolbar and the
+/// tab strip cost nothing; Safari's web area is about 12 elements in. A
+/// timeout set on the window does not carry to its children, so each child
+/// gets its own.
+private func webAreaURL(in window: AXUIElement) -> URL? {
+    var pending = [(element: window, depth: 0)]
+    var index = 0
+    var visited = 0
+    while index < pending.count {
+        let (element, depth) = pending[index]
+        index += 1
+        for child in (copiedAXAttribute(element, kAXChildrenAttribute) as? [AXUIElement]) ?? [] {
+            visited += 1
+            guard visited <= maximumWebAreaSearchElements else {
+                return nil
+            }
+            _ = AXUIElementSetMessagingTimeout(child, accessibilityReadTimeoutSeconds)
+            guard let role = copiedAXAttribute(child, kAXRoleAttribute) as? String else {
+                continue
+            }
+            if role == "AXWebArea" {
+                return copiedAXAttribute(child, kAXURLAttribute).flatMap { $0 as? URL }
+            }
+            if depth + 1 < maximumWebAreaSearchDepth, webAreaContainerRoles.contains(role) {
+                pending.append((child, depth + 1))
+            }
+        }
+    }
+    return nil
+}
+
 private func accessibilityEvidence(for processID: pid_t) -> AccessibilityEvidence {
     guard AXIsProcessTrusted() else {
         return AccessibilityEvidence(title: nil, urlHost: nil, axUnavailable: true)
@@ -1013,9 +1050,9 @@ private func accessibilityEvidence(for processID: pid_t) -> AccessibilityEvidenc
     let title = copiedAXAttribute(focusedWindow, kAXTitleAttribute).flatMap { value in
         (value as? String).flatMap(boundedTitle)
     }
-    let urlHost = copiedAXAttribute(focusedWindow, kAXURLAttribute).flatMap { value in
-        (value as? URL).flatMap(boundedHost)
-    }
+    let urlHost = (copiedAXAttribute(focusedWindow, kAXURLAttribute).flatMap { $0 as? URL }
+        ?? webAreaURL(in: focusedWindow))
+        .flatMap(boundedHost)
 
     return AccessibilityEvidence(title: title, urlHost: urlHost, axUnavailable: false)
 }
