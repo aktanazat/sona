@@ -25,7 +25,8 @@ node_modules
 *.sln
 *.sw?
 
-.claude/
+.claude/*
+!.claude/skills/
 
 /target/
 recording_*
