@@ -245,7 +245,7 @@ fn live_doc_probe() {
             live.append(segment(second, who, text, tracks));
             lines.next();
         }
-        if hear(&service, &store, session_id, &live) {
+        if hear(&service, &store, session_id, &live).started {
             service.read_live_doc_now(&store, session_id, &live);
         }
         live_card::tick(&service, &store, session_id, &live, live_card::Moment::Pass);
@@ -312,4 +312,68 @@ fn live_doc_probe() {
             .iter()
             .any(|point| point.text.contains("start a doc") || point.text.contains("recap so far"))
     );
+}
+
+/// The grocery list from the Clackety Clack demo, said to Sona during a
+/// call: the list made, items added and checked off in one breath, a point
+/// typed by hand, the list split by aisle, a remove that reaches the typed
+/// point, and one more check.
+const GROCERIES: &[&str] = &[
+    "Sona, make a grocery list with milk, eggs, bananas, bread, butter, diet coke, and peanut butter.",
+    "Sona, let's add coffee and Greek yogurt too. And actually, I think I have bananas and bread already.",
+    "Sona, can you separate this by section of the grocery store?",
+    "Sona, remove the oat milk.",
+    "Sona, check off the eggs.",
+];
+const TYPED: &str = "Oat milk, the barista one";
+
+/// SONA_PROBE_OUT=<directory> writes the doc after each ask, as the screens
+/// read it, to `ask-<n>.json` there.
+#[ignore = "says the grocery edits to the meeting engine SONA_PROBE_ENGINE names"]
+#[test]
+fn live_doc_spoken_edit_probe() {
+    let generator = generator();
+    println!("\nsona build {}", env!("SONA_BUILD_COMMIT"));
+    let (_directory, store) = workflow_core_tests::store();
+    let began_utc_ms = Local::now().timestamp_millis() - 20 * 60 * 1_000;
+    let session_id = workflow_core_tests::reviewable_meeting(&store, "Groceries", began_utc_ms);
+    let tracks = workflow_core_tests::recording_tracks(&store, session_id);
+    let service = Arc::new(MeetingProcessingService::new(None));
+    service.set_text_generators(Arc::clone(&generator), Arc::clone(&generator));
+    let live = LiveTranscript::new();
+    let out = std::env::var_os("SONA_PROBE_OUT").map(std::path::PathBuf::from);
+    for (number, (second, ask)) in (10..).step_by(20).zip(GROCERIES).enumerate() {
+        if ask.contains("separate") {
+            // PANIC: the doc has room and the words fit a point.
+            live.edit_doc(&Author::Owner, None, TYPED).unwrap();
+            println!("\ntyped by hand: {TYPED}");
+        }
+        live.append(segment(second, Who::Me, ask, tracks));
+        let started = Instant::now();
+        let heard = hear(&service, &store, session_id, &live);
+        if heard.started {
+            service.read_live_doc_now(&store, session_id, &live);
+        }
+        if heard.edits {
+            service.edit_live_doc_by_voice(&store, session_id, &live);
+        }
+        let doc = live.live_doc(session_id);
+        let outcome = doc.asks.last().and_then(|ask| ask.outcome);
+        println!("\n\"{ask}\"\n  {outcome:?} in {:.1} s", started.elapsed().as_secs_f32());
+        let grouped = doc.points.iter().any(|point| point.section.is_some());
+        let mut section: Option<Option<String>> = None;
+        for point in &doc.points {
+            if grouped && section.as_ref() != Some(&point.section) {
+                println!("  {}", point.section.as_deref().unwrap_or("Other"));
+            }
+            section = Some(point.section.clone());
+            let mark = if point.done { "[x]" } else { "[ ]" };
+            let typed = if point.edited && !point.spoken { "  (typed)" } else { "" };
+            println!("    {mark} {}{typed}", point.text);
+        }
+        if let Some(out) = &out {
+            // PANIC: the doc always serializes, and the directory is the caller's to make writable.
+            std::fs::write(out.join(format!("ask-{}.json", number + 1)), serde_json::to_vec_pretty(&doc).unwrap()).unwrap();
+        }
+    }
 }

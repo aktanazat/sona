@@ -2,7 +2,7 @@ use super::super::live_share::{SharePhase, SharedMeeting};
 use super::super::ReplyShape;
 use super::*;
 use crate::meeting::analytics::MeetingProvisionalSpeaker;
-use crate::meeting::live_doc_types::MeetingLiveAuthor;
+use crate::meeting::live_doc_types::{MeetingLiveAuthor, MeetingVoiceOutcome};
 use crate::meeting::store::{workflow_core_tests, LiveRoom};
 use crate::meeting::types::SourceTrackId;
 use chrono::Local;
@@ -110,11 +110,11 @@ fn a_spoken_start_reads_what_was_said_and_a_hand_edit_outlives_later_readings() 
     live.append(line(call, SourceKind::SystemAudio, 4, "Sona, start a document."));
     live.append(line(microphone, SourceKind::Microphone, 10, "The beta ships Friday."));
     tick(&service, &store, session_id, &live, Moment::Pass);
-    assert!(!hear(&service, &store, session_id, &live));
+    assert!(!hear(&service, &store, session_id, &live).started);
     assert!(engine.given.lock().unwrap().is_empty(), "nothing is read before the doc is asked for");
 
     live.append(line(microphone, SourceKind::Microphone, 20, "Okay Sona, start a doc for this plan."));
-    assert!(hear(&service, &store, session_id, &live), "a spoken start starts the doc");
+    assert!(hear(&service, &store, session_id, &live).started, "a spoken start starts the doc");
     assert!(!tick(&service, &store, session_id, &live, Moment::Pass), "the start holds the reading");
     service.read_live_doc_now(&store, session_id, &live);
     let doc = live.live_doc(session_id);
@@ -255,6 +255,105 @@ fn only_a_line_that_opens_with_sona_is_an_ask() {
     assert_eq!(read("Sona recap so far").map(|ask| ask.0), Some(MeetingVoiceIntent::Recap));
     assert_eq!(read("So and then Sona, start a doc"), None, "at most two words before the name");
     assert_eq!(read("Sona."), None, "a name alone asks nothing");
+    assert_eq!(
+        read("Sona can you separate this by aisle").map(|ask| ask.0),
+        Some(MeetingVoiceIntent::Edit),
+        "an edit needs no pause after the name"
+    );
+    assert_eq!(read("And Sona can just drop the old pricing items"), None, "talk about Sona edits nothing");
+    assert_eq!(
+        read("Sona, can you sort out who owns the pricing page?").map(|ask| ask.0),
+        Some(MeetingVoiceIntent::Ask),
+        "a question with an edit verb in it is still a question"
+    );
+    assert_eq!(
+        read("Sona, check whether Dana sent the quote").map(|ask| ask.0),
+        Some(MeetingVoiceIntent::Ask),
+        "a check with nothing to check off is a question"
+    );
+}
+
+#[test]
+fn a_spoken_edit_changes_the_doc_in_place_and_leaves_typed_words_alone() {
+    let (_directory, store) = workflow_core_tests::store();
+    let session_id =
+        workflow_core_tests::reviewable_meeting(&store, "Groceries", Local::now().timestamp_millis());
+    let (microphone, call) = workflow_core_tests::recording_tracks(&store, session_id);
+    let engine = Arc::new(Scripted::default());
+    engine.replies.lock().unwrap().extend([
+        r#"{"changes":[{"action":"add","item":"milk","to":""},{"action":"add","item":"Eggs","to":""},{"action":"add","item":"Bread","to":""}]}"#,
+        r#"{"changes":[{"action":"check","item":"Bread","to":""},{"action":"remove","item":"the oat milk","to":""}]}"#,
+        r#"{"sections":[{"title":"Dairy","items":["Milk","Eggs","Oat milk, the barista one"]}]}"#,
+        r#"{"sections":[{"title":"Bakery","items":["Bread"]}]}"#,
+        r#"{"changes":[{"action":"add","item":"Coffee","to":""}]}"#,
+        "the sections are on their way",
+    ]);
+    let service = MeetingProcessingService::new(None);
+    service.set_text_generators(engine.clone(), engine.clone());
+    let live = LiveTranscript::new();
+    let say = |second: u64, words: &str| {
+        live.append(line(microphone, SourceKind::Microphone, second, words));
+        let heard = hear(&service, &store, session_id, &live);
+        if heard.started {
+            service.read_live_doc_now(&store, session_id, &live);
+        }
+        if heard.edits {
+            service.edit_live_doc_by_voice(&store, session_id, &live);
+        }
+    };
+    let points = || -> Vec<(String, bool, Option<String>)> {
+        live.doc_points()
+            .into_iter()
+            .map(|point| (point.text, point.done, point.section))
+            .collect()
+    };
+    let row = |text: &str, done: bool, section: Option<&str>| (text.to_string(), done, section.map(str::to_string));
+
+    say(10, "Sona, make a grocery list with milk, eggs and bread.");
+    assert_eq!(
+        points(),
+        [row("Milk", false, None), row("Eggs", false, None), row("Bread", false, None)],
+        "a spoken list starts the doc with its items"
+    );
+
+    live.edit_doc(&Author::Owner, None, "Oat milk, the barista one").unwrap();
+    live.append(line(call, SourceKind::SystemAudio, 20, "Sona, delete everything."));
+    assert_eq!(hear(&service, &store, session_id, &live), Heard::default(), "the far end cannot edit");
+
+    say(30, "Sona, check off the bread and remove the oat milk.");
+    say(40, "Sona, group these by aisle.");
+    assert_eq!(
+        points(),
+        [
+            row("Milk", false, Some("Dairy")),
+            row("Eggs", false, Some("Dairy")),
+            row("Oat milk, the barista one", false, Some("Dairy")),
+            row("Bread", true, Some("Bakery")),
+        ],
+        "the bread is checked off, the typed point stays, and the point the grouping left out is asked about again"
+    );
+    let given = engine.given.lock().unwrap();
+    assert!(given[3].contains(r#""items":["Bread"],"sections":["Dairy"]"#), "{}", given[3]);
+    drop(given);
+
+    say(50, "Sona, add coffee and sort it by aisle again.");
+    let outcomes: Vec<Option<MeetingVoiceOutcome>> =
+        live.live_doc(session_id).asks.into_iter().map(|ask| ask.outcome).collect();
+    assert_eq!(
+        outcomes,
+        [
+            Some(MeetingVoiceOutcome::Done),
+            Some(MeetingVoiceOutcome::KeptTyped),
+            Some(MeetingVoiceOutcome::Done),
+            Some(MeetingVoiceOutcome::Partial),
+        ]
+    );
+    let saved: Vec<String> = store.live_doc_points(session_id).unwrap().into_iter().map(|point| point.text).collect();
+    assert_eq!(
+        saved,
+        ["Milk", "Eggs", "Oat milk, the barista one", "Bread", "Coffee"],
+        "an add whose grouping got no answer is still kept"
+    );
 }
 
 /// A new point from a teammate's browser, as the page sends it.
