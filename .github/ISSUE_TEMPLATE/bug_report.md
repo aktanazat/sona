@@ -18,9 +18,9 @@ assignees: []
 
 ## Environment
 
-- Sona version:
-- Operating system:
-- Installation type:
+- Sona version and build (About screen):
+- Mac or iPhone model and OS version:
+- Audio input or output device, if recording or playback is involved:
 
 ## Logs or screenshots
 

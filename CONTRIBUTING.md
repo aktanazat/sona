@@ -57,16 +57,14 @@ See [BUILD.md](BUILD.md) for the current build and check commands.
 
 ## 🐛 Reporting Bugs
 
-Issues and Discussions are turned off for this repository, so a bug report arrives as a pull request that fixes it.
+### Before Submitting a Bug Report
 
-### Before Submitting a Fix
-
-1. **Search open and closed pull requests** at [github.com/aktanazat/sona/pulls](https://github.com/aktanazat/sona/pulls?q=is%3Apr)
+1. **Search open and closed issues** at [github.com/aktanazat/sona/issues](https://github.com/aktanazat/sona/issues?q=is%3Aissue)
 2. **Check current source** to see whether the bug has already been fixed
 
-### Describing the Bug
+### Submitting a Bug Report
 
-In the pull request's Summary, include:
+Open an issue with the [Bug Report template](https://github.com/aktanazat/sona/issues/new?template=bug_report.md) and include:
 
 **System Information:**
 
@@ -93,7 +91,9 @@ Propose a feature as a pull request. Its Summary says what changes for the user 
 
 **This is critical:** Before writing any code, please do the following:
 
-1. **Search existing pull requests** - Check both open and closed pull requests. Someone may have already addressed this, or there may be a reason it was closed.
+1. **Search existing issues and pull requests** - Check both open and closed ones. Someone may have already addressed this, or there may be a reason it was closed.
+   - [Open issues](https://github.com/aktanazat/sona/issues)
+   - [Closed issues](https://github.com/aktanazat/sona/issues?q=is%3Aissue+is%3Aclosed)
    - [Open PRs](https://github.com/aktanazat/sona/pulls)
    - [Closed PRs](https://github.com/aktanazat/sona/pulls?q=is%3Apr+is%3Aclosed)
 
@@ -203,7 +203,7 @@ Documentation improvements are highly valued! You can contribute by:
 - **Be patient** - This is maintained by a small team, responses may take time
 - **Be constructive** - Focus on solutions and improvements
 - **Be collaborative** - Help others and share knowledge
-- **Search first** - Check existing pull requests before opening a new one
+- **Search first** - Check existing issues and pull requests before opening a new one
 
 ## 📜 License
 
