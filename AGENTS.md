@@ -304,13 +304,11 @@ commands `shared_draft`, `shared_draft_save`, `shared_draft_discard`,
 
 ## Debug Mode
 
-Access debug features: `Cmd+Shift+D` (macOS) or `Ctrl+Shift+D` (Windows/Linux)
+Access debug features: Settings → Debug in the Mac app.
 
 ## Platform Notes
 
 - **macOS**: Metal acceleration, accessibility permissions required for keyboard shortcuts
-- **Windows**: Vulkan acceleration, code signing
-- **Linux**: OpenBLAS + Vulkan, limited Wayland support, overlay uses GTK layer shell (disable with `SONA_NO_GTK_LAYER_SHELL=1`)
 
 ## Troubleshooting
 
