@@ -61,7 +61,7 @@ use crate::meeting::types::{
 use crate::meeting::workflow_types::WorkflowEventKind;
 use crate::settings::AppSettings;
 
-use apps::{BrowserTitleReader, RunningApp, RunningAppsSource};
+use apps::{AudioProcess, BrowserTitleReader, RunningApp, RunningAppsSource};
 use calendar::{CalendarAccess, CalendarSource};
 use input_device::{
     InputDeviceLevel, InputDeviceObserver, InputDeviceState, SelfInputDeviceLease,
@@ -87,6 +87,12 @@ pub const DETECTION_EVENT_SCHEMA_VERSION: u32 = 2;
 const TICK: Duration = Duration::from_secs(15);
 const PANEL_ACK_WINDOW: Duration = Duration::from_millis(750);
 const WRAP_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long an app must hold the microphone before a capture with no app
+/// adopts it. A voice clip, or opening the next call's link, takes the
+/// microphone for seconds; a call holds it for minutes, and adopting the
+/// clip would end the recording when the clip ends.
+const ADOPTION_HOLD_MS: i64 = 60_000;
 
 /// A wall-clock jump this much larger than the monotonic clock's advance means
 /// the host slept. Both clocks are read on the same tick, so the only source of
@@ -385,6 +391,9 @@ pub struct DetectionAutoStop {
     pub session_id: MeetingSessionId,
     pub trigger: machine::StopTrigger,
     pub stops_at_utc_ms: i64,
+    /// The app whose ending this is, as the countdown names it. `None` for
+    /// a capture no app is attributed to.
+    pub app_name: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
@@ -470,25 +479,36 @@ struct TrackedCapture {
 #[derive(Clone, Debug)]
 enum TrackedCaptureKind {
     Detection {
-        trigger_bundle_id: Option<String>,
+        /// The meeting app, browser or call app this capture is about.
+        /// `None` until an eligible app holds the microphone, which the
+        /// capture then adopts.
+        trigger: Option<machine::AdoptedCall>,
         event_end_utc_ms: Option<i64>,
         /// The lanes the session actually started, as its snapshot reported them.
         /// A stop rule about a device applies only to a capture listening to it.
         sources: Vec<SourceKind>,
-        /// What the trigger app's sound has done since it tied this capture to
-        /// a call. Only a trigger app arms it, and only at start.
+        /// What a call app's sound has done since it tied this capture to a
+        /// call. Only a call-app trigger arms it.
         call_output: Option<machine::CallOutputWatch>,
+        /// What a meeting app or browser trigger has done with the microphone
+        /// and sound, read from its own processes.
+        holder: Option<machine::HolderWatch>,
+        /// While no app is attributed: the eligible app seen holding the
+        /// microphone, and since when. It is adopted once it has held it for
+        /// `ADOPTION_HOLD_MS`.
+        candidate: Option<(String, i64)>,
     },
     Operator(machine::OperatorCapture),
 }
+#[derive(Clone, Copy)]
 struct CaptureTick<'a> {
     running: &'a [RunningApp],
+    allowlist: &'a [String],
     mic: MicSignal,
     output: OutputSignal,
-    /// What the tracked capture's trigger app plays through its own
-    /// processes, when that app is not a call app. `None` when CoreAudio
-    /// attributes no process to it.
-    app_output: Option<OutputSignal>,
+    /// Every process outside Sona doing audio, or `None` when CoreAudio
+    /// could not list them this tick.
+    processes: Option<&'a [AudioProcess]>,
     sona_holds: bool,
     call: &'a machine::CallSignal,
     call_live: bool,
@@ -497,6 +517,9 @@ struct CaptureTick<'a> {
 enum CaptureTransition {
     Continue,
     Adopted(machine::AdoptedCall),
+    /// A detection capture no app was attributed to took the meeting app or
+    /// browser that now holds the microphone.
+    HolderAdopted(machine::AdoptedCall),
     /// The meeting ended: the capture stops once its countdown runs out.
     CountdownStarted(machine::StopTrigger),
     /// The ending the countdown waited on no longer holds.
@@ -506,19 +529,39 @@ enum CaptureTransition {
     Ended,
 }
 
+/// The watches an attributed app arms: a call app's sound on the default
+/// output device, any other app's own processes.
+fn watches_for(
+    trigger: Option<&machine::AdoptedCall>,
+) -> (
+    Option<machine::CallOutputWatch>,
+    Option<machine::HolderWatch>,
+) {
+    match trigger {
+        None => (None, None),
+        Some(app) if apps::is_call_app_bundle_id(&app.bundle_id) => {
+            (Some(machine::CallOutputWatch::default()), None)
+        }
+        Some(app) => (
+            None,
+            Some(machine::HolderWatch::new(apps::is_browser_bundle_id(
+                &app.bundle_id,
+            ))),
+        ),
+    }
+}
+
 impl TrackedCapture {
     fn detection(
         snapshot: &MeetingSessionSnapshot,
-        trigger_bundle_id: Option<String>,
+        trigger: Option<machine::AdoptedCall>,
         event_end_utc_ms: Option<i64>,
     ) -> Self {
-        let call_output = trigger_bundle_id
-            .is_some()
-            .then(machine::CallOutputWatch::default);
+        let (call_output, holder) = watches_for(trigger.as_ref());
         Self {
             session_id: snapshot.session_id,
             kind: TrackedCaptureKind::Detection {
-                trigger_bundle_id,
+                trigger,
                 event_end_utc_ms,
                 sources: snapshot
                     .sources
@@ -526,6 +569,8 @@ impl TrackedCapture {
                     .map(|source| source.source_kind)
                     .collect(),
                 call_output,
+                holder,
+                candidate: None,
             },
             ending: machine::CaptureEnding::default(),
         }
@@ -547,17 +592,14 @@ impl TrackedCapture {
         )
     }
 
-    /// The app whose own processes this capture's call watch reads. A call
-    /// app plays through system daemons that CoreAudio never attributes to
-    /// it, so its watch reads the default output device instead.
-    fn output_app(&self) -> Option<&str> {
+    /// The app this capture is about, as its countdown names it.
+    fn app(&self) -> Option<&machine::AdoptedCall> {
         match &self.kind {
-            TrackedCaptureKind::Detection {
-                trigger_bundle_id, ..
-            } => trigger_bundle_id
-                .as_deref()
-                .filter(|bundle_id| !apps::is_call_app_bundle_id(bundle_id)),
-            TrackedCaptureKind::Operator(_) => None,
+            TrackedCaptureKind::Detection { trigger, .. } => trigger.as_ref(),
+            TrackedCaptureKind::Operator(machine::OperatorCapture::Adopted { call, .. }) => {
+                Some(call)
+            }
+            TrackedCaptureKind::Operator(machine::OperatorCapture::Waiting) => None,
         }
     }
 
@@ -573,6 +615,86 @@ impl TrackedCapture {
         };
         watch.observe(output, now_utc_ms);
         Some(*watch)
+    }
+
+    /// Folds this tick's reading of the attributed app's processes into its
+    /// watch, for a capture a meeting app or browser is attributed to.
+    fn observe_holder(
+        &mut self,
+        processes: Option<&[AudioProcess]>,
+        now_utc_ms: i64,
+    ) -> Option<machine::HolderWatch> {
+        let TrackedCaptureKind::Detection {
+            trigger: Some(app),
+            holder: Some(watch),
+            ..
+        } = &mut self.kind
+        else {
+            return None;
+        };
+        watch.observe(
+            processes.map(|processes| apps::app_audio(processes, &app.bundle_id)),
+            now_utc_ms,
+        );
+        Some(*watch)
+    }
+
+    /// Attributes a detection capture that has no app to `holder` once the
+    /// same app has held the microphone for `ADOPTION_HOLD_MS`.
+    fn adopt_holder(
+        &mut self,
+        holder: Option<&RunningApp>,
+        now_utc_ms: i64,
+    ) -> Option<machine::AdoptedCall> {
+        let TrackedCaptureKind::Detection {
+            trigger,
+            call_output,
+            holder: watch,
+            candidate,
+            ..
+        } = &mut self.kind
+        else {
+            return None;
+        };
+        if trigger.is_some() {
+            return None;
+        }
+        let Some(holder) = holder else {
+            *candidate = None;
+            return None;
+        };
+        let since = match candidate {
+            Some((bundle_id, since)) if *bundle_id == holder.bundle_id => *since,
+            _ => {
+                *candidate = Some((holder.bundle_id.clone(), now_utc_ms));
+                return None;
+            }
+        };
+        if now_utc_ms.saturating_sub(since) < ADOPTION_HOLD_MS {
+            return None;
+        }
+        *candidate = None;
+        let app = machine::AdoptedCall {
+            bundle_id: holder.bundle_id.clone(),
+            display_name: holder.display_name.clone(),
+        };
+        (*call_output, *watch) = watches_for(Some(&app));
+        *trigger = Some(app.clone());
+        Some(app)
+    }
+
+    /// When a released holder's grace runs out, while nothing counts down.
+    fn holder_released_at_utc_ms(&self) -> Option<i64> {
+        let TrackedCaptureKind::Detection {
+            holder: Some(watch),
+            ..
+        } = &self.kind
+        else {
+            return None;
+        };
+        matches!(self.ending, machine::CaptureEnding::Recording)
+            .then(|| watch.released_at_utc_ms())
+            .flatten()
     }
 
     /// The operator kept this capture recording through its countdown. Kept
@@ -679,6 +801,43 @@ impl RuntimeState {
         tracked.observe_call_output(output, now_utc_ms)
     }
 
+    /// Folds this tick's process list into the tracked capture's holder
+    /// watch and hands it back for the stop rule to read.
+    fn observe_holder(
+        &mut self,
+        session_id: MeetingSessionId,
+        processes: Option<&[AudioProcess]>,
+        now_utc_ms: i64,
+    ) -> Option<machine::HolderWatch> {
+        self.tracked
+            .as_mut()
+            .filter(|tracked| tracked.session_id == session_id)?
+            .observe_holder(processes, now_utc_ms)
+    }
+
+    /// Attributes the tracked detection capture, when it has no app yet, to
+    /// the meeting app or browser that has held the microphone long enough,
+    /// and folds this tick's reading in. A tick CoreAudio could not list
+    /// changes nothing.
+    fn adopt_holder(
+        &mut self,
+        session_id: MeetingSessionId,
+        tick: CaptureTick<'_>,
+        now_utc_ms: i64,
+    ) -> Option<machine::AdoptedCall> {
+        let processes = tick.processes?;
+        let tracked = self
+            .tracked
+            .as_mut()
+            .filter(|tracked| tracked.session_id == session_id)?;
+        let adopted = tracked.adopt_holder(
+            apps::mic_holder(processes, tick.running, tick.allowlist),
+            now_utc_ms,
+        )?;
+        tracked.observe_holder(Some(processes), now_utc_ms);
+        Some(adopted)
+    }
+
     fn adopt_operator_call(
         &mut self,
         session_id: MeetingSessionId,
@@ -756,7 +915,21 @@ impl RuntimeState {
             session_id: tracked.session_id,
             trigger,
             stops_at_utc_ms,
+            app_name: tracked.app().map(|app| app.display_name.clone()),
         })
+    }
+
+    /// The next instant the tracked capture's ending changes by itself: its
+    /// countdown running out, or a released holder's grace, which is when
+    /// its countdown starts.
+    fn next_deadline_utc_ms(&self) -> Option<i64> {
+        self.auto_stop()
+            .map(|auto_stop| auto_stop.stops_at_utc_ms)
+            .or_else(|| {
+                self.tracked
+                    .as_ref()
+                    .and_then(TrackedCapture::holder_released_at_utc_ms)
+            })
     }
 
     /// Raises the recording card for the tracked capture into the panel slot.
@@ -832,13 +1005,13 @@ impl RuntimeState {
                 session_id,
                 kind:
                     TrackedCaptureKind::Detection {
-                        trigger_bundle_id,
+                        trigger,
                         event_end_utc_ms,
                         ..
                     },
                 ..
             }) if session_id == snapshot.session_id => {
-                TrackedCapture::detection(snapshot, trigger_bundle_id, event_end_utc_ms)
+                TrackedCapture::detection(snapshot, trigger, event_end_utc_ms)
             }
             _ => TrackedCapture::operator(snapshot),
         };
@@ -893,31 +1066,32 @@ fn evaluate_running_capture_transition(
     }
     match &tracked.kind {
         TrackedCaptureKind::Detection {
-            trigger_bundle_id,
+            trigger,
             event_end_utc_ms,
             ..
         } => {
-            let output = if tracked.output_app().is_some() {
-                tick.app_output
-            } else {
-                Some(tick.output)
-            };
-            let call_output = output.and_then(|output| {
-                state.observe_call_output(tracked.session_id, output, now_utc_ms)
-            });
-            let trigger = evaluate_stop(&StopInputs {
+            if trigger.is_none() {
+                if let Some(adopted) = state.adopt_holder(tracked.session_id, tick, now_utc_ms) {
+                    return CaptureTransition::HolderAdopted(adopted);
+                }
+            }
+            let call_output =
+                state.observe_call_output(tracked.session_id, tick.output, now_utc_ms);
+            let holder = state.observe_holder(tracked.session_id, tick.processes, now_utc_ms);
+            let stop = evaluate_stop(&StopInputs {
                 now_utc_ms,
                 linked_event_end_utc_ms: *event_end_utc_ms,
                 self_holds_input_device: tick.sona_holds,
                 device_running_somewhere: tick.mic == MicSignal::Active,
                 microphone_lane: tracked.microphone_lane(),
                 call_output,
-                trigger_app_running: trigger_bundle_id
-                    .as_deref()
-                    .is_none_or(|bundle_id| apps::is_app_running(tick.running, bundle_id)),
+                holder,
+                trigger_app_running: trigger
+                    .as_ref()
+                    .is_none_or(|app| apps::is_app_running(tick.running, &app.bundle_id)),
                 slept_since_start: state.slept,
             });
-            state.advance_ending(tracked.session_id, trigger, now_utc_ms)
+            state.advance_ending(tracked.session_id, stop, now_utc_ms)
         }
         TrackedCaptureKind::Operator(machine::OperatorCapture::Waiting) => {
             let Some(adopted) =
@@ -939,6 +1113,7 @@ fn evaluate_running_capture_transition(
                 device_running_somewhere: tick.mic == MicSignal::Active,
                 microphone_lane: false,
                 call_output,
+                holder: None,
                 trigger_app_running: apps::is_app_running(tick.running, &adopted.bundle_id),
                 slept_since_start: state.slept,
             });
@@ -1257,12 +1432,11 @@ impl DetectionRuntime {
         };
 
         let tracked = self.lock().tracked.clone();
-        // Read per tick, and only for a capture a meeting app triggered: the
-        // process list is every audio client on the Mac.
-        let app_output = tracked
-            .as_ref()
-            .and_then(TrackedCapture::output_app)
-            .and_then(input_device::app_output_signal);
+        // Who holds the microphone, read only while it is in use or a
+        // capture is tracked: the process list is every audio client on the Mac.
+        let processes = (mic == MicSignal::Active || tracked.is_some())
+            .then(|| self.input.audio_processes())
+            .flatten();
         // With the master toggle off there is no calendar query, application
         // enumeration, or store read. Detection-started captures and operator
         // captures that already adopted a call stay alive so their stop triggers
@@ -1288,6 +1462,8 @@ impl DetectionRuntime {
         // Which apps the operator is using is remembered per input-device
         // episode, so an app they switched away from mid-meeting keeps
         // explaining the microphone and one they never touched does not.
+        // Where CoreAudio lists who holds the microphone, the holder decides
+        // instead, and an app the operator only looked at explains nothing.
         let app_signal = {
             let mut state = self.lock();
             if mic == MicSignal::Active {
@@ -1295,7 +1471,10 @@ impl DetectionRuntime {
                     state.apps_used.insert(bundle_id.to_string());
                 }
             }
-            apps::app_signal(&running, &allowlist, &state.apps_used)
+            match processes.as_deref() {
+                Some(processes) => apps::holder_signal(processes, &running, &allowlist),
+                None => apps::app_signal(&running, &allowlist, &state.apps_used),
+            }
         };
         let call = apps::call_signal(&running, &allowlist);
         // Whether a call is happening, decided once per tick: it decides
@@ -1354,9 +1533,10 @@ impl DetectionRuntime {
                 session.as_ref(),
                 CaptureTick {
                     running: &running,
+                    allowlist: &allowlist,
                     mic,
                     output,
-                    app_output,
+                    processes: processes.as_deref(),
                     sona_holds,
                     call: &call,
                     call_live,
@@ -1482,13 +1662,15 @@ impl DetectionRuntime {
                         else {
                             return;
                         };
-                        let context = crate::meeting::session::MeetingDetectionStartContext {
-                            prompt_id: format!("auto:{event_key}"),
-                            title: event_title,
-                            trigger_bundle_id: None,
-                            event_end_utc_ms: Some(event.end_utc_ms),
-                            calendar_event: Some(event),
-                        };
+                        let context = runtime.start_context(
+                            format!("auto:{event_key}"),
+                            &PromptKind::CalendarEvent {
+                                event_key: event_key.clone(),
+                                event_title,
+                            },
+                            Some(event.end_utc_ms),
+                            Some(event),
+                        );
                         match runtime
                             .meetings
                             .start_from_standing_series(&context, standing)
@@ -1582,13 +1764,15 @@ impl DetectionRuntime {
             if !granted {
                 return;
             }
-            let context = crate::meeting::session::MeetingDetectionStartContext {
-                prompt_id: format!("auto-call:{bundle_id}"),
-                title: machine::call_meeting_title(&app_name, chrono::Local::now()),
-                trigger_bundle_id: Some(bundle_id.clone()),
-                event_end_utc_ms: None,
-                calendar_event: None,
-            };
+            let context = runtime.start_context(
+                format!("auto-call:{bundle_id}"),
+                &PromptKind::AppCall {
+                    bundle_id: bundle_id.clone(),
+                    app_name: app_name.clone(),
+                },
+                None,
+                None,
+            );
             match runtime
                 .meetings
                 .start_from_standing_app(&context, bundle_id.clone())
@@ -2209,13 +2393,50 @@ impl DetectionRuntime {
         prompt_id: &str,
     ) -> Option<crate::meeting::session::MeetingDetectionStartContext> {
         let pending = self.finish_prompt(prompt_id, DetectionPromptRetractionReason::Resolved)?;
-        Some(crate::meeting::session::MeetingDetectionStartContext {
-            prompt_id: prompt_id.to_string(),
-            title: pending.prompt.proposed_meeting_title(chrono::Local::now()),
-            trigger_bundle_id: pending.prompt.bundle_id().map(str::to_string),
-            event_end_utc_ms: pending.linked_event_end(),
-            calendar_event: pending.calendar_event,
-        })
+        let event_end_utc_ms = pending.linked_event_end();
+        Some(self.start_context(
+            prompt_id.to_string(),
+            &pending.prompt,
+            event_end_utc_ms,
+            pending.calendar_event,
+        ))
+    }
+
+    /// A detection capture's start, its attribution decided once from what
+    /// is true now: the app the prompt named, or for a prompt that named
+    /// none, the meeting app or browser holding the microphone.
+    fn start_context(
+        &self,
+        prompt_id: String,
+        prompt: &PromptKind,
+        event_end_utc_ms: Option<i64>,
+        calendar_event: Option<CalendarEventSummary>,
+    ) -> crate::meeting::session::MeetingDetectionStartContext {
+        let allowlist = apps::normalize_allowlist(
+            &crate::settings::get_settings(&self.app).detection_meeting_apps,
+        );
+        let running = self.running_apps.running_apps();
+        let processes = self.input.audio_processes();
+        let context = detection_start_context(
+            prompt_id,
+            prompt,
+            event_end_utc_ms,
+            calendar_event,
+            StartReading {
+                running: &running,
+                allowlist: &allowlist,
+                processes: processes.as_deref(),
+            },
+            tab_title,
+        );
+        log::info!(
+            "Meeting detection attributed {} to {}: title {:?}, system audio {:?}",
+            context.prompt_id,
+            holder_reading(context.trigger.as_ref(), processes.as_deref()),
+            context.title,
+            context.system_audio_route,
+        );
+        context
     }
 
     /// Resolves an answered native or in-app fallback prompt. Accepting keeps
@@ -2240,15 +2461,16 @@ impl DetectionRuntime {
             return;
         }
         let runtime = Arc::clone(self);
+        let prompt_id = prompt_id.to_string();
         tauri::async_runtime::spawn(async move {
-            runtime
-                .open_capture(
-                    &pending.prompt,
-                    pending.linked_event_end(),
-                    utc_now_ms(),
-                    pending.calendar_event,
-                )
-                .await;
+            let event_end_utc_ms = pending.linked_event_end();
+            let context = runtime.start_context(
+                prompt_id,
+                &pending.prompt,
+                event_end_utc_ms,
+                pending.calendar_event,
+            );
+            runtime.open_capture(context).await;
         });
     }
 
@@ -2332,17 +2554,22 @@ impl DetectionRuntime {
                             event_key: event.event_key.clone(),
                             event_title: event.title.clone(),
                         };
-                        self.open_capture(
+                        let context = self.start_context(
+                            ritual_id.to_string(),
                             &prompt,
                             Some(event.end_utc_ms),
-                            utc_now_ms(),
                             Some(event),
-                        )
-                        .await;
+                        );
+                        self.open_capture(context).await;
                     }
                     None => {
-                        self.open_capture(&PromptKind::UnknownMicSource, None, utc_now_ms(), None)
-                            .await;
+                        let context = self.start_context(
+                            ritual_id.to_string(),
+                            &PromptKind::UnknownMicSource,
+                            None,
+                            None,
+                        );
+                        self.open_capture(context).await;
                     }
                 }
                 true
@@ -2549,10 +2776,14 @@ impl DetectionRuntime {
         context: &crate::meeting::session::MeetingDetectionStartContext,
         snapshot: &MeetingSessionSnapshot,
     ) {
-        let trigger_bundle_id = context.trigger_bundle_id.clone();
+        log::info!(
+            "Meeting capture {} started for {}",
+            snapshot.session_id.uuid(),
+            holder_reading(context.trigger.as_ref(), None),
+        );
         let mut state = self.lock();
         state.begin_tracked(
-            TrackedCapture::detection(snapshot, trigger_bundle_id, context.event_end_utc_ms),
+            TrackedCapture::detection(snapshot, context.trigger.clone(), context.event_end_utc_ms),
             RecentCapture {
                 session_id: snapshot.session_id.uuid().to_string(),
                 started_utc_ms: utc_now_ms(),
@@ -2575,12 +2806,73 @@ impl DetectionRuntime {
         self.apply_panel_commands(&mut state, capture.commands);
     }
 
+    /// The app the gate detection opened for `session_id` is attributed to:
+    /// `Some(None)` for a gate no app holds, and `None` when detection opened
+    /// no gate for this session.
+    pub fn gate_app(&self, session_id: MeetingSessionId) -> Option<Option<String>> {
+        let state = self.lock();
+        let tracked = state
+            .tracked
+            .as_ref()
+            .filter(|tracked| tracked.session_id == session_id)?;
+        matches!(tracked.kind, TrackedCaptureKind::Detection { .. })
+            .then(|| tracked.app().map(|app| app.bundle_id.clone()))
+    }
+
     pub fn track_started_by_operator(self: &Arc<Self>, snapshot: &MeetingSessionSnapshot) {
         let settings = crate::settings::get_settings(&self.app);
         if !policy_from_settings(&settings).enabled {
             return;
         }
-        self.lock().begin_operator_capture(snapshot, utc_now_ms());
+        let mut state = self.lock();
+        state.begin_operator_capture(snapshot, utc_now_ms());
+        if let Some(TrackedCapture {
+            kind: TrackedCaptureKind::Detection { trigger, .. },
+            ..
+        }) = &state.tracked
+        {
+            log::info!(
+                "Meeting capture {} started from the consent gate for {}",
+                snapshot.session_id.uuid(),
+                holder_reading(trigger.as_ref(), None),
+            );
+        }
+    }
+
+    /// Tracks the consent gate a detection start opened, so the start the
+    /// operator makes from it keeps detection's stop rules. The tick drops a
+    /// tracked capture that is not the tray's session, so the gate is tracked
+    /// as that session.
+    fn track_gate(
+        &self,
+        snapshot: &MeetingSessionSnapshot,
+        trigger: Option<machine::AdoptedCall>,
+        event_end_utc_ms: Option<i64>,
+    ) {
+        self.lock().begin_tracked(
+            TrackedCapture::detection(snapshot, trigger, event_end_utc_ms),
+            RecentCapture {
+                session_id: snapshot.session_id.uuid().to_string(),
+                started_utc_ms: utc_now_ms(),
+            },
+        );
+    }
+
+    /// `track_gate` for a consent-panel start that did not reach recording.
+    /// A start a running capture refused leaves that capture as the tray's
+    /// session, and it stays tracked.
+    pub async fn track_gate_if_shown(
+        &self,
+        gate: MeetingSessionId,
+        trigger: Option<machine::AdoptedCall>,
+        event_end_utc_ms: Option<i64>,
+    ) {
+        let Some(snapshot) = self.tray_session().await else {
+            return;
+        };
+        if snapshot.session_id == gate {
+            self.track_gate(&snapshot, trigger, event_end_utc_ms);
+        }
     }
 
     /// Raises the auto-record card into the panel `begin_capture` just took
@@ -2665,20 +2957,12 @@ impl DetectionRuntime {
     /// `async` rather than blocking: this is reached from a notification click,
     /// which lands on the async runtime. A `block_on` there would be a nested
     /// runtime entry — a hang on the one path the operator explicitly asked for.
-    async fn open_capture(
-        &self,
-        prompt: &PromptKind,
-        event_end_utc_ms: Option<i64>,
-        now_utc_ms: i64,
-        calendar_event: Option<CalendarEventSummary>,
-    ) {
-        let title = prompt.proposed_meeting_title(chrono::Local::now());
-        let trigger_bundle_id = prompt.bundle_id().map(str::to_string);
+    async fn open_capture(&self, context: crate::meeting::session::MeetingDetectionStartContext) {
         // Re-read rather than trusting the tick's snapshot: an operator can take
         // a while to answer a notification, and opening a meeting for an app that
         // has since quit is a note nobody asked for.
-        let trigger_running = trigger_bundle_id.as_deref().is_none_or(|bundle_id| {
-            apps::is_app_running(&self.running_apps.running_apps(), bundle_id)
+        let trigger_running = context.trigger.as_ref().is_none_or(|app| {
+            apps::is_app_running(&self.running_apps.running_apps(), &app.bundle_id)
         });
         if !trigger_running {
             log::info!("Meeting detection dropped a prompt whose application had already quit");
@@ -2703,7 +2987,7 @@ impl DetectionRuntime {
                 operation_id: MeetingOperationId::new(),
                 session_id: snapshot.session_id,
                 expected_revision: snapshot.revision,
-                title,
+                title: context.title,
             })
             .await
         {
@@ -2713,7 +2997,7 @@ impl DetectionRuntime {
                 snapshot
             }
         };
-        if let Some(calendar_event) = calendar_event {
+        if let Some(calendar_event) = context.calendar_event {
             if let Err(error) = self
                 .meetings
                 .remember_calendar_facts(snapshot.session_id, calendar_event)
@@ -2722,13 +3006,7 @@ impl DetectionRuntime {
                 log::warn!("Meeting calendar facts could not be saved: {error:?}");
             }
         }
-        self.lock().begin_tracked(
-            TrackedCapture::detection(&snapshot, trigger_bundle_id, event_end_utc_ms),
-            RecentCapture {
-                session_id: snapshot.session_id.uuid().to_string(),
-                started_utc_ms: now_utc_ms,
-            },
-        );
+        self.track_gate(&snapshot, context.trigger, context.event_end_utc_ms);
         crate::tray::set_meeting_tray_snapshot(&self.app, Some(&snapshot));
         crate::show_meeting_destination(
             &self.app,
@@ -2763,6 +3041,13 @@ impl DetectionRuntime {
                 now_utc_ms,
             )
         };
+        let id = tracked.session_id.uuid();
+        let reading = || {
+            holder_reading(
+                self.lock().tracked.as_ref().and_then(TrackedCapture::app),
+                tick.processes,
+            )
+        };
         let trigger = match transition {
             CaptureTransition::Continue => return,
             CaptureTransition::Ended => {
@@ -2778,18 +3063,43 @@ impl DetectionRuntime {
                 self.publish_capture_status();
                 return;
             }
+            CaptureTransition::HolderAdopted(app) => {
+                log::info!(
+                    "Meeting capture {id} adopted {}, which holds the microphone: {}",
+                    app.display_name,
+                    reading()
+                );
+                self.publish_capture_status();
+                if session.title == crate::meeting::types::MANUAL_DEFAULT_TITLE {
+                    let meetings = Arc::clone(&self.meetings);
+                    let request = MeetingTitleSetRequest {
+                        operation_id: MeetingOperationId::new(),
+                        session_id: session.session_id,
+                        expected_revision: session.revision,
+                        title: holder_title(&app, tab_title(&app.bundle_id)),
+                    };
+                    tauri::async_runtime::spawn(async move {
+                        if let Err(error) = meetings.title_set(request).await {
+                            log::info!(
+                                "Meeting detection kept the default meeting title: {error:?}"
+                            );
+                        }
+                    });
+                }
+                return;
+            }
             CaptureTransition::CountdownStarted(trigger) => {
                 log::info!(
-                    "Meeting detection will stop capture {} on {trigger:?} unless it is kept",
-                    tracked.session_id.uuid()
+                    "Meeting detection will stop capture {id} on {trigger:?} unless it is kept: {}",
+                    reading()
                 );
                 self.publish_capture_status();
                 return;
             }
             CaptureTransition::CountdownWithdrawn => {
                 log::info!(
-                    "Meeting capture {} is no longer ending; its countdown is withdrawn",
-                    tracked.session_id.uuid()
+                    "Meeting capture {id} is no longer ending; its countdown is withdrawn: {}",
+                    reading()
                 );
                 self.publish_capture_status();
                 return;
@@ -2798,7 +3108,10 @@ impl DetectionRuntime {
         };
         // The session stop logs the committed stop and its cause. This names the
         // trigger before the spawned task carries it out and can fail.
-        log::info!("Meeting detection is stopping capture on {trigger:?}");
+        log::info!(
+            "Meeting detection is stopping capture {id} on {trigger:?}: {}",
+            reading()
+        );
         let runtime = Arc::clone(self);
         let meetings = Arc::clone(&self.meetings);
         let request = crate::meeting::session::MeetingMutationRequest {
@@ -2869,17 +3182,18 @@ impl DetectionRuntime {
         let _ = status.emit(&self.app);
     }
 
-    /// The wait before the next tick: the interval, or less when a countdown
-    /// on screen runs out sooner, so its stop lands when it says. The margin
-    /// covers a wall clock that lags the wait's own by a few milliseconds: a
-    /// tick just short of the deadline would leave the stop to the next one.
+    /// The wait before the next tick: the interval, or less when the
+    /// tracked capture's ending changes sooner, so a countdown's stop lands
+    /// when it says and a released holder's countdown starts when its grace
+    /// ends rather than up to a tick later. The margin covers a wall clock
+    /// that lags the wait's own by a few milliseconds: a tick just short of
+    /// the deadline would leave it to the next one.
     fn until_next_tick(&self, interval: Duration) -> Duration {
         const MARGIN_MS: i64 = 250;
-        let Some(auto_stop) = self.lock().auto_stop() else {
+        let Some(deadline) = self.lock().next_deadline_utc_ms() else {
             return interval;
         };
-        let wait_ms = auto_stop
-            .stops_at_utc_ms
+        let wait_ms = deadline
             .saturating_add(MARGIN_MS)
             .saturating_sub(utc_now_ms());
         u64::try_from(wait_ms)
@@ -3205,6 +3519,119 @@ pub fn policy_from_settings(settings: &AppSettings) -> DetectionPolicy {
         attendee_floor: machine::ATTENDEE_FLOOR,
         cross_link_window_ms: machine::CROSS_LINK_WINDOW_MS,
     }
+}
+
+/// What the platform reports at a capture's start, read once.
+struct StartReading<'a> {
+    running: &'a [RunningApp],
+    allowlist: &'a [String],
+    /// `None` when CoreAudio could not list processes.
+    processes: Option<&'a [AudioProcess]>,
+}
+
+/// Everything a detection capture starts from, derived from one attribution:
+/// the app its prompt named, or for a calendar or unknown-source prompt, the
+/// meeting app or browser holding the microphone. The title, the
+/// system-audio route, and through `trigger` the composer, the end rules and
+/// the countdown's words, all follow from it. `tab_title` reads the
+/// meeting's name from the attributed app's window.
+fn detection_start_context(
+    prompt_id: String,
+    prompt: &PromptKind,
+    event_end_utc_ms: Option<i64>,
+    calendar_event: Option<CalendarEventSummary>,
+    reading: StartReading<'_>,
+    tab_title: impl FnOnce(&str) -> Option<String>,
+) -> crate::meeting::session::MeetingDetectionStartContext {
+    let named = |bundle_id: &str, app_name: &str| machine::AdoptedCall {
+        bundle_id: bundle_id.to_string(),
+        display_name: app_name.to_string(),
+    };
+    let trigger = match prompt {
+        PromptKind::AppMeeting {
+            bundle_id,
+            app_name,
+        }
+        | PromptKind::AppHuddle {
+            bundle_id,
+            app_name,
+        }
+        | PromptKind::BrowserCall {
+            bundle_id,
+            app_name,
+        }
+        | PromptKind::AppCall {
+            bundle_id,
+            app_name,
+        } => Some(named(bundle_id, app_name)),
+        PromptKind::CalendarEvent { .. } | PromptKind::UnknownMicSource => reading
+            .processes
+            .and_then(|processes| apps::mic_holder(processes, reading.running, reading.allowlist))
+            .map(|app| named(&app.bundle_id, &app.display_name)),
+    };
+    let title = match (prompt, &trigger) {
+        (PromptKind::CalendarEvent { .. } | PromptKind::AppCall { .. }, _) | (_, None) => {
+            prompt.proposed_meeting_title(chrono::Local::now())
+        }
+        (_, Some(app)) => holder_title(app, tab_title(&app.bundle_id)),
+    };
+    let trigger_plays = trigger
+        .as_ref()
+        .zip(reading.processes)
+        .is_some_and(|(app, processes)| apps::app_audio(processes, &app.bundle_id).output);
+    crate::meeting::session::MeetingDetectionStartContext {
+        prompt_id,
+        title,
+        system_audio_route: apps::system_audio_route(
+            trigger.as_ref().map(|app| app.bundle_id.as_str()),
+            trigger_plays,
+        ),
+        trigger,
+        event_end_utc_ms,
+        calendar_event,
+    }
+}
+
+/// The title of a capture about `app` that no calendar event names: the
+/// meeting's tab title, else "Call in Safari"; "Zoom meeting" for an app.
+fn holder_title(app: &machine::AdoptedCall, tab_title: Option<String>) -> String {
+    if apps::is_browser_bundle_id(&app.bundle_id) {
+        return tab_title.unwrap_or_else(|| format!("Call in {}", app.display_name));
+    }
+    format!("{} meeting", app.display_name)
+}
+
+/// The meeting's name from the focused tab of the browser `bundle_id`, when
+/// it shows one. Any other app's window names no meeting.
+fn tab_title(bundle_id: &str) -> Option<String> {
+    if !apps::is_browser_bundle_id(bundle_id) {
+        return None;
+    }
+    match crate::context::read_app_window(bundle_id) {
+        crate::context::FrontWindowRead::Window(window) => window
+            .title
+            .as_deref()
+            .and_then(|title| apps::meeting_tab_title(title, window.host.as_deref())),
+        _ => None,
+    }
+}
+
+/// What a capture's app is doing on this tick, for the log.
+fn holder_reading(
+    app: Option<&machine::AdoptedCall>,
+    processes: Option<&[AudioProcess]>,
+) -> String {
+    let Some(app) = app else {
+        return "no app".to_string();
+    };
+    let Some(processes) = processes else {
+        return format!("{} ({})", app.display_name, app.bundle_id);
+    };
+    let audio = apps::app_audio(processes, &app.bundle_id);
+    format!(
+        "{} ({}) input={} output={}",
+        app.display_name, app.bundle_id, audio.input, audio.output
+    )
 }
 
 /// True when the wall clock advanced far more than the monotonic clock, which on
@@ -3769,9 +4196,16 @@ mod tests {
     fn tracked_call(session_id: MeetingSessionId) -> TrackedCapture {
         TrackedCapture::detection(
             &capturing(session_id, &SourceKind::ALL),
-            Some("com.apple.facetime".to_string()),
+            attributed("com.apple.facetime", "FaceTime"),
             None,
         )
+    }
+
+    fn attributed(bundle_id: &str, display_name: &str) -> Option<machine::AdoptedCall> {
+        Some(machine::AdoptedCall {
+            bundle_id: bundle_id.to_string(),
+            display_name: display_name.to_string(),
+        })
     }
 
     fn facetime(frontmost: bool) -> machine::CallSignal {
@@ -3791,7 +4225,7 @@ mod tests {
 
         let system_audio_only = TrackedCapture::detection(
             &capturing(session_id, &[SourceKind::SystemAudio]),
-            Some("com.google.chrome".to_string()),
+            attributed("com.google.chrome", "Google Chrome"),
             None,
         );
         assert!(!system_audio_only.microphone_lane());
@@ -3805,14 +4239,13 @@ mod tests {
      * attributed to is never read as quiet. A tick for another session reads
      * nothing, so a stale stop cannot end the wrong capture. */
     #[test]
-    fn a_call_app_capture_watches_the_device_and_a_meeting_app_its_own_sound() {
+    fn a_call_app_capture_watches_the_device_and_a_meeting_app_its_own_processes() {
         use CaptureTransition::{Continue, CountdownStarted};
-        use OutputSignal::{Active, Idle};
 
         let session_id = MeetingSessionId::new();
         let zoom = TrackedCapture::detection(
             &capturing(session_id, &SourceKind::ALL),
-            Some("us.zoom.xos".to_string()),
+            attributed("us.zoom.xos", "Zoom"),
             None,
         );
         let running = [RunningApp {
@@ -3820,7 +4253,14 @@ mod tests {
             display_name: "Zoom".to_string(),
             frontmost: true,
         }];
-        let ticks = |device: [OutputSignal; 3], app: [Option<OutputSignal>; 3]| {
+        let in_call: &[AudioProcess] = &[process("us.zoom.xos", "us.zoom.xos", true, true)];
+        let music: &[AudioProcess] = &[process(
+            "com.spotify.client",
+            "com.spotify.client",
+            false,
+            true,
+        )];
+        let ticks = |readings: [Option<&[AudioProcess]>; 3]| {
             let mut state = RuntimeState::default();
             state.tracked = Some(zoom.clone());
             [
@@ -3829,36 +4269,31 @@ mod tests {
                 NOW + 1_000 + machine::CALL_HANGUP_GRACE_MS,
             ]
             .into_iter()
-            .zip(device.into_iter().zip(app))
-            .map(|(now_utc_ms, (output, app_output))| {
-                meeting_app_transition_at(
-                    &mut state, &zoom, now_utc_ms, &running, output, app_output,
-                )
+            .zip(readings)
+            .map(|(now_utc_ms, processes)| {
+                meeting_app_transition_at(&mut state, &zoom, now_utc_ms, &running, processes)
             })
             .collect::<Vec<_>>()
         };
 
         assert_eq!(
-            ticks(
-                [Active, Active, Active],
-                [Some(Active), Some(Idle), Some(Idle)]
-            ),
+            ticks([Some(in_call), Some(music), Some(music)]),
             [
                 Continue,
                 Continue,
-                CountdownStarted(machine::StopTrigger::CallEnded)
+                CountdownStarted(machine::StopTrigger::HolderReleased)
             ],
-            "Zoom's own sound ending ends its call while other sound plays on"
+            "Zoom leaving its call ends it while other sound plays on"
         );
         assert_eq!(
-            ticks([Active, Idle, Idle], [Some(Idle), Some(Idle), Some(Idle)]),
+            ticks([Some(music), Some(&[]), Some(&[])]),
             [Continue, Continue, Continue],
-            "the device going quiet is not Zoom hanging up"
+            "a Zoom never seen in a call is never read as having left it"
         );
         assert_eq!(
-            ticks([Active, Idle, Idle], [Some(Active), None, None]),
+            ticks([Some(in_call), None, None]),
             [Continue, Continue, Continue],
-            "a Zoom no process is attributed to is never read as quiet"
+            "a tick CoreAudio could not list says nothing"
         );
 
         let mut state = RuntimeState::default();
@@ -3882,6 +4317,7 @@ mod tests {
                 device_running_somewhere: true,
                 microphone_lane: true,
                 call_output: Some(hung_up),
+                holder: None,
                 trigger_app_running: true,
                 slept_since_start: false,
             }),
@@ -3929,6 +4365,7 @@ mod tests {
                     device_running_somewhere: true,
                     microphone_lane: true,
                     call_output,
+                    holder: None,
                     trigger_app_running: true,
                     slept_since_start: false,
                 }),
@@ -3965,6 +4402,7 @@ mod tests {
                 device_running_somewhere: true,
                 microphone_lane: true,
                 call_output: None,
+                holder: None,
                 trigger_app_running: true,
                 slept_since_start: state.slept,
             },),
@@ -4003,9 +4441,10 @@ mod tests {
             MeetingPhase::CapturingRecording,
             CaptureTick {
                 running,
+                allowlist: &[],
                 mic,
                 output,
-                app_output: None,
+                processes: None,
                 sona_holds,
                 call,
                 call_live,
@@ -4014,15 +4453,14 @@ mod tests {
         )
     }
 
-    /// One tick of a capture a meeting app started, with the device's sound
-    /// and the app's own as given, while Sona's microphone runs.
+    /// One tick of a capture a meeting app started, with this tick's process
+    /// list as given, while Sona's microphone runs and the device plays.
     fn meeting_app_transition_at(
         state: &mut RuntimeState,
         tracked: &TrackedCapture,
         now_utc_ms: i64,
         running: &[RunningApp],
-        output: OutputSignal,
-        app_output: Option<OutputSignal>,
+        processes: Option<&[AudioProcess]>,
     ) -> CaptureTransition {
         evaluate_running_capture_transition(
             state,
@@ -4030,9 +4468,10 @@ mod tests {
             MeetingPhase::CapturingRecording,
             CaptureTick {
                 running,
+                allowlist: &[],
                 mic: MicSignal::Active,
-                output,
-                app_output,
+                output: OutputSignal::Active,
+                processes,
                 sona_holds: true,
                 call: &machine::CallSignal::Absent,
                 call_live: false,
@@ -4311,7 +4750,7 @@ mod tests {
         let zoom_id = MeetingSessionId::new();
         let zoom_capture = TrackedCapture::detection(
             &capturing(zoom_id, &SourceKind::ALL),
-            Some("us.zoom.xos".to_string()),
+            attributed("us.zoom.xos", "Zoom"),
             None,
         );
         let mut zoom_state = RuntimeState::default();
@@ -4840,6 +5279,7 @@ mod tests {
                 session_id,
                 trigger: machine::StopTrigger::CallEnded,
                 stops_at_utc_ms: ended_at + machine::ENDING_COUNTDOWN_MS,
+                app_name: Some("FaceTime".to_string()),
             })
         );
         assert_eq!(
@@ -4968,7 +5408,7 @@ mod tests {
         let event_end = NOW + 60_000;
         let mut tracked = TrackedCapture::detection(
             &capturing(session_id, &SourceKind::ALL),
-            Some("com.apple.facetime".to_string()),
+            attributed("com.apple.facetime", "FaceTime"),
             Some(event_end),
         );
         let mut state = RuntimeState::default();
@@ -5184,9 +5624,10 @@ mod tests {
             phase,
             CaptureTick {
                 running: &[],
+                allowlist: &[],
                 mic: MicSignal::Active,
                 output: OutputSignal::Idle,
-                app_output: None,
+                processes: None,
                 sona_holds: true,
                 call: &machine::CallSignal::Absent,
                 call_live: false,
@@ -5332,5 +5773,393 @@ mod tests {
             )
             .is_some());
         assert!(state.tracked.is_none());
+    }
+
+    /// CoreAudio's per-process list, as a test scripts it.
+    #[derive(Default)]
+    struct ScriptedAudio(Mutex<Option<Vec<AudioProcess>>>);
+
+    impl ScriptedAudio {
+        fn set(&self, processes: Vec<AudioProcess>) {
+            *self.0.lock().expect("the script lock") = Some(processes);
+        }
+    }
+
+    impl InputDeviceState for ScriptedAudio {
+        fn mic_signal(&self) -> MicSignal {
+            MicSignal::Active
+        }
+
+        fn output_signal(&self) -> OutputSignal {
+            OutputSignal::Active
+        }
+
+        fn audio_processes(&self) -> Option<Vec<AudioProcess>> {
+            self.0.lock().expect("the script lock").clone()
+        }
+    }
+
+    fn tracking(tracked: TrackedCapture) -> RuntimeState {
+        RuntimeState {
+            tracked: Some(tracked),
+            ..RuntimeState::default()
+        }
+    }
+
+    fn process(bundle_id: &str, owner: &str, input: bool, output: bool) -> AudioProcess {
+        AudioProcess {
+            bundle_id: Some(bundle_id.to_string()),
+            owner_bundle_id: Some(owner.to_string()),
+            input,
+            output,
+        }
+    }
+
+    /// Safari's WebKit GPU process, which records and plays for a Meet tab.
+    fn meet_tab(input: bool, output: bool) -> AudioProcess {
+        process("com.apple.WebKit.GPU", "com.apple.Safari", input, output)
+    }
+
+    fn running_app(bundle_id: &str, display_name: &str, frontmost: bool) -> RunningApp {
+        RunningApp {
+            bundle_id: bundle_id.to_string(),
+            display_name: display_name.to_string(),
+            frontmost,
+        }
+    }
+
+    /// One tick of the tracked capture as the loop runs it: the capture as it
+    /// stood when the tick began, the process list read through `audio`, and
+    /// Sona's microphone live.
+    fn tick_at(
+        state: &mut RuntimeState,
+        audio: &dyn InputDeviceState,
+        now_utc_ms: i64,
+        running: &[RunningApp],
+    ) -> CaptureTransition {
+        let tracked = state.tracked.clone().expect("a capture is tracked");
+        let processes = audio.audio_processes();
+        let allowlist = apps::default_meeting_app_bundle_ids();
+        evaluate_running_capture_transition(
+            state,
+            &tracked,
+            MeetingPhase::CapturingRecording,
+            CaptureTick {
+                running,
+                allowlist: &allowlist,
+                mic: MicSignal::Active,
+                output: OutputSignal::Active,
+                processes: processes.as_deref(),
+                sona_holds: true,
+                call: &machine::CallSignal::Absent,
+                call_live: false,
+            },
+            now_utc_ms,
+        )
+    }
+
+    /// When the loop ticks next, as `until_next_tick` waits: a tick later,
+    /// or at the tracked capture's next deadline when that comes sooner.
+    fn next_tick(state: &RuntimeState, now_utc_ms: i64) -> i64 {
+        let tick_ms = i64::try_from(TICK.as_millis()).expect("a tick fits in i64");
+        state
+            .next_deadline_utc_ms()
+            .filter(|deadline| *deadline > now_utc_ms)
+            .map_or(now_utc_ms + tick_ms, |deadline| {
+                deadline.min(now_utc_ms + tick_ms)
+            })
+    }
+
+    /* The 2026-11-16 call on the work Mac, replayed. A Google Meet ran in
+     * Safari from 10:08:56. Slack was in front for ten seconds while Safari
+     * held the microphone, quit at 10:13:02 and came back at 10:14:31.
+     * Safari released the microphone at 10:19:05, and its output ran on for
+     * about a minute, as it did in the probe. Sona named the call "Slack
+     * meeting", counted down "The call ended." when Slack quit, and never
+     * saw Safari leave. */
+    #[test]
+    fn a_meet_call_in_safari_is_attributed_to_safari_and_ends_when_safari_leaves() {
+        const SECOND: i64 = 1_000;
+        let joined = NOW;
+        let slack_in_front = joined + 41 * SECOND..=joined + 52 * SECOND;
+        let accepted = joined + 52 * SECOND;
+        let slack_gone = joined + 246 * SECOND..joined + 335 * SECOND;
+        let released = joined + 609 * SECOND;
+        let output_released = released + 58 * SECOND;
+        let audio = ScriptedAudio::default();
+        let allowlist = apps::default_meeting_app_bundle_ids();
+        let running_at = |now: i64| {
+            let slack_front = slack_in_front.contains(&now);
+            let mut running = vec![running_app("com.apple.safari", "Safari", !slack_front)];
+            if !slack_gone.contains(&now) {
+                running.push(running_app(
+                    "com.tinyspeck.slackmacgap",
+                    "Slack",
+                    slack_front,
+                ));
+            }
+            running
+        };
+        let script_at = |now: i64| vec![meet_tab(now < released, now < output_released)];
+
+        audio.set(script_at(accepted));
+        let running = running_at(accepted);
+        let processes = audio.audio_processes();
+        let listed = processes.as_deref().expect("the script lists processes");
+        let outcome = evaluate(
+            &DetectionInputs {
+                now_utc_ms: accepted,
+                calendar: CalendarSignal::Absent,
+                app: apps::holder_signal(listed, &running, &allowlist),
+                call: machine::CallSignal::Absent,
+                mic: MicSignal::Active,
+                output: OutputSignal::Active,
+                browser_title: machine::BrowserTitleEvidence::MeetingMatch,
+                standing_series_consent: false,
+                standing_app_consent: false,
+                recent_capture: None,
+                self_holds_input_device: false,
+                self_mic_just_closed: false,
+                capture_active: false,
+            },
+            &DetectionPolicy::default(),
+        );
+        let DetectionOutcome::Prompt(prompt) = outcome else {
+            panic!("a Meet call holding the microphone raises a prompt, not {outcome:?}");
+        };
+        assert_eq!(
+            prompt,
+            PromptKind::BrowserCall {
+                bundle_id: "com.apple.safari".to_string(),
+                app_name: "Safari".to_string(),
+            },
+            "Slack in front is not Slack in a call"
+        );
+
+        let context = detection_start_context(
+            "prompt".to_string(),
+            &prompt,
+            None,
+            None,
+            StartReading {
+                running: &running,
+                allowlist: &allowlist,
+                processes: Some(listed),
+            },
+            |bundle_id| (bundle_id == "com.apple.safari").then(|| "Engineering Sync".to_string()),
+        );
+        assert_eq!(
+            context.trigger,
+            attributed("com.apple.safari", "Safari"),
+            "the capture, its chat notice and its end rules are Safari's"
+        );
+        assert_eq!(context.title, "Engineering Sync");
+        assert_eq!(
+            context.system_audio_route,
+            Vec::<String>::new(),
+            "a browser call records the whole mix"
+        );
+
+        let mut state = tracking(TrackedCapture::detection(
+            &capturing(MeetingSessionId::new(), &SourceKind::ALL),
+            context.trigger,
+            context.event_end_utc_ms,
+        ));
+        let mut ended = Vec::new();
+        let mut now = accepted;
+        while now < output_released + 60 * SECOND {
+            now = next_tick(&state, now);
+            audio.set(script_at(now));
+            let transition = tick_at(&mut state, &audio, now, &running_at(now));
+            if transition == CaptureTransition::Continue {
+                continue;
+            }
+            let stopped = matches!(transition, CaptureTransition::Stop(_));
+            let named = state.auto_stop().and_then(|auto_stop| auto_stop.app_name);
+            ended.push((now, transition, named));
+            if stopped {
+                break;
+            }
+        }
+
+        let [(counted_at, counted, named), (stopped_at, stopped, _)] = ended.as_slice() else {
+            panic!("one countdown and one stop, after Safari left: {ended:?}");
+        };
+        assert_eq!(
+            *counted,
+            CaptureTransition::CountdownStarted(machine::StopTrigger::HolderReleased)
+        );
+        assert!(
+            *counted_at > released,
+            "Slack quitting and coming back counted nothing down"
+        );
+        assert_eq!(
+            named.as_deref(),
+            Some("Safari"),
+            "the countdown names Safari"
+        );
+        assert_eq!(
+            *stopped,
+            CaptureTransition::Stop(machine::StopTrigger::HolderReleased)
+        );
+        assert!(
+            *stopped_at - released <= 55 * SECOND,
+            "stopped {} ms after Safari left",
+            *stopped_at - released
+        );
+    }
+
+    /* Muted with nobody talking, a meeting app keeps the microphone and
+     * plays nothing. That is not a hangup. */
+    #[test]
+    fn a_held_microphone_with_quiet_output_is_not_a_hangup() {
+        let audio = ScriptedAudio::default();
+        let running = [running_app("us.zoom.xos", "Zoom", true)];
+        let mut state = tracking(TrackedCapture::detection(
+            &capturing(MeetingSessionId::new(), &SourceKind::ALL),
+            attributed("us.zoom.xos", "Zoom"),
+            None,
+        ));
+
+        audio.set(vec![process("us.zoom.xos", "us.zoom.xos", true, true)]);
+        assert_eq!(
+            tick_at(&mut state, &audio, NOW, &running),
+            CaptureTransition::Continue
+        );
+        audio.set(vec![process("us.zoom.xos", "us.zoom.xos", true, false)]);
+        for seconds in [15, 30, 45, 60, 75] {
+            assert_eq!(
+                tick_at(&mut state, &audio, NOW + seconds * 1_000, &running),
+                CaptureTransition::Continue,
+                "{seconds} s with the microphone held and nothing playing"
+            );
+        }
+    }
+
+    /* A calendar capture accepted before the call was joined has no app. A
+     * dictation app holding the microphone first is not the meeting; the
+     * Meet tab that holds it next is, once it has held it for a minute. */
+    #[test]
+    fn a_dictation_app_holding_the_microphone_is_never_adopted() {
+        let audio = ScriptedAudio::default();
+        let allowlist = apps::default_meeting_app_bundle_ids();
+        let running = [
+            running_app("com.superduper.superwhisper", "superwhisper", true),
+            running_app("com.apple.safari", "Safari", false),
+        ];
+        audio.set(vec![process(
+            "com.superduper.superwhisper",
+            "com.superduper.superwhisper",
+            true,
+            false,
+        )]);
+        let processes = audio.audio_processes();
+        let context = detection_start_context(
+            "prompt".to_string(),
+            &PromptKind::CalendarEvent {
+                event_key: "event-1".to_string(),
+                event_title: "Engineering Sync".to_string(),
+            },
+            Some(NOW + 3_600_000),
+            None,
+            StartReading {
+                running: &running,
+                allowlist: &allowlist,
+                processes: processes.as_deref(),
+            },
+            |_| None,
+        );
+        assert_eq!(context.trigger, None, "a dictation app names no meeting");
+        assert_eq!(context.title, "Engineering Sync");
+
+        let mut state = tracking(TrackedCapture::detection(
+            &capturing(MeetingSessionId::new(), &SourceKind::ALL),
+            context.trigger,
+            context.event_end_utc_ms,
+        ));
+        assert_eq!(
+            tick_at(&mut state, &audio, NOW, &running),
+            CaptureTransition::Continue
+        );
+        audio.set(vec![meet_tab(true, true)]);
+        for seconds in [15, 30, 45, 60] {
+            assert_eq!(
+                tick_at(&mut state, &audio, NOW + seconds * 1_000, &running),
+                CaptureTransition::Continue,
+                "{seconds} s: the Meet tab has not held the microphone for a minute yet"
+            );
+        }
+        assert_eq!(
+            tick_at(&mut state, &audio, NOW + 75_000, &running),
+            CaptureTransition::HolderAdopted(machine::AdoptedCall {
+                bundle_id: "com.apple.safari".to_string(),
+                display_name: "Safari".to_string(),
+            })
+        );
+    }
+
+    /* An in-person meeting recorded from its calendar prompt has no app. A
+     * twenty-second Slack voice clip during it is not the meeting: adopting
+     * Slack would end the recording when the clip ended, or when Slack
+     * quit. */
+    #[test]
+    fn a_short_microphone_use_is_never_adopted() {
+        let audio = ScriptedAudio::default();
+        let slack = running_app("com.tinyspeck.slackmacgap", "Slack", true);
+        let mut state = tracking(TrackedCapture::detection(
+            &capturing(MeetingSessionId::new(), &SourceKind::ALL),
+            None,
+            Some(NOW + 3_600_000),
+        ));
+        let clip = process(
+            "com.tinyspeck.slackmacgap.helper",
+            "com.tinyspeck.slackmacgap",
+            true,
+            false,
+        );
+
+        for (seconds, processes, running) in [
+            (0, vec![clip.clone()], vec![slack.clone()]),
+            (15, vec![clip], vec![slack.clone()]),
+            (30, Vec::new(), vec![slack.clone()]),
+            (90, Vec::new(), vec![slack]),
+            (105, Vec::new(), Vec::new()),
+            (120, Vec::new(), Vec::new()),
+        ] {
+            audio.set(processes);
+            assert_eq!(
+                tick_at(&mut state, &audio, NOW + seconds * 1_000, &running),
+                CaptureTransition::Continue,
+                "{seconds} s"
+            );
+        }
+        assert_eq!(state.auto_stop(), None);
+    }
+
+    /* A recording started by hand keeps today's rule: it adopts only a call
+     * app's call, so a Meet tab taking and releasing the microphone never
+     * counts it down. */
+    #[test]
+    fn a_manual_capture_never_stops_on_a_meeting_apps_microphone() {
+        let audio = ScriptedAudio::default();
+        let running = [running_app("com.apple.safari", "Safari", true)];
+        let mut state = tracking(TrackedCapture::operator(&capturing(
+            MeetingSessionId::new(),
+            &SourceKind::ALL,
+        )));
+        for (seconds, holding) in [
+            (0, true),
+            (15, false),
+            (30, false),
+            (60, false),
+            (120, false),
+        ] {
+            audio.set(vec![meet_tab(holding, false)]);
+            assert_eq!(
+                tick_at(&mut state, &audio, NOW + seconds * 1_000, &running),
+                CaptureTransition::Continue
+            );
+        }
+        assert_eq!(state.auto_stop(), None);
     }
 }

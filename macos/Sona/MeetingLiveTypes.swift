@@ -656,20 +656,13 @@ struct DetectionAdoptedCall: Decodable {
     let displayName: String
 }
 
-/// `StopTrigger`, for the three endings that count down before they stop a
+/// `StopTrigger`, for the endings that count down before they stop a
 /// recording. No other trigger reaches the countdown.
 enum DetectionEnding: String, Decodable {
     case eventEnd = "event_end"
     case triggerAppExited = "trigger_app_exited"
     case callEnded = "call_ended"
-
-    /// What ended, in the countdown's words.
-    var label: String {
-        switch self {
-        case .eventEnd: "Meeting time is up."
-        case .triggerAppExited, .callEnded: "The call ended."
-        }
-    }
+    case holderReleased = "holder_released"
 }
 
 /// `DetectionAutoStop`: a recording whose meeting ended, and when it stops
@@ -678,6 +671,20 @@ struct DetectionAutoStop: Decodable, Equatable {
     let sessionId: MeetingSessionId
     let trigger: DetectionEnding
     let stopsAtUtcMs: Int64
+    /// The app whose ending this is. Absent for a recording no app is
+    /// attributed to.
+    let appName: String?
+
+    /// What Sona saw end, in the countdown's words.
+    var label: String {
+        let app = appName ?? "The meeting app"
+        return switch trigger {
+        case .eventEnd: "Meeting time is up."
+        case .callEnded: "The call ended."
+        case .triggerAppExited: "\(app) quit."
+        case .holderReleased: "\(app) stopped using the microphone."
+        }
+    }
 }
 
 /// `DetectionStatus`: the whole detection read. Already camelCase on the wire.

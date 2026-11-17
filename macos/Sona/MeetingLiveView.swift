@@ -1121,7 +1121,7 @@ private struct AutoStopLine: View {
     var body: some View {
         let stopsAt = autoStop.stopsAtUtcMs.meetingDate
         let left = Text(timerInterval: min(Date.now, stopsAt)...stopsAt, countsDown: true)
-        Text("\(autoStop.trigger.label) Stopping in \(left).")
+        Text("\(autoStop.label) Stopping in \(left).")
             .bodyText(12, Theme.ink)
             .lineLimit(3)
     }

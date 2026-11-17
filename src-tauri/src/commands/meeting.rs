@@ -183,7 +183,10 @@ pub async fn meeting_start(
     detection: State<'_, Arc<DetectionRuntime>>,
     request: MeetingStartRequest,
 ) -> Result<MeetingMutationResult, MeetingCommandError> {
-    let result = manager.start(request).await;
+    let composer_app = detection
+        .gate_app(request.session_id)
+        .unwrap_or_else(crate::meeting::session::frontmost_composer_app);
+    let result = manager.start(request, composer_app).await;
     if let Ok(started) = &result {
         if started.snapshot.phase == MeetingPhase::CapturingRecording {
             // The active capture already suppresses new detection offers. A
@@ -207,9 +210,14 @@ pub async fn meeting_consent_panel_start(
     let series_consent = request
         .always_record_series
         .then(|| request.consent.clone());
-    let result = manager.start_from_consent_panel(&context, request).await;
-    if let Ok(started) = &result {
-        if started.snapshot.phase == MeetingPhase::CapturingRecording {
+    let preflight = manager
+        .create_consent_panel_preflight(&context, &request)
+        .await?;
+    let result = manager
+        .start_from_consent_panel(&context, &preflight, request)
+        .await;
+    match &result {
+        Ok(started) if started.snapshot.phase == MeetingPhase::CapturingRecording => {
             if let Some(consent) = series_consent {
                 if let Err(error) = manager.grant_panel_series_consent(&context, &consent).await {
                     log::warn!(
@@ -220,6 +228,15 @@ pub async fn meeting_consent_panel_start(
             detection.track_started(&context, &started.snapshot);
             manager
                 .record_prompt_recorded(context.prompt_id, started.snapshot.session_id)
+                .await;
+        }
+        _ => {
+            detection
+                .track_gate_if_shown(
+                    preflight.session_id,
+                    context.trigger.clone(),
+                    context.event_end_utc_ms,
+                )
                 .await;
         }
     }

@@ -290,13 +290,28 @@ pub struct MeetingConsentPanelStartRequest {
     pub announce_in_chat: bool,
 }
 
+/// A detection capture's start, with its attribution decided once: the
+/// meeting app or browser it is about, which every consumer below reads.
 #[derive(Clone, Debug)]
 pub struct MeetingDetectionStartContext {
     pub prompt_id: String,
     pub title: String,
-    pub trigger_bundle_id: Option<String>,
+    /// The app the capture is about, and whose chat composer a recording
+    /// notice goes to. `None` when no meeting app or browser held the
+    /// microphone; the notice then has no composer rather than whatever app
+    /// was in front.
+    pub trigger: Option<super::detection::machine::AdoptedCall>,
+    /// The applications the system-audio lane records, empty for the whole
+    /// mix. See `detection::apps::system_audio_route`.
+    pub system_audio_route: Vec<String>,
     pub event_end_utc_ms: Option<i64>,
     pub calendar_event: Option<CalendarEventSummary>,
+}
+
+impl MeetingDetectionStartContext {
+    fn composer_app(&self) -> Option<String> {
+        self.trigger.as_ref().map(|app| app.bundle_id.clone())
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, Type)]
@@ -1410,36 +1425,47 @@ impl MeetingSessionManager {
         Ok(receipt)
     }
 
+    /// The preflight a consent-panel start records into, made apart from the
+    /// start so the caller knows which session a start that fails lands on.
+    pub async fn create_consent_panel_preflight(
+        &self,
+        context: &MeetingDetectionStartContext,
+        request: &MeetingConsentPanelStartRequest,
+    ) -> Result<MeetingSessionSnapshot, MeetingCommandError> {
+        request_system_audio_permission_once();
+        Ok(self
+            .create_detection_preflight(context, request.operation_id, &request.consent)
+            .await?
+            .snapshot)
+    }
+
     pub async fn start_from_consent_panel(
         &self,
         context: &MeetingDetectionStartContext,
+        preflight: &MeetingSessionSnapshot,
         request: MeetingConsentPanelStartRequest,
     ) -> Result<MeetingMutationResult, MeetingCommandError> {
-        request_system_audio_permission_once();
-        let preflight = self
-            .create_detection_preflight(context, request.operation_id, &request.consent)
-            .await?;
         if request.always_record_series && context.calendar_event.is_none() {
-            self.show_consent_gate(&preflight.snapshot);
+            self.show_consent_gate(preflight);
             return Err(MeetingCommandError::InvalidRequest);
         }
         let start = self
             .start_with_provenance(
                 MeetingStartRequest {
                     operation_id: MeetingOperationId::new(),
-                    session_id: preflight.snapshot.session_id,
-                    expected_revision: preflight.snapshot.revision,
+                    session_id: preflight.session_id,
+                    expected_revision: preflight.revision,
                     consent: request.consent,
                 },
                 MeetingConsentProvenance::Direct,
             )
             .await;
-        let result = self.finish_detection_start(&preflight.snapshot, start)?;
+        let result = self.finish_detection_start(preflight, start)?;
         if result.snapshot.phase == MeetingPhase::CapturingRecording {
             self.arm_disclosure(
                 result.snapshot.session_id,
                 context.calendar_event.as_ref(),
-                composer_app_for(context.trigger_bundle_id.as_deref()),
+                context.composer_app(),
                 request.announce_in_chat,
                 true,
             )
@@ -1572,7 +1598,7 @@ impl MeetingSessionManager {
             self.arm_disclosure(
                 result.snapshot.session_id,
                 context.calendar_event.as_ref(),
-                composer_app_for(context.trigger_bundle_id.as_deref()),
+                context.composer_app(),
                 announce,
                 false,
             )
@@ -1647,7 +1673,7 @@ impl MeetingSessionManager {
             self.arm_disclosure(
                 result.snapshot.session_id,
                 context.calendar_event.as_ref(),
-                composer_app_for(context.trigger_bundle_id.as_deref()),
+                context.composer_app(),
                 true,
                 false,
             )
@@ -1702,10 +1728,7 @@ impl MeetingSessionManager {
                     destination: consent.destination.clone(),
                     remote_acknowledgement: consent.remote_acknowledgement.clone(),
                     microphone_device_uid: None,
-                    frozen_system_audio_application_bundle_ids:
-                        super::detection::apps::system_audio_route(
-                            context.trigger_bundle_id.as_deref(),
-                        ),
+                    frozen_system_audio_application_bundle_ids: context.system_audio_route.clone(),
                 },
                 context.calendar_event.clone(),
             )
@@ -1718,7 +1741,11 @@ impl MeetingSessionManager {
         result
     }
 
+    /// The gate is the session the tray holds until it starts or is
+    /// discarded, as the gate a detection notification opens is, so detection
+    /// keeps tracking it.
     fn show_consent_gate(&self, snapshot: &MeetingSessionSnapshot) {
+        self.actor_lock().tray_session_id = Some(snapshot.session_id);
         if let Some(app) = self.app.as_ref() {
             crate::show_meeting_destination(
                 app,
@@ -1836,11 +1863,14 @@ impl MeetingSessionManager {
             .map_err(map_store_error)
     }
 
+    /// `composer_app` is the app whose chat a recording notice goes to: the
+    /// app a detection gate is attributed to, or for a gate opened by hand
+    /// the meeting app in front (`frontmost_composer_app`).
     pub async fn start(
         &self,
         request: MeetingStartRequest,
+        composer_app: Option<String>,
     ) -> Result<MeetingMutationResult, MeetingCommandError> {
-        let composer_app = composer_app_for(None);
         let result = self
             .start_with_provenance(request, MeetingConsentProvenance::Direct)
             .await?;
@@ -5352,16 +5382,12 @@ fn acknowledged_sources(consent: &MeetingConsentInput) -> Vec<SourceKind> {
 
 /// Which application's chat box a disclosure belongs in.
 ///
-/// An offer raised by an application names it. A calendar offer names none,
-/// so the meeting application in front when the offer was accepted stands in:
-/// the consent panel does not take focus, so that is the application the
-/// person was looking at. Anything else in front — an editor, a terminal,
-/// nothing — means no composer is known, and the attempt is refused later
-/// rather than aimed at whatever happens to be focused.
-fn composer_app_for(trigger_bundle_id: Option<&str>) -> Option<String> {
-    if let Some(bundle_id) = trigger_bundle_id {
-        return Some(bundle_id.to_string());
-    }
+/// A detection capture names it in its start context. A recording started by
+/// hand names none, so the meeting application in front when it started
+/// stands in. Anything else in front — an editor, a terminal, nothing — means
+/// no composer is known, and the attempt is refused later rather than aimed
+/// at whatever happens to be focused.
+pub(crate) fn frontmost_composer_app() -> Option<String> {
     crate::context::frontmost_application_identifier().filter(|bundle_id| {
         super::detection::apps::is_browser_bundle_id(bundle_id)
             || super::detection::apps::DEFAULT_MEETING_APP_BUNDLE_IDS
@@ -6120,20 +6146,23 @@ pub(crate) mod tests {
             None,
         ))
         .unwrap();
-        let active = tauri::async_runtime::block_on(manager.start(MeetingStartRequest {
-            operation_id: MeetingOperationId::new(),
-            session_id: preflight.snapshot.session_id,
-            expected_revision: preflight.snapshot.revision,
-            consent: MeetingConsentInput {
-                policy_version: 1,
-                microphone_acknowledged: true,
-                system_audio_acknowledged: true,
-                known_missing_sources_acknowledged: Vec::new(),
-                degraded_start_policy: DegradedStartPolicy::AbortIfRequiredSourceFails,
-                destination: ProcessingDestination::Local,
-                remote_acknowledgement: None,
+        let active = tauri::async_runtime::block_on(manager.start(
+            MeetingStartRequest {
+                operation_id: MeetingOperationId::new(),
+                session_id: preflight.snapshot.session_id,
+                expected_revision: preflight.snapshot.revision,
+                consent: MeetingConsentInput {
+                    policy_version: 1,
+                    microphone_acknowledged: true,
+                    system_audio_acknowledged: true,
+                    known_missing_sources_acknowledged: Vec::new(),
+                    degraded_start_policy: DegradedStartPolicy::AbortIfRequiredSourceFails,
+                    destination: ProcessingDestination::Local,
+                    remote_acknowledgement: None,
+                },
             },
-        }))
+            None,
+        ))
         .unwrap();
 
         tauri::async_runtime::block_on(manager.sweep_retention_at(retention_deadline(&due)))
@@ -6363,28 +6392,33 @@ pub(crate) mod tests {
         let context = MeetingDetectionStartContext {
             prompt_id: "failed-panel-prompt".to_string(),
             title: event.title.clone(),
-            trigger_bundle_id: None,
+            trigger: None,
+            system_audio_route: Vec::new(),
             event_end_utc_ms: Some(event.end_utc_ms),
             calendar_event: Some(event),
         };
-        let result = tauri::async_runtime::block_on(manager.start_from_consent_panel(
-            &context,
-            MeetingConsentPanelStartRequest {
-                prompt_id: context.prompt_id.clone(),
-                operation_id: MeetingOperationId::new(),
-                consent: MeetingConsentInput {
-                    policy_version: 1,
-                    microphone_acknowledged: true,
-                    system_audio_acknowledged: true,
-                    known_missing_sources_acknowledged: vec![SourceKind::SystemAudio],
-                    degraded_start_policy: DegradedStartPolicy::AbortIfRequiredSourceFails,
-                    destination: ProcessingDestination::Local,
-                    remote_acknowledgement: None,
-                },
-                always_record_series: true,
-                announce_in_chat: false,
+        let request = MeetingConsentPanelStartRequest {
+            prompt_id: context.prompt_id.clone(),
+            operation_id: MeetingOperationId::new(),
+            consent: MeetingConsentInput {
+                policy_version: 1,
+                microphone_acknowledged: true,
+                system_audio_acknowledged: true,
+                known_missing_sources_acknowledged: vec![SourceKind::SystemAudio],
+                degraded_start_policy: DegradedStartPolicy::AbortIfRequiredSourceFails,
+                destination: ProcessingDestination::Local,
+                remote_acknowledgement: None,
             },
-        ));
+            always_record_series: true,
+            announce_in_chat: false,
+        };
+        let preflight = tauri::async_runtime::block_on(
+            manager.create_consent_panel_preflight(&context, &request),
+        )
+        .unwrap();
+        let result = tauri::async_runtime::block_on(
+            manager.start_from_consent_panel(&context, &preflight, request),
+        );
 
         assert!(result.is_err());
         assert!(
@@ -6392,6 +6426,65 @@ pub(crate) mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    /* A panel start that lands on the consent gate must leave the gate as
+    the tray's session: detection drops a tracked capture that is not, and
+    "Record without it" then started a capture with no stop rules. */
+    #[test]
+    fn a_panel_start_that_lands_on_the_gate_leaves_it_as_the_tray_session() {
+        let directory = TempDir::new().unwrap();
+        let secrets = Arc::new(SecretManager::with_backend(Arc::new(
+            MemorySecretBackend::new(),
+        )));
+        let manager = MeetingSessionManager::with_parts(
+            None,
+            Some(directory.path().join("meetings")),
+            secrets,
+            Arc::new(FakeSources {
+                starts: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                aborts: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                unavailable: Some(SourceKind::SystemAudio),
+                lane: Arc::new(Mutex::new(None)),
+            }),
+        );
+        let context = MeetingDetectionStartContext {
+            prompt_id: "gate-prompt".to_string(),
+            title: "Call in Safari".to_string(),
+            trigger: None,
+            system_audio_route: Vec::new(),
+            event_end_utc_ms: None,
+            calendar_event: None,
+        };
+        let request = MeetingConsentPanelStartRequest {
+            prompt_id: context.prompt_id.clone(),
+            operation_id: MeetingOperationId::new(),
+            consent: MeetingConsentInput {
+                policy_version: 1,
+                microphone_acknowledged: true,
+                system_audio_acknowledged: true,
+                known_missing_sources_acknowledged: vec![SourceKind::SystemAudio],
+                degraded_start_policy: DegradedStartPolicy::AbortIfRequiredSourceFails,
+                destination: ProcessingDestination::Local,
+                remote_acknowledgement: None,
+            },
+            always_record_series: false,
+            announce_in_chat: false,
+        };
+        let gate = tauri::async_runtime::block_on(
+            manager.create_consent_panel_preflight(&context, &request),
+        )
+        .unwrap();
+        let started = tauri::async_runtime::block_on(
+            manager.start_from_consent_panel(&context, &gate, request),
+        );
+        assert!(started.map_or(true, |result| result.snapshot.phase
+            != MeetingPhase::CapturingRecording));
+
+        let tray = tauri::async_runtime::block_on(manager.tray_snapshot())
+            .unwrap()
+            .expect("the gate the start landed on is the tray's session");
+        assert_eq!(tray.session_id, gate.session_id);
     }
 
     #[test]
@@ -6434,20 +6527,23 @@ pub(crate) mod tests {
         ))
         .unwrap();
 
-        let started = tauri::async_runtime::block_on(manager.start(MeetingStartRequest {
-            operation_id: MeetingOperationId::new(),
-            session_id: preflight.snapshot.session_id,
-            expected_revision: preflight.snapshot.revision,
-            consent: MeetingConsentInput {
-                policy_version: 1,
-                microphone_acknowledged: true,
-                system_audio_acknowledged: true,
-                known_missing_sources_acknowledged: vec![SourceKind::SystemAudio],
-                degraded_start_policy: DegradedStartPolicy::ContinueAndMarkPartial,
-                destination: ProcessingDestination::Local,
-                remote_acknowledgement: None,
+        let started = tauri::async_runtime::block_on(manager.start(
+            MeetingStartRequest {
+                operation_id: MeetingOperationId::new(),
+                session_id: preflight.snapshot.session_id,
+                expected_revision: preflight.snapshot.revision,
+                consent: MeetingConsentInput {
+                    policy_version: 1,
+                    microphone_acknowledged: true,
+                    system_audio_acknowledged: true,
+                    known_missing_sources_acknowledged: vec![SourceKind::SystemAudio],
+                    degraded_start_policy: DegradedStartPolicy::ContinueAndMarkPartial,
+                    destination: ProcessingDestination::Local,
+                    remote_acknowledgement: None,
+                },
             },
-        }))
+            None,
+        ))
         .unwrap();
 
         assert_eq!(started.snapshot.phase, MeetingPhase::CapturingRecording);
@@ -6511,20 +6607,23 @@ pub(crate) mod tests {
         ))
         .unwrap();
         assert_eq!(starts.load(Ordering::Acquire), 0);
-        let _ = tauri::async_runtime::block_on(manager.start(MeetingStartRequest {
-            operation_id: MeetingOperationId::new(),
-            session_id: preflight.snapshot.session_id,
-            expected_revision: preflight.snapshot.revision,
-            consent: MeetingConsentInput {
-                policy_version: 1,
-                microphone_acknowledged: true,
-                system_audio_acknowledged: true,
-                known_missing_sources_acknowledged: Vec::new(),
-                degraded_start_policy: DegradedStartPolicy::AbortIfRequiredSourceFails,
-                destination: ProcessingDestination::Local,
-                remote_acknowledgement: None,
+        let _ = tauri::async_runtime::block_on(manager.start(
+            MeetingStartRequest {
+                operation_id: MeetingOperationId::new(),
+                session_id: preflight.snapshot.session_id,
+                expected_revision: preflight.snapshot.revision,
+                consent: MeetingConsentInput {
+                    policy_version: 1,
+                    microphone_acknowledged: true,
+                    system_audio_acknowledged: true,
+                    known_missing_sources_acknowledged: Vec::new(),
+                    degraded_start_policy: DegradedStartPolicy::AbortIfRequiredSourceFails,
+                    destination: ProcessingDestination::Local,
+                    remote_acknowledgement: None,
+                },
             },
-        }))
+            None,
+        ))
         .unwrap();
         assert_eq!(starts.load(Ordering::Acquire), 2);
     }
@@ -6551,20 +6650,23 @@ pub(crate) mod tests {
             None,
         ))
         .unwrap();
-        let started = tauri::async_runtime::block_on(manager.start(MeetingStartRequest {
-            operation_id: MeetingOperationId::new(),
-            session_id: preflight.snapshot.session_id,
-            expected_revision: preflight.snapshot.revision,
-            consent: MeetingConsentInput {
-                policy_version: 1,
-                microphone_acknowledged: true,
-                system_audio_acknowledged: true,
-                known_missing_sources_acknowledged: Vec::new(),
-                degraded_start_policy: DegradedStartPolicy::AbortIfRequiredSourceFails,
-                destination: ProcessingDestination::Local,
-                remote_acknowledgement: None,
+        let started = tauri::async_runtime::block_on(manager.start(
+            MeetingStartRequest {
+                operation_id: MeetingOperationId::new(),
+                session_id: preflight.snapshot.session_id,
+                expected_revision: preflight.snapshot.revision,
+                consent: MeetingConsentInput {
+                    policy_version: 1,
+                    microphone_acknowledged: true,
+                    system_audio_acknowledged: true,
+                    known_missing_sources_acknowledged: Vec::new(),
+                    degraded_start_policy: DegradedStartPolicy::AbortIfRequiredSourceFails,
+                    destination: ProcessingDestination::Local,
+                    remote_acknowledgement: None,
+                },
             },
-        }))
+            None,
+        ))
         .unwrap();
 
         let stale = tauri::async_runtime::block_on(manager.discard(MeetingMutationRequest {
@@ -8845,20 +8947,23 @@ pub(crate) mod tests {
             None,
         ))
         .unwrap();
-        let started = tauri::async_runtime::block_on(manager.start(MeetingStartRequest {
-            operation_id: MeetingOperationId::new(),
-            session_id: preflight.snapshot.session_id,
-            expected_revision: preflight.snapshot.revision,
-            consent: MeetingConsentInput {
-                policy_version: 1,
-                microphone_acknowledged: true,
-                system_audio_acknowledged: true,
-                known_missing_sources_acknowledged: Vec::new(),
-                degraded_start_policy: DegradedStartPolicy::AbortIfRequiredSourceFails,
-                destination: ProcessingDestination::Local,
-                remote_acknowledgement: None,
+        let started = tauri::async_runtime::block_on(manager.start(
+            MeetingStartRequest {
+                operation_id: MeetingOperationId::new(),
+                session_id: preflight.snapshot.session_id,
+                expected_revision: preflight.snapshot.revision,
+                consent: MeetingConsentInput {
+                    policy_version: 1,
+                    microphone_acknowledged: true,
+                    system_audio_acknowledged: true,
+                    known_missing_sources_acknowledged: Vec::new(),
+                    degraded_start_policy: DegradedStartPolicy::AbortIfRequiredSourceFails,
+                    destination: ProcessingDestination::Local,
+                    remote_acknowledgement: None,
+                },
             },
-        }))
+            None,
+        ))
         .unwrap();
         assert_eq!(started.snapshot.phase, MeetingPhase::CapturingRecording);
         (directory, manager, started.snapshot.session_id, lane)
@@ -9441,20 +9546,23 @@ pub(crate) mod tests {
         ))
         .unwrap();
 
-        let started = tauri::async_runtime::block_on(manager.start(MeetingStartRequest {
-            operation_id: MeetingOperationId::new(),
-            session_id: preflight.snapshot.session_id,
-            expected_revision: preflight.snapshot.revision,
-            consent: MeetingConsentInput {
-                policy_version: 1,
-                microphone_acknowledged: true,
-                system_audio_acknowledged: true,
-                known_missing_sources_acknowledged: Vec::new(),
-                degraded_start_policy: DegradedStartPolicy::AbortIfRequiredSourceFails,
-                destination: ProcessingDestination::Local,
-                remote_acknowledgement: None,
+        let started = tauri::async_runtime::block_on(manager.start(
+            MeetingStartRequest {
+                operation_id: MeetingOperationId::new(),
+                session_id: preflight.snapshot.session_id,
+                expected_revision: preflight.snapshot.revision,
+                consent: MeetingConsentInput {
+                    policy_version: 1,
+                    microphone_acknowledged: true,
+                    system_audio_acknowledged: true,
+                    known_missing_sources_acknowledged: Vec::new(),
+                    degraded_start_policy: DegradedStartPolicy::AbortIfRequiredSourceFails,
+                    destination: ProcessingDestination::Local,
+                    remote_acknowledgement: None,
+                },
             },
-        }))
+            None,
+        ))
         .unwrap();
 
         assert_eq!(
@@ -9884,7 +9992,7 @@ pub(crate) mod tests {
         }
 
         fn recording(manager: &MeetingSessionManager) -> MeetingSessionId {
-            let started = block_on(manager.start(start_request(&open_gate(manager))))
+            let started = block_on(manager.start(start_request(&open_gate(manager)), None))
                 .unwrap()
                 .snapshot;
             assert_eq!(started.phase, MeetingPhase::CapturingRecording);
@@ -10317,7 +10425,7 @@ pub(crate) mod tests {
             transcribes_imports(&manager);
             let gate = open_gate(&manager);
 
-            let started = block_on(manager.start(start_request(&gate)));
+            let started = block_on(manager.start(start_request(&gate), None));
 
             let after = current(&manager, gate.session_id);
             assert!(started.is_err());

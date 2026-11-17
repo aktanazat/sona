@@ -207,6 +207,20 @@ pub(crate) fn read_front_window(keep_full_url: bool) -> FrontWindowRead {
     }
 }
 
+/// Reads the focused window of the running app `bundle_id`, in front or not.
+pub(crate) fn read_app_window(bundle_id: &str) -> FrontWindowRead {
+    #[cfg(target_os = "macos")]
+    {
+        macos::app_window(bundle_id)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = bundle_id;
+        FrontWindowRead::Nothing
+    }
+}
+
 /// The outcome of an explicit one-shot selection read.
 ///
 /// This is deliberately not a [`ContextPolicy`] source: ambient context is what

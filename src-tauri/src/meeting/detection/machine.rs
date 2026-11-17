@@ -19,6 +19,7 @@
 //!    meeting capture both raise it. Reading that as a meeting would make every
 //!    push-to-talk run prompt "meeting detected".
 
+use super::apps::AppAudio;
 use crate::meeting::context::ConversationLocation;
 use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
@@ -574,9 +575,9 @@ pub fn call_is_live(
 
 /// The input clause on its own: the one reading that says somebody is talking
 /// rather than that something is playing. A meeting app that is only open
-/// still explains the microphone here: attribution to the call app is a guess
-/// either way, and a guess must not become a recording under that app's
-/// standing grant.
+/// still explains the microphone here, and so does a browser holding it:
+/// attribution to the call app is a guess either way, and a guess must not
+/// become a recording under that app's standing grant.
 pub fn call_participation(call: &CallSignal, app: &AppSignal, mic: MicSignal) -> bool {
     let CallSignal::Running {
         frontmost: true, ..
@@ -584,8 +585,10 @@ pub fn call_participation(call: &CallSignal, app: &AppSignal, mic: MicSignal) ->
     else {
         return false;
     };
-    let other_meeting_app_running =
-        matches!(app, AppSignal::Known { .. } | AppSignal::Present { .. });
+    let other_meeting_app_running = matches!(
+        app,
+        AppSignal::Known { .. } | AppSignal::Present { .. } | AppSignal::Browser { .. }
+    );
     mic == MicSignal::Active && !other_meeting_app_running
 }
 
@@ -868,10 +871,14 @@ pub struct StopInputs {
     /// the microphone, and nothing holding it says nothing about the meeting.
     pub microphone_lane: bool,
     /// What the call's sound has done during this capture: the default
-    /// *output* device for a call app, the trigger app's own processes for any
-    /// other meeting app. Present only for a capture an app triggered, where
-    /// it is the one liveness signal Sona's own microphone does not pollute.
+    /// *output* device. Present only for a capture a call app triggered,
+    /// where it is the one liveness signal Sona's own microphone does not
+    /// pollute.
     pub call_output: Option<CallOutputWatch>,
+    /// What the meeting app or browser this capture is attributed to has done
+    /// with the microphone and sound. Present only once a capture has such an
+    /// app.
+    pub holder: Option<HolderWatch>,
     /// True while the process that triggered this capture is still running.
     pub trigger_app_running: bool,
     /// Set once the host crossed a sleep boundary during this capture.
@@ -927,6 +934,63 @@ impl CallOutputWatch {
     }
 }
 
+/// What the meeting app or browser a capture is attributed to has done with
+/// the microphone and sound since then, folded in one tick at a time, from
+/// that app's own processes.
+///
+/// It is released only after it was seen holding: an app CoreAudio never
+/// listed as holding says nothing, while one that held and then stopped, or
+/// whose processes left the list, has let go. Released means idle for
+/// `CALL_HANGUP_GRACE_MS`, so a device swap is not a hangup.
+///
+/// A browser is watched on its microphone alone. Its output is shared by
+/// every tab and ran on for about a minute after a Meet call in Safari was
+/// left, while the Meet tab kept the microphone through mute, camera off and
+/// a minute of silence. A native meeting app is watched on both, so one that
+/// drops the microphone on mute is still in its call while it plays the
+/// other side.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HolderWatch {
+    input_only: bool,
+    held: bool,
+    released_since_utc_ms: Option<i64>,
+}
+
+impl HolderWatch {
+    pub const fn new(input_only: bool) -> Self {
+        Self {
+            input_only,
+            held: false,
+            released_since_utc_ms: None,
+        }
+    }
+
+    /// `None` when CoreAudio could not list processes this tick, which
+    /// changes nothing.
+    pub fn observe(&mut self, audio: Option<AppAudio>, now_utc_ms: i64) {
+        let Some(audio) = audio else {
+            return;
+        };
+        if audio.input || (audio.output && !self.input_only) {
+            self.held = true;
+            self.released_since_utc_ms = None;
+        } else if self.held && self.released_since_utc_ms.is_none() {
+            self.released_since_utc_ms = Some(now_utc_ms);
+        }
+    }
+
+    /// When a release that lasts becomes the end of the call.
+    pub fn released_at_utc_ms(&self) -> Option<i64> {
+        self.released_since_utc_ms
+            .map(|since| since.saturating_add(CALL_HANGUP_GRACE_MS))
+    }
+
+    pub fn released(&self, now_utc_ms: i64) -> bool {
+        self.released_at_utc_ms()
+            .is_some_and(|released_at| now_utc_ms >= released_at)
+    }
+}
+
 /// Why a capture ended by itself. Manual stop is not in this list: it stays the
 /// primary path and does not go through the heuristic at all.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
@@ -942,6 +1006,9 @@ pub enum StopTrigger {
     InputDeviceIdle,
     /// A call capture's sound stayed idle after it had played.
     CallEnded,
+    /// The meeting app or browser the capture is attributed to stopped using
+    /// the microphone (and, for an app, its sound) for the grace.
+    HolderReleased,
 }
 
 impl StopTrigger {
@@ -952,6 +1019,7 @@ impl StopTrigger {
             Self::TriggerAppExited => "trigger_app_exited",
             Self::InputDeviceIdle => "input_device_idle",
             Self::CallEnded => "call_ended",
+            Self::HolderReleased => "holder_released",
         }
     }
 
@@ -960,7 +1028,7 @@ impl StopTrigger {
     pub const fn ends_meeting(self) -> bool {
         matches!(
             self,
-            Self::EventEnd | Self::TriggerAppExited | Self::CallEnded
+            Self::EventEnd | Self::TriggerAppExited | Self::CallEnded | Self::HolderReleased
         )
     }
 }
@@ -987,6 +1055,12 @@ pub fn evaluate_stop(inputs: &StopInputs) -> Option<StopTrigger> {
         .is_some_and(|output| output.hung_up(inputs.now_utc_ms))
     {
         return Some(StopTrigger::CallEnded);
+    }
+    if inputs
+        .holder
+        .is_some_and(|holder| holder.released(inputs.now_utc_ms))
+    {
+        return Some(StopTrigger::HolderReleased);
     }
     // §5.5 condition 3 proper, scoped to a capture that is listening to the
     // device at all. Sona's own microphone lane keeps it raised, so a false
@@ -1853,6 +1927,7 @@ mod tests {
             device_running_somewhere: true,
             microphone_lane: true,
             call_output: None,
+            holder: None,
             trigger_app_running: true,
             slept_since_start: false,
         }
@@ -1988,6 +2063,7 @@ mod tests {
             device_running_somewhere: false,
             microphone_lane: false,
             call_output: Some(watch),
+            holder: None,
             trigger_app_running: true,
             slept_since_start: false,
         };
@@ -2017,6 +2093,51 @@ mod tests {
             Some(StopTrigger::TriggerAppExited)
         );
         assert_eq!(evaluate_stop(&hung_up), Some(StopTrigger::CallEnded));
+    }
+
+    /* The process-list rules: an app never seen holding says nothing, one
+     * whose processes left the list let go, a tick CoreAudio could not list
+     * changes nothing, and a browser's output alone is not the call. */
+    #[test]
+    fn a_holder_is_released_only_after_it_was_seen_holding() {
+        let held = Some(AppAudio {
+            input: true,
+            output: true,
+        });
+        let playing = Some(AppAudio {
+            input: false,
+            output: true,
+        });
+        let gone = Some(AppAudio::default());
+        let after_grace = NOW + 1_000 + CALL_HANGUP_GRACE_MS;
+
+        let mut never_held = HolderWatch::new(false);
+        never_held.observe(gone, NOW);
+        never_held.observe(gone, NOW + 1_000);
+        assert!(!never_held.released(after_grace), "never seen holding");
+
+        let mut left = HolderWatch::new(false);
+        left.observe(held, NOW);
+        left.observe(gone, NOW + 1_000);
+        left.observe(None, NOW + 2_000);
+        assert!(!left.released(after_grace - 1));
+        assert!(left.released(after_grace), "listed, then gone");
+
+        let mut app = HolderWatch::new(false);
+        app.observe(held, NOW);
+        app.observe(playing, NOW + 1_000);
+        assert!(
+            !app.released(after_grace),
+            "an app playing the other side is still in its call"
+        );
+
+        let mut browser = HolderWatch::new(true);
+        browser.observe(held, NOW);
+        browser.observe(playing, NOW + 1_000);
+        assert!(
+            browser.released(after_grace),
+            "a browser's output after the microphone is released is not the call"
+        );
     }
 
     #[test]
@@ -2330,6 +2451,7 @@ mod tests {
             device_running_somewhere: true,
             microphone_lane: true,
             call_output: Some(CallOutputWatch::default()),
+            holder: None,
             trigger_app_running: true,
             slept_since_start: false,
         }
