@@ -2,12 +2,6 @@
 
 Thanks for helping improve Sona, a local-first Mac and iPhone app for dictation and meeting notes.
 
-## ⚠️ Feature Freeze
-
-**Sona is currently undergoing a feature freeze.** If you are submitting a PR which is a new feature that the community has not asked for, it will be rejected. If the community has asked for it, or you have explicitly gathered support, it may still be considered.
-
-**Bug fixes are the top priority.** There are 60+ issues to fix. Please focus your contributions on fixing bugs and improving stability.
-
 ## 📖 Philosophy
 
 Sona aims to be the most forkable speech-to-text app. The goal is to create both a useful tool and a foundation for others to build upon—a well-patterned, simple codebase that serves the community. We prioritize:
@@ -63,15 +57,16 @@ See [BUILD.md](BUILD.md) for the current build and check commands.
 
 ## 🐛 Reporting Bugs
 
-### Before Submitting a Bug Report
+Issues and Discussions are turned off for this repository, so a bug report arrives as a pull request that fixes it.
 
-1. **Search existing issues** at [github.com/aktanazat/sona/issues](https://github.com/aktanazat/sona/issues)
-2. **Check discussions** at [github.com/aktanazat/sona/discussions](https://github.com/aktanazat/sona/discussions)
-3. **Check current source** to see whether the issue has already been fixed
+### Before Submitting a Fix
 
-### Submitting a Bug Report
+1. **Search open and closed pull requests** at [github.com/aktanazat/sona/pulls](https://github.com/aktanazat/sona/pulls?q=is%3Apr)
+2. **Check current source** to see whether the bug has already been fixed
 
-When creating a bug report, please include:
+### Describing the Bug
+
+In the pull request's Summary, include:
 
 **System Information:**
 
@@ -88,29 +83,9 @@ When creating a bug report, please include:
 - Screenshots or logs if applicable
 - Information from debug mode if relevant
 
-Use the [Bug Report template](.github/ISSUE_TEMPLATE/bug_report.md) when creating an issue.
-
 ## 💡 Suggesting Features
 
-We use GitHub Discussions for feature requests rather than issues. This keeps issues focused on bugs and actionable tasks while allowing more open-ended conversations about features.
-
-### Before Suggesting a Feature
-
-1. **Search existing discussions** at [github.com/aktanazat/sona/discussions](https://github.com/aktanazat/sona/discussions)
-2. **Check common feature requests** (these live in the upstream cjpais/Handy project Sona was forked from):
-   - [Post-processing / Editing Transcripts](https://github.com/cjpais/Handy/discussions/168)
-   - [Keyboard Shortcuts / Hotkeys](https://github.com/cjpais/Handy/discussions/211)
-
-### Submitting a Feature Request
-
-1. Go to [Discussions](https://github.com/aktanazat/sona/discussions)
-2. Click "New discussion"
-3. Choose the appropriate category (Ideas, Feature Requests, etc.)
-4. Describe your feature idea including:
-   - The problem you're trying to solve
-   - Your proposed solution
-   - Any alternatives you've considered
-   - How it fits with Sona's philosophy
+Propose a feature as a pull request. Its Summary says what changes for the user and why it belongs in Sona, as the template asks.
 
 ## 🔧 Making Code Contributions
 
@@ -118,20 +93,11 @@ We use GitHub Discussions for feature requests rather than issues. This keeps is
 
 **This is critical:** Before writing any code, please do the following:
 
-1. **Search existing issues and PRs** - Check both open AND closed issues and pull requests. Someone may have already addressed this, or there may be a reason it was closed.
-   - [Open issues](https://github.com/aktanazat/sona/issues)
-   - [Closed issues](https://github.com/aktanazat/sona/issues?q=is%3Aissue+is%3Aclosed)
+1. **Search existing pull requests** - Check both open and closed pull requests. Someone may have already addressed this, or there may be a reason it was closed.
    - [Open PRs](https://github.com/aktanazat/sona/pulls)
    - [Closed PRs](https://github.com/aktanazat/sona/pulls?q=is%3Apr+is%3Aclosed)
 
-2. **If something was previously closed** - If you want to revisit a closed issue or PR, you need to:
-   - Provide a strong argument for why it should be reconsidered
-   - Gather community feedback first via [Discussions](https://github.com/aktanazat/sona/discussions)
-   - Link to that discussion in your PR
-
-3. **Get community feedback for features** - PRs with demonstrated community interest are **much more likely to be merged**. Start a discussion, get feedback, and link to it in your PR. This helps ensure Sona stays focused and useful for the most people without becoming bloated.
-
-Community feedback is essential to keeping Sona the best it can be for everyone. It helps prioritize what matters most and prevents feature creep.
+2. **If something was previously closed** - Say in your pull request why it should be reconsidered.
 
 ### Development Workflow
 
@@ -178,15 +144,7 @@ Community feedback is essential to keeping Sona the best it can be for everyone.
    - Go to the [Sona repository](https://github.com/aktanazat/sona)
    - Click "New Pull Request"
    - Select your fork and branch
-   - Fill out the PR template completely, including:
-     - Clear description of changes
-     - Links to related issues or discussions
-     - **Community feedback** (especially important for features)
-     - How you tested the changes
-     - Screenshots/videos if applicable
-     - Breaking changes (if any)
-
-   **Remember:** PRs with community support are prioritized. If you haven't already, start a [discussion](https://github.com/aktanazat/sona/discussions) to gather feedback before or alongside your PR. It is not explicitly required to gather feedback, but it certainly helps your PR get merged faster.
+   - Fill out the PR template: Summary, Verification, and the Privacy and packaging checklist
 
 ### AI Assistance Disclosure
 
@@ -245,15 +203,7 @@ Documentation improvements are highly valued! You can contribute by:
 - **Be patient** - This is maintained by a small team, responses may take time
 - **Be constructive** - Focus on solutions and improvements
 - **Be collaborative** - Help others and share knowledge
-- **Search first** - Check existing issues/discussions before creating new ones
-
-## 🎯 Good First Issues
-
-Look for issues labeled `good first issue` or `help wanted` if you're new to the project. These are typically:
-
-- Well-defined and scoped
-- Good for learning the codebase
-- Mentor support available
+- **Search first** - Check existing pull requests before opening a new one
 
 ## 📜 License
 
