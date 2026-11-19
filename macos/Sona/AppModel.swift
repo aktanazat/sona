@@ -69,17 +69,18 @@ enum Place: Int, CaseIterable, Identifiable {
 }
 
 /// Settings' pages, in the order its list shows them.
-enum SettingsPlace: Int, CaseIterable, Identifiable {
-    case profile, essentials, dictation, models, modes, vocabulary, prompts, workflows, meetings
+enum SettingsPlace: String, CaseIterable, Identifiable {
+    case profile, essentials, appearance, dictation, models, modes, vocabulary, prompts, workflows, meetings
     case agents, sync, privacy, importing, documents, about, debug
     case connections, tasks
 
-    var id: Int { rawValue }
+    var id: String { rawValue }
 
     var title: String {
         switch self {
         case .profile: "Profile"
         case .essentials: "Essentials"
+        case .appearance: "Appearance"
         case .dictation: "Dictation"
         case .models: "Models"
         case .modes: "Modes"
@@ -761,7 +762,7 @@ final class AppModel {
         let ext = url.pathExtension.lowercased()
         if ext == "sona" {
             reveal()
-            showSettings(.sync)
+            showSettings(.importing)
             cloudSync.enqueueOpenedBundle(at: path)
         } else if ImportMedia.extensions.contains(ext) {
             imports.add(paths: [path])

@@ -186,27 +186,27 @@ extension FilingTarget {
     var headline: String {
         switch self {
         case let .event(title, startUtcMs, endUtcMs):
-            "Maybe \(title), \(FeedClock.date(startUtcMs).time)–\(FeedClock.date(endUtcMs).time)"
+            "Was this \(title), \(FeedClock.date(startUtcMs).time)–\(FeedClock.date(endUtcMs).time)?"
         case let .person(_, name):
-            "Maybe with \(name)"
+            "Was this with \(name)?"
         case let .project(_, title):
-            "Maybe part of \(title)"
+            "Is this part of \(title)?"
         case .kind(.inPerson):
-            "Maybe in person"
+            "Was this in person?"
         case .kind(.onlineCall):
-            "Maybe an online call"
+            "Was this an online call?"
         case .kind(.huddle):
-            "Maybe a huddle"
+            "Was this a huddle?"
         case .kind(.noteSession):
-            "Maybe a note session"
+            "Was this a note session?"
         case .kind(.imported):
-            "Maybe an imported recording"
+            "Is this an imported recording?"
         case .kind(.unspecified):
-            "Maybe a conversation"
+            "Was this a conversation?"
         case let .place(place):
-            "Maybe at \(place.name)"
+            "Was this at \(place.name)?"
         case let .meeting(title, _, place, _):
-            "Maybe \(title)" + (place.map { ", \($0)" } ?? "")
+            "Was this \(title)" + (place.map { ", at \($0)" } ?? "") + "?"
         }
     }
 }

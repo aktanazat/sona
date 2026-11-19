@@ -34,7 +34,6 @@ struct LibraryScreen: View {
                     store: store,
                     correct: { correcting = $0 },
                     processAgain: { reprocessing = $0 })
-                LibraryRetentionSection(store: store)
             }
             .onChange(of: store.revealed) { _, _ in
                 guard let id = store.expanded else { return }
@@ -80,16 +79,15 @@ private struct LibraryHeader: View {
         return store.hasMore ? "\(count)+ matches" : "\(count) matches"
     }
 
-    /// "5 recordings · 3m 39s · 587 words". Nothing recorded, nothing to
-    /// total: the feed below says that in a sentence already.
+    /// "5 dictations · 3m 39s · 587 words", or that there are none yet.
     private var summaryLine: String? {
         guard let stats = store.stats else {
-            return store.statsLoading ? "Counting your recordings…" : "Usage statistics are unavailable."
+            return store.statsLoading ? "Counting your dictations…" : "Usage statistics are unavailable."
         }
-        guard stats.entries > 0 else { return nil }
+        guard stats.entries > 0 else { return "No dictations yet" }
         let length = LibraryClock.short(Double(stats.totalDurationMs) / 1000)
         return [
-            LibraryCount.recordings(Int(stats.entries)),
+            LibraryCount.dictations(Int(stats.entries)),
             length,
             LibraryCount.words(Int(stats.totalWords)),
         ].joined(separator: " · ")
@@ -167,7 +165,7 @@ private struct LibraryActivity: View {
     let store: LibraryStore
 
     var body: some View {
-        if let trend = store.trend, !trend.points.isEmpty {
+        if let trend = store.trend, !trend.points.isEmpty, (store.stats?.entries ?? 0) > 0 {
             PageSection("Over time") {
                 Card {
                     VStack(alignment: .leading, spacing: 16) {
@@ -202,7 +200,7 @@ private struct LibraryActivity: View {
 
     private func totals(_ trend: TrendProjection) -> String {
         [
-            LibraryCount.recordings(trend.rangeTotal.recordings),
+            LibraryCount.dictations(trend.rangeTotal.recordings),
             LibraryClock.short(Double(trend.rangeTotal.durationMs) / 1000),
             LibraryCount.words(trend.rangeTotal.words),
         ].joined(separator: " · ")
@@ -230,7 +228,7 @@ private struct TrendBars: View {
                         .fill(point.recordings == 0 ? Theme.track : Theme.accent)
                         .frame(height: max(2, fraction * 64))
                         .frame(maxWidth: .infinity)
-                        .help("\(TrendAxis.day(point.localDate)): \(LibraryCount.recordings(point.recordings))")
+                        .help("\(TrendAxis.day(point.localDate)): \(LibraryCount.dictations(point.recordings))")
                 }
             }
             .frame(height: 64, alignment: .bottom)
@@ -381,9 +379,11 @@ private struct LibraryFeed: View {
                 }
             default:
                 if store.rows.isEmpty {
-                    Card {
-                        CardRow {
-                            Text(emptyLine).metaText(Theme.inkSecondary)
+                    if let query = searchedFor {
+                        Card {
+                            CardRow {
+                                Text("No transcripts match “\(query)”.").metaText(Theme.inkSecondary)
+                            }
                         }
                     }
                 } else {
@@ -401,9 +401,10 @@ private struct LibraryFeed: View {
         .padding(.bottom, 28)
     }
 
-    private var emptyLine: String {
+    /// An empty log says so in the header; an empty search says so here.
+    private var searchedFor: String? {
         let query = store.activeQuery.trimmingCharacters(in: .whitespacesAndNewlines)
-        return query.isEmpty ? "No dictations yet." : "No transcripts match “\(query)”."
+        return query.isEmpty ? nil : query
     }
 }
 
@@ -1036,48 +1037,43 @@ private struct ReceiptTable: View {
 
 // MARK: - What is kept
 
-/// How much of this survives: how many unsaved dictations the core keeps,
-/// how long their recordings stay after the words were written, and whether
-/// the log is encrypted where it sits. The two policies never read each
-/// other; a saved entry is outside both.
-private struct LibraryRetentionSection: View {
+/// How much of this survives: how many unsaved dictations the core keeps and
+/// how long their recordings stay after the words were written. The two
+/// policies never read each other; a saved entry is outside both. Rows for
+/// the Privacy page's history card, which loads them itself because it can
+/// open before the Library ever has.
+struct LibraryRetentionRows: View {
     let store: LibraryStore
 
     @State private var draft = LimitDraft()
     @FocusState private var editingLimit: Bool
 
     var body: some View {
-        PageSection("What is kept") {
-            Card {
-                CardRow {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Dictations to keep").bodyText()
-                        Text("Only the newest stay, and a saved entry always stays. 0 keeps none.")
-                            .metaText()
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                } trailing: {
-                    InputField(prompt: "100", text: $draft.text)
-                        .frame(width: 88)
-                        .focused($editingLimit)
-                        .disabled(store.savingRetention || store.limit == nil)
-                        .onSubmit { commit() }
+        VStack(alignment: .leading, spacing: 0) {
+            CardRow {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Dictations to keep").bodyText()
+                    Text("Only the newest stay, and a saved entry always stays. 0 keeps none.")
+                        .metaText()
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-                ChoiceRow(
-                    title: "Recordings",
-                    detail: "The audio behind each dictation. The words stay either way.",
-                    choices: LibraryRetention.allCases,
-                    label: { $0.label },
-                    selection: Binding(
-                        get: { store.retention },
-                        set: { store.updateRetention($0) }))
-                if let storage = store.storage {
-                    CardRow {
-                        Text(storage.line).metaText(Theme.inkSecondary)
-                    }
-                }
+            } trailing: {
+                InputField(prompt: "100", text: $draft.text)
+                    .frame(width: 88)
+                    .focused($editingLimit)
+                    .disabled(store.savingRetention || store.limit == nil)
+                    .onSubmit { commit() }
             }
+            ChoiceRow(
+                title: "Recordings",
+                detail: "The audio behind each dictation. The words stay either way.",
+                choices: LibraryRetention.allCases,
+                label: { $0.label },
+                selection: Binding(
+                    get: { store.retention },
+                    set: { store.updateRetention($0) }))
         }
+        .task { await store.loadSettings() }
         .onAppear { draft.follow(store.limit, editing: false) }
         .onChange(of: store.limit) { _, value in
             draft.follow(value, editing: editingLimit)

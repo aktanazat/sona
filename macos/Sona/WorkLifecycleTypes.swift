@@ -148,6 +148,8 @@ struct WorkNotification: Decodable, Identifiable, Equatable {
     var snoozedUntilMs: Int64?
     var archivedAtMs: Int64?
     var digest: WorkProjectDigest?
+    /// Earlier notices of the same failure this one stands for.
+    var earlier: [String]
 
     /// "Claude Code", "Sona", or "An agent" when it gave no name.
     var who: String {
@@ -175,7 +177,8 @@ struct WorkNotification: Decodable, Identifiable, Equatable {
         case .digest: return digestSummary
         case .automation:
             guard to == "done" else {
-                return automation?.error.map { "failed: \($0)" } ?? "failed"
+                let failed = earlier.isEmpty ? "failed" : "failed \(earlier.count + 1) times"
+                return automation?.error.map { "\(failed): \($0)" } ?? failed
             }
             return "finished"
         case .unknown: return "changed it"

@@ -173,8 +173,7 @@ pub(crate) fn passage(
     let end_ms = i64::try_from(segment.base.end_offset_ns / 1_000_000)
         .map_err(|_| "This passage is unavailable.".to_string())?;
     let body = if body.trim().is_empty() {
-        let seconds = start_ms / 1_000;
-        format!("Saved passage at {}:{:02}\nsona://meeting/{meeting_id}?atMs={start_ms}&segmentId={segment_id}", seconds / 60, seconds % 60)
+        format!("{}\nsona://meeting/{meeting_id}?atMs={start_ms}&segmentId={segment_id}", excerpt.trim())
     } else {
         body
     };

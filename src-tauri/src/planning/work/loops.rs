@@ -2212,6 +2212,76 @@ mod tests {
         );
     }
 
+    fn ended(conn: &mut Connection, loop_id: &str, answer: Result<&str, &str>, at: i64) {
+        run_now(conn, loop_id, &format!("op-{at}"), at).expect("a queued run");
+        let claimed = claim(conn, at).expect("the queue").expect("a run started");
+        let outcome = LoopOutcome {
+            answer: answer.map(str::to_owned).map_err(str::to_owned),
+            refused: Vec::new(),
+        };
+        finish(conn, &claimed.run_id, &outcome, at).expect("the run ended");
+    }
+
+    #[test]
+    fn an_automation_failing_the_same_way_again_is_one_inbox_notice_until_that_changes() {
+        let mut conn = Connection::open_in_memory().expect("a history database");
+        schema::apply_all(&conn).expect("the planner schema");
+        let digest = save(
+            &conn,
+            None,
+            &LoopInput {
+                name: "Weekly digest".to_owned(),
+                prompt: "Sum up what moved this week.".to_owned(),
+                trigger: LoopTrigger::MeetingEnded,
+                conditions: LoopConditions::default(),
+                tools: Vec::new(),
+            },
+            "you",
+            1,
+        )
+        .expect("a saved loop");
+
+        ended(&mut conn, &digest.id, Err("offline"), 10);
+        ended(&mut conn, &digest.id, Err("offline"), 20);
+        ended(&mut conn, &digest.id, Ok("Summed up."), 30);
+        ended(&mut conn, &digest.id, Err("offline"), 40);
+        ended(&mut conn, &digest.id, Err("offline"), 50);
+        ended(&mut conn, &digest.id, Err("no quota"), 60);
+        let notices: Vec<_> = inbox::notifications(&conn, inbox::Shown::default(), 70)
+            .expect("the inbox")
+            .into_iter()
+            .map(|notice| {
+                (
+                    notice.to,
+                    notice.automation.and_then(|automation| automation.error),
+                    notice.earlier.len(),
+                )
+            })
+            .collect();
+        let unread = inbox::notifications(
+            &conn,
+            inbox::Shown {
+                unread_only: true,
+                ..inbox::Shown::default()
+            },
+            70,
+        )
+        .expect("the unread")
+        .len();
+
+        let failed = |error: &str, earlier| (Some("failed".to_owned()), Some(error.to_owned()), earlier);
+        assert_eq!(
+            notices,
+            [
+                failed("no quota", 0),
+                failed("offline", 1),
+                (Some("done".to_owned()), None, 0),
+                failed("offline", 1),
+            ]
+        );
+        assert_eq!(unread, 4);
+    }
+
     #[test]
     fn a_project_that_changes_status_queues_a_run_named_for_it() {
         let mut conn = Connection::open_in_memory().expect("a history database");

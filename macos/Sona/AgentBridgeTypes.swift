@@ -34,10 +34,10 @@ enum AgentBridgeAgent: String, Decodable, CaseIterable, Hashable, Sendable {
     /// cannot carry.
     var detail: String {
         switch self {
-        case .claude: "Observe Claude sessions, and reply where Sona supports it."
-        case .codex: "Observe Codex sessions, answer approval requests, and reply when a turn ends."
-        case .grok: "Observe Grok sessions, answer tool requests, and reply when a turn ends."
-        case .omp: "Observe OMP sessions and approval requests. Sona can reply only when an OMP session stops."
+        case .claude: "See its work and reply to it."
+        case .codex: "See its work, approve what it asks to run, and reply when it finishes."
+        case .grok: "See its work, approve what it asks to run, and reply when it finishes."
+        case .omp: "See its work and what it asks to run. Sona can reply only after it stops."
         }
     }
 }

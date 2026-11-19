@@ -141,7 +141,7 @@ struct SessionLiveness: View {
         case .complete:
             return Shown(title: "Finished", help: "\(agent) finished this run.", tint: Theme.inkTertiary, moving: false)
         case .error:
-            return Shown(title: "Ended with an error", help: "\(agent) stopped on an error.", tint: Theme.live, moving: false)
+            return Shown(title: "Didn't finish", help: "\(agent) stopped on an error.", tint: Theme.inkSecondary, moving: false)
         case .unknown:
             return Shown(title: "Unknown", help: "This version of Sona does not know this state.", tint: Theme.inkTertiary, moving: false)
         case .pending, .active:
@@ -298,7 +298,7 @@ private struct SessionActivityLine: View {
         switch activity.kind {
         case .elicitation: standing ? Theme.live : Theme.inkSecondary
         case .response: Theme.accent
-        case .error: Theme.live
+        case .error: Theme.inkTertiary
         default: Theme.inkSecondary
         }
     }
@@ -345,7 +345,7 @@ private struct SessionActivityLine: View {
                 .textSelection(.enabled)
         case .error:
             Text(activity.body ?? "\(agent) hit an error")
-                .bodyText(13, Theme.live)
+                .bodyText(13, Theme.inkSecondary)
                 .fixedSize(horizontal: false, vertical: true)
                 .textSelection(.enabled)
         case .prompt:

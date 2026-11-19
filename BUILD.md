@@ -170,12 +170,19 @@ bun run test:scripts
 bun run typecheck:mcp
 bun run test:mcp
 bun run check:onboarding
+bun run check:meeting-notes
 bun scripts/cargo-target-dir.ts cargo check --manifest-path src-tauri/Cargo.toml --all-features
 bun run test:backend
 bun scripts/cargo-target-dir.ts cargo test --manifest-path src-tauri/Cargo.toml --bin sona-agent-hook
 ast-grep scan -c tools/ast-grep/anti-slop/sgconfig.yml
 ast-grep scan -c tools/ast-grep/design/sgconfig.yml macos/Sona
 ```
+
+The meeting-notes check builds the unsigned Debug app and tests its actual
+module without launching it or starting the core. It checks figure
+comparisons, date history, and playback sources. To reuse a local build
+directory, run `bash scripts/check-meeting-notes.sh /absolute/derived-data`.
+The script rebuilds that directory before testing it.
 
 For the companion service, run its checks from `cloudflare/sona-companion/`:
 

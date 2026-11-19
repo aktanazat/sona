@@ -155,7 +155,7 @@ struct TaskDetailView: View {
     }
 }
 
-/// "3 / 12" and the arrows to the tasks either side, as K and J step.
+/// The arrows to the tasks either side, as K and J step.
 private struct DetailStepper: View {
     let id: String
     @Environment(AppModel.self) private var model
@@ -164,12 +164,6 @@ private struct DetailStepper: View {
         let visible = model.workFocus.visible
         let index = visible.firstIndex(of: id)
         HStack(spacing: 2) {
-            if let index {
-                Text("\(index + 1) / \(visible.count)")
-                    .metaText()
-                    .monospacedDigit()
-                    .padding(.trailing, 6)
-            }
             WorkBarButton(icon: "chevron.up", help: "Previous  K") { _ = model.step(from: id, by: -1) }
                 .disabled(index.map { $0 == 0 } ?? true)
             WorkBarButton(icon: "chevron.down", help: "Next  J") { _ = model.step(from: id, by: 1) }
@@ -198,10 +192,6 @@ private struct DetailMain: View {
             }
             if row.status == .duplicate {
                 DuplicateBanner(canonical: row.duplicateOfId, place: place)
-                    .padding(.bottom, 16)
-            }
-            if let reminder = model.routines.reminders[row.id] {
-                ReminderBanner(itemId: row.id, reminder: reminder)
                     .padding(.bottom, 16)
             }
             DetailTitle(row: row)
@@ -272,56 +262,6 @@ private struct DuplicateBanner: View {
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(other == nil ? [] : .isButton)
         .help(other == nil ? "" : "Open the original")
-    }
-}
-
-/// The reminder set on the task: when it comes, or that it came. Change
-/// picks another time; the cross clears it.
-private struct ReminderBanner: View {
-    let itemId: String
-    let reminder: WorkReminder
-    @Environment(AppModel.self) private var model
-    @State private var changing = false
-
-    var body: some View {
-        let sent = reminder.notifiedAtMs != nil
-        HStack(spacing: 10) {
-            Image(systemName: sent ? "bell.badge" : "bell.fill")
-                .font(.system(size: 12))
-                .foregroundStyle(Theme.accent)
-            Text(sent ? "Reminded you" : "Reminder").metaText()
-            Text(Self.when(reminder.remindAtMs, now: TaskDates.now())).bodyText(13).lineLimit(1)
-            Spacer(minLength: 0)
-            Button("Change") { changing = true }
-                .buttonStyle(QuietButton(compact: true))
-                .popover(isPresented: $changing, arrowEdge: .bottom) {
-                    ReminderPicker(itemId: itemId, reminder: reminder) { changing = false }
-                        .environment(model)
-                }
-            Button {
-                let routines = model.routines
-                let id = itemId
-                Task { await routines.setReminder(on: id, at: nil) }
-            } label: {
-                Image(systemName: "xmark")
-                    .font(.system(size: 9, weight: .bold))
-                    .frame(width: 20, height: 20)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(QuietButton(compact: true))
-            .help("Remove the reminder")
-            .accessibilityLabel("Remove the reminder")
-        }
-        .padding(.leading, 12)
-        .padding(.trailing, 6)
-        .frame(height: 36)
-        .background(Theme.inset, in: RoundedRectangle(cornerRadius: Theme.radiusCard))
-        .accessibilityElement(children: .contain)
-    }
-
-    /// "Tomorrow at 9:00 AM".
-    static func when(_ at: Int64, now: Int64) -> String {
-        "\(TaskDates.label(at, now: now)) at \(PlanningFormat.moment(at).formatted(date: .omitted, time: .shortened))"
     }
 }
 

@@ -151,32 +151,6 @@ struct MeetingProcessingUpdate: Equatable {
     }
 }
 
-/// `ProcessingRoute`: where the notes were written.
-enum MeetingProcessingRoute: String, Decodable {
-    case local
-    case relay
-}
-
-/// `ProcessingReceipt`: what one finished run took.
-struct MeetingProcessingReceipt: Decodable {
-    let wallMs: UInt64
-    let audioNs: UInt64
-    let route: MeetingProcessingRoute
-
-    /// "41 min in 2:31 · 16× · on this Mac".
-    var line: String {
-        let audio = TimeInterval(audioNs) / 1_000_000_000
-        let wall = TimeInterval(wallMs) / 1000
-        let factor = audio / max(wall, 0.001)
-        let speed = factor >= 10 ? "\(Int(factor.rounded()))×" : String(format: "%.1f×", factor)
-        let place = switch route {
-        case .local: "on this Mac"
-        case .relay: "on your server"
-        }
-        return "\(audio.spoken) in \(wall.clock) · \(speed) · \(place)"
-    }
-}
-
 // MARK: - Session state
 
 enum MeetingPhase: String, Decodable {
@@ -1091,7 +1065,6 @@ struct MeetingArtifactRevision: Decodable, Identifiable {
     let state: MeetingArtifactState
     let generatedAtUtcMs: Int64
     let content: MeetingGeneratedArtifacts?
-    let receipt: MeetingProcessingReceipt?
 
     var id: MeetingArtifactId { artifactId }
 
@@ -1302,7 +1275,6 @@ struct MeetingHistorySummary: Decodable, Identifiable {
     let captureCompleteness: MeetingCaptureCompleteness
     let processingStatus: MeetingProcessingStatus
     let recordedDurationMs: Int64?
-    let sources: [MeetingSourceKind]?
     let speakerLabels: [String]?
     /// The apps whose audio this meeting captured. Empty when it named none.
     let applicationBundleIds: [String]

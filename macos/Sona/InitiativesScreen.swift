@@ -88,7 +88,7 @@ struct InitiativesScreen: View {
             }
         } trailing: {
             HStack(spacing: 8) {
-                Text(InitiativeText.projects(initiative.progress)).metaText(Theme.inkSecondary)
+                Text(InitiativeText.progress(initiative.progress)).metaText(Theme.inkSecondary)
                 ProgressRing(fraction: initiative.progress.fraction)
                 Text(ProgressRing.percent(initiative.progress.fraction))
                     .metaText(Theme.inkSecondary)
@@ -96,7 +96,7 @@ struct InitiativesScreen: View {
                     .frame(width: 36, alignment: .trailing)
             }
         }
-        .accessibilityLabel("\(initiative.name), \(initiative.status.title), \(InitiativeText.projects(initiative.progress)), \(ProgressRing.percent(initiative.progress.fraction)) of tasks done")
+        .accessibilityLabel("\(initiative.name), \(initiative.status.title), \(InitiativeText.progress(initiative.progress)), \(ProgressRing.percent(initiative.progress.fraction))")
     }
 }
 
@@ -117,12 +117,15 @@ enum InitiativeText {
         return parts.joined(separator: " · ")
     }
 
-    static func projects(_ progress: PlanningInitiative.Progress) -> String {
-        switch progress.projects {
+    /// "2 projects · 4 of 10 tasks done": the tasks the percent beside it counts.
+    static func progress(_ progress: PlanningInitiative.Progress) -> String {
+        let projects = switch progress.projects {
         case 0: "No projects"
-        case 1: "\(progress.completedProjects) of 1 project done"
-        default: "\(progress.completedProjects) of \(progress.projects) projects done"
+        case 1: "1 project"
+        default: "\(progress.projects) projects"
         }
+        let tasks = progress.openTasks + progress.doneTasks
+        return tasks == 0 ? projects : "\(projects) · \(progress.doneTasks) of \(tasks) tasks done"
     }
 }
 
@@ -151,7 +154,7 @@ private struct InitiativePage: View {
                     field("Progress") {
                         HStack(spacing: 6) {
                             ProgressRing(fraction: initiative.progress.fraction, size: 14)
-                            Text("\(InitiativeText.projects(initiative.progress)), \(ProgressRing.percent(initiative.progress.fraction)) of tasks")
+                            Text("\(InitiativeText.progress(initiative.progress)), \(ProgressRing.percent(initiative.progress.fraction))")
                                 .font(TypeScale.label(12.5))
                         }
                     }

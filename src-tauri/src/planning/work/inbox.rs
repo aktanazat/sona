@@ -17,6 +17,7 @@ use anyhow::Result;
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ValueRef};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tauri::{AppHandle, Manager};
 use uuid::Uuid;
@@ -185,6 +186,9 @@ pub(crate) struct Notification {
     pub(crate) archived_at_ms: Option<i64>,
     /// For a digest, the projects it covers.
     pub(crate) digest: Option<ProjectDigest>,
+    /// Earlier notices this one stands for: the same automation failing
+    /// the same way, with nothing else from it in between.
+    pub(crate) earlier: Vec<String>,
 }
 
 /// The automation run an automation notice is about.
@@ -653,10 +657,56 @@ fn read(row: &Row<'_>) -> rusqlite::Result<Notification> {
         snoozed_until_ms: row.get(15)?,
         archived_at_ms: row.get(16)?,
         digest,
+        earlier: Vec::new(),
     })
 }
 
-/// Notifications, newest first.
+/// Whether `notice` repeats the failure `leader` already stands for.
+fn repeats(leader: &Notification, notice: &Notification, now_ms: i64) -> bool {
+    let awake = |notice: &Notification| notice.snoozed_until_ms.is_none_or(|until| until <= now_ms);
+    let error = |notice: &Notification| notice.automation.as_ref().map(|run| run.error.clone());
+    notice.to == leader.to
+        && notice.item_id == leader.item_id
+        && error(notice) == error(leader)
+        && notice.archived_at_ms.is_some() == leader.archived_at_ms.is_some()
+        && if awake(leader) {
+            awake(notice)
+        } else {
+            notice.snoozed_until_ms == leader.snoozed_until_ms
+        }
+}
+
+/// Folds each run of one automation failing the same way into its newest
+/// notice, unread while any of them is. `notices` come newest first.
+fn fold(notices: Vec<Notification>, now_ms: i64) -> Vec<Notification> {
+    let mut shown: Vec<Notification> = Vec::with_capacity(notices.len());
+    let mut failing: HashMap<String, usize> = HashMap::new();
+    for notice in notices {
+        let Some(loop_id) = notice.automation.as_ref().map(|run| run.id.clone()) else {
+            shown.push(notice);
+            continue;
+        };
+        if let Some(&at) = failing.get(&loop_id) {
+            if repeats(&shown[at], &notice, now_ms) {
+                let leader = &mut shown[at];
+                if notice.read_at_ms.is_none() {
+                    leader.read_at_ms = None;
+                }
+                leader.earlier.push(notice.id);
+                continue;
+            }
+        }
+        if notice.to.as_deref() == Some("failed") {
+            failing.insert(loop_id, shown.len());
+        } else {
+            failing.remove(&loop_id);
+        }
+        shown.push(notice);
+    }
+    shown
+}
+
+/// Notifications, newest first, repeated failures folded.
 pub(crate) fn notifications(
     conn: &Connection,
     shown: Shown,
@@ -664,16 +714,16 @@ pub(crate) fn notifications(
 ) -> Result<Vec<Notification>> {
     let mut statement = conn.prepare(&format!(
         "SELECT {COLUMNS} FROM {FROM}
-         WHERE (?1 = 0 OR x.read_at_ms IS NULL)
-           AND (?2 OR x.snoozed_until_ms IS NULL OR x.snoozed_until_ms <= ?4)
-           AND (?3 OR x.archived_at_ms IS NULL)
+         WHERE (?1 OR x.snoozed_until_ms IS NULL OR x.snoozed_until_ms <= ?3)
+           AND (?2 OR x.archived_at_ms IS NULL)
          ORDER BY x.created_at_ms DESC, x.rowid DESC"
     ))?;
-    let rows = statement.query_map(
-        params![shown.unread_only, shown.snoozed, shown.archived, now_ms],
-        read,
-    )?;
-    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    let rows = statement.query_map(params![shown.snoozed, shown.archived, now_ms], read)?;
+    let mut folded = fold(rows.collect::<rusqlite::Result<Vec<_>>>()?, now_ms);
+    if shown.unread_only {
+        folded.retain(|notice| notice.read_at_ms.is_none());
+    }
+    Ok(folded)
 }
 
 fn notification(conn: &Connection, id: &str) -> Result<Notification> {
@@ -721,7 +771,21 @@ fn marked(
         &(ids, how),
         change.at_ms,
         |tx| {
-            let value = super::unique(ids)?
+            let mut wanted = super::unique(ids)?;
+            let folded = notifications(
+                tx,
+                Shown {
+                    snoozed: true,
+                    ..Shown::default()
+                },
+                change.at_ms,
+            )?;
+            for notice in folded {
+                if wanted.contains(&notice.id) {
+                    wanted.extend(notice.earlier);
+                }
+            }
+            let value = wanted
                 .iter()
                 .map(|id| mark(tx, id, how, change.at_ms))
                 .collect::<Result<Vec<_>>>()?;

@@ -19,8 +19,10 @@ mod dispatch;
 
 use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, Write};
+use std::net::Shutdown;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
+use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -72,6 +74,12 @@ const NAMED_EVENTS: [&str; 30] = [
 
 /// How often the core checks that the shell that spawned it is still there.
 const PARENT_CHECK_INTERVAL: Duration = Duration::from_secs(1);
+
+/// How many frames a connection may leave unread before it is closed. The
+/// shell reads its socket as fast as frames arrive; a client this far behind
+/// has stopped reading, and waiting on it would stall every thread that
+/// emits, the after-call meeting pipeline included.
+const UNREAD_FRAMES: usize = 4096;
 
 /// The parent that connected as the native Sona app, not merely a launcher
 /// that happened to spawn this core. Playback uses it to discount both Sona
@@ -149,17 +157,50 @@ impl Args {
 }
 
 /// One shell connection. Requests arrive on its reader thread; replies and
-/// events share the writer under one lock so frames never interleave.
+/// events queue for its writer thread, which writes them in order, so frames
+/// never interleave and a client that reads slowly never holds up a sender.
 struct Connection {
-    writer: Mutex<UnixStream>,
+    outbox: SyncSender<Arc<str>>,
+    socket: UnixStream,
 }
 
 impl Connection {
-    fn send(&self, frame: &str) -> io::Result<()> {
-        let mut writer = lock_recover(&self.writer);
-        writer.write_all(frame.as_bytes())?;
-        writer.write_all(b"\n")
+    fn open(stream: &UnixStream) -> io::Result<Self> {
+        let mut writer = stream.try_clone()?;
+        let socket = stream.try_clone()?;
+        let (outbox, frames) = mpsc::sync_channel::<Arc<str>>(UNREAD_FRAMES);
+        std::thread::spawn(move || {
+            for frame in frames {
+                if let Err(error) = writer.write_all(frame.as_bytes()) {
+                    log::debug!("Native shell connection stopped taking frames: {error}");
+                    break;
+                }
+            }
+        });
+        Ok(Self { outbox, socket })
     }
+
+    /// Queues `frame` and returns at once. A connection that has left
+    /// `UNREAD_FRAMES` unread, or that can no longer be written, is shut
+    /// down instead, and `false` says it is gone.
+    fn send(&self, frame: Arc<str>) -> bool {
+        let Err(error) = self.outbox.try_send(frame) else {
+            return true;
+        };
+        if matches!(error, TrySendError::Full(_)) {
+            log::warn!("Closing a native shell connection that stopped reading");
+        }
+        if let Err(error) = self.socket.shutdown(Shutdown::Both) {
+            log::debug!("Native shell connection was already closed: {error}");
+        }
+        false
+    }
+}
+
+/// A frame as it goes on the wire, ended by its newline.
+fn wire(mut frame: String) -> Arc<str> {
+    frame.push('\n');
+    Arc::from(frame)
 }
 
 type Registry = Arc<Mutex<Vec<Arc<Connection>>>>;
@@ -194,8 +235,8 @@ pub fn start(app: &AppHandle, path: &Path) -> io::Result<()> {
                     continue;
                 }
             };
-            let writer = match stream.try_clone() {
-                Ok(writer) => writer,
+            let connection = match Connection::open(&stream) {
+                Ok(connection) => Arc::new(connection),
                 Err(error) => {
                     log::warn!("Native shell connection could not be split: {error}");
                     continue;
@@ -205,9 +246,6 @@ pub fn start(app: &AppHandle, path: &Path) -> io::Result<()> {
             if let Some(pid) = verified_native_shell_pid(&stream) {
                 let _ = NATIVE_SHELL_PID.set(pid);
             }
-            let connection = Arc::new(Connection {
-                writer: Mutex::new(writer),
-            });
             lock_recover(&registry).push(Arc::clone(&connection));
             let app = app.clone();
             let registry = Arc::clone(&registry);
@@ -287,19 +325,13 @@ fn broadcast(registry: &Registry, name: &str, payload: &str) {
         event: name,
         payload,
     }) {
-        Ok(frame) => frame,
+        Ok(frame) => wire(frame),
         Err(error) => {
             log::warn!("Event {name} could not be framed: {error}");
             return;
         }
     };
-    lock_recover(registry).retain(|connection| match connection.send(&frame) {
-        Ok(()) => true,
-        Err(error) => {
-            log::debug!("Dropping a native shell connection: {error}");
-            false
-        }
-    });
+    lock_recover(registry).retain(|connection| connection.send(Arc::clone(&frame)));
 }
 
 fn serve(app: AppHandle, connection: Arc<Connection>, stream: UnixStream, registry: Registry) {
@@ -328,8 +360,8 @@ fn serve(app: AppHandle, connection: Arc<Connection>, stream: UnixStream, regist
                 Ok(result) => answer(request.id, &result),
                 Err(fault) => failure(request.id, &fault),
             };
-            if let Err(error) = connection.send(&frame) {
-                log::debug!("Native shell reply was not delivered: {error}");
+            if !connection.send(wire(frame)) {
+                log::debug!("Native shell reply was not delivered: the connection is closed");
             }
         });
     }
@@ -443,8 +475,38 @@ fn lock_recover<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
-    use super::{answer, failure, reply, Args, Fault};
+    use super::{answer, failure, reply, wire, Args, Connection, Fault, UNREAD_FRAMES};
     use serde_json::value::RawValue;
+    use std::io::Read;
+    use std::os::unix::net::UnixStream;
+    use std::sync::{mpsc, Arc};
+    use std::time::Duration;
+
+    #[test]
+    fn a_client_that_stops_reading_is_closed_instead_of_stalling_the_sender() {
+        let (core_end, mut client) = UnixStream::pair().expect("a socket pair");
+        let connection = Connection::open(&core_end).expect("a connection");
+        let frame = wire("x".repeat(1023));
+        let (report, outcome) = mpsc::channel();
+        std::thread::spawn(move || {
+            let open: Vec<bool> = (0..2 * UNREAD_FRAMES)
+                .map(|_| connection.send(Arc::clone(&frame)))
+                .collect();
+            report.send(open).expect("the test waits for the outcome");
+        });
+        let open = outcome
+            .recv_timeout(Duration::from_secs(30))
+            .expect("sending never waits for the client to read");
+        assert!(open[..UNREAD_FRAMES].iter().all(|open| *open));
+        assert_eq!(open.last(), Some(&false));
+        client
+            .set_read_timeout(Some(Duration::from_secs(30)))
+            .expect("a read timeout");
+        let mut received = Vec::new();
+        client
+            .read_to_end(&mut received)
+            .expect("the client sees the connection close");
+    }
 
     #[test]
     fn a_missing_argument_reads_as_null_so_only_options_may_be_omitted() {

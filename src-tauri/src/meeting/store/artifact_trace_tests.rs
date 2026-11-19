@@ -171,3 +171,59 @@ fn revision_written_before_line_provenance_reads_back_untraced() {
     assert_eq!(content.summary.text, "Pricing stayed open.");
     assert!(content.summary_trace.is_empty());
 }
+
+#[test]
+fn a_saved_literal_null_stance_target_reads_as_unknown_without_rewriting_it() {
+    let (_directory, store) = store();
+    let session_id = meeting(&store, "Older meeting", NOW);
+    let mut legacy =
+        serde_json::to_value(artifacts(cited("A meeting."), Vec::new())).expect("artifact");
+    legacy["ledger"] = serde_json::json!({
+        "headline": "The launch was discussed.",
+        "threads": [],
+        "open_loops": [],
+        "commitments": [],
+        "stances": [
+            {"from": "Speaker 1", "to": "null", "what": "Send the timeline", "note": null, "at_ms": 0, "citations": []},
+            {"from": "Speaker 2", "to": "Dana", "what": "Review it", "note": null, "at_ms": 1, "citations": []},
+            {"from": "Speaker 1", "to": "Null", "what": "Call", "note": null, "at_ms": 2, "citations": []}
+        ],
+        "caveats": [],
+        "receipts": {"status": "verified"}
+    });
+    let content_json = serde_json::to_string(&legacy).expect("legacy JSON");
+    let transcript_revision_id = transcript_revision(&store, session_id);
+    store.connection().expect("store connection").execute(
+        "INSERT INTO meeting_artifact_revisions (
+            artifact_id, session_id, transcript_revision_id, input_revision, template_id,
+            template_version, generation_key, state, content_json, generated_at_utc_ms
+         ) VALUES (?1, ?2, ?3, 0, 'default', 4, ?4, 'current', ?5, ?6)",
+        params![
+            uuid::Uuid::new_v4().to_string(),
+            session_id.uuid().to_string(),
+            transcript_revision_id.uuid().to_string(),
+            GENERATION_KEY,
+            &content_json,
+            NOW,
+        ],
+    ).expect("insert saved artifact");
+
+    let content = store
+        .artifact_by_generation_key(session_id, GENERATION_KEY)
+        .expect("read saved artifact")
+        .expect("saved revision")
+        .content
+        .expect("saved content");
+    let stances = content.ledger.expect("saved ledger").stances;
+    assert_eq!(stances[0].to, None);
+    assert_eq!(stances[1].to.as_deref(), Some("Dana"));
+    assert_eq!(stances[2].to.as_deref(), Some("Null"));
+    let stored: String = store.connection().expect("store connection")
+        .query_row(
+            "SELECT content_json FROM meeting_artifact_revisions WHERE generation_key = ?1",
+            params![GENERATION_KEY],
+            |row| row.get(0),
+        )
+        .expect("read unchanged JSON");
+    assert_eq!(stored, content_json);
+}

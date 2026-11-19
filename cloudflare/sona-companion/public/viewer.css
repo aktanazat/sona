@@ -468,6 +468,28 @@ h2 {
     overflow-y: auto;
     overscroll-behavior: contain;
   }
+
+  .live-entries:is([data-above], [data-below]) {
+    mask-image: linear-gradient(
+      transparent,
+      #000 var(--fade-top, 0px),
+      #000 calc(100% - var(--fade-bottom, 0px)),
+      transparent
+    );
+  }
+
+  .live-entries[data-above] {
+    --fade-top: 32px;
+  }
+
+  .live-entries[data-below] {
+    --fade-bottom: 32px;
+  }
+
+  /* A mask also clips the focus ring, which is drawn outside the box. */
+  .live-entries:focus-visible {
+    mask-image: none;
+  }
 }
 
 @media (prefers-color-scheme: dark) {

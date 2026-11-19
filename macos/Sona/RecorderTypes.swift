@@ -133,12 +133,13 @@ extension RecorderPhase {
         }
     }
 
-    /// The `recorder.phase.*` copy.
-    var label: String {
+    /// The `recorder.phase.*` copy. Before anything starts the title says
+    /// enough, so setup has none.
+    var label: String? {
         switch self {
         case .checking: "Checking"
         case .permission: "Permission needed"
-        case .idle: "Set up"
+        case .idle: nil
         case .selectingSource: "Selecting source"
         case .previewing: "Preview ready"
         case .starting: "Starting recording"

@@ -88,8 +88,8 @@ struct CycleTally: Equatable {
         done = cycle.done
     }
 
-    /// Done counts 100 and started 25, over scope: the rule the core closes a cycle by.
-    var success: Int? { scope == 0 ? nil : (done * 100 + started * 25) / scope }
+    /// Done over scope: the rule the core closes a cycle by.
+    var success: Int? { scope == 0 ? nil : done * 100 / scope }
 }
 
 /// The head of a cycle's page: which cycle, how far it has come, and scope
@@ -136,7 +136,6 @@ struct CycleSummary: View {
                         .font(success == nil ? TypeScale.list : TypeScale.stat)
                         .monospacedDigit()
                         .foregroundStyle(success == nil ? Theme.inkSecondary : Theme.ink)
-                        .help("Done counts in full, started counts a quarter")
                     Text("\(tally.done) done, \(tally.started) started of \(tally.scope)").metaText()
                 }
             }
@@ -146,17 +145,14 @@ struct CycleSummary: View {
             if failed {
                 Text("Earlier days could not be read.").metaText(Theme.live)
             }
-            HStack(spacing: 8) {
-                Text("Notes").metaText()
-                ForEach(notes) { note in
-                    Button(note.title) { model.open(link: "sona://note/\(note.id)") }
-                        .buttonStyle(.secondary)
+            if !notes.isEmpty {
+                HStack(spacing: 8) {
+                    Text("Notes").metaText()
+                    ForEach(notes) { note in
+                        Button(note.title) { model.open(link: "sona://note/\(note.id)") }
+                            .buttonStyle(.secondary)
+                    }
                 }
-                Button("New note", systemImage: "square.and.pencil") {
-                    model.newNote(aboutCycle: cycle.number, titled: "Notes for \(cycle.title)")
-                }
-                .buttonStyle(.secondary)
-                .help("Write a note filed under this cycle")
             }
         }
         .task(id: cycle.number) {
@@ -210,30 +206,35 @@ struct CycleSummary: View {
         renaming = nil
     }
 
-    @ViewBuilder
     private var actions: some View {
-        if cycle.state != .past {
-            Button("Dates", systemImage: "calendar") {
-                dating = CycleFormat.span(cycle).map { Dates(first: $0.first, last: $0.last) }
+        Menu {
+            if cycle.state != .past {
+                Button("Change dates…") {
+                    dating = CycleFormat.span(cycle).map { Dates(first: $0.first, last: $0.last) }
+                }
             }
-            .buttonStyle(.secondary)
-            .help(cycle.state == .current ? "Change the last day" : "Change the first and last day")
-            .popover(isPresented: Binding(get: { dating != nil }, set: { if !$0 { dating = nil } })) {
-                datesForm
+            if cycle.state == .current {
+                Button("Move unfinished work to the next cycle") { model.work.rolloverCycle(cycle.number) }
+                if let next = model.work.nextCycle {
+                    Button("End this cycle and start \(next.title) today") { model.work.startCycleToday(next.number) }
+                }
+            } else if cycle.state == .upcoming {
+                Button("Start today") { model.work.startCycleToday(cycle.number) }
             }
+            Button("New note") {
+                model.newNote(aboutCycle: cycle.number, titled: "Notes for \(cycle.title)")
+            }
+        } label: {
+            Image(systemName: "ellipsis")
         }
-        if cycle.state == .current {
-            Button("Roll over", systemImage: "arrow.uturn.right") { model.work.rolloverCycle(cycle.number) }
-                .buttonStyle(.secondary)
-                .help("Move unfinished work into the next cycle")
-            if let next = model.work.nextCycle {
-                Button("Start \(next.title) today") { model.work.startCycleToday(next.number) }
-                    .buttonStyle(.secondary)
-                    .help("End this cycle now and start the next one today")
-            }
-        } else if cycle.state == .upcoming {
-            Button("Start today") { model.work.startCycleToday(cycle.number) }
-                .buttonStyle(.secondary)
+        .menuStyle(.button)
+        .buttonStyle(.icon)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("More")
+        .accessibilityLabel("More")
+        .popover(isPresented: Binding(get: { dating != nil }, set: { if !$0 { dating = nil } })) {
+            datesForm
         }
     }
 
@@ -381,8 +382,13 @@ struct CycleChart: View {
             .frame(height: 88)
             .padding(.vertical, 4)
             .background(alignment: .bottom) { Hairline() }
-            HStack {
+            HStack(spacing: 14) {
                 Text(first.formatted(.dateTime.month(.abbreviated).day()))
+                Spacer(minLength: 8)
+                ChartKey(title: "Scope", color: Theme.inkTertiary, dash: [3, 2])
+                ChartKey(title: "Started", color: Theme.statusInProgress)
+                ChartKey(title: "Done", color: Theme.accent)
+                if !pace.isEmpty { ChartKey(title: "Target", color: Theme.inkSecondary, dash: [1, 3]) }
                 Spacer(minLength: 8)
                 Text(last.formatted(.dateTime.month(.abbreviated).day()))
             }
@@ -430,18 +436,15 @@ struct CycleSettingsMenu: View {
 
     var body: some View {
         if let settings = model.work.cycleSettings {
-            Button { editing = settings } label: {
-                Text("\(CycleFormat.weeks(settings.weeks)) from \(CycleFormat.weekday(settings.startWeekday))")
-            }
-            .buttonStyle(.compact)
-            .fixedSize()
-            .help("Cycle settings")
-            .sheet(item: Binding(get: { editing.map(CycleSettingsDraft.init) }, set: { editing = $0?.settings })) { draft in
-                CycleSettingsSheet(settings: draft.settings) { saved in
-                    model.work.saveCycleSettings(saved)
-                    editing = nil
-                } cancel: { editing = nil }
-            }
+            Button("Cycle settings") { editing = settings }
+                .buttonStyle(.compact)
+                .fixedSize()
+                .sheet(item: Binding(get: { editing.map(CycleSettingsDraft.init) }, set: { editing = $0?.settings })) { draft in
+                    CycleSettingsSheet(settings: draft.settings) { saved in
+                        model.work.saveCycleSettings(saved)
+                        editing = nil
+                    } cancel: { editing = nil }
+                }
         }
     }
 }

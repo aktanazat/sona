@@ -17,11 +17,6 @@ struct SharedPagesView: View {
         Page {
             PageTitle("Shared", subtitle: subtitle)
             ErrorNote(store.failure)
-            if store.siteRead, store.site == nil {
-                PageSection("Where pages go") {
-                    SharedSiteSetup()
-                }
-            }
             if !store.drafts.isEmpty {
                 PageSection("Waiting for you") {
                     Card {
@@ -34,7 +29,7 @@ struct SharedPagesView: View {
             if !store.loaded {
                 Card { CardLine("Reading shared pages…") }
             } else if store.shares.isEmpty, store.drafts.isEmpty {
-                Card { CardLine("Nothing shared yet. Open a meeting and press Share to make a page.") }
+                Card { CardLine("No published pages yet. Live call links stay on their meeting.") }
             } else if !store.shares.isEmpty {
                 PageSection("Links") {
                     Card {
@@ -191,11 +186,8 @@ struct SharedSiteSetup: View {
     var body: some View {
         Card {
             VStack(alignment: .leading, spacing: 10) {
-                Text("Pages go to a private GitHub repository whose Pages site serves the address. Nothing is set up yet.")
-                    .metaText(Theme.inkSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                InputField(prompt: "Repository, like https://github.com/you/pages.git", text: $remote)
-                InputField(prompt: "Address, like https://example.com/m", text: $address)
+                InputField(prompt: "GitHub repository, like https://github.com/you/pages.git", text: $remote)
+                InputField(prompt: "Page address, like https://example.com/m", text: $address)
                 if let failure = model.shared.siteFailure {
                     Text(failure).metaText(Theme.live).textSelection(.enabled)
                 }

@@ -12,9 +12,7 @@ struct EssentialsView<MeetingRows: View>: View {
 
     var body: some View {
         Page {
-            PageTitle("Essentials", subtitle: "The handful of settings worth deciding once.") {
-                EmptyView()
-            }
+            PageTitle("Essentials", subtitle: "")
             ErrorNote(store.error)
             Card {
                 ShortcutCaptureRow(store: store, id: "transcribe")

@@ -47,9 +47,7 @@ extension AppModel {
         guard let items = work.items else { return [] }
         switch workFocus.tab {
         case .owe:
-            let current = workFocus.oweThisCycle ? work.currentCycle?.number : nil
-            let mine = current.map { number in items.filter { $0.cycle == number } } ?? items
-            return TaskListing.myWork(mine, direction: .mine, now: now, focus: rituals.focus)
+            return TaskListing.myWork(items, direction: .mine, now: now, focus: rituals.focus)
         case .waiting:
             return TaskListing.myWork(items, direction: .waitingOn, now: now)
         case .cycle:
@@ -199,15 +197,8 @@ private struct TasksList: View {
     private func empty(_ draft: WorkViewDraft?) -> some View {
         switch model.workFocus.tab {
         case .owe:
-            if model.workFocus.oweThisCycle {
-                TaskEmpty(line: "Nothing you owe in this cycle.") {
-                    Button("Show all my work") { model.workFocus.oweThisCycle = false }
-                        .buttonStyle(.compact)
-                }
-            } else {
-                TaskEmpty(line: "Nothing you owe.") {
-                    TaskKeyButton(title: "New task", keys: "c") { model.newTask() }
-                }
+            TaskEmpty(line: "Nothing you owe.") {
+                TaskKeyButton(title: "New task", keys: "c") { model.newTask() }
             }
         case .waiting:
             TaskEmpty(line: "Nobody owes you anything.")
@@ -230,12 +221,6 @@ private struct TasksList: View {
     @ViewBuilder
     private func trailing(_ draft: WorkViewDraft?) -> some View {
         let focus = model.workFocus
-        if focus.tab == .owe, model.work.currentCycle != nil {
-            WorkBarToggle(
-                title: "This cycle", icon: "arrow.triangle.2.circlepath",
-                help: "Show only work planned in the current cycle",
-                isOn: Bindable(focus).oweThisCycle)
-        }
         if focus.tab == .cycle {
             CycleNavigation()
             CycleSettingsMenu()
@@ -258,26 +243,16 @@ private struct TasksList: View {
     }
 }
 
-/// A listing's filter button, its list-or-board switch, and its display
-/// options; F, ⌘B and ⇧V reach them from the keyboard.
+/// A listing's filter button and its display options, which F and ⇧V open;
+/// ⌘B switches between list and board.
 struct TaskListingButtons: View {
     let draft: WorkViewDraft?
     @Environment(AppModel.self) private var model
 
     var body: some View {
         let focus = model.workFocus
-        if let draft {
+        if draft != nil {
             TaskFilterButton()
-            SegmentedSwitch(
-                items: [
-                    SwitchItem(id: WorkLayout.list, title: "List", icon: "list.bullet"),
-                    SwitchItem(id: WorkLayout.board, title: "Board", icon: "rectangle.split.3x1"),
-                ],
-                selection: draft.display.layout, iconOnly: true
-            ) { layout in
-                model.editListing { $0.display.layout = layout }
-            }
-            .help("List or board  ⌘B")
         }
         WorkBarButton(icon: "slider.horizontal.3", help: "Display options  ⇧V", on: focus.displayShown) {
             focus.displayShown.toggle()
@@ -299,7 +274,8 @@ struct TaskListingBody: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        let shows = Set(draft?.display.properties ?? model.workFocus.myProperties)
+        let chosen = Set(draft?.display.properties ?? model.workFocus.myProperties)
+        let shows = draft == nil && model.workFocus.tab == .owe ? chosen.subtracting([TaskProperty.owner.rawValue]) : chosen
         if let display = draft?.display, display.layout == .board {
             TaskBoardBody(groups: groups, display: display, shows: shows, now: now, scrolls: scrolls,
                           add: model.composeTask(in:))
@@ -387,6 +363,7 @@ private struct TaskTabs: View {
             .frame(height: 28)
             .background(current != nil ? Theme.control : .clear, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
             .contentShape(Rectangle())
+            .accessibilityElement(children: .combine)
         }
         .menuStyle(.button)
         .buttonStyle(.plain)
@@ -822,7 +799,7 @@ private struct TaskCard: View {
                     if let agent = session?.agent ?? (row.status.isOpen ? row.doer?.agent : nil) {
                         TaskDoer(agent: agent, waiting: waiting, session: session)
                     }
-                    if shows.contains(TaskProperty.owner.rawValue) {
+                    if shows.contains(TaskProperty.owner.rawValue), row.ownerIsSelf || row.ownerPersonId != nil {
                         Avatar(face: row.ownerFace, size: 18, revision: revision)
                     }
                 }
@@ -875,7 +852,8 @@ private struct TaskCard: View {
     }
 
     private var hasTop: Bool {
-        [TaskProperty.number, .updated, .owner].contains { shows.contains($0.rawValue) }
+        [TaskProperty.number, .updated].contains { shows.contains($0.rawValue) }
+            || (shows.contains(TaskProperty.owner.rawValue) && (row.ownerIsSelf || row.ownerPersonId != nil))
             || session != nil || (row.doer != nil && row.status.isOpen)
     }
 

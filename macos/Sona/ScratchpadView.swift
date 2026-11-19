@@ -64,14 +64,10 @@ private struct ScratchNoteListPage: View {
                         .buttonStyle(.secondary)
                     SearchField(prompt: "Search notes", text: $store.query)
                         .frame(width: 216)
-                    Button {
+                    Button("New note", systemImage: "plus") {
                         Task { await store.newNote() }
-                    } label: {
-                        Image(systemName: "plus")
                     }
-                    .buttonStyle(.icon)
-                    .help("New note")
-                    .accessibilityLabel("New note")
+                    .buttonStyle(.primary)
                 }
             }
             ErrorNote(store.error)

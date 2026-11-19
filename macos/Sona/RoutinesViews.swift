@@ -180,7 +180,7 @@ struct TasksSettingsView: View {
 
     var body: some View {
         Page {
-            PageTitle("Tasks", subtitle: "The weekly project digest, label groups, retired labels and task templates.")
+            PageTitle("Tasks", subtitle: "")
             ErrorNote(model.routines.error ?? model.work.mutationError)
             ProjectDigestSettings()
             labels
@@ -242,12 +242,12 @@ private struct LabelSettingsRow: View {
                     .opacity(label.retired ? 0.55 : 1)
                 Text(count == 1 ? "1 task" : "\(count) tasks").metaText()
                 if label.retired {
-                    Text("Retired").metaText(Theme.inkSecondary)
+                    Text("Hidden").metaText(Theme.inkSecondary)
                 }
             }
         } trailing: {
             HStack(spacing: Space.s) {
-                Menu(label.group ?? "Group") {
+                Menu("Move") {
                     ForEach(groups, id: \.self) { group in
                         Button {
                             work.groupLabel(label.id, into: group)
@@ -277,7 +277,7 @@ private struct LabelSettingsRow: View {
                 .fixedSize()
                 .help("Where the label can go")
                 .accessibilityLabel("Use on: \(label.scope.label)")
-                Button(label.retired ? "Restore" : "Retire") {
+                Button(label.retired ? "Show" : "Hide") {
                     work.retireLabel(label.id, !label.retired)
                 }
                 .buttonStyle(.compact)

@@ -190,8 +190,7 @@ struct CaptureScreen: View {
     private var hint: String {
         switch model.capture {
         case .idle:
-            let start = model.settings.settings.pushToTalk ? "hold to talk, or tap for hands-free" : "tap to start and stop"
-            return "\(start) · \(model.activeModel?.name ?? "No model")"
+            return model.settings.settings.pushToTalk ? "hold to talk, or tap for hands-free" : "tap to start and stop"
         case .recording:
             /* A hold ends when the keys go up; a tap, a toggle or the Start
              * button ends with the shortcut again or Stop. Which one opened

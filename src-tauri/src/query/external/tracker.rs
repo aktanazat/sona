@@ -2860,8 +2860,7 @@ pub struct ExternalWorkCycle {
     pub scope: u32,
     pub started: u32,
     pub done: u32,
-    /// Done counts fully and started a quarter, out of scope; as it closed
-    /// for a past cycle.
+    /// Done out of scope; as it closed for a past cycle.
     pub success: Option<u8>,
 }
 

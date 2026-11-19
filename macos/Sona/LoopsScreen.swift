@@ -39,20 +39,30 @@ struct LoopsScreen: View {
     }
 
     private func row(_ loop: WorkLoop, _ store: LoopsStore) -> some View {
-        CardRow(action: { store.select(loop.id) }) {
+        let failed = loop.lastRun.flatMap { loop.enabled && $0.status == .failed ? $0 : nil }
+        return CardRow(action: { store.select(loop.id) }) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(loop.name).bodyText(13)
                 Text(loop.trigger.summary(labels: model.work.labels)).metaText().lineLimit(1)
+                if let failed {
+                    Text(failed.error.map { "Failed \(FeedClock.ago(failed.queuedAtMs)): \($0)" }
+                        ?? "Failed \(FeedClock.ago(failed.queuedAtMs))")
+                        .metaText(Theme.live)
+                        .lineLimit(2)
+                        .help(loopDate(failed.queuedAtMs).formatted(date: .abbreviated, time: .shortened))
+                }
             }
         } trailing: {
             VStack(alignment: .trailing, spacing: 2) {
-                Text(loop.nextRunText).metaText(Theme.inkSecondary)
-                if let run = loop.lastRun {
+                if !loop.enabled {
+                    Text("Off").metaText(Theme.inkSecondary)
+                } else if let next = loop.nextRunText {
+                    Text(next).metaText(Theme.inkSecondary)
+                }
+                if loop.enabled, failed == nil, let run = loop.lastRun {
                     Text("\(run.status.label) \(FeedClock.ago(run.queuedAtMs))")
-                        .metaText(run.status == .failed ? Theme.live : Theme.inkTertiary)
+                        .metaText()
                         .help(loopDate(run.queuedAtMs).formatted(date: .abbreviated, time: .shortened))
-                } else {
-                    Text("Never run").metaText()
                 }
             }
         }
@@ -84,7 +94,7 @@ private struct WorkLoopPage: View {
             } else if let detail = store.detail {
                 PageSection("Status") {
                     Card {
-                        ToggleRow(title: "Enabled", detail: "Next run: \(detail.loop.nextRunText)", isOn: Binding(
+                        ToggleRow(title: "Enabled", detail: detail.loop.nextRunText.map { "Next run: \($0)" }, isOn: Binding(
                             get: { detail.loop.enabled },
                             set: { enabled in Task { await store.setEnabled(enabled) } }))
                     }
@@ -576,13 +586,10 @@ extension WorkLoopTrigger {
 }
 
 extension WorkLoop {
-    var nextRunText: String {
-        guard enabled else { return "Off" }
-        if let next = nextRunAtMs {
-            return loopDate(next).formatted(date: .abbreviated, time: .shortened)
-        }
-        if case .schedule = trigger { return "Off" }
-        return "On events"
+    /// When a scheduled automation that is on runs next.
+    var nextRunText: String? {
+        guard enabled, let next = nextRunAtMs else { return nil }
+        return loopDate(next).formatted(date: .abbreviated, time: .shortened)
     }
 }
 

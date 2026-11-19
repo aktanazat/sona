@@ -93,9 +93,9 @@ struct ModesList: View {
     }
 }
 
-/// One mode in the list: its name, whether it is a preset, whether it is the
-/// one in force, the engine it runs on, its dictation chord, and everything
-/// that can be done to it.
+/// One mode in the list: its name, whether it is the one in force, the cloud
+/// service it runs on when it is not this Mac, its dictation chord, and
+/// everything that can be done to it.
 struct ModeRow: View {
     let store: ModesStore
     let mode: Mode
@@ -113,14 +113,9 @@ struct ModeRow: View {
                     .foregroundStyle(isActive ? Theme.accent : Theme.inkSecondary)
                     .frame(width: 16)
                     .accessibilityHidden(true)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(mode.name)
-                        .bodyText()
-                        .lineLimit(1)
-                    if mode.isPreset {
-                        Text("Preset").metaText()
-                    }
-                }
+                Text(mode.name)
+                    .bodyText()
+                    .lineLimit(1)
             }
         } trailing: {
             HStack(spacing: 10) {
@@ -130,7 +125,9 @@ struct ModeRow: View {
                         .foregroundStyle(Theme.accent)
                         .accessibilityLabel("Active")
                 }
-                Text(mode.asr.requestedEngine.summary).metaText().fixedSize()
+                if let cloud = mode.asr.requestedEngine.cloud {
+                    Text(cloud.label).metaText().fixedSize()
+                }
                 ModeChord(mode.shortcuts.transcribe.currentBinding)
                 ModeRowMenu(store: store, mode: mode)
             }
@@ -298,7 +295,7 @@ struct ModeInstructionsSection: View {
                         title: "Cleanup level",
                         detail: mode.llm.cleanupDetail,
                         choices: mode.llm.cleanupChoices,
-                        label: { $0?.label ?? "Current instructions" },
+                        label: { $0?.label ?? "Default" },
                         selection: Binding(
                             get: { mode.llm.cleanupLevel },
                             set: { store.chooseCleanupLevel($0) }))

@@ -21,13 +21,10 @@ struct MeetingStartGateView: View {
     var body: some View {
         Page(back: store.gate == nil ? nil : PageBack("Back") { store.cancel() }) {
             if let session = store.gate {
-                Text(
-                    store.gateBlocked || !store.canStart
-                        ? "Recording did not start" : "Ready to record"
-                )
-                .titleText()
-                .accessibilityAddTraits(.isHeader)
-                .padding(.bottom, 24)
+                Text("New recording")
+                    .titleText()
+                    .accessibilityAddTraits(.isHeader)
+                    .padding(.bottom, 24)
 
                 if let facts = store.options?.preview {
                     MeetingStartPreviewCard(
@@ -76,15 +73,6 @@ struct MeetingStartGateView: View {
                     Text("Records this Mac's audio locally. Nothing joins the call.")
                         .bodyText(14)
 
-                    if store.gateBlocked && store.canStartPartial {
-                        Toggle(partialSentence, isOn: Binding(
-                            get: { store.acceptPartial },
-                            set: { store.setAcceptPartial($0) }))
-                            .toggleStyle(.checkbox)
-                            .font(TypeScale.body(14))
-                            .disabled(store.starting)
-                    }
-
                     if store.gateBlocked && !store.canStartPartial {
                         Text("Nothing can be recorded until at least one source is available.")
                             .bodyText(14, Theme.live)
@@ -102,7 +90,7 @@ struct MeetingStartGateView: View {
                             .buttonStyle(.primary)
                             .disabled(
                                 store.starting || store.refreshing || !store.canStart
-                                    || (store.gateBlocked && !(store.acceptPartial && store.canStartPartial)))
+                                    || (store.gateBlocked && !store.canStartPartial))
                     }
                 }
             }
@@ -113,16 +101,6 @@ struct MeetingStartGateView: View {
         if store.starting { return "Starting…" }
         guard store.gateBlocked else { return "Record" }
         return store.blockedSources.count == 1 ? "Record without it" : "Record without them"
-    }
-
-    /// The acknowledgement names what will be missing, so the press below it
-    /// agrees to something specific.
-    private var partialSentence: String {
-        let names = store.blockedSources.map { $0.sourceKind.label.lowercased() }
-        let missing = names.count == 1
-            ? "The \(names[0]) is missing from"
-            : "The \(names.joined(separator: " and ")) are missing from"
-        return "\(missing) this recording, and the meeting is marked partial."
     }
 }
 

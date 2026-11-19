@@ -450,8 +450,6 @@ final class WorkFocus {
     var displayShown = false
     var collapsed: Set<String> = []
     var tab: TasksTab = .owe
-    /// I owe narrowed to the current cycle.
-    var oweThisCycle = false
     /// The cycle the Cycle tab shows; nil shows the one under way.
     var cycleOpened: Int64?
     /// The Cycle tab lists every cycle instead of one cycle's page.

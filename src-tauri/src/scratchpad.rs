@@ -44,20 +44,27 @@ pub const RECENT_MIGRATION: &str =
 pub const AUTHOR_MIGRATION: &str = "ALTER TABLE scratch_note_versions ADD COLUMN actor TEXT NOT NULL DEFAULT 'me' CHECK(actor IN ('me', 'sona', 'agent'));
 ALTER TABLE scratch_note_versions ADD COLUMN agent TEXT CHECK(agent IS NULL OR (actor = 'agent' AND length(trim(agent)) > 0));";
 
+/// Titles notes saved as `Untitled` while a body under ten characters and
+/// three words got no title of its own, the way [`derive_title`] titles them
+/// now. Such a body's first line is at most nine characters, so three passes
+/// fold every run of spaces to one.
+pub const SHORT_TITLE_MIGRATION: &str = "UPDATE scratch_notes
+SET title = replace(replace(replace(replace(trim(
+        substr(ltrim(body, ' ' || char(9) || char(10) || char(13)), 1,
+            instr(ltrim(body, ' ' || char(9) || char(10) || char(13)) || char(10), char(10)) - 1),
+        ' ' || char(9) || char(13)), char(9), ' '), '  ', ' '), '  ', ' '), '  ', ' ')
+WHERE title = 'Untitled' AND trim(body, ' ' || char(9) || char(10) || char(13)) <> '';";
+
 /// Saves closer together than this fold into the newest version instead of
 /// each becoming one: an autosave fires after every pause in typing, and a
 /// history of every pause is not a history anyone can read. A restore never
 /// folds, and a save never folds into a restore.
 const VERSION_MERGE_WINDOW_MS: i64 = 10 * 60 * 1_000;
 
-/// A body with fewer characters than this *and* fewer words than
-/// [`TITLE_MIN_WORDS`] is too short to be titled by its own words.
-const TITLE_MIN_CHARS: usize = 10;
-const TITLE_MIN_WORDS: usize = 3;
 /// How much of the first line becomes the title.
 const TITLE_MAX_WORDS: usize = 8;
 const TITLE_MAX_CHARS: usize = 60;
-/// The title of a note whose body is too short to name it.
+/// The title of a blank body, which is never saved as a note.
 pub const UNTITLED: &str = "Untitled";
 
 const NOTE_COLUMNS: &str = "id, title, body, pinned, created_at_ms, updated_at_ms";
@@ -67,8 +74,7 @@ const NOTE_COLUMNS: &str = "id, title, body, pinned, created_at_ms, updated_at_m
 pub struct ScratchNote {
     /// UUID v4, minted when the note is first saved.
     pub id: String,
-    /// The first words of the body, or [`UNTITLED`] while the body is too
-    /// short to name it. Derived on every write, never typed.
+    /// The first words of the body. Derived on every write, never typed.
     pub title: String,
     pub body: String,
     pub pinned: bool,
@@ -189,8 +195,7 @@ impl From<rusqlite::Error> for ScratchpadError {
 
 // MARK: - Title
 
-/// The title a body earns: its first words once it has [`TITLE_MIN_CHARS`]
-/// characters or [`TITLE_MIN_WORDS`] words, [`UNTITLED`] before that.
+/// The title a body earns: its first words, or [`UNTITLED`] when it is blank.
 ///
 /// The words come from the first non-blank line, at most [`TITLE_MAX_WORDS`]
 /// of them and [`TITLE_MAX_CHARS`] characters, so a note that opens with a
@@ -198,7 +203,7 @@ impl From<rusqlite::Error> for ScratchpadError {
 /// titled by how it starts.
 pub fn derive_title(body: &str) -> String {
     let body = body.trim();
-    if body.chars().count() < TITLE_MIN_CHARS && body.split_whitespace().count() < TITLE_MIN_WORDS {
+    if body.is_empty() {
         return UNTITLED.to_string();
     }
     let first_line = body
@@ -884,22 +889,38 @@ mod tests {
     }
 
     #[test]
-    fn title_is_untitled_until_the_body_has_ten_characters_or_three_words() {
+    fn title_is_untitled_only_when_the_body_is_blank() {
         let cases = [
             ("", UNTITLED),
             ("   \n  ", UNTITLED),
-            // 8 characters, 2 words.
-            ("Hi there", UNTITLED),
-            // 9 characters, 2 words: one short of the floor.
-            ("Call Mom.", UNTITLED),
-            // 10 characters, 2 words.
+            ("Hi there", "Hi there"),
+            ("Cycle 1", "Cycle 1"),
             ("Call Mom!!", "Call Mom!!"),
-            // 5 characters, 3 words.
-            ("a b c", "a b c"),
             ("Hello world", "Hello world"),
         ];
         for (body, expected) in cases {
             assert_eq!(derive_title(body), expected, "body {body:?}");
+        }
+    }
+
+    #[test]
+    fn notes_saved_untitled_take_the_title_their_body_earns() {
+        let conn = connection();
+        let bodies = ["Cycle 1", "\n  Hi\tthere \n", "a    b", "Call\nMom", "Untitled"];
+        for (index, body) in bodies.iter().enumerate() {
+            conn.execute(
+                "INSERT INTO scratch_notes (id, title, body, pinned, created_at_ms, updated_at_ms)
+                 VALUES (?1, 'Untitled', ?2, 0, 1, 1)",
+                rusqlite::params![index.to_string(), body],
+            )
+            .expect("insert note");
+        }
+        conn.execute_batch(SHORT_TITLE_MIGRATION).expect("retitle");
+        for (index, body) in bodies.iter().enumerate() {
+            let title: String = conn
+                .query_row("SELECT title FROM scratch_notes WHERE id = ?1", [index.to_string()], |row| row.get(0))
+                .expect("title");
+            assert_eq!(title, derive_title(body), "body {body:?}");
         }
     }
 

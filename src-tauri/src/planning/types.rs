@@ -272,7 +272,7 @@ pub struct ProjectProgress {
     pub scope: u32,
     pub started: u32,
     pub done: u32,
-    /// Done counts fully and started a quarter, out of the scope.
+    /// Done out of the scope.
     pub percent: u8,
     pub weeks: Vec<ProjectWeek>,
     /// None until a week has passed with work done, or with nothing left.
