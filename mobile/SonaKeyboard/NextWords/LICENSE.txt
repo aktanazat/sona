@@ -1,0 +1,5 @@
+The English (en.tsv) and Russian (ru.tsv) tables in this folder are built by
+mobile/scripts/build-next-words.ts from sentences published by Tatoeba
+(https://tatoeba.org), licensed CC BY 2.0 FR
+(https://creativecommons.org/licenses/by/2.0/fr/). Only counts of which word follows which
+are kept; no sentence is included.
