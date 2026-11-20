@@ -100,25 +100,22 @@ private struct Caret: View {
     }
 }
 
-/// A short message over the keys, with Undo after a change to the field.
+/// A short message in the top bar, with Undo after a change to the field.
 struct ToolsNotice: View {
     let tools: KeyboardTools
 
     var body: some View {
         if let notice = tools.notice {
             HStack(spacing: 12) {
-                Text(notice.text).font(.footnote).lineLimit(2)
+                Text(notice.text).font(.footnote).foregroundStyle(Theme.textSecondary).lineLimit(2)
                 if notice.undoable, tools.lastChange != nil {
                     Button("tools.undo") { withAnimation(toolsAnimation) { tools.undo() } }
                         .font(.footnote.weight(.semibold))
+                        .frame(minHeight: 44)
                         .accessibilityIdentifier("tools-undo-notice")
                 }
             }
-            .padding(.horizontal, 16)
-            .frame(minHeight: 36)
-            .glassEffect(.regular, in: Capsule())
-            .padding(.top, 4)
-            .transition(.move(edge: .top).combined(with: .opacity))
+            .transition(.opacity)
             .id(notice.id)
             .accessibilityIdentifier("tools-notice")
         }

@@ -171,7 +171,6 @@ final class KeyboardTools {
         case let .commandName(prompt):
             commands.append(SavedCommand(name: words, prompt: prompt))
             show(.ai, .commands)
-            say("tools.commandSaved")
         case let .snippetKeyword(expansion):
             snippets.removeAll { $0.trigger.lowercased() == words.lowercased() }
             snippets.append(DictationProfile.Snippet(trigger: words, expansion: expansion))
@@ -273,11 +272,14 @@ final class KeyboardTools {
 
     /// Dictated text on its way into the field. `styled` is true when the app already
     /// rewrote it; otherwise the recording's style is applied here. With review on it
-    /// waits on the panel for Insert. The recording's choices end with it.
+    /// waits on the panel for Insert. The recording's choices end with it. A dictation that
+    /// cleanup left empty puts nothing in the field: a style given no words writes its
+    /// own instructions back.
     func deliver(_ text: String, styled: Bool) {
         let style = styled ? nil : effectiveStyle
         recordingStyle = nil
         recordingLanguage = nil
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         guard let style, KeyboardAI.unavailable == nil else { return land(text) }
         start(.style(style), on: text) { [weak self] styledText in
             guard let self else { return }

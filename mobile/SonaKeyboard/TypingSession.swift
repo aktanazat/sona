@@ -94,8 +94,10 @@ struct TypingSession {
         /* Text the last edit left as is, unchanged since, is a keyword backspace just put back. */
         if text != textAfterLast, let keyword = TypingText.keyword(before: text),
            let expansion = snippets[keyword.lowercased()] ?? lexicon.expansion(of: keyword) {
-            let snippet = Correction(typed: String(keyword), replacement: expansion)
-            return remember(.corrected(snippet, separator: separator), Edit(deleteCount: keyword.count, insert: expansion + separator), on: text)
+            /* A keyword capitalized at a sentence start capitalizes what it expands to. */
+            let cased = keyword.first?.isUppercase == true ? expansion.prefix(1).uppercased() + expansion.dropFirst() : expansion
+            let snippet = Correction(typed: String(keyword), replacement: cased)
+            return remember(.corrected(snippet, separator: separator), Edit(deleteCount: keyword.count, insert: cased + separator), on: text)
         }
         if corrects, let correction = corrector?.correction(before: text, lexicon: lexicon) {
             let edit = Edit(deleteCount: correction.typed.count, insert: correction.replacement + separator)

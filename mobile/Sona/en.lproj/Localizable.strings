@@ -327,7 +327,6 @@
 "tools.keywordPlaceholder" = "Keyword that expands it";
 "tools.send" = "Done";
 "tools.newCommand" = "New";
-"tools.commandSaved" = "Command saved";
 "tools.snippetSaved %@" = "Type %@ and a space to expand it";
 "tools.saveSelection" = "Save selection as snippet";
 "tools.noSnippets" = "No snippets yet";

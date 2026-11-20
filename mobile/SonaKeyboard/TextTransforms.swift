@@ -20,7 +20,7 @@ enum TextCase: String, CaseIterable, Identifiable {
         switch self {
         case .upper: text.uppercased(with: locale)
         case .lower: text.lowercased(with: locale)
-        case .title: Self.words(of: text) { $0.prefix(1).uppercased(with: locale) + $0.dropFirst().lowercased(with: locale) }
+        case .title: Self.title(of: text, locale: locale)
         case .sentence: Self.sentences(of: text.lowercased(with: locale), locale: locale)
         }
     }
@@ -39,6 +39,23 @@ enum TextCase: String, CaseIterable, Identifiable {
         }
         if !word.isEmpty { output += transform(word) }
         return output
+    }
+
+    /// English titles keep articles, short conjunctions and short prepositions lowercase
+    /// between the first and last word.
+    private static let minorWords: Set<String> = ["a", "an", "and", "as", "at", "but", "by", "for", "in", "nor", "of", "on", "or", "the", "to"]
+
+    private static func title(of text: String, locale: Locale) -> String {
+        var count = 0
+        _ = words(of: text) { count += 1; return $0 }
+        let english = locale.language.languageCode == .english
+        var index = 0
+        return words(of: text) { word in
+            defer { index += 1 }
+            let lower = word.lowercased(with: locale)
+            if english, index > 0, index < count - 1, minorWords.contains(lower) { return lower }
+            return lower.prefix(1).uppercased(with: locale) + lower.dropFirst()
+        }
     }
 
     /// A capital for the first letter of the text and of every sentence, and for "I".

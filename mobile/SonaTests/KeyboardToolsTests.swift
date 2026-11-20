@@ -21,6 +21,13 @@ struct KeyboardToolsTests {
         #expect(text == "Send it to @@addr ")
     }
 
+    @Test func capitalizedKeywordCapitalizesItsExpansion() {
+        var session = TypingSession(corrector: nil)
+        session.snippets = ["ofc": "office"]
+        let text = "See you there. Ofc"
+        #expect(Self.applying(session.end(with: " ", before: text, corrects: true), to: text) == "See you there. Office ")
+    }
+
     /// The phone's tone texts must stay the Mac's, which renders the same blocks.
     @Test(arguments: [DictationTone.casual, .semiCasual, .semiFormal, .formal])
     func toneRuleMatchesTheMacPrompt(_ tone: DictationTone) throws {
@@ -76,6 +83,7 @@ struct KeyboardToolsTests {
     @Test(arguments: [
         (TextCase.sentence, "HELLO THERE. SO i'M here, i THINK!\nnew LINE", "Hello there. So I'm here, I think!\nNew line"),
         (.title, "the QUICK fox's tail", "The Quick Fox's Tail"),
+        (.title, "can we move lunch to the office on friday", "Can We Move Lunch to the Office on Friday"),
     ])
     func caseChangeKeepsSentencesAndWords(_ change: TextCase, _ input: String, _ expected: String) {
         #expect(change.apply(to: input, locale: Locale(identifier: "en_US")) == expected)

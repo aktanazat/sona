@@ -246,6 +246,7 @@ final class KeyboardViewController: UIInputViewController {
             return
         }
         state.notice = nil
+        tools.notice = nil
         state.seenMessage = state.session.message
         switch key {
         case let .character(text):
@@ -299,6 +300,7 @@ final class KeyboardViewController: UIInputViewController {
         guard !words.isEmpty else { return }
         if tools.composing != nil { return tools.type(word: words[0]) }
         state.notice = nil
+        tools.notice = nil
         state.seenMessage = state.session.message
         let before = joiningBefore
         let landing = before + TypingSession.joiningSpace(before: before)
@@ -626,6 +628,7 @@ private struct KeyboardView: View {
             .frame(height: 48)
             .padding(.leading, 4)
             .padding(.trailing, 8)
+            .animation(.snappy(duration: 0.24), value: tools.notice)
             GeometryReader { proxy in
                 let rowHeight = proxy.size.height / 4
                 VStack(spacing: 0) {
@@ -645,8 +648,6 @@ private struct KeyboardView: View {
                         .frame(height: rowHeight)
                 }
             }
-            .overlay(alignment: .top) { ToolsNotice(tools: tools) }
-            .animation(.snappy(duration: 0.24), value: tools.notice)
             .padding(.horizontal, 2)
         }
         .padding(.bottom, 2)
@@ -686,7 +687,9 @@ private struct KeyboardView: View {
                 .contentTransition(.opacity)
                 .animation(.easeOut(duration: 0.15), value: heard)
                 .accessibilityIdentifier("keyboard-heard")
-        } else if let suggestions = typing.suggestions, state.newMessage == nil {
+        } else if tools.notice != nil {
+            ToolsNotice(tools: tools)
+        } else if !tools.isOpen, let suggestions = typing.suggestions, state.newMessage == nil {
             SuggestionStrip(suggestions: suggestions, choose: typing.choose)
         } else if state.hasFullAccess, let notice = state.session.message ?? state.notice {
             Text(notice).font(.caption).foregroundStyle(Theme.textSecondary).lineLimit(2)
