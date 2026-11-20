@@ -60,6 +60,7 @@
 		CC0000000000000000000035 /* ThoughtObjectTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000035 /* ThoughtObjectTests.swift */; };
 		CC0000000000000000000036 /* BoardIndexTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000036 /* BoardIndexTests.swift */; };
 		CC0000000000000000000037 /* UploadQueueTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000037 /* UploadQueueTests.swift */; };
+		CC0000000000000000A9E109 /* PhoneAgentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000A9E109 /* PhoneAgentTests.swift */; };
 		CD0000000000000000000017 /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000017 /* Localizable.strings */; };
 		CD0000000000000000000019 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000019 /* Theme.swift */; };
 		CD0000000000000000000020 /* KeyboardDraft.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000020 /* KeyboardDraft.swift */; };
@@ -240,6 +241,7 @@
 		BB0000000000000000000035 /* ThoughtObjectTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThoughtObjectTests.swift; sourceTree = "<group>"; };
 		BB0000000000000000000036 /* BoardIndexTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BoardIndexTests.swift; sourceTree = "<group>"; };
 		BB0000000000000000000037 /* UploadQueueTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UploadQueueTests.swift; sourceTree = "<group>"; };
+		BB0000000000000000A9E109 /* PhoneAgentTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneAgentTests.swift; sourceTree = "<group>"; };
 		BB0000000000000000000029 /* SonaKeyboard.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = SonaKeyboard.entitlements; sourceTree = "<group>"; };
 		BB0000000000000000000038 /* KeyboardSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardSession.swift; sourceTree = "<group>"; };
 		BB0000000000000000000039 /* DictationProfile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DictationProfile.swift; sourceTree = "<group>"; };
@@ -463,6 +465,7 @@
 				BB0000000000000000000035 /* ThoughtObjectTests.swift */,
 				BB0000000000000000000036 /* BoardIndexTests.swift */,
 				BB0000000000000000000037 /* UploadQueueTests.swift */,
+				BB0000000000000000A9E109 /* PhoneAgentTests.swift */,
 				BB0000000000000000000010 /* CryptoVectorTests.swift */,
 				BB0000000000000000000011 /* DeviceRecordingTests.swift */,
 				BB000000000000000000001E /* CallOfferTests.swift */,
@@ -787,6 +790,7 @@
 				CC0000000000000000000035 /* ThoughtObjectTests.swift in Sources */,
 				CC0000000000000000000036 /* BoardIndexTests.swift in Sources */,
 				CC0000000000000000000037 /* UploadQueueTests.swift in Sources */,
+				CC0000000000000000A9E109 /* PhoneAgentTests.swift in Sources */,
 				CC0000000000000000000019 /* Theme.swift in Sources */,
 				CC000000000000000000001C /* CallOfferMachine.swift in Sources */,
 				CC000000000000000000001E /* CallOfferTests.swift in Sources */,
