@@ -107,25 +107,57 @@ struct SearchPhoneNotesIntent: ShowInAppSearchResultsIntent {
     }
 }
 
-/// Keeps Spotlight's copy of the library equal to the library.
+/// Keeps iPhone search's copy of the library equal to the searchable part of it. The
+/// index is readable only while the phone is unlocked.
 @MainActor
 final class PhoneNoteSpotlight {
+    private static let enabledKey = "sona.spotlight.enabled"
+
+    static var isEnabled: Bool {
+        UserDefaults.standard.object(forKey: enabledKey) as? Bool ?? true
+    }
+
+    private let index = CSSearchableIndex(name: "sona.notes", protectionClass: .complete)
+    private let library: PhoneLibrary
     private var indexed: [UUID: PhoneNote] = [:]
     private var watch: AnyCancellable?
 
     init(library: PhoneLibrary) {
+        self.library = library
         watch = library.$notes.sink { [weak self] notes in self?.reflect(notes) }
     }
 
+    func setEnabled(_ enabled: Bool) {
+        UserDefaults.standard.set(enabled, forKey: Self.enabledKey)
+        reflect(library.notes)
+    }
+
     private func reflect(_ notes: [PhoneNote]) {
-        let next = Dictionary(uniqueKeysWithValues: notes.map { ($0.id, $0) })
-        let changed = notes.filter { indexed[$0.id] != $0 }.map(PhoneNoteEntity.init)
-        let removed = indexed.keys.filter { next[$0] == nil }
-        indexed = next
-        Task {
-            let index = CSSearchableIndex.default()
-            if !removed.isEmpty { try? await index.deleteAppEntities(identifiedBy: removed, ofType: PhoneNoteEntity.self) }
-            if !changed.isEmpty { try? await index.indexAppEntities(changed) }
+        guard Self.isEnabled else {
+            indexed = [:]
+            Task { [index] in try? await index.deleteAllSearchableItems() }
+            return
         }
+        let searchable = notes.filter(\.isSearchable)
+        let next = Dictionary(uniqueKeysWithValues: searchable.map { ($0.id, $0) })
+        let changed = searchable.filter { indexed[$0.id] != $0 }.map(Self.item)
+        let removed = indexed.keys.filter { next[$0] == nil }.map(\.uuidString)
+        indexed = next
+        Task { [index] in
+            if !removed.isEmpty { try? await index.deleteSearchableItems(withIdentifiers: removed) }
+            if !changed.isEmpty { try? await index.indexSearchableItems(changed) }
+        }
+    }
+
+    /// An item of this index, not `indexAppEntities`, so it carries the index's
+    /// protection class; the associated entity still opens the note when tapped.
+    private static func item(_ note: PhoneNote) -> CSSearchableItem {
+        let entity = PhoneNoteEntity(note)
+        let attributes = CSSearchableItemAttributeSet(contentType: .text)
+        attributes.title = entity.title
+        attributes.textContent = entity.text
+        attributes.contentCreationDate = entity.date
+        attributes.associateAppEntity(entity, priority: 1)
+        return CSSearchableItem(uniqueIdentifier: note.id.uuidString, domainIdentifier: "notes", attributeSet: attributes)
     }
 }

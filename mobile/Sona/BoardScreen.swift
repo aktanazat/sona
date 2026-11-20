@@ -41,10 +41,10 @@ struct BoardScreen: View {
             .toolbar { ToolbarItem(placement: .primaryAction) { AskSonaButton(model: model) } }
             .refreshable { await model.refreshBoard() }
             .safeAreaInset(edge: .bottom) { status }
-            .sheet(item: $open) { tile in
+            .sheet(item: $open.yielding(to: model)) { tile in
                 ThoughtDetailScreen(model: model, tile: tile)
             }
-            .sheet(isPresented: $showsPairing) {
+            .sheet(isPresented: $showsPairing.yielding(to: model)) {
                 PairingScreen(model: model)
             }
             .task { await model.refreshBoard() }

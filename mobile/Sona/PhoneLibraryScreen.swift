@@ -162,7 +162,7 @@ struct PhoneLibraryScreen: View {
             .toolbar {
                 Button { newNote = true } label: { Label("library.new", systemImage: "square.and.pencil") }
             }
-            .sheet(isPresented: $newNote) {
+            .sheet(isPresented: $newNote.yielding(to: model)) {
                 NavigationStack {
                     TextEditor(text: $draft)
                         .font(.body)

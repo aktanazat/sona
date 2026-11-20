@@ -43,12 +43,23 @@ struct AgentConversation: Codable, Identifiable, Equatable {
     var title: String { turns.first { $0.role == .user }?.text ?? "" }
 }
 
-/// What the chat needs from the vault: send a question, see it leave the outbox, read
-/// the Mac's replies, and clear an exchange once its answer is kept here.
+/// Where a question stands in this iPhone's outbox.
+enum AskOutbox: Equatable {
+    /// Uploaded: it left the outbox.
+    case left
+    case waiting
+    /// The Worker refused it for good, so it will not leave without a new attempt.
+    case refused
+}
+
+/// What the chat needs from the vault: send a question, follow it through the outbox,
+/// take back one that is not going to leave, read the Mac's replies, and clear an
+/// exchange once its answer is kept here.
 @MainActor
 protocol AgentTransport: AnyObject {
     func send(_ ask: QueuedAsk, askedAt: Date) async throws -> String
-    func hasLeftOutbox(_ askObjectId: String) async -> Bool
+    func outbox(_ askObjectId: String) async -> AskOutbox
+    func withdraw(_ askObjectId: String) async
     func replies() async throws -> [String: AgentReplyManifest]
     func forget(_ askObjectId: String) async
 }
@@ -62,6 +73,9 @@ final class PhoneAgentChat: ObservableObject {
     static let pickUpWindow: TimeInterval = 45
     /// How long the Mac's agent turn may run, with room for the reply to arrive.
     static let answerWindow: TimeInterval = 300
+    /// How long a question may wait in this iPhone's outbox before it counts as not
+    /// sent: long enough for a slow connection, short enough to offer Try again.
+    static let sendWindow: TimeInterval = 120
 
     @Published private(set) var conversations: [AgentConversation] = []
     @Published var refusal: AgentAskObject.Refusal?
@@ -115,6 +129,7 @@ final class PhoneAgentChat: ObservableObject {
             update(turn.id) { $0.askObjectId = objectId }
         } catch {
             update(turn.id) { $0.status = .failed("not_sent") }
+            settle(turn.id, reply: find(turn.id))
         }
         watch()
         return (conversation, turn.id)
@@ -125,9 +140,14 @@ final class PhoneAgentChat: ObservableObject {
         await ask(turn.text, in: conversationID)
     }
 
-    func delete(_ conversationID: UUID) {
+    /// Removes the conversation, and takes back any of its questions still waiting in
+    /// the outbox so the Mac never answers them.
+    func delete(_ conversationID: UUID) async {
+        let queued = conversations.first { $0.id == conversationID }?.turns
+            .filter { $0.status == .queued }.compactMap(\.askObjectId) ?? []
         conversations.removeAll { $0.id == conversationID }
         save()
+        for objectId in queued { await transport.withdraw(objectId) }
     }
 
     /// The settled question `turnID`, waiting at most `timeout`.
@@ -159,8 +179,17 @@ final class PhoneAgentChat: ObservableObject {
     /// One look at the outbox and the vault.
     func check() async {
         for turn in waiting where turn.status == .queued {
-            guard let objectId = turn.askObjectId, await transport.hasLeftOutbox(objectId) else { continue }
-            update(turn.id) { $0.status = .sent(at: now()) }
+            guard let objectId = turn.askObjectId else { continue }
+            switch await transport.outbox(objectId) {
+            case .left:
+                update(turn.id) { $0.status = .sent(at: now()) }
+            case .refused:
+                await notSent(turn, objectId)
+            case .waiting where now().timeIntervalSince(turn.date) > Self.sendWindow:
+                await notSent(turn, objectId)
+            case .waiting:
+                break
+            }
         }
         if waiting.contains(where: { $0.status != .queued }), let replies = try? await transport.replies() {
             for turn in waiting {
@@ -177,6 +206,13 @@ final class PhoneAgentChat: ObservableObject {
             default: break
             }
         }
+    }
+
+    /// Takes the question back from the outbox and offers Try again.
+    private func notSent(_ turn: AgentTurn, _ objectId: String) async {
+        await transport.withdraw(objectId)
+        update(turn.id) { $0.status = .failed("not_sent") }
+        settle(turn.id, reply: find(turn.id))
     }
 
     private func apply(_ reply: AgentReplyManifest, to turn: AgentTurn) async {

@@ -68,7 +68,7 @@ struct DictationScreen: View {
                 }
             }
             .safeAreaBar(edge: .bottom) { controls }
-            .sheet(isPresented: $showsSettings) {
+            .sheet(isPresented: $showsSettings.yielding(to: model)) {
                 PhoneDictationSettings(model: model, dictation: dictation)
             }
         }
@@ -310,6 +310,12 @@ private struct PhoneDictationSettings: View {
                 .listRowBackground(Theme.surface)
                 microphoneSection
                 statsSection
+                Section {
+                    Toggle("search.notes", isOn: Binding(
+                        get: { model.notesInSearch }, set: { model.notesInSearch = $0 }
+                    ))
+                }
+                .listRowBackground(Theme.surface)
                 profile
                 Section {
                     DisclosureGroup("dictation.setupTitle") {

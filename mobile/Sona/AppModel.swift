@@ -84,6 +84,8 @@ final class AppModel: NSObject, ObservableObject {
     private var spotlight: PhoneNoteSpotlight?
     private var keyboardSignal: KeyboardSignal?
     private var keyboardTicker: Task<Void, Never>?
+    private var draining = false
+    private var drainAgain = false
     private var keyboardRequestID: UUID?
     private var keyboardRequestDocumentID: UUID?
     private var lastKeyboardRequestID: UUID?
@@ -179,6 +181,14 @@ final class AppModel: NSObject, ObservableObject {
         get { callOffers.isEnabled }
         set {
             callOffers.isEnabled = newValue
+            objectWillChange.send()
+        }
+    }
+
+    var notesInSearch: Bool {
+        get { PhoneNoteSpotlight.isEnabled }
+        set {
+            spotlight?.setEnabled(newValue)
             objectWillChange.send()
         }
     }
@@ -533,17 +543,27 @@ final class AppModel: NSObject, ObservableObject {
     }
 
     /// Run the outbox and report where it ended up, so the one status line can say
-    /// "uploading", "waiting for a connection" or "saved" without guessing.
+    /// "uploading", "waiting for a connection" or "saved" without guessing. One run at a
+    /// time: a call during a run makes it go round once more.
     private func drain() async {
-        queued = await queue.items()
-        guard !queued.isEmpty else {
-            outbox = .empty
+        guard !draining else {
+            drainAgain = true
             return
         }
-        outbox = .uploading
-        await queue.drain()
-        queued = await queue.items()
-        outbox = queued.isEmpty ? .saved : .waiting
+        draining = true
+        defer { draining = false }
+        repeat {
+            drainAgain = false
+            queued = await queue.items()
+            guard !queued.isEmpty else {
+                outbox = .empty
+                continue
+            }
+            outbox = .uploading
+            await queue.drain()
+            queued = await queue.items()
+            outbox = queued.isEmpty ? .saved : .waiting
+        } while drainAgain
     }
 
     // MARK: - Queue
@@ -874,11 +894,14 @@ extension AppModel: AgentTransport {
         return item.objectId
     }
 
-    func hasLeftOutbox(_ askObjectId: String) async -> Bool {
-        let waiting = await queue.items()
-        guard waiting.contains(where: { $0.objectId == askObjectId }) else { return true }
-        if outbox != .uploading { Task { await drain() } }
-        return false
+    func outbox(_ askObjectId: String) async -> AskOutbox {
+        guard let item = await queue.items().first(where: { $0.objectId == askObjectId }) else { return .left }
+        return item.parked ? .refused : .waiting
+    }
+
+    func withdraw(_ askObjectId: String) async {
+        await queue.discard(objectId: askObjectId)
+        await refresh()
     }
 
     func replies() async throws -> [String: AgentReplyManifest] {

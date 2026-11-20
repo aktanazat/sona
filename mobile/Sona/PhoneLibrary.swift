@@ -13,6 +13,10 @@ struct PhoneNote: Codable, Identifiable, Equatable, Sendable {
     var text: String
     var audioFile: String?
     var duration: TimeInterval?
+
+    /// Whether iPhone search may show it: a meeting holds other people's words, so it
+    /// stays inside Sona.
+    var isSearchable: Bool { kind != .meeting }
 }
 
 private final class PhoneLibraryDisk: @unchecked Sendable {

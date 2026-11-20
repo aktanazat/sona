@@ -56,7 +56,7 @@ final class PhoneAgentTests: XCTestCase {
         let chat = PhoneAgentChat(transport: transport, file: scratchFile(), now: { clock })
         let sent = await chat.ask("What did Nolan and I leave open?")
         let asked = try XCTUnwrap(sent)
-        transport.leftOutbox = true
+        transport.outboxState = .left
         await chat.check()
         XCTAssertEqual(turn(chat, asked.turn)?.status, .sent(at: clock))
 
@@ -89,7 +89,7 @@ final class PhoneAgentTests: XCTestCase {
         let chat = PhoneAgentChat(transport: transport, file: scratchFile(), now: { clock })
         let sent = await chat.ask("Summarize my last meeting")
         let asked = try XCTUnwrap(sent)
-        transport.leftOutbox = true
+        transport.outboxState = .left
         await chat.check()
         transport.answers[transport.sent[0]] = AgentReplyManifest(
             answer: nil, ask_object_id: transport.sent[0], device_id: "mac", failure: nil,
@@ -108,6 +108,55 @@ final class PhoneAgentTests: XCTestCase {
         XCTAssertEqual(turn(chat, asked.turn)?.status, .unanswered)
     }
 
+    /// A question stuck in the outbox (offline, or refused by the Worker) says so and
+    /// offers Try again instead of "Sending" forever, is taken back so the Mac never
+    /// answers it later, and is reported once, as the Action Button needs.
+    @MainActor
+    func testQuestionThatNeverLeavesFailsAndIsTakenBack() async throws {
+        let transport = FakeTransport()
+        var clock = Date(timeIntervalSince1970: 1_000)
+        let chat = PhoneAgentChat(transport: transport, file: scratchFile(), now: { clock })
+        var settled: [AgentTurn] = []
+        chat.onSettled = { _, turn in settled.append(turn) }
+        let sent = await chat.ask("Summarize my last meeting")
+        let asked = try XCTUnwrap(sent)
+        await chat.check()
+        XCTAssertEqual(turn(chat, asked.turn)?.status, .queued)
+
+        clock += PhoneAgentChat.sendWindow + 1
+        await chat.check()
+        XCTAssertEqual(turn(chat, asked.turn)?.status, .failed("not_sent"))
+        XCTAssertEqual(transport.withdrawn, transport.sent)
+        XCTAssertEqual(settled.map(\.id), [asked.turn])
+
+        transport.outboxState = .refused
+        let refused = await chat.ask("What is on tomorrow?", in: asked.conversation)
+        let second = try XCTUnwrap(refused)
+        await chat.check()
+        XCTAssertEqual(turn(chat, second.turn)?.status, .failed("not_sent"))
+        XCTAssertEqual(transport.withdrawn, transport.sent)
+    }
+
+    /// Deleting a conversation takes back its questions still in the outbox.
+    @MainActor
+    func testDeletingAConversationTakesBackItsQueuedQuestion() async throws {
+        let transport = FakeTransport()
+        let chat = PhoneAgentChat(transport: transport, file: scratchFile())
+        let sent = await chat.ask("Summarize my last meeting")
+        let asked = try XCTUnwrap(sent)
+        await chat.delete(asked.conversation)
+        XCTAssertTrue(chat.conversations.isEmpty)
+        XCTAssertEqual(transport.withdrawn, transport.sent)
+    }
+
+    /// A meeting holds other people's words, so iPhone search never shows it.
+    func testMeetingsStayOutOfIPhoneSearch() {
+        let note = { (kind: PhoneNote.Kind) in
+            PhoneNote(id: UUID(), kind: kind, date: Date(), title: "Pricing", text: "Pricing deck")
+        }
+        XCTAssertEqual(PhoneNote.Kind.allCases.filter { note($0).isSearchable }, [.note, .dictation])
+    }
+
     @MainActor
     private func turn(_ chat: PhoneAgentChat, _ id: UUID) -> AgentTurn? {
         chat.conversations.flatMap(\.turns).first { $0.id == id }
@@ -121,7 +170,8 @@ final class PhoneAgentTests: XCTestCase {
 @MainActor
 private final class FakeTransport: AgentTransport {
     var sent: [String] = []
-    var leftOutbox = false
+    var outboxState: AskOutbox = .waiting
+    var withdrawn: [String] = []
     var answers: [String: AgentReplyManifest] = [:]
     var forgotten: [String] = []
 
@@ -131,7 +181,9 @@ private final class FakeTransport: AgentTransport {
         return id
     }
 
-    func hasLeftOutbox(_ askObjectId: String) async -> Bool { leftOutbox }
+    func outbox(_ askObjectId: String) async -> AskOutbox { outboxState }
+
+    func withdraw(_ askObjectId: String) async { withdrawn.append(askObjectId) }
 
     func replies() async throws -> [String: AgentReplyManifest] { answers }
 

@@ -68,6 +68,9 @@ enum UploadQueueError: Error, Equatable {
     case missingAudio
     case incompleteAttachment
     case commitIncomplete(state: String)
+    /// The Worker no longer holds this upload (purged after its lifetime), so the
+    /// same ids can never complete.
+    case uploadGone
 }
 
 /// The on-disk outbox. Capture writes into it; uploading drains it; nothing else owns
@@ -79,6 +82,10 @@ actor UploadQueue {
     private let identity: DeviceIdentity
     private var credentials: VaultCredentials?
     private var client: CompanionClient?
+    /// A pass is running; another caller only asks it to go round once more, so two
+    /// passes never stage and send the same item side by side.
+    private var draining = false
+    private var drainAgain = false
 
     init(root: URL, identity: DeviceIdentity, credentials: VaultCredentials?) {
         self.root = root
@@ -159,9 +166,23 @@ actor UploadQueue {
     /// Try every item that is due, one at a time: questions for the agent first, because
     /// someone is waiting for their answers, then everything else oldest first.
     ///
-    /// A retryable failure ends the pass: the network or the Worker is unhappy and the
-    /// remaining items would fail the same way.
+    /// One pass at a time. A retryable failure ends the pass: the network or the Worker
+    /// is unhappy and the remaining items would fail the same way. An upload the Worker
+    /// purged starts over under new ids and the pass goes on.
     func drain() async {
+        guard !draining else {
+            drainAgain = true
+            return
+        }
+        draining = true
+        defer { draining = false }
+        repeat {
+            drainAgain = false
+            await drainOnce()
+        } while drainAgain
+    }
+
+    private func drainOnce() async {
         guard let credentials else { return }
         let client: CompanionClient
         do {
@@ -177,6 +198,8 @@ actor UploadQueue {
         {
             do {
                 try await upload(item, credentials: credentials, client: client)
+            } catch UploadQueueError.uploadGone {
+                restart(item)
             } catch {
                 let retryable = (error as? CompanionError)?.isRetryable ?? true
                 record(failure: error, on: item, retryable: retryable)
@@ -219,25 +242,30 @@ actor UploadQueue {
             plan: plan
         )
         let accepted = Set(created.acceptedIndexes)
-        for index in item.chunkSizes.indices where !accepted.contains(index) {
-            let ciphertext = try Data(contentsOf: chunkURL(item, index: index))
-            _ = try await client.putChunk(
+        let committed: UploadCommittedResponse
+        do {
+            for index in item.chunkSizes.indices where !accepted.contains(index) {
+                let ciphertext = try Data(contentsOf: chunkURL(item, index: index))
+                _ = try await client.putChunk(
+                    identity: identity,
+                    vaultId: credentials.vaultId,
+                    idempotencyKey: stableIdempotencyKey([
+                        scope, item.objectId, item.revisionId, "chunk-\(index)",
+                    ]),
+                    uploadId: item.uploadId,
+                    index: index,
+                    ciphertext: ciphertext
+                )
+            }
+            committed = try await client.commitUpload(
                 identity: identity,
                 vaultId: credentials.vaultId,
-                idempotencyKey: stableIdempotencyKey([
-                    scope, item.objectId, item.revisionId, "chunk-\(index)",
-                ]),
-                uploadId: item.uploadId,
-                index: index,
-                ciphertext: ciphertext
+                idempotencyKey: stableIdempotencyKey([scope, item.objectId, item.revisionId, "commit"]),
+                uploadId: item.uploadId
             )
+        } catch CompanionError.api(code: "upload_incomplete", _), CompanionError.api(code: "not_found", _) {
+            throw UploadQueueError.uploadGone
         }
-        let committed = try await client.commitUpload(
-            identity: identity,
-            vaultId: credentials.vaultId,
-            idempotencyKey: stableIdempotencyKey([scope, item.objectId, item.revisionId, "commit"]),
-            uploadId: item.uploadId
-        )
         guard committed.state == "committed" else {
             throw UploadQueueError.commitIncomplete(state: committed.state)
         }
@@ -535,6 +563,26 @@ actor UploadQueue {
         let delaySeconds = min(60 * (1 << min(stored.attempts - 1, 4)), 900)
         stored.nextAttemptUtcMs =
             Int64(Date().timeIntervalSince1970 * 1000) + Int64(delaySeconds) * 1000
+        try? save(stored)
+    }
+
+    /// Start a purged upload over: drop the staged bytes and mint new revision and
+    /// upload ids, so the next pass seals and sends it under keys the Worker has not
+    /// seen. Due at once; the pass in flight does not try it again.
+    private func restart(_ item: QueuedObject) {
+        guard var stored = loadItem(root.appending(path: directoryName(item.objectId))) else {
+            return
+        }
+        try? removeStagedFiles(stored)
+        stored.revisionId = randomOpaqueId()
+        stored.uploadId = randomOpaqueId()
+        stored.stagedForVaultId = nil
+        stored.chunkSizes = []
+        stored.chunkDigests = []
+        stored.attempts += 1
+        stored.lastError = String(describing: UploadQueueError.uploadGone)
+        stored.parked = false
+        stored.nextAttemptUtcMs = 0
         try? save(stored)
     }
 

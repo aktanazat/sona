@@ -207,15 +207,33 @@ private struct AgentTurnView: View {
         }
     }
 
+    /// Inline styling only. A link in an answer can come from any transcript the Mac
+    /// looked at, so it shows as text and opens nothing.
     private static func markdown(_ text: String) -> AttributedString {
-        (try? AttributedString(
+        var styled = (try? AttributedString(
             markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
         )) ?? AttributedString(text)
+        styled.link = nil
+        return styled
     }
 }
 
 private extension View {
     func statusStyle() -> some View {
         font(.footnote).foregroundStyle(Theme.textSecondary)
+    }
+}
+
+extension Binding where Value == Bool {
+    /// False while the chat is up, so a screen's own sheet steps aside when a
+    /// notification opens the chat over it.
+    func yielding(to model: AppModel) -> Binding<Bool> {
+        Binding(get: { wrappedValue && !model.showsChat }, set: { wrappedValue = $0 })
+    }
+}
+
+extension Binding {
+    func yielding<Item>(to model: AppModel) -> Binding<Item?> where Value == Item? {
+        Binding<Item?>(get: { model.showsChat ? nil : wrappedValue }, set: { wrappedValue = $0 })
     }
 }
