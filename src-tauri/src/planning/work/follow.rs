@@ -1008,14 +1008,7 @@ fn upcoming_briefs(
             continue;
         }
         let brief = in_both(store, history, |history, meetings| {
-            brief(
-                history,
-                meetings,
-                Some(&event),
-                &people,
-                &HashSet::new(),
-                now_ms,
-            )
+            brief(history, meetings, Some(&event), &people, &HashSet::new(), now_ms)
         })?;
         if let Some(notice) = brief_notice(&event, &brief, now_ms) {
             notices.push((key, notice));
@@ -1043,11 +1036,53 @@ pub(super) fn probe_inputs(
     }))
 }
 
+/// Offers this minute's banners and returns the keys to remember as shown:
+/// those the notification centre took, and a due day's whose banner is
+/// off. While quiet hours hold none is offered, so each waits for them to
+/// end.
+fn offer(
+    prompts: &dyn PromptPresenter,
+    banners: &Banners,
+    due: Vec<Reminder>,
+    follow_ups: Option<(Notice, Vec<String>)>,
+    briefs: Vec<(String, Notice)>,
+) -> Vec<String> {
+    if banners.quiet {
+        return Vec::new();
+    }
+    let mut shown = Vec::new();
+    let mut unshown = Vec::new();
+    let mut show = |notice: &Notice, keys: Vec<String>| {
+        if prompts.present_follow_up(&notice.id, &notice.title, &notice.body) {
+            shown.extend(keys);
+        }
+    };
+    if let Some(notice) = due_notice(&due) {
+        let keys = due.into_iter().map(|due| due.key).collect();
+        if banners.due_days {
+            show(&notice, keys);
+        } else {
+            unshown = keys;
+        }
+    }
+    if let Some((notice, keys)) = &banners.inbox {
+        show(notice, keys.clone());
+    }
+    if let Some((notice, keys)) = follow_ups {
+        show(&notice, keys);
+    }
+    for (key, notice) in briefs {
+        show(&notice, vec![key]);
+    }
+    shown.extend(unshown);
+    shown
+}
+
 /// One minute's look: shows what is due to be said, then remembers what
 /// was shown. Nothing shown is remembered, so a reminder the notification
-/// centre refused is tried again on the next tick. During quiet hours the
-/// inbox's banners wait: a due day or reminder shows once they end, while
-/// what else reached the inbox stays there without one. A kind whose
+/// centre refused is tried again on the next tick. During quiet hours
+/// banners wait: a due day, reminder or follow-up shows once they end,
+/// while what else reached the inbox stays there without one. A kind whose
 /// banner is off counts as shown.
 fn tick(app: &AppHandle, prompts: &dyn PromptPresenter, now_ms: i64) -> Result<()> {
     let history = app.state::<Arc<HistoryManager>>();
@@ -1067,26 +1102,8 @@ fn tick(app: &AppHandle, prompts: &dyn PromptPresenter, now_ms: i64) -> Result<(
     if !posted.is_empty() || others > 0 {
         super::tasks_changed(app, posted);
     }
-    let mut shown = Vec::new();
-    let mut unshown = Vec::new();
-    let mut show = |notice: &Notice, keys: Vec<String>| {
-        if prompts.present_follow_up(&notice.id, &notice.title, &notice.body) {
-            shown.extend(keys);
-        }
-    };
-    if !banners.quiet {
-        if let Some(notice) = due_notice(&due) {
-            let keys = due.into_iter().map(|due| due.key).collect();
-            if banners.due_days {
-                show(&notice, keys);
-            } else {
-                unshown = keys;
-            }
-        }
-        if let Some((notice, keys)) = &banners.inbox {
-            show(notice, keys.clone());
-        }
-    }
+    let mut follow_ups = None;
+    let mut briefs = Vec::new();
     if let Some(store) = &store {
         if !waits.is_empty() {
             let people = store
@@ -1094,15 +1111,12 @@ fn tick(app: &AppHandle, prompts: &dyn PromptPresenter, now_ms: i64) -> Result<(
                     People::read(conn).map_err(|_| StoreError::Unavailable)
                 })
                 .map_err(unreadable)?;
-            if let Some(notice) = follow_notice(&waits, &people) {
-                show(&notice, waits.into_iter().map(|wait| wait.key).collect());
-            }
+            follow_ups = follow_notice(&waits, &people)
+                .map(|notice| (notice, waits.into_iter().map(|wait| wait.key).collect()));
         }
-        for (key, notice) in upcoming_briefs(app, store, &history, &sent, now_ms)? {
-            show(&notice, vec![key]);
-        }
+        briefs = upcoming_briefs(app, store, &history, &sent, now_ms)?;
     }
-    shown.extend(unshown);
+    let shown = offer(prompts, &banners, due, follow_ups, briefs);
     if !shown.is_empty() {
         history.with_connection(|conn| record(conn, &shown, now_ms))?;
     }
@@ -1182,21 +1196,15 @@ pub async fn work_brief(
     if runtime.calendar_access() != CalendarAccess::Authorized {
         return Err("Allow Sona to read Calendar in System Settings.".into());
     }
-    let event =
-        tauri::async_runtime::spawn_blocking(move || runtime.calendar_event_by_key(&event_key))
-            .await
-            .map_err(|_| "The calendar could not be read.")?
-            .ok_or("This event is no longer on your calendar.")?;
+    let event = tauri::async_runtime::spawn_blocking(move || {
+        runtime.calendar_event_by_key(&event_key)
+    })
+    .await
+    .map_err(|_| "The calendar could not be read.")?
+    .ok_or("This event is no longer on your calendar.")?;
     let people = attendees(&store, &event).map_err(super::super::failure)?;
     in_both(&store, &history_state, |history, meetings| {
-        brief(
-            history,
-            meetings,
-            Some(&event),
-            &people,
-            &HashSet::new(),
-            now_ms(),
-        )
+        brief(history, meetings, Some(&event), &people, &HashSet::new(), now_ms())
     })
     .map_err(super::super::failure)
 }
@@ -1684,15 +1692,8 @@ mod tests {
             // PANIC: the fixture's own databases are readable.
             desk.meetings
                 .with_planning_snapshot(|meetings| {
-                    let brief = brief(
-                        &desk.history,
-                        meetings,
-                        None,
-                        &person_ids,
-                        &hidden,
-                        at(0, 10),
-                    )
-                    .expect("the brief");
+                    let brief = brief(&desk.history, meetings, None, &person_ids, &hidden, at(0, 10))
+                        .expect("the brief");
                     Ok(brief.last_time.map(|meeting| meeting.title))
                 })
                 .expect("the meeting database")
@@ -1771,11 +1772,7 @@ mod tests {
         assert_eq!(
             notices
                 .iter()
-                .map(|(item_id, notice)| (
-                    item_id.as_str(),
-                    notice.title.as_str(),
-                    opened(&notice.id)
-                ))
+                .map(|(item_id, notice)| (item_id.as_str(), notice.title.as_str(), opened(&notice.id)))
                 .collect::<Vec<_>>(),
             [(
                 due.id.as_str(),
@@ -1840,5 +1837,81 @@ mod tests {
                 (inbox::NotificationKind::Due, Some(launch.id)),
             ]
         );
+    }
+
+    /// Takes every banner offered and writes down its id.
+    #[derive(Default)]
+    struct Recorded {
+        offered: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl PromptPresenter for Recorded {
+        fn access(&self) -> crate::meeting::detection::notify::NotificationAccess {
+            crate::meeting::detection::notify::NotificationAccess::Authorized
+        }
+
+        fn request_access(&self) -> crate::meeting::detection::notify::NotificationAccessFuture {
+            Box::pin(async { crate::meeting::detection::notify::NotificationAccess::Authorized })
+        }
+
+        fn present(
+            &self,
+            _prompt_id: &str,
+            _prompt: &crate::meeting::detection::machine::PromptKind,
+        ) -> bool {
+            false
+        }
+
+        fn withdraw(&self, _prompt_id: &str) {}
+
+        fn present_digest(&self, _title: &str, _body: &str) -> bool {
+            false
+        }
+
+        fn present_ritual(&self, _ritual_id: &str, _title: &str) -> bool {
+            false
+        }
+
+        fn present_follow_up(&self, id: &str, _title: &str, _body: &str) -> bool {
+            // PANIC: only this test's thread holds the lock.
+            self.offered
+                .lock()
+                .expect("the offered ids")
+                .push(id.to_owned());
+            true
+        }
+    }
+
+    fn notice(id: &str) -> Notice {
+        Notice {
+            id: id.to_owned(),
+            title: id.to_owned(),
+            body: String::new(),
+        }
+    }
+
+    #[test]
+    fn quiet_hours_hold_follow_ups_and_briefs_until_they_end() {
+        let prompts = Recorded::default();
+        let offer_now = |quiet: bool| {
+            let banners = Banners {
+                quiet,
+                due_days: true,
+                reminders: true,
+                inbox: Some((notice("inbox"), vec!["inbox:n1".to_owned()])),
+            };
+            offer(
+                &prompts,
+                &banners,
+                Vec::new(),
+                Some((notice("follow"), vec!["follow:w1".to_owned()])),
+                vec![("brief:e1".to_owned(), notice("brief"))],
+            )
+        };
+
+        assert!(offer_now(true).is_empty());
+        assert!(prompts.offered.lock().expect("the offered ids").is_empty());
+
+        assert_eq!(offer_now(false), ["inbox:n1", "follow:w1", "brief:e1"]);
     }
 }

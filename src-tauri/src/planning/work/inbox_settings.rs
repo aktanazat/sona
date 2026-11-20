@@ -206,7 +206,9 @@ pub(crate) fn save(conn: &Connection, change: &InboxSettingsChange) -> Result<In
 
 /// Unread notices still new enough for a banner, whose kind shows one and
 /// whose key `inbox:<id>` is not in `shown`. A task's reminder or due day
-/// is left out: it has a banner of its own.
+/// is left out: it has a banner of its own. A reminder on a project,
+/// initiative or note is never too old: like a task's, it waits until a
+/// banner shows it, past quiet hours or a sleeping Mac.
 pub(crate) fn banners_due(
     conn: &Connection,
     shown: &HashSet<String>,
@@ -218,17 +220,14 @@ pub(crate) fn banners_due(
     };
     let mut due = Vec::new();
     for notice in inbox::notifications(conn, unread, now_ms)? {
-        let own_banner = notice.item_id.is_some()
-            && matches!(
-                notice.kind,
-                NotificationKind::Reminder | NotificationKind::Due
-            );
+        let reminder = matches!(
+            notice.kind,
+            NotificationKind::Reminder | NotificationKind::Due
+        );
+        let own_banner = reminder && notice.item_id.is_some();
+        let too_old = !reminder && notice.created_at_ms + BANNER_WINDOW_MS < now_ms;
         let key = format!("inbox:{}", notice.id);
-        if notice.created_at_ms + BANNER_WINDOW_MS < now_ms
-            || own_banner
-            || shown.contains(&key)
-            || !banners(conn, notice.kind)?
-        {
+        if too_old || own_banner || shown.contains(&key) || !banners(conn, notice.kind)? {
             continue;
         }
         due.push((key, notice));
@@ -268,11 +267,12 @@ pub(crate) fn save_as(
 #[cfg(test)]
 mod tests {
     use super::super::super::schema;
-    use super::super::inbox::{self, NotificationKind, Remind, Shown};
+    use super::super::inbox::{self, NotificationKind, Remind, Shown, SubjectKind};
     use super::super::items::{self, NewItem};
     use super::super::types::{WorkActor, WorkOwner, WorkStatus};
-    use super::{save, InboxSettingsChange, QuietHours};
+    use super::{banners_due, save, InboxSettingsChange, QuietHours};
     use rusqlite::Connection;
+    use std::collections::HashSet;
 
     const AT: i64 = 1_700_000_000_000;
 
@@ -363,5 +363,23 @@ mod tests {
         assert!(!lunch.holds(13 * 60 + 30));
         assert_eq!(QuietHours::parse("09:00-09:00"), None);
         assert_eq!(QuietHours::parse("25:00-08:00"), None);
+    }
+
+    #[test]
+    fn a_project_reminder_held_past_the_banner_window_still_shows_one() {
+        let (conn, task) = planner();
+        let project = crate::planning::store::insert_project(&conn, "Harbor launch", None, AT)
+            .expect("a project")
+            .id;
+        inbox::asked(&conn, &task, "q1", Some("codex"), "Ship it?", AT).expect("a question");
+        inbox::remind_subject(&conn, SubjectKind::Project, &project, AT, 1, AT).expect("posted");
+
+        let after_quiet_hours = AT + 30 * 60 * 1000;
+        let due: Vec<_> = banners_due(&conn, &HashSet::new(), after_quiet_hours)
+            .expect("banners")
+            .into_iter()
+            .map(|(_, notice)| notice.kind)
+            .collect();
+        assert_eq!(due, [NotificationKind::Reminder]);
     }
 }

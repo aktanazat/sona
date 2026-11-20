@@ -7,7 +7,7 @@
 use super::comments::Author;
 use super::inbox::{self, Notice, NotificationKind, SubjectKind};
 use super::types::{WorkActor, WorkStatus};
-use super::{items, now_ms, run_history, store, Change, Done, Effects};
+use super::{items, run_history, store, Change, Done, Effects};
 use crate::managers::history::HistoryManager;
 use crate::planning::store::Refusal;
 use crate::planning::types::{ProjectHealth, ProjectStatus};
@@ -33,7 +33,7 @@ pub(crate) struct Follow {
 /// The tasks a followed view held at its last look, with their statuses,
 /// and the view's revision then: a view whose filters changed starts over
 /// without telling of every task it gained or lost.
-#[derive(Debug, Default, Deserialize, Serialize)]
+#[derive(Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 struct Members {
     revision: i64,
     tasks: BTreeMap<String, WorkStatus>,
@@ -79,11 +79,25 @@ fn members_now(conn: &Connection, view_id: &str, now_ms: i64) -> Result<Members>
     })
 }
 
-fn store_members(conn: &Connection, view_id: &str, members: &Members) -> Result<()> {
-    conn.execute(
-        "UPDATE planning_follows SET members = ?2 WHERE kind = 'view' AND target_id = ?1",
-        params![view_id, serde_json::to_string(members)?],
-    )?;
+/// Remembers when the view was looked at and, given them, the tasks it
+/// held then.
+fn looked_at(
+    conn: &Connection,
+    view_id: &str,
+    members: Option<&Members>,
+    now_ms: i64,
+) -> Result<()> {
+    match members {
+        Some(members) => conn.execute(
+            "UPDATE planning_follows SET members = ?2, checked_at_ms = ?3
+             WHERE kind = 'view' AND target_id = ?1",
+            params![view_id, serde_json::to_string(members)?, now_ms],
+        )?,
+        None => conn.execute(
+            "UPDATE planning_follows SET checked_at_ms = ?2 WHERE kind = 'view' AND target_id = ?1",
+            params![view_id, now_ms],
+        )?,
+    };
     Ok(())
 }
 
@@ -119,82 +133,114 @@ pub(crate) fn follow(
         params![kind.as_str(), id, now_ms],
     )? > 0;
     if added && kind == SubjectKind::View {
-        store_members(conn, &id, &members_now(conn, &id, now_ms)?)?;
+        looked_at(conn, &id, Some(&members_now(conn, &id, now_ms)?), now_ms)?;
     }
     Ok(added)
 }
 
-/// Who changed the task last.
-fn last_actor(conn: &Connection, task_id: &str) -> Result<Option<(WorkActor, Option<String>)>> {
+/// Who changed the task last, and when.
+fn last_change(
+    conn: &Connection,
+    task_id: &str,
+) -> Result<Option<(WorkActor, Option<String>, i64)>> {
     Ok(conn
         .prepare_cached(
-            "SELECT t.actor, a.agent FROM planning_task_activity t
+            "SELECT t.actor, a.agent, t.at_ms FROM planning_task_activity t
                 LEFT JOIN planning_activity_agents a ON a.activity_id = t.id
              WHERE t.task_id = ?1 ORDER BY t.at_ms DESC, t.rowid DESC LIMIT 1",
         )?
-        .query_row([task_id], |row| Ok((row.get(0)?, row.get(1)?)))
+        .query_row([task_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
         .optional()?)
 }
 
 /// Looks at each followed view: a task that joined it, or one in it that
-/// was done or canceled since the last look, posts a notice, unless the
-/// user made that change. Returns how many were posted.
+/// was done or canceled since the last look, posts a notice when someone
+/// other than the user changed it since then. A task that joined or left
+/// as time passed, a due day coming or a snooze ending, posts none. A
+/// view that cannot be read is skipped. Returns how many were posted.
 pub(crate) fn watch_views(conn: &Connection, now_ms: i64) -> Result<usize> {
-    let followed: Vec<(String, Option<String>)> = conn
-        .prepare("SELECT target_id, members FROM planning_follows WHERE kind = 'view'")?
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+    let followed: Vec<(String, Option<String>, Option<i64>)> = conn
+        .prepare(
+            "SELECT target_id, members, checked_at_ms FROM planning_follows WHERE kind = 'view'",
+        )?
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
         .collect::<rusqlite::Result<_>>()?;
     let mut posted = 0;
-    for (view_id, before) in followed {
-        let now = match members_now(conn, &view_id, now_ms) {
-            Ok(now) => now,
-            Err(error) if matches!(error.downcast_ref::<Refusal>(), Some(Refusal::NotFound)) => {
-                continue
+    for (view_id, before, checked_at_ms) in followed {
+        match watch_view(conn, &view_id, before.as_deref(), checked_at_ms, now_ms) {
+            Ok(count) => posted += count,
+            Err(error) => log::warn!("A followed view could not be looked at: {error:#}"),
+        }
+    }
+    Ok(posted)
+}
+
+fn watch_view(
+    conn: &Connection,
+    view_id: &str,
+    before: Option<&str>,
+    checked_at_ms: Option<i64>,
+    now_ms: i64,
+) -> Result<usize> {
+    let now = match members_now(conn, view_id, now_ms) {
+        Ok(now) => now,
+        Err(error) if matches!(error.downcast_ref::<Refusal>(), Some(Refusal::NotFound)) => {
+            return Ok(0)
+        }
+        Err(error) => return Err(error),
+    };
+    let before = before.and_then(|json| match serde_json::from_str::<Members>(json) {
+        Ok(members) => Some(members),
+        Err(error) => {
+            log::warn!("A followed view's last look could not be read, so it starts over: {error}");
+            None
+        }
+    });
+    let mut posted = 0;
+    if let Some(before) = before
+        .as_ref()
+        .filter(|before| before.revision == now.revision)
+    {
+        let mut moved: Vec<(&str, &str)> = now
+            .tasks
+            .keys()
+            .filter(|id| !before.tasks.contains_key(*id))
+            .map(|id| (id.as_str(), "added"))
+            .collect();
+        for (id, was) in &before.tasks {
+            if was.is_closed() {
+                continue;
             }
-            Err(error) => return Err(error),
-        };
-        let before: Option<Members> = before.map(|json| serde_json::from_str(&json)).transpose()?;
-        if let Some(before) = before.filter(|before| before.revision == now.revision) {
-            let mut moved: Vec<(&str, &str)> = now
-                .tasks
-                .keys()
-                .filter(|id| !before.tasks.contains_key(*id))
-                .map(|id| (id.as_str(), "added"))
-                .collect();
-            for (id, was) in &before.tasks {
-                if was.is_closed() {
-                    continue;
-                }
-                let status = match now.tasks.get(id) {
-                    Some(status) => Some(*status),
-                    None => items::item(conn, id).ok().map(|item| item.status),
-                };
-                match status {
-                    Some(WorkStatus::Done) => moved.push((id, "done")),
-                    Some(WorkStatus::Canceled) => moved.push((id, "canceled")),
-                    _ => {}
-                }
-            }
-            for (task_id, what) in moved {
-                let Some((actor, agent)) = last_actor(conn, task_id)? else {
-                    continue;
-                };
-                if actor == WorkActor::Me {
-                    continue;
-                }
-                let notice = Notice {
-                    task_id: Some(task_id),
-                    agent: agent.as_deref(),
-                    field: Some(what),
-                    ..Notice::about(NotificationKind::View, SubjectKind::View, &view_id, actor)
-                };
-                if inbox::notify(conn, &notice, now_ms)? {
-                    posted += 1;
-                }
+            let status = match now.tasks.get(id) {
+                Some(status) => Some(*status),
+                None => items::item(conn, id).ok().map(|item| item.status),
+            };
+            match status {
+                Some(WorkStatus::Done) => moved.push((id, "done")),
+                Some(WorkStatus::Canceled) => moved.push((id, "canceled")),
+                _ => {}
             }
         }
-        store_members(conn, &view_id, &now)?;
+        for (task_id, what) in moved {
+            let Some((actor, agent, at_ms)) = last_change(conn, task_id)? else {
+                continue;
+            };
+            if actor == WorkActor::Me || checked_at_ms.is_some_and(|checked| at_ms <= checked) {
+                continue;
+            }
+            let notice = Notice {
+                task_id: Some(task_id),
+                agent: agent.as_deref(),
+                field: Some(what),
+                ..Notice::about(NotificationKind::View, SubjectKind::View, view_id, actor)
+            };
+            if inbox::notify(conn, &notice, now_ms)? {
+                posted += 1;
+            }
+        }
     }
+    let changed = before.as_ref() != Some(&now);
+    looked_at(conn, view_id, changed.then_some(&now), now_ms)?;
     Ok(posted)
 }
 
@@ -331,4 +377,116 @@ pub(crate) fn follow_as(
 /// Everything followed besides tasks. The app's `work_follows`.
 pub(crate) fn work_follows(app: AppHandle) -> Result<Vec<Follow>, String> {
     crate::planning::history(&app.state::<Arc<HistoryManager>>(), |conn| follows(conn))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::super::schema;
+    use super::super::inbox::{self, NotificationKind, Shown, SubjectKind};
+    use super::super::items::{self, NewItem};
+    use super::super::types::{
+        WorkActor, WorkDisplay, WorkDue, WorkGroupBy, WorkLayout, WorkOrderBy, WorkOwner,
+        WorkQuery, WorkStatus,
+    };
+    use super::{follow, watch_views};
+    use rusqlite::Connection;
+
+    const AT: i64 = 1_700_000_000_000;
+    const MINUTE: i64 = 60 * 1000;
+    const DAY: i64 = 24 * 60 * MINUTE;
+
+    fn planner() -> Connection {
+        let conn = Connection::open_in_memory().expect("an in-memory history database");
+        schema::apply_all(&conn).expect("the planner schema");
+        conn
+    }
+
+    fn due_today_view(conn: &Connection, name: &str) -> String {
+        let display = WorkDisplay {
+            layout: WorkLayout::List,
+            group_by: WorkGroupBy::None,
+            order_by: WorkOrderBy::Due,
+            show_empty_groups: false,
+            properties: Vec::new(),
+            show_sub_tasks: true,
+            sub_group_by: WorkGroupBy::None,
+            hidden_columns: Vec::new(),
+        };
+        let query = WorkQuery {
+            due: Some(vec![WorkDue::Today]),
+            ..WorkQuery::default()
+        };
+        let view = items::save_view(conn, None, name, &query, &display, AT).expect("a view");
+        follow(conn, SubjectKind::View, &view.id, true, AT).expect("followed");
+        view.id
+    }
+
+    fn agent_task(conn: &Connection, title: &str, due_at_ms: i64, at_ms: i64) {
+        items::insert(
+            conn,
+            &NewItem {
+                title,
+                details: None,
+                status: WorkStatus::NotStarted,
+                priority: 0,
+                project_id: None,
+                milestone_id: None,
+                owner: &WorkOwner::Myself,
+                due_at_ms: Some(due_at_ms),
+                label_ids: &[],
+                source_loop_id: None,
+                recurrence: None,
+            },
+            WorkActor::Agent,
+            at_ms,
+        )
+        .expect("a task");
+    }
+
+    fn view_notices(conn: &Connection, now_ms: i64) -> Vec<String> {
+        inbox::notifications(conn, Shown::default(), now_ms)
+            .expect("the inbox")
+            .into_iter()
+            .filter(|notice| notice.kind == NotificationKind::View)
+            .filter_map(|notice| notice.item_id)
+            .collect()
+    }
+
+    #[test]
+    fn a_task_that_joins_a_view_as_its_day_comes_is_credited_to_no_one() {
+        let conn = planner();
+        due_today_view(&conn, "Due today");
+        agent_task(&conn, "Book the venue", AT + DAY, AT + MINUTE);
+        assert_eq!(watch_views(&conn, AT + 2 * MINUTE).expect("a look"), 0);
+
+        assert_eq!(watch_views(&conn, AT + DAY).expect("the next day"), 0);
+        assert!(view_notices(&conn, AT + DAY).is_empty());
+
+        agent_task(&conn, "Print the badges", AT + DAY, AT + DAY + MINUTE);
+        assert_eq!(
+            watch_views(&conn, AT + DAY + 2 * MINUTE).expect("a look"),
+            1
+        );
+        assert_eq!(view_notices(&conn, AT + DAY + 2 * MINUTE).len(), 1);
+    }
+
+    #[test]
+    fn a_view_whose_last_look_is_unreadable_starts_over_and_the_others_still_post() {
+        let conn = planner();
+        let broken = due_today_view(&conn, "Broken");
+        due_today_view(&conn, "Due today");
+        conn.execute(
+            "UPDATE planning_follows SET members = '{\"revision\":1,\"tasks\":{\"x\":\"gone\"}}'
+             WHERE target_id = ?1",
+            [&broken],
+        )
+        .expect("an unreadable last look");
+        agent_task(&conn, "Book the venue", AT, AT + MINUTE);
+
+        assert_eq!(watch_views(&conn, AT + 2 * MINUTE).expect("a look"), 1);
+        assert_eq!(
+            watch_views(&conn, AT + 3 * MINUTE).expect("another look"),
+            0
+        );
+    }
 }

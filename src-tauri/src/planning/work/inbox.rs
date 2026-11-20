@@ -245,6 +245,7 @@ CREATE TABLE planning_follows (
     target_id TEXT NOT NULL,
     created_at_ms INTEGER NOT NULL,
     members TEXT,
+    checked_at_ms INTEGER,
     PRIMARY KEY(kind, target_id)
 );
 CREATE TABLE planning_inbox_kinds (
@@ -772,11 +773,7 @@ pub(crate) fn automation_ended(conn: &Connection, run_id: &str, now_ms: i64) -> 
         run_id: Some(run_id),
         key: Some(&key),
         to: Some(&status),
-        ..Notice::new(
-            task_id.as_deref(),
-            NotificationKind::Automation,
-            WorkActor::Agent,
-        )
+        ..Notice::new(task_id.as_deref(), NotificationKind::Automation, WorkActor::Agent)
     };
     notify(conn, &notice, now_ms)
 }
@@ -917,11 +914,7 @@ fn read(row: &Row<'_>) -> rusqlite::Result<Notification> {
         .map(|json| serde_json::from_str(&json))
         .transpose()
         .map_err(|error| {
-            rusqlite::Error::FromSqlConversionFailure(
-                17,
-                rusqlite::types::Type::Text,
-                Box::new(error),
-            )
+            rusqlite::Error::FromSqlConversionFailure(17, rusqlite::types::Type::Text, Box::new(error))
         })?;
     let subject = match (row.get::<_, Option<SubjectKind>>(18)?, row.get(19)?) {
         (Some(kind), Some(id)) => Some(NoticeSubject {
