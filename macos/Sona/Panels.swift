@@ -958,6 +958,8 @@ private enum PaletteRow: Identifiable {
     case watch(String)
     case unwatch(WorkWatch)
     case watching(WorkWatch)
+    /// A section of Sona's own help that matches: return shows its text.
+    case help(HelpSection)
 
     /// Which reel "Play all" is to the shared player.
     static let playAllKey = "palette"
@@ -977,6 +979,7 @@ private enum PaletteRow: Identifiable {
         case .watch: "watch"
         case let .unwatch(watch): "unwatch:\(watch.id)"
         case let .watching(watch): "watching:\(watch.id)"
+        case let .help(section): "help:\(section.id)"
         }
     }
 }
@@ -1041,6 +1044,10 @@ struct CommandPalette: View {
     @State private var heard: [SaidMoment] = []
     /// The meeting pictures whose words match the settled question.
     @State private var onScreen: [ScreenTextMoment] = []
+    /// Sona's help sections that match the settled text, best first.
+    @State private var help: [HelpSection] = []
+    /// The help section open in its sheet.
+    @State private var reading: HelpSection?
     /// The line this palette last asked to hear: its failure shows on that
     /// row, and closing the palette stops only that playback.
     @State private var hearing: TranscriptSegmentId?
@@ -1062,6 +1069,8 @@ struct CommandPalette: View {
     /// The few lines whose words matched best: enough to find the moment,
     /// few enough that the meetings stay in view.
     private static let heardLimit = 4
+    /// A few help sections, under the rows the corpus found.
+    private static let helpLimit = 3
     private static let kinds: [(kind: QueryRowKind, label: String)] = [
         (.meeting, "Meetings"), (.task, "Tasks"), (.person, "People"), (.note, "Notes"),
         (.dictation, "Dictations"), (.loop, "Loops"),
@@ -1105,6 +1114,9 @@ struct CommandPalette: View {
                 }
             }
             .padding(.top, 96)
+            .sheet(item: $reading) { section in
+                HelpSectionSheet(section: section) { reading = nil }
+            }
             .onAppear {
                 query = model.takePaletteSeed()
                 DispatchQueue.main.async { focused = true }
@@ -1265,6 +1277,9 @@ struct CommandPalette: View {
         for (kind, label) in Self.kinds {
             let rows = hits.filter { $0.kind == kind }.map(PaletteRow.hit)
             if !rows.isEmpty { sections.append((kind == .task && !listed.isEmpty ? "More tasks" : label, rows, live)) }
+        }
+        if !help.isEmpty {
+            sections.append(("Help", help.map(PaletteRow.help), live))
         }
         if case let .answered(answer) = lookup, answer.next != nil, !answer.loadingMore, !answer.moreFailed {
             sections.append(("More", [.more], true))
@@ -1450,6 +1465,10 @@ struct CommandPalette: View {
             loadMore()
             return
         }
+        if case let .help(section) = row {
+            reading = section
+            return
+        }
         if case .playAll = row {
             playAll()
             return
@@ -1468,6 +1487,10 @@ struct CommandPalette: View {
     /// Closes the palette and goes where the row points: a heard line opens
     /// its meeting at the moment it was said.
     private func open(_ row: PaletteRow) {
+        if case let .help(section) = row {
+            reading = section
+            return
+        }
         model.paletteShown = false
         switch row {
         case let .action(action): action.run()
@@ -1482,7 +1505,7 @@ struct CommandPalette: View {
         case let .unwatch(watch): model.work.unwatch(watch.id)
         case let .watching(watch):
             if let latest = watch.hits.first { model.open(link: latest.line.link) }
-        case .more, .playAll: break
+        case .more, .playAll, .help: break
         }
     }
 
@@ -1567,6 +1590,7 @@ struct CommandPalette: View {
             lookup = .none
             heard = []
             onScreen = []
+            help = []
             command = nil
             answer = nil
             picked = []
@@ -1585,25 +1609,32 @@ struct CommandPalette: View {
             async let shown: [ScreenTextMoment] = core.request("meeting_snapshot_text_search", request)
             async let change = work.command(query)
             async let answered: WorkAnswer? = Self.asks(query) ? try? work.ask(query) : nil
+            async let helped: [HelpSection] = core.request(
+                "help_search",
+                ["words": .string(query), "limit": .number(Double(Self.helpLimit))] as [String: JSONValue])
             do {
                 let page = try await ask(query, after: nil)
                 let moments = (try? await said) ?? []
                 let pictures = (try? await shown) ?? []
+                let sections = (try? await helped) ?? []
                 let read = await change
                 let lines = await answered
                 guard !Task.isCancelled else { return }
                 heard = moments
                 onScreen = pictures
+                help = sections
                 settle(read, lines)
                 lookup = .answered(.init(rows: page.entries, next: page.nextCursor, reason: page.reason))
             } catch {
                 let moments = (try? await said) ?? []
                 let pictures = (try? await shown) ?? []
+                let sections = (try? await helped) ?? []
                 let read = await change
                 let lines = await answered
                 guard !Task.isCancelled else { return }
                 heard = moments
                 onScreen = pictures
+                help = sections
                 settle(read, lines)
                 lookup = .failed(Self.sentence(for: error))
             }
@@ -1743,6 +1774,11 @@ private struct PaletteRowView: View {
                     Text("Stop watching “\(watch.phrase)”").bodyText()
                 case let .watching(watch):
                     PaletteWatchSummary(watch: watch)
+                case let .help(section):
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(section.title).bodyText().lineLimit(1)
+                        Text(section.text.replacingOccurrences(of: "\n", with: " · ")).metaText().lineLimit(1)
+                    }
                 }
                 Spacer(minLength: 0)
                 if case let .heard(moment) = row {
@@ -1997,6 +2033,55 @@ private struct PaletteRowView: View {
         case .answer: "text.quote"
         case .watch, .watching: "eye"
         case .unwatch: "eye.slash"
+        case .help: "questionmark.circle"
         }
+    }
+}
+
+/// One section of Sona's help, as `help_search` answers it.
+private struct HelpSection: Decodable, Identifiable {
+    /// "guide" for the README, "shortcuts" for the shortcut sheet.
+    let source: String
+    let title: String
+    let text: String
+
+    var id: String { "\(source):\(title)" }
+}
+
+/// The text of one help section the palette found.
+private struct HelpSectionSheet: View {
+    let section: HelpSection
+    let done: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(section.title)
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(Theme.ink)
+                    Text(section.source == "shortcuts" ? "Keyboard shortcuts" : "Sona guide").metaText()
+                }
+                Spacer(minLength: 0)
+                Button("Done", action: done)
+                    .buttonStyle(.quiet)
+                    .keyboardShortcut(.cancelAction)
+            }
+            .padding(.horizontal, 20)
+            .frame(height: 60)
+            Hairline()
+            ScrollView {
+                Text(section.text)
+                    .font(TypeScale.body(13))
+                    .foregroundStyle(Theme.inkSecondary)
+                    .lineSpacing(3)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(20)
+            }
+            .frame(minHeight: 160, maxHeight: 480)
+        }
+        .frame(width: 520)
+        .background(Theme.elevated)
     }
 }

@@ -105,6 +105,32 @@ describe("tool arguments", () => {
     );
   });
 
+  test("help, outside MCP servers, and saved prompt skills map to their CLI flags", () => {
+    expect(tool("sona_help").argv({ query: "new task", limit: 3 })).toEqual([
+      "--help-search=new task",
+      "--json",
+      "--limit",
+      "3",
+    ]);
+    expect(tool("sona_mcp_servers").argv({})).toEqual([
+      "work",
+      "mcp-servers",
+      "--json",
+    ]);
+    expect(
+      tool("sona_saved_prompt_save").argv(
+        { name: "Briefing", body: "Summarize.", about: "meeting", skill: true },
+        "Claude",
+      ),
+    ).toContain("--skill");
+    expect(
+      tool("sona_saved_prompt_save").argv(
+        { name: "Briefing", body: "Summarize.", about: "meeting", skill: false },
+        "Claude",
+      ),
+    ).toContain("--no-skill");
+  });
+
   test("a task save sends its steps in order as one JSON argument", () => {
     const save = tool("sona_task_save");
     const patch: Record<string, string | string[] | null>[] = [
