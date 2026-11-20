@@ -9,6 +9,12 @@ private final class KeyboardState: ObservableObject {
     @Published var session = KeyboardSessionState()
     @Published var startURL = DictationLink.url
     @Published var waiting = false
+    /// The keyboard's own dictation, which needs the switch and permissions set in the app.
+    @Published var dictation = KeyboardDictation.Phase.idle
+    @Published var heard: String?
+    @Published var needsSetup = true
+    /// The microphone refused the keyboard since it appeared; Dictate goes through the app.
+    @Published var micRefused = false
     /// The message on show at the last key press. Any other message is new, and the word
     /// strip gives way to it until the next key.
     @Published var seenMessage: String?
@@ -17,7 +23,9 @@ private final class KeyboardState: ObservableObject {
         guard hasFullAccess, let message = session.message ?? notice, message != seenMessage else { return nil }
         return message
     }
-    var dictating: Bool { warm && (session.phase == .listening || session.phase == .finishing) }
+    var dictating: Bool {
+        dictation != .idle || (warm && (session.phase == .listening || session.phase == .finishing))
+    }
 }
 
 @MainActor
@@ -30,6 +38,12 @@ final class KeyboardViewController: UIInputViewController {
     private var minimumHeight: NSLayoutConstraint?
     private var signal: KeyboardSignal?
     private var ticker: Task<Void, Never>?
+    private var dictation = KeyboardDictation()
+    private var microphone: KeyboardMicrophone?
+    private let haptic = UIImpactFeedbackGenerator(style: .light)
+    #if DEBUG
+    private let frames = FrameMeter()
+    #endif
     private var visible = false
     private var requestedAt: Date?
     private var requestedID: UUID?
@@ -54,7 +68,7 @@ final class KeyboardViewController: UIInputViewController {
             state: state,
             typing: typing,
             microphone: { [weak self] in self?.start() },
-            stop: { [weak self] in self?.send(.stop) },
+            stop: { [weak self] in self?.finish() },
             insert: { [weak self] in self?.insertDraft() },
             discard: { [weak self] in self?.discardDraft() }
         )
@@ -82,6 +96,7 @@ final class KeyboardViewController: UIInputViewController {
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
         typing.hasTyped = false
+        state.micRefused = false
         let languages = KeyboardLanguages.shared().enabled
         typing.showsLanguageKey = languages.count > 1
         if !languages.contains(typing.language) { setLanguage(languages[0]) }
@@ -105,6 +120,7 @@ final class KeyboardViewController: UIInputViewController {
 
     override func viewDidDisappear(_ animated: Bool) {
         super.viewDidDisappear(animated)
+        dictate(.hidden)
         visible = false
         ticker?.cancel()
         ticker = nil
@@ -290,8 +306,11 @@ final class KeyboardViewController: UIInputViewController {
             state.draft = nil
             state.session = KeyboardSessionState()
             state.notice = nil
+            state.needsSetup = true
             return
         }
+        state.needsSetup = !DictationPreferences.keyboardEnabled || !DictationPreferences.keyboardMicrophoneAllowed
+        if !state.needsSetup { prepareMicrophone() }
         do {
             state.session = try KeyboardSessionStore.shared().state()
             if let requestedAt {
@@ -321,7 +340,14 @@ final class KeyboardViewController: UIInputViewController {
         } catch { state.notice = error.localizedDescription }
     }
 
+    /// Dictate listens in the keyboard itself; only after the microphone refused it does
+    /// Dictate go through the app's warm session, as it did before the keyboard could listen.
     private func start() {
+        guard state.micRefused else {
+            prepareMicrophone()
+            dictate(.start)
+            return
+        }
         guard hasFullAccess, state.warm else { reload(); return }
         let id = UUID()
         requestedID = id
@@ -334,6 +360,58 @@ final class KeyboardViewController: UIInputViewController {
                 documentID: documentID, createdAt: Date(), language: typing.language.rawValue
             ))
         } catch { state.waiting = false; state.notice = error.localizedDescription }
+    }
+
+    private func finish() {
+        guard !state.micRefused else { send(.stop); return }
+        if dictation.phase != .idle { haptic.impactOccurred(intensity: 0.6) }
+        dictate(.stop)
+    }
+
+    private func prepareMicrophone() {
+        guard microphone == nil else { return }
+        let microphone = KeyboardMicrophone()
+        microphone.onEvent = { [weak self] event in self?.dictate(event) }
+        microphone.onNotice = { [weak self] notice in self?.state.notice = notice }
+        microphone.attach(to: view)
+        self.microphone = microphone
+    }
+
+    private func dictate(_ event: KeyboardDictation.Event) {
+        for effect in dictation.handle(event) {
+            switch effect {
+            case .beginCapture:
+                state.notice = nil
+                haptic.impactOccurred()
+                #if DEBUG
+                frames.begin()
+                #endif
+                microphone?.start(
+                    language: DictationPreferences.recognitionLanguage(for: typing.language.rawValue),
+                    hints: session.lexicon.names
+                )
+            case .endCapture:
+                microphone?.end()
+            case .abandon:
+                microphone?.abandon()
+            case let .insert(text):
+                let language = DictationPreferences.recognitionLanguage(for: typing.language.rawValue)
+                textDocumentProxy.insertText(
+                    TypingSession.joiningSpace(before: textBefore) + DictationCleanup.clean(text, language: language)
+                )
+                refreshShift()
+                refreshSuggestions()
+            case .fallBack:
+                state.micRefused = true
+                state.notice = NSLocalizedString("keyboard.micRefused", comment: "")
+            }
+        }
+        #if DEBUG
+        if event == .captureStarted { frames.mark("microphone open") }
+        if dictation.phase == .idle { frames.end() }
+        #endif
+        state.dictation = dictation.phase
+        state.heard = KeyboardSessionState.heard(dictation.heard)
     }
 
     /// A stop sent before the app has answered the start, as a quick hold-to-talk release
@@ -433,11 +511,15 @@ private struct KeyboardView: View {
     @ViewBuilder
     private var status: some View {
         if state.hasFullAccess, state.dictating {
-            Text(verbatim: state.session.heard ?? String(localized: "keyboard.listening"))
+            let heard = state.dictation == .idle ? state.session.heard : state.heard
+            Text(verbatim: heard ?? String(localized: "keyboard.listening"))
                 .font(.subheadline)
-                .foregroundStyle(state.session.heard == nil ? Theme.textSecondary : Theme.textPrimary)
+                .foregroundStyle(heard == nil ? Theme.textSecondary : Theme.textPrimary)
                 .lineLimit(2)
                 .truncationMode(.head)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentTransition(.opacity)
+                .animation(.easeOut(duration: 0.15), value: heard)
                 .accessibilityIdentifier("keyboard-heard")
         } else if let suggestions = typing.suggestions, state.newMessage == nil {
             SuggestionStrip(suggestions: suggestions, choose: typing.choose)
@@ -447,7 +529,7 @@ private struct KeyboardView: View {
             Text(notice).font(.caption).foregroundStyle(Theme.textSecondary).lineLimit(3)
                 .accessibilityIdentifier("keyboard-status")
         } else if state.hasFullAccess, !typing.hasTyped {
-            hint(state.warm ? "keyboard.ready" : "keyboard.cold")
+            hint(state.needsSetup ? "keyboard.setup" : state.micRefused && !state.warm ? "keyboard.cold" : "keyboard.ready")
         } else {
             HStack(spacing: 8) {
                 SonaMark()
@@ -464,21 +546,34 @@ private struct KeyboardView: View {
         Text(text).font(.caption).foregroundStyle(Theme.textSecondary).lineLimit(3).minimumScaleFactor(0.8)
     }
 
+    /// Before the app has the microphone allowed, Dictate opens it once to ask. After the
+    /// microphone refused the keyboard, Dictate uses the app's warm session, or opens the app.
     @ViewBuilder
     private var control: some View {
-        if state.warm {
+        if state.needsSetup {
+            open(DictationLink.keyboardSetupURL)
+        } else if !state.micRefused {
+            MicControl(
+                phase: state.dictation == .idle ? .ready : state.dictation == .finishing ? .busy : .listening,
+                start: microphone, stop: stop
+            )
+        } else if state.warm {
             MicControl(
                 phase: state.session.phase == .listening ? .listening
                     : state.session.phase == .finishing || state.waiting ? .busy : .ready,
                 start: microphone, stop: stop
             )
         } else {
-            Link(destination: state.startURL) {
-                RecordPill(glyph: .record, title: "dictation.start", height: 40)
-            }
-            .glassEffect(.regular.interactive(), in: Capsule())
-            .accessibilityIdentifier("keyboard-open-sona")
+            open(state.startURL)
         }
+    }
+
+    private func open(_ url: URL) -> some View {
+        Link(destination: url) {
+            RecordPill(glyph: .record, title: "dictation.start", height: 40)
+        }
+        .glassEffect(.regular.interactive(), in: Capsule())
+        .accessibilityIdentifier("keyboard-open-sona")
     }
 }
 
