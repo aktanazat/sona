@@ -2692,13 +2692,89 @@ pub(crate) async fn run_loop_turn(
     deadline: Duration,
 ) -> LoopTurn {
     let mut refused = Vec::new();
-    let answer = loop_turn(app, message, allowed, deadline, &mut refused).await;
+    let answer = loop_turn(
+        app,
+        message,
+        Vec::new(),
+        None,
+        allowed,
+        deadline,
+        &mut refused,
+    )
+    .await;
     LoopTurn { answer, refused }
+}
+
+/// Why a question asked from the phone got no answer, in the words the phone
+/// shows its reader.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PhoneTurnFailure {
+    AgentOff,
+    Unpaired,
+    Unreachable,
+    TimedOut,
+    Failed,
+}
+
+/// One question from the phone, answered the way the Mac panel answers an Ask
+/// turn: the ten read-only lookups and the question's own context pack, both
+/// only under the remote-intelligence consent. Nothing it returns can change
+/// anything on this Mac.
+pub(crate) async fn run_phone_turn(
+    app: &AppHandle,
+    question: &str,
+    recent_turns: Vec<SonaAgentChatTurnV1>,
+    deadline: Duration,
+) -> Result<String, PhoneTurnFailure> {
+    match configured_relay_status(app) {
+        AgentPanelRelayStatusV1::Disabled => return Err(PhoneTurnFailure::AgentOff),
+        AgentPanelRelayStatusV1::Unpaired | AgentPanelRelayStatusV1::InvalidConfiguration => {
+            return Err(PhoneTurnFailure::Unpaired)
+        }
+        _ => {}
+    }
+    let started = Instant::now();
+    let consented = crate::settings::get_settings(app).meeting_remote_intelligence_enabled;
+    let (allowed, context_pack) = if consented {
+        let (Some(meetings), Some(history), Some(calendar)) = (
+            app.try_state::<Arc<MeetingSessionManager>>(),
+            app.try_state::<Arc<HistoryManager>>(),
+            app.try_state::<Arc<dyn CalendarSource>>(),
+        ) else {
+            return Err(PhoneTurnFailure::Failed);
+        };
+        let pack = crate::query::pack::for_question(&meetings, &history, &calendar, question, None)
+            .await
+            .map_err(|_| PhoneTurnFailure::Failed)?;
+        let allowed: Vec<&str> = tools::TOOL_ARGS.iter().map(|(name, _)| *name).collect();
+        (allowed, Some(pack.pack))
+    } else {
+        (Vec::new(), None)
+    };
+    let mut refused = Vec::new();
+    loop_turn(
+        app,
+        question,
+        recent_turns,
+        context_pack,
+        &allowed,
+        deadline.saturating_sub(started.elapsed()),
+        &mut refused,
+    )
+    .await
+    .map_err(|error| match error {
+        _ if started.elapsed() >= deadline => PhoneTurnFailure::TimedOut,
+        ChatTurnError::TimedOut => PhoneTurnFailure::TimedOut,
+        ChatTurnError::Unreachable => PhoneTurnFailure::Unreachable,
+        ChatTurnError::Failed | ChatTurnError::ReplyNotStructured => PhoneTurnFailure::Failed,
+    })
 }
 
 async fn loop_turn(
     app: &AppHandle,
     message: &str,
+    recent_turns: Vec<SonaAgentChatTurnV1>,
+    mut context_pack: Option<String>,
     allowed: &[&str],
     deadline: Duration,
     refused: &mut Vec<String>,
@@ -2717,7 +2793,6 @@ async fn loop_turn(
     };
     let conversation = relay::new_idempotency_key().map_err(chat_turn_error)?;
     let started = Instant::now();
-    let mut context_pack: Option<String> = None;
     let mut round = 0;
     loop {
         let idempotency_key = relay::new_idempotency_key().map_err(chat_turn_error)?;
@@ -2728,7 +2803,7 @@ async fn loop_turn(
             conversation_id: format!("loop-{conversation}"),
             turn_id: format!("turn-{conversation}"),
             user_message: message.to_string(),
-            recent_turns: Vec::new(),
+            recent_turns: recent_turns.clone(),
             context_pack: context_pack.clone(),
             tools_allowed: !allowed.is_empty(),
             locale: crate::settings::get_settings(app).app_language,
