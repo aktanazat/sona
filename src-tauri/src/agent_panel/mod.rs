@@ -1,6 +1,7 @@
 mod actions;
 mod config;
 mod history;
+pub(crate) mod mcp_servers;
 /// `pub(crate)` for one constant: the context-pack ceiling this module
 /// enforces on the wire is the same ceiling `query::pack` truncates to, and a
 /// second copy of that number would be a pack refused after it was built.
@@ -35,6 +36,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_specta::Event as _;
 
 pub use history::AgentChatConversationSummaryV1;
+pub use mcp_servers::AgentMcpServer;
 pub use protocol::{AgentModelCatalogV1, AgentModelSelectionV1, AgentPanelTurnFailureV1};
 pub use relay::AgentPanelPublicIdentityV1;
 pub use wire::{
@@ -2603,8 +2605,15 @@ pub(crate) async fn run_chat_turn(
         Some(manager) => manager.model_alias(&client, false).await,
         None => SONA_MODEL_ALIAS.to_string(),
     };
-    let response =
-        settle_turn(app, &client, &idempotency_key, &turn, &model_alias, deadline).await?;
+    let response = settle_turn(
+        app,
+        &client,
+        &idempotency_key,
+        &turn,
+        &model_alias,
+        deadline,
+    )
+    .await?;
     match response {
         SonaAgentResponseV1::Text { message, .. } => Ok(message),
         /* Unreachable through `validate`, which refuses a proposal from the
@@ -2790,6 +2799,9 @@ async fn lookup<R: tauri::Runtime>(
     call: &ToolCall,
     folder_id: Option<MeetingFolderId>,
 ) -> ToolResult {
+    if folder_id.is_none() && tools::is_mcp_tool(&call.tool) {
+        return tools::run_mcp(app, call).await;
+    }
     let meetings = app.try_state::<Arc<MeetingSessionManager>>();
     let history = app.try_state::<Arc<HistoryManager>>();
     let calendar = app.try_state::<Arc<dyn CalendarSource>>();
@@ -3954,7 +3966,10 @@ mod tests {
             &mut refused,
         ));
         assert_eq!(refused, ["person"]);
-        assert_eq!(results[1].result, "person is not allowed in this automation");
+        assert_eq!(
+            results[1].result,
+            "person is not allowed in this automation"
+        );
         assert!(!results[1].ok);
         assert_eq!(
             results[0].result,

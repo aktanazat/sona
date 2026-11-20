@@ -5,17 +5,22 @@ import SwiftUI
 /// agent, then what it has been doing and what is waiting on a person.
 struct AgentBridgeView: View {
     let store: AgentBridgeStore
+    @State private var addingMcpServer = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             ErrorNote(store.error)
             controls
             taskChanges
+            mcpServers
             projects
             hook
             activity
             queue
             rules
+        }
+        .sheet(isPresented: $addingMcpServer) {
+            AddMcpServerSheet(store: store) { addingMcpServer = false }
         }
     }
 
@@ -65,6 +70,28 @@ struct AgentBridgeView: View {
                         set: { enabled in Task { await store.setCloseParents(enabled) } }))
             }
             .disabled(store.autonomyBusy)
+        }
+    }
+
+    private var mcpServers: some View {
+        AgentBridgeSection(
+            "Outside MCP servers",
+            meta: "Talk to Sona may call read-only tools on servers you list here. Tokens stay in Keychain and never leave this Mac."
+        ) {
+            Button("Add server") { addingMcpServer = true }
+                .buttonStyle(.compact)
+                .disabled(store.mcpBusy)
+        } content: {
+            ErrorNote(store.mcpError)
+            Card {
+                if store.mcpServers.isEmpty {
+                    CardLine("No outside MCP servers are listed.")
+                } else {
+                    ForEach(store.mcpServers) { server in
+                        AgentMcpServerRow(store: store, server: server)
+                    }
+                }
+            }
         }
     }
 
@@ -432,5 +459,111 @@ private struct AgentBridgeHash: View {
             .font(TypeScale.mono(12))
             .foregroundStyle(Theme.inkTertiary)
             .textSelection(.enabled)
+    }
+}
+
+private struct AgentMcpServerRow: View {
+    let store: AgentBridgeStore
+    let server: AgentMcpServerSummary
+
+    var body: some View {
+        let loading = store.mcpToolsLoading.contains(server.id)
+        let tools = store.mcpTools[server.id]
+        VStack(alignment: .leading, spacing: 0) {
+            CardRow {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(server.name).bodyText()
+                    Text(server.hasToken ? "\(server.url) · Token in Keychain" : server.url)
+                        .metaText()
+                        .textSelection(.enabled)
+                }
+            } trailing: {
+                HStack(spacing: 12) {
+                    Button(loading ? "Checking…" : "Read-only tools") {
+                        store.inspectMcpTools(server.id)
+                    }
+                    .buttonStyle(.quiet)
+                    .disabled(loading || store.mcpBusy)
+                    Button("Remove") { store.removeMcpServer(server.id) }
+                        .buttonStyle(QuietButton(color: Theme.live))
+                        .disabled(store.mcpBusy)
+                }
+            }
+            if let tools {
+                AgentBridgeBlock {
+                    if tools.isEmpty {
+                        Text("No tools marked read-only by this server.").metaText()
+                    } else {
+                        ForEach(tools) { tool in
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(tool.name).font(TypeScale.mono(12)).foregroundStyle(Theme.ink)
+                                if !tool.description.isEmpty {
+                                    Text(tool.description).metaText()
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct AddMcpServerSheet: View {
+    let store: AgentBridgeStore
+    let onFinished: () -> Void
+    @State private var name = ""
+    @State private var url = ""
+    @State private var token = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Add MCP server").headlineText()
+                Text("Sona only calls tools the server marks read-only. Adding a server stays in this window because its token is saved in Keychain.")
+                    .metaText()
+            }
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Name").bodyText(14, Theme.inkSecondary)
+                InputField(prompt: "Notion", text: $name)
+            }
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Address").bodyText(14, Theme.inkSecondary)
+                InputField(prompt: "https://mcp.example.com/mcp", text: $url)
+            }
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Token (optional)").bodyText(14, Theme.inkSecondary)
+                SecureField("Bearer token", text: $token)
+                    .textFieldStyle(.roundedBorder)
+            }
+            if let message = store.mcpError {
+                Text(message)
+                    .font(TypeScale.body(14))
+                    .foregroundStyle(Theme.live)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            HStack(spacing: 12) {
+                Spacer()
+                Button("Cancel") { onFinished() }
+                    .buttonStyle(.secondary)
+                    .disabled(store.mcpBusy)
+                Button(store.mcpBusy ? "Saving…" : "Add") {
+                    Task {
+                        if await store.addMcpServer(name: name, url: url, token: token) {
+                            onFinished()
+                        }
+                    }
+                }
+                .buttonStyle(.primary)
+                .disabled(
+                    store.mcpBusy
+                        || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        || url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(28)
+        .frame(width: 500)
+        .background(Theme.page)
+        .clipShape(RoundedRectangle(cornerRadius: Theme.radiusDialog))
     }
 }
