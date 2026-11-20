@@ -33,12 +33,13 @@ struct KeyboardChange: Decodable {
 
 /// Which sound set the start and stop cues come from.
 enum SoundTheme: String, CaseIterable, Hashable, Sendable {
-    case marimba, pop, custom
+    case marimba, pop, mechanical, custom
 
     var label: String {
         switch self {
         case .marimba: "Marimba"
         case .pop: "Pop"
+        case .mechanical: "Mechanical"
         case .custom: "Custom"
         }
     }
@@ -496,14 +497,15 @@ enum LanguageCatalog {
 // MARK: - Copy
 
 /// The names the settings pages give shortcuts. The core carries a name for
-/// every binding; these are the four the pages title differently.
+/// every binding; these are the ones the pages title differently.
 enum BindingCopy {
-    /// The four the pages name themselves. Anything else the core adds
+    /// The ones the pages name themselves. Anything else the core adds
     /// arrives with its own name and description, and shows both.
     static func title(_ record: BindingRecord) -> String {
         switch record.id {
         case "transcribe": "Transcribe shortcut"
         case "cancel": "Cancel shortcut"
+        case "send": "Send shortcut"
         case "command": "Command shortcut"
         case "transcribe_with_post_process": "Post-processing shortcut"
         default: record.name
@@ -520,11 +522,19 @@ enum BindingCopy {
         }
     }
 
+    /// How the core spells a double tap: `double:option_right`.
+    static let doubleTapPrefix = "double:"
+
+    static func isDoubleTap(_ binding: String) -> Bool {
+        binding.hasPrefix(doubleTapPrefix)
+    }
+
     /// A chord as the key caps show it. The core qualifies a modifier with
     /// the side it was pressed on; both sides carry the same engraving, so
     /// the qualifier is dropped rather than printed on the cap.
     static func chord(_ binding: String) -> String {
         binding
+            .dropFirst(isDoubleTap(binding) ? doubleTapPrefix.count : 0)
             .split(separator: "+")
             .map { part -> String in
                 let key = part.trimmingCharacters(in: .whitespaces)
@@ -534,5 +544,15 @@ enum BindingCopy {
                 return key
             }
             .joined(separator: "+")
+    }
+
+    /// What the caps cannot show about a double tap: that it is pressed
+    /// twice, and on which side, since a double tap of Right Option leaves
+    /// Left Option free for typing.
+    static func repeatNote(_ binding: String) -> String? {
+        guard isDoubleTap(binding) else { return nil }
+        if binding.contains("_right") { return "Right side, twice" }
+        if binding.contains("_left") { return "Left side, twice" }
+        return "Twice"
     }
 }

@@ -8,6 +8,8 @@ import SwiftUI
 /// and arrive through `meetingRows`, which is the last thing on the page.
 struct EssentialsView<MeetingRows: View>: View {
     let store: SettingsStore
+    /// The page with every other shortcut, which another slice owns.
+    var onOpenShortcuts: () -> Void = {}
     @ViewBuilder var meetingRows: () -> MeetingRows
 
     var body: some View {
@@ -28,8 +30,7 @@ struct EssentialsView<MeetingRows: View>: View {
                         set: { value in Task { await store.setPushToTalk(value) } }
                     )
                 )
-                ShortcutCaptureRow(store: store, id: "work_quick_entry")
-                ShortcutCaptureRow(store: store, id: "work_ramble")
+                ActionRow(title: "All shortcuts", detail: "Cancel, send, modes, tasks and meetings.", button: "Open", action: onOpenShortcuts)
                 MicrophoneRow(store: store)
                 /// The spoken language, beside the microphone that hears it.
                 /// The list narrows to what the loaded model can recognize,

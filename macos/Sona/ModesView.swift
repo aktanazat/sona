@@ -652,7 +652,7 @@ struct ModeChord: View {
         if binding.isEmpty {
             Text("Not set").metaText()
         } else {
-            Shortcut(binding)
+            BindingChord(binding)
         }
     }
 }
@@ -794,8 +794,8 @@ struct ModeRecognitionBlock: View {
         Group {
             ToggleRow(title: "Translate to English", isOn: store.field(\.asr.translateToEnglish, false))
             ToggleRow(
-                title: "Literal punctuation",
-                detail: "Convert spoken punctuation such as comma and question mark before vocabulary corrections.",
+                title: "Spoken punctuation and lists",
+                detail: "Say comma, period, new line, or quote … end quote. A list you number aloud is written as a numbered list.",
                 isOn: store.field(\.asr.literalPunctuation, false))
             ToggleRow(title: "Remove filler words", isOn: store.field(\.asr.fillerWordRemovalEnabled, false))
             ToggleRow(title: "Voice activity detection", isOn: store.field(\.asr.vadEnabled, false))

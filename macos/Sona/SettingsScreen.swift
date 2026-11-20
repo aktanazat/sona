@@ -15,11 +15,17 @@ struct SettingsScreen: View {
         case .profile:
             ProfileSettingsView()
         case .essentials:
-            EssentialsView(store: model.settings) {
+            EssentialsView(store: model.settings, onOpenShortcuts: { model.showSettings(.shortcuts) }) {
                 MeetingDetectionEssentials(store: model.meetingSettings)
             }
+        case .shortcuts:
+            ShortcutsSettingsView(store: model.settings)
         case .dictation:
-            DictationSettingsView(store: model.settings, onOpenModes: { model.showSettings(.modes) }) {
+            DictationSettingsView(
+                store: model.settings,
+                onOpenModes: { model.showSettings(.modes) },
+                onOpenShortcuts: { model.showSettings(.shortcuts) }
+            ) {
                 SettingsCaptureRows(store: model.settings)
             }
         case .models:

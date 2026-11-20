@@ -92,12 +92,12 @@ struct ShortcutCaptureRow: View {
                     if capture.candidate.isEmpty {
                         Text("Press your keys…").metaText(Theme.accent)
                     } else {
-                        Shortcut(BindingCopy.chord(capture.candidate))
+                        BindingChord(capture.candidate)
                     }
                 } else if record.currentBinding.isEmpty {
                     Text("Not set").metaText(Theme.inkTertiary)
                 } else {
-                    Shortcut(BindingCopy.chord(record.currentBinding))
+                    BindingChord(record.currentBinding)
                 }
             }
             .padding(.horizontal, capture.recording ? 10 : 0)
@@ -111,7 +111,7 @@ struct ShortcutCaptureRow: View {
         }
         .buttonStyle(.plain)
         .disabled(disabled || capture.recording || store.isBusy("binding_\(id)"))
-        .help(capture.recording ? "Press Escape to keep the current shortcut" : "Record a new shortcut for \(BindingCopy.title(record))")
+        .help(capture.recording ? "Tap a key twice for a double tap. Press Escape to keep the current shortcut" : "Record a new shortcut for \(BindingCopy.title(record))")
         .onDisappear {
             /// Leaving the page mid-capture would leave a listener running
             /// with nothing reading it, and every shortcut suspended.
@@ -151,10 +151,10 @@ struct ShortcutCaptureRow: View {
 
     /// One key event from the core's own listener.
     ///
-    /// A chord with a key in it commits when that key comes back up; a
-    /// modifier-only chord commits when the last modifier does. Committing on
-    /// the first release would store the modifier alone whenever the key
-    /// event never arrived, which is exactly what secure input causes.
+    /// A chord with a key in it is released when that key comes back up; a
+    /// modifier-only chord when the last modifier does. Releasing on the
+    /// first key up would store the modifier alone whenever the key event
+    /// never arrived, which is exactly what secure input causes.
     private func handle(_ event: HandyKeysEvent) async {
         guard capture.recording else { return }
         /// The same way out as the window listener has: Escape alone keeps
@@ -164,19 +164,52 @@ struct ShortcutCaptureRow: View {
             return
         }
         if event.isKeyDown, !event.hotkeyString.isEmpty {
+            if !capture.tapped.isEmpty {
+                if event.hotkeyString == capture.tapped {
+                    capture.doubled = true
+                    capture.candidate = BindingCopy.doubleTapPrefix + capture.tapped
+                    return
+                }
+                /// A modifier going down again on the way to a tapped key
+                /// chord is part of the second tap; any other chord starts
+                /// the recording over.
+                let onTheWay = event.key == nil && capture.tapped == capture.keyed
+                if !onTheWay {
+                    capture.tapped = ""
+                    capture.keyed = ""
+                    capture.tapGeneration += 1
+                }
+            }
             if event.key == nil {
                 capture.modifierOnly = event.hotkeyString
             } else {
                 capture.keyed = event.hotkeyString
             }
-            capture.candidate = event.hotkeyString
+            if capture.tapped.isEmpty { capture.candidate = event.hotkeyString }
         } else if !event.isKeyDown, event.key != nil {
             let chord = capture.keyed.isEmpty ? event.hotkeyString : capture.keyed
-            if !chord.isEmpty { await commit(chord) }
+            if !chord.isEmpty { await released(chord) }
         } else if !event.isKeyDown, event.key == nil, event.modifiers.isEmpty,
                   capture.keyed.isEmpty, !capture.modifierOnly.isEmpty {
-            await commit(capture.modifierOnly)
+            await released(capture.modifierOnly)
         }
+    }
+
+    /// A chord let go. The same chord pressed again inside the core's
+    /// double-tap window records a double tap; once the window passes
+    /// without it, the chord is recorded as pressed once.
+    private func released(_ chord: String) async {
+        if capture.doubled, chord == capture.tapped {
+            await commit(BindingCopy.doubleTapPrefix + chord)
+            return
+        }
+        capture.tapped = chord
+        capture.doubled = false
+        capture.tapGeneration += 1
+        let generation = capture.tapGeneration
+        try? await Task.sleep(for: ShortcutCaptureSession.doubleTapWindow)
+        guard capture.recording, capture.tapGeneration == generation, !capture.doubled else { return }
+        await commit(chord)
     }
 
     /// One key event read from this window, for the Tauri layer.
@@ -240,11 +273,31 @@ struct ShortcutCaptureRow: View {
         capture.candidate = ""
         capture.keyed = ""
         capture.modifierOnly = ""
+        capture.tapped = ""
+        capture.doubled = false
         capture.held = []
         capture.recorded = []
         switch store.settings.keyboardImplementation {
         case .handyKeys: await store.stopHandyKeysRecording()
         case .tauri: await store.resumeAllBindings()
+        }
+    }
+}
+
+/// A stored binding as key caps, with the note a double tap needs.
+struct BindingChord: View {
+    let binding: String
+
+    init(_ binding: String) {
+        self.binding = binding
+    }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Shortcut(BindingCopy.chord(binding))
+            if let note = BindingCopy.repeatNote(binding) {
+                Text(note).metaText(Theme.inkSecondary)
+            }
         }
     }
 }
@@ -260,6 +313,14 @@ final class ShortcutCaptureSession {
     /// a key's release never commits the modifiers alone.
     var keyed = ""
     var modifierOnly = ""
+    /// A chord released once, waiting out the window for its second tap.
+    var tapped = ""
+    var doubled = false
+    /// Which release the pending window belongs to, so an older window
+    /// never commits a newer chord.
+    var tapGeneration = 0
+    /// The core's longest gap between the two taps of a double tap.
+    static let doubleTapWindow = Duration.milliseconds(400)
     /// Still down, and everything that went down during this capture.
     var held: [String] = []
     var recorded: [String] = []

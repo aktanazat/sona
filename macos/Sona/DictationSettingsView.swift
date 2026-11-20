@@ -6,6 +6,8 @@ struct DictationSettingsView<DataRows: View>: View {
     let store: SettingsStore
     /// The door to the mode editor, which another slice owns.
     var onOpenModes: () -> Void = {}
+    /// The page that holds every shortcut, cancel and command included.
+    var onOpenShortcuts: () -> Void = {}
     @ViewBuilder var dataRows: () -> DataRows
 
     var body: some View {
@@ -56,7 +58,7 @@ struct DictationSettingsView<DataRows: View>: View {
             }
             PageSection("Shortcuts and commands") {
                 Card {
-                    ShortcutCaptureRow(store: store, id: "cancel")
+                    ActionRow(title: "Shortcuts", detail: "Cancel, send, command and every other key.", button: "Open", action: onOpenShortcuts)
                     ToggleRow(
                         title: "Voice command mode",
                         detail: "Hold the command shortcut and say what to change about the text you have selected, or ask a question.",
@@ -66,7 +68,6 @@ struct DictationSettingsView<DataRows: View>: View {
                         )
                     )
                     if store.settings.commandModeEnabled {
-                        ShortcutCaptureRow(store: store, id: "command")
                         ToggleRow(
                             title: "Show answers in chat",
                             detail: "A question opens the chat with its answer. Nothing is typed over your text. Off, every command edits the selection.",
