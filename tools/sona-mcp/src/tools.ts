@@ -1058,7 +1058,7 @@ function lifecycleTools(): ToolDefinition[] {
       name: "sona_work_inbox",
       title: "Read Sona's inbox",
       description:
-        "Read the inbox, newest first, with the unread count: status changes, comments, mentions, assignments and other field changes (kind changed, with field) that Sona or agents made on tasks the user is subscribed to; an agent's question waiting for an answer (question, to holds it); a reminder firing (reminder, on a task or with subject a project, initiative or note) and open work the user owes coming due today (due); an automation run ending (automation, with automation name and error, task null when the run was about no task); a followed project's update or status change (project, field update or status), a task joining a followed view or done or canceled in it (view, field added, done or canceled), an agent editing a followed note (note); and the weekly project digest (digest, task null, with digest holding each project's status, latest update, tasks done and risks, as sona_work_digest shows). Each notice has priority true when it needs the user: mentions, assignments, questions, reminders and due work. The user's own changes never notify. Snoozed ones stay out until they wake, archived ones until asked for.",
+        "Read the inbox, newest first, with the unread count: status changes, comments, mentions, assignments and other field changes (kind changed, with field) that Sona or agents made on tasks the user is subscribed to; an agent's question waiting for an answer (question, to holds it); a reminder firing (reminder, on a task or with subject a project, initiative or note) and open work the user owes coming due today (due); an automation run ending (automation, with automation name and error, task null when the run was about no task); a followed project's update or status change (project, field update or status), a task joining a followed view or done or canceled in it (view, field added, done or canceled), an agent editing a followed note (note); what Sona closed or archived by itself (housekeeping, to holds the summary, task null for a day's housekeeping or the parent whose sub-tasks it canceled; undo with sona_housekeeping_undo); and the weekly project digest (digest, task null, with digest holding each project's status, latest update, tasks done and risks, as sona_work_digest shows). Each notice has priority true when it needs the user: mentions, assignments, questions, reminders and due work. The user's own changes never notify. Snoozed ones stay out until they wake, archived ones until asked for.",
       optIn: true,
       inputSchema: {
         type: "object",
@@ -1073,7 +1073,7 @@ function lifecycleTools(): ToolDefinition[] {
           kind: {
             type: "string",
             description:
-              "Only these kinds, comma-separated: status, comment, mention, assigned, changed, reminder, due, automation, digest, question, project, view, note.",
+              "Only these kinds, comma-separated: status, comment, mention, assigned, changed, reminder, due, automation, digest, question, project, view, note, housekeeping.",
           },
           project: { type: "string", description: "Only notices about tasks in this project, or the project itself, by name or id." },
           task_priority: {
@@ -1105,7 +1105,7 @@ function lifecycleTools(): ToolDefinition[] {
     {
       name: "sona_work_inbox_settings_save",
       title: "Change Sona's inbox settings",
-      description: `Change which notice kinds reach the inbox (kinds: every kind that should, comma-separated, or all; the rest are never posted), which show a banner on the Mac (banners: comma-separated, all or none), and the quiet hours when banners wait (quiet_hours: HH:MM-HH:MM on the Mac's clock, or off). Kinds: status, comment, mention, assigned, changed, reminder, due, automation, digest, question, project, view, note. Name at least one. ${ORGANIZE_WRITES}`,
+      description: `Change which notice kinds reach the inbox (kinds: every kind that should, comma-separated, or all; the rest are never posted), which show a banner on the Mac (banners: comma-separated, all or none), and the quiet hours when banners wait (quiet_hours: HH:MM-HH:MM on the Mac's clock, or off). Kinds: status, comment, mention, assigned, changed, reminder, due, automation, digest, question, project, view, note, housekeeping. Name at least one. ${ORGANIZE_WRITES}`,
       mutates: "changes",
       optIn: true,
       inputSchema: {
@@ -1339,7 +1339,7 @@ const AGENT_LOOP_WRITES =
   "This changes the user's saved automations in Sona, nothing else. It needs Settings > Agents > External access and External mutations; with either off Sona refuses with consent_required and names the setting. dry_run:true shows the result without writing.";
 
 const AGENT_LOOP_KIND =
-  "An automation is a saved agent workflow: when its trigger fires, the running Sona app has its in-app agent carry out the automation's prompt, using only the tools on the automation's list. With sona_work_create or sona_work_update on the list it may propose new tasks or changes to tasks; they wait in Triage for the user and are never applied by the run. It is not a meeting commitment loop (sona_loop_resolve, sona_meeting_loop_*).";
+  "An automation is a saved agent workflow: when its trigger fires, the running Sona app has its in-app agent carry out the automation's prompt, using only the tools on the automation's list. With sona_work_create or sona_work_update on the list it may propose new tasks or changes to tasks; they wait in Triage for the user and are never applied by the run. With sona_scratchpad_update_body, sona_project_save or sona_project_update_save it may propose an addition to a note, a project description or a project update; they wait in sona_doc_proposal_list. It is not a meeting commitment loop (sona_loop_resolve, sona_meeting_loop_*).";
 
 const AGENT_LOOP = {
   type: "string",
@@ -1371,6 +1371,46 @@ function onAgentLoop(
       "--json",
       "--",
       text(input, "automation", true),
+    ],
+  };
+}
+
+const TRIAGE_AUTO_KIND =
+  "Triage sorts new tasks by itself: rules run first, then, for the fields sona_setting triage-auto-apply names, Sona's own suggestions once every one of at least three similar tasks agrees. It fills only empty fields, as Sona's change, and each fill can be undone with sona_triage_undo.";
+
+const TRIAGE_AUTO_WRITES =
+  "Needs Settings > Agents > External access and External mutations; with either off Sona refuses with consent_required and names the setting. dry_run:true shows the result without writing.";
+
+function triageById(
+  name: string,
+  verb: "triage-rule-delete" | "triage-undo" | "housekeeping-undo",
+  title: string,
+  what: string,
+  mutates: "changes" | "destroys",
+): ToolDefinition {
+  return {
+    name,
+    title,
+    description: `${what} ${TRIAGE_AUTO_WRITES}`,
+    mutates,
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "The id." },
+        dry_run: DRY_RUN,
+        operation_id: OPERATION_ID,
+      },
+      required: ["id"],
+      additionalProperties: false,
+    },
+    argv: (input, agent) => [
+      "work",
+      verb,
+      ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+      ...writing(input, agent),
+      "--json",
+      "--",
+      text(input, "id", true),
     ],
   };
 }
@@ -1437,8 +1477,13 @@ const SETTING_KEYS = [
   "dictation-prompt",
   "keyword-trackers",
   "auto-close-parents",
+  "close-subtasks-with-parent",
+  "start-parent-with-subtask",
   "project-digest",
   "project-digest-day",
+  "auto-close-stale-days",
+  "auto-archive-days",
+  "triage-auto-apply",
   "meeting-prep",
 ] as const;
 
@@ -8063,12 +8108,17 @@ export const TOOLS: readonly ToolDefinition[] = [
             "comment-added",
             "project-status-changed",
             "meeting-ended",
+            "initiative-status",
+            "cycle-started",
+            "cycle-ended",
+            "milestone-done",
+            "project-update",
           ],
-          description: "Run when this happens instead of on a schedule. assigned is a task getting an owner or a delegate; meeting-ended fires once per meeting, when its notes are ready.",
+          description: "Run when this happens instead of on a schedule. assigned is a task getting an owner or a delegate; meeting-ended fires once per meeting, when its notes are ready; cycle-started and cycle-ended fire once per cycle, on its first or last day; project-update is a posted project update.",
         },
         to: {
           type: "string",
-          description: "With status-changed, only a change to this task status; with project-status-changed, to this project status. Left out, any change.",
+          description: "With status-changed, only a change to this task status; with project-status-changed, to this project status; with initiative-status, to this initiative status (planned, active or completed). Left out, any change.",
         },
         label: {
           type: "string",
@@ -8082,7 +8132,7 @@ export const TOOLS: readonly ToolDefinition[] = [
         if_project: {
           type: "array",
           items: { type: "string" },
-          description: "Run only for tasks in, or projects that are, one of these projects. Task and project events only. An empty list clears it.",
+          description: "Run only for tasks in, or projects, milestones and project updates of, one of these projects. Task and project events only. An empty list clears it.",
         },
         if_status: {
           type: "array",
@@ -8092,7 +8142,12 @@ export const TOOLS: readonly ToolDefinition[] = [
         tools: {
           type: "array",
           items: { type: "string" },
-          description: "The Sona tool names the agent may use on a run, such as sona_search or sona_meeting; sona_work_create and sona_work_update let it propose new tasks and changes into Triage, never applied by the run. Sona refuses names it does not offer. An empty list clears it.",
+          description: "The Sona tool names the agent may use on a run, such as sona_search or sona_meeting; sona_work_create and sona_work_update let it propose new tasks and changes into Triage, and sona_scratchpad_update_body, sona_project_save and sona_project_update_save let it propose note additions, project descriptions and project updates, never applied by the run. Sona refuses names it does not offer. An empty list clears it.",
+        },
+        reasoning: {
+          type: "string",
+          enum: ["default", "low", "medium", "high"],
+          description: "How hard the agent thinks on a run; default leaves it to the model.",
         },
         dry_run: DRY_RUN,
         operation_id: OPERATION_ID,
@@ -8116,6 +8171,7 @@ export const TOOLS: readonly ToolDefinition[] = [
       ...joined("--if-project", input, "if_project"),
       ...joined("--if-status", input, "if_status"),
       ...joined("--tools", input, "tools"),
+      ...assigned("--reasoning", text(input, "reasoning")),
       ...(flag(input, "dry_run") ? ["--dry-run"] : []),
       ...writing(input, agent),
       "--json",
@@ -8162,6 +8218,115 @@ export const TOOLS: readonly ToolDefinition[] = [
       requiredCount(input, "version"),
     ],
   },
+  {
+    name: "sona_automation_copy",
+    title: "Copy a Sona automation",
+    description: `Copy an automation with its prompt, trigger, conditions, tools and reasoning under a new name. The copy starts turned off, so one event never runs both; turn it on with sona_automation_enable. ${AGENT_LOOP_KIND} ${AGENT_LOOP_WRITES}`,
+    mutates: "changes",
+    inputSchema: {
+      type: "object",
+      properties: {
+        automation: AGENT_LOOP,
+        name: { type: "string", description: "The copy's name. Left out, \"Copy of\" and the original's name." },
+        dry_run: DRY_RUN,
+        operation_id: OPERATION_ID,
+      },
+      required: ["automation"],
+      additionalProperties: false,
+    },
+    argv: (input, agent) => [
+      "work",
+      "automation-copy",
+      ...assigned("--name", text(input, "name")),
+      ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+      ...writing(input, agent),
+      "--json",
+      "--",
+      text(input, "automation", true),
+    ],
+  },
+  {
+    name: "sona_doc_proposal_list",
+    title: "List proposed note and project edits",
+    description:
+      "List what automations proposed and the user has not decided: additions to the end of a note, new project descriptions and drafted project updates, oldest first. Each has an id, kind, target, the automation that proposed it, and the text. Only the user accepts or declines them, in Sona's Triage. Requires Settings > Agents > External access.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    argv: () => ["work", "doc-proposals", "--json"],
+  },
+  {
+    name: "sona_triage_rule_list",
+    title: "List Sona triage rules",
+    description: `List triage routing rules (words, a meeting title or a folder that sends new tasks to a project, a label or an owner) and auto_apply, the fields Sona fills by itself when every similar task agrees. Change auto_apply with sona_setting triage-auto-apply. ${TRIAGE_AUTO_KIND}`,
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    argv: () => ["work", "triage-rules", "--json"],
+  },
+  {
+    name: "sona_triage_rule_save",
+    title: "Save a Sona triage rule",
+    description: `Create a triage rule, or change one by rule id. A rule needs at least one of project, label or owner. ${TRIAGE_AUTO_KIND} ${TRIAGE_AUTO_WRITES}`,
+    mutates: "changes",
+    inputSchema: {
+      type: "object",
+      properties: {
+        value: { type: "string", description: "What to look for: words, a meeting title, or a folder name." },
+        match: {
+          type: "string",
+          enum: ["words", "meeting", "folder"],
+          description: "Where to look: the task's title and details, the title of the meeting it came from, or that meeting's folder. Left out, words.",
+        },
+        rule: { type: "string", description: "The rule to change, by id from sona_triage_rule_list. Left out, a new rule." },
+        project: { type: "string", description: "The project matching tasks go to, by name or id." },
+        label: { type: "string", description: "The label matching tasks get, by name or id." },
+        owner: { type: "string", description: "Who matching tasks go to: me or a person." },
+        dry_run: DRY_RUN,
+        operation_id: OPERATION_ID,
+      },
+      required: ["value"],
+      additionalProperties: false,
+    },
+    argv: (input, agent) => [
+      "work",
+      "triage-rule-save",
+      ...assigned("--match", text(input, "match")),
+      ...assigned("--rule", text(input, "rule")),
+      ...assigned("--project", text(input, "project")),
+      ...assigned("--label", text(input, "label")),
+      ...assigned("--owner", text(input, "owner")),
+      ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+      ...writing(input, agent),
+      "--json",
+      "--",
+      text(input, "value", true),
+    ],
+  },
+  triageById(
+    "sona_triage_rule_delete",
+    "triage-rule-delete",
+    "Delete a Sona triage rule",
+    "Delete a triage rule, by id from sona_triage_rule_list. Tasks it already sorted keep their fields.",
+    "destroys",
+  ),
+  {
+    name: "sona_triage_applied",
+    title: "List fields Sona filled in Triage",
+    description: `List the tasks in Triage where Sona filled a project, label or owner by itself, with each change's id, field, value and reason. ${TRIAGE_AUTO_KIND}`,
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    argv: () => ["work", "triage-applied", "--json"],
+  },
+  triageById(
+    "sona_triage_undo",
+    "triage-undo",
+    "Undo a field Sona filled in Triage",
+    "Put a field back as it was before Sona filled it, by change id from sona_triage_applied, and set the suggestion behind it aside so it is not filled again.",
+    "changes",
+  ),
+  triageById(
+    "sona_housekeeping_undo",
+    "housekeeping-undo",
+    "Undo what Sona closed or archived by itself",
+    "Put back the tasks, projects and cycles Sona closed or archived by itself, by the id of its housekeeping notice from sona_work_inbox: a day of housekeeping, or the sub-tasks it canceled with their parent. Work changed since stays as it is, and housekeeping leaves what was put back alone.",
+    "changes",
+  ),
   sharePage(false),
   sharePage(true),
   {
