@@ -58,7 +58,7 @@ pub(crate) fn search(words: &str, limit: usize) -> Vec<HelpSection> {
             (score > 0).then_some((score, section))
         })
         .collect();
-    scored.sort_by(|left, right| right.0.cmp(&left.0));
+    scored.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
     scored
         .into_iter()
         .take(limit)
@@ -168,10 +168,9 @@ fn guide_sections(readme: &str) -> Vec<HelpSection> {
         } else if let Some(title) = line.strip_prefix("## ") {
             chapter = title.trim();
             Some((chapter == "Command line").then(|| chapter.to_string()))
-        } else if let Some(title) = line.strip_prefix("### ") {
-            Some((chapter == "What Sona does").then(|| capitalized(title.trim())))
         } else {
-            None
+            line.strip_prefix("### ")
+                .map(|title| (chapter == "What Sona does").then(|| capitalized(title.trim())))
         };
         match new_heading {
             Some(next) => {
@@ -205,10 +204,8 @@ fn push_parts(sections: &mut Vec<HelpSection>, title: &str, body: &[&str]) {
     for line in body {
         let line = line.replace("**", "").replace('`', "");
         let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with("- ") {
-            if !current.is_empty() {
-                blocks.push(std::mem::take(&mut current));
-            }
+        if (trimmed.is_empty() || trimmed.starts_with("- ")) && !current.is_empty() {
+            blocks.push(std::mem::take(&mut current));
         }
         if trimmed.is_empty() {
             continue;
