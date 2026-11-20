@@ -255,25 +255,24 @@ private struct PhoneDictationSettings: View {
                     .foregroundStyle(Theme.textSecondary)
                 }
                 .listRowBackground(Theme.surface)
-                Section {
-                    ForEach(TypingLanguage.allCases) { language in
-                        Toggle(language.name, isOn: Binding(
-                            get: { typingLanguages.contains(language) },
-                            set: { on in
-                                let keyboard = KeyboardLanguages.shared()
-                                keyboard.enabled = on ? typingLanguages + [language] : typingLanguages.filter { $0 != language }
-                                typingLanguages = keyboard.enabled
-                            }
-                        ))
-                        .disabled(typingLanguages == [language])
+                if TypingLanguage.allCases.count > 1 {
+                    Section {
+                        ForEach(TypingLanguage.allCases) { language in
+                            Toggle(language.name, isOn: Binding(
+                                get: { typingLanguages.contains(language) },
+                                set: { on in
+                                    let keyboard = KeyboardLanguages.shared()
+                                    keyboard.enabled = on ? typingLanguages + [language] : typingLanguages.filter { $0 != language }
+                                    typingLanguages = keyboard.enabled
+                                }
+                            ))
+                            .disabled(typingLanguages == [language])
+                        }
+                    } header: {
+                        Text("keyboard.languages")
                     }
-                } header: {
-                    Text("keyboard.languages")
-                } footer: {
-                    Text("keyboard.languagesFooter")
-                        .foregroundStyle(Theme.textSecondary)
+                    .listRowBackground(Theme.surface)
                 }
-                .listRowBackground(Theme.surface)
                 Section {
                     Picker("dictation.language", selection: $activeLanguage) {
                         ForEach(languages, id: \.self) { Text(Self.languageName($0)).tag($0) }
@@ -281,9 +280,6 @@ private struct PhoneDictationSettings: View {
                     .disabled(dictation.isBusy)
                     .onChange(of: activeLanguage) { _, value in DictationPreferences.activeLanguage = value }
                     Button("dictation.chooseLanguages") { choosesLanguages = true }
-                } footer: {
-                    Text("dictation.oneLanguage")
-                        .foregroundStyle(Theme.textSecondary)
                 }
                 .listRowBackground(Theme.surface)
                 Section {

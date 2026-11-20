@@ -71,24 +71,23 @@ struct DictationJoiningTests {
     /// right after it, and hear about changes the host announces.
     @MainActor
     struct Host {
-        let lagging: Bool
-        var text = ""
-        var shown = ""
+        /// How many of the keyboard's edits the host reports late; nil never updates.
+        let lag: Int?
+        var history: [String]
         var echo = FieldEcho()
 
-        init(lagging: Bool, text: String = "") {
-            self.lagging = lagging
-            self.text = text
-            shown = text
+        init(lag: Int?, text: String = "") {
+            self.lag = lag
+            history = [text]
         }
 
+        var text: String { history[history.count - 1] }
+        var shown: String { lag.map { history[max(0, history.count - 1 - $0)] } ?? history[0] }
         var behind: Bool { echo.behind(before: shown, after: "") }
 
         mutating func keyboard(_ edit: TypingSession.Edit) {
             echo.edited(before: shown, after: "", deleting: edit.deleteCount, inserting: edit.insert)
-            let previous = text
-            text = String(text.dropLast(edit.deleteCount)) + edit.insert
-            shown = lagging ? previous : text
+            history.append(String(text.dropLast(edit.deleteCount)) + edit.insert)
             echo.hostReported(before: shown, after: "", ownEdit: true)
         }
 
@@ -98,39 +97,47 @@ struct DictationJoiningTests {
 
         /// The app changed the field and the host said so.
         mutating func app(sets text: String) {
-            self.text = text
-            shown = text
+            history = [text]
             echo.hostReported(before: shown, after: "", ownEdit: false)
         }
 
         /// The app changed the field without a word to the keyboard.
         mutating func appSilently(sets text: String) {
-            self.text = text
-            shown = text
+            history = [text]
         }
+    }
+
+    @Test("with a host two edits behind, or one that never updates, dictated words neither glue on nor double their space", arguments: [2, nil] as [Int?])
+    func farBehindHostJoins(lag: Int?) {
+        var host = Host(lag: lag, text: "Call ")
+        host.keyboard(TypingSession.Edit(insert: "Dauren"))
+        host.dictate("école")
+        host.dictate("Meet me.")
+        #expect(host.text == "Call Dauren école Meet me.")
     }
 
     @Test("with a host one edit behind, dictated words neither glue on nor double their space")
     func laggingHostJoins() {
-        var host = Host(lagging: true, text: "Call Daur")
+        var host = Host(lag: 1, text: "Call Daur")
         host.keyboard(TypingSession.Edit(deleteCount: 4, insert: "Dauren "))
         host.dictate("école")
         host.dictate("Meet me.")
         #expect(host.text == "Call Dauren école Meet me.")
     }
 
-    @Test("while the host is behind, a space does not correct the stale word it reports, which would delete the wrong letters")
-    func laggingHostGetsNoCorrection() throws {
+    @Test("while the host is behind, even after two quick keys, a space does not correct the stale word it reports", arguments: [1, 2, nil] as [Int?])
+    func laggingHostGetsNoCorrection(lag: Int?) throws {
         var session = TypingSession(corrector: try #require(TypingCorrector(language: "en-US")))
-        var host = Host(lagging: true, text: "I said becaus")
-        host.keyboard(session.type("e"))
+        var host = Host(lag: lag, text: "I said beca")
+        host.keyboard(session.type("u"))
+        host.keyboard(session.type("s"))
         #expect(host.behind)
         #expect(session.end(with: " ", before: host.shown, corrects: true, hostBehind: host.behind) == TypingSession.Edit(insert: " "))
     }
 
     @Test("a host that shows the edit ends the memory, so a field it clears without a word starts fresh")
     func silentClearAfterHostCaughtUp() {
-        var host = Host(lagging: false)
+        var host = Host(lag: 0)
         host.dictate("Meet me at noon.")
         host.appSilently(sets: "")
         host.dictate("See you.")
@@ -139,13 +146,13 @@ struct DictationJoiningTests {
 
     @Test("a change the host announces, a cleared field or a moved cursor, ends the memory even while the host is behind")
     func announcedChangeEndsMemory() {
-        var host = Host(lagging: true)
+        var host = Host(lag: 1)
         host.dictate("Meet me at noon.")
         host.app(sets: "")
         host.dictate("See you.")
         #expect(host.text == "See you.")
 
-        var moved = Host(lagging: true, text: "Call ")
+        var moved = Host(lag: 1, text: "Call ")
         moved.keyboard(TypingSession.Edit(insert: "Dauren"))
         moved.app(sets: "Call")
         moved.dictate("Meet")
@@ -154,7 +161,7 @@ struct DictationJoiningTests {
 
     @Test("another empty field starts fresh")
     func switchingBetweenEmptyFields() {
-        var host = Host(lagging: true)
+        var host = Host(lag: 1)
         host.dictate("Meet me.")
         host.echo.forget()
         host.appSilently(sets: "")

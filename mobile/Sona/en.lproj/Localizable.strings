@@ -162,7 +162,6 @@
 "keyboard.listening" = "Listening…";
 "keyboard.language %@" = "Language: %@";
 "keyboard.languages" = "Keyboard languages";
-"keyboard.languagesFooter" = "The language key switches between the languages that are on";
 "keyboard.sessionEnded" = "The microphone session ended. Tap Dictate to open Sona again.";
 "keyboard.otherField" = "This text started in another field. Insert it here only if this is where you want it.";
 "keyboard.storageFailed" = "The keyboard can't reach Sona's storage. Open Sona, then try again";
@@ -170,7 +169,6 @@
 "keyboard.setupReady" = "Then tap Dictate in the Sona keyboard";
 "dictation.language" = "Speaking language";
 "dictation.chooseLanguages" = "Choose languages";
-"dictation.oneLanguage" = "Keep several languages here, then choose the one you will speak. Languages are not detected automatically.";
 "dictation.style" = "Writing style";
 "dictation.noStyle" = "Keep my words";
 "dictation.styleUnavailable" = "Writing styles need Apple Intelligence enabled on a supported iPhone. Your vocabulary and snippets still work.";

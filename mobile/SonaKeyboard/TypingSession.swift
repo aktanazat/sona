@@ -162,41 +162,50 @@ struct TypingSession {
 /// comes in, and a word joined to that stale text either glues on ("écoleMeet") or
 /// doubles its space ("Dauren  école").
 ///
-/// It never decides what to delete. It holds only while the host, before and after the
-/// cursor, shows exactly the text from before the keyboard's last edit; a report that shows
-/// anything else, a change the keyboard did not make, or a new field ends it for good.
+/// It never decides what to delete. It holds while the host, before and after the cursor,
+/// shows the field as it was before one of the keyboard's edits since the host last caught
+/// up, however many edits behind; the host showing the latest edit, a report of anything
+/// else, a change the keyboard did not make, or a new field ends it for good.
 struct FieldEcho {
     private struct Report: Equatable {
         let before: String
         let after: String
     }
 
-    private var stale: Report?
+    /// The field before each of the keyboard's edits the host has not shown yet, oldest
+    /// first, so a host several edits behind still reads as behind. A host that never
+    /// updates keeps showing the oldest, which is therefore never dropped.
+    private var pending: [Report] = []
+    private static let pendingLimit = 64
     private var written = ""
 
     /// The keyboard changed the field, which the host showed as `before` and `after` the
     /// cursor: it deleted `deleting` characters before the cursor and inserted `inserting`.
     mutating func edited(before: String, after: String, deleting: Int, inserting: String) {
         let known = joining(before: before, after: after)
+        if !behind(before: before, after: after) { pending = [] }
+        pending.append(Report(before: known, after: after))
+        if pending.count > Self.pendingLimit { pending.remove(at: 1) }
         written = String(known.dropLast(deleting)) + inserting
-        stale = Report(before: known, after: after)
     }
 
     /// The host reported the field. A report while the keyboard's own edit is going through
-    /// is checked against it; any other report is a change the keyboard did not make.
+    /// keeps the memory only if the host is still behind; any other report is a change the
+    /// keyboard did not make.
     mutating func hostReported(before: String, after: String, ownEdit: Bool) {
-        if ownEdit, stale == Report(before: before, after: after) { return }
-        stale = nil
+        if ownEdit, behind(before: before, after: after) { return }
+        pending = []
     }
 
     /// The field the keyboard types into is a different one.
     mutating func forget() {
-        stale = nil
+        pending = []
     }
 
-    /// Whether the host still shows the field as it was before the keyboard's last edit.
+    /// Whether the host still shows the field as it was before one of the keyboard's edits
+    /// it has not caught up with.
     func behind(before: String, after: String) -> Bool {
-        stale == Report(before: before, after: after)
+        pending.contains(Report(before: before, after: after))
     }
 
     /// The text before the cursor to join a word to: what the keyboard's last edit left,

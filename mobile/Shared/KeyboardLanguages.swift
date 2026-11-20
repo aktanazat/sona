@@ -48,8 +48,6 @@ enum TypingLanguage: String, CaseIterable, Identifiable {
     }
 }
 
-/// Which typing languages the keyboard offers, chosen in the app. The keyboard reads the
-/// list through the shared container, so it needs Full Access to see more than English.
 struct KeyboardLanguages {
     static let enabledKey = "sona.keyboard.languages"
     let defaults: UserDefaults
