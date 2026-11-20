@@ -1,4 +1,4 @@
-//! glibc allocator tuning (Linux only).
+//! Allocator tuning: glibc's mmap threshold, and returning freed pages.
 //!
 //! Each dictation allocates multi-megabyte transient buffers — the captured
 //! 16 kHz PCM (~64 KB per second, held twice: once for transcription, once
@@ -16,8 +16,9 @@
 //! (issue #1792 — measured at ~15 MB retained per 2-minute dictation;
 //! pinning the threshold reduced that to ~0.5 MB).
 //!
-//! Both entry points are no-ops on non-glibc targets (Windows, macOS, musl):
-//! this failure mode is specific to glibc's dynamic-threshold heuristic.
+//! `init_allocator` is a no-op off glibc: this failure mode is specific to
+//! glibc's dynamic-threshold heuristic. `trim_freed_memory` also works on
+//! macOS, whose zones keep freed pages too.
 
 /// Pin glibc's mmap threshold so large transient buffers keep taking the
 /// mmap path and are returned to the OS as soon as they are freed.
@@ -36,11 +37,15 @@ pub fn init_allocator() {
 #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
 pub fn init_allocator() {}
 
-/// Return freed-but-cached malloc arena memory to the OS.
+/// Return freed-but-cached malloc memory to the OS.
 ///
-/// Called once per finished transcription pipeline (see FinishGuard); it
-/// sweeps whatever smaller-than-threshold churn still accumulates in the
-/// arenas. Takes on the order of a millisecond, off the main thread.
+/// Called once per finished transcription pipeline (see FinishGuard) and
+/// after a model loads, unloads or drops its run buffers. On Linux it sweeps
+/// whatever smaller-than-threshold churn still accumulates in the arenas. On
+/// macOS the default zones keep freed pages dirty: after loading
+/// whisper-small.en and transcribing once, 70 MB of the engine's footprint
+/// was freed memory still held by malloc, and it stayed after the model
+/// unloaded. Takes on the order of a millisecond, off the main thread.
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 pub fn trim_freed_memory() {
     // SAFETY: malloc_trim has no pointer arguments and is thread-safe; it returns only whole free pages to the OS.
@@ -49,5 +54,17 @@ pub fn trim_freed_memory() {
     }
 }
 
-#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+#[cfg(target_os = "macos")]
+pub fn trim_freed_memory() {
+    extern "C" {
+        fn malloc_zone_pressure_relief(zone: *mut libc::c_void, goal: libc::size_t)
+            -> libc::size_t;
+    }
+    // SAFETY: a null zone releases free pages across all zones with goal 0; thread-safe and dereferences nothing.
+    unsafe {
+        malloc_zone_pressure_relief(std::ptr::null_mut(), 0);
+    }
+}
+
+#[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
 pub fn trim_freed_memory() {}
