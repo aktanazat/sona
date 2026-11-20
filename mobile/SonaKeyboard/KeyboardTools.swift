@@ -59,7 +59,10 @@ final class KeyboardTools {
     var reviewsDictation: Bool { didSet { defaults.set(reviewsDictation, forKey: Self.reviewKey) } }
     /// One recording's style id: nil keeps the chosen style, empty is no style.
     var recordingStyle: String?
-    var recordingLanguage: TypingLanguage?
+    /// One recording's language, a locale identifier: nil keeps the typing language.
+    var recordingLanguage: String?
+    /// The languages a recording can pick, owner order 2026-11-20: English and Russian.
+    static let recordingLanguages = ["en-US", "ru-RU"]
     /// What the model has written so far for the action at work.
     var partial = ""
 
@@ -272,14 +275,11 @@ final class KeyboardTools {
 
     /// Dictated text on its way into the field. `styled` is true when the app already
     /// rewrote it; otherwise the recording's style is applied here. With review on it
-    /// waits on the panel for Insert. The recording's choices end with it. A dictation that
-    /// cleanup left empty puts nothing in the field: a style given no words writes its
-    /// own instructions back.
+    /// waits on the panel for Insert. The recording's choices end with it.
     func deliver(_ text: String, styled: Bool) {
         let style = styled ? nil : effectiveStyle
         recordingStyle = nil
         recordingLanguage = nil
-        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         guard let style, KeyboardAI.unavailable == nil else { return land(text) }
         start(.style(style), on: text) { [weak self] styledText in
             guard let self else { return }

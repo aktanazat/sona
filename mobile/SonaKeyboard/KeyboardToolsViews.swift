@@ -460,45 +460,46 @@ private struct StyleChoice: Identifiable {
     let name: Text
 }
 
-/// Choices for the next recording only, and review before inserting, which stays.
+/// Choices for the next recording only, and review before inserting, which stays. Sized to
+/// the panel, so nothing hides below a scroll.
 private struct RecordingOptions: View {
     @Bindable var tools: KeyboardTools
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
-                section("tools.recordingStyle") {
-                    ForEach(styles) { choice in
-                        Chip(selected: (tools.recordingStyle ?? "default") == choice.id) { choice.name } action: {
-                            tools.recordingStyle = choice.id == "default" ? nil : choice.id
+        VStack(alignment: .leading, spacing: toolGap) {
+            ScrollView(.horizontal) {
+                GlassEffectContainer(spacing: toolGap) {
+                    HStack(spacing: toolGap) {
+                        ForEach(styles) { choice in
+                            Chip(selected: (tools.recordingStyle ?? "default") == choice.id) { choice.name } action: {
+                                tools.recordingStyle = choice.id == "default" ? nil : choice.id
+                            }
+                            .fixedSize()
                         }
-                        .fixedSize()
                     }
                 }
-                if let style = tools.effectiveStyle, DictationTone.styleIDs.contains(style.id) {
-                    ToneSlider(style: style).id(style.id).padding(.horizontal, 4)
-                }
-                section("tools.recordingLanguage") {
-                    Chip(selected: tools.recordingLanguage == nil) { Text("tools.typingLanguage") } action: {
-                        tools.recordingLanguage = nil
+            }
+            .scrollIndicators(.hidden)
+            if let style = tools.effectiveStyle, DictationTone.styleIDs.contains(style.id) {
+                ToneSlider(style: style, showsTitle: false).id(style.id).padding(.horizontal, 4)
+            }
+            HStack(spacing: 12) {
+                Picker("tools.recordingLanguage", selection: language) {
+                    ForEach(KeyboardTools.recordingLanguages, id: \.self) { id in
+                        Text(verbatim: Self.name(of: id)).tag(id)
                     }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                Toggle("tools.reviewShort", isOn: $tools.reviewsDictation)
                     .fixedSize()
-                    ForEach(TypingLanguage.allCases) { language in
-                        Chip(selected: tools.recordingLanguage == language) { Text(verbatim: language.name) } action: {
-                            tools.recordingLanguage = language
-                        }
-                        .fixedSize()
-                    }
-                }
-                Toggle("tools.reviewBeforeInsert", isOn: $tools.reviewsDictation)
                     .font(.subheadline)
-                    .padding(.horizontal, 4)
+                    .accessibilityLabel(Text("tools.reviewBeforeInsert"))
                     .accessibilityIdentifier("tools-review")
             }
-            .padding(.bottom, 4)
+            .padding(.horizontal, 4)
         }
-        .scrollIndicators(.hidden)
-        .scrollBounceBehavior(.basedOnSize)
+        .frame(maxHeight: .infinity, alignment: .top)
     }
 
     private var styles: [StyleChoice] {
@@ -506,16 +507,15 @@ private struct RecordingOptions: View {
             + tools.profile.styles.map { StyleChoice(id: $0.id, name: Text(verbatim: $0.name)) }
     }
 
-    private func section(_ title: LocalizedStringKey, @ViewBuilder chips: () -> some View) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(title).font(.footnote).foregroundStyle(Theme.textSecondary).padding(.horizontal, 4)
-            ScrollView(.horizontal) {
-                GlassEffectContainer(spacing: toolGap) {
-                    HStack(spacing: toolGap) { chips() }
-                }
-            }
-            .scrollIndicators(.hidden)
-        }
+    private var language: Binding<String> {
+        Binding(get: { tools.recordingLanguage ?? KeyboardTools.recordingLanguages[0] }, set: { tools.recordingLanguage = $0 })
+    }
+
+    /// Each language in its own words: "English", "Русский".
+    private static func name(of id: String) -> String {
+        let locale = Locale(identifier: id)
+        let code = locale.language.languageCode?.identifier ?? id
+        return (locale.localizedString(forLanguageCode: code) ?? id).capitalized(with: locale)
     }
 }
 

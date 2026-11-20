@@ -198,6 +198,22 @@ enum DictationCleanup {
         return text
     }
 
+    /// A style rewrite of `source` without what the on-device model made up
+    /// despite the prompt: a "Subject:" line and lines holding a [placeholder],
+    /// unless the source had them. Asked not to, it still wrote them in 3 of 10
+    /// Email rewrites.
+    static func withoutInventions(_ text: String, source: String) -> String {
+        let keepsSubject = source.range(of: "subject", options: .caseInsensitive) != nil
+        let keepsBrackets = source.contains("[")
+        let lines = text.components(separatedBy: "\n").filter { line in
+            (keepsBrackets || line.range(of: #"\[[^\]\n]+\]"#, options: .regularExpression) == nil)
+                && (keepsSubject || line.range(of: #"^\s*subject\s*:"#, options: [.regularExpression, .caseInsensitive]) == nil)
+        }
+        return lines.joined(separator: "\n")
+            .replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     /// Each filler and the comma or point after it gone. A filler that opened a
     /// sentence hands its capital to the word after it: "Um, can you" is "Can you".
     private static func fillersRemoved(_ text: String, language: String) -> String {

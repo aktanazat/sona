@@ -96,13 +96,16 @@ enum DictationTone: String, CaseIterable, Identifiable {
     private static func key(_ style: String) -> String { "sona.dictation.tone.\(style)" }
 }
 
-/// Casual to formal in five steps, for a style that has a tone.
+/// Casual to formal in five steps, for a style that has a tone. Without its title row it
+/// fits the keyboard's panel; the step's name stays in its accessibility value.
 struct ToneSlider: View {
     let style: DictationProfile.Style
+    let showsTitle: Bool
     @State private var step: Double
 
-    init(style: DictationProfile.Style) {
+    init(style: DictationProfile.Style, showsTitle: Bool = true) {
         self.style = style
+        self.showsTitle = showsTitle
         let tone = DictationTone.chosen(for: style.id) ?? DictationTone.written(in: style.prompt)
         _step = State(initialValue: Double(DictationTone.allCases.firstIndex(of: tone) ?? 2))
     }
@@ -111,14 +114,16 @@ struct ToneSlider: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
-            HStack {
-                Text("tone.title")
-                Spacer()
-                Text(tone.label).foregroundStyle(Theme.textSecondary)
-                    .contentTransition(.numericText())
-                    .animation(.snappy, value: tone)
+            if showsTitle {
+                HStack {
+                    Text("tone.title")
+                    Spacer()
+                    Text(tone.label).foregroundStyle(Theme.textSecondary)
+                        .contentTransition(.numericText())
+                        .animation(.snappy, value: tone)
+                }
+                .font(.subheadline)
             }
-            .font(.subheadline)
             Slider(value: $step, in: 0...4, step: 1) {
                 Text("tone.title")
             } minimumValueLabel: {

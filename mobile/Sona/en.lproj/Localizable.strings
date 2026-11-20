@@ -339,7 +339,6 @@
 "tools.saveCommand" = "Save as command";
 "tools.review" = "Review dictation";
 "tools.reviewBeforeInsert" = "Review before inserting";
-"tools.recordingStyle" = "Style for the next recording";
+"tools.reviewShort" = "Review";
 "tools.recordingLanguage" = "Language for the next recording";
 "tools.chosenStyle" = "Usual";
-"tools.typingLanguage" = "Typing language";

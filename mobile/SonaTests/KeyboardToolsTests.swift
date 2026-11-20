@@ -28,6 +28,15 @@ struct KeyboardToolsTests {
         #expect(Self.applying(session.end(with: " ", before: text, corrects: true), to: text) == "See you there. Office ")
     }
 
+    /// The on-device model adds a subject and placeholders to Email rewrites even when told not to.
+    @Test func styleRewriteDropsInventedSubjectAndPlaceholders() {
+        let reply = "Subject: Lunch Schedule Change\n\nHi [Recipient's Name],\n\nCan we move lunch to Friday?\n\nBest regards,\n[Your Name]"
+        #expect(DictationCleanup.withoutInventions(reply, source: "Can we move lunch to Friday?")
+            == "Can we move lunch to Friday?\n\nBest regards,")
+        #expect(DictationCleanup.withoutInventions("Subject: Q3 budget\n\nIt is approved.", source: "subject Q3 budget it is approved")
+            == "Subject: Q3 budget\n\nIt is approved.")
+    }
+
     /// The phone's tone texts must stay the Mac's, which renders the same blocks.
     @Test(arguments: [DictationTone.casual, .semiCasual, .semiFormal, .formal])
     func toneRuleMatchesTheMacPrompt(_ tone: DictationTone) throws {

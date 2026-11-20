@@ -455,7 +455,7 @@ final class KeyboardViewController: UIInputViewController {
             try KeyboardSessionStore.shared().send(KeyboardCommand(
                 id: UUID(), action: .start, requestID: id,
                 documentID: documentID, createdAt: Date(),
-                language: (tools.recordingLanguage ?? typing.language).rawValue, style: tools.recordingStyle
+                language: tools.recordingLanguage ?? typing.language.rawValue, style: tools.recordingStyle
             ))
         } catch { state.waiting = false; show(error) }
     }
@@ -491,7 +491,7 @@ final class KeyboardViewController: UIInputViewController {
 
     /// The recognizer language for the next recording: the one picked for it, else the typing language.
     private var dictationLanguage: String {
-        DictationPreferences.recognitionLanguage(for: (tools.recordingLanguage ?? typing.language).rawValue)
+        DictationPreferences.recognitionLanguage(for: tools.recordingLanguage ?? typing.language.rawValue)
     }
 
     /// Where Dictate goes changes only between dictations, so a Finish always reaches the
@@ -538,7 +538,7 @@ final class KeyboardViewController: UIInputViewController {
     /// applies them, then the queue Sona keeps in Notes, then the recording's style and
     /// review on the way to the field.
     private func insertDictation(_ heard: String) {
-        let text = tools.profile.apply(to: DictationCleanup.clean(heard, language: dictationLanguage))
+        guard let text = KeyboardDictation.text(of: heard, profile: tools.profile, language: dictationLanguage) else { return }
         do {
             let queue = try KeyboardDictationQueue.shared()
             try queue.enqueue(KeyboardDictationRecord(

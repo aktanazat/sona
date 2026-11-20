@@ -78,7 +78,11 @@ enum KeyboardAI: Equatable {
         case let .command(command):
             command.prompt + "\nApply this to the text. Return only the resulting text."
         case let .style(style):
-            DictationTone.prompt(of: style) + "\nReturn only the rewritten text."
+            DictationTone.prompt(of: style) + """
+
+                Return only the rewritten text. Never write placeholders in square brackets such as [Name]. \
+                Add no subject line, greeting, sign-off or name that the transcript does not contain; leave out what it does not say.
+                """
         }
     }
 
@@ -163,6 +167,8 @@ enum KeyboardAI: Equatable {
             /* A style answers in the Mac's JSON envelope; only the finished reply can be read. */
             if !reply.hasPrefix("{") { partial(reply.trimmingCharacters(in: .whitespacesAndNewlines)) }
         }
-        return DictationCleanup.rewritten(reply)
+        let answer = DictationCleanup.rewritten(reply)
+        if case .style = self { return DictationCleanup.withoutInventions(answer, source: text) }
+        return answer
     }
 }

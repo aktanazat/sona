@@ -82,6 +82,14 @@ struct KeyboardDictation {
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         return text.isEmpty ? [] : [.insert(text)]
     }
+
+    /// What a finished dictation puts in the field: the phone's cleanup, then the Mac
+    /// profile's replacements and vocabulary. Nil when cleanup leaves nothing, as after a
+    /// lone "um": a style given no words writes its own instructions back.
+    static func text(of heard: String, profile: DictationProfile, language: String) -> String? {
+        let text = profile.apply(to: DictationCleanup.clean(heard, language: language)).trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty ? nil : text
+    }
 }
 
 /// Where Dictate goes. After the keyboard could not listen, Dictate goes through the app

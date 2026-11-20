@@ -41,6 +41,12 @@ struct KeyboardDictationTests {
         #expect(dictation.handle(.heard("late", final: true)) == [])
         #expect(dictation.handle(.start) == [.beginCapture])
     }
+
+    @Test("a dictation cleanup leaves empty puts nothing in the field, so no style writes its instructions back")
+    func fillerOnlyDictationInsertsNothing() {
+        #expect(KeyboardDictation.text(of: "Um.", profile: .empty, language: "en-US") == nil)
+        #expect(KeyboardDictation.text(of: "um so it works", profile: .empty, language: "en-US") != nil)
+    }
 }
 
 /// Dictated or swiped text joined to what is before the cursor.
