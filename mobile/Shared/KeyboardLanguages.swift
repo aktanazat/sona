@@ -1,15 +1,9 @@
 import Foundation
 
-/// The languages the Sona keyboard types in: English and the six Raycast Keyboard added on
-/// 2026-11-19. The raw value is the locale spelling and dictation use.
+/// The languages the Sona keyboard types in. The raw value is the locale spelling and
+/// dictation use.
 enum TypingLanguage: String, CaseIterable, Identifiable {
     case english = "en-US"
-    case spanish = "es-ES"
-    case french = "fr-FR"
-    case italian = "it-IT"
-    case dutch = "nl-NL"
-    case danish = "da-DK"
-    case portuguese = "pt-BR"
 
     var id: String { rawValue }
 
@@ -26,11 +20,7 @@ enum TypingLanguage: String, CaseIterable, Identifiable {
     /// The letter rows as the system keyboard for that language lays them out.
     var letterRows: [String] {
         switch self {
-        case .english, .italian, .dutch: ["qwertyuiop", "asdfghjkl", "zxcvbnm"]
-        case .spanish: ["qwertyuiop", "asdfghjklñ", "zxcvbnm"]
-        case .french: ["azertyuiop", "qsdfghjklm", "wxcvbn'"]
-        case .danish: ["qwertyuiopå", "asdfghjklæø", "zxcvbnm"]
-        case .portuguese: ["qwertyuiop", "asdfghjklç", "zxcvbnm"]
+        case .english: ["qwertyuiop", "asdfghjkl", "zxcvbnm"]
         }
     }
 
@@ -38,12 +28,6 @@ enum TypingLanguage: String, CaseIterable, Identifiable {
     var accents: [Character: String] {
         switch self {
         case .english: ["e": "éèêë", "a": "àáâä", "o": "óôö", "u": "úü", "i": "íï", "n": "ñ", "c": "ç"]
-        case .spanish: ["a": "á", "e": "é", "i": "í", "o": "ó", "u": "úü", "n": "ñ"]
-        case .french: ["e": "éèêë", "a": "àâæ", "u": "ùûü", "i": "îï", "o": "ôœ", "c": "ç", "y": "ÿ"]
-        case .italian: ["e": "èé", "a": "à", "i": "ìí", "o": "òó", "u": "ùú"]
-        case .dutch: ["e": "éëè", "i": "ïí", "o": "óö", "u": "úü", "a": "á"]
-        case .danish: ["e": "é", "o": "ö", "a": "ä", "u": "ü"]
-        case .portuguese: ["a": "ãáàâ", "e": "éê", "i": "í", "o": "õóô", "u": "úü", "c": "ç"]
         }
     }
 

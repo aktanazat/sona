@@ -71,25 +71,6 @@ struct SwipeTypingTests {
         #expect(found.isEmpty)
     }
 
-    /* The simulator ships no French spelling lexicon, so these words stand in for it. The
-     * decoder has to look them up by their accented prefixes, as it does Apple's. */
-    static let frenchWords = [
-        "bonjour", "bonne", "bon", "merci", "mercredi", "mer", "école", "écouter", "été", "très", "trop", "tard",
-        "avec", "aussi", "mais", "maison", "demain", "dans", "pour", "peut",
-    ]
-
-    @Test(
-        "on the French AZERTY layout a swipe spells French words, accents included",
-        arguments: ["bonjour", "merci", "école", "très", "demain", "maison"]
-    )
-    func french(word: String) {
-        let decoder = Self.decoder(.french)
-        let plain = word.folding(options: .diacriticInsensitive, locale: nil)
-        let dictionary = { (prefix: String) in Self.frenchWords.filter { $0.hasPrefix(prefix) } }
-        let found = decoder.words(for: Self.path(for: plain, on: decoder), dictionary: dictionary, names: [])
-        #expect(found.first == word, "\(found)")
-    }
-
     @Test("a typed prefix of a Contacts name offers the name, capitalized as in Contacts")
     func contactCompletion() throws {
         var lexicon = TypingLexicon()

@@ -235,7 +235,7 @@ private struct PhoneDictationSettings: View {
     @State private var choosesLanguages = false
     @State private var typingLanguages = KeyboardLanguages.shared().enabled
     private static let supportedLanguages = SFSpeechRecognizer.supportedLocales()
-        .map(\.identifier).sorted { languageName($0).localizedStandardCompare(languageName($1)) == .orderedAscending }
+        .map(\.identifier).filter(DictationPreferences.offered).sorted { languageName($0).localizedStandardCompare(languageName($1)) == .orderedAscending }
 
     var body: some View {
         NavigationStack {

@@ -79,8 +79,16 @@ struct DictationPreferences {
     static let activeLanguageKey = "sona.dictation.activeLanguage"
     static let styleKey = "sona.dictation.style"
 
+    /// Dictation listens in English and Russian only.
+    static func offered(_ language: String) -> Bool {
+        ["en", "ru"].contains(language.prefix { $0 != "-" && $0 != "_" })
+    }
+
     static var languages: [String] {
-        get { UserDefaults.standard.stringArray(forKey: languagesKey) ?? [Locale.current.identifier] }
+        get {
+            let stored = (UserDefaults.standard.stringArray(forKey: languagesKey) ?? [Locale.current.identifier]).filter(offered)
+            return stored.isEmpty ? ["en-US"] : stored
+        }
         set {
             guard !newValue.isEmpty else { return }
             UserDefaults.standard.set(newValue, forKey: languagesKey)
@@ -88,7 +96,7 @@ struct DictationPreferences {
         }
     }
     static var activeLanguage: String {
-        get { UserDefaults.standard.string(forKey: activeLanguageKey) ?? languages.first ?? "en-US" }
+        get { UserDefaults.standard.string(forKey: activeLanguageKey).flatMap { offered($0) ? $0 : nil } ?? languages[0] }
         set { UserDefaults.standard.set(newValue, forKey: activeLanguageKey) }
     }
     static var warmMinutes: Int {

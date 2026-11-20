@@ -36,10 +36,10 @@ final class KeyboardSessionTests {
         let keyboard = KeyboardSessionStore(directory: directory)
         try keyboard.send(KeyboardCommand(
             id: UUID(), action: .start, requestID: UUID(), documentID: nil, createdAt: Date(),
-            language: TypingLanguage.french.rawValue
+            language: TypingLanguage.english.rawValue
         ))
         let command = try #require(try KeyboardSessionStore(directory: directory).takeCommand())
-        #expect(DictationPreferences.recognitionLanguage(for: command.language).hasPrefix("fr"))
+        #expect(DictationPreferences.recognitionLanguage(for: command.language).hasPrefix("en"))
     }
 
     @Test("a quick hold-to-talk release withdraws an unread start instead of overwriting it with an orphaned stop")
