@@ -350,6 +350,11 @@ sona work list --where "completed from Nov 2 to Nov 6 estimate 4 for Dana"  # do
 sona work list --parent S-12                   # the sub-tasks of S-12; --parent none for top-level work
 sona work subtask S-12 --from-checklist        # one sub-task per open "- [ ]" line of S-12's description, then strips them
 sona work setting auto-close-parents true      # a task closes as done once its sub-tasks are done
+sona work setting close-subtasks-with-parent true   # closing a task closes its open sub-tasks the same way
+sona work setting start-parent-with-subtask true    # starting a sub-task starts its backlog or todo parent
+sona work setting auto-close-stale-days 60          # or off: untouched open tasks close as canceled
+sona work setting auto-archive-days 30              # or off: finished tasks, projects and ended cycles archive
+sona work setting triage-auto-apply project,owner   # or off: Triage fills these when every similar task agrees
 sona work list --cycle current --cycle-scope added   # work added after the cycle began; planned for the rest
 sona work update S-12 --estimate 3 --for "Dana Reyes"   # points 0 to 64; the person owed it; none clears either
 sona work list --for "Dana Reyes"            # work owed to Dana, whoever owns it
@@ -444,6 +449,12 @@ sona work watch-task pricing --line 2          # a Triage task from a heard line
 sona work link-suggestions [--all]             # reads only
 sona work link-accept <SUGGESTION_ID>          # or link-dismiss
 sona work triage-suggestions [S-12]            # reads only: project, labels, owner, similar tasks, each with why
+sona work triage-rules                         # routing rules and the fields Sona fills by itself; reads only
+sona work triage-rule-save invoice --project Billing   # --match words|meeting|folder, --label, --owner, --rule ID
+sona work triage-rule-delete <RULE_ID>
+sona work triage-applied                       # fields Sona filled by itself in Triage; reads only
+sona work triage-undo <CHANGE_ID>              # puts the field back and stops that suggestion
+sona work housekeeping-undo <NOTICE_ID>        # puts back what one housekeeping or sub-task notice closed or archived
 sona work suggestion-accept <SUGGESTION_ID>    # a field change waits for the user unless Agents' changes is on Apply
 sona work suggestion-dismiss <SUGGESTION_ID>   # stays dismissed; refused unless Agents' changes is on Apply
 sona work calendar [--from 2026-03-02] [--to 2026-03-08]   # reads only
@@ -828,7 +839,10 @@ automation's list. The in-app agent never changes tasks itself: with
 `sona_work_update` changes to existing ones. Both wait in Triage for the user
 to accept or decline, whatever Settings > Agents lets agents apply; a task from
 a `meeting-ended` run keeps the meeting as its evidence. The run's output lists
-what it proposed.
+what it proposed. With `sona_scratchpad_update_body`, `sona_project_save` or
+`sona_project_update_save` on the list it may propose an addition to a note, a
+project description or a project update; `sona work doc-proposals` lists them,
+and only the user accepts or declines them, in Triage.
 
 ```bash
 sona work automation-list
@@ -842,13 +856,19 @@ sona work automation-enable "Weekly digest"
 sona work automation-disable "Weekly digest"
 sona work automation-restore-version "Weekly digest" 3
 sona work automation-delete "Weekly digest"         # permanent, with its versions and runs
+sona work automation-copy "Weekly digest" --name "Monthly digest"   # the copy starts turned off
+sona work doc-proposals                             # note, description and update proposals waiting; reads only
 ```
 
 A schedule is `hourly`, `daily`, `weekly` or `monthly`; the first run sets the
 time of day and must not be in the past, and `--timezone` defaults to this
 Mac's. An event is `task-created`, `status-changed`, `label-added`, `assigned`,
-`comment-added`, `project-status-changed` or `meeting-ended`. `--if-label`,
-`--if-project`, `--if-status` and `--tools` take comma lists, and `""` clears
+`comment-added`, `project-status-changed`, `meeting-ended`, `initiative-status`
+(with `--to planned|active|completed`), `cycle-started`, `cycle-ended`,
+`milestone-done` or `project-update`; a cycle event runs once per cycle.
+`--reasoning low|medium|high` sets how hard the agent thinks on a run
+(`default` leaves it to the model). `--if-label`, `--if-project`,
+`--if-status` and `--tools` take comma lists, and `""` clears
 one. A new automation needs `--prompt` and a trigger; changing one keeps what
 is not given. Every save is kept as a version, and restoring one saves a new
 version. Writes need External mutations like every other `work` write and take
