@@ -83,23 +83,26 @@ private struct TriageList: View {
         let store = model.work
         let focus = model.workFocus
         let proposed = model.triageProposed
+        let documents = split == nil ? store.documentProposals : []
         if store.items == nil {
             if let error = store.listError {
                 TaskFailure(message: error) { Task { await store.refresh() } }
             } else {
                 TaskSkeleton(rows: 6, twoLine: true)
             }
-        } else if groups.isEmpty, proposed.isEmpty {
+        } else if groups.isEmpty, proposed.isEmpty, documents.isEmpty {
             TaskEmpty(line: split.map { "Nothing \($0.split.lowercased()) to triage." } ?? "Triage is clear.") {
                 TaskKeyButton(title: "Tasks", keys: "g t") { model.go(.tasks) }
             }
             .onAppear { focus.show([]) }
         } else {
             TaskListBody(groups: groups, headers: split.map { $0 == .meeting } ?? true, lead: {
+                if !documents.isEmpty { DocumentProposals(proposals: documents) }
                 if !proposed.isEmpty { TriageProposals(rows: proposed) }
             }) { item in
                 TriageRow(
                     row: item, suggestions: store.suggestions[item.id] ?? [],
+                    applied: store.autoApplied[item.id] ?? [],
                     highlighted: focus.highlighted == item.id, selected: focus.selection.contains(item.id),
                     selecting: focus.selecting, now: now
                 ) {
@@ -235,11 +238,97 @@ private struct TriageBarActions: View {
     }
 }
 
+/// Edits automations proposed to notes and projects, each with what it
+/// would add or replace, and Accept and Decline.
+private struct DocumentProposals: View {
+    let proposals: [WorkDocProposal]
+
+    var body: some View {
+        Section {
+            ForEach(proposals) { proposal in
+                DocumentProposalRow(proposal: proposal)
+            }
+        } header: {
+            HStack(spacing: 10) {
+                Image(systemName: "doc.text")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(Theme.inkTertiary)
+                    .frame(width: 22)
+                Text("Proposed document edits")
+                    .font(TypeScale.listTitle)
+                    .foregroundStyle(Theme.ink)
+                Text("\(proposals.count)")
+                    .font(TypeScale.label(12))
+                    .monospacedDigit()
+                    .foregroundStyle(Theme.inkTertiary)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 14)
+            .frame(height: Theme.listRow)
+            .accessibilityElement(children: .combine)
+            .accessibilityAddTraits(.isHeader)
+        }
+    }
+}
+
+private struct DocumentProposalRow: View {
+    let proposal: WorkDocProposal
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: Space.s) {
+                Text(kind)
+                    .metaText()
+                    .frame(width: 96, alignment: .leading)
+                Text(proposal.targetTitle)
+                    .font(TypeScale.listTitle)
+                    .foregroundStyle(Theme.ink)
+                    .lineLimit(1)
+                AgentName(name: proposal.agent)
+                if let health = proposal.health {
+                    Text(health.label).metaText()
+                }
+                Spacer(minLength: Space.s)
+                Button("Decline") {
+                    Task { await model.work.decideDocProposal(proposal, accept: false) }
+                }
+                .buttonStyle(.quiet)
+                Button("Accept") {
+                    Task { await model.work.decideDocProposal(proposal, accept: true) }
+                }
+                .buttonStyle(QuietButton(compact: true))
+            }
+            .frame(height: Theme.listRow)
+            Text(proposal.body)
+                .bodyText(12, Theme.inkSecondary)
+                .lineLimit(4)
+                .textSelection(.enabled)
+                .help(proposal.body)
+                .padding(.leading, 96 + Space.s)
+        }
+        .padding(.leading, 14)
+        .padding(.trailing, 16)
+        .padding(.bottom, 8)
+        .padding(.horizontal, 8)
+    }
+
+    private var kind: String {
+        switch proposal.kind {
+        case .note: "Add to note"
+        case .projectDescription: "Description"
+        case .projectUpdate: "Project update"
+        case .unknown: "Edit"
+        }
+    }
+}
+
 /// A suggestion waiting in triage: two lines, the title over what was said
 /// and by whom, with Sona's guesses for its owner, date and project.
 private struct TriageRow: View {
     let row: WorkItemRow
     let suggestions: [WorkFieldSuggestion]
+    let applied: [WorkAutoApplied]
     let highlighted: Bool
     let selected: Bool
     let selecting: Bool
@@ -279,6 +368,9 @@ private struct TriageRow: View {
                         }
                     }
                 }
+                ForEach(applied) { change in
+                    AutoAppliedLine(change: change)
+                }
             }
         }
         .padding(.leading, 6)
@@ -288,6 +380,47 @@ private struct TriageRow: View {
         .taskHighlight(highlighted, selected: selected)
         .padding(.horizontal, 8)
         .accessibilityElement(children: .combine)
+    }
+}
+
+/// A field Sona filled by itself, why, and Undo.
+private struct AutoAppliedLine: View {
+    let change: WorkAutoApplied
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "wand.and.stars")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(Theme.accent)
+            Text("\(field) \(value), applied automatically")
+                .metaText()
+                .lineLimit(1)
+                .help(change.reason)
+            Button("Undo") {
+                Task { await model.work.undoAutoApplied(change) }
+            }
+            .buttonStyle(.quiet)
+        }
+    }
+
+    private var field: String {
+        switch change.field {
+        case .project: "Project"
+        case .labels: "Label"
+        case .owner: "Owner"
+        }
+    }
+
+    private var value: String {
+        let work = model.work
+        switch change.field {
+        case .project: return work.projects.first { $0.id == change.value }?.title ?? "a project"
+        case .labels: return work.labels.first { $0.id == change.value }?.name ?? "a label"
+        case .owner:
+            if change.value == "me" { return "Me" }
+            return work.people.first { $0.id == change.value }?.name ?? "someone"
+        }
     }
 }
 

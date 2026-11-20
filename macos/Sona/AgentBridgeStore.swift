@@ -32,9 +32,18 @@ final class AgentBridgeStore {
     private(set) var sonaChanges = WorkAutonomy.suggest
     /// Whether a task closes itself once its sub-tasks are done.
     private(set) var closeParents = false
+    /// Whether closing a parent closes its open sub-tasks.
+    private(set) var closeSubtasks = false
+    /// Whether starting a sub-task moves its parent to in progress.
+    private(set) var startParent = false
     /// Whether the weekly project digest reaches the inbox, and on which day.
     private(set) var digestEnabled = true
     private(set) var digestDay = DigestDay.monday
+    /// Days before stale tasks auto-close or completed work auto-archives; nil = off.
+    private(set) var autoCloseStaleDays: Int?
+    private(set) var autoArchiveDays: Int?
+    /// The fields Triage fills by itself when every similar task agrees.
+    private(set) var triageAutoApply: Set<WorkAutoField> = []
     /// Whether the last settings read failed, so the values above are
     /// defaults rather than what the file holds.
     private(set) var settingsUnread = false
@@ -269,16 +278,30 @@ final class AgentBridgeStore {
     }
 
     func setCloseParents(_ enabled: Bool) async {
+        await setWorkFlag("change_work_close_parents_setting", enabled, keyPath: \.closeParents)
+    }
+
+    func setCloseSubtasks(_ enabled: Bool) async {
+        await setWorkFlag("change_work_close_subtasks_setting", enabled, keyPath: \.closeSubtasks)
+    }
+
+    func setStartParent(_ enabled: Bool) async {
+        await setWorkFlag("change_work_start_parent_setting", enabled, keyPath: \.startParent)
+    }
+
+    private func setWorkFlag(
+        _ method: String, _ enabled: Bool, keyPath: ReferenceWritableKeyPath<AgentBridgeStore, Bool>
+    ) async {
         autonomyBusy = true
         defer { autonomyBusy = false }
-        let previous = closeParents
-        closeParents = enabled
+        let previous = self[keyPath: keyPath]
+        self[keyPath: keyPath] = enabled
         do {
-            try await core.request("change_work_close_parents_setting", ["enabled": enabled])
+            try await core.request(method, ["enabled": enabled])
             error = nil
             await loadSettings()
         } catch {
-            closeParents = previous
+            self[keyPath: keyPath] = previous
             self.error = "Couldn't save that setting: \(Self.reason(error))"
         }
     }
@@ -293,6 +316,40 @@ final class AgentBridgeStore {
                 "change_work_digest_setting", ["enabled": JSONValue.bool(enabled), "day": .string(day.rawValue)])
         } catch {
             (digestEnabled, digestDay) = previous
+            throw error
+        }
+        await loadSettings()
+    }
+
+    func setTriageAutoApply(_ field: WorkAutoField, _ on: Bool) async {
+        autonomyBusy = true
+        defer { autonomyBusy = false }
+        let previous = triageAutoApply
+        if on { triageAutoApply.insert(field) } else { triageAutoApply.remove(field) }
+        do {
+            try await core.request(
+                "change_work_triage_auto_apply_setting",
+                ["fields": JSONValue.array(WorkAutoField.allCases.filter(triageAutoApply.contains).map { .string($0.rawValue) })])
+            error = nil
+            await loadSettings()
+        } catch {
+            triageAutoApply = previous
+            self.error = "Couldn't save that setting: \(Self.reason(error))"
+        }
+    }
+
+    func setHousekeeping(autoCloseStaleDays: Int?, autoArchiveDays: Int?) async throws {
+        let previous = (self.autoCloseStaleDays, self.autoArchiveDays)
+        (self.autoCloseStaleDays, self.autoArchiveDays) = (autoCloseStaleDays, autoArchiveDays)
+        do {
+            try await core.request(
+                "change_work_housekeeping_setting",
+                [
+                    "autoCloseStaleDays": autoCloseStaleDays.map { JSONValue.number(Double($0)) } ?? .null,
+                    "autoArchiveDays": autoArchiveDays.map { JSONValue.number(Double($0)) } ?? .null,
+                ])
+        } catch {
+            (self.autoCloseStaleDays, self.autoArchiveDays) = previous
             throw error
         }
         await loadSettings()
@@ -343,8 +400,13 @@ final class AgentBridgeStore {
             agentChanges = settings.workAgentChanges ?? .suggest
             sonaChanges = settings.workSonaChanges ?? .suggest
             closeParents = settings.workCloseParents ?? false
+            closeSubtasks = settings.workCloseSubtasks ?? false
+            startParent = settings.workStartParent ?? false
             digestEnabled = settings.workDigestEnabled ?? true
             digestDay = settings.workDigestDay ?? .monday
+            autoCloseStaleDays = settings.workAutoCloseStaleDays
+            autoArchiveDays = settings.workAutoArchiveDays
+            triageAutoApply = Set(settings.workTriageAutoApply ?? [])
             error = nil
             settingsUnread = false
         } catch {

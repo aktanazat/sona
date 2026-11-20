@@ -36,6 +36,35 @@ enum WorkLoopProjectStatus: String, WorkLoopValue, CaseIterable, Identifiable {
     var label: String { PlanningProjectStatus(rawValue: rawValue)?.label ?? "Unknown status" }
 }
 
+enum WorkLoopInitiativeStatus: String, WorkLoopValue, CaseIterable, Identifiable {
+    case planned, active, completed
+    case unknown
+
+    static let choices: [Self] = allCases.filter { $0 != .unknown }
+
+    var id: String { rawValue }
+
+    var label: String { PlanningInitiativeStatus(rawValue: rawValue)?.title ?? "Unknown status" }
+}
+
+enum WorkLoopReasoning: String, WorkLoopValue, CaseIterable, Identifiable {
+    case low, medium, high
+    case unknown
+
+    static let choices: [Self] = allCases.filter { $0 != .unknown }
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .low: "Low"
+        case .medium: "Medium"
+        case .high: "High"
+        case .unknown: "Unknown"
+        }
+    }
+}
+
 enum WorkLoopWeekday: String, WorkLoopValue, CaseIterable, Identifiable {
     case mon, tue, wed, thu, fri, sat, sun
     case unknown
@@ -118,6 +147,11 @@ enum WorkLoopTrigger: Codable, Hashable {
     case commentAdded
     case projectStatusChanged(to: WorkLoopProjectStatus?)
     case meetingEnded
+    case initiativeStatusChanged(to: WorkLoopInitiativeStatus?)
+    case cycleStarted
+    case cycleEnded
+    case milestoneDone
+    case projectUpdatePosted
     case unknown(String)
 
     private enum Key: String, CodingKey { case kind, every, days, timezone, firstRunAtMs, to, labelId }
@@ -140,6 +174,12 @@ enum WorkLoopTrigger: Codable, Hashable {
         case "project_status_changed":
             self = .projectStatusChanged(to: try container.decodeIfPresent(WorkLoopProjectStatus.self, forKey: .to))
         case "meeting_ended": self = .meetingEnded
+        case "initiative_status_changed":
+            self = .initiativeStatusChanged(to: try container.decodeIfPresent(WorkLoopInitiativeStatus.self, forKey: .to))
+        case "cycle_started": self = .cycleStarted
+        case "cycle_ended": self = .cycleEnded
+        case "milestone_done": self = .milestoneDone
+        case "project_update_posted": self = .projectUpdatePosted
         default: self = .unknown(kind)
         }
     }
@@ -166,6 +206,13 @@ enum WorkLoopTrigger: Codable, Hashable {
             try container.encode("project_status_changed", forKey: .kind)
             try container.encode(to, forKey: .to)
         case .meetingEnded: try container.encode("meeting_ended", forKey: .kind)
+        case let .initiativeStatusChanged(to):
+            try container.encode("initiative_status_changed", forKey: .kind)
+            try container.encode(to, forKey: .to)
+        case .cycleStarted: try container.encode("cycle_started", forKey: .kind)
+        case .cycleEnded: try container.encode("cycle_ended", forKey: .kind)
+        case .milestoneDone: try container.encode("milestone_done", forKey: .kind)
+        case .projectUpdatePosted: try container.encode("project_update_posted", forKey: .kind)
         case let .unknown(kind): try container.encode(kind, forKey: .kind)
         }
     }
@@ -209,6 +256,7 @@ struct WorkLoop: Codable, Identifiable, Equatable {
     var trigger: WorkLoopTrigger
     var conditions: WorkLoopConditions
     var tools: [String]
+    var reasoning: WorkLoopReasoning?
     var version: Int
     var nextRunAtMs: Int64?
     var lastRun: WorkLoopRun?
@@ -223,6 +271,7 @@ struct WorkLoopVersion: Codable, Identifiable, Equatable {
     var trigger: WorkLoopTrigger
     var conditions: WorkLoopConditions
     var tools: [String]
+    var reasoning: WorkLoopReasoning?
     var savedAtMs: Int64
     var savedBy: String
     var restoredFrom: Int?
@@ -236,6 +285,7 @@ struct WorkLoopInput: Encodable, Equatable {
     var trigger: WorkLoopTrigger
     var conditions: WorkLoopConditions
     var tools: [String]
+    var reasoning: WorkLoopReasoning?
 }
 
 struct WorkLoopList: Decodable, Equatable {
