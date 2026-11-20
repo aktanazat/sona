@@ -65,6 +65,13 @@ enum WorkUpdateEntry: Decodable, Identifiable, Equatable {
         case let .digest(_, createdAtMs, _): createdAtMs
         }
     }
+
+    var icon: String {
+        switch self {
+        case .update: WorkSubjectKind.project.icon
+        case .digest: "chart.bar.doc.horizontal"
+        }
+    }
 }
 
 /// How far back the feed reaches.
@@ -256,9 +263,9 @@ struct UpdatesScreen: View {
             Hairline()
             if let entries = store.entries {
                 if entries.isEmpty {
-                    TaskEmpty(line: store.filter.narrows || store.since != .all
-                        ? "No updates match."
-                        : "No updates yet. Project updates and the weekly digest land here.")
+                    TaskEmpty(line: store.filter.narrows ? "No updates match."
+                        : store.since == .all ? "No updates yet."
+                        : "No updates in the \(store.since.title.lowercased()).")
                 } else {
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 0) {
@@ -299,8 +306,6 @@ struct UpdatesScreen: View {
                 Task { _ = await store.saveFeed(named: name) }
             }
             Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("The feed keeps these filters, to show again from the feeds menu.")
         }
     }
 
@@ -330,10 +335,10 @@ struct UpdatesScreen: View {
                 Button("Delete “\(current.name)”", role: .destructive) { Task { await store.deleteFeed(current) } }
             }
         } label: {
-            UpdatesChip(title: current?.name ?? "Feeds", on: current != nil)
+            Text(current?.name ?? "Feeds").lineLimit(1)
         }
         .menuStyle(.button)
-        .buttonStyle(.plain)
+        .buttonStyle(UpdatesChip(on: current != nil))
         .menuIndicator(.hidden)
         .fixedSize()
         .help("Saved feeds")
@@ -364,10 +369,10 @@ private struct UpdatesFilterBar: View {
                     Toggle(since.title, isOn: Binding(get: { store.since == since }, set: { _ in store.show(since: since) }))
                 }
             } label: {
-                UpdatesChip(title: store.since.title, on: store.since != .all)
+                Text(store.since.title).lineLimit(1)
             }
             .menuStyle(.button)
-            .buttonStyle(.plain)
+            .buttonStyle(UpdatesChip(on: store.since != .week))
             .menuIndicator(.hidden)
             .fixedSize()
             .accessibilityLabel("Since, \(store.since.title)")
@@ -404,10 +409,10 @@ private struct UpdatesFilterBar: View {
                 }))
             }
         } label: {
-            UpdatesChip(title: label, on: !chosen.isEmpty)
+            Text(label).lineLimit(1)
         }
         .menuStyle(.button)
-        .buttonStyle(.plain)
+        .buttonStyle(UpdatesChip(on: !chosen.isEmpty))
         .menuIndicator(.hidden)
         .fixedSize()
         .accessibilityLabel("\(title), \(names.isEmpty ? "any" : names.joined(separator: ", "))")
@@ -415,23 +420,29 @@ private struct UpdatesFilterBar: View {
 }
 
 /// A filter's name and a chevron, filled while it narrows the feed.
-private struct UpdatesChip: View {
-    let title: String
+private struct UpdatesChip: ButtonStyle {
     let on: Bool
+    @State private var hovering = false
 
-    var body: some View {
+    func makeBody(configuration: Configuration) -> some View {
         HStack(spacing: 6) {
-            Text(title).lineLimit(1)
+            configuration.label
             Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold))
                 .foregroundStyle(Theme.inkTertiary)
+                .accessibilityHidden(true)
         }
         .fixedSize()
-        .font(on ? TypeScale.listTitle : TypeScale.list)
-        .foregroundStyle(on ? Theme.ink : Theme.inkSecondary)
+        .font(TypeScale.list)
+        .foregroundStyle(on || hovering ? Theme.ink : Theme.inkSecondary)
         .padding(.horizontal, 10)
         .frame(height: 28)
-        .background(on ? Theme.control : .clear, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
+        .background(
+            configuration.isPressed ? Theme.controlPressed
+                : on ? Theme.control
+                : hovering ? Theme.controlHover : .clear,
+            in: RoundedRectangle(cornerRadius: Theme.radiusControl))
         .contentShape(Rectangle())
+        .onHover { hovering = $0 }
     }
 }
 
@@ -443,6 +454,9 @@ private struct UpdatesRow: View {
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Image(systemName: entry.icon).font(.system(size: 12))
+                .foregroundStyle(Theme.inkSecondary)
+                .frame(width: 14)
             content
             Spacer(minLength: 12)
             Text(TaskDates.ago(entry.createdAtMs, now: model.work.now)).metaText().monospacedDigit()
@@ -485,15 +499,11 @@ private struct UpdatesRow: View {
                 }
             }
         case let .digest(_, _, digest):
-            HStack(alignment: .firstTextBaseline, spacing: 10) {
-                Image(systemName: "chart.bar.doc.horizontal").font(.system(size: 12))
-                    .foregroundStyle(Theme.inkSecondary)
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Weekly project digest").bodyText(13.5).fontWeight(.semibold)
-                    Text("\(PlanningFormat.day(digest.fromMs)) – \(PlanningFormat.day(digest.toMs)) · "
-                        + (digest.projects.count == 1 ? "1 project" : "\(digest.projects.count) projects"))
-                        .metaText(Theme.inkSecondary)
-                }
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Weekly project digest").bodyText(13.5).fontWeight(.semibold)
+                Text("\(PlanningFormat.day(digest.fromMs)) – \(PlanningFormat.day(digest.toMs)) · "
+                    + (digest.projects.count == 1 ? "1 project" : "\(digest.projects.count) projects"))
+                    .metaText(Theme.inkSecondary)
             }
         }
     }

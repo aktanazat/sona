@@ -13,6 +13,15 @@ struct InboxNotificationSettings: View {
             ErrorNote(error ?? (loadFailed ? "Couldn't load the inbox settings." : nil))
             Card {
                 if let settings {
+                    HStack(spacing: 16) {
+                        Spacer()
+                        Text("Inbox").frame(width: Self.column)
+                        Text("Banner").frame(width: Self.column)
+                    }
+                    .metaText(Theme.inkSecondary)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 12)
+                    .accessibilityHidden(true)
                     ForEach(settings.kinds.filter { $0.kind != .unknown }, id: \.kind) { setting in
                         row(setting)
                     }
@@ -24,7 +33,7 @@ struct InboxNotificationSettings: View {
                 Card {
                     ToggleRow(
                         title: "Quiet hours",
-                        detail: "Banners wait until quiet hours end. Notices still reach the inbox.",
+                        detail: "Banners wait until they end. Notices still reach the inbox.",
                         isOn: Binding(get: { settings.quietHours != nil },
                                       set: { on in setQuiet(on ? WorkQuietHours(startMinute: 22 * 60, endMinute: 8 * 60) : nil) }))
                     if let quiet = settings.quietHours {
@@ -58,16 +67,21 @@ struct InboxNotificationSettings: View {
         } trailing: {
             HStack(spacing: 16) {
                 Toggle("In inbox", isOn: Binding(get: { setting.inbox }, set: { set(setting.kind, inbox: $0) }))
-                    .toggleStyle(.checkbox)
+                    .labelsHidden()
+                    .frame(width: Self.column)
                 Toggle("Banner", isOn: Binding(get: { setting.inbox && setting.banner },
                                                set: { set(setting.kind, banner: $0) }))
-                    .toggleStyle(.checkbox)
+                    .labelsHidden()
+                    .frame(width: Self.column)
                     .disabled(!setting.inbox)
             }
+            .toggleStyle(.checkbox)
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel(setting.kind.label)
     }
+
+    private static let column: CGFloat = 48
 
     private func load() async {
         do {

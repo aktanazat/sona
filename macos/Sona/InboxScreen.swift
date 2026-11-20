@@ -118,9 +118,9 @@ struct InboxTabs: View {
         }
         SegmentedSwitch(
             items: [SwitchItem(id: Face.inbox, title: "Inbox", icon: "bell"),
-                    SwitchItem(id: Face.triage, title: waiting > 0 ? "Triage \(waiting)" : "Triage", icon: "tray")]
-                + (place == .inbox ? [SwitchItem(id: Face.snoozed, title: "Snoozed", icon: "moon.zzz")] : [])
-                + [SwitchItem(id: Face.updates, title: "Updates", icon: Place.updates.icon)],
+                    SwitchItem(id: Face.triage, title: waiting > 0 ? "Triage \(waiting)" : "Triage", icon: "tray"),
+                    SwitchItem(id: Face.snoozed, title: "Snoozed", icon: "moon.zzz"),
+                    SwitchItem(id: Face.updates, title: "Updates", icon: Place.updates.icon)],
             selection: face
         ) { picked in
             switch picked {
@@ -200,7 +200,7 @@ private struct InboxFilterMenu: View {
         .buttonStyle(IconButton(on: !filter.isEmpty))
         .menuIndicator(.hidden)
         .fixedSize()
-        .help("Filter by kind, project, task priority or unread")
+        .help("Filter")
         .accessibilityLabel("Filter the inbox")
     }
 

@@ -68,9 +68,7 @@ struct FollowButton: View {
             Label(on ? "Following" : "Follow", systemImage: on ? "bell.fill" : "bell")
         }
         .buttonStyle(.secondary)
-        .help(on
-            ? "Following: \(kind.followNews) reach the inbox. Click to stop."
-            : "Follow this \(kind.noun): \(kind.followNews) reach the inbox.")
+        .help(on ? "Stop following" : "Hear about \(kind.followNews) in the inbox")
         .accessibilityValue(on ? "Following" : "Not following")
     }
 }
@@ -83,30 +81,33 @@ struct SubjectReminderMenu: View {
 
     var body: some View {
         let routines = model.routines
-        let reminder = routines.subjectReminders[subject]
+        let pending = routines.subjectReminders[subject].flatMap { $0.notifiedAtMs == nil ? $0.remindAtMs : nil }
+        let when = pending.map { Self.when($0, now: model.work.now) }
         Menu {
             ForEach(InboxSnooze.allCases, id: \.self) { choice in
                 if let at = choice.until {
                     Button(choice.title) { set(at) }
                 }
             }
-            if reminder != nil {
+            if pending != nil {
                 Divider()
                 Button("Clear") { set(nil) }
             }
         } label: {
-            Label(reminder.map(Self.title) ?? "Remind me", systemImage: "alarm")
+            Label(when ?? "Remind me", systemImage: "alarm")
         }
         .menuStyle(.button)
         .buttonStyle(.secondary)
         .menuIndicator(.hidden)
         .fixedSize()
-        .help(reminder == nil ? "Get a reminder in the inbox" : "Change or clear the reminder")
+        .help(pending.map { "Reminder \(PlanningFormat.date($0))" } ?? "Get a reminder in the inbox")
+        .accessibilityLabel(when.map { "Reminder, \($0)" } ?? "Remind me")
     }
 
-    private static func title(_ reminder: WorkSubjectReminder) -> String {
-        let when = PlanningFormat.date(reminder.remindAtMs)
-        return reminder.notifiedAtMs == nil ? "Remind \(when)" : "Reminded \(when)"
+    /// "Tomorrow 9:00 AM", "Friday 9:00 AM", "Nov 28 9:00 AM".
+    private static func when(_ milliseconds: Int64, now: Int64) -> String {
+        let time = PlanningFormat.moment(milliseconds).formatted(date: .omitted, time: .shortened)
+        return "\(TaskDates.label(milliseconds, now: now)) \(time)"
     }
 
     private func set(_ at: Int64?) {
