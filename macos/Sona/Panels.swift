@@ -19,10 +19,6 @@ struct HUDPill: View {
                 liveWords
                     .transition(.opacity.animation(.easeInOut(duration: reduceMotion ? 0.1 : 0.2)))
             }
-            if let stage = model.slowConnectionStage, presentation.capture != .idle {
-                slowConnection(stage)
-                    .transition(.opacity.animation(.easeInOut(duration: reduceMotion ? 0.1 : 0.2)))
-            }
             if model.settings.settings.overlayPosition != .top {
                 capsule
             }
@@ -132,7 +128,7 @@ struct HUDPill: View {
                                 .controlSize(.mini)
                                 .tint(Theme.hudInk)
                         }
-                        Text(Self.phaseLabel(kind))
+                        Text(model.slowConnectionStage == nil ? Self.phaseLabel(kind) : Self.slowConnection)
                             .font(.system(size: 12, weight: .medium))
                             .lineLimit(1)
                     }
@@ -214,7 +210,7 @@ struct HUDPill: View {
     }
 
     private var liveWords: some View {
-        Text(model.liveText.isEmpty ? "Listening…" : model.liveText)
+        Text(model.liveText.isEmpty ? liveWordsPlaceholder : model.liveText)
             .font(.system(size: 13))
             .foregroundStyle(model.liveText.isEmpty ? Theme.hudInkSecondary : Theme.hudInk)
             .lineLimit(2)
@@ -225,24 +221,13 @@ struct HUDPill: View {
             .overlay(RoundedRectangle(cornerRadius: Theme.radiusDialog).strokeBorder(Theme.hudBorder, lineWidth: 1))
     }
 
-    /// Shown while the network holds up a cloud stage of the dictation.
-    private func slowConnection(_ stage: String) -> some View {
-        Group {
-            if stage == "cleanup" {
-                Text("Slow connection. Cleanup is taking longer than usual.")
-            } else {
-                Text("Slow connection. Cloud transcription may take longer.")
-            }
-        }
-        .font(.system(size: 12))
-        .foregroundStyle(Theme.hudInkSecondary)
-        .fixedSize(horizontal: false, vertical: true)
-        .frame(width: 212, alignment: .leading)
-        .padding(12)
-        .background(Theme.hud, in: RoundedRectangle(cornerRadius: Theme.radiusDialog))
-        .overlay(RoundedRectangle(cornerRadius: Theme.radiusDialog).strokeBorder(Theme.hudBorder, lineWidth: 1))
-        .environment(\.colorScheme, .dark)
+    /// The live words' place before any arrive: a slow connection is why
+    /// none have.
+    private var liveWordsPlaceholder: String {
+        model.slowConnectionStage == nil ? "Listening…" : Self.slowConnection
     }
+
+    private static let slowConnection = "Slow connection"
 
     @ViewBuilder private var status: some View {
         if let seconds = model.pillWarningSeconds {

@@ -149,8 +149,12 @@ struct RewriteSkippedEvent: Decodable {
 /// `cloud-connection-slow`: the network is holding up a cloud transcription
 /// or cleanup in the dictation in flight. Local models never send it.
 struct SlowConnectionEvent: Decodable {
-    /// "transcription" or "cleanup".
-    let stage: String
+    let stage: SlowConnectionStage
+}
+
+/// The cloud stage a slow connection is holding up.
+enum SlowConnectionStage: String, Decodable {
+    case transcription, cleanup
 }
 
 /// A sentence about the last dictation, on the capture page until dismissed
@@ -322,7 +326,7 @@ final class AppModel {
     /// until the recording ends.
     private(set) var meetingSuggested = false
     /// The cloud stage a slow connection is holding up, until the dictation ends.
-    private(set) var slowConnectionStage: String?
+    private(set) var slowConnectionStage: SlowConnectionStage?
     /// The pill's meeting button was pressed: the meeting start opens once the
     /// dictation has been delivered, so the words still reach the app it was for.
     private var meetingAfterCapture = false
@@ -900,7 +904,7 @@ final class AppModel {
             meetingSuggested = false
             meter.stop()
         }
-        if case .working("polishing") = state, slowConnectionStage == "transcription" {
+        if case .working("polishing") = state, slowConnectionStage == .transcription {
             slowConnectionStage = nil
         }
         if case .idle = state {
