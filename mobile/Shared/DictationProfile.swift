@@ -79,8 +79,16 @@ struct DictationPreferences {
     static let activeLanguageKey = "sona.dictation.activeLanguage"
     static let styleKey = "sona.dictation.style"
 
+    /// Dictation listens in English and Russian only.
+    static func offered(_ language: String) -> Bool {
+        ["en", "ru"].contains(language.prefix { $0 != "-" && $0 != "_" })
+    }
+
     static var languages: [String] {
-        get { UserDefaults.standard.stringArray(forKey: languagesKey) ?? [Locale.current.identifier] }
+        get {
+            let stored = (UserDefaults.standard.stringArray(forKey: languagesKey) ?? [Locale.current.identifier]).filter(offered)
+            return stored.isEmpty ? ["en-US"] : stored
+        }
         set {
             guard !newValue.isEmpty else { return }
             UserDefaults.standard.set(newValue, forKey: languagesKey)
@@ -88,12 +96,40 @@ struct DictationPreferences {
         }
     }
     static var activeLanguage: String {
-        get { UserDefaults.standard.string(forKey: activeLanguageKey) ?? languages.first ?? "en-US" }
+        get { UserDefaults.standard.string(forKey: activeLanguageKey).flatMap { offered($0) ? $0 : nil } ?? languages[0] }
         set { UserDefaults.standard.set(newValue, forKey: activeLanguageKey) }
     }
     static var warmMinutes: Int {
         let stored = UserDefaults.standard.integer(forKey: minutesKey)
         return [1, 5, 15, 30].contains(stored) ? stored : 5
+    }
+
+    /// "Dictate from the keyboard", which the keyboard reads too now that it listens itself.
+    static var shared: UserDefaults { UserDefaults(suiteName: KeyboardDraftStore.group) ?? .standard }
+    static var keyboardEnabled: Bool { shared.bool(forKey: keyboardKey) }
+
+    static let microphoneAllowedKey = "sona.keyboard.microphoneAllowed"
+    /// Whether Sona holds the microphone and speech recognition permissions the keyboard
+    /// listens under. The app says so: a keyboard process that asked before they were
+    /// granted keeps its first answer until iOS ends it.
+    static var keyboardMicrophoneAllowed: Bool {
+        get { shared.bool(forKey: microphoneAllowedKey) }
+        set { shared.set(newValue, forKey: microphoneAllowedKey) }
+    }
+
+    /// The switch lived in the app's own defaults until the keyboard needed to read it.
+    static func moveKeyboardSwitchToSharedContainer() {
+        guard let enabled = UserDefaults.standard.object(forKey: keyboardKey) as? Bool else { return }
+        if shared.object(forKey: keyboardKey) == nil { shared.set(enabled, forKey: keyboardKey) }
+        UserDefaults.standard.removeObject(forKey: keyboardKey)
+    }
+
+    /// The recognizer language for a dictation. One the keyboard asked for while typing
+    /// `typing` listens in that language, in the regional form the speaking list prefers.
+    static func recognitionLanguage(for typing: String?) -> String {
+        guard let typing else { return activeLanguage }
+        let base = typing.prefix { $0 != "-" && $0 != "_" }
+        return ([activeLanguage] + languages).first { $0.prefix { $0 != "-" && $0 != "_" } == base } ?? typing
     }
 }
 

@@ -87,6 +87,10 @@ final class PhoneDictation: ObservableObject {
     private let rewrite = BoundedRewrite()
     private var sessionProfile = DictationProfile.empty
     private var sessionStyle: DictationProfile.Style?
+    private var sessionLanguage = DictationPreferences.activeLanguage
+    #if DEBUG
+    private var script: Task<Void, Never>?
+    #endif
 
     init() {
         observers.append(NotificationCenter.default.addObserver(
@@ -107,7 +111,8 @@ final class PhoneDictation: ObservableObject {
 
     deinit { for observer in observers { NotificationCenter.default.removeObserver(observer) } }
 
-    func start(keepingAudio: Bool = false, keyboard: Bool = false) {
+    /// `language` is the keyboard's typing language when the keyboard asked for this dictation.
+    func start(keepingAudio: Bool = false, keyboard: Bool = false, language: String? = nil) {
         guard !isBusy else { return }
         let id = UUID()
         sessionID = id
@@ -118,6 +123,7 @@ final class PhoneDictation: ObservableObject {
         audio = nil
         startedAt = Date()
         sessionProfile = profile
+        sessionLanguage = DictationPreferences.recognitionLanguage(for: language)
         let styleID = UserDefaults.standard.string(forKey: DictationPreferences.styleKey)
         sessionStyle = profile.styles.first { $0.id == styleID }
         onStateChanged?()
@@ -139,7 +145,7 @@ final class PhoneDictation: ObservableObject {
                 settle(error: NSLocalizedString("dictation.speechOff", comment: ""))
                 return
             }
-            guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: DictationPreferences.activeLanguage)),
+            guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: sessionLanguage)),
                   recognizer.isAvailable, recognizer.supportsOnDeviceRecognition
             else {
                 settle(error: NSLocalizedString("dictation.onDeviceUnavailable", comment: ""))
@@ -148,7 +154,7 @@ final class PhoneDictation: ObservableObject {
             do {
                 try capture(recognizer: recognizer, id: id)
                 if keyboard { extendWarmSession() }
-            } catch { settle(error: error.localizedDescription) }
+            } catch { settle(error: NSLocalizedString("dictation.failed", comment: "")) }
             preparation = nil
         }
     }
@@ -158,6 +164,14 @@ final class PhoneDictation: ObservableObject {
         phase = .finishing
         closeCapture()
         onStateChanged?()
+        #if DEBUG
+        if script != nil, let sessionID {
+            script?.cancel()
+            script = nil
+            receive(text: text, final: true, failed: false, id: sessionID)
+            return
+        }
+        #endif
         // A speech service that never returns a final result must not strand the keyboard.
         finishDeadline = Task { [weak self] in
             try? await Task.sleep(for: .seconds(3))
@@ -237,36 +251,80 @@ final class PhoneDictation: ObservableObject {
         let file = FileManager.default.temporaryDirectory.appending(path: "dictation-\(id.uuidString).pcm")
         let writer = try PCMResampler(url: file, inputFormat: engine.inputNode.inputFormat(forBus: 0))
         self.recognizer = recognizer
-        recognition = recognizer.recognitionTask(with: request) { [weak self] result, error in
-            let text = result?.bestTranscription.formattedString
-            let final = result?.isFinal ?? false
-            let failure = error?.localizedDescription
-            Task { @MainActor in self?.receive(text: text, final: final, error: failure, id: id) }
+        #if DEBUG
+        if let words = Self.scriptedWords {
+            feed(words, id: id)
+        } else {
+            recognize(request, with: recognizer, id: id)
         }
+        #else
+        recognize(request, with: recognizer, id: id)
+        #endif
         sink.begin(request: request, writer: writer)
         startedAt = Date()
         phase = .listening
         onStateChanged?()
     }
 
-    private func receive(text: String?, final: Bool, error: String?, id: UUID) {
-        guard sessionID == id, completion == nil else { return }
-        if let text { self.text = text }
-        if final || error != nil { completeRecognition(error: final ? nil : error) }
+    private func recognize(_ request: SFSpeechAudioBufferRecognitionRequest, with recognizer: SFSpeechRecognizer, id: UUID) {
+        recognition = recognizer.recognitionTask(with: request) { [weak self] result, error in
+            let text = result?.bestTranscription.formattedString
+            let final = result?.isFinal ?? false
+            let failed = error != nil
+            Task { @MainActor in self?.receive(text: text, final: final, failed: failed, id: id) }
+        }
     }
 
-    private func completeRecognition(error: String?) {
+    #if DEBUG
+    /// Debug builds launched with `-SonaScriptedRecognition "some words"` hear those words
+    /// instead of asking the speech service, which the simulator cannot run. The microphone
+    /// still runs; the words arrive one at a time as partial results, and finishing makes
+    /// what has arrived final.
+    private static var scriptedWords: [String]? {
+        UserDefaults.standard.string(forKey: "SonaScriptedRecognition").map { $0.split(separator: " ").map(String.init) }
+    }
+
+    private func feed(_ words: [String], id: UUID) {
+        script = Task { [weak self] in
+            for count in words.indices {
+                try? await Task.sleep(for: .milliseconds(450))
+                guard !Task.isCancelled else { return }
+                self?.receive(text: words[...count].joined(separator: " "), final: false, failed: false, id: id)
+            }
+        }
+    }
+    #endif
+
+    /// Each partial result goes to the keyboard too, so the words show there as they are heard.
+    /// A recognizer that stops while still listening keeps the words it heard and says it
+    /// stopped; after Finish, its ending is the dictation finishing; with no words heard it is
+    /// the empty case.
+    private func receive(text: String?, final: Bool, failed: Bool, id: UUID) {
+        guard sessionID == id, completion == nil else { return }
+        if let text, text != self.text {
+            self.text = text
+            if !final { onStateChanged?() }
+        }
+        if final {
+            completeRecognition(error: nil)
+        } else if failed {
+            let stoppedEarly = phase == .listening && !insertableText.isEmpty
+            completeRecognition(error: nil, notice: stoppedEarly ? NSLocalizedString("dictation.stoppedEarly", comment: "") : nil)
+        }
+    }
+
+    private func completeRecognition(error: String?, notice: String? = nil) {
         guard isBusy, completion == nil else { return }
         closeCapture()
         phase = .finishing
         finishDeadline?.cancel()
         finishDeadline = nil
-        let language = DictationPreferences.activeLanguage
+        let language = sessionLanguage
         let corrected = sessionProfile.apply(to: DictationCleanup.clean(insertableText, language: language))
         text = corrected
         onStateChanged?()
-        guard error == nil, !corrected.isEmpty, let style = sessionStyle else {
-            settle(error: error)
+        guard error == nil, notice == nil, !corrected.isEmpty, let style = sessionStyle else {
+            settle(error: error, styleNotice: notice)
             return
         }
         guard Self.stylesAvailable else {
@@ -332,6 +390,10 @@ final class PhoneDictation: ObservableObject {
     }
 
     private func stopRecognition() {
+        #if DEBUG
+        script?.cancel()
+        script = nil
+        #endif
         sessionID = nil
         preparation?.cancel()
         preparation = nil

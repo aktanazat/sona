@@ -15,22 +15,33 @@ struct Suggestions: Equatable {
 }
 
 /// Words the user wants left as typed: Contacts names, text replacements, the Mac
-/// vocabulary, and words restored after a correction.
+/// vocabulary, and words restored after a correction. Names and vocabulary words are also
+/// offered as the completion of a typed prefix, spelled as they were given.
 struct TypingLexicon {
     private var words: Set<String> = []
     private var expansions: [String: String] = [:]
+    private(set) var names: [String] = []
 
     init(replacements: [(shortcut: String, text: String)] = [], vocabulary: [String] = []) {
         replacements.forEach { add(shortcut: $0.shortcut, text: $0.text) }
-        vocabulary.forEach { insert($0) }
+        vocabulary.forEach { addName($0) }
     }
 
     /// A Contacts name or a text replacement: both sides stay as typed, and typing the
-    /// shortcut offers its text.
+    /// shortcut offers its text. iOS hands Contacts names over with both sides the same.
     mutating func add(shortcut: String, text: String) {
+        if shortcut == text { return addName(text) }
         insert(shortcut)
         insert(text)
-        if shortcut != text { expansions[shortcut.lowercased()] = text }
+        expansions[shortcut.lowercased()] = text
+    }
+
+    mutating func addName(_ phrase: String) {
+        insert(phrase)
+        for word in phrase.split(whereSeparator: { !TypingText.isWordCharacter($0) }).map(String.init)
+        where !names.contains(word) {
+            names.append(word)
+        }
     }
 
     mutating func insert(_ phrase: String) {
@@ -41,6 +52,13 @@ struct TypingLexicon {
 
     func contains(_ word: some StringProtocol) -> Bool { words.contains(word.lowercased()) }
     func expansion(of word: some StringProtocol) -> String? { expansions[word.lowercased()] }
+
+    /// Names and vocabulary words that start with `prefix`, ignoring case and accents.
+    func names(startingWith prefix: some StringProtocol) -> [String] {
+        guard prefix.count >= 2 else { return [] }
+        let options: String.CompareOptions = [.caseInsensitive, .diacriticInsensitive, .anchored]
+        return names.filter { $0.count > prefix.count && $0.range(of: prefix, options: options) != nil }
+    }
 }
 
 /// Spelling correction for the word that ends at the cursor. Apple's on-device dictionary
@@ -54,6 +72,7 @@ final class TypingCorrector {
 
     let language: String
     private let checker = UITextChecker()
+    private let centres: [Character: (x: Double, y: Double)]
     private var completionCache: [String: [String]] = [:]
 
     /// The closest spelling language to a keyboard language such as `en-US`.
@@ -65,6 +84,7 @@ final class TypingCorrector {
             ?? available.first(where: { $0 == base || $0.hasPrefix(base + "_") })
         else { return nil }
         language = match
+        centres = (TypingLanguage(rawValue: identifier) ?? .english).keyCentres
     }
 
     /// The replacement for the word that `text` ends with, or nil to keep it as typed.
@@ -85,7 +105,8 @@ final class TypingCorrector {
 
     private func offer(for word: Substring, after text: String, lexicon: TypingLexicon) -> Suggestions {
         let typed = String(word)
-        let completions = completions(of: typed)
+        let names = lexicon.names(startingWith: typed)
+        let completions = names + completions(of: typed)
         if let expansion = lexicon.expansion(of: typed) {
             return Suggestions(typed: typed, correction: nil, others: Self.distinct([expansion] + completions, from: typed))
         }
@@ -101,7 +122,7 @@ final class TypingCorrector {
         return Suggestions(
             typed: typed,
             correction: clear ? words.first : nil,
-            others: Self.distinct(Array(words.dropFirst(clear ? 1 : 0)) + completions, from: typed)
+            others: Self.distinct(names + words.dropFirst(clear ? 1 : 0) + completions, from: typed)
         )
     }
 
@@ -119,7 +140,7 @@ final class TypingCorrector {
         ) ?? []
         let close = guesses.enumerated().compactMap { rank, guess -> Guess? in
             guard !guess.contains(" "), !guess.contains("-") else { return nil }
-            let cost = TypingText.slipCost(from: letters, to: Array(guess.lowercased()))
+            let cost = TypingText.slipCost(from: letters, to: Array(guess.lowercased()), centres: centres)
             guard cost <= budget else { return nil }
             return Guess(word: guess, score: cost + rarity(of: guess) + Double(rank) * 0.01)
         }
@@ -154,9 +175,10 @@ final class TypingCorrector {
         ).location != NSNotFound
     }
 
-    private func completions(of word: String) -> [String] {
+    /// Dictionary words that start with `word`, most common first.
+    func completions(of word: String) -> [String] {
         if let known = completionCache[word] { return known }
-        if completionCache.count > 500 { completionCache.removeAll() }
+        if completionCache.count > 2000 { completionCache.removeAll() }
         let found = checker.completions(
             forPartialWordRange: NSRange(location: 0, length: word.utf16.count), in: word, language: language
         ) ?? []
@@ -221,14 +243,17 @@ enum TypingText {
     /* Costs of the slips a thumb makes on this layout. A neighbouring key, a swapped pair,
      * a doubled or dropped repeat, and a missing apostrophe cost less than an unrelated
      * letter, so among equally close guesses the likelier slip wins. */
-    static func slipCost(from typed: [Character], to intended: [Character]) -> Double {
+    static func slipCost(
+        from typed: [Character], to intended: [Character],
+        centres: [Character: (x: Double, y: Double)] = englishCentres
+    ) -> Double {
         var cost = Array(repeating: Array(repeating: 0.0, count: intended.count + 1), count: typed.count + 1)
-        for i in typed.indices { cost[i + 1][0] = cost[i][0] + extraCost(typed, i) }
+        for i in typed.indices { cost[i + 1][0] = cost[i][0] + extraCost(typed, i, centres) }
         for j in intended.indices { cost[0][j + 1] = cost[0][j] + missingCost(intended, j) }
         for i in typed.indices {
             for j in intended.indices {
-                var best = min(cost[i][j + 1] + extraCost(typed, i), cost[i + 1][j] + missingCost(intended, j))
-                best = min(best, cost[i][j] + substitutionCost(typed[i], intended[j]))
+                var best = min(cost[i][j + 1] + extraCost(typed, i, centres), cost[i + 1][j] + missingCost(intended, j))
+                best = min(best, cost[i][j] + substitutionCost(typed[i], intended[j], centres))
                 if i > 0, j > 0, typed[i] == intended[j - 1], typed[i - 1] == intended[j] {
                     best = min(best, cost[i - 1][j - 1] + 0.6)
                 }
@@ -238,11 +263,15 @@ enum TypingText {
         return cost[typed.count][intended.count]
     }
 
-    private static func extraCost(_ typed: [Character], _ index: Int) -> Double {
+    static let englishCentres = TypingLanguage.english.keyCentres
+
+    private static func extraCost(
+        _ typed: [Character], _ index: Int, _ centres: [Character: (x: Double, y: Double)]
+    ) -> Double {
         let letter = typed[index]
         if index > 0, typed[index - 1] == letter { return 0.5 }
         let neighbours = [index - 1, index + 1].filter(typed.indices.contains).map { typed[$0] }
-        return neighbours.contains { adjacent(letter, $0) } ? 0.7 : 1
+        return neighbours.contains { adjacent(letter, $0, centres) } ? 0.7 : 1
     }
 
     private static func missingCost(_ intended: [Character], _ index: Int) -> Double {
@@ -251,24 +280,17 @@ enum TypingText {
         return index > 0 && intended[index - 1] == letter ? 0.5 : 1
     }
 
-    private static func substitutionCost(_ typed: Character, _ intended: Character) -> Double {
+    private static func substitutionCost(
+        _ typed: Character, _ intended: Character, _ centres: [Character: (x: Double, y: Double)]
+    ) -> Double {
         if typed == intended { return 0 }
-        return adjacent(typed, intended) ? 0.6 : 1
+        return adjacent(typed, intended, centres) ? 0.6 : 1
     }
 
-    private static let keyCentres: [Character: (x: Double, y: Double)] = {
-        var centres: [Character: (x: Double, y: Double)] = [:]
-        for (row, letters) in ["qwertyuiop", "asdfghjkl", "zxcvbnm"].enumerated() {
-            let offset = [0.5, 1.0, 2.0][row]
-            for (column, letter) in letters.enumerated() {
-                centres[letter] = (offset + Double(column), Double(row))
-            }
-        }
-        return centres
-    }()
-
-    private static func adjacent(_ first: Character, _ second: Character) -> Bool {
-        guard let a = keyCentres[first], let b = keyCentres[second] else { return false }
+    private static func adjacent(
+        _ first: Character, _ second: Character, _ centres: [Character: (x: Double, y: Double)]
+    ) -> Bool {
+        guard let a = centres[first], let b = centres[second] else { return false }
         let dx = a.x - b.x, dy = a.y - b.y
         return dx * dx + dy * dy < 2.1
     }

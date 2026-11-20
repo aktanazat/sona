@@ -7,7 +7,7 @@ struct DictationScreen: View {
     /* Observed for the recording state that `model.canStartDictation` reads: AppModel
      * does not republish it. */
     @ObservedObject var recorder: PhoneRecorder
-    @AppStorage(DictationPreferences.keyboardKey) private var keyboardEnabled = false
+    @AppStorage(DictationPreferences.keyboardKey, store: DictationPreferences.shared) private var keyboardEnabled = false
     @AppStorage(DictationPreferences.styleKey) private var style = ""
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ScaledMetric(relativeTo: .body) private var controlSize: CGFloat = 60
@@ -17,18 +17,11 @@ struct DictationScreen: View {
     var body: some View {
         NavigationStack {
             VStack(alignment: .leading, spacing: 12) {
-                if model.keyboardReturn {
-                    Text("keyboard.swipeBack")
-                        .font(.subheadline)
-                        .foregroundStyle(Theme.textPrimary)
-                        .accessibilityIdentifier("keyboard-return-instruction")
-                    if !keyboardEnabled {
-                        Text("keyboard.permission")
-                            .font(.footnote)
-                            .foregroundStyle(Theme.textSecondary)
-                        Button("dictation.settings") { showsSettings = true }
-                            .font(.subheadline)
-                    }
+                if model.keyboardReturn || model.keyboardSetup != nil {
+                    KeyboardReturnCard(
+                        keyboardEnabled: keyboardEnabled, setup: model.keyboardSetup,
+                        openSettings: { showsSettings = true }
+                    )
                 }
                 LevelWaveform(meter: dictation.meter, height: 48)
                     .padding(.vertical, 8)
@@ -56,6 +49,7 @@ struct DictationScreen: View {
                     .accessibilityIdentifier("dictation-transcript")
                 messages
             }
+            .frame(maxWidth: Self.readableWidth)
             .padding(.horizontal, Theme.pageInset)
             .padding(.bottom, 8)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -80,6 +74,10 @@ struct DictationScreen: View {
         }
         .tint(Theme.accent)
     }
+
+    /// The widest the transcript and controls get, so the inner display of iPhone Duo shows
+    /// a readable column instead of lines that run edge to edge.
+    static let readableWidth: CGFloat = 640
 
     @ViewBuilder
     private var messages: some View {
@@ -185,6 +183,7 @@ struct DictationScreen: View {
                     }
                 }
         }
+        .frame(maxWidth: Self.readableWidth)
         .padding(.horizontal, Theme.pageInset)
         .padding(.vertical, 8)
     }
@@ -228,14 +227,15 @@ private struct PhoneDictationSettings: View {
     @ObservedObject var model: AppModel
     @ObservedObject var dictation: PhoneDictation
     @Environment(\.dismiss) private var dismiss
-    @AppStorage(DictationPreferences.keyboardKey) private var keyboardEnabled = false
+    @AppStorage(DictationPreferences.keyboardKey, store: DictationPreferences.shared) private var keyboardEnabled = false
     @AppStorage(DictationPreferences.minutesKey) private var minutes = 5
     @AppStorage(DictationPreferences.styleKey) private var style = ""
     @State private var languages = DictationPreferences.languages
     @State private var activeLanguage = DictationPreferences.activeLanguage
     @State private var choosesLanguages = false
+    @State private var typingLanguages = KeyboardLanguages.shared().enabled
     private static let supportedLanguages = SFSpeechRecognizer.supportedLocales()
-        .map(\.identifier).sorted { languageName($0).localizedStandardCompare(languageName($1)) == .orderedAscending }
+        .map(\.identifier).filter(DictationPreferences.offered).sorted { languageName($0).localizedStandardCompare(languageName($1)) == .orderedAscending }
 
     var body: some View {
         NavigationStack {
@@ -255,6 +255,24 @@ private struct PhoneDictationSettings: View {
                     .foregroundStyle(Theme.textSecondary)
                 }
                 .listRowBackground(Theme.surface)
+                if TypingLanguage.allCases.count > 1 {
+                    Section {
+                        ForEach(TypingLanguage.allCases) { language in
+                            Toggle(language.name, isOn: Binding(
+                                get: { typingLanguages.contains(language) },
+                                set: { on in
+                                    let keyboard = KeyboardLanguages.shared()
+                                    keyboard.enabled = on ? typingLanguages + [language] : typingLanguages.filter { $0 != language }
+                                    typingLanguages = keyboard.enabled
+                                }
+                            ))
+                            .disabled(typingLanguages == [language])
+                        }
+                    } header: {
+                        Text("keyboard.languages")
+                    }
+                    .listRowBackground(Theme.surface)
+                }
                 Section {
                     Picker("dictation.language", selection: $activeLanguage) {
                         ForEach(languages, id: \.self) { Text(Self.languageName($0)).tag($0) }
@@ -262,9 +280,6 @@ private struct PhoneDictationSettings: View {
                     .disabled(dictation.isBusy)
                     .onChange(of: activeLanguage) { _, value in DictationPreferences.activeLanguage = value }
                     Button("dictation.chooseLanguages") { choosesLanguages = true }
-                } footer: {
-                    Text("dictation.oneLanguage")
-                        .foregroundStyle(Theme.textSecondary)
                 }
                 .listRowBackground(Theme.surface)
                 Section {
@@ -368,5 +383,56 @@ private struct PhoneDictationSettings: View {
 
     private static func languageName(_ id: String) -> String {
         Locale.current.localizedString(forIdentifier: id) ?? id
+    }
+}
+
+/// What a keyboard that opened Sona asks next. Normally that is only once, to allow the
+/// microphone; after the microphone refused the keyboard, Sona listens and the person goes
+/// back. iOS gives a keyboard no way to send the person back, nor the app's name, so the
+/// card says where the system's own way back is.
+private struct KeyboardReturnCard: View {
+    let keyboardEnabled: Bool
+    let setup: KeyboardSetup?
+    let openSettings: () -> Void
+    @AppStorage(DictationPreferences.minutesKey) private var minutes = 5
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("keyboard.returnTitle", systemImage: "arrow.uturn.backward")
+                .font(.headline)
+                .foregroundStyle(Theme.textPrimary)
+            Group {
+                switch setup {
+                case nil: Text("keyboard.swipeBack")
+                case .asking: EmptyView()
+                case .ready: Text("keyboard.setupReady")
+                case let .refused(message): Text(message)
+                }
+            }
+            .font(.subheadline)
+            .foregroundStyle(Theme.textPrimary)
+            .fixedSize(horizontal: false, vertical: true)
+            .accessibilityIdentifier("keyboard-return-instruction")
+            if !keyboardEnabled {
+                Text("keyboard.permission")
+                    .font(.footnote)
+                    .foregroundStyle(Theme.textSecondary)
+                Button("dictation.settings", action: openSettings)
+                    .font(.subheadline)
+            } else if setup == nil {
+                LabeledContent("keyboard.sessionLength") {
+                    Picker("keyboard.sessionLength", selection: $minutes) {
+                        ForEach([1, 5, 15, 30], id: \.self) { Text("keyboard.minutes \($0)").tag($0) }
+                    }
+                    .pickerStyle(.menu)
+                    .labelsHidden()
+                }
+                .font(.subheadline)
+                .foregroundStyle(Theme.textPrimary)
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous))
     }
 }

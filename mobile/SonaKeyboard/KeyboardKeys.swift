@@ -39,14 +39,68 @@ enum Key: Hashable {
     case delete
     case layer(KeyLayer)
     case nextKeyboard
+    case language
     case space
     case newLine
 }
 
-/// One key and its width, in tenths of the keyboard's width.
+/// One key and its width, in key units: a row of ten letters is ten units wide.
 struct KeyCap: Hashable {
     let key: Key
     var units = 1.0
+}
+
+/// A pressed letter and the key it sits on.
+struct KeyCallout: Equatable {
+    let text: String
+    let anchor: CGRect
+}
+
+/// A held letter's accented forms, laid out one key wide each from `originX`.
+struct AccentChoice: Equatable {
+    let anchor: CGRect
+    let options: [String]
+    let originX: CGFloat
+    var selected = 0
+}
+
+/// Where every key sits: keys share one unit width, each row is centred, and the block is
+/// never wider than `maxWidth`, so a wide display gets centred keys instead of stretched ones.
+struct KeyGrid {
+    static let maxWidth: CGFloat = 620
+
+    let unit: CGFloat
+    let rowHeight: CGFloat
+    let origin: CGPoint
+    let frames: [(cap: KeyCap, frame: CGRect)]
+
+    init(rows: [[KeyCap]], size: CGSize) {
+        let columns = max(10, rows.map { $0.reduce(0) { $0 + $1.units } }.max() ?? 10)
+        let width = min(size.width, Self.maxWidth)
+        let unit = width / columns
+        let rowHeight = size.height / CGFloat(max(rows.count, 1))
+        let origin = CGPoint(x: (size.width - width) / 2, y: 0)
+        self.unit = unit
+        self.rowHeight = rowHeight
+        self.origin = origin
+        frames = rows.enumerated().flatMap { index, row in
+            var x = origin.x + (width - row.reduce(0) { $0 + $1.units } * unit) / 2
+            return row.map { cap in
+                defer { x += cap.units * unit }
+                return (cap, CGRect(x: x, y: rowHeight * CGFloat(index), width: cap.units * unit, height: rowHeight))
+            }
+        }
+    }
+
+    /// The key under `point`, or the nearest key in that row when the point falls in a gap.
+    func key(at point: CGPoint) -> (cap: KeyCap, frame: CGRect)? {
+        if let hit = frames.first(where: { $0.frame.contains(point) }) { return hit }
+        guard rowHeight > 0, !frames.isEmpty else { return nil }
+        let rows = Int((frames.map(\.frame.maxY).max() ?? 0) / rowHeight)
+        let row = min(max(Int(point.y / rowHeight), 0), rows - 1)
+        return frames.filter { Int($0.frame.minY / rowHeight) == row }
+            .min { abs($0.frame.midX - point.x) < abs($1.frame.midX - point.x) }
+    }
 }
 
 /// The return key's face for the field's return key type.
@@ -77,32 +131,40 @@ struct ReturnKey: Equatable {
 @Observable
 final class TypingModel {
     var layer = KeyLayer.letters
+    var language = TypingLanguage.english
     var shift = Shift.off
     var suggestions: Suggestions?
-    var hasTyped = false
     var returnKey = ReturnKey(.default)
     var extraKeys: [String] = []
     var showsNextKeyboard = true
+    var showsLanguageKey = false
+    var pressed: Set<Key> = []
+    var trail: [CGPoint] = []
+    var accentChoice: AccentChoice?
+    /// The letter under a finger, shown enlarged above its key as the system keyboard does.
+    var callout: KeyCallout?
     @ObservationIgnored var press: (Key) -> Void = { _ in }
     @ObservationIgnored var choose: (String) -> Void = { _ in }
+    @ObservationIgnored var swipe: ([CGPoint], KeyGrid) -> Void = { _, _ in }
 
     var rows: [[KeyCap]] {
         switch layer {
         case .letters:
-            [
-                Self.caps("qwertyuiop"),
-                Self.caps("asdfghjkl"),
-                [KeyCap(key: .shift, units: 1.5)] + Self.caps("zxcvbnm") + [KeyCap(key: .delete, units: 1.5)],
+            let letters = language.letterRows
+            return [
+                Self.caps(letters[0]),
+                Self.caps(letters[1]),
+                [KeyCap(key: .shift, units: 1.5)] + Self.caps(letters[2]) + [KeyCap(key: .delete, units: 1.5)],
             ]
         case .numbers:
-            [
+            return [
                 Self.caps("1234567890"),
                 Self.caps("-/:;()$&@\""),
                 [KeyCap(key: .layer(.symbols), units: 1.5)] + Self.caps(".,?!'", units: 1.4)
                     + [KeyCap(key: .delete, units: 1.5)],
             ]
         case .symbols:
-            [
+            return [
                 Self.caps("[]{}#%^*+="),
                 Self.caps("_\\|~<>€£¥•"),
                 [KeyCap(key: .layer(.numbers), units: 1.5)] + Self.caps(".,?!'", units: 1.4)
@@ -114,11 +176,17 @@ final class TypingModel {
     func bottomRow(withDelete: Bool) -> [KeyCap] {
         var leading = [KeyCap(key: .layer(layer == .letters ? .numbers : .letters), units: 1.5)]
         if showsNextKeyboard { leading.append(KeyCap(key: .nextKeyboard, units: 1.25)) }
-        leading += extraKeys.map { KeyCap(key: .character($0)) }
+        if showsLanguageKey { leading.append(KeyCap(key: .language, units: 1.25)) }
+        if !withDelete { leading += extraKeys.map { KeyCap(key: .character($0)) } }
         var trailing = [KeyCap(key: .newLine, units: 2)]
         if withDelete { trailing.insert(KeyCap(key: .delete, units: 1.5), at: 0) }
         let used = (leading + trailing).reduce(0) { $0 + $1.units }
         return leading + [KeyCap(key: .space, units: 10 - used)] + trailing
+    }
+
+    /// What a character key types with the current shift.
+    func face(of text: String) -> String {
+        layer == .letters && shift != .off ? text.uppercased() : text
     }
 
     private static func caps(_ characters: String, units: Double = 1) -> [KeyCap] {
@@ -126,23 +194,20 @@ final class TypingModel {
     }
 }
 
-/// Rows of keys, each key as wide as its share of the keyboard.
+/// Rows of keys laid out by `KeyGrid`. Without `taps` the faces only show what a
+/// `KeySurface` over them is doing.
 struct KeyRows: View {
     let model: TypingModel
     let rows: [[KeyCap]]
+    var taps = true
 
     var body: some View {
         GeometryReader { proxy in
-            let unit = proxy.size.width / 10
-            VStack(spacing: 0) {
-                ForEach(rows.indices, id: \.self) { index in
-                    HStack(spacing: 0) {
-                        ForEach(rows[index], id: \.key) { cap in
-                            KeyButton(cap: cap, model: model).frame(width: unit * cap.units)
-                        }
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                }
+            let grid = KeyGrid(rows: rows, size: proxy.size)
+            ForEach(Array(grid.frames.enumerated()), id: \.offset) { _, key in
+                KeyButton(cap: key.cap, model: model, taps: taps)
+                    .frame(width: key.frame.width, height: key.frame.height)
+                    .position(x: key.frame.midX, y: key.frame.midY)
             }
         }
     }
@@ -151,9 +216,13 @@ struct KeyRows: View {
 private struct KeyButton: View {
     let cap: KeyCap
     let model: TypingModel
+    let taps: Bool
 
     var body: some View {
-        if cap.key == .delete {
+        if !taps {
+            label.modifier(KeyFace(pressed: model.pressed.contains(cap.key)))
+                .accessibilityHidden(true)
+        } else if cap.key == .delete {
             DeleteKey(press: model.press)
         } else {
             Button { model.press(cap.key) } label: { label }
@@ -165,8 +234,8 @@ private struct KeyButton: View {
     @ViewBuilder private var label: some View {
         switch cap.key {
         case let .character(text):
-            Text(verbatim: model.layer == .letters && model.shift != .off ? text.uppercased() : text)
-                .font(.system(size: 23))
+            Text(verbatim: model.face(of: text))
+                .font(.system(size: KeyFace.letterSize))
         case .shift:
             Image(systemName: model.shift.symbol)
                 .font(.system(size: 18))
@@ -180,8 +249,13 @@ private struct KeyButton: View {
             Image(systemName: "globe")
                 .font(.system(size: 18))
                 .accessibilityLabel(Text("keyboard.next"))
+        case .language:
+            Text(verbatim: model.language.code)
+                .font(.system(size: 16))
+                .accessibilityLabel(Text("keyboard.language \(model.language.name)"))
         case .space:
-            Text("keyboard.space").font(.system(size: 16))
+            Text("keyboard.space")
+                .font(.system(size: 16))
         case .newLine:
             if let title = model.returnKey.title {
                 Text(LocalizedStringKey(title)).font(.system(size: 16)).lineLimit(1).minimumScaleFactor(0.6)
@@ -191,7 +265,8 @@ private struct KeyButton: View {
                     .accessibilityLabel(Text("keyboard.return"))
             }
         case .delete:
-            EmptyView()
+            Image(systemName: "delete.left")
+                .font(.system(size: 18))
         }
     }
 }
@@ -238,7 +313,17 @@ private struct TypingKeyStyle: ButtonStyle {
     }
 }
 
-private struct KeyFace: ViewModifier {
+/// Keys are flat fills with a one-point shadow over the system keyboard backdrop, as the
+/// system keyboard draws them; the return key carries the accent when the field names an
+/// action.
+struct KeyFace: ViewModifier {
+    /// Letters on the keys and in accent choices; a pressed letter shows larger above its key.
+    static let letterSize: CGFloat = 23
+    static let calloutSize: CGFloat = 32
+    static let fill = Color(uiColor: UIColor { $0.userInterfaceStyle == .dark ? UIColor(white: 0.42, alpha: 1) : .white })
+    static let pressedFill = Color(uiColor: UIColor {
+        $0.userInterfaceStyle == .dark ? UIColor(white: 0.3, alpha: 1) : UIColor(white: 0.82, alpha: 1)
+    })
     let pressed: Bool
     var prominent = false
 
@@ -246,13 +331,16 @@ private struct KeyFace: ViewModifier {
         content
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .foregroundStyle(prominent ? Color.white : Theme.textPrimary)
-            .background(
-                prominent ? Theme.accent.opacity(pressed ? 0.7 : 1) : pressed ? Theme.border : Theme.surface,
-                in: RoundedRectangle(cornerRadius: 6, style: .continuous)
-            )
+            .background(fill, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .shadow(color: .black.opacity(0.3), radius: 0, y: 1)
             .padding(.horizontal, 3)
             .padding(.vertical, 5)
             .contentShape(Rectangle())
+    }
+
+    private var fill: Color {
+        if prominent { return Theme.accent.opacity(pressed ? 0.7 : 1) }
+        return pressed ? Self.pressedFill : Self.fill
     }
 }
 
