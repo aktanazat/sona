@@ -61,12 +61,17 @@ pub struct McpToolSummary {
     pub description: String,
 }
 
+/// Scheme, host and port: what a listing may show of a server's address.
+fn origin(url: &str) -> String {
+    Url::parse(url).map_or_else(|_| String::new(), |url| url.origin().ascii_serialization())
+}
+
 impl From<&AgentMcpServer> for McpServerSummary {
     fn from(server: &AgentMcpServer) -> Self {
         Self {
             id: server.id.clone(),
             name: server.name.clone(),
-            url: server.url.clone(),
+            url: origin(&server.url),
             has_token: server.has_token,
         }
     }
@@ -745,6 +750,24 @@ mod tests {
         assert!(backend.has(&format!("agent_mcp_servers/{}", listed[0].id)));
         assert!(!summary.contains(token), "{summary}");
         assert!(!settings.contains(token));
+    }
+
+    #[tokio::test]
+    async fn a_listing_shows_only_the_servers_scheme_and_host() {
+        let data_dir = tempfile::tempdir().expect("temporary app data");
+        let (app, _) = app_with_secrets(&data_dir);
+
+        let listed = add(
+            app.handle(),
+            "Linear",
+            "https://mcp.example.com:8443/k3y-in-path/mcp",
+            None,
+        )
+        .await
+        .expect("added");
+
+        assert_eq!(listed[0].url, "https://mcp.example.com:8443");
+        assert_eq!(list(app.handle())[0].url, "https://mcp.example.com:8443");
     }
 
     #[tokio::test]
