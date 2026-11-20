@@ -296,8 +296,9 @@ final class PhoneDictation: ObservableObject {
     #endif
 
     /// Each partial result goes to the keyboard too, so the words show there as they are heard.
-    /// A recognizer that stops early keeps the words it heard and says it stopped; one that
-    /// stops before any word is the empty case.
+    /// A recognizer that stops while still listening keeps the words it heard and says it
+    /// stopped; after Finish, its ending is the dictation finishing; with no words heard it is
+    /// the empty case.
     private func receive(text: String?, final: Bool, failed: Bool, id: UUID) {
         guard sessionID == id, completion == nil else { return }
         if let text, text != self.text {
@@ -307,7 +308,8 @@ final class PhoneDictation: ObservableObject {
         if final {
             completeRecognition(error: nil)
         } else if failed {
-            completeRecognition(error: nil, notice: insertableText.isEmpty ? nil : NSLocalizedString("dictation.stoppedEarly", comment: ""))
+            let stoppedEarly = phase == .listening && !insertableText.isEmpty
+            completeRecognition(error: nil, notice: stoppedEarly ? NSLocalizedString("dictation.stoppedEarly", comment: "") : nil)
         }
     }
 

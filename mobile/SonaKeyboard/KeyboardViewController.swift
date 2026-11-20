@@ -178,18 +178,14 @@ final class KeyboardViewController: UIInputViewController {
     /// A report that arrives while the keyboard's own edit is still going through is that
     /// edit; any other change, or another field, was not the keyboard's doing.
     private func hostChanged() {
-        let field = documentID
-        if ownEditInFlight, field == editedField {
-            echo.observe(before: textBefore, after: textAfter)
-        } else {
-            echo.forget()
-        }
+        echo.hostReported(before: textBefore, after: textAfter, ownEdit: ownEditInFlight && documentID == editedField)
     }
 
     private var textBefore: String { textDocumentProxy.documentContextBeforeInput ?? "" }
     private var textAfter: String { textDocumentProxy.documentContextAfterInput ?? "" }
     /// The text a word dropped in whole is joined to.
     private var joiningBefore: String { echo.joining(before: textBefore, after: textAfter) }
+    private var hostBehind: Bool { echo.behind(before: textBefore, after: textAfter) }
     /// UIKit declares this nonnull, yet some fields hand over nil, and Swift's bridge to a
     /// non-optional UUID traps on it. The same getter, declared optional, keeps nil as nil.
     private var documentID: UUID? {
@@ -229,17 +225,21 @@ final class KeyboardViewController: UIInputViewController {
         case let .character(text):
             let character = typing.face(of: text)
             if ".,!?;:)\"".contains(character) {
-                apply(session.end(with: character, before: textBefore, corrects: corrects && cursorEndsWord))
+                apply(session.end(
+                    with: character, before: textBefore, corrects: corrects && cursorEndsWord, hostBehind: hostBehind
+                ))
             } else {
                 apply(session.type(character))
             }
             if character == "'" { typing.layer = .letters }
         case .space, .newLine:
             let separator = key == .space ? " " : "\n"
-            apply(session.end(with: separator, before: textBefore, corrects: corrects && cursorEndsWord))
+            apply(session.end(
+                with: separator, before: textBefore, corrects: corrects && cursorEndsWord, hostBehind: hostBehind
+            ))
             typing.layer = .letters
         case .delete:
-            apply(session.backspace(before: textBefore))
+            apply(session.backspace(before: textBefore, hostBehind: hostBehind))
         case .shift:
             toggleShift()
             return
@@ -257,7 +257,7 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private func choose(_ word: String) {
-        apply(session.choose(word, before: textBefore))
+        apply(session.choose(word, before: textBefore, hostBehind: hostBehind))
         refreshShift()
         refreshSuggestions()
     }
@@ -330,7 +330,10 @@ final class KeyboardViewController: UIInputViewController {
         refreshSuggestions()
     }
 
+    /// Runs after every edit, so the memory of the edit is checked against what the host
+    /// shows as soon as the keyboard reads it again.
     private func refreshShift() {
+        echo.hostReported(before: textBefore, after: textAfter, ownEdit: true)
         guard typing.shift != .locked else { return }
         typing.shift = capitalizes(before: textBefore) ? .once : .off
     }
@@ -347,7 +350,7 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private func refreshSuggestions() {
-        typing.suggestions = corrects && cursorEndsWord ? session.suggestions(before: textBefore) : nil
+        typing.suggestions = corrects && cursorEndsWord && !hostBehind ? session.suggestions(before: textBefore) : nil
     }
 
     private func loadVocabulary() {

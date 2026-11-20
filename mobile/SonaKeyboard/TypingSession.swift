@@ -75,7 +75,10 @@ struct TypingSession {
 
     /// Space, return or punctuation, which ends the word before the cursor and corrects it
     /// when the field allows. A second space after a word ends the sentence.
-    mutating func end(with separator: String, before text: String, corrects: Bool) -> Edit {
+    /// A host still behind the keyboard's last edit gets only plain edits: nothing is
+    /// corrected, replaced or deleted beyond one character on text it may not hold.
+    mutating func end(with separator: String, before text: String, corrects: Bool, hostBehind: Bool = false) -> Edit {
+        if hostBehind { return remember(.other, Edit(insert: separator), on: text) }
         let previous = lastKey(before: text)
         if separator == " ", previous.endsWithSpace, Self.endsWord(text) {
             return remember(.other, Edit(deleteCount: 1, insert: ". "), on: text)
@@ -96,7 +99,8 @@ struct TypingSession {
     /// Right after a correction, backspace puts the typed word back and keeps it for the
     /// rest of the session; right after a swipe it deletes the whole word and its space;
     /// otherwise it deletes one character.
-    mutating func backspace(before text: String) -> Edit {
+    mutating func backspace(before text: String, hostBehind: Bool = false) -> Edit {
+        if hostBehind { return remember(.other, Edit(deleteCount: 1), on: text) }
         switch lastKey(before: text) {
         case let .corrected(correction, separator):
             lexicon.insert(correction.typed)
@@ -112,7 +116,8 @@ struct TypingSession {
     /// A strip candidate replaces the word before the cursor and adds a space. Choosing the
     /// word as typed keeps it uncorrected for the rest of the session. After a swipe, the
     /// candidate swaps in for the swiped word and still goes in one backspace.
-    mutating func choose(_ candidate: String, before text: String) -> Edit {
+    mutating func choose(_ candidate: String, before text: String, hostBehind: Bool = false) -> Edit {
+        if hostBehind { return Edit() }
         if case let .swiped(word, spaced, others) = lastKey(before: text) {
             let swapped = [word] + others.filter { $0 != candidate }
             return remember(
@@ -158,8 +163,8 @@ struct TypingSession {
 /// doubles its space ("Dauren  école").
 ///
 /// It never decides what to delete. It holds only while the host, before and after the
-/// cursor, still shows exactly what it showed at the keyboard's last edit; the first report
-/// that differs, a new field, or a change the keyboard did not make ends it for good.
+/// cursor, shows exactly the text from before the keyboard's last edit; a report that shows
+/// anything else, a change the keyboard did not make, or a new field ends it for good.
 struct FieldEcho {
     private struct Report: Equatable {
         let before: String
@@ -172,13 +177,16 @@ struct FieldEcho {
     /// The keyboard changed the field, which the host showed as `before` and `after` the
     /// cursor: it deleted `deleting` characters before the cursor and inserted `inserting`.
     mutating func edited(before: String, after: String, deleting: Int, inserting: String) {
-        written = String(joining(before: before, after: after).dropLast(deleting)) + inserting
-        stale = Report(before: before, after: after)
+        let known = joining(before: before, after: after)
+        written = String(known.dropLast(deleting)) + inserting
+        stale = Report(before: known, after: after)
     }
 
-    /// The host reported the field, after a change of text or selection or on any read.
-    mutating func observe(before: String, after: String) {
-        if stale != Report(before: before, after: after) { stale = nil }
+    /// The host reported the field. A report while the keyboard's own edit is going through
+    /// is checked against it; any other report is a change the keyboard did not make.
+    mutating func hostReported(before: String, after: String, ownEdit: Bool) {
+        if ownEdit, stale == Report(before: before, after: after) { return }
+        stale = nil
     }
 
     /// The field the keyboard types into is a different one.
@@ -186,9 +194,14 @@ struct FieldEcho {
         stale = nil
     }
 
+    /// Whether the host still shows the field as it was before the keyboard's last edit.
+    func behind(before: String, after: String) -> Bool {
+        stale == Report(before: before, after: after)
+    }
+
     /// The text before the cursor to join a word to: what the keyboard's last edit left,
-    /// while the host still shows the field as it was before that edit; otherwise the host's.
+    /// while the host is behind it; otherwise the host's.
     func joining(before: String, after: String) -> String {
-        stale == Report(before: before, after: after) ? written : before
+        behind(before: before, after: after) ? written : before
     }
 }
