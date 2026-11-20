@@ -90,6 +90,15 @@ final class TypingCorrector {
     private let checker = UITextChecker()
     private let centres: [Character: (x: Double, y: Double)]
     private var completionCache: [String: [String]] = [:]
+    /// Prefixes whose completions came from the common words, Apple's dictionary having none.
+    private var fromCommon: Set<String> = []
+    /// The language's common words, for completions and guesses Apple's dictionary leaves out.
+    var common: CommonWords? {
+        didSet {
+            completionCache = [:]
+            fromCommon = []
+        }
+    }
 
     /// The closest spelling language to a keyboard language such as `en-US`.
     init?(language identifier: String) {
@@ -146,19 +155,23 @@ final class TypingCorrector {
     static let margin = 0.025
 
     /* Apple's guesses come in dictionary order, not typing order: for "mettings" it offers
-     * "nettings" before "meetings". Each guess is scored by how a thumb could have produced
+     * "nettings" before "meetings". Its guesses can also miss the obvious word ("превет"
+     * gets "пресет" and "ревет" but not "привет"), so the language's common words of about
+     * the same length join them. Each guess is scored by how a thumb could have produced
      * the typed word from it plus how common it is, and only close guesses are kept. */
     func rankedGuesses(for typed: String) -> [Guess] {
         let letters = Array(typed.lowercased())
         let budget = letters.count <= 4 ? 1.0 : 2.0
-        let guesses = checker.guesses(
+        let apple = checker.guesses(
             forWordRange: NSRange(location: 0, length: typed.utf16.count), in: typed, language: language
         ) ?? []
-        let close = guesses.enumerated().compactMap { rank, guess -> Guess? in
+        let known = Set(apple.map { $0.lowercased() } + [typed.lowercased()])
+        let extra = (common?.candidates(near: typed.lowercased(), limit: 400) ?? []).filter { !known.contains($0) }
+        let close = (apple + extra).enumerated().compactMap { rank, guess -> Guess? in
             guard !guess.contains(" "), !guess.contains("-") else { return nil }
             let cost = TypingText.slipCost(from: letters, to: Array(guess.lowercased()), centres: centres)
             guard cost <= budget else { return nil }
-            return Guess(word: guess, score: cost + rarity(of: guess) + Double(rank) * 0.01)
+            return Guess(word: guess, score: cost + rarity(of: guess) + Double(min(rank, apple.count)) * 0.01)
         }
         return (close + splits(of: typed)).sorted { $0.score < $1.score }
     }
@@ -191,21 +204,37 @@ final class TypingCorrector {
         ).location != NSNotFound
     }
 
-    /// Dictionary words that start with `word`, most common first.
+    /// Dictionary words that start with `word`, most common first: Apple's, or the
+    /// language's common words when Apple's dictionary has none.
     func completions(of word: String) -> [String] {
         if let known = completionCache[word] { return known }
-        if completionCache.count > 2000 { completionCache.removeAll() }
-        let found = checker.completions(
+        if completionCache.count > 2000 {
+            completionCache.removeAll()
+            fromCommon.removeAll()
+        }
+        let apple = checker.completions(
             forPartialWordRange: NSRange(location: 0, length: word.utf16.count), in: word, language: language
         ) ?? []
+        let found: [String]
+        if apple.isEmpty, let common {
+            found = common.completions(of: word.lowercased(), limit: 20).map { Self.matchCase(of: word, in: $0) }
+            fromCommon.insert(word)
+        } else {
+            found = apple
+        }
         completionCache[word] = found
         return found
     }
 
     /// 0 for a word near the top of its first letter's completions, rising to 1 for one that
-    /// even its first four letters never offer.
+    /// even its first four letters never offer. Where the completions are the common words,
+    /// it is the word's place in that list, and a word the list lacks is rarer than any in it.
     private func rarity(of word: String) -> Double {
         let lower = word.lowercased()
+        let first = String(lower.prefix(1))
+        if let common, !completions(of: first).isEmpty, fromCommon.contains(first) {
+            return common.rarity(of: lower) ?? 1.3
+        }
         for length in 1...max(1, min(4, lower.count)) {
             let options = completions(of: String(lower.prefix(length)))
             if let rank = options.firstIndex(where: { $0.lowercased() == lower }) {

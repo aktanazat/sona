@@ -134,6 +134,38 @@ struct KeyboardLearningTests {
     }
 }
 
+@MainActor
+struct RussianTypingTests {
+    private func session() async throws -> TypingSession {
+        let corrector = try #require(TypingCorrector(language: TypingLanguage.russian.rawValue))
+        corrector.common = await CommonWords.list(for: .russian)
+        return TypingSession(corrector: corrector)
+    }
+
+    @Test("a Russian typo is corrected as the word ends", arguments: [
+        ("превет", "привет"), ("спосибо", "спасибо"), ("сегодя", "сегодня"),
+    ])
+    func corrects(typed: String, intended: String) async throws {
+        var session = try await session()
+        var text = "ну " + typed
+        text.apply(session.end(with: " ", before: text, corrects: true))
+        #expect(text == "ну \(intended) ")
+    }
+
+    @Test("a Russian word being typed offers its completions")
+    func completes() async throws {
+        let session = try await session()
+        #expect(session.suggestions(before: "ну спас")?.others.contains("спасибо") == true)
+    }
+
+    @Test("the Russian next words leave out Tatoeba's names")
+    func nextWordsWithoutNames() async throws {
+        let table = try #require(await NextWords.table(for: .russian))
+        #expect(table.next(after: [], limit: 3) == ["я", "ты", "он"])
+        #expect(table.next(after: ["как"], limit: 3) == ["ты", "вы", "я"])
+    }
+}
+
 struct KeyboardLanguagesTests {
     @Test("stored languages the keyboard no longer has count as English", arguments: [
         (["ja-JP"], [TypingLanguage.english]),

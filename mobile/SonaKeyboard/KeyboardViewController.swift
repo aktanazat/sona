@@ -245,11 +245,12 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     /// Letters, spelling, next words and the language dictation listens in all follow the
-    /// typing language. Emoji found by word need English words. The next-word table comes
-    /// in a moment later, read off the main thread the first time.
+    /// typing language. Emoji found by word need English words. The next-word table and the
+    /// common words come in a moment later, read off the main thread the first time.
     private func setLanguage(_ language: TypingLanguage) {
         typing.language = language
-        corrector = TypingCorrector(language: language.rawValue)
+        let corrector = TypingCorrector(language: language.rawValue)
+        self.corrector = corrector
         let catalog = language == .english ? EmojiCatalog.shared : nil
         session = TypingSession(
             corrector: corrector, lexicon: session.lexicon, learning: session.learning,
@@ -257,9 +258,12 @@ final class KeyboardViewController: UIInputViewController {
         )
         session.hostChanged(field: documentID, text: fieldText)
         Task { [weak self] in
-            let table = await NextWords.table(for: language)
+            async let table = NextWords.table(for: language)
+            async let common = CommonWords.list(for: language)
+            let (loadedTable, loadedCommon) = await (table, common)
+            corrector?.common = loadedCommon
             guard let self, typing.language == language else { return }
-            session.predictor = table
+            session.predictor = loadedTable
             refreshSuggestions()
         }
         primaryLanguage = language.rawValue
