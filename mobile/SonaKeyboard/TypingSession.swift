@@ -29,6 +29,8 @@ struct TypingSession {
     }
 
     var lexicon: TypingLexicon
+    /// His keyboard snippets, keyword lowercased to text; ending a keyword expands it.
+    var snippets: [String: String] = [:]
     private let corrector: TypingCorrector?
     private var last = Last.other
     /// The text before the cursor as the last key left it. When the cursor moves, the field
@@ -88,6 +90,12 @@ struct TypingSession {
         }
         if case .swiped = previous {
             return remember(separator == " " ? .space : .other, Edit(insert: separator), on: text)
+        }
+        /* Text the last edit left as is, unchanged since, is a keyword backspace just put back. */
+        if text != textAfterLast, let keyword = TypingText.keyword(before: text),
+           let expansion = snippets[keyword.lowercased()] ?? lexicon.expansion(of: keyword) {
+            let snippet = Correction(typed: String(keyword), replacement: expansion)
+            return remember(.corrected(snippet, separator: separator), Edit(deleteCount: keyword.count, insert: expansion + separator), on: text)
         }
         if corrects, let correction = corrector?.correction(before: text, lexicon: lexicon) {
             let edit = Edit(deleteCount: correction.typed.count, insert: correction.replacement + separator)
