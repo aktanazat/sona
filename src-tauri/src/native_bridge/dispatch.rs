@@ -5818,21 +5818,59 @@ pub(super) async fn call(
             let mut args = Args::parse(params)?;
             let operation_id = args.take("operationId")?;
             let id = args.take("id")?;
-            let name = args.take("name")?;
-            let query = args.take("query")?;
-            let display = args.take("display")?;
+            let view = args.take("view")?;
             let handle = app.clone();
             off_main_thread(move || {
                 reply(crate::planning::work::work_view_save(
                     handle.clone(),
                     operation_id,
                     id,
-                    name,
-                    query,
-                    display,
+                    view,
                 ))
             })
             .await?
+        }
+        "work_project_views" => {
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::planning::work::work_project_views(handle.state()))
+            })
+            .await?
+        }
+        "work_project_view_save" => {
+            let mut args = Args::parse(params)?;
+            let operation_id = args.take("operationId")?;
+            let id = args.take("id")?;
+            let view = args.take("view")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::planning::work::work_project_view_save(
+                    handle.clone(),
+                    operation_id,
+                    id,
+                    view,
+                ))
+            })
+            .await?
+        }
+        "work_project_view_delete" => {
+            let mut args = Args::parse(params)?;
+            let operation_id = args.take("operationId")?;
+            let id = args.take("id")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::planning::work::work_project_view_delete(
+                    handle.clone(),
+                    operation_id,
+                    id,
+                ))
+            })
+            .await?
+        }
+        "work_csv" => {
+            let mut args = Args::parse(params)?;
+            let ids = args.take("ids")?;
+            reply(crate::planning::work::work_csv(app.state(), app.state(), ids).await)
         }
         "work_view_delete" => {
             let mut args = Args::parse(params)?;

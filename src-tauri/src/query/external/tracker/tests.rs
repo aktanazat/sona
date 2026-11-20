@@ -479,16 +479,20 @@ fn paging_with_the_cursor_reads_every_task_once_in_order() {
             limit: Some(limit),
             order_by: Some(*order),
             cursor,
-            fields: Vec::new(),
+            ..PageArgs::default()
+        };
+        let read = |paging: PageArgs| {
+            let order = paging.row_order(None).expect("an order");
+            page(rows.clone(), &paging, order, &board).expect("a page")
         };
         let numbers = |listed: &super::ExternalWorkPage| -> Vec<i64> {
             listed.entries.tasks.iter().map(|task| task.number).collect()
         };
-        let whole = numbers(&page(rows.clone(), &paging(100, None), &board).expect("one page"));
+        let whole = numbers(&read(paging(100, None)));
         let mut paged = Vec::new();
         let mut after = None;
         for _ in 0..rows.len() {
-            let listed = page(rows.clone(), &paging(2, after), &board).expect("a page");
+            let listed = read(paging(2, after));
             paged.extend(numbers(&listed));
             match listed.next_cursor {
                 Some(text) => after = Some(cursor(&text).expect("the cursor reads back")),

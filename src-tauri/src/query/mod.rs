@@ -513,6 +513,12 @@ pub fn task_link(task_id: &str) -> String {
     format!("sona://task/{task_id}")
 }
 
+/// `sona://tasks?view=<id>` — a saved view's list, on the Tasks page or on
+/// its project's page.
+pub fn view_link(view_id: &str) -> String {
+    format!("sona://tasks?view={view_id}")
+}
+
 /// The tasks that hold every word of `query`, each titled with its number so
 /// a reader can name it to `sona work`. A task drawn from a meeting kept on
 /// this Mac is left out wherever `kept_local` hides it.

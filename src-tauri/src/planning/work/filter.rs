@@ -1,5 +1,6 @@
-//! Conditions a list or a saved view filters tasks by, all of which must
-//! hold: a field, an operator, and the values it compares against.
+//! Conditions a list or a saved view filters tasks by: a field, an
+//! operator, and the values it compares against, combined in groups where
+//! all or any of them must hold.
 
 use super::agents;
 use super::cycles;
@@ -104,6 +105,24 @@ pub struct WorkCondition {
     pub values: Vec<String>,
 }
 
+/// A condition, or a group of filters of which any or all must hold. A
+/// query's own list of filters all must hold, so `{"any": [...]}` in it
+/// reads "this or that".
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(untagged)]
+pub enum WorkFilter {
+    Condition(WorkCondition),
+    Any { any: Vec<WorkFilter> },
+    All { all: Vec<WorkFilter> },
+}
+
+impl From<WorkCondition> for WorkFilter {
+    fn from(condition: WorkCondition) -> Self {
+        Self::Condition(condition)
+    }
+}
+
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Value {
     None,
@@ -126,6 +145,14 @@ pub(crate) struct Ready {
     field: WorkFilterField,
     op: WorkFilterOp,
     values: Vec<Value>,
+}
+
+/// A filter with its conditions read.
+#[derive(Clone, Debug)]
+pub(crate) enum ReadyFilter {
+    One(Ready),
+    Any(Vec<ReadyFilter>),
+    All(Vec<ReadyFilter>),
 }
 
 const fn dated(field: WorkFilterField) -> bool {
@@ -190,17 +217,56 @@ fn day(value: &str, now_ms: i64) -> Result<Value> {
     Ok(Value::Day(local_midnight_ms(first)?, local_midnight_ms(end)?))
 }
 
-/// Reads every condition's values; `merged` gives a person with the ids
-/// merged into them. A value its field cannot take is refused.
+/// Reads every filter's values; `merged` gives a person with the ids
+/// merged into them. A value its field cannot take is refused, and so is a
+/// group with nothing in it.
 pub(crate) fn ready(
     conn: &Connection,
-    conditions: &[WorkCondition],
+    filters: &[WorkFilter],
     merged: impl Fn(&str) -> Vec<String>,
     now_ms: i64,
-) -> Result<Vec<Ready>> {
-    let mut made: Option<Vec<WorkCycle>> = None;
-    let mut out = Vec::with_capacity(conditions.len());
-    for condition in conditions {
+) -> Result<Vec<ReadyFilter>> {
+    let mut reader = Reader {
+        conn,
+        merged: &merged,
+        now_ms,
+        cycles: None,
+    };
+    filters.iter().map(|filter| reader.filter(filter)).collect()
+}
+
+/// Reads conditions, every cycle read at most once for all of them.
+struct Reader<'a> {
+    conn: &'a Connection,
+    merged: &'a dyn Fn(&str) -> Vec<String>,
+    now_ms: i64,
+    cycles: Option<Vec<WorkCycle>>,
+}
+
+impl Reader<'_> {
+    fn filter(&mut self, filter: &WorkFilter) -> Result<ReadyFilter> {
+        match filter {
+            WorkFilter::Condition(condition) => self.condition(condition).map(ReadyFilter::One),
+            WorkFilter::Any { any: filters } | WorkFilter::All { all: filters }
+                if filters.is_empty() =>
+            {
+                Err(Refusal::Invalid.into())
+            }
+            WorkFilter::Any { any } => any
+                .iter()
+                .map(|filter| self.filter(filter))
+                .collect::<Result<_>>()
+                .map(ReadyFilter::Any),
+            WorkFilter::All { all } => all
+                .iter()
+                .map(|filter| self.filter(filter))
+                .collect::<Result<_>>()
+                .map(ReadyFilter::All),
+        }
+    }
+
+    fn condition(&mut self, condition: &WorkCondition) -> Result<Ready> {
+        let (conn, now_ms) = (self.conn, self.now_ms);
         let field = condition.field;
         let ranged = matches!(condition.op, WorkFilterOp::Before | WorkFilterOp::After);
         if condition.values.is_empty() || (ranged && !dated(field)) {
@@ -225,7 +291,7 @@ pub(crate) fn ready(
                 }
                 WorkFilterField::Owner if text == "me" => values.push(Value::Me),
                 WorkFilterField::Owner | WorkFilterField::For => {
-                    values.extend(merged(raw.trim()).into_iter().map(Value::Text));
+                    values.extend((self.merged)(raw.trim()).into_iter().map(Value::Text));
                 }
                 WorkFilterField::Estimate => {
                     let points = text
@@ -259,10 +325,10 @@ pub(crate) fn ready(
                     values.push(Value::Text(id));
                 }
                 WorkFilterField::Cycle | WorkFilterField::CycleScope => {
-                    if made.is_none() {
-                        made = Some(cycles::all(conn, now_ms)?);
+                    if self.cycles.is_none() {
+                        self.cycles = Some(cycles::all(conn, now_ms)?);
                     }
-                    let all = made.as_deref().unwrap_or_default();
+                    let all = self.cycles.as_deref().unwrap_or_default();
                     if field == WorkFilterField::CycleScope {
                         let added = all
                             .iter()
@@ -302,13 +368,12 @@ pub(crate) fn ready(
                 }
             }
         }
-        out.push(Ready {
+        Ok(Ready {
             field,
             op: condition.op,
             values,
-        });
+        })
     }
-    Ok(out)
 }
 
 fn text_of(field: WorkFilterField, item: &WorkItem, doer: Option<&str>) -> Option<String> {
@@ -387,25 +452,32 @@ fn after(field: WorkFilterField, item: &WorkItem, value: &Value) -> bool {
     }
 }
 
-/// Whether `item`, worked by the agent `doer` names, meets every condition.
-pub(crate) fn holds(conditions: &[Ready], item: &WorkItem, doer: Option<&str>) -> bool {
-    conditions.iter().all(|condition| {
-        let field = condition.field;
-        let mut values = condition.values.iter();
-        let set = field == WorkFilterField::Label;
-        match condition.op {
-            WorkFilterOp::Is if set => values.all(|value| hits(field, item, doer, value)),
-            WorkFilterOp::IncludesAll => values.all(|value| hits(field, item, doer, value)),
-            WorkFilterOp::Is | WorkFilterOp::AnyOf | WorkFilterOp::IncludesAny => {
-                values.any(|value| hits(field, item, doer, value))
-            }
-            WorkFilterOp::IsNot | WorkFilterOp::NoneOf => {
-                !values.any(|value| hits(field, item, doer, value))
-            }
-            WorkFilterOp::Before => values.any(|value| before(field, item, value)),
-            WorkFilterOp::After => values.any(|value| after(field, item, value)),
+/// Whether `item`, worked by the agent `doer` names, meets every filter.
+pub(crate) fn holds(filters: &[ReadyFilter], item: &WorkItem, doer: Option<&str>) -> bool {
+    filters.iter().all(|filter| meets(filter, item, doer))
+}
+
+fn meets(filter: &ReadyFilter, item: &WorkItem, doer: Option<&str>) -> bool {
+    let condition = match filter {
+        ReadyFilter::One(condition) => condition,
+        ReadyFilter::Any(filters) => return filters.iter().any(|filter| meets(filter, item, doer)),
+        ReadyFilter::All(filters) => return holds(filters, item, doer),
+    };
+    let field = condition.field;
+    let mut values = condition.values.iter();
+    let set = field == WorkFilterField::Label;
+    match condition.op {
+        WorkFilterOp::Is if set => values.all(|value| hits(field, item, doer, value)),
+        WorkFilterOp::IncludesAll => values.all(|value| hits(field, item, doer, value)),
+        WorkFilterOp::Is | WorkFilterOp::AnyOf | WorkFilterOp::IncludesAny => {
+            values.any(|value| hits(field, item, doer, value))
         }
-    })
+        WorkFilterOp::IsNot | WorkFilterOp::NoneOf => {
+            !values.any(|value| hits(field, item, doer, value))
+        }
+        WorkFilterOp::Before => values.any(|value| before(field, item, value)),
+        WorkFilterOp::After => values.any(|value| after(field, item, value)),
+    }
 }
 
 #[cfg(test)]
@@ -445,15 +517,15 @@ mod tests {
         }
     }
 
-    fn labels(op: WorkFilterOp, values: &[&str]) -> Vec<Ready> {
-        vec![Ready {
+    fn labels(op: WorkFilterOp, values: &[&str]) -> Vec<ReadyFilter> {
+        vec![ReadyFilter::One(Ready {
             field: WorkFilterField::Label,
             op,
             values: values
                 .iter()
                 .map(|value| Value::Text((*value).to_owned()))
                 .collect(),
-        }]
+        })]
     }
 
     #[test]
@@ -484,19 +556,19 @@ mod tests {
 
     #[test]
     fn none_matches_an_empty_field_and_days_bound_before_and_after() {
-        let no_project = [Ready {
+        let no_project = [ReadyFilter::One(Ready {
             field: WorkFilterField::Project,
             op: WorkFilterOp::Is,
             values: vec![Value::None],
-        }];
+        })];
         assert!(holds(&no_project, &item(&[], None, None), None));
         assert!(!holds(&no_project, &item(&[], Some("p"), None), None));
         let day = |op| {
-            [Ready {
+            [ReadyFilter::One(Ready {
                 field: WorkFilterField::Due,
                 op,
                 values: vec![Value::Day(100, 200)],
-            }]
+            })]
         };
         assert!(holds(
             &day(WorkFilterOp::Before),
@@ -540,7 +612,8 @@ mod tests {
                     field: WorkFilterField::Delegate,
                     op,
                     values: vec![value.to_owned()],
-                }],
+                }
+                .into()],
                 |_| Vec::new(),
                 0,
             )
@@ -559,5 +632,27 @@ mod tests {
         assert!(holds(&delegate(WorkFilterOp::Is, "none"), &task, None));
         assert!(!holds(&delegate(WorkFilterOp::Is, "none"), &task, Some("Codex")));
         assert!(holds(&delegate(WorkFilterOp::IsNot, "none"), &task, Some("Codex")));
+    }
+
+    #[test]
+    fn an_any_group_keeps_work_that_meets_one_of_its_filters() {
+        let conn = Connection::open_in_memory().expect("an in-memory history database");
+        let read = |json: &str| {
+            let filters: Vec<WorkFilter> = serde_json::from_str(json).expect("filters as JSON");
+            ready(&conn, &filters, |_| Vec::new(), 0)
+        };
+        let either = read(
+            r#"[{"field":"label","op":"includes_any","values":["bug"]},
+                {"any":[{"field":"project","op":"is","values":["p"]},
+                        {"all":[{"field":"project","op":"is","values":["none"]},
+                                {"field":"label","op":"includes_any","values":["ui"]}]}]}]"#,
+        )
+        .expect("a group of conditions");
+        assert!(holds(&either, &item(&["bug"], Some("p"), None), None));
+        assert!(holds(&either, &item(&["bug", "ui"], None, None), None));
+        assert!(!holds(&either, &item(&["bug"], None, None), None));
+        assert!(!holds(&either, &item(&["bug"], Some("q"), None), None));
+        assert!(!holds(&either, &item(&["ui"], Some("p"), None), None));
+        assert!(read(r#"[{"any":[]}]"#).is_err());
     }
 }
