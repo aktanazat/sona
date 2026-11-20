@@ -1627,6 +1627,11 @@ static MIGRATIONS: &[M] = &[
     M::up(include_str!("store/live_docs.sql")),
     M::up(include_str!("store/live_changes.sql")),
     M::up(include_str!("store/live_rooms.sql")),
+    // A saved prompt marked as a skill is one Talk to Sona and automations may
+    // call by its name.
+    M::up(
+        "ALTER TABLE saved_prompts ADD COLUMN skill INTEGER NOT NULL DEFAULT 0 CHECK (skill IN (0, 1));",
+    ),
 ];
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StoreError {
@@ -12989,7 +12994,9 @@ mod tests {
                     .list_sessions(None, 100, &MeetingListFilter::default())
                     .is_ok()
             }),
-            ("evening", |store| store.evening_meetings(0, i64::MAX).is_ok()),
+            ("evening", |store| {
+                store.evening_meetings(0, i64::MAX).is_ok()
+            }),
             ("open loops", |store| store.open_loops_inbox(100).is_ok()),
             ("calendar people", |store| {
                 store

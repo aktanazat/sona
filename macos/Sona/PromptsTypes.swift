@@ -115,10 +115,27 @@ struct SavedPrompt: Decodable, Identifiable, Hashable {
     let body: String
     let output: PromptOutput
     let target: PromptTarget
+    let skill: Bool
     let createdAtUtcMs: Double
     let updatedAtUtcMs: Double
 
     var id: String { promptId }
+
+    private enum CodingKeys: String, CodingKey {
+        case promptId, name, body, output, target, skill, createdAtUtcMs, updatedAtUtcMs
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        promptId = try container.decode(String.self, forKey: .promptId)
+        name = try container.decode(String.self, forKey: .name)
+        body = try container.decode(String.self, forKey: .body)
+        output = try container.decode(PromptOutput.self, forKey: .output)
+        target = try container.decode(PromptTarget.self, forKey: .target)
+        skill = try container.decodeIfPresent(Bool.self, forKey: .skill) ?? false
+        createdAtUtcMs = try container.decode(Double.self, forKey: .createdAtUtcMs)
+        updatedAtUtcMs = try container.decode(Double.self, forKey: .updatedAtUtcMs)
+    }
 }
 
 /// The library and the revision every write has to carry back.

@@ -68,7 +68,7 @@ CREATE INDEX planning_loop_runs_loop ON planning_loop_runs(loop_id, queued_at_ms
 CREATE INDEX planning_loop_runs_waiting ON planning_loop_runs(status, queued_at_ms)
     WHERE status IN ('queued', 'running');";
 
-pub(crate) const LOOP_TOOLS: [(&str, &str, &[&str]); 10] = [
+pub(crate) const LOOP_TOOLS: [(&str, &str, &[&str]); 11] = [
     ("sona_search", "Search", &["search", "dictation"]),
     ("sona_meetings", "List meetings", &["recent"]),
     ("sona_meeting", "Read a meeting", &["meeting"]),
@@ -77,6 +77,7 @@ pub(crate) const LOOP_TOOLS: [(&str, &str, &[&str]); 10] = [
     ("sona_action_items", "Action items", &["loops"]),
     ("sona_upcoming", "Upcoming meetings", &["upcoming"]),
     ("sona_stats", "Statistics", &["word_stats", "activity"]),
+    ("sona_skills", "Use your skills", &["skill"]),
     (PROPOSE_NEW, "Propose new tasks for Triage", &[]),
     (PROPOSE_CHANGE, "Propose task changes for Triage", &[]),
 ];
@@ -1755,7 +1756,9 @@ fn split_offers(reply: &str) -> Result<(String, Offers), String> {
         format!("The agent's proposals could not be read, so none were kept: {reason}.")
     };
     let block = &reply[start + OFFER_FENCE.len()..];
-    let end = block.find("```").ok_or_else(|| unreadable(&"the block never ends"))?;
+    let end = block
+        .find("```")
+        .ok_or_else(|| unreadable(&"the block never ends"))?;
     let offers = serde_json::from_str(block[..end].trim()).map_err(|error| unreadable(&error))?;
     let answer = format!("{}{}", &reply[..start], &block[end + 3..]);
     Ok((answer.trim().to_owned(), offers))
@@ -1823,7 +1826,10 @@ fn file_offers(
             &mut effects,
         )?;
         lines.push(match changed {
-            None => format!("{} isn't a task, so nothing was proposed for it.", offer.task),
+            None => format!(
+                "{} isn't a task, so nothing was proposed for it.",
+                offer.task
+            ),
             Some(changed) if changed.proposed.is_empty() => {
                 format!("S-{} already reads as proposed.", changed.item.number)
             }
@@ -1900,14 +1906,16 @@ async fn settle_reply(
         );
     }
     let filed = offer(app, claimed, &offers).await?;
-    Ok(format!("{answer}\n\n{}", filed.join("\n")).trim().to_owned())
+    Ok(format!("{answer}\n\n{}", filed.join("\n"))
+        .trim()
+        .to_owned())
 }
 
 async fn execute(app: &AppHandle, history: &HistoryManager, claimed: Claimed) {
     if let Some(meeting_id) = &claimed.meeting_id {
         if meeting_kept_here(app, meeting_id).await {
-            if let Err(error) = history
-                .with_connection(|conn| skip_run(conn, &claimed.run_id, KEPT_HERE, now_ms()))
+            if let Err(error) =
+                history.with_connection(|conn| skip_run(conn, &claimed.run_id, KEPT_HERE, now_ms()))
             {
                 log::warn!("A loop run could not be recorded: {error:#}");
             }
@@ -2177,7 +2185,9 @@ mod tests {
         )
         .expect("a saved loop");
         run_now(&conn, &digest.id, "op-1", 2).expect("a queued run");
-        let claimed = claim(&mut conn, 3).expect("the queue").expect("a run started");
+        let claimed = claim(&mut conn, 3)
+            .expect("the queue")
+            .expect("a run started");
 
         let closed = [
             recover(&mut conn, 4).expect("the first restart"),
@@ -2192,7 +2202,9 @@ mod tests {
                     notice.kind,
                     notice.item_id,
                     notice.to,
-                    notice.automation.map(|automation| (automation.name, automation.error)),
+                    notice
+                        .automation
+                        .map(|automation| (automation.name, automation.error)),
                 )
             })
             .collect();
@@ -2296,7 +2308,9 @@ mod tests {
             .expect("the series kept on this Mac");
 
         assert_eq!(
-            ended_meeting(&meetings, open).map(|(title, _)| title).as_deref(),
+            ended_meeting(&meetings, open)
+                .map(|(title, _)| title)
+                .as_deref(),
             Some("Pricing sync")
         );
         assert_eq!(ended_meeting(&meetings, kept), None);
@@ -2407,7 +2421,10 @@ mod tests {
         assert_eq!(answer, "Two follow-ups.");
         assert_eq!(new_status, "triage");
         assert_eq!(evidence, 1);
-        assert_eq!(items::item(&conn, &task.id).expect("the task").status, WorkStatus::NotStarted);
+        assert_eq!(
+            items::item(&conn, &task.id).expect("the task").status,
+            WorkStatus::NotStarted
+        );
         assert_eq!(waiting, [("status".to_owned(), LOOP_AGENT.to_owned())]);
         assert_eq!(filed.value.len(), 2);
     }
