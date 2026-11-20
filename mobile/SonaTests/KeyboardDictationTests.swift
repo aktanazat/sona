@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 
 /// The keyboard dictating by itself, driven by what the person and the microphone do.
@@ -76,9 +77,20 @@ struct DictationJoiningTests {
         var history: [String]
         var echo = FieldEcho()
 
+        /// The test's clock: each step takes a tenth of a second, as keys in a burst do;
+        /// what only a person causes, a quiet clear, a cursor move, a new field, takes a second.
+        final class Clock {
+            var time = Date(timeIntervalSince1970: 1_800_000_000)
+        }
+
+        let clock: Clock
+
         init(lag: Int?, text: String = "") {
             self.lag = lag
             history = [text]
+            let clock = Clock()
+            self.clock = clock
+            echo.now = { clock.time }
         }
 
         var text: String { history[history.count - 1] }
@@ -128,11 +140,15 @@ struct DictationJoiningTests {
 
         mutating func run(_ step: Step) {
             switch step {
+            case .silently, .announced, .newField: clock.time += 1
+            default: clock.time += 0.1
+            }
+            switch step {
             case let .key(text): keyboard(TypingSession.Edit(insert: text))
             case .delete: keyboard(TypingSession.Edit(deleteCount: 1))
             case let .dictate(words): dictate(words)
             case let .lag(lag):
-                self = Host(lag: lag, history: history, echo: echo)
+                self = Host(lag: lag, history: history, echo: echo, clock: clock)
                 echo.hostReported(before: shown, after: "", ownEdit: true)
             case let .silently(text): appSilently(sets: text)
             case let .announced(text): app(sets: text)
@@ -142,10 +158,11 @@ struct DictationJoiningTests {
             }
         }
 
-        private init(lag: Int?, history: [String], echo: FieldEcho) {
+        private init(lag: Int?, history: [String], echo: FieldEcho, clock: Clock) {
             self.lag = lag
             self.history = history
             self.echo = echo
+            self.clock = clock
         }
     }
 
@@ -187,6 +204,14 @@ struct DictationJoiningTests {
         Pattern(name: "quiet clear, never updates", lag: nil, start: "Note: ", steps: [.key("H"), .key("i"), .silently(""), .dictate("See you.")], behind: [t, t, f, t], text: "See you."),
         Pattern(name: "cursor moved", lag: 1, start: "Call ", steps: [.key("Dauren"), .announced("Call "), .dictate("Meet")], behind: [t, f, t], text: "Call Meet"),
         Pattern(name: "field switch", lag: 1, start: "", steps: [.dictate("Meet me."), .newField(""), .dictate("Hello")], behind: [t, f, t], text: "Hello"),
+        /* After the backspace the host, two behind, happens to show the real text, so it
+         * reads as caught up for that moment; the next key finds it behind again. */
+        Pattern(
+            name: "typo fixed with backspace, 2 behind, then caught up", lag: 2, start: "I said te",
+            steps: [.key("h"), .key("x"), .delete, .key(" "), .key("b"), .lag(0)],
+            behind: [t, t, f, t, t, f], text: "I said teh b"
+        ),
+        Pattern(name: "dictate, quiet send, dictate, 1 behind", lag: 1, start: "", steps: [.dictate("See you."), .silently(""), .dictate("Hello")], behind: [t, f, t], text: "Hello"),
         Pattern(name: "return to earlier text after catching up", lag: 1, start: "Call ", steps: [.key("D"), .key("a"), .lag(0), .silently("Call D"), .dictate("x")], behind: [t, t, f, f, f], text: "Call D x"),
     ]
 
@@ -200,6 +225,89 @@ struct DictationJoiningTests {
         }
         #expect(behind == pattern.behind, "\(pattern.steps)")
         #expect(host.text == pattern.text)
+    }
+
+    struct Random {
+        var state: UInt64
+        mutating func next(_ count: Int) -> Int {
+            state = state &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407
+            return Int((state >> 33) % UInt64(count))
+        }
+    }
+
+    /// Thousands of seeded sessions of keys, backspaces and dictation into hosts 0 to 5 edits
+    /// behind or never updating within a burst, with quiet clears, announced changes, new
+    /// fields and pauses, in which hosts catch up. Before every keyboard edit: a host showing
+    /// old text must read as behind, a host showing the real text must not, and dictation
+    /// must join with the space the real text needs.
+    @Test("across seeded random sessions the keyboard makes no edit on stale text, never stays careful once caught up, and joins dictation right", arguments: [1, 2, 3] as [UInt64])
+    func seededSessions(seed: UInt64) {
+        var random = Random(state: seed)
+        var unsafe = 0, stuck = 0, wrongSpace = 0, edits = 0, dictations = 0
+        for _ in 0..<2_000 {
+            let clock = Host.Clock()
+            var echo = FieldEcho()
+            echo.now = { clock.time }
+            var history = [["", "a", "Note: "][random.next(3)]]
+            var shown = 0
+            let lag = [0, 1, 2, 3, 5, 1_000][random.next(6)]
+            for _ in 0..<12 {
+                let real = history[history.count - 1]
+                let op = random.next(11)
+                if op <= 5 {
+                    clock.time += Double(5 + random.next(20)) / 100
+                    let before = history[shown]
+                    echo.hostReported(before: before, after: "", ownEdit: true)
+                    let behind = echo.behind(before: before, after: "")
+                    edits += 1
+                    if before != real, !behind { unsafe += 1 }
+                    if before == real, behind { stuck += 1 }
+                    var deleting = 0, inserting = ""
+                    switch op {
+                    case 0, 1: inserting = ["a", "b"][random.next(2)]
+                    case 2: inserting = " "
+                    case 3: deleting = 1
+                    default:
+                        let joined = echo.joining(before: before, after: "")
+                        inserting = TypingSession.joiningSpace(before: joined) + "W"
+                        dictations += 1
+                        if TypingSession.joiningSpace(before: joined) != TypingSession.joiningSpace(before: real) { wrongSpace += 1 }
+                    }
+                    echo.edited(before: before, after: "", deleting: deleting, inserting: inserting)
+                    history.append(String(real.dropLast(deleting)) + inserting)
+                    let oldest = max(shown, history.count - 1 - lag)
+                    shown = oldest + random.next(history.count - oldest)
+                    echo.hostReported(before: history[shown], after: "", ownEdit: true)
+                } else if op == 6 {
+                    clock.time += Double(5 + random.next(20)) / 100
+                    shown = history.count - 1
+                    echo.hostReported(before: history[shown], after: "", ownEdit: true)
+                } else if op == 7 {
+                    clock.time += 1
+                    history = [["", "a", "Note: ", "ab"][random.next(4)]]
+                    shown = 0
+                } else if op == 8 {
+                    clock.time += 1
+                    history = [["", "a"][random.next(2)]]
+                    shown = 0
+                    echo.hostReported(before: history[0], after: "", ownEdit: false)
+                } else if op == 9 {
+                    clock.time += 1
+                    history = [["", "a"][random.next(2)]]
+                    shown = 0
+                    echo.forget()
+                } else {
+                    clock.time += 1
+                    shown = history.count - 1
+                }
+            }
+        }
+        #expect(edits > 10_000)
+        #expect(dictations > 3_000)
+        #expect(unsafe == 0, "unsafe edits \(unsafe) of \(edits)")
+        #expect(stuck == 0, "stuck in plain mode \(stuck) of \(edits)")
+        #expect(wrongSpace == 0, "wrong joining spaces \(wrongSpace) of \(dictations)")
+        print("seed \(seed): \(edits) edits, \(dictations) dictations, unsafe \(unsafe), stuck \(stuck), wrong spaces \(wrongSpace)")
     }
 
     @Test("a host that never updates stays behind through a long burst")

@@ -164,36 +164,53 @@ struct TypingSession {
 ///
 /// It never decides what to delete. The keyboard keeps each version of the field from the
 /// one the host last showed to its own latest. The host is behind while it shows one of
-/// those versions other than the latest; showing the latest means it caught up, showing a
-/// newer remembered version lets the older ones go, and showing anything else, a change the
-/// keyboard did not make, or a new field ends the memory.
+/// those versions other than the latest; showing any remembered version lets the older ones
+/// go, and showing anything else, a change the keyboard did not make, or a new field ends
+/// the memory.
+///
+/// The memory also lasts only `lifetime` after the keyboard's last edit. Hosts lag for the
+/// milliseconds a reply takes, so a burst of keys stays inside it; an app that clears the
+/// field after a send needs a person's tap first, which comes later, so a key or dictation
+/// after that pause trusts the host's own text.
 struct FieldEcho {
     private struct Report: Equatable {
         let before: String
         let after: String
     }
 
+    /// A host's reply takes milliseconds; moving a finger from the keys to Send and tapping
+    /// it takes longer than this.
+    static let lifetime: TimeInterval = 0.3
+
+    /// The clock, which tests set.
+    var now: () -> Date = { Date() }
+
     /// The versions the host may still show, oldest first; the last is the keyboard's latest.
     /// A host that never updates keeps showing the oldest, so a long burst drops the second.
     private var versions: [Report] = []
     private static let versionLimit = 64
+    private var lastEdit = Date.distantPast
+
+    private var current: Bool { now().timeIntervalSince(lastEdit) <= Self.lifetime }
 
     /// The keyboard changed the field, which the host showed as `before` and `after` the
     /// cursor: it deleted `deleting` characters before the cursor and inserted `inserting`.
     mutating func edited(before: String, after: String, deleting: Int, inserting: String) {
         let shown = Report(before: before, after: after)
-        if behind(before: before, after: after) { advance(to: shown) } else { versions = [shown] }
+        if current, versions.contains(shown) { advance(to: shown) } else { versions = [shown] }
         let known = versions[versions.count - 1].before
         versions.append(Report(before: String(known.dropLast(deleting)) + inserting, after: after))
         if versions.count > Self.versionLimit { versions.remove(at: 1) }
+        lastEdit = now()
     }
 
     /// The host reported the field. A report while the keyboard's own edit is going through
-    /// keeps the memory only if the host is still behind; any other report is a change the
+    /// keeps the memory if it shows a remembered version; any other report is a change the
     /// keyboard did not make.
     mutating func hostReported(before: String, after: String, ownEdit: Bool) {
-        if ownEdit, behind(before: before, after: after) {
-            advance(to: Report(before: before, after: after))
+        let shown = Report(before: before, after: after)
+        if ownEdit, current, versions.contains(shown) {
+            advance(to: shown)
         } else {
             versions = []
         }
@@ -205,10 +222,10 @@ struct FieldEcho {
     }
 
     /// Whether the host shows a version of the field older than the keyboard's latest, and
-    /// no older than the last one it showed.
+    /// no older than the last one it showed, soon enough after the keyboard's last edit.
     func behind(before: String, after: String) -> Bool {
         let shown = Report(before: before, after: after)
-        return shown != versions.last && versions.contains(shown)
+        return current && shown != versions.last && versions.contains(shown)
     }
 
     /// The text before the cursor to join a word to: the keyboard's latest version while the
