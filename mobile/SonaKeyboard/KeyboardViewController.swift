@@ -81,6 +81,7 @@ final class KeyboardViewController: UIInputViewController {
             return FieldText(hostBefore: textBefore, hostAfter: textAfter, selection: textDocumentProxy.selectedText, echo: echo)
         }
         tools.apply = { [weak self] step in self?.applyTool(step) }
+        tools.fieldID = { [weak self] in self?.documentID }
         tools.canCopy = { [weak self] in self?.hasFullAccess ?? false }
         tools.snippetsChanged = { [weak self] in self?.applySnippets() }
         #if DEBUG
@@ -169,6 +170,7 @@ final class KeyboardViewController: UIInputViewController {
     override func viewDidDisappear(_ animated: Bool) {
         super.viewDidDisappear(animated)
         dictate(.hidden)
+        tools.keyboardHidden()
         visible = false
         ticker?.cancel()
         ticker = nil
@@ -236,6 +238,7 @@ final class KeyboardViewController: UIInputViewController {
         session = TypingSession(corrector: corrector, lexicon: session.lexicon)
         applySnippets()
         primaryLanguage = language.rawValue
+        tools.typingLanguage = language.rawValue
         state.startURL = DictationLink.keyboardURL(documentID: documentID, language: language)
         UserDefaults.standard.set(language.rawValue, forKey: Self.languageKey)
     }

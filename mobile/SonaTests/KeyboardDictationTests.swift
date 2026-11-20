@@ -47,6 +47,14 @@ struct KeyboardDictationTests {
         #expect(KeyboardDictation.text(of: "Um.", profile: .empty, language: "en-US") == nil)
         #expect(KeyboardDictation.text(of: "um so it works", profile: .empty, language: "en-US") != nil)
     }
+
+    @Test("a dictation styled after the keyboard moved to another field waits for Insert instead of typing there")
+    func lateDictationInAnotherFieldWaitsForReview() {
+        let heardFor = UUID(), other = UUID()
+        #expect(KeyboardDictation.landing(heardFor: heardFor, now: other, reviews: false) == .review)
+        #expect(KeyboardDictation.landing(heardFor: heardFor, now: heardFor, reviews: false) == .write)
+        #expect(KeyboardDictation.landing(heardFor: heardFor, now: heardFor, reviews: true) == .review)
+    }
 }
 
 /// Dictated or swiped text joined to what is before the cursor.

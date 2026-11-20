@@ -90,6 +90,19 @@ struct KeyboardDictation {
         let text = profile.apply(to: DictationCleanup.clean(heard, language: language)).trimmingCharacters(in: .whitespacesAndNewlines)
         return text.isEmpty ? nil : text
     }
+
+    enum Landing: Equatable {
+        case write
+        /// Waits on the panel for Insert.
+        case review
+    }
+
+    /// Where a finished dictation goes: typed into the field it was heard for, or held for
+    /// review when review is on or the keyboard is in another field by now, as after a
+    /// style that finished late.
+    static func landing(heardFor field: UUID?, now current: UUID?, reviews: Bool) -> Landing {
+        reviews || field != current ? .review : .write
+    }
 }
 
 /// Where Dictate goes. After the keyboard could not listen, Dictate goes through the app

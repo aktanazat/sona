@@ -320,7 +320,7 @@
 "tools.noText" = "Type or select some text first.";
 "tools.selectFirst" = "Select the text to save as a snippet.";
 "tools.textChanged" = "The text changed, so nothing was replaced.";
-"tools.noStyles" = "No writing styles yet. They come from Sona on your Mac.";
+"tools.noStyles" = "No writing styles from your Mac yet";
 "tools.askPlaceholder" = "Ask about your text";
 "tools.commandPromptPlaceholder" = "What should the command do?";
 "tools.commandNamePlaceholder" = "Name this command";

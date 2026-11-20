@@ -158,14 +158,14 @@ enum KeyboardAI: Equatable {
         LanguageModelSession(instructions: instructions)
     }
 
-    /// The answer, handing each longer part of it to `partial` as the model writes it.
+    /// The answer, handing each longer part of it to `partial` as the model writes it, even
+    /// a style's JSON envelope, so a long rewrite counts as answering.
     @MainActor
     func run(_ text: String, in session: LanguageModelSession, partial: (String) -> Void) async throws -> String {
         var reply = ""
         for try await snapshot in session.streamResponse(to: prompt(for: text), options: options) {
             reply = snapshot.content
-            /* A style answers in the Mac's JSON envelope; only the finished reply can be read. */
-            if !reply.hasPrefix("{") { partial(reply.trimmingCharacters(in: .whitespacesAndNewlines)) }
+            partial(reply.trimmingCharacters(in: .whitespacesAndNewlines))
         }
         let answer = DictationCleanup.rewritten(reply)
         if case .style = self { return DictationCleanup.withoutInventions(answer, source: text) }

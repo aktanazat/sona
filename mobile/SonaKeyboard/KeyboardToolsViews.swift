@@ -485,7 +485,7 @@ private struct RecordingOptions: View {
             }
             HStack(spacing: 12) {
                 Picker("tools.recordingLanguage", selection: language) {
-                    ForEach(KeyboardTools.recordingLanguages, id: \.self) { id in
+                    ForEach(DictationPreferences.keyboardChoices, id: \.self) { id in
                         Text(verbatim: Self.name(of: id)).tag(id)
                     }
                 }
@@ -508,7 +508,7 @@ private struct RecordingOptions: View {
     }
 
     private var language: Binding<String> {
-        Binding(get: { tools.recordingLanguage ?? KeyboardTools.recordingLanguages[0] }, set: { tools.recordingLanguage = $0 })
+        Binding(get: { tools.recordingLanguage ?? DictationPreferences.keyboardChoice(for: tools.typingLanguage) }, set: { tools.recordingLanguage = $0 })
     }
 
     /// Each language in its own words: "English", "Русский".

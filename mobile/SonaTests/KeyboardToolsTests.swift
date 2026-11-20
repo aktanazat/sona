@@ -28,11 +28,32 @@ struct KeyboardToolsTests {
         #expect(Self.applying(session.end(with: " ", before: text, corrects: true), to: text) == "See you there. Office ")
     }
 
+    /// Expansion rewrites text as a correction does: never where the field turns autocorrect
+    /// off or the cursor sits inside a word.
+    @Test func snippetWaitsForTheCorrectionGoAhead() {
+        var session = TypingSession(corrector: nil)
+        session.snippets = ["ofc": "office"]
+        let text = "at the ofc"
+        #expect(Self.applying(session.end(with: " ", before: text, corrects: false), to: text) == "at the ofc ")
+    }
+
+    @Test func snippetKeywordOfSeveralWordsExpands() {
+        var session = TypingSession(corrector: nil)
+        session.snippets = ["see you": "See you at 6", "you": "YOU"]
+        let text = "ok see you"
+        #expect(Self.applying(session.end(with: " ", before: text, corrects: true), to: text) == "ok See you at 6 ")
+    }
+
+    @Test func dictationTabShowsTheLanguageARecordingListensIn() {
+        #expect(DictationPreferences.keyboardChoice(for: "ru-RU") == "ru-RU")
+        #expect(DictationPreferences.keyboardChoice(for: "en-GB") == "en-US")
+    }
+
     /// The on-device model adds a subject and placeholders to Email rewrites even when told not to.
     @Test func styleRewriteDropsInventedSubjectAndPlaceholders() {
         let reply = "Subject: Lunch Schedule Change\n\nHi [Recipient's Name],\n\nCan we move lunch to Friday?\n\nBest regards,\n[Your Name]"
         #expect(DictationCleanup.withoutInventions(reply, source: "Can we move lunch to Friday?")
-            == "Can we move lunch to Friday?\n\nBest regards,")
+            == "Hi,\n\nCan we move lunch to Friday?\n\nBest regards,")
         #expect(DictationCleanup.withoutInventions("Subject: Q3 budget\n\nIt is approved.", source: "subject Q3 budget it is approved")
             == "Subject: Q3 budget\n\nIt is approved.")
     }

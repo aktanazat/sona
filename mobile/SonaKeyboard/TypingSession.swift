@@ -91,12 +91,12 @@ struct TypingSession {
         if case .swiped = previous {
             return remember(separator == " " ? .space : .other, Edit(insert: separator), on: text)
         }
-        /* Text the last edit left as is, unchanged since, is a keyword backspace just put back. */
-        if text != textAfterLast, let keyword = TypingText.keyword(before: text),
-           let expansion = snippets[keyword.lowercased()] ?? lexicon.expansion(of: keyword) {
+        /* Text the last edit left as is, unchanged since, is a keyword backspace just put back.
+         * Expansion rewrites text like a correction, so it waits for the same go-ahead. */
+        if corrects, text != textAfterLast, let (keyword, expansion) = expansion(endingAt: text) {
             /* A keyword capitalized at a sentence start capitalizes what it expands to. */
             let cased = keyword.first?.isUppercase == true ? expansion.prefix(1).uppercased() + expansion.dropFirst() : expansion
-            let snippet = Correction(typed: String(keyword), replacement: cased)
+            let snippet = Correction(typed: keyword, replacement: cased)
             return remember(.corrected(snippet, separator: separator), Edit(deleteCount: keyword.count, insert: cased + separator), on: text)
         }
         if corrects, let correction = corrector?.correction(before: text, lexicon: lexicon) {
@@ -153,6 +153,21 @@ struct TypingSession {
 
     private func lastKey(before text: String) -> Last {
         text == textAfterLast ? last : .other
+    }
+
+    /// The snippet keyword `text` ends with and what it expands to: his own snippets, which
+    /// may be several words, the longest first, then the system's text replacements.
+    private func expansion(endingAt text: String) -> (keyword: String, expansion: String)? {
+        let lowered = text.lowercased()
+        let mine = snippets
+            .filter { trigger, _ in
+                guard !trigger.isEmpty, lowered.hasSuffix(trigger) else { return false }
+                return lowered.dropLast(trigger.count).last.map(\.isWhitespace) ?? true
+            }
+            .max { $0.key.count < $1.key.count }
+        if let mine { return (String(text.suffix(mine.key.count)), mine.value) }
+        guard let keyword = TypingText.keyword(before: text), let replacement = lexicon.expansion(of: keyword) else { return nil }
+        return (String(keyword), replacement)
     }
 
     private mutating func remember(_ key: Last, _ edit: Edit, on text: String) -> Edit {

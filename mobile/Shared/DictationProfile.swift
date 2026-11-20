@@ -84,6 +84,16 @@ struct DictationPreferences {
         ["en", "ru"].contains(language.prefix { $0 != "-" && $0 != "_" })
     }
 
+    /// The languages the keyboard's Dictation tab offers for one recording.
+    static let keyboardChoices = ["en-US", "ru-RU"]
+
+    /// The choice that stands for `language`, so the tab shows the language a recording
+    /// with nothing picked listens in.
+    static func keyboardChoice(for language: String) -> String {
+        let base = language.prefix { $0 != "-" && $0 != "_" }
+        return keyboardChoices.first { $0.hasPrefix(base + "-") } ?? keyboardChoices[0]
+    }
+
     static var languages: [String] {
         get {
             let stored = (UserDefaults.standard.stringArray(forKey: languagesKey) ?? [Locale.current.identifier]).filter(offered)
@@ -199,15 +209,23 @@ enum DictationCleanup {
     }
 
     /// A style rewrite of `source` without what the on-device model made up
-    /// despite the prompt: a "Subject:" line and lines holding a [placeholder],
-    /// unless the source had them. Asked not to, it still wrote them in 3 of 10
-    /// Email rewrites.
+    /// despite the prompt, unless the source had it: a "Subject:" line, and each
+    /// [placeholder], with a line it alone filled. Asked not to, it still wrote
+    /// them in 3 of 10 Email rewrites.
     static func withoutInventions(_ text: String, source: String) -> String {
         let keepsSubject = source.range(of: "subject", options: .caseInsensitive) != nil
         let keepsBrackets = source.contains("[")
-        let lines = text.components(separatedBy: "\n").filter { line in
-            (keepsBrackets || line.range(of: #"\[[^\]\n]+\]"#, options: .regularExpression) == nil)
-                && (keepsSubject || line.range(of: #"^\s*subject\s*:"#, options: [.regularExpression, .caseInsensitive]) == nil)
+        var lines: [String] = []
+        for line in text.components(separatedBy: "\n") {
+            if !keepsSubject, line.range(of: #"^\s*subject\s*:"#, options: [.regularExpression, .caseInsensitive]) != nil { continue }
+            guard !keepsBrackets, line.range(of: #"\[[^\]\n]+\]"#, options: .regularExpression) != nil else {
+                lines.append(line)
+                continue
+            }
+            let kept = line
+                .replacingOccurrences(of: #"\s*\[[^\]\n]+\]"#, with: "", options: .regularExpression)
+                .replacingOccurrences(of: #"\s+([,.!?;:])"#, with: "$1", options: .regularExpression)
+            if kept.contains(where: { $0.isLetter || $0.isNumber }) { lines.append(kept) }
         }
         return lines.joined(separator: "\n")
             .replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)

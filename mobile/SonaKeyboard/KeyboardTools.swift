@@ -61,8 +61,8 @@ final class KeyboardTools {
     var recordingStyle: String?
     /// One recording's language, a locale identifier: nil keeps the typing language.
     var recordingLanguage: String?
-    /// The languages a recording can pick, owner order 2026-11-20: English and Russian.
-    static let recordingLanguages = ["en-US", "ru-RU"]
+    /// The typing language, which a recording with no language picked listens in.
+    var typingLanguage = TypingLanguage.english.rawValue
     /// What the model has written so far for the action at work.
     var partial = ""
 
@@ -70,6 +70,8 @@ final class KeyboardTools {
     @ObservationIgnored var field: () -> FieldText? = { nil }
     /// Applies a change the way a key does, so the field memory sees it.
     @ObservationIgnored var apply: (FieldText.Step) -> Void = { _ in }
+    /// The field the keyboard types into now.
+    @ObservationIgnored var fieldID: () -> UUID? = { nil }
     @ObservationIgnored var canCopy: () -> Bool = { false }
     @ObservationIgnored var snippetsChanged: () -> Void = {}
     #if DEBUG
@@ -80,8 +82,9 @@ final class KeyboardTools {
     @ObservationIgnored private var work: Task<Void, Never>?
     @ObservationIgnored private var deadline: Task<Void, Never>?
     @ObservationIgnored private var answering = false
-    /// The dictation being styled, which goes in as heard if the style stops.
-    @ObservationIgnored private var unstyled: String?
+    /// The dictation being styled and the field it was heard for; it goes in as heard if
+    /// the style stops.
+    @ObservationIgnored private var unstyled: (text: String, field: UUID?)?
     @ObservationIgnored private var warmFix: LanguageModelSession?
     @ObservationIgnored private var noticeTimer: Task<Void, Never>?
 
@@ -107,6 +110,7 @@ final class KeyboardTools {
     // MARK: Navigation
 
     func toggle() {
+        if case .working = page, unstyled != nil { return stop() }
         let open = isOpen
         cancelWork()
         #if DEBUG
@@ -279,24 +283,37 @@ final class KeyboardTools {
     /// waits on the panel for Insert. The recording's choices end with it.
     func deliver(_ text: String, styled: Bool) {
         let style = styled ? nil : effectiveStyle
+        let field = fieldID()
         recordingStyle = nil
         recordingLanguage = nil
-        guard let style, KeyboardAI.unavailable == nil else { return land(text) }
+        guard let style, KeyboardAI.unavailable == nil else { return land(text, heardFor: field) }
         start(.style(style), on: text) { [weak self] styledText in
             guard let self else { return }
             if styledText == nil { say("dictation.styleFailed") }
-            land(styledText ?? text)
+            land(styledText ?? text, heardFor: field)
         }
-        unstyled = text
+        unstyled = (text, field)
     }
 
-    private func land(_ text: String) {
-        if reviewsDictation {
+    /// A dictation goes into the field it was heard for; in any other field it waits for
+    /// Insert instead of landing in text it was not meant for.
+    private func land(_ text: String, heardFor field: UUID?) {
+        switch KeyboardDictation.landing(heardFor: field, now: fieldID(), reviews: reviewsDictation) {
+        case .review:
             page = .review(text)
-        } else {
+        case .write:
             write(text)
             page = .closed
         }
+    }
+
+    /// The keyboard went away: a dictation still being styled stops and waits for Insert,
+    /// as heard, for when it comes back.
+    func keyboardHidden() {
+        guard let pending = unstyled else { return }
+        unstyled = nil
+        cancelWork()
+        page = .review(pending.text)
     }
 
     // MARK: The model at work
@@ -350,10 +367,10 @@ final class KeyboardTools {
     /// Stop on the working page: a dictation goes in without its style, anything else returns
     /// to the actions.
     func stop() {
-        let text = unstyled
+        let pending = unstyled
         unstyled = nil
         cancelWork()
-        if let text { land(text) } else { page = .browse(.ai, nil) }
+        if let pending { land(pending.text, heardFor: pending.field) } else { page = .browse(.ai, nil) }
     }
 
     /// Ends the model's work. A dictation it was styling goes in as it was heard.
@@ -362,9 +379,9 @@ final class KeyboardTools {
         work = nil
         deadline?.cancel()
         deadline = nil
-        if let text = unstyled {
+        if let pending = unstyled {
             unstyled = nil
-            write(text)
+            land(pending.text, heardFor: pending.field)
         }
     }
 
