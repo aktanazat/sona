@@ -122,6 +122,18 @@ impl From<WorkCondition> for WorkFilter {
     }
 }
 
+impl WorkFilter {
+    /// A group holding nothing, at any depth: it neither holds nor fails,
+    /// so a list refuses it.
+    pub(crate) fn has_empty_group(&self) -> bool {
+        match self {
+            Self::Condition(_) => false,
+            Self::Any { any: filters } | Self::All { all: filters } => {
+                filters.is_empty() || filters.iter().any(Self::has_empty_group)
+            }
+        }
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Value {

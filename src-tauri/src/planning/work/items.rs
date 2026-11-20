@@ -1477,6 +1477,9 @@ pub(crate) fn save_view(
     view: &WorkViewInput,
     now_ms: i64,
 ) -> Result<WorkView> {
+    if view.query.filters.iter().any(super::filter::WorkFilter::has_empty_group) {
+        return Err(Refusal::Invalid.into());
+    }
     let name = clean_title(&view.name)?;
     let icon = super::views::clean_icon(view.icon.as_deref())?;
     let project_id = view

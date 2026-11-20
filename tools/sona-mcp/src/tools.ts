@@ -2914,7 +2914,8 @@ export const TOOLS: readonly ToolDefinition[] = [
         },
         path: {
           type: "string",
-          description: "The CSV file to write, as an absolute path.",
+          description:
+            "The CSV file to write, as an absolute path ending in .csv. Sona replaces only a .csv file there, never a link or another kind of file.",
         },
         view: {
           type: "string",
@@ -7078,7 +7079,7 @@ export const TOOLS: readonly ToolDefinition[] = [
     name: "sona_work_changes",
     title: "Follow changes in Sona's tracker",
     description:
-      "What changed on tasks, projects, milestones, cycles, views, labels, project updates, notes, meetings Sona took work from, comments and agent sessions, oldest first, each with a seq, what changed, and under updated_from the fields' values before the change. Pass the answer's next_cursor as since to read only what came after; has_more says another page is waiting. Changes are kept 30 days: an older cursor is refused as expired, and the fix is to read the tasks again and follow from a fresh start. A comment on a project, milestone, meeting or note names it in data.subject_kind and data.subject_id; a note's text is left out, so read it with sona_note. Anything tied to a meeting kept on this Mac is left out.",
+      "What changed on tasks, projects, milestones, cycles, views (of the Tasks and Projects pages), labels, project updates, notes, meetings Sona took work from, comments and agent sessions, oldest first, each with a seq, what changed, and under updated_from the fields' values before the change. Pass the answer's next_cursor as since to read only what came after; has_more says another page is waiting. Changes are kept 30 days: an older cursor is refused as expired, and the fix is to read the tasks again and follow from a fresh start. A comment on a project, milestone, meeting or note names it in data.subject_kind and data.subject_id; a note's text is left out, so read it with sona_note. Anything tied to a meeting kept on this Mac is left out.",
     inputSchema: {
       type: "object",
       properties: {

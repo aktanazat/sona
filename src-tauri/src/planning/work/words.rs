@@ -527,7 +527,7 @@ struct Reader<'a, Tz: TimeZone> {
 
 impl<Tz: TimeZone> Reader<'_, Tz> {
     fn read(&self) -> WorkWhere {
-        let mut terms: Vec<(Range<usize>, Term)> = Vec::new();
+        let mut units: Vec<Vec<(Range<usize>, Term)>> = Vec::new();
         let mut unread: Vec<(Range<usize>, Vec<String>)> = Vec::new();
         let mut glue = vec![false; self.toks.len()];
         let mut not: Option<Range<usize>> = None;
@@ -543,9 +543,18 @@ impl<Tz: TimeZone> Reader<'_, Tz> {
                 Reading::Not => unread.extend(not.replace(span).map(|word| (word, Vec::new()))),
                 Reading::Or => unread.extend(or.replace(span).map(|word| (word, Vec::new()))),
                 Reading::Range(first, split, last) => {
-                    unread.extend(not.take().into_iter().chain(or.take()).map(|word| (word, Vec::new())));
-                    terms.push((span.start..span.start + split, first));
-                    terms.push((span.start + split..span.end, last));
+                    unread.extend(not.take().map(|word| (word, Vec::new())));
+                    if let Some(word) = or.take() {
+                        if units.is_empty() {
+                            unread.push((word, Vec::new()));
+                        } else {
+                            either.push(units.len());
+                        }
+                    }
+                    units.push(vec![
+                        (span.start..span.start + split, first),
+                        (span.start + split..span.end, last),
+                    ]);
                 }
                 Reading::Term(mut term) => {
                     let mut span = span;
@@ -559,8 +568,11 @@ impl<Tz: TimeZone> Reader<'_, Tz> {
                         }
                     }
                     if let Some(word) = or.take() {
-                        if let Some((kept_span, kept)) =
-                            terms.last_mut().filter(|(_, kept)| kept.field == term.field)
+                        if let Some((kept_span, kept)) = units
+                            .last_mut()
+                            .filter(|unit| unit.len() == 1)
+                            .and_then(|unit| unit.last_mut())
+                            .filter(|(_, kept)| kept.field == term.field)
                         {
                             if let Some(op) = joined(kept.op, term.op, term.field) {
                                 kept.op = op;
@@ -574,13 +586,13 @@ impl<Tz: TimeZone> Reader<'_, Tz> {
                                 continue;
                             }
                         }
-                        if terms.is_empty() {
+                        if units.is_empty() {
                             unread.push((word, Vec::new()));
                         } else {
-                            either.push(terms.len());
+                            either.push(units.len());
                         }
                     }
-                    terms.push((span, term));
+                    units.push(vec![(span, term)]);
                 }
                 Reading::Unclear(could_be) => {
                     unread.extend(not.take().into_iter().chain(or.take()).map(|word| (word, Vec::new())));
@@ -607,43 +619,56 @@ impl<Tz: TimeZone> Reader<'_, Tz> {
             }
             runs.push((span, could_be));
         }
-        let mut groups: Vec<(Range<usize>, Vec<Term>)> = Vec::new();
-        for (at, (span, term)) in terms.into_iter().enumerate() {
+        let mut groups: Vec<Vec<Vec<(Range<usize>, Term)>>> = Vec::new();
+        for (at, unit) in units.into_iter().enumerate() {
             match groups.last_mut().filter(|_| either.contains(&at)) {
-                Some((kept, members)) => {
-                    kept.end = span.end;
-                    members.push(term);
-                }
-                None => groups.push((span, vec![term])),
+                Some(members) => members.push(unit),
+                None => groups.push(vec![unit]),
             }
         }
-        WorkWhere {
-            terms: groups
+        let condition = |term: Term| {
+            WorkFilter::from(WorkCondition {
+                field: term.field,
+                op: term.op,
+                values: term.values,
+            })
+        };
+        let mut terms = Vec::new();
+        for mut members in groups {
+            if members.len() == 1 {
+                terms.extend(members.remove(0).into_iter().map(|(span, term)| WorkWhereTerm {
+                    text: self.words(span),
+                    label: term.label(),
+                    condition: condition(term),
+                }));
+                continue;
+            }
+            let start = members[0][0].0.start;
+            let end = members.last().and_then(|unit| unit.last()).map_or(start, |(span, _)| span.end);
+            let label = members
+                .iter()
+                .map(|unit| unit.iter().map(|(_, term)| term.label()).collect::<Vec<_>>().join(" and "))
+                .collect::<Vec<_>>()
+                .join(" or ");
+            let any = members
                 .into_iter()
-                .map(|(span, members)| {
-                    let label = members.iter().map(Term::label).collect::<Vec<_>>().join(" or ");
-                    let mut filters: Vec<WorkFilter> = members
-                        .into_iter()
-                        .map(|term| {
-                            WorkFilter::from(WorkCondition {
-                                field: term.field,
-                                op: term.op,
-                                values: term.values,
-                            })
-                        })
-                        .collect();
-                    let condition = if filters.len() == 1 {
-                        filters.remove(0)
+                .map(|unit| {
+                    let mut all: Vec<WorkFilter> = unit.into_iter().map(|(_, term)| condition(term)).collect();
+                    if all.len() == 1 {
+                        all.remove(0)
                     } else {
-                        WorkFilter::Any { any: filters }
-                    };
-                    WorkWhereTerm {
-                        text: self.words(span),
-                        label,
-                        condition,
+                        WorkFilter::All { all }
                     }
                 })
-                .collect(),
+                .collect();
+            terms.push(WorkWhereTerm {
+                text: self.words(start..end),
+                label,
+                condition: WorkFilter::Any { any },
+            });
+        }
+        WorkWhere {
+            terms,
             unread: runs
                 .into_iter()
                 .map(|(span, could_be)| WorkWhereWord {
@@ -1233,5 +1258,34 @@ mod tests {
         assert_eq!(read.terms[0].text, "urgent or overdue");
         assert_eq!(conditions(&read), [(F::Label, O::Is, vec!["bug"])]);
         assert!(read.unread.is_empty(), "{:?}", read.unread);
+    }
+
+    #[test]
+    fn or_joins_a_date_range_whole_on_either_side() {
+        let one = |field, op, value: &str| {
+            WorkFilter::from(WorkCondition {
+                field,
+                op,
+                values: vec![value.to_owned()],
+            })
+        };
+        let range = WorkFilter::All {
+            all: vec![
+                one(F::Completed, O::After, "2026-11-01"),
+                one(F::Completed, O::Before, "2026-11-07"),
+            ],
+        };
+        let urgent = one(F::Priority, O::Is, "1");
+
+        for (text, any) in [
+            ("completed from Nov 2 to Nov 6 or urgent", vec![range.clone(), urgent.clone()]),
+            ("urgent or completed from Nov 2 to Nov 6", vec![urgent.clone(), range.clone()]),
+        ] {
+            let read = words(text);
+            assert_eq!(read.terms.len(), 1, "{text}: {:?}", read.terms);
+            assert_eq!(read.terms[0].condition, WorkFilter::Any { any }, "{text}");
+            assert_eq!(read.terms[0].text, text);
+            assert!(read.unread.is_empty(), "{text}: {:?}", read.unread);
+        }
     }
 }

@@ -25,13 +25,14 @@ const HEADER: [&str; 15] = [
 ];
 
 /// The rows in the order given, under a header row; `labels` names the
-/// labels the rows carry.
-pub(crate) fn csv(rows: &[WorkItemRow], labels: &[WorkLabel]) -> String {
+/// labels the rows carry and `every` holds the parents they name, whether
+/// or not those are exported too.
+pub(crate) fn csv(rows: &[WorkItemRow], every: &[WorkItemRow], labels: &[WorkLabel]) -> String {
     let names: HashMap<&str, &str> = labels
         .iter()
         .map(|label| (label.id.as_str(), label.name.as_str()))
         .collect();
-    let numbers: HashMap<&str, i64> = rows
+    let numbers: HashMap<&str, i64> = every
         .iter()
         .map(|row| (row.item.id.as_str(), row.item.number))
         .collect();
@@ -49,11 +50,11 @@ pub(crate) fn csv(rows: &[WorkItemRow], labels: &[WorkLabel]) -> String {
             .iter()
             .filter_map(|id| names.get(id.as_str()).copied())
             .collect();
-        let parent = item.parent_id.as_deref().map_or_else(String::new, |id| {
-            numbers
-                .get(id)
-                .map_or_else(|| id.to_owned(), |number| format!("S-{number}"))
-        });
+        let parent = item
+            .parent_id
+            .as_deref()
+            .and_then(|id| numbers.get(id))
+            .map_or_else(String::new, |number| format!("S-{number}"));
         line(
             &mut out,
             [

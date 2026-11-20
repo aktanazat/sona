@@ -2551,14 +2551,17 @@ pub async fn work_csv(
             include_snoozed: true,
             ..WorkQuery::default()
         };
-        let mut listed = list(history, meeting_conn, user_name.as_deref(), &query, now)?;
-        let mut by_id: HashMap<String, WorkItemRow> = listed
+        let listed = list(history, meeting_conn, user_name.as_deref(), &query, now)?;
+        let mut by_id: HashMap<&str, &WorkItemRow> = listed
             .items
-            .drain(..)
-            .map(|row| (row.item.id.clone(), row))
+            .iter()
+            .map(|row| (row.item.id.as_str(), row))
             .collect();
-        let rows: Vec<WorkItemRow> = ids.iter().filter_map(|id| by_id.remove(id)).collect();
-        Ok(export::csv(&rows, &listed.labels))
+        let rows: Vec<WorkItemRow> = ids
+            .iter()
+            .filter_map(|id| by_id.remove(id.as_str()).cloned())
+            .collect();
+        Ok(export::csv(&rows, &listed.items, &listed.labels))
     })
     .await
 }

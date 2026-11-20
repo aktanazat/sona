@@ -1143,7 +1143,8 @@ pub struct ExportArgs {
     #[arg(long, value_name = "DIR")]
     pub md: Option<PathBuf>,
     /// One CSV file with a row per task, in the order the list shows them;
-    /// a spreadsheet opens it.
+    /// a spreadsheet opens it. The name ends in .csv; an earlier export there
+    /// is replaced.
     #[arg(long, value_name = "FILE")]
     pub csv: Option<PathBuf>,
     /// Start from a saved view's filters and order (name or id); other
@@ -1358,10 +1359,14 @@ fn conditions(value: &str) -> Result<ConditionsArg, String> {
         One(WorkFilter),
         Many(Vec<WorkFilter>),
     }
-    match serde_json::from_str(value).map_err(|error| format!("Not a filter: {error}"))? {
-        OneOrMany::One(filter) => Ok(ConditionsArg(vec![filter])),
-        OneOrMany::Many(filters) => Ok(ConditionsArg(filters)),
+    let filters = match serde_json::from_str(value).map_err(|error| format!("Not a filter: {error}"))? {
+        OneOrMany::One(filter) => vec![filter],
+        OneOrMany::Many(filters) => filters,
+    };
+    if filters.iter().any(WorkFilter::has_empty_group) {
+        return Err("A group holds no conditions: put at least one in each {\"any\": [...]} or {\"all\": [...]}.".to_owned());
     }
+    Ok(ConditionsArg(filters))
 }
 
 /// What a new task starts with, or what an update sets.
@@ -5103,8 +5108,7 @@ impl Tracker<'_> {
         if let Some(csv) = &args.csv {
             let order = PageArgs::default().row_order(view.as_ref().map(|view| &view.display))?;
             rows.sort_by_cached_key(|row| place(row, order));
-            std::fs::write(csv, work::export::csv(&rows, &board.labels))
-                .map_err(|error| failed(csv, "written", error))?;
+            write_csv(csv, &work::export::csv(&rows, &board.rows, &board.labels))?;
             return Ok(WorkAnswer::Export(ExternalWorkExport {
                 schema_version: QUERY_SCHEMA_VERSION,
                 format: "csv",
@@ -7778,6 +7782,33 @@ fn filter_text(filter: &WorkFilter) -> String {
     };
     let inner: Vec<String> = filters.iter().map(filter_text).collect();
     format!("({})", inner.join(joiner))
+}
+
+/// Writes an export to a `.csv` file, new or an earlier export, and never
+/// through a link: an agent naming the path cannot replace a document or a
+/// dotfile with task text.
+fn write_csv(path: &std::path::Path, text: &str) -> Result<(), ExternalError> {
+    if !path
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("csv"))
+    {
+        return Err(ExternalError::invalid(format!(
+            "{} does not end in .csv. Name a .csv file.",
+            path.display()
+        )));
+    }
+    if std::fs::symlink_metadata(path).is_ok_and(|found| !found.is_file()) {
+        return Err(ExternalError::invalid(format!(
+            "{} is a link or a folder. Name a .csv file.",
+            path.display()
+        )));
+    }
+    std::fs::write(path, text).map_err(|error| {
+        ExternalError::new(
+            ExternalErrorCode::Failed,
+            format!("{} could not be written: {error}", path.display()),
+        )
+    })
 }
 
 mod attachments;
