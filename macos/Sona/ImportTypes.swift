@@ -63,23 +63,16 @@ enum ImportSource: String, CaseIterable, Identifiable, Hashable {
         }
     }
 
-    /// The one sentence that says where the export is.
+    /// What the import brings in. The picker opens in the app's own folder,
+    /// so the hint never has to say where it is.
     var hint: String {
         switch self {
-        case .wisprFlowDictations:
-            "History and dictionary, from the Wispr Flow folder in Library › Application Support."
-        case .aquaVoice:
-            "History and dictionary, from the Aqua Voice folder in Library › Application Support."
-        case .typeless:
-            "History, from the Typeless folder in Library › Application Support. Typeless keeps its dictionary online."
-        case .willowVoice:
-            "Transcripts and dictionary, from the com.seewillow.WillowMac folder in Library › Application Support."
-        case .granola:
-            "In Granola, Settings › Profile › Generate CSV emails an export. Choose the CSV or its unzipped folder."
-        case .wisprFlowMeetings:
-            "Notetaker meetings, from the same Wispr Flow folder in Library › Application Support."
-        case .otter:
-            "In Otter, export a conversation as TXT, DOCX or SRT with speaker names on. Choose the file or a folder of them."
+        case .wisprFlowDictations, .aquaVoice: "History and dictionary"
+        case .typeless: "History"
+        case .willowVoice: "Transcripts and dictionary"
+        case .granola: "CSV export from Settings › Profile"
+        case .wisprFlowMeetings: "Notetaker meetings"
+        case .otter: "TXT, DOCX or SRT export, with speaker names"
         }
     }
 
@@ -122,10 +115,14 @@ struct DictationImportResult: Decodable {
     let wordsSkipped: Int
 
     var sentence: String {
-        let imported = "Imported \(ImportCount.dictations(dictationsImported)) and \(LibraryCount.words(wordsAdded))."
-        let skipped = dictationsSkipped + wordsSkipped
-        guard skipped > 0 else { return imported }
-        return imported + " Skipped \(ImportCount.dictations(dictationsSkipped)) and \(LibraryCount.words(wordsSkipped)) already here or not supported."
+        let imported = "Imported \(ImportCount.dictations(dictationsImported)) and \(LibraryCount.words(wordsAdded))"
+        let skippedParts = [
+            dictationsSkipped > 0 ? ImportCount.dictations(dictationsSkipped) : nil,
+            wordsSkipped > 0 ? LibraryCount.words(wordsSkipped) : nil,
+        ].compactMap { $0 }
+        guard !skippedParts.isEmpty else { return imported }
+        let skipped = "Already here or not supported: " + skippedParts.joined(separator: " and ")
+        return dictationsImported + wordsAdded == 0 ? skipped : imported + ". " + skipped
     }
 }
 
@@ -138,8 +135,8 @@ struct MeetingAppImportResult: Decodable {
         var skipped: [String] = []
         if alreadyImported > 0 { skipped.append("\(alreadyImported.formatted()) already imported") }
         if unreadable > 0 { skipped.append("\(unreadable.formatted()) Sona couldn't read") }
-        let imported = "Imported \(ImportCount.meetings(imported))."
-        return skipped.isEmpty ? imported : imported + " Skipped " + skipped.joined(separator: " and ") + "."
+        let imported = "Imported \(ImportCount.meetings(imported))"
+        return skipped.isEmpty ? imported : imported + ". Skipped " + skipped.joined(separator: " and ")
     }
 }
 

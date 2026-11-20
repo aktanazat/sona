@@ -602,7 +602,7 @@ private struct HistoryRowView: View {
                 Text("by meaning").metaText(Theme.inkSecondary)
             }
             if let app = row.importedFrom {
-                Text("from \(app.name)").metaText(Theme.inkSecondary)
+                Text("from \(app.name)").metaText()
             }
             if let words {
                 Text(LibraryCount.words(words))

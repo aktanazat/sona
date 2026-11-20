@@ -15,7 +15,7 @@ mkdir -p "$work/Library.xctest/Contents/MacOS"
 xcrun swiftc -emit-library -I "$swift_modules" -L "$swift_modules" -F "$frameworks" \
     -Xlinker -rpath -Xlinker "$frameworks" -framework XCTest \
     -module-name Library macos/Sona/CoreTypes.swift macos/Sona/Models.swift \
-    macos/Sona/PrivacyTypes.swift macos/Sona/LibraryTypes.swift \
+    macos/Sona/PrivacyTypes.swift macos/Sona/LibraryTypes.swift macos/Sona/ImportTypes.swift \
     macos/Tests/LibraryTests.swift \
     -o "$work/Library.xctest/Contents/MacOS/Library"
 xcrun xctest "$work/Library.xctest"

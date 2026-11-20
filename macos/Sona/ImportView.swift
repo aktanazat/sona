@@ -16,7 +16,7 @@ struct ImportView: View {
 
     var body: some View {
         Page {
-            PageTitle("Import", subtitle: "Recordings from this Mac, and dictations and meetings from other apps.")
+            PageTitle("Import", subtitle: "")
             ErrorNote(store.error)
             routedNotice
             dropZone
@@ -66,29 +66,25 @@ struct ImportView: View {
     // MARK: - Choosing
 
     private var dropZone: some View {
-        VStack(spacing: 12) {
-            Text("Drag and drop, or choose files to import.")
-                .bodyText(14, Theme.inkSecondary)
-            Button("Choose files") { store.chooseFiles() }
-                .buttonStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 36)
-        .background(
-            RoundedRectangle(cornerRadius: Theme.radiusCard)
-                .fill(dragging ? Theme.selection : Theme.surface))
-        .overlay(
-            RoundedRectangle(cornerRadius: Theme.radiusCard)
-                .strokeBorder(
-                    dragging ? Theme.accent : Theme.border,
-                    style: StrokeStyle(lineWidth: 1, dash: [4, 4])))
-        // An OS drop is native here, where the React window needed a webview
-        // drag event: same files, one fewer layer.
-        .dropDestination(for: URL.self) { urls, _ in
-            store.add(paths: urls.map(\.path))
-            return true
-        } isTargeted: { dragging = $0 }
-        .padding(.bottom, 28)
+        Button("Choose files") { store.chooseFiles() }
+            .buttonStyle(.secondary)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 36)
+            .background(
+                RoundedRectangle(cornerRadius: Theme.radiusCard)
+                    .fill(dragging ? Theme.selection : Theme.surface))
+            .overlay(
+                RoundedRectangle(cornerRadius: Theme.radiusCard)
+                    .strokeBorder(
+                        dragging ? Theme.accent : Theme.border,
+                        style: StrokeStyle(lineWidth: 1, dash: [4, 4])))
+            // An OS drop is native here, where the React window needed a webview
+            // drag event: same files, one fewer layer.
+            .dropDestination(for: URL.self) { urls, _ in
+                store.add(paths: urls.map(\.path))
+                return true
+            } isTargeted: { dragging = $0 }
+            .padding(.bottom, 28)
     }
 
     @ViewBuilder
@@ -192,12 +188,12 @@ private struct ImportSourceRow: View {
                     .fixedSize(horizontal: false, vertical: true)
                 if let outcome {
                     Text(outcome.sentence)
-                        .metaText(outcome.failed ? Theme.live : Theme.ink)
+                        .metaText(outcome.failed ? Theme.live : Theme.inkSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
         } trailing: {
-            Button(importing ? "Importing…" : "Choose…", action: choose)
+            Button(importing ? "Importing…" : "Import…", action: choose)
                 .buttonStyle(.compact)
                 .disabled(busy)
         }

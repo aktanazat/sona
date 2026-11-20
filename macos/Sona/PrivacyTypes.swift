@@ -498,10 +498,10 @@ struct UpstreamHistoryRemovals: Decodable {
 
     static func sentence(_ removals: Int) -> String {
         let oldest = removals == 1
-            ? "the oldest dictation that isn't saved"
-            : "the \(removals) oldest dictations that aren't saved"
-        return "This import goes over Dictations to keep, so Sona will delete \(oldest). "
-            + "To keep everything, cancel and raise Dictations to keep in Library first."
+            ? "the oldest unsaved dictation"
+            : "the \(removals.formatted()) oldest unsaved dictations"
+        return "Importing deletes \(oldest). "
+            + "To keep \(removals == 1 ? "it" : "them"), cancel and raise Dictations to keep in Library."
     }
 }
 

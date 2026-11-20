@@ -2841,60 +2841,81 @@ impl HistoryManager {
         cursor: Option<i64>,
         limit: Option<usize>,
     ) -> Result<PaginatedHistory> {
+        self.storage
+            .with_connection(|conn| Self::history_page_with_connection(conn, cursor, limit))
+    }
+
+    /// One page of history, newest spoken first. An imported row keeps the
+    /// time it was spoken but takes a new id, so the order is the timestamp,
+    /// with the id breaking ties. The cursor is the last returned id; the page
+    /// after it starts below that row's time.
+    fn history_page_with_connection(
+        conn: &Connection,
+        cursor: Option<i64>,
+        limit: Option<usize>,
+    ) -> Result<PaginatedHistory> {
         let limit = limit.map(|l| l.min(MAX_HISTORY_PAGE_SIZE));
-
-        self.storage.with_connection(|conn| {
-            let mut entries: Vec<HistoryEntry> = match (cursor, limit) {
-                (Some(cursor_id), Some(lim)) => {
-                    let fetch_count = i64::try_from(lim + 1)?;
-                    let mut stmt = conn.prepare(
-                        "SELECT id, file_name, timestamp, saved, title, transcription_text, post_processed_text, post_process_requested, parent_id,
-                                (SELECT source FROM dictation_import_history WHERE history_id = transcription_history.id) AS imported_from
-                         FROM transcription_history
-                         WHERE id < ?1
-                         ORDER BY id DESC
-                         LIMIT ?2",
-                    )?;
-                    let result = stmt
-                        .query_map(params![cursor_id, fetch_count], Self::map_history_entry)?
-                        .collect::<std::result::Result<Vec<_>, _>>()?;
-                    result
-                }
-                (None, Some(lim)) => {
-                    let fetch_count = i64::try_from(lim + 1)?;
-                    let mut stmt = conn.prepare(
-                        "SELECT id, file_name, timestamp, saved, title, transcription_text, post_processed_text, post_process_requested, parent_id,
-                                (SELECT source FROM dictation_import_history WHERE history_id = transcription_history.id) AS imported_from
-                         FROM transcription_history
-                         ORDER BY id DESC
-                         LIMIT ?1",
-                    )?;
-                    let result = stmt
-                        .query_map(params![fetch_count], Self::map_history_entry)?
-                        .collect::<std::result::Result<Vec<_>, _>>()?;
-                    result
-                }
-                (_, None) => {
-                    let mut stmt = conn.prepare(
-                        "SELECT id, file_name, timestamp, saved, title, transcription_text, post_processed_text, post_process_requested, parent_id,
-                                (SELECT source FROM dictation_import_history WHERE history_id = transcription_history.id) AS imported_from
-                         FROM transcription_history
-                         ORDER BY id DESC",
-                    )?;
-                    let result = stmt
-                        .query_map([], Self::map_history_entry)?
-                        .collect::<std::result::Result<Vec<_>, _>>()?;
-                    result
-                }
-            };
-
-            let has_more = limit.is_some_and(|lim| entries.len() > lim);
-            if has_more {
-                entries.pop();
+        let mut entries: Vec<HistoryEntry> = match (cursor, limit) {
+            (Some(cursor_id), Some(lim)) => {
+                let cursor_timestamp: i64 = conn
+                    .query_row(
+                        "SELECT timestamp FROM transcription_history WHERE id = ?1",
+                        params![cursor_id],
+                        |row| row.get(0),
+                    )
+                    .optional()?
+                    .ok_or_else(|| anyhow!("history cursor {cursor_id} is no longer in history"))?;
+                let fetch_count = i64::try_from(lim + 1)?;
+                let mut stmt = conn.prepare(
+                    "SELECT id, file_name, timestamp, saved, title, transcription_text, post_processed_text, post_process_requested, parent_id,
+                            (SELECT source FROM dictation_import_history WHERE history_id = transcription_history.id) AS imported_from
+                     FROM transcription_history
+                     WHERE (timestamp, id) < (?1, ?2)
+                     ORDER BY timestamp DESC, id DESC
+                     LIMIT ?3",
+                )?;
+                let result = stmt
+                    .query_map(
+                        params![cursor_timestamp, cursor_id, fetch_count],
+                        Self::map_history_entry,
+                    )?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                result
             }
+            (None, Some(lim)) => {
+                let fetch_count = i64::try_from(lim + 1)?;
+                let mut stmt = conn.prepare(
+                    "SELECT id, file_name, timestamp, saved, title, transcription_text, post_processed_text, post_process_requested, parent_id,
+                            (SELECT source FROM dictation_import_history WHERE history_id = transcription_history.id) AS imported_from
+                     FROM transcription_history
+                     ORDER BY timestamp DESC, id DESC
+                     LIMIT ?1",
+                )?;
+                let result = stmt
+                    .query_map(params![fetch_count], Self::map_history_entry)?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                result
+            }
+            (_, None) => {
+                let mut stmt = conn.prepare(
+                    "SELECT id, file_name, timestamp, saved, title, transcription_text, post_processed_text, post_process_requested, parent_id,
+                            (SELECT source FROM dictation_import_history WHERE history_id = transcription_history.id) AS imported_from
+                     FROM transcription_history
+                     ORDER BY timestamp DESC, id DESC",
+                )?;
+                let result = stmt
+                    .query_map([], Self::map_history_entry)?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                result
+            }
+        };
 
-            Ok(PaginatedHistory { entries, has_more })
-        })
+        let has_more = limit.is_some_and(|lim| entries.len() > lim);
+        if has_more {
+            entries.pop();
+        }
+
+        Ok(PaginatedHistory { entries, has_more })
     }
 
     /// Search transcription history by raw or post-processed text, with
@@ -5511,6 +5532,42 @@ mod tests {
 
         assert_eq!(entry.timestamp, 100);
         assert_eq!(entry.transcription_text, "completed");
+    }
+
+    #[test]
+    fn history_pages_list_an_imported_older_dictation_by_when_it_was_spoken() {
+        let conn = setup_conn();
+        let newest = insert_entry(&conn, 300, "spoken today", None);
+        let imported_oldest = insert_entry(&conn, 100, "imported from last year", None);
+        let imported_middle = insert_entry(&conn, 200, "imported from last month", None);
+
+        let first_page = HistoryManager::history_page_with_connection(&conn, None, Some(2))
+            .expect("read the first page");
+        assert_eq!(
+            first_page
+                .entries
+                .iter()
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>(),
+            vec![newest, imported_middle]
+        );
+        assert!(first_page.has_more);
+
+        let second_page = HistoryManager::history_page_with_connection(
+            &conn,
+            first_page.entries.last().map(|entry| entry.id),
+            Some(2),
+        )
+        .expect("read the second page");
+        assert_eq!(
+            second_page
+                .entries
+                .iter()
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>(),
+            vec![imported_oldest]
+        );
+        assert!(!second_page.has_more);
     }
 
     #[test]

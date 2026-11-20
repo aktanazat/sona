@@ -242,8 +242,10 @@ final class ImportStore {
             } else if let meetingError = failure.remote(as: MeetingCommandError.self),
                       meetingError != .importUnreadable {
                 meetingError.label
+            } else if source.dataFolder != nil {
+                "That isn't \(source.name)'s data. Choose its folder in Library › Application Support"
             } else {
-                "Sona couldn't read that as \(source.name)'s data. Choose the folder or file named above."
+                "That isn't a \(source.name) export. Choose the export file or its folder"
             }
             appOutcomes[source] = ImportOutcome(sentence: sentence, failed: true)
         } catch {

@@ -30,6 +30,14 @@ final class LibraryTests: XCTestCase {
         XCTAssertTrue(plain.hasSuffix("so history is stored unencrypted."), plain)
     }
 
+    /// Imports bring dictations from earlier years. Their day heading names
+    /// the year, so one is never read as a day of this year.
+    func testADayFromAnEarlierYearShowsItsYear() throws {
+        let lastYear = try XCTUnwrap(Calendar.current.date(byAdding: .year, value: -1, to: .now))
+        let year = Calendar.current.component(.year, from: lastYear)
+        XCTAssertTrue(lastYear.relativeDay.hasSuffix(" \(year)"), lastYear.relativeDay)
+    }
+
     private func storage(encrypted: Bool, reason: String?) throws -> StorageStatus {
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
