@@ -180,9 +180,10 @@ struct TasksSettingsView: View {
 
     var body: some View {
         Page {
-            PageTitle("Tasks", subtitle: "The weekly project digest, label groups, retired labels and task templates.")
+            PageTitle("Tasks", subtitle: "The weekly project digest, inbox notifications, label groups, retired labels and task templates.")
             ErrorNote(model.routines.error ?? model.work.mutationError)
             ProjectDigestSettings()
+            InboxNotificationSettings()
             labels
             templates
         }

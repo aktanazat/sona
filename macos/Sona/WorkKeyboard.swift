@@ -420,6 +420,9 @@ final class WorkFocus {
     var inboxHighlighted: String?
     /// The inbox shows snoozed notices instead of awake ones.
     var inboxSnoozed = false
+    /// The inbox shows only the notices that need the user.
+    var inboxPriorityOnly = false
+    var inboxFilter = InboxFilter()
     /// The archive row J/K or the pointer are on, for # to restore.
     var archiveHighlighted: String?
     private(set) var selection: Set<String> = []

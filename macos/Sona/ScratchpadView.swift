@@ -242,6 +242,10 @@ private struct ScratchNoteEditorPage: View {
                 .help("Link a source")
                 .accessibilityLabel("Link a source")
                 .disabled(store.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                if let note = store.saved {
+                    FollowButton(kind: .note, id: note.id)
+                    SubjectReminderMenu(subject: WorkSubjectRef(kind: .note, id: note.id))
+                }
                 ScratchNoteActions(
                     store: store,
                     share: shareAction,
