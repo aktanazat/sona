@@ -76,7 +76,7 @@ struct AgentBridgeView: View {
     private var mcpServers: some View {
         AgentBridgeSection(
             "Outside MCP servers",
-            meta: "Talk to Sona may ask to call the read-only tools you switch on here, and calls one only when you press its card. Tokens stay in Keychain and never leave this Mac."
+            meta: "Talk to Sona can ask to use the tools you switch on. Each call waits for your press."
         ) {
             Button("Add server") { addingMcpServer = true }
                 .buttonStyle(.compact)
@@ -85,7 +85,7 @@ struct AgentBridgeView: View {
             ErrorNote(store.mcpError)
             Card {
                 if store.mcpServers.isEmpty {
-                    CardLine("No outside MCP servers are listed.")
+                    CardLine("No servers")
                 } else {
                     ForEach(store.mcpServers) { server in
                         AgentMcpServerRow(store: store, server: server)
@@ -473,13 +473,13 @@ private struct AgentMcpServerRow: View {
             CardRow {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(server.name).bodyText()
-                    Text(server.hasToken ? "\(server.url) · Token in Keychain" : server.url)
+                    Text(server.hasToken ? "\(server.url) · Token saved" : server.url)
                         .metaText()
                         .textSelection(.enabled)
                 }
             } trailing: {
                 HStack(spacing: 12) {
-                    Button(loading ? "Checking…" : "Read-only tools") {
+                    Button(loading ? "Checking…" : "Tools") {
                         store.inspectMcpTools(server.id)
                     }
                     .buttonStyle(.quiet)
@@ -494,8 +494,6 @@ private struct AgentMcpServerRow: View {
                     if tools.isEmpty {
                         Text("No tools marked read-only by this server.").metaText()
                     } else {
-                        Text("Tools stay off until you switch them on. A server's own read-only label is its claim, not Sona's check.")
-                            .metaText()
                         ForEach(tools) { tool in
                             ToggleRow(
                                 title: tool.name,
@@ -520,11 +518,7 @@ private struct AddMcpServerSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Add MCP server").headlineText()
-                Text("Sona offers only tools the server marks read-only, each off until you switch it on. Adding a server stays in this window because its token is saved in Keychain.")
-                    .metaText()
-            }
+            Text("Add MCP server").headlineText()
             VStack(alignment: .leading, spacing: 8) {
                 Text("Name").bodyText(14, Theme.inkSecondary)
                 InputField(prompt: "Notion", text: $name)

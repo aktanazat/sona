@@ -368,8 +368,8 @@ struct ChatTaskChange: Decodable {
         if let projectId {
             lines.append(
                 projectId == "none"
-                    ? String(localized: "Project: taken out of its project")
-                    : String(localized: "Project: moved to the project the answer names"))
+                    ? String(localized: "Project: none")
+                    : String(localized: "Project: changed"))
         }
         return lines
     }
@@ -504,7 +504,7 @@ enum AgentChatAction: Decodable {
         case let .saveProject(_, name, _, isNew):
             isNew ? "Create project \"\(name)\"" : "Update project \"\(name)\""
         case .editNote: "Replace a note's text"
-        case let .callOutsideTool(_, server, _, _): "Ask \(server), an outside MCP server"
+        case let .callOutsideTool(_, server, _, _): "Ask \(server)"
         }
     }
 
@@ -519,7 +519,7 @@ enum AgentChatAction: Decodable {
                 + (description.map {
                     [$0.isEmpty ? String(localized: "Description: cleared") : String(localized: "Description: \($0)")]
                 } ?? [])
-        case let .editNote(_, body): [String(localized: "New text, replacing the whole note:\n\(body)")]
+        case let .editNote(_, body): [String(localized: "New text:\n\(body)")]
         case let .callOutsideTool(_, server, tool, arguments):
             [
                 String(localized: "Server: \(server)"),
@@ -542,7 +542,7 @@ enum AgentChatAction: Decodable {
         case .draftEmail: "Draft opened in Mail. Nothing was sent."
         case .createCalendarEvent: "Event created. No invitations were sent."
         case .postSlack, .sendNotes: "Sent"
-        case .callOutsideTool: "Called. The answer is below and goes to the chat with your next question."
+        case .callOutsideTool: "Called"
         default: "Applied"
         }
     }
