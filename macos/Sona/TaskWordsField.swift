@@ -9,7 +9,8 @@ struct WorkWhere: Decodable {
 struct WorkWhereTerm: Decodable {
     let text: String
     let label: String
-    let condition: WorkCondition
+    /// A condition, or a group for words joined by "or" across fields.
+    let condition: WorkFilter
 }
 
 /// Words that became no condition; `couldBe` names each thing they could mean.

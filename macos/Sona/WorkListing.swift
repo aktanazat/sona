@@ -115,6 +115,11 @@ struct TaskGroup: Identifiable, Equatable {
     var patch: WorkPatch?
     /// The label a task dropped here gains, beside the ones it has.
     var addsLabel: String? = nil
+    /// The list's second grouping of these rows; nil without one.
+    var subgroups: [TaskGroup]? = nil
+    /// How deep a sub-task sits under its parent, by id, when the list
+    /// nests them; a row not in it sits at the top.
+    var depth: [String: Int] = [:]
 }
 
 /// Filtering, ordering and grouping, on the rows the store already holds, so
@@ -130,7 +135,7 @@ enum TaskListing {
         let now: Int64
         private let due: [DueSpan]?
         private let cycle: CycleWant?
-        private let conditions: [Condition]
+        private let filters: [Node]
 
         private enum Value {
             case none, me, text(String), day(Int64, Int64), at(Int64)
@@ -254,6 +259,29 @@ enum TaskListing {
             }
         }
 
+        /// A filter with its conditions read, as the core reads a group.
+        private enum Node {
+            case one(Condition)
+            case any([Node])
+            case all([Node])
+
+            init(_ filter: WorkFilter, now: Int64, cycles: [WorkCycle]) {
+                switch filter {
+                case let .condition(condition): self = .one(Condition(condition, now: now, cycles: cycles))
+                case let .any(members): self = .any(members.map { Node($0, now: now, cycles: cycles) })
+                case let .all(members): self = .all(members.map { Node($0, now: now, cycles: cycles) })
+                }
+            }
+
+            func holds(_ row: WorkItemRow) -> Bool {
+                switch self {
+                case let .one(condition): condition.holds(row)
+                case let .any(members): members.contains { $0.holds(row) }
+                case let .all(members): members.allSatisfy { $0.holds(row) }
+                }
+            }
+        }
+
         private enum CycleWant {
             case number(Int64), noCycle, nothing
 
@@ -282,7 +310,7 @@ enum TaskListing {
             case let .number(number)?: .number(number)
             case .current?, .next?: named.map { .number($0.number) } ?? .nothing
             }
-            conditions = (query.filters ?? []).map { Condition($0, now: now, cycles: cycles) }
+            filters = (query.filters ?? []).map { Node($0, now: now, cycles: cycles) }
         }
 
         func matches(_ row: WorkItemRow) -> Bool {
@@ -299,7 +327,7 @@ enum TaskListing {
             }
             if let due, !due.contains(where: { $0.holds(row) }) { return false }
             if let cycle, !cycle.holds(row) { return false }
-            if !conditions.allSatisfy({ $0.holds(row) }) { return false }
+            if !filters.allSatisfy({ $0.holds(row) }) { return false }
             if let meeting = query.sourceMeetingId, row.sourceMeetingId != meeting { return false }
             if let search = query.search?.trimmingCharacters(in: .whitespaces), !search.isEmpty {
                 let number = search.hasPrefix("#") ? String(search.dropFirst()) : search
@@ -377,6 +405,36 @@ enum TaskListing {
         }
     }
 
+    /// Rows in a display's order: turned around when it runs against the
+    /// order's natural way, as the core turns it, and ordered by priority,
+    /// work with no priority last unless the display puts it first.
+    static func ordered(_ rows: [WorkItemRow], display: WorkDisplay) -> [WorkItemRow] {
+        let natural = ordered(rows, by: display.orderBy)
+        let turned = display.direction == display.orderBy.natural ? natural : Array(natural.reversed())
+        guard display.orderBy == .priority else { return turned }
+        let none = turned.filter { $0.priority == TaskPriority.none.rawValue }
+        let rest = turned.filter { $0.priority != TaskPriority.none.rawValue }
+        return display.noPriorityFirst ? none + rest : rest + none
+    }
+
+    /// Rows with each sub-task right after its parent when both are in
+    /// them, and how deep each nested one sits.
+    static func nested(_ rows: [WorkItemRow]) -> (rows: [WorkItemRow], depth: [String: Int]) {
+        let ids = Set(rows.map(\.id))
+        let under = Dictionary(grouping: rows.filter { $0.parentId.map(ids.contains) == true }) { $0.parentId ?? "" }
+        var placed: [WorkItemRow] = []
+        var depth: [String: Int] = [:]
+        func place(_ row: WorkItemRow, at level: Int) {
+            guard depth[row.id] == nil else { return }
+            placed.append(row)
+            depth[row.id] = level
+            for child in under[row.id] ?? [] { place(child, at: level + 1) }
+        }
+        for row in rows where row.parentId.map(ids.contains) != true { place(row, at: 0) }
+        for row in rows { place(row, at: 0) }
+        return (placed, depth.filter { $0.value > 0 })
+    }
+
     /// Dated work before undated, sooner first; nil when both dates tie.
     private static func earlierDue(_ left: WorkItemRow, _ right: WorkItemRow) -> Bool? {
         switch (left.dueAtMs, right.dueAtMs) {
@@ -389,14 +447,39 @@ enum TaskListing {
 
     private static let statusRank = Dictionary(uniqueKeysWithValues: statusOrder.enumerated().map { ($1, $0) })
 
+    /// A list's groups as its display asks; a list, not a board, splits
+    /// each again by its second grouping and nests sub-tasks when asked.
     static func groups(
         _ rows: [WorkItemRow], display: WorkDisplay, now: Int64,
         projects: [WorkProjectChoice], people: [WorkPersonChoice], cycles: [WorkCycle] = [],
         labels: [String: WorkLabel] = [:], milestones: [PlanningMilestone] = []
     ) -> [TaskGroup] {
         let shown = display.showSubTasks ? rows : rows.filter { $0.parentId == nil }
-        return grouped(ordered(shown, by: display.orderBy), display: display, now: now, projects: projects,
-                       people: people, cycles: cycles, labels: labels, milestones: milestones)
+        let groups = grouped(ordered(shown, display: display), display: display, now: now, projects: projects,
+                             people: people, cycles: cycles, labels: labels, milestones: milestones)
+        guard display.layout == .list else { return groups }
+        let nests = display.showSubTasks && display.nestSubTasks
+        var second = display
+        second.groupBy = display.subGroupBy
+        second.showEmptyGroups = false
+        let splits = display.subGroupBy != .none && display.subGroupBy != display.groupBy
+        return groups.map { group in
+            var group = group
+            let id = group.id
+            if splits {
+                group.subgroups = grouped(group.rows, display: second, now: now, projects: projects, people: people,
+                                          cycles: cycles, labels: labels, milestones: milestones)
+                    .map { sub in
+                        var sub = TaskGroup(id: "\(id)|\(sub.id)", title: sub.title, mark: sub.mark,
+                                            rows: sub.rows, patch: sub.patch, addsLabel: sub.addsLabel)
+                        if nests { (sub.rows, sub.depth) = nested(sub.rows) }
+                        return sub
+                    }
+            } else if nests {
+                (group.rows, group.depth) = nested(group.rows)
+            }
+            return group
+        }
     }
 
     /// Ordered rows split by `display.groupBy`; the board's swimlanes pass a

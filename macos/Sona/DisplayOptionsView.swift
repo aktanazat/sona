@@ -36,39 +36,67 @@ struct DisplayOptionsView: View {
                     .fixedSize()
                 }
                 line("Ordering") {
-                    Picker("Ordering", selection: Binding(
-                        get: { display.orderBy },
-                        set: { order in model.editListing { $0.display.orderBy = order } }
+                    HStack(spacing: 4) {
+                        Picker("Ordering", selection: Binding(
+                            get: { display.orderBy },
+                            set: { order in model.editListing { $0.display.orderBy = order } }
+                        )) {
+                            ForEach(WorkOrderBy.allCases, id: \.self) { Text(Self.title($0)).tag($0) }
+                        }
+                        .pickerStyle(.menu)
+                        .controlSize(.large)
+                        .labelsHidden()
+                        .fixedSize()
+                        let ascending = display.direction == .ascending
+                        Button {
+                            model.editListing { draft in
+                                let turned: WorkOrderDirection = ascending ? .descending : .ascending
+                                draft.display.orderDirection = turned == draft.display.orderBy.natural ? nil : turned
+                            }
+                        } label: {
+                            Image(systemName: ascending ? "arrow.up" : "arrow.down")
+                                .font(.system(size: 11, weight: .semibold))
+                                .frame(width: 24, height: 24)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(display.orderDirection == nil ? Theme.inkSecondary : Theme.accent)
+                        .help(ascending ? "Ascending" : "Descending")
+                        .accessibilityLabel(ascending ? "Order ascending" : "Order descending")
+                    }
+                }
+                if display.orderBy == .priority {
+                    line("No priority first") {
+                        Toggle("No priority first", isOn: Binding(
+                            get: { display.noPriorityFirst },
+                            set: { on in model.editListing { $0.display.noPriorityFirst = on } }
+                        ))
+                        .toggleStyle(.switch)
+                        .controlSize(.mini)
+                        .labelsHidden()
+                    }
+                }
+                let board = display.layout == .board
+                line(board ? "Swimlanes" : "Sub-grouping") {
+                    Picker(board ? "Swimlanes" : "Sub-grouping", selection: Binding(
+                        get: { display.subGroupBy },
+                        set: { lanes in model.editListing { $0.display.subGroupBy = lanes } }
                     )) {
-                        ForEach(WorkOrderBy.allCases, id: \.self) { Text(Self.title($0)).tag($0) }
+                        ForEach(WorkGroupBy.allCases.filter { $0 != display.groupBy }, id: \.self) {
+                            Text($0 == .none ? (board ? "No swimlanes" : "No sub-grouping") : Self.title($0)).tag($0)
+                        }
                     }
                     .pickerStyle(.menu)
                     .controlSize(.large)
                     .labelsHidden()
                     .fixedSize()
                 }
-                if display.layout == .board {
-                    line("Swimlanes") {
-                        Picker("Swimlanes", selection: Binding(
-                            get: { display.subGroupBy },
-                            set: { lanes in model.editListing { $0.display.subGroupBy = lanes } }
-                        )) {
-                            ForEach(WorkGroupBy.allCases.filter { $0 != display.groupBy }, id: \.self) {
-                                Text($0 == .none ? "No swimlanes" : Self.title($0)).tag($0)
-                            }
+                if board, !display.hiddenColumns.isEmpty {
+                    line("Hidden columns") {
+                        Button(display.hiddenColumns.count == 1 ? "Show 1" : "Show \(display.hiddenColumns.count)") {
+                            model.editListing { $0.display.hiddenColumns = [] }
                         }
-                        .pickerStyle(.menu)
-                        .controlSize(.large)
-                        .labelsHidden()
-                        .fixedSize()
-                    }
-                    if !display.hiddenColumns.isEmpty {
-                        line("Hidden columns") {
-                            Button(display.hiddenColumns.count == 1 ? "Show 1" : "Show \(display.hiddenColumns.count)") {
-                                model.editListing { $0.display.hiddenColumns = [] }
-                            }
-                            .controlSize(.small)
-                        }
+                        .controlSize(.small)
                     }
                 }
                 line("Sub-tasks") {
@@ -79,6 +107,17 @@ struct DisplayOptionsView: View {
                     .toggleStyle(.switch)
                     .controlSize(.mini)
                     .labelsHidden()
+                }
+                if !board, display.showSubTasks {
+                    line("Nest under parent") {
+                        Toggle("Nest under parent", isOn: Binding(
+                            get: { display.nestSubTasks },
+                            set: { on in model.editListing { $0.display.nestSubTasks = on } }
+                        ))
+                        .toggleStyle(.switch)
+                        .controlSize(.mini)
+                        .labelsHidden()
+                    }
                 }
                 line("Empty groups") {
                     Toggle("Empty groups", isOn: Binding(

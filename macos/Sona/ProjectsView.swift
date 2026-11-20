@@ -48,7 +48,7 @@ struct ProjectsView: View {
     @State private var sourceLink: PlanningLinkRequest?
     @State private var reviewProject: PlanningProject?
     @State private var cursor: String?
-    @State private var collapsed: Set<PlanningProjectStatus> = []
+    @State private var collapsed: Set<String> = []
     @State private var ownerFilter: String?
     @State private var peeking = false
     @State private var editingMilestone: PlanningMilestone?
@@ -58,6 +58,9 @@ struct ProjectsView: View {
     @State private var deletingMilestone: PlanningMilestone?
     @State private var templatingProject: PlanningProject?
     @State private var pickingUpdateDay = false
+    @State private var namingView = false
+    @State private var viewName = ""
+    @State private var viewIcon: String?
     @FocusState private var keysFocused: Bool
 
     var body: some View {
@@ -84,9 +87,9 @@ struct ProjectsView: View {
         .task(id: store.selectedProjectId) {
             if let id = store.selectedProjectId { await store.loadDetail(id) }
         }
-        .onChange(of: store.selectedProjectId) { _, _ in
+        .onChange(of: store.selectedProjectId) { _, id in
             ownerFilter = nil
-            pageTab = .overview
+            pageTab = id.flatMap { model.workFocus.projectViews[$0] } == nil ? .overview : .tasks
             peeking = false
             titleDraft = nil
             model.workFocus.open(nil, in: .projects)
@@ -205,6 +208,14 @@ struct ProjectsView: View {
                     pickingUpdateDay = false
                 }
             }
+            .popover(isPresented: $namingView, arrowEdge: .bottom) {
+                ViewNamer(name: $viewName, icon: $viewIcon) {
+                    let name = viewName.trimmingCharacters(in: .whitespaces)
+                    guard !name.isEmpty else { return }
+                    namingView = false
+                    Task { await store.saveView(id: nil, name: name, icon: viewIcon, layout: layout) }
+                }
+            }
         }
     }
 
@@ -225,6 +236,7 @@ struct ProjectsView: View {
             .frame(width: 160)
             .accessibilityLabel("Search projects")
         filterMenu
+        viewsMenu
         SegmentedSwitch(items: ProjectsViewChoice.items, selection: layout.choice,
                         iconOnly: true) { choice in
             switch choice {
@@ -254,6 +266,72 @@ struct ProjectsView: View {
         Button("New project", systemImage: "plus") { creation = .project }
             .buttonStyle(.primary)
             .help("New project (C)")
+    }
+
+    /// The Projects page's saved views, the grouping, and saving the list
+    /// as it stands as a view.
+    private var viewsMenu: some View {
+        let opened = store.views.first { $0.id == store.openedView }
+        return Menu {
+            ForEach(store.views) { view in
+                Toggle(isOn: Binding(get: { store.openedView == view.id }, set: { _ in layout = store.open(view: view) })) {
+                    Label(view.name, systemImage: view.icon ?? "line.3.horizontal.decrease.circle")
+                }
+            }
+            if !store.views.isEmpty { Divider() }
+            Picker("Group by", selection: Binding(get: { store.groupBy }, set: { store.groupBy = $0 })) {
+                ForEach(ProjectGroupBy.allCases, id: \.self) { group in
+                    Text(Self.title(group)).tag(group)
+                }
+            }
+            Divider()
+            if let opened {
+                Button("Save to “\(opened.name)”") {
+                    Task { await store.saveView(id: opened.id, name: opened.name, icon: opened.icon, layout: layout) }
+                }
+                Button("Copy link", systemImage: "link") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(ProjectView.link(opened.id), forType: .string)
+                }
+                Button("Close view") {
+                    store.openedView = nil
+                    store.filter = PlanningListFilter()
+                    store.groupBy = .status
+                }
+                Button("Delete view", systemImage: "trash", role: .destructive) {
+                    Task { await store.deleteView(opened.id) }
+                }
+            }
+            Button("Save as view…") {
+                viewName = ""
+                viewIcon = nil
+                namingView = true
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: opened?.icon ?? "rectangle.stack")
+                Text(opened?.name ?? "Views").lineLimit(1)
+            }
+            .font(TypeScale.label(12))
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .padding(.horizontal, 10)
+        .frame(height: Theme.controlHeight)
+        .background(opened != nil ? Theme.accentSoft : Theme.control, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
+        .help("Saved views and grouping")
+        .accessibilityLabel(opened.map { "Saved view, \($0.name)" } ?? "Saved views")
+    }
+
+    private static func title(_ group: ProjectGroupBy) -> String {
+        switch group {
+        case .status: "Group by status"
+        case .lead: "Group by lead"
+        case .priority: "Group by priority"
+        case .quarter: "Group by target quarter"
+        case .none: "No grouping"
+        }
     }
 
     private var filterMenu: some View {
@@ -378,15 +456,58 @@ struct ProjectsView: View {
     }
 
     private var listRows: [ProjectListRow] {
-        let visible = visibleProjects
         var rows: [ProjectListRow] = []
-        for status in PlanningProjectStatus.allCases {
-            let members = visible.filter { $0.project.status == status }
-            guard !members.isEmpty else { continue }
-            rows.append(.group(status, members.count))
-            if !collapsed.contains(status) { rows += members.map(ProjectListRow.project) }
+        for (group, members) in groupedProjects {
+            rows.append(.group(group, members.count))
+            if !collapsed.contains(group.id) { rows += members.map(ProjectListRow.project) }
         }
         return rows
+    }
+
+    /// The visible projects in the groups the list or its view asks for.
+    private var groupedProjects: [(ProjectListGroup, [PlanningProjectSummary])] {
+        let visible = visibleProjects
+        switch store.groupBy {
+        case .status:
+            return PlanningProjectStatus.allCases.compactMap { status in
+                let members = visible.filter { $0.project.status == status }
+                return members.isEmpty ? nil : (ProjectListGroup(id: "status:\(status.rawValue)", title: status.label,
+                                                                 status: status), members)
+            }
+        case .none:
+            return [(ProjectListGroup(id: "all", title: "All projects", status: nil), visible)]
+        case .priority:
+            return [TaskPriority.urgent, .high, .medium, .low, .none].compactMap { priority in
+                let members = visible.filter { ($0.project.priority ?? 0) == priority.rawValue }
+                return members.isEmpty ? nil
+                    : (ProjectListGroup(id: "priority:\(priority.rawValue)", title: priority.label, status: nil), members)
+            }
+        case .lead:
+            let keyed = Dictionary(grouping: visible) { summary -> String in
+                summary.project.leadIsSelf == true ? "me" : summary.project.leadPersonId ?? ""
+            }
+            let name = { (key: String) -> String in
+                key == "me" ? "Me" : key.isEmpty ? "No lead" : people.first { $0.id == key }?.name ?? "Someone"
+            }
+            return keyed.keys
+                .sorted { left, right in
+                    if left.isEmpty != right.isEmpty { return right.isEmpty }
+                    if (left == "me") != (right == "me") { return left == "me" }
+                    return name(left).localizedStandardCompare(name(right)) == .orderedAscending
+                }
+                .map { key in (ProjectListGroup(id: "lead:\(key)", title: name(key), status: nil), keyed[key] ?? []) }
+        case .quarter:
+            let calendar = Calendar.current
+            let keyed = Dictionary(grouping: visible) { summary -> Int in
+                guard let target = summary.project.targetAtMs else { return Int.max }
+                let date = PlanningFormat.moment(target)
+                return calendar.component(.year, from: date) * 4 + (calendar.component(.month, from: date) - 1) / 3
+            }
+            return keyed.keys.sorted().map { key in
+                let title = key == Int.max ? "No target date" : "Q\(key % 4 + 1) \(key / 4)"
+                return (ProjectListGroup(id: "quarter:\(key)", title: title, status: nil), keyed[key] ?? [])
+            }
+        }
     }
 
     private func list(_ proxy: ScrollViewProxy) -> some View {
@@ -395,11 +516,15 @@ struct ProjectsView: View {
         return Card {
             ForEach(rows) { row in
                 switch row {
-                case let .group(status, count):
-                    GroupHeader(title: status.label, count: count, collapsed: collapsed.contains(status)) {
-                        ProjectStatusIcon(status: status, progress: 0.5)
+                case let .group(group, count):
+                    GroupHeader(title: group.title, count: count, collapsed: collapsed.contains(group.id)) {
+                        if let status = group.status {
+                            ProjectStatusIcon(status: status, progress: 0.5)
+                        } else {
+                            Image(systemName: "folder").font(.system(size: 11)).foregroundStyle(Theme.inkSecondary)
+                        }
                     } toggle: {
-                        if collapsed.contains(status) { collapsed.remove(status) } else { collapsed.insert(status) }
+                        if collapsed.contains(group.id) { collapsed.remove(group.id) } else { collapsed.insert(group.id) }
                     }
                 case let .project(summary):
                     projectRow(summary, now: now)
@@ -1080,6 +1205,16 @@ struct ProjectsView: View {
             if let person {
                 Text("Showing \(person.name)'s open tasks.").metaText()
             }
+            let saved = model.work.views.filter { $0.projectId == id }
+            if !saved.isEmpty {
+                let shownView = model.workFocus.projectViews[id]
+                HStack(spacing: 2) {
+                    WorkTab(title: "All tasks", on: shownView == nil) { showView(nil, in: id) }
+                    ForEach(saved) { view in
+                        WorkTab(title: view.name, icon: view.icon, on: shownView == view.id) { showView(view, in: id) }
+                    }
+                }
+            }
             TaskFilterBar(draft: draft)
             if shown == 0 {
                 Card { CardLine(rows.isEmpty ? "No tasks yet." : "No tasks match these filters.") }
@@ -1097,6 +1232,14 @@ struct ProjectsView: View {
             focus.renaming = nil
             focus.clearSelection()
         }
+    }
+
+    /// A project's Tasks tab showing one of its saved views, or nil for
+    /// its own filters.
+    private func showView(_ view: WorkView?, in project: String) {
+        let focus = model.workFocus
+        focus.projectViews[project] = view?.id
+        focus.projectDrafts[project] = view.map { WorkViewDraft(query: $0.query, display: $0.display) }
     }
 
     @ViewBuilder
@@ -1210,15 +1353,23 @@ struct ProjectsView: View {
     }
 }
 
+/// A group the projects list shows under one header.
+private struct ProjectListGroup: Hashable {
+    let id: String
+    let title: String
+    /// The status a status group draws its icon for.
+    let status: PlanningProjectStatus?
+}
+
 private enum ProjectListRow: Identifiable {
-    case group(PlanningProjectStatus, Int)
+    case group(ProjectListGroup, Int)
     case project(PlanningProjectSummary)
 
     static func projectId(_ id: String) -> String { "project:\(id)" }
 
     var id: String {
         switch self {
-        case let .group(status, _): "group:\(status.rawValue)"
+        case let .group(group, _): "group:\(group.id)"
         case let .project(summary): Self.projectId(summary.id)
         }
     }

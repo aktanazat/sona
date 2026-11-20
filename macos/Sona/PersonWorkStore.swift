@@ -123,7 +123,7 @@ final class PersonWorkStore {
                 "work_list", PersonTasksParams(query: WorkQuery(ownerPersonIds: [personId])))
             async let owed: WorkList = core.request(
                 "work_list", PersonTasksParams(query: WorkQuery(filters: [
-                    WorkCondition(field: .forPerson, op: .is, values: [personId]),
+                    .condition(WorkCondition(field: .forPerson, op: .is, values: [personId])),
                 ])))
             let (result, list, owedList) = try await (work, owned, owed)
             guard active, generation == stamp, !Task.isCancelled else { return }
