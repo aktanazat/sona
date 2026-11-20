@@ -193,7 +193,7 @@ impl Registry {
             }
             let fires = match registered.taps.as_mut() {
                 None => changes,
-                Some(taps) => double_tap_fires(taps, changes, event.is_key_down, at),
+                Some(taps) => double_tap_fires(taps, hotkey, event, changes, at),
             };
             if fires {
                 transitions.push(Transition {
@@ -210,8 +210,17 @@ impl Registry {
 /// Advances a double-tap binding by one key event at `at`; whether the
 /// binding presses or releases on it. `changes` is whether the event pressed
 /// or released the binding's chord.
-fn double_tap_fires(taps: &mut TapState, changes: bool, is_key_down: bool, at: Instant) -> bool {
-    let (next, fires) = match (*taps, changes, is_key_down) {
+fn double_tap_fires(
+    taps: &mut TapState,
+    hotkey: Hotkey,
+    event: &KeyEvent,
+    changes: bool,
+    at: Instant,
+) -> bool {
+    let building_chord = event.key.is_none()
+        && !event.modifiers.is_empty()
+        && hotkey.modifiers.contains(event.modifiers);
+    let (next, fires) = match (*taps, changes, event.is_key_down) {
         (TapState::SecondDown, true, false) => (TapState::Idle, true),
         (TapState::SecondDown, _, _) => (TapState::SecondDown, false),
         (TapState::FirstUp(up), true, true) if at.duration_since(up) <= DOUBLE_TAP_MAX_GAP => {
@@ -223,6 +232,7 @@ fn double_tap_fires(taps: &mut TapState, changes: bool, is_key_down: bool, at: I
         {
             (TapState::FirstUp(at), false)
         }
+        (TapState::FirstUp(up), false, true) if building_chord => (TapState::FirstUp(up), false),
         (_, true, false) | (_, false, true) => (TapState::Idle, false),
         (state, false, false) => (state, false),
     };
@@ -688,6 +698,29 @@ mod tests {
                 (90, right_option(false)),
                 (300, right_option(true)),
                 (380, right_option(false)),
+            ],
+        );
+        assert_eq!(
+            transitions,
+            [fired("transcribe", true), fired("transcribe", false)]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_modifier_plus_key_double_tap_fires_with_full_release_between_taps() -> Result<(), String> {
+        let mut registry = registry(&[("transcribe", "double:option_right+space")])?;
+        let transitions = replay_timed(
+            &mut registry,
+            &[
+                (0, right_option(true)),
+                (20, event(Modifiers::OPT_RIGHT, Some(Key::Space), true)),
+                (80, event(Modifiers::OPT_RIGHT, Some(Key::Space), false)),
+                (100, right_option(false)),
+                (220, right_option(true)),
+                (240, event(Modifiers::OPT_RIGHT, Some(Key::Space), true)),
+                (300, event(Modifiers::OPT_RIGHT, Some(Key::Space), false)),
+                (320, right_option(false)),
             ],
         );
         assert_eq!(

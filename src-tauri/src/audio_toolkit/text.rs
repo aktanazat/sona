@@ -979,30 +979,24 @@ fn spoken_punctuation_at(
 }
 
 /// Words before `period` or `full stop` that make it the noun rather than the
-/// mark: "the trial period", "came to a full stop".
+/// mark even at the end of an utterance: "the trial period", "came to a full stop".
 const MARK_AS_WORD_BEFORE: &[&str] = &[
     "a",
     "an",
     "the",
-    "this",
-    "that",
     "each",
     "every",
     "any",
-    "one",
     "per",
     "my",
     "your",
     "our",
     "their",
     "his",
-    "her",
     "its",
     "same",
     "whole",
     "entire",
-    "next",
-    "last",
     "trial",
     "grace",
     "waiting",
@@ -1010,10 +1004,14 @@ const MARK_AS_WORD_BEFORE: &[&str] = &[
     "notice",
     "probation",
     "cooling",
-    "free",
-    "time",
     "class",
 ];
+
+/// Words that can either modify `period` ("that period was hard") or end a
+/// sentence before a spoken period ("I liked that period"). Only treat
+/// `period` as the noun when another word follows it.
+const MARK_AS_WORD_BEFORE_IF_FOLLOWED: &[&str] =
+    &["this", "that", "her", "one", "free", "time", "last", "next"];
 
 /// A word without the marks a transcriber attached to its end, and those marks.
 fn split_trailing_marks(word: &str) -> (&str, &str) {
@@ -1031,8 +1029,10 @@ fn mark_meant_as_word(words: &[&str], index: usize, consumed: usize) -> bool {
     let after = words
         .get(index + consumed)
         .map(|next| split_trailing_marks(next).0.to_ascii_lowercase());
-    before.is_some_and(|word| MARK_AS_WORD_BEFORE.contains(&word.as_str()))
-        || after.is_some_and(|word| word == "of")
+    before.as_deref().is_some_and(|word| {
+        MARK_AS_WORD_BEFORE.contains(&word)
+            || (after.is_some() && MARK_AS_WORD_BEFORE_IF_FOLLOWED.contains(&word))
+    }) || after.is_some_and(|word| word == "of")
 }
 
 /// Where the `end quote` or `unquote` closing a quotation opened at `open`
@@ -1264,10 +1264,12 @@ fn number_dictated_list(output: &str) -> Option<String> {
         if first.value != 1 || !opens_clause(output, spans[start].0) {
             continue;
         }
+        let after_newline =
+            |word_start: usize| output[..word_start].trim_end_matches(' ').ends_with('\n');
         let evident = |number: &ItemNumber, index: usize| {
             matches!(number.style, ListStyle::Spelled | ListStyle::Digits)
-                || number.paused
-                || opens_clause(output, spans[index].0)
+                || (first.paused && number.paused)
+                || after_newline(spans[index].0)
         };
         let mut strict = vec![(start, first)];
         let mut loose = vec![(start, first)];
@@ -2421,6 +2423,14 @@ mod tests {
             spoken("First of all, the second option is better."),
             "First of all, the second option is better."
         );
+        assert_eq!(
+            spoken("One day I will visit. Two weeks is enough."),
+            "One day I will visit. Two weeks is enough."
+        );
+        assert_eq!(
+            spoken("One was red. Two were blue."),
+            "One was red. Two were blue."
+        );
     }
 
     #[test]
@@ -2437,6 +2447,11 @@ mod tests {
             spoken("for a period of time comma we waited"),
             "for a period of time, we waited"
         );
+        assert_eq!(spoken("I liked that period"), "I liked that.");
+        assert_eq!(spoken("Give it to her period"), "Give it to her.");
+        assert_eq!(spoken("We ran out of time period"), "We ran out of time.");
+        assert_eq!(spoken("I'll take one period"), "I'll take one.");
+        assert_eq!(spoken("that period was hard"), "that period was hard");
     }
     #[test]
     fn literal_punctuation_is_english_only_opt_in_and_respects_vocabulary() {

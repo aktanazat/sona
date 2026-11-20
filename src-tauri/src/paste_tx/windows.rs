@@ -26,7 +26,7 @@ use windows::Win32::Foundation::{
 };
 
 use super::{evaluate, send_chord, take_auto_submit_key, TxState, WaitDecision};
-use crate::clipboard::send_return_key;
+use crate::clipboard::{clipboard_after_paste, send_return_key, ClipboardAfterPaste};
 use crate::input::EnigoState;
 use crate::settings::{AutoSubmitKey, ClipboardHandling, PasteMethod};
 use windows::Win32::Foundation::GlobalFree;
@@ -263,13 +263,14 @@ fn flush_pending() {
     let Some(previous) = previous else {
         return;
     };
-    {
+    let injection_failed = {
         let mut st = match transaction_state(&previous) {
             Ok(st) => st,
             Err(_) => return,
         };
         st.cancelled = true;
-    }
+        st.injection_failed
+    };
     send_auto_submit(&previous);
     let sequence = match stored_sequence(&previous) {
         Ok(sequence) => sequence,
@@ -279,30 +280,35 @@ fn flush_pending() {
         }
     };
     let still_ours = system_clipboard_sequence() == sequence;
-    if still_ours {
-        // The transaction is still alive in `previous`.
-        // SAFETY: the matching sequence proves this module may settle its promise.
-        unsafe { settle_clipboard(&previous) };
-    }
+    // The transaction is still alive in `previous`.
+    // SAFETY: `settle_clipboard` writes only when `still_ours` is true.
+    unsafe { settle_clipboard(&previous, still_ours, injection_failed) };
 }
 
-/// Settle-time clipboard handling once we know we still own the clipboard:
-/// restore the snapshot, or — for ClipboardHandling::CopyToClipboard — replace
-/// the concealed promise with plain transcript text, so clipboard history and
-/// managers record it and it survives this transaction's window going away.
-unsafe fn settle_clipboard(shared: &WinTxShared) {
-    if !shared.preserve_transcript {
-        restore_snapshot(shared);
-        return;
+/// Settle-time clipboard handling: restore the snapshot after a sent paste,
+/// keep the transcript as plain text when `ClipboardHandling::CopyToClipboard`
+/// is configured or sending the paste chord failed, and leave the clipboard
+/// alone if another app already overwrote it.
+unsafe fn settle_clipboard(shared: &WinTxShared, still_ours: bool, injection_failed: bool) {
+    match clipboard_after_paste(still_ours, !injection_failed, shared.preserve_transcript) {
+        ClipboardAfterPaste::Untouched => {
+            info!("[reliable-paste] clipboard changed externally; leaving it untouched");
+        }
+        ClipboardAfterPaste::KeepDictation => {
+            if OpenClipboard(None).is_err() {
+                warn!("[reliable-paste] could not open clipboard to leave transcript");
+                return;
+            }
+            let _ = EmptyClipboard();
+            render_text(shared);
+            let _ = CloseClipboard();
+            info!("[reliable-paste] left transcript on clipboard as plain text");
+        }
+        ClipboardAfterPaste::Restore => {
+            restore_snapshot(shared);
+            info!("[reliable-paste] restored previous clipboard");
+        }
     }
-    if OpenClipboard(None).is_err() {
-        warn!("[reliable-paste] could not open clipboard to leave transcript");
-        return;
-    }
-    let _ = EmptyClipboard();
-    render_text(shared);
-    let _ = CloseClipboard();
-    info!("[reliable-paste] left transcript on clipboard as plain text");
 }
 
 /// Restores the snapshotted clipboard contents. Safe to call from any thread.
@@ -496,7 +502,7 @@ fn on_timer(_hwnd: HWND, shared: &WinTxShared) {
     } else if receipt {
         info!("[reliable-paste] settling: reads went quiet");
     } else if injection_failed {
-        info!("[reliable-paste] settling: chord injection failed, restoring quickly");
+        info!("[reliable-paste] settling: chord injection failed, keeping dictation on clipboard");
     } else {
         info!("[reliable-paste] settling: no read within timeout, restoring anyway");
     }
@@ -510,13 +516,9 @@ fn on_timer(_hwnd: HWND, shared: &WinTxShared) {
             false
         }
     };
-    if still_ours {
-        // The timer owns this live transaction.
-        // SAFETY: the matching sequence prevents overwriting a newer clipboard writer.
-        unsafe { settle_clipboard(shared) };
-    } else {
-        info!("[reliable-paste] clipboard changed externally; leaving it untouched");
-    }
+    // The timer owns this live transaction.
+    // SAFETY: `settle_clipboard` writes only when `still_ours` is true.
+    unsafe { settle_clipboard(shared, still_ours, injection_failed) };
 
     if let Ok(mut slot) = PENDING.lock() {
         let is_us = slot
@@ -681,8 +683,8 @@ pub(super) fn run(
             info!("[reliable-paste] paste chord sent ({paste_method:?})");
         }
         Err(e) => {
-            // Keep the transaction alive: the worker restores the clipboard
-            // after the short failed-injection timeout.
+            // Keep the transaction alive: the worker settles quickly and leaves
+            // the dictation on the clipboard so the user can paste it manually.
             match transaction_state(&shared) {
                 Ok(mut state) => state.injection_failed = true,
                 Err(error) => warn!("[reliable-paste] {error}; waiting for settlement"),
