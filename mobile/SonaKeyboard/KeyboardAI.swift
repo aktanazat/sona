@@ -1,5 +1,6 @@
 import Foundation
 import FoundationModels
+import NaturalLanguage
 import SwiftUI
 
 /// A command he saved from the keyboard: a name and the instruction it runs on the text.
@@ -38,9 +39,30 @@ enum KeyboardAI: Equatable {
         switch self {
         case .fix:
             """
-            You correct text typed on a phone. Fix spelling, grammar, punctuation and capitalization. \
-            Keep the meaning, language, tone, wording, line breaks, names, links and emoji. \
-            Do not add, remove or explain anything. Return only the corrected text.
+            You are a careful copy editor. You get text someone typed on a phone and return it corrected, \
+            in the language it is written in. Never translate.
+            Fix every spelling, grammar, punctuation, accent and capitalization mistake, including:
+            - tense: a finished event with a past time word ("yesterday", "last night") takes the simple past \
+            ("I went", not "I have gone");
+            - agreement ("she doesn't", "people are") and pronoun case ("He and I were", not "Me and him was");
+            - words that sound alike ("their", "there", "they're"; "accept", "except");
+            - questions keep their question marks.
+            Keep the writer's meaning, tone, names, links, emoji, line breaks, abbreviations and casual words \
+            (asap, thx, lol, 3pm). Change no correct word and add or remove no ideas.
+            Reply with the corrected text only.
+
+            Examples:
+            Text in English:
+            i has went to teh park yesterday and seen a dog lol
+            I went to the park yesterday and saw a dog lol.
+
+            Text in English:
+            him and me was late cuz the bus dont come
+            He and I were late cuz the bus didn't come.
+
+            Text in Spanish:
+            no se si el puede venir manana, tu sabes?
+            No sé si él puede venir mañana, ¿tú sabes?
             """
         case .ask:
             """
@@ -62,14 +84,32 @@ enum KeyboardAI: Equatable {
 
     func prompt(for text: String) -> String {
         switch self {
+        case .fix:
+            /* Naming the language keeps the model from answering in English. */
+            "Text in \(Self.writtenLanguage(of: text)):\n\(text)"
         case let .ask(question):
             text.isEmpty ? question : "Request: \(question)\n\nText from the field:\n\(text)"
         case .style:
             /* The Mac's style prompts expect the cleanup envelope PhoneDictation sends. */
             Self.envelope(text)
-        case .fix, .translate, .command:
+        case .translate, .command:
             text
         }
+    }
+
+    /// Corrections and translations take the most likely answer, so the same text gets the same fix.
+    private var options: GenerationOptions {
+        switch self {
+        case .fix, .translate: GenerationOptions(samplingMode: .greedy)
+        case .ask, .command, .style: GenerationOptions()
+        }
+    }
+
+    private static func writtenLanguage(of text: String) -> String {
+        let recognizer = NLLanguageRecognizer()
+        recognizer.processString(text)
+        return recognizer.dominantLanguage.flatMap { Locale(identifier: "en").localizedString(forIdentifier: $0.rawValue) }
+            ?? "the language it is written in"
     }
 
     static func name(of language: Locale.Language, in locale: Locale = .current) -> String {
@@ -109,18 +149,20 @@ enum KeyboardAI: Equatable {
         return mine + rest
     }
 
-    /// One answer, with the same deadline the phone's style rewrite keeps, longer for a question.
+    /// A session ready for this action. `prewarm()` on it before the tap loads the model early.
+    func session() -> LanguageModelSession {
+        LanguageModelSession(instructions: instructions)
+    }
+
+    /// The answer, handing each longer part of it to `partial` as the model writes it.
     @MainActor
-    func run(_ text: String, using rewrite: BoundedRewrite) async -> BoundedRewrite.Outcome {
-        let instructions = instructions
-        let prompt = prompt(for: text)
-        let seconds: Double = if case .ask = self { 30 } else { 20 }
-        return await rewrite.run {
-            let session = LanguageModelSession(instructions: instructions)
-            let reply = try await session.respond(to: prompt).content
-            return DictationCleanup.rewritten(reply)
-        } waitForDeadline: {
-            try await Task.sleep(for: .seconds(seconds))
+    func run(_ text: String, in session: LanguageModelSession, partial: (String) -> Void) async throws -> String {
+        var reply = ""
+        for try await snapshot in session.streamResponse(to: prompt(for: text), options: options) {
+            reply = snapshot.content
+            /* A style answers in the Mac's JSON envelope; only the finished reply can be read. */
+            if !reply.hasPrefix("{") { partial(reply.trimmingCharacters(in: .whitespacesAndNewlines)) }
         }
+        return DictationCleanup.rewritten(reply)
     }
 }

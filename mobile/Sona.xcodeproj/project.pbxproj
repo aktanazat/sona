@@ -142,7 +142,6 @@
 		CD00000000000000000000D7 /* FieldText.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB00000000000000000000D7 /* FieldText.swift */; };
 		CD00000000000000000000D4 /* KeyboardToolsViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB00000000000000000000D4 /* KeyboardToolsViews.swift */; };
 		CC00000000000000000000D5 /* KeyboardToolsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB00000000000000000000D5 /* KeyboardToolsTests.swift */; };
-		CD00000000000000000000D6 /* BoundedRewrite.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000044 /* BoundedRewrite.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -818,7 +817,6 @@
 				CD00000000000000000000D3 /* KeyboardTools.swift in Sources */,
 				CD00000000000000000000D7 /* FieldText.swift in Sources */,
 				CD00000000000000000000D4 /* KeyboardToolsViews.swift in Sources */,
-				CD00000000000000000000D6 /* BoundedRewrite.swift in Sources */,
 				CD0000000000000000000019 /* Theme.swift in Sources */,
 				CD0000000000000000000020 /* KeyboardDraft.swift in Sources */,
 				CD0000000000000000000023 /* KeyboardViewController.swift in Sources */,

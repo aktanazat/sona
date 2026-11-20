@@ -49,6 +49,7 @@ final class KeyboardViewController: UIInputViewController {
     #if DEBUG
     private let frames = FrameMeter()
     private let appearFrames = FrameMeter()
+    private let panelFrames = FrameMeter()
     #endif
     private var visible = false
     private var requestedAt: Date?
@@ -82,6 +83,16 @@ final class KeyboardViewController: UIInputViewController {
             self?.refreshShift()
             self?.refreshSuggestions()
         }
+        #if DEBUG
+        tools.toggled = { [weak self] in
+            guard let self else { return }
+            panelFrames.begin(label: "tools panel")
+            Task { [panelFrames] in
+                try? await Task.sleep(for: .milliseconds(600))
+                panelFrames.end()
+            }
+        }
+        #endif
         applySnippets()
         let content = KeyboardView(
             state: state,

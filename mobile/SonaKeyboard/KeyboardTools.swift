@@ -1,5 +1,9 @@
+import FoundationModels
+import os
 import SwiftUI
 import UIKit
+
+private let log = Logger(subsystem: "com.aktanazat.sona.mobile.keyboard", category: "tools")
 
 /// The keyboard's tools: AI on the field's text, case and styles, snippets, and the choices
 /// for the next recording. Owned by the keyboard controller, drawn by `ToolsPanel`.
@@ -56,15 +60,25 @@ final class KeyboardTools {
     /// One recording's style id: nil keeps the chosen style, empty is no style.
     var recordingStyle: String?
     var recordingLanguage: TypingLanguage?
+    /// What the model has written so far for the action at work.
+    var partial = ""
 
     @ObservationIgnored var proxy: () -> UITextDocumentProxy? = { nil }
     @ObservationIgnored var canCopy: () -> Bool = { false }
     @ObservationIgnored var snippetsChanged: () -> Void = {}
     /// The tools wrote to the field, which UIKit does not report as a text change.
     @ObservationIgnored var fieldChanged: () -> Void = {}
+    #if DEBUG
+    /// The panel opened or closed, for the frame count.
+    @ObservationIgnored var toggled: () -> Void = {}
+    #endif
     @ObservationIgnored private let defaults: UserDefaults
-    @ObservationIgnored private let rewrite = BoundedRewrite()
     @ObservationIgnored private var work: Task<Void, Never>?
+    @ObservationIgnored private var deadline: Task<Void, Never>?
+    @ObservationIgnored private var answering = false
+    /// The dictation being styled, which goes in as heard if the style stops.
+    @ObservationIgnored private var unstyled: String?
+    @ObservationIgnored private var warmFix: LanguageModelSession?
     @ObservationIgnored private var noticeTimer: Task<Void, Never>?
 
     init(defaults: UserDefaults = .standard) {
@@ -89,16 +103,23 @@ final class KeyboardTools {
     // MARK: Navigation
 
     func toggle() {
+        let open = isOpen
         cancelWork()
-        page = isOpen ? .closed : .browse(lastTab, nil)
+        #if DEBUG
+        toggled()
+        #endif
+        page = open ? .closed : .browse(lastTab, nil)
+        if !open, lastTab == .ai { prewarm() }
     }
 
     func show(_ tab: Tab, _ menu: Menu? = nil) {
         lastTab = tab
         page = .browse(tab, menu)
+        if tab == .ai { prewarm() }
     }
 
     func back() {
+        if case .working = page { return stop() }
         cancelWork()
         switch page {
         case let .browse(tab, .some):
@@ -167,28 +188,15 @@ final class KeyboardTools {
         let target = FieldText.target(in: proxy)
         let source: FieldTarget? = target.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : target
         guard source != nil || !action.needsText else { return say("tools.noText") }
-        cancelWork()
-        page = .working(action)
-        work = Task { [weak self] in
+        start(action, on: source?.text ?? "") { [weak self] text in
             guard let self else { return }
-            let outcome = await action.run(source?.text ?? "", using: rewrite)
-            guard !Task.isCancelled else { return }
-            switch outcome {
-            case let .rewritten(text):
+            if let text {
                 page = .answer(Answer(action: action, source: source, text: text))
-            case .fallback:
+            } else {
                 page = .browse(.ai, nil)
                 say("tools.ai.failed")
-            case .cancelled:
-                break
             }
         }
-    }
-
-    func cancelWork() {
-        work?.cancel()
-        work = nil
-        rewrite.cancel()
     }
 
     /// Case and styles change the text at once, with Undo on the notice.
@@ -211,9 +219,13 @@ final class KeyboardTools {
     }
 
     func insert(_ text: String) {
+        write(text)
+        page = .closed
+    }
+
+    private func write(_ text: String) {
         guard let proxy = proxy() else { return }
         proxy.insertText(TypingSession.joiningSpace(before: proxy.documentContextBeforeInput ?? "") + text)
-        page = .closed
         fieldChanged()
     }
 
@@ -267,24 +279,89 @@ final class KeyboardTools {
         recordingStyle = nil
         recordingLanguage = nil
         guard let style, KeyboardAI.unavailable == nil else { return land(text) }
-        cancelWork()
-        page = .working(.style(style))
-        work = Task { [weak self] in
+        start(.style(style), on: text) { [weak self] styledText in
             guard let self else { return }
-            let outcome = await KeyboardAI.style(style).run(text, using: rewrite)
-            guard !Task.isCancelled else { return }
-            if case .cancelled = outcome { return }
-            if case .fallback = outcome { say("dictation.styleFailed") }
-            if case let .rewritten(styledText) = outcome { land(styledText) } else { land(text) }
+            if styledText == nil { say("dictation.styleFailed") }
+            land(styledText ?? text)
         }
+        unstyled = text
     }
 
     private func land(_ text: String) {
         if reviewsDictation {
             page = .review(text)
         } else {
-            if case .working = page { page = .closed }
-            insert(text)
+            write(text)
+            page = .closed
+        }
+    }
+
+    // MARK: The model at work
+
+    /// Loads the model while he looks at the AI actions, so Fix answers sooner.
+    func prewarm() {
+        guard warmFix == nil, KeyboardAI.unavailable == nil else { return }
+        let session = KeyboardAI.fix.session()
+        session.prewarm()
+        warmFix = session
+    }
+
+    /// Shows the action at work at once and its answer as the model writes it. `done` gets
+    /// nil when the model failed or wrote nothing; Stop and leaving the page never call it.
+    private func start(_ action: KeyboardAI, on text: String, done: @escaping (String?) -> Void) {
+        cancelWork()
+        partial = ""
+        answering = false
+        page = .working(action)
+        let session = action == .fix ? warmFix ?? action.session() : action.session()
+        if action == .fix { warmFix = nil }
+        let clock = ContinuousClock()
+        let started = clock.now
+        work = Task { [weak self] in
+            let reply = try? await action.run(text, in: session) { [weak self] reply in
+                guard let self else { return }
+                if !answering {
+                    answering = true
+                    log.info("first words \(Int((clock.now - started) / .milliseconds(1))) ms after the tap")
+                }
+                partial = reply.hasPrefix("{") ? "" : reply.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            guard !Task.isCancelled, let self else { return }
+            log.info("answer done \(Int((clock.now - started) / .milliseconds(1))) ms after the tap")
+            work = nil
+            deadline?.cancel()
+            unstyled = nil
+            done(reply.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 })
+        }
+        /* A model that has not started answering by now is stuck; one that is writing may finish. */
+        deadline = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(20))
+            guard !Task.isCancelled, let self, !answering, work != nil else { return }
+            work?.cancel()
+            work = nil
+            unstyled = nil
+            done(nil)
+        }
+    }
+
+    /// Stop on the working page: a dictation goes in without its style, anything else returns
+    /// to the actions.
+    func stop() {
+        let text = unstyled
+        unstyled = nil
+        cancelWork()
+        if let text { land(text) } else { page = .browse(.ai, nil) }
+    }
+
+    /// Ends the model's work. A dictation it was styling goes in as it was heard.
+    func cancelWork() {
+        work?.cancel()
+        work = nil
+        deadline?.cancel()
+        deadline = nil
+        if let text = unstyled {
+            unstyled = nil
+            write(text)
         }
     }
 
