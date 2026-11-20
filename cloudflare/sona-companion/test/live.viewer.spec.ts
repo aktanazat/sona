@@ -1,4 +1,14 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
+import { ws, type WebSocketHandlerConnection } from "msw";
+import { setupServer } from "msw/node";
 
 import pageHtml from "../public/index.html?raw";
 import fixture from "../fixtures/crypto-v1.json";
@@ -61,32 +71,85 @@ type LiveFrame =
   | { type: "ended" }
   | { type: "state"; seq: number; box: string; final: boolean };
 
-class FakeSocket extends EventTarget {
-  static readonly made: FakeSocket[] = [];
+type LiveClient = WebSocketHandlerConnection["client"];
+
+function deferredAt<T>(list: PromiseWithResolvers<T>[], index: number) {
+  while (list.length <= index) list.push(Promise.withResolvers<T>());
+  return required(list[index]);
+}
+
+// The page's own socket, so a frame or close can be awaited until the page's
+// listener, registered first, has handled it.
+function pageSocket(client: LiveClient): EventTarget {
+  if (!("socket" in client) || !(client.socket instanceof EventTarget))
+    throw new Error("msw client carries no page socket");
+  return client.socket;
+}
+
+class LiveRoom {
   readonly sent: string[] = [];
+  closed = false;
+  readonly #arrivals: PromiseWithResolvers<string>[] = [];
+  readonly #page: EventTarget;
 
-  constructor(readonly url: string) {
-    super();
-    FakeSocket.made.push(this);
+  constructor(readonly client: LiveClient) {
+    this.#page = pageSocket(client);
+    this.#page.addEventListener("close", () => {
+      this.closed = true;
+    });
+    client.addEventListener("message", (event) => {
+      const data = String(event.data);
+      deferredAt(this.#arrivals, this.sent.length).resolve(data);
+      this.sent.push(data);
+    });
   }
 
-  send(data: string): void {
-    this.sent.push(data);
+  sentAt(index: number): Promise<string> {
+    return deferredAt(this.#arrivals, index).promise;
   }
 
-  close(code: number): void {
-    this.dispatchEvent(new CloseEvent("close", { code }));
+  async receive(frame: LiveFrame): Promise<void> {
+    const handled = Promise.withResolvers<void>();
+    this.#page.addEventListener("message", () => handled.resolve(), {
+      once: true,
+    });
+    this.client.send(JSON.stringify(frame));
+    await handled.promise;
   }
 
-  open(): void {
-    this.dispatchEvent(new Event("open"));
+  async close(code: number): Promise<void> {
+    const handled = Promise.withResolvers<void>();
+    this.#page.addEventListener("close", () => handled.resolve(), {
+      once: true,
+    });
+    this.client.close(code);
+    await handled.promise;
   }
+}
 
-  receive(frame: LiveFrame): void {
-    this.dispatchEvent(
-      new MessageEvent("message", { data: JSON.stringify(frame) }),
-    );
-  }
+const rooms: PromiseWithResolvers<LiveRoom>[] = [];
+const connected: LiveRoom[] = [];
+let connections = 0;
+
+const server = setupServer(
+  ws
+    .link(`ws://${location.host}/v1/live/*`)
+    .addEventListener("connection", ({ client }) => {
+      const room = new LiveRoom(client);
+      connected.push(room);
+      const index = connections;
+      connections += 1;
+      client.addEventListener(
+        "open",
+        () => deferredAt(rooms, index).resolve(room),
+        { once: true },
+      );
+    }),
+);
+
+// Resolves once the page has opened its index-th socket since the test began.
+function roomAt(index: number): Promise<LiveRoom> {
+  return deferredAt(rooms, index).promise;
 }
 
 const SECOND = 1_000_000_000;
@@ -250,15 +313,14 @@ function edit(field: HTMLTextAreaElement, text: string): void {
 }
 
 async function sentEdit(
-  socket: FakeSocket,
+  room: LiveRoom,
   index: number,
   seq: number,
 ): Promise<string> {
-  await vi.waitFor(() => expect(socket.sent.length).toBeGreaterThan(index));
   const match = new RegExp(
     `^\\{"type":"edit","seq":${seq},"box":"([A-Za-z0-9_-]+)"\\}$`,
     "u",
-  ).exec(required(socket.sent[index]));
+  ).exec(await room.sentAt(index));
   return unseal(liveAad("edit", seq), required(match?.[1]));
 }
 
@@ -270,21 +332,26 @@ function showLivePage(path: string): void {
     ),
   );
   history.replaceState(null, "", path);
-  vi.stubGlobal("WebSocket", FakeSocket);
 }
 
-function lastSocket(): FakeSocket {
-  return required(FakeSocket.made.at(-1));
-}
+beforeAll(() => server.listen({ onUnhandledFrame: "error" }));
+afterAll(() => server.close());
 
-afterEach(() => {
+afterEach(async () => {
   vi.useRealTimers();
-  vi.unstubAllGlobals();
+  // Gone, so no page from this test reconnects into the next one.
+  await Promise.all(
+    connected
+      .filter((room) => !room.closed)
+      .map((room) => room.close(LIVE_ROOM_GONE)),
+  );
+  connected.length = 0;
   document.body.replaceChildren();
   history.replaceState(null, "", "/");
   sessionStorage.clear();
   localStorage.clear();
-  FakeSocket.made.length = 0;
+  rooms.length = 0;
+  connections = 0;
 });
 
 // Each query loads a fresh copy of the page script, which boots on load.
@@ -292,8 +359,7 @@ describe("live doc page", () => {
   it("joins with the contract token, drops the key from the address, and keeps it for a reload", async () => {
     showLivePage(`/l/${ROOM}#v=1&k=${ROOT}`);
     await import("../public/viewer.js?live-join-test");
-    await vi.waitFor(() => expect(FakeSocket.made).toHaveLength(1));
-    const url = new URL(lastSocket().url);
+    const url = (await roomAt(0)).client.url;
     expect(url.protocol).toBe("ws:");
     expect(url.pathname).toBe(`/v1/live/${ROOM}/socket`);
     expect(url.search).toBe(`?t=${JOIN_TOKEN}`);
@@ -302,8 +368,7 @@ describe("live doc page", () => {
 
     showLivePage(`/l/${ROOM}`);
     await import("../public/viewer.js?live-reload-test");
-    await vi.waitFor(() => expect(FakeSocket.made).toHaveLength(2));
-    expect(new URL(lastSocket().url).search).toBe(`?t=${JOIN_TOKEN}`);
+    expect((await roomAt(1)).client.url.search).toBe(`?t=${JOIN_TOKEN}`);
   });
 
   it("renders a state sealed for its seq and ignores forged or stale ones", async () => {
@@ -312,8 +377,7 @@ describe("live doc page", () => {
     );
     showLivePage(`/l/${ROOM}#v=1&k=${ROOT}`);
     await import("../public/viewer.js?live-order-test");
-    await vi.waitFor(() => expect(FakeSocket.made).toHaveLength(1));
-    const socket = lastSocket();
+    const socket = await roomAt(0);
     const title = byId("live-title");
     const titles: (string | null)[] = [];
     new MutationObserver(() => titles.push(title.textContent)).observe(title, {
@@ -321,19 +385,22 @@ describe("live doc page", () => {
       characterData: true,
       subtree: true,
     });
-    socket.open();
-    socket.receive({ type: "presence", host: true });
+    await socket.receive({ type: "presence", host: true });
 
-    socket.receive(await stateFrame(5, liveState("Forged agenda"), false, 4));
-    socket.receive(await stateFrame(3, liveState("Harbor walk follow-up")));
+    await socket.receive(
+      await stateFrame(5, liveState("Forged agenda"), false, 4),
+    );
+    await socket.receive(
+      await stateFrame(3, liveState("Harbor walk follow-up")),
+    );
     await vi.waitFor(() =>
       expect(title.textContent).toBe("Harbor walk follow-up"),
     );
     expect(document.title).toBe("Harbor walk follow-up — Sona");
     expect(rowField("live-points", 0).value).toBe(lampsPoint.text);
 
-    socket.receive(await stateFrame(2, liveState("Old agenda")));
-    socket.receive(await stateFrame(6, liveState("Final agenda")));
+    await socket.receive(await stateFrame(2, liveState("Old agenda")));
+    await socket.receive(await stateFrame(6, liveState("Final agenda")));
     await vi.waitFor(() => expect(title.textContent).toBe("Final agenda"));
     expect(titles).not.toContain("Forged agenda");
     expect(titles).not.toContain("Old agenda");
@@ -342,11 +409,9 @@ describe("live doc page", () => {
   it("opens the state box the Mac sealed for the shared vectors", async () => {
     showLivePage(`/l/${ROOM}#v=1&k=${ROOT}`);
     await import("../public/viewer.js?live-vector-test");
-    await vi.waitFor(() => expect(FakeSocket.made).toHaveLength(1));
-    const socket = lastSocket();
-    socket.open();
-    socket.receive({ type: "presence", host: true });
-    socket.receive({
+    const socket = await roomAt(0);
+    await socket.receive({ type: "presence", host: true });
+    await socket.receive({
       type: "state",
       seq: vectors.state.seq,
       box: vectors.state.box,
@@ -363,11 +428,9 @@ describe("live doc page", () => {
     localStorage.setItem("sona-live-name", "Priya");
     showLivePage(`/l/${ROOM}#v=1&k=${ROOT}`);
     await import("../public/viewer.js?live-render-test");
-    await vi.waitFor(() => expect(FakeSocket.made).toHaveLength(1));
-    const socket = lastSocket();
-    socket.open();
-    socket.receive({ type: "presence", host: true });
-    socket.receive(
+    const socket = await roomAt(0);
+    await socket.receive({ type: "presence", host: true });
+    await socket.receive(
       await stateFrame(1, {
         ...liveState("Harbor walk follow-up"),
         heard_ns: 3920 * SECOND,
@@ -463,11 +526,11 @@ describe("live doc page", () => {
   it("seals each edit for its own seq and confirms it when the change lands", async () => {
     showLivePage(`/l/${ROOM}#v=1&k=${ROOT}`);
     await import("../public/viewer.js?live-edit-test");
-    await vi.waitFor(() => expect(FakeSocket.made).toHaveLength(1));
-    const socket = lastSocket();
-    socket.open();
-    socket.receive({ type: "presence", host: true });
-    socket.receive(await stateFrame(3, liveState("Harbor walk follow-up")));
+    const socket = await roomAt(0);
+    await socket.receive({ type: "presence", host: true });
+    await socket.receive(
+      await stateFrame(3, liveState("Harbor walk follow-up")),
+    );
     await vi.waitFor(() => expect(byId("live-name-form").hidden).toBe(false));
     expect(rowField("live-points", 0).readOnly).toBe(true);
 
@@ -491,7 +554,7 @@ describe("live doc page", () => {
     const editId = required(first?.[1]);
     expect(rowMark("live-points", 0)).toBe("Sending");
 
-    socket.receive(
+    await socket.receive(
       await stateFrame(4, {
         ...liveState("Harbor walk follow-up"),
         points: [
@@ -532,18 +595,18 @@ describe("live doc page", () => {
     localStorage.setItem("sona-live-name", "Priya");
     showLivePage(`/l/${ROOM}#v=1&k=${ROOT}`);
     await import("../public/viewer.js?live-ended-test");
-    await vi.waitFor(() => expect(FakeSocket.made).toHaveLength(1));
-    const socket = lastSocket();
-    socket.open();
-    socket.receive({ type: "presence", host: true });
-    socket.receive(await stateFrame(1, liveState("Harbor walk follow-up")));
+    const socket = await roomAt(0);
+    await socket.receive({ type: "presence", host: true });
+    await socket.receive(
+      await stateFrame(1, liveState("Harbor walk follow-up")),
+    );
     await vi.waitFor(() =>
       expect(rowField("live-cards", 0).readOnly).toBe(false),
     );
 
     edit(rowField("live-cards", 0), "Call the electrician on Friday");
     await sentEdit(socket, 0, 1);
-    socket.receive(
+    await socket.receive(
       await stateFrame(
         2,
         { ...liveState("Harbor walk follow-up"), live: false },
@@ -564,11 +627,11 @@ describe("live doc page", () => {
     localStorage.setItem("sona-live-name", "Priya");
     showLivePage(`/l/${ROOM}#v=1&k=${ROOT}`);
     await import("../public/viewer.js?live-late-test");
-    await vi.waitFor(() => expect(FakeSocket.made).toHaveLength(1));
-    const socket = lastSocket();
-    socket.open();
-    socket.receive({ type: "presence", host: true });
-    socket.receive(await stateFrame(1, liveState("Harbor walk follow-up")));
+    const socket = await roomAt(0);
+    await socket.receive({ type: "presence", host: true });
+    await socket.receive(
+      await stateFrame(1, liveState("Harbor walk follow-up")),
+    );
     await vi.waitFor(() =>
       expect(rowField("live-points", 0).readOnly).toBe(false),
     );
@@ -581,7 +644,7 @@ describe("live doc page", () => {
     vi.advanceTimersByTime(20_000);
     expect(rowMark("live-points", 0)).toBe("Not saved");
 
-    socket.receive(
+    await socket.receive(
       await stateFrame(2, {
         ...liveState("Harbor walk follow-up"),
         points: [
@@ -612,11 +675,11 @@ describe("live doc page", () => {
     localStorage.setItem("sona-live-name", "Priya");
     showLivePage(`/l/${ROOM}#v=1&k=${ROOT}`);
     await import("../public/viewer.js?live-unsent-test");
-    await vi.waitFor(() => expect(FakeSocket.made).toHaveLength(1));
-    const socket = lastSocket();
-    socket.open();
-    socket.receive({ type: "presence", host: true });
-    socket.receive(await stateFrame(1, liveState("Harbor walk follow-up")));
+    const socket = await roomAt(0);
+    await socket.receive({ type: "presence", host: true });
+    await socket.receive(
+      await stateFrame(1, liveState("Harbor walk follow-up")),
+    );
     await vi.waitFor(() =>
       expect(rowField("live-points", 0).readOnly).toBe(false),
     );
@@ -624,7 +687,7 @@ describe("live doc page", () => {
     const lamps = rowField("live-points", 0);
     lamps.value = "Replace the pier lamps on berth four";
     lamps.dispatchEvent(new Event("input", { bubbles: true }));
-    socket.receive({ type: "presence", host: false });
+    await socket.receive({ type: "presence", host: false });
     lamps.dispatchEvent(new FocusEvent("blur"));
     expect(rowMark("live-points", 0)).toBe("Not saved");
     expect(rowField("live-points", 0).value).toBe(
@@ -632,7 +695,7 @@ describe("live doc page", () => {
     );
     expect(socket.sent).toHaveLength(0);
 
-    socket.receive({ type: "presence", host: true });
+    await socket.receive({ type: "presence", host: true });
     edit(rowField("live-points", 0), "Replace the pier lamps on berth four");
     expect(await sentEdit(socket, 0, 1)).toMatch(
       /"target_id":"p-lamps","text":"Replace the pier lamps on berth four"\}$/u,
@@ -642,11 +705,11 @@ describe("live doc page", () => {
   it("keeps the names that mark the call's own changes", async () => {
     showLivePage(`/l/${ROOM}#v=1&k=${ROOT}`);
     await import("../public/viewer.js?live-reserved-test");
-    await vi.waitFor(() => expect(FakeSocket.made).toHaveLength(1));
-    const socket = lastSocket();
-    socket.open();
-    socket.receive({ type: "presence", host: true });
-    socket.receive(await stateFrame(1, liveState("Harbor walk follow-up")));
+    const socket = await roomAt(0);
+    await socket.receive({ type: "presence", host: true });
+    await socket.receive(
+      await stateFrame(1, liveState("Harbor walk follow-up")),
+    );
     await vi.waitFor(() => expect(byId("live-name-form").hidden).toBe(false));
 
     required(
@@ -665,11 +728,9 @@ describe("live doc page", () => {
   it("empties the page once the host deletes the meeting, even from a later launch", async () => {
     showLivePage(`/l/${ROOM}#v=1&k=${ROOT}`);
     await import("../public/viewer.js?live-removed-test");
-    await vi.waitFor(() => expect(FakeSocket.made).toHaveLength(1));
-    const socket = lastSocket();
-    socket.open();
-    socket.receive({ type: "presence", host: true });
-    socket.receive(
+    const socket = await roomAt(0);
+    await socket.receive({ type: "presence", host: true });
+    await socket.receive(
       await stateFrame(
         1,
         { ...liveState("Harbor walk follow-up"), live: false },
@@ -682,7 +743,7 @@ describe("live doc page", () => {
       ),
     );
 
-    socket.receive(
+    await socket.receive(
       await stateFrame(Number.MAX_SAFE_INTEGER, { v: 1, removed: true }, true),
     );
     await vi.waitFor(() =>
@@ -698,29 +759,26 @@ describe("live doc page", () => {
   it("retries a dropped socket but stops and says the link expired once the room is gone", async () => {
     showLivePage(`/l/${ROOM}#v=1&k=${ROOT}`);
     await import("../public/viewer.js?live-gone-test");
-    await vi.waitFor(() => expect(FakeSocket.made).toHaveLength(1));
+    const first = await roomAt(0);
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-    lastSocket().open();
-    lastSocket().close(1001);
+    await first.close(1001);
+    expect(vi.getTimerCount()).toBe(1);
     vi.advanceTimersByTime(1_000);
-    expect(FakeSocket.made).toHaveLength(2);
 
-    lastSocket().open();
-    lastSocket().close(LIVE_ROOM_GONE);
+    await (await roomAt(1)).close(LIVE_ROOM_GONE);
     expect(byId("live-status").textContent).toBe("This link has expired.");
-    vi.advanceTimersByTime(60_000);
-    expect(FakeSocket.made).toHaveLength(2);
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it("pauses editing while the host is away", async () => {
     localStorage.setItem("sona-live-name", "Priya");
     showLivePage(`/l/${ROOM}#v=1&k=${ROOT}`);
     await import("../public/viewer.js?live-host-test");
-    await vi.waitFor(() => expect(FakeSocket.made).toHaveLength(1));
-    const socket = lastSocket();
-    socket.open();
-    socket.receive({ type: "presence", host: false });
-    socket.receive(await stateFrame(1, liveState("Harbor walk follow-up")));
+    const socket = await roomAt(0);
+    await socket.receive({ type: "presence", host: false });
+    await socket.receive(
+      await stateFrame(1, liveState("Harbor walk follow-up")),
+    );
     await vi.waitFor(() =>
       expect(byId("live-status").textContent).toBe(
         "The host is offline. Edits are paused.",
@@ -729,7 +787,7 @@ describe("live doc page", () => {
     expect(rowField("live-points", 0).readOnly).toBe(true);
     expect(byId("live-add").hidden).toBe(true);
 
-    socket.receive({ type: "presence", host: true });
+    await socket.receive({ type: "presence", host: true });
     expect(byId("live-status").textContent).toBe("Live");
     expect(rowField("live-points", 0).readOnly).toBe(false);
     expect(byId("live-add").hidden).toBe(false);

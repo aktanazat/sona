@@ -1,4 +1,14 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
+import { http, HttpResponse } from "msw";
+import { setupServer } from "msw/node";
 
 import fixture from "../fixtures/crypto-v1.json";
 
@@ -28,14 +38,13 @@ async function sha256(value: Uint8Array): Promise<string> {
   );
 }
 
-function requestPath(input: RequestInfo | URL): string {
-  if (input instanceof URL) return input.pathname;
-  if (input instanceof Request) return new URL(input.url).pathname;
-  return new URL(input, location.origin).pathname;
-}
+const server = setupServer();
+
+beforeAll(() => server.listen({ onUnhandledFrame: "error" }));
+afterAll(() => server.close());
 
 afterEach(() => {
-  vi.unstubAllGlobals();
+  server.resetHandlers();
   document.body.replaceChildren();
   history.replaceState(null, "", "/");
 });
@@ -48,35 +57,26 @@ describe("encrypted share viewer", () => {
       fixture.share_aes_gcm_hkdf.manifest.ciphertext,
     );
     const chunk = decodeBase64Url(fixture.share_aes_gcm_hkdf.chunk.ciphertext);
-    const fetchMock = vi.fn(
-      async (input: RequestInfo | URL): Promise<Response> => {
-        const path = requestPath(input);
-        if (path === `/v1/shares/${shareId}/manifest`) {
-          return new Response(
-            JSON.stringify({
-              version: 1,
-              share: {
-                share_id: shareId,
-                crypto_version: 1,
-                manifest_sha256: await sha256(manifest),
-                chunk_count: 1,
-                total_bytes: chunk.length,
-                writer_signature: fixture.canonical_request.signature,
-              },
-              manifest: fixture.share_aes_gcm_hkdf.manifest.ciphertext,
-              chunks: [
-                { index: 0, size: chunk.length, sha256: await sha256(chunk) },
-              ],
-            }),
-            { headers: { "content-type": "application/json" } },
-          );
-        }
-        if (path === `/v1/shares/${shareId}/chunks/0`)
-          return new Response(chunk);
-        return new Response(null, { status: 404 });
-      },
+    server.use(
+      http.get(`/v1/shares/${shareId}/manifest`, async () =>
+        HttpResponse.json({
+          version: 1,
+          share: {
+            share_id: shareId,
+            crypto_version: 1,
+            manifest_sha256: await sha256(manifest),
+            chunk_count: 1,
+            total_bytes: chunk.length,
+            writer_signature: fixture.canonical_request.signature,
+          },
+          manifest: fixture.share_aes_gcm_hkdf.manifest.ciphertext,
+          chunks: [
+            { index: 0, size: chunk.length, sha256: await sha256(chunk) },
+          ],
+        }),
+      ),
+      http.get(`/v1/shares/${shareId}/chunks/0`, () => new HttpResponse(chunk)),
     );
-    vi.stubGlobal("fetch", fetchMock);
     document.body.innerHTML = `
       <h1 id="share-title"></h1>
       <p id="status"></p>
@@ -128,29 +128,28 @@ describe("encrypted share viewer", () => {
       fixture.share_aes_gcm_hkdf.manifest.ciphertext,
     );
     const chunk = decodeBase64Url(fixture.share_aes_gcm_hkdf.chunk.ciphertext);
-    const fetchMock = vi.fn(
-      async (): Promise<Response> =>
-        new Response(
-          JSON.stringify({
-            version: 1,
-            unexpected: true,
-            share: {
-              share_id: shareId,
-              crypto_version: 1,
-              manifest_sha256: await sha256(manifest),
-              chunk_count: 1,
-              total_bytes: chunk.length,
-              writer_signature: fixture.canonical_request.signature,
-            },
-            manifest: fixture.share_aes_gcm_hkdf.manifest.ciphertext,
-            chunks: [
-              { index: 0, size: chunk.length, sha256: await sha256(chunk) },
-            ],
-          }),
-          { headers: { "content-type": "application/json" } },
-        ),
+    const requested: string[] = [];
+    server.use(
+      http.all("*", async ({ request }) => {
+        requested.push(new URL(request.url).pathname);
+        return HttpResponse.json({
+          version: 1,
+          unexpected: true,
+          share: {
+            share_id: shareId,
+            crypto_version: 1,
+            manifest_sha256: await sha256(manifest),
+            chunk_count: 1,
+            total_bytes: chunk.length,
+            writer_signature: fixture.canonical_request.signature,
+          },
+          manifest: fixture.share_aes_gcm_hkdf.manifest.ciphertext,
+          chunks: [
+            { index: 0, size: chunk.length, sha256: await sha256(chunk) },
+          ],
+        });
+      }),
     );
-    vi.stubGlobal("fetch", fetchMock);
     document.body.innerHTML = `
       <h1 id="share-title"></h1>
       <p id="status"></p>
@@ -169,7 +168,7 @@ describe("encrypted share viewer", () => {
     expect(
       document.getElementById("markdown-content")?.hasAttribute("hidden"),
     ).toBe(true);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(requested).toEqual([`/v1/shares/${shareId}/manifest`]);
   });
 });
 
@@ -352,31 +351,23 @@ describe("shared notes document", () => {
     const chunk = await seal(root, shareId, "chunk", body);
     const manifestSha256 = await sha256(manifest);
     const chunkSha256 = await sha256(chunk);
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL): Promise<Response> => {
-        const path = requestPath(input);
-        if (path === `/v1/shares/${shareId}/manifest`)
-          return new Response(
-            JSON.stringify({
-              version: 1,
-              share: {
-                share_id: shareId,
-                crypto_version: 1,
-                manifest_sha256: manifestSha256,
-                chunk_count: 1,
-                total_bytes: chunk.length,
-                writer_signature: fixture.canonical_request.signature,
-              },
-              manifest: encodeBase64Url(manifest),
-              chunks: [{ index: 0, size: chunk.length, sha256: chunkSha256 }],
-            }),
-            { headers: { "content-type": "application/json" } },
-          );
-        if (path === `/v1/shares/${shareId}/chunks/0`)
-          return new Response(chunk);
-        return new Response(null, { status: 404 });
-      }),
+    server.use(
+      http.get(`/v1/shares/${shareId}/manifest`, () =>
+        HttpResponse.json({
+          version: 1,
+          share: {
+            share_id: shareId,
+            crypto_version: 1,
+            manifest_sha256: manifestSha256,
+            chunk_count: 1,
+            total_bytes: chunk.length,
+            writer_signature: fixture.canonical_request.signature,
+          },
+          manifest: encodeBase64Url(manifest),
+          chunks: [{ index: 0, size: chunk.length, sha256: chunkSha256 }],
+        }),
+      ),
+      http.get(`/v1/shares/${shareId}/chunks/0`, () => new HttpResponse(chunk)),
     );
     document.body.innerHTML = `
       <h1 id="share-title"></h1>
