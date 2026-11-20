@@ -27,7 +27,7 @@ struct SwipeDecoder {
         guard path.count > 1, length >= keyWidth else { return [] }
         let points = Self.resample(path, count: Self.samples)
         let dense = Self.resample(path, count: max(Self.samples, Int(length / (keyWidth / 4))))
-        let firsts = nearest(to: points[0], within: keyWidth * 1.1)
+        let firsts = Array(nearest(to: points[0], within: keyWidth * 1.1).prefix(3))
         let lasts = Set(nearest(to: points[points.count - 1], within: keyWidth * 1.1))
         let passed = Set(dense.flatMap { nearest(to: $0, within: keyWidth * 0.8) })
 
@@ -54,14 +54,21 @@ struct SwipeDecoder {
     }
 
     /// Two-letter prefixes from a starting key and a key the path crossed, with the
-    /// language's accented forms, so "école" is found from a path that starts on e.
+    /// language's accented forms for languages that use them natively, so "école" is found
+    /// from a path that starts on e.
     private func prefixes(firsts: [Character], passed: Set<Character>) -> [String] {
-        let variants = { (letter: Character) in [String(letter)] + (language.accents[letter] ?? "").map(String.init) }
+        let expandAccents = language != .english
+        let variants = { (letter: Character) in
+            guard expandAccents, let accents = language.accents[letter] else { return [String(letter)] }
+            return [String(letter)] + accents.map(String.init)
+        }
+        var seen: Set<String> = []
         var found: [String] = []
         for first in firsts {
             for start in variants(first) {
-                for second in passed.union([first]).flatMap(variants) where !found.contains(start + second) {
-                    found.append(start + second)
+                for second in passed.union([first]).flatMap(variants) {
+                    let prefix = start + second
+                    if seen.insert(prefix).inserted { found.append(prefix) }
                 }
             }
         }

@@ -41,4 +41,27 @@ final class KeyboardSessionTests {
         let command = try #require(try KeyboardSessionStore(directory: directory).takeCommand())
         #expect(DictationPreferences.recognitionLanguage(for: command.language).hasPrefix("fr"))
     }
+
+    @Test("a quick hold-to-talk release withdraws an unread start instead of overwriting it with an orphaned stop")
+    func quickReleaseWithdrawsUnreadStart() throws {
+        let store = KeyboardSessionStore(directory: directory)
+        let requestID = UUID()
+        try store.send(KeyboardCommand(
+            id: UUID(), action: .start, requestID: requestID, documentID: nil, createdAt: Date()
+        ))
+        #expect(try store.cancelPendingStart(requestID: UUID()) == false)
+        #expect(try store.cancelPendingStart(requestID: requestID) == true)
+        #expect(try store.takeCommand() == nil)
+    }
+
+    @Test("once the app takes a start command, cancelPendingStart returns false so stop is still sent")
+    func cancelPendingStartAfterAppReadsStart() throws {
+        let store = KeyboardSessionStore(directory: directory)
+        let requestID = UUID()
+        try store.send(KeyboardCommand(
+            id: UUID(), action: .start, requestID: requestID, documentID: nil, createdAt: Date()
+        ))
+        _ = try #require(try store.takeCommand())
+        #expect(try store.cancelPendingStart(requestID: requestID) == false)
+    }
 }

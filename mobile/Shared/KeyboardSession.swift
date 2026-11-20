@@ -69,6 +69,20 @@ struct KeyboardSessionStore {
         KeyboardSignal.post(.command)
     }
 
+    /// Withdraws an unread `.start` command for `requestID` so a quick hold-to-talk release
+    /// does not overwrite it with an orphaned `.stop`. Returns false if the app already took it.
+    func cancelPendingStart(requestID: UUID) throws -> Bool {
+        try coordinated { folder in
+            let file = folder.appendingPathComponent("keyboard-command.json")
+            guard FileManager.default.fileExists(atPath: file.path) else { return false }
+            let data = try Data(contentsOf: file)
+            let command = try JSONDecoder().decode(KeyboardCommand.self, from: data)
+            guard command.action == .start, command.requestID == requestID else { return false }
+            try FileManager.default.removeItem(at: file)
+            return true
+        }
+    }
+
     /// Taking under the container lock makes a delivered command a one-time request.
     func takeCommand(now: Date = Date()) throws -> KeyboardCommand? {
         try coordinated { folder in

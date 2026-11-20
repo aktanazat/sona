@@ -145,6 +145,7 @@ final class KeyboardViewController: UIInputViewController {
         corrector = TypingCorrector(language: language.rawValue)
         session = TypingSession(corrector: corrector, lexicon: session.lexicon)
         primaryLanguage = language.rawValue
+        state.startURL = DictationLink.keyboardURL(documentID: documentID, language: language)
         UserDefaults.standard.set(language.rawValue, forKey: Self.languageKey)
     }
 
@@ -296,8 +297,11 @@ final class KeyboardViewController: UIInputViewController {
             if let requestedAt {
                 if state.session.requestID == requestedID {
                     self.requestedAt = nil
+                    self.requestedID = nil
                     state.waiting = false
                 } else if Date().timeIntervalSince(requestedAt) >= 3 {
+                    self.requestedAt = nil
+                    self.requestedID = nil
                     state.session.heartbeat = .distantPast
                     state.waiting = false
                     state.notice = NSLocalizedString("keyboard.sessionEnded", comment: "")
@@ -333,11 +337,19 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     /// A stop sent before the app has answered the start, as a quick hold-to-talk release
-    /// does, names the request the keyboard just made.
+    /// does, withdraws the unread start when the app has not taken it yet; otherwise it names
+    /// the request the keyboard just made.
     private func send(_ action: KeyboardCommand.Action) {
         guard hasFullAccess, let id = requestedAt == nil ? state.session.requestID : requestedID else { return }
         do {
-            try KeyboardSessionStore.shared().send(KeyboardCommand(
+            let store = try KeyboardSessionStore.shared()
+            if action == .stop, requestedAt != nil, try store.cancelPendingStart(requestID: id) {
+                requestedAt = nil
+                requestedID = nil
+                state.waiting = false
+                return
+            }
+            try store.send(KeyboardCommand(
                 id: UUID(), action: action, requestID: id,
                 documentID: documentID, createdAt: Date()
             ))

@@ -178,7 +178,7 @@ final class TypingCorrector {
     /// Dictionary words that start with `word`, most common first.
     func completions(of word: String) -> [String] {
         if let known = completionCache[word] { return known }
-        if completionCache.count > 500 { completionCache.removeAll() }
+        if completionCache.count > 2000 { completionCache.removeAll() }
         let found = checker.completions(
             forPartialWordRange: NSRange(location: 0, length: word.utf16.count), in: word, language: language
         ) ?? []

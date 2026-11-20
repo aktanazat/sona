@@ -170,7 +170,7 @@ final class TypingModel {
         var leading = [KeyCap(key: .layer(layer == .letters ? .numbers : .letters), units: 1.5)]
         if showsNextKeyboard { leading.append(KeyCap(key: .nextKeyboard, units: 1.25)) }
         if showsLanguageKey { leading.append(KeyCap(key: .language, units: 1.25)) }
-        leading += extraKeys.map { KeyCap(key: .character($0)) }
+        if !withDelete { leading += extraKeys.map { KeyCap(key: .character($0)) } }
         var trailing = [KeyCap(key: .newLine, units: 2)]
         if withDelete { trailing.insert(KeyCap(key: .delete, units: 1.5), at: 0) }
         let used = (leading + trailing).reduce(0) { $0 + $1.units }
@@ -249,6 +249,9 @@ private struct KeyButton: View {
         case .space:
             Text(verbatim: model.showsLanguageKey ? model.language.name : String(localized: "keyboard.space"))
                 .font(.system(size: 16))
+                .lineLimit(1)
+                .minimumScaleFactor(0.6)
+                .padding(.horizontal, 4)
                 .accessibilityLabel(Text("keyboard.space"))
         case .newLine:
             if let title = model.returnKey.title {
