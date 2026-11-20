@@ -577,7 +577,8 @@ pub struct ListArgs {
     #[arg(long, value_enum)]
     pub sub_group_by: Option<GroupArg>,
     /// Print sub-tasks under their parent when both are on the page; JSON
-    /// nests them in the parent's children.
+    /// nests them in the parent's children. A --view that nests its
+    /// sub-tasks does this too.
     #[arg(long)]
     pub tree: bool,
     /// Count the matching tasks by each value of these fields,
@@ -1065,7 +1066,8 @@ pub struct ViewSaveArgs {
     /// Show sub-tasks as rows of their own: true or false.
     #[arg(long, value_name = "BOOL")]
     pub show_sub_tasks: Option<bool>,
-    /// Board swimlanes: rows of columns, one per group; none for one row.
+    /// A second grouping: the board's swimlanes, the list's sub-groups;
+    /// none for neither.
     #[arg(long, value_enum)]
     pub sub_group_by: Option<GroupArg>,
     /// The board columns to leave out, comma-separated group keys such as
@@ -1079,6 +1081,10 @@ pub struct ViewSaveArgs {
     /// false.
     #[arg(long, value_name = "BOOL")]
     pub no_priority_first: Option<bool>,
+    /// In a list, sub-tasks sit under their parent instead of in rows of
+    /// their own: true or false.
+    #[arg(long, value_name = "BOOL")]
+    pub nest_sub_tasks: Option<bool>,
     /// An SF Symbol to show beside the view's name, such as
     /// exclamationmark.triangle; an empty value clears it.
     #[arg(long, value_name = "SYMBOL")]
@@ -2949,6 +2955,8 @@ pub struct ExternalWorkView {
     pub order_direction: WorkOrderDirection,
     /// Ordered by priority, work with no priority comes first.
     pub no_priority_first: bool,
+    /// In a list, sub-tasks sit under their parent.
+    pub nest_sub_tasks: bool,
     pub show_empty_groups: bool,
     pub properties: Vec<String>,
     pub show_sub_tasks: bool,
@@ -3718,7 +3726,7 @@ impl Tracker<'_> {
             {
                 query.statuses = None;
             }
-            query.filters.extend(read_as.conditions().map(WorkFilter::from));
+            query.filters.extend(read_as.conditions());
         }
         if let Some(delegate) = args.delegate.as_deref().map(str::trim) {
             let (op, value) = if delegate.eq_ignore_ascii_case("any") {
@@ -3779,7 +3787,7 @@ impl Tracker<'_> {
                 now_ms(),
             ));
         }
-        if args.tree {
+        if args.tree || display.is_some_and(|display| display.nest_sub_tasks) {
             listed.entries.tasks = views::nest(std::mem::take(&mut listed.entries.tasks));
         }
         Ok(WorkAnswer::Page(listed))
@@ -4975,6 +4983,7 @@ impl Tracker<'_> {
                 hidden_columns: Vec::new(),
                 order_direction: None,
                 no_priority_first: false,
+                nest_sub_tasks: false,
             },
             |view| view.display.clone(),
         );
@@ -5013,6 +5022,9 @@ impl Tracker<'_> {
         }
         if let Some(first) = args.no_priority_first {
             display.no_priority_first = first;
+        }
+        if let Some(nest) = args.nest_sub_tasks {
+            display.nest_sub_tasks = nest;
         }
         let project_id = match args.on_project.as_deref().map(str::trim) {
             None => existing.and_then(|view| view.project_id.clone()),
@@ -6387,6 +6399,7 @@ fn project_view(view: &WorkView) -> ExternalWorkView {
             .order_direction
             .unwrap_or_else(|| view.display.order_by.natural()),
         no_priority_first: view.display.no_priority_first,
+        nest_sub_tasks: view.display.nest_sub_tasks,
         show_empty_groups: view.display.show_empty_groups,
         properties: view.display.properties.clone(),
         show_sub_tasks: view.display.show_sub_tasks,

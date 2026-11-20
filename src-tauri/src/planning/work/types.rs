@@ -840,6 +840,9 @@ pub struct WorkDisplay {
     /// Ordered by priority, work with no priority comes first, not last.
     #[serde(default)]
     pub no_priority_first: bool,
+    /// Sub-tasks sit under their parent in a list, not in rows of their own.
+    #[serde(default)]
+    pub nest_sub_tasks: bool,
 }
 
 const fn shown() -> bool {

@@ -4120,6 +4120,10 @@ export const TOOLS: readonly ToolDefinition[] = [
           type: "boolean",
           description: "Ordered by priority, work with no priority comes first instead of last.",
         },
+        nest_sub_tasks: {
+          type: "boolean",
+          description: "In a list, sub-tasks sit under their parent instead of in rows of their own.",
+        },
         icon: {
           type: "string",
           description: "An SF Symbol shown beside the view's name, such as exclamationmark.triangle; empty clears it.",
@@ -4161,6 +4165,7 @@ export const TOOLS: readonly ToolDefinition[] = [
       ...(input.no_priority_first === undefined
         ? []
         : [`--no-priority-first=${flag(input, "no_priority_first")}`]),
+      ...(input.nest_sub_tasks === undefined ? [] : [`--nest-sub-tasks=${flag(input, "nest_sub_tasks")}`]),
       ...cleared("--icon", input, "icon"),
       ...assigned("--on-project", text(input, "on_project")),
       ...(flag(input, "dry_run") ? ["--dry-run"] : []),

@@ -2,7 +2,7 @@
 //! the conditions a list filters by. Every word is read, joins words that
 //! are, or is kept as not understood; none is dropped.
 
-use super::filter::{self, WorkCondition, WorkFilterField, WorkFilterOp};
+use super::filter::{self, WorkCondition, WorkFilter, WorkFilterField, WorkFilterOp};
 use super::items::MAX_ESTIMATE;
 use super::parse::{self, Lexicon, Said, WorkField, WorkToken};
 use super::types::{WorkLabel, WorkPersonChoice, WorkProjectChoice};
@@ -20,6 +20,8 @@ use tauri::State;
 #[serde(rename_all = "camelCase")]
 pub struct WorkWhere {
     /// What the words were read as, in their order; all of them must hold.
+    /// Words joined by "or" across fields read as one group, any of whose
+    /// conditions holds.
     pub terms: Vec<WorkWhereTerm>,
     /// Words read as nothing, in their order.
     pub unread: Vec<WorkWhereWord>,
@@ -30,9 +32,10 @@ pub struct WorkWhere {
 pub struct WorkWhereTerm {
     /// The words as typed.
     pub text: String,
-    /// The condition in words: "Priority is High".
+    /// The condition in words: "Priority is High", or "Priority is Urgent
+    /// or Due is before today" for a group.
     pub label: String,
-    pub condition: WorkCondition,
+    pub condition: WorkFilter,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize, Type)]
@@ -529,6 +532,7 @@ impl<Tz: TimeZone> Reader<'_, Tz> {
         let mut glue = vec![false; self.toks.len()];
         let mut not: Option<Range<usize>> = None;
         let mut or: Option<Range<usize>> = None;
+        let mut either: Vec<usize> = Vec::new();
         let mut at = 0;
         while at < self.toks.len() {
             let (len, reading) = self.best(at);
@@ -570,7 +574,11 @@ impl<Tz: TimeZone> Reader<'_, Tz> {
                                 continue;
                             }
                         }
-                        unread.push((word, Vec::new()));
+                        if terms.is_empty() {
+                            unread.push((word, Vec::new()));
+                        } else {
+                            either.push(terms.len());
+                        }
                     }
                     terms.push((span, term));
                 }
@@ -599,17 +607,41 @@ impl<Tz: TimeZone> Reader<'_, Tz> {
             }
             runs.push((span, could_be));
         }
+        let mut groups: Vec<(Range<usize>, Vec<Term>)> = Vec::new();
+        for (at, (span, term)) in terms.into_iter().enumerate() {
+            match groups.last_mut().filter(|_| either.contains(&at)) {
+                Some((kept, members)) => {
+                    kept.end = span.end;
+                    members.push(term);
+                }
+                None => groups.push((span, vec![term])),
+            }
+        }
         WorkWhere {
-            terms: terms
+            terms: groups
                 .into_iter()
-                .map(|(span, term)| WorkWhereTerm {
-                    text: self.words(span),
-                    label: term.label(),
-                    condition: WorkCondition {
-                        field: term.field,
-                        op: term.op,
-                        values: term.values,
-                    },
+                .map(|(span, members)| {
+                    let label = members.iter().map(Term::label).collect::<Vec<_>>().join(" or ");
+                    let mut filters: Vec<WorkFilter> = members
+                        .into_iter()
+                        .map(|term| {
+                            WorkFilter::from(WorkCondition {
+                                field: term.field,
+                                op: term.op,
+                                values: term.values,
+                            })
+                        })
+                        .collect();
+                    let condition = if filters.len() == 1 {
+                        filters.remove(0)
+                    } else {
+                        WorkFilter::Any { any: filters }
+                    };
+                    WorkWhereTerm {
+                        text: self.words(span),
+                        label,
+                        condition,
+                    }
                 })
                 .collect(),
             unread: runs
@@ -1078,10 +1110,11 @@ mod tests {
     fn conditions(read: &WorkWhere) -> Vec<(F, O, Vec<&str>)> {
         read.terms
             .iter()
-            .map(|term| {
-                let condition = &term.condition;
-                (condition.field, condition.op, condition.values.iter().map(String::as_str).collect())
+            .filter_map(|term| match &term.condition {
+                WorkFilter::Condition(condition) => Some(condition),
+                WorkFilter::Any { .. } | WorkFilter::All { .. } => None,
             })
+            .map(|condition| (condition.field, condition.op, condition.values.iter().map(String::as_str).collect()))
             .collect()
     }
 
@@ -1177,5 +1210,28 @@ mod tests {
 
         assert_eq!(conditions(&read), [(F::Label, O::Is, vec!["bug"])]);
         assert_eq!(unread(&read), [("mobile", vec!["label Mobile", "project Mobile"])]);
+    }
+
+    #[test]
+    fn or_between_two_fields_reads_as_either_of_them() {
+        let read = words("urgent or overdue bugs");
+        let either = |field, op, value: &str| {
+            WorkFilter::from(WorkCondition {
+                field,
+                op,
+                values: vec![value.to_owned()],
+            })
+        };
+
+        assert_eq!(read.terms.len(), 2, "{:?}", read.terms);
+        assert_eq!(
+            read.terms[0].condition,
+            WorkFilter::Any {
+                any: vec![either(F::Priority, O::Is, "1"), either(F::Due, O::Before, "today")],
+            }
+        );
+        assert_eq!(read.terms[0].text, "urgent or overdue");
+        assert_eq!(conditions(&read), [(F::Label, O::Is, vec!["bug"])]);
+        assert!(read.unread.is_empty(), "{:?}", read.unread);
     }
 }
