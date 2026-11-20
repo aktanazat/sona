@@ -1056,6 +1056,56 @@ pub(super) async fn call(
             })
             .await?
         }
+        "change_work_close_subtasks_setting" => {
+            let mut args = Args::parse(params)?;
+            let enabled = args.take("enabled")?;
+            let handle = app.clone();
+            on_main_thread(app, move || {
+                reply(crate::settings::change_work_close_subtasks_setting(
+                    handle.clone(),
+                    enabled,
+                ))
+            })
+            .await?
+        }
+        "change_work_start_parent_setting" => {
+            let mut args = Args::parse(params)?;
+            let enabled = args.take("enabled")?;
+            let handle = app.clone();
+            on_main_thread(app, move || {
+                reply(crate::settings::change_work_start_parent_setting(
+                    handle.clone(),
+                    enabled,
+                ))
+            })
+            .await?
+        }
+        "change_work_housekeeping_setting" => {
+            let mut args = Args::parse(params)?;
+            let auto_close_stale_days = args.take("autoCloseStaleDays")?;
+            let auto_archive_days = args.take("autoArchiveDays")?;
+            let handle = app.clone();
+            on_main_thread(app, move || {
+                reply(crate::settings::change_work_housekeeping_setting(
+                    handle.clone(),
+                    auto_close_stale_days,
+                    auto_archive_days,
+                ))
+            })
+            .await?
+        }
+        "change_work_triage_auto_apply_setting" => {
+            let mut args = Args::parse(params)?;
+            let fields = args.take("fields")?;
+            let handle = app.clone();
+            on_main_thread(app, move || {
+                reply(crate::settings::change_work_triage_auto_apply_setting(
+                    handle.clone(),
+                    fields,
+                ))
+            })
+            .await?
+        }
         "change_work_agent_changes_setting" => {
             let mut args = Args::parse(params)?;
             let autonomy = args.take("autonomy")?;
@@ -5707,6 +5757,87 @@ pub(super) async fn call(
                 ))
             })
             .await?
+        }
+        "work_loop_copy" => {
+            let mut args = Args::parse(params)?;
+            let operation_id: String = args.take("operationId")?;
+            let id: String = args.take("loopId")?;
+            let name: Option<String> = args.take("name")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::planning::work::loops::copy_as(
+                    &handle,
+                    &operation_id,
+                    &id,
+                    name.as_deref(),
+                    "you",
+                ))
+            })
+            .await?
+        }
+        "work_doc_proposal_accept" | "work_doc_proposal_reject" => {
+            let accepting = method == "work_doc_proposal_accept";
+            let mut args = Args::parse(params)?;
+            let operation_id: String = args.take("operationId")?;
+            let id: String = args.take("id")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(if accepting {
+                    crate::planning::work::doc_proposals::accept_as(&handle, &operation_id, &id)
+                } else {
+                    crate::planning::work::doc_proposals::reject_as(&handle, &operation_id, &id)
+                })
+            })
+            .await?
+        }
+        "work_triage_rules" => {
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::planning::work::triage_auto::rules_read(&handle))
+            })
+            .await?
+        }
+        "work_triage_rule_save" => {
+            let mut args = Args::parse(params)?;
+            let operation_id: String = args.take("operationId")?;
+            let id: Option<String> = args.take("id")?;
+            let input: crate::planning::work::triage_auto::TriageRuleInput = args.take("input")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::planning::work::triage_auto::rule_save_as(
+                    &handle,
+                    &operation_id,
+                    id.as_deref(),
+                    &input,
+                ))
+            })
+            .await?
+        }
+        "work_triage_rule_delete" => {
+            let mut args = Args::parse(params)?;
+            let operation_id: String = args.take("operationId")?;
+            let id: String = args.take("id")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::planning::work::triage_auto::rule_delete_as(
+                    &handle,
+                    &operation_id,
+                    &id,
+                ))
+            })
+            .await?
+        }
+        "work_triage_undo" => {
+            let mut args = Args::parse(params)?;
+            let operation_id: String = args.take("operationId")?;
+            let id: String = args.take("id")?;
+            reply(crate::planning::work::triage_auto::undo_as(app, &operation_id, &id).await)
+        }
+        "work_housekeeping_undo" => {
+            let mut args = Args::parse(params)?;
+            let operation_id: String = args.take("operationId")?;
+            let id: String = args.take("id")?;
+            reply(crate::planning::work::batches::undo_as(app, &operation_id, &id).await)
         }
         "work_templates" => {
             let handle = app.clone();
