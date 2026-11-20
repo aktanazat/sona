@@ -73,7 +73,7 @@ struct PrivacyView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: { removals in
-            Text(removalsSentence(removals))
+            Text(UpstreamHistoryRemovals.sentence(removals))
         }
     }
 
@@ -362,14 +362,6 @@ struct PrivacyView: View {
             return "Puts back the settings this Mac had before the import."
         }
         return "Puts back the settings saved \(saved.relativeDay) at \(saved.time)."
-    }
-
-    private func removalsSentence(_ removals: Int) -> String {
-        let oldest = removals == 1
-            ? "the oldest dictation that isn't saved"
-            : "the \(removals) oldest dictations that aren't saved"
-        return "This import goes over Dictations to keep, so Sona will delete \(oldest). "
-            + "To keep everything, cancel and raise Dictations to keep in Library first."
     }
 
     // MARK: - Identity adoption

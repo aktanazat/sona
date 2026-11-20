@@ -601,6 +601,9 @@ private struct HistoryRowView: View {
             if row.matchKind == .semantic {
                 Text("by meaning").metaText(Theme.inkSecondary)
             }
+            if let app = row.importedFrom {
+                Text("from \(app.name)").metaText(Theme.inkSecondary)
+            }
             if let words {
                 Text(LibraryCount.words(words))
                     .font(TypeScale.body(12).monospacedDigit())

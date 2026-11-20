@@ -32,11 +32,13 @@ struct HistoryRow: Identifiable, Decodable {
     /// The entry this one was reprocessed or retried from.
     let parentId: Int64?
     let matchKind: HistoryMatchKind?
+    /// The dictation app this row was imported from.
+    let importedFrom: DictationApp?
 
     var id: Int64 { item.id }
 
     private enum Key: String, CodingKey {
-        case postProcessRequested, parentId, matchKind
+        case postProcessRequested, parentId, matchKind, importedFrom
     }
 
     init(from decoder: Decoder) throws {
@@ -48,6 +50,7 @@ struct HistoryRow: Identifiable, Decodable {
         postProcessRequested = try values.decodeIfPresent(Bool.self, forKey: .postProcessRequested) ?? false
         parentId = try values.decodeIfPresent(Int64.self, forKey: .parentId)
         matchKind = try values.decodeIfPresent(HistoryMatchKind.self, forKey: .matchKind)
+        importedFrom = try values.decodeIfPresent(DictationApp.self, forKey: .importedFrom)
     }
 
     /// The words this row reads in, under the view the page is set to. A

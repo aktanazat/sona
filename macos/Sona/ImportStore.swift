@@ -22,6 +22,13 @@ final class ImportStore {
     private(set) var routed: AudioImportRouted?
     private(set) var running = false
     private(set) var error: String?
+    /// The app whose export is being read, while it is.
+    private(set) var appImporting: ImportSource?
+    /// What the last import from each app did, or why it did nothing.
+    private(set) var appOutcomes: [ImportSource: ImportOutcome] = [:]
+    /// A dictation import that would push older dictations out of
+    /// Dictations to keep, waiting for the person to agree.
+    private(set) var removalsToConfirm: PendingRemovals?
 
     /// A finished dictation import has a history row behind it; the shell
     /// reloads Library on this.
@@ -176,6 +183,77 @@ final class ImportStore {
 
     func dismissRouted() {
         routed = nil
+    }
+
+    // MARK: - Other apps
+
+    /// The picker opens where the app keeps its data when that folder is
+    /// there; either the folder or a file in it will do.
+    func chooseExport(from source: ImportSource) {
+        guard appImporting == nil else { return }
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Import"
+        panel.message = source.hint
+        if let folder = source.dataFolder,
+           FileManager.default.fileExists(atPath: folder.path) {
+            panel.directoryURL = folder
+        }
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        Task { await importExport(from: source, path: url.path) }
+    }
+
+    /// `removalsAllowed` is how many older dictations the person agreed the
+    /// import may push out of Dictations to keep; the core asks when it needs
+    /// more.
+    func importExport(from source: ImportSource, path: String, removalsAllowed: Int = 0) async {
+        guard appImporting == nil else { return }
+        appImporting = source
+        removalsToConfirm = nil
+        defer { appImporting = nil }
+        do {
+            switch source.kind {
+            case let .dictation(app):
+                let params: [String: JSONValue] = [
+                    "source": .string(app.rawValue),
+                    "path": .string(path),
+                    "removalsAllowed": .number(Double(removalsAllowed)),
+                ]
+                let result: DictationImportResult = try await core.request("import_dictation_app", params)
+                appOutcomes[source] = ImportOutcome(sentence: result.sentence, failed: false)
+            case let .meetings(app):
+                let params: [String: JSONValue] = [
+                    "source": .string(app),
+                    "path": .string(path),
+                ]
+                let result: MeetingAppImportResult = try await core.request("meeting_import_from_app", params)
+                appOutcomes[source] = ImportOutcome(sentence: result.sentence, failed: false)
+            }
+        } catch let failure as CoreError {
+            if let ask = failure.remote(as: UpstreamHistoryRemovals.self) {
+                removalsToConfirm = PendingRemovals(
+                    source: source, path: path, removals: ask.historyWouldRemoveOlder.removals)
+                return
+            }
+            let sentence: String = if failure.remote(as: String.self) == "history_off" {
+                "Saved history is off. Raise Dictations to keep in Library, then import again."
+            } else if let meetingError = failure.remote(as: MeetingCommandError.self),
+                      meetingError != .importUnreadable {
+                meetingError.label
+            } else {
+                "Sona couldn't read that as \(source.name)'s data. Choose the folder or file named above."
+            }
+            appOutcomes[source] = ImportOutcome(sentence: sentence, failed: true)
+        } catch {
+            appOutcomes[source] = ImportOutcome(
+                sentence: "The import didn't finish. \(error.localizedDescription)", failed: true)
+        }
+    }
+
+    func declineRemovals() {
+        removalsToConfirm = nil
     }
 
     // MARK: - Updates
