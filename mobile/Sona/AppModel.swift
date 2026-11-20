@@ -72,6 +72,7 @@ final class AppModel: NSObject, ObservableObject {
     private var keyboardRequestDocumentID: UUID?
     private var lastKeyboardRequestID: UUID?
     private var keyboardDocumentID: UUID?
+    private var keyboardLanguage: TypingLanguage?
     private var pendingURL: URL?
 
     let recorder = PhoneRecorder()
@@ -161,7 +162,7 @@ final class AppModel: NSObject, ObservableObject {
         guard canStartDictation else { return }
         if keyboardReturn {
             guard UserDefaults.standard.bool(forKey: DictationPreferences.keyboardKey) else { return }
-            startKeyboardDictation(requestID: UUID(), documentID: keyboardDocumentID)
+            startKeyboardDictation(requestID: UUID(), documentID: keyboardDocumentID, language: keyboardLanguage)
         } else {
             dictation.start()
         }
@@ -177,6 +178,7 @@ final class AppModel: NSObject, ObservableObject {
             startRecording()
         } else if DictationLink.opens(url) {
             keyboardDocumentID = DictationLink.keyboardDocument(url)
+            keyboardLanguage = DictationLink.keyboardLanguage(url)
             keyboardReturn = DictationLink.fromKeyboard(url)
             guard !keyboardReturn || UserDefaults.standard.bool(forKey: DictationPreferences.keyboardKey) else { return }
             pendingURL = nil
@@ -196,13 +198,14 @@ final class AppModel: NSObject, ObservableObject {
         publishKeyboardState()
     }
 
-    private func startKeyboardDictation(requestID: UUID, documentID: UUID?) {
+    private func startKeyboardDictation(requestID: UUID, documentID: UUID?, language: TypingLanguage?) {
         guard canStartDictation, !dictation.isBusy else { return }
         keyboardRequestID = requestID
         keyboardRequestDocumentID = documentID
         lastKeyboardRequestID = requestID
         keyboardDocumentID = documentID
-        dictation.start(keyboard: true)
+        keyboardLanguage = language
+        dictation.start(keyboard: true, language: language?.rawValue)
     }
 
     private func receiveKeyboardCommand() {
@@ -213,7 +216,10 @@ final class AppModel: NSObject, ObservableObject {
             switch command.action {
             case .start:
                 guard dictation.isWarm else { publishKeyboardState(); return }
-                startKeyboardDictation(requestID: command.requestID, documentID: command.documentID)
+                startKeyboardDictation(
+                    requestID: command.requestID, documentID: command.documentID,
+                    language: command.language.flatMap(TypingLanguage.init(rawValue:))
+                )
             case .stop:
                 guard command.requestID == keyboardRequestID else { return }
                 if dictation.phase == .authorizing { dictation.cancel() } else { dictation.finish() }
@@ -237,7 +243,8 @@ final class AppModel: NSObject, ObservableObject {
         do {
             try KeyboardSessionStore.shared().publish(KeyboardSessionState(
                 phase: phase, expiresAt: dictation.warmUntil ?? .distantPast,
-                heartbeat: Date(), requestID: keyboardRequestID ?? lastKeyboardRequestID, message: dictation.notice
+                heartbeat: Date(), requestID: keyboardRequestID ?? lastKeyboardRequestID, message: dictation.notice,
+                heard: keyboardRequestID == nil ? nil : KeyboardSessionState.heard(dictation.text)
             ))
         } catch { library.error = error.localizedDescription }
         if dictation.isWarm, keyboardTicker == nil {

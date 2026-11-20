@@ -1,7 +1,8 @@
 import Foundation
 import CoreFoundation
 
-/// Only control messages cross the extension boundary. Microphone buffers stay in the app.
+/// Only control messages and the words heard so far cross the extension boundary.
+/// Microphone buffers stay in the app.
 struct KeyboardSessionState: Codable, Equatable {
     enum Phase: String, Codable { case off, ready, listening, finishing, finished, failed }
     var phase: Phase = .off
@@ -9,10 +10,26 @@ struct KeyboardSessionState: Codable, Equatable {
     var heartbeat: Date = .distantPast
     var requestID: UUID?
     var message: String?
+    /// The running dictation's latest words, as `heard(_:)` trims them.
+    var heard: String?
 
     func isWarm(at now: Date) -> Bool {
         let age = now.timeIntervalSince(heartbeat)
         return expiresAt > now && age >= -5 && age < 6 && phase != .off && phase != .failed
+    }
+
+    static let heardLimit = 160
+
+    /// The end of `text` the keyboard shows while it is spoken: whole words, newest last,
+    /// at most `heardLimit` characters however long the dictation runs, since every partial
+    /// result rewrites the shared file.
+    static func heard(_ text: String) -> String? {
+        let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return nil }
+        guard text.count > heardLimit else { return text }
+        let tail = text.suffix(heardLimit - 1)
+        let start = tail.firstIndex(where: \.isWhitespace).map(tail.index(after:)) ?? tail.startIndex
+        return "…" + tail[start...]
     }
 }
 
@@ -23,6 +40,8 @@ struct KeyboardCommand: Codable, Equatable {
     let requestID: UUID
     let documentID: UUID?
     let createdAt: Date
+    /// The keyboard's typing language, which a start asks the recognizer to listen in.
+    var language: String?
 
     func isFresh(at now: Date) -> Bool {
         let age = now.timeIntervalSince(createdAt)

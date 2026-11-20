@@ -18,17 +18,7 @@ struct DictationScreen: View {
         NavigationStack {
             VStack(alignment: .leading, spacing: 12) {
                 if model.keyboardReturn {
-                    Text("keyboard.swipeBack")
-                        .font(.subheadline)
-                        .foregroundStyle(Theme.textPrimary)
-                        .accessibilityIdentifier("keyboard-return-instruction")
-                    if !keyboardEnabled {
-                        Text("keyboard.permission")
-                            .font(.footnote)
-                            .foregroundStyle(Theme.textSecondary)
-                        Button("dictation.settings") { showsSettings = true }
-                            .font(.subheadline)
-                    }
+                    KeyboardReturnCard(keyboardEnabled: keyboardEnabled, openSettings: { showsSettings = true })
                 }
                 LevelWaveform(meter: dictation.meter, height: 48)
                     .padding(.vertical, 8)
@@ -56,6 +46,7 @@ struct DictationScreen: View {
                     .accessibilityIdentifier("dictation-transcript")
                 messages
             }
+            .frame(maxWidth: Self.readableWidth)
             .padding(.horizontal, Theme.pageInset)
             .padding(.bottom, 8)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -80,6 +71,10 @@ struct DictationScreen: View {
         }
         .tint(Theme.accent)
     }
+
+    /// The widest the transcript and controls get, so the inner display of iPhone Duo shows
+    /// a readable column instead of lines that run edge to edge.
+    static let readableWidth: CGFloat = 640
 
     @ViewBuilder
     private var messages: some View {
@@ -185,6 +180,7 @@ struct DictationScreen: View {
                     }
                 }
         }
+        .frame(maxWidth: Self.readableWidth)
         .padding(.horizontal, Theme.pageInset)
         .padding(.vertical, 8)
     }
@@ -234,6 +230,7 @@ private struct PhoneDictationSettings: View {
     @State private var languages = DictationPreferences.languages
     @State private var activeLanguage = DictationPreferences.activeLanguage
     @State private var choosesLanguages = false
+    @State private var typingLanguages = KeyboardLanguages.shared().enabled
     private static let supportedLanguages = SFSpeechRecognizer.supportedLocales()
         .map(\.identifier).sorted { languageName($0).localizedStandardCompare(languageName($1)) == .orderedAscending }
 
@@ -253,6 +250,25 @@ private struct PhoneDictationSettings: View {
                         Text("keyboard.sessionPrivacy")
                     }
                     .foregroundStyle(Theme.textSecondary)
+                }
+                .listRowBackground(Theme.surface)
+                Section {
+                    ForEach(TypingLanguage.allCases) { language in
+                        Toggle(language.name, isOn: Binding(
+                            get: { typingLanguages.contains(language) },
+                            set: { on in
+                                let keyboard = KeyboardLanguages.shared()
+                                keyboard.enabled = on ? typingLanguages + [language] : typingLanguages.filter { $0 != language }
+                                typingLanguages = keyboard.enabled
+                            }
+                        ))
+                        .disabled(typingLanguages == [language])
+                    }
+                } header: {
+                    Text("keyboard.languages")
+                } footer: {
+                    Text("keyboard.languagesFooter")
+                        .foregroundStyle(Theme.textSecondary)
                 }
                 .listRowBackground(Theme.surface)
                 Section {
@@ -368,5 +384,50 @@ private struct PhoneDictationSettings: View {
 
     private static func languageName(_ id: String) -> String {
         Locale.current.localizedString(forIdentifier: id) ?? id
+    }
+}
+
+/// What a dictation the keyboard opened Sona for asks next: go back to the app it came from.
+/// iOS gives a keyboard no way to send the person back, nor the app's name, so the card says
+/// where the system's own way back is.
+private struct KeyboardReturnCard: View {
+    let keyboardEnabled: Bool
+    let openSettings: () -> Void
+    @AppStorage(DictationPreferences.minutesKey) private var minutes = 5
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label("keyboard.returnTitle", systemImage: "arrow.uturn.backward")
+                .font(.headline)
+                .foregroundStyle(Theme.textPrimary)
+            Text("keyboard.swipeBack")
+                .font(.subheadline)
+                .foregroundStyle(Theme.textPrimary)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("keyboard-return-instruction")
+            if keyboardEnabled {
+                LabeledContent("keyboard.sessionLength") {
+                    Picker("keyboard.sessionLength", selection: $minutes) {
+                        ForEach([1, 5, 15, 30], id: \.self) { Text("keyboard.minutes \($0)").tag($0) }
+                    }
+                    .pickerStyle(.menu)
+                    .labelsHidden()
+                }
+                .font(.subheadline)
+                .foregroundStyle(Theme.textPrimary)
+                Text("keyboard.nextTime")
+                    .font(.footnote)
+                    .foregroundStyle(Theme.textSecondary)
+            } else {
+                Text("keyboard.permission")
+                    .font(.footnote)
+                    .foregroundStyle(Theme.textSecondary)
+                Button("dictation.settings", action: openSettings)
+                    .font(.subheadline)
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.controlRadius * 2, style: .continuous))
     }
 }

@@ -95,6 +95,14 @@ struct DictationPreferences {
         let stored = UserDefaults.standard.integer(forKey: minutesKey)
         return [1, 5, 15, 30].contains(stored) ? stored : 5
     }
+
+    /// The recognizer language for a dictation. One the keyboard asked for while typing
+    /// `typing` listens in that language, in the regional form the speaking list prefers.
+    static func recognitionLanguage(for typing: String?) -> String {
+        guard let typing else { return activeLanguage }
+        let base = typing.prefix { $0 != "-" && $0 != "_" }
+        return ([activeLanguage] + languages).first { $0.prefix { $0 != "-" && $0 != "_" } == base } ?? typing
+    }
 }
 
 

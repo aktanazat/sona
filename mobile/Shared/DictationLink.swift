@@ -12,10 +12,11 @@ enum DictationLink {
     static let url = URL(string: "\(scheme)://\(host)")!
     static let meetingURL = URL(string: "\(scheme)://record-meeting")!
 
-    static func keyboardURL(documentID: UUID?) -> URL {
+    static func keyboardURL(documentID: UUID?, language: TypingLanguage) -> URL {
         var components = URLComponents(url: url, resolvingAgainstBaseURL: false)!
         components.queryItems = [URLQueryItem(name: "keyboard", value: "1")]
             + (documentID.map { [URLQueryItem(name: "document", value: $0.uuidString)] } ?? [])
+            + [URLQueryItem(name: "language", value: language.rawValue)]
         return components.url!
     }
 
@@ -25,11 +26,16 @@ enum DictationLink {
     }
 
     static func keyboardDocument(_ url: URL) -> UUID? {
-        guard fromKeyboard(url),
-              let value = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?
-                .first(where: { $0.name == "document" })?.value
-        else { return nil }
-        return UUID(uuidString: value)
+        keyboardQuery("document", in: url).flatMap(UUID.init(uuidString:))
+    }
+
+    static func keyboardLanguage(_ url: URL) -> TypingLanguage? {
+        keyboardQuery("language", in: url).flatMap(TypingLanguage.init(rawValue:))
+    }
+
+    private static func keyboardQuery(_ name: String, in url: URL) -> String? {
+        guard fromKeyboard(url) else { return nil }
+        return URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == name }?.value
     }
 
     static func opens(_ url: URL) -> Bool {
