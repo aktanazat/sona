@@ -42,6 +42,8 @@ struct KeyboardCommand: Codable, Equatable {
     let createdAt: Date
     /// The keyboard's typing language, which a start asks the recognizer to listen in.
     var language: String?
+    /// The style one recording asked for, empty for none; nil keeps the chosen style.
+    var style: String?
 
     func isFresh(at now: Date) -> Bool {
         let age = now.timeIntervalSince(createdAt)

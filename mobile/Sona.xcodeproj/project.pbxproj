@@ -131,6 +131,9 @@
 		CE000000000000000000004B /* RecordingIntents.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000000000000000000004B /* RecordingIntents.swift */; };
 		CE000000000000000000004C /* SonaWidgets.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000000000000000000004C /* SonaWidgets.swift */; };
 		CE0000000000000000000038 /* KeyboardSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000038 /* KeyboardSession.swift */; };
+		CA00000000000000000000D0 /* DictationTone.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB00000000000000000000D0 /* DictationTone.swift */; };
+		CC00000000000000000000D0 /* DictationTone.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB00000000000000000000D0 /* DictationTone.swift */; };
+		CD00000000000000000000D0 /* DictationTone.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB00000000000000000000D0 /* DictationTone.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -269,6 +272,7 @@
 		BB000000000000000000004D /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		BB000000000000000000004E /* SonaWidgets.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = SonaWidgets.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		BB000000000000000000004F /* SonaWidgets.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = SonaWidgets.entitlements; sourceTree = "<group>"; };
+		BB00000000000000000000D0 /* DictationTone.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DictationTone.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -355,6 +359,7 @@
 		AA0000000000000000000004 /* Shared */ = {
 			isa = PBXGroup;
 			children = (
+				BB00000000000000000000D0 /* DictationTone.swift */,
 				BB0000000000000000000030 /* ThoughtObject.swift */,
 				BB0000000000000000000031 /* CardObject.swift */,
 				BB0000000000000000000032 /* VaultReader.swift */,
@@ -669,6 +674,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				CA00000000000000000000D0 /* DictationTone.swift in Sources */,
 				CA0000000000000000000001 /* CanonicalRecord.swift in Sources */,
 				CA0000000000000000000002 /* SonaCrypto.swift in Sources */,
 				CA0000000000000000000003 /* DeviceRecordingObject.swift in Sources */,
@@ -730,6 +736,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				CC00000000000000000000D0 /* DictationTone.swift in Sources */,
 				CC0000000000000000000001 /* CanonicalRecord.swift in Sources */,
 				CC0000000000000000000002 /* SonaCrypto.swift in Sources */,
 				CC0000000000000000000003 /* DeviceRecordingObject.swift in Sources */,
@@ -781,6 +788,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				CD00000000000000000000D0 /* DictationTone.swift in Sources */,
 				CD0000000000000000000019 /* Theme.swift in Sources */,
 				CD0000000000000000000020 /* KeyboardDraft.swift in Sources */,
 				CD0000000000000000000023 /* KeyboardViewController.swift in Sources */,

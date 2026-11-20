@@ -120,6 +120,7 @@ final class AppModel: NSObject, ObservableObject {
             self?.stopRecording()
         }
         DictationPreferences.moveKeyboardSwitchToSharedContainer()
+        DictationPreferences.moveStyleToSharedContainer()
         dictation.onEnded = { [weak self] capture in self?.collectDictation(capture) }
         dictation.onStateChanged = { [weak self] in self?.publishKeyboardState() }
         keyboardSignal = KeyboardSignal(.command) { [weak self] in
@@ -234,14 +235,14 @@ final class AppModel: NSObject, ObservableObject {
         publishKeyboardState()
     }
 
-    private func startKeyboardDictation(requestID: UUID, documentID: UUID?, language: TypingLanguage?) {
+    private func startKeyboardDictation(requestID: UUID, documentID: UUID?, language: TypingLanguage?, style: String? = nil) {
         guard canStartDictation, !dictation.isBusy else { return }
         keyboardRequestID = requestID
         keyboardRequestDocumentID = documentID
         lastKeyboardRequestID = requestID
         keyboardDocumentID = documentID
         keyboardLanguage = language
-        dictation.start(keyboard: true, language: language?.rawValue)
+        dictation.start(keyboard: true, language: language?.rawValue, style: style)
     }
 
     private func receiveKeyboardCommand() {
@@ -254,7 +255,7 @@ final class AppModel: NSObject, ObservableObject {
                 guard dictation.isWarm else { publishKeyboardState(); return }
                 startKeyboardDictation(
                     requestID: command.requestID, documentID: command.documentID,
-                    language: command.language.flatMap(TypingLanguage.init(rawValue:))
+                    language: command.language.flatMap(TypingLanguage.init(rawValue:)), style: command.style
                 )
             case .stop:
                 guard command.requestID == keyboardRequestID else { return }

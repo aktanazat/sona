@@ -124,6 +124,16 @@ struct DictationPreferences {
         UserDefaults.standard.removeObject(forKey: keyboardKey)
     }
 
+    /// The style every dictation uses unless one recording asks for another.
+    static var style: String { shared.string(forKey: styleKey) ?? "" }
+
+    /// The style lived in the app's own defaults until the keyboard needed to read it.
+    static func moveStyleToSharedContainer() {
+        guard let style = UserDefaults.standard.string(forKey: styleKey) else { return }
+        if shared.object(forKey: styleKey) == nil { shared.set(style, forKey: styleKey) }
+        UserDefaults.standard.removeObject(forKey: styleKey)
+    }
+
     /// The recognizer language for a dictation. One the keyboard asked for while typing
     /// `typing` listens in that language, in the regional form the speaking list prefers.
     static func recognitionLanguage(for typing: String?) -> String {

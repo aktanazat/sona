@@ -272,3 +272,11 @@
 "calls.status.no-answer" = "No answer";
 "calls.status.canceled" = "Call canceled";
 "calls.status.failed" = "Call failed";
+
+/* Writing style tone */
+"tone.title" = "Tone";
+"tone.casual" = "Casual";
+"tone.semiCasual" = "Relaxed";
+"tone.balanced" = "Balanced";
+"tone.semiFormal" = "Polished";
+"tone.formal" = "Formal";
