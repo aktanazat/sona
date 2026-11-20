@@ -4552,6 +4552,7 @@ mod tests {
             "transcribe_file",
             "model",
             "diagnose",
+            "live",
             "without_prompt",
             "without_no_speech_check",
             "without_filter",

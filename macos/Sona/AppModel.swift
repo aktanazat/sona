@@ -146,6 +146,13 @@ struct RewriteSkippedEvent: Decodable {
     let outcome: RewriteOutcome
 }
 
+/// `cloud-connection-slow`: the network is holding up a cloud transcription
+/// or cleanup in the dictation in flight. Local models never send it.
+struct SlowConnectionEvent: Decodable {
+    /// "transcription" or "cleanup".
+    let stage: String
+}
+
 /// A sentence about the last dictation, on the capture page until dismissed
 /// or the next recording: the cause, the way out, and when the words were
 /// kept, the entry to open.
@@ -242,6 +249,7 @@ extension CoreEvent {
     static let dictationKept = "dictation-kept"
     /// Sent once per dictation when it reaches three minutes.
     static let dictationMeetingSuggestion = "dictation-meeting-suggestion"
+    static let cloudConnectionSlow = "cloud-connection-slow"
 }
 
 /// Everything the windows share. One instance, on the main actor, handed to
@@ -313,6 +321,8 @@ final class AppModel {
     /// The dictation has run long enough that meeting mode would suit it,
     /// until the recording ends.
     private(set) var meetingSuggested = false
+    /// The cloud stage a slow connection is holding up, until the dictation ends.
+    private(set) var slowConnectionStage: String?
     /// The pill's meeting button was pressed: the meeting start opens once the
     /// dictation has been delivered, so the words still reach the app it was for.
     private var meetingAfterCapture = false
@@ -455,7 +465,7 @@ final class AppModel {
             CoreEvent.transcriptionError, CoreEvent.settingsChanged, CoreEvent.modesChanged,
             CoreEvent.meetingNavigationRequested, CoreEvent.dictationDurationWarning,
             CoreEvent.commandAnswered, CoreEvent.showMainWindow, CoreEvent.dictationDelivery,
-            CoreEvent.dictationKept, CoreEvent.dictationMeetingSuggestion,
+            CoreEvent.dictationKept, CoreEvent.dictationMeetingSuggestion, CoreEvent.cloudConnectionSlow,
         ] {
             core.observe(name) { [weak self] line in self?.handle(name, line) }
         }
@@ -883,6 +893,7 @@ final class AppModel {
     private func setCapture(_ state: CaptureState) {
         capture = state
         if case .recording = state {
+            slowConnectionStage = nil
             clearPillFeedback()
             meter.start()
         } else {
@@ -890,6 +901,7 @@ final class AppModel {
             meter.stop()
         }
         if case .idle = state {
+            slowConnectionStage = nil
             dismissPillFeedbackAfterDelay()
             if meetingAfterCapture {
                 meetingAfterCapture = false
@@ -1414,6 +1426,9 @@ final class AppModel {
                 showPillFeedback(.kept)
             case CoreEvent.dictationMeetingSuggestion:
                 if case .recording = capture { meetingSuggested = true }
+            case CoreEvent.cloudConnectionSlow:
+                let event: SlowConnectionEvent = try Core.payload(line)
+                if capture != .idle { slowConnectionStage = event.stage }
             default:
                 break
             }

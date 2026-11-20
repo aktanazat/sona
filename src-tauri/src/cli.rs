@@ -112,6 +112,16 @@ pub struct CliArgs {
     #[arg(long, requires = "transcribe_file", conflicts_with = "json")]
     pub diagnose: bool,
 
+    /// With --transcribe-file: play the file through voice detection at
+    /// real-time pace, as a dictation hears it, printing each change to the
+    /// live words and then the final text.
+    #[arg(
+        long,
+        requires = "transcribe_file",
+        conflicts_with_all = ["json", "diagnose", "repeat"]
+    )]
+    pub live: bool,
+
     /// With --transcribe-file: decode without the custom-words prompt.
     #[arg(long, requires = "transcribe_file")]
     pub without_prompt: bool,

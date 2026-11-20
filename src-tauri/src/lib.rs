@@ -56,6 +56,7 @@ mod settings;
 mod shared_pages;
 mod shortcut;
 mod signal_handle;
+mod slow_connection;
 mod snippets;
 mod transcription_coordinator;
 mod tray;
@@ -1356,6 +1357,24 @@ fn run_headless_transcription(app: &AppHandle, args: &CliArgs) -> i32 {
     let load_ms = u64::try_from(load_start.elapsed().as_millis()).unwrap_or(u64::MAX);
     let bound_backend = tm.current_backend();
 
+    if args.live {
+        println!(
+            "mode={} model={} backend={} audio={:.2}s load={}ms",
+            mode_id,
+            model_id,
+            bound_backend.as_deref().unwrap_or("?"),
+            audio_secs,
+            load_ms,
+        );
+        return match replay_live(app, &tm, &asr, &samples) {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("error: live replay failed: {e}");
+                1
+            }
+        };
+    }
+
     let switches = managers::transcription::DecodeSwitches {
         without_prompt: args.without_prompt,
         without_no_speech_check: args.without_no_speech_check,
@@ -1436,6 +1455,73 @@ fn run_headless_transcription(app: &AppHandle, args: &CliArgs) -> i32 {
         }
     }
     0
+}
+
+/// `--transcribe-file --live`: a dictation's voice detection, live words and
+/// final decode, fed from a file at the pace a microphone delivers it.
+fn replay_live(
+    app: &AppHandle,
+    tm: &TranscriptionManager,
+    asr: &modes::AsrPlan,
+    samples: &[f32],
+) -> anyhow::Result<()> {
+    use crate::audio_toolkit::vad::{
+        VadFrame, VAD_OFFLINE_HANGOVER_FRAMES, VAD_STREAMING_HANGOVER_FRAMES,
+    };
+    use crate::audio_toolkit::VoiceActivityDetector;
+    use managers::transcription::{SpeechEvidence, StreamTextEvent};
+    use std::time::{Duration, Instant};
+    use tauri_specta::Event;
+
+    const FRAME_SAMPLES: usize = 480;
+    const FRAME: Duration = Duration::from_millis(30);
+    let streams = app
+        .state::<Arc<ModelManager>>()
+        .get_model_info(&asr.model_id)
+        .is_some_and(|model| model.supports_streaming);
+    let hangover = if streams {
+        VAD_STREAMING_HANGOVER_FRAMES
+    } else {
+        VAD_OFFLINE_HANGOVER_FRAMES
+    };
+    let mut vad = managers::audio::create_voice_detector(app, hangover)?;
+    let started = Instant::now();
+    let listener = StreamTextEvent::listen(app, move |event| {
+        println!(
+            "[{:>6.2}s] {} ⟨{}⟩",
+            started.elapsed().as_secs_f64(),
+            event.payload.committed,
+            event.payload.tentative
+        );
+    });
+    tm.arm_stream_on_first_speech(asr);
+    let router = tm.stream_router();
+    let mut frame = [0.0; FRAME_SAMPLES];
+    for (index, chunk) in samples.chunks(FRAME_SAMPLES).enumerate() {
+        let due = started + FRAME * u32::try_from(index)?;
+        std::thread::sleep(due.saturating_duration_since(Instant::now()));
+        frame[..chunk.len()].copy_from_slice(chunk);
+        frame[chunk.len()..].fill(0.0);
+        if let VadFrame::Speech(speech) = vad.push_frame(&frame)? {
+            router.feed(speech);
+        }
+    }
+    let stopped = Instant::now();
+    let text = match tm.finalize_stream(asr)? {
+        Some(decode) => decode.text,
+        None => {
+            tm.transcribe_with_evidence(asr, samples, SpeechEvidence::Detected)?
+                .text
+        }
+    };
+    app.unlisten(listener);
+    println!(
+        "[{:>6.2}s] final, {}ms after the recording ended: {}",
+        started.elapsed().as_secs_f64(),
+        stopped.elapsed().as_millis(),
+        text
+    );
+    Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -2551,10 +2637,6 @@ pub fn run(cli_args: CliArgs) {
                     settings.overlay_style != settings::OverlayStyle::None,
                 );
 
-                std::thread::spawn(|| {
-                    crate::managers::transcription::report_compute_devices();
-                    let _ = crate::managers::transcription::get_available_accelerators();
-                });
                 let prewarm_audio = startup_app.clone();
                 std::thread::spawn(move || {
                     if let Some(manager) = prewarm_audio.try_state::<Arc<AudioRecordingManager>>() {
