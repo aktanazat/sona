@@ -131,6 +131,19 @@
 		CE000000000000000000004B /* RecordingIntents.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000000000000000000004B /* RecordingIntents.swift */; };
 		CE000000000000000000004C /* SonaWidgets.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000000000000000000004C /* SonaWidgets.swift */; };
 		CE0000000000000000000038 /* KeyboardSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000038 /* KeyboardSession.swift */; };
+		CA0000000000000000A9E101 /* MicrophoneSessionActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000A9E101 /* MicrophoneSessionActivity.swift */; };
+		CE0000000000000000A9E101 /* MicrophoneSessionActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000A9E101 /* MicrophoneSessionActivity.swift */; };
+		CA0000000000000000A9E102 /* MicrophoneLiveActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000A9E102 /* MicrophoneLiveActivity.swift */; };
+		CA0000000000000000A9E103 /* PhoneNoteEntity.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000A9E103 /* PhoneNoteEntity.swift */; };
+		CA0000000000000000A9E104 /* MicrophoneChoice.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000A9E104 /* MicrophoneChoice.swift */; };
+		CA0000000000000000A9E105 /* DictationStats.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000A9E105 /* DictationStats.swift */; };
+		CA0000000000000000A9E106 /* AgentAsk.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000A9E106 /* AgentAsk.swift */; };
+		CC0000000000000000A9E106 /* AgentAsk.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000A9E106 /* AgentAsk.swift */; };
+		CA0000000000000000A9E107 /* PhoneAgentChat.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000A9E107 /* PhoneAgentChat.swift */; };
+		CC0000000000000000A9E107 /* PhoneAgentChat.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000A9E107 /* PhoneAgentChat.swift */; };
+		CA0000000000000000A9E108 /* AgentChatScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000A9E108 /* AgentChatScreen.swift */; };
+		CC0000000000000000A9E10A /* agent-ask-v1.json in Resources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000A9E10A /* agent-ask-v1.json */; };
+		CC0000000000000000A9E10B /* agent-reply-v1.json in Resources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000A9E10B /* agent-reply-v1.json */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -269,6 +282,16 @@
 		BB000000000000000000004D /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		BB000000000000000000004E /* SonaWidgets.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = SonaWidgets.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		BB000000000000000000004F /* SonaWidgets.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = SonaWidgets.entitlements; sourceTree = "<group>"; };
+		BB0000000000000000A9E101 /* MicrophoneSessionActivity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MicrophoneSessionActivity.swift; sourceTree = "<group>"; };
+		BB0000000000000000A9E102 /* MicrophoneLiveActivity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MicrophoneLiveActivity.swift; sourceTree = "<group>"; };
+		BB0000000000000000A9E103 /* PhoneNoteEntity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneNoteEntity.swift; sourceTree = "<group>"; };
+		BB0000000000000000A9E104 /* MicrophoneChoice.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MicrophoneChoice.swift; sourceTree = "<group>"; };
+		BB0000000000000000A9E105 /* DictationStats.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DictationStats.swift; sourceTree = "<group>"; };
+		BB0000000000000000A9E106 /* AgentAsk.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentAsk.swift; sourceTree = "<group>"; };
+		BB0000000000000000A9E107 /* PhoneAgentChat.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneAgentChat.swift; sourceTree = "<group>"; };
+		BB0000000000000000A9E108 /* AgentChatScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentChatScreen.swift; sourceTree = "<group>"; };
+		BB0000000000000000A9E10A /* agent-ask-v1.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "agent-ask-v1.json"; sourceTree = "<group>"; };
+		BB0000000000000000A9E10B /* agent-reply-v1.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "agent-reply-v1.json"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -381,6 +404,8 @@
 				BB0000000000000000000044 /* BoundedRewrite.swift */,
 				BB000000000000000000004A /* RecordingActivity.swift */,
 				BB000000000000000000004B /* RecordingIntents.swift */,
+				BB0000000000000000A9E106 /* AgentAsk.swift */,
+				BB0000000000000000A9E101 /* MicrophoneSessionActivity.swift */,
 			);
 			path = Shared;
 			sourceTree = "<group>";
@@ -408,6 +433,12 @@
 				BB0000000000000000000049 /* PhoneMemoryScreen.swift */,
 				BB000000000000000000003E /* PhoneCalendar.swift */,
 				BB000000000000000000003F /* SonaIntents.swift */,
+				BB0000000000000000A9E102 /* MicrophoneLiveActivity.swift */,
+				BB0000000000000000A9E103 /* PhoneNoteEntity.swift */,
+				BB0000000000000000A9E104 /* MicrophoneChoice.swift */,
+				BB0000000000000000A9E105 /* DictationStats.swift */,
+				BB0000000000000000A9E107 /* PhoneAgentChat.swift */,
+				BB0000000000000000A9E108 /* AgentChatScreen.swift */,
 				BB0000000000000000000040 /* PhoneCallsScreen.swift */,
 				BB0000000000000000000042 /* Assets.xcassets */,
 				BB0000000000000000000046 /* PrivacyInfo.xcprivacy */,
@@ -454,6 +485,8 @@
 			isa = PBXGroup;
 			children = (
 				BB0000000000000000000012 /* crypto-v1.json */,
+				BB0000000000000000A9E10A /* agent-ask-v1.json */,
+				BB0000000000000000A9E10B /* agent-reply-v1.json */,
 			);
 			path = Fixtures;
 			sourceTree = "<group>";
@@ -647,6 +680,8 @@
 			buildActionMask = 2147483647;
 			files = (
 				CC0000000000000000000012 /* crypto-v1.json in Resources */,
+				CC0000000000000000A9E10A /* agent-ask-v1.json in Resources */,
+				CC0000000000000000A9E10B /* agent-reply-v1.json in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -713,6 +748,14 @@
 				CA0000000000000000000044 /* BoundedRewrite.swift in Sources */,
 				CA000000000000000000004A /* RecordingActivity.swift in Sources */,
 				CA000000000000000000004B /* RecordingIntents.swift in Sources */,
+				CA0000000000000000A9E101 /* MicrophoneSessionActivity.swift in Sources */,
+				CA0000000000000000A9E102 /* MicrophoneLiveActivity.swift in Sources */,
+				CA0000000000000000A9E103 /* PhoneNoteEntity.swift in Sources */,
+				CA0000000000000000A9E104 /* MicrophoneChoice.swift in Sources */,
+				CA0000000000000000A9E105 /* DictationStats.swift in Sources */,
+				CA0000000000000000A9E106 /* AgentAsk.swift in Sources */,
+				CA0000000000000000A9E107 /* PhoneAgentChat.swift in Sources */,
+				CA0000000000000000A9E108 /* AgentChatScreen.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -774,6 +817,8 @@
 				CC0000000000000000000041 /* PhoneParityTests.swift in Sources */,
 				CC0000000000000000000044 /* BoundedRewrite.swift in Sources */,
 				CC0000000000000000000045 /* DictationDeliveryTests.swift in Sources */,
+				CC0000000000000000A9E106 /* AgentAsk.swift in Sources */,
+				CC0000000000000000A9E107 /* PhoneAgentChat.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -808,6 +853,7 @@
 				CE0000000000000000000020 /* KeyboardDraft.swift in Sources */,
 				CE000000000000000000004A /* RecordingActivity.swift in Sources */,
 				CE000000000000000000004B /* RecordingIntents.swift in Sources */,
+				CE0000000000000000A9E101 /* MicrophoneSessionActivity.swift in Sources */,
 				CE000000000000000000004C /* SonaWidgets.swift in Sources */,
 				CE0000000000000000000038 /* KeyboardSession.swift in Sources */,
 			);

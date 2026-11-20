@@ -6,6 +6,7 @@ import PhotosUI
 import Speech
 import SwiftUI
 import UIKit
+import UserNotifications
 import WatchConnectivity
 
 /// What the one status line has to be able to say about the outbox.
@@ -72,10 +73,15 @@ final class AppModel: NSObject, ObservableObject {
     /// Set while the keyboard has Sona open only to allow the microphone.
     @Published private(set) var keyboardSetup: KeyboardSetup?
     private var importingKeyboardDictations = false
+    /// The library note Spotlight, Siri or a shortcut asked to open.
+    @Published var openedNote: UUID?
+    /// A search Siri or a shortcut asked the library to show, until the library takes it.
+    @Published var librarySearchRequest: String?
 
     let library = PhoneLibrary()
     let calendar = PhoneCalendar()
     let calls = PhoneCalls()
+    private var spotlight: PhoneNoteSpotlight?
     private var keyboardSignal: KeyboardSignal?
     private var keyboardTicker: Task<Void, Never>?
     private var keyboardRequestID: UUID?
@@ -88,6 +94,16 @@ final class AppModel: NSObject, ObservableObject {
     let recorder = PhoneRecorder()
     let dictation = PhoneDictation()
     let callOffers = CallOfferService()
+    private let microphoneActivity = MicrophoneLiveActivity()
+    /// The chat with Sona's agent. The Mac answers it through the vault.
+    private(set) lazy var chat: PhoneAgentChat = {
+        let chat = PhoneAgentChat(transport: self, file: AppModel.supportDirectory("agent").appending(path: "chat.json"))
+        chat.onSettled = { [weak self] conversation, turn in self?.notify(conversation, turn) }
+        return chat
+    }()
+    @Published var showsChat = false
+    /// The conversation a notification or the Action Button asked the chat to show.
+    @Published var chatConversation: UUID?
 
     /// Set when this recording was started from a call notification.
     private var afterCall = false
@@ -116,6 +132,7 @@ final class AppModel: NSObject, ObservableObject {
             credentials: state.credentials
         )
         super.init()
+        spotlight = PhoneNoteSpotlight(library: library)
         recorder.onInterrupted = { [weak self] in
             self?.stopRecording()
         }
@@ -132,6 +149,7 @@ final class AppModel: NSObject, ObservableObject {
             self?.afterCall = true
             self?.startRecording()
         }
+        callOffers.onAgentNotification = { [weak self] conversation in self?.openChat(conversation) }
         startConnectivityWatch()
         activateWatchSession()
         /* A launch is the operator asking again: anything the vault refused earlier gets
@@ -141,6 +159,7 @@ final class AppModel: NSObject, ObservableObject {
             await queue.retryParked()
             await drain()
             await refreshBoard()
+            chat.watch()
         }
     }
 
@@ -182,6 +201,7 @@ final class AppModel: NSObject, ObservableObject {
     }
 
     func handle(_ url: URL) {
+        if url == DictationLink.askURL { openChat(nil); return }
         if DictationLink.opens(url) { page = .dictation }
         if url == DictationLink.meetingURL { page = .recording }
         pendingURL = url
@@ -285,6 +305,9 @@ final class AppModel: NSObject, ObservableObject {
                 heard: keyboardRequestID == nil ? nil : KeyboardSessionState.heard(dictation.text)
             ))
         } catch { library.error = error.localizedDescription }
+        microphoneActivity.show(dictation.isWarm ? MicrophoneActivityAttributes.ContentState(
+            readyUntil: dictation.warmUntil ?? Date(), listening: dictation.phase == .listening
+        ) : nil)
         if dictation.isWarm, keyboardTicker == nil {
             keyboardTicker = Task { [weak self] in
                 while !Task.isCancelled {
@@ -295,6 +318,20 @@ final class AppModel: NSObject, ObservableObject {
                 }
             }
         }
+    }
+
+    func endMicrophoneSession() {
+        dictation.endWarmSession()
+    }
+
+    func open(note id: UUID) {
+        page = .library
+        openedNote = id
+    }
+
+    func search(library term: String) {
+        page = .library
+        librarySearchRequest = term
     }
 
     /// The calendar event the running recording was started from.
@@ -620,6 +657,12 @@ final class AppModel: NSObject, ObservableObject {
             do { keyboardStore = try KeyboardDraftStore.shared() }
             catch { draftError = error.localizedDescription }
         }
+        if !capture.isThought, capture.error == nil {
+            var stats = DictationStats.load()
+            stats.record(capture.text, seconds: capture.audio.map { Double($0.durationMs) / 1000 }
+                ?? Date().timeIntervalSince(capture.startedAt))
+            stats.save()
+        }
         let background = UIApplication.shared.beginBackgroundTask(withName: "Save dictation")
         let delivery = library.deliverDictation(
             kind: capture.isThought ? .note : .dictation,
@@ -823,7 +866,64 @@ final class AppModel: NSObject, ObservableObject {
     }
 }
 
+extension AppModel: AgentTransport {
+    func send(_ ask: QueuedAsk, askedAt: Date) async throws -> String {
+        guard isPaired else { throw UploadQueueError.notPaired }
+        let item = try await queue.enqueue(ask: ask, askedAtUtcMs: Int64(askedAt.timeIntervalSince1970 * 1000))
+        Task { await drain() }
+        return item.objectId
+    }
+
+    func hasLeftOutbox(_ askObjectId: String) async -> Bool {
+        let waiting = await queue.items()
+        guard waiting.contains(where: { $0.objectId == askObjectId }) else { return true }
+        if outbox != .uploading { Task { await drain() } }
+        return false
+    }
+
+    func replies() async throws -> [String: AgentReplyManifest] {
+        let index = try await reader.sync()
+        board = index
+        return index.agentReplies
+    }
+
+    func forget(_ askObjectId: String) async {
+        try? await reader.deleteAgentExchange(askObjectId: askObjectId)
+        board = await reader.current()
+    }
+
+    /// An answer, a failure or an overdue question becomes a notification while Sona is
+    /// not on screen.
+    func notify(_ conversation: AgentConversation, _ turn: AgentTurn) {
+        guard UIApplication.shared.applicationState != .active else { return }
+        let content = UNMutableNotificationContent()
+        content.threadIdentifier = conversation.id.uuidString
+        content.userInfo = [AgentNotification.conversationKey: conversation.id.uuidString]
+        content.sound = .default
+        if turn.role == .assistant {
+            content.title = NSLocalizedString("agent.notification.answered", comment: "")
+            content.subtitle = conversation.turns.last { $0.role == .user && $0.askObjectId == turn.askObjectId }?.text ?? ""
+            content.body = turn.text
+        } else {
+            content.title = NSLocalizedString(
+                turn.status == .unanswered ? "agent.notification.waiting" : "agent.notification.failed", comment: ""
+            )
+            content.subtitle = turn.text
+            content.body = NSLocalizedString(AgentFailure.message(turn.status), comment: "")
+        }
+        UNUserNotificationCenter.current().add(UNNotificationRequest(
+            identifier: AgentNotification.identifierPrefix + turn.id.uuidString, content: content, trigger: nil
+        ))
+    }
+
+    func openChat(_ conversation: UUID?) {
+        chatConversation = conversation
+        showsChat = true
+    }
+}
+
 extension AppModel: PhoneRecordingControls {}
+extension AppModel: PhoneMicrophoneControls {}
 
 extension AppModel: WCSessionDelegate {
     nonisolated func session(

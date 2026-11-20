@@ -11,6 +11,7 @@ enum DictationLink {
     /// Built from the two literals above, so it is a URL by construction.
     static let url = URL(string: "\(scheme)://\(host)")!
     static let meetingURL = URL(string: "\(scheme)://record-meeting")!
+    static let askURL = URL(string: "\(scheme)://ask")!
 
     static func keyboardURL(documentID: UUID?, language: TypingLanguage) -> URL {
         var components = URLComponents(url: url, resolvingAgainstBaseURL: false)!

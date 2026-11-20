@@ -145,6 +145,18 @@ struct PhoneLibraryScreen: View {
             .navigationTitle("library.title")
             .navigationBarTitleDisplayMode(.inline)
             .searchable(text: $search)
+            .onChange(of: model.librarySearchRequest, initial: true) { _, term in
+                guard let term else { return }
+                search = term
+                model.librarySearchRequest = nil
+            }
+            .navigationDestination(item: $model.openedNote) { id in
+                if let note = library.notes.first(where: { $0.id == id }) {
+                    PhoneNoteScreen(model: model, library: library, note: note)
+                } else {
+                    ContentUnavailableView("library.noteGone", systemImage: "note.text")
+                }
+            }
             .task { await model.refreshBoard() }
             .refreshable { await model.refreshBoard() }
             .toolbar {
@@ -228,6 +240,19 @@ struct PhoneLibraryScreen: View {
         .swipeActions {
             Button("library.delete", role: .destructive) {
                 do { try library.delete(note) } catch { library.error = error.localizedDescription }
+            }
+        }
+        .contextMenu {
+            Button { UIPasteboard.general.string = note.text } label: {
+                Label("library.copy", systemImage: "doc.on.doc")
+            }
+            .disabled(note.text.isEmpty)
+            ShareLink(item: note.text) { Label("library.share", systemImage: "square.and.arrow.up") }
+                .disabled(note.text.isEmpty)
+            Button(role: .destructive) {
+                do { try library.delete(note) } catch { library.error = error.localizedDescription }
+            } label: {
+                Label("library.delete", systemImage: "trash")
             }
         }
         .listRowBackground(Theme.surface)

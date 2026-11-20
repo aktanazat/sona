@@ -10,6 +10,9 @@ struct SonaApp: App {
         let model = AppModel()
         _model = StateObject(wrappedValue: model)
         AppDependencyManager.shared.add(dependency: model as any PhoneRecordingControls)
+        AppDependencyManager.shared.add(dependency: model as any PhoneMicrophoneControls)
+        AppDependencyManager.shared.add(dependency: model)
+        AppDependencyManager.shared.add(dependency: model.library)
     }
 
     var body: some Scene {
@@ -37,6 +40,9 @@ struct SonaApp: App {
             .sheet(isPresented: .constant(!model.consentAccepted)) {
                 ConsentScreen(model: model)
                     .interactiveDismissDisabled()
+            }
+            .sheet(isPresented: $model.showsChat) {
+                AgentChatScreen(model: model, chat: model.chat)
             }
             .onOpenURL { model.handle($0) }
             .onChange(of: scenePhase) { _, phase in if phase == .active { model.importKeyboardDictations() } }

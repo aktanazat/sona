@@ -38,6 +38,7 @@ struct BoardScreen: View {
             .background(Theme.background)
             .navigationTitle("tab.board")
             .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .primaryAction) { AskSonaButton(model: model) } }
             .refreshable { await model.refreshBoard() }
             .safeAreaInset(edge: .bottom) { status }
             .sheet(item: $open) { tile in

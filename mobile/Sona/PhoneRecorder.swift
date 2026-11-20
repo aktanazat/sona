@@ -127,8 +127,9 @@ final class PhoneRecorder: ObservableObject {
         if requiringActivity && activity == nil { throw LiveActivityRefused() }
         do {
             let session = AVAudioSession.sharedInstance()
-            try session.setCategory(.record, mode: .default)
+            try session.setCategory(.record, mode: .default, options: MicrophoneChoice.categoryOptions)
             try session.setActive(true, options: [])
+            try MicrophoneChoice.apply(to: session)
             let input = engine.inputNode
             let format = input.inputFormat(forBus: 0)
             let url = FileManager.default.temporaryDirectory

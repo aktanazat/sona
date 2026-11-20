@@ -221,8 +221,10 @@ final class PhoneDictation: ObservableObject {
         if engine?.isRunning != true {
             stopEngine()
             let session = AVAudioSession.sharedInstance()
-            try session.setCategory(.playAndRecord, mode: .measurement, options: [.mixWithOthers, .defaultToSpeaker])
+            let options: AVAudioSession.CategoryOptions = [.mixWithOthers, .defaultToSpeaker]
+            try session.setCategory(.playAndRecord, mode: .measurement, options: options.union(MicrophoneChoice.categoryOptions))
             try session.setActive(true)
+            try MicrophoneChoice.apply(to: session)
             let engine = AVAudioEngine()
             let input = engine.inputNode
             let format = input.inputFormat(forBus: 0)

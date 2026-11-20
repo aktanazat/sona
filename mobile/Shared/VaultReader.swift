@@ -7,6 +7,7 @@ enum BoardObject: Codable, Equatable {
     case dictationProfile(DictationProfile)
     case meeting(PhoneMeeting)
     case memoryIndex(PortableMemoryIndex)
+    case agentReply(AgentReplyManifest)
     /// A recording or a format this build does not know.
     case other
 }
@@ -79,6 +80,19 @@ struct BoardIndex: Codable, Equatable {
             guard case .meeting(let meeting) = head.object else { return nil }
             return meeting
         }.sorted { $0.date > $1.date }
+    }
+
+    /// The Mac's replies to this phone's questions, keyed by the question's object id.
+    /// A reply counts only at the object id derived from its question.
+    var agentReplies: [String: AgentReplyManifest] {
+        var replies: [String: AgentReplyManifest] = [:]
+        for (id, head) in heads {
+            guard case .agentReply(let reply) = head.object,
+                  id == AgentAskObject.replyObjectId(askObjectId: reply.ask_object_id)
+            else { continue }
+            replies[reply.ask_object_id] = reply
+        }
+        return replies
     }
 }
 
@@ -285,6 +299,14 @@ actor VaultReader {
         try await tombstone(objectId: id)
     }
 
+    /// Tombstone a question for the agent and the Mac's reply, once the phone has kept
+    /// the answer. A question the Mac has not started is then never answered.
+    func deleteAgentExchange(askObjectId: String) async throws {
+        if let syncing { _ = try? await syncing.value }
+        try await tombstone(objectId: AgentAskObject.replyObjectId(askObjectId: askObjectId))
+        try await tombstone(objectId: askObjectId)
+    }
+
     /// Tombstone one object over the head this index holds, and drop it locally.
     private func tombstone(objectId: String) async throws {
         let (credentials, client) = try session()
@@ -395,6 +417,12 @@ actor VaultReader {
            card.kind == CardObject.kind, card.format_version == 1
         {
             return (envelope.chunkCount, .card(card))
+        }
+        if let plaintext = open(AgentAskObject.replySourceFormat),
+           let reply = try? decoder.decode(AgentReplyManifest.self, from: plaintext),
+           reply.kind == AgentAskObject.replyKind, reply.format_version == 1
+        {
+            return (envelope.chunkCount, .agentReply(reply))
         }
         for format in [DictationProfile.sourceFormat, PhoneMeeting.sourceFormat, PhoneMeeting.phoneSourceFormat,
                        PortableMemoryIndex.sourceFormat] {

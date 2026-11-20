@@ -21,9 +21,17 @@ struct QueuedThought: Codable, Equatable {
     var attachments: [ThoughtAttachment]
 }
 
+/// A question for Sona's agent waiting to reach the vault.
+struct QueuedAsk: Codable, Equatable {
+    var conversationId: String
+    var question: String
+    var recentTurns: [AgentAskManifest.Turn]
+}
+
 enum QueuedPayload: Codable, Equatable {
     case recording(QueuedRecording)
     case thought(QueuedThought)
+    case ask(QueuedAsk)
 }
 
 /// One object on its way into the vault.
@@ -48,6 +56,11 @@ struct QueuedObject: Codable, Equatable, Identifiable {
     var parked: Bool
 
     var id: String { objectId }
+
+    var isAsk: Bool {
+        if case .ask = payload { return true }
+        return false
+    }
 }
 
 enum UploadQueueError: Error, Equatable {
@@ -136,7 +149,15 @@ actor UploadQueue {
         return item
     }
 
-    /// Try every item that is due, oldest first, one at a time.
+    /// Take a question for the agent.
+    func enqueue(ask: QueuedAsk, askedAtUtcMs: Int64) throws -> QueuedObject {
+        let item = newItem(objectId: randomOpaqueId(), capturedAtUtcMs: askedAtUtcMs, payload: .ask(ask))
+        try save(item)
+        return item
+    }
+
+    /// Try every item that is due, one at a time: questions for the agent first, because
+    /// someone is waiting for their answers, then everything else oldest first.
     ///
     /// A retryable failure ends the pass: the network or the Worker is unhappy and the
     /// remaining items would fail the same way.
@@ -150,7 +171,8 @@ actor UploadQueue {
         }
         self.client = client
         let now = Int64(Date().timeIntervalSince1970 * 1000)
-        for item in items() where
+        let waiting = items()
+        for item in waiting.filter(\.isAsk) + waiting.filter({ !$0.isAsk }) where
             (!item.parked && item.nextAttemptUtcMs <= now) || needsThoughtRestaging(item)
         {
             do {
@@ -373,6 +395,7 @@ actor UploadQueue {
         switch item.payload {
         case .recording: return DeviceRecordingObject.sourceFormat
         case .thought: return ThoughtObject.sourceFormat
+        case .ask: return AgentAskObject.sourceFormat
         }
     }
 
@@ -382,6 +405,7 @@ actor UploadQueue {
         switch item.payload {
         case .recording: return "device-recording"
         case .thought: return "thought"
+        case .ask: return "agent-ask"
         }
     }
 
@@ -391,6 +415,8 @@ actor UploadQueue {
             return DeviceRecordingObject.chunkCount(audioByteLength: recording.audioByteLength)
         case let .thought(thought):
             return ThoughtObject.chunkCount(thought.attachments)
+        case .ask:
+            return 1
         }
     }
 
@@ -422,6 +448,13 @@ actor UploadQueue {
                     attachments: thought.attachments
                 )
             )
+        case let .ask(ask):
+            return try AgentAskObject.encodeManifest(
+                AgentAskObject.manifest(
+                    deviceId: identity.deviceId, askedAtUtcMs: item.capturedAtUtcMs,
+                    conversationId: ask.conversationId, question: ask.question, recentTurns: ask.recentTurns
+                )
+            )
         }
     }
 
@@ -443,6 +476,8 @@ actor UploadQueue {
                 bytes.append(Data(count: size - bytes.count))
             }
             return bytes
+        case .ask:
+            return Data()
         }
     }
 

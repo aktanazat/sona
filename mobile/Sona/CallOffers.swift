@@ -11,6 +11,9 @@ import UserNotifications
 final class CallOfferService: NSObject {
     /// Set by the owner; called when the operator taps one of the offers.
     var onOfferAccepted: (() -> Void)?
+    /// Set by the owner; called with the conversation when the operator taps an answer
+    /// from Sona's agent. This service owns the one notification delegate the app has.
+    var onAgentNotification: ((UUID?) -> Void)?
 
     private let observer = CXCallObserver()
     private var machine = CallOfferMachine()
@@ -86,8 +89,15 @@ extension CallOfferService: UNUserNotificationCenterDelegate {
         didReceive response: UNNotificationResponse,
         withCompletionHandler completionHandler: @escaping () -> Void
     ) {
+        let identifier = response.notification.request.identifier
+        let conversation = (response.notification.request.content.userInfo[AgentNotification.conversationKey] as? String)
+            .flatMap(UUID.init(uuidString:))
         Task { @MainActor [weak self] in
-            self?.onOfferAccepted?()
+            if identifier.hasPrefix(AgentNotification.identifierPrefix) {
+                self?.onAgentNotification?(conversation)
+            } else {
+                self?.onOfferAccepted?()
+            }
             completionHandler()
         }
     }
