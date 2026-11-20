@@ -495,9 +495,12 @@ private struct TaskFilterPanel: View {
                         if any { Text("All of these") } else { Label("All of these", systemImage: "checkmark") }
                     }
                 } label: {
-                    Text(any ? "Any of these" : "All of these")
-                        .font(TypeScale.body(13).weight(.medium))
-                        .foregroundStyle(Theme.accent)
+                    HStack(spacing: 4) {
+                        Text(any ? "Any of these" : "All of these")
+                        Image(systemName: "chevron.up.chevron.down").font(.system(size: 9))
+                    }
+                    .font(TypeScale.body(13).weight(.medium))
+                    .foregroundStyle(Theme.inkSecondary)
                 }
                 .menuStyle(.borderlessButton)
                 .menuIndicator(.hidden)
@@ -517,7 +520,7 @@ private struct TaskFilterPanel: View {
             }
         }
         .overlay(alignment: .leading) {
-            Rectangle().fill(Theme.accent.opacity(0.5)).frame(width: 2)
+            Rectangle().fill(Theme.border).frame(width: 2)
                 .padding(.leading, 6 + CGFloat(depth - 1) * 12)
                 .padding(.vertical, 4)
         }

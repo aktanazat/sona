@@ -236,7 +236,7 @@ struct ProjectsView: View {
             .frame(width: 160)
             .accessibilityLabel("Search projects")
         filterMenu
-        viewsMenu
+        viewsMenu(compact: compact)
         SegmentedSwitch(items: ProjectsViewChoice.items, selection: layout.choice,
                         iconOnly: true) { choice in
             switch choice {
@@ -270,7 +270,7 @@ struct ProjectsView: View {
 
     /// The Projects page's saved views, the grouping, and saving the list
     /// as it stands as a view.
-    private var viewsMenu: some View {
+    private func viewsMenu(compact: Bool) -> some View {
         let opened = store.views.first { $0.id == store.openedView }
         return Menu {
             ForEach(store.views) { view in
@@ -310,7 +310,9 @@ struct ProjectsView: View {
         } label: {
             HStack(spacing: 6) {
                 Image(systemName: opened?.icon ?? "rectangle.stack")
-                Text(opened?.name ?? "Views").lineLimit(1)
+                if !compact {
+                    Text(opened?.name ?? "Views").lineLimit(1)
+                }
             }
             .font(TypeScale.label(12))
         }
@@ -320,7 +322,7 @@ struct ProjectsView: View {
         .padding(.horizontal, 10)
         .frame(height: Theme.controlHeight)
         .background(opened != nil ? Theme.accentSoft : Theme.control, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
-        .help("Saved views and grouping")
+        .help(opened?.name ?? "Saved views and grouping")
         .accessibilityLabel(opened.map { "Saved view, \($0.name)" } ?? "Saved views")
     }
 
@@ -456,6 +458,7 @@ struct ProjectsView: View {
     }
 
     private var listRows: [ProjectListRow] {
+        guard store.groupBy != .none else { return visibleProjects.map(ProjectListRow.project) }
         var rows: [ProjectListRow] = []
         for (group, members) in groupedProjects {
             rows.append(.group(group, members.count))
@@ -472,15 +475,16 @@ struct ProjectsView: View {
             return PlanningProjectStatus.allCases.compactMap { status in
                 let members = visible.filter { $0.project.status == status }
                 return members.isEmpty ? nil : (ProjectListGroup(id: "status:\(status.rawValue)", title: status.label,
-                                                                 status: status), members)
+                                                                 mark: .status(status)), members)
             }
         case .none:
-            return [(ProjectListGroup(id: "all", title: "All projects", status: nil), visible)]
+            return []
         case .priority:
             return [TaskPriority.urgent, .high, .medium, .low, .none].compactMap { priority in
                 let members = visible.filter { ($0.project.priority ?? 0) == priority.rawValue }
                 return members.isEmpty ? nil
-                    : (ProjectListGroup(id: "priority:\(priority.rawValue)", title: priority.label, status: nil), members)
+                    : (ProjectListGroup(id: "priority:\(priority.rawValue)", title: priority.label,
+                                        mark: .priority(priority)), members)
             }
         case .lead:
             let keyed = Dictionary(grouping: visible) { summary -> String in
@@ -495,7 +499,11 @@ struct ProjectsView: View {
                     if (left == "me") != (right == "me") { return left == "me" }
                     return name(left).localizedStandardCompare(name(right)) == .orderedAscending
                 }
-                .map { key in (ProjectListGroup(id: "lead:\(key)", title: name(key), status: nil), keyed[key] ?? []) }
+                .map { key in
+                    (ProjectListGroup(id: "lead:\(key)", title: name(key),
+                                      mark: .symbol(key.isEmpty ? "person.crop.circle.dashed" : "person.crop.circle")),
+                     keyed[key] ?? [])
+                }
         case .quarter:
             let calendar = Calendar.current
             let keyed = Dictionary(grouping: visible) { summary -> Int in
@@ -505,7 +513,8 @@ struct ProjectsView: View {
             }
             return keyed.keys.sorted().map { key in
                 let title = key == Int.max ? "No target date" : "Q\(key % 4 + 1) \(key / 4)"
-                return (ProjectListGroup(id: "quarter:\(key)", title: title, status: nil), keyed[key] ?? [])
+                return (ProjectListGroup(id: "quarter:\(key)", title: title, mark: .symbol("calendar")),
+                        keyed[key] ?? [])
             }
         }
     }
@@ -518,10 +527,11 @@ struct ProjectsView: View {
                 switch row {
                 case let .group(group, count):
                     GroupHeader(title: group.title, count: count, collapsed: collapsed.contains(group.id)) {
-                        if let status = group.status {
-                            ProjectStatusIcon(status: status, progress: 0.5)
-                        } else {
-                            Image(systemName: "folder").font(.system(size: 11)).foregroundStyle(Theme.inkSecondary)
+                        switch group.mark {
+                        case let .status(status): ProjectStatusIcon(status: status, progress: 0.5)
+                        case let .priority(priority): PriorityIcon(priority: priority)
+                        case let .symbol(name):
+                            Image(systemName: name).font(.system(size: 11)).foregroundStyle(Theme.inkSecondary)
                         }
                     } toggle: {
                         if collapsed.contains(group.id) { collapsed.remove(group.id) } else { collapsed.insert(group.id) }
@@ -1357,8 +1367,14 @@ struct ProjectsView: View {
 private struct ProjectListGroup: Hashable {
     let id: String
     let title: String
-    /// The status a status group draws its icon for.
-    let status: PlanningProjectStatus?
+    let mark: Mark
+
+    /// What the header draws before its title.
+    enum Mark: Hashable {
+        case status(PlanningProjectStatus)
+        case priority(TaskPriority)
+        case symbol(String)
+    }
 }
 
 private enum ProjectListRow: Identifiable {

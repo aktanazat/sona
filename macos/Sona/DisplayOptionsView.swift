@@ -77,19 +77,21 @@ struct DisplayOptionsView: View {
                     }
                 }
                 let board = display.layout == .board
-                line(board ? "Swimlanes" : "Sub-grouping") {
-                    Picker(board ? "Swimlanes" : "Sub-grouping", selection: Binding(
-                        get: { display.subGroupBy },
-                        set: { lanes in model.editListing { $0.display.subGroupBy = lanes } }
-                    )) {
-                        ForEach(WorkGroupBy.allCases.filter { $0 != display.groupBy }, id: \.self) {
-                            Text($0 == .none ? (board ? "No swimlanes" : "No sub-grouping") : Self.title($0)).tag($0)
+                if board || display.groupBy != .none {
+                    line(board ? "Swimlanes" : "Sub-grouping") {
+                        Picker(board ? "Swimlanes" : "Sub-grouping", selection: Binding(
+                            get: { display.subGroupBy == display.groupBy ? .none : display.subGroupBy },
+                            set: { lanes in model.editListing { $0.display.subGroupBy = lanes } }
+                        )) {
+                            ForEach(WorkGroupBy.allCases.filter { $0 == .none || $0 != display.groupBy }, id: \.self) {
+                                Text($0 == .none ? (board ? "No swimlanes" : "No sub-grouping") : Self.title($0)).tag($0)
+                            }
                         }
+                        .pickerStyle(.menu)
+                        .controlSize(.large)
+                        .labelsHidden()
+                        .fixedSize()
                     }
-                    .pickerStyle(.menu)
-                    .controlSize(.large)
-                    .labelsHidden()
-                    .fixedSize()
                 }
                 if board, !display.hiddenColumns.isEmpty {
                     line("Hidden columns") {
