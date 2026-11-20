@@ -3,8 +3,9 @@ use super::{
     memory_index::phone_sync_directory,
     open_object_revision_payload,
     revision_upload::{self, StagedRevision, UploadRefused},
-    sha256_base64url, verify_writer_signature, write_staged_file, CloudAccess, CloudRuntimeError,
-    CloudSyncRuntime, ObjectContentKind, ObjectRevisionCryptoContext, ObjectRevisionEnvelope,
+    sha256_base64url, verify_writer_signature, write_staged_file, CloudAccess, CloudClientError,
+    CloudErrorCode, CloudRuntimeError, CloudSyncRuntime, ObjectContentKind,
+    ObjectRevisionCryptoContext, ObjectRevisionEnvelope,
 };
 use crate::agent_panel::{
     protocol::{SonaAgentChatRoleV1, SonaAgentChatTurnV1},
@@ -475,7 +476,10 @@ impl CloudSyncRuntime {
                         None,
                         adjusted_now_ms(access.state.clock_offset_ms),
                     );
-                    let revision = stage_reply(&access, &reply)?;
+                    let mut revision = stage_reply(&access, &reply)?;
+                    // The claim is a create: the service commits only the first
+                    // Mac's, even when this Mac already pulled another's claim.
+                    revision.base_revision_id = None;
                     self.edit_asks(&access, |state| {
                         let Some(entry) = state.entry(&object_id) else {
                             return Ok(false);
@@ -557,35 +561,75 @@ impl CloudSyncRuntime {
         };
         let uploaded =
             revision_upload::upload(self, access, REPLY_SOURCE_FORMAT, &mut revision).await;
-        let refused = match uploaded {
-            Ok(()) => None,
+        let (outcome, refused) = match uploaded {
+            Ok(()) => (Uploaded::Committed, None),
             Err(UploadRefused::Retry(error)) => return Err(error),
-            Err(UploadRefused::Restage(error)) => Some(error),
+            Err(UploadRefused::Restage(error)) if is_stale(&error) => {
+                (Uploaded::Stale, Some(error))
+            }
+            Err(UploadRefused::Restage(error)) => (Uploaded::Restage, Some(error)),
         };
         let reply_deleted = access
             .store
             .cloud_head(&reply_object_id(object_id))
             .map_err(map_store_error)?
             .is_some_and(|head| head.tombstone);
+        let mut done = false;
         self.edit_asks(access, |state| {
             let Some(entry) = state.entry(object_id) else {
                 return Ok(false);
             };
             let progress = std::mem::replace(&mut entry.progress, Progress::Done);
-            entry.progress = match (progress, refused.is_some()) {
-                (Progress::PublishingWorking { .. }, false) => Progress::Working,
-                (Progress::PublishingWorking { .. }, true) => Progress::Remembered,
-                (Progress::PublishingFinal { .. }, false) => Progress::Done,
-                (Progress::PublishingFinal { .. }, true) if reply_deleted => Progress::Done,
-                (Progress::PublishingFinal { reply, .. }, true) => {
-                    let revision = stage_reply(access, &reply)?;
-                    Progress::PublishingFinal { reply, revision }
-                }
-                (progress, _) => progress,
-            };
+            entry.progress = progress
+                .after_upload(outcome, reply_deleted, |reply| stage_reply(access, reply))?;
+            done = matches!(entry.progress, Progress::Done);
             Ok(true)
         })?;
-        refused.map_or(Ok(()), Err)
+        refused.filter(|_| !done).map_or(Ok(()), Err)
+    }
+}
+
+/// How an upload of a staged reply ended.
+#[derive(Clone, Copy)]
+enum Uploaded {
+    Committed,
+    /// The object's head is not the staged base: for a claim, another Mac
+    /// committed its claim first.
+    Stale,
+    /// The service dropped the upload; stage it again.
+    Restage,
+}
+
+fn is_stale(error: &CloudRuntimeError) -> bool {
+    matches!(
+        error,
+        CloudRuntimeError::Client(CloudClientError::Api(error))
+            if matches!(error.code, CloudErrorCode::StaleRevision)
+    )
+}
+
+impl Progress {
+    /// Where an ask goes once its reply upload ended. A final answer whose
+    /// reply object the phone already deleted is dropped; any other refused
+    /// final answer is staged again from the current head.
+    fn after_upload(
+        self,
+        outcome: Uploaded,
+        reply_deleted: bool,
+        restage: impl FnOnce(&AgentReply) -> Result<StagedRevision, CloudRuntimeError>,
+    ) -> Result<Self, CloudRuntimeError> {
+        Ok(match (self, outcome) {
+            (Progress::PublishingWorking { .. }, Uploaded::Committed) => Progress::Working,
+            (Progress::PublishingWorking { .. }, Uploaded::Stale) => Progress::Done,
+            (Progress::PublishingWorking { .. }, Uploaded::Restage) => Progress::Remembered,
+            (Progress::PublishingFinal { .. }, Uploaded::Committed) => Progress::Done,
+            (Progress::PublishingFinal { .. }, _) if reply_deleted => Progress::Done,
+            (Progress::PublishingFinal { reply, .. }, _) => {
+                let revision = restage(&reply)?;
+                Progress::PublishingFinal { reply, revision }
+            }
+            (progress, _) => progress,
+        })
     }
 }
 
@@ -734,5 +778,54 @@ mod tests {
             Progress::Remembered,
         ));
         assert_eq!(state.next(now), Some(("stale".to_owned(), Step::Expire)));
+    }
+
+    #[test]
+    fn only_the_mac_whose_claim_commits_answers() {
+        let now = 1_763_600_100_000;
+        let claim = || Progress::PublishingWorking {
+            revision: StagedRevision {
+                object_id: reply_object_id("ask"),
+                revision_id: "revision".to_owned(),
+                upload_id: "upload".to_owned(),
+                base_revision_id: None,
+                manifest: Vec::new(),
+                chunks: Vec::new(),
+            },
+        };
+        let no_restage = |_: &AgentReply| -> Result<StagedRevision, CloudRuntimeError> {
+            panic!("a claim is never restaged as a final answer")
+        };
+        let mut first = AskState::default();
+        let mut second = AskState::default();
+        first.asks.push(remembered(
+            "ask",
+            now,
+            claim()
+                .after_upload(Uploaded::Committed, false, no_restage)
+                .expect("committed"),
+        ));
+        second.asks.push(remembered(
+            "ask",
+            now,
+            claim()
+                .after_upload(Uploaded::Stale, false, no_restage)
+                .expect("stale"),
+        ));
+        assert_eq!(first.next(now), Some(("ask".to_owned(), Step::RunTurn)));
+        assert_eq!(second.next(now), None);
+
+        let mut dropped = AskState::default();
+        dropped.asks.push(remembered(
+            "ask",
+            now,
+            claim()
+                .after_upload(Uploaded::Restage, false, no_restage)
+                .expect("restage"),
+        ));
+        assert_eq!(
+            dropped.next(now),
+            Some(("ask".to_owned(), Step::PublishWorking))
+        );
     }
 }

@@ -172,19 +172,7 @@ pub(super) async fn upload(
         .create_object_upload(&credentials, &key("create")?, &plan)
         .await;
     runtime.persist_clock(&access.store, &access.client);
-    let created = match created {
-        Err(CloudClientError::Api(error))
-            if matches!(
-                error.code,
-                CloudErrorCode::NotFound | CloudErrorCode::StaleRevision
-            ) =>
-        {
-            return Err(UploadRefused::Restage(CloudRuntimeError::Client(
-                CloudClientError::Api(error),
-            )));
-        }
-        other => other.map_err(|error| retry(CloudRuntimeError::Client(error)))?,
-    };
+    let created = created.map_err(refused)?;
     if created.upload_id != staged.upload_id {
         return Err(retry(CloudRuntimeError::IntegrityFailure));
     }
@@ -229,7 +217,7 @@ pub(super) async fn upload(
         .client
         .commit_upload(&credentials, &key("commit")?, &staged.upload_id)
         .await
-        .map_err(|error| retry(CloudRuntimeError::Client(error)))?;
+        .map_err(refused)?;
     if committed.state != "committed"
         || committed.upload_id != staged.upload_id
         || committed.revision_id.as_deref() != Some(&staged.revision_id)
@@ -247,4 +235,20 @@ pub(super) async fn upload(
             change_sequence: committed.change_sequence.unwrap_or(0),
         })
         .map_err(|error| retry(map_store_error(error)))
+}
+
+/// A refusal the same bytes can never get past is restaged: the base moved
+/// (for a claim, another writer created the object first) or the upload is gone.
+fn refused(error: CloudClientError) -> UploadRefused {
+    let restage = matches!(
+        &error,
+        CloudClientError::Api(api)
+            if matches!(api.code, CloudErrorCode::NotFound | CloudErrorCode::StaleRevision)
+    );
+    let error = CloudRuntimeError::Client(error);
+    if restage {
+        UploadRefused::Restage(error)
+    } else {
+        UploadRefused::Retry(error)
+    }
 }
