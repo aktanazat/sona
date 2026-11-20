@@ -1,6 +1,10 @@
 import SwiftUI
 
 private let toolsAnimation = Animation.snappy(duration: 0.24)
+/// The keys' corner radius and gap, so the tools sit on the keys' grid.
+private let toolRadius: CGFloat = 8
+private let toolGap: CGFloat = 6
+private let toolShape = RoundedRectangle(cornerRadius: toolRadius, style: .continuous)
 
 /// The top bar's first button: opens the tools, goes back from a tool's own field, and
 /// returns to the keys.
@@ -14,7 +18,7 @@ struct ToolsButton: View {
             }
         } label: {
             Image(systemName: symbol)
-                .font(.system(size: 17, weight: .medium))
+                .font(.body)
                 .contentTransition(.symbolEffect(.replace))
                 .frame(width: 38, height: 38)
                 .contentShape(Circle())
@@ -29,7 +33,7 @@ struct ToolsButton: View {
 
     private var symbol: String {
         if tools.composing != nil { return "chevron.backward" }
-        return tools.isOpen ? "keyboard.chevron.compact.down" : "sparkles"
+        return tools.isOpen ? "keyboard.chevron.compact.down" : "square.grid.2x2"
     }
 }
 
@@ -50,8 +54,8 @@ struct ComposeBar: View {
                 }
                 Spacer(minLength: 0)
             }
-            .font(.system(size: 16))
-            .padding(.horizontal, 14)
+            .font(.body)
+            .padding(.horizontal, 16)
             .frame(height: 38)
             .glassEffect(.regular, in: Capsule())
             .accessibilityElement(children: .ignore)
@@ -62,7 +66,7 @@ struct ComposeBar: View {
                 withAnimation(toolsAnimation) { tools.submit() }
             } label: {
                 Image(systemName: "arrow.up")
-                    .font(.system(size: 16, weight: .semibold))
+                    .font(.body.weight(.semibold))
                     .frame(width: 38, height: 38)
             }
             .buttonStyle(.glassProminent)
@@ -102,16 +106,16 @@ struct ToolsNotice: View {
 
     var body: some View {
         if let notice = tools.notice {
-            HStack(spacing: 10) {
-                Text(notice.text).font(.footnote.weight(.medium)).lineLimit(2)
+            HStack(spacing: 12) {
+                Text(notice.text).font(.footnote).lineLimit(2)
                 if notice.undoable, tools.lastChange != nil {
                     Button("tools.undo") { withAnimation(toolsAnimation) { tools.undo() } }
                         .font(.footnote.weight(.semibold))
                         .accessibilityIdentifier("tools-undo-notice")
                 }
             }
-            .padding(.horizontal, 14)
-            .frame(minHeight: 34)
+            .padding(.horizontal, 16)
+            .frame(minHeight: 36)
             .glassEffect(.regular, in: Capsule())
             .padding(.top, 4)
             .transition(.move(edge: .top).combined(with: .opacity))
@@ -127,12 +131,12 @@ struct ToolsPanel: View {
     let canCopy: Bool
 
     var body: some View {
-        VStack(spacing: 6) {
+        VStack(spacing: 8) {
             header.frame(height: 34)
             content.frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .padding(.horizontal, 6)
-        .padding(.top, 2)
+        .padding(.horizontal, 3)
+        .padding(.top, 4)
         .animation(toolsAnimation, value: tools.page)
         .sensoryFeedback(.selection, trigger: tools.page)
     }
@@ -172,7 +176,7 @@ struct ToolsPanel: View {
             }
         case .browse(.snippets, _): SnippetsList(tools: tools)
         case .browse(.dictation, _): RecordingOptions(tools: tools)
-        case let .working(action): Working(tools: tools, action: action)
+        case .working: Working(tools: tools)
         case let .answer(answer): AnswerView(tools: tools, answer: answer, canCopy: canCopy)
         case let .review(text): ReviewView(tools: tools, text: text, canCopy: canCopy)
         case .closed, .compose: EmptyView()
@@ -193,40 +197,18 @@ struct ToolsPanel: View {
 private struct TabBar: View {
     let tools: KeyboardTools
     let selected: KeyboardTools.Tab
-    @Namespace private var highlight
 
     var body: some View {
-        HStack(spacing: 4) {
-            tab(.ai, "tools.tab.ai", "sparkles")
-            tab(.snippets, "tools.tab.snippets", "text.append")
-            tab(.dictation, "tools.tab.dictation", "waveform")
-        }
-        .padding(3)
-        .glassEffect(.regular, in: Capsule())
-    }
-
-    private func tab(_ tab: KeyboardTools.Tab, _ title: LocalizedStringKey, _ symbol: String) -> some View {
-        Button {
+        Picker("tools.open", selection: Binding(get: { selected }, set: { tab in
             withAnimation(toolsAnimation) { tools.show(tab) }
-        } label: {
-            Label(title, systemImage: symbol)
-                .font(.subheadline.weight(.semibold))
-                .labelStyle(.titleAndIcon)
-                .lineLimit(1)
-                .minimumScaleFactor(0.8)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .foregroundStyle(selected == tab ? Theme.textPrimary : Theme.textSecondary)
-                .background {
-                    if selected == tab {
-                        Capsule().fill(Theme.surface).matchedGeometryEffect(id: "tab", in: highlight)
-                            .shadow(color: .black.opacity(0.08), radius: 2, y: 1)
-                    }
-                }
-                .contentShape(Capsule())
+        })) {
+            Text("tools.tab.ai").tag(KeyboardTools.Tab.ai)
+            Text("tools.tab.snippets").tag(KeyboardTools.Tab.snippets)
+            Text("tools.tab.dictation").tag(KeyboardTools.Tab.dictation)
         }
-        .buttonStyle(.plain)
-        .accessibilityAddTraits(selected == tab ? .isSelected : [])
-        .accessibilityIdentifier("tools-tab-\(String(describing: tab))")
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .accessibilityIdentifier("tools-tabs")
     }
 }
 
@@ -235,12 +217,12 @@ private struct BackHeader: View {
     let title: Text
 
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 8) {
             Button {
                 withAnimation(toolsAnimation) { tools.back() }
             } label: {
                 Image(systemName: "chevron.backward")
-                    .font(.system(size: 15, weight: .semibold))
+                    .font(.body.weight(.semibold))
                     .frame(width: 34, height: 34)
             }
             .buttonStyle(.plain)
@@ -258,15 +240,15 @@ private struct AIGrid: View {
     let tools: KeyboardTools
 
     var body: some View {
-        GlassEffectContainer(spacing: 8) {
-            VStack(spacing: 8) {
-                HStack(spacing: 8) {
+        GlassEffectContainer(spacing: toolGap) {
+            VStack(spacing: toolGap) {
+                HStack(spacing: toolGap) {
                     Tile("tools.ai.fix", "text.badge.checkmark", id: "fix") { tools.run(.fix) }
                     Tile("tools.ai.ask", "bubble.left.and.text.bubble.right", id: "ask") { tools.begin(.ask) }
                     Tile("tools.ai.translate", "translate", id: "translate") { tools.show(.ai, .translate) }
                     Tile("tools.ai.rewrite", "pencil.and.scribble", id: "rewrite") { tools.show(.ai, .rewrite) }
                 }
-                HStack(spacing: 8) {
+                HStack(spacing: toolGap) {
                     Tile("tools.ai.commands", "command", id: "commands") { tools.show(.ai, .commands) }
                     Tile("tools.ai.case", "textformat", id: "case") { tools.show(.ai, .changeCase) }
                     Tile("tools.ai.styles", "bold.italic.underline", id: "styles") { tools.show(.ai, .styles) }
@@ -297,17 +279,17 @@ private struct Tile: View {
         Button {
             withAnimation(toolsAnimation) { action() }
         } label: {
-            VStack(spacing: 5) {
-                Image(systemName: symbol).font(.system(size: 19, weight: .medium)).frame(height: 22)
-                Text(title).font(.caption.weight(.medium)).lineLimit(1).minimumScaleFactor(0.75)
+            VStack(spacing: 4) {
+                Image(systemName: symbol).font(.title3).frame(height: 24)
+                Text(title).font(.caption).lineLimit(1).minimumScaleFactor(0.75)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .contentShape(toolShape)
         }
         .buttonStyle(.plain)
         .foregroundStyle(Theme.textPrimary)
         .opacity(isEnabled ? 1 : 0.35)
-        .glassEffect(.regular.interactive(), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .glassEffect(.regular.interactive(), in: toolShape)
         .accessibilityIdentifier("tools-\(id)")
     }
 }
@@ -315,22 +297,16 @@ private struct Tile: View {
 /// Two columns of choices that scroll when there are more than fit.
 private struct ChipGrid<Item: Identifiable, Content: View>: View {
     let items: [Item]
-    var leading: AnyView?
     @ViewBuilder let chip: (Item) -> Content
-
-    init(items: [Item], @ViewBuilder chip: @escaping (Item) -> Content) {
-        self.items = items
-        self.chip = chip
-    }
 
     var body: some View {
         ScrollView {
-            GlassEffectContainer(spacing: 6) {
-                LazyVGrid(columns: [GridItem(.flexible(), spacing: 6), GridItem(.flexible(), spacing: 6)], spacing: 6) {
+            GlassEffectContainer(spacing: toolGap) {
+                LazyVGrid(columns: [GridItem(.flexible(), spacing: toolGap), GridItem(.flexible(), spacing: toolGap)], spacing: toolGap) {
                     ForEach(items) { chip($0) }
                 }
             }
-            .padding(.bottom, 6)
+            .padding(.bottom, 4)
         }
         .scrollIndicators(.hidden)
         .scrollBounceBehavior(.basedOnSize)
@@ -347,19 +323,16 @@ private struct Chip<Label: View>: View {
             withAnimation(toolsAnimation) { action() }
         } label: {
             label()
-                .font(.system(size: 15, weight: .medium))
+                .font(.subheadline)
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
                 .padding(.horizontal, 12)
-                .frame(maxWidth: .infinity, minHeight: 40)
-                .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .frame(maxWidth: .infinity, minHeight: 44)
+                .contentShape(toolShape)
         }
         .buttonStyle(.plain)
         .foregroundStyle(Theme.textPrimary)
-        .glassEffect(
-            selected ? .regular.tint(Theme.accent.opacity(0.3)).interactive() : .regular.interactive(),
-            in: RoundedRectangle(cornerRadius: 12, style: .continuous)
-        )
+        .glassEffect(selected ? .regular.tint(Theme.accent.opacity(0.3)).interactive() : .regular.interactive(), in: toolShape)
         .accessibilityAddTraits(selected ? .isSelected : [])
     }
 }
@@ -428,24 +401,24 @@ private struct SnippetsList: View {
 
     var body: some View {
         ScrollView {
-            GlassEffectContainer(spacing: 6) {
-                LazyVStack(spacing: 6) {
+            GlassEffectContainer(spacing: toolGap) {
+                LazyVStack(spacing: toolGap) {
                     Row(action: tools.saveSelection) {
-                        Label("tools.saveSelection", systemImage: "plus.square.on.square")
+                        Label("tools.saveSelection", systemImage: "plus")
                             .font(.subheadline.weight(.semibold))
                             .foregroundStyle(Theme.accent)
                     }
                     .accessibilityIdentifier("tools-save-snippet")
                     ForEach(tools.allSnippets, id: \.self) { snippet in
                         Row { tools.insert(snippet.expansion) } label: {
-                            HStack(spacing: 10) {
+                            HStack(spacing: 12) {
                                 Text(verbatim: snippet.trigger)
-                                    .font(.footnote.monospaced().weight(.medium))
                                     .foregroundStyle(Theme.textSecondary)
                                     .lineLimit(1)
-                                    .frame(maxWidth: 110, alignment: .leading)
-                                Text(verbatim: snippet.expansion).font(.subheadline).lineLimit(1)
+                                    .frame(maxWidth: 96, alignment: .leading)
+                                Text(verbatim: snippet.expansion).lineLimit(1)
                             }
+                            .font(.subheadline)
                         }
                         .contextMenu {
                             if tools.snippets.contains(snippet) {
@@ -455,11 +428,11 @@ private struct SnippetsList: View {
                     }
                     if tools.allSnippets.isEmpty {
                         Text("tools.noSnippets").font(.footnote).foregroundStyle(Theme.textSecondary)
-                            .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 4)
+                            .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 12)
                     }
                 }
             }
-            .padding(.bottom, 6)
+            .padding(.bottom, 4)
         }
         .scrollIndicators(.hidden)
         .scrollBounceBehavior(.basedOnSize)
@@ -475,13 +448,13 @@ private struct Row<Content: View>: View {
             withAnimation(toolsAnimation) { action() }
         } label: {
             label()
-                .frame(maxWidth: .infinity, minHeight: 40, alignment: .leading)
+                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
                 .padding(.horizontal, 12)
-                .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .contentShape(toolShape)
         }
         .buttonStyle(.plain)
         .foregroundStyle(Theme.textPrimary)
-        .glassEffect(.regular.interactive(), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .glassEffect(.regular.interactive(), in: toolShape)
     }
 }
 
@@ -496,7 +469,7 @@ private struct RecordingOptions: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 12) {
                 section("tools.recordingStyle") {
                     ForEach(styles) { choice in
                         Chip(selected: (tools.recordingStyle ?? "default") == choice.id) { choice.name } action: {
@@ -506,7 +479,7 @@ private struct RecordingOptions: View {
                     }
                 }
                 if let style = tools.effectiveStyle, DictationTone.styleIDs.contains(style.id) {
-                    ToneSlider(style: style).id(style.id).padding(.horizontal, 6)
+                    ToneSlider(style: style).id(style.id).padding(.horizontal, 4)
                 }
                 section("tools.recordingLanguage") {
                     Chip(selected: tools.recordingLanguage == nil) { Text("tools.typingLanguage") } action: {
@@ -522,11 +495,10 @@ private struct RecordingOptions: View {
                 }
                 Toggle("tools.reviewBeforeInsert", isOn: $tools.reviewsDictation)
                     .font(.subheadline)
-                    .padding(.horizontal, 6)
+                    .padding(.horizontal, 4)
                     .accessibilityIdentifier("tools-review")
-                Text("tools.recordingFooter").font(.caption).foregroundStyle(Theme.textSecondary).padding(.horizontal, 6)
             }
-            .padding(.bottom, 6)
+            .padding(.bottom, 4)
         }
         .scrollIndicators(.hidden)
         .scrollBounceBehavior(.basedOnSize)
@@ -539,10 +511,10 @@ private struct RecordingOptions: View {
 
     private func section(_ title: LocalizedStringKey, @ViewBuilder chips: () -> some View) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(title).font(.caption.weight(.semibold)).foregroundStyle(Theme.textSecondary).padding(.horizontal, 6)
+            Text(title).font(.footnote).foregroundStyle(Theme.textSecondary).padding(.horizontal, 4)
             ScrollView(.horizontal) {
-                GlassEffectContainer(spacing: 6) {
-                    HStack(spacing: 6) { chips() }
+                GlassEffectContainer(spacing: toolGap) {
+                    HStack(spacing: toolGap) { chips() }
                 }
             }
             .scrollIndicators(.hidden)
@@ -550,20 +522,25 @@ private struct RecordingOptions: View {
     }
 }
 
+/// The answer as the model writes it, in the card the finished answer keeps, with Stop where
+/// its actions will be.
 private struct Working: View {
     let tools: KeyboardTools
-    let action: KeyboardAI
 
     var body: some View {
-        VStack(spacing: 10) {
-            Image(systemName: "sparkles")
-                .font(.system(size: 28, weight: .medium))
-                .foregroundStyle(Theme.accent)
-                .symbolEffect(.variableColor.iterative.dimInactiveLayers.nonReversing, options: .repeating)
-            Text("tools.working").font(.subheadline).foregroundStyle(Theme.textSecondary)
+        VStack(spacing: 8) {
+            TextCard(text: tools.partial, follows: true)
+                .overlay {
+                    if tools.partial.isEmpty { ProgressView().accessibilityLabel(Text("tools.working")) }
+                }
+            HStack(spacing: 8) {
+                Button("tools.stop") { withAnimation(toolsAnimation) { tools.stop() } }
+                    .buttonStyle(.glass)
+                    .accessibilityIdentifier("tools-stop")
+            }
+            .font(.subheadline.weight(.semibold))
+            .padding(.bottom, 4)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .accessibilityElement(children: .combine)
         .accessibilityIdentifier("tools-working")
     }
 }
@@ -636,19 +613,23 @@ private struct ReviewView: View {
     }
 }
 
+/// Text in a well below the keys' glass: white in light mode, black in dark.
 private struct TextCard: View {
     let text: String
+    /// Keeps the newest words in view while the model writes.
+    var follows = false
 
     var body: some View {
         ScrollView {
             Text(verbatim: text)
-                .font(.system(size: 16))
+                .font(.body)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(12)
                 .accessibilityIdentifier("tools-answer")
         }
+        .defaultScrollAnchor(follows ? .bottom : .top)
         .scrollBounceBehavior(.basedOnSize)
-        .background(Theme.surface.opacity(0.7), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .background(Color(uiColor: .systemBackground), in: toolShape)
     }
 }
 
