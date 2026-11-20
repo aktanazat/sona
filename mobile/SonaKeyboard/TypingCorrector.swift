@@ -7,20 +7,27 @@ struct Correction: Equatable {
 }
 
 /// What the strip offers for the word being typed. `correction` is exactly what ending the
-/// word would apply, so the strip never promises something space does not do.
+/// word would apply, so the strip never promises something space does not do. `restore` is
+/// the typed form of a word corrected earlier that the cursor came back to; `emoji` stands
+/// for the word. With nothing typed, `others` are the words likely to come next.
 struct Suggestions: Equatable {
     let typed: String
     let correction: String?
     let others: [String]
+    var restore: String?
+    var emoji: String?
 }
 
 /// Words the user wants left as typed: Contacts names, text replacements, the Mac
-/// vocabulary, and words restored after a correction. Names and vocabulary words are also
-/// offered as the completion of a typed prefix, spelled as they were given.
+/// vocabulary, words restored after a correction, and words the keyboard learned. Names,
+/// vocabulary and learned words are also offered as the completion of a typed prefix,
+/// spelled as they were given.
 struct TypingLexicon {
     private var words: Set<String> = []
     private var expansions: [String: String] = [:]
     private(set) var names: [String] = []
+    private(set) var learned: [String] = []
+    private var learnedKeys: Set<String> = []
 
     init(replacements: [(shortcut: String, text: String)] = [], vocabulary: [String] = []) {
         replacements.forEach { add(shortcut: $0.shortcut, text: $0.text) }
@@ -50,14 +57,23 @@ struct TypingLexicon {
         }
     }
 
-    func contains(_ word: some StringProtocol) -> Bool { words.contains(word.lowercased()) }
+    /// Replaces the learned words with `words`, as the keyboard's learning has them now.
+    mutating func setLearned(_ words: [String]) {
+        learned = words
+        learnedKeys = Set(words.map { $0.lowercased() })
+    }
+
+    func contains(_ word: some StringProtocol) -> Bool {
+        let key = word.lowercased()
+        return words.contains(key) || learnedKeys.contains(key)
+    }
     func expansion(of word: some StringProtocol) -> String? { expansions[word.lowercased()] }
 
-    /// Names and vocabulary words that start with `prefix`, ignoring case and accents.
+    /// Names, vocabulary and learned words that start with `prefix`, ignoring case and accents.
     func names(startingWith prefix: some StringProtocol) -> [String] {
         guard prefix.count >= 2 else { return [] }
         let options: String.CompareOptions = [.caseInsensitive, .diacriticInsensitive, .anchored]
-        return names.filter { $0.count > prefix.count && $0.range(of: prefix, options: options) != nil }
+        return (names + learned).filter { $0.count > prefix.count && $0.range(of: prefix, options: options) != nil }
     }
 }
 
@@ -159,9 +175,9 @@ final class TypingCorrector {
     }
 
     private func needsCorrection(_ word: Substring, after text: String, lexicon: TypingLexicon) -> Bool {
-        guard word.count > 1, !word.dropFirst().contains(where: \.isUppercase), !lexicon.contains(word) else {
-            return false
-        }
+        guard word.count > 1, !word.dropFirst().contains(where: \.isUppercase), !lexicon.contains(word),
+              !TypingText.isStretched(word)
+        else { return false }
         if word.first?.isUppercase == true, !TypingText.startsSentence(before: text[..<word.startIndex]) {
             return false
         }
@@ -228,6 +244,29 @@ enum TypingText {
         let word = chunk[wordStart...].drop { $0 == "'" || $0 == "’" }
         guard word.last?.isLetter == true else { return nil }
         return word
+    }
+
+    /// A letter held three times or more, as in "sooo" or "yesss", is a word stretched on
+    /// purpose; no dictionary word repeats a letter that often.
+    static func isStretched(_ word: some StringProtocol) -> Bool {
+        var run = 1
+        for (previous, letter) in zip(word.lowercased(), word.lowercased().dropFirst()) {
+            run = previous == letter ? run + 1 : 1
+            if run >= 3 { return true }
+        }
+        return false
+    }
+
+    /// The whole words of the sentence before `text`'s end, last `limit` of them, oldest
+    /// first; a word still being typed at the end is left out.
+    static func sentenceWords(before text: Substring, limit: Int) -> [String] {
+        let start = text.lastIndex { $0.isNewline || ".!?".contains($0) }.map(text.index(after:)) ?? text.startIndex
+        var sentence = text[start...]
+        if let last = sentence.last, isWordCharacter(last) {
+            sentence = sentence[..<(sentence.lastIndex { !isWordCharacter($0) } ?? sentence.startIndex)]
+        }
+        let words = sentence.split { !isWordCharacter($0) }.map(String.init)
+        return Array(words.suffix(limit))
     }
 
     /// Whether `text` leaves the cursor at the start of a sentence: nothing before it, a new

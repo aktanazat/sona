@@ -71,6 +71,25 @@ struct SwipeTypingTests {
         #expect(found.isEmpty)
     }
 
+    /* These words stand in for a Russian spelling lexicon. The decoder has to find "ёлка"
+     * by its held-key prefix, from a path that starts on е. */
+    static let russianWords = [
+        "привет", "приветствие", "при", "спасибо", "спас", "ёлка", "ёж", "есть", "завтра", "завод",
+        "дома", "дом", "домой", "хорошо", "хор", "ход",
+    ]
+
+    @Test(
+        "on the Russian layout a swipe spells Russian words, ё included",
+        arguments: ["привет", "спасибо", "ёлка", "завтра", "дома", "хорошо"]
+    )
+    func russian(word: String) {
+        let decoder = Self.decoder(.russian)
+        let plain = word.replacingOccurrences(of: "ё", with: "е")
+        let dictionary = { (prefix: String) in Self.russianWords.filter { $0.hasPrefix(prefix) } }
+        let found = decoder.words(for: Self.path(for: plain, on: decoder), dictionary: dictionary, names: [])
+        #expect(found.first == word, "\(found)")
+    }
+
     @Test("a typed prefix of a Contacts name offers the name, capitalized as in Contacts")
     func contactCompletion() throws {
         var lexicon = TypingLexicon()
