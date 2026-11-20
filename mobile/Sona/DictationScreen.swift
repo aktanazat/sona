@@ -401,14 +401,14 @@ private struct KeyboardReturnCard: View {
     @AppStorage(DictationPreferences.minutesKey) private var minutes = 5
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 8) {
             Label("keyboard.returnTitle", systemImage: "arrow.uturn.backward")
                 .font(.headline)
                 .foregroundStyle(Theme.textPrimary)
             Group {
                 switch setup {
                 case nil: Text("keyboard.swipeBack")
-                case .asking: Text("keyboard.setupAsking")
+                case .asking: EmptyView()
                 case .ready: Text("keyboard.setupReady")
                 case let .refused(message): Text(message)
                 }
@@ -433,13 +433,10 @@ private struct KeyboardReturnCard: View {
                 }
                 .font(.subheadline)
                 .foregroundStyle(Theme.textPrimary)
-                Text("keyboard.nextTime")
-                    .font(.footnote)
-                    .foregroundStyle(Theme.textSecondary)
             }
         }
-        .padding(14)
+        .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.controlRadius * 2, style: .continuous))
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous))
     }
 }

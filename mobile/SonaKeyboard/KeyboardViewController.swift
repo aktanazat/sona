@@ -41,6 +41,7 @@ final class KeyboardViewController: UIInputViewController {
     private var dictation = KeyboardDictation()
     private var microphone: KeyboardMicrophone?
     private var profile = DictationProfile.empty
+    private var echo = FieldEcho()
     private let haptic = UIImpactFeedbackGenerator(style: .light)
     #if DEBUG
     private let frames = FrameMeter()
@@ -50,6 +51,11 @@ final class KeyboardViewController: UIInputViewController {
     private var requestedAt: Date?
     private var requestedID: UUID?
     private var wantedHeight: CGFloat { traitCollection.verticalSizeClass == .compact ? 200 : 280 }
+
+    /// The system plays its key click only for an input view that asks for it.
+    override func loadView() {
+        view = ClickingInputView(frame: .zero, inputViewStyle: .keyboard)
+    }
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -98,7 +104,6 @@ final class KeyboardViewController: UIInputViewController {
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
-        typing.hasTyped = false
         let languages = KeyboardLanguages.shared().enabled
         typing.showsLanguageKey = languages.count > 1
         if !languages.contains(typing.language) { setLanguage(languages[0]) }
@@ -150,7 +155,7 @@ final class KeyboardViewController: UIInputViewController {
         refreshTyping(startingField: false)
     }
 
-    private var textBefore: String { textDocumentProxy.documentContextBeforeInput ?? "" }
+    private var textBefore: String { echo.before(textDocumentProxy.documentContextBeforeInput ?? "") }
     /// UIKit declares this nonnull, yet some fields hand over nil, and Swift's bridge to a
     /// non-optional UUID traps on it. The same getter, declared optional, keeps nil as nil.
     private var documentID: UUID? {
@@ -184,7 +189,6 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private func press(_ key: Key) {
-        typing.hasTyped = true
         state.notice = nil
         state.seenMessage = state.session.message
         switch key {
@@ -219,7 +223,6 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private func choose(_ word: String) {
-        typing.hasTyped = true
         apply(session.choose(word, before: textBefore))
         refreshShift()
         refreshSuggestions()
@@ -234,7 +237,6 @@ final class KeyboardViewController: UIInputViewController {
         )
         let words = decoder.words(for: path, dictionary: corrector.completions(of:), names: session.lexicon.names)
         guard !words.isEmpty else { return }
-        typing.hasTyped = true
         state.notice = nil
         state.seenMessage = state.session.message
         let before = textBefore
@@ -250,6 +252,9 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private func apply(_ edit: TypingSession.Edit) {
+        echo.edited(
+            host: textDocumentProxy.documentContextBeforeInput ?? "", deleting: edit.deleteCount, inserting: edit.insert
+        )
         for _ in 0..<edit.deleteCount { textDocumentProxy.deleteBackward() }
         if !edit.insert.isEmpty { textDocumentProxy.insertText(edit.insert) }
     }
@@ -315,7 +320,7 @@ final class KeyboardViewController: UIInputViewController {
             let store = try KeyboardVocabularyStore.shared()
             profile = try store.profile()
             try store.load().forEach { session.lexicon.addName($0) }
-        } catch { state.notice = error.localizedDescription }
+        } catch { show(error) }
     }
 
     private func reload() {
@@ -357,7 +362,7 @@ final class KeyboardViewController: UIInputViewController {
                 state.draft = nil
             }
             refreshRoute(readingStatus: false)
-        } catch { state.notice = error.localizedDescription }
+        } catch { show(error) }
     }
 
     /// Dictate listens in the keyboard itself; only after the microphone refused it does
@@ -379,7 +384,7 @@ final class KeyboardViewController: UIInputViewController {
                 id: UUID(), action: .start, requestID: id,
                 documentID: documentID, createdAt: Date(), language: typing.language.rawValue
             ))
-        } catch { state.waiting = false; state.notice = error.localizedDescription }
+        } catch { state.waiting = false; show(error) }
     }
 
     private func finish() {
@@ -402,6 +407,13 @@ final class KeyboardViewController: UIInputViewController {
         microphone.onNotice = { [weak self] notice in self?.state.notice = notice }
         microphone.attach(to: view)
         self.microphone = microphone
+    }
+
+    /// Sona's own draft errors say what happened; anything else from the shared storage
+    /// is one plain sentence, never the system's wording.
+    private func show(_ error: Error) {
+        state.notice = (error as? KeyboardDraftError)?.localizedDescription
+            ?? NSLocalizedString("keyboard.storageFailed", comment: "")
     }
 
     private var dictationLanguage: String {
@@ -452,7 +464,7 @@ final class KeyboardViewController: UIInputViewController {
     /// applies them, then the field, then the queue Sona keeps in Notes.
     private func insertDictation(_ heard: String) {
         let text = profile.apply(to: DictationCleanup.clean(heard, language: dictationLanguage))
-        textDocumentProxy.insertText(TypingSession.joiningSpace(before: textBefore) + text)
+        apply(TypingSession.Edit(insert: TypingSession.joiningSpace(before: textBefore) + text))
         refreshShift()
         refreshSuggestions()
         do {
@@ -463,7 +475,7 @@ final class KeyboardViewController: UIInputViewController {
             Task.detached(priority: .utility) {
                 try? queue.trimAudio(maxBytes: 32_000_000, maxAge: 7 * 24 * 60 * 60)
             }
-        } catch { state.notice = error.localizedDescription }
+        } catch { show(error) }
     }
 
     /// A stop sent before the app has answered the start, as a quick hold-to-talk release
@@ -483,7 +495,7 @@ final class KeyboardViewController: UIInputViewController {
                 id: UUID(), action: action, requestID: id,
                 documentID: documentID, createdAt: Date()
             ))
-        } catch { state.notice = error.localizedDescription }
+        } catch { show(error) }
     }
 
     private func insertDraft() {
@@ -491,9 +503,8 @@ final class KeyboardViewController: UIInputViewController {
         do {
             let text = try KeyboardDraftStore.shared().take(id: draft.id)
             state.draft = nil
-            textDocumentProxy.insertText(TypingSession.joiningSpace(before: textBefore) + text)
-            state.notice = NSLocalizedString("keyboard.inserted", comment: "")
-        } catch { state.draft = nil; state.notice = error.localizedDescription }
+            apply(TypingSession.Edit(insert: TypingSession.joiningSpace(before: textBefore) + text))
+        } catch { state.draft = nil; show(error) }
     }
 
     private func discardDraft() {
@@ -501,7 +512,7 @@ final class KeyboardViewController: UIInputViewController {
         do {
             try KeyboardDraftStore.shared().discard(id: draft.id)
             state.draft = nil
-        } catch { state.notice = error.localizedDescription }
+        } catch { show(error) }
     }
 }
 
@@ -555,15 +566,23 @@ private struct KeyboardView: View {
             .overlay { SwipeTrail(points: typing.trail) }
             .overlay { KeySurface(model: typing, rows: rows, swipes: typing.layer == .letters) }
             .overlay(alignment: .topLeading) {
-                if let choice = typing.accentChoice { AccentPopup(choice: choice) }
+                if let choice = typing.accentChoice {
+                    AccentPopup(choice: choice)
+                } else if let callout = typing.callout {
+                    KeyBubble(anchor: callout.anchor, width: callout.anchor.width + 12) {
+                        Text(verbatim: callout.text).font(.system(size: 32))
+                    }
+                }
             }
     }
 
     /// While dictating, the words heard so far; then the word strip while a word is being
-    /// typed, unless a message came after the last key; otherwise what the keyboard has to say.
+    /// typed, unless a message came after the last key; then that message; otherwise nothing.
     @ViewBuilder
     private var status: some View {
-        if state.hasFullAccess, state.dictating {
+        if typing.accentChoice != nil {
+            Color.clear
+        } else if state.hasFullAccess, state.dictating {
             let heard = state.dictation == .idle ? state.session.heard : state.heard
             Text(verbatim: heard ?? String(localized: "keyboard.listening"))
                 .font(.subheadline)
@@ -576,27 +595,12 @@ private struct KeyboardView: View {
                 .accessibilityIdentifier("keyboard-heard")
         } else if let suggestions = typing.suggestions, state.newMessage == nil {
             SuggestionStrip(suggestions: suggestions, choose: typing.choose)
-        } else if !state.hasFullAccess, !typing.hasTyped {
-            hint("keyboard.needsFullAccess")
         } else if state.hasFullAccess, let notice = state.session.message ?? state.notice {
-            Text(notice).font(.caption).foregroundStyle(Theme.textSecondary).lineLimit(3)
+            Text(notice).font(.caption).foregroundStyle(Theme.textSecondary).lineLimit(2)
                 .accessibilityIdentifier("keyboard-status")
-        } else if state.hasFullAccess, !typing.hasTyped {
-            hint(state.needsSetup ? "keyboard.setup" : state.route == .openApp ? "keyboard.cold" : "keyboard.ready")
         } else {
-            HStack(spacing: 8) {
-                SonaMark()
-                    .frame(width: 26, height: 15)
-                    .accessibilityHidden(true)
-                Text("keyboard.title")
-                    .font(.subheadline.weight(.semibold))
-                    .lineLimit(1)
-            }
+            Color.clear
         }
-    }
-
-    private func hint(_ text: LocalizedStringKey) -> some View {
-        Text(text).font(.caption).foregroundStyle(Theme.textSecondary).lineLimit(3).minimumScaleFactor(0.8)
     }
 
     /// Before the app has the microphone allowed, Dictate opens it once to ask. After the
@@ -722,7 +726,7 @@ private struct SwipeTrail: View {
             path.move(to: first)
             points.dropFirst().forEach { path.addLine(to: $0) }
             context.stroke(
-                path, with: .color(Theme.accent.opacity(0.55)),
+                path, with: .color(Theme.textPrimary.opacity(0.25)),
                 style: StrokeStyle(lineWidth: 6, lineCap: .round, lineJoin: .round)
             )
         }
@@ -736,23 +740,49 @@ private struct AccentPopup: View {
     let choice: AccentChoice
 
     var body: some View {
-        HStack(spacing: 0) {
-            ForEach(Array(choice.options.enumerated()), id: \.offset) { index, option in
-                Text(verbatim: option)
-                    .font(.system(size: 23))
-                    .frame(width: choice.anchor.width, height: choice.anchor.height - 10)
-                    .foregroundStyle(index == choice.selected ? Color.white : Theme.textPrimary)
-                    .background(
-                        index == choice.selected ? Theme.accent : Color.clear,
-                        in: RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    )
+        KeyBubble(anchor: choice.anchor, width: CGFloat(choice.options.count) * choice.anchor.width + 8, x: choice.originX - 4) {
+            HStack(spacing: 0) {
+                ForEach(Array(choice.options.enumerated()), id: \.offset) { index, option in
+                    Text(verbatim: option)
+                        .font(.system(size: 23))
+                        .frame(width: choice.anchor.width, height: choice.anchor.height - 10)
+                        .foregroundStyle(index == choice.selected ? Color.white : Theme.textPrimary)
+                        .background(
+                            index == choice.selected ? Theme.accent : Color.clear,
+                            in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        )
+                }
             }
         }
-        .padding(4)
-        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .shadow(color: .black.opacity(0.2), radius: 6, y: 2)
-        .offset(x: choice.originX - 4, y: choice.anchor.minY - choice.anchor.height)
+    }
+}
+
+/// A key's fill grown up out of the key itself, as the system keyboard draws its letter
+/// callouts and accent choices: a bubble one key high above the key, joined to it.
+private struct KeyBubble<Content: View>: View {
+    let anchor: CGRect
+    let width: CGFloat
+    var x: CGFloat?
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        let key = anchor.insetBy(dx: 3, dy: 5)
+        let left = x ?? key.midX - width / 2
+        ZStack(alignment: .topLeading) {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(KeyFace.fill)
+                .frame(width: key.width, height: key.height + 8)
+                .offset(x: key.minX - left, y: key.height - 4)
+            content
+                .frame(width: width, height: key.height)
+                .foregroundStyle(Theme.textPrimary)
+                .background(KeyFace.fill, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        }
+        .compositingGroup()
+        .shadow(color: .black.opacity(0.25), radius: 3, y: 1)
+        .offset(x: left, y: key.minY - key.height - 4)
         .allowsHitTesting(false)
+        .accessibilityHidden(true)
     }
 }
 
@@ -781,36 +811,18 @@ private struct DraftPanel: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 10)
+            .padding(.top, 8)
         }
         .scrollBounceBehavior(.basedOnSize)
         .clipped()
     }
 }
 
-/// Sona's mark, traced from the app icon in its 1024-point space.
-private struct SonaMark: View {
-    var body: some View {
-        Canvas { context, size in
-            let scale = min(size.width / 678, size.height / 383)
-            let transform = CGAffineTransform(scaleX: scale, y: scale).translatedBy(x: -173, y: -320)
-            let dot = Path(ellipseIn: CGRect(x: 173, y: 458, width: 108, height: 108))
-            var wave = Path()
-            wave.move(to: CGPoint(x: 404, y: 512))
-            wave.addCurve(to: CGPoint(x: 481, y: 374), control1: CGPoint(x: 420, y: 440), control2: CGPoint(x: 450, y: 374))
-            wave.addCurve(to: CGPoint(x: 620, y: 649), control1: CGPoint(x: 530, y: 374), control2: CGPoint(x: 570, y: 649))
-            wave.addCurve(to: CGPoint(x: 760, y: 472), control1: CGPoint(x: 680, y: 649), control2: CGPoint(x: 720, y: 472))
-            wave.addLine(to: CGPoint(x: 797, y: 472))
-            context.fill(dot.applying(transform), with: .foreground)
-            context.stroke(
-                wave.applying(transform),
-                with: .foreground,
-                style: StrokeStyle(lineWidth: 108 * scale, lineCap: .round, lineJoin: .round)
-            )
-        }
-    }
-}
-
 /// UITextDocumentProxy's own `documentIdentifier` getter with the nullability it has in practice.
 @objc private protocol OptionalDocumentIdentifier {
     var documentIdentifier: UUID? { get }
+}
+
+private final class ClickingInputView: UIInputView, UIInputViewAudioFeedback {
+    var enableInputClicksWhenVisible: Bool { true }
 }

@@ -50,6 +50,12 @@ struct KeyCap: Hashable {
     var units = 1.0
 }
 
+/// A pressed letter and the key it sits on.
+struct KeyCallout: Equatable {
+    let text: String
+    let anchor: CGRect
+}
+
 /// A held letter's accented forms, laid out one key wide each from `originX`.
 struct AccentChoice: Equatable {
     let anchor: CGRect
@@ -128,7 +134,6 @@ final class TypingModel {
     var language = TypingLanguage.english
     var shift = Shift.off
     var suggestions: Suggestions?
-    var hasTyped = false
     var returnKey = ReturnKey(.default)
     var extraKeys: [String] = []
     var showsNextKeyboard = true
@@ -136,6 +141,8 @@ final class TypingModel {
     var pressed: Set<Key> = []
     var trail: [CGPoint] = []
     var accentChoice: AccentChoice?
+    /// The letter under a finger, shown enlarged above its key as the system keyboard does.
+    var callout: KeyCallout?
     @ObservationIgnored var press: (Key) -> Void = { _ in }
     @ObservationIgnored var choose: (String) -> Void = { _ in }
     @ObservationIgnored var swipe: ([CGPoint], KeyGrid) -> Void = { _, _ in }
@@ -244,15 +251,11 @@ private struct KeyButton: View {
                 .accessibilityLabel(Text("keyboard.next"))
         case .language:
             Text(verbatim: model.language.code)
-                .font(.system(size: 15, weight: .semibold))
+                .font(.system(size: 16))
                 .accessibilityLabel(Text("keyboard.language \(model.language.name)"))
         case .space:
-            Text(verbatim: model.showsLanguageKey ? model.language.name : String(localized: "keyboard.space"))
+            Text("keyboard.space")
                 .font(.system(size: 16))
-                .lineLimit(1)
-                .minimumScaleFactor(0.6)
-                .padding(.horizontal, 4)
-                .accessibilityLabel(Text("keyboard.space"))
         case .newLine:
             if let title = model.returnKey.title {
                 Text(LocalizedStringKey(title)).font(.system(size: 16)).lineLimit(1).minimumScaleFactor(0.6)
@@ -310,9 +313,14 @@ private struct TypingKeyStyle: ButtonStyle {
     }
 }
 
-/// Keys are Liquid Glass over the system keyboard backdrop; the return key carries the accent
-/// when the field names an action.
-private struct KeyFace: ViewModifier {
+/// Keys are flat fills with a one-point shadow over the system keyboard backdrop, as the
+/// system keyboard draws them; the return key carries the accent when the field names an
+/// action.
+struct KeyFace: ViewModifier {
+    static let fill = Color(uiColor: UIColor { $0.userInterfaceStyle == .dark ? UIColor(white: 0.42, alpha: 1) : .white })
+    static let pressedFill = Color(uiColor: UIColor {
+        $0.userInterfaceStyle == .dark ? UIColor(white: 0.3, alpha: 1) : UIColor(white: 0.82, alpha: 1)
+    })
     let pressed: Bool
     var prominent = false
 
@@ -320,15 +328,16 @@ private struct KeyFace: ViewModifier {
         content
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .foregroundStyle(prominent ? Color.white : Theme.textPrimary)
-            .glassEffect(glass, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .background(fill, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .shadow(color: .black.opacity(0.3), radius: 0, y: 1)
             .padding(.horizontal, 3)
             .padding(.vertical, 5)
             .contentShape(Rectangle())
     }
 
-    private var glass: Glass {
-        if prominent { return .regular.tint(Theme.accent.opacity(pressed ? 0.7 : 1)) }
-        return pressed ? .regular.tint(Theme.border) : .regular
+    private var fill: Color {
+        if prominent { return Theme.accent.opacity(pressed ? 0.7 : 1) }
+        return pressed ? Self.pressedFill : Self.fill
     }
 }
 

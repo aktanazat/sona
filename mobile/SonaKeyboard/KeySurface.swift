@@ -72,7 +72,9 @@ final class KeyTouchView: UIView {
             let finger = Finger(key: grid.key(at: point), start: point)
             fingers[touch] = finger
             guard let key = finger.key?.cap.key else { continue }
+            UIDevice.current.playInputClick()
             model.pressed.insert(key)
+            showCallout(finger)
             if key == .delete { finger.repeating = repeatDelete() } else { holdForAccents(finger) }
         }
     }
@@ -92,6 +94,7 @@ final class KeyTouchView: UIView {
                 finger.swiping = true
                 finger.hold?.cancel()
                 model.pressed = []
+                model.callout = nil
             }
             if finger.swiping {
                 model.trail = finger.path
@@ -99,6 +102,7 @@ final class KeyTouchView: UIView {
                 finger.key.map { model.pressed.remove($0.cap.key) }
                 finger.key = under
                 model.pressed.insert(under.cap.key)
+                showCallout(finger)
                 holdForAccents(finger)
             }
         }
@@ -123,6 +127,7 @@ final class KeyTouchView: UIView {
         finger.hold?.cancel()
         finger.repeating?.cancel()
         finger.key.map { model.pressed.remove($0.cap.key) }
+        if model.callout?.anchor == finger.key?.frame { model.callout = nil }
         if let choice = model.accentChoice {
             model.accentChoice = nil
             if typing { model.press(.character(choice.options[choice.selected])) }
@@ -210,5 +215,16 @@ private final class KeyElement: UIAccessibilityElement {
     override func accessibilityActivate() -> Bool {
         MainActor.assumeIsolated { model.press(key) }
         return true
+    }
+}
+
+extension KeyTouchView {
+    /// A letter under a finger grows above its key; other keys only darken.
+    private func showCallout(_ finger: Finger) {
+        guard let key = finger.key, case let .character(text) = key.cap.key else {
+            model.callout = nil
+            return
+        }
+        model.callout = KeyCallout(text: model.face(of: text), anchor: key.frame)
     }
 }

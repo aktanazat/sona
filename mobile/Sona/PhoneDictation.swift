@@ -154,7 +154,7 @@ final class PhoneDictation: ObservableObject {
             do {
                 try capture(recognizer: recognizer, id: id)
                 if keyboard { extendWarmSession() }
-            } catch { settle(error: error.localizedDescription) }
+            } catch { settle(error: NSLocalizedString("dictation.failed", comment: "")) }
             preparation = nil
         }
     }
@@ -270,7 +270,7 @@ final class PhoneDictation: ObservableObject {
         recognition = recognizer.recognitionTask(with: request) { [weak self] result, error in
             let text = result?.bestTranscription.formattedString
             let final = result?.isFinal ?? false
-            let failure = error?.localizedDescription
+            let failure = error.map { _ in NSLocalizedString("dictation.failed", comment: "") }
             Task { @MainActor in self?.receive(text: text, final: final, error: failure, id: id) }
         }
     }

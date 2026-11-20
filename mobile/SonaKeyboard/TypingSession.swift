@@ -151,3 +151,24 @@ struct TypingSession {
         return previous.isLetter || previous.isNumber
     }
 }
+
+/// The text before the cursor as the keyboard's own last edit left it. Some hosts keep
+/// reporting the text from before an edit until the next one comes in, and a word joined to
+/// that stale text either glues on ("écoleMeet") or doubles its space ("Dauren  école").
+struct FieldEcho {
+    private var reported: String?
+    private var written = ""
+
+    /// The keyboard changed the field, which the host showed as `host`: it deleted
+    /// `deleting` characters before the cursor and inserted `inserting`.
+    mutating func edited(host: String, deleting: Int, inserting: String) {
+        written = String(before(host).dropLast(deleting)) + inserting
+        reported = host
+    }
+
+    /// What is before the cursor: the host's report, unless it still shows the text from
+    /// before the keyboard's last edit.
+    func before(_ host: String) -> String {
+        host == reported ? written : host
+    }
+}
