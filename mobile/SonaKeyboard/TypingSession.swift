@@ -17,12 +17,13 @@ struct TypingSession {
         case chosen
         case corrected(Correction, separator: String)
         case shift(Date)
+        case swiped(String, spaced: Bool, others: [String])
 
         var endsWithSpace: Bool {
             switch self {
             case .space, .chosen: true
             case let .corrected(_, separator): separator == " "
-            case .other, .shift: false
+            case .other, .shift, .swiped: false
             }
         }
     }
@@ -39,9 +40,31 @@ struct TypingSession {
         self.lexicon = lexicon
     }
 
-    /// What the strip offers for the word before the cursor.
+    /// What the strip offers for the word before the cursor: right after a swipe, the other
+    /// words the path could have meant.
     func suggestions(before text: String) -> Suggestions? {
-        corrector?.suggestions(before: text, lexicon: lexicon)
+        if case let .swiped(word, _, others) = lastKey(before: text), !others.isEmpty {
+            return Suggestions(typed: word, correction: nil, others: others)
+        }
+        return corrector?.suggestions(before: text, lexicon: lexicon)
+    }
+
+    /// The space a word dropped in whole, swiped or dictated, needs in front of it: none at
+    /// the start of the text, after a space or after an opening bracket or quote.
+    static func joiningSpace(before text: String) -> String {
+        guard let last = text.last, !last.isWhitespace, !"([{\"“‘/-".contains(last) else { return "" }
+        return " "
+    }
+
+    /// The best word a swipe spelled, spaced from the word before it as the system keyboard
+    /// does; `words` are already cased for where they land.
+    mutating func swipe(_ words: [String], before text: String) -> Edit {
+        guard let word = words.first else { return Edit() }
+        let space = Self.joiningSpace(before: text)
+        return remember(
+            .swiped(word, spaced: !space.isEmpty, others: Array(words.dropFirst())),
+            Edit(insert: space + word), on: text
+        )
     }
 
     /// A letter or symbol that keeps the current word going.
@@ -60,6 +83,9 @@ struct TypingSession {
         if previous == .chosen, ".,!?;:".contains(separator), text.hasSuffix(" ") {
             return remember(.other, Edit(deleteCount: 1, insert: separator + " "), on: text)
         }
+        if case .swiped = previous {
+            return remember(separator == " " ? .space : .other, Edit(insert: separator), on: text)
+        }
         if corrects, let correction = corrector?.correction(before: text, lexicon: lexicon) {
             let edit = Edit(deleteCount: correction.typed.count, insert: correction.replacement + separator)
             return remember(.corrected(correction, separator: separator), edit, on: text)
@@ -68,19 +94,32 @@ struct TypingSession {
     }
 
     /// Right after a correction, backspace puts the typed word back and keeps it for the
-    /// rest of the session; otherwise it deletes one character.
+    /// rest of the session; right after a swipe it deletes the whole word and its space;
+    /// otherwise it deletes one character.
     mutating func backspace(before text: String) -> Edit {
-        guard case let .corrected(correction, separator) = lastKey(before: text) else {
+        switch lastKey(before: text) {
+        case let .corrected(correction, separator):
+            lexicon.insert(correction.typed)
+            let edit = Edit(deleteCount: (correction.replacement + separator).count, insert: correction.typed)
+            return remember(.other, edit, on: text)
+        case let .swiped(word, spaced, _):
+            return remember(.other, Edit(deleteCount: word.count + (spaced ? 1 : 0)), on: text)
+        case .other, .space, .chosen, .shift:
             return remember(.other, Edit(deleteCount: 1), on: text)
         }
-        lexicon.insert(correction.typed)
-        let edit = Edit(deleteCount: (correction.replacement + separator).count, insert: correction.typed)
-        return remember(.other, edit, on: text)
     }
 
     /// A strip candidate replaces the word before the cursor and adds a space. Choosing the
-    /// word as typed keeps it uncorrected for the rest of the session.
+    /// word as typed keeps it uncorrected for the rest of the session. After a swipe, the
+    /// candidate swaps in for the swiped word and still goes in one backspace.
     mutating func choose(_ candidate: String, before text: String) -> Edit {
+        if case let .swiped(word, spaced, others) = lastKey(before: text) {
+            let swapped = [word] + others.filter { $0 != candidate }
+            return remember(
+                .swiped(candidate, spaced: spaced, others: swapped),
+                Edit(deleteCount: word.count, insert: candidate), on: text
+            )
+        }
         let word = TypingText.word(before: text) ?? ""
         if candidate == String(word) { lexicon.insert(candidate) }
         return remember(.chosen, Edit(deleteCount: word.count, insert: candidate + " "), on: text)

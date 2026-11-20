@@ -17,12 +17,15 @@ private final class KeyboardState: ObservableObject {
         guard hasFullAccess, let message = session.message ?? notice, message != seenMessage else { return nil }
         return message
     }
+    var dictating: Bool { warm && (session.phase == .listening || session.phase == .finishing) }
 }
 
 @MainActor
 final class KeyboardViewController: UIInputViewController {
+    private static let languageKey = "sona.keyboard.language"
     private let state = KeyboardState()
     private let typing = TypingModel()
+    private var corrector: TypingCorrector?
     private var session = TypingSession(corrector: nil)
     private var minimumHeight: NSLayoutConstraint?
     private var signal: KeyboardSignal?
@@ -37,9 +40,10 @@ final class KeyboardViewController: UIInputViewController {
         signal = KeyboardSignal(.state) { [weak self] in
             Task { @MainActor in self?.reload() }
         }
-        session = TypingSession(corrector: TypingCorrector(language: primaryLanguage ?? "en-US"))
+        setLanguage(storedLanguage(in: KeyboardLanguages.shared().enabled))
         typing.press = { [weak self] key in self?.press(key) }
         typing.choose = { [weak self] word in self?.choose(word) }
+        typing.swipe = { [weak self] path, grid in self?.swipe(path, on: grid) }
         requestSupplementaryLexicon { [weak self] lexicon in
             let entries = lexicon.entries.map { (shortcut: $0.userInput, text: $0.documentText) }
             Task { @MainActor in
@@ -55,6 +59,7 @@ final class KeyboardViewController: UIInputViewController {
             discard: { [weak self] in self?.discardDraft() }
         )
         let host = UIHostingController(rootView: content)
+        host.view.backgroundColor = .clear
         addChild(host)
         host.view.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(host.view)
@@ -77,6 +82,9 @@ final class KeyboardViewController: UIInputViewController {
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
         typing.hasTyped = false
+        let languages = KeyboardLanguages.shared().enabled
+        typing.showsLanguageKey = languages.count > 1
+        if !languages.contains(typing.language) { setLanguage(languages[0]) }
         if hasFullAccess { loadVocabulary() }
         refreshTyping(startingField: true)
     }
@@ -126,13 +134,27 @@ final class KeyboardViewController: UIInputViewController {
         }
     }
 
+    private func storedLanguage(in enabled: [TypingLanguage]) -> TypingLanguage {
+        let stored = UserDefaults.standard.string(forKey: Self.languageKey).flatMap(TypingLanguage.init(rawValue:))
+        return stored.flatMap { enabled.contains($0) ? $0 : nil } ?? enabled[0]
+    }
+
+    /// Letters, spelling and the language dictation listens in all follow the typing language.
+    private func setLanguage(_ language: TypingLanguage) {
+        typing.language = language
+        corrector = TypingCorrector(language: language.rawValue)
+        session = TypingSession(corrector: corrector, lexicon: session.lexicon)
+        primaryLanguage = language.rawValue
+        UserDefaults.standard.set(language.rawValue, forKey: Self.languageKey)
+    }
+
     private func press(_ key: Key) {
         typing.hasTyped = true
         state.notice = nil
         state.seenMessage = state.session.message
         switch key {
         case let .character(text):
-            let character = typing.layer == .letters && typing.shift != .off ? text.uppercased() : text
+            let character = typing.face(of: text)
             if ".,!?;:)\"".contains(character) {
                 apply(session.end(with: character, before: textBefore, corrects: corrects && cursorEndsWord))
             } else {
@@ -151,6 +173,8 @@ final class KeyboardViewController: UIInputViewController {
         case let .layer(layer):
             typing.layer = layer
             return
+        case .language:
+            setLanguage(KeyboardLanguages.shared().next(after: typing.language))
         case .nextKeyboard:
             advanceToNextInputMode()
             return
@@ -162,6 +186,30 @@ final class KeyboardViewController: UIInputViewController {
     private func choose(_ word: String) {
         typing.hasTyped = true
         apply(session.choose(word, before: textBefore))
+        refreshShift()
+        refreshSuggestions()
+    }
+
+    /// A swipe types the word its path most likely spelled, cased for where it lands; the
+    /// strip then offers the runners-up.
+    private func swipe(_ path: [CGPoint], on grid: KeyGrid) {
+        guard let corrector else { return }
+        let decoder = SwipeDecoder(
+            language: typing.language, unit: grid.unit, rowHeight: grid.rowHeight, origin: grid.origin
+        )
+        let words = decoder.words(for: path, dictionary: corrector.completions(of:), names: session.lexicon.names)
+        guard !words.isEmpty else { return }
+        typing.hasTyped = true
+        state.notice = nil
+        state.seenMessage = state.session.message
+        let before = textBefore
+        let landing = before + TypingSession.joiningSpace(before: before)
+        let capital = typing.shift != .off || capitalizes(before: landing)
+        let cased = words.map { word in
+            if typing.shift == .locked { return word.uppercased() }
+            return capital ? word.prefix(1).uppercased() + word.dropFirst() : word
+        }
+        apply(session.swipe(cased, before: before))
         refreshShift()
         refreshSuggestions()
     }
@@ -209,15 +257,18 @@ final class KeyboardViewController: UIInputViewController {
 
     private func refreshShift() {
         guard typing.shift != .locked else { return }
-        let before = textBefore
-        let capitalizes = switch textDocumentProxy.autocapitalizationType ?? .sentences {
+        typing.shift = capitalizes(before: textBefore) ? .once : .off
+    }
+
+    /// Whether the field's capitalization asks for a capital after `before`.
+    private func capitalizes(before: String) -> Bool {
+        switch textDocumentProxy.autocapitalizationType ?? .sentences {
         case .allCharacters: true
         case .words: before.last.map(\.isWhitespace) ?? true
         case .sentences: TypingText.startsSentence(before: before[...])
         case .none: false
         @unknown default: false
         }
-        typing.shift = capitalizes ? .once : .off
     }
 
     private func refreshSuggestions() {
@@ -226,14 +277,14 @@ final class KeyboardViewController: UIInputViewController {
 
     private func loadVocabulary() {
         do {
-            try KeyboardVocabularyStore.shared().load().forEach { session.lexicon.insert($0) }
+            try KeyboardVocabularyStore.shared().load().forEach { session.lexicon.addName($0) }
         } catch { state.notice = error.localizedDescription }
     }
 
     private func reload() {
         guard visible else { return }
         state.hasFullAccess = hasFullAccess
-        state.startURL = DictationLink.keyboardURL(documentID: documentID)
+        state.startURL = DictationLink.keyboardURL(documentID: documentID, language: typing.language)
         guard hasFullAccess else {
             state.draft = nil
             state.session = KeyboardSessionState()
@@ -276,13 +327,15 @@ final class KeyboardViewController: UIInputViewController {
         do {
             try KeyboardSessionStore.shared().send(KeyboardCommand(
                 id: UUID(), action: .start, requestID: id,
-                documentID: documentID, createdAt: Date()
+                documentID: documentID, createdAt: Date(), language: typing.language.rawValue
             ))
         } catch { state.waiting = false; state.notice = error.localizedDescription }
     }
 
+    /// A stop sent before the app has answered the start, as a quick hold-to-talk release
+    /// does, names the request the keyboard just made.
     private func send(_ action: KeyboardCommand.Action) {
-        guard hasFullAccess, let id = state.session.requestID else { return }
+        guard hasFullAccess, let id = requestedAt == nil ? state.session.requestID : requestedID else { return }
         do {
             try KeyboardSessionStore.shared().send(KeyboardCommand(
                 id: UUID(), action: action, requestID: id,
@@ -296,7 +349,7 @@ final class KeyboardViewController: UIInputViewController {
         do {
             let text = try KeyboardDraftStore.shared().take(id: draft.id)
             state.draft = nil
-            textDocumentProxy.insertText(text)
+            textDocumentProxy.insertText(TypingSession.joiningSpace(before: textBefore) + text)
             state.notice = NSLocalizedString("keyboard.inserted", comment: "")
         } catch { state.draft = nil; state.notice = error.localizedDescription }
     }
@@ -330,6 +383,7 @@ private struct KeyboardView: View {
                         .frame(minHeight: 44)
                 }
             }
+            .frame(maxWidth: KeyGrid.maxWidth)
             .frame(height: 48)
             .padding(.horizontal, 8)
             GeometryReader { proxy in
@@ -337,9 +391,10 @@ private struct KeyboardView: View {
                 VStack(spacing: 0) {
                     if state.hasFullAccess, let draft = state.draft {
                         DraftPanel(text: draft.text, insert: insert, discard: discard)
+                            .frame(maxWidth: KeyGrid.maxWidth)
                             .frame(height: rowHeight * 3)
                     } else {
-                        KeyRows(model: typing, rows: typing.rows).frame(height: rowHeight * 3)
+                        keys.frame(height: rowHeight * 3)
                     }
                     KeyRows(model: typing, rows: [typing.bottomRow(withDelete: state.hasFullAccess && state.draft != nil)])
                         .frame(height: rowHeight)
@@ -348,14 +403,31 @@ private struct KeyboardView: View {
             .padding(.horizontal, 2)
         }
         .padding(.bottom, 2)
-        .foregroundStyle(Theme.textPrimary).background(Theme.inset).tint(Theme.accent)
+        .foregroundStyle(Theme.textPrimary).tint(Theme.accent)
     }
 
-    /// The word strip while a word is being typed, unless a message came after the last key;
-    /// otherwise what the keyboard has to say.
+    private var keys: some View {
+        let rows = typing.rows
+        return KeyRows(model: typing, rows: rows, taps: false)
+            .overlay { SwipeTrail(points: typing.trail) }
+            .overlay { KeySurface(model: typing, rows: rows, swipes: typing.layer == .letters) }
+            .overlay(alignment: .topLeading) {
+                if let choice = typing.accentChoice { AccentPopup(choice: choice) }
+            }
+    }
+
+    /// While dictating, the words heard so far; then the word strip while a word is being
+    /// typed, unless a message came after the last key; otherwise what the keyboard has to say.
     @ViewBuilder
     private var status: some View {
-        if let suggestions = typing.suggestions, state.newMessage == nil {
+        if state.hasFullAccess, state.dictating {
+            Text(verbatim: state.session.heard ?? String(localized: "keyboard.listening"))
+                .font(.subheadline)
+                .foregroundStyle(state.session.heard == nil ? Theme.textSecondary : Theme.textPrimary)
+                .lineLimit(2)
+                .truncationMode(.head)
+                .accessibilityIdentifier("keyboard-heard")
+        } else if let suggestions = typing.suggestions, state.newMessage == nil {
             SuggestionStrip(suggestions: suggestions, choose: typing.choose)
         } else if !state.hasFullAccess, !typing.hasTyped {
             hint("keyboard.needsFullAccess")
@@ -382,27 +454,140 @@ private struct KeyboardView: View {
 
     @ViewBuilder
     private var control: some View {
-        if state.warm, state.session.phase == .listening {
-            Button(action: stop) {
-                RecordPill(glyph: .stop, title: "keyboard.stop", height: 40)
-            }
-            .buttonStyle(.plain)
-            .accessibilityIdentifier("keyboard-stop")
-        } else if state.warm, state.session.phase == .finishing || state.waiting {
-            RecordPill(glyph: .busy, title: "dictation.finishing", height: 40)
-                .disabled(true)
-        } else if state.warm {
-            Button(action: microphone) {
-                RecordPill(glyph: .record, title: "dictation.start", height: 40)
-            }
-            .buttonStyle(.plain)
-            .accessibilityIdentifier("keyboard-mic")
+        if state.warm {
+            MicControl(
+                phase: state.session.phase == .listening ? .listening
+                    : state.session.phase == .finishing || state.waiting ? .busy : .ready,
+                start: microphone, stop: stop
+            )
         } else {
             Link(destination: state.startURL) {
                 RecordPill(glyph: .record, title: "dictation.start", height: 40)
             }
+            .glassEffect(.regular.interactive(), in: Capsule())
             .accessibilityIdentifier("keyboard-open-sona")
         }
+    }
+}
+
+/// The dictate pill. A tap starts, and a tap while listening finishes; holding it talks
+/// until it is let go. One view for every phase, so a hold survives the pill changing.
+private struct MicControl: View {
+    enum Phase { case ready, busy, listening }
+
+    let phase: Phase
+    let start: () -> Void
+    let stop: () -> Void
+    @State private var down = false
+    @State private var holding = false
+    @State private var hold: Task<Void, Never>?
+
+    var body: some View {
+        RecordPill(glyph: glyph, title: title, height: 40)
+            .glassEffect(.regular.interactive(), in: Capsule())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { _ in press() }
+                    .onEnded { _ in release() }
+            )
+            .accessibilityElement()
+            .accessibilityLabel(Text(title))
+            .accessibilityAddTraits(.isButton)
+            .accessibilityAction { tap() }
+            .accessibilityIdentifier(phase == .listening ? "keyboard-stop" : "keyboard-mic")
+    }
+
+    private var glyph: RecordPill.Glyph {
+        switch phase {
+        case .ready: .record
+        case .busy: .busy
+        case .listening: .stop
+        }
+    }
+
+    private var title: LocalizedStringKey {
+        switch phase {
+        case .ready: "dictation.start"
+        case .busy: "dictation.finishing"
+        case .listening: "keyboard.stop"
+        }
+    }
+
+    private func press() {
+        guard !down else { return }
+        down = true
+        guard phase == .ready else { return }
+        hold = Task {
+            try? await Task.sleep(for: .seconds(0.35))
+            guard !Task.isCancelled else { return }
+            holding = true
+            start()
+        }
+    }
+
+    private func release() {
+        hold?.cancel()
+        hold = nil
+        down = false
+        if holding {
+            holding = false
+            stop()
+        } else {
+            tap()
+        }
+    }
+
+    private func tap() {
+        switch phase {
+        case .ready: start()
+        case .listening: stop()
+        case .busy: break
+        }
+    }
+}
+
+/// The path a swipe has drawn so far.
+private struct SwipeTrail: View {
+    let points: [CGPoint]
+
+    var body: some View {
+        Canvas { context, _ in
+            guard let first = points.first else { return }
+            var path = Path()
+            path.move(to: first)
+            points.dropFirst().forEach { path.addLine(to: $0) }
+            context.stroke(
+                path, with: .color(Theme.accent.opacity(0.55)),
+                style: StrokeStyle(lineWidth: 6, lineCap: .round, lineJoin: .round)
+            )
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+}
+
+/// A held letter's accents above it; the finger slides to one and lets go.
+private struct AccentPopup: View {
+    let choice: AccentChoice
+
+    var body: some View {
+        HStack(spacing: 0) {
+            ForEach(Array(choice.options.enumerated()), id: \.offset) { index, option in
+                Text(verbatim: option)
+                    .font(.system(size: 23))
+                    .frame(width: choice.anchor.width, height: choice.anchor.height - 10)
+                    .foregroundStyle(index == choice.selected ? Color.white : Theme.textPrimary)
+                    .background(
+                        index == choice.selected ? Theme.accent : Color.clear,
+                        in: RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    )
+            }
+        }
+        .padding(4)
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .shadow(color: .black.opacity(0.2), radius: 6, y: 2)
+        .offset(x: choice.originX - 4, y: choice.anchor.minY - choice.anchor.height)
+        .allowsHitTesting(false)
     }
 }
 
@@ -433,6 +618,7 @@ private struct DraftPanel: View {
             .padding(.horizontal, 10)
         }
         .scrollBounceBehavior(.basedOnSize)
+        .clipped()
     }
 }
 
