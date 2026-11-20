@@ -503,21 +503,28 @@ enum BindingCopy {
     /// arrives with its own name and description, and shows both.
     static func title(_ record: BindingRecord) -> String {
         switch record.id {
-        case "transcribe": "Transcribe shortcut"
-        case "cancel": "Cancel shortcut"
-        case "send": "Send shortcut"
-        case "command": "Command shortcut"
-        case "transcribe_with_post_process": "Post-processing shortcut"
+        case "transcribe": "Transcribe"
+        case "cancel": "Cancel"
+        case "send": "Send"
+        case "command": "Command"
+        case "transcribe_with_post_process": "Post-processing"
+        case "work_quick_entry": "New task"
+        case "work_ramble": "Speak tasks"
+        case "meeting_attach_window": "Attach window"
         default: record.name
         }
     }
 
-    /// Only the transcribe row carries a hint: that a shortcut can be held
-    /// as well as tapped is the one thing about it nothing else shows.
+    static func pushToTalkDetail(_ on: Bool) -> String {
+        on ? "Hold to talk. Tap once for hands-free" : "Tap to start and stop"
+    }
+
+    /// A mode's row needs no detail: the core's description only restates
+    /// its name.
     static func detail(_ record: BindingRecord) -> String? {
         switch record.id {
-        case "transcribe": "Tap to toggle, hold to talk. Works with any shortcut."
-        case "cancel", "command", "transcribe_with_post_process": nil
+        case "transcribe", "cancel", "command", "transcribe_with_post_process": nil
+        case let id where id.hasPrefix("mode/"): nil
         default: record.description.isEmpty ? nil : record.description
         }
     }
@@ -546,13 +553,12 @@ enum BindingCopy {
             .joined(separator: "+")
     }
 
-    /// What the caps cannot show about a double tap: that it is pressed
-    /// twice, and on which side, since a double tap of Right Option leaves
-    /// Left Option free for typing.
-    static func repeatNote(_ binding: String) -> String? {
+    /// The side a double tap is bound to, which the caps cannot show: a
+    /// double tap of Right Option leaves Left Option free for typing.
+    static func side(_ binding: String) -> String? {
         guard isDoubleTap(binding) else { return nil }
-        if binding.contains("_right") { return "Right side, twice" }
-        if binding.contains("_left") { return "Left side, twice" }
-        return "Twice"
+        if binding.contains("_right") { return "right" }
+        if binding.contains("_left") { return "left" }
+        return nil
     }
 }

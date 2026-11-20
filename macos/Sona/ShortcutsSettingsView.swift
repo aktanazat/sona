@@ -15,7 +15,7 @@ struct ShortcutsSettingsView: View {
 
     var body: some View {
         Page {
-            PageTitle("Shortcuts", subtitle: "Every key Sona listens for. To record a double tap, tap the key twice.") {
+            PageTitle("Shortcuts", subtitle: "") {
                 EmptyView()
             }
             ErrorNote(store.error)
@@ -24,9 +24,7 @@ struct ShortcutsSettingsView: View {
                     ShortcutCaptureRow(store: store, id: "transcribe")
                     ToggleRow(
                         title: "Push to talk",
-                        detail: store.settings.pushToTalk
-                            ? "Hold the shortcut to talk and let go to stop. For a long stretch, tap it once and talk hands-free, then tap it again to stop."
-                            : "Tap the shortcut to start, and tap it again to stop.",
+                        detail: BindingCopy.pushToTalkDetail(store.settings.pushToTalk),
                         isOn: Binding(
                             get: { store.settings.pushToTalk },
                             set: { value in Task { await store.setPushToTalk(value) } }

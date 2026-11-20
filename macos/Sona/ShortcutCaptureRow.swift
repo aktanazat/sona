@@ -111,7 +111,7 @@ struct ShortcutCaptureRow: View {
         }
         .buttonStyle(.plain)
         .disabled(disabled || capture.recording || store.isBusy("binding_\(id)"))
-        .help(capture.recording ? "Tap a key twice for a double tap. Press Escape to keep the current shortcut" : "Record a new shortcut for \(BindingCopy.title(record))")
+        .help(capture.recording ? "Tap twice for a double tap. Escape keeps the current shortcut" : "Record a new shortcut for \(BindingCopy.title(record))")
         .onDisappear {
             /// Leaving the page mid-capture would leave a listener running
             /// with nothing reading it, and every shortcut suspended.
@@ -284,7 +284,8 @@ struct ShortcutCaptureRow: View {
     }
 }
 
-/// A stored binding as key caps, with the note a double tap needs.
+/// A stored binding as key caps. A double tap shows its caps twice, then
+/// the side it is bound to.
 struct BindingChord: View {
     let binding: String
 
@@ -293,10 +294,13 @@ struct BindingChord: View {
     }
 
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 8) {
             Shortcut(BindingCopy.chord(binding))
-            if let note = BindingCopy.repeatNote(binding) {
-                Text(note).metaText(Theme.inkSecondary)
+            if BindingCopy.isDoubleTap(binding) {
+                Shortcut(BindingCopy.chord(binding))
+            }
+            if let side = BindingCopy.side(binding) {
+                Text(side).metaText()
             }
         }
     }

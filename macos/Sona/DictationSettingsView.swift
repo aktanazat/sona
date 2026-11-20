@@ -6,8 +6,6 @@ struct DictationSettingsView<DataRows: View>: View {
     let store: SettingsStore
     /// The door to the mode editor, which another slice owns.
     var onOpenModes: () -> Void = {}
-    /// The page that holds every shortcut, cancel and command included.
-    var onOpenShortcuts: () -> Void = {}
     @ViewBuilder var dataRows: () -> DataRows
 
     var body: some View {
@@ -56,9 +54,8 @@ struct DictationSettingsView<DataRows: View>: View {
                     CardLine("Dictations can last up to 20 minutes. Sona warns you with one minute left, then stops and transcribes what you said.")
                 }
             }
-            PageSection("Shortcuts and commands") {
+            PageSection("Commands") {
                 Card {
-                    ActionRow(title: "Shortcuts", detail: "Cancel, send, command and every other key.", button: "Open", action: onOpenShortcuts)
                     ToggleRow(
                         title: "Voice command mode",
                         detail: "Hold the command shortcut and say what to change about the text you have selected, or ask a question.",

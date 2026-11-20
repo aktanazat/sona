@@ -2212,8 +2212,7 @@ pub fn get_default_settings() -> AppSettings {
         ShortcutBinding {
             id: crate::shortcut::SEND_BINDING_ID.to_string(),
             name: "Send".to_string(),
-            description: "While recording, stops, pastes, and presses the mode's send key once."
-                .to_string(),
+            description: "Finishes, pastes and sends".to_string(),
             default_binding: default_send_shortcut.to_string(),
             current_binding: default_send_shortcut.to_string(),
         },
