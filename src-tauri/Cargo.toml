@@ -100,6 +100,9 @@ jiff = "0.2"
 rusqlite = { version = "0.37", features = ["bundled-sqlcipher"] }
 tar = "0.4.44"
 flate2 = "1.0"
+# Otter's DOCX export: a zip holding `word/document.xml`.
+zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
+quick-xml = "0.41"
 sha2 = "0.10"
 hmac = "0.12"
 # Whisper-family models run through transcribe-cpp (GGUF/ggml, native backends);

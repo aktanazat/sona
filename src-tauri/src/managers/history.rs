@@ -1,6 +1,7 @@
 use crate::analytics::{DashboardTrendRange, DashboardTrendRequest, LocalCalendarRange};
 use crate::context::ContextReceipt;
 use crate::delivery::{DeliveryMethod, DeliveryOutcome, DeliveryReceipt};
+use crate::dictation_import::{AppDictation, DictationApp};
 use crate::modes::{ModeReceipt, RunPlan};
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Local, NaiveDate, Utc};
@@ -317,6 +318,24 @@ pub(crate) static MIGRATIONS: &[M] = &[
     M::up(crate::planning::work::agents::ESTIMATE_FOR_PROPOSALS_MIGRATION),
     M::up(crate::planning::updates::QUOTED_MEETINGS_MIGRATION),
     M::up(crate::planning::catalog::DEPENDENCY_INITIATIVE_HISTORY_MIGRATION),
+    // The rows another dictation app's import made, by that app's own id, so
+    // a second import adds only what is new and a row says where it came
+    // from. Deleting the row forgets it, as `upstream_import_history` does.
+    M::up(
+        "CREATE TABLE dictation_import_history (
+            source TEXT NOT NULL,
+            source_key TEXT NOT NULL,
+            history_id INTEGER NOT NULL,
+            PRIMARY KEY (source, source_key),
+            FOREIGN KEY(history_id) REFERENCES transcription_history(id)
+        );
+        CREATE INDEX dictation_import_history_history_id
+            ON dictation_import_history(history_id);
+        CREATE TRIGGER dictation_import_history_delete
+        AFTER DELETE ON transcription_history BEGIN
+            DELETE FROM dictation_import_history WHERE history_id = old.id;
+        END;",
+    ),
 ];
 
 const MAX_HISTORY_PAGE_SIZE: usize = 100;
@@ -373,6 +392,9 @@ pub struct HistoryEntry {
     /// id has no match to explain, and claiming one would be false.
     #[serde(default)]
     pub match_kind: Option<HistoryMatchKind>,
+    /// The dictation app this row was imported from. `None` for Sona's own.
+    #[serde(default)]
+    pub imported_from: Option<DictationApp>,
 }
 
 /// Where the captured audio originated. Existing history rows intentionally
@@ -822,6 +844,23 @@ pub(crate) enum UpstreamHistoryImportOutcome {
     Inserted { history_id: i64 },
     Existing { history_id: i64 },
 }
+
+/// What an import from another dictation app did, or why it wrote nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AppDictationImport {
+    Imported { imported: u64, skipped: u64 },
+    HistoryOff,
+    WouldRemoveOlder { removals: u64 },
+}
+
+/// A name for an imported row's recording field that names no file: the other
+/// app's audio stays where it is, and the sweep finds nothing to delete.
+fn app_dictation_file_name(app: DictationApp, source_key: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = crate::fs_util::hex_digest(&Sha256::digest(source_key.as_bytes()));
+    format!("{}-{}", app.as_str(), &digest[..16])
+}
+
 /// One row queued for embedding, carrying the text so the worker never has to
 /// read it back out of the database it is about to write to.
 struct SemanticWork {
@@ -1176,6 +1215,10 @@ impl HistoryManager {
             post_process_requested: row.get("post_process_requested")?,
             parent_id: row.get("parent_id")?,
             match_kind: None,
+            imported_from: row
+                .get::<_, Option<String>>("imported_from")?
+                .as_deref()
+                .and_then(DictationApp::from_stored),
         })
     }
 
@@ -1191,6 +1234,138 @@ impl HistoryManager {
             run.run_started_at_ms / 1_000,
             run.run_id
         ))
+    }
+
+    /// Bring another dictation app's rows into history in one transaction,
+    /// keeping each row's own time. A row an earlier import of the same app
+    /// made is skipped by the app's id.
+    pub(crate) fn import_app_dictations(
+        &self,
+        app: DictationApp,
+        dictations: &[AppDictation],
+        removals_allowed: u64,
+    ) -> Result<AppDictationImport> {
+        let limit = crate::settings::get_settings(&self.app_handle).history_limit;
+        let (outcome, inserted) = self.storage.with_connection(|conn| {
+            Self::import_app_dictations_with_connection(
+                conn,
+                app,
+                dictations,
+                limit,
+                removals_allowed,
+            )
+        })?;
+        for (history_id, index) in inserted {
+            let Some(dictation) = dictations.get(index) else {
+                continue;
+            };
+            let entry = HistoryEntry {
+                id: history_id,
+                file_name: app_dictation_file_name(app, &dictation.source_key),
+                timestamp: dictation.timestamp,
+                saved: false,
+                title: Self::format_timestamp_title(dictation.timestamp),
+                transcription_text: dictation.heard.clone(),
+                post_processed_text: dictation.written.clone(),
+                post_process_requested: dictation.written.is_some(),
+                parent_id: None,
+                match_kind: None,
+                imported_from: Some(app),
+            };
+            self.queue_semantic_embedding(
+                history_id,
+                semantic::embeddable_text(
+                    &entry.transcription_text,
+                    entry.post_processed_text.as_deref(),
+                ),
+            );
+            if let Err(error) = (HistoryUpdatePayload::Added { entry }).emit(&self.app_handle) {
+                error!("Failed to emit imported history update: {error}");
+            }
+        }
+        Ok(outcome)
+    }
+
+    /// The transaction behind [`Self::import_app_dictations`]. Returns the
+    /// outcome and, for each inserted row, its id and its index in
+    /// `dictations`. Nothing is written unless every row can be: history off,
+    /// or more removals than agreed, refuses the whole import, because the
+    /// next sweep would delete the oldest unsaved rows, the person's own among
+    /// them.
+    pub(crate) fn import_app_dictations_with_connection(
+        conn: &mut Connection,
+        app: DictationApp,
+        dictations: &[AppDictation],
+        limit: usize,
+        removals_allowed: u64,
+    ) -> Result<(AppDictationImport, Vec<(i64, usize)>)> {
+        let transaction = conn.transaction()?;
+        let mut fresh = Vec::new();
+        let mut seen = HashSet::new();
+        for (index, dictation) in dictations.iter().enumerate() {
+            let imported: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM dictation_import_history
+                               WHERE source = ?1 AND source_key = ?2)",
+                params![app.as_str(), &dictation.source_key],
+                |row| row.get(0),
+            )?;
+            if !imported && seen.insert(dictation.source_key.as_str()) {
+                fresh.push(index);
+            }
+        }
+        let skipped = u64::try_from(dictations.len() - fresh.len())?;
+        if !fresh.is_empty() {
+            if limit == 0 {
+                return Ok((AppDictationImport::HistoryOff, Vec::new()));
+            }
+            let counted = Self::counted_entries_with_connection(&transaction)?.len();
+            let removals =
+                u64::try_from(counted.saturating_add(fresh.len()).saturating_sub(limit))?;
+            if removals > removals_allowed {
+                return Ok((
+                    AppDictationImport::WouldRemoveOlder { removals },
+                    Vec::new(),
+                ));
+            }
+        }
+        let mut inserted = Vec::with_capacity(fresh.len());
+        for index in fresh {
+            let dictation = &dictations[index];
+            transaction.execute(
+                "INSERT INTO transcription_history (
+                    file_name,
+                    timestamp,
+                    saved,
+                    title,
+                    transcription_text,
+                    post_processed_text,
+                    post_process_requested,
+                    duration_ms,
+                    word_count,
+                    has_audio
+                ) VALUES (?1, ?2, 0, ?3, ?4, ?5, ?6, ?7, ?8, 0)",
+                params![
+                    app_dictation_file_name(app, &dictation.source_key),
+                    dictation.timestamp,
+                    Self::format_timestamp_title(dictation.timestamp),
+                    &dictation.heard,
+                    &dictation.written,
+                    dictation.written.is_some(),
+                    dictation.duration_ms.map(as_sql_i64).transpose()?,
+                    dictation.word_count.map(as_sql_i64).transpose()?,
+                ],
+            )?;
+            let history_id = transaction.last_insert_rowid();
+            transaction.execute(
+                "INSERT INTO dictation_import_history (source, source_key, history_id)
+                 VALUES (?1, ?2, ?3)",
+                params![app.as_str(), &dictation.source_key, history_id],
+            )?;
+            inserted.push((history_id, index));
+        }
+        transaction.commit()?;
+        let imported = u64::try_from(inserted.len())?;
+        Ok((AppDictationImport::Imported { imported, skipped }, inserted))
     }
 
     /// Insert one validated upstream row through this manager's schema. It
@@ -1226,6 +1401,7 @@ impl HistoryManager {
                 post_process_requested: entry.post_process_requested,
                 parent_id: None,
                 match_kind: None,
+                imported_from: None,
             };
             self.queue_semantic_embedding(
                 history_id,
@@ -1703,7 +1879,7 @@ impl HistoryManager {
             receipt
         });
         let timestamp = timestamp.unwrap_or_else(|| Utc::now().timestamp());
-        let title = self.format_timestamp_title(timestamp);
+        let title = Self::format_timestamp_title(timestamp);
         // The insert owns the connection only until it commits. `cleanup_old_entries`
         // below takes the same single connection, and the emit after it must not
         // run while a database lock is held.
@@ -1731,6 +1907,7 @@ impl HistoryManager {
             post_process_requested,
             parent_id: derived_from_history_id,
             match_kind: None,
+            imported_from: None,
         };
 
         debug!("Saved history entry with id {}", entry.id);
@@ -2671,7 +2848,8 @@ impl HistoryManager {
                 (Some(cursor_id), Some(lim)) => {
                     let fetch_count = i64::try_from(lim + 1)?;
                     let mut stmt = conn.prepare(
-                        "SELECT id, file_name, timestamp, saved, title, transcription_text, post_processed_text, post_process_requested, parent_id
+                        "SELECT id, file_name, timestamp, saved, title, transcription_text, post_processed_text, post_process_requested, parent_id,
+                                (SELECT source FROM dictation_import_history WHERE history_id = transcription_history.id) AS imported_from
                          FROM transcription_history
                          WHERE id < ?1
                          ORDER BY id DESC
@@ -2685,7 +2863,8 @@ impl HistoryManager {
                 (None, Some(lim)) => {
                     let fetch_count = i64::try_from(lim + 1)?;
                     let mut stmt = conn.prepare(
-                        "SELECT id, file_name, timestamp, saved, title, transcription_text, post_processed_text, post_process_requested, parent_id
+                        "SELECT id, file_name, timestamp, saved, title, transcription_text, post_processed_text, post_process_requested, parent_id,
+                                (SELECT source FROM dictation_import_history WHERE history_id = transcription_history.id) AS imported_from
                          FROM transcription_history
                          ORDER BY id DESC
                          LIMIT ?1",
@@ -2697,7 +2876,8 @@ impl HistoryManager {
                 }
                 (_, None) => {
                     let mut stmt = conn.prepare(
-                        "SELECT id, file_name, timestamp, saved, title, transcription_text, post_processed_text, post_process_requested, parent_id
+                        "SELECT id, file_name, timestamp, saved, title, transcription_text, post_processed_text, post_process_requested, parent_id,
+                                (SELECT source FROM dictation_import_history WHERE history_id = transcription_history.id) AS imported_from
                          FROM transcription_history
                          ORDER BY id DESC",
                     )?;
@@ -2819,7 +2999,8 @@ impl HistoryManager {
                         h.transcription_text,
                         h.post_processed_text,
                         h.post_process_requested,
-                        h.parent_id
+                        h.parent_id,
+                        (SELECT source FROM dictation_import_history WHERE history_id = h.id) AS imported_from
                      FROM transcription_history_fts
                      JOIN transcription_history AS h
                        ON h.id = transcription_history_fts.rowid
@@ -2845,7 +3026,8 @@ impl HistoryManager {
                         h.transcription_text,
                         h.post_processed_text,
                         h.post_process_requested,
-                        h.parent_id
+                        h.parent_id,
+                        (SELECT source FROM dictation_import_history WHERE history_id = h.id) AS imported_from
                      FROM transcription_history_fts
                      JOIN transcription_history AS h
                        ON h.id = transcription_history_fts.rowid
@@ -2904,7 +3086,8 @@ impl HistoryManager {
                 transcription_text,
                 post_processed_text,
                 post_process_requested,
-                parent_id
+                parent_id,
+                (SELECT source FROM dictation_import_history WHERE history_id = transcription_history.id) AS imported_from
              FROM transcription_history
              WHERE transcription_text != ''
              ORDER BY timestamp DESC
@@ -2940,7 +3123,8 @@ impl HistoryManager {
                     transcription_text,
                     post_processed_text,
                     post_process_requested,
-                    parent_id
+                    parent_id,
+                    (SELECT source FROM dictation_import_history WHERE history_id = transcription_history.id) AS imported_from
                  FROM transcription_history
                  WHERE timestamp >= ?1
                  ORDER BY timestamp DESC
@@ -3045,7 +3229,8 @@ impl HistoryManager {
                 transcription_text,
                 post_processed_text,
                 post_process_requested,
-                parent_id
+                parent_id,
+                (SELECT source FROM dictation_import_history WHERE history_id = transcription_history.id) AS imported_from
              FROM transcription_history
              WHERE id = ?1",
         )?;
@@ -3135,7 +3320,7 @@ impl HistoryManager {
         Ok(())
     }
 
-    fn format_timestamp_title(&self, timestamp: i64) -> String {
+    fn format_timestamp_title(timestamp: i64) -> String {
         if let Some(utc_datetime) = DateTime::from_timestamp(timestamp, 0) {
             // Convert UTC to local timezone
             let local_datetime = utc_datetime.with_timezone(&Local);
@@ -3290,7 +3475,8 @@ fn entries_by_ids_with_connection(conn: &Connection, ids: &[i64]) -> Result<Vec<
             transcription_text,
             post_processed_text,
             post_process_requested,
-            parent_id
+            parent_id,
+            (SELECT source FROM dictation_import_history WHERE history_id = transcription_history.id) AS imported_from
          FROM transcription_history
          WHERE id IN ({placeholders})
          ORDER BY id DESC"

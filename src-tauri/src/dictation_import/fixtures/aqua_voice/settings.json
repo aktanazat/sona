@@ -1,0 +1,15 @@
+{
+  "dictionary": ["Triton", " ", "PyTorch"],
+  "replacements": [{ "from": "jason", "to": "JSON", "preserveCase": true }],
+  "history": [
+    {
+      "kind": "transcription",
+      "rawText": "run the triton kernel",
+      "content": "Run the Triton kernel.",
+      "timestamp": "2026-07-27T15:54:07.373Z",
+      "sessionId": 42
+    },
+    { "kind": "transcription", "rawText": "", "content": "", "timestamp": "2026-07-27T15:55:00Z" }
+  ],
+  "hotkeys": [{ "keys": "Alt", "action": "activate" }]
+}

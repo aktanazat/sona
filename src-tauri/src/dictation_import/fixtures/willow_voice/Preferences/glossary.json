@@ -1,0 +1,6 @@
+[
+  { "id": "1", "term": "Sona", "tag": "My Terms", "isEnabled": true, "isReplacement": false },
+  { "id": "2", "term": "Supabase", "tag": "Auto-Learned", "isEnabled": true, "isReplacement": false },
+  { "id": "3", "term": "brb", "tag": "My Terms", "isEnabled": true, "isReplacement": true },
+  { "id": "4", "term": "Retired", "tag": "My Terms", "isEnabled": false, "isReplacement": false }
+]

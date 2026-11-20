@@ -460,6 +460,18 @@ pub async fn meeting_import_transcript(
     manager.import_transcript(path).await
 }
 
+/// Bring every meeting in another app's export in, skipping the ones an
+/// earlier import of it already brought.
+#[tauri::command]
+#[specta::specta]
+pub async fn meeting_import_from_app(
+    manager: State<'_, Arc<MeetingSessionManager>>,
+    source: crate::meeting::import_formats::MeetingApp,
+    path: PathBuf,
+) -> Result<crate::meeting::import_formats::MeetingAppImportResult, MeetingCommandError> {
+    manager.import_from_app(source, path).await
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn meeting_recovery_list(
