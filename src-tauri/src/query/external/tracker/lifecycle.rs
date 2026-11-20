@@ -647,10 +647,10 @@ pub(super) fn text(answer: &WorkAnswer, text: &mut String) {
             }
             if change.action == LifecycleAction::FavoriteMoved {
                 if let Some(position) = change.position {
-                    let place = change.folder.as_ref().map_or_else(
-                        || "at the top".to_owned(),
-                        |folder| format!("in {}", folder.name),
-                    );
+                    let place = change
+                        .folder
+                        .as_ref()
+                        .map_or_else(|| "at the top".to_owned(), |folder| format!("in {}", folder.name));
                     let _ = writeln!(text, "Place {position} {place}.");
                 }
             }
@@ -1140,19 +1140,16 @@ impl Tracker<'_> {
             .map_err(|message| refusal(self.history, message))
     }
 
-    fn favorite_folder(saved: &Favorites, value: &str) -> Result<ExternalFolderRef, ExternalError> {
-        pick(
-            "favorites folder",
-            value,
-            &saved.folders,
-            |folder| &folder.id,
-            |folder| &folder.name,
-        )
-        .map(|folder| ExternalFolderRef {
-            id: Some(folder.id.clone()),
-            name: folder.name.clone(),
-        })
-        .map_err(|refusal| refusal.hint("List them with: sona work favorites"))
+    fn favorite_folder(
+        saved: &Favorites,
+        value: &str,
+    ) -> Result<ExternalFolderRef, ExternalError> {
+        pick("favorites folder", value, &saved.folders, |folder| &folder.id, |folder| &folder.name)
+            .map(|folder| ExternalFolderRef {
+                id: Some(folder.id.clone()),
+                name: folder.name.clone(),
+            })
+            .map_err(|refusal| refusal.hint("List them with: sona work favorites"))
     }
 
     pub(super) async fn favorite(
@@ -1210,9 +1207,7 @@ impl Tracker<'_> {
         if name.is_some_and(str::is_empty) {
             return Err(ExternalError::invalid("Give the folder a name."));
         }
-        let index = args
-            .position
-            .map(|position| usize::try_from(position - 1).unwrap_or(usize::MAX));
+        let index = args.position.map(|position| usize::try_from(position - 1).unwrap_or(usize::MAX));
         let operation_id = args.write.fresh_operation_id();
         let (shown, save, asked) = planning::history(self.history, |conn| {
             folder_request(conn, &operation_id, existing, name, index)
@@ -1231,12 +1226,9 @@ impl Tracker<'_> {
         if let Some(asked) = asked {
             self.file_sent(&operation_id, FOLDER_SAVE_ASKED, &asked, &save)?;
         }
-        answer.position = self
-            .saved_favorites()?
-            .top()
-            .iter()
-            .position(|entry| matches!(entry, FavoriteEntry::Folder { id } if *id == folder.id))
-            .map(|at| at + 1);
+        answer.position = self.saved_favorites()?.top().iter().position(|entry| {
+            matches!(entry, FavoriteEntry::Folder { id } if *id == folder.id)
+        }).map(|at| at + 1);
         answer.folder = Some(ExternalFolderRef {
             id: Some(folder.id),
             name: folder.name,
@@ -1259,12 +1251,8 @@ impl Tracker<'_> {
             return Ok(WorkAnswer::Lifecycle(Box::new(answer)));
         }
         self.applies("changing favorites")?;
-        favorites::delete_folder_as(
-            self.app,
-            &operation_id,
-            folder.id.as_deref().unwrap_or_default(),
-        )
-        .map_err(|message| self.write_refusal(message, &operation_id, "The folder"))?;
+        favorites::delete_folder_as(self.app, &operation_id, folder.id.as_deref().unwrap_or_default())
+            .map_err(|message| self.write_refusal(message, &operation_id, "The folder"))?;
         answer.replayed = replayed;
         Ok(WorkAnswer::Lifecycle(Box::new(answer)))
     }
@@ -1369,17 +1357,15 @@ impl Tracker<'_> {
                     name: project.title.clone(),
                     handle: None,
                 }),
-            FavoriteKind::View => {
-                views
-                    .iter()
-                    .find(|view| view.id == favorite.target_id)
-                    .map(|view| ExternalFavorite {
-                        kind: favorite.kind,
-                        id: view.id.clone(),
-                        name: view.name.clone(),
-                        handle: None,
-                    })
-            }
+            FavoriteKind::View => views
+                .iter()
+                .find(|view| view.id == favorite.target_id)
+                .map(|view| ExternalFavorite {
+                    kind: favorite.kind,
+                    id: view.id.clone(),
+                    name: view.name.clone(),
+                    handle: None,
+                }),
             FavoriteKind::Person => board
                 .people
                 .iter()
@@ -1904,9 +1890,7 @@ fn folder_request(
         index,
     };
     let asked_json = serde_json::to_string(&asked)?;
-    if let Some(sent) =
-        sent_before::<FolderSave>(conn, operation_id, FOLDER_SAVE_ASKED, &asked_json)?
-    {
+    if let Some(sent) = sent_before::<FolderSave>(conn, operation_id, FOLDER_SAVE_ASKED, &asked_json)? {
         let shown = ExternalFolderRef {
             id: sent.id.clone(),
             name: shown_name,
@@ -1932,13 +1916,7 @@ fn folder_request(
                 index,
             },
         ),
-        None => (
-            ExternalFolderRef {
-                id,
-                name: shown_name,
-            },
-            asked,
-        ),
+        None => (ExternalFolderRef { id, name: shown_name }, asked),
     };
     Ok((shown, save, Some(asked_json)))
 }
@@ -1972,10 +1950,7 @@ mod tests {
         }
         let folders = favorites::favorites(&conn).expect("the favorites").folders;
         assert_eq!(
-            folders
-                .iter()
-                .map(|folder| folder.name.as_str())
-                .collect::<Vec<_>>(),
+            folders.iter().map(|folder| folder.name.as_str()).collect::<Vec<_>>(),
             ["Launch"]
         );
     }

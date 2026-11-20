@@ -35,9 +35,10 @@ use crate::planning::work::types::{
     WorkActivity, WorkActivityKind, WorkActor, WorkCycle, WorkCycleRef, WorkCycleState, WorkCycles,
     WorkDirection, WorkDisplay, WorkDue, WorkFieldSuggestion, WorkGroupBy, WorkItem,
     WorkItemDetail, WorkItemInput, WorkItemRow, WorkLabel, WorkLayout, WorkList, WorkOrderBy,
-    WorkOwner, WorkPatch, WorkPersonChoice, WorkPlace, WorkProgress, WorkProjectChoice,
-    WorkProposal, WorkProposalField, WorkQuery, WorkRelation, WorkRelationKind, WorkRepeat,
-    WorkSource, WorkStatus, WorkSuggestionField, WorkSuggestionValue, WorkVia, WorkView,
+    WorkOwner, WorkPatch, WorkPersonChoice, WorkPlace, WorkProgress, WorkProjectChoice, WorkProposal,
+    WorkProposalField,
+    WorkQuery, WorkRelation, WorkRelationKind, WorkRepeat, WorkSource, WorkStatus,
+    WorkSuggestionField, WorkSuggestionValue, WorkVia, WorkView,
 };
 use crate::planning::work::watch::WorkWatch;
 use crate::planning::work::{self, items, parse};
@@ -1518,17 +1519,7 @@ impl GroupArg {
 /// A board column's group key: the grouping, a colon, and the group.
 fn column_key(value: &str) -> Result<String, String> {
     let key = value.trim();
-    let kinds = [
-        "status",
-        "owner",
-        "project",
-        "meeting",
-        "due",
-        "priority",
-        "cycle",
-        "label",
-        "milestone",
-    ];
+    let kinds = ["status", "owner", "project", "meeting", "due", "priority", "cycle", "label", "milestone"];
     match key.split_once(':') {
         _ if key.is_empty() => Ok(String::new()),
         Some((kind, group)) if kinds.contains(&kind) && !group.is_empty() => Ok(key.to_owned()),
@@ -1716,13 +1707,8 @@ impl WorkVerb {
             | Self::DescriptionRestore(lifecycle::VersionRestoreArgs { dry_run: true, .. })
             | Self::Favorite(lifecycle::FavoriteArgs { dry_run: true, .. })
             | Self::Unfavorite(lifecycle::FavoriteArgs { dry_run: true, .. })
-            | Self::FavoriteFolderSave(lifecycle::FavoriteFolderSaveArgs {
-                dry_run: true, ..
-            })
-            | Self::FavoriteFolderDelete(lifecycle::FavoriteFolderDeleteArgs {
-                dry_run: true,
-                ..
-            })
+            | Self::FavoriteFolderSave(lifecycle::FavoriteFolderSaveArgs { dry_run: true, .. })
+            | Self::FavoriteFolderDelete(lifecycle::FavoriteFolderDeleteArgs { dry_run: true, .. })
             | Self::FavoriteMove(lifecycle::FavoriteMoveArgs { dry_run: true, .. })
             | Self::Subscribe(lifecycle::SubscribeArgs { dry_run: true, .. })
             | Self::Unsubscribe(lifecycle::SubscribeArgs { dry_run: true, .. })
@@ -1754,8 +1740,14 @@ impl WorkVerb {
                 verb:
                     threads::CommentVerb::Add(threads::CommentAddArgs { dry_run: true, .. })
                     | threads::CommentVerb::Edit(threads::CommentEditArgs { dry_run: true, .. })
-                    | threads::CommentVerb::Delete(threads::CommentDeleteArgs { dry_run: true, .. })
-                    | threads::CommentVerb::Resolve(threads::CommentResolveArgs { dry_run: true, .. }),
+                    | threads::CommentVerb::Delete(threads::CommentDeleteArgs {
+                        dry_run: true,
+                        ..
+                    })
+                    | threads::CommentVerb::Resolve(threads::CommentResolveArgs {
+                        dry_run: true,
+                        ..
+                    }),
             })
             | Self::CommentEdit(threads::CommentEditArgs { dry_run: true, .. })
             | Self::CommentDelete(threads::CommentDeleteArgs { dry_run: true, .. })
@@ -1793,13 +1785,9 @@ impl WorkVerb {
             | Self::InitiativeNew(initiatives::InitiativeNewArgs { dry_run: true, .. })
             | Self::InitiativeUpdate(initiatives::InitiativeUpdateArgs { dry_run: true, .. })
             | Self::InitiativeDelete(initiatives::InitiativeDeleteArgs { dry_run: true, .. })
-            | Self::InitiativeAddProject(initiatives::InitiativeProjectArgs {
-                dry_run: true,
-                ..
-            })
+            | Self::InitiativeAddProject(initiatives::InitiativeProjectArgs { dry_run: true, .. })
             | Self::InitiativeRemoveProject(initiatives::InitiativeProjectArgs {
-                dry_run: true,
-                ..
+                dry_run: true, ..
             })
             | Self::ProjectTemplateList
             | Self::ProjectTemplateSave(project_templates::ProjectTemplateSaveArgs {
@@ -1812,9 +1800,7 @@ impl WorkVerb {
             })
             | Self::ProjectNew(project_templates::ProjectNewArgs { dry_run: true, .. })
             | Self::ProjectStatusSave(catalog::ProjectStatusSaveArgs { dry_run: true, .. })
-            | Self::ProjectStatusDelete(catalog::ProjectStatusDeleteArgs {
-                dry_run: true, ..
-            })
+            | Self::ProjectStatusDelete(catalog::ProjectStatusDeleteArgs { dry_run: true, .. })
             | Self::TemplateSave(routines::TemplateSaveArgs { dry_run: true, .. })
             | Self::TemplateDelete(routines::TemplateDeleteArgs { dry_run: true, .. })
             | Self::TemplateUse(routines::TemplateUseArgs { dry_run: true, .. })
@@ -1830,9 +1816,7 @@ impl WorkVerb {
             | Self::ProjectUpdateDraft(_)
             | Self::ProjectUpdate(roadmap::ProjectUpdateArgs { dry_run: true, .. })
             | Self::ProjectUpdateEdit(roadmap::ProjectUpdateEditArgs { dry_run: true, .. })
-            | Self::ProjectUpdateDelete(roadmap::ProjectUpdateDeleteArgs {
-                dry_run: true, ..
-            })
+            | Self::ProjectUpdateDelete(roadmap::ProjectUpdateDeleteArgs { dry_run: true, .. })
             | Self::ProjectDelete(roadmap::ProjectDeleteArgs { dry_run: true, .. })
             | Self::ProjectSave(catalog::ProjectSaveArgs { dry_run: true, .. })
             | Self::ProjectArchive(catalog::ProjectArchiveArgs { dry_run: true, .. })
@@ -1860,9 +1844,7 @@ impl WorkVerb {
             | Self::PersonSplit(people::PersonSplitArgs { dry_run: true, .. })
             | Self::PersonDelete(people::PersonDeleteArgs { dry_run: true, .. })
             | Self::PersonPhoto(people::PersonPhotoArgs { dry_run: true, .. })
-            | Self::PersonContactRemove(people::PersonContactRemoveArgs {
-                dry_run: true, ..
-            })
+            | Self::PersonContactRemove(people::PersonContactRemoveArgs { dry_run: true, .. })
             | Self::FirstMetAnswer(people::FirstMetArgs { dry_run: true, .. })
             | Self::SpeakerConfirm(voices::SpeakerVoiceArgs { dry_run: true, .. })
             | Self::SpeakerVoiceUndo(voices::SpeakerVoiceArgs { dry_run: true, .. })
@@ -1897,12 +1879,8 @@ impl WorkVerb {
             | Self::LinkAccept(planner::LinkDecideArgs { dry_run: true, .. })
             | Self::LinkDismiss(planner::LinkDecideArgs { dry_run: true, .. })
             | Self::TriageSuggestions(_)
-            | Self::SuggestionAccept(triage_hints::SuggestionDecideArgs {
-                dry_run: true, ..
-            })
-            | Self::SuggestionDismiss(triage_hints::SuggestionDecideArgs {
-                dry_run: true, ..
-            })
+            | Self::SuggestionAccept(triage_hints::SuggestionDecideArgs { dry_run: true, .. })
+            | Self::SuggestionDismiss(triage_hints::SuggestionDecideArgs { dry_run: true, .. })
             | Self::Calendar(_)
             | Self::Trend(_)
             | Self::Today
@@ -1922,7 +1900,9 @@ impl WorkVerb {
             | Self::Watch(WatchArgs { dry_run: true, .. })
             | Self::Unwatch(UnwatchArgs { dry_run: true, .. })
             | Self::Session(_)
-            | Self::Sessions(_) => READ_SCOPES,
+            | Self::Sessions(_) => {
+                READ_SCOPES
+            }
             Self::Ask(AskArgs { take, .. }) if take.is_empty() => READ_SCOPES,
             Self::Export(_)
             | Self::Create(_)
@@ -4489,12 +4469,7 @@ impl Tracker<'_> {
             .filter(|item| ids.contains(&item.id))
             .map(|item| board.project_item(item))
             .collect();
-        Ok(changed(
-            WorkAction::Moved,
-            Some(operation_id),
-            tasks,
-            Vec::new(),
-        ))
+        Ok(changed(WorkAction::Moved, Some(operation_id), tasks, Vec::new()))
     }
 
     async fn relate(&self, args: &RelateArgs) -> Result<WorkAnswer, ExternalError> {
@@ -4816,11 +4791,7 @@ impl Tracker<'_> {
             display.sub_group_by = lanes.group();
         }
         if let Some(hidden) = &args.hidden_columns {
-            display.hidden_columns = hidden
-                .iter()
-                .filter(|key| !key.is_empty())
-                .cloned()
-                .collect();
+            display.hidden_columns = hidden.iter().filter(|key| !key.is_empty()).cloned().collect();
         }
         let (id, operation_id) = match existing {
             Some(view) => (
@@ -4994,9 +4965,7 @@ impl Fence {
     /// The tasks it leaves out, by id: each whose own commitment or evidence
     /// names a meeting it hides, whatever the task's row shows of it.
     fn hidden_tasks(&self, history: &Connection) -> anyhow::Result<HashSet<String>> {
-        work::drawing_on(history, |kind, source_id| {
-            self.hides_source(kind, source_id)
-        })
+        work::drawing_on(history, |kind, source_id| self.hides_source(kind, source_id))
     }
 
     fn hides_suggestion(&self, suggestion: &WorkFieldSuggestion) -> bool {
@@ -5138,13 +5107,16 @@ fn page(
         },
         total: rows.len(),
         has_more,
-        next_cursor: shown.last().filter(|_| has_more).map(|row| {
-            Cursor {
-                order,
-                after: place(row, order),
-            }
-            .to_string()
-        }),
+        next_cursor: shown
+            .last()
+            .filter(|_| has_more)
+            .map(|row| {
+                Cursor {
+                    order,
+                    after: place(row, order),
+                }
+                .to_string()
+            }),
         conversations_available: board.fence.is_open(),
         read_as: None,
     })
@@ -5874,8 +5846,7 @@ impl Board {
                 let mut line = self.activity(entry);
                 if heard && matches!(entry.kind, WorkActivityKind::Created) {
                     line.meeting_id.clone_from(&detail.item.source_meeting_id);
-                    line.meeting_title
-                        .clone_from(&detail.item.source_meeting_title);
+                    line.meeting_title.clone_from(&detail.item.source_meeting_title);
                 }
                 line
             })
@@ -6826,13 +6797,7 @@ impl WorkAnswer {
             }
             Self::FollowUp(follow_up) => text.push_str(&follow_up.text),
             Self::Cycles(listing) if listing.calendar.is_some() => {
-                text.push_str(
-                    &listing
-                        .calendar
-                        .as_deref()
-                        .unwrap_or_default()
-                        .replace("\r\n", "\n"),
-                );
+                text.push_str(&listing.calendar.as_deref().unwrap_or_default().replace("\r\n", "\n"));
             }
             Self::Cycles(listing) => {
                 let _ = writeln!(
@@ -7126,10 +7091,7 @@ fn task_line(text: &mut String, task: &ExternalWorkItem, today: &Today) {
         notes.push(format!("under {}", parent.handle));
     }
     if let Some(progress) = task.sub_tasks {
-        notes.push(format!(
-            "{}/{} sub-tasks done",
-            progress.done, progress.total
-        ));
+        notes.push(format!("{}/{} sub-tasks done", progress.done, progress.total));
     }
     match task.attachment_count {
         0 => {}
@@ -7529,38 +7491,38 @@ fn filters_text(filters: &ExternalWorkFilters) -> String {
 
 mod attachments;
 mod catalog;
+mod preferences;
 mod cloud;
 mod dictation_rules;
 mod lifecycle;
 mod notes;
 mod organize;
 mod people;
-mod preferences;
 mod roadmap;
 mod save;
 pub(crate) use save::MeetingFence;
-mod agent_loops;
-mod dependencies;
-mod dictations;
-mod digest;
-mod feed;
-mod initiatives;
-mod insights;
+mod speakers;
+mod voices;
+mod sources;
 mod library;
+mod transcript;
+mod dictations;
 mod meeting_review;
 mod meeting_settings;
-mod planner;
-mod project_templates;
-mod routines;
 mod sessions;
-mod sources;
-mod speakers;
-mod subjects;
+mod routines;
+mod agent_loops;
 mod threads;
-mod timeline;
-mod transcript;
+mod planner;
 mod triage_hints;
-mod voices;
+mod subjects;
+mod dependencies;
+mod initiatives;
+mod digest;
+mod feed;
+mod project_templates;
+mod timeline;
+mod insights;
 mod words;
 
 #[cfg(test)]

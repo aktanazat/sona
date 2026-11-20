@@ -7,8 +7,8 @@ use super::transcript::missing_line;
 use super::{
     cycle_ref, named_cycle, now_ms, refusal, task_ref, Fence, Tracker, WorkAnswer, WriteArgs,
 };
-use crate::planning::work::types::WorkCycleRef;
 use crate::planning::{self, EvidenceSourceKind, EvidenceTargetKind};
+use crate::planning::work::types::WorkCycleRef;
 use crate::query::external::{ExternalError, ExternalErrorCode};
 use crate::query::QUERY_SCHEMA_VERSION;
 use crate::scratchpad::documents::{self, ScratchDocumentKind, ScratchDocumentOf};
@@ -272,9 +272,7 @@ impl Tracker<'_> {
     pub(super) fn note(&self, id: &Uuid) -> Result<ScratchNote, ExternalError> {
         scratchpad::scratchpad_get(self.app.state(), id.to_string())
             .map_err(|message| refusal(self.history, message))?
-            .ok_or_else(|| {
-                ExternalError::new(ExternalErrorCode::NotFound, format!("No note {id}."))
-            })
+            .ok_or_else(|| ExternalError::new(ExternalErrorCode::NotFound, format!("No note {id}.")))
     }
 
     fn replayed(&self, note_id: &str) -> Result<ScratchNote, ExternalError> {
@@ -379,10 +377,7 @@ impl Tracker<'_> {
         let body = args.body.join(" ");
         let document = match args.cycle {
             Some(cycle) => Some(self.cycle_document(cycle)?.1),
-            None => {
-                self.planning_document(args.task.as_deref(), args.project.as_deref())
-                    .await?
-            }
+            None => self.planning_document(args.task.as_deref(), args.project.as_deref()).await?,
         };
         if args.dry_run {
             let mut answer = Self::note_change(
@@ -411,8 +406,7 @@ impl Tracker<'_> {
             |tx| scratchpad::create_note_in(tx, &body, author, now_ms()),
         )?;
         if let Some(document) = &document {
-            self.file_document(&note.id, document, &operation_id)
-                .await?;
+            self.file_document(&note.id, document, &operation_id).await?;
         }
         let mut answer = Self::note_change(
             NoteAction::Created,
@@ -602,10 +596,8 @@ impl Tracker<'_> {
             ScratchDocumentKind::Milestone => EvidenceTargetKind::Milestone,
             ScratchDocumentKind::Task => EvidenceTargetKind::Task,
         };
-        let link_operation = Uuid::new_v5(
-            &Uuid::NAMESPACE_OID,
-            format!("{operation_id}/document").as_bytes(),
-        );
+        let link_operation =
+            Uuid::new_v5(&Uuid::NAMESPACE_OID, format!("{operation_id}/document").as_bytes());
         planning::planning_link_source(
             self.app.clone(),
             self.app.state(),
@@ -627,9 +619,9 @@ impl Tracker<'_> {
     /// a cycle or takes it off. Both settle on the same state when run twice.
     fn note_cycle(&self, args: &NoteLinkArgs, link: bool) -> Result<WorkAnswer, ExternalError> {
         let note = self.note(&args.note)?;
-        let cycle = args.cycle.ok_or_else(|| {
-            ExternalError::invalid("Name a meeting, a person, a note or a cycle.")
-        })?;
+        let cycle = args
+            .cycle
+            .ok_or_else(|| ExternalError::invalid("Name a meeting, a person, a note or a cycle."))?;
         let (number, document) = self.cycle_document(cycle)?;
         let present = planning::history(self.history, |conn| {
             documents::documents_of(conn, &note.id, |_, _| false)
@@ -640,17 +632,13 @@ impl Tracker<'_> {
         let settled = present == link;
         if !args.dry_run && !settled {
             self.applies("writing notes")?;
-            scratchpad::immediate(
-                self.history,
-                "The note's cycle could not be changed.",
-                |tx| {
-                    if link {
-                        documents::link_cycle_in(tx, &note.id, number, now_ms())
-                    } else {
-                        documents::unlink_cycle_in(tx, &note.id, number)
-                    }
-                },
-            )
+            scratchpad::immediate(self.history, "The note's cycle could not be changed.", |tx| {
+                if link {
+                    documents::link_cycle_in(tx, &note.id, number, now_ms())
+                } else {
+                    documents::unlink_cycle_in(tx, &note.id, number)
+                }
+            })
             .map_err(|message| refusal(self.history, message))?;
             scratchpad::emit_changed(self.app, &note.id, false);
         }
