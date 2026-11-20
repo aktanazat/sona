@@ -1,4 +1,5 @@
 import AVFoundation
+import CryptoKit
 import Dispatch
 import Combine
 import Foundation
@@ -139,18 +140,18 @@ final class PhoneLibrary: ObservableObject {
     }
 
     func keep(kind: PhoneNote.Kind, title: String, text: String, date: Date = Date(), audio: CapturedAudio? = nil) throws {
-        try apply(disk.keep(Self.note(kind: kind, title: title, text: text, date: date, audio: audio), audio: audio))
+        try apply(disk.keep(Self.note(id: UUID(), kind: kind, title: title, text: text, date: date, audio: audio), audio: audio))
     }
 
     func deliverDictation(
-        kind: PhoneNote.Kind, text: String, date: Date, audio: CapturedAudio?,
+        id: UUID = UUID(), kind: PhoneNote.Kind, text: String, date: Date, audio: CapturedAudio?,
         keyboardStore: KeyboardDraftStore?, documentID: UUID?, removeSourceAfterSaving: Bool
     ) -> DictationDelivery {
         var draft: KeyboardDraft?
         var draftError: String?
         do { draft = try keyboardStore?.save(text: text, documentID: documentID) }
         catch { draftError = error.localizedDescription; self.error = draftError }
-        let note = Self.note(kind: kind, title: String(text.prefix(80)), text: text, date: date, audio: audio)
+        let note = Self.note(id: id, kind: kind, title: String(text.prefix(80)), text: text, date: date, audio: audio)
         let saving = Task {
             do {
                 if audio != nil || !text.isEmpty {
@@ -165,6 +166,32 @@ final class PhoneLibrary: ObservableObject {
             }
         }
         return DictationDelivery(draft: draft, saving: saving)
+    }
+
+    /// Keeps what the keyboard dictated by itself. Each note takes its dictation's id, so a
+    /// dictation kept before a crash removed it from the queue is not kept twice.
+    func importKeyboardDictations(from queue: KeyboardDictationQueue) async {
+        for record in (try? queue.pending()) ?? [] {
+            if notes.contains(where: { $0.id == record.id }) {
+                if let audio = record.audio { try? FileManager.default.removeItem(at: queue.audioURL(audio.file)) }
+            } else {
+                let audio = await Task.detached { record.audio.flatMap { Self.captured($0, in: queue) } }.value
+                let delivery = deliverDictation(
+                    id: record.id, kind: .dictation, text: record.text, date: record.date, audio: audio,
+                    keyboardStore: nil, documentID: nil, removeSourceAfterSaving: true
+                )
+                guard await delivery.saving.value else { continue }
+            }
+            try? queue.remove(record)
+        }
+        try? queue.removeOrphanedAudio(olderThan: 60 * 60)
+    }
+
+    private nonisolated static func captured(_ audio: KeyboardDictationRecord.Audio, in queue: KeyboardDictationQueue) -> CapturedAudio? {
+        let url = queue.audioURL(audio.file)
+        guard let bytes = try? Data(contentsOf: url) else { return nil }
+        return CapturedAudio(url: url, byteLength: bytes.count, sha256: Base64URL.encode(Data(SHA256.hash(data: bytes))),
+                             durationMs: audio.durationMs)
     }
 
     func update(_ note: PhoneNote) throws { try apply(disk.update(note)) }
@@ -186,8 +213,7 @@ final class PhoneLibrary: ObservableObject {
         error = nil
     }
 
-    private static func note(kind: PhoneNote.Kind, title: String, text: String, date: Date, audio: CapturedAudio?) -> PhoneNote {
-        let id = UUID()
+    private static func note(id: UUID, kind: PhoneNote.Kind, title: String, text: String, date: Date, audio: CapturedAudio?) -> PhoneNote {
         return PhoneNote(id: id, kind: kind, date: date, title: title, text: text,
                          audioFile: audio.map { _ in "\(id.uuidString).wav" },
                          duration: audio.map { Double($0.durationMs) / 1000 })

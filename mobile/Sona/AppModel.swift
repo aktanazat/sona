@@ -1,6 +1,5 @@
 import ActivityKit
 import Combine
-import CryptoKit
 import Foundation
 import Network
 import PhotosUI
@@ -610,21 +609,7 @@ final class AppModel: NSObject, ObservableObject {
         importingKeyboardDictations = true
         Task {
             defer { importingKeyboardDictations = false }
-            for record in (try? queue.pending()) ?? [] {
-                let audio = record.audio.flatMap { audio -> CapturedAudio? in
-                    let url = queue.audioURL(audio.file)
-                    guard let bytes = try? Data(contentsOf: url) else { return nil }
-                    return CapturedAudio(url: url, byteLength: bytes.count,
-                                         sha256: Base64URL.encode(Data(SHA256.hash(data: bytes))),
-                                         durationMs: audio.durationMs)
-                }
-                let delivery = library.deliverDictation(
-                    kind: .dictation, text: record.text, date: record.date, audio: audio,
-                    keyboardStore: nil, documentID: nil, removeSourceAfterSaving: true
-                )
-                if await delivery.saving.value { try? queue.remove(record) }
-            }
-            try? queue.removeOrphanedAudio(olderThan: 60 * 60)
+            await library.importKeyboardDictations(from: queue)
         }
     }
 

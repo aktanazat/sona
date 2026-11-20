@@ -10,6 +10,7 @@ struct KeyboardMicrophoneTests {
     final class Page: CapturePage {
         var onMessage: (([String: Any]) -> Void)?
         var onFailure: ((String) -> Void)?
+        var onReload: (() -> Void)?
         private(set) var calls: [String] = []
         func attach(to view: UIView) { onMessage?(["type": "ready"]) }
         func run(_ call: String) { calls.append(call) }
@@ -66,17 +67,40 @@ struct KeyboardMicrophoneTests {
         #expect(box.events == [.captureRefused])
     }
 
-    @Test("a final result before Stop ends the dictation, and a later Stop asks the page for nothing")
+    @Test("a final result before Stop inserts once, and the dictation's own stop asks the page for nothing more")
     func finalBeforeStop() async {
         let (microphone, box) = microphone()
-        microphone.start(language: "en-US", hints: [])
+        var dictation = KeyboardDictation()
+        var inserted: [String] = []
+        microphone.onEvent = { event in
+            box.events.append(event)
+            for effect in dictation.handle(event) {
+                switch effect {
+                case .endCapture: microphone.end()
+                case .abandon: microphone.abandon()
+                case let .insert(text): inserted.append(text)
+                case .beginCapture, .fallBack: break
+                }
+            }
+        }
+        for effect in dictation.handle(.start) where effect == .beginCapture {
+            microphone.start(language: "en-US", hints: [])
+        }
         page.onMessage?(["type": "started", "sampleRate": 48_000.0])
         recognizer.reports[0]("Meet me at noon.", true, nil)
-        await until { box.events.count == 2 }
-        microphone.end()
-        #expect(box.events == [.captureStarted, .heard("Meet me at noon.", final: true)])
+        await until { !inserted.isEmpty }
+        #expect(inserted == ["Meet me at noon."])
+        #expect(dictation.phase == .idle)
         #expect(!page.calls.contains("finishCapture()"))
-        #expect(page.calls.last == "stopCapture()")
+    }
+
+    @Test("a page call that fails while nothing is dictating does not keep the next Dictate waiting for the page")
+    func failedCallWhileIdle() {
+        let (microphone, box) = microphone()
+        page.onFailure?("captureHeartbeat(): A JavaScript exception occurred")
+        microphone.start(language: "en-US", hints: [])
+        #expect(page.calls.last == "startCapture()")
+        #expect(box.events.isEmpty)
     }
 
     @Test("Stop asks the page for the samples it still holds before the audio ends")
@@ -96,15 +120,23 @@ struct KeyboardRouteTests {
     let defaults = UserDefaults(suiteName: "keyboard-route-\(UUID().uuidString)")!
     let now = Date(timeIntervalSince1970: 1_800_000_000)
 
-    @Test("after a refusal Dictate goes through the app at once, across keyboard appearances, for ten minutes")
+    @Test("a fallback is kept: Dictate goes through the app at once, across keyboard appearances, for ten minutes")
     func refusalHoldsForTenMinutes() {
         var dictation = KeyboardDictation()
         _ = dictation.handle(.start)
-        #expect(dictation.handle(.captureRefused).contains(.fallBack))
-        KeyboardRoute(defaults: defaults).refuse(at: now)
+        KeyboardRoute(defaults: defaults).record(dictation.handle(.captureRefused), at: now)
         let route = KeyboardRoute(defaults: defaults)
         #expect(route.choice(at: now.addingTimeInterval(60), warm: false) == .openApp)
         #expect(route.choice(at: now.addingTimeInterval(60), warm: true) == .appSession)
         #expect(route.choice(at: now.addingTimeInterval(10 * 60 + 1), warm: false) == .keyboard)
+    }
+
+    @Test("a language with no recognizer on this iPhone does not send Dictate to the app")
+    func unavailableLanguageStaysInTheKeyboard() {
+        var dictation = KeyboardDictation()
+        _ = dictation.handle(.start)
+        KeyboardRoute(defaults: defaults).record(dictation.handle(.recognizerUnavailable), at: now)
+        #expect(dictation.phase == .idle)
+        #expect(KeyboardRoute(defaults: defaults).choice(at: now, warm: false) == .keyboard)
     }
 }

@@ -20,6 +20,8 @@ struct KeyboardDictation {
         case captureEnded
         case heard(String, final: Bool)
         case recognitionFailed
+        /// No recognizer for the language runs on this iPhone; the app has none either.
+        case recognizerUnavailable
         /// The recognizer gave no final result in time after the audio ended.
         case finishTimedOut
         /// The keyboard went away; its field may not be the one it comes back to.
@@ -50,7 +52,8 @@ struct KeyboardDictation {
         case (.starting, .captureStarted):
             phase = .listening
             return []
-        case (.starting, .stop), (.starting, .hidden), (.listening, .hidden), (.finishing, .hidden):
+        case (.starting, .stop), (.starting, .hidden), (.listening, .hidden), (.finishing, .hidden),
+             (.starting, .recognizerUnavailable):
             return reset([.abandon])
         case (.starting, .captureRefused), (.starting, .recognitionFailed):
             return reset([.abandon, .fallBack])
@@ -97,7 +100,10 @@ struct KeyboardRoute {
     static let refusalLife: TimeInterval = 10 * 60
     let defaults: UserDefaults
 
-    func refuse(at now: Date) {
+    /// Keeps a fallback the dictation asked for, so Dictate goes through the app from the
+    /// next tap on, in this keyboard and the next.
+    func record(_ effects: [KeyboardDictation.Effect], at now: Date) {
+        guard effects.contains(.fallBack) else { return }
         defaults.set(now.addingTimeInterval(Self.refusalLife), forKey: Self.refusedKey)
     }
 

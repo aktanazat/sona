@@ -43,6 +43,22 @@ struct KeyboardDictationQueue {
             .sorted { $0.date < $1.date }
     }
 
+    /// Sona may stay closed for days while the keyboard keeps dictating, so the audio
+    /// waiting for it is held to `maxBytes` and `maxAge`: the oldest audio goes first, and
+    /// its text stays queued.
+    func trimAudio(maxBytes: Int, maxAge: TimeInterval, now: Date = Date()) throws {
+        let records = try pending()
+        var total = records.compactMap(\.audio).reduce(0) { $0 + $1.byteLength }
+        for var record in records {
+            guard let audio = record.audio,
+                  total > maxBytes || now.timeIntervalSince(record.date) > maxAge else { continue }
+            try? FileManager.default.removeItem(at: audioURL(audio.file))
+            record.audio = nil
+            try enqueue(record)
+            total -= audio.byteLength
+        }
+    }
+
     /// Removes a kept record. Its audio is removed by whoever kept it.
     func remove(_ record: KeyboardDictationRecord) throws {
         try FileManager.default.removeItem(at: folder.appendingPathComponent("\(record.id.uuidString).json"))

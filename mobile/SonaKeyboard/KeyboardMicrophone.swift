@@ -12,8 +12,10 @@ protocol CapturePage: AnyObject {
     /// Each message the page posts: `ready`, `started`, `audio` with base64 samples,
     /// `stopped`, `failed` or `interrupted` with a reason.
     var onMessage: (([String: Any]) -> Void)? { get set }
-    /// The page could not run a call, or its process ended.
+    /// The page could not run a call.
     var onFailure: ((String) -> Void)? { get set }
+    /// The page's process ended and the page is loading again; it posts `ready` once loaded.
+    var onReload: (() -> Void)? { get set }
     func attach(to view: UIView)
     func run(_ call: String)
 }
@@ -79,9 +81,10 @@ final class KeyboardMicrophone {
         self.timing = timing
         self.queue = queue
         self.page.onMessage = { [weak self] message in self?.receive(message) }
-        self.page.onFailure = { [weak self] reason in
+        self.page.onFailure = { [weak self] reason in self?.refused(reason) }
+        self.page.onReload = { [weak self] in
             self?.ready = false
-            self?.refused(reason)
+            self?.refused("web content process ended")
         }
     }
 
@@ -119,7 +122,7 @@ final class KeyboardMicrophone {
         if unavailable {
             log.error("no on-device recognizer for \(language, privacy: .public)")
             onNotice?(NSLocalizedString("dictation.onDeviceUnavailable", comment: ""))
-            onEvent?(.recognitionFailed)
+            onEvent?(.recognizerUnavailable)
             return
         }
         self.request = request
@@ -235,10 +238,13 @@ final class KeyboardMicrophone {
 
     private func recognized(text: String?, final: Bool, failure: String?, run: Int) {
         guard run == self.run, request != nil else { return }
-        if let text { onEvent?(.heard(text, final: final)) }
         if final {
             abandon()
-        } else if text == nil, let failure {
+            if let text { onEvent?(.heard(text, final: true)) }
+            return
+        }
+        if let text { onEvent?(.heard(text, final: false)) }
+        if text == nil, let failure {
             log.error("recognition failed: \(failure, privacy: .public)")
             abandon()
             onEvent?(.recognitionFailed)
@@ -324,6 +330,7 @@ final class WebCapturePage: NSObject, CapturePage, WKUIDelegate, WKNavigationDel
     private static let origin = URL(string: "https://keyboard.sona.invalid/")!
     var onMessage: (([String: Any]) -> Void)?
     var onFailure: ((String) -> Void)?
+    var onReload: (() -> Void)?
     private let webView: WKWebView
 
     override init() {
@@ -371,7 +378,7 @@ final class WebCapturePage: NSObject, CapturePage, WKUIDelegate, WKNavigationDel
     }
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
-        onFailure?("web content process ended")
+        onReload?()
         webView.loadHTMLString(Self.page, baseURL: Self.origin)
     }
 

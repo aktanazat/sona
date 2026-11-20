@@ -330,7 +330,6 @@ final class KeyboardViewController: UIInputViewController {
             return
         }
         state.needsSetup = !DictationPreferences.keyboardEnabled || !DictationPreferences.keyboardMicrophoneAllowed
-        state.route = KeyboardRoute(defaults: DictationPreferences.shared).choice(at: Date(), warm: state.warm)
         do {
             state.session = try KeyboardSessionStore.shared().state()
             if let requestedAt {
@@ -357,6 +356,7 @@ final class KeyboardViewController: UIInputViewController {
             case .missing:
                 state.draft = nil
             }
+            refreshRoute(readingStatus: false)
         } catch { state.notice = error.localizedDescription }
     }
 
@@ -408,8 +408,18 @@ final class KeyboardViewController: UIInputViewController {
         DictationPreferences.recognitionLanguage(for: typing.language.rawValue)
     }
 
+    /// Where Dictate goes changes only between dictations, so a Finish always reaches the
+    /// route that started it, and it reads the app's latest status first.
+    private func refreshRoute(readingStatus: Bool) {
+        guard !state.dictating, !state.waiting else { return }
+        if readingStatus, let latest = try? KeyboardSessionStore.shared().state() { state.session = latest }
+        state.route = KeyboardRoute(defaults: DictationPreferences.shared).choice(at: Date(), warm: state.warm)
+    }
+
     private func dictate(_ event: KeyboardDictation.Event) {
-        for effect in dictation.handle(event) {
+        let effects = dictation.handle(event)
+        KeyboardRoute(defaults: DictationPreferences.shared).record(effects, at: Date())
+        for effect in effects {
             switch effect {
             case .beginCapture:
                 state.notice = nil
@@ -425,8 +435,6 @@ final class KeyboardViewController: UIInputViewController {
             case let .insert(text):
                 insertDictation(text)
             case .fallBack:
-                KeyboardRoute(defaults: DictationPreferences.shared).refuse(at: Date())
-                state.route = KeyboardRoute(defaults: DictationPreferences.shared).choice(at: Date(), warm: state.warm)
                 state.notice = state.notice ?? NSLocalizedString("keyboard.micRefused", comment: "")
             }
         }
@@ -436,6 +444,7 @@ final class KeyboardViewController: UIInputViewController {
         #endif
         state.dictation = dictation.phase
         state.heard = KeyboardSessionState.heard(dictation.heard)
+        refreshRoute(readingStatus: true)
     }
 
     /// The one step every dictation the keyboard heard goes through: the phone's cleanup and
@@ -447,9 +456,11 @@ final class KeyboardViewController: UIInputViewController {
         refreshShift()
         refreshSuggestions()
         do {
-            try KeyboardDictationQueue.shared().enqueue(KeyboardDictationRecord(
+            let queue = try KeyboardDictationQueue.shared()
+            try queue.enqueue(KeyboardDictationRecord(
                 id: UUID(), text: text, date: Date(), language: dictationLanguage, audio: microphone?.takeAudio()
             ))
+            try queue.trimAudio(maxBytes: 32_000_000, maxAge: 7 * 24 * 60 * 60)
         } catch { state.notice = error.localizedDescription }
     }
 
