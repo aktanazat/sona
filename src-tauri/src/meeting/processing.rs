@@ -3191,7 +3191,7 @@ impl MeetingProcessingService {
                     generator.as_ref(),
                     &evidence,
                     &speakers,
-                    &plain_notes_prompt(language),
+                    &plain_notes_prompt(language, &evidence),
                     checkpoint,
                 ) {
                     Ok((text, left_out)) => {
@@ -6699,13 +6699,12 @@ fn notes_system_prompt(
     evidence: &ArtifactEvidence,
     settings: Option<&crate::settings::AppSettings>,
 ) -> String {
-    let mut prompt = artifact_system_prompt(
-        &evidence.template,
-        !evidence.user_notes.is_empty(),
-        settings
-            .map(|settings| settings.meeting_notes_language)
-            .unwrap_or_default(),
-    );
+    let language = settings
+        .map(|settings| settings.meeting_notes_language)
+        .unwrap_or_default();
+    let mut prompt =
+        artifact_system_prompt(&evidence.template, !evidence.user_notes.is_empty(), language);
+    prompt.push_str(&spoken_language_note(language, evidence));
     if !evidence.marks.is_empty() {
         prompt.push_str(MARKED_ROWS_RULE);
     }
@@ -6715,11 +6714,32 @@ fn notes_system_prompt(
     prompt
 }
 
-fn plain_notes_prompt(language: MeetingNotesLanguage) -> String {
+fn plain_notes_prompt(language: MeetingNotesLanguage, evidence: &ArtifactEvidence) -> String {
     format!(
-        "Write notes of this meeting transcript for someone who missed it. Begin with one sentence on what the meeting was about and where it landed. Then write one short line for each decision, each thing someone agreed to do, with who and by when if that was said, and each question left open. Use only what the transcript says and leave out small talk. Write plain sentences, one per line, with no headings, bullets or markdown.\n\n{}",
-        language.instruction()
+        "Write notes of this meeting transcript for someone who missed it. Begin with one sentence on what the meeting was about and where it landed. Then write one short line for each decision, each thing someone agreed to do, with who and by when if that was said, and each question left open. Use only what the transcript says and leave out small talk. Write plain sentences, one per line, with no headings, bullets or markdown.\n\n{}{}",
+        language.instruction(),
+        spoken_language_note(language, evidence)
     )
+}
+
+/// Names the language the transcript is in when the notes follow the meeting:
+/// told only to match it, a model reading these English instructions drifts
+/// into English. Empty when the notes are in English anyway or detection is
+/// unsure.
+fn spoken_language_note(language: MeetingNotesLanguage, evidence: &ArtifactEvidence) -> String {
+    if language != MeetingNotesLanguage::Auto {
+        return String::new();
+    }
+    let transcript = evidence
+        .transcript
+        .iter()
+        .map(|item| item.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    match crate::audio_toolkit::lang_id::detect_language_name(&transcript) {
+        Some(name) => format!(" Most of this meeting was spoken in {name}, so write in {name}."),
+        None => String::new(),
+    }
 }
 
 /// Plain notes as a revision: the summary holds them, and nothing claims a
@@ -10511,6 +10531,39 @@ pub(crate) mod tests {
             },
             text: text.to_string(),
         }
+    }
+
+    #[test]
+    fn notes_prompts_name_the_language_the_meeting_was_spoken_in() {
+        let session_id = MeetingSessionId::new();
+        let evidence = ArtifactEvidence {
+            transcript: vec![
+                segment_line(
+                    session_id,
+                    1,
+                    "Buenos días a todos. Hoy vamos a revisar el presupuesto del próximo trimestre.",
+                ),
+                segment_line(
+                    session_id,
+                    2,
+                    "Lucía enviará el informe final el viernes y Pedro revisará los números con el equipo de ventas.",
+                ),
+            ],
+            manual_notes: Vec::new(),
+            user_notes: String::new(),
+            marks: Vec::new(),
+            template: MeetingNotesTemplate::default().into(),
+        };
+        let mut settings = crate::settings::get_default_settings();
+        assert_eq!(settings.meeting_notes_language, MeetingNotesLanguage::Auto);
+        let rule = "Most of this meeting was spoken in Spanish, so write in Spanish.";
+        assert!(notes_system_prompt(&evidence, Some(&settings)).contains(rule));
+        assert!(plain_notes_prompt(MeetingNotesLanguage::Auto, &evidence).contains(rule));
+
+        settings.meeting_notes_language = MeetingNotesLanguage::English;
+        let english = notes_system_prompt(&evidence, Some(&settings));
+        assert!(!english.contains("spoken in Spanish"));
+        assert!(english.contains(MeetingNotesLanguage::English.instruction()));
     }
 
     fn cited(line: &MeetingEvidence, text: &str) -> RawCitedText {
