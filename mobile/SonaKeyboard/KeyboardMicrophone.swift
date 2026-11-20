@@ -478,7 +478,8 @@ private final class WeakHandler: NSObject, WKScriptMessageHandler {
 
 #if DEBUG
 /// Debug builds log how soon the keyboard showed it was listening after Dictate, how soon
-/// the microphone opened, and how many frames the keyboard dropped while dictating.
+/// the microphone opened, and how many frames the keyboard dropped while dictating or
+/// while it appeared and loaded the page.
 @MainActor
 final class FrameMeter: NSObject {
     private var link: CADisplayLink?
@@ -486,9 +487,11 @@ final class FrameMeter: NSObject {
     private var last: CFTimeInterval = 0
     private var frames = 0
     private var dropped = 0
+    private var label = "Dictate"
 
-    func begin() {
+    func begin(label: String = "Dictate") {
         end()
+        self.label = label
         tapped = CACurrentMediaTime()
         last = 0
         frames = 0
@@ -500,19 +503,19 @@ final class FrameMeter: NSObject {
 
     func mark(_ moment: String) {
         guard link != nil else { return }
-        log.info("\(moment, privacy: .public) \(Int((CACurrentMediaTime() - self.tapped) * 1000)) ms after Dictate")
+        log.info("\(moment, privacy: .public) \(Int((CACurrentMediaTime() - self.tapped) * 1000)) ms after \(self.label, privacy: .public)")
     }
 
     func end() {
         guard let link else { return }
         link.invalidate()
         self.link = nil
-        log.info("dictation drew \(self.frames) frames and dropped \(self.dropped)")
+        log.info("\(self.label, privacy: .public): drew \(self.frames) frames and dropped \(self.dropped)")
     }
 
     @objc private func tick(_ link: CADisplayLink) {
         if frames == 0 {
-            log.info("listening shown on the frame \(Int((link.targetTimestamp - self.tapped) * 1000)) ms after Dictate")
+            log.info("first frame \(Int((link.targetTimestamp - self.tapped) * 1000)) ms after \(self.label, privacy: .public)")
         }
         let interval = link.targetTimestamp - link.timestamp
         if last > 0, interval > 0 {

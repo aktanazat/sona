@@ -44,6 +44,7 @@ final class KeyboardViewController: UIInputViewController {
     private let haptic = UIImpactFeedbackGenerator(style: .light)
     #if DEBUG
     private let frames = FrameMeter()
+    private let appearFrames = FrameMeter()
     #endif
     private var visible = false
     private var requestedAt: Date?
@@ -109,6 +110,22 @@ final class KeyboardViewController: UIInputViewController {
         super.viewDidAppear(animated)
         visible = true
         reload()
+        #if DEBUG
+        appearFrames.begin(label: "keyboard appearing")
+        Task { [appearFrames] in
+            try? await Task.sleep(for: .seconds(2))
+            appearFrames.end()
+        }
+        #endif
+        /* Setting up the page holds the main thread for about 100 ms on the simulator, so
+         * it waits until the keyboard has drawn, then for a moment no finger is on a key:
+         * touch tracking runs the loop outside the default mode, and the load waits. */
+        Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(400))
+            RunLoop.main.perform(inModes: [.default]) {
+                MainActor.assumeIsolated { self?.prepareMicrophone() }
+            }
+        }
         ticker?.cancel()
         ticker = Task { [weak self] in
             while !Task.isCancelled {
@@ -371,10 +388,15 @@ final class KeyboardViewController: UIInputViewController {
         dictate(.stop)
     }
 
-    /// The page loads when a finger first touches Dictate, so a keyboard only typed with
-    /// never starts WebKit.
+    /// The page loads once the keyboard is on screen and idle, so the first Dictate starts
+    /// at once; a Dictate touched before it is ready shows it is listening and starts
+    /// capture when the page is.
     private func prepareMicrophone() {
-        guard microphone == nil, state.route == .keyboard, !state.needsSetup else { return }
+        guard microphone == nil, visible, state.route == .keyboard, !state.needsSetup else { return }
+        #if DEBUG
+        let began = CACurrentMediaTime()
+        defer { appearFrames.mark("page set up, \(Int((CACurrentMediaTime() - began) * 1000)) ms on the main thread, done") }
+        #endif
         let microphone = KeyboardMicrophone()
         microphone.onEvent = { [weak self] event in self?.dictate(event) }
         microphone.onNotice = { [weak self] notice in self?.state.notice = notice }
