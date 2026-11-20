@@ -168,9 +168,11 @@ struct TypingSession {
 /// go, and showing anything else, a change the keyboard did not make, or a new field ends
 /// the memory.
 ///
-/// An app that clears the field without a word just after a one-edit message, while it is
-/// still behind, can show the very text the memory holds as the oldest version; the next
-/// dictation then gets a stray space in front.
+/// One case is left. An app that both lags and clears the field after Send without a word
+/// can show, after the clear, text the memory holds as an older version. The keyboard then
+/// takes the app for behind and loses track until the app catches up: dictation gets a
+/// stray space, a space can double, and a correction can rewrite stale letters
+/// (" Hello I said bbecause  Bye").
 struct FieldEcho {
     private struct Report: Equatable {
         let before: String

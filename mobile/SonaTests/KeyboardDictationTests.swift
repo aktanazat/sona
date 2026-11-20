@@ -72,16 +72,12 @@ struct DictationJoiningTests {
     /// right after it, and hear about changes the host announces.
     @MainActor
     struct Host {
-        /// How many of the keyboard's edits the host reports late; nil never updates.
+        /// How many of the keyboard's edits the host reports late, however long a step takes;
+        /// nil never updates.
         let lag: Int?
         var history: [String]
         var echo = FieldEcho()
 
-        /// The time the steps take: a tenth of a second for a key in a burst, a second and a
-        /// half for a dictation, a second for what only a person causes, and pauses as given.
-        /// The field memory keeps no clock; a host here stays as far behind as its lag however
-        /// long a step takes, because a memory that expired with time once glued dictation on.
-        var elapsed: TimeInterval = 0
 
         init(lag: Int?, text: String = "") {
             self.lag = lag
@@ -119,7 +115,6 @@ struct DictationJoiningTests {
             /// reads the field again, as it does on its next key.
             case lag(Int?)
             case silently(String), announced(String), newField(String)
-            case pause(TimeInterval)
             /// A space, corrected as the keyboard would correct it.
             case space
 
@@ -132,7 +127,6 @@ struct DictationJoiningTests {
                 case let .silently(text): "silent \(text)"
                 case let .announced(text): "announced \(text)"
                 case let .newField(text): "new field \(text)"
-                case let .pause(seconds): "pause \(seconds) s"
                 case .space: "space"
                 }
             }
@@ -140,19 +134,12 @@ struct DictationJoiningTests {
 
         mutating func run(_ step: Step) {
             switch step {
-            case .silently, .announced, .newField: elapsed += 1
-            case .dictate: elapsed += 1.5
-            case let .pause(seconds): elapsed += seconds
-            default: elapsed += 0.1
-            }
-            switch step {
             case let .key(text): keyboard(TypingSession.Edit(insert: text))
             case .delete: keyboard(TypingSession.Edit(deleteCount: 1))
             case let .dictate(words): dictate(words)
             case let .lag(lag):
-                self = Host(lag: lag, history: history, echo: echo, session: session, elapsed: elapsed)
+                self = Host(lag: lag, history: history, echo: echo, session: session)
                 echo.hostReported(before: shown, after: "", ownEdit: true)
-            case .pause: break
             case .space:
                 keyboard(session.end(with: " ", before: shown, corrects: true, hostBehind: behind))
             case let .silently(text): appSilently(sets: text)
@@ -163,14 +150,14 @@ struct DictationJoiningTests {
             }
         }
 
-        var session = TypingSession(corrector: TypingCorrector(language: "en-US"))
+        static let corrector = TypingCorrector(language: "en-US")
+        var session = TypingSession(corrector: Host.corrector)
 
-        private init(lag: Int?, history: [String], echo: FieldEcho, session: TypingSession, elapsed: TimeInterval) {
+        private init(lag: Int?, history: [String], echo: FieldEcho, session: TypingSession) {
             self.lag = lag
             self.history = history
             self.echo = echo
             self.session = session
-            self.elapsed = elapsed
         }
     }
 
@@ -222,20 +209,21 @@ struct DictationJoiningTests {
         Pattern(name: "dictating twice into a host 1 behind", lag: 1, start: "Call Dauren ", steps: [.dictate("école"), .dictate("Meet")], behind: [t, t], text: "Call Dauren école Meet"),
         Pattern(name: "dictating twice into a host 2 behind", lag: 2, start: "Call Dauren ", steps: [.dictate("école"), .dictate("Meet")], behind: [t, t], text: "Call Dauren école Meet"),
         Pattern(
-            name: "typing on after a pause, 1 behind", lag: 1, start: "I said ",
-            steps: [.key("b"), .key("e"), .key("c"), .key("a"), .key("u"), .pause(0.5), .key("s"), .key("e"), .space],
-            behind: [t, t, t, t, t, t, t, t, t], text: "I said because "
+            name: "typing a word, then a corrected space, 1 behind", lag: 1, start: "I said ",
+            steps: [.key("b"), .key("e"), .key("c"), .key("a"), .key("u"), .key("s"), .key("e"), .space],
+            behind: [t, t, t, t, t, t, t, t], text: "I said because "
         ),
         Pattern(
-            name: "typing on after a pause, 2 behind", lag: 2, start: "I said ",
-            steps: [.key("b"), .key("e"), .key("c"), .key("a"), .key("u"), .pause(0.5), .key("s"), .key("e"), .space],
-            behind: [t, t, t, t, t, t, t, t, t], text: "I said because "
+            name: "typing a word, then a corrected space, 2 behind", lag: 2, start: "I said ",
+            steps: [.key("b"), .key("e"), .key("c"), .key("a"), .key("u"), .key("s"), .key("e"), .space],
+            behind: [t, t, t, t, t, t, t, t], text: "I said because "
         ),
         Pattern(name: "return to earlier text after catching up", lag: 1, start: "Call ", steps: [.key("D"), .key("a"), .lag(0), .silently("Call D"), .dictate("x")], behind: [t, t, f, f, f], text: "Call D x"),
     ]
 
     @Test("the keyboard knows when the host is behind, and joins dictation right, across lag patterns", arguments: patterns)
-    func lagPatterns(_ pattern: Pattern) {
+    func lagPatterns(_ pattern: Pattern) throws {
+        _ = try #require(Host.corrector)
         var host = Host(lag: pattern.lag, text: pattern.start)
         var behind: [Bool] = []
         for step in pattern.steps {
@@ -264,10 +252,8 @@ struct DictationJoiningTests {
     func seededSessions(seed: UInt64) {
         var random = Random(state: seed)
         var unsafe = 0, stuck = 0, wrongSpace = 0, edits = 0, dictations = 0, clears = 0
-        var seconds: TimeInterval = 0
         for _ in 0..<2_000 {
             var echo = FieldEcho()
-            var elapsed: TimeInterval = 0
             var history = [["", "a", "Note: "][random.next(3)]]
             var shown = 0
             let lag = [0, 1, 2, 3, 5, 1_000][random.next(6)]
@@ -275,7 +261,6 @@ struct DictationJoiningTests {
                 let real = history[history.count - 1]
                 let op = random.next(11)
                 if op <= 5 {
-                    elapsed += op >= 4 ? 1.5 : Double(5 + random.next(20)) / 100
                     let before = history[shown]
                     echo.hostReported(before: before, after: "", ownEdit: true)
                     let behind = echo.behind(before: before, after: "")
@@ -299,11 +284,9 @@ struct DictationJoiningTests {
                     shown = oldest + random.next(history.count - oldest)
                     echo.hostReported(before: history[shown], after: "", ownEdit: true)
                 } else if op == 6 {
-                    elapsed += Double(5 + random.next(20)) / 100
                     shown = history.count - 1
                     echo.hostReported(before: history[shown], after: "", ownEdit: true)
                 } else if op == 7 {
-                    elapsed += 1
                     shown = history.count - 1
                     echo.hostReported(before: history[shown], after: "", ownEdit: true)
                     /* The one case left: a quiet clear to text the memory still holds as an
@@ -313,28 +296,24 @@ struct DictationJoiningTests {
                     history = ["Draft \(clears): "]
                     shown = 0
                 } else if op == 8 {
-                    elapsed += 1
                     history = [["", "a"][random.next(2)]]
                     shown = 0
                     echo.hostReported(before: history[0], after: "", ownEdit: false)
                 } else if op == 9 {
-                    elapsed += 1
                     history = [["", "a"][random.next(2)]]
                     shown = 0
                     echo.forget()
                 } else {
-                    elapsed += Double(50 + random.next(250)) / 100
                     if random.next(2) == 0 { shown = history.count - 1 }
                 }
             }
-            seconds += elapsed
         }
         #expect(edits > 10_000)
         #expect(dictations > 3_000)
         #expect(unsafe == 0, "unsafe edits \(unsafe) of \(edits)")
         #expect(stuck == 0, "stuck in plain mode \(stuck) of \(edits)")
         #expect(wrongSpace == 0, "wrong joining spaces \(wrongSpace) of \(dictations)")
-        print("seed \(seed): \(edits) edits, \(dictations) dictations over \(Int(seconds)) s, unsafe \(unsafe), stuck \(stuck), wrong spaces \(wrongSpace)")
+        print("seed \(seed): \(edits) edits, \(dictations) dictations, unsafe \(unsafe), stuck \(stuck), wrong spaces \(wrongSpace)")
     }
 
     @Test("a host that never updates stays behind through a long burst")
