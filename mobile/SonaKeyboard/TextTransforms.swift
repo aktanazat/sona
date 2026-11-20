@@ -98,7 +98,9 @@ enum TextStyle: String, CaseIterable, Identifiable {
         }
     }
 
+    /// The text in this style alone: a style the text already has gives way to it.
     func apply(to text: String) -> String {
+        let text = Self.plain(text)
         switch self {
         case .strikethrough: return combining(text, mark: "\u{0336}")
         case .underline: return combining(text, mark: "\u{0332}")
@@ -122,6 +124,24 @@ enum TextStyle: String, CaseIterable, Identifiable {
         }
         return String(output)
     }
+
+    /// Text with every style's look-alikes and marks turned back into plain letters and digits.
+    static func plain(_ text: String) -> String {
+        var output = String.UnicodeScalarView()
+        for scalar in text.unicodeScalars where scalar != "\u{0336}" && scalar != "\u{0332}" {
+            if styled.contains(scalar.value) {
+                output.append(contentsOf: String(scalar).precomposedStringWithCompatibilityMapping.unicodeScalars)
+            } else {
+                output.append(scalar)
+            }
+        }
+        return String(output)
+    }
+
+    /// The mathematical letters and digits, the circled letters, and the letterlike symbols the
+    /// styles borrow, each of which Unicode's compatibility mapping turns back into its letter.
+    private static let styled = Set<UInt32>(0x1D400...0x1D7FF).union(0x24B6...0x24E9)
+        .union(allCases.flatMap(\.exceptions.values))
 
     private func combining(_ text: String, mark: Character) -> String {
         var output = ""

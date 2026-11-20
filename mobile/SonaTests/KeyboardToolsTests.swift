@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import UIKit
 
 @MainActor
 struct KeyboardToolsTests {
@@ -52,6 +53,26 @@ struct KeyboardToolsTests {
         #expect(style.apply(to: input) == expected)
     }
 
+    /// A style replaces the one the text had, so Italic on bold text gives italic text.
+    @Test(arguments: [
+        (TextStyle.italic, "𝐎𝐤 𝟏", "𝑂𝑘 1"),
+        (.bold, "ℋℯ𝓁𝓁ℴ", "𝐇𝐞𝐥𝐥𝐨"),
+        (.monospace, "a̶b̶", "𝚊𝚋"),
+    ])
+    func textStyleReplacesTheStyleTheTextHad(_ style: TextStyle, _ input: String, _ expected: String) {
+        #expect(style.apply(to: input) == expected)
+    }
+
+    /// Styled letters take two UTF-16 units each, and the host moves the cursor by those units.
+    @Test func replacingWithTheCursorBeforeStyledTextReplacesTheWholeField() {
+        let field = Field(before: "I have", after: " 𝐠𝐨𝐧𝐞 home")
+        let target = FieldText.target(in: field)
+        #expect(FieldText.replace(target, with: "We went home", in: field))
+        #expect(field.text == "We went home")
+        #expect(FieldText.undo(FieldText.Change(original: target.text, replacement: "We went home"), in: field))
+        #expect(field.text == "I have 𝐠𝐨𝐧𝐞 home")
+    }
+
     @Test(arguments: [
         (TextCase.sentence, "HELLO THERE. SO i'M here, i THINK!\nnew LINE", "Hello there. So I'm here, I think!\nNew line"),
         (.title, "the QUICK fox's tail", "The Quick Fox's Tail"),
@@ -59,4 +80,38 @@ struct KeyboardToolsTests {
     func caseChangeKeepsSentencesAndWords(_ change: TextCase, _ input: String, _ expected: String) {
         #expect(change.apply(to: input, locale: Locale(identifier: "en_US")) == expected)
     }
+}
+
+/// A text field as a host shows it to the keyboard: the cursor moves by UTF-16 units and
+/// a backspace deletes one character.
+private final class Field: NSObject, UITextDocumentProxy {
+    private var before: String
+    private var after: String
+
+    init(before: String, after: String) {
+        self.before = before
+        self.after = after
+    }
+
+    var text: String { before + after }
+    var documentContextBeforeInput: String? { before }
+    var documentContextAfterInput: String? { after }
+    var selectedText: String? { nil }
+    var documentInputMode: UITextInputMode? { nil }
+    var documentIdentifier = UUID()
+    var hasText: Bool { !text.isEmpty }
+
+    func adjustTextPosition(byCharacterOffset offset: Int) {
+        var moved = 0
+        while moved < offset, let scalar = after.unicodeScalars.first {
+            before.unicodeScalars.append(scalar)
+            after.unicodeScalars.removeFirst()
+            moved += scalar.utf16.count
+        }
+    }
+
+    func insertText(_ text: String) { before += text }
+    func deleteBackward() { if !before.isEmpty { before.removeLast() } }
+    func setMarkedText(_ markedText: String, selectedRange: NSRange) {}
+    func unmarkText() {}
 }

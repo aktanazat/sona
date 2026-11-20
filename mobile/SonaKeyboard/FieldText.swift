@@ -21,7 +21,8 @@ enum FieldText {
         guard self.target(in: proxy) == target else { return false }
         if !target.selected {
             let after = proxy.documentContextAfterInput ?? ""
-            if !after.isEmpty { proxy.adjustTextPosition(byCharacterOffset: after.count) }
+            /* The host moves the cursor by UTF-16 units, not characters. */
+            if !after.isEmpty { proxy.adjustTextPosition(byCharacterOffset: after.utf16.count) }
             for _ in 0..<target.text.count { proxy.deleteBackward() }
         }
         proxy.insertText(text)
