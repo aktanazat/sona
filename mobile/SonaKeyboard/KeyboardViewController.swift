@@ -78,6 +78,10 @@ final class KeyboardViewController: UIInputViewController {
         tools.proxy = { [weak self] in self?.textDocumentProxy }
         tools.canCopy = { [weak self] in self?.hasFullAccess ?? false }
         tools.snippetsChanged = { [weak self] in self?.applySnippets() }
+        tools.fieldChanged = { [weak self] in
+            self?.refreshShift()
+            self?.refreshSuggestions()
+        }
         applySnippets()
         let content = KeyboardView(
             state: state,

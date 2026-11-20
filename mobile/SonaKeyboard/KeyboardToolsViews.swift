@@ -66,6 +66,7 @@ struct ComposeBar: View {
                     .frame(width: 38, height: 38)
             }
             .buttonStyle(.glassProminent)
+            .foregroundStyle(.white)
             .buttonBorderShape(.circle)
             .disabled(tools.composeText.trimmingCharacters(in: .whitespaces).isEmpty)
             .accessibilityLabel(Text("tools.send"))
@@ -580,10 +581,11 @@ private struct AnswerView: View {
                 if answer.source != nil {
                     Button("tools.replace") { withAnimation(toolsAnimation) { tools.replace(with: answer) } }
                         .buttonStyle(.glassProminent)
+                        .foregroundStyle(.white)
                         .accessibilityIdentifier("tools-replace")
                 }
                 if answer.source == nil {
-                    insertButton.buttonStyle(.glassProminent)
+                    insertButton.buttonStyle(.glassProminent).foregroundStyle(.white)
                 } else if answer.source?.selected == false {
                     insertButton.buttonStyle(.glass)
                 }
@@ -620,6 +622,7 @@ private struct ReviewView: View {
             HStack(spacing: 8) {
                 Button("keyboard.insert") { withAnimation(toolsAnimation) { tools.insert(text) } }
                     .buttonStyle(.glassProminent)
+                    .foregroundStyle(.white)
                     .accessibilityIdentifier("tools-review-insert")
                 Button("keyboard.discard") { withAnimation(toolsAnimation) { tools.back() } }
                     .buttonStyle(.glass)

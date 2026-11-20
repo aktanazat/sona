@@ -102,6 +102,8 @@ final class KeyboardTools {
     @ObservationIgnored var proxy: () -> UITextDocumentProxy? = { nil }
     @ObservationIgnored var canCopy: () -> Bool = { false }
     @ObservationIgnored var snippetsChanged: () -> Void = {}
+    /// The tools wrote to the field, which UIKit does not report as a text change.
+    @ObservationIgnored var fieldChanged: () -> Void = {}
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private let rewrite = BoundedRewrite()
     @ObservationIgnored private var work: Task<Void, Never>?
@@ -254,6 +256,7 @@ final class KeyboardTools {
         guard let proxy = proxy() else { return }
         proxy.insertText(TypingSession.joiningSpace(before: proxy.documentContextBeforeInput ?? "") + text)
         page = .closed
+        fieldChanged()
     }
 
     func copy(_ text: String) {
@@ -267,11 +270,13 @@ final class KeyboardTools {
         lastChange = nil
         notice = nil
         if !FieldText.undo(change, in: proxy) { say("tools.textChanged") }
+        fieldChanged()
     }
 
     private func changed(_ change: FieldText.Change, _ text: LocalizedStringKey) {
         lastChange = change
         say(text, undoable: true)
+        fieldChanged()
     }
 
     // MARK: Snippets
