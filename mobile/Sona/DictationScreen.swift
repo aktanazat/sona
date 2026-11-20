@@ -7,7 +7,7 @@ struct DictationScreen: View {
     /* Observed for the recording state that `model.canStartDictation` reads: AppModel
      * does not republish it. */
     @ObservedObject var recorder: PhoneRecorder
-    @AppStorage(DictationPreferences.keyboardKey) private var keyboardEnabled = false
+    @AppStorage(DictationPreferences.keyboardKey, store: DictationPreferences.shared) private var keyboardEnabled = false
     @AppStorage(DictationPreferences.styleKey) private var style = ""
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ScaledMetric(relativeTo: .body) private var controlSize: CGFloat = 60
@@ -17,8 +17,11 @@ struct DictationScreen: View {
     var body: some View {
         NavigationStack {
             VStack(alignment: .leading, spacing: 12) {
-                if model.keyboardReturn {
-                    KeyboardReturnCard(keyboardEnabled: keyboardEnabled, openSettings: { showsSettings = true })
+                if model.keyboardReturn || model.keyboardSetup != nil {
+                    KeyboardReturnCard(
+                        keyboardEnabled: keyboardEnabled, setup: model.keyboardSetup,
+                        openSettings: { showsSettings = true }
+                    )
                 }
                 LevelWaveform(meter: dictation.meter, height: 48)
                     .padding(.vertical, 8)
@@ -224,7 +227,7 @@ private struct PhoneDictationSettings: View {
     @ObservedObject var model: AppModel
     @ObservedObject var dictation: PhoneDictation
     @Environment(\.dismiss) private var dismiss
-    @AppStorage(DictationPreferences.keyboardKey) private var keyboardEnabled = false
+    @AppStorage(DictationPreferences.keyboardKey, store: DictationPreferences.shared) private var keyboardEnabled = false
     @AppStorage(DictationPreferences.minutesKey) private var minutes = 5
     @AppStorage(DictationPreferences.styleKey) private var style = ""
     @State private var languages = DictationPreferences.languages
@@ -387,11 +390,13 @@ private struct PhoneDictationSettings: View {
     }
 }
 
-/// What a dictation the keyboard opened Sona for asks next: go back to the app it came from.
-/// iOS gives a keyboard no way to send the person back, nor the app's name, so the card says
-/// where the system's own way back is.
+/// What a keyboard that opened Sona asks next. Normally that is only once, to allow the
+/// microphone; after the microphone refused the keyboard, Sona listens and the person goes
+/// back. iOS gives a keyboard no way to send the person back, nor the app's name, so the
+/// card says where the system's own way back is.
 private struct KeyboardReturnCard: View {
     let keyboardEnabled: Bool
+    let setup: KeyboardSetup?
     let openSettings: () -> Void
     @AppStorage(DictationPreferences.minutesKey) private var minutes = 5
 
@@ -400,12 +405,25 @@ private struct KeyboardReturnCard: View {
             Label("keyboard.returnTitle", systemImage: "arrow.uturn.backward")
                 .font(.headline)
                 .foregroundStyle(Theme.textPrimary)
-            Text("keyboard.swipeBack")
-                .font(.subheadline)
-                .foregroundStyle(Theme.textPrimary)
-                .fixedSize(horizontal: false, vertical: true)
-                .accessibilityIdentifier("keyboard-return-instruction")
-            if keyboardEnabled {
+            Group {
+                switch setup {
+                case nil: Text("keyboard.swipeBack")
+                case .asking: Text("keyboard.setupAsking")
+                case .ready: Text("keyboard.setupReady")
+                case let .refused(message): Text(message)
+                }
+            }
+            .font(.subheadline)
+            .foregroundStyle(Theme.textPrimary)
+            .fixedSize(horizontal: false, vertical: true)
+            .accessibilityIdentifier("keyboard-return-instruction")
+            if !keyboardEnabled {
+                Text("keyboard.permission")
+                    .font(.footnote)
+                    .foregroundStyle(Theme.textSecondary)
+                Button("dictation.settings", action: openSettings)
+                    .font(.subheadline)
+            } else if setup == nil {
                 LabeledContent("keyboard.sessionLength") {
                     Picker("keyboard.sessionLength", selection: $minutes) {
                         ForEach([1, 5, 15, 30], id: \.self) { Text("keyboard.minutes \($0)").tag($0) }
@@ -418,12 +436,6 @@ private struct KeyboardReturnCard: View {
                 Text("keyboard.nextTime")
                     .font(.footnote)
                     .foregroundStyle(Theme.textSecondary)
-            } else {
-                Text("keyboard.permission")
-                    .font(.footnote)
-                    .foregroundStyle(Theme.textSecondary)
-                Button("dictation.settings", action: openSettings)
-                    .font(.subheadline)
             }
         }
         .padding(14)

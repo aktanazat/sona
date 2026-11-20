@@ -20,6 +20,14 @@ enum DictationLink {
         return components.url!
     }
 
+    /// The keyboard opens Sona this way only to have the microphone and speech recognition
+    /// allowed, which a keyboard cannot ask for itself; nothing is dictated in the app.
+    static let keyboardSetupURL = URL(string: "\(scheme)://\(host)?keyboard=1&setup=1")!
+
+    static func keyboardSetup(_ url: URL) -> Bool {
+        keyboardQuery("setup", in: url) == "1"
+    }
+
     static func fromKeyboard(_ url: URL) -> Bool {
         opens(url) && URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?
             .contains(where: { $0.name == "keyboard" && $0.value == "1" }) == true
