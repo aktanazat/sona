@@ -68,6 +68,21 @@ pub(crate) enum ActionUndo {
     CalendarEvent {
         event_id: String,
     },
+    RemoveCreatedTask {
+        task_id: String,
+    },
+    RestoreTask {
+        task_id: String,
+        prior: Box<crate::planning::work::chat::TaskPrior>,
+    },
+    RestoreProject {
+        project_id: String,
+        prior: Option<crate::planning::work::chat::ProjectPrior>,
+    },
+    RestoreNote {
+        note_id: String,
+        body: String,
+    },
     Unavailable,
 }
 
@@ -210,6 +225,112 @@ pub(crate) async fn apply(
                 crate::integrations::send_notes(app, &store, &request, None).await?,
             );
         }
+        SonaChatActionV1::CreateTask {
+            title,
+            details,
+            project_id,
+            priority,
+            due,
+            ..
+        } => {
+            let due = due
+                .as_deref()
+                .map(|value| {
+                    crate::planning::work::chat::DueEdit::named(value)
+                        .ok_or_else(|| "That due day is not valid.".to_owned())
+                })
+                .transpose()?;
+            let item = crate::planning::work::chat::create_task(
+                app,
+                operation_id,
+                title,
+                details.as_deref(),
+                project_id.as_deref(),
+                *priority,
+                due,
+            )
+            .await?;
+            return Ok(AppliedAction {
+                operation_id: Some(operation_id.to_owned()),
+                undo: ActionUndo::RemoveCreatedTask { task_id: item.id },
+            });
+        }
+        SonaChatActionV1::UpdateTask {
+            task_id,
+            title,
+            details,
+            status,
+            priority,
+            due,
+            project_id,
+            ..
+        } => {
+            let status = status
+                .as_deref()
+                .map(|value| {
+                    crate::planning::work::chat::status_named(value)
+                        .ok_or_else(|| "That status is not valid.".to_owned())
+                })
+                .transpose()?;
+            let due = due
+                .as_deref()
+                .map(|value| {
+                    crate::planning::work::chat::DueEdit::named(value)
+                        .ok_or_else(|| "That due day is not valid.".to_owned())
+                })
+                .transpose()?;
+            let project_id = project_id
+                .as_deref()
+                .map(|pid| (pid != "none").then(|| pid.to_owned()));
+            let edit = crate::planning::work::chat::TaskEdit {
+                title: title.clone(),
+                details: details.clone(),
+                status,
+                priority: *priority,
+                due,
+                project_id,
+            };
+            let prior =
+                crate::planning::work::chat::update_task(app, operation_id, task_id, &edit).await?;
+            return Ok(AppliedAction {
+                operation_id: Some(operation_id.to_owned()),
+                undo: ActionUndo::RestoreTask {
+                    task_id: task_id.clone(),
+                    prior: Box::new(prior),
+                },
+            });
+        }
+        SonaChatActionV1::SaveProject {
+            project_id,
+            name,
+            description,
+            ..
+        } => {
+            let (project, prior) = crate::planning::work::chat::save_project(
+                app,
+                operation_id,
+                project_id.as_deref(),
+                name,
+                description.as_deref(),
+            )?;
+            return Ok(AppliedAction {
+                operation_id: Some(operation_id.to_owned()),
+                undo: ActionUndo::RestoreProject {
+                    project_id: project.id,
+                    prior,
+                },
+            });
+        }
+        SonaChatActionV1::EditNote { note_id, body, .. } => {
+            let prior = crate::planning::work::chat::edit_note(app, note_id, body)?;
+            return Ok(AppliedAction {
+                operation_id: Some(operation_id.to_owned()),
+                undo: ActionUndo::RestoreNote {
+                    note_id: note_id.clone(),
+                    body: prior,
+                },
+            });
+        }
     };
     result.map_err(|_| "This change could not be applied. The meeting may have changed.".into())
 }
@@ -247,6 +368,26 @@ pub(crate) async fn undo(
             return crate::integrations::undo_send(app, &store, receipt_id).await;
         }
         ActionUndo::CalendarEvent { event_id } => return crate::integrations::calendar::undo(event_id).await,
+        ActionUndo::RemoveCreatedTask { task_id } => {
+            let op = uuid::Uuid::new_v4().to_string();
+            return crate::planning::work::chat::remove_created_task(app, &op, task_id);
+        }
+        ActionUndo::RestoreTask { task_id, prior } => {
+            let op = uuid::Uuid::new_v4().to_string();
+            return crate::planning::work::chat::restore_task(app, &op, task_id, prior).await;
+        }
+        ActionUndo::RestoreProject { project_id, prior } => {
+            let op = uuid::Uuid::new_v4().to_string();
+            return crate::planning::work::chat::restore_project(
+                app,
+                &op,
+                project_id,
+                prior.as_ref(),
+            );
+        }
+        ActionUndo::RestoreNote { note_id, body } => {
+            return crate::planning::work::chat::edit_note(app, note_id, body).map(drop);
+        }
         ActionUndo::Unavailable => return Err("This action cannot be undone in Sona. Close the draft in Mail or remove the message at its destination.".into()),
     };
     result.map_err(|_| "This change could not be undone. The meeting may have changed.".into())

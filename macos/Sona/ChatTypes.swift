@@ -316,6 +316,18 @@ struct AgentPanelStep: Decodable, Identifiable {
         case "dictation": return "Reading a dictation"
         case "word_stats": return "Counting words"
         case "activity": return "Counting activity"
+        case "tasks": return "Reading your tasks"
+        case "task": return "Reading a task"
+        case "projects": return "Reading your projects"
+        case "cycles": return "Checking cycles"
+        case "initiatives": return "Reading initiatives"
+        case "notes": return "Searching your notes"
+        case "note": return "Reading a note"
+        case "skill": return "Reading a skill"
+        case "help": return "Checking Sona's help"
+        case "mcp_servers": return "Listing outside MCP servers"
+        case "mcp_tools": return "Checking outside MCP tools"
+        case "mcp_call": return "Calling an outside MCP tool"
         default: return label
         }
     }
@@ -341,9 +353,13 @@ enum AgentChatAction: Decodable {
     case postSlack(ChatSlackDraft)
     case createCalendarEvent(ChatCalendarDraft)
     case sendNotes(ChatNotesSend)
+    case createTask(reason: String, title: String)
+    case updateTask(reason: String, title: String?, status: String?)
+    case saveProject(reason: String, name: String, isNew: Bool)
+    case editNote(reason: String)
 
     private enum Key: String, CodingKey {
-        case kind, reason, templateId, term, replacement, name, personId
+        case kind, reason, templateId, term, replacement, name, personId, title, status, projectId
     }
 
     init(from decoder: Decoder) throws {
@@ -370,6 +386,20 @@ enum AgentChatAction: Decodable {
         case "post_slack": self = .postSlack(try ChatSlackDraft(from: decoder))
         case "create_calendar_event": self = .createCalendarEvent(try ChatCalendarDraft(from: decoder))
         case "send_notes": self = .sendNotes(try ChatNotesSend(from: decoder))
+        case "create_task":
+            self = .createTask(reason: reason, title: try container.decode(String.self, forKey: .title))
+        case "update_task":
+            self = .updateTask(
+                reason: reason,
+                title: try container.decodeIfPresent(String.self, forKey: .title),
+                status: try container.decodeIfPresent(String.self, forKey: .status))
+        case "save_project":
+            self = .saveProject(
+                reason: reason,
+                name: try container.decode(String.self, forKey: .name),
+                isNew: try container.decodeIfPresent(String.self, forKey: .projectId) == nil)
+        case "edit_note":
+            self = .editNote(reason: reason)
         default:
             throw DecodingError.dataCorruptedError(
                 forKey: .kind, in: container, debugDescription: "unknown chat action \(kind)")
@@ -387,6 +417,8 @@ enum AgentChatAction: Decodable {
         case let .postSlack(draft): draft.reason
         case let .createCalendarEvent(draft): draft.reason
         case let .sendNotes(draft): draft.reason
+        case let .createTask(reason, _), let .updateTask(reason, _, _),
+             let .saveProject(reason, _, _), let .editNote(reason): reason
         }
     }
 
@@ -411,6 +443,14 @@ enum AgentChatAction: Decodable {
         case .postSlack: "Post a message to Slack"
         case .createCalendarEvent: "Create a calendar event"
         case .sendNotes: "Send generated meeting notes"
+        case let .createTask(_, title): "Create task \"\(title)\""
+        case let .updateTask(_, title, status):
+            if let title { "Update task to \"\(title)\"" }
+            else if let status { "Mark task \(status.replacingOccurrences(of: "_", with: " "))" }
+            else { "Update a task" }
+        case let .saveProject(_, name, isNew):
+            isNew ? "Create project \"\(name)\"" : "Update project \"\(name)\""
+        case .editNote: "Update a note"
         }
     }
 

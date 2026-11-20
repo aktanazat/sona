@@ -622,6 +622,47 @@ pub enum SonaChatActionV1 {
         connection_id: String,
         session_id: MeetingSessionId,
     },
+    CreateTask {
+        reason: String,
+        title: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        details: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        priority: Option<u8>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        due: Option<String>,
+    },
+    UpdateTask {
+        reason: String,
+        task_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        details: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        priority: Option<u8>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        due: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project_id: Option<String>,
+    },
+    SaveProject {
+        reason: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project_id: Option<String>,
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+    },
+    EditNote {
+        reason: String,
+        note_id: String,
+        body: String,
+    },
 }
 
 impl SonaChatActionV1 {
@@ -635,7 +676,11 @@ impl SonaChatActionV1 {
             | Self::DraftEmail { reason, .. }
             | Self::PostSlack { reason, .. }
             | Self::CreateCalendarEvent { reason, .. }
-            | Self::SendNotes { reason, .. } => reason,
+            | Self::SendNotes { reason, .. }
+            | Self::CreateTask { reason, .. }
+            | Self::UpdateTask { reason, .. }
+            | Self::SaveProject { reason, .. }
+            | Self::EditNote { reason, .. } => reason,
         }
     }
 
@@ -744,6 +789,108 @@ impl SonaChatActionV1 {
                     return Err(ProposalValidationError::InvalidAction);
                 }
                 vec![connection_id.clone(), session_id.uuid().to_string()]
+            }
+            Self::CreateTask {
+                title,
+                details,
+                project_id,
+                priority,
+                due,
+                ..
+            } => {
+                if !is_message_text(title, MAX_ACTION_TEXT_BYTES)
+                    || title.contains(['\n', '\t'])
+                    || details.as_deref().is_some_and(|d| {
+                        !d.is_empty() && !is_message_text(d, MAX_ACTION_BODY_BYTES)
+                    })
+                    || priority.is_some_and(|p| p > 4)
+                    || due
+                        .as_deref()
+                        .is_some_and(|d| crate::planning::work::chat::DueEdit::named(d).is_none())
+                {
+                    return Err(ProposalValidationError::InvalidAction);
+                }
+                if let Some(pid) = project_id {
+                    if uuid::Uuid::parse_str(pid).is_err() {
+                        return Err(ProposalValidationError::InvalidAction);
+                    }
+                    vec![pid.clone()]
+                } else {
+                    Vec::new()
+                }
+            }
+            Self::UpdateTask {
+                task_id,
+                title,
+                details,
+                status,
+                priority,
+                due,
+                project_id,
+                ..
+            } => {
+                if uuid::Uuid::parse_str(task_id).is_err()
+                    || (title.is_none()
+                        && details.is_none()
+                        && status.is_none()
+                        && priority.is_none()
+                        && due.is_none()
+                        && project_id.is_none())
+                    || title.as_deref().is_some_and(|t| {
+                        !is_message_text(t, MAX_ACTION_TEXT_BYTES) || t.contains(['\n', '\t'])
+                    })
+                    || details.as_deref().is_some_and(|d| {
+                        !d.is_empty() && !is_message_text(d, MAX_ACTION_BODY_BYTES)
+                    })
+                    || status
+                        .as_deref()
+                        .is_some_and(|s| crate::planning::work::chat::status_named(s).is_none())
+                    || priority.is_some_and(|p| p > 4)
+                    || due
+                        .as_deref()
+                        .is_some_and(|d| crate::planning::work::chat::DueEdit::named(d).is_none())
+                {
+                    return Err(ProposalValidationError::InvalidAction);
+                }
+                let mut ids = vec![task_id.clone()];
+                if let Some(pid) = project_id.as_deref().filter(|pid| *pid != "none") {
+                    if uuid::Uuid::parse_str(pid).is_err() {
+                        return Err(ProposalValidationError::InvalidAction);
+                    }
+                    ids.push(pid.to_owned());
+                }
+                ids
+            }
+            Self::SaveProject {
+                project_id,
+                name,
+                description,
+                ..
+            } => {
+                if !is_message_text(name, MAX_ACTION_TEXT_BYTES)
+                    || name.contains(['\n', '\t'])
+                    || description.as_deref().is_some_and(|d| {
+                        !d.is_empty() && !is_message_text(d, MAX_ACTION_BODY_BYTES)
+                    })
+                {
+                    return Err(ProposalValidationError::InvalidAction);
+                }
+                if let Some(pid) = project_id {
+                    if uuid::Uuid::parse_str(pid).is_err() {
+                        return Err(ProposalValidationError::InvalidAction);
+                    }
+                    vec![pid.clone()]
+                } else {
+                    Vec::new()
+                }
+            }
+            Self::EditNote { note_id, body, .. } => {
+                if uuid::Uuid::parse_str(note_id).is_err()
+                    || (!body.is_empty() && !is_message_text(body, MAX_ACTION_BODY_BYTES))
+                {
+                    return Err(ProposalValidationError::InvalidAction);
+                }
+                vec![note_id.clone()]
             }
         };
         for id in cited {
@@ -2103,5 +2250,92 @@ mod tests {
                 Err(ProposalValidationError::InvalidAction)
             );
         }
+    }
+
+    #[test]
+    fn work_actions_validate_fields_and_require_cited_ids() {
+        let task_id = "11111111-1111-4111-8111-111111111111".to_string();
+        let project_id = "22222222-2222-4222-8222-222222222222".to_string();
+        let note_id = "33333333-3333-4333-8333-333333333333".to_string();
+        let foreign = "99999999-9999-4999-8999-999999999999".to_string();
+        let pack = format!("task {task_id} project {project_id} note {note_id}");
+
+        let create = SonaChatActionV1::CreateTask {
+            reason: "You asked to track it.".into(),
+            title: "Ship release".into(),
+            details: Some("Check changelog.".into()),
+            project_id: Some(project_id.clone()),
+            priority: Some(2),
+            due: Some("2026-12-01".into()),
+        };
+        assert_eq!(create.validate(Some(&pack)), Ok(()));
+        assert_eq!(
+            create.validate(None),
+            Err(ProposalValidationError::ForeignActionId)
+        );
+
+        let update = SonaChatActionV1::UpdateTask {
+            reason: "Mark it done.".into(),
+            task_id: task_id.clone(),
+            title: None,
+            details: None,
+            status: Some("done".into()),
+            priority: None,
+            due: Some("none".into()),
+            project_id: None,
+        };
+        assert_eq!(update.validate(Some(&pack)), Ok(()));
+        let empty_update = SonaChatActionV1::UpdateTask {
+            reason: "Nothing changes.".into(),
+            task_id: task_id.clone(),
+            title: None,
+            details: None,
+            status: None,
+            priority: None,
+            due: None,
+            project_id: None,
+        };
+        assert_eq!(
+            empty_update.validate(Some(&pack)),
+            Err(ProposalValidationError::InvalidAction)
+        );
+        let foreign_update = SonaChatActionV1::UpdateTask {
+            reason: "Mark it done.".into(),
+            task_id: foreign.clone(),
+            title: None,
+            details: None,
+            status: Some("done".into()),
+            priority: None,
+            due: None,
+            project_id: None,
+        };
+        assert_eq!(
+            foreign_update.validate(Some(&pack)),
+            Err(ProposalValidationError::ForeignActionId)
+        );
+
+        let save_project = SonaChatActionV1::SaveProject {
+            reason: "Update summary.".into(),
+            project_id: Some(project_id),
+            name: "Q4 Launch".into(),
+            description: Some("Updated scope.".into()),
+        };
+        assert_eq!(save_project.validate(Some(&pack)), Ok(()));
+
+        let edit_note = SonaChatActionV1::EditNote {
+            reason: "Add meeting takeaways.".into(),
+            note_id,
+            body: "# Notes\n- Done".into(),
+        };
+        assert_eq!(edit_note.validate(Some(&pack)), Ok(()));
+        let foreign_note = SonaChatActionV1::EditNote {
+            reason: "Add meeting takeaways.".into(),
+            note_id: foreign,
+            body: "# Notes\n- Done".into(),
+        };
+        assert_eq!(
+            foreign_note.validate(Some(&pack)),
+            Err(ProposalValidationError::ForeignActionId)
+        );
     }
 }

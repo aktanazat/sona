@@ -781,7 +781,7 @@ struct WorkActivity: Codable, Identifiable, Equatable {
     var to: String?
     /// The agent behind an `agent` entry, when it gave its name.
     var agent: String?
-    /// How that agent reached Sona: "mcp" or "cli", when recorded.
+    /// How that agent reached Sona: "mcp", "cli" or "chat", when recorded.
     var via: String?
     var reason: String?
 }

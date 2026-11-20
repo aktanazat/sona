@@ -32,8 +32,21 @@ use uuid::Uuid;
 pub(crate) const UNNAMED: &str = "Agent";
 
 /// Lets each agent entry and proposal say how the agent reached Sona.
-pub const VIA_MIGRATION: &str = "ALTER TABLE planning_activity_agents ADD COLUMN via TEXT CHECK (via IN ('mcp', 'cli'));
+pub const VIA_MIGRATION: &str =
+    "ALTER TABLE planning_activity_agents ADD COLUMN via TEXT CHECK (via IN ('mcp', 'cli'));
 ALTER TABLE planning_task_proposals ADD COLUMN via TEXT CHECK (via IN ('mcp', 'cli'));";
+
+/// Lets an agent entry say it came through Talk to Sona. The table is
+/// rebuilt to widen its check, every row and rowid kept.
+pub const CHAT_VIA_MIGRATION: &str = "CREATE TABLE planning_activity_agents_next (
+    activity_id TEXT PRIMARY KEY NOT NULL,
+    agent TEXT NOT NULL CHECK(length(trim(agent)) > 0),
+    via TEXT CHECK (via IN ('mcp', 'cli', 'chat'))
+);
+INSERT INTO planning_activity_agents_next (rowid, activity_id, agent, via)
+    SELECT rowid, activity_id, agent, via FROM planning_activity_agents;
+DROP TABLE planning_activity_agents;
+ALTER TABLE planning_activity_agents_next RENAME TO planning_activity_agents;";
 
 /// Lets an agent propose an estimate and the person work is for. The
 /// proposal table is rebuilt to widen its fields, every row and rowid kept.
@@ -1622,8 +1635,8 @@ mod tests {
 
         let evidence =
             super::super::detail(&history, None, None, std::path::Path::new("/"), &task.id)
-            .expect("the task's page")
-            .evidence;
+                .expect("the task's page")
+                .evidence;
         let kept: Vec<_> = evidence
             .iter()
             .map(|link| {
