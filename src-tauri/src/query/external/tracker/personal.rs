@@ -168,6 +168,16 @@ pub struct ExternalPersonalDocument {
     pub link: String,
 }
 
+fn require_agent(agent: Option<&str>) -> Result<&str, ExternalError> {
+    agent
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| {
+            ExternalError::invalid("Name the agent with --agent NAME.")
+                .hint("Personal documents are shared by agent name, e.g. --agent \"Codex\".")
+        })
+}
+
 impl Tracker<'_> {
     /// The document `id` the caller reaches at `needed`, refused when it is
     /// not a personal document.
@@ -268,6 +278,7 @@ impl Tracker<'_> {
     }
 
     pub(super) fn personal_new(&self, args: &PersonalNewArgs) -> Result<WorkAnswer, ExternalError> {
+        let caller = require_agent(args.write.agent.as_deref())?;
         let body = args.body.join(" ");
         if args.dry_run {
             let now = now_ms();
@@ -291,7 +302,7 @@ impl Tracker<'_> {
                     note: project_note(note),
                     role: Some(ScratchNoteRole::Edit),
                     shared_with: vec![ScratchCollaborator {
-                        agent: args.write.agent(),
+                        agent: agents::agent_name(Some(caller)),
                         role: ScratchNoteRole::Edit,
                         added_at_ms: now_ms(),
                     }],
@@ -299,7 +310,7 @@ impl Tracker<'_> {
                 },
             )));
         }
-        let author = Author::Agent(args.write.agent.as_deref());
+        let author = Author::Agent(Some(caller));
         let (operation_id, note, replayed) = self.once(
             &args.write,
             "cli_personal_create",
@@ -396,8 +407,8 @@ impl Tracker<'_> {
         &self,
         args: &PersonalPrivateArgs,
     ) -> Result<WorkAnswer, ExternalError> {
-        let caller = args.write.agent.as_deref();
-        let note = self.note(&args.note, caller, ScratchNoteRole::Edit)?;
+        let caller = require_agent(args.write.agent.as_deref())?;
+        let note = self.note(&args.note, Some(caller), ScratchNoteRole::Edit)?;
         if args.dry_run || note.personal {
             return self.document_answer(
                 PersonalAction::MadePrivate,
@@ -417,7 +428,7 @@ impl Tracker<'_> {
             &request,
             "The note could not be made private.",
             |tx| {
-                personal::make_personal_in(tx, &note.id, Author::Agent(caller), now_ms())
+                personal::make_personal_in(tx, &note.id, Author::Agent(Some(caller)), now_ms())
                     .map(|_| (note.id.clone(), ()))
             },
         )?;
@@ -429,7 +440,7 @@ impl Tracker<'_> {
             Receipt::Replay(_) => true,
             Receipt::Conflict => return Err(super::notes::conflict(&operation_id)),
         };
-        let note = self.note(&args.note, caller, ScratchNoteRole::View)?;
+        let note = self.note(&args.note, Some(caller), ScratchNoteRole::View)?;
         self.document_answer(
             PersonalAction::MadePrivate,
             false,
@@ -444,11 +455,6 @@ impl Tracker<'_> {
         &self,
         args: &PersonalMoveArgs,
     ) -> Result<WorkAnswer, ExternalError> {
-        let (note, role) = self.personal_document(
-            &args.note,
-            args.write.agent.as_deref(),
-            ScratchNoteRole::Edit,
-        )?;
         let document = match args.cycle {
             Some(cycle) => self.cycle_document(cycle)?.1,
             None => self
@@ -464,6 +470,37 @@ impl Tracker<'_> {
                 answer
             })
         };
+        let request = request_json(&(&args.note, &document.kind, &document.id))?;
+        if let Some(explicit_id) = args.write.operation_id {
+            let operation_id = explicit_id.to_string();
+            match self.receipt(&operation_id, "cli_personal_move", &request)? {
+                Receipt::New(()) => {}
+                Receipt::Replay(note_id) => {
+                    let filed = scratchpad::scratchpad_get(self.app.state(), note_id.clone())
+                        .map_err(|message| refusal(self.history, message))?
+                        .ok_or_else(|| {
+                            ExternalError::new(
+                                ExternalErrorCode::NotFound,
+                                format!("No note {note_id}."),
+                            )
+                        })?;
+                    return moved(self.document_answer(
+                        PersonalAction::Moved,
+                        false,
+                        Some(operation_id),
+                        true,
+                        filed,
+                        None,
+                    ));
+                }
+                Receipt::Conflict => return Err(super::notes::conflict(&operation_id)),
+            }
+        }
+        let (note, role) = self.personal_document(
+            &args.note,
+            args.write.agent.as_deref(),
+            ScratchNoteRole::Edit,
+        )?;
         if args.dry_run {
             return moved(self.document_answer(
                 PersonalAction::Moved,
@@ -478,6 +515,17 @@ impl Tracker<'_> {
         let operation_id = args.write.fresh_operation_id();
         self.file_document(&note.id, &document, &operation_id)
             .await?;
+        let replayed = match self.write_once(
+            &operation_id,
+            "cli_personal_move",
+            &request,
+            "The document could not be moved.",
+            |_| Ok((note.id.clone(), ())),
+        )? {
+            Receipt::New(()) => false,
+            Receipt::Replay(_) => true,
+            Receipt::Conflict => return Err(super::notes::conflict(&operation_id)),
+        };
         let filed = scratchpad::scratchpad_get(self.app.state(), note.id.clone())
             .map_err(|message| refusal(self.history, message))?
             .ok_or_else(|| {
@@ -487,7 +535,7 @@ impl Tracker<'_> {
             PersonalAction::Moved,
             false,
             Some(operation_id),
-            false,
+            replayed,
             filed,
             None,
         ))
@@ -554,5 +602,19 @@ pub(super) fn text(answer: &WorkAnswer, text: &mut String) {
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn blank_or_missing_agent_is_refused_before_writing() {
+        for missing in [None, Some(""), Some("   ")] {
+            let err = require_agent(missing).expect_err("blank agent must be refused");
+            assert_eq!(err.error, ExternalErrorCode::InvalidRequest);
+        }
+        assert_eq!(require_agent(Some("  Codex  ")).unwrap(), "Codex");
     }
 }

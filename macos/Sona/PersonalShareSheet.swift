@@ -73,6 +73,7 @@ struct PersonalShareSheet: View {
         .task {
             await store.loadCollaborators()
             if model.projects.projects == nil { await model.projects.refresh() }
+            if model.work.cycles.isEmpty { await model.work.refresh() }
         }
     }
 

@@ -929,13 +929,18 @@ final class ScratchpadStore {
 
     /// The agents the open personal document is shared with.
     func loadCollaborators() async {
+        let current = session
         guard let id = openId, saved?.personal == true else {
             collaborators = []
             return
         }
         do {
-            collaborators = try await core.request("scratchpad_collaborators", ScratchIdParams(id: id))
+            let loaded: [ScratchCollaborator] = try await core.request(
+                "scratchpad_collaborators", ScratchIdParams(id: id))
+            guard current == session else { return }
+            collaborators = loaded
         } catch {
+            guard current == session else { return }
             self.error = error.localizedDescription
         }
     }

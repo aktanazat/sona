@@ -83,6 +83,13 @@ pub(crate) enum Reach {
     Personal(Option<ScratchNoteRole>),
 }
 
+fn named_agent(agent: Option<&str>) -> Option<String> {
+    agent
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(|name| agent_name(Some(name)))
+}
+
 /// The reach of the agent named `agent`, or of a reader who gives no name
 /// when `None`, into note `id`; `None` when there is no such note.
 pub(crate) fn reach(
@@ -103,13 +110,13 @@ pub(crate) fn reach(
     if !personal {
         return Ok(Some(Reach::Open));
     }
-    let Some(agent) = agent else {
+    let Some(agent) = named_agent(agent) else {
         return Ok(Some(Reach::Personal(None)));
     };
     let role = conn
         .query_row(
             "SELECT role FROM scratch_note_collaborators WHERE note_id = ?1 AND agent = ?2",
-            params![id, agent_name(Some(agent))],
+            params![id, agent],
             |row| row.get::<_, String>(0),
         )
         .optional()?
@@ -155,7 +162,7 @@ pub(crate) fn shared_with(
     after: Option<&str>,
     limit: usize,
 ) -> rusqlite::Result<Vec<(ScratchNote, ScratchNoteRole)>> {
-    let Some(agent) = agent else {
+    let Some(agent) = named_agent(agent) else {
         return Ok(Vec::new());
     };
     let mut statement = conn.prepare_cached(
@@ -168,11 +175,7 @@ pub(crate) fn shared_with(
     )?;
     let found = statement
         .query_map(
-            params![
-                agent_name(Some(agent)),
-                after,
-                i64::try_from(limit).unwrap_or(i64::MAX)
-            ],
+            params![agent, after, i64::try_from(limit).unwrap_or(i64::MAX)],
             |row| {
                 Ok((
                     super::read_note_row(row)?,
@@ -200,11 +203,13 @@ pub(crate) fn create_in(
     )?;
     note.personal = true;
     if let Author::Agent(agent) = author {
-        transaction.execute(
-            "INSERT INTO scratch_note_collaborators (note_id, agent, role, created_at_ms)
-             VALUES (?1, ?2, 'edit', ?3)",
-            params![note.id, agent_name(agent), now_ms],
-        )?;
+        if let Some(agent) = named_agent(agent) {
+            transaction.execute(
+                "INSERT INTO scratch_note_collaborators (note_id, agent, role, created_at_ms)
+                 VALUES (?1, ?2, 'edit', ?3)",
+                params![note.id, agent, now_ms],
+            )?;
+        }
     }
     Ok(note)
 }
@@ -282,11 +287,13 @@ pub(crate) fn make_personal_in(
     conn.execute("DELETE FROM scratch_note_cycles WHERE note_id = ?1", params![id])?;
     conn.execute("UPDATE scratch_notes SET personal = 1 WHERE id = ?1", params![id])?;
     if let Author::Agent(agent) = author {
-        conn.execute(
-            "INSERT INTO scratch_note_collaborators (note_id, agent, role, created_at_ms)
-             VALUES (?1, ?2, 'edit', ?3) ON CONFLICT(note_id, agent) DO UPDATE SET role = 'edit'",
-            params![id, agent_name(agent), now_ms],
-        )?;
+        if let Some(agent) = named_agent(agent) {
+            conn.execute(
+                "INSERT INTO scratch_note_collaborators (note_id, agent, role, created_at_ms)
+                 VALUES (?1, ?2, 'edit', ?3) ON CONFLICT(note_id, agent) DO UPDATE SET role = 'edit'",
+                params![id, agent, now_ms],
+            )?;
+        }
     }
     Ok(reach == Reach::Open)
 }
@@ -518,5 +525,35 @@ mod tests {
 
         assert_eq!(change_rows(&conn, &private.id), 0);
         assert!(change_rows(&conn, &ordinary.id) > 0);
+    }
+
+    /// Blank or missing agent names never match a collaborator and never
+    /// insert the fallback "Agent" name as a collaborator.
+    #[test]
+    fn blank_or_missing_agent_never_gains_access_or_collaborator_row() {
+        let conn = connection();
+        let unnamed = create_in(&conn, "Unnamed agent draft", Author::Agent(None), 1).unwrap();
+        let blank = create_in(&conn, "Blank agent draft", Author::Agent(Some("   ")), 2).unwrap();
+        assert!(collaborators(&conn, &unnamed.id).unwrap().is_empty());
+        assert!(collaborators(&conn, &blank.id).unwrap().is_empty());
+
+        let ordinary = super::super::create_note_in(&conn, "Ordinary note", Author::Me, 3).unwrap();
+        assert!(make_personal_in(&conn, &ordinary.id, Author::Agent(Some("  ")), 4).unwrap());
+        assert!(collaborators(&conn, &ordinary.id).unwrap().is_empty());
+
+        // Even if a document were explicitly shared with "Agent", blank/empty
+        // agent names must be treated as anonymous and never match it.
+        share_in(&conn, &unnamed.id, "Agent", Some(ScratchNoteRole::Edit), 5).unwrap();
+        for missing in [None, Some(""), Some("   ")] {
+            assert_eq!(
+                reach(&conn, &unnamed.id, missing).unwrap(),
+                Some(Reach::Personal(None)),
+                "{missing:?} must not match collaborator Agent"
+            );
+            assert!(
+                shared_with(&conn, missing, None, 10).unwrap().is_empty(),
+                "{missing:?} must not list documents shared with Agent"
+            );
+        }
     }
 }
