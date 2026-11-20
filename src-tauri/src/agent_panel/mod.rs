@@ -2685,21 +2685,43 @@ pub(crate) struct LoopTurn {
     pub(crate) refused: Vec<String>,
 }
 
+/// Runs an automation's turn. `thinking_effort`, when the chosen model
+/// offers it, sets how hard the model thinks; otherwise the relay's default.
 pub(crate) async fn run_loop_turn(
     app: &AppHandle,
     message: &str,
     allowed: &[&str],
+    thinking_effort: Option<&str>,
     deadline: Duration,
 ) -> LoopTurn {
     let mut refused = Vec::new();
-    let answer = loop_turn(app, message, allowed, deadline, &mut refused).await;
+    let answer = loop_turn(app, message, allowed, thinking_effort, deadline, &mut refused).await;
     LoopTurn { answer, refused }
+}
+
+/// The panel's chosen model, or the catalog's default, at `effort`; none
+/// when the catalog cannot be read or that model has no such effort.
+async fn effort_selection(
+    app: &AppHandle,
+    client: &RelayClient,
+    effort: &str,
+) -> Option<AgentModelSelectionV1> {
+    let catalog = client.subscription_models().await.ok()?;
+    let base = crate::settings::get_settings(app)
+        .agent_panel_model_selection
+        .or_else(|| catalog.default_selection.clone())?;
+    let selection = AgentModelSelectionV1 {
+        model: base.model,
+        thinking_effort: Some(effort.to_owned()),
+    };
+    catalog.supports(&selection).then_some(selection)
 }
 
 async fn loop_turn(
     app: &AppHandle,
     message: &str,
     allowed: &[&str],
+    thinking_effort: Option<&str>,
     deadline: Duration,
     refused: &mut Vec<String>,
 ) -> Result<String, ChatTurnError> {
@@ -2715,6 +2737,10 @@ async fn loop_turn(
         Some(manager) => manager.model_alias(&client, false).await,
         None => SONA_MODEL_ALIAS.to_string(),
     };
+    let model_selection = match thinking_effort {
+        Some(effort) => effort_selection(app, &client, effort).await,
+        None => None,
+    };
     let conversation = relay::new_idempotency_key().map_err(chat_turn_error)?;
     let started = Instant::now();
     let mut context_pack: Option<String> = None;
@@ -2722,7 +2748,7 @@ async fn loop_turn(
     loop {
         let idempotency_key = relay::new_idempotency_key().map_err(chat_turn_error)?;
         let turn = PanelTurnV1::Chat(SonaChatTurnV2 {
-            model_selection: None,
+            model_selection: model_selection.clone(),
             screenshot: None,
             protocol_version: SONA_CHAT_TURN_VERSION.to_string(),
             conversation_id: format!("loop-{conversation}"),
