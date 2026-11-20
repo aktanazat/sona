@@ -76,7 +76,7 @@ struct AgentBridgeView: View {
     private var mcpServers: some View {
         AgentBridgeSection(
             "Outside MCP servers",
-            meta: "Talk to Sona may call read-only tools on servers you list here. Tokens stay in Keychain and never leave this Mac."
+            meta: "Talk to Sona may ask to call the read-only tools you switch on here, and calls one only when you press its card. Tokens stay in Keychain and never leave this Mac."
         ) {
             Button("Add server") { addingMcpServer = true }
                 .buttonStyle(.compact)
@@ -494,13 +494,15 @@ private struct AgentMcpServerRow: View {
                     if tools.isEmpty {
                         Text("No tools marked read-only by this server.").metaText()
                     } else {
+                        Text("Tools stay off until you switch them on. A server's own read-only label is its claim, not Sona's check.")
+                            .metaText()
                         ForEach(tools) { tool in
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(tool.name).font(TypeScale.mono(12)).foregroundStyle(Theme.ink)
-                                if !tool.description.isEmpty {
-                                    Text(tool.description).metaText()
-                                }
-                            }
+                            ToggleRow(
+                                title: tool.name,
+                                detail: tool.description.isEmpty ? nil : tool.description,
+                                isOn: Binding(
+                                    get: { tool.enabled },
+                                    set: { store.setMcpTool(server.id, tool: tool.name, enabled: $0) }))
                         }
                     }
                 }
@@ -520,7 +522,7 @@ private struct AddMcpServerSheet: View {
         VStack(alignment: .leading, spacing: 18) {
             VStack(alignment: .leading, spacing: 6) {
                 Text("Add MCP server").headlineText()
-                Text("Sona only calls tools the server marks read-only. Adding a server stays in this window because its token is saved in Keychain.")
+                Text("Sona offers only tools the server marks read-only, each off until you switch it on. Adding a server stays in this window because its token is saved in Keychain.")
                     .metaText()
             }
             VStack(alignment: .leading, spacing: 8) {

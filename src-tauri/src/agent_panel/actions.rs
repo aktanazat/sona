@@ -73,15 +73,18 @@ pub(crate) enum ActionUndo {
     },
     RestoreTask {
         task_id: String,
-        prior: Box<crate::planning::work::chat::TaskPrior>,
+        prior: Box<crate::planning::work::chat::TaskFields>,
+        written: Box<crate::planning::work::chat::TaskFields>,
     },
     RestoreProject {
         project_id: String,
-        prior: Option<crate::planning::work::chat::ProjectPrior>,
+        prior: Option<crate::planning::work::chat::ProjectFields>,
+        written: crate::planning::work::chat::ProjectFields,
     },
     RestoreNote {
         note_id: String,
         body: String,
+        written: String,
     },
     Unavailable,
 }
@@ -92,6 +95,9 @@ pub(crate) struct AppliedAction {
     /// vocabulary term is written to settings, which keeps no ledger.
     pub(crate) operation_id: Option<String>,
     pub(crate) undo: ActionUndo,
+    /// A line the card shows under it: an outside tool's answer, or why Undo
+    /// was refused.
+    pub(crate) detail: Option<String>,
 }
 
 /// Why a change did not happen. One variant, because every caller does the
@@ -158,6 +164,7 @@ pub(crate) async fn apply(
             }
             return Ok(AppliedAction {
                 operation_id: None,
+                detail: None,
                 undo: ActionUndo::Unavailable,
             });
         }
@@ -190,6 +197,7 @@ pub(crate) async fn apply(
             .await?;
             return Ok(AppliedAction {
                 operation_id: Some(event_id.clone()),
+                detail: None,
                 undo: ActionUndo::CalendarEvent { event_id },
             });
         }
@@ -252,6 +260,7 @@ pub(crate) async fn apply(
             .await?;
             return Ok(AppliedAction {
                 operation_id: Some(operation_id.to_owned()),
+                detail: None,
                 undo: ActionUndo::RemoveCreatedTask { task_id: item.id },
             });
         }
@@ -290,14 +299,16 @@ pub(crate) async fn apply(
                 due,
                 project_id,
             };
-            let prior =
+            let (prior, written) =
                 crate::planning::work::chat::update_task(app, operation_id, task_id, &edit).await?;
             return Ok(AppliedAction {
                 operation_id: Some(operation_id.to_owned()),
                 undo: ActionUndo::RestoreTask {
                     task_id: task_id.clone(),
                     prior: Box::new(prior),
+                    written: Box::new(written),
                 },
+                detail: None,
             });
         }
         SonaChatActionV1::SaveProject {
@@ -306,7 +317,7 @@ pub(crate) async fn apply(
             description,
             ..
         } => {
-            let (project, prior) = crate::planning::work::chat::save_project(
+            let (project, prior, written) = crate::planning::work::chat::save_project(
                 app,
                 operation_id,
                 project_id.as_deref(),
@@ -318,7 +329,9 @@ pub(crate) async fn apply(
                 undo: ActionUndo::RestoreProject {
                     project_id: project.id,
                     prior,
+                    written,
                 },
+                detail: None,
             });
         }
         SonaChatActionV1::EditNote { note_id, body, .. } => {
@@ -328,7 +341,26 @@ pub(crate) async fn apply(
                 undo: ActionUndo::RestoreNote {
                     note_id: note_id.clone(),
                     body: prior,
+                    written: body.clone(),
                 },
+                detail: None,
+            });
+        }
+        SonaChatActionV1::CallOutsideTool {
+            server,
+            tool,
+            arguments,
+            ..
+        } => {
+            let arguments = serde_json::from_str(arguments)
+                .map_err(|_| "The tool's arguments are not a JSON object.".to_owned())?;
+            let answer =
+                crate::agent_panel::mcp_servers::call_read_only(app, server, tool, arguments)
+                    .await?;
+            return Ok(AppliedAction {
+                operation_id: None,
+                undo: ActionUndo::Unavailable,
+                detail: Some(answer),
             });
         }
     };
@@ -372,21 +404,35 @@ pub(crate) async fn undo(
             let op = uuid::Uuid::new_v4().to_string();
             return crate::planning::work::chat::remove_created_task(app, &op, task_id);
         }
-        ActionUndo::RestoreTask { task_id, prior } => {
+        ActionUndo::RestoreTask {
+            task_id,
+            prior,
+            written,
+        } => {
             let op = uuid::Uuid::new_v4().to_string();
-            return crate::planning::work::chat::restore_task(app, &op, task_id, prior).await;
+            return crate::planning::work::chat::restore_task(app, &op, task_id, prior, written)
+                .await;
         }
-        ActionUndo::RestoreProject { project_id, prior } => {
+        ActionUndo::RestoreProject {
+            project_id,
+            prior,
+            written,
+        } => {
             let op = uuid::Uuid::new_v4().to_string();
             return crate::planning::work::chat::restore_project(
                 app,
                 &op,
                 project_id,
                 prior.as_ref(),
+                written,
             );
         }
-        ActionUndo::RestoreNote { note_id, body } => {
-            return crate::planning::work::chat::edit_note(app, note_id, body).map(drop);
+        ActionUndo::RestoreNote {
+            note_id,
+            body,
+            written,
+        } => {
+            return crate::planning::work::chat::restore_note(app, note_id, body, written);
         }
         ActionUndo::Unavailable => return Err("This action cannot be undone in Sona. Close the draft in Mail or remove the message at its destination.".into()),
     };
@@ -406,6 +452,7 @@ fn applied_send(receipt: crate::integrations::types::SendReceipt) -> Result<Appl
     };
     Ok(AppliedAction {
         operation_id: Some(receipt.id),
+        detail: None,
         undo,
     })
 }
@@ -499,6 +546,7 @@ async fn assign_loop(
 fn applied_loop(result: MeetingLoopMutationResult, undo: ActionUndo) -> AppliedAction {
     AppliedAction {
         operation_id: Some(receipt_id(&result.receipt)),
+        detail: None,
         undo,
     }
 }
@@ -530,6 +578,7 @@ async fn set_series_template(
         .map_err(|_| ActionError)?;
     Ok(AppliedAction {
         operation_id: Some(receipt_id(&result.receipt)),
+        detail: None,
         undo: ActionUndo::SeriesTemplate {
             series_key: series_key.to_string(),
             template: preferences.template,
@@ -565,6 +614,7 @@ async fn rename_speaker(
         .map_err(|_| ActionError)?;
     Ok(AppliedAction {
         operation_id: Some(receipt_id(&result.receipt)),
+        detail: None,
         undo: ActionUndo::SpeakerName {
             session_id,
             speaker_id,
@@ -592,6 +642,7 @@ fn add_vocabulary_term(
     .map_err(|_| ActionError)?;
     Ok(AppliedAction {
         operation_id: None,
+        detail: None,
         undo: ActionUndo::Vocabulary {
             spoken: saved.spoken,
             prior,

@@ -663,6 +663,15 @@ pub enum SonaChatActionV1 {
         note_id: String,
         body: String,
     },
+    /// One call to an owner-enabled read-only tool on an outside MCP server.
+    /// `arguments` is one JSON object as text. Its result rides in the next
+    /// turn's pack.
+    CallOutsideTool {
+        reason: String,
+        server: String,
+        tool: String,
+        arguments: String,
+    },
 }
 
 impl SonaChatActionV1 {
@@ -680,7 +689,8 @@ impl SonaChatActionV1 {
             | Self::CreateTask { reason, .. }
             | Self::UpdateTask { reason, .. }
             | Self::SaveProject { reason, .. }
-            | Self::EditNote { reason, .. } => reason,
+            | Self::EditNote { reason, .. }
+            | Self::CallOutsideTool { reason, .. } => reason,
         }
     }
 
@@ -891,6 +901,25 @@ impl SonaChatActionV1 {
                     return Err(ProposalValidationError::InvalidAction);
                 }
                 vec![note_id.clone()]
+            }
+            Self::CallOutsideTool {
+                server,
+                tool,
+                arguments,
+                ..
+            } => {
+                let single_line = |text: &str| {
+                    is_message_text(text, MAX_ACTION_TEXT_BYTES) && !text.contains(['\n', '\t'])
+                };
+                if !single_line(server)
+                    || !single_line(tool)
+                    || arguments.len() > MAX_ACTION_BODY_BYTES
+                    || !serde_json::from_str::<serde_json::Value>(arguments)
+                        .is_ok_and(|value| value.is_object())
+                {
+                    return Err(ProposalValidationError::InvalidAction);
+                }
+                Vec::new()
             }
         };
         for id in cited {
@@ -2336,6 +2365,36 @@ mod tests {
         assert_eq!(
             foreign_note.validate(Some(&pack)),
             Err(ProposalValidationError::ForeignActionId)
+        );
+    }
+
+    #[test]
+    fn an_outside_call_card_carries_one_json_object_of_arguments() {
+        let call = |arguments: &str| SonaChatActionV1::CallOutsideTool {
+            reason: "You asked about S-12.".into(),
+            server: "Linear Docs".into(),
+            tool: "search".into(),
+            arguments: arguments.into(),
+        };
+
+        assert_eq!(call("{\"q\":\"S-12\"}").validate(None), Ok(()));
+        assert_eq!(call("{}").validate(None), Ok(()));
+        for bad in ["[1, 2]", "\"text\"", "{", ""] {
+            assert_eq!(
+                call(bad).validate(None),
+                Err(ProposalValidationError::InvalidAction),
+                "{bad:?}"
+            );
+        }
+        let multi_line = SonaChatActionV1::CallOutsideTool {
+            reason: "You asked.".into(),
+            server: "Linear\nDocs".into(),
+            tool: "search".into(),
+            arguments: "{}".into(),
+        };
+        assert_eq!(
+            multi_line.validate(None),
+            Err(ProposalValidationError::InvalidAction)
         );
     }
 }

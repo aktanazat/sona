@@ -342,6 +342,57 @@ enum AgentPanelActionState: String, Decodable {
     case pending, applied, dismissed, failed
 }
 
+/// A task a card creates or changes. A field left out stays as it is; on a
+/// change, `none` clears a due day or takes the task out of its project.
+struct ChatTaskChange: Decodable {
+    let reason: String
+    let title: String?
+    let details: String?
+    let status: String?
+    let priority: Int?
+    let due: String?
+    let projectId: String?
+
+    func lines(includingTitle: Bool) -> [String] {
+        var lines: [String] = []
+        if includingTitle, let title { lines.append(String(localized: "Title: \(title)")) }
+        if let details {
+            lines.append(
+                details.isEmpty ? String(localized: "Description: cleared") : String(localized: "Description: \(details)"))
+        }
+        if let status { lines.append(String(localized: "Status: \(Self.statuses[status] ?? status)")) }
+        if let priority { lines.append(String(localized: "Priority: \(Self.priorities[priority] ?? String(priority))")) }
+        if let due {
+            lines.append(due == "none" ? String(localized: "Due date: cleared") : String(localized: "Due: \(due)"))
+        }
+        if let projectId {
+            lines.append(
+                projectId == "none"
+                    ? String(localized: "Project: taken out of its project")
+                    : String(localized: "Project: moved to the project the answer names"))
+        }
+        return lines
+    }
+
+    private static let statuses = [
+        "triage": String(localized: "Triage"),
+        "backlog": String(localized: "Backlog"),
+        "todo": String(localized: "To do"),
+        "in_progress": String(localized: "In progress"),
+        "done": String(localized: "Done"),
+        "canceled": String(localized: "Canceled"),
+        "duplicate": String(localized: "Duplicate"),
+    ]
+
+    private static let priorities = [
+        0: String(localized: "None"),
+        1: String(localized: "Urgent"),
+        2: String(localized: "High"),
+        3: String(localized: "Medium"),
+        4: String(localized: "Low"),
+    ]
+}
+
 /// One corpus change an answer offered: what it changes, and why.
 enum AgentChatAction: Decodable {
     case resolveLoop(reason: String)
@@ -353,13 +404,15 @@ enum AgentChatAction: Decodable {
     case postSlack(ChatSlackDraft)
     case createCalendarEvent(ChatCalendarDraft)
     case sendNotes(ChatNotesSend)
-    case createTask(reason: String, title: String)
-    case updateTask(reason: String, title: String?, status: String?)
-    case saveProject(reason: String, name: String, isNew: Bool)
-    case editNote(reason: String)
+    case createTask(ChatTaskChange)
+    case updateTask(ChatTaskChange)
+    case saveProject(reason: String, name: String, description: String?, isNew: Bool)
+    case editNote(reason: String, body: String)
+    case callOutsideTool(reason: String, server: String, tool: String, arguments: String)
 
     private enum Key: String, CodingKey {
-        case kind, reason, templateId, term, replacement, name, personId, title, status, projectId
+        case kind, reason, templateId, term, replacement, name, personId, projectId, description, body
+        case server, tool, arguments
     }
 
     init(from decoder: Decoder) throws {
@@ -386,20 +439,22 @@ enum AgentChatAction: Decodable {
         case "post_slack": self = .postSlack(try ChatSlackDraft(from: decoder))
         case "create_calendar_event": self = .createCalendarEvent(try ChatCalendarDraft(from: decoder))
         case "send_notes": self = .sendNotes(try ChatNotesSend(from: decoder))
-        case "create_task":
-            self = .createTask(reason: reason, title: try container.decode(String.self, forKey: .title))
-        case "update_task":
-            self = .updateTask(
-                reason: reason,
-                title: try container.decodeIfPresent(String.self, forKey: .title),
-                status: try container.decodeIfPresent(String.self, forKey: .status))
+        case "create_task": self = .createTask(try ChatTaskChange(from: decoder))
+        case "update_task": self = .updateTask(try ChatTaskChange(from: decoder))
         case "save_project":
             self = .saveProject(
                 reason: reason,
                 name: try container.decode(String.self, forKey: .name),
+                description: try container.decodeIfPresent(String.self, forKey: .description),
                 isNew: try container.decodeIfPresent(String.self, forKey: .projectId) == nil)
         case "edit_note":
-            self = .editNote(reason: reason)
+            self = .editNote(reason: reason, body: try container.decode(String.self, forKey: .body))
+        case "call_outside_tool":
+            self = .callOutsideTool(
+                reason: reason,
+                server: try container.decode(String.self, forKey: .server),
+                tool: try container.decode(String.self, forKey: .tool),
+                arguments: try container.decode(String.self, forKey: .arguments))
         default:
             throw DecodingError.dataCorruptedError(
                 forKey: .kind, in: container, debugDescription: "unknown chat action \(kind)")
@@ -417,8 +472,9 @@ enum AgentChatAction: Decodable {
         case let .postSlack(draft): draft.reason
         case let .createCalendarEvent(draft): draft.reason
         case let .sendNotes(draft): draft.reason
-        case let .createTask(reason, _), let .updateTask(reason, _, _),
-             let .saveProject(reason, _, _), let .editNote(reason): reason
+        case let .createTask(change), let .updateTask(change): change.reason
+        case let .saveProject(reason, _, _, _), let .editNote(reason, _),
+             let .callOutsideTool(reason, _, _, _): reason
         }
     }
 
@@ -443,14 +499,34 @@ enum AgentChatAction: Decodable {
         case .postSlack: "Post a message to Slack"
         case .createCalendarEvent: "Create a calendar event"
         case .sendNotes: "Send generated meeting notes"
-        case let .createTask(_, title): "Create task \"\(title)\""
-        case let .updateTask(_, title, status):
-            if let title { "Update task to \"\(title)\"" }
-            else if let status { "Mark task \(status.replacingOccurrences(of: "_", with: " "))" }
-            else { "Update a task" }
-        case let .saveProject(_, name, isNew):
+        case let .createTask(change): "Create task \"\(change.title ?? "")\""
+        case .updateTask: "Update a task"
+        case let .saveProject(_, name, _, isNew):
             isNew ? "Create project \"\(name)\"" : "Update project \"\(name)\""
-        case .editNote: "Update a note"
+        case .editNote: "Replace a note's text"
+        case let .callOutsideTool(_, server, _, _): "Ask \(server), an outside MCP server"
+        }
+    }
+
+    /// Every field the card changes, with the value it sets, so nothing
+    /// happens on Apply that the card did not show.
+    var changes: [String] {
+        switch self {
+        case let .createTask(change): change.lines(includingTitle: false)
+        case let .updateTask(change): change.lines(includingTitle: true)
+        case let .saveProject(_, name, description, _):
+            [String(localized: "Name: \(name)")]
+                + (description.map {
+                    [$0.isEmpty ? String(localized: "Description: cleared") : String(localized: "Description: \($0)")]
+                } ?? [])
+        case let .editNote(_, body): [String(localized: "New text, replacing the whole note:\n\(body)")]
+        case let .callOutsideTool(_, server, tool, arguments):
+            [
+                String(localized: "Server: \(server)"),
+                String(localized: "Tool: \(tool)"),
+                String(localized: "Arguments: \(arguments)"),
+            ]
+        default: []
         }
     }
 
@@ -466,6 +542,7 @@ enum AgentChatAction: Decodable {
         case .draftEmail: "Draft opened in Mail. Nothing was sent."
         case .createCalendarEvent: "Event created. No invitations were sent."
         case .postSlack, .sendNotes: "Sent"
+        case .callOutsideTool: "Called. The answer is below and goes to the chat with your next question."
         default: "Applied"
         }
     }

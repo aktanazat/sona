@@ -4,11 +4,14 @@
 //! "what are my most used words" or "what did Nolan and I leave open". So the
 //! chat brain may reply with a `tool_calls` request instead of an answer, the
 //! panel runs each call through [`run`], and the results ride back inside the
-//! next round's pack. Ten tools, catalogued as [`TOOL_CATALOGUE_VERSION`], each
-//! with exactly the argument names [`TOOL_ARGS`] lists. The relay carries the
-//! same table (`SONA_TOOL_ARGS` in `omp_bridge/sona_chat.py`) and checks names
-//! and value shapes on the way out; every bound on a value is enforced here,
-//! and only here.
+//! next round's pack. Twenty-one tools, catalogued as
+//! [`TOOL_CATALOGUE_VERSION`], each with exactly the argument names
+//! [`TOOL_ARGS`] lists. The relay carries the same table (`SONA_TOOL_ARGS` in
+//! `omp_bridge/sona_chat.py`) and checks names and value shapes on the way
+//! out; every bound on a value is enforced here, and only here. No tool calls
+//! an outside MCP server: that is a card the owner presses
+//! (`call_outside_tool`), since what an outside tool does is the server's
+//! word, not Sona's.
 //!
 //! # What a tool may see
 //!
@@ -22,13 +25,14 @@
 //!
 //! # A chat limited to one folder
 //!
-//! A chat opened on a folder ("Ask about these meetings") may run five of
-//! the ten: `search`, `recent` (meetings), `meeting`, `transcript` and
-//! `loops`, each cut to the folder's meetings by one [`FolderScope`] read at
-//! the start of every call, so a folder deleted mid-chat refuses the next
-//! call rather than widening it. A meeting outside the folder gets the same
-//! sentence an absent one gets, for the reason above. The other five read
-//! the calendar, the dictation history or a person's page, which no folder
+//! A chat opened on a folder ("Ask about these meetings") may run seven of
+//! them: `search`, `recent` (meetings), `meeting`, `transcript` and `loops`,
+//! each cut to the folder's meetings by one [`FolderScope`] read at the
+//! start of every call, so a folder deleted mid-chat refuses the next call
+//! rather than widening it, plus `skill` and `help`, which read no meetings.
+//! A meeting outside the folder gets the same sentence an absent one gets,
+//! for the reason above. The rest read the calendar, the dictation history,
+//! a person's page, the tracker, notes or outside servers, which no folder
 //! bounds, and are refused with one line saying so.
 //!
 //! # Bounds
@@ -79,14 +83,14 @@ pub const TOOL_RESULT_MAX_BYTES: usize = 8 * 1024;
 
 /// Bumped when a tool's arguments or result shape change meaning. The relay
 /// names the same version in its prompt.
-pub const TOOL_CATALOGUE_VERSION: &str = "sona-tools/1";
+pub const TOOL_CATALOGUE_VERSION: &str = "sona-tools/2";
 
 /// The catalogue: every tool, in the order the relay lists them, with exactly
 /// the argument names it accepts. Mirrored by `SONA_TOOL_ARGS` in
 /// `omp_bridge/sona_chat.py`; a call naming an argument outside this list is
 /// refused, so a catalogue that drifts fails loudly in the model's next round
 /// rather than silently ignoring what it asked for.
-pub const TOOL_ARGS: [(&str, &[&str]); 22] = [
+pub const TOOL_ARGS: [(&str, &[&str]); 21] = [
     ("search", &["query", "scope", "limit"]),
     ("recent", &["scope", "limit", "days"]),
     ("meeting", &["session_id"]),
@@ -108,7 +112,6 @@ pub const TOOL_ARGS: [(&str, &[&str]); 22] = [
     ("help", &["query", "limit"]),
     ("mcp_servers", &[]),
     ("mcp_tools", &["server"]),
-    ("mcp_call", &["server", "tool", "arguments"]),
 ];
 
 /// The longest search query a call may carry, in characters.
@@ -177,7 +180,7 @@ pub struct ToolResult {
 /// Whether `tool` calls an outside MCP server and therefore needs the app
 /// handle (settings and Keychain) rather than the meeting store.
 pub(crate) fn is_mcp_tool(tool: &str) -> bool {
-    matches!(tool, "mcp_servers" | "mcp_tools" | "mcp_call")
+    matches!(tool, "mcp_servers" | "mcp_tools")
 }
 
 /// Run one outside-MCP lookup through [`crate::agent_panel::mcp_servers`].
@@ -203,25 +206,11 @@ async fn answer_mcp<R: tauri::Runtime>(
             Ok(Outcome::new(map, &["/servers"]))
         }
         Request::McpTools { server } => {
-            let tools = crate::agent_panel::mcp_servers::read_only_tools(app, &server).await?;
+            let tools = crate::agent_panel::mcp_servers::enabled_tools(app, &server).await?;
             let mut map = Map::new();
             map.insert("server".to_string(), json!(server));
             map.insert("tools".to_string(), json!(tools));
             Ok(Outcome::new(map, &["/tools"]))
-        }
-        Request::McpCall {
-            server,
-            tool,
-            arguments,
-        } => {
-            let text =
-                crate::agent_panel::mcp_servers::call_read_only(app, &server, &tool, arguments)
-                    .await?;
-            let mut map = Map::new();
-            map.insert("server".to_string(), json!(server));
-            map.insert("tool".to_string(), json!(tool));
-            map.insert("text".to_string(), json!(text));
-            Ok(Outcome::new(map, &["/text"]))
         }
         _ => Err(format!("{} is not an outside MCP tool", short(&call.tool))),
     }
@@ -511,7 +500,7 @@ async fn answer(
             map.insert("sections".to_string(), json!(sections));
             Ok(Outcome::new(map, &["/sections"]))
         }
-        Request::McpServers | Request::McpTools { .. } | Request::McpCall { .. } => {
+        Request::McpServers | Request::McpTools { .. } => {
             Err("outside MCP servers are not available in this process".to_string())
         }
     }
@@ -649,11 +638,6 @@ enum Request {
     McpServers,
     McpTools {
         server: String,
-    },
-    McpCall {
-        server: String,
-        tool: String,
-        arguments: Value,
     },
 }
 
@@ -813,15 +797,6 @@ fn parse(call: &ToolCall) -> Result<Request, String> {
         "mcp_servers" => Request::McpServers,
         "mcp_tools" => Request::McpTools {
             server: required(text(args, "server", 64)?, "server")?,
-        },
-        "mcp_call" => Request::McpCall {
-            server: required(text(args, "server", 64)?, "server")?,
-            tool: required(text(args, "tool", 128)?, "tool")?,
-            arguments: match args.get("arguments") {
-                None | Some(Value::Null) => json!({}),
-                Some(value @ Value::Object(_)) => value.clone(),
-                Some(_) => return Err("arguments must be an object".to_string()),
-            },
         },
         _ => return Err(format!("unknown tool {}", short(&call.tool))),
     };

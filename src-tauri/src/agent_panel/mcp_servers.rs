@@ -1,8 +1,10 @@
 //! Outside MCP servers the user lists in Settings › Agents, which Talk to
 //! Sona may call read-only over MCP Streamable HTTP. A server's token lives
 //! in the keychain under the server's id; settings keep only whether one is
-//! saved, so no listing can carry it. Only tools the server itself marks
-//! `readOnlyHint: true` are listed or called.
+//! saved, so no listing can carry it. A listing names a server's address by
+//! scheme and host alone, since a path can carry a key. Only tools the server
+//! marks `readOnlyHint: true` are offered, and each stays off until the owner
+//! switches it on, because the hint is the server's own claim.
 
 use crate::secrets::{SecretAccount, SecretManager, SecretValue};
 use crate::settings;
@@ -45,6 +47,10 @@ pub struct AgentMcpServer {
     #[serde(default)]
     pub has_token: bool,
     pub added_at: i64,
+    /// The tools the owner switched on for Talk to Sona. Every other tool is
+    /// off, whatever the server says about it.
+    #[serde(default)]
+    pub enabled_tools: Vec<String>,
 }
 
 #[derive(Serialize, Debug, Clone, PartialEq, Eq, Type)]
@@ -59,6 +65,7 @@ pub struct McpServerSummary {
 pub struct McpToolSummary {
     pub name: String,
     pub description: String,
+    pub enabled: bool,
 }
 
 /// Scheme, host and port: what a listing may show of a server's address.
@@ -90,6 +97,8 @@ pub(crate) fn list<R: Runtime>(app: &AppHandle<R>) -> Vec<McpServerSummary> {
         .collect()
 }
 
+/// The tools `server` marks read-only, each saying whether the owner switched
+/// it on.
 pub(crate) async fn read_only_tools<R: Runtime>(
     app: &AppHandle<R>,
     server: &str,
@@ -100,8 +109,41 @@ pub(crate) async fn read_only_tools<R: Runtime>(
         .tools()
         .await?
         .iter()
-        .filter_map(read_only_summary)
+        .filter_map(|tool| read_only_summary(tool, &server.enabled_tools))
         .collect())
+}
+
+/// The tools Talk to Sona may ask the owner to call on `server`.
+pub(crate) async fn enabled_tools<R: Runtime>(
+    app: &AppHandle<R>,
+    server: &str,
+) -> Result<Vec<McpToolSummary>, String> {
+    let mut tools = read_only_tools(app, server).await?;
+    tools.retain(|tool| tool.enabled);
+    Ok(tools)
+}
+
+/// Switches one of `id`'s tools on or off for Talk to Sona.
+async fn set_tool_enabled<R: Runtime>(
+    app: &AppHandle<R>,
+    id: &str,
+    tool: &str,
+    enabled: bool,
+) -> Result<(), String> {
+    let _gate = operation_gate().lock().await;
+    let found = settings::update_settings(app, |settings| {
+        let server = settings
+            .agent_mcp_servers
+            .iter_mut()
+            .find(|server| server.id == id)?;
+        server.enabled_tools.retain(|name| name != tool);
+        if enabled {
+            server.enabled_tools.push(tool.to_owned());
+        }
+        Some(())
+    })
+    .map_err(|_| "The change could not be saved. Try again.".to_owned())?;
+    found.ok_or_else(|| "That server is no longer listed.".to_owned())
 }
 
 pub(crate) async fn call_read_only<R: Runtime>(
@@ -116,13 +158,19 @@ pub(crate) async fn call_read_only<R: Runtime>(
         _ => return Err("A tool's arguments must be an object.".to_owned()),
     };
     let server = find(app, server)?;
+    if !server.enabled_tools.iter().any(|name| name == tool) {
+        return Err(format!(
+            "{tool} on {} is off. Switch it on in Settings › Agents first.",
+            server.name
+        ));
+    }
     let mut connection = Connection::open(app, &server).await?;
     let tools = connection.tools().await?;
     let listed = tools
         .iter()
         .find(|candidate| candidate.get("name").and_then(Value::as_str) == Some(tool))
         .ok_or_else(|| format!("{} has no tool named {tool}.", server.name))?;
-    if read_only_summary(listed).is_none() {
+    if read_only_summary(listed, &server.enabled_tools).is_none() {
         return Err(format!(
             "{tool} is not marked read-only by {}, so Sona won't call it.",
             server.name
@@ -156,9 +204,9 @@ fn find<R: Runtime>(app: &AppHandle<R>, server: &str) -> Result<AgentMcpServer, 
         })
 }
 
-/// A tool as Talk to Sona may see it, or nothing when the server does not
+/// A tool as Settings › Agents lists it, or nothing when the server does not
 /// mark it read-only.
-fn read_only_summary(tool: &Value) -> Option<McpToolSummary> {
+fn read_only_summary(tool: &Value, enabled_tools: &[String]) -> Option<McpToolSummary> {
     if tool.pointer("/annotations/readOnlyHint") != Some(&Value::Bool(true)) {
         return None;
     }
@@ -174,6 +222,7 @@ fn read_only_summary(tool: &Value) -> Option<McpToolSummary> {
     Some(McpToolSummary {
         name: name.to_owned(),
         description: description.chars().take(MAX_DESCRIPTION_CHARS).collect(),
+        enabled: enabled_tools.iter().any(|enabled| enabled == name),
     })
 }
 
@@ -291,6 +340,7 @@ async fn add<R: Runtime>(
         url,
         has_token: token.is_some(),
         added_at: chrono::Utc::now().timestamp_millis(),
+        enabled_tools: Vec::new(),
     };
     let secrets = app.state::<Arc<SecretManager>>();
     if let Some(token) = token {
@@ -592,6 +642,17 @@ pub async fn agent_mcp_server_tools(
     read_only_tools(&app, &id).await
 }
 
+#[tauri::command]
+#[specta::specta]
+pub async fn agent_mcp_server_tool_set(
+    app: AppHandle,
+    id: String,
+    tool: String,
+    enabled: bool,
+) -> Result<(), String> {
+    set_tool_enabled(&app, &id, &tool, enabled).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -608,6 +669,7 @@ mod tests {
             url: "https://mcp.example.com/mcp".to_owned(),
             has_token: false,
             added_at: 0,
+            enabled_tools: Vec::new(),
         }
     }
 
@@ -687,7 +749,7 @@ mod tests {
             .as_array()
             .expect("tools")
             .iter()
-            .filter_map(read_only_summary)
+            .filter_map(|tool| read_only_summary(tool, &[]))
             .collect();
 
         assert_eq!(
@@ -695,6 +757,7 @@ mod tests {
             [McpToolSummary {
                 name: "search".to_owned(),
                 description: "Find issues".to_owned(),
+                enabled: false,
             }]
         );
     }
@@ -893,19 +956,21 @@ mod tests {
         tempfile::TempDir,
         tauri::App<tauri::test::MockRuntime>,
         Called,
+        String,
     ) {
         let data_dir = tempfile::tempdir().expect("temporary app data");
         let (app, _) = app_with_secrets(&data_dir);
         let (address, called) = fake_mcp().await;
-        add(app.handle(), "Fake", &address, None)
+        let listed = add(app.handle(), "Fake", &address, None)
             .await
             .expect("added");
-        (data_dir, app, called)
+        let id = listed[0].id.clone();
+        (data_dir, app, called, id)
     }
 
     #[tokio::test]
     async fn check_lists_only_the_read_only_tool() {
-        let (_data_dir, app, _) = app_with_fake_server().await;
+        let (_data_dir, app, _, _) = app_with_fake_server().await;
 
         let tools = read_only_tools(app.handle(), "fake").await.expect("tools");
 
@@ -914,13 +979,43 @@ mod tests {
             [McpToolSummary {
                 name: "lookup".to_owned(),
                 description: "Reads".to_owned(),
+                enabled: false,
             }]
         );
     }
 
     #[tokio::test]
+    async fn a_read_only_tool_stays_off_until_the_owner_switches_it_on() {
+        let (_data_dir, app, called, id) = app_with_fake_server().await;
+
+        let refused = call_read_only(app.handle(), "Fake", "lookup", json!({ "q": "S-12" })).await;
+        let offered_before = enabled_tools(app.handle(), "Fake").await.expect("tools");
+        set_tool_enabled(app.handle(), &id, "lookup", true)
+            .await
+            .expect("switched on");
+        let offered_after = enabled_tools(app.handle(), "Fake").await.expect("tools");
+
+        assert_eq!(
+            refused,
+            Err("lookup on Fake is off. Switch it on in Settings › Agents first.".to_owned())
+        );
+        assert!(called.lock().expect("record").is_empty());
+        assert!(offered_before.is_empty());
+        assert_eq!(
+            offered_after
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>(),
+            ["lookup"]
+        );
+    }
+
+    #[tokio::test]
     async fn a_read_only_tool_answers_over_the_session() {
-        let (_data_dir, app, _) = app_with_fake_server().await;
+        let (_data_dir, app, _, id) = app_with_fake_server().await;
+        set_tool_enabled(app.handle(), &id, "lookup", true)
+            .await
+            .expect("switched on");
 
         let text = call_read_only(app.handle(), "Fake", "lookup", json!({ "q": "S-12" }))
             .await
@@ -931,7 +1026,10 @@ mod tests {
 
     #[tokio::test]
     async fn a_tool_not_marked_read_only_is_never_called() {
-        let (_data_dir, app, called) = app_with_fake_server().await;
+        let (_data_dir, app, called, id) = app_with_fake_server().await;
+        set_tool_enabled(app.handle(), &id, "erase", true)
+            .await
+            .expect("switched on");
 
         let refused = call_read_only(app.handle(), "Fake", "erase", json!({})).await;
 

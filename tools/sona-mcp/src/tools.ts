@@ -7779,7 +7779,7 @@ export const TOOLS: readonly ToolDefinition[] = [
     name: "sona_mcp_servers",
     title: "Read outside MCP servers",
     description:
-      "The outside MCP servers listed in Settings > Agents that Talk to Sona may call read-only: each server's id, name, url and whether a token is saved in Keychain (has_token). Never returns a token. Adding or removing a server stays in Settings > Agents.",
+      "The outside MCP servers listed in Settings > Agents, whose read-only tools Talk to Sona may ask to call once the owner switches each one on: each server's id, name, address (url: scheme and host only, since a path can carry a key) and whether a token is saved in Keychain (has_token). Never returns a token. Adding or removing a server and switching its tools on stay in Settings > Agents.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     argv: () => ["work", "mcp-servers", "--json"],
   },

@@ -137,7 +137,8 @@ impl StoredAction {
             can_undo: matches!(&self.state, StoredActionState::Applied(applied) if !matches!(applied.undo, ActionUndo::Unavailable)),
             detail: match &self.state {
                 StoredActionState::Failed(detail) => Some(detail.clone()),
-                _ => None,
+                StoredActionState::Applied(applied) => applied.detail.clone(),
+                StoredActionState::Pending | StoredActionState::Dismissed => None,
             },
         }
     }
@@ -214,6 +215,41 @@ impl ActiveTurn {
                 .collect(),
             failure: self.failure,
         }
+    }
+
+    /// The answers to outside tool calls the owner approved on this turn's
+    /// cards, as one pack block for the next turn, so the model reads what
+    /// it asked for.
+    fn outside_results(&self) -> Option<String> {
+        let calls: Vec<String> = self
+            .actions
+            .iter()
+            .filter_map(|stored| match (&stored.action, &stored.state) {
+                (
+                    SonaChatActionV1::CallOutsideTool {
+                        server,
+                        tool,
+                        arguments,
+                        ..
+                    },
+                    StoredActionState::Applied(AppliedAction {
+                        detail: Some(answer),
+                        ..
+                    }),
+                ) => {
+                    let arguments = serde_json::from_str::<serde_json::Value>(arguments)
+                        .map_or_else(|_| "{}".to_string(), |value| value.to_string());
+                    Some(format!("call {server} {tool} {arguments}\n{answer}"))
+                }
+                _ => None,
+            })
+            .collect();
+        (!calls.is_empty()).then(|| {
+            format!(
+                "outside tool results the owner approved\n{}",
+                calls.join("\n")
+            )
+        })
     }
 
     /// The one place a turn's state moves, so the one place that can stamp
@@ -819,6 +855,16 @@ impl<R: tauri::Runtime> AgentPanelManager<R> {
             if self.turn_holds_sheet(&state) {
                 return Err(AgentPanelCommandErrorV1::TurnActive);
             }
+            if let Some(block) = state.turn.as_ref().and_then(ActiveTurn::outside_results) {
+                if request.workspace == AgentPanelWorkspaceV1::SonaChat {
+                    let pack = context_pack.get_or_insert_with(String::new);
+                    let separator = if pack.is_empty() { "" } else { "\n\n" };
+                    if pack.len() + separator.len() + block.len() <= MAX_CONTEXT_PACK_BYTES {
+                        pack.push_str(separator);
+                        pack.push_str(&block);
+                    }
+                }
+            }
             let conversation_id = match state.conversation_id.clone() {
                 Some(conversation_id) => conversation_id,
                 None => {
@@ -1388,9 +1434,16 @@ impl<R: tauri::Runtime> AgentPanelManager<R> {
         };
         if let Some(undo) = undo {
             let app = R::native_handle(&self.app);
-            actions::undo(&app, meetings, &undo)
-                .await
-                .map_err(|_| AgentPanelCommandErrorV1::ActionFailed)?;
+            if let Err(refusal) = actions::undo(&app, meetings, &undo).await {
+                if matches!(undo, ActionUndo::Unavailable) {
+                    return Err(AgentPanelCommandErrorV1::ActionFailed);
+                }
+                return self.update_action(&request, |state| {
+                    if let StoredActionState::Applied(applied) = state {
+                        applied.detail = Some(refusal);
+                    }
+                });
+            }
         }
         self.settle_action(&request, StoredActionState::Dismissed)
     }
@@ -1422,6 +1475,14 @@ impl<R: tauri::Runtime> AgentPanelManager<R> {
         request: &AgentPanelActionRequestV1,
         settled: StoredActionState,
     ) -> Result<AgentPanelTurnStatusV1, AgentPanelCommandErrorV1> {
+        self.update_action(request, |state| *state = settled)
+    }
+
+    fn update_action(
+        &self,
+        request: &AgentPanelActionRequestV1,
+        change: impl FnOnce(&mut StoredActionState),
+    ) -> Result<AgentPanelTurnStatusV1, AgentPanelCommandErrorV1> {
         let index = usize::try_from(request.action_index)
             .map_err(|_| AgentPanelCommandErrorV1::UnknownAction)?;
         let (invalidation_id, status) = {
@@ -1431,11 +1492,13 @@ impl<R: tauri::Runtime> AgentPanelManager<R> {
                 .as_mut()
                 .filter(|active| active.turn_id == request.turn_id)
                 .ok_or(AgentPanelCommandErrorV1::UnknownTurn)?;
-            active
-                .actions
-                .get_mut(index)
-                .ok_or(AgentPanelCommandErrorV1::UnknownAction)?
-                .state = settled;
+            change(
+                &mut active
+                    .actions
+                    .get_mut(index)
+                    .ok_or(AgentPanelCommandErrorV1::UnknownAction)?
+                    .state,
+            );
             let status = active.status();
             (state.invalidate(), status)
         };
@@ -3361,6 +3424,34 @@ mod tests {
         }
     }
 
+    #[test]
+    fn only_an_approved_outside_answer_reaches_the_next_turn() {
+        let mut state = active_chat_state("conversation-outside", "turn-outside", "Look it up");
+        let active = state.turn.as_mut().expect("turn");
+        let call = |tool: &str| SonaChatActionV1::CallOutsideTool {
+            reason: "You asked about S-12.".to_string(),
+            server: "Linear Docs".to_string(),
+            tool: tool.to_string(),
+            arguments: "{ \"q\": \"S-12\" }".to_string(),
+        };
+        active.actions = vec![
+            StoredAction::pending(call("search")),
+            StoredAction::pending(call("lookup")),
+        ];
+        active.actions[0].state = StoredActionState::Applied(AppliedAction {
+            operation_id: None,
+            undo: ActionUndo::Unavailable,
+            detail: Some("S-12 is open.".to_string()),
+        });
+
+        assert_eq!(
+            active.outside_results().as_deref(),
+            Some(
+                "outside tool results the owner approved\ncall Linear Docs search {\"q\":\"S-12\"}\nS-12 is open."
+            )
+        );
+    }
+
     fn assert_persisted_outcome(
         manager: &AgentPanelManager<tauri::test::MockRuntime>,
         conversation_id: &str,
@@ -3538,6 +3629,7 @@ mod tests {
                 &request,
                 StoredActionState::Applied(AppliedAction {
                     operation_id: None,
+                    detail: None,
                     undo: ActionUndo::CalendarEvent {
                         event_id: "event-1".to_string(),
                     },

@@ -1839,6 +1839,7 @@ pub fn run(cli_args: CliArgs) {
             agent_panel::mcp_servers::agent_mcp_server_add,
             agent_panel::mcp_servers::agent_mcp_server_remove,
             agent_panel::mcp_servers::agent_mcp_server_tools,
+            agent_panel::mcp_servers::agent_mcp_server_tool_set,
             commands::meeting::meeting_title_set,
             commands::meeting::meeting_speaker_rename,
             commands::call_names::meeting_call_name_targets,

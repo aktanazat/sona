@@ -159,6 +159,22 @@ final class AgentBridgeStore {
         }
     }
 
+    func setMcpTool(_ id: String, tool: String, enabled: Bool) {
+        mcpError = nil
+        Task {
+            do {
+                try await core.request(
+                    "agent_mcp_server_tool_set",
+                    ["id": JSONValue.string(id), "tool": .string(tool), "enabled": .bool(enabled)])
+                if let index = mcpTools[id]?.firstIndex(where: { $0.name == tool }) {
+                    mcpTools[id]?[index].enabled = enabled
+                }
+            } catch {
+                mcpError = Self.reason(error)
+            }
+        }
+    }
+
     /// Status, sessions, requests and the queue, in one round trip.
     func refresh() async {
         loading = true

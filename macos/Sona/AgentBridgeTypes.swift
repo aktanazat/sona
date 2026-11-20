@@ -308,10 +308,12 @@ struct AgentMcpServerSummary: Decodable, Identifiable, Equatable, Sendable {
     let hasToken: Bool
 }
 
-/// One read-only tool an outside MCP server offers to Talk to Sona.
+/// One tool an outside MCP server marks read-only. Talk to Sona may ask to
+/// call it only once it is switched on here.
 struct AgentMcpToolSummary: Decodable, Identifiable, Equatable, Sendable {
     let name: String
     let description: String
+    var enabled: Bool
 
     var id: String { name }
 }

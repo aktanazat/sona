@@ -2993,6 +2993,21 @@ pub(super) async fn call(
             let id = args.take("id")?;
             reply(crate::agent_panel::mcp_servers::agent_mcp_server_tools(app.clone(), id).await)
         }
+        "agent_mcp_server_tool_set" => {
+            let mut args = Args::parse(params)?;
+            let id = args.take("id")?;
+            let tool = args.take("tool")?;
+            let enabled = args.take("enabled")?;
+            reply(
+                crate::agent_panel::mcp_servers::agent_mcp_server_tool_set(
+                    app.clone(),
+                    id,
+                    tool,
+                    enabled,
+                )
+                .await,
+            )
+        }
         "meeting_title_set" => {
             let mut args = Args::parse(params)?;
             let request = args.take("request")?;

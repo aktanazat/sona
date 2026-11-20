@@ -639,6 +639,12 @@ private struct ChatActionCard: View {
                 Text(action.action.reason)
                     .metaText()
                     .fixedSize(horizontal: false, vertical: true)
+                ForEach(Array(action.action.changes.enumerated()), id: \.offset) { _, change in
+                    Text(change)
+                        .bodyText(13)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                }
                 if let detail = action.detail {
                     Text(detail).bodyText(13, Theme.inkSecondary).textSelection(.enabled)
                 }

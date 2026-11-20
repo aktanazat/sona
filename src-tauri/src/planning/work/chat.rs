@@ -444,9 +444,10 @@ pub(crate) struct TaskEdit {
     pub(crate) project_id: Option<Option<String>>,
 }
 
-/// What a task held in the fields a card changed, for putting it back.
+/// The fields a card changed on a task: what they held before, for putting
+/// them back, or what the card wrote, for checking nobody changed them since.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct TaskPrior {
+pub(crate) struct TaskFields {
     title: Option<String>,
     details: Option<Option<String>>,
     status: Option<WorkStatus>,
@@ -455,7 +456,18 @@ pub(crate) struct TaskPrior {
     project_id: Option<Option<String>>,
 }
 
-impl TaskPrior {
+impl TaskFields {
+    fn written(patch: &WorkPatch) -> Self {
+        Self {
+            title: patch.title.clone(),
+            details: patch.details.clone(),
+            status: patch.status,
+            priority: patch.priority,
+            due_at_ms: patch.due_at_ms,
+            project_id: patch.project_id.clone(),
+        }
+    }
+
     fn patch(&self) -> WorkPatch {
         WorkPatch {
             title: self.title.clone(),
@@ -467,16 +479,37 @@ impl TaskPrior {
             ..WorkPatch::default()
         }
     }
+
+    /// Whether `item` still holds every field named here.
+    fn held_by(&self, item: &WorkItem) -> bool {
+        self.title.as_ref().is_none_or(|title| *title == item.title)
+            && self
+                .details
+                .as_ref()
+                .is_none_or(|details| *details == item.details)
+            && self.status.is_none_or(|status| status == item.status)
+            && self
+                .priority
+                .is_none_or(|priority| priority == item.priority)
+            && self.due_at_ms.is_none_or(|due| due == item.due_at_ms)
+            && self
+                .project_id
+                .as_ref()
+                .is_none_or(|project_id| *project_id == item.project_id)
+    }
 }
+
+/// Why Undo leaves a task, project or note the chat changed as it is.
+const CHANGED_SINCE: &str = "This changed again after the chat's edit, so Undo would overwrite the newer change. Change it by hand instead.";
 
 /// The patch an edit makes to `item`, with what it replaces. Fields the
 /// edit sets to what the task already holds are left out of both.
 pub(crate) fn task_patch(
     item: &WorkItem,
     edit: &TaskEdit,
-) -> std::result::Result<(WorkPatch, TaskPrior), String> {
+) -> std::result::Result<(WorkPatch, TaskFields), String> {
     let mut patch = WorkPatch::default();
-    let mut prior = TaskPrior {
+    let mut prior = TaskFields {
         title: None,
         details: None,
         status: None,
@@ -600,17 +633,19 @@ pub(crate) fn remove_created_task(
     credit(app, &[id.to_owned()], since)
 }
 
-/// Changes one task, and returns what the changed fields held.
+/// Changes one task, and returns what the changed fields held before and
+/// what they hold now.
 pub(crate) async fn update_task(
     app: &AppHandle,
     operation_id: &str,
     id: &str,
     edit: &TaskEdit,
-) -> std::result::Result<TaskPrior, String> {
+) -> std::result::Result<(TaskFields, TaskFields), String> {
     let item = read_item(app, id)?;
     let (patch, prior) = task_patch(&item, edit)?;
+    let written = TaskFields::written(&patch);
     if patch == WorkPatch::default() {
-        return Ok(prior);
+        return Ok((prior, written));
     }
     let since = now_ms();
     super::update_as(
@@ -623,21 +658,26 @@ pub(crate) async fn update_task(
     )
     .await?;
     credit(app, std::slice::from_ref(&item.id), since)?;
-    Ok(prior)
+    Ok((prior, written))
 }
 
-/// Puts back what [`update_task`] replaced.
+/// Puts back what [`update_task`] replaced, unless a field it wrote has
+/// changed since.
 pub(crate) async fn restore_task(
     app: &AppHandle,
     operation_id: &str,
     id: &str,
-    prior: &TaskPrior,
+    prior: &TaskFields,
+    written: &TaskFields,
 ) -> std::result::Result<(), String> {
     let patch = prior.patch();
     if patch == WorkPatch::default() {
         return Ok(());
     }
     let item = read_item(app, id)?;
+    if !written.held_by(&item) {
+        return Err(CHANGED_SINCE.to_owned());
+    }
     let since = now_ms();
     super::update_as(
         app,
@@ -651,32 +691,41 @@ pub(crate) async fn restore_task(
     credit(app, std::slice::from_ref(&item.id), since)
 }
 
-/// A project's name and description before a card changed them.
+/// A project's name and description: before a card changed them, or as the
+/// card left them.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ProjectPrior {
+pub(crate) struct ProjectFields {
     name: String,
     description: Option<String>,
 }
 
+impl ProjectFields {
+    fn of(project: &Project) -> Self {
+        Self {
+            name: project.title.clone(),
+            description: project.description.clone(),
+        }
+    }
+}
+
+fn read_project(app: &AppHandle, id: &str) -> std::result::Result<Project, String> {
+    crate::planning::history(&app.state::<Arc<HistoryManager>>(), |conn| {
+        store::project(conn, &store::uuid(id)?)
+    })
+}
+
 /// Saves a project's name and description, making it when `id` is none.
-/// Returns the project and, for an existing one, what it held.
+/// Returns the project, what an existing one held before, and what it holds
+/// now.
 pub(crate) fn save_project(
     app: &AppHandle,
     operation_id: &str,
     id: Option<&str>,
     name: &str,
     description: Option<&str>,
-) -> std::result::Result<(Project, Option<ProjectPrior>), String> {
+) -> std::result::Result<(Project, Option<ProjectFields>, ProjectFields), String> {
     let prior = id
-        .map(|id| {
-            crate::planning::history(&app.state::<Arc<HistoryManager>>(), |conn| {
-                store::project(conn, &store::uuid(id)?)
-            })
-            .map(|project| ProjectPrior {
-                name: project.title,
-                description: project.description,
-            })
-        })
+        .map(|id| read_project(app, id).map(|project| ProjectFields::of(&project)))
         .transpose()?;
     let edit = ProjectEdit {
         title: Some(name.trim().to_owned()),
@@ -684,17 +733,22 @@ pub(crate) fn save_project(
         ..ProjectEdit::default()
     };
     let project = super::catalog_project_save(app, operation_id, id.map(str::to_owned), &edit)?;
-    Ok((project, prior))
+    let written = ProjectFields::of(&project);
+    Ok((project, prior, written))
 }
 
 /// Puts a project's name and description back, or moves a project the chat
-/// made to the bin.
+/// made to the bin, unless its name or description changed since.
 pub(crate) fn restore_project(
     app: &AppHandle,
     operation_id: &str,
     id: &str,
-    prior: Option<&ProjectPrior>,
+    prior: Option<&ProjectFields>,
+    written: &ProjectFields,
 ) -> std::result::Result<(), String> {
+    if ProjectFields::of(&read_project(app, id)?) != *written {
+        return Err(CHANGED_SINCE.to_owned());
+    }
     let edit = match prior {
         Some(prior) => ProjectEdit {
             title: Some(prior.name.clone()),
@@ -709,6 +763,66 @@ pub(crate) fn restore_project(
     super::catalog_project_save(app, operation_id, Some(id.to_owned()), &edit).map(drop)
 }
 
+/// Who is replacing a note's text, which decides what must hold first.
+#[derive(Clone, Copy, Debug)]
+enum NoteWrite<'a> {
+    /// A card: the note must be short enough that the chat read all of it.
+    Chat,
+    /// Undo: the note must still hold what the card wrote.
+    Undo { written: &'a str },
+}
+
+/// What became of a note replacement.
+#[derive(Debug, Eq, PartialEq)]
+enum NoteEdit {
+    /// Done; the text it held before.
+    Replaced(String),
+    /// Longer than [`NOTE_CHARS`]: the chat saw only its start, and its text
+    /// would drop the rest.
+    TooLong,
+    /// Changed after the card wrote it.
+    ChangedSince,
+}
+
+fn replace_note_in(
+    tx: &Connection,
+    id: &str,
+    body: &str,
+    write: NoteWrite<'_>,
+    at_ms: i64,
+) -> std::result::Result<NoteEdit, scratchpad::ScratchpadError> {
+    let Some(note) = scratchpad::note_with_connection(tx, id)? else {
+        return Err(scratchpad::ScratchpadRefusal::NotFound.into());
+    };
+    match write {
+        NoteWrite::Chat if note.body.chars().count() > NOTE_CHARS => return Ok(NoteEdit::TooLong),
+        NoteWrite::Undo { written } if note.body != written => return Ok(NoteEdit::ChangedSince),
+        NoteWrite::Chat | NoteWrite::Undo { .. } => {}
+    }
+    scratchpad::update_body_in(tx, id, body, Author::Agent(Some(CHAT_AGENT)), at_ms)?;
+    Ok(NoteEdit::Replaced(note.body))
+}
+
+fn replace_note(
+    app: &AppHandle,
+    id: &str,
+    body: &str,
+    write: NoteWrite<'_>,
+) -> std::result::Result<String, String> {
+    let history = app.state::<Arc<HistoryManager>>();
+    let edit = scratchpad::immediate(&history, "The note could not be saved.", |tx| {
+        replace_note_in(tx, id, body, write, now_ms())
+    })?;
+    match edit {
+        NoteEdit::Replaced(prior) => {
+            scratchpad::emit_changed(app, id, false);
+            Ok(prior)
+        }
+        NoteEdit::TooLong => Err("This note is longer than Talk to Sona can read, so it won't replace the text. Edit the note in Notes.".to_owned()),
+        NoteEdit::ChangedSince => Err(CHANGED_SINCE.to_owned()),
+    }
+}
+
 /// Replaces a note's text as a version written by [`CHAT_AGENT`], and
 /// returns the text it replaced.
 pub(crate) fn edit_note(
@@ -716,16 +830,17 @@ pub(crate) fn edit_note(
     id: &str,
     body: &str,
 ) -> std::result::Result<String, String> {
-    let history = app.state::<Arc<HistoryManager>>();
-    let prior = scratchpad::immediate(&history, "The note could not be saved.", |tx| {
-        let Some(note) = scratchpad::note_with_connection(tx, id)? else {
-            return Err(scratchpad::ScratchpadRefusal::NotFound.into());
-        };
-        scratchpad::update_body_in(tx, id, body, Author::Agent(Some(CHAT_AGENT)), now_ms())?;
-        Ok(note.body)
-    })?;
-    scratchpad::emit_changed(app, id, false);
-    Ok(prior)
+    replace_note(app, id, body, NoteWrite::Chat)
+}
+
+/// Puts back the text [`edit_note`] replaced, unless the note changed since.
+pub(crate) fn restore_note(
+    app: &AppHandle,
+    id: &str,
+    prior: &str,
+    written: &str,
+) -> std::result::Result<(), String> {
+    replace_note(app, id, prior, NoteWrite::Undo { written }).map(drop)
 }
 
 #[cfg(test)]
@@ -847,5 +962,99 @@ mod tests {
             .expect("detail")
             .expect("present");
         assert_eq!(detail["activity"][0]["who"], "Talk to Sona via chat");
+    }
+
+    #[test]
+    fn undo_leaves_a_task_whose_written_field_changed_again() {
+        let conn = db();
+        let item = make(&conn, "Draft plan", None, 3, WorkActor::Me, 1_000);
+        let edit = TaskEdit {
+            status: Some(WorkStatus::InProgress),
+            priority: Some(1),
+            ..TaskEdit::default()
+        };
+        let (patch, _) = task_patch(&item, &edit).expect("patch");
+        let written = TaskFields::written(&patch);
+        let as_written = WorkItem {
+            status: WorkStatus::InProgress,
+            priority: 1,
+            ..item.clone()
+        };
+        let retitled = WorkItem {
+            title: "Owner's own title".to_owned(),
+            ..as_written.clone()
+        };
+        let reprioritized = WorkItem {
+            priority: 2,
+            ..as_written.clone()
+        };
+
+        assert!(written.held_by(&as_written));
+        assert!(
+            written.held_by(&retitled),
+            "a field the card left alone may change"
+        );
+        assert!(!written.held_by(&reprioritized));
+    }
+
+    fn notes_db() -> Connection {
+        let mut conn = Connection::open_in_memory().expect("in-memory sqlite");
+        rusqlite_migration::Migrations::new(crate::managers::history::MIGRATIONS.to_vec())
+            .to_latest(&mut conn)
+            .expect("history migrations");
+        conn
+    }
+
+    #[test]
+    fn a_chat_edit_leaves_a_note_longer_than_the_chat_could_read() {
+        let conn = notes_db();
+        let long = "word ".repeat(NOTE_CHARS / 5 + 1);
+        let note = scratchpad::create_note_in(&conn, &long, Author::Me, 1_000).expect("note");
+        let short =
+            scratchpad::create_note_in(&conn, "Short note", Author::Me, 1_000).expect("note");
+
+        let refused = replace_note_in(&conn, &note.id, "Start only", NoteWrite::Chat, 2_000);
+        let replaced = replace_note_in(&conn, &short.id, "New text", NoteWrite::Chat, 2_000);
+
+        assert_eq!(refused.ok(), Some(NoteEdit::TooLong));
+        assert_eq!(
+            scratchpad::note_with_connection(&conn, &note.id)
+                .expect("read")
+                .expect("note")
+                .body,
+            long
+        );
+        assert_eq!(
+            replaced.ok(),
+            Some(NoteEdit::Replaced("Short note".to_owned()))
+        );
+    }
+
+    #[test]
+    fn undo_leaves_a_note_changed_after_the_chat_wrote_it() {
+        let conn = notes_db();
+        let note = scratchpad::create_note_in(&conn, "Before", Author::Me, 1_000).expect("note");
+        replace_note_in(&conn, &note.id, "From chat", NoteWrite::Chat, 2_000).expect("chat edit");
+        scratchpad::update_body_in(&conn, &note.id, "Owner's later text", Author::Me, 3_000)
+            .expect("owner edit");
+
+        let undo = replace_note_in(
+            &conn,
+            &note.id,
+            "Before",
+            NoteWrite::Undo {
+                written: "From chat",
+            },
+            4_000,
+        );
+
+        assert_eq!(undo.ok(), Some(NoteEdit::ChangedSince));
+        assert_eq!(
+            scratchpad::note_with_connection(&conn, &note.id)
+                .expect("read")
+                .expect("note")
+                .body,
+            "Owner's later text"
+        );
     }
 }
