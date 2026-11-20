@@ -647,6 +647,9 @@ struct WorkDisplay: Codable, Equatable, Hashable {
     var subGroupBy: WorkGroupBy
     /// Board columns left out, by `TaskGroup.id`.
     var hiddenColumns: [String]
+    /// Kept as the core stores them; the window does not change them yet.
+    var orderDirection: String? = nil
+    var noPriorityFirst: Bool? = nil
 
     init(
         layout: WorkLayout = .list, groupBy: WorkGroupBy = .status, orderBy: WorkOrderBy = .priority,
@@ -691,6 +694,8 @@ struct WorkView: Codable, Identifiable, Equatable {
     var query: WorkQuery
     var display: WorkDisplay
     var revision: Int64
+    var icon: String? = nil
+    var projectId: String? = nil
 }
 
 struct WorkLabel: Codable, Identifiable, Equatable {
