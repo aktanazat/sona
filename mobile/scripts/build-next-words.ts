@@ -1,10 +1,16 @@
-// Builds mobile/SonaKeyboard/NextWords/<lang>.tsv, the keyboard's English and Russian next-word tables, from
-// Tatoeba's sentence exports (CC BY 2.0 FR, https://tatoeba.org/en/downloads).
+// Builds the keyboard's English and Russian word data in mobile/SonaKeyboard/NextWords from
+// Tatoeba's sentence exports (CC BY 2.0 FR, https://tatoeba.org/en/downloads):
 //
-// Each line is `context<TAB>word word word`: the words most often seen after the context,
-// best first. A context is one word, two words joined by a space, or empty for the start
-// of a sentence. Words that are capitalized in mid-sentence most of the time (names such
-// as Tatoeba's ubiquitous "Tom") are never predicted, except "I".
+// - <lang>.tsv, the next-word table. Each line is `context<TAB>word word word`: the words most
+//   often seen after the context, best first. A context is one word, two words joined by a
+//   space, or empty for the start of a sentence.
+// - <lang>-words.txt, the language's common words, most common first, one per line, for
+//   completions and spelling guesses where the phone's dictionary has none.
+//
+// Words that are capitalized most of the time in mid-sentence are names (Tatoeba's
+// ubiquitous "Tom", "Том") and appear in neither, except "I". Only mid-sentence uses count:
+// a sentence's first word is capitalized whatever it is, and in Russian "Том" opens a sentence
+// three times as often as it appears inside one.
 //
 // Usage: bun mobile/scripts/build-next-words.ts <dir with <code>.tsv exports> [codes...]
 // The exports are https://downloads.tatoeba.org/exports/per_language/<code>/<code>_sentences.tsv.bz2,
@@ -27,7 +33,7 @@ const perContext = 3;
 const bigramContexts = 6000;
 const trigramContexts = 8000;
 const minimumCount = 3;
-const tatoebaNames = new Set(["tom", "mary", "maria", "marie", "john", "jim", "ken", "tomás", "tomas", "mari", "toms", "tom's", "mary's", "sami", "layla", "mennad", "baya", "ziri", "yanni", "skura"]);
+const commonWords = 50000;
 
 const word = /[\p{L}]+(?:['’][\p{L}]+)*/gu;
 
@@ -36,8 +42,8 @@ for (const code of picked.length ? picked : [...languages.keys()]) {
   if (!lang) throw new Error(`unknown language ${code}`);
   const text = readFileSync(join(source, `${code}.tsv`), "utf8");
   const unigrams = new Map<string, number>();
+  const midSentence = new Map<string, number>();
   const capitalMid = new Map<string, number>();
-  const forms = new Map<string, Map<string, number>>();
   const follows = new Map<string, Map<string, number>>();
 
   const count = (context: string, next: string) => {
@@ -55,31 +61,20 @@ for (const code of picked.length ? picked : [...languages.keys()]) {
       const keys = tokens.map((token) => token.replace("’", "'").toLowerCase());
       keys.forEach((key, index) => {
         unigrams.set(key, (unigrams.get(key) ?? 0) + 1);
-        const form = tokens[index].replace("’", "'");
-        let seen = forms.get(key);
-        if (!seen) forms.set(key, (seen = new Map()));
-        seen.set(form, (seen.get(form) ?? 0) + 1);
-        if (index > 0 && /^\p{Lu}/u.test(form)) capitalMid.set(key, (capitalMid.get(key) ?? 0) + 1);
+        if (index > 0) {
+          midSentence.set(key, (midSentence.get(key) ?? 0) + 1);
+          if (/^\p{Lu}/u.test(tokens[index])) capitalMid.set(key, (capitalMid.get(key) ?? 0) + 1);
+        }
         count(index === 0 ? "" : keys[index - 1], key);
         if (index > 1) count(`${keys[index - 2]} ${keys[index - 1]}`, key);
       });
     }
   }
 
-  // German capitalizes every noun, so there only Tatoeba's recurring characters are dropped.
   const isName = (key: string) =>
-    tatoebaNames.has(key) ||
-    (lang !== "de" && key !== "i" && (capitalMid.get(key) ?? 0) > (unigrams.get(key) ?? 0) * 0.45);
-  const display = (key: string) => {
-    if (lang === "en" && (key === "i" || key.startsWith("i'"))) return "I" + key.slice(1);
-    const seen = forms.get(key);
-    if (!seen) return key;
-    // The lowercase form unless the word is nearly always capitalized (German nouns).
-    const lower = seen.get(key) ?? 0;
-    const total = [...seen.values()].reduce((sum, value) => sum + value, 0);
-    if (lower >= total * 0.3) return key;
-    return [...seen.entries()].sort((a, b) => b[1] - a[1])[0][0];
-  };
+    key !== "i" && (capitalMid.get(key) ?? 0) > (midSentence.get(key) ?? 0) * 0.45;
+  const display = (key: string) =>
+    lang === "en" && (key === "i" || key.startsWith("i'")) ? "I" + key.slice(1) : key;
 
   const best = (row: Map<string, number>) =>
     [...row.entries()]
@@ -109,5 +104,12 @@ for (const code of picked.length ? picked : [...languages.keys()]) {
   }
   lines.sort();
   writeFileSync(join(out, `${lang}.tsv`), lines.join("\n") + "\n");
-  console.log(`${lang}: ${lines.length} contexts`);
+
+  const words = [...unigrams.entries()]
+    .filter(([key, value]) => value >= minimumCount && (midSentence.get(key) ?? 0) > 0 && !isName(key))
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, commonWords)
+    .map(([key]) => display(key));
+  writeFileSync(join(out, `${lang}-words.txt`), words.join("\n") + "\n");
+  console.log(`${lang}: ${lines.length} contexts, ${words.length} words`);
 }
