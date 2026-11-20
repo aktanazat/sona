@@ -901,6 +901,7 @@ impl ModelUnloadTimeout {
 pub enum SoundTheme {
     Marimba,
     Pop,
+    Mechanical,
     Custom,
 }
 
@@ -909,6 +910,7 @@ impl SoundTheme {
         match self {
             SoundTheme::Marimba => "marimba",
             SoundTheme::Pop => "pop",
+            SoundTheme::Mechanical => "mechanical",
             SoundTheme::Custom => "custom",
         }
     }
@@ -2179,6 +2181,10 @@ pub fn get_default_settings() -> AppSettings {
     let default_command_shortcut = "option+shift+space";
     #[cfg(not(target_os = "macos"))]
     let default_command_shortcut = "ctrl+shift+space";
+    #[cfg(target_os = "macos")]
+    let default_send_shortcut = "command+enter";
+    #[cfg(not(target_os = "macos"))]
+    let default_send_shortcut = "ctrl+enter";
 
     let mut bindings = HashMap::new();
     bindings.insert(
@@ -2199,6 +2205,17 @@ pub fn get_default_settings() -> AppSettings {
             description: "Cancels the current recording.".to_string(),
             default_binding: "escape".to_string(),
             current_binding: "escape".to_string(),
+        },
+    );
+    bindings.insert(
+        crate::shortcut::SEND_BINDING_ID.to_string(),
+        ShortcutBinding {
+            id: crate::shortcut::SEND_BINDING_ID.to_string(),
+            name: "Send".to_string(),
+            description: "While recording, stops, pastes, and presses the mode's send key once."
+                .to_string(),
+            default_binding: default_send_shortcut.to_string(),
+            current_binding: default_send_shortcut.to_string(),
         },
     );
     bindings.insert(

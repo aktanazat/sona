@@ -17,17 +17,21 @@ use crate::TranscriptionCoordinator;
 pub(super) enum ShortcutIntent {
     StartStop(TranscriptionIntent),
     Cancel,
+    /// End the dictation in flight and press the submit key once it is pasted.
+    Send,
     SwitchMode(String),
     AttachWindow,
     QuickEntry,
 }
 
 pub(super) fn shortcut_intent(binding_id: &str) -> Option<ShortcutIntent> {
-    // The cancel key is registered once bare and once per modifier prefix a
-    // recording can be held by, each under its own id, so that an Escape
-    // struck mid-hold is still cancel. Every one of them means cancel.
-    if binding_id == "cancel" || binding_id.starts_with("cancel#") {
-        return Some(ShortcutIntent::Cancel);
+    // Cancel and send are registered once bare and once per modifier prefix
+    // a recording can be held by, each under its own id, so that an Escape
+    // struck mid-hold is still cancel. Every variant means its key.
+    match super::recording_key_of(binding_id) {
+        Some("cancel") => return Some(ShortcutIntent::Cancel),
+        Some(super::SEND_BINDING_ID) => return Some(ShortcutIntent::Send),
+        _ => {}
     }
     if binding_id == ATTACH_WINDOW_BINDING_ID {
         return Some(ShortcutIntent::AttachWindow);
@@ -78,6 +82,15 @@ pub(super) fn handle_shortcut_event(
             let audio_manager = app.state::<Arc<AudioRecordingManager>>();
             if is_pressed && audio_manager.is_recording() {
                 crate::utils::cancel_current_operation(app);
+            }
+        }
+        ShortcutIntent::Send => {
+            if is_pressed {
+                if let Some(coordinator) = app.try_state::<TranscriptionCoordinator>() {
+                    coordinator.send_submit(shortcut);
+                } else {
+                    warn!("TranscriptionCoordinator is not initialized");
+                }
             }
         }
         ShortcutIntent::AttachWindow => {
@@ -146,6 +159,11 @@ mod tests {
         assert_eq!(
             shortcut_intent("cancel#option+shift"),
             Some(ShortcutIntent::Cancel)
+        );
+        assert_eq!(shortcut_intent("send"), Some(ShortcutIntent::Send));
+        assert_eq!(
+            shortcut_intent("send#option+command+return"),
+            Some(ShortcutIntent::Send)
         );
         assert_eq!(
             shortcut_intent(ATTACH_WINDOW_BINDING_ID),

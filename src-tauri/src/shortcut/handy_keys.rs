@@ -42,17 +42,57 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::thread;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::settings::{self, get_settings, ShortcutBinding};
 
 use super::handler::handle_shortcut_event;
 
+/// The stored spelling of a double-tap binding: `double:option_right` fires
+/// on the second of two quick taps of Right Option.
+pub(crate) const DOUBLE_TAP_PREFIX: &str = "double:";
+
+/// Longest a first tap may be held and still count as a tap.
+const DOUBLE_TAP_MAX_HOLD: Duration = Duration::from_millis(350);
+/// Longest gap between letting go of the first tap and pressing the second.
+const DOUBLE_TAP_MAX_GAP: Duration = Duration::from_millis(400);
+
+/// A stored binding string, split into its chord and how the chord fires.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ParsedShortcut {
+    pub hotkey: Hotkey,
+    pub double_tap: bool,
+}
+
+pub(crate) fn parse_shortcut(raw: &str) -> Result<ParsedShortcut, String> {
+    let (chord, double_tap) = match raw.trim().strip_prefix(DOUBLE_TAP_PREFIX) {
+        Some(chord) => (chord, true),
+        None => (raw, false),
+    };
+    let hotkey = chord
+        .parse::<Hotkey>()
+        .map_err(|e| format!("Failed to parse hotkey '{raw}': {e}"))?;
+    Ok(ParsedShortcut { hotkey, double_tap })
+}
+
+/// Where a double-tap binding is between its two taps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TapState {
+    Idle,
+    FirstDown(Instant),
+    FirstUp(Instant),
+    /// The second tap fired the binding; its release ends it.
+    SecondDown,
+}
+
 /// A registered binding and whether its chord is held right now.
 struct RegisteredHotkey {
     hotkey: Hotkey,
     shortcut: String,
     pressed: bool,
+    /// `Some` for a double-tap binding.
+    taps: Option<TapState>,
 }
 
 /// Registered bindings, matched against every key event the listener reports.
@@ -72,9 +112,21 @@ struct Transition {
 }
 
 impl Registry {
-    /// Refuses a chord that is already registered, even to this binding; a
-    /// binding registered again with a new chord gives up its old one.
-    fn register(&mut self, binding_id: &str, shortcut: &str, hotkey: Hotkey) -> Result<(), String> {
+    /// Refuses a chord that is already registered, even to this binding or
+    /// as the other of a single press and a double tap, since every tap of a
+    /// double tap is also a press; a binding registered again with a new
+    /// chord gives up its old one.
+    ///
+    /// A double tap is never blocked: its first tap cannot be told from an
+    /// ordinary press until the second arrives, so swallowing it would take
+    /// the key away from every app.
+    fn register(
+        &mut self,
+        binding_id: &str,
+        shortcut: &str,
+        parsed: ParsedShortcut,
+    ) -> Result<(), String> {
+        let hotkey = parsed.hotkey;
         if self
             .bindings
             .values()
@@ -88,13 +140,16 @@ impl Registry {
                 hotkey,
                 shortcut: shortcut.to_string(),
                 pressed: false,
+                taps: parsed.double_tap.then_some(TapState::Idle),
             },
         );
         let mut blocking = lock_recover(&self.blocking);
         if let Some(previous) = previous {
             blocking.remove(&previous.hotkey);
         }
-        blocking.insert(hotkey);
+        if !parsed.double_tap {
+            blocking.insert(hotkey);
+        }
         Ok(())
     }
 
@@ -107,12 +162,18 @@ impl Registry {
         true
     }
 
-    /// The transitions one key event causes, with the semantics of handy-keys'
-    /// own manager: a chord presses when its key goes down with matching
-    /// modifiers, and releases when its key comes up or, for a modifier event,
-    /// when the held modifiers stop matching. A modifier event that still
-    /// matches (tapping Shift while a Cmd-only chord is held) releases nothing.
-    fn transitions(&mut self, event: &KeyEvent) -> Vec<Transition> {
+    /// The transitions one key event at `at` causes, with the semantics of
+    /// handy-keys' own manager: a chord presses when its key goes down with
+    /// matching modifiers, and releases when its key comes up or, for a
+    /// modifier event, when the held modifiers stop matching. A modifier event
+    /// that still matches (tapping Shift while a Cmd-only chord is held)
+    /// releases nothing.
+    ///
+    /// A double-tap binding presses only on the second of two taps of its
+    /// chord, the first tap short and the gap between them short, and
+    /// releases when that second tap comes up. Any other key struck between
+    /// the taps starts the count again.
+    fn transitions(&mut self, event: &KeyEvent, at: Instant) -> Vec<Transition> {
         let mut transitions = Vec::new();
         for (binding_id, registered) in &mut self.bindings {
             let hotkey = registered.hotkey;
@@ -129,6 +190,12 @@ impl Registry {
             };
             if changes {
                 registered.pressed = event.is_key_down;
+            }
+            let fires = match registered.taps.as_mut() {
+                None => changes,
+                Some(taps) => double_tap_fires(taps, changes, event.is_key_down, at),
+            };
+            if fires {
                 transitions.push(Transition {
                     binding_id: binding_id.clone(),
                     shortcut: registered.shortcut.clone(),
@@ -138,6 +205,29 @@ impl Registry {
         }
         transitions
     }
+}
+
+/// Advances a double-tap binding by one key event at `at`; whether the
+/// binding presses or releases on it. `changes` is whether the event pressed
+/// or released the binding's chord.
+fn double_tap_fires(taps: &mut TapState, changes: bool, is_key_down: bool, at: Instant) -> bool {
+    let (next, fires) = match (*taps, changes, is_key_down) {
+        (TapState::SecondDown, true, false) => (TapState::Idle, true),
+        (TapState::SecondDown, _, _) => (TapState::SecondDown, false),
+        (TapState::FirstUp(up), true, true) if at.duration_since(up) <= DOUBLE_TAP_MAX_GAP => {
+            (TapState::SecondDown, true)
+        }
+        (_, true, true) => (TapState::FirstDown(at), false),
+        (TapState::FirstDown(down), true, false)
+            if at.duration_since(down) <= DOUBLE_TAP_MAX_HOLD =>
+        {
+            (TapState::FirstUp(at), false)
+        }
+        (_, true, false) | (_, false, true) => (TapState::Idle, false),
+        (state, false, false) => (state, false),
+    };
+    *taps = next;
+    fires
 }
 
 /// State for the handy-keys shortcut manager
@@ -221,7 +311,7 @@ impl HandyKeysState {
             let Some(registry) = registry.upgrade() else {
                 break;
             };
-            let transitions = lock_recover(&registry).transitions(&event);
+            let transitions = lock_recover(&registry).transitions(&event, Instant::now());
             drop(registry);
             for transition in transitions {
                 debug!(
@@ -242,16 +332,11 @@ impl HandyKeysState {
     /// Register a shortcut binding
     pub fn register(&self, binding: &ShortcutBinding) -> Result<(), String> {
         let registry = self.registry.as_ref().map_err(Clone::clone)?;
-        let hotkey: Hotkey = binding.current_binding.parse().map_err(|e| {
-            format!(
-                "Failed to parse hotkey '{}': {}",
-                binding.current_binding, e
-            )
-        })?;
-        lock_recover(registry).register(&binding.id, &binding.current_binding, hotkey)?;
+        let parsed = parse_shortcut(&binding.current_binding)?;
+        lock_recover(registry).register(&binding.id, &binding.current_binding, parsed)?;
         debug!(
             "Registered handy-keys shortcut: {} -> {:?}",
-            binding.id, hotkey
+            binding.id, parsed
         );
         Ok(())
     }
@@ -415,9 +500,9 @@ pub fn validate_shortcut(raw: &str) -> Result<(), String> {
     if raw.trim().is_empty() {
         return Err("Shortcut cannot be empty".into());
     }
-    // HandyKeys accepts modifier-only, key-only, and modifier+key combos
-    // Just verify the string is parseable
-    raw.parse::<Hotkey>()
+    // HandyKeys accepts modifier-only, key-only, and modifier+key combos,
+    // each pressed once or double-tapped.
+    parse_shortcut(raw)
         .map(|_| ())
         .map_err(|e| format!("Invalid shortcut for HandyKeys: {}", e))
 }
@@ -513,10 +598,11 @@ pub fn stop_handy_keys_recording(app: AppHandle) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{lock_recover, FrontendKeyEvent, Registry};
+    use super::{lock_recover, parse_shortcut, FrontendKeyEvent, Registry};
     use handy_keys::{Hotkey, Key, KeyEvent, Modifiers};
     use std::collections::{HashMap, HashSet};
     use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
 
     fn chord(shortcut: &str) -> Result<Hotkey, String> {
         shortcut
@@ -530,7 +616,7 @@ mod tests {
             blocking: Arc::new(Mutex::new(HashSet::new())),
         };
         for (binding_id, shortcut) in bindings {
-            registry.register(binding_id, shortcut, chord(shortcut)?)?;
+            registry.register(binding_id, shortcut, parse_shortcut(shortcut)?)?;
         }
         Ok(registry)
     }
@@ -546,16 +632,181 @@ mod tests {
 
     /// The press (`true`) and release (`false`) transitions each event causes.
     fn replay(registry: &mut Registry, events: &[KeyEvent]) -> Vec<Vec<bool>> {
+        let start = Instant::now();
         events
             .iter()
             .map(|event| {
                 registry
-                    .transitions(event)
+                    .transitions(event, start)
                     .iter()
                     .map(|transition| transition.is_pressed)
                     .collect()
             })
             .collect()
+    }
+
+    /// Every binding that pressed or released, over events each stamped with
+    /// its millisecond offset from the first.
+    fn replay_timed(registry: &mut Registry, events: &[(u64, KeyEvent)]) -> Vec<(String, bool)> {
+        let start = Instant::now();
+        events
+            .iter()
+            .flat_map(|(ms, event)| registry.transitions(event, start + Duration::from_millis(*ms)))
+            .map(|transition| (transition.binding_id, transition.is_pressed))
+            .collect()
+    }
+
+    fn right_option(is_key_down: bool) -> KeyEvent {
+        let held = if is_key_down {
+            Modifiers::OPT_RIGHT
+        } else {
+            Modifiers::empty()
+        };
+        event(held, None, is_key_down)
+    }
+
+    fn left_option(is_key_down: bool) -> KeyEvent {
+        let held = if is_key_down {
+            Modifiers::OPT_LEFT
+        } else {
+            Modifiers::empty()
+        };
+        event(held, None, is_key_down)
+    }
+
+    fn fired(binding_id: &str, is_pressed: bool) -> (String, bool) {
+        (binding_id.to_string(), is_pressed)
+    }
+
+    #[test]
+    fn a_double_tap_presses_on_the_second_quick_tap_and_releases_with_it() -> Result<(), String> {
+        let mut registry = registry(&[("transcribe", "double:option_right")])?;
+        let transitions = replay_timed(
+            &mut registry,
+            &[
+                (0, right_option(true)),
+                (90, right_option(false)),
+                (300, right_option(true)),
+                (380, right_option(false)),
+            ],
+        );
+        assert_eq!(
+            transitions,
+            [fired("transcribe", true), fired("transcribe", false)]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_slow_or_interrupted_double_tap_presses_nothing() -> Result<(), String> {
+        let double_tap = || registry(&[("transcribe", "double:option_right")]);
+        let no_presses: [(String, bool); 0] = [];
+
+        let held_first_tap = replay_timed(
+            &mut double_tap()?,
+            &[
+                (0, right_option(true)),
+                (600, right_option(false)),
+                (700, right_option(true)),
+                (760, right_option(false)),
+            ],
+        );
+        assert_eq!(
+            held_first_tap, no_presses,
+            "a first tap held 600 ms is a hold"
+        );
+
+        let long_gap = replay_timed(
+            &mut double_tap()?,
+            &[
+                (0, right_option(true)),
+                (80, right_option(false)),
+                (700, right_option(true)),
+                (760, right_option(false)),
+            ],
+        );
+        assert_eq!(
+            long_gap, no_presses,
+            "taps 620 ms apart are two single taps"
+        );
+
+        let typed_between = replay_timed(
+            &mut double_tap()?,
+            &[
+                (0, right_option(true)),
+                (80, right_option(false)),
+                (150, event(Modifiers::empty(), Some(Key::E), true)),
+                (180, event(Modifiers::empty(), Some(Key::E), false)),
+                (250, right_option(true)),
+                (320, right_option(false)),
+            ],
+        );
+        assert_eq!(
+            typed_between, no_presses,
+            "a key typed between the taps resets them"
+        );
+        Ok(())
+    }
+
+    /// Push-to-talk on Left Option beside a double tap on Right Option: the
+    /// hold presses and releases only push-to-talk, quick taps of the left
+    /// key stay push-to-talk taps, and only the right key's double tap fires
+    /// its binding. Neither key's taps are swallowed beyond the held chord.
+    #[test]
+    fn a_double_tap_leaves_push_to_talk_on_the_other_side_alone() -> Result<(), String> {
+        let mut registry = registry(&[
+            ("transcribe", "option_left"),
+            ("mode/email/transcribe", "double:option_right"),
+        ])?;
+        let transitions = replay_timed(
+            &mut registry,
+            &[
+                (0, left_option(true)),
+                (2_000, left_option(false)),
+                (2_100, left_option(true)),
+                (2_180, left_option(false)),
+                (2_300, left_option(true)),
+                (2_380, left_option(false)),
+                (3_000, right_option(true)),
+                (3_080, right_option(false)),
+                (3_200, right_option(true)),
+                (3_270, right_option(false)),
+            ],
+        );
+        assert_eq!(
+            transitions,
+            [
+                fired("transcribe", true),
+                fired("transcribe", false),
+                fired("transcribe", true),
+                fired("transcribe", false),
+                fired("transcribe", true),
+                fired("transcribe", false),
+                fired("mode/email/transcribe", true),
+                fired("mode/email/transcribe", false),
+            ]
+        );
+        assert_eq!(
+            *lock_recover(&registry.blocking),
+            HashSet::from([chord("option_left")?]),
+            "the double tap's key reaches other apps"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_double_tap_of_a_chord_bound_to_a_single_press_is_refused() -> Result<(), String> {
+        let mut registry = registry(&[("transcribe", "option_right")])?;
+        let refused = registry.register(
+            "mode/email/transcribe",
+            "double:option_right",
+            parse_shortcut("double:option_right")?,
+        );
+        assert!(
+            refused.is_err(),
+            "every tap would also press the single binding"
+        );
+        Ok(())
     }
 
     #[test]
@@ -609,7 +860,7 @@ mod tests {
     fn the_tap_blocks_exactly_the_registered_chords() -> Result<(), String> {
         let mut registry = registry(&[("transcribe", "option+space")])?;
 
-        registry.register("transcribe", "option+k", chord("option+k")?)?;
+        registry.register("transcribe", "option+k", parse_shortcut("option+k")?)?;
         assert_eq!(
             *lock_recover(&registry.blocking),
             HashSet::from([chord("option+k")?]),
@@ -625,10 +876,13 @@ mod tests {
     fn a_chord_another_binding_holds_is_refused_and_keeps_firing_the_first() -> Result<(), String> {
         let mut registry = registry(&[("transcribe", "option+space")])?;
 
-        let refused = registry.register("cancel", "option+space", chord("option+space")?);
+        let refused = registry.register("cancel", "option+space", parse_shortcut("option+space")?);
         assert!(refused.is_err(), "the duplicate chord was accepted");
 
-        let fired = registry.transitions(&event(Modifiers::OPT_LEFT, Some(Key::Space), true));
+        let fired = registry.transitions(
+            &event(Modifiers::OPT_LEFT, Some(Key::Space), true),
+            Instant::now(),
+        );
         let fired: Vec<&str> = fired
             .iter()
             .map(|transition| transition.binding_id.as_str())

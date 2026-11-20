@@ -127,7 +127,7 @@ pub enum SettingKey {
     AudioFeedback,
     /// Their volume, 0 to 1.
     AudioFeedbackVolume,
-    /// marimba, pop or custom.
+    /// marimba, pop, mechanical or custom.
     SoundTheme,
     /// Mute other audio while dictating: true or false.
     MuteWhileRecording,
@@ -761,7 +761,7 @@ fn setting_change<'a>(args: &'a SettingArgs) -> SettingsChange<'a> {
         SettingKey::SoundTheme => (
             show(|s| json!(s.sound_theme)),
             apply(move |s| {
-                s.sound_theme = named::<SoundTheme>(value, "marimba, pop, custom")?;
+                s.sound_theme = named::<SoundTheme>(value, "marimba, pop, mechanical, custom")?;
                 Ok(())
             }),
         ),

@@ -2052,8 +2052,8 @@ impl TranscribeAction {
 
         let started = recording_error.is_none();
         if started {
-            // Dynamically register the cancel shortcut in a separate task to avoid deadlock
-            shortcut::register_cancel_shortcut(app);
+            // Dynamically register cancel and send in a separate task to avoid deadlock
+            shortcut::register_recording_keys(app);
         } else {
             // Starting failed (for example due to blocked microphone permissions).
             // Revert UI state so we don't stay stuck in the recording overlay.
@@ -2085,8 +2085,8 @@ impl TranscribeAction {
         app.state::<Arc<AudioRecordingManager>>()
             .invalidate_recording_readiness();
 
-        // Unregister the cancel shortcut when transcription stops
-        shortcut::unregister_cancel_shortcut(app);
+        // Unregister cancel and send when transcription stops
+        shortcut::unregister_recording_keys(app);
 
         let stop_time = Instant::now();
         debug!("TranscribeAction::stop called for binding: {}", binding_id);
