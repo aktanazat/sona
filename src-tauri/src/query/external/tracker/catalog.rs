@@ -18,10 +18,8 @@ use crate::planning::catalog::{LinkEdit, MilestoneEdit, ProjectEdit};
 use crate::planning::store as plans;
 use crate::planning::work;
 use crate::planning::work::types::{WorkOwner, WorkStatus};
-use crate::planning::{
-    DateResolution, Milestone, Project, ProjectLink, ProjectStatus, TaskStatus,
-};
 use crate::planning::ProjectStatusName;
+use crate::planning::{DateResolution, Milestone, Project, ProjectLink, ProjectStatus, TaskStatus};
 use crate::query::external::{
     meeting_detail, meeting_summaries, session_id, store, transcript, ExternalError,
     ExternalErrorCode, ExternalMeetingDetail, ExternalTranscript,
@@ -173,7 +171,8 @@ pub struct ProjectsArgs {
 }
 
 fn calendar_day(value: &str) -> Result<NaiveDate, String> {
-    NaiveDate::parse_from_str(value.trim(), "%Y-%m-%d").map_err(|_| "expected YYYY-MM-DD".to_owned())
+    NaiveDate::parse_from_str(value.trim(), "%Y-%m-%d")
+        .map_err(|_| "expected YYYY-MM-DD".to_owned())
 }
 
 #[derive(Args, Clone, Debug, Eq, PartialEq)]
@@ -788,24 +787,25 @@ impl Tracker<'_> {
                 done += 1;
             }
         }
-        let (milestones, latest_update_at_ms, status_name, initiative) = planning::history(self.history, |conn| {
-            let milestones = plans::records(conn, &project.id)?.milestones.len();
-            let latest = planning::updates::latest(conn, &project.id)?
-                .map(|update| update.created_at_ms);
-            let status_name = project
-                .status_name_id
-                .as_deref()
-                .map(|id| planning::catalog::status_name(conn, id))
-                .transpose()?
-                .map(|name| name.name);
-            let initiative = planning::work::initiatives::initiative_of(conn, &project.id)?
-                .map(|initiative| ExternalWorkPersonRef {
-                    id: initiative.id,
-                    name: initiative.name,
-                });
-            Ok((milestones, latest, status_name, initiative))
-        })
-        .unwrap_or_default();
+        let (milestones, latest_update_at_ms, status_name, initiative) =
+            planning::history(self.history, |conn| {
+                let milestones = plans::records(conn, &project.id)?.milestones.len();
+                let latest = planning::updates::latest(conn, &project.id)?
+                    .map(|update| update.created_at_ms);
+                let status_name = project
+                    .status_name_id
+                    .as_deref()
+                    .map(|id| planning::catalog::status_name(conn, id))
+                    .transpose()?
+                    .map(|name| name.name);
+                let initiative = planning::work::initiatives::initiative_of(conn, &project.id)?
+                    .map(|initiative| ExternalWorkPersonRef {
+                        id: initiative.id,
+                        name: initiative.name,
+                    });
+                Ok((milestones, latest, status_name, initiative))
+            })
+            .unwrap_or_default();
         let labels = self.all_labels().unwrap_or_default();
         ExternalWorkProject {
             id: project.id.clone(),
@@ -988,10 +988,13 @@ impl Tracker<'_> {
             start_at_ms: args.start.map(DayArg::ms).transpose()?,
             start_resolution: args.start_resolution.map(ResolutionArg::resolution),
             target_resolution: args.target_resolution.map(ResolutionArg::resolution),
-            icon: args
-                .icon
-                .as_deref()
-                .map(|icon| if cleared(icon) { String::new() } else { icon.trim().to_owned() }),
+            icon: args.icon.as_deref().map(|icon| {
+                if cleared(icon) {
+                    String::new()
+                } else {
+                    icon.trim().to_owned()
+                }
+            }),
             label_ids,
             links,
             trashed: None,
@@ -1031,7 +1034,8 @@ impl Tracker<'_> {
         }
         let operation_id = operation_id.unwrap_or_else(|| args.write.fresh_operation_id());
         self.applies("saving a project")?;
-        let project = work::catalog_project_save(self.app, &operation_id, id, &edit)
+        let author = Self::update_author(&args.write);
+        let project = work::catalog_project_save(self.app, author, &operation_id, id, &edit)
             .map_err(|message| self.write_refusal(message, &operation_id, "The project"))?;
         Ok(WorkAnswer::Project(ExternalWorkProjectChange {
             schema_version: QUERY_SCHEMA_VERSION,
@@ -1064,8 +1068,14 @@ impl Tracker<'_> {
                 })?
             } else {
                 self.applies("putting a project away")?;
-                work::catalog_project_save(self.app, &operation_id, Some(current.id.clone()), &edit)
-                    .map_err(|message| self.write_refusal(message, &operation_id, "The project"))?
+                work::catalog_project_save(
+                    self.app,
+                    Self::update_author(&args.write),
+                    &operation_id,
+                    Some(current.id.clone()),
+                    &edit,
+                )
+                .map_err(|message| self.write_refusal(message, &operation_id, "The project"))?
             };
             return Ok(WorkAnswer::Project(ExternalWorkProjectChange {
                 schema_version: QUERY_SCHEMA_VERSION,
@@ -1542,7 +1552,11 @@ impl Tracker<'_> {
             status: args.status.map(Into::into).unwrap_or_default(),
             title_query: args.title.clone().unwrap_or_default(),
             folder_id: match &args.folder {
-                Some(folder) => Some(super::library::folder(self.meetings, folder).await?.folder_id),
+                Some(folder) => Some(
+                    super::library::folder(self.meetings, folder)
+                        .await?
+                        .folder_id,
+                ),
                 None => None,
             },
             ..Default::default()
@@ -1687,7 +1701,9 @@ fn changes_project(current: &Project, edit: &ProjectEdit) -> bool {
         || edit
             .archived
             .is_some_and(|archived| archived != current.archived_at_ms.is_some())
-        || edit.priority.is_some_and(|priority| priority != current.priority)
+        || edit
+            .priority
+            .is_some_and(|priority| priority != current.priority)
         || edit
             .start_at_ms
             .is_some_and(|start| start != current.start_at_ms)
@@ -1819,7 +1835,10 @@ impl Tracker<'_> {
             .map_err(|message| super::refusal(self.history, message))
     }
 
-    fn status_named(&self, args: &ProjectSaveArgs) -> Result<Option<Option<String>>, ExternalError> {
+    fn status_named(
+        &self,
+        args: &ProjectSaveArgs,
+    ) -> Result<Option<Option<String>>, ExternalError> {
         let Some(value) = args.status_name.as_deref() else {
             return Ok(None);
         };
@@ -1885,15 +1904,17 @@ impl Tracker<'_> {
         };
         let projects = self.every_project()?;
         let change = |dry_run, operation_id, status: &ProjectStatusName, changed_projects| {
-            admin(ProjectAdminAnswer::Status(ExternalWorkProjectStatusChange {
-                schema_version: QUERY_SCHEMA_VERSION,
-                dry_run,
-                operation_id,
-                created: existing.is_none(),
-                deleted: false,
-                status: status_row(status, &projects),
-                changed_projects,
-            }))
+            admin(ProjectAdminAnswer::Status(
+                ExternalWorkProjectStatusChange {
+                    schema_version: QUERY_SCHEMA_VERSION,
+                    dry_run,
+                    operation_id,
+                    created: existing.is_none(),
+                    deleted: false,
+                    status: status_row(status, &projects),
+                    changed_projects,
+                },
+            ))
         };
         if let Some(current) = existing {
             if current.name == name && current.category == category {
@@ -1992,9 +2013,9 @@ impl Tracker<'_> {
                 | "milestoneTarget" => value
                     .parse::<i64>()
                     .map_or(value.clone(), |ms| day_text(Some(ms))),
-                "priority" => value
-                    .parse::<u8>()
-                    .map_or(value.clone(), |priority| Priority::of(priority).text().to_owned()),
+                "priority" => value.parse::<u8>().map_or(value.clone(), |priority| {
+                    Priority::of(priority).text().to_owned()
+                }),
                 _ => value,
             })
         };
@@ -2020,7 +2041,10 @@ impl Tracker<'_> {
         )))
     }
 
-    pub(super) async fn milestone(&self, args: &MilestoneArgs) -> Result<WorkAnswer, ExternalError> {
+    pub(super) async fn milestone(
+        &self,
+        args: &MilestoneArgs,
+    ) -> Result<WorkAnswer, ExternalError> {
         let board = self.board().await?;
         let projects = self.every_project()?;
         let project = Self::pick_project(&args.project, &projects)?;
@@ -2066,9 +2090,11 @@ impl Tracker<'_> {
             .map(|id| id.to_string());
         let asked = request_json(&(&project.id, &args.milestone))?;
         let replaying = match &caller {
-            Some(id) => planning::history(self.history, |conn| converted_milestone(conn, id, &asked))
-                .map_err(|message| self.write_refusal(message, id, "The milestone"))?
-                .map(|milestone_id| (milestone_id, id.clone())),
+            Some(id) => {
+                planning::history(self.history, |conn| converted_milestone(conn, id, &asked))
+                    .map_err(|message| self.write_refusal(message, id, "The milestone"))?
+                    .map(|milestone_id| (milestone_id, id.clone()))
+            }
             None => None,
         };
         let (milestone_id, operation_id, moved) = match replaying {
@@ -2076,9 +2102,10 @@ impl Tracker<'_> {
             None => {
                 let milestones = self.milestones_of(project)?;
                 let milestone = pick_milestone(&args.milestone, &milestones)?;
-                if let Some(taken) = projects.iter().find(|project| {
-                    project.title.to_lowercase() == milestone.title.to_lowercase()
-                }) {
+                if let Some(taken) = projects
+                    .iter()
+                    .find(|project| project.title.to_lowercase() == milestone.title.to_lowercase())
+                {
                     return Err(ExternalError::invalid(format!(
                         "A project called {:?} already exists; rename the milestone first.",
                         taken.title
@@ -2103,9 +2130,16 @@ impl Tracker<'_> {
         } else {
             self.applies("turning a milestone into a project")?;
             let made = work::catalog_milestone_to_project(self.app, &operation_id, &milestone_id)
-                .map_err(|message| self.write_refusal(message, &operation_id, "The milestone"))?;
+                .map_err(|message| {
+                self.write_refusal(message, &operation_id, "The milestone")
+            })?;
             if caller.is_some() && moved.is_some() {
-                self.file_sent(&operation_id, MILESTONE_TO_PROJECT_ASKED, &asked, &milestone_id)?;
+                self.file_sent(
+                    &operation_id,
+                    MILESTONE_TO_PROJECT_ASKED,
+                    &asked,
+                    &milestone_id,
+                )?;
             }
             made
         };
@@ -2185,12 +2219,20 @@ pub(super) fn admin_text(answer: &ProjectAdminAnswer, text: &mut String) {
                 change.status.name, change.status.category
             );
             if !change.changed_projects.is_empty() {
-                let _ = writeln!(text, "Projects changed: {}.", change.changed_projects.join(", "));
+                let _ = writeln!(
+                    text,
+                    "Projects changed: {}.",
+                    change.changed_projects.join(", ")
+                );
             }
         }
         ProjectAdminAnswer::History(history) => {
             if history.changes.is_empty() {
-                let _ = writeln!(text, "{} has no recorded changes yet.", history.project.name);
+                let _ = writeln!(
+                    text,
+                    "{} has no recorded changes yet.",
+                    history.project.name
+                );
             }
             for change in &history.changes {
                 let link = match change.kind.as_str() {
@@ -2450,7 +2492,6 @@ pub(super) fn text(answer: &WorkAnswer, text: &mut String) {
     }
 }
 
-
 pub(super) async fn merge_people(
     meetings: &Arc<MeetingSessionManager>,
     from: PersonId,
@@ -2508,7 +2549,9 @@ mod tests {
     use std::collections::{BTreeMap, HashMap, HashSet};
 
     fn project_save(argv: &[&str]) -> ProjectSaveArgs {
-        let argv = ["sona", "work", "project-save", "Harbor"].iter().chain(argv);
+        let argv = ["sona", "work", "project-save", "Harbor"]
+            .iter()
+            .chain(argv);
         match CliArgs::try_parse_from(argv) {
             Ok(CliArgs {
                 command: Some(Command::Work(work)),

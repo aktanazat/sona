@@ -361,7 +361,22 @@ pub(crate) fn update_body_in(
             "UPDATE scratch_notes SET title = ?2, body = ?3, updated_at_ms = ?4 WHERE id = ?1",
             params![id, note.title, note.body, now_ms],
         )?;
-        record_version(transaction, id, body, now_ms, ScratchVersionKind::Edit, author)?;
+        record_version(
+            transaction,
+            id,
+            body,
+            now_ms,
+            ScratchVersionKind::Edit,
+            author,
+        )?;
+        if author.actor() == WorkActor::Agent {
+            crate::planning::work::follows::note_edited(
+                transaction,
+                id,
+                author.agent().as_deref(),
+                now_ms,
+            )?;
+        }
     }
     Ok(note)
 }
@@ -484,7 +499,15 @@ fn record_version(
                 "SELECT id, kind, saved_at_ms, actor, agent FROM scratch_note_versions
                  WHERE note_id = ?1 ORDER BY id DESC LIMIT 1",
                 params![note_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
             )
             .optional()?;
         if let Some((version_id, newest_kind, saved_at_ms, newest_actor, newest_agent)) = newest {
@@ -995,20 +1018,42 @@ mod tests {
     fn an_agent_save_is_its_own_version_named_for_the_agent() {
         let mut conn = connection();
         let note = create_note_with_connection(&mut conn, "my first words", 0).expect("create");
-        update_body_in(&conn, &note.id, "my first words, and the agent's", Author::Agent(Some("codex")), MINUTE_MS)
-            .expect("agent save");
-        update_body_in(&conn, &note.id, "my first words, and the agent's, twice", Author::Agent(Some("codex")), 2 * MINUTE_MS)
-            .expect("agent save again");
+        update_body_in(
+            &conn,
+            &note.id,
+            "my first words, and the agent's",
+            Author::Agent(Some("codex")),
+            MINUTE_MS,
+        )
+        .expect("agent save");
+        update_body_in(
+            &conn,
+            &note.id,
+            "my first words, and the agent's, twice",
+            Author::Agent(Some("codex")),
+            2 * MINUTE_MS,
+        )
+        .expect("agent save again");
 
         let versions = versions_with_connection(&conn, &note.id).expect("versions");
         let authors: Vec<_> = versions
             .iter()
-            .map(|version| (version.body.as_str(), version.actor, version.agent.as_deref()))
+            .map(|version| {
+                (
+                    version.body.as_str(),
+                    version.actor,
+                    version.agent.as_deref(),
+                )
+            })
             .collect();
         assert_eq!(
             authors,
             vec![
-                ("my first words, and the agent's, twice", WorkActor::Agent, Some("codex")),
+                (
+                    "my first words, and the agent's, twice",
+                    WorkActor::Agent,
+                    Some("codex")
+                ),
                 ("my first words", WorkActor::Me, None),
             ]
         );
@@ -1171,7 +1216,10 @@ mod tests {
                 .collect::<Vec<_>>()
         };
 
-        assert_eq!(titles(&|_, _| false), ["Fire the vendor", "Send the outline"]);
+        assert_eq!(
+            titles(&|_, _| false),
+            ["Fire the vendor", "Send the outline"]
+        );
         assert_eq!(
             titles(&|kind, id| {
                 kind == crate::planning::EvidenceSourceKind::Meeting && id == "board-prep"

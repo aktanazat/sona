@@ -5,11 +5,13 @@
 
 use super::super::sources;
 use super::super::store::{self, Refusal};
-use super::inbox;
+use super::follows;
+use super::inbox::{self, Notification, NotificationKind};
+use super::inbox_settings;
 use super::items;
 use super::routines;
 use super::sync::People;
-use super::types::{WorkItem, WorkOwner, WorkSource};
+use super::types::{WorkActor, WorkItem, WorkOwner, WorkSource};
 use super::{in_both, now_ms, run_history, with_both, Done, Effects};
 use crate::managers::history::HistoryManager;
 use crate::meeting::detection::calendar::CalendarAccess;
@@ -160,6 +162,8 @@ pub enum WorkReminderKind {
     Due,
     FollowUp,
     Brief,
+    /// New in the inbox: `id` is the notice.
+    Inbox,
 }
 
 impl WorkReminderKind {
@@ -168,11 +172,12 @@ impl WorkReminderKind {
             Self::Due => "due",
             Self::FollowUp => "follow",
             Self::Brief => "brief",
+            Self::Inbox => "inbox",
         }
     }
 
     fn parse(value: &str) -> Option<Self> {
-        [Self::Due, Self::FollowUp, Self::Brief]
+        [Self::Due, Self::FollowUp, Self::Brief, Self::Inbox]
             .into_iter()
             .find(|kind| kind.as_str() == value)
     }
@@ -411,6 +416,125 @@ fn post_due(history: &mut Connection, due: &[Reminder], now_ms: i64) -> Result<V
     }
     tx.commit()?;
     Ok(posted)
+}
+
+/// Posts the reminders on projects, initiatives and notes whose time came,
+/// and what moved in the followed views. Returns how many notices it
+/// posted.
+fn post_subjects(history: &mut Connection, now_ms: i64) -> Result<usize> {
+    let tx = history.transaction()?;
+    let posted =
+        routines::post_subject_reminders(&tx, now_ms)? + follows::watch_views(&tx, now_ms)?;
+    tx.commit()?;
+    Ok(posted)
+}
+
+/// The words after who did it, for one inbox notice's banner.
+fn said(notice: &Notification) -> String {
+    let words = |value: Option<&str>| value.unwrap_or_default().replace('_', " ");
+    match notice.kind {
+        NotificationKind::Status => format!("moved it to {}", words(notice.to.as_deref())),
+        NotificationKind::Comment => "commented".to_owned(),
+        NotificationKind::Mention => "mentioned you".to_owned(),
+        NotificationKind::Assigned => "assigned it to you".to_owned(),
+        NotificationKind::Changed => format!("changed the {}", words(notice.field.as_deref())),
+        NotificationKind::Reminder => "Reminder".to_owned(),
+        NotificationKind::Due => "Due today".to_owned(),
+        NotificationKind::Automation if notice.to.as_deref() == Some("done") => {
+            "finished".to_owned()
+        }
+        NotificationKind::Automation => "failed".to_owned(),
+        NotificationKind::Digest => "The weekly project digest is in".to_owned(),
+        NotificationKind::Question => format!("asks: {}", words(notice.to.as_deref())),
+        NotificationKind::Project if notice.field.as_deref() == Some("update") => {
+            "posted an update".to_owned()
+        }
+        NotificationKind::Project => format!("moved it to {}", words(notice.to.as_deref())),
+        NotificationKind::View => match notice.field.as_deref() {
+            Some("done") => "finished a task in it".to_owned(),
+            Some("canceled") => "canceled a task in it".to_owned(),
+            _ => "added a task to it".to_owned(),
+        },
+        NotificationKind::Note => "edited it".to_owned(),
+    }
+}
+
+/// What a notice is about, for its banner's title.
+fn about(history: &Connection, notice: &Notification) -> Result<String> {
+    if let Some(id) = &notice.item_id {
+        if let Ok(item) = items::item(history, id) {
+            return Ok(item.title);
+        }
+    }
+    Ok(match (&notice.subject, &notice.automation) {
+        (Some(subject), _) => subject.name.clone().unwrap_or_default(),
+        (None, Some(automation)) => automation.name.clone(),
+        (None, None) => "Inbox".to_owned(),
+    })
+}
+
+fn line(notice: &Notification) -> String {
+    let who = match (notice.kind, notice.agent.as_deref(), notice.actor) {
+        (NotificationKind::Reminder | NotificationKind::Due | NotificationKind::Digest, _, _) => {
+            None
+        }
+        (_, Some(agent), _) => Some(agent.to_owned()),
+        (_, None, WorkActor::Sona) => Some("Sona".to_owned()),
+        (_, None, _) => Some("An agent".to_owned()),
+    };
+    match who {
+        Some(who) => format!("{who} {}", said(notice)),
+        None => said(notice),
+    }
+}
+
+/// One banner for what newly reached the inbox: the notice itself when
+/// there is one, else how many and the first few.
+fn inbox_banner(history: &Connection, due: &[(String, Notification)]) -> Result<Option<Notice>> {
+    Ok(match due {
+        [] => None,
+        [(_, one)] => Some(Notice {
+            id: request_id(WorkReminderKind::Inbox, Some(&one.id)),
+            title: about(history, one)?,
+            body: line(one),
+        }),
+        many => Some(Notice {
+            id: request_id(WorkReminderKind::Inbox, None),
+            title: format!("{} new in Inbox", many.len()),
+            body: named(
+                many.iter()
+                    .map(|(_, notice)| Ok(format!("{}: {}", about(history, notice)?, line(notice))))
+                    .collect::<Result<_>>()?,
+                " · ",
+            ),
+        }),
+    })
+}
+
+/// What the inbox owes banners this minute, unless banners keep quiet.
+struct Banners {
+    quiet: bool,
+    due_days: bool,
+    reminders: bool,
+    inbox: Option<(Notice, Vec<String>)>,
+}
+
+fn banners(history: &mut Connection, sent: &HashSet<String>, now_ms: i64) -> Result<Banners> {
+    let quiet = inbox_settings::quiet_at(history, now_ms)?;
+    let mut due = inbox_settings::banners_due(history, sent, now_ms)?;
+    let mut subjects: Vec<Notification> = due.iter().map(|(_, notice)| notice.clone()).collect();
+    inbox::name_notes(history, &mut subjects)?;
+    for ((_, notice), named) in due.iter_mut().zip(subjects) {
+        *notice = named;
+    }
+    let inbox = inbox_banner(history, &due)?
+        .map(|notice| (notice, due.into_iter().map(|(key, _)| key).collect()));
+    Ok(Banners {
+        quiet,
+        due_days: inbox_settings::banners(history, NotificationKind::Due)?,
+        reminders: inbox_settings::banners(history, NotificationKind::Reminder)?,
+        inbox,
+    })
 }
 
 fn unreadable(error: StoreError) -> anyhow::Error {
@@ -884,7 +1008,14 @@ fn upcoming_briefs(
             continue;
         }
         let brief = in_both(store, history, |history, meetings| {
-            brief(history, meetings, Some(&event), &people, &HashSet::new(), now_ms)
+            brief(
+                history,
+                meetings,
+                Some(&event),
+                &people,
+                &HashSet::new(),
+                now_ms,
+            )
         })?;
         if let Some(notice) = brief_notice(&event, &brief, now_ms) {
             notices.push((key, notice));
@@ -914,30 +1045,47 @@ pub(super) fn probe_inputs(
 
 /// One minute's look: shows what is due to be said, then remembers what
 /// was shown. Nothing shown is remembered, so a reminder the notification
-/// centre refused is tried again on the next tick.
+/// centre refused is tried again on the next tick. During quiet hours the
+/// inbox's banners wait: a due day or reminder shows once they end, while
+/// what else reached the inbox stays there without one. A kind whose
+/// banner is off counts as shown.
 fn tick(app: &AppHandle, prompts: &dyn PromptPresenter, now_ms: i64) -> Result<()> {
     let history = app.state::<Arc<HistoryManager>>();
     let store = app.state::<Arc<MeetingSessionManager>>().open_store();
-    let (sent, (due, waits), reminded, posted) = history.with_connection(|conn| {
-        let sent = sent(conn)?;
-        let (mut due, mut waits) = pending(conn, &HashSet::new(), now_ms)?;
-        let posted = post_due(conn, &due, now_ms)?;
-        due.retain(|due| !sent.contains(&due.key));
-        waits.retain(|wait| !sent.contains(&wait.key));
-        let reminded = reminder_notices(conn, now_ms)?;
-        Ok((sent, (due, waits), reminded, posted))
-    })?;
-    if !posted.is_empty() {
+    let (sent, (due, waits), reminded, posted, others, banners) =
+        history.with_connection(|conn| {
+            let sent = sent(conn)?;
+            let (mut due, mut waits) = pending(conn, &HashSet::new(), now_ms)?;
+            let posted = post_due(conn, &due, now_ms)?;
+            let others = post_subjects(conn, now_ms)?;
+            due.retain(|due| !sent.contains(&due.key));
+            waits.retain(|wait| !sent.contains(&wait.key));
+            let reminded = reminder_notices(conn, now_ms)?;
+            let banners = banners(conn, &sent, now_ms)?;
+            Ok((sent, (due, waits), reminded, posted, others, banners))
+        })?;
+    if !posted.is_empty() || others > 0 {
         super::tasks_changed(app, posted);
     }
     let mut shown = Vec::new();
+    let mut unshown = Vec::new();
     let mut show = |notice: &Notice, keys: Vec<String>| {
         if prompts.present_follow_up(&notice.id, &notice.title, &notice.body) {
             shown.extend(keys);
         }
     };
-    if let Some(notice) = due_notice(&due) {
-        show(&notice, due.into_iter().map(|due| due.key).collect());
+    if !banners.quiet {
+        if let Some(notice) = due_notice(&due) {
+            let keys = due.into_iter().map(|due| due.key).collect();
+            if banners.due_days {
+                show(&notice, keys);
+            } else {
+                unshown = keys;
+            }
+        }
+        if let Some((notice, keys)) = &banners.inbox {
+            show(notice, keys.clone());
+        }
     }
     if let Some(store) = &store {
         if !waits.is_empty() {
@@ -954,14 +1102,22 @@ fn tick(app: &AppHandle, prompts: &dyn PromptPresenter, now_ms: i64) -> Result<(
             show(&notice, vec![key]);
         }
     }
+    shown.extend(unshown);
     if !shown.is_empty() {
         history.with_connection(|conn| record(conn, &shown, now_ms))?;
     }
-    let reminded: Vec<String> = reminded
-        .into_iter()
-        .filter(|(_, notice)| prompts.present_follow_up(&notice.id, &notice.title, &notice.body))
-        .map(|(item_id, _)| item_id)
-        .collect();
+    let reminded: Vec<String> = if banners.quiet {
+        Vec::new()
+    } else {
+        reminded
+            .into_iter()
+            .filter(|(_, notice)| {
+                !banners.reminders
+                    || prompts.present_follow_up(&notice.id, &notice.title, &notice.body)
+            })
+            .map(|(item_id, _)| item_id)
+            .collect()
+    };
     if !reminded.is_empty() {
         routines::reminders_notified(app, &Uuid::new_v4().to_string(), &reminded)
             .map_err(anyhow::Error::msg)?;
@@ -1026,15 +1182,21 @@ pub async fn work_brief(
     if runtime.calendar_access() != CalendarAccess::Authorized {
         return Err("Allow Sona to read Calendar in System Settings.".into());
     }
-    let event = tauri::async_runtime::spawn_blocking(move || {
-        runtime.calendar_event_by_key(&event_key)
-    })
-    .await
-    .map_err(|_| "The calendar could not be read.")?
-    .ok_or("This event is no longer on your calendar.")?;
+    let event =
+        tauri::async_runtime::spawn_blocking(move || runtime.calendar_event_by_key(&event_key))
+            .await
+            .map_err(|_| "The calendar could not be read.")?
+            .ok_or("This event is no longer on your calendar.")?;
     let people = attendees(&store, &event).map_err(super::super::failure)?;
     in_both(&store, &history_state, |history, meetings| {
-        brief(history, meetings, Some(&event), &people, &HashSet::new(), now_ms())
+        brief(
+            history,
+            meetings,
+            Some(&event),
+            &people,
+            &HashSet::new(),
+            now_ms(),
+        )
     })
     .map_err(super::super::failure)
 }
@@ -1522,8 +1684,15 @@ mod tests {
             // PANIC: the fixture's own databases are readable.
             desk.meetings
                 .with_planning_snapshot(|meetings| {
-                    let brief = brief(&desk.history, meetings, None, &person_ids, &hidden, at(0, 10))
-                        .expect("the brief");
+                    let brief = brief(
+                        &desk.history,
+                        meetings,
+                        None,
+                        &person_ids,
+                        &hidden,
+                        at(0, 10),
+                    )
+                    .expect("the brief");
                     Ok(brief.last_time.map(|meeting| meeting.title))
                 })
                 .expect("the meeting database")
@@ -1602,7 +1771,11 @@ mod tests {
         assert_eq!(
             notices
                 .iter()
-                .map(|(item_id, notice)| (item_id.as_str(), notice.title.as_str(), opened(&notice.id)))
+                .map(|(item_id, notice)| (
+                    item_id.as_str(),
+                    notice.title.as_str(),
+                    opened(&notice.id)
+                ))
                 .collect::<Vec<_>>(),
             [(
                 due.id.as_str(),

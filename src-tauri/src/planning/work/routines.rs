@@ -1,7 +1,8 @@
-//! Task templates, a reminder on a task, and label groups and retired
-//! labels.
+//! Task templates, a reminder on a task, project, initiative or note, and
+//! label groups and retired labels.
 
 use super::agents;
+use super::inbox::{self, SubjectKind};
 use super::items::{self, NewItem};
 use super::types::{
     WorkActivityKind, WorkActor, WorkItem, WorkLabel, WorkOwner, WorkPatch, WorkStatus,
@@ -72,6 +73,46 @@ pub struct WorkReminder {
     pub actor: WorkActor,
     pub agent: Option<String>,
     pub notified_at_ms: Option<i64>,
+}
+
+/// The reminders on projects, initiatives and notes: one each, posted to
+/// the inbox once its time comes.
+pub(crate) const SUBJECT_REMINDERS_MIGRATION: &str = "CREATE TABLE planning_subject_reminders (
+    subject_kind TEXT NOT NULL CHECK(subject_kind IN ('project', 'initiative', 'note')),
+    subject_id TEXT NOT NULL,
+    remind_at_ms INTEGER NOT NULL,
+    set_at_ms INTEGER NOT NULL,
+    actor TEXT NOT NULL CHECK(actor IN ('me', 'sona', 'agent')),
+    agent TEXT CHECK(agent IS NULL OR length(trim(agent)) > 0),
+    notified_at_ms INTEGER,
+    PRIMARY KEY(subject_kind, subject_id)
+);
+CREATE INDEX planning_subject_reminders_due
+    ON planning_subject_reminders(notified_at_ms, remind_at_ms);
+CREATE TRIGGER planning_subject_reminders_project_delete AFTER DELETE ON planning_projects
+BEGIN
+    DELETE FROM planning_subject_reminders WHERE subject_kind = 'project'
+        AND subject_id = old.id;
+END;
+CREATE TRIGGER planning_subject_reminders_initiative_delete AFTER DELETE
+    ON planning_initiatives
+BEGIN
+    DELETE FROM planning_subject_reminders WHERE subject_kind = 'initiative'
+        AND subject_id = old.id;
+END;";
+
+/// A reminder on a project, initiative or note. Due once `remind_at_ms`
+/// passes; posted to the inbox once, when `notified_at_ms` is set.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SubjectReminder {
+    pub(crate) subject_kind: SubjectKind,
+    pub(crate) subject_id: String,
+    pub(crate) remind_at_ms: i64,
+    pub(crate) set_at_ms: i64,
+    pub(crate) actor: WorkActor,
+    pub(crate) agent: Option<String>,
+    pub(crate) notified_at_ms: Option<i64>,
 }
 
 fn read_template(row: &Row<'_>) -> rusqlite::Result<(String, String, String, i64, i64, i64)> {
@@ -413,6 +454,139 @@ fn notified(conn: &Connection, item_ids: &[String], now_ms: i64) -> StorageResul
     Ok(marked)
 }
 
+const SUBJECT_REMINDER_COLUMNS: &str =
+    "subject_kind, subject_id, remind_at_ms, set_at_ms, actor, agent, notified_at_ms";
+
+fn read_subject_reminder(row: &Row<'_>) -> rusqlite::Result<SubjectReminder> {
+    Ok(SubjectReminder {
+        subject_kind: row.get(0)?,
+        subject_id: row.get(1)?,
+        remind_at_ms: row.get(2)?,
+        set_at_ms: row.get(3)?,
+        actor: row.get(4)?,
+        agent: row.get(5)?,
+        notified_at_ms: row.get(6)?,
+    })
+}
+
+/// Every reminder on a project, initiative or note, soonest first.
+pub(crate) fn subject_reminders(conn: &Connection) -> StorageResult<Vec<SubjectReminder>> {
+    let mut statement = conn.prepare(&format!(
+        "SELECT {SUBJECT_REMINDER_COLUMNS} FROM planning_subject_reminders
+         ORDER BY remind_at_ms, subject_kind, subject_id"
+    ))?;
+    let rows = statement.query_map([], read_subject_reminder)?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// Those whose time has come and that were not posted yet, leaving out
+/// projects in the bin.
+pub(crate) fn due_subject_reminders(
+    conn: &Connection,
+    now_ms: i64,
+) -> StorageResult<Vec<SubjectReminder>> {
+    let mut statement = conn.prepare(&format!(
+        "SELECT {SUBJECT_REMINDER_COLUMNS} FROM planning_subject_reminders
+         WHERE notified_at_ms IS NULL AND remind_at_ms <= ?1
+           AND NOT (subject_kind = 'project' AND subject_id IN
+                (SELECT id FROM planning_projects WHERE trashed_at_ms IS NOT NULL))
+         ORDER BY remind_at_ms, subject_kind, subject_id"
+    ))?;
+    let rows = statement.query_map([now_ms], read_subject_reminder)?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn subject_reminder(
+    conn: &Connection,
+    kind: SubjectKind,
+    id: &str,
+) -> StorageResult<Option<SubjectReminder>> {
+    Ok(conn
+        .query_row(
+            &format!(
+                "SELECT {SUBJECT_REMINDER_COLUMNS} FROM planning_subject_reminders
+                 WHERE subject_kind = ?1 AND subject_id = ?2"
+            ),
+            params![kind.as_str(), id],
+            read_subject_reminder,
+        )
+        .optional()?)
+}
+
+/// The project, initiative or note, which must exist and not be in the bin.
+fn reminded_subject(conn: &Connection, kind: SubjectKind, id: &str) -> StorageResult<String> {
+    let id = store::uuid(id)?;
+    let found = match kind {
+        SubjectKind::Project => store::project(conn, &id)?.trashed_at_ms.is_none(),
+        SubjectKind::Initiative => conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM planning_initiatives WHERE id = ?1)",
+            [&id],
+            |row| row.get(0),
+        )?,
+        SubjectKind::Note => crate::scratchpad::note_with_connection(conn, &id)?.is_some(),
+        SubjectKind::View => false,
+    };
+    if found {
+        Ok(id)
+    } else {
+        Err(Refusal::NotFound.into())
+    }
+}
+
+/// Sets the one reminder on a project, initiative or note, replacing any it
+/// had, or with `None` clears it. Returns the reminder as it now is.
+pub(crate) fn set_subject_reminder(
+    conn: &Connection,
+    kind: SubjectKind,
+    id: &str,
+    at_ms: Option<i64>,
+    actor: WorkActor,
+    agent: Option<&str>,
+    now_ms: i64,
+) -> StorageResult<Option<SubjectReminder>> {
+    let id = reminded_subject(conn, kind, id)?;
+    match at_ms {
+        Some(at_ms) => conn.execute(
+            "INSERT INTO planning_subject_reminders
+                (subject_kind, subject_id, remind_at_ms, set_at_ms, actor, agent, notified_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL)
+             ON CONFLICT(subject_kind, subject_id) DO UPDATE SET
+                remind_at_ms = excluded.remind_at_ms, set_at_ms = excluded.set_at_ms,
+                actor = excluded.actor, agent = excluded.agent, notified_at_ms = NULL",
+            params![kind.as_str(), id, at_ms, now_ms, actor.as_str(), agent],
+        )?,
+        None => conn.execute(
+            "DELETE FROM planning_subject_reminders WHERE subject_kind = ?1 AND subject_id = ?2",
+            params![kind.as_str(), id],
+        )?,
+    };
+    subject_reminder(conn, kind, &id)
+}
+
+/// Posts each reminder on a project, initiative or note whose time came to
+/// the inbox, and marks it posted. Returns how many it posted.
+pub(crate) fn post_subject_reminders(conn: &Connection, now_ms: i64) -> StorageResult<usize> {
+    let mut posted = 0;
+    for reminder in due_subject_reminders(conn, now_ms)? {
+        if inbox::remind_subject(
+            conn,
+            reminder.subject_kind,
+            &reminder.subject_id,
+            reminder.remind_at_ms,
+            reminder.set_at_ms,
+            now_ms,
+        )? {
+            posted += 1;
+        }
+        conn.execute(
+            "UPDATE planning_subject_reminders SET notified_at_ms = ?3
+             WHERE subject_kind = ?1 AND subject_id = ?2",
+            params![reminder.subject_kind.as_str(), reminder.subject_id, now_ms],
+        )?;
+    }
+    Ok(posted)
+}
+
 fn label(conn: &Connection, id: &str) -> StorageResult<WorkLabel> {
     conn.query_row(
         &format!(
@@ -511,6 +685,43 @@ pub(crate) fn reminders_read(app: &AppHandle, due_only: bool) -> Result<Vec<Work
         } else {
             reminders(conn)
         }
+    })
+}
+
+/// Every reminder on a project, initiative or note. The app's
+/// `work_subject_reminders`.
+pub(crate) fn subject_reminders_read(app: &AppHandle) -> Result<Vec<SubjectReminder>, String> {
+    crate::planning::history(&app.state::<Arc<HistoryManager>>(), |conn| {
+        subject_reminders(conn)
+    })
+}
+
+/// Sets or with `None` clears the reminder on a project, initiative or
+/// note, as `actor`. The app's `work_subject_reminder_set`.
+pub(crate) fn subject_reminder_set_as(
+    app: &AppHandle,
+    actor: WorkActor,
+    agent: Option<&str>,
+    operation_id: &str,
+    kind: SubjectKind,
+    id: &str,
+    at_ms: Option<i64>,
+) -> Result<Option<SubjectReminder>, String> {
+    let now = now_ms();
+    run_history(app, |history| {
+        store::mutate(
+            history,
+            operation_id,
+            "work_subject_reminder_set",
+            &(kind, id, at_ms, actor, agent),
+            now,
+            |tx| {
+                Ok(Done {
+                    value: set_subject_reminder(tx, kind, id, at_ms, actor, agent, now)?,
+                    effects: Effects::default(),
+                })
+            },
+        )
     })
 }
 

@@ -383,6 +383,36 @@ fn runs_it(found: &Stored, agent: &str) -> Result<()> {
     }
 }
 
+/// An agent's question reaches the inbox, and an answer reads it.
+fn tell_inbox(
+    conn: &Connection,
+    session_id: &str,
+    activity_id: &str,
+    kind: WorkSessionActivityKind,
+    author: Author<'_>,
+    question: Option<&str>,
+    at_ms: i64,
+) -> Result<()> {
+    match (kind, question) {
+        (WorkSessionActivityKind::Elicitation, Some(question)) => {
+            let agent = author.name();
+            super::inbox::asked(
+                conn,
+                &task_of(conn, session_id)?,
+                activity_id,
+                agent.as_deref(),
+                question,
+                at_ms,
+            )?;
+        }
+        (WorkSessionActivityKind::Prompt, _) => {
+            super::inbox::answered(conn, &task_of(conn, session_id)?, at_ms)?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 fn insert_activity(
     conn: &Connection,
     session_id: &str,
@@ -420,6 +450,16 @@ fn insert_activity(
             value,
             input.ephemeral,
         ],
+    )?;
+    let question = text(input.body.as_deref());
+    tell_inbox(
+        conn,
+        session_id,
+        &id,
+        kind,
+        author,
+        question.as_deref(),
+        at_ms,
     )?;
     Ok(id)
 }

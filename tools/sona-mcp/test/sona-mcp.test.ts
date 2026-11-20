@@ -571,6 +571,32 @@ describe("tool arguments", () => {
     ]);
   });
 
+  test("subscribe follows one project, view or note, and remind names a subject before when", () => {
+    const subscribe = tool("sona_work_subscribe");
+    expect(subscribe.argv({ view: "-Open work" }, "Claude")).toEqual([
+      "work",
+      "subscribe",
+      "--agent=Claude",
+      "--json",
+      "--view=-Open work",
+    ]);
+    expect(subscribe.argv({ tasks: "S-1, S-2" })).toEqual(["work", "subscribe", "--json", "--", "S-1", "S-2"]);
+    expect(() => subscribe.argv({ tasks: "S-1", project: "Harbor" })).toThrow(SonaInputError);
+    expect(() => subscribe.argv({})).toThrow(SonaInputError);
+
+    const remind = tool("sona_work_remind");
+    expect(remind.argv({ project: "-Harbor", when: "tomorrow 9am" })).toEqual([
+      "work",
+      "remind",
+      "--json",
+      "--project=-Harbor",
+      "--",
+      "tomorrow 9am",
+    ]);
+    expect(remind.argv({ task: "S-3", when: "none" })).toEqual(["work", "remind", "--json", "--", "S-3", "none"]);
+    expect(() => remind.argv({ task: "S-3", note: "n", when: "none" })).toThrow(SonaInputError);
+  });
+
   test("a favorite move names its folder or place, and a person by flag", () => {
     const move = tool("sona_work_favorite_move");
     expect(move.argv({ kind: "task", target: "-S-1", into: "-Launch", position: 2 })).toEqual([
@@ -864,6 +890,9 @@ async function published(selection?: string) {
 /** The verbs and flags with which `sona` changes something. */
 const SONA_WRITES = {
   "meeting-restore": true,
+  "inbox-settings-save": true,
+  "feed-save": true,
+  "feed-delete": true,
   "meeting-delete-forever": true,
   "meeting-export": true,
   export: true,

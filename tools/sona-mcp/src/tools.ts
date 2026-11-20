@@ -701,8 +701,8 @@ function archiving(verb: "archive" | "restore", title: string, what: string): To
   };
 }
 
-/** A task write that takes tasks only: delete, subscribe, unsubscribe. */
-function onTasks(verb: "delete" | "subscribe" | "unsubscribe", title: string, what: string): ToolDefinition {
+/** A task write that takes tasks only. */
+function onTasks(verb: "delete", title: string, what: string): ToolDefinition {
   return {
     name: `sona_work_${verb}`,
     title,
@@ -727,6 +727,48 @@ function onTasks(verb: "delete" | "subscribe" | "unsubscribe", title: string, wh
   };
 }
 
+/** Subscribing to tasks, or following one project, saved view or note. */
+function subscribing(verb: "subscribe" | "unsubscribe", title: string, what: string): ToolDefinition {
+  return {
+    name: `sona_work_${verb}`,
+    title,
+    description: `${what} Name tasks, or exactly one of project, view or note. What is already that way is listed under skipped. ${ORGANIZE_WRITES}`,
+    mutates: "changes",
+    optIn: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        tasks: TASKS,
+        project: { type: "string", description: "A project, by name or id: its updates and status changes." },
+        view: { type: "string", description: "A saved view, by name or id: tasks that join it, and tasks in it done or canceled." },
+        note: { type: "string", description: "A note's id: an agent's edits to it." },
+        dry_run: DRY_RUN,
+        operation_id: OPERATION_ID,
+      },
+      additionalProperties: false,
+    },
+    argv: (input, agent) => {
+      const named = (["project", "view", "note"] as const).flatMap((key) => {
+        const value = text(input, key);
+        return value === null ? [] : [`--${key}=${value}`];
+      });
+      const hasTasks = text(input, "tasks") !== null;
+      if (named.length + (hasTasks ? 1 : 0) !== 1) {
+        throw new SonaInputError("Name tasks, or exactly one of project, view or note.");
+      }
+      return [
+        "work",
+        verb,
+        ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+        ...writing(input, agent),
+        "--json",
+        ...named,
+        ...(hasTasks ? ["--", ...tasks(input, "tasks")] : []),
+      ];
+    },
+  };
+}
+
 /** A read that takes nothing. */
 function listing(name: string, verb: string, title: string, description: string): ToolDefinition {
   return {
@@ -737,6 +779,23 @@ function listing(name: string, verb: string, title: string, description: string)
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     argv: () => ["work", verb, "--json"],
   };
+}
+
+/** The filters `updates` and `feed-save` share, each list one flag per value. */
+function feedFilter(input: ToolInput): string[] {
+  const each = (key: string, flagName: string) =>
+    (text(input, key) ?? "")
+      .split(",")
+      .map((value) => value.trim())
+      .filter((value) => value !== "")
+      .map((value) => `${flagName}=${value}`);
+  return [
+    ...each("project", "--project"),
+    ...each("initiative", "--initiative"),
+    ...each("label", "--label"),
+    ...each("health", "--health"),
+    ...assigned("--since", text(input, "since")),
+  ];
 }
 
 const VERSION = {
@@ -979,23 +1038,27 @@ function lifecycleTools(): ToolDefinition[] {
       "Read the user's favorites in the sidebar's order: tasks, projects, saved views and people (kind, id, name, handle for a task), and folders (kind folder, id, name) each holding its favorites in order.",
     ),
     ...favoriteFolderTools(),
-    onTasks(
+    subscribing(
       "subscribe",
-      "Subscribe to Sona tasks",
-      "Subscribe the user to tasks: status changes, comments, mentions and assignments others make on them reach the inbox.",
+      "Subscribe to Sona tasks, or follow a project, view or note",
+      "Subscribe the user to tasks: status changes, comments, mentions and assignments others make on them reach the inbox. Or follow a project (updates others post, status changes), a saved view (tasks that join it, tasks in it done or canceled) or a note (an agent's edits).",
     ),
-    onTasks("unsubscribe", "Unsubscribe from Sona tasks", "Unsubscribe the user from tasks."),
+    subscribing(
+      "unsubscribe",
+      "Unsubscribe from Sona tasks, or stop following",
+      "Unsubscribe the user from tasks, or stop following a project, view or note.",
+    ),
     listing(
       "sona_work_subscriptions",
       "subscriptions",
-      "Read Sona task subscriptions",
-      "Read the tasks the user is subscribed to and why: subscribed, created, assigned or mentioned. Creating a task, being made its owner or being mentioned in a comment subscribes the user.",
+      "Read Sona task subscriptions and follows",
+      "Read the tasks the user is subscribed to and why (subscribed, created, assigned or mentioned), and under follows the projects, saved views and notes followed (kind, id, name). Creating a task, being made its owner or being mentioned in a comment subscribes the user.",
     ),
     {
       name: "sona_work_inbox",
       title: "Read Sona's inbox",
       description:
-        "Read the inbox, newest first, with the unread count: status changes, comments, mentions, assignments and other field changes (kind changed, with field) that Sona or agents made on tasks the user is subscribed to; a reminder firing (reminder) and open work the user owes coming due today (due); an automation run ending (automation, with automation name and error, task null when the run was about no task); and the weekly project digest (digest, task null, with digest holding each project's status, latest update, tasks done and risks, as sona_work_digest shows). The user's own changes never notify. Snoozed ones stay out until they wake, archived ones until asked for.",
+        "Read the inbox, newest first, with the unread count: status changes, comments, mentions, assignments and other field changes (kind changed, with field) that Sona or agents made on tasks the user is subscribed to; an agent's question waiting for an answer (question, to holds it); a reminder firing (reminder, on a task or with subject a project, initiative or note) and open work the user owes coming due today (due); an automation run ending (automation, with automation name and error, task null when the run was about no task); a followed project's update or status change (project, field update or status), a task joining a followed view or done or canceled in it (view, field added, done or canceled), an agent editing a followed note (note); and the weekly project digest (digest, task null, with digest holding each project's status, latest update, tasks done and risks, as sona_work_digest shows). Each notice has priority true when it needs the user: mentions, assignments, questions, reminders and due work. The user's own changes never notify. Snoozed ones stay out until they wake, archived ones until asked for.",
       optIn: true,
       inputSchema: {
         type: "object",
@@ -1003,6 +1066,20 @@ function lifecycleTools(): ToolDefinition[] {
           unread: { type: "boolean", description: "Only unread notifications." },
           snoozed: { type: "boolean", description: "Also snoozed ones that have not woken yet." },
           archived: { type: "boolean", description: "Also archived ones." },
+          priority: {
+            type: "boolean",
+            description: "Only what needs the user: mentions, assignments, questions, reminders and work due today.",
+          },
+          kind: {
+            type: "string",
+            description:
+              "Only these kinds, comma-separated: status, comment, mention, assigned, changed, reminder, due, automation, digest, question, project, view, note.",
+          },
+          project: { type: "string", description: "Only notices about tasks in this project, or the project itself, by name or id." },
+          task_priority: {
+            type: "string",
+            description: "Only notices about tasks of these priorities, comma-separated: urgent, high, medium, low, none.",
+          },
         },
         additionalProperties: false,
       },
@@ -1012,6 +1089,44 @@ function lifecycleTools(): ToolDefinition[] {
         ...(flag(input, "unread") ? ["--unread"] : []),
         ...(flag(input, "snoozed") ? ["--snoozed"] : []),
         ...(flag(input, "archived") ? ["--archived"] : []),
+        ...(flag(input, "priority") ? ["--priority"] : []),
+        ...assigned("--kind", text(input, "kind")),
+        ...assigned("--project", text(input, "project")),
+        ...assigned("--task-priority", text(input, "task_priority")),
+        "--json",
+      ],
+    },
+    listing(
+      "sona_work_inbox_settings",
+      "inbox-settings",
+      "Read Sona's inbox settings",
+      "Read which notice kinds reach the inbox (inbox) and which also show a banner on the Mac (banner), and the quiet hours (HH:MM-HH:MM) when banners wait; null when off.",
+    ),
+    {
+      name: "sona_work_inbox_settings_save",
+      title: "Change Sona's inbox settings",
+      description: `Change which notice kinds reach the inbox (kinds: every kind that should, comma-separated, or all; the rest are never posted), which show a banner on the Mac (banners: comma-separated, all or none), and the quiet hours when banners wait (quiet_hours: HH:MM-HH:MM on the Mac's clock, or off). Kinds: status, comment, mention, assigned, changed, reminder, due, automation, digest, question, project, view, note. Name at least one. ${ORGANIZE_WRITES}`,
+      mutates: "changes",
+      optIn: true,
+      inputSchema: {
+        type: "object",
+        properties: {
+          kinds: { type: "string", description: "Kinds that reach the inbox, comma-separated, or all." },
+          banners: { type: "string", description: "Kinds that show a banner, comma-separated, all or none." },
+          quiet_hours: { type: "string", description: "HH:MM-HH:MM, such as 22:00-08:00, or off." },
+          dry_run: DRY_RUN,
+          operation_id: OPERATION_ID,
+        },
+        additionalProperties: false,
+      },
+      argv: (input, agent) => [
+        "work",
+        "inbox-settings-save",
+        ...assigned("--kinds", text(input, "kinds")),
+        ...assigned("--banners", text(input, "banners")),
+        ...assigned("--quiet-hours", text(input, "quiet_hours")),
+        ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+        ...writing(input, agent),
         "--json",
       ],
     },
@@ -3894,13 +4009,16 @@ export const TOOLS: readonly ToolDefinition[] = [
   },
   {
     name: "sona_work_remind",
-    title: "Set a reminder on a Sona task",
-    description: `Set when Sona reminds the user of a task, replacing any reminder it had, or clear it with when none. ${WRITES}`,
+    title: "Set a reminder on a Sona task, project, initiative or note",
+    description: `Set when Sona reminds the user of a task, or of a project, initiative or note (exactly one of task, project, initiative, note), replacing any reminder it had, or clear it with when none. A project, initiative or note reminder lands in the inbox when its time comes. ${WRITES}`,
     mutates: "changes",
     inputSchema: {
       type: "object",
       properties: {
         task: TASK,
+        project: { type: "string", description: "A project, by name or id, in place of a task." },
+        initiative: { type: "string", description: "An initiative, by name or id, in place of a task." },
+        note: { type: "string", description: "A note's id, in place of a task." },
         when: {
           type: "string",
           description:
@@ -3909,25 +4027,36 @@ export const TOOLS: readonly ToolDefinition[] = [
         dry_run: DRY_RUN,
         operation_id: OPERATION_ID,
       },
-      required: ["task", "when"],
+      required: ["when"],
       additionalProperties: false,
     },
-    argv: (input, agent) => [
-      "work",
-      "remind",
-      ...(flag(input, "dry_run") ? ["--dry-run"] : []),
-      ...writing(input, agent),
-      "--json",
-      "--",
-      text(input, "task", true),
-      text(input, "when", true),
-    ],
+    argv: (input, agent) => {
+      const task = text(input, "task");
+      const named = (["project", "initiative", "note"] as const).flatMap((key) => {
+        const value = text(input, key);
+        return value === null ? [] : [`--${key}=${value}`];
+      });
+      if (named.length + (task === null ? 0 : 1) !== 1) {
+        throw new SonaInputError("Name exactly one of task, project, initiative or note.");
+      }
+      return [
+        "work",
+        "remind",
+        ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+        ...writing(input, agent),
+        "--json",
+        ...named,
+        "--",
+        ...(task === null ? [] : [task]),
+        text(input, "when", true),
+      ];
+    },
   },
   {
     name: "sona_work_reminders",
     title: "List Sona reminders",
     description:
-      "List reminders on tasks, soonest first, each with its task, time, who set it and whether Sona has shown it. due:true lists only those whose time has come and that Sona has not shown yet. Reminders on work kept on this Mac are left out.",
+      "List reminders, soonest first: on tasks under reminders, each with its task, time, who set it and whether Sona has shown it; on projects, initiatives and notes under subjects, each with its subject (kind, id, name). due:true lists only those whose time has come and that Sona has not shown yet. Reminders on work kept on this Mac are left out.",
     inputSchema: {
       type: "object",
       properties: {
@@ -3936,6 +4065,102 @@ export const TOOLS: readonly ToolDefinition[] = [
       additionalProperties: false,
     },
     argv: (input) => ["work", "reminders", ...(flag(input, "due") ? ["--due"] : []), "--json"],
+  },
+  {
+    name: "sona_updates_list",
+    title: "Read Sona's feed of project updates",
+    description:
+      "One feed, newest first, of every update posted on a project (kind update, with project and update: health, body, author) and every weekly project digest (kind digest). Narrow it with project, initiative and label (comma-separated names or ids), health (on-track, at-risk, off-track; leaves digests out) and since (YYYY-MM-DD or 7d), or read a saved feed by name. A digest stays in while it covers a project asked for.",
+    optIn: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        feed: { type: "string", description: "A saved feed, by name or id, in place of the filters." },
+        project: { type: "string", description: "Projects, comma-separated names or ids." },
+        initiative: { type: "string", description: "The projects of these initiatives, comma-separated." },
+        label: { type: "string", description: "Projects with these labels, comma-separated." },
+        health: { type: "string", description: "Healths, comma-separated: on-track, at-risk, off-track." },
+        since: { type: "string", description: "Only since this day: YYYY-MM-DD, or 7d." },
+        limit: { type: "integer", minimum: 1, maximum: 500, description: "At most this many. Default 50." },
+      },
+      additionalProperties: false,
+    },
+    argv: (input) => [
+      "work",
+      "updates",
+      ...assigned("--feed", text(input, "feed")),
+      ...feedFilter(input),
+      ...assigned("--limit", count(input, "limit")),
+      "--json",
+    ],
+  },
+  {
+    name: "sona_feed_list",
+    title: "List Sona's saved update feeds",
+    description: "List saved feeds of project updates: id, name and the project, initiative and label ids, healths and start they narrow to.",
+    optIn: true,
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    argv: () => ["work", "feeds", "--json"],
+  },
+  {
+    name: "sona_feed_save",
+    title: "Save a Sona update feed",
+    description: `Save the filters sona_updates_list takes under a name, as a feed the Updates page and sona_updates_list read. A feed with that name, or the one feed names, changes. ${ORGANIZE_WRITES}`,
+    mutates: "changes",
+    optIn: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "The feed's name." },
+        feed: { type: "string", description: "The feed to rename or refill, by name or id." },
+        project: { type: "string", description: "Projects, comma-separated names or ids." },
+        initiative: { type: "string", description: "The projects of these initiatives, comma-separated." },
+        label: { type: "string", description: "Projects with these labels, comma-separated." },
+        health: { type: "string", description: "Healths, comma-separated: on-track, at-risk, off-track." },
+        since: { type: "string", description: "Only since this day: YYYY-MM-DD, or 7d." },
+        dry_run: DRY_RUN,
+        operation_id: OPERATION_ID,
+      },
+      required: ["name"],
+      additionalProperties: false,
+    },
+    argv: (input, agent) => [
+      "work",
+      "feed-save",
+      ...assigned("--feed", text(input, "feed")),
+      ...feedFilter(input),
+      ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+      ...writing(input, agent),
+      "--json",
+      "--",
+      text(input, "name", true),
+    ],
+  },
+  {
+    name: "sona_feed_delete",
+    title: "Delete a Sona update feed",
+    description: `Delete a saved feed of updates. The updates stay. ${ORGANIZE_WRITES}`,
+    mutates: "changes",
+    optIn: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        feed: { type: "string", description: "The feed, by name or id." },
+        dry_run: DRY_RUN,
+        operation_id: OPERATION_ID,
+      },
+      required: ["feed"],
+      additionalProperties: false,
+    },
+    argv: (input, agent) => [
+      "work",
+      "feed-delete",
+      ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+      ...writing(input, agent),
+      "--json",
+      "--",
+      text(input, "feed", true),
+    ],
   },
   {
     name: "sona_work_views",

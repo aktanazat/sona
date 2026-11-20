@@ -35,10 +35,9 @@ use crate::planning::work::types::{
     WorkActivity, WorkActivityKind, WorkActor, WorkCycle, WorkCycleRef, WorkCycleState, WorkCycles,
     WorkDirection, WorkDisplay, WorkDue, WorkFieldSuggestion, WorkGroupBy, WorkItem,
     WorkItemDetail, WorkItemInput, WorkItemRow, WorkLabel, WorkLayout, WorkList, WorkOrderBy,
-    WorkOwner, WorkPatch, WorkPersonChoice, WorkPlace, WorkProgress, WorkProjectChoice, WorkProposal,
-    WorkProposalField,
-    WorkQuery, WorkRelation, WorkRelationKind, WorkRepeat, WorkSource, WorkStatus,
-    WorkSuggestionField, WorkSuggestionValue, WorkVia, WorkView,
+    WorkOwner, WorkPatch, WorkPersonChoice, WorkPlace, WorkProgress, WorkProjectChoice,
+    WorkProposal, WorkProposalField, WorkQuery, WorkRelation, WorkRelationKind, WorkRepeat,
+    WorkSource, WorkStatus, WorkSuggestionField, WorkSuggestionValue, WorkVia, WorkView,
 };
 use crate::planning::work::watch::WorkWatch;
 use crate::planning::work::{self, items, parse};
@@ -152,18 +151,35 @@ pub enum WorkVerb {
     /// Move a favorite into a folder (--into), out to the top (--top), or
     /// to another place (--position).
     FavoriteMove(lifecycle::FavoriteMoveArgs),
-    /// Subscribe the user to tasks: what others change on them reaches the
-    /// inbox.
-    Subscribe(TasksArgs),
-    /// Unsubscribe the user from tasks.
-    Unsubscribe(TasksArgs),
-    /// The tasks the user is subscribed to.
+    /// Subscribe the user to tasks, or follow a project (--project), saved
+    /// view (--view) or note (--note): what others change on them reaches
+    /// the inbox.
+    Subscribe(lifecycle::SubscribeArgs),
+    /// Unsubscribe the user from tasks, or stop following a project, view or
+    /// note.
+    Unsubscribe(lifecycle::SubscribeArgs),
+    /// The tasks the user is subscribed to, and the projects, views and
+    /// notes followed.
     Subscriptions,
     /// The inbox: status changes, comments, mentions and assignments others
-    /// made on subscribed tasks, with the unread count.
+    /// made on subscribed tasks, with the unread count. --priority shows
+    /// only what needs you; --kind, --project and --task-priority narrow it.
     Inbox(lifecycle::InboxArgs),
     /// Mark notifications read or unread, archive them, or snooze them.
     InboxMark(lifecycle::InboxMarkArgs),
+    /// Which kinds reach the inbox and show a banner, and the quiet hours.
+    InboxSettings,
+    /// Change which kinds reach the inbox (--kinds), show a banner
+    /// (--banners), and when banners keep quiet (--quiet-hours).
+    InboxSettingsSave(lifecycle::InboxSettingsArgs),
+    /// One feed of project updates and weekly digests, newest first.
+    Updates(feed::UpdatesArgs),
+    /// Saved feeds of updates.
+    Feeds,
+    /// Save a feed: the filters `updates` takes, under a name.
+    FeedSave(feed::FeedSaveArgs),
+    /// Delete a saved feed.
+    FeedDelete(feed::FeedDeleteArgs),
     /// The weekly project digest over the last seven days: each project's
     /// status, latest update, tasks done and risks, posted to the inbox.
     Digest(digest::DigestArgs),
@@ -222,9 +238,11 @@ pub enum WorkVerb {
     /// Delete an automation with its versions and runs.
     #[command(name = "automation-delete")]
     LoopDelete(agent_loops::LoopArgs),
-    /// Set when Sona reminds you of a task, or none to clear it.
+    /// Set when Sona reminds you of a task, project (--project), initiative
+    /// (--initiative) or note (--note), or none to clear it.
     Remind(routines::RemindArgs),
-    /// List reminders; --due lists those whose time has come.
+    /// List reminders on tasks, projects, initiatives and notes; --due
+    /// lists those whose time has come.
     Reminders(routines::RemindersArgs),
     /// List saved views.
     Views,
@@ -1500,7 +1518,17 @@ impl GroupArg {
 /// A board column's group key: the grouping, a colon, and the group.
 fn column_key(value: &str) -> Result<String, String> {
     let key = value.trim();
-    let kinds = ["status", "owner", "project", "meeting", "due", "priority", "cycle", "label", "milestone"];
+    let kinds = [
+        "status",
+        "owner",
+        "project",
+        "meeting",
+        "due",
+        "priority",
+        "cycle",
+        "label",
+        "milestone",
+    ];
     match key.split_once(':') {
         _ if key.is_empty() => Ok(String::new()),
         Some((kind, group)) if kinds.contains(&kind) && !group.is_empty() => Ok(key.to_owned()),
@@ -1678,15 +1706,26 @@ impl WorkVerb {
             | Self::Favorites
             | Self::Subscriptions
             | Self::Inbox(_)
+            | Self::InboxSettings
+            | Self::InboxSettingsSave(lifecycle::InboxSettingsArgs { dry_run: true, .. })
+            | Self::Updates(_)
+            | Self::Feeds
+            | Self::FeedSave(feed::FeedSaveArgs { dry_run: true, .. })
+            | Self::FeedDelete(feed::FeedDeleteArgs { dry_run: true, .. })
             | Self::Delete(TasksArgs { dry_run: true, .. })
             | Self::DescriptionRestore(lifecycle::VersionRestoreArgs { dry_run: true, .. })
             | Self::Favorite(lifecycle::FavoriteArgs { dry_run: true, .. })
             | Self::Unfavorite(lifecycle::FavoriteArgs { dry_run: true, .. })
-            | Self::FavoriteFolderSave(lifecycle::FavoriteFolderSaveArgs { dry_run: true, .. })
-            | Self::FavoriteFolderDelete(lifecycle::FavoriteFolderDeleteArgs { dry_run: true, .. })
+            | Self::FavoriteFolderSave(lifecycle::FavoriteFolderSaveArgs {
+                dry_run: true, ..
+            })
+            | Self::FavoriteFolderDelete(lifecycle::FavoriteFolderDeleteArgs {
+                dry_run: true,
+                ..
+            })
             | Self::FavoriteMove(lifecycle::FavoriteMoveArgs { dry_run: true, .. })
-            | Self::Subscribe(TasksArgs { dry_run: true, .. })
-            | Self::Unsubscribe(TasksArgs { dry_run: true, .. })
+            | Self::Subscribe(lifecycle::SubscribeArgs { dry_run: true, .. })
+            | Self::Unsubscribe(lifecycle::SubscribeArgs { dry_run: true, .. })
             | Self::InboxMark(lifecycle::InboxMarkArgs { dry_run: true, .. })
             | Self::Digest(digest::DigestArgs { dry_run: true, .. })
             | Self::Ready(_)
@@ -1715,14 +1754,8 @@ impl WorkVerb {
                 verb:
                     threads::CommentVerb::Add(threads::CommentAddArgs { dry_run: true, .. })
                     | threads::CommentVerb::Edit(threads::CommentEditArgs { dry_run: true, .. })
-                    | threads::CommentVerb::Delete(threads::CommentDeleteArgs {
-                        dry_run: true,
-                        ..
-                    })
-                    | threads::CommentVerb::Resolve(threads::CommentResolveArgs {
-                        dry_run: true,
-                        ..
-                    }),
+                    | threads::CommentVerb::Delete(threads::CommentDeleteArgs { dry_run: true, .. })
+                    | threads::CommentVerb::Resolve(threads::CommentResolveArgs { dry_run: true, .. }),
             })
             | Self::CommentEdit(threads::CommentEditArgs { dry_run: true, .. })
             | Self::CommentDelete(threads::CommentDeleteArgs { dry_run: true, .. })
@@ -1760,9 +1793,13 @@ impl WorkVerb {
             | Self::InitiativeNew(initiatives::InitiativeNewArgs { dry_run: true, .. })
             | Self::InitiativeUpdate(initiatives::InitiativeUpdateArgs { dry_run: true, .. })
             | Self::InitiativeDelete(initiatives::InitiativeDeleteArgs { dry_run: true, .. })
-            | Self::InitiativeAddProject(initiatives::InitiativeProjectArgs { dry_run: true, .. })
+            | Self::InitiativeAddProject(initiatives::InitiativeProjectArgs {
+                dry_run: true,
+                ..
+            })
             | Self::InitiativeRemoveProject(initiatives::InitiativeProjectArgs {
-                dry_run: true, ..
+                dry_run: true,
+                ..
             })
             | Self::ProjectTemplateList
             | Self::ProjectTemplateSave(project_templates::ProjectTemplateSaveArgs {
@@ -1775,7 +1812,9 @@ impl WorkVerb {
             })
             | Self::ProjectNew(project_templates::ProjectNewArgs { dry_run: true, .. })
             | Self::ProjectStatusSave(catalog::ProjectStatusSaveArgs { dry_run: true, .. })
-            | Self::ProjectStatusDelete(catalog::ProjectStatusDeleteArgs { dry_run: true, .. })
+            | Self::ProjectStatusDelete(catalog::ProjectStatusDeleteArgs {
+                dry_run: true, ..
+            })
             | Self::TemplateSave(routines::TemplateSaveArgs { dry_run: true, .. })
             | Self::TemplateDelete(routines::TemplateDeleteArgs { dry_run: true, .. })
             | Self::TemplateUse(routines::TemplateUseArgs { dry_run: true, .. })
@@ -1791,7 +1830,9 @@ impl WorkVerb {
             | Self::ProjectUpdateDraft(_)
             | Self::ProjectUpdate(roadmap::ProjectUpdateArgs { dry_run: true, .. })
             | Self::ProjectUpdateEdit(roadmap::ProjectUpdateEditArgs { dry_run: true, .. })
-            | Self::ProjectUpdateDelete(roadmap::ProjectUpdateDeleteArgs { dry_run: true, .. })
+            | Self::ProjectUpdateDelete(roadmap::ProjectUpdateDeleteArgs {
+                dry_run: true, ..
+            })
             | Self::ProjectDelete(roadmap::ProjectDeleteArgs { dry_run: true, .. })
             | Self::ProjectSave(catalog::ProjectSaveArgs { dry_run: true, .. })
             | Self::ProjectArchive(catalog::ProjectArchiveArgs { dry_run: true, .. })
@@ -1819,7 +1860,9 @@ impl WorkVerb {
             | Self::PersonSplit(people::PersonSplitArgs { dry_run: true, .. })
             | Self::PersonDelete(people::PersonDeleteArgs { dry_run: true, .. })
             | Self::PersonPhoto(people::PersonPhotoArgs { dry_run: true, .. })
-            | Self::PersonContactRemove(people::PersonContactRemoveArgs { dry_run: true, .. })
+            | Self::PersonContactRemove(people::PersonContactRemoveArgs {
+                dry_run: true, ..
+            })
             | Self::FirstMetAnswer(people::FirstMetArgs { dry_run: true, .. })
             | Self::SpeakerConfirm(voices::SpeakerVoiceArgs { dry_run: true, .. })
             | Self::SpeakerVoiceUndo(voices::SpeakerVoiceArgs { dry_run: true, .. })
@@ -1854,8 +1897,12 @@ impl WorkVerb {
             | Self::LinkAccept(planner::LinkDecideArgs { dry_run: true, .. })
             | Self::LinkDismiss(planner::LinkDecideArgs { dry_run: true, .. })
             | Self::TriageSuggestions(_)
-            | Self::SuggestionAccept(triage_hints::SuggestionDecideArgs { dry_run: true, .. })
-            | Self::SuggestionDismiss(triage_hints::SuggestionDecideArgs { dry_run: true, .. })
+            | Self::SuggestionAccept(triage_hints::SuggestionDecideArgs {
+                dry_run: true, ..
+            })
+            | Self::SuggestionDismiss(triage_hints::SuggestionDecideArgs {
+                dry_run: true, ..
+            })
             | Self::Calendar(_)
             | Self::Trend(_)
             | Self::Today
@@ -1875,9 +1922,7 @@ impl WorkVerb {
             | Self::Watch(WatchArgs { dry_run: true, .. })
             | Self::Unwatch(UnwatchArgs { dry_run: true, .. })
             | Self::Session(_)
-            | Self::Sessions(_) => {
-                READ_SCOPES
-            }
+            | Self::Sessions(_) => READ_SCOPES,
             Self::Ask(AskArgs { take, .. }) if take.is_empty() => READ_SCOPES,
             Self::Export(_)
             | Self::Create(_)
@@ -1900,6 +1945,9 @@ impl WorkVerb {
             | Self::Subscribe(_)
             | Self::Unsubscribe(_)
             | Self::InboxMark(_)
+            | Self::InboxSettingsSave(_)
+            | Self::FeedSave(_)
+            | Self::FeedDelete(_)
             | Self::Digest(_)
             | Self::Snooze(_)
             | Self::Relate(_)
@@ -2095,6 +2143,9 @@ impl WorkVerb {
             {
                 "--body cannot be empty."
             }
+            Self::InboxSettingsSave(args) if !args.changes_something() => {
+                "Name a change: --kinds, --banners or --quiet-hours."
+            }
             Self::CycleSettings(args) if !args.changes_something() => {
                 "Name a change: --weeks, --start-weekday, --cooldown, --upcoming, --auto-add-started or --auto-add-completed."
             }
@@ -2190,6 +2241,7 @@ pub enum WorkAnswer {
     Template(Box<routines::ExternalWorkTemplateChange>),
     Reminders(routines::ExternalWorkReminders),
     Reminder(Box<routines::ExternalWorkReminderChange>),
+    SubjectReminder(Box<routines::ExternalSubjectReminderChange>),
     AgentLoops(agent_loops::ExternalAgentLoops),
     AgentLoop(Box<agent_loops::ExternalAgentLoop>),
     AgentLoopChange(Box<agent_loops::ExternalAgentLoopChange>),
@@ -2260,6 +2312,10 @@ pub enum WorkAnswer {
     Favorites(lifecycle::ExternalWorkFavorites),
     Subscriptions(lifecycle::ExternalWorkSubscriptions),
     Inbox(lifecycle::ExternalWorkInbox),
+    InboxSettings(lifecycle::ExternalInboxSettings),
+    Updates(feed::ExternalWorkUpdates),
+    Feeds(feed::ExternalWorkFeeds),
+    Feed(feed::ExternalFeedChange),
     Digest(Box<digest::ExternalWorkDigest>),
 }
 
@@ -2963,6 +3019,12 @@ pub(super) async fn answer(
         WorkVerb::Subscriptions => tracker.subscriptions().await,
         WorkVerb::Inbox(args) => tracker.inbox(args).await,
         WorkVerb::InboxMark(args) => tracker.inbox_mark(args).await,
+        WorkVerb::InboxSettings => tracker.inbox_settings(None),
+        WorkVerb::InboxSettingsSave(args) => tracker.inbox_settings(Some(args)),
+        WorkVerb::Updates(args) => tracker.updates(args).await,
+        WorkVerb::Feeds => tracker.feeds(),
+        WorkVerb::FeedSave(args) => tracker.feed_save(args).await,
+        WorkVerb::FeedDelete(args) => tracker.feed_delete(args),
         WorkVerb::Digest(args) => tracker.digest(args).await,
         WorkVerb::Snooze(args) => tracker.snooze(args).await,
         WorkVerb::Relate(args) => tracker.relate(args).await,
@@ -4427,7 +4489,12 @@ impl Tracker<'_> {
             .filter(|item| ids.contains(&item.id))
             .map(|item| board.project_item(item))
             .collect();
-        Ok(changed(WorkAction::Moved, Some(operation_id), tasks, Vec::new()))
+        Ok(changed(
+            WorkAction::Moved,
+            Some(operation_id),
+            tasks,
+            Vec::new(),
+        ))
     }
 
     async fn relate(&self, args: &RelateArgs) -> Result<WorkAnswer, ExternalError> {
@@ -4749,7 +4816,11 @@ impl Tracker<'_> {
             display.sub_group_by = lanes.group();
         }
         if let Some(hidden) = &args.hidden_columns {
-            display.hidden_columns = hidden.iter().filter(|key| !key.is_empty()).cloned().collect();
+            display.hidden_columns = hidden
+                .iter()
+                .filter(|key| !key.is_empty())
+                .cloned()
+                .collect();
         }
         let (id, operation_id) = match existing {
             Some(view) => (
@@ -4923,7 +4994,9 @@ impl Fence {
     /// The tasks it leaves out, by id: each whose own commitment or evidence
     /// names a meeting it hides, whatever the task's row shows of it.
     fn hidden_tasks(&self, history: &Connection) -> anyhow::Result<HashSet<String>> {
-        work::drawing_on(history, |kind, source_id| self.hides_source(kind, source_id))
+        work::drawing_on(history, |kind, source_id| {
+            self.hides_source(kind, source_id)
+        })
     }
 
     fn hides_suggestion(&self, suggestion: &WorkFieldSuggestion) -> bool {
@@ -5065,16 +5138,13 @@ fn page(
         },
         total: rows.len(),
         has_more,
-        next_cursor: shown
-            .last()
-            .filter(|_| has_more)
-            .map(|row| {
-                Cursor {
-                    order,
-                    after: place(row, order),
-                }
-                .to_string()
-            }),
+        next_cursor: shown.last().filter(|_| has_more).map(|row| {
+            Cursor {
+                order,
+                after: place(row, order),
+            }
+            .to_string()
+        }),
         conversations_available: board.fence.is_open(),
         read_as: None,
     })
@@ -5804,7 +5874,8 @@ impl Board {
                 let mut line = self.activity(entry);
                 if heard && matches!(entry.kind, WorkActivityKind::Created) {
                     line.meeting_id.clone_from(&detail.item.source_meeting_id);
-                    line.meeting_title.clone_from(&detail.item.source_meeting_title);
+                    line.meeting_title
+                        .clone_from(&detail.item.source_meeting_title);
                 }
                 line
             })
@@ -6689,12 +6760,15 @@ impl WorkAnswer {
             | Self::Versions(_)
             | Self::Favorites(_)
             | Self::Subscriptions(_)
-            | Self::Inbox(_) => lifecycle::text(self, &mut text),
+            | Self::Inbox(_)
+            | Self::InboxSettings(_) => lifecycle::text(self, &mut text),
+            Self::Updates(_) | Self::Feeds(_) | Self::Feed(_) => feed::text(self, &mut text),
             Self::LabelEdit(_)
             | Self::Templates(_)
             | Self::Template(_)
             | Self::Reminders(_)
-            | Self::Reminder(_) => routines::text(self, &mut text),
+            | Self::Reminder(_)
+            | Self::SubjectReminder(_) => routines::text(self, &mut text),
             Self::AgentLoops(_)
             | Self::AgentLoop(_)
             | Self::AgentLoopChange(_)
@@ -6752,7 +6826,13 @@ impl WorkAnswer {
             }
             Self::FollowUp(follow_up) => text.push_str(&follow_up.text),
             Self::Cycles(listing) if listing.calendar.is_some() => {
-                text.push_str(&listing.calendar.as_deref().unwrap_or_default().replace("\r\n", "\n"));
+                text.push_str(
+                    &listing
+                        .calendar
+                        .as_deref()
+                        .unwrap_or_default()
+                        .replace("\r\n", "\n"),
+                );
             }
             Self::Cycles(listing) => {
                 let _ = writeln!(
@@ -6870,6 +6950,10 @@ impl WorkAnswer {
             | Self::Template(_)
             | Self::Reminders(_)
             | Self::Reminder(_)
+            | Self::SubjectReminder(_)
+            | Self::InboxSettings(_)
+            | Self::Feeds(_)
+            | Self::Feed(_)
             | Self::AgentLoops(_)
             | Self::AgentLoop(_)
             | Self::AgentLoopChange(_)
@@ -6938,6 +7022,7 @@ impl WorkAnswer {
             | Self::Favorites(_)
             | Self::Subscriptions(_)
             | Self::Inbox(_)
+            | Self::Updates(_)
             | Self::ProjectAdmin(_) => true,
         }
     }
@@ -7041,7 +7126,10 @@ fn task_line(text: &mut String, task: &ExternalWorkItem, today: &Today) {
         notes.push(format!("under {}", parent.handle));
     }
     if let Some(progress) = task.sub_tasks {
-        notes.push(format!("{}/{} sub-tasks done", progress.done, progress.total));
+        notes.push(format!(
+            "{}/{} sub-tasks done",
+            progress.done, progress.total
+        ));
     }
     match task.attachment_count {
         0 => {}
@@ -7441,37 +7529,38 @@ fn filters_text(filters: &ExternalWorkFilters) -> String {
 
 mod attachments;
 mod catalog;
-mod preferences;
 mod cloud;
 mod dictation_rules;
 mod lifecycle;
 mod notes;
 mod organize;
 mod people;
+mod preferences;
 mod roadmap;
 mod save;
 pub(crate) use save::MeetingFence;
-mod speakers;
-mod voices;
-mod sources;
-mod library;
-mod transcript;
+mod agent_loops;
+mod dependencies;
 mod dictations;
+mod digest;
+mod feed;
+mod initiatives;
+mod insights;
+mod library;
 mod meeting_review;
 mod meeting_settings;
-mod sessions;
-mod routines;
-mod agent_loops;
-mod threads;
 mod planner;
-mod triage_hints;
-mod subjects;
-mod dependencies;
-mod initiatives;
-mod digest;
 mod project_templates;
+mod routines;
+mod sessions;
+mod sources;
+mod speakers;
+mod subjects;
+mod threads;
 mod timeline;
-mod insights;
+mod transcript;
+mod triage_hints;
+mod voices;
 mod words;
 
 #[cfg(test)]

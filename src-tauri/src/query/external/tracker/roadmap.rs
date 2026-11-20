@@ -38,7 +38,7 @@ pub enum Health {
 }
 
 impl Health {
-    const fn of(health: ProjectHealth) -> Self {
+    pub(super) const fn of(health: ProjectHealth) -> Self {
         match health {
             ProjectHealth::OnTrack => Self::OnTrack,
             ProjectHealth::AtRisk => Self::AtRisk,
@@ -46,7 +46,7 @@ impl Health {
         }
     }
 
-    const fn health(self) -> ProjectHealth {
+    pub(super) const fn health(self) -> ProjectHealth {
         match self {
             Self::OnTrack => ProjectHealth::OnTrack,
             Self::AtRisk => ProjectHealth::AtRisk,
@@ -54,7 +54,7 @@ impl Health {
         }
     }
 
-    const fn text(self) -> &'static str {
+    pub(super) const fn text(self) -> &'static str {
         match self {
             Self::OnTrack => "On track",
             Self::AtRisk => "At risk",
@@ -389,7 +389,7 @@ pub struct ExternalWorkCycleChange {
     pub cycles: ExternalWorkCycles,
 }
 
-fn project_ref(project: &Project) -> ExternalProjectRef {
+pub(super) fn project_ref(project: &Project) -> ExternalProjectRef {
     ExternalProjectRef {
         id: project.id.clone(),
         name: project.title.clone(),
@@ -398,7 +398,7 @@ fn project_ref(project: &Project) -> ExternalProjectRef {
 
 /// The update as an agent reads it: without its `discussed` lines unless it
 /// is in `quotes_shown`.
-fn external_update(
+pub(super) fn external_update(
     update: ProjectUpdate,
     quotes_shown: &HashSet<String>,
 ) -> ExternalProjectUpdate {
@@ -464,7 +464,7 @@ pub(super) fn rehearsed<T>(
 }
 
 impl Tracker<'_> {
-    fn update_author(write: &WriteArgs) -> Author<'_> {
+    pub(super) fn update_author(write: &WriteArgs) -> Author<'_> {
         Author {
             actor: WorkActor::Agent,
             agent: write.agent.as_deref(),
@@ -481,7 +481,7 @@ impl Tracker<'_> {
             .map_err(|message| refusal(self.history, message))
     }
 
-    fn project_named(&self, value: &str) -> Result<Project, ExternalError> {
+    pub(super) fn project_named(&self, value: &str) -> Result<Project, ExternalError> {
         let projects = planning::history(self.history, |conn| plans::all_projects(conn))
             .map_err(|message| refusal(self.history, message))?;
         Self::pick_project(value, &projects).cloned()
@@ -555,7 +555,7 @@ impl Tracker<'_> {
     }
 
     /// The updates whose `discussed` lines an agent may read.
-    async fn quotes_shown(&self) -> Result<HashSet<String>, ExternalError> {
+    pub(super) async fn quotes_shown(&self) -> Result<HashSet<String>, ExternalError> {
         let meetings = MeetingFence::read(self.meetings).await?;
         planning::history(self.history, |conn| {
             updates::quotes_shown(conn, |meeting| meetings.hides_meeting(meeting))
@@ -663,8 +663,7 @@ impl Tracker<'_> {
                     quoted,
                     now_ms(),
                 )?;
-                let shown =
-                    updates::quotes_shown(conn, |meeting| meetings.hides_meeting(meeting))?;
+                let shown = updates::quotes_shown(conn, |meeting| meetings.hides_meeting(meeting))?;
                 Ok((update, shown))
             })?;
             return Ok(Self::update_change(
@@ -812,8 +811,14 @@ impl Tracker<'_> {
             self.rehearse(|conn| catalog::save_project(conn, Some(&current.id), &edit, now_ms()))?
         } else {
             self.applies("deleting a project")?;
-            work::catalog_project_save(self.app, &operation_id, Some(current.id.clone()), &edit)
-                .map_err(|message| self.write_refusal(message, &operation_id, "The project"))?
+            work::catalog_project_save(
+                self.app,
+                Self::update_author(&args.write),
+                &operation_id,
+                Some(current.id.clone()),
+                &edit,
+            )
+            .map_err(|message| self.write_refusal(message, &operation_id, "The project"))?
         };
         Ok(WorkAnswer::Project(
             super::catalog::ExternalWorkProjectChange {
@@ -1206,7 +1211,14 @@ mod tests {
 
     fn update(health: &str, body: &str) -> ProjectUpdateArgs {
         let argv = [
-            "sona", "work", "project-update", "Harbor launch", "--health", health, "--body", body,
+            "sona",
+            "work",
+            "project-update",
+            "Harbor launch",
+            "--health",
+            health,
+            "--body",
+            body,
         ];
         match CliArgs::try_parse_from(argv) {
             Ok(CliArgs {
