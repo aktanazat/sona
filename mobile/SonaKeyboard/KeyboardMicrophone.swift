@@ -6,6 +6,25 @@ import WebKit
 
 private let log = Logger(subsystem: "com.aktanazat.sona.mobile.keyboard", category: "microphone")
 
+/// A page that opens the microphone when asked and posts what it hears.
+@MainActor
+protocol CapturePage: AnyObject {
+    /// Each message the page posts: `ready`, `started`, `audio` with base64 samples,
+    /// `stopped`, `failed` or `interrupted` with a reason.
+    var onMessage: (([String: Any]) -> Void)? { get set }
+    /// The page could not run a call, or its process ended.
+    var onFailure: ((String) -> Void)? { get set }
+    func attach(to view: UIView)
+    func run(_ call: String)
+}
+
+/// Starts recognizing what a request is fed, in a language, reporting text, whether it is
+/// final, and a failure. Returns what cancels it, or nil when no recognizer for the
+/// language runs on this iPhone.
+typealias Recognize = @MainActor (
+    SFSpeechAudioBufferRecognitionRequest, String, @escaping @Sendable (String?, Bool, String?) -> Void
+) -> (() -> Void)?
+
 /// The keyboard's own microphone and recognizer.
 ///
 /// iOS starts no audio input in a keyboard process, even with Full Access. WebKit captures
@@ -13,55 +32,67 @@ private let log = Logger(subsystem: "com.aktanazat.sona.mobile.keyboard", catego
 /// almost invisible web view opens the microphone and posts 16 kHz samples here, and Apple's
 /// recognizer, which also runs outside this process, turns them into words on this iPhone.
 @MainActor
-final class KeyboardMicrophone: NSObject {
+final class KeyboardMicrophone {
     static let sampleRate = 16_000.0
-    private static let origin = URL(string: "https://keyboard.sona.invalid/")!
+
+    struct Timing {
+        /// How long the page has to load, the first time Dictate is touched.
+        var load: Duration = .seconds(10)
+        /// How long the page has to say the microphone opened once asked, before it
+        /// counts as refused.
+        var start: Duration = .seconds(3)
+        /// How long a stop waits for the page's last samples.
+        var drain: Duration = .milliseconds(150)
+        /// How long the recognizer has to finish after the audio ends.
+        var finish: Duration = .seconds(3)
+    }
 
     var onEvent: ((KeyboardDictation.Event) -> Void)?
     var onNotice: ((String) -> Void)?
 
-    private let webView: WKWebView
+    private let page: CapturePage
+    private let recognize: Recognize
+    private let timing: Timing
+    private let queue: KeyboardDictationQueue?
     private let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1)!
     private var ready = false
     private var wanted = false
     private var started = false
+    private var draining = false
     private var run = 0
     private var request: SFSpeechAudioBufferRecognitionRequest?
-    private var recognition: SFSpeechRecognitionTask?
+    private var cancelRecognition: (() -> Void)?
     private var heartbeat: Timer?
     private var deadline: Task<Void, Never>?
     private var samples = 0
+    private var audio: KeyboardAudioFile?
     #if DEBUG
     private var script: [String]?
-    private var captured = Data()
     #endif
 
-    override init() {
-        let configuration = WKWebViewConfiguration()
-        configuration.allowsInlineMediaPlayback = true
-        configuration.mediaTypesRequiringUserActionForPlayback = []
-        configuration.websiteDataStore = .nonPersistent()
-        webView = WKWebView(frame: CGRect(x: 0, y: 0, width: 2, height: 2), configuration: configuration)
-        super.init()
-        configuration.userContentController.add(WeakHandler(self), name: "capture")
-        webView.uiDelegate = self
-        webView.navigationDelegate = self
-        webView.alpha = 0.02
-        webView.isOpaque = false
-        webView.isUserInteractionEnabled = false
-        webView.accessibilityElementsHidden = true
+    init(
+        page: CapturePage? = nil, recognize: @escaping Recognize = KeyboardMicrophone.apple,
+        timing: Timing = Timing(), queue: KeyboardDictationQueue? = try? KeyboardDictationQueue.shared()
+    ) {
+        self.page = page ?? WebCapturePage()
+        self.recognize = recognize
+        self.timing = timing
+        self.queue = queue
+        self.page.onMessage = { [weak self] message in self?.receive(message) }
+        self.page.onFailure = { [weak self] reason in
+            self?.ready = false
+            self?.refused(reason)
+        }
     }
 
-    /// WebKit throttles a web view outside a window, so it stays in the keyboard's view,
-    /// loaded before the first tap so Dictate starts at once.
+    /// WebKit throttles a web view outside a window, so the page stays in the keyboard's view.
     func attach(to view: UIView) {
-        guard webView.superview == nil else { return }
-        view.insertSubview(webView, at: 0)
-        webView.loadHTMLString(Self.page, baseURL: Self.origin)
+        page.attach(to: view)
     }
 
     func start(language: String, hints: [String]) {
         abandon()
+        discardAudio()
         run += 1
         let run = run
         let request = SFSpeechAudioBufferRecognitionRequest()
@@ -71,48 +102,100 @@ final class KeyboardMicrophone: NSObject {
         request.taskHint = .dictation
         request.contextualStrings = Array(hints.prefix(100))
         samples = 0
+        let report: @Sendable (String?, Bool, String?) -> Void = { [weak self] text, final, failure in
+            Task { @MainActor in self?.recognized(text: text, final: final, failure: failure, run: run) }
+        }
         #if DEBUG
-        captured = Data()
         script = Self.scriptedWords
-        if script == nil, !recognize(request, language: language, run: run) { return }
+        if script == nil { cancelRecognition = recognize(request, language, report) }
         #else
-        guard recognize(request, language: language, run: run) else { return }
+        cancelRecognition = recognize(request, language, report)
         #endif
+        #if DEBUG
+        let unavailable = script == nil && cancelRecognition == nil
+        #else
+        let unavailable = cancelRecognition == nil
+        #endif
+        if unavailable {
+            log.error("no on-device recognizer for \(language, privacy: .public)")
+            onNotice?(NSLocalizedString("dictation.onDeviceUnavailable", comment: ""))
+            onEvent?(.recognitionFailed)
+            return
+        }
         self.request = request
+        audio = queue.flatMap { try? KeyboardAudioFile(in: $0) }
         wanted = true
         heartbeat = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { _ = self?.webView.evaluateJavaScript("captureHeartbeat(); 0") }
+            MainActor.assumeIsolated {
+                guard let self, self.started else { return }
+                self.page.run("captureHeartbeat()")
+            }
         }
-        if ready { beginPage() }
+        if ready { beginCapture() } else { refuse(after: timing.load) }
+    }
+
+    /// The start time runs from when the page is asked, so a page still loading on the
+    /// first Dictate does not count against the microphone.
+    private func beginCapture() {
+        page.run("startCapture()")
+        refuse(after: timing.start)
+    }
+
+    private func refuse(after delay: Duration) {
+        let run = run
+        deadline?.cancel()
         deadline = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(3))
+            try? await Task.sleep(for: delay)
             guard !Task.isCancelled, let self, self.run == run, wanted, !started else { return }
             log.error("capture did not start in time")
             onEvent?(.captureRefused)
         }
     }
 
-    private func recognize(_ request: SFSpeechAudioBufferRecognitionRequest, language: String, run: Int) -> Bool {
-        guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: language)),
-              recognizer.isAvailable, recognizer.supportsOnDeviceRecognition
-        else {
-            onNotice?(NSLocalizedString("dictation.onDeviceUnavailable", comment: ""))
-            onEvent?(.recognitionFailed)
-            return false
+    /// Asks the page for the samples it still holds, so the last syllable is heard, then
+    /// ends the audio; the recognizer finishes the words it has, or gives up after a while
+    /// with what it heard.
+    func end() {
+        guard request != nil, !draining else { return }
+        guard started else { endAudio(); return }
+        draining = true
+        page.run("finishCapture()")
+        let run = run
+        deadline?.cancel()
+        deadline = Task { [weak self, timing] in
+            try? await Task.sleep(for: timing.drain)
+            guard !Task.isCancelled, let self, self.run == run, draining else { return }
+            endAudio()
         }
-        recognition = recognizer.recognitionTask(with: request) { [weak self] result, error in
-            let text = result?.bestTranscription.formattedString
-            let final = result?.isFinal ?? false
-            let failure = error.map { "\($0)" }
-            Task { @MainActor in self?.recognized(text: text, final: final, failure: failure, run: run) }
-        }
-        return true
     }
 
-    /// Stops the microphone; the recognizer finishes the words it has, or gives up after
-    /// three seconds with what it heard.
-    func end() {
-        guard request != nil else { return }
+    func abandon() {
+        stopPage()
+        deadline?.cancel()
+        deadline = nil
+        cancelRecognition?()
+        cancelRecognition = nil
+        request = nil
+        #if DEBUG
+        script = nil
+        #endif
+    }
+
+    /// The finished dictation's audio, written to the queue's folder, for the record of it.
+    func takeAudio() -> KeyboardDictationRecord.Audio? {
+        defer { audio = nil }
+        return try? audio?.finish()
+    }
+
+    private func discardAudio() {
+        guard let audio, let queue else { return }
+        _ = try? audio.finish()
+        try? FileManager.default.removeItem(at: queue.audioURL(audio.name))
+        self.audio = nil
+    }
+
+    private func endAudio() {
+        draining = false
         stopPage()
         request?.endAudio()
         #if DEBUG
@@ -125,41 +208,20 @@ final class KeyboardMicrophone: NSObject {
         #endif
         let run = run
         deadline?.cancel()
-        deadline = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(3))
+        deadline = Task { [weak self, timing] in
+            try? await Task.sleep(for: timing.finish)
             guard !Task.isCancelled, let self, self.run == run, request != nil else { return }
             onEvent?(.finishTimedOut)
-        }
-    }
-
-    func abandon() {
-        stopPage()
-        deadline?.cancel()
-        deadline = nil
-        recognition?.cancel()
-        recognition = nil
-        request = nil
-        #if DEBUG
-        script = nil
-        #endif
-    }
-
-    private func beginPage() {
-        webView.evaluateJavaScript("startCapture(); 0") { [weak self] _, error in
-            guard let error else { return }
-            MainActor.assumeIsolated { self?.refused("start: \(error.localizedDescription)") }
         }
     }
 
     private func stopPage() {
         heartbeat?.invalidate()
         heartbeat = nil
+        draining = false
         if wanted {
-            webView.evaluateJavaScript("stopCapture(); 0")
+            page.run("stopCapture()")
             log.info("captured \(self.samples) samples")
-            #if DEBUG
-            keepCapture()
-            #endif
         }
         wanted = false
         started = false
@@ -179,17 +241,15 @@ final class KeyboardMicrophone: NSObject {
         } else if text == nil, let failure {
             log.error("recognition failed: \(failure, privacy: .public)")
             abandon()
-            onNotice?(NSLocalizedString("keyboard.recognitionFailed", comment: ""))
             onEvent?(.recognitionFailed)
         }
     }
 
-    fileprivate func receive(_ body: Any) {
-        guard let message = body as? [String: Any], let type = message["type"] as? String else { return }
-        switch type {
+    private func receive(_ message: [String: Any]) {
+        switch message["type"] as? String {
         case "ready":
             ready = true
-            if wanted { beginPage() }
+            if wanted { beginCapture() }
         case "started":
             guard wanted else { return }
             started = true
@@ -199,7 +259,9 @@ final class KeyboardMicrophone: NSObject {
             guard wanted, started, let base64 = message["data"] as? String,
                   let data = Data(base64Encoded: base64) else { return }
             append(data)
-        case "failed", "interrupted":
+        case "stopped":
+            if draining { endAudio() }
+        case let type? where type == "failed" || type == "interrupted":
             refused("\(type): \(message["reason"] as? String ?? "")")
         default:
             break
@@ -220,20 +282,32 @@ final class KeyboardMicrophone: NSObject {
         }
         samples += frames
         request.append(buffer)
+        try? audio?.append(data)
         #if DEBUG
-        captured.append(data)
-        if let script, frames > 0, samples / 8_000 != (samples - frames) / 8_000 {
+        if let script, samples / 8_000 != (samples - frames) / 8_000 {
             onEvent?(.heard(scriptedText(script), final: false))
         }
         #endif
     }
 
+    /// Apple's on-device recognizer, which runs in its own process.
+    static func apple(
+        _ request: SFSpeechAudioBufferRecognitionRequest, language: String,
+        report: @escaping @Sendable (String?, Bool, String?) -> Void
+    ) -> (() -> Void)? {
+        guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: language)),
+              recognizer.isAvailable, recognizer.supportsOnDeviceRecognition
+        else { return nil }
+        let task = recognizer.recognitionTask(with: request) { result, error in
+            report(result?.bestTranscription.formattedString, result?.isFinal ?? false, error.map { "\($0)" })
+        }
+        return { task.cancel() }
+    }
+
     #if DEBUG
     /* Debug builds with `SonaScriptedRecognition` set in the shared container hear those
      * words instead of asking the speech service, which the simulator cannot run: one more
-     * word for each half second of audio the web view delivers. With
-     * `SonaKeyboardKeepCapture` set they also keep what the microphone heard, as
-     * keyboard-capture.wav in the shared container, for a recognizer elsewhere to check. */
+     * word for each half second of audio the page delivers. */
     private static var scriptedWords: [String]? {
         DictationPreferences.shared.string(forKey: "SonaScriptedRecognition").map { $0.split(separator: " ").map(String.init) }
     }
@@ -241,29 +315,74 @@ final class KeyboardMicrophone: NSObject {
     private func scriptedText(_ words: [String]) -> String {
         words.prefix(samples / 8_000).joined(separator: " ")
     }
-
-    private func keepCapture() {
-        guard DictationPreferences.shared.bool(forKey: "SonaKeyboardKeepCapture"), !captured.isEmpty,
-              let folder = try? KeyboardDraftStore.shared().directory
-        else { return }
-        var wav = Data()
-        func put<T: FixedWidthInteger>(_ value: T) { withUnsafeBytes(of: value.littleEndian) { wav.append(contentsOf: $0) } }
-        wav.append(contentsOf: Array("RIFF".utf8)); put(UInt32(36 + captured.count))
-        wav.append(contentsOf: Array("WAVEfmt ".utf8)); put(UInt32(16)); put(UInt16(1)); put(UInt16(1))
-        put(UInt32(Self.sampleRate)); put(UInt32(Self.sampleRate * 2)); put(UInt16(2)); put(UInt16(16))
-        wav.append(contentsOf: Array("data".utf8)); put(UInt32(captured.count))
-        wav.append(captured)
-        try? wav.write(to: folder.appendingPathComponent("keyboard-capture.wav"))
-    }
     #endif
+}
+
+/// The capture page in a 2-point web view that is all but invisible.
+@MainActor
+final class WebCapturePage: NSObject, CapturePage, WKUIDelegate, WKNavigationDelegate {
+    private static let origin = URL(string: "https://keyboard.sona.invalid/")!
+    var onMessage: (([String: Any]) -> Void)?
+    var onFailure: ((String) -> Void)?
+    private let webView: WKWebView
+
+    override init() {
+        let configuration = WKWebViewConfiguration()
+        configuration.allowsInlineMediaPlayback = true
+        configuration.mediaTypesRequiringUserActionForPlayback = []
+        configuration.websiteDataStore = .nonPersistent()
+        webView = WKWebView(frame: CGRect(x: 0, y: 0, width: 2, height: 2), configuration: configuration)
+        super.init()
+        configuration.userContentController.add(WeakHandler(self), name: "capture")
+        webView.uiDelegate = self
+        webView.navigationDelegate = self
+        webView.alpha = 0.02
+        webView.isOpaque = false
+        webView.isUserInteractionEnabled = false
+        webView.accessibilityElementsHidden = true
+    }
+
+    func attach(to view: UIView) {
+        guard webView.superview == nil else { return }
+        view.insertSubview(webView, at: 0)
+        webView.loadHTMLString(Self.page, baseURL: Self.origin)
+    }
+
+    func run(_ call: String) {
+        webView.evaluateJavaScript(call + "; 0") { [weak self] _, error in
+            guard let error else { return }
+            MainActor.assumeIsolated { self?.onFailure?("\(call): \(error.localizedDescription)") }
+        }
+    }
+
+    fileprivate func receive(_ body: Any) {
+        if let message = body as? [String: Any] { onMessage?(message) }
+    }
+
+    /// Skips WebKit's own per-page prompt; the app's microphone permission still decides.
+    func webView(
+        _ webView: WKWebView,
+        requestMediaCapturePermissionFor origin: WKSecurityOrigin,
+        initiatedByFrame frame: WKFrameInfo,
+        type: WKMediaCaptureType,
+        decisionHandler: @escaping @MainActor (WKPermissionDecision) -> Void
+    ) {
+        decisionHandler(type == .microphone ? .grant : .deny)
+    }
+
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        onFailure?("web content process ended")
+        webView.loadHTMLString(Self.page, baseURL: Self.origin)
+    }
 
     /* The page opens the microphone only when asked, since an AudioContext made earlier
      * can take audio focus or move a Bluetooth route while the keyboard is merely shown.
      * It stops itself when native code stops calling captureHeartbeat, so a keyboard that
-     * was suspended or crashed cannot leave the microphone on. */
+     * was suspended or crashed cannot leave the microphone on. finishCapture posts the
+     * samples still in the processor's buffer before it stops. */
     private static let page = """
     <!doctype html><html><body><script>
-    const targetRate = \(Int(sampleRate));
+    const targetRate = \(Int(KeyboardMicrophone.sampleRate));
     const post = message => window.webkit.messageHandlers.capture.postMessage(message);
     const encode = samples => {
       const bytes = new Uint8Array(samples.buffer, 0, samples.length * 2);
@@ -274,10 +393,12 @@ final class KeyboardMicrophone: NSObject {
     let lastHeartbeat = performance.now();
     window.captureHeartbeat = () => { lastHeartbeat = performance.now(); };
     let stopCapture = () => {};
+    let finishCapture = () => {};
     window.stopCapture = () => stopCapture();
+    window.finishCapture = () => finishCapture();
     window.startCapture = async () => {
       stopCapture();
-      let stopping = false, stream, context, source, processor, sink, watchdog;
+      let stopping = false, draining = false, stream, context, source, processor, sink, watchdog;
       const audioSession = navigator.audioSession;
       const previousType = audioSession?.type ?? 'auto';
       const cleanup = () => {
@@ -293,6 +414,7 @@ final class KeyboardMicrophone: NSObject {
       };
       const interrupted = reason => { if (!stopping) { cleanup(); post({ type: 'interrupted', reason }); } };
       stopCapture = cleanup;
+      finishCapture = () => { draining = true; };
       try {
         try { if (audioSession) audioSession.type = 'play-and-record'; } catch (_) {}
         stream = await navigator.mediaDevices.getUserMedia({
@@ -329,6 +451,7 @@ final class KeyboardMicrophone: NSObject {
             }
           }
           if (written > 0) post({ type: 'audio', data: encode(output.subarray(0, written)) });
+          if (draining) { cleanup(); post({ type: 'stopped' }); }
         };
         post({ type: 'started', sampleRate: context.sampleRate });
       } catch (error) {
@@ -343,22 +466,13 @@ final class KeyboardMicrophone: NSObject {
     """
 }
 
-extension KeyboardMicrophone: WKUIDelegate, WKNavigationDelegate {
-    /// Skips WebKit's own per-page prompt; the app's microphone permission still decides.
-    func webView(
-        _ webView: WKWebView,
-        requestMediaCapturePermissionFor origin: WKSecurityOrigin,
-        initiatedByFrame frame: WKFrameInfo,
-        type: WKMediaCaptureType,
-        decisionHandler: @escaping @MainActor (WKPermissionDecision) -> Void
-    ) {
-        decisionHandler(type == .microphone ? .grant : .deny)
-    }
+/// The content controller keeps its handler alive; this keeps it from keeping the page.
+private final class WeakHandler: NSObject, WKScriptMessageHandler {
+    weak var target: WebCapturePage?
+    init(_ target: WebCapturePage) { self.target = target }
 
-    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
-        ready = false
-        refused("web content process ended")
-        webView.loadHTMLString(Self.page, baseURL: Self.origin)
+    func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
+        MainActor.assumeIsolated { target?.receive(message.body) }
     }
 }
 
@@ -409,13 +523,3 @@ final class FrameMeter: NSObject {
     }
 }
 #endif
-
-/// The content controller keeps its handler alive; this keeps it from keeping the microphone.
-private final class WeakHandler: NSObject, WKScriptMessageHandler {
-    weak var target: KeyboardMicrophone?
-    init(_ target: KeyboardMicrophone) { self.target = target }
-
-    func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
-        MainActor.assumeIsolated { target?.receive(message.body) }
-    }
-}

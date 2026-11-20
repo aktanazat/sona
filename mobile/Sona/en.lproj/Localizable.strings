@@ -170,8 +170,7 @@
 "keyboard.sessionEnded" = "The microphone session ended. Tap Dictate to open Sona again.";
 "keyboard.otherField" = "This text started in another field. Insert it here only if this is where you want it.";
 "keyboard.setup" = "Tap Dictate. Sona opens once to ask for the microphone; after that the keyboard listens right here.";
-"keyboard.micRefused" = "The keyboard couldn't use the microphone, so Dictate goes through the Sona app for now.";
-"keyboard.recognitionFailed" = "Speech recognition stopped before any words came through. Tap Dictate to try again.";
+"keyboard.micRefused" = "The keyboard couldn't listen just now, so for the next ten minutes Dictate goes through the Sona app.";
 "keyboard.setupAsking" = "Allow the microphone and speech recognition, and the Sona keyboard can listen right where you type.";
 "keyboard.setupReady" = "Tap ◀ at the top left, or swipe right along the bottom edge of the screen, then tap Dictate. From now on the keyboard listens right there.";
 "dictation.language" = "Speaking language";

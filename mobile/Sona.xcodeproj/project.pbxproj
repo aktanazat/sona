@@ -89,6 +89,12 @@
 		CC0000000000000000000065 /* KeyboardDictation.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000065 /* KeyboardDictation.swift */; };
 		CD0000000000000000000065 /* KeyboardDictation.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000065 /* KeyboardDictation.swift */; };
 		CD0000000000000000000066 /* KeyboardMicrophone.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000066 /* KeyboardMicrophone.swift */; };
+		CC0000000000000000000066 /* KeyboardMicrophone.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000066 /* KeyboardMicrophone.swift */; };
+		CA0000000000000000000068 /* KeyboardDictationQueue.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000068 /* KeyboardDictationQueue.swift */; };
+		CC0000000000000000000068 /* KeyboardDictationQueue.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000068 /* KeyboardDictationQueue.swift */; };
+		CD0000000000000000000068 /* KeyboardDictationQueue.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000068 /* KeyboardDictationQueue.swift */; };
+		CC0000000000000000000069 /* KeyboardMicrophoneTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000069 /* KeyboardMicrophoneTests.swift */; };
+		CC000000000000000000006A /* KeyboardDictationQueueTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000000000000000000006A /* KeyboardDictationQueueTests.swift */; };
 		CC0000000000000000000063 /* SwipeTypingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000063 /* SwipeTypingTests.swift */; };
 		CC0000000000000000000064 /* KeyboardSessionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000064 /* KeyboardSessionTests.swift */; };
 		CC0000000000000000000067 /* KeyboardDictationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000067 /* KeyboardDictationTests.swift */; };
@@ -235,6 +241,9 @@
 		BB0000000000000000000062 /* KeySurface.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeySurface.swift; sourceTree = "<group>"; };
 		BB0000000000000000000065 /* KeyboardDictation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardDictation.swift; sourceTree = "<group>"; };
 		BB0000000000000000000066 /* KeyboardMicrophone.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardMicrophone.swift; sourceTree = "<group>"; };
+		BB0000000000000000000068 /* KeyboardDictationQueue.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardDictationQueue.swift; sourceTree = "<group>"; };
+		BB0000000000000000000069 /* KeyboardMicrophoneTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardMicrophoneTests.swift; sourceTree = "<group>"; };
+		BB000000000000000000006A /* KeyboardDictationQueueTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardDictationQueueTests.swift; sourceTree = "<group>"; };
 		BB0000000000000000000063 /* SwipeTypingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SwipeTypingTests.swift; sourceTree = "<group>"; };
 		BB0000000000000000000064 /* KeyboardSessionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardSessionTests.swift; sourceTree = "<group>"; };
 		BB0000000000000000000067 /* KeyboardDictationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardDictationTests.swift; sourceTree = "<group>"; };
@@ -366,6 +375,7 @@
 				BB0000000000000000000060 /* KeyboardLanguages.swift */,
 				BB0000000000000000000039 /* DictationProfile.swift */,
 				BB0000000000000000000053 /* KeyboardVocabulary.swift */,
+				BB0000000000000000000068 /* KeyboardDictationQueue.swift */,
 				BB000000000000000000003A /* PhoneMeeting.swift */,
 				BB000000000000000000003B /* CallService.swift */,
 				BB0000000000000000000044 /* BoundedRewrite.swift */,
@@ -431,6 +441,8 @@
 				BB0000000000000000000063 /* SwipeTypingTests.swift */,
 				BB0000000000000000000064 /* KeyboardSessionTests.swift */,
 				BB0000000000000000000067 /* KeyboardDictationTests.swift */,
+				BB0000000000000000000069 /* KeyboardMicrophoneTests.swift */,
+				BB000000000000000000006A /* KeyboardDictationQueueTests.swift */,
 				BB0000000000000000000041 /* PhoneParityTests.swift */,
 				BB0000000000000000000045 /* DictationDeliveryTests.swift */,
 				AA0000000000000000000008 /* Fixtures */,
@@ -686,6 +698,7 @@
 				CA0000000000000000000034 /* BoardScreen.swift in Sources */,
 				CA0000000000000000000038 /* KeyboardSession.swift in Sources */,
 				CA0000000000000000000039 /* DictationProfile.swift in Sources */,
+				CA0000000000000000000068 /* KeyboardDictationQueue.swift in Sources */,
 				CA0000000000000000000053 /* KeyboardVocabulary.swift in Sources */,
 				CA000000000000000000003A /* PhoneMeeting.swift in Sources */,
 				CA000000000000000000003B /* CallService.swift in Sources */,
@@ -747,6 +760,10 @@
 				CC0000000000000000000060 /* KeyboardLanguages.swift in Sources */,
 				CC0000000000000000000061 /* SwipeTyping.swift in Sources */,
 				CC0000000000000000000065 /* KeyboardDictation.swift in Sources */,
+				CC0000000000000000000066 /* KeyboardMicrophone.swift in Sources */,
+				CC0000000000000000000068 /* KeyboardDictationQueue.swift in Sources */,
+				CC0000000000000000000069 /* KeyboardMicrophoneTests.swift in Sources */,
+				CC000000000000000000006A /* KeyboardDictationQueueTests.swift in Sources */,
 				CC0000000000000000000063 /* SwipeTypingTests.swift in Sources */,
 				CC0000000000000000000064 /* KeyboardSessionTests.swift in Sources */,
 				CC0000000000000000000067 /* KeyboardDictationTests.swift in Sources */,
@@ -778,6 +795,7 @@
 				CD0000000000000000000062 /* KeySurface.swift in Sources */,
 				CD0000000000000000000065 /* KeyboardDictation.swift in Sources */,
 				CD0000000000000000000066 /* KeyboardMicrophone.swift in Sources */,
+				CD0000000000000000000068 /* KeyboardDictationQueue.swift in Sources */,
 				CD0000000000000000000053 /* KeyboardVocabulary.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

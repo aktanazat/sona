@@ -52,16 +52,16 @@ struct KeyboardDictation {
             return []
         case (.starting, .stop), (.starting, .hidden), (.listening, .hidden), (.finishing, .hidden):
             return reset([.abandon])
-        case (.starting, .captureRefused):
+        case (.starting, .captureRefused), (.starting, .recognitionFailed):
             return reset([.abandon, .fallBack])
-        case (.starting, .recognitionFailed):
-            return reset([.abandon])
         case (.listening, .stop), (.listening, .captureEnded), (.listening, .captureRefused):
             phase = .finishing
             return [.endCapture]
         case let (.listening, .heard(text, final)), let (.finishing, .heard(text, final)):
             heard = text
             return final ? reset([.endCapture] + inserting(text)) : []
+        case (.listening, .recognitionFailed) where inserting(heard).isEmpty:
+            return reset([.abandon, .fallBack])
         case (.listening, .recognitionFailed), (.finishing, .recognitionFailed), (.finishing, .finishTimedOut):
             return reset([.abandon] + inserting(heard))
         default:
@@ -78,5 +78,31 @@ struct KeyboardDictation {
     private func inserting(_ text: String) -> [Effect] {
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         return text.isEmpty ? [] : [.insert(text)]
+    }
+}
+
+/// Where Dictate goes. After the keyboard could not listen, Dictate goes through the app
+/// for ten minutes, across keyboard appearances, so later dictations do not wait out
+/// another refusal first.
+struct KeyboardRoute {
+    enum Choice: Equatable {
+        case keyboard
+        /// The app's warm session listens.
+        case appSession
+        /// Dictate opens the app.
+        case openApp
+    }
+
+    static let refusedKey = "sona.keyboard.refusedUntil"
+    static let refusalLife: TimeInterval = 10 * 60
+    let defaults: UserDefaults
+
+    func refuse(at now: Date) {
+        defaults.set(now.addingTimeInterval(Self.refusalLife), forKey: Self.refusedKey)
+    }
+
+    func choice(at now: Date, warm: Bool) -> Choice {
+        guard let until = defaults.object(forKey: Self.refusedKey) as? Date, until > now else { return .keyboard }
+        return warm ? .appSession : .openApp
     }
 }

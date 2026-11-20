@@ -2,12 +2,12 @@ import Testing
 
 /// The keyboard dictating by itself, driven by what the person and the microphone do.
 struct KeyboardDictationTests {
-    @Test("a microphone that refuses the keyboard hands dictation to the app, and the next Dictate still starts")
-    func refusedMicrophoneFallsBack() {
+    @Test("a recognizer that fails before any word hands dictation to the app, as a refused microphone does")
+    func recognizerFailureFallsBack() {
         var dictation = KeyboardDictation()
-        #expect(dictation.handle(.start) == [.beginCapture])
-        #expect(dictation.handle(.captureRefused) == [.abandon, .fallBack])
-        #expect(dictation.phase == .idle)
+        _ = dictation.handle(.start)
+        _ = dictation.handle(.captureStarted)
+        #expect(dictation.handle(.recognitionFailed) == [.abandon, .fallBack])
         #expect(dictation.handle(.start) == [.beginCapture])
     }
 

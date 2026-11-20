@@ -1,5 +1,6 @@
 import ActivityKit
 import Combine
+import CryptoKit
 import Foundation
 import Network
 import PhotosUI
@@ -71,6 +72,7 @@ final class AppModel: NSObject, ObservableObject {
     @Published private(set) var keyboardReturn = false
     /// Set while the keyboard has Sona open only to allow the microphone.
     @Published private(set) var keyboardSetup: KeyboardSetup?
+    private var importingKeyboardDictations = false
 
     let library = PhoneLibrary()
     let calendar = PhoneCalendar()
@@ -135,6 +137,7 @@ final class AppModel: NSObject, ObservableObject {
         activateWatchSession()
         /* A launch is the operator asking again: anything the vault refused earlier gets
          * one more attempt before it is reported as still here. */
+        importKeyboardDictations()
         Task {
             await queue.retryParked()
             await drain()
@@ -598,6 +601,31 @@ final class AppModel: NSObject, ObservableObject {
     func startVoiceThought() {
         guard canStartDictation else { return }
         dictation.start(keepingAudio: true)
+    }
+
+    /// Dictations the keyboard heard itself wait in the shared container until Sona keeps
+    /// them in Notes, with their audio, as it keeps its own.
+    func importKeyboardDictations() {
+        guard !importingKeyboardDictations, let queue = try? KeyboardDictationQueue.shared() else { return }
+        importingKeyboardDictations = true
+        Task {
+            defer { importingKeyboardDictations = false }
+            for record in (try? queue.pending()) ?? [] {
+                let audio = record.audio.flatMap { audio -> CapturedAudio? in
+                    let url = queue.audioURL(audio.file)
+                    guard let bytes = try? Data(contentsOf: url) else { return nil }
+                    return CapturedAudio(url: url, byteLength: bytes.count,
+                                         sha256: Base64URL.encode(Data(SHA256.hash(data: bytes))),
+                                         durationMs: audio.durationMs)
+                }
+                let delivery = library.deliverDictation(
+                    kind: .dictation, text: record.text, date: record.date, audio: audio,
+                    keyboardStore: nil, documentID: nil, removeSourceAfterSaving: true
+                )
+                if await delivery.saving.value { try? queue.remove(record) }
+            }
+            try? queue.removeOrphanedAudio(olderThan: 60 * 60)
+        }
     }
 
     private func collectDictation(_ capture: DictationCapture) {
