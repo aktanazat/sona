@@ -44,18 +44,35 @@ struct KeyboardDictationQueue {
     }
 
     /// Sona may stay closed for days while the keyboard keeps dictating, so the audio
-    /// waiting for it is held to `maxBytes` and `maxAge`: the oldest audio goes first, and
-    /// its text stays queued.
+    /// waiting for it is held to `maxBytes` and `maxAge`, counting audio a keyboard ended
+    /// mid-dictation left behind: the oldest goes first, its text stays queued, and the
+    /// newest dictation keeps its audio whatever its size. Records are read only when
+    /// the audio files on disk are over a limit.
     func trimAudio(maxBytes: Int, maxAge: TimeInterval, now: Date = Date()) throws {
+        let keys: Set<URLResourceKey> = [.fileSizeKey, .contentModificationDateKey]
+        let files = try FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: Array(keys))
+            .filter { $0.pathExtension == "pcm" }
+            .map { url -> (url: URL, size: Int, date: Date) in
+                let values = try url.resourceValues(forKeys: keys)
+                return (url, values.fileSize ?? 0, values.contentModificationDate ?? now)
+            }
+            .sorted { $0.date < $1.date }
+        var total = files.reduce(0) { $0 + $1.size }
+        guard total > maxBytes || files.contains(where: { now.timeIntervalSince($0.date) > maxAge }) else { return }
         let records = try pending()
-        var total = records.compactMap(\.audio).reduce(0) { $0 + $1.byteLength }
-        for var record in records {
-            guard let audio = record.audio,
-                  total > maxBytes || now.timeIntervalSince(record.date) > maxAge else { continue }
-            try? FileManager.default.removeItem(at: audioURL(audio.file))
-            record.audio = nil
-            try enqueue(record)
-            total -= audio.byteLength
+        let owners = Dictionary(records.compactMap { record in record.audio.map { ($0.file, record) } }) { first, _ in first }
+        let newest = records.last?.audio?.file
+        for file in files where total > maxBytes || now.timeIntervalSince(file.date) > maxAge {
+            let name = file.url.lastPathComponent
+            if name == newest { continue }
+            if var record = owners[name] {
+                record.audio = nil
+                try enqueue(record)
+            } else if now.timeIntervalSince(file.date) < 60 {
+                continue
+            }
+            try? FileManager.default.removeItem(at: file.url)
+            total -= file.size
         }
     }
 

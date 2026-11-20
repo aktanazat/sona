@@ -35,7 +35,33 @@ struct KeyboardDictationQueueTests {
         try file.append(Data(count: seconds * 32_000))
         let record = KeyboardDictationRecord(id: UUID(), text: "said at \(date)", date: date, language: "en-US", audio: try file.finish())
         try queue.enqueue(record)
+        try FileManager.default.setAttributes([.modificationDate: date], ofItemAtPath: queue.audioURL(file.name).path)
         return record
+    }
+
+    @Test("audio a keyboard ended mid-dictation left behind counts toward the cap and goes first")
+    func orphanedAudioCountsTowardTheCap() throws {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let orphan = try KeyboardAudioFile(in: queue)
+        try orphan.append(Data(count: 2 * 32_000))
+        _ = try orphan.finish()
+        try FileManager.default.setAttributes([.modificationDate: now.addingTimeInterval(-600)], ofItemAtPath: queue.audioURL(orphan.name).path)
+        _ = try record(seconds: 1, at: now.addingTimeInterval(-60))
+        _ = try record(seconds: 1, at: now)
+
+        try queue.trimAudio(maxBytes: 2 * 32_000, maxAge: 7 * 24 * 3600, now: now)
+
+        #expect(!FileManager.default.fileExists(atPath: queue.audioURL(orphan.name).path))
+        #expect(try queue.pending().map { $0.audio != nil } == [true, true])
+    }
+
+    @Test("one dictation longer than the cap keeps its own audio")
+    func newestKeepsItsAudio() throws {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let long = try record(seconds: 3, at: now)
+        try queue.trimAudio(maxBytes: 32_000, maxAge: 7 * 24 * 3600, now: now)
+        #expect(try queue.pending().first?.audio == long.audio)
+        #expect(FileManager.default.fileExists(atPath: queue.audioURL(try #require(long.audio).file).path))
     }
 
     @Test("queued audio past the size cap or the age cap goes, oldest first, and every dictation's text stays")

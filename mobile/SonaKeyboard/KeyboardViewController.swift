@@ -460,7 +460,9 @@ final class KeyboardViewController: UIInputViewController {
             try queue.enqueue(KeyboardDictationRecord(
                 id: UUID(), text: text, date: Date(), language: dictationLanguage, audio: microphone?.takeAudio()
             ))
-            try queue.trimAudio(maxBytes: 32_000_000, maxAge: 7 * 24 * 60 * 60)
+            Task.detached(priority: .utility) {
+                try? queue.trimAudio(maxBytes: 32_000_000, maxAge: 7 * 24 * 60 * 60)
+            }
         } catch { state.notice = error.localizedDescription }
     }
 
