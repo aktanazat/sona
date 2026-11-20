@@ -80,13 +80,26 @@ struct KeyboardToolsTests {
     }
 
     /// Styled letters take two UTF-16 units each, and the host moves the cursor by those units.
-    @Test func replacingWithTheCursorBeforeStyledTextReplacesTheWholeField() {
+    @Test func replacingWithTheCursorBeforeStyledTextReplacesTheWholeField() throws {
         let field = Field(before: "I have", after: " 𝐠𝐨𝐧𝐞 home")
-        let target = FieldText.target(in: field)
-        #expect(FieldText.replace(target, with: "We went home", in: field))
+        let target = field.view().target
+        field.perform(try #require(field.view().replacing(target, with: "We went home")))
         #expect(field.text == "We went home")
-        #expect(FieldText.undo(FieldText.Change(original: target.text, replacement: "We went home"), in: field))
+        field.perform(try #require(field.view().undoing(FieldText.Change(original: target.text, replacement: "We went home"))))
         #expect(field.text == "I have 𝐠𝐨𝐧𝐞 home")
+    }
+
+    /// A host that has not caught up still shows the field from before the keyboard's last
+    /// edit; a tool working from that report would cut the wrong text or glue its words on.
+    @Test func toolChangeWhileTheHostIsBehindNeitherGluesNorCorrupts() throws {
+        let field = Field(before: "Hi", after: "")
+        var echo = FieldEcho()
+        echo.edited(before: "Hi", after: "", deleting: 0, inserting: " there ")
+        field.insertText(" there ")
+        let behind = FieldText(hostBefore: "Hi", hostAfter: "", selection: nil, echo: echo)
+        #expect(behind.inserting("friend").edit.insert == "friend")
+        field.perform(try #require(behind.replacing(behind.target, with: "Hello there ")))
+        #expect(field.text == "Hello there ")
     }
 
     @Test(arguments: [
@@ -131,4 +144,16 @@ private final class Field: NSObject, UITextDocumentProxy {
     func deleteBackward() { if !before.isEmpty { before.removeLast() } }
     func setMarkedText(_ markedText: String, selectedRange: NSRange) {}
     func unmarkText() {}
+
+    /// The field as the tools see it from a host that is up to date.
+    func view() -> FieldText {
+        FieldText(hostBefore: before, hostAfter: after, selection: nil, echo: FieldEcho())
+    }
+
+    /// A tools step, carried out as the keyboard carries it out.
+    func perform(_ step: FieldText.Step) {
+        adjustTextPosition(byCharacterOffset: step.move)
+        for _ in 0..<step.edit.deleteCount { deleteBackward() }
+        insertText(step.edit.insert)
+    }
 }

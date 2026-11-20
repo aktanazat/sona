@@ -66,11 +66,12 @@ final class KeyboardTools {
     /// What the model has written so far for the action at work.
     var partial = ""
 
-    @ObservationIgnored var proxy: () -> UITextDocumentProxy? = { nil }
+    /// The field as the keyboard sees it, with its memory of its own last edit.
+    @ObservationIgnored var field: () -> FieldText? = { nil }
+    /// Applies a change the way a key does, so the field memory sees it.
+    @ObservationIgnored var apply: (FieldText.Step) -> Void = { _ in }
     @ObservationIgnored var canCopy: () -> Bool = { false }
     @ObservationIgnored var snippetsChanged: () -> Void = {}
-    /// The tools wrote to the field, which UIKit does not report as a text change.
-    @ObservationIgnored var fieldChanged: () -> Void = {}
     #if DEBUG
     /// The panel opened or closed, for the frame count.
     @ObservationIgnored var toggled: () -> Void = {}
@@ -185,9 +186,9 @@ final class KeyboardTools {
     // MARK: Field actions
 
     func run(_ action: KeyboardAI) {
-        guard let proxy = proxy() else { return }
+        guard let field = field() else { return }
         if let reason = KeyboardAI.unavailable { return say(reason) }
-        let target = FieldText.target(in: proxy)
+        let target = field.target
         let source: FieldTarget? = target.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : target
         guard source != nil || !action.needsText else { return say("tools.noText") }
         start(action, on: source?.text ?? "") { [weak self] text in
@@ -203,19 +204,21 @@ final class KeyboardTools {
 
     /// Case and styles change the text at once, with Undo on the notice.
     func transform(_ change: (String) -> String) {
-        guard let proxy = proxy() else { return }
-        let target = FieldText.target(in: proxy)
+        guard let field = field() else { return }
+        let target = field.target
         guard !target.text.isEmpty else { return say("tools.noText") }
         let replacement = change(target.text)
-        guard replacement != target.text, FieldText.replace(target, with: replacement, in: proxy) else { return }
+        guard replacement != target.text, let step = field.replacing(target, with: replacement) else { return }
+        apply(step)
         changed(FieldText.Change(original: target.text, replacement: replacement), "tools.changed")
     }
 
     func replace(with answer: Answer) {
-        guard let proxy = proxy(), let source = answer.source else { return }
-        guard FieldText.replace(source, with: answer.text, in: proxy) else {
+        guard let source = answer.source else { return }
+        guard let step = field()?.replacing(source, with: answer.text) else {
             return say("tools.textChanged")
         }
+        apply(step)
         page = .closed
         changed(FieldText.Change(original: source.text, replacement: answer.text), "tools.replaced")
     }
@@ -226,9 +229,8 @@ final class KeyboardTools {
     }
 
     private func write(_ text: String) {
-        guard let proxy = proxy() else { return }
-        proxy.insertText(TypingSession.joiningSpace(before: proxy.documentContextBeforeInput ?? "") + text)
-        fieldChanged()
+        guard let field = field() else { return }
+        apply(field.inserting(text))
     }
 
     func copy(_ text: String) {
@@ -238,17 +240,16 @@ final class KeyboardTools {
 
     /// Puts back the text the last case change, style or AI replacement took.
     func undo() {
-        guard let proxy = proxy(), let change = lastChange else { return }
+        guard let field = field(), let change = lastChange else { return }
         lastChange = nil
         notice = nil
-        if !FieldText.undo(change, in: proxy) { say("tools.textChanged") }
-        fieldChanged()
+        guard let step = field.undoing(change) else { return say("tools.textChanged") }
+        apply(step)
     }
 
     private func changed(_ change: FieldText.Change, _ text: LocalizedStringKey) {
         lastChange = change
         say(text, undoable: true)
-        fieldChanged()
     }
 
     // MARK: Snippets
@@ -259,7 +260,7 @@ final class KeyboardTools {
     }
 
     func saveSelection() {
-        guard let selection = proxy()?.selectedText, !selection.isEmpty else { return say("tools.selectFirst") }
+        guard let selection = field()?.selection else { return say("tools.selectFirst") }
         begin(.snippetKeyword(expansion: selection))
     }
 

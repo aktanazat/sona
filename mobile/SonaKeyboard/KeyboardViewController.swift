@@ -76,13 +76,13 @@ final class KeyboardViewController: UIInputViewController {
                 entries.forEach { self?.session.lexicon.add(shortcut: $0.shortcut, text: $0.text) }
             }
         }
-        tools.proxy = { [weak self] in self?.textDocumentProxy }
+        tools.field = { [weak self] in
+            guard let self else { return nil }
+            return FieldText(hostBefore: textBefore, hostAfter: textAfter, selection: textDocumentProxy.selectedText, echo: echo)
+        }
+        tools.apply = { [weak self] step in self?.applyTool(step) }
         tools.canCopy = { [weak self] in self?.hasFullAccess ?? false }
         tools.snippetsChanged = { [weak self] in self?.applySnippets() }
-        tools.fieldChanged = { [weak self] in
-            self?.refreshShift()
-            self?.refreshSuggestions()
-        }
         #if DEBUG
         tools.toggled = { [weak self] in
             guard let self else { return }
@@ -321,6 +321,18 @@ final class KeyboardViewController: UIInputViewController {
         DispatchQueue.main.async { [weak self] in self?.ownEditInFlight = false }
         for _ in 0..<edit.deleteCount { textDocumentProxy.deleteBackward() }
         if !edit.insert.isEmpty { textDocumentProxy.insertText(edit.insert) }
+    }
+
+    /// A change from the tools, applied as a key's edit is so the field memory sees it. A
+    /// move to the end of the field first is the host's own report from then on.
+    private func applyTool(_ step: FieldText.Step) {
+        if step.move > 0 {
+            echo.forget()
+            textDocumentProxy.adjustTextPosition(byCharacterOffset: step.move)
+        }
+        apply(step.edit)
+        refreshShift()
+        refreshSuggestions()
     }
 
     /// A word with letters right after the cursor is being edited in the middle, so ending
