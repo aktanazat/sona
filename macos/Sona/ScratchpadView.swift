@@ -64,22 +64,18 @@ private struct ScratchNoteListPage: View {
                         .buttonStyle(.secondary)
                     SearchField(prompt: "Search notes", text: $store.query)
                         .frame(width: 216)
-                    Button {
-                        Task { await store.newPersonalDocument() }
-                    } label: {
-                        Image(systemName: "lock.doc")
-                    }
-                    .buttonStyle(.icon)
-                    .help("New personal document")
-                    .accessibilityLabel("New personal document")
-                    Button {
-                        Task { await store.newNote() }
+                    Menu {
+                        Button("New note") { Task { await store.newNote() } }
+                        Button("New personal document") { Task { await store.newPersonalDocument() } }
                     } label: {
                         Image(systemName: "plus")
                     }
+                    .menuStyle(.button)
                     .buttonStyle(.icon)
-                    .help("New note")
-                    .accessibilityLabel("New note")
+                    .menuIndicator(.hidden)
+                    .fixedSize()
+                    .help("New")
+                    .accessibilityLabel("New")
                 }
             }
             ErrorNote(store.error)
@@ -121,7 +117,6 @@ private struct ScratchNoteListPage: View {
                 let others = store.notes.filter { !$0.personal }
                 if !personal.isEmpty {
                     PageSection("Personal") { noteRows(personal) }
-                        .padding(.bottom, 20)
                 }
                 if personal.isEmpty {
                     noteRows(others)
@@ -161,12 +156,6 @@ private struct ScratchNoteRow: View {
             }
         } trailing: {
             HStack(spacing: 10) {
-                if note.personal {
-                    Image(systemName: "lock.fill")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(Theme.inkSecondary)
-                        .accessibilityLabel("Personal")
-                }
                 if note.pinned {
                     Image(systemName: "pin.fill")
                         .font(.system(size: 12, weight: .medium))
@@ -197,6 +186,7 @@ private struct ScratchNoteEditorPage: View {
     @State private var showingHistory = false
     @State private var showingSources = false
     @State private var showingPersonalShare = false
+    @State private var confirmingPrivate = false
     @State private var captured: ScratchSourceEvidence?
     @State private var sourceError: String?
     @State private var selectedPhoneThought: PhoneThoughtReference?
@@ -239,6 +229,13 @@ private struct ScratchNoteEditorPage: View {
         case 1: return "Shared with \(store.collaborators[0].agent)"
         default: return "Shared with \(store.collaborators.count) agents"
         }
+    }
+
+    /// What making the open note private undoes, named by what it is filed under.
+    private var privateConsequence: String {
+        let filed = (store.memory?.documents ?? []).map(\.title)
+        guard !filed.isEmpty else { return "Agents can no longer read it" }
+        return "Removes it from \(filed.formatted(.list(type: .and))) and from agents' reads"
     }
 
     var body: some View {
@@ -289,14 +286,8 @@ private struct ScratchNoteEditorPage: View {
                         .buttonStyle(.secondary)
                         .help("Share with agents, or move it into a project")
                 } else if store.saved != nil {
-                    Button {
-                        Task { await store.makePrivate() }
-                    } label: {
-                        Image(systemName: "lock")
-                    }
-                    .buttonStyle(.icon)
-                    .help("Make private: take it off its projects and cycles and out of agents' reads")
-                    .accessibilityLabel("Make private")
+                    Button("Make private…") { confirmingPrivate = true }
+                        .buttonStyle(.quiet)
                 }
                 ScratchNoteActions(
                     store: store,
@@ -328,6 +319,14 @@ private struct ScratchNoteEditorPage: View {
                 Task { await store.delete() }
             }
             Button("Keep it", role: .cancel) {}
+        }
+        .alert("Make this note private?", isPresented: $confirmingPrivate) {
+            Button("Make private") {
+                Task { await store.makePrivate() }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(privateConsequence)
         }
         .sheet(isPresented: $showingHistory) {
             ScratchVersionHistorySheet(store: store)
