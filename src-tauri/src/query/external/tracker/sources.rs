@@ -613,6 +613,16 @@ impl Tracker<'_> {
         args: &SourceLinkArgs,
     ) -> Result<ExternalSourceLink, ExternalError> {
         let source = linked_source(self.meetings, args).await?;
+        if source.kind == EvidenceSourceKind::Note {
+            let note = Uuid::parse_str(&source.id).map_err(|_| {
+                ExternalError::invalid(format!("{:?} is not a note id.", source.id))
+            })?;
+            self.note(
+                &note,
+                args.write.agent.as_deref(),
+                crate::scratchpad::personal::ScratchNoteRole::Edit,
+            )?;
+        }
         let board = self.board().await?;
         let target = link_target(&board, &args.target)?;
         let at_ms = args.at.map(|seconds| i64::from(seconds) * 1_000);

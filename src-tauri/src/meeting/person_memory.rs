@@ -158,7 +158,8 @@ pub struct PersonMemorySnapshot {
 
 /// `hides_meeting` names the meetings this reader may not see, by id. Their
 /// rows leave before anything below links a note to them or picks the last
-/// conversation.
+/// conversation. Personal documents are never among the notes: this is
+/// read for agents, who reach those only by name through `sona work`.
 pub(crate) async fn read(
     app: &AppHandle,
     person_id: PersonId,
@@ -232,7 +233,9 @@ fn read_stored(
                 if !direct && related_sources.is_empty() {
                     continue;
                 }
-                let Some(note) = scratchpad::note_with_connection(connection, &id)? else {
+                let Some(note) = scratchpad::note_with_connection(connection, &id)?
+                    .filter(|note| !note.personal)
+                else {
                     continue;
                 };
                 let synthesis: bool = connection.query_row(

@@ -15,6 +15,7 @@ pub mod evidence;
 pub mod links;
 pub(crate) mod memory_index;
 pub mod passages;
+pub mod personal;
 pub mod phone_import;
 pub mod review;
 pub mod subjects;
@@ -60,7 +61,7 @@ const TITLE_MAX_CHARS: usize = 60;
 /// The title of a note whose body is too short to name it.
 pub const UNTITLED: &str = "Untitled";
 
-const NOTE_COLUMNS: &str = "id, title, body, pinned, created_at_ms, updated_at_ms";
+const NOTE_COLUMNS: &str = "id, title, body, pinned, created_at_ms, updated_at_ms, personal";
 
 /// One note, as the screen and every other slice read it.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
@@ -74,6 +75,9 @@ pub struct ScratchNote {
     pub pinned: bool,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
+    /// A personal document: private to the person in the app and the agents
+    /// it is shared with, until it is filed under something.
+    pub personal: bool,
 }
 
 /// How a version came to be.
@@ -234,6 +238,7 @@ fn read_note_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ScratchNote> {
         pinned: row.get(3)?,
         created_at_ms: row.get(4)?,
         updated_at_ms: row.get(5)?,
+        personal: row.get(6)?,
     })
 }
 
@@ -307,6 +312,7 @@ pub(crate) fn create_note_in(
         pinned: false,
         created_at_ms: now_ms,
         updated_at_ms: now_ms,
+        personal: false,
     };
     transaction.execute(
         "INSERT INTO scratch_notes (id, title, body, pinned, created_at_ms, updated_at_ms)
@@ -613,21 +619,16 @@ pub(crate) fn read_versions(
     .map_err(|error| failure_sentence(history, error, "The note's history could not be read."))
 }
 
-pub(crate) fn search_notes(
-    history: &HistoryManager,
-    query: &str,
-    before_ms: Option<i64>,
-    limit: usize,
-) -> Result<Vec<ScratchNote>, String> {
-    search_notes_after(history, query, before_ms, None, limit)
-}
-
+/// Notes whose words hold every word of `query`, newest modified first,
+/// before `before_ms` and past `after_id` when given. Personal documents are
+/// among them only when `include_personal` says so.
 pub(crate) fn search_notes_after(
     history: &HistoryManager,
     query: &str,
     before_ms: Option<i64>,
     after_id: Option<&str>,
     limit: usize,
+    include_personal: bool,
 ) -> Result<Vec<ScratchNote>, String> {
     if limit == 0 {
         return Ok(Vec::new());
@@ -642,10 +643,11 @@ pub(crate) fn search_notes_after(
                 "SELECT {NOTE_COLUMNS} FROM scratch_notes
              WHERE (?1 IS NULL OR updated_at_ms <= ?1)
                AND (?2 IS NULL OR updated_at_ms != ?1 OR id > ?2)
+               AND (?3 OR personal = 0)
              ORDER BY updated_at_ms DESC, id"
             ))?;
             let mut notes = Vec::new();
-            let mut rows = statement.query(params![before_ms, after_id])?;
+            let mut rows = statement.query(params![before_ms, after_id, include_personal])?;
             while let Some(row) = rows.next()? {
                 let note = read_note_row(row)?;
                 let haystack = format!("{} {}", note.title, note.body).to_lowercase();

@@ -919,7 +919,8 @@ impl MeetingFence {
     }
 }
 
-/// The notes, by id, that link a meeting the fence hides.
+/// The notes, by id, that link a meeting the fence hides, and every
+/// personal document.
 fn hidden_notes(
     history: &rusqlite::Connection,
     meetings: &MeetingFence,
@@ -927,13 +928,18 @@ fn hidden_notes(
     let mut statement = history
         .prepare("SELECT note_id, target_id FROM scratch_note_sources WHERE kind = 'meeting'")?;
     let found = statement
-        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(found
-        .into_iter()
-        .filter(|(_, meeting)| meetings.hides(planning::EvidenceSourceKind::Meeting, meeting))
-        .map(|(note, _)| note)
-        .collect())
+    let mut hidden = crate::scratchpad::personal::personal_ids(history)?;
+    hidden.extend(
+        found
+            .into_iter()
+            .filter(|(_, meeting)| meetings.hides(planning::EvidenceSourceKind::Meeting, meeting))
+            .map(|(note, _)| note),
+    );
+    Ok(hidden)
 }
 
 /// Whether a change stays out of an outside reader's stream: it is on a

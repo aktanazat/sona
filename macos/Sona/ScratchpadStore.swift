@@ -10,6 +10,9 @@ struct ScratchNote: Decodable, Identifiable, Equatable {
     var pinned: Bool
     let createdAtMs: Int64
     var updatedAtMs: Int64
+    /// Private to this Mac's owner and the agents it is shared with, until it
+    /// is moved into a project, a task or a cycle.
+    let personal: Bool
 
     /// The words after the ones the title took, on one line, for a list row,
     /// as a reader sees them: no markdown marks and none of Sona's own links.
@@ -323,6 +326,10 @@ final class ScratchpadStore {
     private(set) var focusRequest = 0
     /// The last thing the core could not do, until the next success.
     private(set) var error: String?
+    /// The new editor's first save makes a personal document, not a note.
+    private(set) var draftPersonal = false
+    /// The agents the open personal document is shared with.
+    private(set) var collaborators: [ScratchCollaborator] = []
 
     /// The open note's saved states, once the history is asked for.
     private(set) var versions: [ScratchNoteVersion]?
@@ -458,6 +465,7 @@ final class ScratchpadStore {
             body = note.body
             versions = nil
         }
+        await loadCollaborators()
     }
 
     // MARK: - The editor
@@ -477,6 +485,15 @@ final class ScratchpadStore {
         take(nil)
     }
 
+    /// An empty editor whose first saved words make a personal document:
+    /// private to the owner until it is shared or moved.
+    func newPersonalDocument() async {
+        let current = session
+        guard await flush(), current == session, !hasPendingSave else { return }
+        take(nil)
+        draftPersonal = true
+    }
+
     private func take(_ note: ScratchNote?) {
         session = UUID()
         viewedVersion = nil
@@ -487,11 +504,16 @@ final class ScratchpadStore {
         versions = nil
         versionsError = nil
         error = nil
+        draftPersonal = false
+        collaborators = []
         editing = true
         focusRequest += 1
         memory = nil
         memoryLoading = false
-        Task { await loadMemory() }
+        Task {
+            await loadMemory()
+            await loadCollaborators()
+        }
     }
 
     /// Bring a retained draft back into focus after quitting was cancelled.
@@ -554,6 +576,8 @@ final class ScratchpadStore {
             let note: ScratchNote =
                 if let id {
                     try await core.request("scratchpad_update_body", ScratchBodyParams(id: id, body: text))
+                } else if draftPersonal {
+                    try await core.request("scratchpad_create_personal", ScratchCreateParams(body: text))
                 } else {
                     try await core.request("scratchpad_create", ScratchCreateParams(body: text))
                 }
@@ -903,6 +927,53 @@ final class ScratchpadStore {
                                ScratchCycleLinkParams(id: id, number: number))
     }
 
+    /// The agents the open personal document is shared with.
+    func loadCollaborators() async {
+        guard let id = openId, saved?.personal == true else {
+            collaborators = []
+            return
+        }
+        do {
+            collaborators = try await core.request("scratchpad_collaborators", ScratchIdParams(id: id))
+        } catch {
+            self.error = error.localizedDescription
+        }
+    }
+
+    /// Shares the open personal document with `agent` at `role`, changes the
+    /// role it has, or with no role takes the agent off.
+    func share(agent: String, role: ScratchNoteRole?) async throws {
+        guard let id = openId else { return }
+        collaborators = try await core.request(
+            "scratchpad_share", ScratchShareParams(id: id, agent: agent, role: role))
+    }
+
+    /// Takes the open note back into the personal space: off every project,
+    /// task and cycle it was filed under, private again.
+    func makePrivate() async {
+        guard let id = openId else { return }
+        do {
+            let note: ScratchNote = try await core.request("scratchpad_make_personal", ScratchIdParams(id: id))
+            merge(note)
+            saved = note
+            error = nil
+            await loadCollaborators()
+            await loadMemory()
+        } catch {
+            self.error = error.localizedDescription
+        }
+    }
+
+    /// Reads the open note again once it was filed elsewhere, so a moved
+    /// personal document shows as the ordinary note it now is.
+    func refreshOpen() async {
+        await load()
+        guard let id = openId, let note = notes.first(where: { $0.id == id }) else { return }
+        saved = note
+        await loadCollaborators()
+        await loadMemory()
+    }
+
     private func isBlank(_ text: String) -> Bool {
         text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
@@ -915,6 +986,33 @@ private struct ScratchCycleParams: Encodable {
 private struct ScratchCycleLinkParams: Encodable {
     let id: String
     let number: Int64
+}
+
+enum ScratchNoteRole: String, Codable, CaseIterable, Identifiable {
+    case view, comment, edit
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .view: "Can view"
+        case .comment: "Can comment"
+        case .edit: "Can edit"
+        }
+    }
+}
+
+/// One agent a personal document is shared with.
+struct ScratchCollaborator: Decodable, Identifiable, Equatable {
+    let agent: String
+    let role: ScratchNoteRole
+    let addedAtMs: Int64
+    var id: String { agent.lowercased() }
+}
+
+private struct ScratchShareParams: Encodable {
+    let id: String
+    let agent: String
+    let role: ScratchNoteRole?
 }
 
 extension AppModel {

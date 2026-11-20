@@ -230,7 +230,7 @@ impl Passage {
             run(history, |conn| {
                 let transaction = conn.transaction()?;
                 let now = now_ms();
-                let note = ScratchNote { id: note_id.to_string(), title: super::derive_title(&self.body), body: self.body, pinned: false, created_at_ms: now, updated_at_ms: now };
+                let note = ScratchNote { id: note_id.to_string(), title: super::derive_title(&self.body), body: self.body, pinned: false, created_at_ms: now, updated_at_ms: now, personal: false };
                 transaction.execute("INSERT INTO scratch_notes (id, title, body, pinned, created_at_ms, updated_at_ms) VALUES (?1, ?2, ?3, 0, ?4, ?4)", params![note.id, note.title, note.body, now])?;
                 super::record_version(&transaction, &note.id, &note.body, now, super::ScratchVersionKind::Edit, author)?;
                 insert_source(&transaction, &note.id, &ResolvedSource { source: self.meeting, evidence: None })?;

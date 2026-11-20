@@ -260,6 +260,13 @@ them. `list` and `ready` take `--due overdue,today,this-week,next:N,none`;
 | `ask <QUESTION> [--take N,...]`        | Cited lines answering it; `--take` writes them as Triage tasks   |
 | `say <WORDS>`                          | **Writes.** "push everything not urgent to monday"; `--dry-run`  |
 | `watches`, `watch`, `unwatch`          | Topics Sona notifies about; watch and unwatch write              |
+| `personal`, `personal-show`            | Personal documents shared with `--agent NAME`, and its role      |
+| `personal-new`, `personal-share`       | **Writes.** Private by default; share at view, comment or edit   |
+| `personal-move`, `personal-private`    | **Writes.** File into a project, task or cycle; or back again    |
+
+A personal document never shows in any other read, `--notes` and search
+included. An agent reaches one only at the role the owner, or an editor,
+gave the name it passes as `--agent`; without one it reads as not found.
 
 In a portable profile only the tracker's history side opens: work from
 meetings, people as owners and `--meeting` filters need the encrypted corpus.

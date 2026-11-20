@@ -346,7 +346,7 @@ pub(crate) fn read_memory(
         let Some(note) = note_with_connection(conn, id)? else { return Ok(None) };
         let sources = sources_with_connection(conn, id)?;
         let mut statement = conn.prepare(
-            "SELECT DISTINCT n.id, n.title, n.body, n.pinned, n.created_at_ms, n.updated_at_ms
+            "SELECT DISTINCT n.id, n.title, n.body, n.pinned, n.created_at_ms, n.updated_at_ms, n.personal
              FROM scratch_notes n WHERE n.id != ?1 AND (
                 n.id IN (SELECT target_id FROM scratch_note_sources WHERE note_id = ?1 AND kind = 'note')
                 OR n.id IN (SELECT note_id FROM scratch_note_sources WHERE kind = 'note' AND target_id = ?1)
@@ -365,12 +365,14 @@ pub(crate) fn read_memory(
     let Some(mut memory) = memory else {
         return Ok(None);
     };
+    memory.sources.retain(|source| match source.kind {
+        ScratchSourceKind::Meeting => !hides(EvidenceSourceKind::Meeting, &source.id),
+        ScratchSourceKind::Note => !hides(EvidenceSourceKind::Note, &source.id),
+        ScratchSourceKind::Person => true,
+    });
     memory
-        .sources
-        .retain(|source| {
-            source.kind != ScratchSourceKind::Meeting
-                || !hides(EvidenceSourceKind::Meeting, &source.id)
-        });
+        .related_notes
+        .retain(|note| !hides(EvidenceSourceKind::Note, &note.id));
     if store.is_none()
         && memory
             .sources

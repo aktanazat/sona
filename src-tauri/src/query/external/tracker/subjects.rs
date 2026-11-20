@@ -3,6 +3,7 @@
 
 use super::notes::{conflict, request_json, Receipt};
 use super::{refusal, Tracker, WorkAnswer, WriteArgs};
+use crate::planning;
 use crate::query::external::{ExternalError, ExternalErrorCode};
 use crate::query::QUERY_SCHEMA_VERSION;
 use crate::scratchpad::subjects::{self, ScratchSubject, ScratchSubjectPage, SubjectNoteAction};
@@ -136,18 +137,30 @@ fn answer(
 }
 
 impl Tracker<'_> {
+    /// Subject `id` as an agent reads it: without the personal documents
+    /// filed under it, which it reaches only through `sona work personal`.
     fn subject_page(&self, id: &str) -> Result<ScratchSubjectPage, ExternalError> {
-        subjects::read(self.history, id)
+        let mut page = subjects::read(self.history, id)
             .map_err(|message| refusal(self.history, message))?
             .ok_or_else(|| {
                 ExternalError::new(ExternalErrorCode::NotFound, format!("No subject {id}."))
                     .hint("List them with: sona work subjects")
-            })
+            })?;
+        page.history.retain(|note| !note.personal);
+        if page.current.as_ref().is_some_and(|note| note.personal) {
+            page.current = None;
+            page.subject.current_note_id = None;
+        }
+        Ok(page)
     }
 
     pub(super) fn subjects(&self) -> Result<WorkAnswer, ExternalError> {
         let listed = subjects::scratchpad_subjects(self.app.state())
             .map_err(|message| refusal(self.history, message))?;
+        let personal = planning::history(self.history, |conn| {
+            Ok(crate::scratchpad::personal::personal_ids(conn)?)
+        })
+        .map_err(|message| refusal(self.history, message))?;
         Ok(answer(
             SubjectAction::Listed,
             false,
@@ -155,7 +168,16 @@ impl Tracker<'_> {
             false,
             listed
                 .into_iter()
-                .map(|subject| project_subject(subject, None))
+                .map(|mut subject| {
+                    if subject
+                        .current_note_id
+                        .as_ref()
+                        .is_some_and(|id| personal.contains(id))
+                    {
+                        subject.current_note_id = None;
+                    }
+                    project_subject(subject, None)
+                })
                 .collect(),
         ))
     }
@@ -208,6 +230,11 @@ impl Tracker<'_> {
     }
 
     pub(super) fn subject_note(&self, args: &SubjectNoteArgs) -> Result<WorkAnswer, ExternalError> {
+        self.note(
+            &args.note,
+            args.write.agent.as_deref(),
+            crate::scratchpad::personal::ScratchNoteRole::Edit,
+        )?;
         let page = self.subject_page(&args.subject.to_string())?;
         let note_id = args.note.to_string();
         let (action, how) = match (args.current, args.remove) {
