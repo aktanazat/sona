@@ -67,8 +67,8 @@ enum AskSonaError: Error, CustomLocalizedStringResourceConvertible {
 
     var localizedStringResource: LocalizedStringResource {
         switch self {
-        case .notPaired: "Pair Sona with your Mac first. Your Mac answers questions for Sona's agent."
-        case .refused: "Sona's agent can't take this question. Keep it shorter, and leave out web addresses and file paths."
+        case .notPaired: "Pair this iPhone with your Mac to ask Sona."
+        case .refused: "Sona can't take this question. Keep it shorter and leave out web addresses and file paths."
         }
     }
 }

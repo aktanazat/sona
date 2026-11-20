@@ -36,8 +36,10 @@ struct AgentChatScreen: View {
                             }
                             .id(turn.id)
                         }
-                    } else {
-                        starters
+                    } else if !model.isPaired {
+                        Text("agent.needsPairing")
+                            .font(.subheadline)
+                            .foregroundStyle(Theme.textSecondary)
                     }
                 }
                 .padding(.horizontal, Theme.pageInset)
@@ -64,6 +66,7 @@ struct AgentChatScreen: View {
             }
             .safeAreaBar(edge: .bottom) { composer }
             .onChange(of: scenePhase, initial: true) { _, phase in if phase == .active { chat.watch() } }
+            .onAppear { composing = conversation == nil && model.isPaired }
         }
         .tint(Theme.accent)
     }
@@ -80,52 +83,20 @@ struct AgentChatScreen: View {
         }
     }
 
-    @ViewBuilder
-    private var starters: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("agent.title")
-                .font(.title2.weight(.semibold))
-                .foregroundStyle(Theme.textPrimary)
-            Text(model.isPaired ? "agent.intro" : "agent.needsPairing")
-                .font(.subheadline)
-                .foregroundStyle(Theme.textSecondary)
-        }
-        .padding(.top, 24)
-        if model.isPaired {
-            VStack(alignment: .leading, spacing: 8) {
-                ForEach(Self.starterKeys, id: \.self) { key in
-                    Button { send(NSLocalizedString(key, comment: "")) } label: {
-                        Text(LocalizedStringKey(key))
-                            .font(.subheadline)
-                            .foregroundStyle(Theme.textPrimary)
-                            .multilineTextAlignment(.leading)
-                            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
-                            .padding(.horizontal, 14)
-                            .background(Theme.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .padding(.top, 8)
-        }
-    }
-
-    private static let starterKeys = ["agent.starter.open", "agent.starter.lastMeeting", "agent.starter.tomorrow"]
-
     private var composer: some View {
         VStack(alignment: .leading, spacing: 6) {
             if let refusal = chat.refusal {
                 Text(Self.refusalKey(refusal))
                     .font(.footnote)
                     .foregroundStyle(Theme.recording)
-                    .padding(.horizontal, 6)
+                    .padding(.horizontal, 16)
             }
             HStack(alignment: .bottom, spacing: 8) {
                 TextField("agent.placeholder", text: $draft, axis: .vertical)
                     .lineLimit(1...6)
                     .focused($composing)
                     .padding(.horizontal, 16)
-                    .padding(.vertical, 11)
+                    .padding(.vertical, 12)
                     .accessibilityIdentifier("agent-composer")
                 Button { send(draft) } label: {
                     Image(systemName: "arrow.up")
@@ -182,8 +153,8 @@ private struct AgentTurnView: View {
                     .font(.body)
                     .foregroundStyle(Color.white)
                     .textSelection(.enabled)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 10)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
                     .background(Theme.accent, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
                 status
             }
@@ -208,10 +179,10 @@ private struct AgentTurnView: View {
     private var status: some View {
         switch turn.status {
         case .queued:
-            Label("agent.status.queued", systemImage: "arrow.up.circle")
+            Text("agent.status.queued")
                 .statusStyle()
         case .sent:
-            Label("agent.status.sent", systemImage: "desktopcomputer")
+            Text("agent.status.sent")
                 .statusStyle()
         case .working:
             HStack(spacing: 6) {

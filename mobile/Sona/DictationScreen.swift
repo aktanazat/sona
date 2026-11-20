@@ -370,9 +370,6 @@ private struct PhoneDictationSettings: View {
             }
             .disabled(dictation.isBusy || model.recorder.isRecording)
             .onChange(of: microphone) { _, choice in MicrophoneChoice.preferred = choice }
-        } footer: {
-            Text("dictation.microphoneFooter")
-                .foregroundStyle(Theme.textSecondary)
         }
         .listRowBackground(Theme.surface)
         .task { microphones = MicrophoneChoice.available() }
@@ -402,6 +399,7 @@ private struct PhoneDictationSettings: View {
                 .foregroundStyle(Theme.textSecondary)
         }
         .listRowBackground(Theme.surface)
+        .monospacedDigit()
     }
 
     private var profileIsEmpty: Bool {

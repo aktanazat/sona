@@ -165,7 +165,9 @@ struct MicrophoneLiveActivityWidget: Widget {
                 DynamicIslandExpandedRegion(.leading) {
                     MicrophoneStatus(listening: context.state.listening, isStale: context.isStale)
                         .font(.subheadline.weight(.semibold))
+                        .lineLimit(1)
                         .padding(.leading, 4)
+                        .dynamicIsland(verticalPlacement: .belowIfTooWide)
                 }
                 DynamicIslandExpandedRegion(.trailing) {
                     if !context.isStale {
