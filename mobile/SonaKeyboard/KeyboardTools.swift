@@ -82,9 +82,9 @@ final class KeyboardTools {
     @ObservationIgnored private var work: Task<Void, Never>?
     @ObservationIgnored private var deadline: Task<Void, Never>?
     @ObservationIgnored private var answering = false
-    /// The dictation being styled and the field it was heard for; it goes in as heard if
-    /// the style stops.
-    @ObservationIgnored private var unstyled: (text: String, field: UUID?)?
+    /// The dictation being styled, the field it was heard for and any dictation already
+    /// waiting on review; it goes in as heard if the style stops.
+    @ObservationIgnored private var unstyled: (text: String, field: UUID?, earlier: String?)?
     @ObservationIgnored private var warmFix: LanguageModelSession?
     @ObservationIgnored private var noticeTimer: Task<Void, Never>?
 
@@ -286,18 +286,30 @@ final class KeyboardTools {
         let field = fieldID()
         recordingStyle = nil
         recordingLanguage = nil
-        guard let style, KeyboardAI.unavailable == nil else { return land(text, heardFor: field) }
+        cancelWork()
+        let earlier = waitingReview
+        guard let style, KeyboardAI.unavailable == nil else { return land(text, heardFor: field, earlier: earlier) }
         start(.style(style), on: text) { [weak self] styledText in
             guard let self else { return }
             if styledText == nil { say("dictation.styleFailed") }
-            land(styledText ?? text, heardFor: field)
+            land(styledText ?? text, heardFor: field, earlier: earlier)
         }
-        unstyled = (text, field)
+        unstyled = (text, field, earlier)
+    }
+
+    private var waitingReview: String? {
+        if case let .review(text) = page { return text }
+        return nil
     }
 
     /// A dictation goes into the field it was heard for; in any other field it waits for
-    /// Insert instead of landing in text it was not meant for.
-    private func land(_ text: String, heardFor field: UUID?) {
+    /// Insert instead of landing in text it was not meant for. One that lands while an
+    /// `earlier` dictation waits on review joins it there.
+    private func land(_ text: String, heardFor field: UUID?, earlier: String?) {
+        if earlier != nil {
+            page = .review(KeyboardDictation.reviewing(text, after: earlier))
+            return say("dictation.reviewJoined")
+        }
         switch KeyboardDictation.landing(heardFor: field, now: fieldID(), reviews: reviewsDictation) {
         case .review:
             page = .review(text)
@@ -313,7 +325,7 @@ final class KeyboardTools {
         guard let pending = unstyled else { return }
         unstyled = nil
         cancelWork()
-        page = .review(pending.text)
+        page = .review(KeyboardDictation.reviewing(pending.text, after: pending.earlier))
     }
 
     // MARK: The model at work
@@ -370,7 +382,7 @@ final class KeyboardTools {
         let pending = unstyled
         unstyled = nil
         cancelWork()
-        if let pending { land(pending.text, heardFor: pending.field) } else { page = .browse(.ai, nil) }
+        if let pending { land(pending.text, heardFor: pending.field, earlier: pending.earlier) } else { page = .browse(.ai, nil) }
     }
 
     /// Ends the model's work. A dictation it was styling goes in as it was heard.
@@ -381,7 +393,7 @@ final class KeyboardTools {
         deadline = nil
         if let pending = unstyled {
             unstyled = nil
-            land(pending.text, heardFor: pending.field)
+            land(pending.text, heardFor: pending.field, earlier: pending.earlier)
         }
     }
 

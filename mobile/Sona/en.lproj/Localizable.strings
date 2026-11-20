@@ -173,6 +173,7 @@
 "dictation.noStyle" = "Keep my words";
 "dictation.styleUnavailable" = "Writing styles need Apple Intelligence enabled on a supported iPhone. Your vocabulary and snippets still work.";
 "dictation.styleFailed" = "The writing style could not finish. Your dictated words were kept.";
+"dictation.reviewJoined" = "Added below the dictation already waiting";
 "dictation.profileEmpty" = "Pair with your Mac and sync to bring over vocabulary, replacements, snippets and writing styles.";
 "dictation.profileSynced" = "From your Mac. Change these in Sona on your Mac, then refresh Notes to sync.";
 "dictation.vocabulary" = "Vocabulary";

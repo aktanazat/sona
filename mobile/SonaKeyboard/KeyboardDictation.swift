@@ -98,10 +98,18 @@ struct KeyboardDictation {
     }
 
     /// Where a finished dictation goes: typed into the field it was heard for, or held for
-    /// review when review is on or the keyboard is in another field by now, as after a
-    /// style that finished late.
+    /// review when review is on, or the keyboard is in another field by now, as after a
+    /// style that finished late, or either field is unknown.
     static func landing(heardFor field: UUID?, now current: UUID?, reviews: Bool) -> Landing {
-        reviews || field != current ? .review : .write
+        guard !reviews, let field, field == current else { return .review }
+        return .write
+    }
+
+    /// The text on review once another dictation lands while one is showing: both, the
+    /// earlier first, a paragraph apart.
+    static func reviewing(_ text: String, after showing: String?) -> String {
+        guard let showing, !showing.isEmpty else { return text }
+        return showing + "\n\n" + text
     }
 }
 

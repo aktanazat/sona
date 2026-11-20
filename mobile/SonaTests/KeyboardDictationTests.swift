@@ -55,6 +55,18 @@ struct KeyboardDictationTests {
         #expect(KeyboardDictation.landing(heardFor: heardFor, now: heardFor, reviews: false) == .write)
         #expect(KeyboardDictation.landing(heardFor: heardFor, now: heardFor, reviews: true) == .review)
     }
+
+    @Test("a dictation whose field the host never named waits for Insert, since it may not be the same field")
+    func unknownFieldWaitsForReview() {
+        #expect(KeyboardDictation.landing(heardFor: nil, now: nil, reviews: false) == .review)
+        #expect(KeyboardDictation.landing(heardFor: UUID(), now: nil, reviews: false) == .review)
+    }
+
+    @Test("a dictation landing while another waits on review joins it below, never replaces it")
+    func secondDictationJoinsTheReview() {
+        #expect(KeyboardDictation.reviewing("Second.", after: "First.") == "First.\n\nSecond.")
+        #expect(KeyboardDictation.reviewing("Only.", after: nil) == "Only.")
+    }
 }
 
 /// Dictated or swiped text joined to what is before the cursor.
