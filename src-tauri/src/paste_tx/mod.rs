@@ -62,7 +62,7 @@ pub(crate) const QUIET_PERIOD: Duration = Duration::from_millis(200);
 pub(crate) const RESTORE_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// When the chord could not be injected at all, no legitimate receipt can
-/// arrive, so restore quickly instead of waiting out the full timeout.
+/// arrive, so settle quickly instead of waiting out the full timeout.
 pub(crate) const FAILED_INJECTION_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// Shared, cross-thread record of one paste transaction.
