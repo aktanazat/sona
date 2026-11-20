@@ -162,6 +162,11 @@ enum StreamControl {
     Cancel,
 }
 
+enum ChunkedPreviewOutcome {
+    Finished(Option<mpsc::Sender<Option<FinalizedStreamText>>>),
+    Panicked,
+}
+
 impl From<StreamControl> for StreamCmd {
     fn from(control: StreamControl) -> Self {
         match control {
@@ -2085,13 +2090,26 @@ impl TranscriptionManager {
                 }
                 _ => None,
             };
-            self.lock_engine().put_back(engine);
             match preview {
-                Some(Some(reply)) => {
+                Some(ChunkedPreviewOutcome::Finished(Some(reply))) => {
+                    self.lock_engine().put_back(engine);
                     let _ = reply.send(None);
                 }
-                Some(None) => {}
+                Some(ChunkedPreviewOutcome::Finished(None)) => {
+                    self.lock_engine().put_back(engine);
+                }
+                Some(ChunkedPreviewOutcome::Panicked) => {
+                    drop(engine);
+                    *self.lock_engine() = EngineSlot::Empty;
+                    crate::memory::trim_freed_memory();
+                    let _ = self
+                        .app_handle
+                        .emit("model-state-changed", engine_panic_model_state_event());
+                    self.router.clear();
+                    drain_until_finalize(lanes);
+                }
                 None => {
+                    self.lock_engine().put_back(engine);
                     self.router.clear();
                     drain_until_finalize(lanes);
                 }
@@ -2256,7 +2274,7 @@ impl TranscriptionManager {
         lanes: &mut StreamLanes,
         session: &mut Session,
         options: &RunOptions,
-    ) -> Option<mpsc::Sender<Option<FinalizedStreamText>>> {
+    ) -> ChunkedPreviewOutcome {
         let mut transcript = ChunkedTranscript::default();
         loop {
             let paused = match lanes.recv_within(SEGMENT_GAP) {
@@ -2268,8 +2286,12 @@ impl TranscriptionManager {
                     transcript.push(&pcm);
                     false
                 }
-                Ok(Some(StreamCmd::Finalize(reply))) => return Some(reply),
-                Ok(Some(StreamCmd::Cancel)) | Err(_) => return None,
+                Ok(Some(StreamCmd::Finalize(reply))) => {
+                    return ChunkedPreviewOutcome::Finished(Some(reply));
+                }
+                Ok(Some(StreamCmd::Cancel)) | Err(_) => {
+                    return ChunkedPreviewOutcome::Finished(None);
+                }
                 Ok(None) => true,
             };
             // Once the dictation has ended, its last frames only need draining.
@@ -2279,16 +2301,23 @@ impl TranscriptionManager {
             let Some(due) = transcript.due(paused) else {
                 continue;
             };
-            match session.run(transcript.segment(), options) {
-                Ok(decoded) => {
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                session.run(transcript.segment(), options)
+            })) {
+                Ok(Ok(decoded)) => {
                     if transcript.apply(due, &decoded.text) {
                         self.emit_stream_text(transcript.committed(), transcript.tentative());
                     }
                 }
-                Err(error) => {
+                Ok(Err(error)) => {
                     warn!("live preview decode failed: {error}");
                     self.router
                         .disable_preview("live preview decode was rejected");
+                }
+                Err(_) => {
+                    error!("{ENGINE_PANIC_LOG_MESSAGE}");
+                    self.router.disable_preview("live preview engine panicked");
+                    return ChunkedPreviewOutcome::Panicked;
                 }
             }
         }
@@ -2851,7 +2880,7 @@ impl TranscriptionManager {
 
                     // Empty the slot so the next attempt reloads.
                     *self.lock_engine() = EngineSlot::Empty;
-        crate::memory::trim_freed_memory();
+                    crate::memory::trim_freed_memory();
 
                     let _ = self
                         .app_handle
@@ -3305,7 +3334,7 @@ fn run_cloud_transport_session<F>(
     router: &StreamRouter,
     mut consume_event: F,
     result_tx: mpsc::SyncSender<CloudStreamFinalization>,
-    on_slow: &dyn Fn(),
+    on_slow: &(dyn Fn() + Sync),
 ) where
     F: FnMut(
         crate::cloud_stt::CloudEvent,
@@ -3334,14 +3363,43 @@ fn run_cloud_transport_session<F>(
     };
     let mut latency = crate::slow_connection::TranscriptionLatency::default();
     let connecting = Instant::now();
-    let mut transport = match factory.connect(plan, api_key) {
+    let warned_during_connect = AtomicBool::new(false);
+    let connect_result = std::thread::scope(|scope| {
+        let (done_tx, done_rx) = mpsc::channel::<()>();
+        let warned_flag = &warned_during_connect;
+        scope.spawn(move || {
+            if matches!(
+                done_rx.recv_timeout(crate::slow_connection::SLOW_CONNECT),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ) {
+                warned_flag.store(true, Ordering::Release);
+                on_slow();
+            }
+        });
+        let result = factory.connect(plan, api_key);
+        drop(done_tx);
+        result
+    });
+    let already_warned = warned_during_connect.load(Ordering::Acquire);
+    if already_warned {
+        let _ = latency.connected(crate::slow_connection::SLOW_CONNECT);
+    }
+    let mut transport = match connect_result {
         Ok(transport) => {
-            if latency.connected(connecting.elapsed()) {
+            if !already_warned && latency.connected(connecting.elapsed()) {
                 on_slow();
             }
             transport
         }
         Err(failure) => {
+            if matches!(
+                failure,
+                CloudStreamFailure::Network | CloudStreamFailure::Disconnected
+            ) && !already_warned
+                && latency.timed_out()
+            {
+                on_slow();
+            }
             router.disable_preview("cloud session could not connect");
             drain_cloud_until_finalize(
                 lanes,

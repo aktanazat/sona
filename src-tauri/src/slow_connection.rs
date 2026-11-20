@@ -12,7 +12,7 @@ pub const SLOW_CONNECTION_EVENT: &str = "cloud-connection-slow";
 /// Opening the provider's session; a healthy one takes a few hundred
 /// milliseconds.
 #[cfg(feature = "cloud-realtime")]
-const SLOW_CONNECT: Duration = Duration::from_secs(2);
+pub const SLOW_CONNECT: Duration = Duration::from_secs(2);
 /// Speech sent with no word back from the provider. Live providers answer
 /// within about a second of speech.
 #[cfg(feature = "cloud-realtime")]

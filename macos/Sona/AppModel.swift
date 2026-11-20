@@ -900,6 +900,9 @@ final class AppModel {
             meetingSuggested = false
             meter.stop()
         }
+        if case .working("polishing") = state, slowConnectionStage == "transcription" {
+            slowConnectionStage = nil
+        }
         if case .idle = state {
             slowConnectionStage = nil
             dismissPillFeedbackAfterDelay()

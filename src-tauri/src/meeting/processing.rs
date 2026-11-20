@@ -5764,10 +5764,20 @@ pub(crate) fn first_json_value<T: DeserializeOwned>(message: &str) -> Result<T, 
 /// `risks: []` and said in prose that the material did not support more —
 /// a model honestly emptying a list it cannot fill, which is right for `risks`
 /// and fatal for `summary`.
+#[cfg(test)]
 fn artifact_system_prompt(
     template: &NotesTemplate,
     has_user_notes: bool,
     language: MeetingNotesLanguage,
+) -> String {
+    artifact_system_prompt_with_spoken_language(template, has_user_notes, language, "")
+}
+
+fn artifact_system_prompt_with_spoken_language(
+    template: &NotesTemplate,
+    has_user_notes: bool,
+    language: MeetingNotesLanguage,
+    spoken_note: &str,
 ) -> String {
     let steering = match template {
         NotesTemplate::BuiltIn(template) => template.steering(),
@@ -5804,6 +5814,7 @@ fn artifact_system_prompt(
     }
     prompt.push_str("\n\n");
     prompt.push_str(language.instruction());
+    prompt.push_str(spoken_note);
     if matches!(template, NotesTemplate::Custom(_)) {
         prompt.push_str(" Exception: the supplied custom section titles are fixed labels, not generated text. Preserve them exactly as typed, even if they are not in the selected notes language; this rule takes precedence over the language instruction. Never translate them.");
     }
@@ -6702,9 +6713,13 @@ fn notes_system_prompt(
     let language = settings
         .map(|settings| settings.meeting_notes_language)
         .unwrap_or_default();
-    let mut prompt =
-        artifact_system_prompt(&evidence.template, !evidence.user_notes.is_empty(), language);
-    prompt.push_str(&spoken_language_note(language, evidence));
+    let spoken_note = spoken_language_note(language, evidence);
+    let mut prompt = artifact_system_prompt_with_spoken_language(
+        &evidence.template,
+        !evidence.user_notes.is_empty(),
+        language,
+        &spoken_note,
+    );
     if !evidence.marks.is_empty() {
         prompt.push_str(MARKED_ROWS_RULE);
     }
