@@ -116,6 +116,7 @@
 "dictation.setup" = "Settings, General, Keyboard, Keyboards, Add New Keyboard: choose Sona Dictation and turn on Allow Full Access. Switch to it with the globe key.";
 "dictation.fullAccess" = "Full Access lets the keyboard use the microphone and share drafts with Sona. Nothing is sent to a server";
 "dictation.failed" = "Dictation couldn't start. Tap Dictate to try again";
+"dictation.stoppedEarly" = "Dictation stopped early. The words heard so far are kept";
 "dictation.speechOff" = "Speech recognition is off in Settings.";
 "dictation.onDeviceUnavailable" = "No on-device speech for this language. Turn on Dictation in Settings, General, Keyboard. Nothing is sent to a server.";
 "dictation.interrupted" = "Another app took the microphone. Check the text before using it.";

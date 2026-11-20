@@ -235,7 +235,7 @@ private struct KeyButton: View {
         switch cap.key {
         case let .character(text):
             Text(verbatim: model.face(of: text))
-                .font(.system(size: 23))
+                .font(.system(size: KeyFace.letterSize))
         case .shift:
             Image(systemName: model.shift.symbol)
                 .font(.system(size: 18))
@@ -317,6 +317,9 @@ private struct TypingKeyStyle: ButtonStyle {
 /// system keyboard draws them; the return key carries the accent when the field names an
 /// action.
 struct KeyFace: ViewModifier {
+    /// Letters on the keys and in accent choices; a pressed letter shows larger above its key.
+    static let letterSize: CGFloat = 23
+    static let calloutSize: CGFloat = 32
     static let fill = Color(uiColor: UIColor { $0.userInterfaceStyle == .dark ? UIColor(white: 0.42, alpha: 1) : .white })
     static let pressedFill = Color(uiColor: UIColor {
         $0.userInterfaceStyle == .dark ? UIColor(white: 0.3, alpha: 1) : UIColor(white: 0.82, alpha: 1)

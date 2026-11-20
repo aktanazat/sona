@@ -152,23 +152,43 @@ struct TypingSession {
     }
 }
 
-/// The text before the cursor as the keyboard's own last edit left it. Some hosts keep
-/// reporting the text from before an edit until the next one comes in, and a word joined to
-/// that stale text either glues on ("écoleMeet") or doubles its space ("Dauren  école").
+/// The text a word dropped in whole is joined to, for the space in front of it only. Some
+/// hosts keep reporting the text from before the keyboard's last edit until the next one
+/// comes in, and a word joined to that stale text either glues on ("écoleMeet") or
+/// doubles its space ("Dauren  école").
+///
+/// It never decides what to delete. It holds only while the host, before and after the
+/// cursor, still shows exactly what it showed at the keyboard's last edit; the first report
+/// that differs, a new field, or a change the keyboard did not make ends it for good.
 struct FieldEcho {
-    private var reported: String?
-    private var written = ""
-
-    /// The keyboard changed the field, which the host showed as `host`: it deleted
-    /// `deleting` characters before the cursor and inserted `inserting`.
-    mutating func edited(host: String, deleting: Int, inserting: String) {
-        written = String(before(host).dropLast(deleting)) + inserting
-        reported = host
+    private struct Report: Equatable {
+        let before: String
+        let after: String
     }
 
-    /// What is before the cursor: the host's report, unless it still shows the text from
-    /// before the keyboard's last edit.
-    func before(_ host: String) -> String {
-        host == reported ? written : host
+    private var stale: Report?
+    private var written = ""
+
+    /// The keyboard changed the field, which the host showed as `before` and `after` the
+    /// cursor: it deleted `deleting` characters before the cursor and inserted `inserting`.
+    mutating func edited(before: String, after: String, deleting: Int, inserting: String) {
+        written = String(joining(before: before, after: after).dropLast(deleting)) + inserting
+        stale = Report(before: before, after: after)
+    }
+
+    /// The host reported the field, after a change of text or selection or on any read.
+    mutating func observe(before: String, after: String) {
+        if stale != Report(before: before, after: after) { stale = nil }
+    }
+
+    /// The field the keyboard types into is a different one.
+    mutating func forget() {
+        stale = nil
+    }
+
+    /// The text before the cursor to join a word to: what the keyboard's last edit left,
+    /// while the host still shows the field as it was before that edit; otherwise the host's.
+    func joining(before: String, after: String) -> String {
+        stale == Report(before: before, after: after) ? written : before
     }
 }

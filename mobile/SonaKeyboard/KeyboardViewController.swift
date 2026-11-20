@@ -42,6 +42,9 @@ final class KeyboardViewController: UIInputViewController {
     private var microphone: KeyboardMicrophone?
     private var profile = DictationProfile.empty
     private var echo = FieldEcho()
+    /// True from the keyboard's own edit until the main loop next turns.
+    private var ownEditInFlight = false
+    private var editedField: UUID?
     private let haptic = UIImpactFeedbackGenerator(style: .light)
     #if DEBUG
     private let frames = FrameMeter()
@@ -104,6 +107,7 @@ final class KeyboardViewController: UIInputViewController {
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
+        echo.forget()
         let languages = KeyboardLanguages.shared().enabled
         typing.showsLanguageKey = languages.count > 1
         if !languages.contains(typing.language) { setLanguage(languages[0]) }
@@ -149,13 +153,43 @@ final class KeyboardViewController: UIInputViewController {
         ticker = nil
     }
 
+    override func textWillChange(_ textInput: (any UITextInput)?) {
+        super.textWillChange(textInput)
+        hostChanged()
+    }
+
     override func textDidChange(_ textInput: (any UITextInput)?) {
         super.textDidChange(textInput)
+        hostChanged()
         reload()
         refreshTyping(startingField: false)
     }
 
-    private var textBefore: String { echo.before(textDocumentProxy.documentContextBeforeInput ?? "") }
+    override func selectionWillChange(_ textInput: (any UITextInput)?) {
+        super.selectionWillChange(textInput)
+        hostChanged()
+    }
+
+    override func selectionDidChange(_ textInput: (any UITextInput)?) {
+        super.selectionDidChange(textInput)
+        hostChanged()
+    }
+
+    /// A report that arrives while the keyboard's own edit is still going through is that
+    /// edit; any other change, or another field, was not the keyboard's doing.
+    private func hostChanged() {
+        let field = documentID
+        if ownEditInFlight, field == editedField {
+            echo.observe(before: textBefore, after: textAfter)
+        } else {
+            echo.forget()
+        }
+    }
+
+    private var textBefore: String { textDocumentProxy.documentContextBeforeInput ?? "" }
+    private var textAfter: String { textDocumentProxy.documentContextAfterInput ?? "" }
+    /// The text a word dropped in whole is joined to.
+    private var joiningBefore: String { echo.joining(before: textBefore, after: textAfter) }
     /// UIKit declares this nonnull, yet some fields hand over nil, and Swift's bridge to a
     /// non-optional UUID traps on it. The same getter, declared optional, keeps nil as nil.
     private var documentID: UUID? {
@@ -239,7 +273,7 @@ final class KeyboardViewController: UIInputViewController {
         guard !words.isEmpty else { return }
         state.notice = nil
         state.seenMessage = state.session.message
-        let before = textBefore
+        let before = joiningBefore
         let landing = before + TypingSession.joiningSpace(before: before)
         let capital = typing.shift != .off || capitalizes(before: landing)
         let cased = words.map { word in
@@ -252,9 +286,10 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private func apply(_ edit: TypingSession.Edit) {
-        echo.edited(
-            host: textDocumentProxy.documentContextBeforeInput ?? "", deleting: edit.deleteCount, inserting: edit.insert
-        )
+        echo.edited(before: textBefore, after: textAfter, deleting: edit.deleteCount, inserting: edit.insert)
+        editedField = documentID
+        ownEditInFlight = true
+        DispatchQueue.main.async { [weak self] in self?.ownEditInFlight = false }
         for _ in 0..<edit.deleteCount { textDocumentProxy.deleteBackward() }
         if !edit.insert.isEmpty { textDocumentProxy.insertText(edit.insert) }
     }
@@ -464,7 +499,7 @@ final class KeyboardViewController: UIInputViewController {
     /// applies them, then the field, then the queue Sona keeps in Notes.
     private func insertDictation(_ heard: String) {
         let text = profile.apply(to: DictationCleanup.clean(heard, language: dictationLanguage))
-        apply(TypingSession.Edit(insert: TypingSession.joiningSpace(before: textBefore) + text))
+        apply(TypingSession.Edit(insert: TypingSession.joiningSpace(before: joiningBefore) + text))
         refreshShift()
         refreshSuggestions()
         do {
@@ -503,7 +538,7 @@ final class KeyboardViewController: UIInputViewController {
         do {
             let text = try KeyboardDraftStore.shared().take(id: draft.id)
             state.draft = nil
-            apply(TypingSession.Edit(insert: TypingSession.joiningSpace(before: textBefore) + text))
+            apply(TypingSession.Edit(insert: TypingSession.joiningSpace(before: joiningBefore) + text))
         } catch { state.draft = nil; show(error) }
     }
 
@@ -570,7 +605,7 @@ private struct KeyboardView: View {
                     AccentPopup(choice: choice)
                 } else if let callout = typing.callout {
                     KeyBubble(anchor: callout.anchor, width: callout.anchor.width + 12) {
-                        Text(verbatim: callout.text).font(.system(size: 32))
+                        Text(verbatim: callout.text).font(.system(size: KeyFace.calloutSize))
                     }
                 }
             }
@@ -598,6 +633,8 @@ private struct KeyboardView: View {
         } else if state.hasFullAccess, let notice = state.session.message ?? state.notice {
             Text(notice).font(.caption).foregroundStyle(Theme.textSecondary).lineLimit(2)
                 .accessibilityIdentifier("keyboard-status")
+        } else if state.hasFullAccess, state.needsSetup {
+            Text("keyboard.permission").font(.caption).foregroundStyle(Theme.textSecondary).lineLimit(2)
         } else {
             Color.clear
         }
@@ -744,7 +781,7 @@ private struct AccentPopup: View {
             HStack(spacing: 0) {
                 ForEach(Array(choice.options.enumerated()), id: \.offset) { index, option in
                     Text(verbatim: option)
-                        .font(.system(size: 23))
+                        .font(.system(size: KeyFace.letterSize))
                         .frame(width: choice.anchor.width, height: choice.anchor.height - 10)
                         .foregroundStyle(index == choice.selected ? Color.white : Theme.textPrimary)
                         .background(

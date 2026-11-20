@@ -168,7 +168,7 @@ final class PhoneDictation: ObservableObject {
         if script != nil, let sessionID {
             script?.cancel()
             script = nil
-            receive(text: text, final: true, error: nil, id: sessionID)
+            receive(text: text, final: true, failed: false, id: sessionID)
             return
         }
         #endif
@@ -270,8 +270,8 @@ final class PhoneDictation: ObservableObject {
         recognition = recognizer.recognitionTask(with: request) { [weak self] result, error in
             let text = result?.bestTranscription.formattedString
             let final = result?.isFinal ?? false
-            let failure = error.map { _ in NSLocalizedString("dictation.failed", comment: "") }
-            Task { @MainActor in self?.receive(text: text, final: final, error: failure, id: id) }
+            let failed = error != nil
+            Task { @MainActor in self?.receive(text: text, final: final, failed: failed, id: id) }
         }
     }
 
@@ -289,23 +289,29 @@ final class PhoneDictation: ObservableObject {
             for count in words.indices {
                 try? await Task.sleep(for: .milliseconds(450))
                 guard !Task.isCancelled else { return }
-                self?.receive(text: words[...count].joined(separator: " "), final: false, error: nil, id: id)
+                self?.receive(text: words[...count].joined(separator: " "), final: false, failed: false, id: id)
             }
         }
     }
     #endif
 
     /// Each partial result goes to the keyboard too, so the words show there as they are heard.
-    private func receive(text: String?, final: Bool, error: String?, id: UUID) {
+    /// A recognizer that stops early keeps the words it heard and says it stopped; one that
+    /// stops before any word is the empty case.
+    private func receive(text: String?, final: Bool, failed: Bool, id: UUID) {
         guard sessionID == id, completion == nil else { return }
         if let text, text != self.text {
             self.text = text
             if !final { onStateChanged?() }
         }
-        if final || error != nil { completeRecognition(error: final ? nil : error) }
+        if final {
+            completeRecognition(error: nil)
+        } else if failed {
+            completeRecognition(error: nil, notice: insertableText.isEmpty ? nil : NSLocalizedString("dictation.stoppedEarly", comment: ""))
+        }
     }
 
-    private func completeRecognition(error: String?) {
+    private func completeRecognition(error: String?, notice: String? = nil) {
         guard isBusy, completion == nil else { return }
         closeCapture()
         phase = .finishing
@@ -315,8 +321,8 @@ final class PhoneDictation: ObservableObject {
         let corrected = sessionProfile.apply(to: DictationCleanup.clean(insertableText, language: language))
         text = corrected
         onStateChanged?()
-        guard error == nil, !corrected.isEmpty, let style = sessionStyle else {
-            settle(error: error)
+        guard error == nil, notice == nil, !corrected.isEmpty, let style = sessionStyle else {
+            settle(error: error, styleNotice: notice)
             return
         }
         guard Self.stylesAvailable else {

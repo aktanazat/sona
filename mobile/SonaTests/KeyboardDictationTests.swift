@@ -47,8 +47,8 @@ struct KeyboardDictationTests {
 struct DictationJoiningTests {
     /// What the field holds after `text` is dropped in whole where the host reports `host`
     /// before the cursor, with the keyboard's own last edit remembered in `echo`.
-    func joined(_ text: String, host: String, echo: FieldEcho = FieldEcho()) -> String {
-        let before = echo.before(host)
+    func joined(_ text: String, before host: String, after: String = "", echo: FieldEcho = FieldEcho()) -> String {
+        let before = echo.joining(before: host, after: after)
         return before + TypingSession.joiningSpace(before: before) + text
     }
 
@@ -63,23 +63,47 @@ struct DictationJoiningTests {
         ("à l'école", "à l'école Meet me."),
     ])
     func joinsWithOneSpace(host: String, expected: String) {
-        #expect(joined("Meet me.", host: host) == expected)
+        #expect(joined("Meet me.", before: host) == expected)
     }
 
-    @Test("a host still showing the text from before the keyboard's last edit neither glues the next words on nor doubles the space")
-    func staleHostAfterOwnEdit() {
+    @Test("a host one edit behind joins the next words to what the keyboard's last edit left")
+    func hostOneEditBehind() {
         var echo = FieldEcho()
-        echo.edited(host: "Call Daur", deleting: 4, inserting: "Dauren ")
-        #expect(joined("école", host: "Call Daur", echo: echo) == "Call Dauren école")
-        echo.edited(host: "Call Daur", deleting: 0, inserting: "école")
-        #expect(joined("Meet me.", host: "Call Daur", echo: echo) == "Call Dauren école Meet me.")
+        echo.edited(before: "Call Daur", after: "", deleting: 4, inserting: "Dauren ")
+        echo.observe(before: "Call Daur", after: "")
+        #expect(joined("école", before: "Call Daur", after: "", echo: echo) == "Call Dauren école")
+        echo.edited(before: "Call Daur", after: "", deleting: 0, inserting: "école")
+        #expect(joined("Meet me.", before: "Call Daur", after: "", echo: echo) == "Call Dauren école Meet me.")
     }
 
-    @Test("once the host catches up, or the cursor moves, the host's text is what counts")
-    func hostReportWins() {
+    @Test("a host that catches up and then shows the old text again is believed")
+    func hostChangesBackToOldText() {
         var echo = FieldEcho()
-        echo.edited(host: "Call Daur", deleting: 4, inserting: "Dauren ")
-        #expect(echo.before("Call Dauren ") == "Call Dauren ")
-        #expect(echo.before("Elsewhere") == "Elsewhere")
+        echo.edited(before: "Call Daur", after: "", deleting: 4, inserting: "Dauren ")
+        echo.observe(before: "Call Dauren ", after: "")
+        #expect(joined("ok", before: "Call Daur", after: "", echo: echo) == "Call Daur ok")
+    }
+
+    @Test("moving the cursor back after a swipe joins to the text at the cursor, not the swipe")
+    func cursorMovedAfterSwipe() {
+        var echo = FieldEcho()
+        echo.edited(before: "Call ", after: "", deleting: 0, inserting: "Dauren")
+        #expect(joined("Meet", before: "Call ", after: "Dauren", echo: echo) == "Call Meet")
+    }
+
+    @Test("a sent message clears the field, and the next dictation starts it fresh")
+    func sendClearsFieldThenDictate() {
+        var echo = FieldEcho()
+        echo.edited(before: "", after: "", deleting: 0, inserting: "Meet me at noon.")
+        echo.forget()
+        #expect(joined("See you.", before: "", after: "", echo: echo) == "See you.")
+    }
+
+    @Test("another empty field starts fresh")
+    func switchingBetweenEmptyFields() {
+        var echo = FieldEcho()
+        echo.edited(before: "", after: "", deleting: 0, inserting: "Meet me.")
+        echo.forget()
+        #expect(joined("Hello", before: "", after: "", echo: echo) == "Hello")
     }
 }
