@@ -105,6 +105,108 @@ struct DictationJoiningTests {
         mutating func appSilently(sets text: String) {
             history = [text]
         }
+
+        enum Step: CustomStringConvertible {
+            case key(String), delete, dictate(String)
+            /// The host starts reporting this many edits late, or never again, and the keyboard
+            /// reads the field again, as it does on its next key.
+            case lag(Int?)
+            case silently(String), announced(String), newField(String)
+
+            var description: String {
+                switch self {
+                case let .key(text): "key \(text)"
+                case .delete: "delete"
+                case let .dictate(words): "dictate \(words)"
+                case let .lag(lag): "lag \(lag.map(String.init) ?? "never")"
+                case let .silently(text): "silent \(text)"
+                case let .announced(text): "announced \(text)"
+                case let .newField(text): "new field \(text)"
+                }
+            }
+        }
+
+        mutating func run(_ step: Step) {
+            switch step {
+            case let .key(text): keyboard(TypingSession.Edit(insert: text))
+            case .delete: keyboard(TypingSession.Edit(deleteCount: 1))
+            case let .dictate(words): dictate(words)
+            case let .lag(lag):
+                self = Host(lag: lag, history: history, echo: echo)
+                echo.hostReported(before: shown, after: "", ownEdit: true)
+            case let .silently(text): appSilently(sets: text)
+            case let .announced(text): app(sets: text)
+            case let .newField(text):
+                echo.forget()
+                history = [text]
+            }
+        }
+
+        private init(lag: Int?, history: [String], echo: FieldEcho) {
+            self.lag = lag
+            self.history = history
+            self.echo = echo
+        }
+    }
+
+    struct Pattern: CustomTestStringConvertible, Sendable {
+        let name: String
+        let lag: Int?
+        let start: String
+        let steps: [Host.Step]
+        /// Whether the keyboard treats the host as behind after each step.
+        let behind: [Bool]
+        let text: String
+        var testDescription: String { name }
+    }
+
+    static let t = true, f = false
+    static let patterns: [Pattern] = [
+        Pattern(name: "in step", lag: 0, start: "I said beca", steps: [.key("u"), .key("s"), .key("e")], behind: [f, f, f], text: "I said becaus" + "e"),
+        Pattern(name: "1 behind, burst", lag: 1, start: "I said beca", steps: [.key("u"), .key("s"), .key("e")], behind: [t, t, t], text: "I said because"),
+        Pattern(name: "2 behind, burst", lag: 2, start: "I said beca", steps: [.key("u"), .key("s"), .key("e")], behind: [t, t, t], text: "I said because"),
+        Pattern(name: "3 behind, burst", lag: 3, start: "I said beca", steps: [.key("u"), .key("s"), .key("e")], behind: [t, t, t], text: "I said because"),
+        Pattern(name: "never updates, burst", lag: nil, start: "I said beca", steps: [.key("u"), .key("s"), .key("e")], behind: [t, t, t], text: "I said because"),
+        Pattern(name: "catches up mid burst", lag: 3, start: "Call ", steps: [.key("D"), .key("a"), .key("u"), .lag(0), .key("r")], behind: [t, t, t, f, f], text: "Call Daur"),
+        Pattern(
+            name: "3 behind then 1 behind, dictating", lag: 3, start: "Call ",
+            steps: [.key("D"), .key("a"), .key("u"), .key("r"), .lag(1), .dictate("école"), .dictate("Meet"), .lag(0)],
+            behind: [t, t, t, t, t, t, t, f], text: "Call Daur école Meet"
+        ),
+        Pattern(name: "dictation in step", lag: 0, start: "Call ", steps: [.key("Dauren"), .dictate("école"), .dictate("Meet me.")], behind: [f, f, f], text: "Call Dauren école Meet me."),
+        Pattern(name: "dictation 1 behind", lag: 1, start: "Call ", steps: [.key("Dauren"), .dictate("école"), .dictate("Meet me.")], behind: [t, t, t], text: "Call Dauren école Meet me."),
+        Pattern(name: "dictation 2 behind", lag: 2, start: "Call ", steps: [.key("Dauren"), .dictate("école"), .dictate("Meet me.")], behind: [t, t, t], text: "Call Dauren école Meet me."),
+        Pattern(name: "dictation 5 behind", lag: 5, start: "Call ", steps: [.key("Dauren"), .dictate("école"), .dictate("Meet me.")], behind: [t, t, t], text: "Call Dauren école Meet me."),
+        Pattern(name: "dictation, never updates", lag: nil, start: "Call ", steps: [.key("Dauren"), .dictate("école"), .dictate("Meet me.")], behind: [t, t, t], text: "Call Dauren école Meet me."),
+        Pattern(name: "back to the same text, then caught up", lag: 1, start: "I said teh", steps: [.key("x"), .delete, .lag(0)], behind: [t, t, f], text: "I said teh"),
+        Pattern(name: "quiet clear, in step", lag: 0, start: "Note: ", steps: [.key("H"), .key("i"), .silently(""), .dictate("See you.")], behind: [f, f, f, f], text: "See you."),
+        Pattern(name: "quiet clear, 1 behind", lag: 1, start: "Note: ", steps: [.key("H"), .key("i"), .silently(""), .dictate("See you.")], behind: [t, t, f, t], text: "See you."),
+        Pattern(name: "quiet clear of a new field, 1 behind", lag: 1, start: "", steps: [.key("H"), .key("i"), .silently(""), .dictate("See you.")], behind: [t, t, f, t], text: "See you."),
+        Pattern(name: "quiet clear, 2 behind", lag: 2, start: "Note: ", steps: [.key("H"), .key("i"), .silently(""), .dictate("See you.")], behind: [t, t, f, t], text: "See you."),
+        Pattern(name: "quiet clear, 3 behind", lag: 3, start: "Note: ", steps: [.key("H"), .key("i"), .silently(""), .dictate("See you.")], behind: [t, t, f, t], text: "See you."),
+        Pattern(name: "quiet clear, never updates", lag: nil, start: "Note: ", steps: [.key("H"), .key("i"), .silently(""), .dictate("See you.")], behind: [t, t, f, t], text: "See you."),
+        Pattern(name: "cursor moved", lag: 1, start: "Call ", steps: [.key("Dauren"), .announced("Call "), .dictate("Meet")], behind: [t, f, t], text: "Call Meet"),
+        Pattern(name: "field switch", lag: 1, start: "", steps: [.dictate("Meet me."), .newField(""), .dictate("Hello")], behind: [t, f, t], text: "Hello"),
+        Pattern(name: "return to earlier text after catching up", lag: 1, start: "Call ", steps: [.key("D"), .key("a"), .lag(0), .silently("Call D"), .dictate("x")], behind: [t, t, f, f, f], text: "Call D x"),
+    ]
+
+    @Test("the keyboard knows when the host is behind, and joins dictation right, across lag patterns", arguments: patterns)
+    func lagPatterns(_ pattern: Pattern) {
+        var host = Host(lag: pattern.lag, text: pattern.start)
+        var behind: [Bool] = []
+        for step in pattern.steps {
+            host.run(step)
+            behind.append(host.behind)
+        }
+        #expect(behind == pattern.behind, "\(pattern.steps)")
+        #expect(host.text == pattern.text)
+    }
+
+    @Test("a host that never updates stays behind through a long burst")
+    func neverUpdatesLongBurst() {
+        var host = Host(lag: nil, text: "x")
+        for _ in 0..<200 { host.keyboard(TypingSession.Edit(insert: "a")) }
+        #expect(host.behind)
     }
 
     @Test("with a host two edits behind, or one that never updates, dictated words neither glue on nor double their space", arguments: [2, nil] as [Int?])

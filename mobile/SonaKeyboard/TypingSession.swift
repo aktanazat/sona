@@ -162,55 +162,62 @@ struct TypingSession {
 /// comes in, and a word joined to that stale text either glues on ("écoleMeet") or
 /// doubles its space ("Dauren  école").
 ///
-/// It never decides what to delete. It holds while the host, before and after the cursor,
-/// shows the field as it was before one of the keyboard's edits since the host last caught
-/// up, however many edits behind; the host showing the latest edit, a report of anything
-/// else, a change the keyboard did not make, or a new field ends it for good.
+/// It never decides what to delete. The keyboard keeps each version of the field from the
+/// one the host last showed to its own latest. The host is behind while it shows one of
+/// those versions other than the latest; showing the latest means it caught up, showing a
+/// newer remembered version lets the older ones go, and showing anything else, a change the
+/// keyboard did not make, or a new field ends the memory.
 struct FieldEcho {
     private struct Report: Equatable {
         let before: String
         let after: String
     }
 
-    /// The field before each of the keyboard's edits the host has not shown yet, oldest
-    /// first, so a host several edits behind still reads as behind. A host that never
-    /// updates keeps showing the oldest, which is therefore never dropped.
-    private var pending: [Report] = []
-    private static let pendingLimit = 64
-    private var written = ""
+    /// The versions the host may still show, oldest first; the last is the keyboard's latest.
+    /// A host that never updates keeps showing the oldest, so a long burst drops the second.
+    private var versions: [Report] = []
+    private static let versionLimit = 64
 
     /// The keyboard changed the field, which the host showed as `before` and `after` the
     /// cursor: it deleted `deleting` characters before the cursor and inserted `inserting`.
     mutating func edited(before: String, after: String, deleting: Int, inserting: String) {
-        let known = joining(before: before, after: after)
-        if !behind(before: before, after: after) { pending = [] }
-        pending.append(Report(before: known, after: after))
-        if pending.count > Self.pendingLimit { pending.remove(at: 1) }
-        written = String(known.dropLast(deleting)) + inserting
+        let shown = Report(before: before, after: after)
+        if behind(before: before, after: after) { advance(to: shown) } else { versions = [shown] }
+        let known = versions[versions.count - 1].before
+        versions.append(Report(before: String(known.dropLast(deleting)) + inserting, after: after))
+        if versions.count > Self.versionLimit { versions.remove(at: 1) }
     }
 
     /// The host reported the field. A report while the keyboard's own edit is going through
     /// keeps the memory only if the host is still behind; any other report is a change the
     /// keyboard did not make.
     mutating func hostReported(before: String, after: String, ownEdit: Bool) {
-        if ownEdit, behind(before: before, after: after) { return }
-        pending = []
+        if ownEdit, behind(before: before, after: after) {
+            advance(to: Report(before: before, after: after))
+        } else {
+            versions = []
+        }
     }
 
     /// The field the keyboard types into is a different one.
     mutating func forget() {
-        pending = []
+        versions = []
     }
 
-    /// Whether the host still shows the field as it was before one of the keyboard's edits
-    /// it has not caught up with.
+    /// Whether the host shows a version of the field older than the keyboard's latest, and
+    /// no older than the last one it showed.
     func behind(before: String, after: String) -> Bool {
-        pending.contains(Report(before: before, after: after))
+        let shown = Report(before: before, after: after)
+        return shown != versions.last && versions.contains(shown)
     }
 
-    /// The text before the cursor to join a word to: what the keyboard's last edit left,
-    /// while the host is behind it; otherwise the host's.
+    /// The text before the cursor to join a word to: the keyboard's latest version while the
+    /// host is behind it; otherwise the host's.
     func joining(before: String, after: String) -> String {
-        behind(before: before, after: after) ? written : before
+        behind(before: before, after: after) ? versions[versions.count - 1].before : before
+    }
+
+    private mutating func advance(to shown: Report) {
+        if let index = versions.firstIndex(of: shown) { versions.removeFirst(index) }
     }
 }
