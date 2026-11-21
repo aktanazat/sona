@@ -84,7 +84,7 @@ struct HUDPill: View {
                         .id(phase)
                         .transition(.opacity)
                 }
-                .frame(width: 176, height: 36)
+                .frame(width: showsSlowConnection ? 236 : 176, height: 36)
                 .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: phase)
                 .background(Theme.hud, in: Capsule())
                 .overlay(Capsule().strokeBorder(Theme.hudBorder, lineWidth: 1))
@@ -115,9 +115,16 @@ struct HUDPill: View {
                 case .recording:
                     RecordingWaveform(meter: model.meter)
                         .frame(width: 55, height: 18)
-                    status
-                        .font(.system(size: 11, weight: .medium))
-                        .frame(minWidth: 32)
+                    if showsSlowConnection {
+                        Text(Self.slowConnection)
+                            .font(.system(size: 11, weight: .medium))
+                            .fixedSize()
+                            .frame(maxWidth: .infinity)
+                    } else {
+                        status
+                            .font(.system(size: 11, weight: .medium))
+                            .frame(minWidth: 32)
+                    }
                     control("Stop recording", symbol: "stop.fill") { model.stopCapture() }
                 case let .working(kind):
                     HStack(spacing: 8) {
@@ -128,7 +135,7 @@ struct HUDPill: View {
                                 .controlSize(.mini)
                                 .tint(Theme.hudInk)
                         }
-                        Text(Self.phaseLabel(kind))
+                        Text(model.slowConnectionStage == nil ? Self.phaseLabel(kind) : Self.slowConnection)
                             .font(.system(size: 12, weight: .medium))
                             .lineLimit(1)
                     }
@@ -219,6 +226,16 @@ struct HUDPill: View {
             .padding(12)
             .background(Theme.hud, in: RoundedRectangle(cornerRadius: Theme.radiusDialog))
             .overlay(RoundedRectangle(cornerRadius: Theme.radiusDialog).strokeBorder(Theme.hudBorder, lineWidth: 1))
+    }
+
+    /// The pill's status while the network holds up a cloud stage.
+    private static let slowConnection = "Slow connection"
+
+    /// A recording held up by the network, unless its last minute is
+    /// counting down: the countdown says the recording is about to stop.
+    private var showsSlowConnection: Bool {
+        guard case .recording = presentation.capture, presentation.feedback == nil else { return false }
+        return model.slowConnectionStage != nil && model.pillWarningSeconds == nil
     }
 
     @ViewBuilder private var status: some View {

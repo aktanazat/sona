@@ -787,9 +787,9 @@ pub enum OverlayStyle {
 pub enum ModelUnloadTimeout {
     Never,
     Immediately,
+    #[default]
     #[serde(rename = "min2")]
     Min2,
-    #[default]
     #[serde(rename = "min5")]
     Min5,
     #[serde(rename = "min10")]

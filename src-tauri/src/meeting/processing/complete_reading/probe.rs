@@ -871,7 +871,7 @@ fn notes_probe() {
         &witness,
         &evidence,
         &speakers,
-        &plain_notes_prompt(language),
+        &plain_notes_prompt(language, &evidence),
         || Ok(()),
     ) {
         Ok((text, spans)) => {

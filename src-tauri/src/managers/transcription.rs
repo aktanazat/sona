@@ -52,8 +52,10 @@ use transcribe_rs::{
 use zeroize::Zeroizing;
 
 mod audio_chunks;
+mod chunked_preview;
 mod diagnosis;
 use audio_chunks::transcribe_windows;
+use chunked_preview::{ChunkedTranscript, SEGMENT_GAP};
 use diagnosis::{seconds, FilterOutcome, NativeRuns, SAMPLING_SEED};
 pub use diagnosis::{DecodeDiagnosis, DecodeSwitches, TextFilter};
 
@@ -160,6 +162,20 @@ enum StreamControl {
     Cancel,
 }
 
+enum ChunkedPreviewOutcome {
+    Finished(Option<mpsc::Sender<Option<FinalizedStreamText>>>),
+    Panicked,
+}
+
+impl From<StreamControl> for StreamCmd {
+    fn from(control: StreamControl) -> Self {
+        match control {
+            StreamControl::Finalize(reply) => Self::Finalize(reply),
+            StreamControl::Cancel => Self::Cancel,
+        }
+    }
+}
+
 struct StreamRoute {
     audio_tx: mpsc::SyncSender<Vec<f32>>,
     control_tx: mpsc::Sender<StreamControl>,
@@ -219,41 +235,53 @@ impl WorkerClaim {
 impl StreamLanes {
     fn recv(&mut self) -> Result<StreamCmd, mpsc::RecvError> {
         loop {
+            if let Some(cmd) = self.recv_within(STREAM_CONTROL_POLL_INTERVAL)? {
+                return Ok(cmd);
+            }
+        }
+    }
+
+    /// [`Self::recv`], or `None` once `wait` passes with no command.
+    fn recv_within(&mut self, wait: Duration) -> Result<Option<StreamCmd>, mpsc::RecvError> {
+        let deadline = Instant::now() + wait;
+        loop {
             if let Some(reply) = self.pending_finalize.take() {
                 match self.audio_rx.try_recv() {
                     Ok(pcm) => {
                         self.pending_finalize = Some(reply);
-                        return Ok(StreamCmd::Feed(pcm));
+                        return Ok(Some(StreamCmd::Feed(pcm)));
                     }
                     Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => {
-                        return Ok(StreamCmd::Finalize(reply));
+                        return Ok(Some(StreamCmd::Finalize(reply)));
                     }
                 }
             }
 
             match self.control_rx.try_recv() {
-                Ok(StreamControl::Cancel) => return Ok(StreamCmd::Cancel),
+                Ok(StreamControl::Cancel) => return Ok(Some(StreamCmd::Cancel)),
                 Ok(StreamControl::Finalize(reply)) => {
                     self.pending_finalize = Some(reply);
                     continue;
                 }
                 Err(mpsc::TryRecvError::Disconnected) => {
-                    return self.control_rx.recv().map(|control| match control {
-                        StreamControl::Finalize(reply) => StreamCmd::Finalize(reply),
-                        StreamControl::Cancel => StreamCmd::Cancel,
-                    });
+                    return self.control_rx.recv().map(|control| Some(control.into()));
                 }
                 Err(mpsc::TryRecvError::Empty) => {}
             }
 
-            match self.audio_rx.recv_timeout(STREAM_CONTROL_POLL_INTERVAL) {
-                Ok(pcm) => return Ok(StreamCmd::Feed(pcm)),
-                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            match self
+                .audio_rx
+                .recv_timeout(remaining.min(STREAM_CONTROL_POLL_INTERVAL))
+            {
+                Ok(pcm) => return Ok(Some(StreamCmd::Feed(pcm))),
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    if Instant::now() >= deadline {
+                        return Ok(None);
+                    }
+                }
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    return self.control_rx.recv().map(|control| match control {
-                        StreamControl::Finalize(reply) => StreamCmd::Finalize(reply),
-                        StreamControl::Cancel => StreamCmd::Cancel,
-                    });
+                    return self.control_rx.recv().map(|control| Some(control.into()));
                 }
             }
         }
@@ -1073,6 +1101,7 @@ fn unload_engine(
     let unload_start = std::time::Instant::now();
     debug!("Starting to unload model");
     *lock_recover(engine) = EngineSlot::Empty;
+    crate::memory::trim_freed_memory();
     let _ = app_handle.emit(
         "model-state-changed",
         ModelStateEvent {
@@ -1502,6 +1531,7 @@ impl TranscriptionManager {
         // once (peak memory on large GGUFs). If the new load fails, status reads
         // "no loaded model", not the dropped engine.
         *self.lock_engine() = EngineSlot::Empty;
+        crate::memory::trim_freed_memory();
 
         // Create appropriate engine based on model type
         let emit_loading_failed = |error_msg: &str| {
@@ -1675,6 +1705,9 @@ impl TranscriptionManager {
         // Reset idle timer so the watcher doesn't immediately unload a just-loaded model
         self.touch_activity();
         self.signal_idle_watcher();
+        // Parsing the model leaves tens of megabytes of freed tokenizer and
+        // metadata allocations behind.
+        crate::memory::trim_freed_memory();
 
         // Emit loading completed event
         let _ = self.app_handle.emit(
@@ -1939,6 +1972,12 @@ impl TranscriptionManager {
                 self.consume_cloud_event(event, final_segments, interim)
             },
             result_tx,
+            &|| {
+                crate::slow_connection::announce(
+                    &self.app_handle,
+                    crate::slow_connection::SlowStage::Transcription,
+                )
+            },
         );
     }
 
@@ -2013,7 +2052,7 @@ impl TranscriptionManager {
 
         // A restricted set needs a short draft before one language is chosen.
         // Do not accept an unrestricted stream as this dictation's final.
-        if !supports_streaming || asr.language_candidates.len() > 1 {
+        if asr.language_candidates.len() > 1 {
             self.lock_engine().put_back(engine);
             self.router.clear();
             drain_until_finalize(lanes);
@@ -2041,6 +2080,42 @@ impl TranscriptionManager {
             target_language: run_plan.target_language,
             ..Default::default()
         };
+
+        if !supports_streaming {
+            let preview = match &mut engine {
+                LoadedEngine::TranscribeCpp(session) => {
+                    info!("Live preview: model '{model_id}' cannot stream; drafting each voice segment");
+                    self.stream_active.store(true, Ordering::Release);
+                    Some(self.run_chunked_preview(&mut lanes, session, &run_options))
+                }
+                _ => None,
+            };
+            match preview {
+                Some(ChunkedPreviewOutcome::Finished(Some(reply))) => {
+                    self.lock_engine().put_back(engine);
+                    let _ = reply.send(None);
+                }
+                Some(ChunkedPreviewOutcome::Finished(None)) => {
+                    self.lock_engine().put_back(engine);
+                }
+                Some(ChunkedPreviewOutcome::Panicked) => {
+                    drop(engine);
+                    *self.lock_engine() = EngineSlot::Empty;
+                    crate::memory::trim_freed_memory();
+                    let _ = self
+                        .app_handle
+                        .emit("model-state-changed", engine_panic_model_state_event());
+                    self.router.clear();
+                    drain_until_finalize(lanes);
+                }
+                None => {
+                    self.lock_engine().put_back(engine);
+                    self.router.clear();
+                    drain_until_finalize(lanes);
+                }
+            }
+            return;
+        }
 
         // Run the stream on the held session. The Stream borrows the session
         // (and thus the engine) for its lifetime, so the feed/finalize loop
@@ -2188,6 +2263,64 @@ impl TranscriptionManager {
         }
         // `_worker` drops here, clearing this worker's flags after the engine
         // is back in its slot.
+    }
+
+    /// Draft live words on a model that cannot stream, segment by segment,
+    /// until the dictation ends. Returns the finalize reply when it ended
+    /// normally; the caller answers it with no text so the complete recording
+    /// is decoded as the dictation.
+    fn run_chunked_preview(
+        &self,
+        lanes: &mut StreamLanes,
+        session: &mut Session,
+        options: &RunOptions,
+    ) -> ChunkedPreviewOutcome {
+        let mut transcript = ChunkedTranscript::default();
+        loop {
+            let paused = match lanes.recv_within(SEGMENT_GAP) {
+                Ok(Some(StreamCmd::Feed(pcm))) => {
+                    if self.router.preview_degraded() {
+                        continue;
+                    }
+                    self.touch_activity();
+                    transcript.push(&pcm);
+                    false
+                }
+                Ok(Some(StreamCmd::Finalize(reply))) => {
+                    return ChunkedPreviewOutcome::Finished(Some(reply));
+                }
+                Ok(Some(StreamCmd::Cancel)) | Err(_) => {
+                    return ChunkedPreviewOutcome::Finished(None);
+                }
+                Ok(None) => true,
+            };
+            // Once the dictation has ended, its last frames only need draining.
+            if lanes.pending_finalize.is_some() || self.router.preview_degraded() {
+                continue;
+            }
+            let Some(due) = transcript.due(paused) else {
+                continue;
+            };
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                session.run(transcript.segment(), options)
+            })) {
+                Ok(Ok(decoded)) => {
+                    if transcript.apply(due, &decoded.text) {
+                        self.emit_stream_text(transcript.committed(), transcript.tentative());
+                    }
+                }
+                Ok(Err(error)) => {
+                    warn!("live preview decode failed: {error}");
+                    self.router
+                        .disable_preview("live preview decode was rejected");
+                }
+                Err(_) => {
+                    error!("{ENGINE_PANIC_LOG_MESSAGE}");
+                    self.router.disable_preview("live preview engine panicked");
+                    return ChunkedPreviewOutcome::Panicked;
+                }
+            }
+        }
     }
 
     /// Consume a body-free cloud protocol event without promoting preview text.
@@ -2747,6 +2880,7 @@ impl TranscriptionManager {
 
                     // Empty the slot so the next attempt reloads.
                     *self.lock_engine() = EngineSlot::Empty;
+                    crate::memory::trim_freed_memory();
 
                     let _ = self
                         .app_handle
@@ -2888,6 +3022,7 @@ impl TranscriptionManager {
         }
 
         self.maybe_unload_immediately("transcription");
+        crate::memory::trim_freed_memory();
 
         Ok(BatchDecode {
             text: final_result,
@@ -3199,6 +3334,7 @@ fn run_cloud_transport_session<F>(
     router: &StreamRouter,
     mut consume_event: F,
     result_tx: mpsc::SyncSender<CloudStreamFinalization>,
+    on_slow: &(dyn Fn() + Sync),
 ) where
     F: FnMut(
         crate::cloud_stt::CloudEvent,
@@ -3225,9 +3361,45 @@ fn run_cloud_transport_session<F>(
             return;
         }
     };
-    let mut transport = match factory.connect(plan, api_key) {
-        Ok(transport) => transport,
+    let mut latency = crate::slow_connection::TranscriptionLatency::default();
+    let connecting = Instant::now();
+    let warned_during_connect = AtomicBool::new(false);
+    let connect_result = std::thread::scope(|scope| {
+        let (done_tx, done_rx) = mpsc::channel::<()>();
+        let warned_flag = &warned_during_connect;
+        scope.spawn(move || {
+            if matches!(
+                done_rx.recv_timeout(crate::slow_connection::SLOW_CONNECT),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ) {
+                warned_flag.store(true, Ordering::Release);
+                on_slow();
+            }
+        });
+        let result = factory.connect(plan, api_key);
+        drop(done_tx);
+        result
+    });
+    let already_warned = warned_during_connect.load(Ordering::Acquire);
+    if already_warned {
+        let _ = latency.connected(crate::slow_connection::SLOW_CONNECT);
+    }
+    let mut transport = match connect_result {
+        Ok(transport) => {
+            if !already_warned && latency.connected(connecting.elapsed()) {
+                on_slow();
+            }
+            transport
+        }
         Err(failure) => {
+            if matches!(
+                failure,
+                CloudStreamFailure::Network | CloudStreamFailure::Disconnected
+            ) && !already_warned
+                && latency.timed_out()
+            {
+                on_slow();
+            }
             router.disable_preview("cloud session could not connect");
             drain_cloud_until_finalize(
                 lanes,
@@ -3270,8 +3442,13 @@ fn run_cloud_transport_session<F>(
                     return;
                 }
                 audio_sent = true;
+                let audio = u64::try_from(frame.len()).unwrap_or(u64::MAX);
+                if latency.sent(Duration::from_nanos(audio.saturating_mul(62_500))) {
+                    on_slow();
+                }
                 match transport.poll_event(Duration::from_millis(1)) {
                     Ok(Some(event)) => {
+                        latency.replied();
                         match consume_event(event, &mut final_segments, &mut interim) {
                             Ok(false) => {}
                             Ok(true) => {
@@ -3315,32 +3492,35 @@ fn run_cloud_transport_session<F>(
                 }
             }
             None => match transport.poll_event(CLOUD_EVENT_POLL_INTERVAL) {
-                Ok(Some(event)) => match consume_event(event, &mut final_segments, &mut interim) {
-                    Ok(false) => {}
-                    Ok(true) => {
-                        drain_cloud_until_finalize(
-                            lanes,
-                            result_tx,
-                            CloudStreamFinalization::Failed {
-                                failure: CloudStreamFailure::Disconnected,
-                                audio_sent,
-                            },
-                        );
-                        return;
+                Ok(Some(event)) => {
+                    latency.replied();
+                    match consume_event(event, &mut final_segments, &mut interim) {
+                        Ok(false) => {}
+                        Ok(true) => {
+                            drain_cloud_until_finalize(
+                                lanes,
+                                result_tx,
+                                CloudStreamFinalization::Failed {
+                                    failure: CloudStreamFailure::Disconnected,
+                                    audio_sent,
+                                },
+                            );
+                            return;
+                        }
+                        Err(failure) => {
+                            router.disable_preview("cloud provider rejected the session");
+                            drain_cloud_until_finalize(
+                                lanes,
+                                result_tx,
+                                CloudStreamFinalization::Failed {
+                                    failure,
+                                    audio_sent,
+                                },
+                            );
+                            return;
+                        }
                     }
-                    Err(failure) => {
-                        router.disable_preview("cloud provider rejected the session");
-                        drain_cloud_until_finalize(
-                            lanes,
-                            result_tx,
-                            CloudStreamFinalization::Failed {
-                                failure,
-                                audio_sent,
-                            },
-                        );
-                        return;
-                    }
-                },
+                }
                 Ok(None) => {}
                 Err(failure) => {
                     router.disable_preview("cloud provider disconnected");
@@ -3372,10 +3552,17 @@ fn run_cloud_transport_session<F>(
                     return;
                 }
 
-                let deadline = Instant::now() + CLOUD_FINALIZE_TIMEOUT;
+                let finalizing = Instant::now();
+                let deadline = finalizing + CLOUD_FINALIZE_TIMEOUT;
                 loop {
+                    if latency.awaiting_final(finalizing.elapsed()) {
+                        on_slow();
+                    }
                     let remaining = deadline.saturating_duration_since(Instant::now());
                     if remaining.is_zero() {
+                        if latency.timed_out() {
+                            on_slow();
+                        }
                         let _ = result_tx.send(CloudStreamFinalization::Failed {
                             failure: CloudStreamFailure::MissingFinal,
                             audio_sent,
@@ -4883,6 +5070,7 @@ mod tests {
                     consume_cloud_event_with_preview(event, final_segments, interim, |_, _| {})
                 },
                 result_tx,
+                &|| {},
             );
         });
 
