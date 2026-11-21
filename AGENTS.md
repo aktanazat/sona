@@ -26,7 +26,7 @@ bun run format            # Prettier + cargo fmt
 bun run format:check      # Check formatting without changes
 bun run format:backend    # cargo fmt only
 bun run lint:backend      # cargo clippy
-bun run lint:anti-slop    # oxlint against tools/oxlint/baseline.json (CI gate)
+bun run lint:anti-slop    # oxlint against tools/oxlint/baseline.json
 ```
 
 **Verifying a change against a running Sona:**

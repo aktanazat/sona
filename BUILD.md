@@ -7,7 +7,7 @@ Sona has one native Mac app in `macos/` and one native iPhone app in `mobile/`. 
 - macOS 15 or later for the native Mac app.
 - Xcode 26 with the macOS, iOS 26, and watchOS SDKs. Select it with `xcode-select` before building. The iPhone app requires iOS 26; its embedded Watch companion targets watchOS 10 or later.
 - Current stable Rust, Bun, CMake, and Xcode's C/C++ tools.
-- An Apple silicon Mac for the commands and CI artifacts below. CI does not produce an Intel or universal Mac bundle.
+- An Apple silicon Mac for the commands below.
 - `ffmpeg` for the Rust media-import tests, not for launching the app.
 
 ```bash
@@ -97,17 +97,9 @@ codesign --verify --deep --strict \
   /private/var/tmp/sona-native-signed/Sona.xcarchive/Products/Applications/Sona.app
 ```
 
-A development signature is not a Developer ID distribution signature or notarization. Public Mac distribution additionally requires a Developer ID Application certificate/private key, compatible app and camera-extension provisioning profiles, and notarization access. Export the archive through Xcode Organizer with the intended distribution credentials, notarize the exported app, staple its ticket, and check both `codesign --verify --deep --strict` and `spctl --assess --type execute` on that exported bundle before publishing it. Those credentials are not configured in this repository's Actions secrets, so the tag workflow does not claim to perform that export.
+A development signature is not a Developer ID distribution signature or notarization. Public Mac distribution additionally requires a Developer ID Application certificate/private key, compatible app and camera-extension provisioning profiles, and notarization access. Export the archive through Xcode Organizer with the intended distribution credentials, notarize the exported app, staple its ticket, and check both `codesign --verify --deep --strict` and `spctl --assess --type execute` on that exported bundle before publishing it.
 
 When upgrading a signed installation, replace `/Applications/Sona.app` as a complete bundle with the same registered identities and team. Do not overwrite its executable in place, reset permission grants, change its data directory, or register a second runnable copy as part of an upgrade. A signing-team change needs its own migration decision.
-
-### CI and tag drafts
-
-`.github/workflows/native.yml` builds the native Mac Release bundle and the iPhone simulator app on pushes to `main`, pull requests, and manual runs. The Mac job uses the reusable `build.yml`: it builds both helpers and the release engine, builds the native Xcode app, inspects the complete payload, and stores `Sona-macos-arm64-unsigned.zip`. The phone job checks that the Watch app and keyboard are embedded. Simulator output is not an installable `.ipa`.
-
-Pushing a `vX.Y.Z` tag runs `release.yml`. It uses that same Mac build, requires the tag, core version, and native app version to agree, then attaches the explicitly unsigned ZIP to a draft GitHub release. It refuses to modify an already-published release. A successful draft job proves the unsigned package was built and inspected, not that it passed Gatekeeper or can be distributed as signed software. Review and signed distribution remain separate.
-
-There are no Tauri web-app, browser UI, Windows, Linux, or Nix package release jobs.
 
 ## Build the iPhone app
 
