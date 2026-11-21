@@ -40,6 +40,7 @@ bun run check:onboarding  # macos/: onboarding
 bun run check:library     # macos/: Library
 bun run check:recorder    # macos/: recorder
 bun run check:theme       # macos/: theme, text and control contrast
+(cd cloudflare/sona-companion && bun run test)  # cloudflare/sona-companion/ and share-site/viewer.js
 ```
 
 **Verifying a change against a running Sona:**
