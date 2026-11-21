@@ -5,8 +5,10 @@ import Testing
 struct TypingCorrectorTests {
     let corrector: TypingCorrector
 
-    init() throws {
+    /// The corrector as the keyboard runs it, with the English common words.
+    init() async throws {
         corrector = try #require(TypingCorrector(language: "en-US"))
+        corrector.common = await CommonWords.list(for: .english)
     }
 
     @Test("space fixes at least 9 in 10 typos written after tuning and turns at most 1 in 20 into a wrong word")

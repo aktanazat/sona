@@ -234,6 +234,10 @@ private struct PhoneDictationSettings: View {
     @State private var activeLanguage = DictationPreferences.activeLanguage
     @State private var choosesLanguages = false
     @State private var typingLanguages = KeyboardLanguages.shared().enabled
+    @AppStorage(KeyboardFeelPreferences.numberRowKey, store: DictationPreferences.shared) private var numberRow = false
+    @AppStorage(KeyboardFeelPreferences.hapticsKey, store: DictationPreferences.shared) private var keyHaptics = true
+    @AppStorage(KeyboardFeelPreferences.soundsKey, store: DictationPreferences.shared) private var keySounds = true
+    @State private var learningReset = false
     private static let supportedLanguages = SFSpeechRecognizer.supportedLocales()
         .map(\.identifier).filter(DictationPreferences.offered).sorted { languageName($0).localizedStandardCompare(languageName($1)) == .orderedAscending }
 
@@ -255,24 +259,27 @@ private struct PhoneDictationSettings: View {
                     .foregroundStyle(Theme.textSecondary)
                 }
                 .listRowBackground(Theme.surface)
-                if TypingLanguage.allCases.count > 1 {
-                    Section {
-                        ForEach(TypingLanguage.allCases) { language in
-                            Toggle(language.name, isOn: Binding(
-                                get: { typingLanguages.contains(language) },
-                                set: { on in
-                                    let keyboard = KeyboardLanguages.shared()
-                                    keyboard.enabled = on ? typingLanguages + [language] : typingLanguages.filter { $0 != language }
-                                    typingLanguages = keyboard.enabled
-                                }
-                            ))
-                            .disabled(typingLanguages == [language])
-                        }
-                    } header: {
-                        Text("keyboard.languages")
-                    }
-                    .listRowBackground(Theme.surface)
+                Section {
+                    ForEach(TypingLanguage.allCases) { language in languageToggle(language) }
+                } header: {
+                    Text("keyboard.languages")
                 }
+                .listRowBackground(Theme.surface)
+                Section {
+                    Toggle("keyboard.numberRow", isOn: $numberRow)
+                    Toggle("keyboard.haptics", isOn: $keyHaptics)
+                    Toggle("keyboard.sounds", isOn: $keySounds)
+                    Button("keyboard.resetLearning", role: .destructive) {
+                        KeyboardLearningStore.shared().reset()
+                        learningReset = true
+                    }
+                } header: {
+                    Text("keyboard.feel")
+                } footer: {
+                    Text(learningReset ? "keyboard.resetLearningDone" : "keyboard.feelFooter")
+                        .foregroundStyle(Theme.textSecondary)
+                }
+                .listRowBackground(Theme.surface)
                 Section {
                     Picker("dictation.language", selection: $activeLanguage) {
                         ForEach(languages, id: \.self) { Text(Self.languageName($0)).tag($0) }
@@ -347,6 +354,18 @@ private struct PhoneDictationSettings: View {
             }
         }
         .tint(Theme.accent)
+    }
+
+    private func languageToggle(_ language: TypingLanguage) -> some View {
+        Toggle(language.name, isOn: Binding(
+            get: { typingLanguages.contains(language) },
+            set: { on in
+                let keyboard = KeyboardLanguages.shared()
+                keyboard.enabled = on ? typingLanguages + [language] : typingLanguages.filter { $0 != language }
+                typingLanguages = keyboard.enabled
+            }
+        ))
+        .disabled(typingLanguages == [language])
     }
 
     private var profileIsEmpty: Bool {
