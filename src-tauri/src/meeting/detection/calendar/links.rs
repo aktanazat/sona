@@ -57,7 +57,10 @@ fn is_meeting_link(value: &str) -> bool {
                 path.starts_with("/l/meetup-join/") || path.starts_with("/meet/")
             }
             _ if host == "zoom.us" || host.ends_with(".zoom.us") => {
-                path.starts_with("/j/") || path.starts_with("/s/") || path.starts_with("/wc/join/")
+                path.starts_with("/j/")
+                    || path.starts_with("/s/")
+                    || path.starts_with("/my/")
+                    || path.starts_with("/wc/join/")
             }
             _ if host.ends_with(".webex.com") => {
                 path.starts_with("/meet/")
@@ -189,6 +192,13 @@ mod tests {
     fn literal_terminal_query_punctuation_is_preserved() {
         let link =
             "https://www.google.com/url?q=https%3A%2F%2Fus02web.zoom.us%2Fj%2F123456789%3Fpwd%3DA;";
+
+        assert_eq!(calendar_join_url(None, Some(link)).as_deref(), Some(link));
+    }
+
+    #[test]
+    fn a_zoom_personal_room_link_in_calendar_details_is_a_join_link() {
+        let link = "https://example.zoom.us/my/fixture-room?pwd=A%2Bb";
 
         assert_eq!(calendar_join_url(None, Some(link)).as_deref(), Some(link));
     }
