@@ -26,8 +26,9 @@ pub use schema::{
 };
 pub use types::{
     DateResolution, EvidenceLink, EvidenceSourceKind, EvidenceTargetKind, LabelScope, Milestone,
-    PlanningCalendarPage, PlanningTask, Project, ProjectDetail, ProjectHealth, ProjectLink,
-    ProjectProgress, ProjectStatus, ProjectStatusName, ProjectSummary, ProjectUpdate, TaskStatus,
+    PlanningCalendarPage, PlanningTask, Project, ProjectDetail, ProjectHealth,
+    ProjectLink, ProjectProgress, ProjectStatus, ProjectStatusName, ProjectSummary, ProjectUpdate,
+    TaskStatus,
 };
 
 use crate::managers::history::HistoryManager;

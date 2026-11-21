@@ -401,7 +401,15 @@ pub(crate) fn record(
     conn.execute(
         "INSERT INTO planning_task_activity (id, task_id, at_ms, actor, kind, from_value, to_value)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        params![id, task_id, now_ms, actor.as_str(), kind.as_str(), from, to],
+        params![
+            id,
+            task_id,
+            now_ms,
+            actor.as_str(),
+            kind.as_str(),
+            from,
+            to
+        ],
     )?;
     super::inbox::on_activity(
         conn,
@@ -921,9 +929,7 @@ pub(crate) fn place_manually(
 ) -> Result<Vec<Changed>> {
     let order = conn
         .prepare("SELECT id, sort_order FROM planning_tasks ORDER BY sort_order, number")?
-        .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
-        })?
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?)))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let (moving, mut rest): (Vec<_>, Vec<_>) =
         order.iter().cloned().partition(|(id, _)| ids.contains(id));
@@ -968,10 +974,7 @@ pub(crate) fn place_manually(
             .map(|(index, (id, _))| (id.clone(), f64::from(index) * 1024.0))
             .collect()
     };
-    let was: HashMap<&str, f64> = order
-        .iter()
-        .map(|(id, sort)| (id.as_str(), *sort))
-        .collect();
+    let was: HashMap<&str, f64> = order.iter().map(|(id, sort)| (id.as_str(), *sort)).collect();
     let mut changed = Vec::new();
     for (id, sort) in placed {
         if was.get(id.as_str()) == Some(&sort) {
@@ -1264,8 +1267,8 @@ fn mentioned(text: &str) -> Vec<i64> {
             .position(|byte| !byte.is_ascii_digit())
             .map_or(bytes.len(), |length| digits + length);
         at = digits;
-        let bounded =
-            (start == 0 || !word(bytes[start - 1])) && (end == bytes.len() || !word(bytes[end]));
+        let bounded = (start == 0 || !word(bytes[start - 1]))
+            && (end == bytes.len() || !word(bytes[end]));
         if end == digits || !bounded {
             continue;
         }
