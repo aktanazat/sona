@@ -65,6 +65,7 @@ struct DictationSettingsView<DataRows: View>: View {
                         )
                     )
                     if store.settings.commandModeEnabled {
+                        ShortcutCaptureRow(store: store, id: "command")
                         ToggleRow(
                             title: "Show answers in chat",
                             detail: "A question opens the chat with its answer. Nothing is typed over your text. Off, every command edits the selection.",

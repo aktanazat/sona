@@ -34,7 +34,10 @@ struct ShortcutCaptureRow: View {
             CardRow {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(BindingCopy.title(record)).bodyText()
-                    if let detail = BindingCopy.detail(record) {
+                    if capture.recording {
+                        Text("Tap twice for a double tap. Escape keeps the current shortcut")
+                            .metaText(Theme.inkSecondary)
+                    } else if let detail = BindingCopy.detail(record) {
                         Text(detail).metaText(Theme.inkSecondary)
                     }
                 }
@@ -111,7 +114,7 @@ struct ShortcutCaptureRow: View {
         }
         .buttonStyle(.plain)
         .disabled(disabled || capture.recording || store.isBusy("binding_\(id)"))
-        .help(capture.recording ? "Tap twice for a double tap. Escape keeps the current shortcut" : "Record a new shortcut for \(BindingCopy.title(record))")
+        .help(capture.recording ? "" : "Record a new shortcut for \(BindingCopy.title(record))")
         .onDisappear {
             /// Leaving the page mid-capture would leave a listener running
             /// with nothing reading it, and every shortcut suspended.
