@@ -188,11 +188,7 @@ struct TasksSettingsView: View {
             labels
             templates
         }
-        .task {
-            await model.routines.loadTemplates()
-            if model.projects.projects == nil { await model.projects.loadProjects() }
-            await model.projects.loadInitiatives()
-        }
+        .task { await model.routines.loadTemplates() }
     }
 
     @ViewBuilder private var labels: some View {
@@ -381,38 +377,29 @@ private struct LabelSettingsRow: View {
     /// What a move into a one-label group would take a label off.
     struct Crowding {
         let group: String
-        let tasks: Int
-        let projects: Int
-        let initiatives: Int
+        let crowded: LabelCrowding
 
-        var count: Int { tasks + projects + initiatives }
+        var count: Int { crowded.tasks.count + crowded.projects.count + crowded.initiatives.count }
 
         /// "2 tasks and 1 project".
         var items: String {
-            let parts = [(tasks, "task", "tasks"), (projects, "project", "projects"), (initiatives, "initiative", "initiatives")]
+            let parts = [
+                (crowded.tasks.count, "task", "tasks"),
+                (crowded.projects.count, "project", "projects"),
+                (crowded.initiatives.count, "initiative", "initiatives")
+            ]
                 .filter { $0.0 > 0 }
                 .map { "\($0.0) \($0.0 == 1 ? $0.1 : $0.2)" }
             return parts.count > 1 ? parts.dropLast().joined(separator: ", ") + " and " + parts[parts.count - 1] : parts.joined()
         }
     }
 
-    /// Moves the label into `group`, first asking when the group allows one
-    /// label and something carries this one and another of the group's.
+    /// Moves the label into `group`, first asking when the core finds
+    /// something that would hold this label and another of a one-label
+    /// group's.
     private func move(into group: String) {
-        let members = others.filter { $0.group == group }
-        let siblings = Set(members.map(\.id))
-        let crowded: ([String]) -> Bool = { ids in
-            ids.contains(label.id) && ids.contains(where: siblings.contains)
-        }
-        let crowding = Crowding(
-            group: group,
-            tasks: (model.work.items ?? []).filter { crowded($0.labelIds) }.count,
-            projects: (model.projects.projects ?? []).filter { crowded($0.project.labelIds ?? []) }.count,
-            initiatives: model.projects.initiatives.filter { crowded($0.labelIds) }.count)
-        if members.first?.groupMulti == true || crowding.count == 0 {
-            model.work.groupLabel(label.id, into: group)
-        } else {
-            self.crowding = crowding
+        model.work.groupLabel(label.id, into: group) { crowded in
+            crowding = Crowding(group: group, crowded: crowded)
         }
     }
 }

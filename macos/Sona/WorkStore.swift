@@ -734,8 +734,11 @@ final class WorkStore {
     /// Moves a label into `group`, or out of its group with `nil`. `settle`
     /// makes the group one label per item, and each item holding several of
     /// its labels keeps the first by name; without it the core refuses a
-    /// move that would leave an item holding two.
-    func groupLabel(_ id: String, into group: String?, settle: Bool = false) {
+    /// move that would leave an item holding two, archived and binned ones
+    /// included, and `crowded` gets what would lose a label.
+    func groupLabel(
+        _ id: String, into group: String?, settle: Bool = false, crowded: @escaping (LabelCrowding) -> Void = { _ in }
+    ) {
         guard var shown = labels.first(where: { $0.id == id }) else { return }
         let name = group?.trimmingCharacters(in: .whitespacesAndNewlines)
         let value = name?.isEmpty == false ? name : nil
@@ -745,8 +748,23 @@ final class WorkStore {
         shown.groupMulti = settle ? false : value.flatMap { group in
             labels.first { $0.group == group && $0.id != id }?.groupMulti
         } ?? false
-        changeLabel(before, to: shown, "work_label_group", LabelGroupParams(
-            operationId: Self.newId(), id: id, group: value, multi: settle && value != nil ? false : nil))
+        let params = LabelGroupParams(
+            operationId: Self.newId(), id: id, group: value, multi: settle && value != nil ? false : nil)
+        let refusable = value != nil && !settle && !shown.groupMulti
+        if !refusable { place(shown) }
+        enqueue {
+            do {
+                let saved: WorkLabel = try await self.core.request("work_label_group", params)
+                self.place(saved)
+            } catch {
+                self.place(before)
+                if let refusal = (error as? CoreError)?.remote(as: LabelGroupRefusal.self) {
+                    crowded(refusal.crowded)
+                } else {
+                    self.mutationError = error.localizedDescription
+                }
+            }
+        }
     }
 
     /// Lets a task carry several labels of `group`, or only one.
@@ -1933,6 +1951,16 @@ private struct LabelGroupParams: Encodable {
     let id: String
     let group: String?
     let multi: Bool?
+}
+/// What a label move would leave holding two labels of a one-label group,
+/// by id.
+struct LabelCrowding: Decodable {
+    let tasks: [String]
+    let projects: [String]
+    let initiatives: [String]
+}
+private struct LabelGroupRefusal: Decodable {
+    let crowded: LabelCrowding
 }
 private struct LabelMergeParams: Encodable {
     let operationId: String

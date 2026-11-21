@@ -1211,6 +1211,25 @@ pub(crate) fn reminders_notified(
     })
 }
 
+/// Why the app's label move was refused: what a move into a one-label group
+/// would leave holding two of its labels, archived and binned items too, so
+/// the app can ask before settling; or the core's own reason.
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+pub(crate) enum LabelGroupRefusal {
+    Crowded { crowded: Labeled },
+    Failed(String),
+}
+
+impl From<LabelGroupRefusal> for String {
+    fn from(refusal: LabelGroupRefusal) -> Self {
+        match refusal {
+            LabelGroupRefusal::Crowded { .. } => Refusal::LabelGroup.to_string(),
+            LabelGroupRefusal::Failed(message) => message,
+        }
+    }
+}
+
 /// Puts a label in a group or out of one. The app's `work_label_group`.
 /// Also returns what kept one label from a group that now allows one.
 pub(crate) fn label_group_as(
@@ -1219,7 +1238,7 @@ pub(crate) fn label_group_as(
     id: &str,
     group: Option<&str>,
     multi: Option<bool>,
-) -> Result<(WorkLabel, Labeled), String> {
+) -> Result<(WorkLabel, Labeled), LabelGroupRefusal> {
     let now = now_ms();
     run_history(app, |history| {
         store::mutate(
@@ -1240,6 +1259,14 @@ pub(crate) fn label_group_as(
                 })
             },
         )
+    })
+    .map_err(|message| {
+        match crate::planning::history(&app.state::<Arc<HistoryManager>>(), |conn| {
+            group_clash(conn, id, group, multi)
+        }) {
+            Ok(crowded) if !crowded.is_empty() => LabelGroupRefusal::Crowded { crowded },
+            _ => LabelGroupRefusal::Failed(message),
+        }
     })
 }
 
@@ -1270,6 +1297,7 @@ pub(crate) fn label_merge_as(
             },
         )
     })
+    .inspect(|_| crate::planning::changed_everywhere(app))
 }
 
 /// Retires a label or restores it. The app's `work_label_retire`.

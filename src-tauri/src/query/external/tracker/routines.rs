@@ -1128,7 +1128,7 @@ impl Tracker<'_> {
         self.applies("grouping a label")?;
         let (saved, settled) =
             routines::label_group_as(self.app, &operation_id, &label.id, group.as_deref(), multi)
-                .map_err(|message| self.write_refusal(message, &operation_id, "The label"))?;
+                .map_err(|refused| self.write_refusal(refused.into(), &operation_id, "The label"))?;
         let settled = planning::history(self.history, |conn| ExternalLabeled::of(conn, &settled))
             .map_err(|message| refusal(self.history, message))?;
         Ok(Self::label_settled(
