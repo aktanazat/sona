@@ -25,6 +25,8 @@ const TONE_FORMAL: &str = include_str!("../resources/prompts/tone_formal.txt");
 const TONE_SEMI_FORMAL: &str = include_str!("../resources/prompts/tone_semi_formal.txt");
 const TONE_SEMI_CASUAL: &str = include_str!("../resources/prompts/tone_semi_casual.txt");
 const TONE_CASUAL: &str = include_str!("../resources/prompts/tone_casual.txt");
+const TONE_VERY_CASUAL: &str = include_str!("../resources/prompts/tone_very_casual.txt");
+const TONE_EXCITED: &str = include_str!("../resources/prompts/tone_excited.txt");
 const MINIMALIST_CLEANUP: &str = include_str!("../resources/prompts/minimalist_cleanup.txt");
 const EMAIL: &str = include_str!("../resources/prompts/email.txt");
 const MEETING: &str = include_str!("../resources/prompts/meeting.txt");
@@ -402,6 +404,8 @@ fn tone_block(tone: Tone) -> Option<&'static str> {
         Tone::SemiFormal => Some(TONE_SEMI_FORMAL),
         Tone::SemiCasual => Some(TONE_SEMI_CASUAL),
         Tone::Casual => Some(TONE_CASUAL),
+        Tone::VeryCasual => Some(TONE_VERY_CASUAL),
+        Tone::Excited => Some(TONE_EXCITED),
     }
 }
 
@@ -510,6 +514,17 @@ mod tests {
         assert!(system.contains("[WRITING SAMPLES]"));
         assert!(system.contains("Sample 1:\nShort sentences. No throat clearing."));
         assert!(system.contains("Sample 2:\nI write like I talk."));
+    }
+
+    #[test]
+    fn very_casual_and_excited_each_send_their_own_tone_rule() {
+        let very_casual = render_for(&run(Tone::VeryCasual)).system_message;
+        let excited = render_for(&run(Tone::Excited)).system_message;
+
+        assert!(very_casual.contains("[TONE_RULE: VERY_CASUAL]"));
+        assert!(very_casual.contains("all lowercase"));
+        assert!(excited.contains("[TONE_RULE: EXCITED]"));
+        assert!(!excited.contains("VERY_CASUAL"));
     }
 
     /// A prompt written for the version that pasted the transcript into the

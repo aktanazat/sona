@@ -10,21 +10,25 @@ import Foundation
 // MARK: - Closed choices
 
 enum ModeTone: String, Codable, CaseIterable, Hashable, Identifiable {
+    case veryCasual = "very_casual"
     case casual
     case semiCasual = "semi_casual"
     case balanced
     case semiFormal = "semi_formal"
     case formal
+    case excited
 
     var id: String { rawValue }
 
     var label: String {
         switch self {
+        case .veryCasual: "Very casual"
         case .casual: "Casual"
         case .semiCasual: "Semi-casual"
         case .balanced: "Balanced"
         case .semiFormal: "Semi-formal"
         case .formal: "Formal"
+        case .excited: "Excited"
         }
     }
 }

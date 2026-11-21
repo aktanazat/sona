@@ -30,12 +30,16 @@ static NEXT_RUN_ID: AtomicU64 = AtomicU64::new(1);
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize, Type)]
 #[serde(rename_all = "snake_case")]
 pub enum Tone {
+    /// Lowercase, no closing periods: a quick text to a friend.
+    VeryCasual,
     Casual,
     SemiCasual,
     #[default]
     Balanced,
     SemiFormal,
     Formal,
+    /// Upbeat wording, off the casual-to-formal scale.
+    Excited,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize, Type)]
