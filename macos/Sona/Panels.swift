@@ -84,7 +84,7 @@ struct HUDPill: View {
                         .id(phase)
                         .transition(.opacity)
                 }
-                .frame(width: 176, height: 36)
+                .frame(width: showsSlowConnection ? 236 : 176, height: 36)
                 .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: phase)
                 .background(Theme.hud, in: Capsule())
                 .overlay(Capsule().strokeBorder(Theme.hudBorder, lineWidth: 1))
@@ -113,17 +113,17 @@ struct HUDPill: View {
                 control("Cancel", symbol: "xmark") { model.cancelCapture() }
                 switch presentation.capture {
                 case .recording:
-                    if model.slowConnectionStage == nil {
-                        RecordingWaveform(meter: model.meter)
-                            .frame(width: 55, height: 18)
+                    RecordingWaveform(meter: model.meter)
+                        .frame(width: 55, height: 18)
+                    if showsSlowConnection {
+                        Text(Self.slowConnection)
+                            .font(.system(size: 11, weight: .medium))
+                            .fixedSize()
+                            .frame(maxWidth: .infinity)
+                    } else {
                         status
                             .font(.system(size: 11, weight: .medium))
                             .frame(minWidth: 32)
-                    } else {
-                        Text(Self.slowConnection)
-                            .font(.system(size: 12, weight: .medium))
-                            .lineLimit(1)
-                            .frame(maxWidth: .infinity)
                     }
                     control("Stop recording", symbol: "stop.fill") { model.stopCapture() }
                 case let .working(kind):
@@ -230,6 +230,13 @@ struct HUDPill: View {
 
     /// The pill's status while the network holds up a cloud stage.
     private static let slowConnection = "Slow connection"
+
+    /// A recording held up by the network, unless its last minute is
+    /// counting down: the countdown says the recording is about to stop.
+    private var showsSlowConnection: Bool {
+        guard case .recording = presentation.capture, presentation.feedback == nil else { return false }
+        return model.slowConnectionStage != nil && model.pillWarningSeconds == nil
+    }
 
     @ViewBuilder private var status: some View {
         if let seconds = model.pillWarningSeconds {
