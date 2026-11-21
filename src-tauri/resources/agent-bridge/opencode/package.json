@@ -1,0 +1,21 @@
+{
+  "name": "@sona/opencode",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "index.mjs",
+  "exports": {
+    ".": "./index.mjs",
+    "./server": "./server.mjs",
+    "./package.json": "./package.json"
+  },
+  "oc-plugin": [
+    "server"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "zod": "3.25.76"
+  }
+}

@@ -74,7 +74,9 @@ when the original conversation is deleted or its transcript expires, its saved e
 - A chat that answers from your corpus. Once you allow it to send matching quotes to your server, it can search recordings, read a meeting or transcript, look up a person, check open loops and the calendar, and count words and activity, at most three lookups per question, each shown as a step. It can also offer changes (close a commitment, assign an owner, rename a speaker, add a vocabulary term) that apply only when you press Apply, each with a receipt and an undo.
 - In native macOS chat, choose ChatGPT or Claude, then a model and one of its supported thinking levels. The paired server supplies the model list. `Use server default` clears the saved choice.
 - A `sona` CLI and MCP server for reading notes, note versions and diffs, statistics, meetings, people, loops, and the upcoming calendar, plus a consent-gated write to close a loop. `skills/sona/SKILL.md` documents the surface and JSON schema version 4.
-- Local agent hooks for Claude Code, Codex, Grok, and OMP, with permission requests answerable from Sona where the tool has a reply channel.
+- Local agent hooks for Claude Code, Codex, Grok, OMP and OpenCode. OpenCode 2 supports one-time approvals, question answers and declines, and a preview and confirmation step for follow-up replies.
+
+In Settings > Agents, enable connections and OpenCode, authorize a project folder, then select OpenCode under Setup code. Add the copied `plugins` entry to OpenCode's `opencode.json` and restart OpenCode. Sona checks for the OpenCode command without launching it and never edits agent files. OpenCode answers and replies show as sent only after OpenCode accepts them. Question answers stay in the window until that acceptance; if the request closes, copy them back to OpenCode.
 
 ### Phone and watch
 

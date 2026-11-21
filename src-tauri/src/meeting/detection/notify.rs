@@ -783,16 +783,8 @@ mod macos {
         }
     }
 
-    /// Owns the notification center's delegate and category registration, and
-    /// creates all three lazily.
-    ///
-    /// `start` runs inside Tauri's `setup`, before the window and its webview
-    /// exist. Nothing in this type may touch UserNotifications there: that is
-    /// main-thread framework work in the middle of app launch, and it is the
-    /// only code in this slice whose execution differs between a `cargo` build
-    /// and a bundled app — so it is also the only code no test has ever run.
-    /// Deferring it means the earliest possible touch is the first detection
-    /// tick, on the detection thread, well after the window is up.
+    /// Owns the notification center, its delegate and categories. Initialization
+    /// waits until the first permission check after app startup.
     pub struct UserNotificationPrompts {
         responder: Arc<dyn PromptResponder>,
         center: OnceLock<CenterBinding>,
@@ -863,18 +855,26 @@ mod macos {
             }
             let cached_access = Arc::clone(&self.cached_access);
             let query_in_flight = Arc::clone(&self.access_query_in_flight);
+            // The service can reply with nil despite the SDK's nonnull annotation.
             let completion = RcBlock::new(
-                move |settings: core::ptr::NonNull<
-                    objc2_user_notifications::UNNotificationSettings,
-                >| {
-                    // SAFETY: the system hands a live settings object to this block.
-                    let status = unsafe { settings.as_ref().authorizationStatus() };
-                    cached_access.store(access_code(status), Ordering::Release);
+                move |settings: *mut objc2_user_notifications::UNNotificationSettings| {
+                    // SAFETY: a non-null callback object stays live for this call.
+                    let access = match unsafe { settings.as_ref() } {
+                        Some(settings) => access_code(settings.authorizationStatus()),
+                        None => {
+                            log::warn!("Notification settings are unavailable.");
+                            ACCESS_NOT_DETERMINED
+                        }
+                    };
+                    cached_access.store(access, Ordering::Release);
                     query_in_flight.store(false, Ordering::Release);
                 },
             );
-            self.center()
-                .getNotificationSettingsWithCompletionHandler(&completion);
+            // SAFETY: this preserves the Objective-C block ABI with a nullable pointer.
+            unsafe {
+                let _: () = msg_send![self.center(),
+                    getNotificationSettingsWithCompletionHandler: &*completion];
+            }
         }
     }
 

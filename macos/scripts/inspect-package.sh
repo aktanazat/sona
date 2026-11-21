@@ -67,6 +67,14 @@ for resource in \
     resources/models/meeting-diarization.json \
     resources/models/meeting-diarization-sortformer.json \
     resources/agent-bridge/sona-omp-agent-bridge.mjs \
+    resources/agent-bridge/opencode/package.json \
+    resources/agent-bridge/opencode/index.mjs \
+    resources/agent-bridge/opencode/server.mjs \
+    resources/agent-bridge/opencode/bridge.mjs \
+    resources/agent-bridge/opencode/v1.mjs \
+    resources/agent-bridge/opencode/v2.mjs \
+    resources/agent-bridge/opencode/questions.mjs \
+    resources/agent-bridge/opencode/service.mjs \
     resources/ledger/ledger-template.html \
     resources/prompts/notes.txt \
     resources/cleanup-runtime/llama-LICENSE \

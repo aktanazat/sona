@@ -13,13 +13,12 @@ extension CoreEvent {
     static let agentBridgeSettingsChanged = "settings-changed"
 }
 
-/// The four agents the local hook bridge knows. A closed set in Rust too:
-/// settings cannot name a fifth one into existence.
 enum AgentBridgeAgent: String, Decodable, CaseIterable, Hashable, Sendable {
     case claude
     case codex
     case grok
     case omp
+    case opencode
 
     var label: String {
         switch self {
@@ -27,6 +26,7 @@ enum AgentBridgeAgent: String, Decodable, CaseIterable, Hashable, Sendable {
         case .codex: "Codex"
         case .grok: "Grok"
         case .omp: "OMP"
+        case .opencode: "OpenCode"
         }
     }
 
@@ -38,6 +38,7 @@ enum AgentBridgeAgent: String, Decodable, CaseIterable, Hashable, Sendable {
         case .codex: "Observe Codex sessions, answer approval requests, and reply when a turn ends."
         case .grok: "Observe Grok sessions, answer tool requests, and reply when a turn ends."
         case .omp: "Observe OMP sessions and approval requests. Sona can reply only when an OMP session stops."
+        case .opencode: "Reply to OpenCode, answer questions and approve requests once."
         }
     }
 }
@@ -99,6 +100,7 @@ enum AgentBridgeRequestKind: String, Decodable, Sendable {
     case postToolUse = "post_tool_use"
     case stop
     case notification
+    case inputRequest = "input_request"
 
     var label: String {
         switch self {
@@ -109,6 +111,7 @@ enum AgentBridgeRequestKind: String, Decodable, Sendable {
         case .postToolUse: "After tool use"
         case .stop: "Stop"
         case .notification: "Notification"
+        case .inputRequest: "Ready for your reply"
         }
     }
 
@@ -119,8 +122,23 @@ enum AgentBridgeRequestKind: String, Decodable, Sendable {
 enum AgentBridgeRequestState: String, Decodable, Sendable {
     case observed
     case responded
+    case delivered
     case dismissed
     case expired
+}
+
+struct AgentBridgeQuestionOption: Decodable, Sendable {
+    let label: String
+    let description: String?
+}
+
+struct AgentBridgeQuestion: Decodable, Sendable {
+    let header: String
+    let question: String
+    let options: [AgentBridgeQuestionOption]
+    let multiSelect: Bool
+    let custom: Bool
+    let required: Bool
 }
 
 /// One hook invocation the bridge saw, and whether it is still holding its
@@ -140,22 +158,41 @@ struct AgentBridgeObservedRequest: Decodable, Identifiable, Sendable {
     /// The core's own answer to "can this be replied to", so the console and
     /// the responder never disagree about which invocations are waiting.
     let awaitingResponse: Bool
+    let message: String?
+    let questions: [AgentBridgeQuestion]?
 
     var expiresAt: Date { Date(timeIntervalSince1970: TimeInterval(expiresAtMs) / 1000) }
 
     var isOpen: Bool { state == .observed }
 
+    var stateLabel: String {
+        switch state {
+        case .observed: awaitingResponse ? "Waiting for you" : "Observed"
+        case .responded: agent == .opencode ? "Waiting for OpenCode" : "Answered"
+        case .delivered: "Sent"
+        case .dismissed: "No longer waiting"
+        case .expired: "Expired"
+        }
+    }
+
+    var isQuestion: Bool { questions?.isEmpty == false }
+
+    func canAnswerQuestions(interactiveReady: Bool) -> Bool {
+        interactiveReady && isOpen && isQuestion && awaitingResponse
+    }
+
     /// Allow and Deny appear only when an answer will actually reach the
     /// agent: the bridge is live, the row is open, the kind takes a rule, and
     /// the hook is still waiting.
     func canRespond(interactiveReady: Bool) -> Bool {
-        interactiveReady && isOpen && kind.isPermission && awaitingResponse
+        interactiveReady && isOpen && !isQuestion && kind.isPermission && awaitingResponse
     }
 
     /// The hook already returned, so Sona can only watch this one.
     var observeOnly: Bool { isOpen && kind.isPermission && !awaitingResponse }
 
     var headline: String {
+        if isQuestion { return "\(agent.label) · Questions" }
         let head = "\(agent.label) · \(kind.label)"
         guard let toolName, !toolName.isEmpty else { return head }
         return "\(head) · \(toolName)"
@@ -199,7 +236,14 @@ struct AgentBridgePendingMessage: Decodable, Identifiable, Equatable, Sendable {
 
     /// What is true of this reply now, not what to do about it.
     var stateLabel: String {
-        state == .held && confirmed ? "Will send when the agent stops" : state.label
+        if agent == .opencode {
+            switch state {
+            case .held: return confirmed ? "Waiting to send" : "Review your reply"
+            case .responseWritten: return "Waiting for OpenCode"
+            case .emitted, .copyOnly, .cancelled: return state.label
+            }
+        }
+        return state == .held && confirmed ? "Will send when the agent stops" : state.label
     }
 }
 
@@ -238,6 +282,7 @@ struct AgentBridgeSettings: Decodable, Sendable {
     let codexEnabled: Bool
     let grokEnabled: Bool
     let ompEnabled: Bool
+    let opencodeEnabled: Bool
     let policyGeneration: UInt64?
     let allowedProjects: [AgentBridgeProjectScope]
     let permissionRules: [AgentBridgePermissionRule]
@@ -245,7 +290,7 @@ struct AgentBridgeSettings: Decodable, Sendable {
     /// What the console shows before the first read answers.
     static let empty = AgentBridgeSettings(
         masterEnabled: false, claudeEnabled: false, codexEnabled: false, grokEnabled: false,
-        ompEnabled: false, policyGeneration: nil, allowedProjects: [], permissionRules: [])
+        ompEnabled: false, opencodeEnabled: false, policyGeneration: nil, allowedProjects: [], permissionRules: [])
 
     func isEnabled(_ agent: AgentBridgeAgent) -> Bool {
         switch agent {
@@ -253,6 +298,7 @@ struct AgentBridgeSettings: Decodable, Sendable {
         case .codex: codexEnabled
         case .grok: grokEnabled
         case .omp: ompEnabled
+        case .opencode: opencodeEnabled
         }
     }
 }

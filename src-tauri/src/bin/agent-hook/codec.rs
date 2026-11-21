@@ -10,6 +10,8 @@ use serde_json::{Map, Value};
 pub(crate) use super::wire::{Agent, CanonicalEvent, CanonicalEventKind, CanonicalTool};
 use super::SCHEMA_VERSION;
 
+mod opencode;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DecodeError {
     Invalid,
@@ -170,6 +172,7 @@ pub(crate) fn decode_event(agent: Agent, raw: &[u8]) -> Result<CanonicalEvent, D
         Agent::Codex => decode_codex(raw),
         Agent::Grok => decode_grok(raw),
         Agent::Omp => decode_omp(raw),
+        Agent::OpenCode => opencode::decode(raw),
     }
 }
 
@@ -220,9 +223,9 @@ fn validate_claude(input: &ClaudeInput, kind: CanonicalEventKind) -> Result<(), 
         }
         CanonicalEventKind::PreToolUse => tool_call && no_suggestions && no_notification,
         CanonicalEventKind::Notification => no_tool && no_suggestions && input.message.is_some(),
-        CanonicalEventKind::SessionStart | CanonicalEventKind::PostToolUse => {
-            return Err(DecodeError::Unsupported)
-        }
+        CanonicalEventKind::SessionStart
+        | CanonicalEventKind::PostToolUse
+        | CanonicalEventKind::InputRequest => return Err(DecodeError::Unsupported),
     };
     expected.then_some(()).ok_or(DecodeError::Invalid)
 }
@@ -242,6 +245,7 @@ fn canonical_from_claude(input: &ClaudeInput, event: CanonicalEventKind) -> Cano
         request_id: None,
         model: None,
         source: None,
+        order: None,
         prompt: input.prompt.clone(),
         message: match event {
             CanonicalEventKind::Stop => input.last_assistant_message.clone(),
@@ -315,8 +319,9 @@ fn validate_codex(input: &CodexInput, kind: CanonicalEventKind) -> Result<(), De
         CanonicalEventKind::Stop => {
             input.turn_id.is_some() && input.stop_hook_active.is_some() && no_tool
         }
-        // Codex has no notification hook, so `decode_codex` never maps one.
-        CanonicalEventKind::Notification => return Err(DecodeError::Unsupported),
+        CanonicalEventKind::Notification | CanonicalEventKind::InputRequest => {
+            return Err(DecodeError::Unsupported)
+        }
     };
     expected.then_some(()).ok_or(DecodeError::Invalid)
 }
@@ -335,6 +340,7 @@ fn canonical_from_codex(input: &CodexInput, event: CanonicalEventKind) -> Canoni
         request_id: input.turn_id.clone(),
         model: input.model.clone(),
         source: input.source.clone(),
+        order: None,
         prompt: input.prompt.clone(),
         message: input.last_assistant_message.clone(),
         reason: None,
@@ -369,7 +375,7 @@ fn validate_grok(input: &GrokInput, kind: CanonicalEventKind) -> Result<(), Deco
     }
     // Grok spells the event name twice. Disagreement means the payload is not
     // the event it announces, which no Grok release should ever send.
-    if input.claude_event_name != claude_event_name(kind) {
+    if Some(input.claude_event_name.as_str()) != claude_event_name(kind) {
         return Err(DecodeError::Invalid);
     }
 
@@ -384,22 +390,24 @@ fn validate_grok(input: &GrokInput, kind: CanonicalEventKind) -> Result<(), Deco
         CanonicalEventKind::SessionStart | CanonicalEventKind::UserPromptSubmit => {
             input.tool_name.is_none() && input.tool_input.is_none()
         }
-        // Grok denies through `PreToolUse`; it has no permission-request hook.
-        CanonicalEventKind::PermissionRequest => return Err(DecodeError::Unsupported),
+        CanonicalEventKind::PermissionRequest | CanonicalEventKind::InputRequest => {
+            return Err(DecodeError::Unsupported)
+        }
     };
     expected.then_some(()).ok_or(DecodeError::Invalid)
 }
 
 /// The Claude spelling Grok mirrors in its `hook_event_name` key.
-fn claude_event_name(kind: CanonicalEventKind) -> &'static str {
+fn claude_event_name(kind: CanonicalEventKind) -> Option<&'static str> {
     match kind {
-        CanonicalEventKind::SessionStart => "SessionStart",
-        CanonicalEventKind::UserPromptSubmit => "UserPromptSubmit",
-        CanonicalEventKind::PermissionRequest => "PermissionRequest",
-        CanonicalEventKind::PreToolUse => "PreToolUse",
-        CanonicalEventKind::PostToolUse => "PostToolUse",
-        CanonicalEventKind::Stop => "Stop",
-        CanonicalEventKind::Notification => "Notification",
+        CanonicalEventKind::SessionStart => Some("SessionStart"),
+        CanonicalEventKind::UserPromptSubmit => Some("UserPromptSubmit"),
+        CanonicalEventKind::PermissionRequest => Some("PermissionRequest"),
+        CanonicalEventKind::PreToolUse => Some("PreToolUse"),
+        CanonicalEventKind::PostToolUse => Some("PostToolUse"),
+        CanonicalEventKind::Stop => Some("Stop"),
+        CanonicalEventKind::Notification => Some("Notification"),
+        CanonicalEventKind::InputRequest => None,
     }
 }
 
@@ -415,6 +423,7 @@ fn canonical_from_grok(input: &GrokInput, event: CanonicalEventKind) -> Canonica
         request_id: input.prompt_id.clone(),
         model: None,
         source: input.source.clone(),
+        order: None,
         prompt: None,
         message: match event {
             CanonicalEventKind::Notification => input.message.clone(),
@@ -510,6 +519,7 @@ fn canonical_from_omp(input: &OmpInput, event: CanonicalEventKind) -> CanonicalE
         },
         model: None,
         source: None,
+        order: None,
         prompt: None,
         message: None,
         reason: None,

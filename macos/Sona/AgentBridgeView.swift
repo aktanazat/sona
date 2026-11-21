@@ -98,7 +98,7 @@ struct AgentBridgeView: View {
     /// rather than drawing an empty surface.
     @ViewBuilder
     private var hook: some View {
-        if store.hookSnippet != nil || store.hookError != nil {
+        if !store.hookSnippets.isEmpty || store.hookError != nil {
             AgentBridgeSection(
                 "Setup code",
                 meta: "Paste this into your agent's own configuration. Sona never changes agent files."
@@ -109,14 +109,26 @@ struct AgentBridgeView: View {
                 }
             } content: {
                 Card {
+                    ChoiceRow(
+                        title: "Agent",
+                        choices: AgentBridgeAgent.allCases,
+                        label: \.label,
+                        selection: Binding(get: { store.hookAgent }, set: { store.hookAgent = $0 }))
+                    if store.hookAgent == .opencode {
+                        AgentBridgeBlock {
+                            Text(store.openCodeInstalled ? "OpenCode command found." : "OpenCode command not found on this Mac.")
+                                .bodyText(14)
+                            Text("OpenCode 2 · Add this to opencode.json, then restart OpenCode.")
+                                .metaText()
+                        }
+                    }
                     if let hookError = store.hookError {
                         AgentBridgeBlock {
                             Text("Setup code unavailable: \(hookError)")
                                 .bodyText(14, Theme.live)
                                 .textSelection(.enabled)
                         }
-                    }
-                    if let snippet = store.hookSnippet {
+                    } else if let snippet = store.hookSnippet {
                         AgentBridgeBlock {
                             Text(snippet)
                                 .font(TypeScale.mono(12))
@@ -124,6 +136,8 @@ struct AgentBridgeView: View {
                                 .textSelection(.enabled)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                         }
+                    } else {
+                        CardLine("Setup for \(store.hookAgent.label) is unavailable.")
                     }
                 }
             }
@@ -157,7 +171,11 @@ struct AgentBridgeView: View {
                         CardLine("No requests yet.")
                     } else {
                         ForEach(store.requests) { request in
-                            AgentBridgeRequestRow(store: store, request: request)
+                            if request.isQuestion {
+                                AgentBridgeQuestionRow(store: store, request: request)
+                            } else {
+                                AgentBridgeRequestRow(store: store, request: request)
+                            }
                         }
                     }
                 }
@@ -187,7 +205,7 @@ struct AgentBridgeView: View {
     private var rules: some View {
         AgentBridgeSection(
             "Permission rules",
-            meta: "One rule per answer you gave: that exact tool call, in that project."
+            meta: "Rules apply to an exact tool call in one project. OpenCode approvals are never saved."
         ) {
             Card {
                 if store.bridge.permissionRules.isEmpty {
@@ -232,6 +250,12 @@ private struct AgentBridgeRequestRow: View {
         CardRow {
             VStack(alignment: .leading, spacing: 4) {
                 Text(request.headline).bodyText()
+                if request.agent == .opencode {
+                    Text(request.stateLabel).metaText()
+                }
+                if let message = request.message, !message.isEmpty {
+                    Text(message).bodyText(14).textSelection(.enabled)
+                }
                 if let preview = request.toolInputPreview, !preview.isEmpty {
                     Text(preview)
                         .font(TypeScale.mono(12))
@@ -248,16 +272,22 @@ private struct AgentBridgeRequestRow: View {
                         .metaText(Theme.inkSecondary)
                 }
                 if canRespond {
-                    Text("Answering saves an exact rule for this call in this project.")
+                    Text(request.agent == .opencode
+                         ? "Applies only to this request."
+                         : "Answering saves an exact rule for this call in this project.")
                         .metaText(Theme.inkSecondary)
                 }
             }
         } trailing: {
             HStack(spacing: 12) {
                 if canRespond {
-                    Button("Allow exactly this") { store.decidePermission(request, .allow) }
+                    Button(request.agent == .opencode ? "Allow once" : "Allow exactly this") {
+                        store.decidePermission(request, .allow)
+                    }
                         .buttonStyle(.compact)
-                    Button("Deny exactly this") { store.decidePermission(request, .deny) }
+                    Button(request.agent == .opencode ? "Deny" : "Deny exactly this") {
+                        store.decidePermission(request, .deny)
+                    }
                         .buttonStyle(QuietButton(color: Theme.live))
                 }
                 if request.isOpen {
@@ -265,7 +295,93 @@ private struct AgentBridgeRequestRow: View {
                         .buttonStyle(.quiet)
                 }
             }
+            .disabled(store.respondingRequests.contains(request.id))
         }
+    }
+}
+
+private struct AgentBridgeQuestionRow: View {
+    let store: AgentBridgeStore
+    let request: AgentBridgeObservedRequest
+
+    var body: some View {
+        let editable = request.canAnswerQuestions(interactiveReady: store.interactiveReady)
+            && !store.respondingRequests.contains(request.id)
+        let complete = store.questionDrafts[request.id]?.canSend
+            ?? (request.questions?.allSatisfy { !$0.required } == true)
+        AgentBridgeBlock {
+            HStack {
+                Text(request.headline).bodyText()
+                Spacer()
+                Text(request.stateLabel).metaText()
+            }
+            if let message = request.message, !message.isEmpty {
+                Text(message).bodyText(14).textSelection(.enabled)
+            }
+            if request.state != .delivered, let questions = request.questions {
+                ForEach(questions.indices, id: \.self) { index in
+                    let question = questions[index]
+                    VStack(alignment: .leading, spacing: 8) {
+                        if !question.header.isEmpty && question.header != question.question {
+                            Text(question.header).sectionLabel()
+                        }
+                        Text(question.question).bodyText(14)
+                        Text(instruction(question)).metaText()
+                        ForEach(question.options, id: \.label) { option in
+                            Toggle(isOn: Binding(
+                                get: { store.questionDrafts[request.id]?.answers[index].selected.contains(option.label) == true },
+                                set: { store.setQuestionOption(request, question: index, label: option.label, selected: $0) }
+                            )) {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(option.label).bodyText(14)
+                                    if let description = option.description, !description.isEmpty {
+                                        Text(description).metaText()
+                                    }
+                                }
+                            }
+                            .toggleStyle(.checkbox)
+                            .disabled(!editable)
+                        }
+                        if question.custom {
+                            TextField(
+                                question.options.isEmpty ? "Your answer" : "Another answer",
+                                text: Binding(
+                                    get: { store.questionDrafts[request.id]?.answers[index].custom ?? "" },
+                                    set: { store.setQuestionCustomAnswer(request, question: index, text: $0) }))
+                                .textFieldStyle(.roundedBorder)
+                                .accessibilityLabel(question.question)
+                                .disabled(!editable)
+                        }
+                    }
+                    .padding(.vertical, 6)
+                }
+                HStack(spacing: 12) {
+                    if store.questionDrafts[request.id] != nil {
+                        Button("Copy answers") { store.copyQuestionAnswers(request.id) }
+                            .buttonStyle(.quiet)
+                    }
+                    Spacer()
+                    Button("Decline") { store.declineQuestions(request) }
+                        .buttonStyle(QuietButton(color: Theme.live))
+                        .disabled(!editable)
+                    Button("Send answers") { store.sendQuestionAnswers(request) }
+                        .buttonStyle(.primary)
+                        .disabled(!editable || !complete)
+                }
+                if !request.isOpen && store.questionDrafts[request.id] != nil {
+                    Text(request.state == .responded
+                         ? "Your answers stay here until OpenCode accepts them."
+                         : "Copy your answers to continue in OpenCode.")
+                        .metaText()
+                }
+            }
+        }
+    }
+
+    private func instruction(_ question: AgentBridgeQuestion) -> String {
+        let choice = question.options.isEmpty ? "Write an answer"
+            : (question.multiSelect ? "Choose any that apply" : "Choose one")
+        return question.required ? choice : "\(choice) · Optional"
     }
 }
 
