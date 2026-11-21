@@ -43,18 +43,9 @@ struct AgentConversation: Codable, Identifiable, Equatable {
     var title: String { turns.first { $0.role == .user }?.text ?? "" }
 }
 
-/// Where a question stands in this iPhone's outbox.
-enum AskOutbox: Equatable {
-    /// Uploaded: it left the outbox.
-    case left
-    case waiting
-    /// The Worker refused it for good, so it will not leave without a new attempt.
-    case refused
-}
-
 /// What the chat needs from the vault: send a question, follow it through the outbox,
-/// take back one that is not going to leave, read the Mac's replies, and clear an
-/// exchange once its answer is kept here.
+/// take back one that is not going to leave, read the Mac's replies, and delete an
+/// exchange from the vault.
 @MainActor
 protocol AgentTransport: AnyObject {
     func send(_ ask: QueuedAsk, askedAt: Date) async throws -> String
@@ -62,7 +53,10 @@ protocol AgentTransport: AnyObject {
     /// False while the question is being sent: it may still reach the vault.
     func withdraw(_ askObjectId: String) async -> Bool
     func replies() async throws -> [String: AgentReplyManifest]
-    func forget(_ askObjectId: String) async
+    /// Throws until the ask is in this iPhone's copy of the vault and its delete went through.
+    func deleteAsk(_ askObjectId: String) async throws
+    /// Throws until the reply is in this iPhone's copy of the vault and its delete went through.
+    func deleteReply(_ askObjectId: String) async throws
 }
 
 /// The phone's chat with Sona's agent. The Mac answers, so every question has a clock:
@@ -74,8 +68,9 @@ final class PhoneAgentChat: ObservableObject {
     static let pickUpWindow: TimeInterval = 45
     /// How long the Mac's agent turn may run, with room for the reply to arrive.
     static let answerWindow: TimeInterval = 300
-    /// How long a question may wait in this iPhone's outbox before it counts as not
-    /// sent: long enough for a slow connection, short enough to offer Try again.
+    /// How long a question may wait in this iPhone's outbox while nothing is uploading
+    /// before it counts as not sent: long enough for a slow connection, short enough to
+    /// offer Try again. An upload in progress pauses it.
     static let sendWindow: TimeInterval = 120
 
     @Published private(set) var conversations: [AgentConversation] = []
@@ -87,6 +82,9 @@ final class PhoneAgentChat: ObservableObject {
     private let file: URL
     private let now: () -> Date
     private var watcher: Task<Void, Never>?
+    /// When each queued question's send clock last restarted: when it was asked, or
+    /// when the outbox last reported an upload in progress.
+    private var sendClock: [UUID: Date] = [:]
     /// Questions taken off the screen while they were being sent. Each may still reach
     /// the vault, so its ask and reply are deleted there once they show up.
     private(set) var orphans: [Orphan] = []
@@ -144,6 +142,7 @@ final class PhoneAgentChat: ObservableObject {
         do {
             let objectId = try await transport.send(ask, askedAt: turn.date)
             update(turn.id) { $0.askObjectId = objectId }
+            sendClock[turn.id] = turn.date
         } catch {
             update(turn.id) { $0.status = .failed("not_sent") }
             settle(turn.id, reply: find(turn.id))
@@ -157,15 +156,16 @@ final class PhoneAgentChat: ObservableObject {
         await ask(turn.text, in: conversationID)
     }
 
-    /// Removes the conversation, and takes back any of its questions still waiting in
-    /// the outbox so the Mac never answers them.
+    /// Removes the conversation. Questions still in the outbox are taken back; any that
+    /// reached the vault, or may still reach it, are followed until their ask and reply
+    /// are deleted there.
     func delete(_ conversationID: UUID) async {
-        let queued = conversations.first { $0.id == conversationID }?.turns
-            .filter { $0.status == .queued }.compactMap(\.askObjectId) ?? []
+        let open = conversations.first { $0.id == conversationID }?.turns.filter(\.isWaiting) ?? []
         conversations.removeAll { $0.id == conversationID }
         save()
-        for objectId in queued {
-            if await transport.withdraw(objectId) { continue }
+        for turn in open {
+            guard let objectId = turn.askObjectId else { continue }
+            if turn.status == .queued, await transport.withdraw(objectId) { continue }
             orphans.append(Orphan(askObjectId: objectId, since: now()))
         }
         saveOrphans()
@@ -205,13 +205,16 @@ final class PhoneAgentChat: ObservableObject {
             guard let objectId = turn.askObjectId else { continue }
             switch await transport.outbox(objectId) {
             case .left:
+                sendClock[turn.id] = nil
                 update(turn.id) { $0.status = .sent(at: now()) }
             case .refused:
                 await notSent(turn, objectId)
-            case .waiting where now().timeIntervalSince(turn.date) > Self.sendWindow:
-                await notSent(turn, objectId)
+            case .busy:
+                sendClock[turn.id] = now()
             case .waiting:
-                break
+                let since = sendClock[turn.id] ?? now()
+                sendClock[turn.id] = since
+                if now().timeIntervalSince(since) > Self.sendWindow { await notSent(turn, objectId) }
             }
         }
         if waiting.contains(where: { $0.status != .queued }), let replies = try? await transport.replies() {
@@ -235,14 +238,16 @@ final class PhoneAgentChat: ObservableObject {
     /// as it is: it is about to leave.
     private func notSent(_ turn: AgentTurn, _ objectId: String) async {
         guard await transport.withdraw(objectId) else { return }
+        sendClock[turn.id] = nil
         update(turn.id) { $0.status = .failed("not_sent") }
         settle(turn.id, reply: find(turn.id))
     }
 
     /// An orphan still in the outbox is taken back once it is no longer being sent. One
-    /// that reached the vault has its ask deleted at once, so a Mac that has not started
-    /// drops it, and its reply deleted when the Mac finishes; it is let go after the
-    /// Mac's own windows.
+    /// in the vault has its ask deleted at once, so a Mac that has not started drops
+    /// it, and its reply when the Mac finishes. Each delete counts only once it went
+    /// through; until then it is tried again. An orphan whose ask is gone is let go
+    /// after the Mac's own windows if no final reply came.
     private func followOrphans() async {
         guard !orphans.isEmpty else { return }
         let replies = try? await transport.replies()
@@ -250,18 +255,19 @@ final class PhoneAgentChat: ObservableObject {
         for var orphan in orphans {
             let objectId = orphan.askObjectId
             switch await transport.outbox(objectId) {
-            case .waiting, .refused:
+            case .waiting, .busy, .refused:
                 if await transport.withdraw(objectId) { continue }
             case .left:
-                if let state = replies?[objectId]?.state, state != .working {
-                    await transport.forget(objectId)
-                    continue
-                }
-                if !orphan.askDeleted {
-                    await transport.forget(objectId)
+                if !orphan.askDeleted, (try? await transport.deleteAsk(objectId)) != nil {
                     orphan.askDeleted = true
                 }
-                if now().timeIntervalSince(orphan.since) > Self.pickUpWindow + Self.answerWindow { continue }
+                if let state = replies?[objectId]?.state, state != .working {
+                    if orphan.askDeleted, (try? await transport.deleteReply(objectId)) != nil { continue }
+                } else if orphan.askDeleted,
+                          now().timeIntervalSince(orphan.since) > Self.pickUpWindow + Self.answerWindow
+                {
+                    continue
+                }
             }
             kept.append(orphan)
         }
@@ -297,7 +303,10 @@ final class PhoneAgentChat: ObservableObject {
             update(turn.id) { $0.status = .failed(reply.failure ?? "failed") }
             settle(turn.id, reply: find(turn.id))
         }
-        if reply.state != .working, let objectId = turn.askObjectId { await transport.forget(objectId) }
+        if reply.state != .working, let objectId = turn.askObjectId {
+            try? await transport.deleteReply(objectId)
+            try? await transport.deleteAsk(objectId)
+        }
     }
 
     private func settle(_ turnID: UUID, reply: AgentTurn?) {

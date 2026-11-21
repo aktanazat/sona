@@ -120,15 +120,16 @@ final class PhoneNoteSpotlight {
 
     private let index = CSSearchableIndex(name: "sona.notes", protectionClass: .complete)
     private let library: PhoneLibrary
-    private var book = SearchIndexBook()
+    private var book: SearchIndexBook
     private var watch: AnyCancellable?
     private var unlock: AnyCancellable?
     /// The write in flight; the next one waits for it, so a quick off and on lands in
     /// order.
     private var writing: Task<Void, Never>?
 
-    init(library: PhoneLibrary) {
+    init(library: PhoneLibrary, record: URL) {
         self.library = library
+        book = SearchIndexBook(file: record)
         watch = library.$notes.sink { [weak self] notes in self?.reflect(notes) }
         unlock = NotificationCenter.default
             .publisher(for: UIApplication.protectedDataDidBecomeAvailableNotification)

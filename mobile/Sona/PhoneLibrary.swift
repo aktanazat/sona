@@ -19,9 +19,10 @@ struct PhoneNote: Codable, Identifiable, Equatable, Sendable {
     var isSearchable: Bool { kind != .meeting }
 }
 
-/// What iPhone search holds of the library, as far as a finished write says. A write
-/// that fails (the protected index is closed while the phone is locked) confirms
-/// nothing, so the next pass sends the same notes again.
+/// What iPhone search holds of the library, as far as a finished write says, kept on
+/// disk. A write that fails (the protected index is closed while the phone is locked)
+/// confirms nothing, so the next pass, even after a relaunch, sends it again; a note
+/// deleted while its removal failed is removed on a later pass.
 struct SearchIndexBook {
     struct Plan: Equatable {
         let changed: [PhoneNote]
@@ -30,23 +31,45 @@ struct SearchIndexBook {
         var isEmpty: Bool { changed.isEmpty && removed.isEmpty }
     }
 
-    private var indexed: [UUID: PhoneNote] = [:]
+    private let file: URL
+    /// Each indexed note's fingerprint, so a changed note is written again.
+    private var indexed: [UUID: String]
+
+    init(file: URL) {
+        self.file = file
+        indexed = (try? Data(contentsOf: file)).flatMap { try? JSONDecoder().decode([UUID: String].self, from: $0) } ?? [:]
+    }
 
     func plan(_ notes: [PhoneNote]) -> Plan {
         let searchable = notes.filter(\.isSearchable)
         let kept = Set(searchable.map(\.id))
         return Plan(
-            changed: searchable.filter { indexed[$0.id] != $0 },
+            changed: searchable.filter { indexed[$0.id] != Self.fingerprint($0) },
             removed: indexed.keys.filter { !kept.contains($0) }.sorted { $0.uuidString < $1.uuidString }
         )
     }
 
     mutating func confirm(_ plan: Plan) {
         for id in plan.removed { indexed[id] = nil }
-        for note in plan.changed { indexed[note.id] = note }
+        for note in plan.changed { indexed[note.id] = Self.fingerprint(note) }
+        save()
     }
 
-    mutating func clear() { indexed = [:] }
+    mutating func clear() {
+        indexed = [:]
+        save()
+    }
+
+    private func save() {
+        try? JSONEncoder().encode(indexed)
+            .write(to: file, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+    }
+
+    private static func fingerprint(_ note: PhoneNote) -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        return sha256Base64URL((try? encoder.encode(note)) ?? Data())
+    }
 }
 
 private final class PhoneLibraryDisk: @unchecked Sendable {

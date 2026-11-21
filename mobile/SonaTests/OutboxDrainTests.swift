@@ -88,6 +88,28 @@ final class OutboxDrainTests: XCTestCase {
         XCTAssertEqual(left, [])
     }
 
+    /// While another item's upload is held, longer than any window, a queued question
+    /// reads as busy, so its clock does not run; once the outbox is idle it reads as
+    /// waiting, and it leaves on the next pass.
+    func testAQuestionBehindAHeldUploadReadsAsBusy() async throws {
+        let worker = try await FakeWorker.start()
+        defer { worker.stop() }
+        worker.holdFirstChunk = true
+        let queue = try makeQueue(worker)
+        _ = try await queue.enqueue(thought: thought("Long"), capturedAtUtcMs: 1, files: [])
+
+        let pass = Task { await queue.drain() }
+        try await worker.waitUntilHolding()
+        let question = try await queue.enqueue(ask: ask("Asked meanwhile"), askedAtUtcMs: 2)
+        let held = await queue.state(of: question.objectId)
+        XCTAssertEqual(held, .busy)
+        worker.release()
+        await pass.value
+
+        let after = await queue.state(of: question.objectId)
+        XCTAssertEqual(after, .left)
+    }
+
     private func makeQueue(_ worker: FakeWorker) throws -> UploadQueue {
         let root = FileManager.default.temporaryDirectory.appending(path: "outbox-\(UUID().uuidString)")
         addTeardownBlock { try? FileManager.default.removeItem(at: root) }

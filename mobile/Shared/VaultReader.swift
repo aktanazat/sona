@@ -173,6 +173,8 @@ extension BoardIndex {
 enum VaultReaderError: Error, Equatable {
     case notPaired
     case integrity
+    /// The object is not in this iPhone's copy of the vault yet.
+    case notInIndex
 }
 
 /// The phone's read side of the vault: the change feed kept on disk as a head index,
@@ -299,12 +301,13 @@ actor VaultReader {
         try await tombstone(objectId: id)
     }
 
-    /// Tombstone a question for the agent and the Mac's reply, once the phone has kept
-    /// the answer. A question the Mac has not started is then never answered.
-    func deleteAgentExchange(askObjectId: String) async throws {
+    /// Tombstone one object of a question for the agent: the ask, or the Mac's reply.
+    /// Throws `notInIndex` until a sync has brought it here, so a caller retries instead
+    /// of taking a missing object for a deleted one.
+    func deleteAgentObject(_ objectId: String) async throws {
         if let syncing { _ = try? await syncing.value }
-        try await tombstone(objectId: AgentAskObject.replyObjectId(askObjectId: askObjectId))
-        try await tombstone(objectId: askObjectId)
+        guard index?.heads[objectId] != nil else { throw VaultReaderError.notInIndex }
+        try await tombstone(objectId: objectId)
     }
 
     /// Tombstone one object over the head this index holds, and drop it locally.

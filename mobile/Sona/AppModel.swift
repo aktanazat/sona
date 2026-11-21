@@ -134,7 +134,9 @@ final class AppModel: NSObject, ObservableObject {
             credentials: state.credentials
         )
         super.init()
-        spotlight = PhoneNoteSpotlight(library: library)
+        spotlight = PhoneNoteSpotlight(
+            library: library, record: AppModel.supportDirectory("search").appending(path: "indexed.json")
+        )
         recorder.onInterrupted = { [weak self] in
             self?.stopRecording()
         }
@@ -895,8 +897,7 @@ extension AppModel: AgentTransport {
     }
 
     func outbox(_ askObjectId: String) async -> AskOutbox {
-        guard let item = await queue.items().first(where: { $0.objectId == askObjectId }) else { return .left }
-        return item.parked ? .refused : .waiting
+        await queue.state(of: askObjectId)
     }
 
     func withdraw(_ askObjectId: String) async -> Bool {
@@ -911,8 +912,13 @@ extension AppModel: AgentTransport {
         return index.agentReplies
     }
 
-    func forget(_ askObjectId: String) async {
-        try? await reader.deleteAgentExchange(askObjectId: askObjectId)
+    func deleteAsk(_ askObjectId: String) async throws {
+        try await reader.deleteAgentObject(askObjectId)
+        board = await reader.current()
+    }
+
+    func deleteReply(_ askObjectId: String) async throws {
+        try await reader.deleteAgentObject(AgentAskObject.replyObjectId(askObjectId: askObjectId))
         board = await reader.current()
     }
 

@@ -28,6 +28,18 @@ struct QueuedAsk: Codable, Equatable {
     var recentTurns: [AgentAskManifest.Turn]
 }
 
+/// Where a question stands in this iPhone's outbox.
+enum AskOutbox: Equatable {
+    /// Uploaded: it left the outbox.
+    case left
+    /// Next to go, with nothing uploading.
+    case waiting
+    /// The outbox is sending, this question or another one: its clock is paused.
+    case busy
+    /// The Worker refused it for good, so it will not leave without a new attempt.
+    case refused
+}
+
 enum QueuedPayload: Codable, Equatable {
     case recording(QueuedRecording)
     case thought(QueuedThought)
@@ -227,6 +239,14 @@ actor UploadQueue {
         guard sending != objectId else { return false }
         discard(objectId: objectId)
         return true
+    }
+
+    /// Where a question stands. While any item is being sent the question's wait does
+    /// not count: it goes once the outbox is free.
+    func state(of objectId: String) -> AskOutbox {
+        guard let item = loadItem(root.appending(path: directoryName(objectId))) else { return .left }
+        if item.parked { return .refused }
+        return sending == nil ? .waiting : .busy
     }
 
     /// Clear every refusal so the next drain tries again.
