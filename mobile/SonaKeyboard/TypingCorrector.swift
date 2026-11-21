@@ -187,7 +187,10 @@ final class TypingCorrector {
         var slips = SlipCost(typed: letters, centres: centres)
         let close = (apple + extra).enumerated().compactMap { rank, guess -> Guess? in
             guard !guess.contains(" "), !guess.contains("-") else { return nil }
-            let cost = slips.cost(to: Array(guess.lowercased()))
+            /* A guess that only capitalizes the typed word ("Occassion" for "occassion") is
+             * a change too, not a perfect match. */
+            let caseOnly = guess != typed && guess.lowercased() == typed.lowercased()
+            let cost = caseOnly ? 1 : slips.cost(to: Array(guess.lowercased()))
             guard cost <= budget else { return nil }
             return Guess(word: guess, score: cost + rarity(of: guess) + Double(min(rank, apple.count)) * 0.01)
         }
@@ -270,15 +273,12 @@ enum TypingText {
         return word
     }
 
-    /// A letter held three times or more, as in "sooo" or "yesss", is a word stretched on
-    /// purpose; no dictionary word repeats a letter that often.
+    /// A last letter held three times or more, as in "sooo" or "yesss", is a word stretched
+    /// on purpose; a letter tripled inside a word, as in "schoool", is a typo.
     static func isStretched(_ word: some StringProtocol) -> Bool {
-        var run = 1
-        for (previous, letter) in zip(word.lowercased(), word.lowercased().dropFirst()) {
-            run = previous == letter ? run + 1 : 1
-            if run >= 3 { return true }
-        }
-        return false
+        let letters = word.lowercased()
+        guard let last = letters.last else { return false }
+        return letters.reversed().prefix { $0 == last }.count >= 3
     }
 
     /// The whole words of the sentence before `text`'s end, last `limit` of them, oldest

@@ -212,6 +212,14 @@ struct EnglishWordListTests {
         #expect(corrector.correction(before: "it " + typed, lexicon: TypingLexicon())?.replacement == "occurred")
     }
 
+    @Test("a letter tripled inside a word is a typo, and a guess that only capitalizes it does not block the fix", arguments: [
+        ("after schoool", "school"), ("order pizzza", "pizza"), ("so goood", "good"), ("a special occassion", "occasion"),
+    ])
+    func fixesTypoNotEmphasis(text: String, intended: String) async throws {
+        let corrector = try await corrector()
+        #expect(corrector.correction(before: text, lexicon: TypingLexicon())?.replacement == intended)
+    }
+
     @Test("completions and swipe words from the English list are all words the spell checker accepts")
     func listHoldsNoMisspellings() async throws {
         let corrector = try await corrector()
