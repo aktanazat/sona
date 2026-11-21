@@ -129,7 +129,7 @@ final class KeyboardTools {
         if case .review = page {
             parkShownReview()
             page = .closed
-            saveReviews()
+            syncReviews()
         } else if open {
             page = .closed
         } else {
@@ -148,7 +148,7 @@ final class KeyboardTools {
         if shownReview != nil { parkShownReview() }
         shownReview = review
         page = .review(review.text)
-        saveReviews()
+        syncReviews()
     }
 
     /// The review on the page goes behind the button, joining the newest one there when
@@ -168,23 +168,22 @@ final class KeyboardTools {
     private func endShownReview() {
         if let shown = shownReview { endedReviews.insert(shown.id) }
         shownReview = nil
-        saveReviews()
+        syncReviews()
     }
 
-    private func saveReviews() {
-        reviewStore?.save(heldReviews + [shownReview].compactMap { $0 }, ended: endedReviews, at: Date())
-    }
-
-    /// The keyboard appeared, perhaps after another app's copy of it kept or ended reviews.
-    /// A review on the page that is gone from the file was inserted or discarded there, so
-    /// the page closes rather than offer it twice.
-    func reloadReviews() {
-        guard let saved = reviewStore?.load(at: Date()) else { return }
-        if let shown = shownReview, !saved.contains(where: { $0.id == shown.id }) {
+    /// Merges this copy's reviews with the file and takes the result: reviews other copies
+    /// kept join the button, and ones they inserted or discarded go, closing the review page
+    /// rather than let one go in twice. Runs on every change and when the keyboard appears.
+    /// While the file is locked everything stays in memory for the next try.
+    func syncReviews() {
+        let mine = heldReviews + [shownReview].compactMap { $0 }
+        guard let saved = reviewStore?.sync(mine, ended: endedReviews, at: Date()) else { return }
+        endedReviews = []
+        if let shown = shownReview, !saved.reviews.contains(where: { $0.id == shown.id }) {
             shownReview = nil
             if case .review = page { page = .closed }
         }
-        heldReviews = saved.filter { $0.id != shownReview?.id }
+        heldReviews = saved.reviews.filter { $0.id != shownReview?.id }
     }
 
     func show(_ tab: Tab, _ menu: Menu? = nil) {
@@ -361,7 +360,7 @@ final class KeyboardTools {
         /* The styling page takes the panel, so a review showing waits behind the button. */
         if case .review = page {
             parkShownReview()
-            saveReviews()
+            syncReviews()
         }
         guard let style, KeyboardAI.unavailable == nil else { return land(text, heardFor: field, fromApp: styled) }
         start(.style(style), on: text) { [weak self] styledText in

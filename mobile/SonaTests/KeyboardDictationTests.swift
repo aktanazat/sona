@@ -117,7 +117,7 @@ struct KeyboardDictationTests {
         let start = Date(timeIntervalSince1970: 1_000_000)
         let heard = KeyboardDictation.KeptReview(text: "Heard.", field: field, date: start)
         let draft = KeyboardDictation.KeptReview(text: "Draft.", field: field, date: start, fromApp: true)
-        store.save([heard, draft], ended: [], at: start)
+        store.sync([heard, draft], ended: [], at: start)
         #expect(store.load(at: start.addingTimeInterval(23 * 60 * 60)) == [heard, draft])
         #expect(store.load(at: start.addingTimeInterval(2 * 24 * 60 * 60)) == [draft])
         #expect(store.load(at: start.addingTimeInterval(8 * 24 * 60 * 60)) == [])
@@ -131,13 +131,40 @@ struct KeyboardDictationTests {
         let now = Date(timeIntervalSince1970: 1_000_000)
         let mail = KeyboardDictation.KeptReview(text: "In Mail.", field: field, date: now)
         let notes = KeyboardDictation.KeptReview(text: "In Notes.", field: field, date: now.addingTimeInterval(1))
-        store.save([mail], ended: [], at: now)
-        store.save([notes], ended: [], at: now)
+        store.sync([mail], ended: [], at: now)
+        store.sync([notes], ended: [], at: now)
         #expect(store.load(at: now) == [mail, notes])
-        store.save([], ended: [mail.id], at: now)
+        store.sync([], ended: [mail.id], at: now)
         #expect(store.load(at: now) == [notes])
-        store.save([], ended: [notes.id], at: now)
-        #expect(!FileManager.default.fileExists(atPath: store.url.path))
+    }
+
+    @Test("a review one keyboard copy inserted does not come back from another copy's memory")
+    func endedReviewIsNotResurrected() {
+        let store = KeyboardDictation.KeptReviewStore(url: Self.scratchURL())
+        defer { try? FileManager.default.removeItem(at: store.url) }
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        let review = KeyboardDictation.KeptReview(text: "Kept.", field: KeyboardDictation.FieldMark(id: nil, shown: 1, before: "", traits: ""), date: now)
+        store.sync([review], ended: [], at: now)
+        store.sync([], ended: [review.id], at: now)
+        #expect(store.sync([review], ended: [], at: now)?.reviews == [])
+    }
+
+    @Test("a review kept while the file was locked is saved once it opens again")
+    func reviewKeptWhileLockedIsSavedOnReappear() throws {
+        let store = KeyboardDictation.KeptReviewStore(url: Self.scratchURL())
+        defer { try? FileManager.default.removeItem(at: store.url) }
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        let earlier = KeyboardDictation.KeptReview(text: "Earlier.", field: KeyboardDictation.FieldMark(id: nil, shown: 1, before: "", traits: ""), date: now)
+        let whileLocked = KeyboardDictation.KeptReview(text: "While locked.", field: earlier.field, date: now.addingTimeInterval(1))
+        store.sync([earlier], ended: [], at: now)
+        let file = try Data(contentsOf: store.url)
+        try FileManager.default.removeItem(at: store.url)
+        try FileManager.default.createDirectory(at: store.url, withIntermediateDirectories: false)
+        #expect(store.sync([earlier, whileLocked], ended: [], at: now) == nil)
+        try FileManager.default.removeItem(at: store.url)
+        try file.write(to: store.url)
+        #expect(store.sync([earlier, whileLocked], ended: [], at: now)?.reviews == [earlier, whileLocked])
+        #expect(store.load(at: now) == [earlier, whileLocked])
     }
 
     @Test("a reviews file that does not decode is moved aside and a fresh one written")
@@ -148,7 +175,7 @@ struct KeyboardDictationTests {
         let now = Date(timeIntervalSince1970: 1_000_000)
         let review = KeyboardDictation.KeptReview(text: "Kept.", field: KeyboardDictation.FieldMark(id: nil, shown: 1, before: "", traits: ""), date: now)
         try Data("not json".utf8).write(to: store.url)
-        store.save([review], ended: [], at: now)
+        store.sync([review], ended: [], at: now)
         #expect(store.load(at: now) == [review])
         #expect(try Data(contentsOf: aside) == Data("not json".utf8))
     }
@@ -161,7 +188,7 @@ struct KeyboardDictationTests {
         let now = Date(timeIntervalSince1970: 1_000_000)
         let review = KeyboardDictation.KeptReview(text: "Kept.", field: KeyboardDictation.FieldMark(id: nil, shown: 1, before: "", traits: ""), date: now)
         #expect(store.load(at: now) == nil)
-        store.save([review], ended: [], at: now)
+        store.sync([review], ended: [], at: now)
         var isFolder: ObjCBool = false
         #expect(FileManager.default.fileExists(atPath: store.url.path, isDirectory: &isFolder) && isFolder.boolValue)
     }

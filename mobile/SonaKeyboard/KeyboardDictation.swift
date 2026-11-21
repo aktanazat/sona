@@ -180,9 +180,19 @@ struct KeyboardDictation {
 
     /// Reviews kept across the keyboard being ended: in a file only the keyboard reads,
     /// locked while the phone is, each forgotten after its lifetime. Every keyboard copy
-    /// (one per app) reads the file again before it writes, so none drops another's.
+    /// (one per app) merges with the file before it writes, so none drops another's, and
+    /// the file remembers which reviews were inserted or discarded, so none comes back.
     struct KeptReviewStore {
         let url: URL
+
+        /// The file: the kept reviews, and when each ended review was inserted or discarded.
+        struct Saved: Equatable, Codable {
+            var reviews: [KeptReview] = []
+            var done: [UUID: Date] = [:]
+        }
+
+        /// Ended reviews are remembered as long as the longest-kept review lives.
+        static let doneLifetime: TimeInterval = 7 * 24 * 60 * 60
 
         static func shared() -> Self? {
             guard let folder = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return nil }
@@ -191,33 +201,54 @@ struct KeyboardDictation {
         }
 
         /// The kept reviews still in their lifetime: none when there is no file, nil while
-        /// the file is locked with the phone. A file that reads but does not decode is moved
-        /// aside as `.corrupt`, and the store starts empty.
+        /// the file is locked with the phone.
         func load(at now: Date) -> [KeptReview]? {
-            guard FileManager.default.fileExists(atPath: url.path) else { return [] }
+            read(at: now)?.reviews
+        }
+
+        /// Merges this keyboard copy's reviews with the file and writes the result: `mine`
+        /// replaces reviews with the same ids, `ended` are marked done, reviews the file marks
+        /// done stay gone, and the rest of the file is kept. Nil while the file is locked,
+        /// when nothing is written and the next sync tries again.
+        @discardableResult
+        func sync(_ mine: [KeptReview], ended: Set<UUID>, at now: Date) -> Saved? {
+            guard var saved = read(at: now) else { return nil }
+            for id in ended { saved.done[id] = now }
+            let ids = Set(mine.map(\.id))
+            saved.reviews = (saved.reviews.filter { !ids.contains($0.id) } + mine)
+                .filter { saved.done[$0.id] == nil && now.timeIntervalSince($0.date) < $0.lifetime }
+                .sorted { $0.date < $1.date }
+            guard !saved.reviews.isEmpty || !saved.done.isEmpty else {
+                try? FileManager.default.removeItem(at: url)
+                return saved
+            }
+            if let data = try? JSONEncoder().encode(saved) {
+                try? data.write(to: url, options: [.atomic, .completeFileProtection])
+            }
+            return saved
+        }
+
+        /// The file as it stands, without expired reviews or old done marks. A file that reads
+        /// but does not decode is moved aside as `.corrupt` and the store starts empty; a
+        /// plain list of reviews is the file before it remembered ended ones.
+        private func read(at now: Date) -> Saved? {
+            guard FileManager.default.fileExists(atPath: url.path) else { return Saved() }
             guard let data = try? Data(contentsOf: url) else { return nil }
-            guard let reviews = try? JSONDecoder().decode([KeptReview].self, from: data) else {
+            let decoder = JSONDecoder()
+            var saved: Saved
+            if let current = try? decoder.decode(Saved.self, from: data) {
+                saved = current
+            } else if let older = try? decoder.decode([KeptReview].self, from: data) {
+                saved = Saved(reviews: older)
+            } else {
                 let aside = url.appendingPathExtension("corrupt")
                 try? FileManager.default.removeItem(at: aside)
                 try? FileManager.default.moveItem(at: url, to: aside)
-                return []
+                return Saved()
             }
-            return reviews.filter { now.timeIntervalSince($0.date) < $0.lifetime }
-        }
-
-        /// Writes `mine` over the reviews with the same ids, drops `ended`, and keeps every
-        /// other review another keyboard copy saved. While the file is locked it writes
-        /// nothing, and the next save tries again.
-        func save(_ mine: [KeptReview], ended: Set<UUID>, at now: Date) {
-            guard let others = load(at: now) else { return }
-            let ids = Set(mine.map(\.id))
-            let all = others.filter { !ids.contains($0.id) && !ended.contains($0.id) } + mine
-            guard !all.isEmpty else {
-                try? FileManager.default.removeItem(at: url)
-                return
-            }
-            guard let data = try? JSONEncoder().encode(all.sorted { $0.date < $1.date }) else { return }
-            try? data.write(to: url, options: [.atomic, .completeFileProtection])
+            saved.reviews = saved.reviews.filter { now.timeIntervalSince($0.date) < $0.lifetime }
+            saved.done = saved.done.filter { now.timeIntervalSince($0.value) < Self.doneLifetime }
+            return saved
         }
     }
 }
