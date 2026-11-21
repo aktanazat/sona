@@ -26,9 +26,8 @@ pub use schema::{
 };
 pub use types::{
     DateResolution, EvidenceLink, EvidenceSourceKind, EvidenceTargetKind, LabelScope, Milestone,
-    PlanningCalendarPage, PlanningTask, Project, ProjectDetail, ProjectHealth,
-    ProjectLink, ProjectProgress, ProjectStatus, ProjectStatusName, ProjectSummary, ProjectUpdate,
-    TaskStatus,
+    PlanningCalendarPage, PlanningTask, Project, ProjectDetail, ProjectHealth, ProjectLink,
+    ProjectProgress, ProjectStatus, ProjectStatusName, ProjectSummary, ProjectUpdate, TaskStatus,
 };
 
 use crate::managers::history::HistoryManager;
@@ -125,6 +124,9 @@ pub(crate) fn failure(error: anyhow::Error) -> String {
         }
         Some(store::Refusal::DependencyLoop) => {
             "A project cannot wait on itself, or on a project that already waits on it."
+        }
+        Some(store::Refusal::HasTasks) => {
+            "Numbers are kept only when Sona has no tasks yet, deleted ones included. Import without keeping them."
         }
         None => {
             log::error!("Planning database operation failed");

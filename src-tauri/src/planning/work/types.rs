@@ -817,6 +817,25 @@ pub struct WorkDisplay {
     pub hidden_columns: Vec<String>,
 }
 
+impl WorkDisplay {
+    /// How a new saved view shows its tasks: a list by status, most urgent
+    /// first, with its number, priority, labels, project, owner and due day.
+    pub(crate) fn standard() -> Self {
+        Self {
+            layout: WorkLayout::List,
+            group_by: WorkGroupBy::Status,
+            order_by: WorkOrderBy::Priority,
+            show_empty_groups: false,
+            properties: ["id", "priority", "labels", "project", "owner", "due"]
+                .map(str::to_owned)
+                .to_vec(),
+            show_sub_tasks: true,
+            sub_group_by: WorkGroupBy::None,
+            hidden_columns: Vec::new(),
+        }
+    }
+}
+
 const fn shown() -> bool {
     true
 }

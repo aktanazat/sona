@@ -398,11 +398,19 @@ pub(crate) fn fitting(
     let Some(due) = due_at_ms else {
         return Ok(None);
     };
-    let day = local_today(due)?;
-    Ok(all
-        .iter()
+    Ok(within(&all, local_today(due)?, today))
+}
+
+/// The number of the cycle in `all` not yet over on `today` that holds `day`.
+fn within(all: &[Span], day: NaiveDate, today: NaiveDate) -> Option<i64> {
+    all.iter()
         .find(|span| span.start <= day && day < span.end && today < span.end)
-        .map(|span| span.number))
+        .map(|span| span.number)
+}
+
+/// The cycle not yet over that holds `day`.
+pub(crate) fn holding(conn: &Connection, day: NaiveDate, now_ms: i64) -> Result<Option<i64>> {
+    Ok(within(&spans(conn)?, day, local_today(now_ms)?))
 }
 
 /// A cycle a change may plan work in: one that exists and has not ended.
@@ -438,7 +446,9 @@ pub(crate) fn want(conn: &Connection, cycle: WorkCycleRef, now_ms: i64) -> Resul
     let current = under_way(&all, local_today(now_ms)?);
     let number = match cycle {
         WorkCycleRef::Current => current.map(|span| span.number),
-        WorkCycleRef::Next => current.and_then(|current| after(&all, current.end).map(|span| span.number)),
+        WorkCycleRef::Next => {
+            current.and_then(|current| after(&all, current.end).map(|span| span.number))
+        }
         WorkCycleRef::None => return Ok(CycleWant::NoCycle),
         WorkCycleRef::Number { number } => Some(number),
     };
@@ -543,7 +553,10 @@ fn closing_counts(conn: &Connection) -> Result<HashMap<i64, Counts>> {
     )?;
     let counts = statement
         .query_map([], |row| {
-            Ok((row.get::<_, i64>(0)?, (row.get(1)?, row.get(2)?, row.get(3)?)))
+            Ok((
+                row.get::<_, i64>(0)?,
+                (row.get(1)?, row.get(2)?, row.get(3)?),
+            ))
         })?
         .collect::<rusqlite::Result<HashMap<_, _>>>()?;
     Ok(counts)
@@ -559,14 +572,16 @@ pub(crate) fn all(conn: &Connection, now_ms: i64) -> Result<Vec<WorkCycle>> {
     )?;
     let counts = statement
         .query_map([], |row| {
-            Ok((row.get::<_, i64>(0)?, (row.get(1)?, row.get(2)?, row.get(3)?)))
+            Ok((
+                row.get::<_, i64>(0)?,
+                (row.get(1)?, row.get(2)?, row.get(3)?),
+            ))
         })?
         .collect::<rusqlite::Result<HashMap<i64, Counts>>>()?;
     let closing = closing_counts(conn)?;
     let made = spans(conn)?;
     let mut added = added_after_start(conn, &made, today)?;
-    made
-        .iter()
+    made.iter()
         .map(|span| {
             shown(
                 span,
@@ -584,7 +599,11 @@ pub(crate) fn all(conn: &Connection, now_ms: i64) -> Result<Vec<WorkCycle>> {
 fn capacity(closing: &HashMap<i64, Counts>) -> Option<u32> {
     let mut ended: Vec<_> = closing.iter().collect();
     ended.sort_unstable_by_key(|(number, _)| std::cmp::Reverse(**number));
-    let last: Vec<u32> = ended.iter().take(3).map(|(_, (_, _, done))| *done).collect();
+    let last: Vec<u32> = ended
+        .iter()
+        .take(3)
+        .map(|(_, (_, _, done))| *done)
+        .collect();
     let count = u32::try_from(last.len()).ok().filter(|count| *count > 0)?;
     Some((last.iter().sum::<u32>() + count / 2) / count).filter(|usual| *usual > 0)
 }
@@ -610,7 +629,9 @@ fn target(span: &Span, scope: u32) -> Result<Vec<WorkCycleTarget>> {
     let weekday = |day: &NaiveDate| !matches!(day.weekday(), Weekday::Sat | Weekday::Sun);
     let all_weekend = !days.iter().any(weekday);
     let counts = |day: &NaiveDate| all_weekend || weekday(day);
-    let total = f64::from(u32::try_from(days.iter().filter(|day| counts(day)).count())?);
+    let total = f64::from(u32::try_from(
+        days.iter().filter(|day| counts(day)).count(),
+    )?);
     let mut passed = 0_u32;
     Ok(days
         .into_iter()
@@ -693,7 +714,11 @@ pub(crate) fn save_settings(
     let today = local_today(now_ms)?;
     let all = spans(conn)?;
     let reshaped = (before.weeks, before.start_weekday, before.cooldown_weeks)
-        != (settings.weeks, settings.start_weekday, settings.cooldown_weeks);
+        != (
+            settings.weeks,
+            settings.start_weekday,
+            settings.cooldown_weeks,
+        );
     match under_way(&all, today) {
         Some(current) if reshaped => {
             let end = plus(aligned(today, settings.start_weekday)?, 7)?;
@@ -736,7 +761,9 @@ fn unplan_removed(conn: &Connection, now_ms: i64) -> Result<Vec<String>> {
          ORDER BY number",
     )?;
     let planned = statement
-        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))?
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for (id, cycle) in &planned {
         items::place_in_cycle(conn, id, Some(*cycle), None, WorkActor::Sona, now_ms)?;
@@ -906,9 +933,7 @@ pub(crate) fn progress(conn: &Connection, number: i64, now_ms: i64) -> Result<Wo
         .find(|span| span.number == number)
         .ok_or(Refusal::NotFound)?;
     let frozen = frozen_days(conn, number)?;
-    let at_close = frozen
-        .last()
-        .map(|day| (day.scope, day.started, day.done));
+    let at_close = frozen.last().map(|day| (day.scope, day.started, day.done));
     let days = if frozen.is_empty() {
         live_days(conn, span, now_ms)?
     } else {
@@ -1060,9 +1085,13 @@ pub(crate) fn cycle_rollover(
     operation_id: &str,
     number: i64,
 ) -> Result<WorkCycles, String> {
-    cycle_change(app, operation_id, "work_cycle_rollover", &number, |tx, now| {
-        rollover(tx, number, now)
-    })
+    cycle_change(
+        app,
+        operation_id,
+        "work_cycle_rollover",
+        &number,
+        |tx, now| rollover(tx, number, now),
+    )
 }
 
 pub(crate) fn cycle_start_today(
@@ -1193,9 +1222,9 @@ mod tests {
         added_after_start, advance, capacity, day_text, insert, local_midnight_ms, plus,
         save_settings, spans, target, Counts, Span,
     };
-    use std::collections::HashMap;
     use chrono::{Days, NaiveDate};
     use rusqlite::Connection;
+    use std::collections::HashMap;
 
     const HOUR_MS: i64 = 60 * 60 * 1000;
 
@@ -1235,7 +1264,11 @@ mod tests {
         let conn = tracker();
         let now = noon();
         save_settings(&conn, every(2, 0, 3), now).expect("three cycles ahead");
-        let last = spans(&conn).expect("cycles").last().expect("a cycle").number;
+        let last = spans(&conn)
+            .expect("cycles")
+            .last()
+            .expect("a cycle")
+            .number;
         let task = items::insert(
             &conn,
             &NewItem {
@@ -1298,7 +1331,9 @@ mod tests {
             day_text(next.start),
             day_text(plus(today(), 6).expect("a day"))
         );
-        assert!(made.iter().all(|span| span.number == 1 || span.start > today()));
+        assert!(made
+            .iter()
+            .all(|span| span.number == 1 || span.start > today()));
     }
 
     /// Work the user moves into a cycle already under way is scope added

@@ -323,6 +323,25 @@ fn notify(conn: &Connection, notice: &Notice<'_>, now_ms: i64) -> Result<bool> {
     )? > 0)
 }
 
+/// Where the notices stand, for [`forget_since`].
+pub(crate) fn last_posted(conn: &Connection) -> Result<i64> {
+    Ok(conn.query_row(
+        "SELECT coalesce(max(rowid), 0) FROM planning_notifications",
+        [],
+        |row| row.get(0),
+    )?)
+}
+
+/// Takes back every notice posted since `mark`: work brought in from
+/// another tracker is old news, not a run of assignments and comments.
+pub(crate) fn forget_since(conn: &Connection, mark: i64) -> Result<()> {
+    conn.execute(
+        "DELETE FROM planning_notifications WHERE rowid > ?1",
+        [mark],
+    )?;
+    Ok(())
+}
+
 fn owned_by_user(conn: &Connection, task_id: &str) -> Result<bool> {
     Ok(conn
         .query_row(
@@ -503,7 +522,11 @@ pub(crate) fn automation_ended(conn: &Connection, run_id: &str, now_ms: i64) -> 
         run_id: Some(run_id),
         key: Some(&key),
         to: Some(&status),
-        ..Notice::new(task_id.as_deref(), NotificationKind::Automation, WorkActor::Agent)
+        ..Notice::new(
+            task_id.as_deref(),
+            NotificationKind::Automation,
+            WorkActor::Agent,
+        )
     };
     notify(conn, &notice, now_ms)
 }
@@ -635,7 +658,11 @@ fn read(row: &Row<'_>) -> rusqlite::Result<Notification> {
         .map(|json| serde_json::from_str(&json))
         .transpose()
         .map_err(|error| {
-            rusqlite::Error::FromSqlConversionFailure(17, rusqlite::types::Type::Text, Box::new(error))
+            rusqlite::Error::FromSqlConversionFailure(
+                17,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
         })?;
     Ok(Notification {
         id: row.get(0)?,
