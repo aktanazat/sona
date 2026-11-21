@@ -5831,13 +5831,29 @@ pub(super) async fn call(
             let mut args = Args::parse(params)?;
             let operation_id: String = args.take("operationId")?;
             let id: String = args.take("id")?;
-            reply(crate::planning::work::triage_auto::undo_as(app, &operation_id, &id).await)
+            reply(
+                crate::planning::work::triage_auto::undo_as(
+                    app,
+                    crate::planning::work::types::WorkActor::Me,
+                    &operation_id,
+                    &id,
+                )
+                .await,
+            )
         }
         "work_housekeeping_undo" => {
             let mut args = Args::parse(params)?;
             let operation_id: String = args.take("operationId")?;
             let id: String = args.take("id")?;
-            reply(crate::planning::work::batches::undo_as(app, &operation_id, &id).await)
+            reply(
+                crate::planning::work::batches::undo_as(
+                    app,
+                    crate::planning::work::types::WorkActor::Me,
+                    &operation_id,
+                    &id,
+                )
+                .await,
+            )
         }
         "work_templates" => {
             let handle = app.clone();

@@ -2060,6 +2060,62 @@ fn a_done_parent_cancels_its_accepted_subtasks_with_a_notice_that_undoes_it() {
 }
 
 #[test]
+fn a_closed_parent_s_one_notice_covers_and_undoes_grandchildren_without_status_noise() {
+    let mut desk = desk(&[]);
+    let launch = typed_item(&mut desk, "Ship the launch");
+    let deck = typed_item(&mut desk, "Finish the deck");
+    let deck = sub_task_of(&mut desk, &deck, &launch.id);
+    let charts = typed_item(&mut desk, "Draw the charts");
+    let charts = sub_task_of(&mut desk, &charts, &deck.id);
+    for id in [&deck.id, &charts.id] {
+        inbox::subscribe(&desk.history, id, inbox::SubscribeReason::Subscribed, desk.now)
+            .expect("following the sub-task");
+    }
+
+    let at = desk.tick();
+    let mut done = update(
+        &mut desk.history,
+        None,
+        by_me(&operation(), at),
+        &launch.id,
+        launch.revision,
+        &status(WorkStatus::Done),
+    )
+    .expect("parent done");
+    apply_parent_rules(
+        &mut desk.history,
+        None,
+        ParentRules {
+            close_subtasks: true,
+            ..ParentRules::default()
+        },
+        &mut done.effects,
+    )
+    .expect("sub-tasks closed");
+    let notices = inbox::notifications(&desk.history, inbox::Shown::default(), desk.now)
+        .expect("the inbox");
+    let at = desk.tick();
+    let undone = super::batches::undo(
+        &desk.history,
+        None,
+        by_me(&operation(), at),
+        &notices[0].id,
+        &mut Effects::default(),
+    )
+    .expect("the batch undone");
+
+    assert_eq!(
+        notices
+            .iter()
+            .map(|notice| (notice.kind, notice.item_id.clone()))
+            .collect::<Vec<_>>(),
+        [(inbox::NotificationKind::Housekeeping, Some(launch.id.clone()))]
+    );
+    assert_eq!(undone.restored, 2);
+    assert_eq!(desk.item(&charts.id).status, charts.status);
+}
+
+#[test]
 fn starting_a_subtask_starts_waiting_parents_up_the_chain_when_enabled() {
     let mut desk = desk(&[]);
     let goal = typed_item(&mut desk, "Quarterly launch");

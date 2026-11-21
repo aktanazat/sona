@@ -4,7 +4,7 @@ use crate::planning::work::doc_proposals::{self, DocProposal, DocProposalKind};
 use crate::planning::work::triage_auto::{
     self, TriageAutoField, TriageRule, TriageRuleInput, TriageRuleMatch, WorkAutoApplied,
 };
-use crate::planning::work::types::WorkOwner;
+use crate::planning::work::types::{WorkActor, WorkOwner};
 use crate::query::external::{ExternalError, ExternalErrorCode};
 use crate::query::QUERY_SCHEMA_VERSION;
 use clap::{Args, ValueEnum};
@@ -322,7 +322,7 @@ impl Tracker<'_> {
         let operation_id = args.write.operation_id("triage-undo", &id)?;
         if !args.dry_run {
             self.applies("undoing a change Sona made in Triage")?;
-            triage_auto::undo_as(self.app, &operation_id, &id)
+            triage_auto::undo_as(self.app, WorkActor::Agent, &operation_id, &id)
                 .await
                 .map_err(|message| self.write_refusal(message, &operation_id, "The change"))?;
         }
@@ -347,7 +347,7 @@ impl Tracker<'_> {
             self.rehearse(|tx| batches::rehearse_undo(tx, &id, now_ms()))?
         } else {
             self.applies("undoing what Sona closed or archived")?;
-            batches::undo_as(self.app, &operation_id, &id)
+            batches::undo_as(self.app, WorkActor::Agent, &operation_id, &id)
                 .await
                 .map_err(|message| self.write_refusal(message, &operation_id, "The notice"))?
         };

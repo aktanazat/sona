@@ -749,10 +749,11 @@ pub(crate) fn rule_delete_as(
 
 pub(crate) async fn undo_as(
     app: &AppHandle,
+    actor: WorkActor,
     operation_id: &str,
     id: &str,
 ) -> Result<WorkItem, String> {
-    let change = Change::now(operation_id, WorkActor::Me);
+    let change = Change::now(operation_id, actor);
     run_with_meetings(app, |history, meetings| {
         store::mutate(
             history,

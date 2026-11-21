@@ -349,6 +349,7 @@ fn apply_parent_rules_in(
         status: Some(WorkStatus::InProgress),
         ..WorkPatch::default()
     };
+    let mut cascade_of: HashMap<String, (String, String)> = HashMap::new();
     loop {
         let mut progressed = false;
         if rules.close_parents {
@@ -366,10 +367,13 @@ fn apply_parent_rules_in(
                 if children.is_empty() {
                     continue;
                 }
-                let batch = format!("subtasks:{parent_id}:{}", change.at_ms);
+                let (batch, top) = cascade_of.get(&parent_id).cloned().unwrap_or_else(|| {
+                    (format!("subtasks:{parent_id}:{}", change.at_ms), parent_id.clone())
+                });
                 let before = batches::last_change(history)?;
                 for (child_id, status) in children {
                     edit(history, meetings, change, &child_id, &canceled_patch, effects)?;
+                    inbox::withdraw_sona_notices(history, &child_id, change.at_ms)?;
                     batches::record(
                         history,
                         &batch,
@@ -378,9 +382,10 @@ fn apply_parent_rules_in(
                         Some(status),
                         change.at_ms,
                     )?;
+                    cascade_of.insert(child_id, (batch.clone(), top.clone()));
                 }
                 batches::quiet_since(history, before)?;
-                batches::post(history, Some(&parent_id), &batch, change.at_ms)?;
+                batches::post(history, Some(&top), &batch, change.at_ms)?;
             }
         }
         if rules.start_parent {

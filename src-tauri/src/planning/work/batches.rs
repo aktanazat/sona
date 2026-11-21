@@ -294,13 +294,14 @@ pub(crate) fn rehearse_undo(conn: &Connection, notice_id: &str, now_ms: i64) -> 
     undo(conn, None, change, notice_id, &mut Effects::default())
 }
 
-/// [`undo`] for the app, the command line and agents, as the user's change.
+/// [`undo`] for the app, the command line and agents, in `actor`'s name.
 pub(crate) async fn undo_as(
     app: &tauri::AppHandle,
+    actor: WorkActor,
     operation_id: &str,
     notice_id: &str,
 ) -> Result<BatchUndo, String> {
-    let change = Change::now(operation_id, WorkActor::Me);
+    let change = Change::now(operation_id, actor);
     run_with_meetings(app, |history, meetings| {
         store::mutate(
             history,
