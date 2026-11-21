@@ -289,11 +289,11 @@ END;";
 /// after `INBOX_SUBJECTS_MIGRATION` and `NOTE_NOTICES_MIGRATION`; the note
 /// trigger, on a table only the history database has, is dropped here and
 /// made again by running `NOTE_NOTICES_MIGRATION` once more.
-pub(crate) const HOUSEKEEPING_NOTICES_MIGRATION: &str = "DROP TRIGGER planning_task_lifecycle_delete;
-DROP TRIGGER planning_notifications_run_delete;
-DROP TRIGGER planning_notifications_project_delete;
-DROP TRIGGER planning_notifications_initiative_delete;
-DROP TRIGGER planning_notifications_view_delete;
+pub(crate) const HOUSEKEEPING_NOTICES_MIGRATION: &str = "DROP TRIGGER IF EXISTS planning_task_lifecycle_delete;
+DROP TRIGGER IF EXISTS planning_notifications_run_delete;
+DROP TRIGGER IF EXISTS planning_notifications_project_delete;
+DROP TRIGGER IF EXISTS planning_notifications_initiative_delete;
+DROP TRIGGER IF EXISTS planning_notifications_view_delete;
 DROP TRIGGER IF EXISTS planning_notifications_note_delete;
 CREATE TABLE planning_notifications_next (
     id TEXT PRIMARY KEY NOT NULL,

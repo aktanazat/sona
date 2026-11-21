@@ -585,7 +585,8 @@ mod tests {
             &mut super::super::Effects::default(),
         )
         .expect("undone");
-        let again = run_housekeeping(&mut conn, Some(30), Some(30), now + 60_000).expect("rerun");
+        let again =
+            run_housekeeping(&mut conn, Some(30), Some(30), now + 31 * DAY_MS).expect("rerun");
 
         assert_eq!(undone.restored, 2);
         assert_eq!(items::item(&conn, &stale.id).expect("stale").status, WorkStatus::Backlog);

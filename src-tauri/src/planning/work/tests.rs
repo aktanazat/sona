@@ -526,6 +526,38 @@ fn the_inbox_and_housekeeping_rebuilds_keep_every_notice_of_every_kind() {
 }
 
 #[test]
+fn the_housekeeping_rebuild_runs_when_another_branch_already_dropped_a_trigger() {
+    let mut conn = Connection::open_in_memory().expect("history");
+    conn.pragma_update(None, "foreign_keys", false)
+        .expect("the migration runner turns foreign keys off");
+    let all = crate::managers::history::MIGRATIONS.to_vec();
+    let housekeeping = all
+        .iter()
+        .position(|step| *step == rusqlite_migration::M::up(inbox::HOUSEKEEPING_NOTICES_MIGRATION))
+        .expect("the housekeeping migration");
+    let migrations = rusqlite_migration::Migrations::new(all);
+    migrations
+        .to_version(&mut conn, housekeeping)
+        .expect("every migration before housekeeping");
+    conn.execute_batch("DROP TRIGGER planning_notifications_initiative_delete;")
+        .expect("the initiative trigger gone, as an earlier merge may leave it");
+
+    migrations
+        .to_latest(&mut conn)
+        .expect("the housekeeping rebuild and every one after it");
+
+    let made_again: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'trigger'
+                AND name = 'planning_notifications_initiative_delete')",
+            [],
+            |row| row.get(0),
+        )
+        .expect("the trigger lookup");
+    assert!(made_again);
+}
+
+#[test]
 fn the_repeat_migration_keeps_every_history_entry_and_waiting_change() {
     let conn = Connection::open_in_memory().expect("history");
     for migration in [
