@@ -362,6 +362,14 @@ pub(crate) fn update_body_in(
             params![id, note.title, note.body, now_ms],
         )?;
         record_version(transaction, id, body, now_ms, ScratchVersionKind::Edit, author)?;
+        if author.actor() == WorkActor::Agent {
+            crate::planning::work::follows::note_edited(
+                transaction,
+                id,
+                author.agent().as_deref(),
+                now_ms,
+            )?;
+        }
     }
     Ok(note)
 }
@@ -989,6 +997,45 @@ mod tests {
             version_bodies(&conn, &note.id),
             vec!["a new sitting", "first words, more, done"]
         );
+    }
+
+    #[test]
+    fn a_followed_note_deleted_takes_its_follow_reminder_and_notices_with_it() {
+        use crate::planning::work::{follows, inbox::SubjectKind, routines};
+        let mut conn = connection();
+        let note = create_note_with_connection(&mut conn, "Launch checklist", 0).expect("create");
+        follows::follow(&conn, SubjectKind::Note, &note.id, true, 0).expect("followed");
+        routines::set_subject_reminder(
+            &conn,
+            SubjectKind::Note,
+            &note.id,
+            Some(60 * MINUTE_MS),
+            WorkActor::Me,
+            None,
+            0,
+        )
+        .expect("a reminder");
+        update_body_in(
+            &conn,
+            &note.id,
+            "Launch checklist, venue booked",
+            Author::Agent(Some("codex")),
+            MINUTE_MS,
+        )
+        .expect("agent save");
+        let left = |conn: &Connection| -> [i64; 3] {
+            [
+                "SELECT count(*) FROM planning_follows",
+                "SELECT count(*) FROM planning_subject_reminders",
+                "SELECT count(*) FROM planning_notifications",
+            ]
+            .map(|sql| conn.query_row(sql, [], |row| row.get(0)).expect("a count"))
+        };
+        assert_eq!(left(&conn), [1, 1, 1]);
+
+        delete_note_with_connection(&conn, &note.id).expect("deleted");
+
+        assert_eq!(left(&conn), [0, 0, 0]);
     }
 
     #[test]

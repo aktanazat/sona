@@ -1,21 +1,25 @@
 //! `sona work` verbs for the bin and the archive, a description's earlier
-//! versions, favorites, subscriptions and the inbox.
+//! versions, favorites, subscriptions and follows, the inbox and its
+//! settings.
 
+use super::organize::sent_before;
 use super::{
     handle, iso_day, now_ms, pick, refusal, task_ref, Board, ExternalWorkRef, TaskRef, TasksArgs,
     Tracker, WorkAnswer, WriteArgs,
 };
-use super::organize::sent_before;
 use crate::planning;
 use crate::planning::work::agents;
 use crate::planning::work::bin::{self, Binned};
+use crate::planning::work::digest::{DigestRisk, ProjectDigest};
 use crate::planning::work::favorites::{
     self, FavoriteEntry, FavoriteKind, FavoriteMove, Favorites, FolderSave,
 };
+use crate::planning::work::follows;
 use crate::planning::work::inbox::{
-    self, Mark, Notification, NotificationKind, Shown, SubscribeReason,
+    self, InboxFilter, Mark, NoticeSubject, Notification, NotificationKind, Shown, SubjectKind,
+    SubscribeReason,
 };
-use crate::planning::work::digest::{DigestRisk, ProjectDigest};
+use crate::planning::work::inbox_settings::{self, InboxSettingsChange, KindSetting, QuietHours};
 use crate::planning::work::types::{WorkActor, WorkItem, WorkPatch};
 use crate::planning::work::versions::{self, DescriptionVersion};
 use crate::query::external::{ExternalError, ExternalErrorCode};
@@ -136,6 +140,33 @@ pub struct FavoriteMoveArgs {
     pub write: WriteArgs,
 }
 
+/// A notification kind, as `inbox --kind` and `inbox-settings` name it.
+fn notice_kind(value: &str) -> Result<NotificationKind, String> {
+    NotificationKind::parse(value.trim()).ok_or_else(|| {
+        let kinds: Vec<&str> = NotificationKind::ALL
+            .iter()
+            .map(|kind| kind.as_str())
+            .collect();
+        format!("{value} is not a kind: {}.", kinds.join(", "))
+    })
+}
+
+/// A task priority by name or number, as 0 none to 4 low.
+fn task_priority(value: &str) -> Result<u8, String> {
+    Ok(match value.trim().to_lowercase().as_str() {
+        "0" | "none" => 0,
+        "1" | "urgent" => 1,
+        "2" | "high" => 2,
+        "3" | "medium" => 3,
+        "4" | "low" => 4,
+        other => {
+            return Err(format!(
+                "{other} is not a priority: urgent, high, medium, low or none."
+            ))
+        }
+    })
+}
+
 #[derive(Args, Clone, Debug, Eq, PartialEq)]
 pub struct InboxArgs {
     /// Only unread notifications.
@@ -147,6 +178,73 @@ pub struct InboxArgs {
     /// Also archived ones.
     #[arg(long)]
     pub archived: bool,
+    /// Only what needs you: mentions, assignments, agents' questions,
+    /// reminders and work due today.
+    #[arg(long)]
+    pub priority: bool,
+    /// Only these kinds, comma-separated: status, comment, mention,
+    /// assigned, changed, reminder, due, automation, digest, question,
+    /// project, view, note.
+    #[arg(long, value_delimiter = ',', value_parser = notice_kind, value_name = "KINDS")]
+    pub kind: Vec<NotificationKind>,
+    /// Only notices about tasks in this project, or about the project, by
+    /// name or id.
+    #[arg(long, value_name = "PROJECT")]
+    pub project: Option<String>,
+    /// Only notices about tasks of these priorities, comma-separated:
+    /// urgent, high, medium, low, none.
+    #[arg(long, value_delimiter = ',', value_parser = task_priority, value_name = "PRIORITIES")]
+    pub task_priority: Vec<u8>,
+}
+
+/// Tasks to subscribe to, or one project, saved view or note to follow.
+#[derive(Args, Clone, Debug, Eq, PartialEq)]
+pub struct SubscribeArgs {
+    /// S-12, 12, or task ids.
+    #[arg(value_parser = task_ref, value_name = "TASK", required_unless_present_any = ["project", "view", "note"])]
+    pub tasks: Vec<TaskRef>,
+    /// A project, by name or id: updates posted on it and its status
+    /// changes.
+    #[arg(long, value_name = "PROJECT", conflicts_with_all = ["tasks", "view", "note"])]
+    pub project: Option<String>,
+    /// A saved view, by name or id: tasks that join it, and tasks in it
+    /// done or canceled.
+    #[arg(long, value_name = "VIEW", conflicts_with_all = ["tasks", "note"])]
+    pub view: Option<String>,
+    /// A note, by id: an agent's edits to it.
+    #[arg(long, value_name = "NOTE", conflicts_with = "tasks")]
+    pub note: Option<Uuid>,
+    /// Print what would change and write nothing.
+    #[arg(long)]
+    pub dry_run: bool,
+    #[command(flatten)]
+    pub write: WriteArgs,
+}
+
+#[derive(Args, Clone, Debug, Eq, PartialEq)]
+pub struct InboxSettingsArgs {
+    /// The kinds that reach the inbox, comma-separated, or all; the rest are
+    /// turned off and never posted.
+    #[arg(long, value_name = "KINDS")]
+    pub kinds: Option<String>,
+    /// The kinds that also show a banner on this Mac, comma-separated, all,
+    /// or none.
+    #[arg(long, value_name = "KINDS")]
+    pub banners: Option<String>,
+    /// When banners keep quiet, HH:MM-HH:MM on this Mac's clock, or off.
+    #[arg(long, value_name = "HOURS")]
+    pub quiet_hours: Option<String>,
+    /// Print what would change and write nothing.
+    #[arg(long)]
+    pub dry_run: bool,
+    #[command(flatten)]
+    pub write: WriteArgs,
+}
+
+impl InboxSettingsArgs {
+    pub(super) const fn changes_something(&self) -> bool {
+        self.kinds.is_some() || self.banners.is_some() || self.quiet_hours.is_some()
+    }
 }
 
 #[derive(Args, Clone, Debug, Eq, PartialEq)]
@@ -185,6 +283,8 @@ pub enum LifecycleAction {
     Subscribed,
     Unsubscribed,
     InboxMarked,
+    Followed,
+    Unfollowed,
 }
 
 impl LifecycleAction {
@@ -212,6 +312,10 @@ impl LifecycleAction {
             (Self::Unsubscribed, true) => "Would unsubscribe",
             (Self::InboxMarked, false) => "Marked",
             (Self::InboxMarked, true) => "Would mark",
+            (Self::Followed, false) => "Following",
+            (Self::Followed, true) => "Would follow",
+            (Self::Unfollowed, false) => "Stopped following",
+            (Self::Unfollowed, true) => "Would stop following",
         }
     }
 }
@@ -244,6 +348,8 @@ pub struct ExternalLifecycleChange {
     pub notifications: Vec<ExternalNotification>,
     /// For a description restore under suggest: it waits for the user.
     pub proposed: bool,
+    /// The project, view or note followed, or no longer.
+    pub followed: Option<ExternalFollow>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -330,24 +436,41 @@ pub struct ExternalSubscription {
     pub reason: SubscribeReason,
 }
 
+/// A followed project, saved view or note.
+#[derive(Clone, Debug, Serialize)]
+pub struct ExternalFollow {
+    pub kind: SubjectKind,
+    pub id: String,
+    pub name: String,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct ExternalWorkSubscriptions {
     pub schema_version: u32,
     pub subscriptions: Vec<ExternalSubscription>,
+    /// The projects, saved views and notes followed.
+    pub follows: Vec<ExternalFollow>,
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub struct ExternalNotification {
     pub id: String,
     pub kind: NotificationKind,
-    /// None only for an automation run about no task.
+    /// None for an automation run about no task, a digest, and a notice
+    /// about a project, initiative or note.
     pub task: Option<ExternalWorkRef>,
+    /// The project, initiative, note or saved view it is about.
+    pub subject: Option<NoticeSubject>,
+    /// It needs the user: a mention, assignment, agent's question,
+    /// reminder or work due today.
+    pub priority: bool,
     /// Sona or the agent's name.
     pub by: String,
     pub comment_id: Option<String>,
     /// For `changed`: what changed, as the task history names it (due,
     /// priority, details, owner, labels, project, parent, relation,
-    /// attachment) or `reminder`.
+    /// attachment) or `reminder`. For `project`: update or status. For
+    /// `view`: added, done or canceled.
     pub field: Option<String>,
     /// For `automation`: which automation ran, and its error when it failed.
     pub automation: Option<ExternalNoticeAutomation>,
@@ -371,13 +494,24 @@ pub struct ExternalNoticeAutomation {
 }
 
 impl ExternalNotification {
-    /// The task it is about, or the automation for a run about no task.
+    /// The task it is about, or what else it is about.
     fn about(&self) -> String {
-        match (&self.task, &self.automation) {
-            (Some(task), _) => format!("{} {}", task.handle, task.title),
-            (None, Some(automation)) => format!("automation {}", automation.name),
-            (None, None) if self.digest.is_some() => "weekly project digest".to_owned(),
-            (None, None) => String::new(),
+        match (&self.task, &self.subject, &self.automation) {
+            (Some(task), Some(subject), _) => format!(
+                "{} {} in {}",
+                task.handle,
+                task.title,
+                subject.name.as_deref().unwrap_or_default()
+            ),
+            (Some(task), None, _) => format!("{} {}", task.handle, task.title),
+            (None, Some(subject), _) => format!(
+                "{} {}",
+                subject.kind.as_str(),
+                subject.name.as_deref().unwrap_or(&subject.id)
+            ),
+            (None, None, Some(automation)) => format!("automation {}", automation.name),
+            (None, None, None) if self.digest.is_some() => "weekly project digest".to_owned(),
+            (None, None, None) => String::new(),
         }
     }
 }
@@ -388,6 +522,37 @@ pub struct ExternalWorkInbox {
     /// Unread notifications that are awake and not archived.
     pub unread: usize,
     pub notifications: Vec<ExternalNotification>,
+}
+
+/// Which kinds reach the inbox and show a banner, and the quiet hours; for
+/// a change, what it did or would do.
+#[derive(Clone, Debug, Serialize)]
+pub struct ExternalInboxSettings {
+    pub schema_version: u32,
+    pub dry_run: bool,
+    /// None when nothing was asked to change, or nothing needed to.
+    pub operation_id: Option<String>,
+    pub kinds: Vec<KindSetting>,
+    /// HH:MM-HH:MM on this Mac's clock; none when banners never keep quiet.
+    pub quiet_hours: Option<String>,
+}
+
+/// A stored digest as an agent may read it: no task the board hides, and
+/// no overdue risk left without one.
+pub(super) fn agents_digest(board: &Board, digest: ProjectDigest) -> ProjectDigest {
+    let mut digest = digest.for_agents();
+    for project in &mut digest.projects {
+        project.done.retain(|task| board.row(&task.id).is_some());
+        for risk in &mut project.risks {
+            if let DigestRisk::Overdue { tasks } = risk {
+                tasks.retain(|task| board.row(&task.id).is_some());
+            }
+        }
+        project
+            .risks
+            .retain(|risk| !matches!(risk, DigestRisk::Overdue { tasks } if tasks.is_empty()));
+    }
+    digest
 }
 
 pub(super) fn item_ref(item: &WorkItem) -> ExternalWorkRef {
@@ -469,6 +634,12 @@ pub(super) fn text(answer: &WorkAnswer, text: &mut String) {
                         .notifications
                         .iter()
                         .map(|notice| format!("{} on {}", notice.id, notice.about())),
+                )
+                .chain(
+                    change
+                        .followed
+                        .iter()
+                        .map(|follow| format!("{} {}", follow.kind.as_str(), follow.name)),
                 )
                 .collect();
             if !what.is_empty() {
@@ -588,6 +759,15 @@ pub(super) fn text(answer: &WorkAnswer, text: &mut String) {
                     subscription.task.handle, subscription.task.title, subscription.reason
                 );
             }
+            for follow in &subscriptions.follows {
+                let _ = writeln!(
+                    text,
+                    "Following {} {}  ({})",
+                    follow.kind.as_str(),
+                    follow.name,
+                    follow.id
+                );
+            }
         }
         WorkAnswer::Inbox(inbox) => {
             let _ = writeln!(text, "{} unread.", inbox.unread);
@@ -603,8 +783,9 @@ pub(super) fn text(answer: &WorkAnswer, text: &mut String) {
                 };
                 let _ = writeln!(
                     text,
-                    "{} {}  {what} by {} on {}{}",
+                    "{}{} {}  {what} by {} on {}{}",
                     if notice.read { " " } else { "*" },
+                    if notice.priority { "!" } else { " " },
                     notice.id,
                     notice.by,
                     notice.about(),
@@ -619,6 +800,35 @@ pub(super) fn text(answer: &WorkAnswer, text: &mut String) {
                 text.push('\n');
                 super::digest::digest_text(digest, text);
             }
+        }
+        WorkAnswer::InboxSettings(settings) => {
+            if settings.dry_run {
+                text.push_str("Dry run. ");
+            }
+            let on = |pick: fn(&KindSetting) -> bool| {
+                let kinds: Vec<&str> = settings
+                    .kinds
+                    .iter()
+                    .filter(|setting| pick(setting))
+                    .map(|setting| setting.kind.as_str())
+                    .collect();
+                if kinds.is_empty() {
+                    "none".to_owned()
+                } else {
+                    kinds.join(", ")
+                }
+            };
+            let _ = writeln!(text, "Inbox: {}.", on(|setting| setting.inbox));
+            let _ = writeln!(
+                text,
+                "Banners: {}.",
+                on(|setting| setting.inbox && setting.banner)
+            );
+            let _ = writeln!(
+                text,
+                "Quiet hours: {}.",
+                settings.quiet_hours.as_deref().unwrap_or("off")
+            );
         }
         _ => {}
     }
@@ -650,6 +860,7 @@ impl Tracker<'_> {
             position: None,
             notifications: Vec::new(),
             proposed: false,
+            followed: None,
         }
     }
 
@@ -1195,10 +1406,13 @@ impl Tracker<'_> {
 
     pub(super) async fn subscribe(
         &self,
-        args: &TasksArgs,
+        args: &SubscribeArgs,
         on: bool,
     ) -> Result<WorkAnswer, ExternalError> {
         let board = self.board().await?;
+        if args.tasks.is_empty() {
+            return self.follow(&board, args, on);
+        }
         let rows = board.tasks(&args.tasks)?;
         let action = if on {
             LifecycleAction::Subscribed
@@ -1245,6 +1459,85 @@ impl Tracker<'_> {
         Ok(WorkAnswer::Lifecycle(Box::new(answer)))
     }
 
+    /// The project, view or note `args` names.
+    fn follow_target(
+        &self,
+        board: &Board,
+        args: &SubscribeArgs,
+    ) -> Result<ExternalFollow, ExternalError> {
+        if let Some(project) = &args.project {
+            let project = board
+                .project(project)?
+                .ok_or_else(|| ExternalError::invalid("Name a project."))?;
+            return Ok(ExternalFollow {
+                kind: SubjectKind::Project,
+                id: project.id.clone(),
+                name: project.title.clone(),
+            });
+        }
+        if let Some(view) = &args.view {
+            let view = self.view_named(view)?;
+            return Ok(ExternalFollow {
+                kind: SubjectKind::View,
+                id: view.id,
+                name: view.name,
+            });
+        }
+        let id = args
+            .note
+            .ok_or_else(|| ExternalError::invalid("Name tasks, or --project, --view or --note."))?;
+        let note = self.note(&id)?;
+        Ok(ExternalFollow {
+            kind: SubjectKind::Note,
+            id: note.id,
+            name: note.title,
+        })
+    }
+
+    /// Follows a project, view or note, or stops.
+    fn follow(
+        &self,
+        board: &Board,
+        args: &SubscribeArgs,
+        on: bool,
+    ) -> Result<WorkAnswer, ExternalError> {
+        let target = self.follow_target(board, args)?;
+        let action = if on {
+            LifecycleAction::Followed
+        } else {
+            LifecycleAction::Unfollowed
+        };
+        let mut answer = self.change(action, args.dry_run);
+        let operation_id = args.write.fresh_operation_id();
+        let replayed = self.ran(&operation_id)?;
+        let following = planning::history(self.history, |conn| {
+            follows::following(conn, target.kind, &target.id)
+        })
+        .map_err(|message| refusal(self.history, message))?;
+        if following == on && !replayed {
+            answer.skipped.push(ExternalLifecycleSkip {
+                id: target.name.clone(),
+                reason: if on {
+                    "already following"
+                } else {
+                    "not following"
+                }
+                .to_owned(),
+            });
+            return Ok(WorkAnswer::Lifecycle(Box::new(answer)));
+        }
+        answer.followed = Some(target.clone());
+        answer.operation_id = Some(operation_id.clone());
+        if args.dry_run {
+            return Ok(WorkAnswer::Lifecycle(Box::new(answer)));
+        }
+        self.applies("changing what you follow")?;
+        follows::follow_as(self.app, &operation_id, target.kind, &target.id, on)
+            .map_err(|message| self.write_refusal(message, &operation_id, "What you named"))?;
+        answer.replayed = replayed;
+        Ok(WorkAnswer::Lifecycle(Box::new(answer)))
+    }
+
     pub(super) async fn subscriptions(&self) -> Result<WorkAnswer, ExternalError> {
         let board = self.board().await?;
         let subscriptions = planning::history(self.history, |conn| inbox::subscriptions(conn))
@@ -1259,9 +1552,40 @@ impl Tracker<'_> {
                     })
             })
             .collect();
+        let projects = self.every_project()?;
+        let views = self.all_views()?;
+        let followed = planning::history(self.history, |conn| {
+            follows::follows(conn)?
+                .into_iter()
+                .map(|follow| {
+                    let name = match follow.kind {
+                        SubjectKind::Project => projects
+                            .iter()
+                            .find(|project| project.id == follow.target_id)
+                            .map(|project| project.title.clone()),
+                        SubjectKind::View => views
+                            .iter()
+                            .find(|view| view.id == follow.target_id)
+                            .map(|view| view.name.clone()),
+                        SubjectKind::Note => {
+                            crate::scratchpad::note_with_connection(conn, &follow.target_id)?
+                                .map(|note| note.title)
+                        }
+                        SubjectKind::Initiative => None,
+                    };
+                    Ok(name.map(|name| ExternalFollow {
+                        kind: follow.kind,
+                        id: follow.target_id,
+                        name,
+                    }))
+                })
+                .collect::<anyhow::Result<Vec<_>>>()
+        })
+        .map_err(|message| refusal(self.history, message))?;
         Ok(WorkAnswer::Subscriptions(ExternalWorkSubscriptions {
             schema_version: QUERY_SCHEMA_VERSION,
             subscriptions,
+            follows: followed.into_iter().flatten().collect(),
         }))
     }
 
@@ -1272,6 +1596,8 @@ impl Tracker<'_> {
         };
         Some(ExternalNotification {
             task,
+            subject: notification.subject,
+            priority: notification.priority,
             by: author(Some(notification.actor), notification.agent.as_deref()),
             id: notification.id,
             kind: notification.kind,
@@ -1291,21 +1617,9 @@ impl Tracker<'_> {
             read: notification.read_at_ms.is_some(),
             snoozed_until_ms: notification.snoozed_until_ms,
             archived: notification.archived_at_ms.is_some(),
-            digest: notification.digest.map(|digest| {
-                let mut digest = digest.for_agents();
-                for project in &mut digest.projects {
-                    project.done.retain(|task| board.row(&task.id).is_some());
-                    for risk in &mut project.risks {
-                        if let DigestRisk::Overdue { tasks } = risk {
-                            tasks.retain(|task| board.row(&task.id).is_some());
-                        }
-                    }
-                    project.risks.retain(|risk| {
-                        !matches!(risk, DigestRisk::Overdue { tasks } if tasks.is_empty())
-                    });
-                }
-                digest
-            }),
+            digest: notification
+                .digest
+                .map(|digest| agents_digest(board, digest)),
         })
     }
 
@@ -1313,9 +1627,12 @@ impl Tracker<'_> {
         &self,
         board: &Board,
         shown: Shown,
+        filter: &InboxFilter,
     ) -> Result<Vec<ExternalNotification>, ExternalError> {
         planning::history(self.history, |conn| {
-            inbox::notifications(conn, shown, now_ms())
+            let mut found = inbox::filtered(conn, shown, filter, now_ms())?;
+            inbox::name_notes(conn, &mut found)?;
+            Ok(found)
         })
         .map_err(|message| refusal(self.history, message))
         .map(|found| {
@@ -1335,14 +1652,31 @@ impl Tracker<'_> {
                     unread_only: true,
                     ..Shown::default()
                 },
+                &InboxFilter::default(),
             )?
             .len();
+        let project_id = match &args.project {
+            Some(project) => Some(
+                board
+                    .project(project)?
+                    .ok_or_else(|| ExternalError::invalid("Name a project."))?
+                    .id
+                    .clone(),
+            ),
+            None => None,
+        };
         let notifications = self.notices(
             &board,
             Shown {
                 unread_only: args.unread,
                 snoozed: args.snoozed,
                 archived: args.archived,
+                priority_only: args.priority,
+            },
+            &InboxFilter {
+                kinds: args.kind.clone(),
+                project_id,
+                task_priorities: args.task_priority.clone(),
             },
         )?;
         Ok(WorkAnswer::Inbox(ExternalWorkInbox {
@@ -1350,6 +1684,77 @@ impl Tracker<'_> {
             unread,
             notifications,
         }))
+    }
+
+    fn inbox_settings_answer(
+        settings: inbox_settings::InboxSettings,
+        dry_run: bool,
+        operation_id: Option<String>,
+    ) -> WorkAnswer {
+        WorkAnswer::InboxSettings(ExternalInboxSettings {
+            schema_version: QUERY_SCHEMA_VERSION,
+            dry_run,
+            operation_id,
+            kinds: settings.kinds,
+            quiet_hours: settings.quiet_hours.map(QuietHours::text),
+        })
+    }
+
+    /// Reads the inbox settings, or with `args` changes them.
+    pub(super) fn inbox_settings(
+        &self,
+        args: Option<&InboxSettingsArgs>,
+    ) -> Result<WorkAnswer, ExternalError> {
+        let current = planning::history(self.history, |conn| inbox_settings::read(conn))
+            .map_err(|message| refusal(self.history, message))?;
+        let Some(args) = args else {
+            return Ok(Self::inbox_settings_answer(current, false, None));
+        };
+        let kinds = |value: &Option<String>, empty_ok: bool| {
+            value
+                .as_deref()
+                .map(|value| match value.trim().to_lowercase().as_str() {
+                    "all" => Ok(NotificationKind::ALL.to_vec()),
+                    "none" if empty_ok => Ok(Vec::new()),
+                    listed => listed
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|kind| !kind.is_empty())
+                        .map(notice_kind)
+                        .collect::<Result<Vec<_>, String>>(),
+                })
+                .transpose()
+                .map_err(ExternalError::invalid)
+        };
+        let quiet_hours = match args.quiet_hours.as_deref().map(str::trim) {
+            None => None,
+            Some("off" | "none") => Some(None),
+            Some(hours) => Some(Some(QuietHours::parse(hours).ok_or_else(|| {
+                ExternalError::invalid(
+                    "--quiet-hours takes HH:MM-HH:MM, such as 22:00-08:00, or off.",
+                )
+            })?)),
+        };
+        let change = InboxSettingsChange {
+            inbox: kinds(&args.kinds, false)?,
+            banners: kinds(&args.banners, true)?,
+            quiet_hours,
+        };
+        let operation_id = args
+            .write
+            .operation_id("inbox-settings", &(&change, &current))?;
+        if args.dry_run {
+            let would = self.rehearse(|conn| inbox_settings::save(conn, &change))?;
+            return Ok(Self::inbox_settings_answer(would, true, Some(operation_id)));
+        }
+        self.applies("changing the inbox settings")?;
+        let saved = inbox_settings::save_as(self.app, &operation_id, &change)
+            .map_err(|message| self.write_refusal(message, &operation_id, "The inbox settings"))?;
+        Ok(Self::inbox_settings_answer(
+            saved,
+            false,
+            Some(operation_id),
+        ))
     }
 
     pub(super) async fn inbox_mark(
@@ -1380,7 +1785,9 @@ impl Tracker<'_> {
                 unread_only: false,
                 snoozed: true,
                 archived: true,
+                priority_only: false,
             },
+            &InboxFilter::default(),
         )?;
         let picked: Vec<ExternalNotification> = if args.all {
             every
@@ -1516,8 +1923,8 @@ fn folder_request(
 
 #[cfg(test)]
 mod tests {
-    use super::{folder_request, FOLDER_SAVE_ASKED};
     use super::super::organize::file_sent;
+    use super::{folder_request, FOLDER_SAVE_ASKED};
     use crate::planning::schema;
     use crate::planning::work::favorites;
     use rusqlite::Connection;

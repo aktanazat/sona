@@ -136,6 +136,7 @@ pub(crate) fn add(
         ],
     )?;
     touch(conn, &project.id, now_ms)?;
+    super::work::follows::project_update_posted(conn, &project.id, author, health, now_ms)?;
     update(conn, &id)
 }
 

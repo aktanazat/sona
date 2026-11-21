@@ -269,7 +269,7 @@ pub(super) fn request_json(request: &impl Serialize) -> Result<String, ExternalE
 }
 
 impl Tracker<'_> {
-    fn note(&self, id: &Uuid) -> Result<ScratchNote, ExternalError> {
+    pub(super) fn note(&self, id: &Uuid) -> Result<ScratchNote, ExternalError> {
         scratchpad::scratchpad_get(self.app.state(), id.to_string())
             .map_err(|message| refusal(self.history, message))?
             .ok_or_else(|| ExternalError::new(ExternalErrorCode::NotFound, format!("No note {id}.")))

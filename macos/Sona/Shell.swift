@@ -185,6 +185,8 @@ struct Shell: View {
                 LoopsScreen()
             case .initiatives:
                 InitiativesScreen(store: model.projects, people: model.plannerPeople, openProject: model.openProject)
+            case .updates:
+                UpdatesScreen()
             }
         }
     }
@@ -667,7 +669,7 @@ struct Sidebar: View {
         case .inbox:
             SidebarCount(value: model.work.unread + (model.work.counts?.triage ?? 0), meaning: "unread or to triage")
         case .capture, .library, .activity, .meetings, .scratchpad, .calendar, .today, .projects, .archive, .loops,
-             .initiatives, .triage:
+             .initiatives, .triage, .updates:
             nil
         }
     }

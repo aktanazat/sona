@@ -6804,14 +6804,150 @@ pub(super) async fn call(
             let unread_only: Option<bool> = args.take("unreadOnly")?;
             let snoozed: Option<bool> = args.take("snoozed")?;
             let archived: Option<bool> = args.take("archived")?;
+            let priority_only: Option<bool> = args.take("priorityOnly")?;
+            let filter: Option<crate::planning::work::inbox::InboxFilter> = args.take("filter")?;
             let shown = crate::planning::work::inbox::Shown {
                 unread_only: unread_only.unwrap_or(false),
                 snoozed: snoozed.unwrap_or(false),
                 archived: archived.unwrap_or(false),
+                priority_only: priority_only.unwrap_or(false),
             };
             let handle = app.clone();
             off_main_thread(move || {
-                reply(crate::planning::work::inbox::work_inbox(handle.clone(), shown))
+                reply(crate::planning::work::inbox::work_inbox(
+                    handle.clone(),
+                    shown,
+                    filter.unwrap_or_default(),
+                ))
+            })
+            .await?
+        }
+        "work_inbox_settings" => {
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::planning::work::inbox_settings::work_inbox_settings(
+                    handle.clone(),
+                ))
+            })
+            .await?
+        }
+        "work_inbox_settings_save" => {
+            let mut args = Args::parse(params)?;
+            let operation_id: String = args.take("operationId")?;
+            let change: crate::planning::work::inbox_settings::InboxSettingsChange =
+                args.take("change")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::planning::work::inbox_settings::save_as(
+                    &handle,
+                    &operation_id,
+                    &change,
+                ))
+            })
+            .await?
+        }
+        "work_follow" => {
+            let mut args = Args::parse(params)?;
+            let operation_id: String = args.take("operationId")?;
+            let kind: crate::planning::work::inbox::SubjectKind = args.take("kind")?;
+            let id: String = args.take("id")?;
+            let on: bool = args.take("on")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::planning::work::follows::follow_as(
+                    &handle,
+                    &operation_id,
+                    kind,
+                    &id,
+                    on,
+                ))
+            })
+            .await?
+        }
+        "work_follows" => {
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::planning::work::follows::work_follows(handle.clone()))
+            })
+            .await?
+        }
+        "work_subject_reminders" => {
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::planning::work::routines::subject_reminders_read(
+                    &handle,
+                ))
+            })
+            .await?
+        }
+        "work_subject_reminder_set" => {
+            let mut args = Args::parse(params)?;
+            let operation_id: String = args.take("operationId")?;
+            let kind: crate::planning::work::inbox::SubjectKind = args.take("kind")?;
+            let id: String = args.take("id")?;
+            let at_ms: Option<i64> = args.take("atMs")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::planning::work::routines::subject_reminder_set_as(
+                    &handle,
+                    crate::planning::work::types::WorkActor::Me,
+                    None,
+                    &operation_id,
+                    kind,
+                    &id,
+                    at_ms,
+                ))
+            })
+            .await?
+        }
+        "work_updates" => {
+            let mut args = Args::parse(params)?;
+            let filter: Option<crate::planning::work::feed::FeedFilter> = args.take("filter")?;
+            let limit: Option<usize> = args.take("limit")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::planning::work::feed::work_updates(
+                    handle.clone(),
+                    filter.unwrap_or_default(),
+                    limit,
+                ))
+            })
+            .await?
+        }
+        "work_feeds" => {
+            let handle = app.clone();
+            off_main_thread(move || reply(crate::planning::work::feed::work_feeds(handle.clone())))
+                .await?
+        }
+        "work_feed_save" => {
+            let mut args = Args::parse(params)?;
+            let operation_id: String = args.take("operationId")?;
+            let id: Option<String> = args.take("id")?;
+            let name: String = args.take("name")?;
+            let filter: crate::planning::work::feed::FeedFilter = args.take("filter")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::planning::work::feed::feed_save_as(
+                    &handle,
+                    &operation_id,
+                    id.as_deref(),
+                    &name,
+                    &filter,
+                ))
+            })
+            .await?
+        }
+        "work_feed_delete" => {
+            let mut args = Args::parse(params)?;
+            let operation_id: String = args.take("operationId")?;
+            let id: String = args.take("id")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::planning::work::feed::feed_delete_as(
+                    &handle,
+                    &operation_id,
+                    &id,
+                ))
             })
             .await?
         }

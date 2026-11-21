@@ -46,6 +46,8 @@ final class WorkStore {
     private(set) var favoriteFolders: [WorkFavoriteFolder] = []
     /// The tasks the inbox follows, by item id.
     private(set) var subscriptions: [String: WorkSubscription] = [:]
+    /// The projects, saved views and notes the inbox follows.
+    private(set) var follows: [WorkFollow] = []
     /// Every notice not archived, snoozed ones too, newest first.
     private(set) var notifications: [WorkNotification] = []
     /// Archived and deleted tasks, once the archive page has asked.
@@ -1074,6 +1076,38 @@ final class WorkStore {
         }
     }
 
+    func isFollowing(_ kind: WorkSubjectKind, _ id: String) -> Bool {
+        follows.contains { $0.kind == kind && $0.targetId == id }
+    }
+
+    func follow(_ kind: WorkSubjectKind, _ id: String, _ on: Bool) {
+        guard isFollowing(kind, id) != on else { return }
+        let before = follows
+        if on {
+            follows.append(WorkFollow(kind: kind, targetId: id, createdAtMs: TaskDates.now()))
+        } else {
+            follows.removeAll { $0.kind == kind && $0.targetId == id }
+        }
+        Task {
+            do {
+                let _: Bool = try await core.request(
+                    "work_follow", FollowParams(operationId: Self.newId(), kind: kind, id: id, on: on))
+            } catch {
+                follows = before
+                mutationError = error.localizedDescription
+            }
+        }
+    }
+
+    func inboxSettings() async throws -> WorkInboxSettings {
+        try await core.request("work_inbox_settings")
+    }
+
+    func saveInboxSettings(_ change: WorkInboxSettingsChange) async throws -> WorkInboxSettings {
+        try await core.request(
+            "work_inbox_settings_save", InboxSettingsSaveParams(operationId: Self.newId(), change: change))
+    }
+
     /// Marks notices read or unread, archives them or snoozes them until
     /// `until`.
     func mark(_ ids: [String], _ mark: WorkInboxMark, until: Int64? = nil) {
@@ -1324,22 +1358,25 @@ final class WorkStore {
         }
     }
 
-    /// The inbox, subscriptions and favorites, apart from the list so a core
-    /// without them still lists tasks.
+    /// The inbox, subscriptions, follows and favorites, apart from the list
+    /// so a core without them still lists tasks.
     private func loadLifecycle() async {
         let core = core
         do {
             async let starred: WorkFavorites = core.request("work_favorites")
             async let followed: [WorkSubscription] = core.request("work_subscriptions")
+            async let followedSubjects: [WorkFollow] = core.request("work_follows")
             async let heard: WorkInbox = core.request("work_inbox", InboxParams(snoozed: true))
             async let trashed: [WorkBinned] = core.request("work_bin")
-            let (starredList, followedList, inboxRead, binList) = try await (starred, followed, heard, trashed)
+            let (starredList, followedList, subjectList, inboxRead, binList)
+                = try await (starred, followed, followedSubjects, heard, trashed)
             if pending > 0 {
                 reloadWhenIdle = true
             } else {
                 favorites = starredList.favorites
                 favoriteFolders = starredList.folders
                 subscriptions = Dictionary(followedList.map { ($0.itemId, $0) }) { first, _ in first }
+                follows = subjectList
                 notifications = inboxRead.notifications
                 binned = Dictionary(binList.map { ($0.id, $0) }) { first, _ in first }
                 keepTime()
@@ -1929,6 +1966,16 @@ private struct SubscribeParams: Encodable {
     let operationId: String
     let ids: [String]
     let on: Bool
+}
+private struct FollowParams: Encodable {
+    let operationId: String
+    let kind: WorkSubjectKind
+    let id: String
+    let on: Bool
+}
+private struct InboxSettingsSaveParams: Encodable {
+    let operationId: String
+    let change: WorkInboxSettingsChange
 }
 private struct InboxParams: Encodable { let snoozed: Bool }
 private struct InboxMarkParams: Encodable {

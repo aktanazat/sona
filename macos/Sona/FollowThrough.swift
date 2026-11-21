@@ -8,10 +8,12 @@ enum WorkReminderKind: String, Decodable {
     case due
     case followUp = "follow_up"
     case brief
+    case inbox
 }
 
-/// `work-reminder-opened`: a reminder was clicked. `id` is the task or the
-/// calendar event, or nil when the reminder named several tasks.
+/// `work-reminder-opened`: a reminder was clicked. `id` is the task, the
+/// calendar event or the inbox notice, or nil when the reminder named
+/// several.
 struct WorkReminderOpened: Decodable {
     let kind: WorkReminderKind
     let id: String?
@@ -130,7 +132,8 @@ private struct TalkingPointDoneParams: Encodable {
 
 extension AppModel {
     /// A reminder's click: a due day opens the task, a wait opens its nudge,
-    /// a meeting about to start opens its brief.
+    /// a meeting about to start opens its brief, an inbox banner opens its
+    /// notice.
     func observeReminders() {
         core.observe("work-reminder-opened") { [weak self] line in
             guard let opened: WorkReminderOpened = try? Core.payload(line) else { return }
@@ -149,6 +152,24 @@ extension AppModel {
             if let id = opened.id { sheet = .nudge(id) }
         case .brief:
             if let key = opened.id { sheet = .workBrief(.event(key)) }
+        case .inbox:
+            showNotice(opened.id)
+        }
+    }
+
+    /// The inbox, unfiltered, with the notice open when it is there;
+    /// several notices leave the inbox at its top.
+    private func showNotice(_ id: String?) {
+        let notice = id.flatMap { id in work.notifications.first { $0.id == id } }
+        workFocus.inboxSnoozed = notice.map { ($0.snoozedUntilMs ?? 0) > work.now } ?? false
+        workFocus.inboxPriorityOnly = false
+        workFocus.inboxFilter = InboxFilter()
+        workFocus.open(nil, in: .inbox)
+        go(.inbox)
+        if let notice {
+            openNotice(notice)
+        } else {
+            workFocus.inboxHighlighted = id
         }
     }
 

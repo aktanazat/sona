@@ -632,6 +632,8 @@ struct ProjectsView: View {
             if let detail {
                 Button("Talk to Sona", systemImage: "bubble.left") { discussProject(detail.project) }
                     .buttonStyle(.secondary)
+                FollowButton(kind: .project, id: detail.project.id)
+                SubjectReminderMenu(subject: WorkSubjectRef(kind: .project, id: detail.project.id))
                 let starred = model.work.isFavorite(.project, detail.project.id)
                 Button {
                     model.work.setFavorite(.project, detail.project.id, !starred)
