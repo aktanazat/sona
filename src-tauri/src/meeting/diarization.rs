@@ -1,5 +1,5 @@
+use crate::managers::model::public_hf_api;
 use crate::meeting::types::{DiarizationStatus, SpeakerAssignmentKind};
-use hf_hub::api::tokio::ApiBuilder;
 use hf_hub::{Repo, RepoType};
 use ndarray::Array3;
 use ort::inputs;
@@ -427,7 +427,7 @@ async fn download_asset(
     model_directory: &Path,
     manifest: &'static DiarizationModelManifest,
 ) -> Result<(), DiarizationError> {
-    let api = ApiBuilder::from_env()
+    let api = public_hf_api()
         .build()
         .map_err(|_| DiarizationError::DownloadFailed)?;
     let repository = api.repo(Repo::with_revision(

@@ -21,8 +21,10 @@ use tar::Archive;
 use tauri::{AppHandle, Emitter, Manager};
 
 mod download;
+mod downloads;
 
 use download::{HttpDownloadOutcome, DOWNLOAD_STALL_TIMEOUT};
+use downloads::{DownloadClaim, Downloads};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub enum EngineType {
@@ -333,6 +335,13 @@ fn lock_model_state<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
         Ok(guard) => guard,
         Err(_) => panic!("model manager state mutex must not be poisoned"),
     }
+}
+
+/// A Hugging Face client for the public repositories Sona fetches models
+/// from. The saved Hugging Face token is never sent: no fetch needs it, and a
+/// stale one can make an otherwise public download fail authentication.
+pub(crate) fn public_hf_api() -> ApiBuilder {
+    ApiBuilder::from_env().with_token(None)
 }
 
 /// The Hugging Face caches Sona resolves models from, in lookup order.
@@ -880,36 +889,11 @@ impl Drop for RescanGuard {
     }
 }
 
-/// RAII guard that cleans up download state (`is_downloading` flag and cancel flag)
-/// when dropped, unless explicitly disarmed. This ensures consistent cleanup on
-/// every error path without requiring manual cleanup at each `?` or `return Err`.
-struct DownloadCleanup<'a> {
-    available_models: &'a Mutex<HashMap<String, ModelInfo>>,
-    cancel_flags: &'a Arc<Mutex<HashMap<String, CancellationToken>>>,
-    model_id: String,
-    disarmed: bool,
-}
-
-impl<'a> Drop for DownloadCleanup<'a> {
-    fn drop(&mut self) {
-        if self.disarmed {
-            return;
-        }
-        {
-            let mut models = lock_model_state(self.available_models);
-            if let Some(model) = models.get_mut(self.model_id.as_str()) {
-                model.is_downloading = false;
-            }
-        }
-        lock_model_state(self.cancel_flags).remove(&self.model_id);
-    }
-}
-
 pub struct ModelManager {
     app_handle: AppHandle,
     models_dir: PathBuf,
     available_models: Mutex<HashMap<String, ModelInfo>>,
-    cancel_flags: Arc<Mutex<HashMap<String, CancellationToken>>>,
+    downloads: Mutex<Downloads>,
     extracting_models: Arc<Mutex<HashSet<String>>>,
     /// Single-flight guard for [`Self::rescan_local_models`] so concurrent
     /// refresh requests coalesce instead of scanning the disk in parallel.
@@ -1534,7 +1518,7 @@ impl ModelManager {
             app_handle: app_handle.clone(),
             models_dir,
             available_models: Mutex::new(available_models),
-            cancel_flags: Arc::new(Mutex::new(HashMap::new())),
+            downloads: Mutex::new(Downloads::default()),
             extracting_models: Arc::new(Mutex::new(HashSet::new())),
             is_rescanning: Arc::new(AtomicBool::new(false)),
             hf_caches,
@@ -1560,6 +1544,12 @@ impl ModelManager {
             let models = lock_model_state(&self.available_models);
             models.values().cloned().collect()
         };
+        {
+            let downloads = lock_model_state(&self.downloads);
+            for model in &mut list {
+                model.is_downloading = downloads.is_running(&model.id);
+            }
+        }
         // Stable, reasonable order: catalog editorial rank first (lower = higher
         // priority), then any other recommended model, then by accuracy, speed,
         // and name. `ModelInfo` doesn't carry rank, so resolve it by id from the
@@ -1630,9 +1620,7 @@ impl ModelManager {
     /// The merge is additive: only new ids are inserted, so existing entries keep
     /// their values — including runtime-probed capabilities from
     /// [`Self::set_runtime_capabilities`]. It then runs [`Self::update_download_status`],
-    /// which recomputes disk-derived flags for *every* entry; a rescan racing an
-    /// in-flight download can briefly clear its `is_downloading`, but the download
-    /// continues and the event-driven UI self-corrects.
+    /// which recomputes disk-derived flags for *every* entry.
     ///
     /// The disk walk and 64 KiB header probes run against a cloned snapshot
     /// *off-lock* so readers never block on I/O; only the brief merge takes the
@@ -1677,8 +1665,11 @@ impl ModelManager {
         Ok(())
     }
     pub fn get_model_info(&self, model_id: &str) -> Option<ModelInfo> {
-        let models = lock_model_state(&self.available_models);
-        models.get(model_id).cloned()
+        let mut info = lock_model_state(&self.available_models)
+            .get(model_id)
+            .cloned()?;
+        info.is_downloading = lock_model_state(&self.downloads).is_running(model_id);
+        Some(info)
     }
 
     /// Whether `model_id`'s files are on disk right now, read from disk and
@@ -1811,9 +1802,9 @@ impl ModelManager {
     fn update_download_status(&self) -> Result<()> {
         // Snapshot in-flight download ids before taking the registry lock (the
         // two locks are never nested) so a mid-download entry is never dropped.
-        let downloading_ids: HashSet<String> = lock_model_state(&self.cancel_flags)
-            .keys()
-            .cloned()
+        let downloading_ids: HashSet<String> = lock_model_state(&self.downloads)
+            .active_ids()
+            .map(str::to_string)
             .collect();
         let mut models = lock_model_state(&self.available_models);
         let mut vanished_alternates: Vec<String> = Vec::new();
@@ -1822,7 +1813,6 @@ impl ModelManager {
             if let ModelSource::HuggingFace { repo_id, .. } = &model.source {
                 let partial_path = self.models_dir.join(format!("{}.partial", model.filename));
                 model.is_downloaded = self.files_present(model);
-                model.is_downloading = false;
                 model.partial_size = partial_path.metadata().map(|m| m.len()).unwrap_or(0);
                 // Alternate-quant entries exist only because their file was
                 // discovered on disk — the catalog offers just the default
@@ -1854,7 +1844,6 @@ impl ModelManager {
                 }
 
                 model.is_downloaded = self.files_present(model);
-                model.is_downloading = false;
 
                 // Get partial file size if it exists (for the .tar.gz being downloaded)
                 if partial_path.exists() {
@@ -1867,7 +1856,6 @@ impl ModelManager {
                 let partial_path = self.models_dir.join(format!("{}.partial", model.filename));
 
                 model.is_downloaded = self.files_present(model);
-                model.is_downloading = false;
 
                 // Get partial file size if it exists
                 if partial_path.exists() {
@@ -2384,6 +2372,7 @@ impl ModelManager {
     /// because every catalog repository is public.
     async fn download_hf_model(
         &self,
+        claim: DownloadClaim<'_>,
         model_info: &ModelInfo,
         repo_id: String,
         revision: String,
@@ -2401,6 +2390,7 @@ impl ModelManager {
         if let Some(path) = candidate {
             match verify_model_cache_trust(&self.models_dir, model_info, &path) {
                 Ok(CacheTrust::CatalogVerified | CacheTrust::Unverified) => {
+                    drop(claim);
                     self.update_download_status()?;
                     let _ = self.app_handle.emit("model-download-complete", &model_id);
                     return Ok(());
@@ -2418,28 +2408,7 @@ impl ModelManager {
             }
         }
 
-        // Mark downloading; the guard resets the flag on any error path.
-        {
-            let mut models = lock_model_state(&self.available_models);
-            if let Some(model) = models.get_mut(&model_id) {
-                model.is_downloading = true;
-            }
-        }
-
-        // Register a cancellation token so `cancel_download` can abort this
-        // transfer promptly. The guard removes it on every exit path.
-        let cancel_token = CancellationToken::new();
-        {
-            let mut flags = lock_model_state(&self.cancel_flags);
-            flags.insert(model_id.clone(), cancel_token.clone());
-        }
-
-        let mut cleanup = DownloadCleanup {
-            available_models: &self.available_models,
-            cancel_flags: &self.cancel_flags,
-            model_id: model_id.clone(),
-            disarmed: false,
-        };
+        let cancel_token = claim.cancel.clone();
 
         info!(
             "Downloading HF model {} from {}@{} ({})",
@@ -2471,11 +2440,8 @@ impl ModelManager {
 
             // Fresh client per attempt so a wedged connection from the previous
             // try can't poison the retry.
-            let api = ApiBuilder::from_env()
+            let api = public_hf_api()
                 .with_cache_dir(self.hf_caches.own.path().clone())
-                // Ignore cached and environment-provided credentials. A stale token
-                // can make otherwise-public downloads fail authentication.
-                .with_token(None)
                 .with_progress(false)
                 .with_max_files(stream_count)
                 .build()
@@ -2537,9 +2503,9 @@ impl ModelManager {
                 Err(hf_hub::api::tokio::ApiError::Cancelled) if cancel_token.is_cancelled() => {
                     // User cancelled. hf-hub leaves the partially downloaded
                     // `.sync.part` in Sona's cache, so a later attempt resumes
-                    // instead of restarting. The guard resets is_downloading and
-                    // drops the token; `cancel_download` already emitted
-                    // `model-download-cancelled`.
+                    // instead of restarting. Dropping the claim releases the
+                    // model for the next download; `cancel_download` already
+                    // emitted `model-download-cancelled`.
                     info!("HF download cancelled for: {}", model_id);
                     return Ok(());
                 }
@@ -2658,9 +2624,8 @@ impl ModelManager {
             .ok_or_else(|| anyhow::anyhow!("Downloaded model file not found: {}", model_id))?;
         verify_model_cache_trust(&self.models_dir, model_info, &installed_path)?;
 
-        cleanup.disarmed = true;
+        drop(claim);
         self.update_download_status()?;
-        lock_model_state(&self.cancel_flags).remove(&model_id);
         let _ = self.app_handle.emit("model-download-complete", &model_id);
         info!("HF model {} downloaded", model_id);
         Ok(())
@@ -2733,11 +2698,16 @@ impl ModelManager {
         let model_info =
             model_info.ok_or_else(|| anyhow::anyhow!("Model not found: {}", model_id))?;
 
+        let Some(claim) = downloads::claim(&self.downloads, model_id).await else {
+            info!("Download already running for: {}", model_id);
+            return Ok(());
+        };
+
         let (url, expected_sha256) = match &model_info.source {
             ModelSource::Url { url, sha256 } => (url.clone(), sha256.clone()),
             ModelSource::HuggingFace { repo_id, revision } => {
                 return self
-                    .download_hf_model(&model_info, repo_id.clone(), revision.clone())
+                    .download_hf_model(claim, &model_info, repo_id.clone(), revision.clone())
                     .await;
             }
             ModelSource::Local => {
@@ -2759,29 +2729,7 @@ impl ModelManager {
             return Ok(());
         }
 
-        // Mark as downloading
-        {
-            let mut models = lock_model_state(&self.available_models);
-            if let Some(model) = models.get_mut(model_id) {
-                model.is_downloading = true;
-            }
-        }
-
-        // Create cancellation token for this download
-        let cancel_token = CancellationToken::new();
-        {
-            let mut flags = lock_model_state(&self.cancel_flags);
-            flags.insert(model_id.to_string(), cancel_token.clone());
-        }
-
-        // Guard ensures is_downloading and cancel_flags are cleaned up on every
-        // error path. Disarmed only on success (which sets is_downloaded = true).
-        let mut cleanup = DownloadCleanup {
-            available_models: &self.available_models,
-            cancel_flags: &self.cancel_flags,
-            model_id: model_id.to_string(),
-            disarmed: false,
-        };
+        let cancel_token = claim.cancel.clone();
 
         // URL sources carry no authoritative size, so the helper falls back to
         // the server's content-length for progress and completeness checks.
@@ -2799,7 +2747,7 @@ impl ModelManager {
             HttpDownloadOutcome::Cancelled => {
                 info!("Download cancelled for: {}", model_id);
                 // Keep partial file for resume functionality.
-                // Guard handles is_downloading + cancel_flags cleanup on drop.
+                // Dropping the claim releases the model for the next download.
                 return Ok(());
             }
             HttpDownloadOutcome::Completed => {}
@@ -2898,18 +2846,14 @@ impl ModelManager {
             fs::rename(&partial_path, &model_path)?;
         }
 
-        // Disarm the guard — success path does its own cleanup because it
-        // additionally sets is_downloaded = true.
-        cleanup.disarmed = true;
         {
             let mut models = lock_model_state(&self.available_models);
             if let Some(model) = models.get_mut(model_id) {
-                model.is_downloading = false;
                 model.is_downloaded = true;
                 model.partial_size = 0;
             }
         }
-        lock_model_state(&self.cancel_flags).remove(model_id);
+        drop(claim);
 
         // Emit completion event
         let _ = self.app_handle.emit("model-download-complete", model_id);
@@ -3062,7 +3006,7 @@ impl ModelManager {
             .ok_or_else(|| anyhow::anyhow!("Model not found: {}", model_id))?;
 
         // Ensure we don't return a model while its bytes are still changing.
-        if model_info.is_downloading {
+        if lock_model_state(&self.downloads).is_active(model_id) {
             return Err(anyhow::anyhow!(
                 "Model is currently downloading: {}",
                 model_id
@@ -3130,23 +3074,12 @@ impl ModelManager {
 
         // Trigger the cancellation token to stop the download. The HF path
         // aborts its in-flight chunk tasks and unwinds promptly; the URL path
-        // observes it on the next chunk of its stream loop.
-        {
-            let flags = lock_model_state(&self.cancel_flags);
-            if let Some(token) = flags.get(model_id) {
-                token.cancel();
-                info!("Cancellation token triggered for: {}", model_id);
-            } else {
-                warn!("No active download found for: {}", model_id);
-            }
-        }
-
-        // Update state immediately for UI responsiveness
-        {
-            let mut models = lock_model_state(&self.available_models);
-            if let Some(model) = models.get_mut(model_id) {
-                model.is_downloading = false;
-            }
+        // observes it on the next chunk of its stream loop. The row reads as
+        // not downloading from here on.
+        if lock_model_state(&self.downloads).cancel(model_id) {
+            info!("Cancellation token triggered for: {}", model_id);
+        } else {
+            warn!("No active download found for: {}", model_id);
         }
 
         // Update download status to reflect current state
@@ -3198,6 +3131,65 @@ mod tests {
             crate::modes::AsrPlan::from_mode(&settings, &settings.modes[2].asr).model_id,
             "installed-model"
         );
+    }
+
+    /// A stale saved token can fail a public download, so none is sent.
+    #[tokio::test]
+    async fn a_public_model_fetch_sends_no_saved_hugging_face_token() -> Result<()> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let hf_home = TempDir::new()?;
+        fs::write(hf_home.path().join("token"), "hf_stale")?;
+        let previous_home = std::env::var_os("HF_HOME");
+        std::env::set_var("HF_HOME", hf_home.path());
+        let builder = public_hf_api();
+        match previous_home {
+            Some(previous) => std::env::set_var("HF_HOME", previous),
+            None => std::env::remove_var("HF_HOME"),
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let endpoint = format!("http://{}", listener.local_addr()?);
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await?;
+            let mut head = Vec::new();
+            let mut byte = [0u8; 1];
+            while !head.ends_with(b"\r\n\r\n") && socket.read_exact(&mut byte).await.is_ok() {
+                head.push(byte[0]);
+            }
+            socket
+                .write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await?;
+            Ok::<String, std::io::Error>(String::from_utf8_lossy(&head).to_lowercase())
+        });
+
+        let api = builder
+            .with_endpoint(endpoint)
+            .with_cache_dir(hf_home.path().join("hub"))
+            .with_progress(false)
+            .build()?;
+        let fetch = api
+            .repo(Repo::with_revision(
+                "org/model".to_string(),
+                RepoType::Model,
+                "main".to_string(),
+            ))
+            .get("model.bin")
+            .await;
+        assert!(fetch.is_err(), "the scripted server answers 404");
+
+        let head = tokio::time::timeout(Duration::from_secs(5), server).await???;
+        assert!(
+            head.contains("/org/model/resolve/main/model.bin"),
+            "the fetch reached the server: {head}"
+        );
+        assert!(
+            !head.contains("authorization:"),
+            "a public fetch sent credentials: {head}"
+        );
+        Ok(())
     }
 
     fn write_cache_file(temp_dir: &TempDir, bytes: &[u8]) -> Result<PathBuf> {

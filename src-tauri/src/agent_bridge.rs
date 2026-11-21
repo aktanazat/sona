@@ -33,6 +33,10 @@ const MAX_IDLE_WAIT_MS: u64 = 5_000;
 /// How soon a worker whose tick failed tries again. A lease it could not
 /// read or a heartbeat it could not write has no deadline to wait for.
 const TICK_RETRY: std::time::Duration = std::time::Duration::from_secs(1);
+/// Held with an OS lock by the app that serves the bridge, beside the lease
+/// hooks read. The kernel releases it when that process exits, however it
+/// exits. Hooks never open it.
+const OWNER_LOCK_FILE: &str = "app-owner.lock";
 /// The app is the only reader of hook acknowledgements.
 const MAX_ACK_BYTES: usize = 8 * 1024;
 /// The only reply lifetime comes from the existing hook request boundary.
@@ -218,10 +222,19 @@ struct PendingMessageRecord {
     response_invocation_id: Option<String>,
 }
 
+/// Whether this core serves the bridge. One app on the Mac serves at a time;
+/// another app with the bridge on waits in `Standby` and takes over on its
+/// next tick once the owner lock frees.
+enum Stage {
+    Off,
+    Standby,
+    Serving { _owner: fs::File },
+}
+
 pub struct AgentBridgeCore {
     paths: RuntimePaths,
     app_instance_id: String,
-    running: bool,
+    stage: Stage,
     diagnostic: AgentBridgeDiagnostic,
     last_heartbeat_ms: u64,
     observed_sessions: BTreeMap<String, AgentBridgeObservedSession>,
@@ -243,7 +256,7 @@ impl AgentBridgeCore {
         Ok(Self {
             paths,
             app_instance_id,
-            running: false,
+            stage: Stage::Off,
             diagnostic: AgentBridgeDiagnostic::Disabled,
             last_heartbeat_ms: 0,
             observed_sessions: BTreeMap::new(),
@@ -268,13 +281,27 @@ impl AgentBridgeCore {
             self.diagnostic = AgentBridgeDiagnostic::InteractiveUnsupported;
             return Err(AgentBridgeError::InteractiveUnsupported);
         }
+        self.stage = Stage::Standby;
+        self.serve(settings, now_ms)
+    }
 
+    /// Takes the owner lock and publishes this core's lease. While another
+    /// app holds either, this core stays in standby.
+    fn serve(
+        &mut self,
+        settings: &AgentBridgeSettings,
+        now_ms: u64,
+    ) -> Result<(), AgentBridgeError> {
+        let owner = self.claim_owner_lock().inspect_err(|error| {
+            self.diagnostic = match error {
+                AgentBridgeError::AppLockHeld => AgentBridgeDiagnostic::AppLockHeld,
+                _ => AgentBridgeDiagnostic::RuntimeUnavailable,
+            };
+        })?;
+        // An app built before the owner lock publishes only the lease file.
+        // Its lease blocks this one while that publisher is still running; a
+        // killed app's unexpired record does not.
         if let Ok(existing) = self.paths.read_lease() {
-            // Another instance's lease blocks this one only while that
-            // publisher is still running. An app that was killed leaves an
-            // unexpired record behind, and refusing on it would keep the bridge
-            // dark for the whole session: reconcile runs at startup and on a
-            // settings change, never on a timer.
             if existing.is_valid_at(now_ms)
                 && existing.app_instance_id != self.app_instance_id
                 && publisher_alive(existing.pid)
@@ -282,36 +309,29 @@ impl AgentBridgeCore {
                 self.diagnostic = AgentBridgeDiagnostic::AppLockHeld;
                 return Err(AgentBridgeError::AppLockHeld);
             }
-            remove_private_file(&self.paths.app_lock_path());
-        }
-
-        let lease = lease(&self.app_instance_id, settings.policy_generation, now_ms);
-        if wire::atomic_write_json(&self.paths.app_lock_path(), &lease, WriteMode::CreateNew)
-            .is_err()
-        {
-            // The release above and this create are not one operation, so
-            // another instance can win the gap. When it has, the lock is held —
-            // saying the runtime is unavailable would send a reader looking for
-            // a broken directory instead of a second Sona.
-            let contended = self
-                .paths
-                .read_lease()
-                .is_ok_and(|held| held.is_valid_at(now_ms));
-            self.diagnostic = if contended {
-                AgentBridgeDiagnostic::AppLockHeld
-            } else {
-                AgentBridgeDiagnostic::RuntimeUnavailable
-            };
-            return Err(if contended {
-                AgentBridgeError::AppLockHeld
-            } else {
-                AgentBridgeError::RuntimeUnavailable
-            });
         }
         self.write_control_state(settings, now_ms)?;
-        self.running = true;
+        self.stage = Stage::Serving { _owner: owner };
         self.diagnostic = AgentBridgeDiagnostic::Active;
         Ok(())
+    }
+
+    fn claim_owner_lock(&self) -> Result<fs::File, AgentBridgeError> {
+        let mut options = fs::OpenOptions::new();
+        options.create(true).truncate(false).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let file = options
+            .open(self.paths.app_lock_path().with_file_name(OWNER_LOCK_FILE))
+            .map_err(|_| AgentBridgeError::RuntimeUnavailable)?;
+        match file.try_lock() {
+            Ok(()) => Ok(file),
+            Err(fs::TryLockError::WouldBlock) => Err(AgentBridgeError::AppLockHeld),
+            Err(fs::TryLockError::Error(_)) => Err(AgentBridgeError::RuntimeUnavailable),
+        }
     }
 
     pub fn stop(&mut self) {
@@ -323,7 +343,7 @@ impl AgentBridgeCore {
                 let _ = fs::remove_file(self.paths.wake_path());
             }
         }
-        self.running = false;
+        self.stage = Stage::Off;
         self.diagnostic = AgentBridgeDiagnostic::Disabled;
     }
 
@@ -332,25 +352,30 @@ impl AgentBridgeCore {
         settings: &AgentBridgeSettings,
         now_ms: u64,
     ) -> Result<(), AgentBridgeError> {
-        if !self.running || !settings.master_enabled {
+        if !settings.master_enabled {
             return Err(AgentBridgeError::Disabled);
         }
-        let lease = self
-            .paths
-            .read_lease()
-            .map_err(|_| AgentBridgeError::RuntimeUnavailable)?;
-        if lease.app_instance_id != self.app_instance_id {
-            self.running = false;
-            self.diagnostic = AgentBridgeDiagnostic::AppLockHeld;
-            return Err(AgentBridgeError::AppLockHeld);
+        match self.stage {
+            Stage::Off => return Err(AgentBridgeError::Disabled),
+            Stage::Standby => self.serve(settings, now_ms)?,
+            Stage::Serving { .. } => {}
         }
-        // The lease is ours (checked above), so a generation it does not
-        // carry can only mean the settings moved under a running worker.
-        // Hooks read the projection with that generation, so it is republished
-        // at once rather than on the heartbeat.
-        if lease.policy_generation != settings.policy_generation
-            || now_ms.saturating_sub(self.last_heartbeat_ms) >= HEARTBEAT_INTERVAL_MS
-        {
+        let republish = match self.paths.read_lease() {
+            Ok(lease) if lease.app_instance_id != self.app_instance_id => {
+                self.stage = Stage::Standby;
+                self.diagnostic = AgentBridgeDiagnostic::AppLockHeld;
+                return Err(AgentBridgeError::AppLockHeld);
+            }
+            // The lease is ours, so a generation it does not carry can only
+            // mean the settings moved under a running worker. Hooks read the
+            // projection with that generation, so it is republished at once
+            // rather than on the heartbeat.
+            Ok(lease) => lease.policy_generation != settings.policy_generation,
+            // This core holds the owner lock, so a lease that went missing
+            // or unreadable is still its own to write.
+            Err(_) => true,
+        };
+        if republish || now_ms.saturating_sub(self.last_heartbeat_ms) >= HEARTBEAT_INTERVAL_MS {
             self.write_control_state(settings, now_ms)?;
         }
         self.expire_pending(now_ms);
@@ -388,7 +413,7 @@ impl AgentBridgeCore {
 
     pub fn status(&self, settings: &AgentBridgeSettings) -> AgentBridgeStatus {
         AgentBridgeStatus {
-            running: self.running,
+            running: matches!(self.stage, Stage::Serving { .. }),
             diagnostic: self.diagnostic,
             policy_generation: settings.policy_generation,
             observed_sessions: self.observed_sessions.len(),
@@ -1366,17 +1391,13 @@ impl AgentBridgeManager {
             wire::send_wake(&lock_recover(&self.core).paths.wake_path());
             return Ok(());
         }
-        let listener = {
+        let wake_path = {
             let mut core = lock_recover(&self.core);
-            core.start(&settings, now_ms())
-                .map_err(|error| error.to_string())?;
-            match WakeListener::bind(&core.paths.wake_path()) {
-                Ok(listener) => listener,
-                Err(error) => {
-                    core.stop();
-                    return Err(format!("agent wake socket unavailable: {error}"));
-                }
+            match core.start(&settings, now_ms()) {
+                Ok(()) | Err(AgentBridgeError::AppLockHeld) => {}
+                Err(error) => return Err(error.to_string()),
             }
+            core.paths.wake_path()
         };
 
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1393,6 +1414,9 @@ impl AgentBridgeManager {
             use tauri_specta::Event as _;
             let mut previous: Option<AgentBridgeStatus> = None;
             let mut recorded_workflow_requests = BTreeSet::new();
+            // The wake socket belongs to whichever app serves, so a core in
+            // standby leaves it alone and polls.
+            let mut listener: Option<WakeListener> = None;
             while !worker_stop.load(Ordering::Acquire) {
                 let settings = crate::settings::get_settings(&app).agent_bridge;
                 if !settings.master_enabled {
@@ -1412,6 +1436,18 @@ impl AgentBridgeManager {
                         wait,
                     )
                 };
+                let was_serving = previous.as_ref().is_some_and(|status| status.running);
+                if !status.running {
+                    listener = None;
+                } else if listener.is_none() {
+                    listener = WakeListener::bind(&wake_path)
+                        .inspect_err(|error| {
+                            if !was_serving {
+                                log::warn!("Agent wake socket unavailable: {error}");
+                            }
+                        })
+                        .ok();
+                }
                 for (agent, session_id, task) in started {
                     crate::planning::work::agents::follow_session(
                         &app,
@@ -1452,7 +1488,12 @@ impl AgentBridgeManager {
                     );
                     previous = Some(status);
                 }
-                listener.wait(wait);
+                match &listener {
+                    Some(listener) => {
+                        listener.wait(wait);
+                    }
+                    None => std::thread::sleep(wait),
+                }
             }
         });
         *lock_recover(&self.worker) = Some(BridgeWorker { stop, join });
@@ -2211,6 +2252,59 @@ mod tests {
         first.stop();
         second.start(&settings, 1_002)?;
         second.stop();
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    /// A second app refused the bridge takes it over once the first quits,
+    /// without a relaunch or a settings change.
+    #[test]
+    fn a_refused_app_serves_once_the_holder_quits() -> Result<(), Box<dyn Error>> {
+        let root = test_root("standby")?;
+        let paths = RuntimePaths::from_root(root.clone(), true)?;
+        let settings = enabled_settings(wire::project_hash(&root)?);
+        let mut first = AgentBridgeCore::new(paths.clone(), opaque_hash(&[b"first"]))?;
+        let mut second = AgentBridgeCore::new(paths.clone(), opaque_hash(&[b"second"]))?;
+        first.start(&settings, 1_000)?;
+        assert_eq!(
+            second.start(&settings, 1_001),
+            Err(AgentBridgeError::AppLockHeld)
+        );
+
+        first.stop();
+        second.tick(&settings, 2_000)?;
+
+        assert_eq!(
+            second.status(&settings).diagnostic,
+            AgentBridgeDiagnostic::Active
+        );
+        assert_eq!(
+            paths.read_lease()?.app_instance_id,
+            opaque_hash(&[b"second"])
+        );
+        second.stop();
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    /// The serving app holds the owner lock, so a lease that disappears
+    /// under it is written again instead of leaving hooks without one.
+    #[test]
+    fn a_serving_app_republishes_a_lease_that_went_missing() -> Result<(), Box<dyn Error>> {
+        let root = test_root("missing-lease")?;
+        let paths = RuntimePaths::from_root(root.clone(), true)?;
+        let settings = enabled_settings(wire::project_hash(&root)?);
+        let mut core = AgentBridgeCore::new(paths.clone(), opaque_hash(&[b"serving"]))?;
+        core.start(&settings, 1_000)?;
+        fs::remove_file(paths.app_lock_path())?;
+
+        core.tick(&settings, 1_001)?;
+
+        assert_eq!(
+            paths.read_lease()?.app_instance_id,
+            opaque_hash(&[b"serving"])
+        );
+        core.stop();
         fs::remove_dir_all(root)?;
         Ok(())
     }
