@@ -500,3 +500,72 @@ async fn reading_linear_live_follows_every_page_of_issues() {
     assert_eq!(titles, ["Issue i1", "Issue i2"]);
     assert_eq!(batch.me, ["Aktan Azat"]);
 }
+
+#[test]
+fn undoing_the_first_import_after_a_rerun_lets_the_next_import_bring_it_back() {
+    let mut conn = sona();
+    let batch = linear::read_csv(ISSUES).expect("a Linear issues export");
+    let first = import(&mut conn, &batch, &mine()).expect("the first import");
+    import(&mut conn, &batch, &mine()).expect("a rerun that skips everything");
+
+    revert(&conn, &first.id.expect("the first import's id"), WorkActor::Me, AT + 1)
+        .expect("the undo");
+    let again = import(&mut conn, &batch, &mine()).expect("importing again");
+
+    assert_eq!(again.totals.tasks.made + again.totals.tasks.archived, 4);
+}
+
+#[test]
+fn refreshing_keeps_what_the_source_does_not_carry() {
+    let mut conn = sona();
+    let batch = linear::read_csv(ISSUES).expect("a Linear issues export");
+    import(&mut conn, &batch, &mine()).expect("the import");
+    let flights = task_titled(&conn, "Book the flights");
+    let onboarding = task_titled(&conn, "Rewrite onboarding");
+    items::apply(
+        &conn,
+        &onboarding.id,
+        &crate::planning::work::types::WorkPatch {
+            priority: Some(1),
+            ..Default::default()
+        },
+        crate::planning::work::types::WorkActivityKind::Status,
+        WorkActor::Me,
+        AT + 1,
+    )
+    .expect("setting a priority in Sona");
+
+    let mut refresh = ImportOptions {
+        update_existing: true,
+        ..mine()
+    };
+    refresh.copy.projects = false;
+    refresh.copy.milestones = false;
+    import(&mut conn, &batch, &refresh).expect("the refresh");
+
+    assert_eq!(task_titled(&conn, "Book the flights").project_id, flights.project_id);
+    assert!(flights.project_id.is_some());
+    assert_eq!(task_titled(&conn, "Rewrite onboarding").priority, 1);
+}
+
+#[test]
+fn a_number_too_large_to_keep_leaves_the_task_counter_working() {
+    let mut conn = sona();
+    let huge = ISSUES.replace("\"AKT-4\"", "\"AKT-9223372036854775807\"");
+    let batch = linear::read_csv(&huge).expect("a Linear issues export");
+    let keep = ImportOptions {
+        keep_numbers: true,
+        ..mine()
+    };
+
+    let report = import(&mut conn, &batch, &keep).expect("the import");
+
+    assert!(report.notes.iter().any(|note| note.contains("numbers were not kept")));
+    assert_eq!(
+        count(
+            &conn,
+            "SELECT typeof(next_number) = 'integer' FROM planning_work_counter WHERE id = 1"
+        ),
+        1
+    );
+}

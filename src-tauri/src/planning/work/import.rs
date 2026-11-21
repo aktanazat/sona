@@ -68,6 +68,10 @@ CREATE INDEX planning_import_items_source ON planning_import_items(kind, source_
 /// Open work untouched this long reads as stale.
 const STALE_MS: i64 = 182 * 24 * 60 * 60 * 1000;
 
+/// The highest tracker number kept as a Sona task number; far above any real
+/// tracker, far below where the task counter would overflow.
+const MAX_KEPT_NUMBER: i64 = 999_999_999;
+
 /// The label every imported task gets unless told otherwise.
 pub(crate) const DEFAULT_LABEL: &str = "Migrated";
 
@@ -414,18 +418,19 @@ fn known(
     let Some(target) = target else {
         return Ok(None);
     };
-    let table = match kind {
-        ImportKind::Task => "planning_tasks",
-        ImportKind::Project => "planning_projects",
-        ImportKind::Milestone => "planning_milestones",
-        ImportKind::Label => "planning_labels",
-        ImportKind::Initiative => "planning_initiatives",
-        ImportKind::Comment => "planning_task_comments",
-        ImportKind::Note => "scratch_notes",
-        ImportKind::View => "planning_views",
+    // A task or project in the bin was undone; importing again brings it back.
+    let (table, live) = match kind {
+        ImportKind::Task => ("planning_tasks", " AND trashed_at_ms IS NULL"),
+        ImportKind::Project => ("planning_projects", " AND trashed_at_ms IS NULL"),
+        ImportKind::Milestone => ("planning_milestones", ""),
+        ImportKind::Label => ("planning_labels", ""),
+        ImportKind::Initiative => ("planning_initiatives", ""),
+        ImportKind::Comment => ("planning_task_comments", ""),
+        ImportKind::Note => ("scratch_notes", ""),
+        ImportKind::View => ("planning_views", ""),
     };
     let there: bool = conn.query_row(
-        &format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE id = ?1)"),
+        &format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE id = ?1{live})"),
         [&target],
         |row| row.get(0),
     )?;
@@ -796,6 +801,8 @@ impl Writer<'_> {
         (project, milestone)
     }
 
+    /// Refreshes only what the source carries: a field it leaves blank, a
+    /// project it does not place, and labels added in Sona since stay as they are.
     fn update(&mut self, id: &str, task: &SourceTask, migrated: Option<&String>) -> Result<bool> {
         let (project, milestone) = self.place(task);
         let status = if task.status == WorkStatus::Duplicate {
@@ -803,6 +810,14 @@ impl Writer<'_> {
         } else {
             task.status
         };
+        let mut labels: Vec<String> = self
+            .tx
+            .prepare_cached("SELECT label_id FROM planning_task_labels WHERE task_id = ?1")?
+            .query_map([id], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        labels.extend(self.task_labels(task, migrated));
+        labels.sort();
+        labels.dedup();
         let changed = items::apply(
             self.tx,
             id,
@@ -810,12 +825,12 @@ impl Writer<'_> {
                 title: Some(task.title.clone()),
                 details: Some(task.details.clone()),
                 status: Some(status),
-                priority: Some(task.priority),
-                due_at_ms: Some(task.due_at_ms),
-                label_ids: Some(self.task_labels(task, migrated)),
-                project_id: Some(project),
-                milestone_id: Some(milestone),
-                estimate: Some(task.estimate),
+                priority: (task.priority != 0).then_some(task.priority),
+                due_at_ms: task.due_at_ms.map(Some),
+                label_ids: Some(labels),
+                project_id: project.map(Some),
+                milestone_id: milestone.map(Some),
+                estimate: task.estimate.map(Some),
                 ..WorkPatch::default()
             },
             WorkActivityKind::Status,
@@ -1007,6 +1022,17 @@ impl Writer<'_> {
     /// Whether numbers can be kept: Sona has no tasks and no two of these
     /// share a number. A note says why not.
     fn numbers_fit(&mut self, wanted: &[(&SourceTask, ImportState)]) -> Result<bool> {
+        if let Some(task) = wanted
+            .iter()
+            .map(|(task, _)| *task)
+            .find(|task| task.number.is_some_and(|number| !(1..=MAX_KEPT_NUMBER).contains(&number)))
+        {
+            self.report.notes.push(format!(
+                "{} has a number Sona can't keep, so numbers were not kept.",
+                task.id
+            ));
+            return Ok(false);
+        }
         let mut seen = HashMap::new();
         for (task, _) in wanted {
             if let Some(number) = task.number {
