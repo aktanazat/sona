@@ -46,6 +46,7 @@ final class KeyboardTools {
     private static let commandsKey = "sona.keyboard.commands"
     private static let snippetsKey = "sona.keyboard.snippets"
     private static let reviewKey = "sona.keyboard.review"
+    private static let reviewTextKey = "sona.keyboard.reviewText"
 
     var page = Page.closed
     var lastTab = Tab.ai
@@ -96,6 +97,7 @@ final class KeyboardTools {
         commands = Self.load([SavedCommand].self, Self.commandsKey, from: defaults) ?? []
         snippets = Self.load([DictationProfile.Snippet].self, Self.snippetsKey, from: defaults) ?? []
         reviewsDictation = defaults.bool(forKey: Self.reviewKey)
+        heldReview = defaults.string(forKey: Self.reviewTextKey)
     }
 
     var isOpen: Bool { page != .closed }
@@ -138,9 +140,15 @@ final class KeyboardTools {
         showReview(held)
     }
 
+    /// The dictation on review is also saved, so iOS ending the keyboard does not lose it.
     private func showReview(_ text: String) {
         heldReview = nil
         page = .review(text)
+        defaults.set(text, forKey: Self.reviewTextKey)
+    }
+
+    private func endReview() {
+        defaults.removeObject(forKey: Self.reviewTextKey)
     }
 
     func show(_ tab: Tab, _ menu: Menu? = nil) {
@@ -161,7 +169,10 @@ final class KeyboardTools {
             page = .browse(.snippets, nil)
         case .answer, .working, .compose:
             page = .browse(.ai, nil)
-        case .review, .closed, .browse:
+        case .review:
+            endReview()
+            page = .closed
+        case .closed, .browse:
             page = .closed
         }
     }
@@ -251,6 +262,7 @@ final class KeyboardTools {
     }
 
     func insert(_ text: String) {
+        if case .review = page { endReview() }
         write(text)
         page = .closed
     }

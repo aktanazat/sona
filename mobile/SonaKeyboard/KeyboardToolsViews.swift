@@ -37,6 +37,29 @@ struct ToolsButton: View {
     }
 }
 
+/// Beside the tools button while a dictation waits on review with the panel hidden; opens it.
+struct HeldReviewButton: View {
+    let tools: KeyboardTools
+
+    var body: some View {
+        Button {
+            withAnimation(toolsAnimation) { tools.showHeldReview() }
+        } label: {
+            Image(systemName: "text.bubble")
+                .font(.body)
+                .frame(width: 38, height: 38)
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(Theme.accent)
+        .glassEffect(.regular.interactive(), in: Circle())
+        .frame(width: 44, height: 44)
+        .transition(.opacity)
+        .accessibilityLabel(Text("tools.review"))
+        .accessibilityIdentifier("tools-held-review")
+    }
+}
+
 /// The tools' own text field in the top bar, which the letter keys type into.
 struct ComposeBar: View {
     let tools: KeyboardTools
