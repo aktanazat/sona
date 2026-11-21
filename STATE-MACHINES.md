@@ -64,9 +64,9 @@ Result: 86 candidates. 60 confirmed, 20 rejected, 5 unreachable in the shipped a
 | D15 | Meeting notes and ledger | A quit between storing notes and `finish_review` lands the meeting in recovery | confirmed (rare; the window is milliseconds) | fixed: a launch after notes were stored enters review without rewriting; sends fire only where a re-run would have |
 | D16 | Meeting notes and ledger | The record-page engine warning goes stale while Sona stays in front | confirmed (low severity; the "during capture" part is rejected) | fixed: the meetings home rechecks the notes engine every 30 s |
 | E1 | Settings and migrations | A torn or empty settings file silently becomes a fresh install, and the startup cleanup then trims history | confirmed | fixed: saves are atomic; an unreadable file is kept aside and that run deletes no history |
-| E2 | Settings and migrations | Re-importing Handy history after Handy was used again imports every entry and recording a second time | confirmed (same root cause as E3) | fixed: re-import matches by entry, not by the legacy app's identity, so nothing doubles |
+| E2 | Settings and migrations | Re-importing history from the legacy app after it was used again imports every entry and recording a second time | confirmed (same root cause as E3) | fixed: re-import matches by entry, not by the legacy app's identity, so nothing doubles |
 | E3 | Settings and migrations | The same identity change orphans the settings-import undo and re-arms the settings import over later edits | confirmed (same root cause as E2) | fixed with E2: the settings-import undo survives |
-| E5 | Settings and migrations | Importing from Handy deletes Sona history at the next dictation, with no warning | confirmed for sequence B; sequence A is a design choice | fixed: an import that would push out older dictations says how many first and runs only after "Import anyway" |
+| E5 | Settings and migrations | Importing from the legacy app deletes Sona history at the next dictation, with no warning | confirmed for sequence B; sequence A is a design choice | fixed: an import that would push out older dictations says how many first and runs only after "Import anyway" |
 | E6 | Settings and migrations | Undoing the identity move is reversed by Sona's own quit, and the move is never offered again | confirmed once N2 was fixed; before that no build could finish a move | fixed: Sona writes settings at quit only to retry a save that failed, so putting data back stays put |
 | E9 | Settings and migrations | A failed first entry blocks every later "Move data" | confirmed (rare trigger, but once hit it never recovers) | fixed: a failed move can run its plan again |
 | E12 | Settings and migrations | Bookkeeping writes advance the settings generation and break agent-panel changes | confirmed (common for users with cloud cleanup) | fixed: the verified-key stamp no longer moves the settings revision |
@@ -1850,14 +1850,14 @@ Combinations nobody named:
 - The `<20` step changes `history_limit` 5 → 100 and marks the document updated unconditionally (2834-2842).
 - The version is stamped only if it is lower (2843-2846).
 - The overlay step comes after the stamp (about 2858-2870).
-- The Handy decoder and the backup decoder run the whole ladder, then stamp the current version regardless (2919, 2935).
+- The legacy app's decoder and the backup decoder run the whole ladder, then stamp the current version regardless (2919, 2935).
 - The import merge stamps the current version (2968).
 
 **Invariant:** a document is migrated once. Nothing repairs a document whose version is already current or newer.
 
 **Out-of-band:**
 - An older build writes a newer file (E10).
-- A Handy document is run through the whole ladder (2918), including the schema-20 step (E5).
+- A legacy app document is run through the whole ladder (2918), including the schema-20 step (E5).
 
 #### M5. Settings generation (`settings_revision`)
 
@@ -1873,7 +1873,7 @@ Combinations nobody named:
 
 **Transitions:**
 - Every `update_settings` and `try_update_settings` adds 1 (3444). That includes bookkeeping such as `mark_post_process_secret_verified` (3551-3561), called from `credential_proved` (actions.rs:872-874).
-- Reverting the Handy import sets R to the backup's R plus 1 (upstream_import.rs:285, then 3444). R can go backwards.
+- Reverting the legacy app import sets R to the backup's R plus 1 (upstream_import.rs:285, then 3444). R can go backwards.
 - The import merge keeps the target's R (2967), then adds 1.
 - An apply with a stale R fails as StaleRevision, and the proposal is marked Rejected with its receipt dropped (mod.rs:1740-1741).
 - An undo with a stale R does the same (mod.rs:1699-1703, then 1740-1741).
@@ -1888,14 +1888,14 @@ Combinations nobody named:
 
 Re-serializing keeps the legacy secret keys (2347-2364). Checked and benign.
 
-#### M7. Handy import (receipt plus settings backup)
+#### M7. Legacy app import (receipt plus settings backup)
 
 **Owner:** upstream_import.rs.
 - The files are the receipt and the pre-import settings backup. Their names are at identity_adoption.rs:22-23.
 - The source is `com.pais.handy` (upstream_import.rs:24), root at 746-750.
 
 **How imported history is identified:**
-- The identity is a hash of the label, the canonical root and the byte length of Handy's `history.db` (632-645; the length is at 641-643).
+- The identity is a hash of the label, the canonical root and the byte length of the legacy app's `history.db` (632-645; the length is at 641-643).
 - History is deduplicated on (identity, source id) (history.rs:169-176, 1219-1240).
 - Imported recording names embed a 12-character prefix of the identity (upstream_import.rs:513-514, 665).
 
@@ -1912,8 +1912,8 @@ Re-serializing keeps the legacy secret keys (2347-2364). Checked and benign.
 | From | Event | Guard | To | Code |
 |---|---|---|---|---|
 | any | import with Settings ticked | `settings_imported` is false | settings imported; backup written; receipt written before the settings save | 197-258 (guard 203-205, backup 242, merge 243, assign 247, receipt 248-251) |
-| any | import with History ticked | Handy is closed | history imported under the current identity | 333, 334-359, 372 |
-| any imported | import after Handy's `history.db` changed size | identity differs from the receipt | receipt reset to default, then the import runs as if it were the first | 317-322 |
+| any | import with History ticked | legacy app closed | history imported under the current identity | 333, 334-359, 372 |
+| any imported | import after the legacy app's `history.db` changed size | identity differs from the receipt | receipt reset to default, then the import runs as if it were the first | 317-322 |
 | settings imported | "Undo the settings import" | backup readable | whole document = backup; receipt written; backup removed after the save | 271-299 (278, 285, 289, 295-297) |
 
 **Intended invariants:**
@@ -1923,7 +1923,7 @@ Re-serializing keeps the legacy secret keys (2347-2364). Checked and benign.
 
 **Out-of-band:**
 - A crash between the receipt write and the settings save (E13).
-- Handy used between imports (E2, E3).
+- Legacy app used between imports (E2, E3).
 - The Privacy page selection is seeded once per session (PrivacyStore.swift:489-505).
 
 #### M8. Identity adoption (old app identity → Sona)
@@ -2002,7 +2002,7 @@ It runs after every saved entry (1622) and once per launch (lib.rs:2395-2397).
 - the Library control (LibraryStore.swift:645-662, no confirmation; it shows `limit ?? 100` at 631-634)
 - the schema-20 step
 - fresh defaults or salvage (E1, E15)
-- the Handy settings import (settings.rs:2992-2993)
+- the legacy app settings import (settings.rs:2992-2993)
 - reverting that import (upstream_import.rs:285)
 
 **Out-of-band:**
