@@ -206,6 +206,13 @@ enum Step {
 }
 
 impl AskState {
+    fn milestones(&self) -> Vec<(String, u8)> {
+        self.asks
+            .iter()
+            .map(|entry| (entry.object_id.clone(), entry.progress.milestone()))
+            .collect()
+    }
+
     /// The next step of every open ask, in pull order. Each ask moves on its
     /// own, so one whose upload keeps failing never holds up the others; past
     /// its lifetime every unfinished ask expires, a pending answer included.
@@ -519,21 +526,25 @@ impl CloudSyncRuntime {
             if !self.request_permitted(&access.state).await {
                 return Ok(());
             }
+            let now = adjusted_now_ms(access.state.clock_offset_ms);
             let mut steps = Vec::new();
+            let mut before = Vec::new();
             self.edit_asks(&access, |state| {
-                steps = state.open_steps(adjusted_now_ms(access.state.clock_offset_ms));
+                steps = state.open_steps(now);
+                before = state.milestones();
                 Ok(false)
             })?;
-            let mut moved = false;
             for (object_id, step) in steps {
-                match self.take_step(&access, &object_id, step).await {
-                    Ok(()) => moved = true,
-                    Err(error) => {
-                        log::warn!("A question from the phone is not answered yet: {error:?}");
-                    }
+                if let Err(error) = self.take_step(&access, &object_id, step).await {
+                    log::warn!("A question from the phone is not answered yet: {error:?}");
                 }
             }
-            if !moved {
+            let mut after = Vec::new();
+            self.edit_asks(&access, |state| {
+                after = state.milestones();
+                Ok(false)
+            })?;
+            if !advanced(&before, &after) {
                 return Ok(());
             }
         }
@@ -572,7 +583,8 @@ impl CloudSyncRuntime {
                     }
                     entry.progress = Progress::PublishingWorking { revision };
                     Ok(true)
-                })
+                })?;
+                self.upload_reply(access, object_id).await
             }
             Step::Upload => self.upload_reply(access, object_id).await,
             Step::RunTurn => {
@@ -690,7 +702,27 @@ fn is_stale(error: &CloudRuntimeError) -> bool {
     )
 }
 
+/// Whether any ask got further. Staging or restaging a revision is not a step
+/// forward: only a committed claim, a finished turn, a committed answer or an end.
+fn advanced(before: &[(String, u8)], after: &[(String, u8)]) -> bool {
+    after.iter().any(|(object_id, milestone)| {
+        before
+            .iter()
+            .find(|(id, _)| id == object_id)
+            .is_some_and(|(_, earlier)| milestone > earlier)
+    })
+}
+
 impl Progress {
+    fn milestone(&self) -> u8 {
+        match self {
+            Progress::Remembered | Progress::PublishingWorking { .. } => 0,
+            Progress::Working => 1,
+            Progress::PublishingFinal { .. } => 2,
+            Progress::Done => 3,
+        }
+    }
+
     /// Where an ask goes once its reply upload ended. A final answer whose
     /// reply object the phone already deleted is dropped; any other refused
     /// final answer is staged again from the current head.
@@ -989,5 +1021,28 @@ mod tests {
             first_step(&dropped, now),
             Some(("ask".to_owned(), Step::PublishWorking))
         );
+    }
+
+    #[test]
+    fn staging_or_restaging_is_not_progress_but_a_committed_claim_is() {
+        let now = 1_763_600_100_000;
+        let state = |claim: Progress, answer: Progress| AskState {
+            asks: vec![
+                remembered("claim", now, claim),
+                remembered("answer", now, answer),
+            ],
+            ..AskState::default()
+        };
+        let before = state(Progress::Remembered, pending_answer()).milestones();
+        let restaged = state(
+            Progress::PublishingWorking { revision: staged() },
+            pending_answer(),
+        )
+        .milestones();
+        assert!(!advanced(&before, &restaged));
+        let claimed = state(Progress::Working, pending_answer()).milestones();
+        assert!(advanced(&restaged, &claimed));
+        let answered = state(Progress::Working, Progress::Done).milestones();
+        assert!(advanced(&claimed, &answered));
     }
 }

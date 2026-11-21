@@ -2,9 +2,9 @@ use super::{
     base64_url_encode, credentials, map_store_error, random_array, random_opaque_id,
     seal_object_revision_payload, sha256_base64url, sign_canonical_upload_envelope,
     stable_idempotency_value, CanonicalUploadEnvelopeInput, CloudAccess, CloudClientError,
-    CloudErrorCode, CloudHead, CloudRuntimeError, CloudSyncRuntime, IdempotencyKey,
-    ObjectContentKind, ObjectRevisionCryptoContext, ObjectUploadPlan, UploadChunk, UploadChunkPlan,
-    UploadKind,
+    CloudCredentials, CloudErrorCode, CloudHead, CloudRuntimeError, CloudSyncRuntime,
+    IdempotencyKey, ObjectContentKind, ObjectRevisionCryptoContext, ObjectUploadPlan, UploadChunk,
+    UploadChunkPlan, UploadKind,
 };
 use serde::{Deserialize, Serialize};
 
@@ -180,45 +180,59 @@ pub(super) async fn upload(
     if created.state != "active" && created.state != "committed" {
         return Err(UploadRefused::Restage(CloudRuntimeError::Deferred));
     }
-    if created.state != "committed" {
-        for (index, bytes) in staged.chunks.iter_mut().enumerate() {
-            let index =
-                u32::try_from(index).map_err(|_| retry(CloudRuntimeError::IntegrityFailure))?;
-            if created.accepted_indexes.contains(&index) {
-                continue;
-            }
-            runtime
-                .require_request_permission(&access.state)
-                .await
-                .map_err(retry)?;
-            let response = access
-                .client
-                .upload_chunk(
-                    &credentials,
-                    &key(&format!("chunk-{index}"))?,
-                    &staged.upload_id,
-                    index,
-                    std::mem::take(bytes),
-                )
-                .await
-                .map_err(refused)?;
-            if response.upload_id != staged.upload_id
-                || response.index != index
-                || !response.accepted
-            {
-                return Err(retry(CloudRuntimeError::IntegrityFailure));
+    let sent = async {
+        if created.state != "committed" {
+            for (index, bytes) in staged.chunks.iter_mut().enumerate() {
+                let index =
+                    u32::try_from(index).map_err(|_| retry(CloudRuntimeError::IntegrityFailure))?;
+                if created.accepted_indexes.contains(&index) {
+                    continue;
+                }
+                runtime
+                    .require_request_permission(&access.state)
+                    .await
+                    .map_err(retry)?;
+                let response = access
+                    .client
+                    .upload_chunk(
+                        &credentials,
+                        &key(&format!("chunk-{index}"))?,
+                        &staged.upload_id,
+                        index,
+                        std::mem::take(bytes),
+                    )
+                    .await
+                    .map_err(refused)?;
+                if response.upload_id != staged.upload_id
+                    || response.index != index
+                    || !response.accepted
+                {
+                    return Err(retry(CloudRuntimeError::IntegrityFailure));
+                }
             }
         }
+        runtime
+            .require_request_permission(&access.state)
+            .await
+            .map_err(retry)?;
+        access
+            .client
+            .commit_upload(&credentials, &key("commit")?, &staged.upload_id)
+            .await
+            .map_err(refused)
     }
-    runtime
-        .require_request_permission(&access.state)
-        .await
-        .map_err(retry)?;
-    let committed = access
-        .client
-        .commit_upload(&credentials, &key("commit")?, &staged.upload_id)
-        .await
-        .map_err(refused)?;
+    .await;
+    let committed = match sent {
+        Err(UploadRefused::Restage(error)) => {
+            if let CloudRuntimeError::Client(CloudClientError::Api(api)) = &error {
+                if leaves_session_open(&api.code) {
+                    cancel(access, &credentials, &key("cancel")?, &staged.upload_id).await;
+                }
+            }
+            return Err(UploadRefused::Restage(error));
+        }
+        other => other?,
+    };
     if committed.state != "committed"
         || committed.upload_id != staged.upload_id
         || committed.revision_id.as_deref() != Some(&staged.revision_id)
@@ -261,6 +275,35 @@ fn restages(code: &CloudErrorCode) -> bool {
     )
 }
 
+/// Whether a refused upload's session is still open on the service: a
+/// stale base or a conflicting key leaves it active until it expires, and
+/// open sessions count against the vault's limit. A purged or missing one
+/// is already gone.
+fn leaves_session_open(code: &CloudErrorCode) -> bool {
+    matches!(
+        code,
+        CloudErrorCode::StaleRevision | CloudErrorCode::IdempotencyConflict
+    )
+}
+
+/// Close an abandoned session. Best effort: a refusal leaves it to expire.
+async fn cancel(
+    access: &CloudAccess,
+    credentials: &CloudCredentials<'_>,
+    key: &IdempotencyKey,
+    upload_id: &str,
+) {
+    match access
+        .client
+        .cancel_upload(credentials, key, upload_id)
+        .await
+    {
+        Ok(cancelled) if cancelled.upload_id == upload_id && cancelled.state == "cancelled" => {}
+        Ok(_) => log::warn!("The service did not cancel an abandoned upload"),
+        Err(error) => log::warn!("An abandoned upload was not cancelled: {error:?}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -271,5 +314,13 @@ mod tests {
         assert!(restages(&CloudErrorCode::IdempotencyConflict));
         assert!(restages(&CloudErrorCode::StaleRevision));
         assert!(!restages(&CloudErrorCode::QuotaExceeded));
+    }
+
+    #[test]
+    fn a_refused_session_still_open_is_cancelled_and_a_purged_one_is_not() {
+        assert!(leaves_session_open(&CloudErrorCode::StaleRevision));
+        assert!(leaves_session_open(&CloudErrorCode::IdempotencyConflict));
+        assert!(!leaves_session_open(&CloudErrorCode::UploadIncomplete));
+        assert!(!leaves_session_open(&CloudErrorCode::NotFound));
     }
 }
