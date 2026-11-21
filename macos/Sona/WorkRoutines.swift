@@ -32,6 +32,40 @@ struct WorkReminder: Codable, Equatable {
     var notifiedAtMs: Int64?
 }
 
+enum WorkTriageMatch: String, Codable, CaseIterable, Identifiable {
+    case words, meeting, folder
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .words: "Task mentions"
+        case .meeting: "Meeting title has"
+        case .folder: "Meeting is in folder"
+        }
+    }
+}
+
+struct WorkTriageRuleInput: Encodable, Equatable {
+    var matches: WorkTriageMatch
+    var value: String
+    var projectId: String?
+    var labelId: String?
+    var owner: WorkOwner?
+}
+
+/// A routing rule: new tasks in Triage that match go to a project, get a
+/// label, or go to an owner.
+struct WorkTriageRule: Decodable, Identifiable, Equatable {
+    var id: String
+    var matches: WorkTriageMatch
+    var value: String
+    var projectId: String?
+    var labelId: String?
+    var owner: WorkOwner?
+    var createdAtMs: Int64
+}
+
 @MainActor
 @Observable
 final class RoutinesStore {
@@ -39,6 +73,7 @@ final class RoutinesStore {
     private(set) var reminders: [String: WorkReminder] = [:]
     /// Reminders on projects, initiatives and notes.
     private(set) var subjectReminders: [WorkSubjectRef: WorkSubjectReminder] = [:]
+    private(set) var triageRules: [WorkTriageRule] = []
     private(set) var error: String?
 
     @ObservationIgnored private let core: Core
@@ -62,6 +97,39 @@ final class RoutinesStore {
     func loadTemplates() async {
         do {
             templates = Self.sorted(try await core.request("work_templates"))
+        } catch {
+            self.error = error.localizedDescription
+        }
+    }
+
+    func loadTriageRules() async {
+        do {
+            triageRules = try await core.request("work_triage_rules")
+        } catch {
+            self.error = error.localizedDescription
+        }
+    }
+
+    @discardableResult
+    func saveTriageRule(id: String? = nil, _ input: WorkTriageRuleInput) async -> Bool {
+        error = nil
+        do {
+            let saved: WorkTriageRule = try await core.request("work_triage_rule_save", TriageRuleSaveParams(
+                operationId: Self.newId(), id: id, input: input))
+            triageRules = triageRules.filter { $0.id != saved.id } + [saved]
+            return true
+        } catch {
+            self.error = error.localizedDescription
+            return false
+        }
+    }
+
+    func deleteTriageRule(_ rule: WorkTriageRule) async {
+        error = nil
+        do {
+            let _: WorkTriageRule = try await core.request(
+                "work_triage_rule_delete", IdParams(operationId: Self.newId(), id: rule.id))
+            triageRules.removeAll { $0.id == rule.id }
         } catch {
             self.error = error.localizedDescription
         }
@@ -156,6 +224,11 @@ final class RoutinesStore {
 
 private struct RemindersParams: Encodable { let dueOnly: Bool }
 private struct ItemParams: Encodable { let id: String }
+private struct TriageRuleSaveParams: Encodable {
+    let operationId: String
+    let id: String?
+    let input: WorkTriageRuleInput
+}
 private struct IdParams: Encodable {
     let operationId: String
     let id: String

@@ -102,6 +102,10 @@ private struct WorkLoopPage: View {
                     Button("Run now") { Task { await store.run() } }
                         .buttonStyle(.secondary)
                         .disabled(store.busy)
+                    Button("Duplicate") { Task { await store.copy() } }
+                        .buttonStyle(.secondary)
+                        .help("Copy this automation. The copy starts turned off.")
+                        .disabled(store.busy)
                     Button {
                         deleting = true
                     } label: {
@@ -245,6 +249,16 @@ private struct WorkLoopEditor: View {
             PageSection("Tools") {
                 Card { tools }
             }
+            PageSection("Thinking") {
+                Card {
+                    ChoiceRow(
+                        title: "Effort",
+                        detail: "Higher is slower and costs more.",
+                        choices: [nil] + WorkLoopReasoning.choices.map(Optional.some),
+                        label: { $0?.label ?? "Model default" },
+                        selection: $draft.reasoning)
+                }
+            }
             HStack {
                 Spacer(minLength: 0)
                 Button(loop == nil ? "Create automation" : "Save") {
@@ -320,9 +334,13 @@ private struct WorkLoopEditor: View {
         case .projectStatusChanged:
             ChoiceRow(title: "To", choices: [nil] + WorkLoopProjectStatus.choices.map(Optional.some),
                       label: { $0?.label ?? "Any status" }, selection: $draft.projectStatusTo)
+        case .initiativeStatusChanged:
+            ChoiceRow(title: "To", choices: [nil] + WorkLoopInitiativeStatus.choices.map(Optional.some),
+                      label: { $0?.label ?? "Any status" }, selection: $draft.initiativeStatusTo)
         case .unknown:
             CardLine("This trigger is from a newer Sona. Pick one to save changes.")
-        case .taskCreated, .assigned, .commentAdded, .meetingEnded:
+        case .taskCreated, .assigned, .commentAdded, .meetingEnded, .cycleStarted, .cycleEnded, .milestoneDone,
+             .projectUpdatePosted:
             EmptyView()
         }
     }
@@ -408,6 +426,7 @@ enum WorkLoopConditionScope {
 
 enum WorkLoopTriggerKind: String, CaseIterable, Identifiable {
     case schedule, taskCreated, statusChanged, labelAdded, assigned, commentAdded, projectStatusChanged, meetingEnded
+    case initiativeStatusChanged, cycleStarted, cycleEnded, milestoneDone, projectUpdatePosted
     case unknown
 
     static let choices: [Self] = allCases.filter { $0 != .unknown }
@@ -424,6 +443,11 @@ enum WorkLoopTriggerKind: String, CaseIterable, Identifiable {
         case .commentAdded: "When a comment is added"
         case .projectStatusChanged: "When a project’s status changes"
         case .meetingEnded: "When a meeting ends"
+        case .initiativeStatusChanged: "When an initiative’s status changes"
+        case .cycleStarted: "When a cycle starts"
+        case .cycleEnded: "When a cycle ends"
+        case .milestoneDone: "When a milestone is finished"
+        case .projectUpdatePosted: "When a project gets an update"
         case .unknown: "Unknown trigger"
         }
     }
@@ -431,8 +455,8 @@ enum WorkLoopTriggerKind: String, CaseIterable, Identifiable {
     var scope: WorkLoopConditionScope {
         switch self {
         case .taskCreated, .statusChanged, .labelAdded, .assigned, .commentAdded: .tasks
-        case .projectStatusChanged: .projects
-        case .schedule, .meetingEnded, .unknown: .unavailable
+        case .projectStatusChanged, .milestoneDone, .projectUpdatePosted: .projects
+        case .schedule, .meetingEnded, .initiativeStatusChanged, .cycleStarted, .cycleEnded, .unknown: .unavailable
         }
     }
 }
@@ -448,6 +472,8 @@ struct WorkLoopDraft: Equatable {
     var statusTo: WorkLoopTaskStatus?
     var labelId: String?
     var projectStatusTo: WorkLoopProjectStatus?
+    var initiativeStatusTo: WorkLoopInitiativeStatus?
+    var reasoning: WorkLoopReasoning?
     var labels: Set<String> = []
     var projects: Set<String> = []
     var statuses: Set<WorkLoopTaskStatus> = []
@@ -467,6 +493,7 @@ struct WorkLoopDraft: Equatable {
         projects = Set(loop.conditions.projects)
         statuses = Set(loop.conditions.statuses.filter { $0 != .unknown })
         tools = Set(loop.tools)
+        reasoning = loop.reasoning
         switch loop.trigger {
         case let .schedule(schedule):
             kind = .schedule
@@ -487,6 +514,13 @@ struct WorkLoopDraft: Equatable {
             kind = .projectStatusChanged
             projectStatusTo = to
         case .meetingEnded: kind = .meetingEnded
+        case let .initiativeStatusChanged(to):
+            kind = .initiativeStatusChanged
+            initiativeStatusTo = to
+        case .cycleStarted: kind = .cycleStarted
+        case .cycleEnded: kind = .cycleEnded
+        case .milestoneDone: kind = .milestoneDone
+        case .projectUpdatePosted: kind = .projectUpdatePosted
         case .unknown: kind = .unknown
         }
     }
@@ -504,7 +538,8 @@ struct WorkLoopDraft: Equatable {
                 labels: scope == .tasks ? labels.sorted() : [],
                 projects: scope == .unavailable ? [] : projects.sorted(),
                 statuses: scope == .tasks ? WorkLoopTaskStatus.choices.filter(statuses.contains) : []),
-            tools: available.map(\.name).filter(tools.contains))
+            tools: available.map(\.name).filter(tools.contains),
+            reasoning: reasoning == .unknown ? nil : reasoning)
     }
 
     private var trigger: WorkLoopTrigger? {
@@ -521,6 +556,11 @@ struct WorkLoopDraft: Equatable {
         case .commentAdded: return .commentAdded
         case .projectStatusChanged: return .projectStatusChanged(to: projectStatusTo)
         case .meetingEnded: return .meetingEnded
+        case .initiativeStatusChanged: return .initiativeStatusChanged(to: initiativeStatusTo)
+        case .cycleStarted: return .cycleStarted
+        case .cycleEnded: return .cycleEnded
+        case .milestoneDone: return .milestoneDone
+        case .projectUpdatePosted: return .projectUpdatePosted
         case .unknown: return nil
         }
     }
@@ -569,6 +609,16 @@ extension WorkLoopTrigger {
             to.map { "When a project moves to \($0.label)" } ?? "When a project’s status changes"
         case .meetingEnded:
             "When a meeting ends"
+        case let .initiativeStatusChanged(to):
+            to.map { "When an initiative moves to \($0.label)" } ?? "When an initiative’s status changes"
+        case .cycleStarted:
+            "When a cycle starts"
+        case .cycleEnded:
+            "When a cycle ends"
+        case .milestoneDone:
+            "When a milestone is finished"
+        case .projectUpdatePosted:
+            "When a project gets an update"
         case .unknown:
             "Unknown trigger"
         }

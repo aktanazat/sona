@@ -49,10 +49,12 @@ pub enum NotificationKind {
     View,
     /// An agent edited a followed note.
     Note,
+    /// What Sona closed or archived by itself; `to` holds the summary.
+    Housekeeping,
 }
 
 impl NotificationKind {
-    pub(crate) const ALL: [Self; 13] = [
+    pub(crate) const ALL: [Self; 14] = [
         Self::Status,
         Self::Comment,
         Self::Mention,
@@ -66,6 +68,7 @@ impl NotificationKind {
         Self::Project,
         Self::View,
         Self::Note,
+        Self::Housekeeping,
     ];
 
     pub(crate) fn parse(value: &str) -> Option<Self> {
@@ -96,6 +99,7 @@ crate::planning::types::sql_enum!(NotificationKind {
     Project => "project",
     View => "view",
     Note => "note",
+    Housekeeping => "housekeeping",
 });
 
 /// Notices without a task, kinds for a field change, Sona's own posts
@@ -279,6 +283,78 @@ pub(crate) const NOTE_NOTICES_MIGRATION: &str =
     DELETE FROM planning_follows WHERE kind = 'note' AND target_id = old.id;
     DELETE FROM planning_subject_reminders WHERE subject_kind = 'note' AND subject_id = old.id;
     DELETE FROM planning_notifications WHERE subject_kind = 'note' AND subject_id = old.id;
+END;";
+
+/// A notice may be Sona's own housekeeping, with or without a task. Runs
+/// after `INBOX_SUBJECTS_MIGRATION` and `NOTE_NOTICES_MIGRATION`; the note
+/// trigger, on a table only the history database has, is dropped here and
+/// made again by running `NOTE_NOTICES_MIGRATION` once more.
+pub(crate) const HOUSEKEEPING_NOTICES_MIGRATION: &str = "DROP TRIGGER IF EXISTS planning_task_lifecycle_delete;
+DROP TRIGGER IF EXISTS planning_notifications_run_delete;
+DROP TRIGGER IF EXISTS planning_notifications_project_delete;
+DROP TRIGGER IF EXISTS planning_notifications_initiative_delete;
+DROP TRIGGER IF EXISTS planning_notifications_view_delete;
+DROP TRIGGER IF EXISTS planning_notifications_note_delete;
+CREATE TABLE planning_notifications_next (
+    id TEXT PRIMARY KEY NOT NULL,
+    task_id TEXT,
+    kind TEXT NOT NULL CHECK(kind IN ('status', 'comment', 'mention', 'assigned', 'changed',
+        'reminder', 'due', 'automation', 'digest', 'question', 'project', 'view', 'note',
+        'housekeeping')),
+    actor TEXT NOT NULL CHECK(actor IN ('sona', 'agent')),
+    agent TEXT CHECK(agent IS NULL OR length(trim(agent)) > 0),
+    activity_id TEXT,
+    comment_id TEXT,
+    field TEXT,
+    run_id TEXT,
+    event_key TEXT UNIQUE,
+    from_value TEXT,
+    to_value TEXT,
+    digest TEXT,
+    subject_kind TEXT CHECK(subject_kind IN ('project', 'initiative', 'note', 'view')),
+    subject_id TEXT,
+    created_at_ms INTEGER NOT NULL,
+    read_at_ms INTEGER,
+    snoozed_until_ms INTEGER,
+    archived_at_ms INTEGER,
+    CHECK((subject_kind IS NULL) = (subject_id IS NULL)),
+    CHECK((kind = 'digest') = (digest IS NOT NULL)),
+    CHECK(task_id IS NOT NULL OR run_id IS NOT NULL OR subject_id IS NOT NULL
+        OR kind IN ('digest', 'housekeeping'))
+);
+INSERT INTO planning_notifications_next (rowid, id, task_id, kind, actor, agent, activity_id,
+        comment_id, field, run_id, event_key, from_value, to_value, digest, subject_kind,
+        subject_id, created_at_ms, read_at_ms, snoozed_until_ms, archived_at_ms)
+    SELECT rowid, id, task_id, kind, actor, agent, activity_id, comment_id, field, run_id,
+        event_key, from_value, to_value, digest, subject_kind, subject_id, created_at_ms,
+        read_at_ms, snoozed_until_ms, archived_at_ms
+    FROM planning_notifications;
+DROP TABLE planning_notifications;
+ALTER TABLE planning_notifications_next RENAME TO planning_notifications;
+CREATE INDEX planning_notifications_created ON planning_notifications(created_at_ms);
+CREATE INDEX planning_notifications_task ON planning_notifications(task_id);
+CREATE INDEX planning_notifications_subject ON planning_notifications(subject_kind, subject_id);
+CREATE TRIGGER planning_task_lifecycle_delete AFTER DELETE ON planning_tasks BEGIN
+    DELETE FROM planning_task_versions WHERE task_id = old.id;
+    DELETE FROM planning_task_subscriptions WHERE task_id = old.id;
+    DELETE FROM planning_notifications WHERE task_id = old.id;
+    DELETE FROM planning_favorites WHERE kind = 'task' AND target_id = old.id;
+END;
+CREATE TRIGGER planning_notifications_run_delete AFTER DELETE ON planning_loop_runs BEGIN
+    DELETE FROM planning_notifications WHERE run_id = old.id;
+END;
+CREATE TRIGGER planning_notifications_project_delete AFTER DELETE ON planning_projects BEGIN
+    DELETE FROM planning_follows WHERE kind = 'project' AND target_id = old.id;
+    DELETE FROM planning_notifications WHERE subject_kind = 'project' AND subject_id = old.id;
+END;
+CREATE TRIGGER planning_notifications_initiative_delete AFTER DELETE ON planning_initiatives
+BEGIN
+    DELETE FROM planning_notifications WHERE subject_kind = 'initiative'
+        AND subject_id = old.id;
+END;
+CREATE TRIGGER planning_notifications_view_delete AFTER DELETE ON planning_views BEGIN
+    DELETE FROM planning_follows WHERE kind = 'view' AND target_id = old.id;
+    DELETE FROM planning_notifications WHERE subject_kind = 'view' AND subject_id = old.id;
 END;";
 
 /// What a notice is about when it is not a task.
@@ -813,6 +889,66 @@ pub(crate) fn digest_since(conn: &Connection, since_ms: i64) -> Result<bool> {
         [since_ms],
         |row| row.get(0),
     )?)
+}
+
+/// Takes back the status and comment notices Sona posted on `task_id` at
+/// `at_ms`, for a batch whose one summary notice stands for them.
+pub(crate) fn withdraw_sona_notices(conn: &Connection, task_id: &str, at_ms: i64) -> Result<()> {
+    conn.execute(
+        "DELETE FROM planning_notifications
+         WHERE task_id = ?1 AND actor = 'sona' AND created_at_ms = ?2 AND kind IN ('status', 'comment')",
+        params![task_id, at_ms],
+    )?;
+    Ok(())
+}
+
+/// Posts the housekeeping notice for a batch of Sona's moves, or brings
+/// the one posted for `key` up to date and unread again.
+pub(crate) fn batch_posted(
+    conn: &Connection,
+    task_id: Option<&str>,
+    key: &str,
+    summary: &str,
+    now_ms: i64,
+) -> Result<()> {
+    let notice = Notice {
+        key: Some(key),
+        to: Some(summary),
+        ..Notice::new(task_id, NotificationKind::Housekeeping, WorkActor::Sona)
+    };
+    if !notify(conn, &notice, now_ms)? {
+        conn.execute(
+            "UPDATE planning_notifications
+             SET to_value = ?2, created_at_ms = ?3, read_at_ms = NULL, snoozed_until_ms = NULL,
+                 archived_at_ms = NULL
+             WHERE event_key = ?1",
+            params![key, summary, now_ms],
+        )?;
+    }
+    Ok(())
+}
+
+/// The batch a housekeeping notice stands for.
+pub(crate) fn batch_key(conn: &Connection, notice_id: &str) -> Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT event_key FROM planning_notifications WHERE id = ?1 AND kind = 'housekeeping'",
+            [notice_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .flatten())
+}
+
+/// Reads and archives a batch notice once the user undid what it reports.
+pub(crate) fn batch_handled(conn: &Connection, key: &str, now_ms: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE planning_notifications
+         SET read_at_ms = coalesce(read_at_ms, ?2), archived_at_ms = ?2
+         WHERE event_key = ?1",
+        params![key, now_ms],
+    )?;
+    Ok(())
 }
 
 /// Whether `body` mentions the user: `@me`, or `@` and their first name or

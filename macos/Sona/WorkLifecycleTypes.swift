@@ -70,7 +70,7 @@ struct WorkSubscription: Codable, Equatable {
 
 enum WorkNotificationKind: String, Codable, Hashable {
     case status, comment, mention, assigned, changed, reminder, due, automation, digest
-    case question, project, view, note
+    case question, project, view, note, housekeeping
     case unknown
 
     init(from decoder: Decoder) throws {
@@ -80,7 +80,7 @@ enum WorkNotificationKind: String, Codable, Hashable {
     /// Every kind the core posts, in the order its settings list them.
     static let listed: [WorkNotificationKind] = [
         .status, .comment, .mention, .assigned, .changed, .reminder, .due, .automation, .digest,
-        .question, .project, .view, .note,
+        .question, .project, .view, .note, .housekeeping,
     ]
 
     var label: String {
@@ -98,6 +98,7 @@ enum WorkNotificationKind: String, Codable, Hashable {
         case .project: "Followed projects"
         case .view: "Followed views"
         case .note: "Followed notes"
+        case .housekeeping: "Housekeeping"
         case .unknown: "Other"
         }
     }
@@ -270,7 +271,7 @@ struct WorkNotification: Decodable, Identifiable, Equatable {
 
     /// "Claude Code", "Sona", or "An agent" when it gave no name.
     var who: String {
-        if kind == .reminder || kind == .due || kind == .digest { return "Sona" }
+        if kind == .reminder || kind == .due || kind == .digest || kind == .housekeeping { return "Sona" }
         if kind == .automation {
             guard itemId != nil, let automation else { return "Automation" }
             return "Automation “\(automation.name)”"
@@ -296,6 +297,7 @@ struct WorkNotification: Decodable, Identifiable, Equatable {
         case .project: return projectChange
         case .view: return viewChange
         case .note: return "edited it"
+        case .housekeeping: return to ?? "ran housekeeping"
         case .automation:
             guard to == "done" else {
                 return automation?.error.map { "failed: \($0)" } ?? "failed"

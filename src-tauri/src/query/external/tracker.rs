@@ -239,6 +239,33 @@ pub enum WorkVerb {
     /// Delete an automation with its versions and runs.
     #[command(name = "automation-delete")]
     LoopDelete(agent_loops::LoopArgs),
+    /// Copy an automation under a new name, turned off until you turn it on.
+    #[command(name = "automation-copy")]
+    LoopCopy(agent_loops::LoopCopyArgs),
+    /// List note additions, project descriptions and project updates that
+    /// automations proposed and that wait for you to accept in Triage.
+    #[command(name = "doc-proposals")]
+    DocProposals,
+    /// List triage routing rules and the fields Sona fills by itself.
+    #[command(name = "triage-rules")]
+    TriageRules,
+    /// Save a triage rule: words, a meeting title or a folder that sends
+    /// new tasks to a project, a label or an owner.
+    #[command(name = "triage-rule-save")]
+    TriageRuleSave(automations::TriageRuleSaveArgs),
+    /// Delete a triage rule.
+    #[command(name = "triage-rule-delete")]
+    TriageRuleDelete(automations::TriageIdArgs),
+    /// List the fields Sona filled by itself on tasks in Triage.
+    #[command(name = "triage-applied")]
+    TriageApplied,
+    /// Undo a field Sona filled by itself, by id from triage-applied.
+    #[command(name = "triage-undo")]
+    TriageUndo(automations::TriageIdArgs),
+    /// Put back what Sona closed or archived by itself, by the id of its
+    /// housekeeping notice in the inbox. Work you changed since stays as it is.
+    #[command(name = "housekeeping-undo")]
+    HousekeepingUndo(automations::HousekeepingUndoArgs),
     /// Set when Sona reminds you of a task, project (--project), initiative
     /// (--initiative) or note (--note), or none to clear it.
     Remind(routines::RemindArgs),
@@ -1769,6 +1796,14 @@ impl WorkVerb {
             | Self::LoopDisable(agent_loops::LoopArgs { dry_run: true, .. })
             | Self::LoopRestoreVersion(agent_loops::LoopRestoreArgs { dry_run: true, .. })
             | Self::LoopDelete(agent_loops::LoopArgs { dry_run: true, .. })
+            | Self::LoopCopy(agent_loops::LoopCopyArgs { dry_run: true, .. })
+            | Self::DocProposals
+            | Self::TriageRules
+            | Self::TriageRuleSave(automations::TriageRuleSaveArgs { dry_run: true, .. })
+            | Self::TriageRuleDelete(automations::TriageIdArgs { dry_run: true, .. })
+            | Self::TriageApplied
+            | Self::TriageUndo(automations::TriageIdArgs { dry_run: true, .. })
+            | Self::HousekeepingUndo(automations::HousekeepingUndoArgs { dry_run: true, .. })
             | Self::Reminders(_)
             | Self::LabelGroup(routines::LabelGroupArgs { dry_run: true, .. })
             | Self::LabelRetire(routines::LabelRetireArgs { dry_run: true, .. })
@@ -1959,6 +1994,11 @@ impl WorkVerb {
             | Self::LoopDisable(_)
             | Self::LoopRestoreVersion(_)
             | Self::LoopDelete(_)
+            | Self::LoopCopy(_)
+            | Self::TriageRuleSave(_)
+            | Self::TriageRuleDelete(_)
+            | Self::TriageUndo(_)
+            | Self::HousekeepingUndo(_)
             | Self::Remind(_)
             | Self::ProjectSave(_)
             | Self::ProjectArchive(_)
@@ -2281,6 +2321,7 @@ pub enum WorkAnswer {
     Subjects(Box<subjects::ExternalSubjects>),
     Planner(Box<planner::PlannerAnswer>),
     TriageHints(Box<triage_hints::TriageHintsAnswer>),
+    Automations(Box<automations::AutomationsAnswer>),
     ProjectAdmin(Box<catalog::ProjectAdminAnswer>),
     Settings(Box<preferences::ExternalSettings>),
     Changes(save::ExternalWorkChanges),
@@ -3027,6 +3068,14 @@ pub(super) async fn answer(
         WorkVerb::LoopDisable(args) => tracker.loop_enable(args, false),
         WorkVerb::LoopRestoreVersion(args) => tracker.loop_restore(args),
         WorkVerb::LoopDelete(args) => tracker.loop_delete(args),
+        WorkVerb::LoopCopy(args) => tracker.loop_copy(args),
+        WorkVerb::DocProposals => tracker.doc_proposals(),
+        WorkVerb::TriageRules => tracker.triage_rules(),
+        WorkVerb::TriageRuleSave(args) => tracker.triage_rule_save(args).await,
+        WorkVerb::TriageRuleDelete(args) => tracker.triage_rule_delete(args),
+        WorkVerb::TriageApplied => tracker.triage_applied().await,
+        WorkVerb::TriageUndo(args) => tracker.triage_undo(args).await,
+        WorkVerb::HousekeepingUndo(args) => tracker.housekeeping_undo(args).await,
         WorkVerb::Remind(args) => tracker.remind(args).await,
         WorkVerb::Reminders(args) => tracker.reminders(args).await,
         WorkVerb::Projects(args) => tracker.projects(args).await,
@@ -6722,6 +6771,7 @@ impl WorkAnswer {
             Self::Subjects(_) => subjects::text(self, &mut text),
             Self::Planner(_) => planner::text(self, &mut text),
             Self::TriageHints(_) => triage_hints::text(self, &mut text),
+            Self::Automations(_) => automations::text(self, &mut text),
             Self::ProjectAdmin(answer) => catalog::admin_text(answer, &mut text),
             Self::Changes(_) => save::text(self, &mut text),
             Self::Sessions(_) | Self::Session(_) => sessions::text(self, &mut text),
@@ -6977,6 +7027,7 @@ impl WorkAnswer {
             | Self::Note(_)
             | Self::Subjects(_)
             | Self::Planner(_)
+            | Self::Automations(_)
             | Self::Settings(_)
             | Self::Changes(_)
             | Self::Sessions(_)
@@ -7515,6 +7566,7 @@ mod agent_loops;
 mod threads;
 mod planner;
 mod triage_hints;
+mod automations;
 mod subjects;
 mod dependencies;
 mod initiatives;

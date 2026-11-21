@@ -136,6 +136,17 @@ final class LoopsStore {
         if selectedId == id { close() }
     }
 
+    /// Copies the open automation and opens the copy, which starts off.
+    func copy() async {
+        guard let id = selectedId else { return }
+        let copied: WorkLoop? = await perform {
+            try await self.core.request("work_loop_copy", LoopParams(operationId: Self.newId(), loopId: id))
+        }
+        guard let copied else { return }
+        loops = Self.sorted((loops ?? []) + [copied])
+        select(copied.id)
+    }
+
     private func perform<T>(_ call: () async throws -> T) async -> T? {
         busy = true
         error = nil

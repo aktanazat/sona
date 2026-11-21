@@ -31,6 +31,7 @@ pub(crate) const GONE: &str = "This suggestion no longer applies. Reload and try
 const NAMESPACE: Uuid = Uuid::from_u128(0x6f3c_9d2e_51a4_4b87_9e0d_c4a1_7b58_2f63);
 const RECENT: usize = 5;
 const ENOUGH: usize = 2;
+const SURE: usize = 3;
 const RELATED: usize = 2;
 const COMMON: [&str; 40] = [
     "the", "and", "for", "with", "from", "about", "that", "this", "will", "into", "our", "your",
@@ -64,6 +65,7 @@ fn hint(
     value: WorkSuggestionValue,
     reason: String,
     drawn_from: Vec<String>,
+    sure: bool,
 ) -> WorkFieldSuggestion {
     WorkFieldSuggestion {
         id: id(&item.id, field, &value),
@@ -74,6 +76,7 @@ fn hint(
         at_ms: None,
         meeting_id: None,
         drawn_from,
+        sure,
     }
 }
 
@@ -127,6 +130,12 @@ impl Window<'_> {
 
     fn passes(&self, count: usize) -> bool {
         count >= ENOUGH && 2 * count > self.tasks.len()
+    }
+
+    /// Whether every task in the window, and at least [`SURE`] of them,
+    /// agree on `count`.
+    fn sure(&self, count: usize) -> bool {
+        count >= SURE && count == self.tasks.len()
     }
 
     fn top<'a>(&'a self, pick: impl Fn(&'a Past) -> Option<&'a str>) -> Option<(&'a str, usize)> {
@@ -326,13 +335,14 @@ impl Pool {
                 .map(|found| (found, &siblings))
                 .or(by_people)
                 .or_else(|| self.project(&similar).map(|found| (found, &similar)));
-            if let Some(((project_id, reason, _), window)) = chosen {
+            if let Some(((project_id, reason, count), window)) = chosen {
                 found.push(hint(
                     item,
                     WorkSuggestionField::Project,
                     WorkSuggestionValue::Id(project_id),
                     reason,
                     self.drawn(window, mine),
+                    window.sure(count),
                 ));
             }
         }
@@ -346,6 +356,7 @@ impl Pool {
                 "self" => Some((
                     WorkOwner::Myself,
                     format!("{} were yours", similar.share(count)),
+                    count,
                 )),
                 person_id => self.names.get(person_id).map(|name| {
                     (
@@ -353,16 +364,18 @@ impl Pool {
                             person_id: person_id.to_owned(),
                         },
                         format!("{} went to {name}", similar.share(count)),
+                        count,
                     )
                 }),
             });
-            if let Some((owner, reason)) = owner {
+            if let Some((owner, reason, count)) = owner {
                 found.push(hint(
                     item,
                     WorkSuggestionField::Owner,
                     WorkSuggestionValue::Owner(owner),
                     reason,
                     self.drawn(&similar, mine),
+                    similar.sure(count),
                 ));
             }
         }
@@ -394,6 +407,7 @@ impl Pool {
                     value,
                     format!("{} were labeled {name}", window.share(count)),
                     self.drawn(window, mine),
+                    window.sure(count),
                 ));
             }
         }
@@ -424,13 +438,14 @@ impl Pool {
                 WorkSuggestionValue::Id(task.id.clone()),
                 format!("#{} has a similar title: {}", task.number, task.title),
                 self.meetings_of(&task.id).to_vec(),
+                false,
             ));
         }
         found
     }
 }
 
-fn task_meetings(history: &Connection) -> Result<HashMap<String, Vec<String>>> {
+pub(crate) fn task_meetings(history: &Connection) -> Result<HashMap<String, Vec<String>>> {
     let mut statement = history.prepare(
         "SELECT id, 'loop', source_loop_id FROM planning_tasks WHERE source_loop_id IS NOT NULL
          UNION ALL

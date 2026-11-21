@@ -860,6 +860,52 @@ struct WorkList: Decodable, Equatable {
     /// False when the conversations could not be opened: every item is
     /// listed, but nothing read from its meeting, and no people.
     var conversationsAvailable: Bool
+    /// Note, description and update edits automations proposed, oldest first.
+    var documentProposals: [WorkDocProposal]
+    /// Fields Sona filled by itself on listed items in Triage, by item id.
+    var autoApplied: [String: [WorkAutoApplied]]
+}
+
+enum WorkDocProposalKind: String, Codable, Hashable {
+    case note
+    case projectDescription = "project_description"
+    case projectUpdate = "project_update"
+    case unknown
+
+    init(from decoder: Decoder) throws {
+        self = Self(rawValue: try decoder.singleValueContainer().decode(String.self)) ?? .unknown
+    }
+}
+
+/// An edit an automation proposed to a note or a project, waiting for a yes
+/// or no. `before` is the description it would replace.
+struct WorkDocProposal: Decodable, Identifiable, Equatable {
+    var id: String
+    var kind: WorkDocProposalKind
+    var targetId: String
+    var targetTitle: String
+    var agent: String
+    var body: String
+    var before: String?
+    var health: PlanningProjectHealth?
+    var createdAtMs: Int64
+}
+
+enum WorkAutoField: String, Codable, Hashable, CaseIterable, Identifiable {
+    case project, labels, owner
+
+    var id: String { rawValue }
+}
+
+/// A field Sona filled by itself on a task in Triage, until undone.
+struct WorkAutoApplied: Decodable, Identifiable, Equatable {
+    var id: String
+    var taskId: String
+    var field: WorkAutoField
+    /// The project or label id, or "me" or a person id for an owner.
+    var value: String
+    var reason: String
+    var appliedAtMs: Int64
 }
 
 struct WorkItemDetail: Decodable, Equatable {
