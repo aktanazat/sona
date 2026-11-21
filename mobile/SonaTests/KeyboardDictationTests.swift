@@ -41,6 +41,184 @@ struct KeyboardDictationTests {
         #expect(dictation.handle(.heard("late", final: true)) == [])
         #expect(dictation.handle(.start) == [.beginCapture])
     }
+
+    @Test("a dictation cleanup leaves empty puts nothing in the field, so no style writes its instructions back")
+    func fillerOnlyDictationInsertsNothing() {
+        #expect(KeyboardDictation.text(of: "Um.", profile: .empty, language: "en-US") == nil)
+        #expect(KeyboardDictation.text(of: "um so it works", profile: .empty, language: "en-US") != nil)
+    }
+
+    @Test("a dictation styled after the keyboard moved to another field waits for Insert instead of typing there")
+    func lateDictationInAnotherFieldWaitsForReview() {
+        let heardFor = KeyboardDictation.FieldMark(id: UUID(), shown: 1, before: "Hi", traits: "0 0")
+        var other = heardFor
+        other.id = UUID()
+        #expect(KeyboardDictation.landing(heardFor: heardFor, now: other, reviews: false) == .review)
+        #expect(KeyboardDictation.landing(heardFor: heardFor, now: heardFor, reviews: false) == .write)
+        #expect(KeyboardDictation.landing(heardFor: heardFor, now: heardFor, reviews: true) == .review)
+    }
+
+    @Test("a field id the host reuses, as Messages does across conversations, still needs nothing to have changed")
+    func sameIdWithChangedTextWaitsForReview() {
+        let heardFor = KeyboardDictation.FieldMark(id: UUID(), shown: 1, before: "See you at 6", traits: "0 0")
+        var otherConversation = heardFor
+        otherConversation.before = ""
+        #expect(KeyboardDictation.landing(heardFor: heardFor, now: otherConversation, reviews: false) == .review)
+        #expect(KeyboardDictation.landing(heardFor: heardFor, now: heardFor, reviews: false) == .write)
+    }
+
+    @Test("in a host that names no fields, a dictation is typed unless something since says the field changed")
+    func unnamedFieldIsTheSameUntilSomethingChanges() {
+        let heardFor = KeyboardDictation.FieldMark(id: nil, shown: 1, before: "Hi", traits: "0 0")
+        #expect(KeyboardDictation.landing(heardFor: heardFor, now: heardFor, reviews: false) == .write)
+        var hidden = heardFor
+        hidden.shown = 2
+        #expect(KeyboardDictation.landing(heardFor: heardFor, now: hidden, reviews: false) == .review)
+        var edited = heardFor
+        edited.before = "Hi there"
+        #expect(KeyboardDictation.landing(heardFor: heardFor, now: edited, reviews: false) == .review)
+        var keys = heardFor
+        keys.traits = "7 0"
+        #expect(KeyboardDictation.landing(heardFor: heardFor, now: keys, reviews: false) == .review)
+    }
+
+    @Test("a dictation joins a kept review only from the same field and within five minutes")
+    func dictationJoinsOnlyARecentReviewFromTheSameField() {
+        let field = KeyboardDictation.FieldMark(id: UUID(), shown: 1, before: "Hi", traits: "0 0")
+        let kept = KeyboardDictation.KeptReview(text: "First.", field: field, date: Date(timeIntervalSince1970: 0))
+        let soon = KeyboardDictation.KeptReview(text: "Second.", field: field, date: Date(timeIntervalSince1970: 4 * 60))
+        #expect(kept.joins(soon))
+        #expect(kept.joined(with: soon).text == "First.\n\nSecond.")
+        var later = soon
+        later.date = Date(timeIntervalSince1970: 6 * 60)
+        #expect(!kept.joins(later))
+        var elsewhere = soon
+        elsewhere.field.id = UUID()
+        #expect(!kept.joins(elsewhere))
+    }
+
+    @Test("a kept review from another field does not hold back a normal dictation")
+    func keptReviewElsewhereLetsADictationBeTyped() {
+        let here = KeyboardDictation.FieldMark(id: UUID(), shown: 1, before: "Hi", traits: "0 0")
+        var elsewhere = here
+        elsewhere.id = UUID()
+        let kept = KeyboardDictation.KeptReview(text: "Old.", field: elsewhere, date: Date(timeIntervalSince1970: 0))
+        let new = KeyboardDictation.KeptReview(text: "New.", field: here, date: Date(timeIntervalSince1970: 60))
+        #expect(KeyboardDictation.placing(new, newestKept: kept, now: here, reviews: false) == .write)
+        let recentHere = KeyboardDictation.KeptReview(text: "Old.", field: here, date: Date(timeIntervalSince1970: 0))
+        #expect(KeyboardDictation.placing(new, newestKept: recentHere, now: here, reviews: false) == .join)
+    }
+
+    @Test("kept reviews last a day for heard words and a week for app drafts")
+    func keptReviewsExpireByWhereTheyCameFrom() {
+        let store = KeyboardDictation.KeptReviewStore(url: Self.scratchURL())
+        defer { try? FileManager.default.removeItem(at: store.url) }
+        let field = KeyboardDictation.FieldMark(id: nil, shown: 1, before: "", traits: "")
+        let start = Date(timeIntervalSince1970: 1_000_000)
+        let heard = KeyboardDictation.KeptReview(text: "Heard.", field: field, date: start)
+        let draft = KeyboardDictation.KeptReview(text: "Draft.", field: field, date: start, fromApp: true)
+        store.sync([heard, draft], ended: [], at: start)
+        #expect(store.load(at: start.addingTimeInterval(23 * 60 * 60)) == [heard, draft])
+        #expect(store.load(at: start.addingTimeInterval(2 * 24 * 60 * 60)) == [draft])
+        #expect(store.load(at: start.addingTimeInterval(8 * 24 * 60 * 60)) == [])
+    }
+
+    @Test("two keyboard copies keep each other's reviews")
+    func keptReviewsFromTwoCopiesMerge() {
+        let store = KeyboardDictation.KeptReviewStore(url: Self.scratchURL())
+        defer { try? FileManager.default.removeItem(at: store.url) }
+        let field = KeyboardDictation.FieldMark(id: nil, shown: 1, before: "", traits: "")
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        let mail = KeyboardDictation.KeptReview(text: "In Mail.", field: field, date: now)
+        let notes = KeyboardDictation.KeptReview(text: "In Notes.", field: field, date: now.addingTimeInterval(1))
+        store.sync([mail], ended: [], at: now)
+        store.sync([notes], ended: [], at: now)
+        #expect(store.load(at: now) == [mail, notes])
+        store.sync([], ended: [mail.id], at: now)
+        #expect(store.load(at: now) == [notes])
+    }
+
+    @Test("a review one keyboard copy inserted does not come back from another copy's memory")
+    func endedReviewIsNotResurrected() {
+        let store = KeyboardDictation.KeptReviewStore(url: Self.scratchURL())
+        defer { try? FileManager.default.removeItem(at: store.url) }
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        let review = KeyboardDictation.KeptReview(text: "Kept.", field: KeyboardDictation.FieldMark(id: nil, shown: 1, before: "", traits: ""), date: now)
+        store.sync([review], ended: [], at: now)
+        store.sync([], ended: [review.id], at: now)
+        #expect(store.sync([review], ended: [], at: now)?.reviews == [])
+    }
+
+    @Test("when memory and the file hold the same review, the later copy wins")
+    func laterCopyOfAReviewWins() {
+        let store = KeyboardDictation.KeptReviewStore(url: Self.scratchURL())
+        defer { try? FileManager.default.removeItem(at: store.url) }
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        let first = KeyboardDictation.KeptReview(text: "First.", field: KeyboardDictation.FieldMark(id: nil, shown: 1, before: "", traits: ""), date: now)
+        let second = KeyboardDictation.KeptReview(text: "Second.", field: first.field, date: now.addingTimeInterval(60))
+        let joined = first.joined(with: second)
+        store.sync([joined], ended: [], at: now)
+        #expect(store.sync([first], ended: [], at: now)?.reviews == [joined])
+    }
+
+    @Test("a review kept while the file was locked is saved once it opens again")
+    func reviewKeptWhileLockedIsSavedOnReappear() throws {
+        let store = KeyboardDictation.KeptReviewStore(url: Self.scratchURL())
+        defer { try? FileManager.default.removeItem(at: store.url) }
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        let earlier = KeyboardDictation.KeptReview(text: "Earlier.", field: KeyboardDictation.FieldMark(id: nil, shown: 1, before: "", traits: ""), date: now)
+        let whileLocked = KeyboardDictation.KeptReview(text: "While locked.", field: earlier.field, date: now.addingTimeInterval(1))
+        store.sync([earlier], ended: [], at: now)
+        let file = try Data(contentsOf: store.url)
+        try FileManager.default.removeItem(at: store.url)
+        try FileManager.default.createDirectory(at: store.url, withIntermediateDirectories: false)
+        #expect(store.sync([earlier, whileLocked], ended: [], at: now) == nil)
+        try FileManager.default.removeItem(at: store.url)
+        try file.write(to: store.url)
+        #expect(store.sync([earlier, whileLocked], ended: [], at: now)?.reviews == [earlier, whileLocked])
+        #expect(store.load(at: now) == [earlier, whileLocked])
+    }
+
+    @Test("a reviews file that does not decode is moved aside and a fresh one written")
+    func corruptReviewsFileIsSetAside() throws {
+        let store = KeyboardDictation.KeptReviewStore(url: Self.scratchURL())
+        let aside = store.url.appendingPathExtension("corrupt")
+        defer { [store.url, aside].forEach { try? FileManager.default.removeItem(at: $0) } }
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        let review = KeyboardDictation.KeptReview(text: "Kept.", field: KeyboardDictation.FieldMark(id: nil, shown: 1, before: "", traits: ""), date: now)
+        try Data("not json".utf8).write(to: store.url)
+        store.sync([review], ended: [], at: now)
+        #expect(store.load(at: now) == [review])
+        #expect(try Data(contentsOf: aside) == Data("not json".utf8))
+    }
+
+    @Test("a reviews file that cannot be read, as while the phone is locked, is not written over")
+    func lockedReviewsFileIsLeftAlone() throws {
+        let store = KeyboardDictation.KeptReviewStore(url: Self.scratchURL())
+        defer { try? FileManager.default.removeItem(at: store.url) }
+        try FileManager.default.createDirectory(at: store.url, withIntermediateDirectories: false)
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        let review = KeyboardDictation.KeptReview(text: "Kept.", field: KeyboardDictation.FieldMark(id: nil, shown: 1, before: "", traits: ""), date: now)
+        #expect(store.load(at: now) == nil)
+        store.sync([review], ended: [], at: now)
+        var isFolder: ObjCBool = false
+        #expect(FileManager.default.fileExists(atPath: store.url.path, isDirectory: &isFolder) && isFolder.boolValue)
+    }
+
+    @Test("reviews saved before they had an id or a source still load")
+    func olderReviewsFileStillLoads() throws {
+        let store = KeyboardDictation.KeptReviewStore(url: Self.scratchURL())
+        defer { try? FileManager.default.removeItem(at: store.url) }
+        let older = #"[{"text":"Old.","field":{"shown":1,"before":"","traits":""},"date":0}]"#
+        try Data(older.utf8).write(to: store.url)
+        let loaded = store.load(at: Date(timeIntervalSinceReferenceDate: 60))
+        #expect(loaded?.map(\.text) == ["Old."])
+        #expect(loaded?.first?.fromApp == false)
+    }
+
+    private static func scratchURL() -> URL {
+        FileManager.default.temporaryDirectory.appendingPathComponent("kept-\(UUID().uuidString).json")
+    }
 }
 
 /// Dictated or swiped text joined to what is before the cursor.
