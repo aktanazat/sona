@@ -96,7 +96,7 @@ struct VocabularyView: View {
             )
             ToggleRow(
                 title: "Obey spoken editing commands",
-                detail: "Act on “scratch that”, “delete last word”, “capitalize that”, “quote that” and “new bullet” instead of writing them. English only, and only when the phrase stands alone between two pauses.",
+                detail: "Act on “scratch that”, “delete last word”, “capitalize that”, “quote that” and “new bullet” instead of writing them, and send a dictation that ends with “send”. English only, and only when the phrase stands alone between two pauses.",
                 isOn: Binding(
                     get: { store.spokenEditsEnabled },
                     set: { store.setSpokenEdits($0) }
