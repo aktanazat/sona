@@ -354,7 +354,7 @@ private struct InboxRow: View {
                     .frame(width: 14)
             } else if notice.kind == .housekeeping {
                 Image(systemName: "archivebox").font(.system(size: 12))
-                    .foregroundStyle(Theme.inkTertiary)
+                    .foregroundStyle(Theme.inkSecondary)
                     .frame(width: 14)
             }
             VStack(alignment: .leading, spacing: 2) {

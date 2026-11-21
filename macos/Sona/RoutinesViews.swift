@@ -180,7 +180,7 @@ struct TasksSettingsView: View {
 
     var body: some View {
         Page {
-            PageTitle("Tasks", subtitle: "The weekly project digest, inbox notifications, housekeeping, triage routing, label groups, retired labels and task templates.")
+            PageTitle("Tasks", subtitle: "")
             ErrorNote(model.routines.error ?? model.work.mutationError)
             ProjectDigestSettings()
             InboxNotificationSettings()
@@ -239,18 +239,19 @@ private struct TriageRoutingSettings: View {
     var body: some View {
         let agents = model.agents
         PageSection("Triage routing") {
+            Text("Sona fills these on new tasks in Triage when at least three similar tasks agree, with Undo.").metaText(Theme.inkSecondary)
+                .padding(.bottom, Space.xs)
             Card {
                 ForEach(WorkAutoField.allCases) { field in
                     ToggleRow(
                         title: title(field),
-                        detail: "Fill it on new tasks in Triage when every one of at least three similar tasks agrees. You can undo each one.",
                         isOn: Binding(
                             get: { agents.triageAutoApply.contains(field) },
                             set: { on in Task { await agents.setTriageAutoApply(field, on) } }))
                 }
             }
             .disabled(agents.settingsUnread || agents.autonomyBusy)
-            Text("Rules run first, on every new task in Triage, and fill only empty fields.").metaText(Theme.inkSecondary)
+            Text("Rules fill only empty fields, before Sona's own guesses.").metaText(Theme.inkSecondary)
                 .padding(.top, Space.xs)
             Card {
                 if model.routines.triageRules.isEmpty {
@@ -313,9 +314,9 @@ private struct TriageRoutingSettings: View {
 
     private func title(_ field: WorkAutoField) -> String {
         switch field {
-        case .project: "Fill the project by itself"
-        case .labels: "Add labels by themselves"
-        case .owner: "Fill the owner by itself"
+        case .project: "Fill in the project"
+        case .labels: "Add labels"
+        case .owner: "Fill in the owner"
         }
     }
 
@@ -357,16 +358,16 @@ private struct HousekeepingSettings: View {
             ErrorNote(error ?? (model.agents.settingsUnread ? "Couldn't load housekeeping settings." : nil))
             Card {
                 ChoiceRow(
-                    title: "Auto-close stale tasks",
-                    detail: "Closes untouched open tasks as canceled with a history note, and posts an inbox summary.",
+                    title: "Close stale tasks",
+                    detail: "Cancels your untouched backlog and to-do tasks. One inbox notice a day lists them, with Undo.",
                     choices: choices(including: model.agents.autoCloseStaleDays),
                     label: Self.label,
                     selection: Binding(
                         get: { model.agents.autoCloseStaleDays },
                         set: { picked in Task { await save(picked, model.agents.autoArchiveDays) } }))
                 ChoiceRow(
-                    title: "Auto-archive completed work",
-                    detail: "Archives done or canceled tasks, completed projects, and ended cycles after this many days.",
+                    title: "Archive finished work",
+                    detail: "Done and canceled tasks, completed projects and ended cycles.",
                     choices: choices(including: model.agents.autoArchiveDays),
                     label: Self.label,
                     selection: Binding(

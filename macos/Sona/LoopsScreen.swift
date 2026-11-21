@@ -249,11 +249,11 @@ private struct WorkLoopEditor: View {
             PageSection("Tools") {
                 Card { tools }
             }
-            PageSection("Reasoning") {
+            PageSection("Thinking") {
                 Card {
                     ChoiceRow(
-                        title: "Thinking",
-                        detail: "How hard the agent thinks on each run. Higher is slower and costs more.",
+                        title: "Effort",
+                        detail: "Higher is slower and costs more.",
                         choices: [nil] + WorkLoopReasoning.choices.map(Optional.some),
                         label: { $0?.label ?? "Model default" },
                         selection: $draft.reasoning)

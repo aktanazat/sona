@@ -64,14 +64,14 @@ struct AgentBridgeView: View {
                         get: { store.closeParents },
                         set: { enabled in Task { await store.setCloseParents(enabled) } }))
                 ToggleRow(
-                    title: "Close sub-tasks when their parent closes",
-                    detail: "When a parent task is marked done or canceled, Sona closes its open sub-tasks the same way.",
+                    title: "Cancel open sub-tasks when their parent closes",
+                    detail: "Sub-tasks still in Triage stay. The inbox lists the rest, with Undo.",
                     isOn: Binding(
                         get: { store.closeSubtasks },
                         set: { enabled in Task { await store.setCloseSubtasks(enabled) } }))
                 ToggleRow(
                     title: "Start a parent when a sub-task starts",
-                    detail: "When a sub-task moves to In progress, Sona moves its backlog or todo parent to In progress too.",
+                    detail: "Only a parent still in Backlog or Todo.",
                     isOn: Binding(
                         get: { store.startParent },
                         set: { enabled in Task { await store.setStartParent(enabled) } }))

@@ -250,21 +250,28 @@ private struct DocumentProposals: View {
             }
         } header: {
             HStack(spacing: 10) {
+                Color.clear
+                    .frame(width: 22)
+                    .padding(.trailing, -4)
                 Image(systemName: "doc.text")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(Theme.inkTertiary)
-                    .frame(width: 22)
-                Text("Proposed document edits")
-                    .font(TypeScale.listTitle)
-                    .foregroundStyle(Theme.ink)
-                Text("\(proposals.count)")
-                    .font(TypeScale.label(12))
-                    .monospacedDigit()
-                    .foregroundStyle(Theme.inkTertiary)
+                    .frame(width: 16, height: 16)
+                HStack(spacing: 6) {
+                    Text("Proposed edits")
+                        .font(TypeScale.listTitle)
+                        .foregroundStyle(Theme.ink)
+                    Text("\(proposals.count)")
+                        .font(TypeScale.label(12))
+                        .monospacedDigit()
+                        .foregroundStyle(Theme.inkTertiary)
+                }
                 Spacer(minLength: 0)
             }
-            .padding(.horizontal, 14)
+            .padding(.leading, 14)
+            .padding(.trailing, 24)
             .frame(height: Theme.listRow)
+            .background(Theme.inset)
             .accessibilityElement(children: .combine)
             .accessibilityAddTraits(.isHeader)
         }
@@ -277,14 +284,17 @@ private struct DocumentProposalRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: Space.s) {
-                Text(kind)
-                    .metaText()
-                    .frame(width: 96, alignment: .leading)
+            HStack(spacing: 10) {
+                Color.clear.frame(width: 22)
+                Image(systemName: proposal.kind == .note ? "note.text" : "folder")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(Theme.inkTertiary)
+                    .frame(width: 14)
                 Text(proposal.targetTitle)
                     .font(TypeScale.listTitle)
                     .foregroundStyle(Theme.ink)
                     .lineLimit(1)
+                Text(kind).metaText()
                 AgentName(name: proposal.agent)
                 if let health = proposal.health {
                     Text(health.label).metaText()
@@ -305,9 +315,9 @@ private struct DocumentProposalRow: View {
                 .lineLimit(4)
                 .textSelection(.enabled)
                 .help(proposal.body)
-                .padding(.leading, 96 + Space.s)
+                .padding(.leading, 22 + 10 + 14 + 10)
         }
-        .padding(.leading, 14)
+        .padding(.leading, 6)
         .padding(.trailing, 16)
         .padding(.bottom, 8)
         .padding(.horizontal, 8)
@@ -315,7 +325,7 @@ private struct DocumentProposalRow: View {
 
     private var kind: String {
         switch proposal.kind {
-        case .note: "Add to note"
+        case .note: "Addition"
         case .projectDescription: "Description"
         case .projectUpdate: "Project update"
         case .unknown: "Edit"
@@ -390,10 +400,7 @@ private struct AutoAppliedLine: View {
 
     var body: some View {
         HStack(spacing: 6) {
-            Image(systemName: "wand.and.stars")
-                .font(.system(size: 10, weight: .medium))
-                .foregroundStyle(Theme.accent)
-            Text("\(field) \(value), applied automatically")
+            Text(line)
                 .metaText()
                 .lineLimit(1)
                 .help(change.reason)
@@ -404,22 +411,16 @@ private struct AutoAppliedLine: View {
         }
     }
 
-    private var field: String {
-        switch change.field {
-        case .project: "Project"
-        case .labels: "Label"
-        case .owner: "Owner"
-        }
-    }
-
-    private var value: String {
+    private var line: String {
         let work = model.work
         switch change.field {
-        case .project: return work.projects.first { $0.id == change.value }?.title ?? "a project"
-        case .labels: return work.labels.first { $0.id == change.value }?.name ?? "a label"
+        case .project:
+            return "Sona set the project to \(work.projects.first { $0.id == change.value }?.title ?? "a project")"
+        case .labels:
+            return "Sona added the label \(work.labels.first { $0.id == change.value }?.name ?? "a label")"
         case .owner:
-            if change.value == "me" { return "Me" }
-            return work.people.first { $0.id == change.value }?.name ?? "someone"
+            if change.value == "me" { return "Sona made you the owner" }
+            return "Sona set the owner to \(work.people.first { $0.id == change.value }?.name ?? "someone")"
         }
     }
 }
