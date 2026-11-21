@@ -208,14 +208,12 @@ final class TypingCorrector {
         }
     }
 
-    /// A Russian word in the common words is one people write, such as "щас" or "прога",
-    /// even where Apple's dictionary does not know it. English is left to Apple's
-    /// dictionary: its common words also hold misspellings people often write, such as
-    /// "occured" and "thats".
+    /// A word in the common words is one people write, such as "щас" or "gonna", even where
+    /// Apple's dictionary does not know it. The English list holds only words a spell checker
+    /// accepts, so a misspelling such as "occured" is not kept this way.
     private func needsCorrection(_ word: Substring, after text: String, lexicon: TypingLexicon) -> Bool {
         guard word.count > 1, !word.dropFirst().contains(where: \.isUppercase), !lexicon.contains(word),
-              !TypingText.isStretched(word),
-              !language.hasPrefix("ru") || common?.rarity(of: word.lowercased()) == nil
+              !TypingText.isStretched(word), common?.rarity(of: word.lowercased()) == nil
         else { return false }
         if word.first?.isUppercase == true, !TypingText.startsSentence(before: text[..<word.startIndex]) {
             return false

@@ -56,6 +56,7 @@ final class KeyboardViewController: UIInputViewController {
     private var suggesting: Task<Void, Never>?
     /// The strip's spelling guesses, worked out once typing pauses.
     private var guessing: Task<Void, Never>?
+    private var lastKeyAt = Date.distantPast
     #if DEBUG
     private let frames = FrameMeter()
     private let appearFrames = FrameMeter()
@@ -273,9 +274,12 @@ final class KeyboardViewController: UIInputViewController {
             session.predictor = loadedTable
             refreshSuggestions()
             /* Apple's checker loads its dictionary on its first call, which would otherwise
-             * be the first space. It waits until the keyboard has drawn and no finger is on
-             * a key: touch tracking runs the loop outside the default mode. */
-            try? await Task.sleep(for: .milliseconds(400))
+             * be the first space: 4 to 23 ms in a fresh keyboard on the simulator. So it is
+             * asked once no key has come for a second, when no finger is on a key (touch
+             * tracking runs the loop outside the default mode). */
+            repeat {
+                try? await Task.sleep(for: .milliseconds(250))
+            } while Date().timeIntervalSince(lastKeyAt) < 1
             RunLoop.main.perform(inModes: [.default]) { [weak self] in
                 MainActor.assumeIsolated {
                     guard let corrector, self?.corrector === corrector else { return }
@@ -332,6 +336,7 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private func afterKey() {
+        lastKeyAt = Date()
         refreshShift()
         scheduleSuggestions()
     }

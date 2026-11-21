@@ -5,7 +5,11 @@
 //   often seen after the context, best first. A context is one word, two words joined by a
 //   space, or empty for the start of a sentence.
 // - <lang>-words.txt, the language's common words, most common first, one per line, for
-//   completions and spelling guesses where the phone's dictionary has none.
+//   completions, swipe words and spelling guesses. The keyboard never corrects a word in it,
+//   so the English list keeps only words macOS's spell checker accepts in en_US
+//   (spelled-words.swift): Tatoeba's sentences also hold misspellings people often write,
+//   such as "occured" and "untill", and British spellings. The Russian list is not checked,
+//   so the chat words people write ("щас", "прога") stay in it. Run it on macOS.
 //
 // Words that are capitalized most of the time in mid-sentence are names (Tatoeba's
 // ubiquitous "Tom", "Том") and appear in neither, except "I". Only mid-sentence uses count:
@@ -16,6 +20,7 @@
 // The exports are https://downloads.tatoeba.org/exports/per_language/<code>/<code>_sentences.tsv.bz2,
 // decompressed.
 
+import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -105,11 +110,23 @@ for (const code of picked.length ? picked : [...languages.keys()]) {
   lines.sort();
   writeFileSync(join(out, `${lang}.tsv`), lines.join("\n") + "\n");
 
-  const words = [...unigrams.entries()]
+  const counted = [...unigrams.entries()]
     .filter(([key, value]) => value >= minimumCount && (midSentence.get(key) ?? 0) > 0 && !isName(key))
     .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
     .slice(0, commonWords)
     .map(([key]) => display(key));
+  const words = lang === "en" ? spelled(counted, "en_US") : counted;
   writeFileSync(join(out, `${lang}-words.txt`), words.join("\n") + "\n");
   console.log(`${lang}: ${lines.length} contexts, ${words.length} words`);
+}
+
+/** The words macOS's spell checker accepts in `language`, in order. */
+function spelled(words: string[], language: string): string[] {
+  const checked = spawnSync("swift", [join(import.meta.dir, "spelled-words.swift"), language], {
+    input: words.join("\n") + "\n",
+    encoding: "utf8",
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  if (checked.status !== 0) throw new Error(`spell check failed: ${checked.stderr}`);
+  return checked.stdout.split("\n").filter(Boolean);
 }

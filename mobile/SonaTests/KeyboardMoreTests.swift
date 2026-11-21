@@ -196,6 +196,38 @@ struct RussianTypingTests {
     }
 }
 
+@MainActor
+struct EnglishWordListTests {
+    private func corrector() async throws -> TypingCorrector {
+        let corrector = try #require(TypingCorrector(language: TypingLanguage.english.rawValue))
+        corrector.common = await CommonWords.list(for: .english)
+        return corrector
+    }
+
+    @Test("a misspelling is corrected to the word, never to a misspelling in the word list", arguments: [
+        "occuted", "occurrd", "occired", "ocured",
+    ])
+    func correctsToTheWord(typed: String) async throws {
+        let corrector = try await corrector()
+        #expect(corrector.correction(before: "it " + typed, lexicon: TypingLexicon())?.replacement == "occurred")
+    }
+
+    @Test("completions and swipe words from the English list are all words the spell checker accepts")
+    func listHoldsNoMisspellings() async throws {
+        let corrector = try await corrector()
+        let checker = UITextChecker()
+        let letters = "abcdefghijklmnopqrstuvwxyz".map(String.init)
+        let offered = Set((letters + letters.flatMap { first in letters.map { first + $0 } }).flatMap(corrector.completions(of:)))
+        let rejected = offered.filter { word in
+            checker.rangeOfMisspelledWord(
+                in: word, range: NSRange(location: 0, length: word.utf16.count),
+                startingAt: 0, wrap: false, language: corrector.language
+            ).location != NSNotFound
+        }
+        #expect(rejected.isEmpty, "\(rejected.sorted())")
+    }
+}
+
 struct KeyboardLanguagesTests {
     @Test("stored languages the keyboard no longer has count as English", arguments: [
         (["ja-JP"], [TypingLanguage.english]),
