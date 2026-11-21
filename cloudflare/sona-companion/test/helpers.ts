@@ -12,7 +12,7 @@ import {
   sha256Base64Url,
   utf8,
 } from "../src/encoding";
-import { isJsonRecord, type JsonRecord } from "../src/validation";
+import { isJsonRecord, type JsonRecord } from "../src/json";
 
 export interface Device {
   deviceId: string;

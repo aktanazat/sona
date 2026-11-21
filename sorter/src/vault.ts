@@ -1,9 +1,9 @@
+import { encodeChangeCursor } from "../../cloudflare/sona-companion/src/encoding";
 import {
   ApiError,
   type ChangeRow,
   type CompanionClient,
   type DeviceIdentity,
-  changeCursorAfter,
   snapshotHighWater,
 } from "./client";
 import {
@@ -104,7 +104,7 @@ export class Sorter {
       if (!page.has_more) break;
     }
     feed.objects = objects;
-    feed.cursor = changeCursorAfter(snapshotHighWater(highWater));
+    feed.cursor = encodeChangeCursor(snapshotHighWater(highWater));
     await this.deps.state.saveFeed(feed);
     return synced;
   }

@@ -1,12 +1,7 @@
 import type { MaintenanceClass } from "./constants";
 import { base64UrlEncode, randomId, toBytes } from "./encoding";
 import { problem } from "./errors";
-import {
-  isJsonArray,
-  isJsonInteger,
-  isJsonRecord,
-  isJsonString,
-} from "./validation";
+import { isJsonArray, isJsonInteger, isJsonRecord, isJsonString } from "./json";
 import type {
   ActiveDeviceRow,
   Env,

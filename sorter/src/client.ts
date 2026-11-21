@@ -144,11 +144,6 @@ interface Mutation {
   idempotencyKey: string;
 }
 
-/** The change cursor after `sequence`, in the Worker's own `c.` encoding. */
-export function changeCursorAfter(sequence: number): string {
-  return `c.${base64UrlEncode(utf8(JSON.stringify({ v: 1, a: sequence })))}`;
-}
-
 /** The sequence a snapshot `high_water` token names. */
 export function snapshotHighWater(token: string): number {
   const bytes = token.startsWith("h.") ? base64UrlDecode(token.slice(2)) : null;
