@@ -23,9 +23,10 @@ pub(super) struct StagedRevision {
 
 /// How an upload of a staged revision ended without committing.
 pub(super) enum UploadRefused {
-    /// The service will never take these bytes: the base revision moved or
-    /// the upload is gone. The caller drops the staged revision and stages
-    /// again from the current head.
+    /// The service will never take these bytes: the base revision moved, the
+    /// upload is gone or was purged, or its key already holds other bytes.
+    /// The caller drops the staged revision and stages again from the
+    /// current head, under new ids.
     Restage(CloudRuntimeError),
     /// Anything else; the same staged bytes are retried later.
     Retry(CloudRuntimeError),
@@ -200,7 +201,7 @@ pub(super) async fn upload(
                     std::mem::take(bytes),
                 )
                 .await
-                .map_err(|error| retry(CloudRuntimeError::Client(error)))?;
+                .map_err(refused)?;
             if response.upload_id != staged.upload_id
                 || response.index != index
                 || !response.accepted
@@ -237,18 +238,38 @@ pub(super) async fn upload(
         .map_err(|error| retry(map_store_error(error)))
 }
 
-/// A refusal the same bytes can never get past is restaged: the base moved
-/// (for a claim, another writer created the object first) or the upload is gone.
 fn refused(error: CloudClientError) -> UploadRefused {
-    let restage = matches!(
-        &error,
-        CloudClientError::Api(api)
-            if matches!(api.code, CloudErrorCode::NotFound | CloudErrorCode::StaleRevision)
-    );
+    let restage = matches!(&error, CloudClientError::Api(api) if restages(&api.code));
     let error = CloudRuntimeError::Client(error);
     if restage {
         UploadRefused::Restage(error)
     } else {
         UploadRefused::Retry(error)
+    }
+}
+
+/// Refusals the same bytes can never get past: for a claim, stale means
+/// another writer created the object first; a purged session answers
+/// upload_incomplete.
+fn restages(code: &CloudErrorCode) -> bool {
+    matches!(
+        code,
+        CloudErrorCode::NotFound
+            | CloudErrorCode::StaleRevision
+            | CloudErrorCode::UploadIncomplete
+            | CloudErrorCode::IdempotencyConflict
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_purged_or_conflicting_upload_is_staged_again() {
+        assert!(restages(&CloudErrorCode::UploadIncomplete));
+        assert!(restages(&CloudErrorCode::IdempotencyConflict));
+        assert!(restages(&CloudErrorCode::StaleRevision));
+        assert!(!restages(&CloudErrorCode::QuotaExceeded));
     }
 }

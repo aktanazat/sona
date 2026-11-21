@@ -3,13 +3,16 @@ use super::{
     memory_index::phone_sync_directory,
     open_object_revision_payload,
     revision_upload::{self, StagedRevision, UploadRefused},
-    sha256_base64url, verify_writer_signature, write_staged_file, CloudAccess, CloudClientError,
-    CloudErrorCode, CloudRuntimeError, CloudSyncRuntime, ObjectContentKind,
+    sha256_base64url, utc_now_ms, verify_writer_signature, write_staged_file, CloudAccess,
+    CloudClientError, CloudErrorCode, CloudRuntimeError, CloudSyncRuntime, ObjectContentKind,
     ObjectRevisionCryptoContext, ObjectRevisionEnvelope,
 };
-use crate::agent_panel::{
-    protocol::{SonaAgentChatRoleV1, SonaAgentChatTurnV1},
-    PhoneTurnFailure,
+use crate::{
+    agent_panel::{
+        protocol::{SonaAgentChatRoleV1, SonaAgentChatTurnV1},
+        PhoneTurnFailure,
+    },
+    settings,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -79,6 +82,15 @@ impl AgentAsk {
 
     fn expired(&self, now_utc_ms: i64) -> bool {
         self.asked_at_utc_ms < now_utc_ms.saturating_sub(ASK_LIFETIME_MS)
+    }
+
+    /// Drop the question and the earlier turns, keeping what replay
+    /// protection needs. Whether there was text to drop.
+    fn forget_text(&mut self) -> bool {
+        let had = !self.question.is_empty() || !self.recent_turns.is_empty();
+        self.question = String::new();
+        self.recent_turns = Vec::new();
+        had
     }
 }
 
@@ -154,8 +166,8 @@ fn reply_object_id(ask_object_id: &str) -> String {
 }
 
 /// Every ask this Mac took, in the order it pulled them. An ask is resumed
-/// from its phase after a restart; `Done` stays until the ask is a day old so
-/// a replayed revision is never answered twice.
+/// from its phase after a restart; a `Done` entry keeps only its id and time
+/// until the ask is a day old, so a replayed revision is never answered twice.
 #[derive(Default, Serialize, Deserialize)]
 struct AskState {
     vault_id: String,
@@ -194,18 +206,25 @@ enum Step {
 }
 
 impl AskState {
-    fn next(&self, now_utc_ms: i64) -> Option<(String, Step)> {
-        self.asks.iter().find_map(|entry| {
-            let step = match &entry.progress {
-                Progress::Done => return None,
-                Progress::PublishingFinal { .. } => Step::Upload,
-                _ if entry.ask.expired(now_utc_ms) => Step::Expire,
-                Progress::Remembered => Step::PublishWorking,
-                Progress::PublishingWorking { .. } => Step::Upload,
-                Progress::Working => Step::RunTurn,
-            };
-            Some((entry.object_id.clone(), step))
-        })
+    /// The next step of every open ask, in pull order. Each ask moves on its
+    /// own, so one whose upload keeps failing never holds up the others; past
+    /// its lifetime every unfinished ask expires, a pending answer included.
+    fn open_steps(&self, now_utc_ms: i64) -> Vec<(String, Step)> {
+        self.asks
+            .iter()
+            .filter_map(|entry| {
+                let step = match &entry.progress {
+                    Progress::Done => return None,
+                    _ if entry.ask.expired(now_utc_ms) => Step::Expire,
+                    Progress::Remembered => Step::PublishWorking,
+                    Progress::PublishingWorking { .. } | Progress::PublishingFinal { .. } => {
+                        Step::Upload
+                    }
+                    Progress::Working => Step::RunTurn,
+                };
+                Some((entry.object_id.clone(), step))
+            })
+            .collect()
     }
 
     fn entry(&mut self, object_id: &str) -> Option<&mut RememberedAsk> {
@@ -234,48 +253,77 @@ impl AskState {
         self.asks.len() != before
     }
 
-    fn prune(&mut self, now_utc_ms: i64) {
+    /// Drop a finished ask's text at once and its entry once it is a day old.
+    /// Whether anything changed.
+    fn tidy(&mut self, now_utc_ms: i64) -> bool {
+        let before = self.asks.len();
         self.asks.retain(|entry| {
             !(matches!(entry.progress, Progress::Done) && entry.ask.expired(now_utc_ms))
         });
+        let mut changed = self.asks.len() != before;
+        for entry in &mut self.asks {
+            if matches!(entry.progress, Progress::Done) {
+                changed |= entry.ask.forget_text();
+            }
+        }
+        changed
     }
 }
 
-fn load(directory: &Path, vault_id: &str, device_id: &str) -> Result<AskState, CloudRuntimeError> {
-    let state = match fs::read(directory.join(STATE_FILE)) {
-        Ok(bytes) => serde_json::from_slice::<AskState>(&Zeroizing::new(bytes))
-            .map_err(|_| CloudRuntimeError::IntegrityFailure)?,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => AskState::default(),
-        Err(_) => return Err(CloudRuntimeError::File),
+/// The asks for this vault and device, tidied, and whether that changed the
+/// file. Asks kept for another vault or device are dropped.
+fn load(
+    directory: &Path,
+    vault_id: &str,
+    device_id: &str,
+    now_utc_ms: i64,
+) -> Result<(AskState, bool), CloudRuntimeError> {
+    let (mut state, mut changed) = match read_state(directory)? {
+        Some(state) if state.vault_id == vault_id && state.device_id == device_id => (state, false),
+        stored => (
+            AskState {
+                vault_id: vault_id.to_owned(),
+                device_id: device_id.to_owned(),
+                asks: Vec::new(),
+            },
+            stored.is_some(),
+        ),
     };
-    if state.vault_id == vault_id && state.device_id == device_id {
-        return Ok(state);
-    }
-    Ok(AskState {
-        vault_id: vault_id.to_owned(),
-        device_id: device_id.to_owned(),
-        asks: Vec::new(),
-    })
+    changed |= state.tidy(now_utc_ms);
+    Ok((state, changed))
 }
 
-/// Whether any ask on disk, for any vault, still needs work. Read before the
-/// keychain is, so a Mac with nothing to answer costs one small file read.
-fn has_open_asks(directory: &Path) -> Result<bool, CloudRuntimeError> {
+fn read_state(directory: &Path) -> Result<Option<AskState>, CloudRuntimeError> {
     match fs::read(directory.join(STATE_FILE)) {
         Ok(bytes) => serde_json::from_slice::<AskState>(&Zeroizing::new(bytes))
-            .map(|state| {
-                state
-                    .asks
-                    .iter()
-                    .any(|entry| !matches!(entry.progress, Progress::Done))
-            })
+            .map(Some)
             .map_err(|_| CloudRuntimeError::IntegrityFailure),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(_) => Err(CloudRuntimeError::File),
     }
 }
 
+/// Tidy the file for whichever vault wrote it and say whether any ask still
+/// needs work. Read before the keychain is, so a Mac with nothing to answer
+/// costs one small file read.
+fn tidy_on_disk(directory: &Path, now_utc_ms: i64) -> Result<bool, CloudRuntimeError> {
+    let Some(mut state) = read_state(directory)? else {
+        return Ok(false);
+    };
+    if state.tidy(now_utc_ms) {
+        persist(directory, &state)?;
+    }
+    Ok(state
+        .asks
+        .iter()
+        .any(|entry| !matches!(entry.progress, Progress::Done)))
+}
+
+/// Write the asks, or delete the file once none are left.
 fn persist(directory: &Path, state: &AskState) -> Result<(), CloudRuntimeError> {
+    if state.asks.is_empty() {
+        return remove_state(directory);
+    }
     fs::create_dir_all(directory).map_err(|_| CloudRuntimeError::File)?;
     fs::set_permissions(directory, fs::Permissions::from_mode(0o700))
         .map_err(|_| CloudRuntimeError::File)?;
@@ -284,6 +332,14 @@ fn persist(directory: &Path, state: &AskState) -> Result<(), CloudRuntimeError> 
         STATE_FILE,
         &Zeroizing::new(serde_json::to_vec(state).map_err(|_| CloudRuntimeError::File)?),
     )
+}
+
+fn remove_state(directory: &Path) -> Result<(), CloudRuntimeError> {
+    match fs::remove_file(directory.join(STATE_FILE)) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(CloudRuntimeError::File),
+    }
 }
 
 /// Serializes the sync loop's writes (remember, forget) with the worker's,
@@ -344,9 +400,15 @@ impl CloudSyncRuntime {
             .gate
             .lock()
             .map_err(|_| CloudRuntimeError::Storage)?;
-        let mut state = load(&directory, &access.state.vault_id, &access.state.device_id)?;
-        if edit(&mut state)? {
-            state.prune(adjusted_now_ms(access.state.clock_offset_ms));
+        let now = adjusted_now_ms(access.state.clock_offset_ms);
+        let (mut state, tidied) = load(
+            &directory,
+            &access.state.vault_id,
+            &access.state.device_id,
+            now,
+        )?;
+        if edit(&mut state)? | tidied {
+            state.tidy(now);
             persist(&directory, &state)?;
         }
         Ok(())
@@ -442,7 +504,10 @@ impl CloudSyncRuntime {
                 .gate
                 .lock()
                 .map_err(|_| CloudRuntimeError::Storage)?;
-            has_open_asks(&directory)?
+            if !settings::get_settings(&self.app).cloud_sync.enabled {
+                return remove_state(&directory);
+            }
+            tidy_on_disk(&directory, utc_now_ms())?
         };
         if !open {
             return Ok(());
@@ -454,85 +519,102 @@ impl CloudSyncRuntime {
             if !self.request_permitted(&access.state).await {
                 return Ok(());
             }
-            let mut next = None;
+            let mut steps = Vec::new();
             self.edit_asks(&access, |state| {
-                next = state.next(adjusted_now_ms(access.state.clock_offset_ms));
+                steps = state.open_steps(adjusted_now_ms(access.state.clock_offset_ms));
                 Ok(false)
             })?;
-            let Some((object_id, step)) = next else {
-                return Ok(());
-            };
-            match step {
-                Step::Expire => self.edit_asks(&access, |state| {
-                    if let Some(entry) = state.entry(&object_id) {
-                        entry.progress = Progress::Done;
+            let mut moved = false;
+            for (object_id, step) in steps {
+                match self.take_step(&access, &object_id, step).await {
+                    Ok(()) => moved = true,
+                    Err(error) => {
+                        log::warn!("A question from the phone is not answered yet: {error:?}");
                     }
+                }
+            }
+            if !moved {
+                return Ok(());
+            }
+        }
+    }
+
+    async fn take_step(
+        &self,
+        access: &CloudAccess,
+        object_id: &str,
+        step: Step,
+    ) -> Result<(), CloudRuntimeError> {
+        match step {
+            Step::Expire => self.edit_asks(access, |state| {
+                if let Some(entry) = state.entry(object_id) {
+                    entry.progress = Progress::Done;
+                }
+                Ok(true)
+            }),
+            Step::PublishWorking => {
+                let reply = AgentReply::new(
+                    object_id,
+                    &access.state.device_id,
+                    None,
+                    adjusted_now_ms(access.state.clock_offset_ms),
+                );
+                let mut revision = stage_reply(access, &reply)?;
+                // The claim is a create: the service commits only the first
+                // Mac's, even when this Mac already pulled another's claim.
+                revision.base_revision_id = None;
+                self.edit_asks(access, |state| {
+                    let Some(entry) = state.entry(object_id) else {
+                        return Ok(false);
+                    };
+                    if !matches!(entry.progress, Progress::Remembered) {
+                        return Ok(false);
+                    }
+                    entry.progress = Progress::PublishingWorking { revision };
                     Ok(true)
-                })?,
-                Step::PublishWorking => {
-                    let reply = AgentReply::new(
-                        &object_id,
-                        &access.state.device_id,
-                        None,
-                        adjusted_now_ms(access.state.clock_offset_ms),
-                    );
-                    let mut revision = stage_reply(&access, &reply)?;
-                    // The claim is a create: the service commits only the first
-                    // Mac's, even when this Mac already pulled another's claim.
-                    revision.base_revision_id = None;
-                    self.edit_asks(&access, |state| {
-                        let Some(entry) = state.entry(&object_id) else {
-                            return Ok(false);
-                        };
-                        if !matches!(entry.progress, Progress::Remembered) {
-                            return Ok(false);
-                        }
-                        entry.progress = Progress::PublishingWorking { revision };
-                        Ok(true)
-                    })?;
-                }
-                Step::Upload => self.upload_reply(&access, &object_id).await?,
-                Step::RunTurn => {
-                    let mut ask = None;
-                    self.edit_asks(&access, |state| {
-                        ask = state.entry(&object_id).map(|entry| entry.ask.clone());
-                        Ok(false)
-                    })?;
-                    let Some(ask) = ask else { continue };
-                    let recent_turns = ask
-                        .recent_turns
-                        .into_iter()
-                        .map(|turn| SonaAgentChatTurnV1 {
-                            role: turn.role,
-                            message: turn.message,
-                            outcome: None,
-                        })
-                        .collect();
-                    let outcome = crate::agent_panel::run_phone_turn(
-                        &self.app,
-                        &ask.question,
-                        recent_turns,
-                        TURN_DEADLINE,
-                    )
-                    .await;
-                    let reply = AgentReply::new(
-                        &object_id,
-                        &access.state.device_id,
-                        Some(outcome),
-                        adjusted_now_ms(access.state.clock_offset_ms),
-                    );
-                    let revision = stage_reply(&access, &reply)?;
-                    self.edit_asks(&access, |state| {
-                        let Some(entry) = state.entry(&object_id) else {
-                            return Ok(false);
-                        };
-                        if !matches!(entry.progress, Progress::Working) {
-                            return Ok(false);
-                        }
-                        entry.progress = Progress::PublishingFinal { reply, revision };
-                        Ok(true)
-                    })?;
-                }
+                })
+            }
+            Step::Upload => self.upload_reply(access, object_id).await,
+            Step::RunTurn => {
+                let mut ask = None;
+                self.edit_asks(access, |state| {
+                    ask = state.entry(object_id).map(|entry| entry.ask.clone());
+                    Ok(false)
+                })?;
+                let Some(ask) = ask else { return Ok(()) };
+                let recent_turns = ask
+                    .recent_turns
+                    .into_iter()
+                    .map(|turn| SonaAgentChatTurnV1 {
+                        role: turn.role,
+                        message: turn.message,
+                        outcome: None,
+                    })
+                    .collect();
+                let outcome = crate::agent_panel::run_phone_turn(
+                    &self.app,
+                    &ask.question,
+                    recent_turns,
+                    TURN_DEADLINE,
+                )
+                .await;
+                let reply = AgentReply::new(
+                    object_id,
+                    &access.state.device_id,
+                    Some(outcome),
+                    adjusted_now_ms(access.state.clock_offset_ms),
+                );
+                let revision = stage_reply(access, &reply)?;
+                self.edit_asks(access, |state| {
+                    let Some(entry) = state.entry(object_id) else {
+                        return Ok(false);
+                    };
+                    if !matches!(entry.progress, Progress::Working) {
+                        return Ok(false);
+                    }
+                    entry.progress = Progress::PublishingFinal { reply, revision };
+                    Ok(true)
+                })
             }
         }
     }
@@ -719,11 +801,33 @@ mod tests {
         ));
     }
 
+    fn first_step(state: &AskState, now: i64) -> Option<(String, Step)> {
+        state.open_steps(now).into_iter().next()
+    }
+
+    fn staged() -> StagedRevision {
+        StagedRevision {
+            object_id: reply_object_id("ask"),
+            revision_id: "revision".to_owned(),
+            upload_id: "upload".to_owned(),
+            base_revision_id: None,
+            manifest: Vec::new(),
+            chunks: Vec::new(),
+        }
+    }
+
+    fn pending_answer() -> Progress {
+        Progress::PublishingFinal {
+            reply: AgentReply::new("ask", "mac", Some(Ok("An answer".to_owned())), 1),
+            revision: staged(),
+        }
+    }
+
     #[test]
     fn a_restart_resumes_an_unanswered_ask_and_never_reruns_an_answered_one() {
         let directory = tempfile::tempdir().expect("directory");
         let now = 1_763_600_100_000;
-        let mut state = load(directory.path(), "vault", "mac").expect("empty state");
+        let (mut state, _) = load(directory.path(), "vault", "mac", now).expect("empty state");
         state
             .asks
             .push(remembered("answered", now - 1_000, Progress::Done));
@@ -735,19 +839,19 @@ mod tests {
             .push(remembered("later", now - 100, Progress::Remembered));
         persist(directory.path(), &state).expect("persist");
 
-        let mut restarted = load(directory.path(), "vault", "mac").expect("reload");
+        let (mut restarted, _) = load(directory.path(), "vault", "mac", now).expect("reload");
         assert_eq!(
-            restarted.next(now),
+            first_step(&restarted, now),
             Some(("working".to_owned(), Step::RunTurn))
         );
         assert!(!restarted.remember("answered", fixture_ask()));
         restarted.entry("working").expect("working").progress = Progress::Done;
         assert_eq!(
-            restarted.next(now),
+            first_step(&restarted, now),
             Some(("later".to_owned(), Step::PublishWorking))
         );
         restarted.entry("later").expect("later").progress = Progress::Done;
-        assert_eq!(restarted.next(now), None);
+        assert_eq!(first_step(&restarted, now), None);
     }
 
     #[test]
@@ -763,7 +867,7 @@ mod tests {
         assert!(state.forget_unstarted("unstarted"));
         assert!(!state.forget_unstarted("thinking"));
         assert_eq!(
-            state.next(now),
+            first_step(&state, now),
             Some(("thinking".to_owned(), Step::RunTurn))
         );
     }
@@ -777,22 +881,77 @@ mod tests {
             now - ASK_LIFETIME_MS - 1,
             Progress::Remembered,
         ));
-        assert_eq!(state.next(now), Some(("stale".to_owned(), Step::Expire)));
+        assert_eq!(
+            first_step(&state, now),
+            Some(("stale".to_owned(), Step::Expire))
+        );
+    }
+
+    #[test]
+    fn an_answer_that_cannot_upload_holds_up_no_other_ask_and_expires() {
+        let now = 1_763_600_100_000;
+        let mut state = AskState::default();
+        state
+            .asks
+            .push(remembered("stuck", now - 1_000, pending_answer()));
+        state
+            .asks
+            .push(remembered("next", now - 500, Progress::Remembered));
+        assert_eq!(
+            state.open_steps(now),
+            [
+                ("stuck".to_owned(), Step::Upload),
+                ("next".to_owned(), Step::PublishWorking),
+            ]
+        );
+        assert_eq!(
+            first_step(&state, now + ASK_LIFETIME_MS),
+            Some(("stuck".to_owned(), Step::Expire))
+        );
+    }
+
+    #[test]
+    fn a_finished_ask_keeps_no_text_and_the_file_goes_with_the_last_ask() {
+        let directory = tempfile::tempdir().expect("directory");
+        let file = directory.path().join(STATE_FILE);
+        let now = 1_763_600_100_000;
+        let mut state = AskState {
+            vault_id: "vault".to_owned(),
+            device_id: "mac".to_owned(),
+            asks: vec![remembered("answered", now, Progress::Done)],
+        };
+        persist(directory.path(), &state).expect("persist");
+        assert_eq!(
+            fs::metadata(&file).expect("file").permissions().mode() & 0o777,
+            0o600
+        );
+
+        let (tidied, changed) = load(directory.path(), "vault", "mac", now).expect("load");
+        assert!(changed);
+        persist(directory.path(), &tidied).expect("persist");
+        let question = fixture_ask().question;
+        assert!(!String::from_utf8(fs::read(&file).expect("read"))
+            .expect("utf8")
+            .contains(&question));
+
+        let (gone, changed) =
+            load(directory.path(), "vault", "mac", now + ASK_LIFETIME_MS + 1).expect("load");
+        assert!(changed && gone.asks.is_empty());
+        persist(directory.path(), &gone).expect("persist");
+        assert!(!file.exists());
+
+        state.asks = vec![remembered("open", now, Progress::Working)];
+        persist(directory.path(), &state).expect("persist");
+        let (other, changed) = load(directory.path(), "other", "mac", now).expect("load");
+        assert!(changed);
+        persist(directory.path(), &other).expect("persist");
+        assert!(!file.exists());
     }
 
     #[test]
     fn only_the_mac_whose_claim_commits_answers() {
         let now = 1_763_600_100_000;
-        let claim = || Progress::PublishingWorking {
-            revision: StagedRevision {
-                object_id: reply_object_id("ask"),
-                revision_id: "revision".to_owned(),
-                upload_id: "upload".to_owned(),
-                base_revision_id: None,
-                manifest: Vec::new(),
-                chunks: Vec::new(),
-            },
-        };
+        let claim = || Progress::PublishingWorking { revision: staged() };
         let no_restage = |_: &AgentReply| -> Result<StagedRevision, CloudRuntimeError> {
             panic!("a claim is never restaged as a final answer")
         };
@@ -812,8 +971,11 @@ mod tests {
                 .after_upload(Uploaded::Stale, false, no_restage)
                 .expect("stale"),
         ));
-        assert_eq!(first.next(now), Some(("ask".to_owned(), Step::RunTurn)));
-        assert_eq!(second.next(now), None);
+        assert_eq!(
+            first_step(&first, now),
+            Some(("ask".to_owned(), Step::RunTurn))
+        );
+        assert_eq!(first_step(&second, now), None);
 
         let mut dropped = AskState::default();
         dropped.asks.push(remembered(
@@ -824,7 +986,7 @@ mod tests {
                 .expect("restage"),
         ));
         assert_eq!(
-            dropped.next(now),
+            first_step(&dropped, now),
             Some(("ask".to_owned(), Step::PublishWorking))
         );
     }

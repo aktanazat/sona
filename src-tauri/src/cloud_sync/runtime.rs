@@ -2,6 +2,7 @@ use std::{
     fmt,
     fs::{self, File, OpenOptions},
     io::Write,
+    os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -4400,6 +4401,7 @@ fn write_staged_file(
         let mut file = OpenOptions::new()
             .create_new(true)
             .write(true)
+            .mode(0o600)
             .open(&temporary)
             .map_err(|_| CloudRuntimeError::File)?;
         file.write_all(bytes).map_err(|_| CloudRuntimeError::File)?;
