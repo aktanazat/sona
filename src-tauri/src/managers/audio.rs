@@ -9,6 +9,7 @@ use crate::audio_toolkit::{
 };
 use crate::helpers::clamshell;
 use crate::managers::transcription::{StreamRouter, TranscriptionManager};
+use crate::media_playback::PlaybackChange;
 use crate::meeting::detection::input_device::SelfInputDeviceLease;
 use crate::meeting::{
     capture::{MeetingCaptureSource, PacketSink},
@@ -19,7 +20,7 @@ use crate::meeting::{
     },
 };
 use crate::modes::RunPlan;
-use crate::settings::{get_settings, update_settings, AppSettings};
+use crate::settings::{get_settings, update_settings, AppSettings, PlaybackWhileRecording};
 use crate::utils;
 use log::{debug, error, info, trace, warn};
 use serde::Serialize;
@@ -478,14 +479,24 @@ pub enum MicrophoneMode {
     OnDemand,
 }
 
-/// Tracks our forced "mute while recording" so we can restore the user's audio
-/// exactly as it was. `did_mute` is true while our mute is active; `prev_muted`
-/// is the system mute state captured just before we muted, used to decide
-/// whether to unmute on stop (so a system that was already muted stays muted).
-#[derive(Debug, Default, Clone, Copy)]
-struct MuteState {
-    did_mute: bool,
-    prev_muted: Option<bool>,
+/// Other apps' sound as Sona changed it for the current dictation.
+#[derive(Debug, Clone, Copy)]
+enum PlaybackHold {
+    /// The system output was muted; `prev_muted` is its state just before,
+    /// so a system already muted stays muted.
+    Muted {
+        prev_muted: Option<bool>,
+    },
+    Changed(PlaybackChange),
+}
+
+impl PlaybackHold {
+    fn restore(self) {
+        match self {
+            Self::Muted { prev_muted } => restore_mute(prev_muted),
+            Self::Changed(change) => change.restore(),
+        }
+    }
 }
 
 /// The persisted microphone preference currently in effect. Clamshell and
@@ -734,7 +745,7 @@ pub struct AudioRecordingManager {
     practice_generation: Arc<AtomicU64>,
     is_open: Arc<Mutex<bool>>,
     is_recording: Arc<Mutex<bool>>,
-    mute_state: Arc<Mutex<MuteState>>,
+    playback_hold: Arc<Mutex<Option<PlaybackHold>>>,
     close_generation: Arc<AtomicU64>,
     cancel_generation: Arc<AtomicU64>,
     stream_router: Arc<StreamRouter>,
@@ -787,7 +798,7 @@ impl AudioRecordingManager {
             practice_generation: Arc::new(AtomicU64::new(0)),
             is_open: Arc::new(Mutex::new(false)),
             is_recording: Arc::new(Mutex::new(false)),
-            mute_state: Arc::new(Mutex::new(MuteState::default())),
+            playback_hold: Arc::new(Mutex::new(None)),
             close_generation: Arc::new(AtomicU64::new(0)),
             cancel_generation: Arc::new(AtomicU64::new(0)),
             stream_router,
@@ -1098,13 +1109,13 @@ impl AudioRecordingManager {
 
     /* ---------- microphone life-cycle -------------------------------------- */
 
-    /// Applies mute for the still-current recording if mute_while_recording
-    /// is enabled, something other than Sona is playing, and the stream is
-    /// open. Snapshots the system's prior mute state so `remove_mute` can
-    /// restore it instead of unconditionally unmuting.
-    pub fn apply_mute(&self, generation: u64) {
-        let settings = get_settings(&self.app_handle);
-        if !settings.mute_while_recording {
+    /// Pauses, lowers or mutes other apps' sound for the still-current
+    /// recording, as `playback_while_recording` says, when something other
+    /// than Sona is playing and the stream is open. What it changed is kept so
+    /// `release_playback` puts back exactly that.
+    pub fn hold_playback(&self, generation: u64) {
+        let choice = get_settings(&self.app_handle).playback_while_recording;
+        if choice == PlaybackWhileRecording::Keep {
             return;
         }
         // A dictation riding a meeting's stream must not silence the call the
@@ -1112,50 +1123,52 @@ impl AudioRecordingManager {
         if self.capture_lease.holder() == Some(CaptureOwner::Meeting) {
             return;
         }
-        // Nothing playing means nothing to mute, and a mute then would only
+        // Nothing playing means nothing to change, and a mute then would only
         // silence a notification that arrives mid-dictation. When the check
-        // itself is unavailable the mute goes ahead, as it always did.
+        // itself is unavailable the change goes ahead.
         if output_playing_elsewhere() == Some(false) {
-            debug!("Mute skipped: nothing is playing");
+            debug!("Playback left alone: nothing is playing");
             return;
         }
 
-        // Lock order: is_open before mute_state (matches stop_microphone_stream).
+        // Lock order: is_open before playback_hold (matches stop_microphone_stream).
         let is_open = lock_recover(&self.is_open);
-        let mut mute_guard = lock_recover(&self.mute_state);
-        // Already muted this session — don't re-snapshot, or a duplicate/late
-        // apply would overwrite prev_muted with our own forced-muted state and
-        // strand audio muted on stop.
-        if mute_guard.did_mute {
+        let mut hold = lock_recover(&self.playback_hold);
+        // Already held this session: a duplicate or late call would take our
+        // own change for the user's state and strand it on stop.
+        if hold.is_some() || !*is_open {
             return;
         }
-        if *is_open {
-            let prev_muted = get_mute();
-            // Stop/cancel invalidate first, then take mute_state to restore.
-            // Check under that same lock after the slow playback/mute reads:
-            // either they already ended this generation, or their restore
-            // will follow this mute. A late start cue cannot mute afterwards.
-            if !self.is_recording_readiness_current(generation) {
-                return;
+        let held = match choice {
+            PlaybackWhileRecording::Keep => return,
+            PlaybackWhileRecording::Pause => PlaybackChange::pause().map(PlaybackHold::Changed),
+            PlaybackWhileRecording::Lower => PlaybackChange::lower().map(PlaybackHold::Changed),
+            PlaybackWhileRecording::Mute => {
+                let prev_muted = get_mute();
+                set_mute(true);
+                Some(PlaybackHold::Muted { prev_muted })
             }
-            mute_guard.prev_muted = prev_muted;
-            set_mute(true);
-            mute_guard.did_mute = true;
-            debug!("Mute applied (prev_muted={:?})", mute_guard.prev_muted);
+        };
+        let Some(held) = held else {
+            return;
+        };
+        // Stop/cancel invalidate first, then take playback_hold to restore.
+        // Checked under that same lock after the slow change: either they
+        // already ended this generation and it is undone here, or their
+        // restore follows.
+        if !self.is_recording_readiness_current(generation) {
+            held.restore();
+            return;
         }
+        debug!("Playback held: {held:?}");
+        *hold = Some(held);
     }
 
-    /// Removes mute if it was applied, restoring the system's prior mute state
-    /// (a system already muted before recording stays muted).
-    pub fn remove_mute(&self) {
-        let mut mute_guard = lock_recover(&self.mute_state);
-        if mute_guard.did_mute {
-            restore_mute(mute_guard.prev_muted);
-            mute_guard.did_mute = false;
-            debug!(
-                "Mute removed (restored prev_muted={:?})",
-                mute_guard.prev_muted
-            );
+    /// Puts back what `hold_playback` changed, if anything.
+    pub fn release_playback(&self) {
+        if let Some(held) = lock_recover(&self.playback_hold).take() {
+            debug!("Playback released: {held:?}");
+            held.restore();
         }
     }
 
@@ -1282,13 +1295,7 @@ impl AudioRecordingManager {
 
             // Torn down inline rather than via stop_microphone_stream(), which
             // takes the `is_open` lock we are already holding.
-            {
-                let mut mute_guard = lock_recover(&self.mute_state);
-                if mute_guard.did_mute {
-                    restore_mute(mute_guard.prev_muted);
-                    mute_guard.did_mute = false;
-                }
-            }
+            self.release_playback();
             if let Some(rec) = lock_recover(&self.recorder).as_mut() {
                 let _ = rec.close();
             }
@@ -1305,17 +1312,9 @@ impl AudioRecordingManager {
 
         let start_time = Instant::now();
 
-        // Don't mute immediately - caller will handle muting after audio feedback.
-        // The previous stream restored audio on close, so did_mute should already
-        // be false here; if it somehow isn't, restore rather than just clearing the
-        // flag, which would strand system audio muted.
-        {
-            let mut mute_guard = lock_recover(&self.mute_state);
-            if mute_guard.did_mute {
-                restore_mute(mute_guard.prev_muted);
-                mute_guard.did_mute = false;
-            }
-        }
+        // The previous stream restored playback on close, so nothing should
+        // be held here; if something is, put it back rather than strand it.
+        self.release_playback();
 
         // Get the selected device from settings, considering clamshell mode.
         // No pre-flight enumeration here: when nothing is configured the
@@ -1385,13 +1384,7 @@ impl AudioRecordingManager {
             return;
         }
 
-        {
-            let mut mute_guard = lock_recover(&self.mute_state);
-            if mute_guard.did_mute {
-                restore_mute(mute_guard.prev_muted);
-            }
-            mute_guard.did_mute = false;
-        }
+        self.release_playback();
 
         Self::close_releasing_lease(&self.self_lease, || {
             if let Some(rec) = lock_recover(&self.recorder).as_mut() {
@@ -1896,11 +1889,10 @@ impl AudioRecordingManager {
 
                 *lock_recover(&self.is_recording) = false;
 
-                // A cancelled dictation ends the mute like a finished one does.
-                // Only a stream close restored it before, so with the microphone
-                // held open (always-on, lazy close, a meeting capture) the Mac
-                // stayed silent until the stream finally closed.
-                self.remove_mute();
+                // A cancelled dictation puts playback back like a finished one
+                // does, even with the microphone held open (always-on, lazy
+                // close, a meeting capture).
+                self.release_playback();
 
                 // In on-demand mode, close the mic (lazily if the setting is enabled)
                 if matches!(*lock_recover(&self.mode), MicrophoneMode::OnDemand) {

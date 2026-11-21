@@ -12,7 +12,7 @@ enum VocabularyFocus: Hashable {
 
 /// Every text rule Sona applies after a transcript, as one settings tab.
 ///
-/// Four switches say which kinds of rule are in force; one list holds the
+/// Switches say which kinds of rule are in force; one list holds the
 /// rules themselves, whichever store they live in. Below them are the writing
 /// samples a rewrite is shown as voice-matching examples.
 struct VocabularyView: View {
@@ -42,7 +42,10 @@ struct VocabularyView: View {
             rulesSection
             samplesSection
         }
-        .task { await store.loadHeardWords() }
+        .task {
+            await store.loadHeardWords()
+            await store.loadMeetingWords()
+        }
         .onChange(of: focus) { previous, _ in
             commit(previous)
         }
@@ -79,13 +82,21 @@ struct VocabularyView: View {
         return "Sona's starter list replaces \(mine). Vocabulary, shortcuts, and emoji rules stay. This cannot be undone."
     }
 
-    // MARK: The four switches
+    // MARK: The switches
 
     private var switches: some View {
         Card {
             ToggleRow(
+                title: "Spell names and words from meetings",
+                detail: meetingWordsDetail,
+                isOn: Binding(
+                    get: { store.meetingWordsEnabled },
+                    set: { store.setMeetingWordsEnabled($0) }
+                )
+            )
+            ToggleRow(
                 title: "Obey spoken editing commands",
-                detail: "Act on “scratch that”, “delete last word”, “capitalize that”, “quote that” and “new bullet” instead of writing them. English only, and only when the phrase stands alone between two pauses.",
+                detail: "Act on “scratch that”, “delete last word”, “capitalize that”, “quote that” and “new bullet” instead of writing them, and send a dictation that ends with “send”. English only, and only when the phrase stands alone between two pauses.",
                 isOn: Binding(
                     get: { store.spokenEditsEnabled },
                     set: { store.setSpokenEdits($0) }
@@ -107,6 +118,15 @@ struct VocabularyView: View {
                 )
             )
             ToggleRow(
+                title: "Expand shortcuts as you type",
+                detail: "Reads keys in every app, except password fields.",
+                isOn: Binding(
+                    get: { store.typedSnippetsEnabled },
+                    set: { store.setTypedSnippetsEnabled($0) }
+                )
+            )
+            .disabled(!store.snippetsEnabled)
+            ToggleRow(
                 title: "Apply rewrites",
                 isOn: Binding(
                     get: { store.replacementsEnabled },
@@ -116,6 +136,18 @@ struct VocabularyView: View {
         }
         .disabled(store.busy)
         .padding(.bottom, 28)
+    }
+
+    /// The first few words dictation takes from meetings, so the switch says
+    /// what it does with his own names rather than in general.
+    private var meetingWordsDetail: String {
+        let words = store.meetingWords
+        guard store.meetingWordsEnabled, !words.isEmpty else {
+            return "Names of people you meet, your project titles and words heard in your meetings."
+        }
+        let shown = words.prefix(6).joined(separator: ", ")
+        let rest = words.count - min(words.count, 6)
+        return rest > 0 ? "\(shown) and \(rest) more." : "\(shown)."
     }
 
     // MARK: Heard in meetings

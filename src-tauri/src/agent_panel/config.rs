@@ -61,7 +61,7 @@ enum SettingKind {
     OverlayPosition,
     AudioFeedback,
     AudioVolume,
-    MuteWhileRecording,
+    PlaybackWhileRecording,
     OutputDevice,
     Microphone,
     DefaultModel,
@@ -82,7 +82,7 @@ enum ResolvedChange {
     OverlayPosition(crate::settings::OverlayPosition),
     AudioFeedback(bool),
     AudioVolume(f32),
-    MuteWhileRecording(bool),
+    PlaybackWhileRecording(crate::settings::PlaybackWhileRecording),
     OutputDevice(Option<String>),
     Microphone(Option<String>),
     DefaultModel(String),
@@ -103,7 +103,7 @@ pub(crate) enum SettingUndo {
     OverlayPosition(crate::settings::OverlayPosition),
     AudioFeedback(bool),
     AudioVolume(f32),
-    MuteWhileRecording(bool),
+    PlaybackWhileRecording(crate::settings::PlaybackWhileRecording),
     OutputDevice(Option<String>),
     Microphone(Option<String>),
     DefaultModel {
@@ -135,7 +135,7 @@ impl SettingUndo {
             Self::OverlayPosition(_) => SettingKind::OverlayPosition,
             Self::AudioFeedback(_) => SettingKind::AudioFeedback,
             Self::AudioVolume(_) => SettingKind::AudioVolume,
-            Self::MuteWhileRecording(_) => SettingKind::MuteWhileRecording,
+            Self::PlaybackWhileRecording(_) => SettingKind::PlaybackWhileRecording,
             Self::OutputDevice(_) => SettingKind::OutputDevice,
             Self::Microphone(_) => SettingKind::Microphone,
             Self::DefaultModel { .. } => SettingKind::DefaultModel,
@@ -255,7 +255,7 @@ pub(super) fn snapshot_from_parts(
         audio: SonaAudioSnapshotV1 {
             feedback_enabled: settings.audio_feedback,
             volume: settings.audio_feedback_volume,
-            mute_while_recording: settings.mute_while_recording,
+            playback_while_recording: settings.playback_while_recording,
             output_device_id: selected_device_id(
                 &settings.selected_output_device,
                 &device_names.output,
@@ -536,8 +536,8 @@ fn resolve_changes(
             {
                 ResolvedChange::AudioVolume(*value)
             }
-            SonaSettingChangeV1::MuteWhileRecording(value) => {
-                ResolvedChange::MuteWhileRecording(*value)
+            SonaSettingChangeV1::PlaybackWhileRecording(value) => {
+                ResolvedChange::PlaybackWhileRecording(*value)
             }
             SonaSettingChangeV1::AudioOutputDeviceId(id) => {
                 ResolvedChange::OutputDevice(resolve_device(id, &allowed.output_device_names)?)
@@ -630,9 +630,9 @@ fn mutate_settings(
                 settings.audio_feedback_volume = *value;
                 prior
             }
-            ResolvedChange::MuteWhileRecording(value) => {
-                let prior = SettingUndo::MuteWhileRecording(settings.mute_while_recording);
-                settings.mute_while_recording = *value;
+            ResolvedChange::PlaybackWhileRecording(value) => {
+                let prior = SettingUndo::PlaybackWhileRecording(settings.playback_while_recording);
+                settings.playback_while_recording = *value;
                 prior
             }
             ResolvedChange::OutputDevice(value) => {
@@ -758,7 +758,7 @@ fn restore_setting(settings: &mut AppSettings, undo: &SettingUndo) -> Result<(),
         SettingUndo::OverlayPosition(value) => settings.overlay_position = *value,
         SettingUndo::AudioFeedback(value) => settings.audio_feedback = *value,
         SettingUndo::AudioVolume(value) => settings.audio_feedback_volume = *value,
-        SettingUndo::MuteWhileRecording(value) => settings.mute_while_recording = *value,
+        SettingUndo::PlaybackWhileRecording(value) => settings.playback_while_recording = *value,
         SettingUndo::OutputDevice(value) => settings.selected_output_device = value.clone(),
         SettingUndo::Microphone(value) => settings.selected_microphone = value.clone(),
         SettingUndo::DefaultModel {
@@ -856,7 +856,7 @@ const fn setting_kind_index(kind: SettingKind) -> u8 {
         SettingKind::OverlayPosition => 3,
         SettingKind::AudioFeedback => 4,
         SettingKind::AudioVolume => 5,
-        SettingKind::MuteWhileRecording => 6,
+        SettingKind::PlaybackWhileRecording => 6,
         SettingKind::OutputDevice => 7,
         SettingKind::Microphone => 8,
         SettingKind::DefaultModel => 9,

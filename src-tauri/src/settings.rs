@@ -771,6 +771,19 @@ pub enum OverlayStyle {
     Live,
 }
 
+/// What happens to other apps' sound while Sona records a dictation. A
+/// meeting pauses it only under `Pause`: lowering or muting would silence the
+/// call it records.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default, Type)]
+#[serde(rename_all = "lowercase")]
+pub enum PlaybackWhileRecording {
+    Keep,
+    #[default]
+    Pause,
+    Lower,
+    Mute,
+}
+
 /* Every digit-bearing variant pins its wire name explicitly. `rename_all =
  * "snake_case"` alone is not enough here: serde only breaks before an
  * uppercase char, so it yields `min2`, while specta runs the same idents
@@ -1353,6 +1366,10 @@ pub struct AppSettings {
     pub custom_words: Vec<VocabularyEntry>,
     #[serde(default)]
     pub learn_destination_corrections: bool,
+    /// Dictation also knows the names of people he meets, his project titles
+    /// and words heard across meetings (`meeting_vocabulary`).
+    #[serde(default = "default_meeting_vocabulary_enabled")]
+    pub meeting_vocabulary_enabled: bool,
     /// Explicit local folder grant; imports cannot enable project context.
     #[serde(default)]
     pub dictation_project_root: Option<String>,
@@ -1403,7 +1420,7 @@ pub struct AppSettings {
     #[serde(default)]
     pub post_process_selected_prompt_id: Option<String>,
     #[serde(default)]
-    pub mute_while_recording: bool,
+    pub playback_while_recording: PlaybackWhileRecording,
     #[serde(default)]
     pub append_trailing_space: bool,
     #[serde(default = "default_app_language")]
@@ -1490,6 +1507,10 @@ pub struct AppSettings {
     pub snippets: Vec<Snippet>,
     #[serde(default = "default_snippets_enabled")]
     pub snippets_enabled: bool,
+    /// Expand shortcuts where they are typed, in any app. Off until turned on:
+    /// it reads key presses system-wide.
+    #[serde(default)]
+    pub typed_snippets_enabled: bool,
     /// Whether the app may ask GitHub for the latest published release. No
     /// update is ever installed automatically.
     #[serde(default = "default_update_check_enabled")]
@@ -1697,6 +1718,10 @@ fn default_count_words_per_app() -> bool {
 }
 
 fn default_meeting_open_windows_enabled() -> bool {
+    true
+}
+
+fn default_meeting_vocabulary_enabled() -> bool {
     true
 }
 
@@ -2287,6 +2312,7 @@ pub fn get_default_settings() -> AppSettings {
             written: "Sona".to_string(),
         }],
         learn_destination_corrections: false,
+        meeting_vocabulary_enabled: true,
         dictation_project_root: None,
         emoji_replacements: Vec::new(),
         emoji_replacements_enabled: false,
@@ -2308,7 +2334,7 @@ pub fn get_default_settings() -> AppSettings {
         post_process_models: default_post_process_models(),
         post_process_prompts: default_post_process_prompts(),
         post_process_selected_prompt_id: None,
-        mute_while_recording: false,
+        playback_while_recording: PlaybackWhileRecording::default(),
         append_trailing_space: false,
         app_language: default_app_language(),
         theme: default_theme(),
@@ -2337,6 +2363,7 @@ pub fn get_default_settings() -> AppSettings {
         agent_bridge: AgentBridgeSettings::default(),
         snippets: Vec::new(),
         snippets_enabled: default_snippets_enabled(),
+        typed_snippets_enabled: false,
         update_check_enabled: default_update_check_enabled(),
         agent_panel_enabled: default_agent_panel_enabled(),
         agent_panel_relay_url: None,
@@ -3313,7 +3340,7 @@ pub(crate) fn merge_upstream_import_settings(
     merged.post_process_models = imported.post_process_models;
     merged.post_process_prompts = imported.post_process_prompts;
     merged.post_process_selected_prompt_id = imported.post_process_selected_prompt_id;
-    merged.mute_while_recording = imported.mute_while_recording;
+    merged.playback_while_recording = imported.playback_while_recording;
     merged.append_trailing_space = imported.append_trailing_space;
     merged.app_language = imported.app_language;
     merged.theme = imported.theme;

@@ -1290,6 +1290,9 @@ pub struct AsrPlan {
     pub language_candidates: Vec<String>,
     pub translate_to_english: bool,
     pub custom_words: Vec<VocabularyEntry>,
+    /// Names and words from meetings. They prime a whisper decode ahead of
+    /// `custom_words` and are never applied as corrections.
+    pub meeting_words: Vec<VocabularyEntry>,
     /// Whether Whisper decodes are prompted with the vocabulary. Meetings are
     /// not: across their silences a prompted decoder writes the prompt back as
     /// speech, so a meeting chunk made only of vocabulary words is discarded.
@@ -1336,6 +1339,7 @@ impl AsrPlan {
             language_candidates,
             translate_to_english: mode.translate_to_english,
             custom_words: effective_vocabulary(&settings.custom_words, &mode.custom_words),
+            meeting_words: Vec::new(),
             prompt_vocabulary: true,
             log_probability_skip: true,
             emoji_replacements: settings.emoji_replacements.clone(),
@@ -1365,6 +1369,7 @@ impl AsrPlan {
             language_candidates,
             translate_to_english: settings.translate_to_english,
             custom_words: settings.custom_words.clone(),
+            meeting_words: Vec::new(),
             prompt_vocabulary: true,
             log_probability_skip: true,
             emoji_replacements: settings.emoji_replacements.clone(),
@@ -2015,7 +2020,10 @@ impl RunPlan {
         {
             cleanup_level = Some(CleanupLevel::Light);
         }
-        let asr = AsrPlan::from_mode(settings, &mode.asr);
+        let mut asr = AsrPlan::from_mode(settings, &mode.asr);
+        if settings.meeting_vocabulary_enabled {
+            asr.meeting_words = crate::meeting_vocabulary::prompt_entries(&asr.custom_words);
+        }
         let requested_engine = mode.asr.requested_engine;
         let (cloud, local_fallback) = match requested_engine.cloud_provider() {
             None => (None, None),

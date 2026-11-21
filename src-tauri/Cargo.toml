@@ -214,6 +214,8 @@ objc2-app-kit = "0.3"
 objc2-core-audio-types = "0.3.2"
 objc2-core-graphics = { version = "0.3.2", default-features = false, features = [
   "CGWindow",
+  "CGEvent",
+  "CGEventTypes",
 ] }
 objc2-service-management = "0.3.2"
 # Accessibility (ApplicationServices/HIServices) drives context capture and the
@@ -234,6 +236,8 @@ objc2-core-foundation = { version = "0.3", default-features = false, features = 
   "CFString",
   "CFURL",
   "CFUserNotification",
+  "CFMachPort",
+  "CFRunLoop",
 ] }
 # Automatic meeting detection. EventKit reads upcoming events, CoreAudio watches
 # the default input device, UserNotifications delivers the prompt, and block2

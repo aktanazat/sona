@@ -13,7 +13,9 @@ pub use audio::{
     CaptureOverrun, CpalDeviceInfo, RecordedAudio, VadPolicy,
 };
 pub use lang_id::detect_output_language;
-pub use spoken_edits::{apply_spoken_edits, split_spoken_instruction, SpokenInstruction};
+pub use spoken_edits::{
+    apply_spoken_edits, split_spoken_instruction, split_spoken_send, SpokenInstruction,
+};
 pub use text::{
     apply_british_spelling, apply_emoji_replacements, apply_literal_punctuation,
     apply_prompted_vocabulary_entries, apply_text_replacements, apply_vocabulary_entries,
