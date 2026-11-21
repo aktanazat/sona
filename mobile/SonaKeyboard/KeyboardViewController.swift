@@ -715,6 +715,11 @@ private struct KeyboardView: View {
                 .accessibilityIdentifier("keyboard-heard")
         } else if tools.notice != nil {
             ToolsNotice(tools: tools)
+        } else if !tools.isOpen, tools.heldReview != nil {
+            Button("tools.review", systemImage: "text.bubble") { withAnimation(.snappy(duration: 0.24)) { tools.showHeldReview() } }
+                .font(.footnote.weight(.semibold))
+                .frame(minHeight: 44)
+                .accessibilityIdentifier("tools-held-review")
         } else if !tools.isOpen, let suggestions = typing.suggestions, state.newMessage == nil {
             SuggestionStrip(suggestions: suggestions, choose: typing.choose)
         } else if state.hasFullAccess, let notice = state.session.message ?? state.notice {

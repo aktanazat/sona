@@ -65,6 +65,9 @@ final class KeyboardTools {
     var typingLanguage = TypingLanguage.english.rawValue
     /// What the model has written so far for the action at work.
     var partial = ""
+    /// A dictation on review while the panel is hidden, until he opens it again and
+    /// inserts or discards it.
+    private(set) var heldReview: String?
 
     /// The field as the keyboard sees it, with its memory of its own last edit.
     @ObservationIgnored var field: () -> FieldText? = { nil }
@@ -116,8 +119,28 @@ final class KeyboardTools {
         #if DEBUG
         toggled()
         #endif
-        page = open ? .closed : .browse(lastTab, nil)
-        if !open, lastTab == .ai { prewarm() }
+        if case let .review(text) = page {
+            heldReview = text
+            page = .closed
+        } else if open {
+            page = .closed
+        } else if let held = heldReview {
+            showReview(held)
+        } else {
+            page = .browse(lastTab, nil)
+            if lastTab == .ai { prewarm() }
+        }
+    }
+
+    /// Opens the dictation the hidden panel kept on review.
+    func showHeldReview() {
+        guard let held = heldReview else { return }
+        showReview(held)
+    }
+
+    private func showReview(_ text: String) {
+        heldReview = nil
+        page = .review(text)
     }
 
     func show(_ tab: Tab, _ menu: Menu? = nil) {
@@ -299,7 +322,7 @@ final class KeyboardTools {
 
     private var waitingReview: String? {
         if case let .review(text) = page { return text }
-        return nil
+        return heldReview
     }
 
     /// A dictation goes into the field it was heard for; in any other field it waits for
@@ -307,12 +330,12 @@ final class KeyboardTools {
     /// `earlier` dictation waits on review joins it there.
     private func land(_ text: String, heardFor field: KeyboardDictation.FieldMark, earlier: String?) {
         if earlier != nil {
-            page = .review(KeyboardDictation.reviewing(text, after: earlier))
+            showReview(KeyboardDictation.reviewing(text, after: earlier))
             return say("dictation.reviewJoined")
         }
         switch KeyboardDictation.landing(heardFor: field, now: fieldMark(), reviews: reviewsDictation) {
         case .review:
-            page = .review(text)
+            showReview(text)
         case .write:
             write(text)
             page = .closed
@@ -325,7 +348,7 @@ final class KeyboardTools {
         guard let pending = unstyled else { return }
         unstyled = nil
         cancelWork()
-        page = .review(KeyboardDictation.reviewing(pending.text, after: pending.earlier))
+        showReview(KeyboardDictation.reviewing(pending.text, after: pending.earlier))
     }
 
     // MARK: The model at work
