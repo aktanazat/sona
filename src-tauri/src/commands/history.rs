@@ -102,7 +102,8 @@ pub async fn search_history_entries(
 }
 
 /// A page for the shell. A cursor whose dictation was deleted fails like a
-/// read does: the shell lists again from the top either way.
+/// read does: Library shows its paging error, and Try again pages on from the
+/// last row it still lists.
 fn page_shown(page: anyhow::Result<HistoryPage>, what: &str) -> Result<PaginatedHistory, ()> {
     match page {
         Ok(HistoryPage::Entries(page)) => Ok(page),
