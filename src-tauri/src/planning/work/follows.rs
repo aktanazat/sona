@@ -31,12 +31,17 @@ pub(crate) struct Follow {
 }
 
 /// The tasks a followed view held at its last look, with their statuses,
-/// and the view's revision then: a view whose filters changed starts over
-/// without telling of every task it gained or lost.
+/// the view's revision then, and the newest task change written by then:
+/// a view whose filters changed starts over without telling of every task
+/// it gained or lost, and a change counts as new when written after the
+/// look, whatever time its writer stamped on it. Writers take turns, so a
+/// change saved after a look always has a higher rowid than any it saw.
 #[derive(Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 struct Members {
     revision: i64,
     tasks: BTreeMap<String, WorkStatus>,
+    #[serde(default)]
+    activity: i64,
 }
 
 pub(crate) fn following(conn: &Connection, kind: SubjectKind, id: &str) -> Result<bool> {
@@ -76,28 +81,21 @@ fn members_now(conn: &Connection, view_id: &str, now_ms: i64) -> Result<Members>
             .into_iter()
             .map(|row| (row.item.id, row.item.status))
             .collect(),
+        activity: conn.query_row(
+            "SELECT COALESCE(MAX(rowid), 0) FROM planning_task_activity",
+            [],
+            |row| row.get(0),
+        )?,
     })
 }
 
-/// Remembers when the view was looked at and, given them, the tasks it
-/// held then.
-fn looked_at(
-    conn: &Connection,
-    view_id: &str,
-    members: Option<&Members>,
-    now_ms: i64,
-) -> Result<()> {
-    match members {
-        Some(members) => conn.execute(
-            "UPDATE planning_follows SET members = ?2, checked_at_ms = ?3
-             WHERE kind = 'view' AND target_id = ?1",
-            params![view_id, serde_json::to_string(members)?, now_ms],
-        )?,
-        None => conn.execute(
-            "UPDATE planning_follows SET checked_at_ms = ?2 WHERE kind = 'view' AND target_id = ?1",
-            params![view_id, now_ms],
-        )?,
-    };
+/// Remembers what the view held at this look.
+fn looked_at(conn: &Connection, view_id: &str, members: &Members, now_ms: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE planning_follows SET members = ?2, checked_at_ms = ?3
+         WHERE kind = 'view' AND target_id = ?1",
+        params![view_id, serde_json::to_string(members)?, now_ms],
+    )?;
     Ok(())
 }
 
@@ -133,21 +131,21 @@ pub(crate) fn follow(
         params![kind.as_str(), id, now_ms],
     )? > 0;
     if added && kind == SubjectKind::View {
-        looked_at(conn, &id, Some(&members_now(conn, &id, now_ms)?), now_ms)?;
+        looked_at(conn, &id, &members_now(conn, &id, now_ms)?, now_ms)?;
     }
     Ok(added)
 }
 
-/// Who changed the task last, and when.
+/// Who changed the task last, and the change's rowid.
 fn last_change(
     conn: &Connection,
     task_id: &str,
 ) -> Result<Option<(WorkActor, Option<String>, i64)>> {
     Ok(conn
         .prepare_cached(
-            "SELECT t.actor, a.agent, t.at_ms FROM planning_task_activity t
+            "SELECT t.actor, a.agent, t.rowid FROM planning_task_activity t
                 LEFT JOIN planning_activity_agents a ON a.activity_id = t.id
-             WHERE t.task_id = ?1 ORDER BY t.at_ms DESC, t.rowid DESC LIMIT 1",
+             WHERE t.task_id = ?1 ORDER BY t.rowid DESC LIMIT 1",
         )?
         .query_row([task_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
         .optional()?)
@@ -157,19 +155,25 @@ fn last_change(
 /// was done or canceled since the last look, posts a notice when someone
 /// other than the user changed it since then. A task that joined or left
 /// as time passed, a due day coming or a snooze ending, posts none. A
-/// view that cannot be read is skipped. Returns how many were posted.
+/// view that cannot be read is skipped, with whatever it posted undone.
+/// Returns how many were posted.
 pub(crate) fn watch_views(conn: &Connection, now_ms: i64) -> Result<usize> {
-    let followed: Vec<(String, Option<String>, Option<i64>)> = conn
-        .prepare(
-            "SELECT target_id, members, checked_at_ms FROM planning_follows WHERE kind = 'view'",
-        )?
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+    let followed: Vec<(String, Option<String>)> = conn
+        .prepare("SELECT target_id, members FROM planning_follows WHERE kind = 'view'")?
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
         .collect::<rusqlite::Result<_>>()?;
     let mut posted = 0;
-    for (view_id, before, checked_at_ms) in followed {
-        match watch_view(conn, &view_id, before.as_deref(), checked_at_ms, now_ms) {
-            Ok(count) => posted += count,
-            Err(error) => log::warn!("A followed view could not be looked at: {error:#}"),
+    for (view_id, before) in followed {
+        conn.execute_batch("SAVEPOINT watch_view")?;
+        match watch_view(conn, &view_id, before.as_deref(), now_ms) {
+            Ok(count) => {
+                conn.execute_batch("RELEASE watch_view")?;
+                posted += count;
+            }
+            Err(error) => {
+                conn.execute_batch("ROLLBACK TO watch_view; RELEASE watch_view")?;
+                log::warn!("A followed view could not be looked at: {error:#}");
+            }
         }
     }
     Ok(posted)
@@ -179,7 +183,6 @@ fn watch_view(
     conn: &Connection,
     view_id: &str,
     before: Option<&str>,
-    checked_at_ms: Option<i64>,
     now_ms: i64,
 ) -> Result<usize> {
     let now = match members_now(conn, view_id, now_ms) {
@@ -222,10 +225,10 @@ fn watch_view(
             }
         }
         for (task_id, what) in moved {
-            let Some((actor, agent, at_ms)) = last_change(conn, task_id)? else {
+            let Some((actor, agent, change)) = last_change(conn, task_id)? else {
                 continue;
             };
-            if actor == WorkActor::Me || checked_at_ms.is_some_and(|checked| at_ms <= checked) {
+            if actor == WorkActor::Me || change <= before.activity {
                 continue;
             }
             let notice = Notice {
@@ -239,8 +242,9 @@ fn watch_view(
             }
         }
     }
-    let changed = before.as_ref() != Some(&now);
-    looked_at(conn, view_id, changed.then_some(&now), now_ms)?;
+    if before.as_ref() != Some(&now) {
+        looked_at(conn, view_id, &now, now_ms)?;
+    }
     Ok(posted)
 }
 
@@ -488,5 +492,39 @@ mod tests {
             watch_views(&conn, AT + 3 * MINUTE).expect("another look"),
             0
         );
+    }
+
+    #[test]
+    fn a_change_stamped_before_a_look_but_saved_after_it_still_posts() {
+        let conn = planner();
+        due_today_view(&conn, "Due today");
+        assert_eq!(watch_views(&conn, AT + 2 * MINUTE).expect("a look"), 0);
+
+        agent_task(&conn, "Book the venue", AT, AT + MINUTE);
+        assert_eq!(
+            watch_views(&conn, AT + 3 * MINUTE).expect("the next look"),
+            1
+        );
+    }
+
+    #[test]
+    fn a_view_that_fails_after_posting_keeps_none_of_it_until_it_can_be_looked_at() {
+        let conn = planner();
+        due_today_view(&conn, "Due today");
+        agent_task(&conn, "Book the venue", AT, AT + MINUTE);
+        conn.execute_batch(
+            "CREATE TEMP TRIGGER stuck BEFORE UPDATE OF members ON planning_follows
+             BEGIN SELECT RAISE(ABORT, 'stuck'); END;",
+        )
+        .expect("a view whose look cannot be saved");
+
+        assert_eq!(watch_views(&conn, AT + 2 * MINUTE).expect("a look"), 0);
+        assert_eq!(watch_views(&conn, AT + 3 * MINUTE).expect("a look"), 0);
+        assert!(view_notices(&conn, AT + 3 * MINUTE).is_empty());
+
+        conn.execute_batch("DROP TRIGGER stuck")
+            .expect("the view saved again");
+        assert_eq!(watch_views(&conn, AT + 4 * MINUTE).expect("a look"), 1);
+        assert_eq!(view_notices(&conn, AT + 4 * MINUTE).len(), 1);
     }
 }

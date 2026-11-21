@@ -375,7 +375,9 @@ fn reminder_notices(history: &Connection, now_ms: i64) -> Result<Vec<(String, No
         .collect()
 }
 
-/// Remembers reminders as shown, and forgets ones shown long ago.
+/// Remembers reminders as shown, and forgets ones shown long ago. An
+/// inbox notice's banner is remembered while the notice is still in the
+/// inbox unread, or it would show again.
 fn record(history: &mut Connection, keys: &[String], now_ms: i64) -> Result<()> {
     let tx = history.transaction()?;
     for key in keys {
@@ -385,7 +387,9 @@ fn record(history: &mut Connection, keys: &[String], now_ms: i64) -> Result<()> 
         )?;
     }
     tx.execute(
-        "DELETE FROM planning_reminders WHERE sent_at_ms < ?1",
+        "DELETE FROM planning_reminders WHERE sent_at_ms < ?1
+           AND NOT EXISTS (SELECT 1 FROM planning_notifications n
+                WHERE planning_reminders.key = 'inbox:' || n.id AND n.read_at_ms IS NULL)",
         [now_ms - REMEMBERED_MS],
     )?;
     tx.commit()?;
@@ -1913,5 +1917,36 @@ mod tests {
         assert!(prompts.offered.lock().expect("the offered ids").is_empty());
 
         assert_eq!(offer_now(false), ["inbox:n1", "follow:w1", "brief:e1"]);
+    }
+
+    #[test]
+    fn an_unread_project_reminder_shows_one_banner_however_long_it_waits() {
+        let mut desk = desk();
+        let project = store::insert_project(&desk.history, "Harbor launch", None, at(0, 9))
+            .expect("a project")
+            .id;
+        inbox::remind_subject(
+            &desk.history,
+            inbox::SubjectKind::Project,
+            &project,
+            at(0, 9),
+            at(0, 8),
+            at(0, 9),
+        )
+        .expect("the reminder posted");
+        let banners_at = |desk: &Desk, now_ms: i64| -> Vec<String> {
+            let shown = sent(&desk.history).expect("the banners shown before");
+            inbox_settings::banners_due(&desk.history, &shown, now_ms)
+                .expect("the banners due")
+                .into_iter()
+                .map(|(key, _)| key)
+                .collect()
+        };
+
+        let first = banners_at(&desk, at(0, 9));
+        assert_eq!(first.len(), 1);
+        record(&mut desk.history, &first, at(0, 9)).expect("the banner remembered");
+        record(&mut desk.history, &[], at(61, 9)).expect("old banners forgotten");
+        assert!(banners_at(&desk, at(61, 9)).is_empty());
     }
 }
