@@ -50,6 +50,7 @@ import {
   base64UrlDecode,
   base64UrlEncode,
   decodeUtf8,
+  encodeChangeCursor,
   equalBytes,
   equalSecret,
   isIdempotencyKey,
@@ -398,10 +399,6 @@ function parseLimit(
   const limit = Number(value);
   if (limit > maximum) throw problem("invalid_request");
   return limit;
-}
-
-function encodeChangeCursor(sequence: number): string {
-  return `c.${base64UrlEncode(utf8(JSON.stringify({ v: 1, a: sequence })))}`;
 }
 
 function decodeChangeCursor(value: string | null): number {
