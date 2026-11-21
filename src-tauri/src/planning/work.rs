@@ -17,6 +17,7 @@ pub(crate) mod filter;
 pub(crate) mod favorites;
 pub(crate) mod follow;
 mod hygiene;
+pub(crate) mod import;
 pub(crate) mod inbox;
 pub(crate) mod initiatives;
 pub(crate) mod insights;

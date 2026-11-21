@@ -427,7 +427,7 @@ fn label(conn: &Connection, id: &str) -> StorageResult<WorkLabel> {
 }
 
 /// Puts a label in a group, or with `None` takes it out of its group.
-fn group_label(
+pub(crate) fn group_label(
     conn: &Connection,
     id: &str,
     group: Option<&str>,

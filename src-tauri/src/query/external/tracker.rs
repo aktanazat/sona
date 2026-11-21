@@ -62,9 +62,6 @@ const OPERATION_NAMESPACE: Uuid = Uuid::from_u128(0x5f0e_2c71_a8d4_4b39_9e06_d13
 /// Open work untouched this long is stale, as the morning plan counts it.
 const STALE_AFTER_MS: i64 = 30 * 24 * 3_600_000;
 
-/// The properties the app's own new views show.
-const VIEW_PROPERTIES: [&str; 6] = ["id", "priority", "labels", "project", "owner", "due"];
-
 const OPEN_AND_TRIAGE: [WorkStatus; 4] = [
     WorkStatus::Triage,
     WorkStatus::Backlog,
@@ -300,6 +297,18 @@ pub enum WorkVerb {
     ProjectTemplateDelete(project_templates::ProjectTemplateDeleteArgs),
     /// Make a project from a template, starting on a day.
     ProjectNew(project_templates::ProjectNewArgs),
+    /// Import tasks, projects, milestones, initiatives, labels, cycles,
+    /// comments, documents and views from another tracker's export: Linear,
+    /// a CSV sheet, Jira, GitHub, Asana, Shortcut or Trello. A second run
+    /// skips what the first brought in. Undo with import-revert.
+    Import(imports::ImportArgs),
+    /// Sona's CSV import template: its columns and one example row.
+    ImportTemplate,
+    /// Past imports, newest first, with what each brought in.
+    Imports,
+    /// Undo an import: its tasks and projects go to the bin for 30 days,
+    /// and the labels, initiatives, notes and views it made are removed.
+    ImportRevert(imports::ImportRevertArgs),
     /// Custom project statuses, each a kind of a built-in status.
     ProjectStatuses,
     /// Make a custom project status, or rename or move one.
@@ -1774,6 +1783,10 @@ impl WorkVerb {
                 ..
             })
             | Self::ProjectNew(project_templates::ProjectNewArgs { dry_run: true, .. })
+            | Self::Import(imports::ImportArgs { dry_run: true, .. })
+            | Self::ImportTemplate
+            | Self::Imports
+            | Self::ImportRevert(imports::ImportRevertArgs { dry_run: true, .. })
             | Self::ProjectStatusSave(catalog::ProjectStatusSaveArgs { dry_run: true, .. })
             | Self::ProjectStatusDelete(catalog::ProjectStatusDeleteArgs { dry_run: true, .. })
             | Self::TemplateSave(routines::TemplateSaveArgs { dry_run: true, .. })
@@ -1920,6 +1933,8 @@ impl WorkVerb {
             | Self::ProjectTemplateSave(_)
             | Self::ProjectTemplateDelete(_)
             | Self::ProjectNew(_)
+            | Self::Import(_)
+            | Self::ImportRevert(_)
             | Self::ProjectStatusSave(_)
             | Self::ProjectStatusDelete(_)
             | Self::TemplateSave(_)
@@ -2223,6 +2238,10 @@ pub enum WorkAnswer {
     ProjectTemplates(project_templates::ExternalWorkProjectTemplates),
     ProjectTemplate(Box<project_templates::ExternalWorkProjectTemplateChange>),
     ProjectNew(Box<project_templates::ExternalWorkProjectNew>),
+    Import(Box<imports::ExternalWorkImport>),
+    Imports(imports::ExternalWorkImports),
+    ImportRevert(Box<imports::ExternalWorkImportRevert>),
+    ImportTemplate(imports::ExternalWorkImportTemplate),
     ProjectUpdates(roadmap::ExternalWorkProjectUpdates),
     ProjectUpdate(Box<roadmap::ExternalWorkProjectUpdateChange>),
     ProjectDraft(roadmap::ExternalWorkProjectDraft),
@@ -3011,6 +3030,10 @@ pub(super) async fn answer(
         WorkVerb::ProjectTemplateSave(args) => tracker.project_template_save(args).await,
         WorkVerb::ProjectTemplateDelete(args) => tracker.project_template_delete(args).await,
         WorkVerb::ProjectNew(args) => tracker.project_new(args).await,
+        WorkVerb::Import(args) => tracker.import(args).await,
+        WorkVerb::ImportTemplate => Ok(imports::import_template()),
+        WorkVerb::Imports => tracker.imports(),
+        WorkVerb::ImportRevert(args) => tracker.import_revert(args),
         WorkVerb::ProjectStatuses => tracker.project_statuses(),
         WorkVerb::ProjectStatusSave(args) => tracker.project_status_save(args),
         WorkVerb::ProjectStatusDelete(args) => tracker.project_status_delete(args),
@@ -4708,19 +4731,7 @@ impl Tracker<'_> {
             &board,
             existing.map_or_else(WorkQuery::default, |view| view.query.clone()),
         )?;
-        let mut display = existing.map_or_else(
-            || WorkDisplay {
-                layout: WorkLayout::List,
-                group_by: WorkGroupBy::Status,
-                order_by: WorkOrderBy::Priority,
-                show_empty_groups: false,
-                properties: VIEW_PROPERTIES.map(str::to_owned).to_vec(),
-                show_sub_tasks: true,
-                sub_group_by: WorkGroupBy::None,
-                hidden_columns: Vec::new(),
-            },
-            |view| view.display.clone(),
-        );
+        let mut display = existing.map_or_else(WorkDisplay::standard, |view| view.display.clone());
         if let Some(layout) = args.layout {
             display.layout = match layout {
                 LayoutArg::List => WorkLayout::List,
@@ -6659,6 +6670,12 @@ impl WorkAnswer {
             Self::ProjectTemplates(_) | Self::ProjectTemplate(_) | Self::ProjectNew(_) => {
                 project_templates::text(self, &mut text);
             }
+            Self::Import(_)
+            | Self::Imports(_)
+            | Self::ImportRevert(_)
+            | Self::ImportTemplate(_) => {
+                imports::text(self, &mut text);
+            }
             Self::Comments(_) | Self::Comment(_) => threads::text(self, &mut text),
             Self::Attachments(_) | Self::Attachment(_) => attachments::text(self, &mut text),
             Self::Organize(_) | Self::Day(_) | Self::Brief(_) => organize::text(self, &mut text),
@@ -6898,6 +6915,10 @@ impl WorkAnswer {
             | Self::ProjectTemplates(_)
             | Self::ProjectTemplate(_)
             | Self::ProjectNew(_)
+            | Self::Import(_)
+            | Self::Imports(_)
+            | Self::ImportRevert(_)
+            | Self::ImportTemplate(_)
             | Self::ProjectUpdates(_)
             | Self::ProjectUpdate(_)
             | Self::ProjectDraft(_)
@@ -7470,6 +7491,7 @@ mod dependencies;
 mod initiatives;
 mod digest;
 mod project_templates;
+mod imports;
 mod timeline;
 mod insights;
 mod words;

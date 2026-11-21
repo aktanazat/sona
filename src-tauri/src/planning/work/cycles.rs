@@ -398,11 +398,19 @@ pub(crate) fn fitting(
     let Some(due) = due_at_ms else {
         return Ok(None);
     };
-    let day = local_today(due)?;
-    Ok(all
-        .iter()
+    Ok(within(&all, local_today(due)?, today))
+}
+
+/// The number of the cycle in `all` not yet over on `today` that holds `day`.
+fn within(all: &[Span], day: NaiveDate, today: NaiveDate) -> Option<i64> {
+    all.iter()
         .find(|span| span.start <= day && day < span.end && today < span.end)
-        .map(|span| span.number))
+        .map(|span| span.number)
+}
+
+/// The cycle not yet over that holds `day`.
+pub(crate) fn holding(conn: &Connection, day: NaiveDate, now_ms: i64) -> Result<Option<i64>> {
+    Ok(within(&spans(conn)?, day, local_today(now_ms)?))
 }
 
 /// A cycle a change may plan work in: one that exists and has not ended.
