@@ -40,8 +40,9 @@ struct SwipeTypingTests {
     }
 
     @Test("a swipe through a common word puts that word first at least 17 times in 20, and in the four offered 19 in 20")
-    func commonWords() throws {
+    func commonWords() async throws {
         let corrector = try #require(TypingCorrector(language: "en-US"))
+        corrector.common = await CommonWords.list(for: .english)
         let decoder = Self.decoder(.english)
         var first = 0, offered = 0
         var misses: [String] = []

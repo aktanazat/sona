@@ -57,8 +57,10 @@ final class CommonWords: Sendable {
         let length: Int
     }
 
-    /// The words, most common first; a word's index is its frequency rank.
+    /// The words in lowercase, most common first; a word's index is its frequency rank.
     private let words: [String]
+    /// How the few words not written in lowercase are written ("I", "I'm").
+    private let display: [Int32: String]
     /// Ranks in alphabetical order of their words, for prefix lookups.
     private let alphabetical: [Int32]
     /// Ranks, most common first, by length and by first letter, first two letters, or second
@@ -78,16 +80,23 @@ final class CommonWords: Sendable {
     }
 
     init(contents: String) {
-        let words = contents.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
-        var buckets: [Bucket: [Int32]] = [:]
+        let written = contents.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
+        let words = written.map { $0.lowercased() }
+        var buckets: [Bucket: [Int32]] = [:], display: [Int32: String] = [:]
         for (rank, word) in words.enumerated() {
+            if written[rank] != word { display[Int32(rank)] = written[rank] }
             for start in Self.starts(of: Array(word)) {
                 buckets[Bucket(start: start, length: word.count), default: []].append(Int32(rank))
             }
         }
         self.words = words
+        self.display = display
         alphabetical = words.indices.sorted { words[$0] < words[$1] }.map(Int32.init)
         self.buckets = buckets
+    }
+
+    private func shown(_ rank: Int32) -> String {
+        display[rank] ?? words[Int(rank)]
     }
 
     /// The bucket starts a word is filed under: its first letter, its first two, and its
@@ -98,12 +107,13 @@ final class CommonWords: Sendable {
         return [String(first), String(letters[0...1]), " " + String(letters[1])]
     }
 
-    /// Up to `limit` words that start with `prefix` and are longer than it, most common first.
+    /// Up to `limit` words that start with `prefix` (in lowercase) and are longer than it,
+    /// most common first.
     func completions(of prefix: String, limit: Int) -> [String] {
         alphabetical[firstIndex(notBefore: prefix)...].prefix { words[Int($0)].hasPrefix(prefix) }
             .filter { words[Int($0)] != prefix }
             .sorted()
-            .prefix(limit).map { words[Int($0)] }
+            .prefix(limit).map(shown)
     }
 
     /// 0 for the most common word, rising on a log scale to 1 for the least common in the
@@ -136,6 +146,6 @@ final class CommonWords: Sendable {
                 picked.formUnion(buckets[Bucket(start: start, length: length)]?.prefix(perBucket) ?? [])
             }
         }
-        return picked.sorted().map { words[Int($0)] }
+        return picked.sorted().map(shown)
     }
 }

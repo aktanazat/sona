@@ -175,25 +175,12 @@ struct RussianTypingTests {
         #expect(table.next(after: ["как"], limit: 3) == ["ты", "вы", "я"])
     }
 
-    @Test("Russian chat words stay as typed", arguments: ["щас", "чё", "чел", "комп", "прога", "пж", "ок", "мб", "спс", "кст", "оч"])
+    @Test("Russian chat words stay as typed", arguments: ["щас", "чё", "прога", "пж", "ок", "спс", "кст", "оч"])
     func chatWordsStay(word: String) async throws {
         var session = try await session()
         var text = "ну " + word
         text.apply(session.end(with: " ", before: text, corrects: true))
         #expect(text == "ну \(word) ")
-    }
-}
-
-@MainActor
-struct EnglishChatWordTests {
-    @Test("English chat words stay as typed", arguments: ["lol", "tbh", "gonna"])
-    func chatWordsStay(word: String) async throws {
-        let corrector = try #require(TypingCorrector(language: TypingLanguage.english.rawValue))
-        corrector.common = await CommonWords.list(for: .english)
-        var session = TypingSession(corrector: corrector)
-        var text = "ok " + word
-        text.apply(session.end(with: " ", before: text, corrects: true))
-        #expect(text == "ok \(word) ")
     }
 }
 

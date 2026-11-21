@@ -267,6 +267,16 @@ final class KeyboardViewController: UIInputViewController {
             guard let self, typing.language == language else { return }
             session.predictor = loadedTable
             refreshSuggestions()
+            /* Apple's checker loads its dictionary on its first call, which would otherwise
+             * be the first space. It waits until the keyboard has drawn and no finger is on
+             * a key: touch tracking runs the loop outside the default mode. */
+            try? await Task.sleep(for: .milliseconds(400))
+            RunLoop.main.perform(inModes: [.default]) { [weak self] in
+                MainActor.assumeIsolated {
+                    guard let corrector, self?.corrector === corrector else { return }
+                    corrector.warmUp()
+                }
+            }
         }
         primaryLanguage = language.rawValue
         state.startURL = DictationLink.keyboardURL(documentID: documentID, language: language)
