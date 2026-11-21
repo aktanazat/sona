@@ -144,6 +144,24 @@ struct KeyboardDictation {
         /// How long it is kept: a day for words the keyboard heard, which the Notes queue
         /// also keeps; seven days, as long as that queue, for the app's drafts.
         var lifetime: TimeInterval { (fromApp ? 7 : 1) * 24 * 60 * 60 }
+
+        init(id: UUID = UUID(), text: String, field: FieldMark, date: Date, fromApp: Bool = false) {
+            self.id = id
+            self.text = text
+            self.field = field
+            self.date = date
+            self.fromApp = fromApp
+        }
+
+        /// Reviews saved before they had an id or a source still load.
+        init(from decoder: Decoder) throws {
+            let values = try decoder.container(keyedBy: CodingKeys.self)
+            id = try values.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+            text = try values.decode(String.self, forKey: .text)
+            field = try values.decode(FieldMark.self, forKey: .field)
+            date = try values.decode(Date.self, forKey: .date)
+            fromApp = try values.decodeIfPresent(Bool.self, forKey: .fromApp) ?? false
+        }
     }
 
     enum Placement: Equatable {
@@ -172,18 +190,24 @@ struct KeyboardDictation {
             return Self(url: folder.appendingPathComponent("kept-reviews.json"))
         }
 
-        /// The kept reviews still in their lifetime: none when there is no file, nil when the
-        /// file cannot be read.
+        /// The kept reviews still in their lifetime: none when there is no file, nil while
+        /// the file is locked with the phone. A file that reads but does not decode is moved
+        /// aside as `.corrupt`, and the store starts empty.
         func load(at now: Date) -> [KeptReview]? {
             guard FileManager.default.fileExists(atPath: url.path) else { return [] }
-            guard let data = try? Data(contentsOf: url),
-                  let reviews = try? JSONDecoder().decode([KeptReview].self, from: data) else { return nil }
+            guard let data = try? Data(contentsOf: url) else { return nil }
+            guard let reviews = try? JSONDecoder().decode([KeptReview].self, from: data) else {
+                let aside = url.appendingPathExtension("corrupt")
+                try? FileManager.default.removeItem(at: aside)
+                try? FileManager.default.moveItem(at: url, to: aside)
+                return []
+            }
             return reviews.filter { now.timeIntervalSince($0.date) < $0.lifetime }
         }
 
         /// Writes `mine` over the reviews with the same ids, drops `ended`, and keeps every
-        /// other review another keyboard copy saved. A file it cannot read, as while the
-        /// phone is locked, is left as it is.
+        /// other review another keyboard copy saved. While the file is locked it writes
+        /// nothing, and the next save tries again.
         func save(_ mine: [KeptReview], ended: Set<UUID>, at now: Date) {
             guard let others = load(at: now) else { return }
             let ids = Set(mine.map(\.id))

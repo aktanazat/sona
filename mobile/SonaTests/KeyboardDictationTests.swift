@@ -123,8 +123,8 @@ struct KeyboardDictationTests {
         #expect(store.load(at: start.addingTimeInterval(8 * 24 * 60 * 60)) == [])
     }
 
-    @Test("two keyboard copies keep each other's reviews, and an unreadable file is left alone")
-    func keptReviewsFromTwoCopiesMerge() throws {
+    @Test("two keyboard copies keep each other's reviews")
+    func keptReviewsFromTwoCopiesMerge() {
         let store = KeyboardDictation.KeptReviewStore(url: Self.scratchURL())
         defer { try? FileManager.default.removeItem(at: store.url) }
         let field = KeyboardDictation.FieldMark(id: nil, shown: 1, before: "", traits: "")
@@ -138,10 +138,43 @@ struct KeyboardDictationTests {
         #expect(store.load(at: now) == [notes])
         store.save([], ended: [notes.id], at: now)
         #expect(!FileManager.default.fileExists(atPath: store.url.path))
+    }
+
+    @Test("a reviews file that does not decode is moved aside and a fresh one written")
+    func corruptReviewsFileIsSetAside() throws {
+        let store = KeyboardDictation.KeptReviewStore(url: Self.scratchURL())
+        let aside = store.url.appendingPathExtension("corrupt")
+        defer { [store.url, aside].forEach { try? FileManager.default.removeItem(at: $0) } }
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        let review = KeyboardDictation.KeptReview(text: "Kept.", field: KeyboardDictation.FieldMark(id: nil, shown: 1, before: "", traits: ""), date: now)
         try Data("not json".utf8).write(to: store.url)
-        store.save([], ended: [], at: now)
-        store.save([mail], ended: [], at: now)
-        #expect(try Data(contentsOf: store.url) == Data("not json".utf8))
+        store.save([review], ended: [], at: now)
+        #expect(store.load(at: now) == [review])
+        #expect(try Data(contentsOf: aside) == Data("not json".utf8))
+    }
+
+    @Test("a reviews file that cannot be read, as while the phone is locked, is not written over")
+    func lockedReviewsFileIsLeftAlone() throws {
+        let store = KeyboardDictation.KeptReviewStore(url: Self.scratchURL())
+        defer { try? FileManager.default.removeItem(at: store.url) }
+        try FileManager.default.createDirectory(at: store.url, withIntermediateDirectories: false)
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        let review = KeyboardDictation.KeptReview(text: "Kept.", field: KeyboardDictation.FieldMark(id: nil, shown: 1, before: "", traits: ""), date: now)
+        #expect(store.load(at: now) == nil)
+        store.save([review], ended: [], at: now)
+        var isFolder: ObjCBool = false
+        #expect(FileManager.default.fileExists(atPath: store.url.path, isDirectory: &isFolder) && isFolder.boolValue)
+    }
+
+    @Test("reviews saved before they had an id or a source still load")
+    func olderReviewsFileStillLoads() throws {
+        let store = KeyboardDictation.KeptReviewStore(url: Self.scratchURL())
+        defer { try? FileManager.default.removeItem(at: store.url) }
+        let older = #"[{"text":"Old.","field":{"shown":1,"before":"","traits":""},"date":0}]"#
+        try Data(older.utf8).write(to: store.url)
+        let loaded = store.load(at: Date(timeIntervalSinceReferenceDate: 60))
+        #expect(loaded?.map(\.text) == ["Old."])
+        #expect(loaded?.first?.fromApp == false)
     }
 
     private static func scratchURL() -> URL {

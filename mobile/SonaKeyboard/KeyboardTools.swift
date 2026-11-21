@@ -175,9 +175,15 @@ final class KeyboardTools {
         reviewStore?.save(heldReviews + [shownReview].compactMap { $0 }, ended: endedReviews, at: Date())
     }
 
-    /// The keyboard appeared, perhaps after another app's copy of it kept reviews too.
+    /// The keyboard appeared, perhaps after another app's copy of it kept or ended reviews.
+    /// A review on the page that is gone from the file was inserted or discarded there, so
+    /// the page closes rather than offer it twice.
     func reloadReviews() {
         guard let saved = reviewStore?.load(at: Date()) else { return }
+        if let shown = shownReview, !saved.contains(where: { $0.id == shown.id }) {
+            shownReview = nil
+            if case .review = page { page = .closed }
+        }
         heldReviews = saved.filter { $0.id != shownReview?.id }
     }
 
