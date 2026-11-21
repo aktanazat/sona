@@ -112,6 +112,7 @@ pub(crate) fn link_cycle_in(
         "INSERT OR IGNORE INTO scratch_note_cycles (note_id, cycle, created_at_ms) VALUES (?1, ?2, ?3)",
         params![id, number, now_ms],
     )?;
+    super::personal::filed_in(conn, id)?;
     Ok(added > 0)
 }
 
@@ -137,7 +138,7 @@ pub(crate) fn cycle_notes_with_connection(
     number: i64,
 ) -> rusqlite::Result<Vec<ScratchNote>> {
     let mut statement = conn.prepare_cached(
-        "SELECT n.id, n.title, n.body, n.pinned, n.created_at_ms, n.updated_at_ms
+        "SELECT n.id, n.title, n.body, n.pinned, n.created_at_ms, n.updated_at_ms, n.personal
          FROM scratch_notes n JOIN scratch_note_cycles c ON c.note_id = n.id
          WHERE c.cycle = ?1 ORDER BY n.updated_at_ms DESC, n.id",
     )?;

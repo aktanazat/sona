@@ -289,6 +289,7 @@ fn save_review(
         pinned: false,
         created_at_ms: now,
         updated_at_ms: now,
+        personal: false,
     };
     let captures = resolved
         .iter()

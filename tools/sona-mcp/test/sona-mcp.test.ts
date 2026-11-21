@@ -269,6 +269,20 @@ describe("tool arguments", () => {
     ).toContain("--cycle=next");
   });
 
+  /* role null is how an agent takes a collaborator off; read as a role it
+   * would share the document instead. Reads carry the caller so Sona can
+   * check what it was invited to. */
+  test("a personal share's null role takes the agent off, and reads name the caller", () => {
+    const share = tool("sona_personal_document_share");
+
+    expect(share.argv({ note_id: "n", agent: "Codex", role: null }, "Claude Code")).toEqual([
+      "work", "personal-share", "--with=Codex", "--role=none", "--agent=Claude Code", "--json", "--", "n",
+    ]);
+    expect(share.argv({ note_id: "n", agent: "Codex", role: "comment" })).toContain("--role=comment");
+    expect(tool("sona_personal_document_list").argv({}, "Codex")).toContain("--agent=Codex");
+    expect(tool("sona_comment_list").argv({ note: "n" }, "Codex")).toContain("--agent=Codex");
+  });
+
   test("a setting's value arrives whole after --, and settings that take things away are opt-in", () => {
     expect(tool("sona_setting").argv({ key: "keyword-trackers", value: "-[]", dry_run: true }, "Claude")).toEqual([
       "work",
@@ -1055,6 +1069,10 @@ const SONA_WRITES = {
   "doc-marked-copy": true,
   "note-passage": true,
   "subject-delete": true,
+  "personal-new": true,
+  "personal-share": true,
+  "personal-move": true,
+  "personal-private": true,
 };
 
 /** The verbs with which `sona` takes away what no Sona tool gives back. */

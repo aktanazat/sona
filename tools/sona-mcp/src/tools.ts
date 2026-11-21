@@ -3090,7 +3090,7 @@ export const TOOLS: readonly ToolDefinition[] = [
     name: "sona_comment_list",
     title: "Read comments in Sona",
     description:
-      "Read the comment threads on a task, a project, a milestone, a meeting or a note, oldest first: name exactly one of task, project (with milestone for one of its milestones), meeting or note. Each comment carries its id, author (me, sona or an agent by name), Markdown body, when it was written, edited and resolved, and its replies. A task's comment also carries link, the sona:// address the app's Copy link gives, which opens the task scrolled to that comment. A deleted comment keeps its place with body null while it has replies. Pass next_cursor back as cursor for the next page.",
+      "Read the comment threads on a task, a project, a milestone, a meeting or a note, oldest first: name exactly one of task, project (with milestone for one of its milestones), meeting or note. A personal document's threads show only when it is shared with you. Each comment carries its id, author (me, sona or an agent by name), Markdown body, when it was written, edited and resolved, and its replies. A task's comment also carries link, the sona:// address the app's Copy link gives, which opens the task scrolled to that comment. A deleted comment keeps its place with body null while it has replies. Pass next_cursor back as cursor for the next page.",
     inputSchema: {
       type: "object",
       properties: {
@@ -3107,7 +3107,7 @@ export const TOOLS: readonly ToolDefinition[] = [
       },
       additionalProperties: false,
     },
-    argv: (input) => {
+    argv: (input, agent) => {
       const on = commentOn(input);
       return [
         "work",
@@ -3115,6 +3115,7 @@ export const TOOLS: readonly ToolDefinition[] = [
         ...on.flags,
         ...assigned("--limit", count(input, "limit")),
         ...assigned("--cursor", text(input, "cursor")),
+        ...assigned("--agent", agent ?? null),
         "--json",
         "--",
         ...on.task,
@@ -6148,6 +6149,162 @@ export const TOOLS: readonly ToolDefinition[] = [
       "--",
       text(input, "note_id", true),
       requiredCount(input, "version_id"),
+    ],
+  },
+  {
+    name: "sona_personal_document_list",
+    title: "List Sona personal documents shared with you",
+    description:
+      "List the user's personal documents shared with you, newest changed first, each with its id, title and your role: view, comment or edit. A personal document is private to the user until they share it, and no other tool reads it: it is never in sona_notes, sona_search, sona_note or a person's notes. Pass next_cursor back as cursor for the next page. Requires Settings > Agents > External access.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        limit: { ...LIMIT, description: "How many documents to return. Sona defaults to 50 and caps at 100." },
+        cursor: { type: "string", description: "The next_cursor of the page before." },
+      },
+      additionalProperties: false,
+    },
+    argv: (input, agent) => [
+      "work",
+      "personal",
+      ...assigned("--agent", agent ?? null),
+      ...assigned("--limit", count(input, "limit")),
+      ...assigned("--cursor", text(input, "cursor")),
+      "--json",
+    ],
+  },
+  {
+    name: "sona_personal_document_get",
+    title: "Read a Sona personal document",
+    description:
+      "Read one personal document shared with you: its words, your role and every agent it is shared with and at what role. One not shared with you answers not_found. Read its comments with sona_comment_list and note. Requires Settings > Agents > External access.",
+    inputSchema: {
+      type: "object",
+      properties: { note_id: { type: "string", description: "The document's id from sona_personal_document_list." } },
+      required: ["note_id"],
+      additionalProperties: false,
+    },
+    argv: (input, agent) => [
+      "work",
+      "personal-show",
+      ...assigned("--agent", agent ?? null),
+      "--json",
+      "--",
+      text(input, "note_id", true),
+    ],
+  },
+  {
+    name: "sona_personal_document_save",
+    title: "Make a Sona personal document",
+    description: `Make a personal document: private to the user, shared with you at the edit role, and in no other tool's reads until the user or you share it or move it into a project. Use it for drafts and material not ready for the user's notes. ${NOTE_WRITES}`,
+    mutates: "changes",
+    optIn: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        body: { type: "string", description: "The document's text; its first words become its title." },
+        dry_run: DRY_RUN,
+        operation_id: { ...OPERATION_ID, description: NOTE_OPERATION },
+      },
+      required: ["body"],
+      additionalProperties: false,
+    },
+    argv: (input, agent) => [
+      "work",
+      "personal-new",
+      ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+      ...writing(input, agent),
+      "--json",
+      "--",
+      text(input, "body", true),
+    ],
+  },
+  {
+    name: "sona_personal_document_share",
+    title: "Share a Sona personal document with an agent",
+    description: `Share a personal document with another agent at role view (read it and its comments), comment (also comment) or edit (also change, share and move it); a second call changes the role, and role null takes the agent off. Needs your edit role on it. A share already so answers replayed:true. ${NOTE_WRITES}`,
+    mutates: "changes",
+    optIn: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        note_id: { type: "string", description: "The document's id from sona_personal_document_list." },
+        agent: { type: "string", description: 'The agent to share with, as Sona names agents: "Claude Code", "Codex".' },
+        role: { type: "string", description: "view, comment or edit; null takes the agent off." },
+        dry_run: DRY_RUN,
+        operation_id: { ...OPERATION_ID, description: NOTE_OPERATION },
+      },
+      required: ["note_id", "agent", "role"],
+      additionalProperties: false,
+    },
+    argv: (input, agent) => [
+      "work",
+      "personal-share",
+      `--with=${text(input, "agent", true)}`,
+      ...nullable("--role", input, "role", "none"),
+      ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+      ...writing(input, agent),
+      "--json",
+      "--",
+      text(input, "note_id", true),
+    ],
+  },
+  {
+    name: "sona_personal_document_move",
+    title: "Move a Sona personal document into a project",
+    description: `Move a personal document into a project, a task or a cycle: name exactly one. It becomes an ordinary note filed as a document of it, with its words, versions and comments kept, readable by any agent the user's External access allows; its sharing ends. Needs your edit role on it. ${NOTE_WRITES}`,
+    mutates: "changes",
+    optIn: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        note_id: { type: "string", description: "The document's id from sona_personal_document_list." },
+        project: { type: "string", description: "A project, by name or id." },
+        task: TASK,
+        cycle: { type: "string", description: "A cycle: current, next, or its number." },
+        dry_run: DRY_RUN,
+        operation_id: OPERATION_ID,
+      },
+      required: ["note_id"],
+      additionalProperties: false,
+    },
+    argv: (input, agent) => {
+      const into = (["task", "project", "cycle"] as const).flatMap((key) => {
+        const value = text(input, key);
+        return value === null ? [] : [`--${key}=${value}`];
+      });
+      return [
+        "work",
+        "personal-move",
+        ...into,
+        ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+        ...writing(input, agent),
+        "--json",
+        "--",
+        text(input, "note_id", true),
+      ];
+    },
+  },
+  {
+    name: "sona_personal_document_make_private",
+    title: "Make a Sona note private again",
+    description: `Take a note back into the personal space: off every project, task and cycle it was filed under, and out of every other agent's reads; it stays shared with you at the edit role. A personal document already answers replayed:true. ${NOTE_WRITES}`,
+    mutates: "changes",
+    optIn: true,
+    inputSchema: {
+      type: "object",
+      properties: { note_id: NOTE_ID, dry_run: DRY_RUN, operation_id: { ...OPERATION_ID, description: NOTE_OPERATION } },
+      required: ["note_id"],
+      additionalProperties: false,
+    },
+    argv: (input, agent) => [
+      "work",
+      "personal-private",
+      ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+      ...writing(input, agent),
+      "--json",
+      "--",
+      text(input, "note_id", true),
     ],
   },
   {

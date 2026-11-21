@@ -64,14 +64,19 @@ private struct ScratchNoteListPage: View {
                         .buttonStyle(.secondary)
                     SearchField(prompt: "Search notes", text: $store.query)
                         .frame(width: 216)
-                    Button {
-                        Task { await store.newNote() }
+                    Menu {
+                        Button("New note") { Task { await store.newNote() } }
+                        Button("New personal document") { Task { await store.newPersonalDocument() } }
                     } label: {
                         Image(systemName: "plus")
+                    } primaryAction: {
+                        Task { await store.newNote() }
                     }
-                    .buttonStyle(.icon)
-                    .help("New note")
-                    .accessibilityLabel("New note")
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.visible)
+                    .fixedSize()
+                    .help("New")
+                    .accessibilityLabel("New")
                 }
             }
             ErrorNote(store.error)
@@ -109,12 +114,25 @@ private struct ScratchNoteListPage: View {
                     }
                 }
             } else {
-                Card {
-                    ForEach(store.notes) { note in
-                        ScratchNoteRow(note: note) {
-                            Task { await store.open(note) }
-                        }
-                    }
+                let personal = store.notes.filter(\.personal)
+                let others = store.notes.filter { !$0.personal }
+                if !personal.isEmpty {
+                    PageSection("Personal") { noteRows(personal) }
+                }
+                if personal.isEmpty {
+                    noteRows(others)
+                } else if !others.isEmpty {
+                    PageSection("Notes") { noteRows(others) }
+                }
+            }
+        }
+    }
+
+    private func noteRows(_ notes: [ScratchNote]) -> some View {
+        Card {
+            ForEach(notes) { note in
+                ScratchNoteRow(note: note) {
+                    Task { await store.open(note) }
                 }
             }
         }
@@ -168,6 +186,8 @@ private struct ScratchNoteEditorPage: View {
     @State private var confirmingDelete = false
     @State private var showingHistory = false
     @State private var showingSources = false
+    @State private var showingPersonalShare = false
+    @State private var confirmingPrivate = false
     @State private var captured: ScratchSourceEvidence?
     @State private var sourceError: String?
     @State private var selectedPhoneThought: PhoneThoughtReference?
@@ -202,6 +222,27 @@ private struct ScratchNoteEditorPage: View {
         return { share(note) }
     }
 
+    /// Who can reach a personal document; nothing for an ordinary note.
+    private var privacy: String? {
+        guard store.saved?.personal == true || (store.openId == nil && store.draftPersonal) else { return nil }
+        switch store.collaborators.count {
+        case 0: return "Private"
+        case 1: return "Shared with \(store.collaborators[0].agent)"
+        default: return "Shared with \(store.collaborators.count) agents"
+        }
+    }
+
+    /// What making the open note private undoes, named by what it is filed
+    /// under once that is known.
+    private var privateConsequence: String {
+        guard let memory = store.memory else {
+            return "Removes it from its projects and cycles, and from agents' reads"
+        }
+        let filed = memory.documents.map(\.title)
+        guard !filed.isEmpty else { return "Agents can no longer read it" }
+        return "Removes it from \(filed.formatted(.list(type: .and))) and from agents' reads"
+    }
+
     var body: some View {
         Page(back: PageBack("Notes") { Task { await store.close() } }, title: store.saved?.title ?? "New note") {
             VStack(alignment: .leading, spacing: 6) {
@@ -211,6 +252,9 @@ private struct ScratchNoteEditorPage: View {
                     .accessibilityAddTraits(.isHeader)
                     .pageHeadline()
                 Text(status).metaText(Theme.inkSecondary)
+                if let privacy {
+                    Label(privacy, systemImage: "lock.fill").metaText()
+                }
                 if store.memory?.interpretation == true {
                     Text("AI interpretation").metaText()
                 } else if store.memory?.passages.isEmpty == false {
@@ -242,9 +286,17 @@ private struct ScratchNoteEditorPage: View {
                 .help("Link a source")
                 .accessibilityLabel("Link a source")
                 .disabled(store.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                if store.saved?.personal == true {
+                    Button("Share") { showingPersonalShare = true }
+                        .buttonStyle(.secondary)
+                        .help("Share with agents, or move it into a project")
+                } else if store.saved != nil {
+                    Button("Make private…") { confirmingPrivate = true }
+                        .buttonStyle(.quiet)
+                }
                 ScratchNoteActions(
                     store: store,
-                    share: shareAction,
+                    share: store.saved?.personal == true ? nil : shareAction,
                     showHistory: { showingHistory = true },
                     confirmDelete: { confirmingDelete = true })
             }
@@ -273,8 +325,19 @@ private struct ScratchNoteEditorPage: View {
             }
             Button("Keep it", role: .cancel) {}
         }
+        .alert("Make this note private?", isPresented: $confirmingPrivate) {
+            Button("Make private") {
+                Task { await store.makePrivate() }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(privateConsequence)
+        }
         .sheet(isPresented: $showingHistory) {
             ScratchVersionHistorySheet(store: store)
+        }
+        .sheet(isPresented: $showingPersonalShare) {
+            PersonalShareSheet(store: store, shareLink: shareAction)
         }
         .sheet(isPresented: $showingSources) {
             ScratchSourcePicker(store: store, synthesis: false)
