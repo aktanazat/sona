@@ -118,6 +118,15 @@ struct VocabularyView: View {
                 )
             )
             ToggleRow(
+                title: "Expand shortcuts as you type",
+                detail: "Reads keys in every app, except password fields.",
+                isOn: Binding(
+                    get: { store.typedSnippetsEnabled },
+                    set: { store.setTypedSnippetsEnabled($0) }
+                )
+            )
+            .disabled(!store.snippetsEnabled)
+            ToggleRow(
                 title: "Apply rewrites",
                 isOn: Binding(
                     get: { store.replacementsEnabled },

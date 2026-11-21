@@ -155,6 +155,18 @@ pub fn set_snippets_enabled(app: AppHandle, enabled: bool) -> Result<(), String>
     Ok(())
 }
 
+/// Expand shortcuts where they are typed, in any app.
+#[tauri::command]
+#[specta::specta]
+pub fn set_typed_snippets_enabled(app: AppHandle, enabled: bool) -> Result<(), String> {
+    settings::update_settings(&app, |settings| {
+        settings.typed_snippets_enabled = enabled;
+    })?;
+    #[cfg(target_os = "macos")]
+    crate::typed_snippets::start_if_enabled(&app);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

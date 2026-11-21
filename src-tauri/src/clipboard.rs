@@ -53,6 +53,23 @@ pub(crate) fn write_text_to_clipboard(app_handle: &AppHandle, text: &str) -> Res
         .map_err(|e| format!("Failed to write to clipboard: {}", e))
 }
 
+/// The text on the general pasteboard now.
+#[cfg(target_os = "macos")]
+pub(crate) fn current_text() -> Option<String> {
+    objc2::rc::autoreleasepool(|_| {
+        // SAFETY: NSPasteboardTypeString is a read-only AppKit framework static.
+        let pasteboard_type = unsafe { objc2_app_kit::NSPasteboardTypeString };
+        NSPasteboard::generalPasteboard()
+            .stringForType(pasteboard_type)
+            .map(|text| text.to_string())
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn current_text() -> Option<String> {
+    None
+}
+
 /// Attempts to send a key combination using Linux-native tools.
 /// Returns `Ok(true)` if a native tool handled it, `Ok(false)` to fall back to enigo.
 #[cfg(target_os = "linux")]

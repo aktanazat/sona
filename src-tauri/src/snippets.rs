@@ -89,6 +89,133 @@ pub fn apply_snippets(text: &str, snippets: &[Snippet]) -> String {
     result
 }
 
+/// An expansion with its placeholders filled in.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Filled {
+    pub text: String,
+    /// Characters after `{cursor}`: how far the caret moves back once the
+    /// text is in. Zero without one.
+    pub caret_back: usize,
+}
+
+/// Fills `{date}`, `{time}`, `{clipboard}` and `{cursor}`. Any other braces
+/// stay as written. The clipboard is read only when the expansion uses it.
+pub fn fill_placeholders(
+    expansion: &str,
+    now: &chrono::DateTime<chrono::Local>,
+    clipboard: impl FnOnce() -> Option<String>,
+) -> Filled {
+    let mut read_clipboard = Some(clipboard);
+    let mut clipboard_text: Option<String> = None;
+    let mut text = String::with_capacity(expansion.len());
+    let mut cursor_at = None;
+    let mut rest = expansion;
+    while let Some(open) = rest.find('{') {
+        text.push_str(&rest[..open]);
+        let tail = &rest[open..];
+        rest = if let Some(after) = tail.strip_prefix("{date}") {
+            text.push_str(&now.format("%B %-d, %Y").to_string());
+            after
+        } else if let Some(after) = tail.strip_prefix("{time}") {
+            text.push_str(&now.format("%-I:%M %p").to_string());
+            after
+        } else if let Some(after) = tail.strip_prefix("{clipboard}") {
+            let pasted = clipboard_text.get_or_insert_with(|| {
+                read_clipboard
+                    .take()
+                    .and_then(|read| read())
+                    .unwrap_or_default()
+            });
+            text.push_str(pasted);
+            after
+        } else if let Some(after) = tail.strip_prefix("{cursor}") {
+            cursor_at.get_or_insert(text.len());
+            after
+        } else {
+            text.push('{');
+            &tail[1..]
+        };
+    }
+    text.push_str(rest);
+    let caret_back = cursor_at.map_or(0, |at| text[at..].chars().count());
+    Filled { text, caret_back }
+}
+
+/// One key as the typed-shortcut matcher sees it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Keystroke {
+    Text(char),
+    Erase,
+    /// The caret moved or the text changed some other way, so what came
+    /// before is no longer known.
+    Reset,
+}
+
+/// A shortcut typed and ended with a space: erase that many characters,
+/// the space included, and write the expansion in their place.
+#[derive(Debug, PartialEq, Eq)]
+pub struct TypedExpansion {
+    pub erase: usize,
+    pub expansion: String,
+}
+
+/// The characters typed since the caret last moved, enough to hold the
+/// longest trigger.
+#[derive(Debug, Default)]
+pub struct TypedTriggers {
+    typed: String,
+}
+
+const TYPED_MEMORY_BYTES: usize = 256;
+
+impl TypedTriggers {
+    /// A trigger expands when a space follows it and it starts a word, so
+    /// "sig" never fires inside "design". The longest trigger wins.
+    pub fn key(&mut self, keystroke: Keystroke, snippets: &[Snippet]) -> Option<TypedExpansion> {
+        match keystroke {
+            Keystroke::Reset => self.typed.clear(),
+            Keystroke::Erase => {
+                self.typed.pop();
+            }
+            Keystroke::Text(' ') => {
+                let found = snippets
+                    .iter()
+                    .filter(|snippet| snippet.enabled && snippet.is_usable())
+                    .filter(|snippet| ends_with_word(&self.typed, &snippet.trigger))
+                    .max_by_key(|snippet| snippet.trigger.chars().count());
+                if let Some(snippet) = found {
+                    self.typed.clear();
+                    return Some(TypedExpansion {
+                        erase: snippet.trigger.chars().count() + 1,
+                        expansion: snippet.expansion.clone(),
+                    });
+                }
+                self.typed.push(' ');
+            }
+            Keystroke::Text(character) => self.typed.push(character),
+        }
+        if self.typed.len() > TYPED_MEMORY_BYTES {
+            let half = self.typed.len() / 2;
+            let keep_from = (half..self.typed.len())
+                .find(|&index| self.typed.is_char_boundary(index))
+                .unwrap_or(half);
+            self.typed.drain(..keep_from);
+        }
+        None
+    }
+}
+
+fn ends_with_word(typed: &str, trigger: &str) -> bool {
+    let mut typed = typed.chars().rev();
+    for wanted in trigger.chars().rev() {
+        match typed.next() {
+            Some(got) if got.to_lowercase().eq(wanted.to_lowercase()) => {}
+            _ => return false,
+        }
+    }
+    typed.next().is_none_or(|before| !before.is_alphanumeric())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -236,5 +363,55 @@ mod tests {
             serde_json::from_value::<Vec<Snippet>>(encoded).expect("snippets deserialize"),
             snippets
         );
+    }
+
+    #[test]
+    fn placeholders_fill_and_the_cursor_lands_where_it_was_written() {
+        use chrono::TimeZone;
+        let now = chrono::Local
+            .with_ymd_and_hms(2026, 11, 20, 21, 5, 0)
+            .unwrap();
+        let filled = fill_placeholders(
+            "Hi {cursor}, re {clipboard} on {date} at {time} {x}",
+            &now,
+            || Some("PR 12".to_string()),
+        );
+        assert_eq!(
+            filled.text,
+            "Hi , re PR 12 on November 20, 2026 at 9:05 PM {x}"
+        );
+        assert_eq!(filled.caret_back, filled.text.chars().count() - 3);
+
+        let plain = fill_placeholders("Best, Aktan", &now, || panic!("clipboard read"));
+        assert_eq!(plain.caret_back, 0);
+    }
+
+    fn typed(triggers: &mut TypedTriggers, text: &str, snippets: &[Snippet]) -> Option<TypedExpansion> {
+        text.chars()
+            .map(|character| triggers.key(Keystroke::Text(character), snippets))
+            .last()
+            .flatten()
+    }
+
+    #[test]
+    fn a_typed_trigger_expands_on_the_space_after_it_and_only_as_a_word() {
+        let snippets = vec![snippet("sig", "Best,\nAktan"), snippet("sig2", "Aktan")];
+        let mut triggers = TypedTriggers::default();
+        assert_eq!(
+            typed(&mut triggers, "thanks SIG ", &snippets),
+            Some(TypedExpansion {
+                erase: 4,
+                expansion: "Best,\nAktan".to_string()
+            })
+        );
+        assert_eq!(typed(&mut triggers, "unsig ", &snippets), None);
+
+        typed(&mut triggers, "sih", &snippets);
+        triggers.key(Keystroke::Erase, &snippets);
+        assert_eq!(typed(&mut triggers, "g2 ", &snippets).map(|found| found.erase), Some(5));
+
+        typed(&mut triggers, "si", &snippets);
+        triggers.key(Keystroke::Reset, &snippets);
+        assert_eq!(typed(&mut triggers, "g ", &snippets), None);
     }
 }

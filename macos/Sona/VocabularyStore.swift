@@ -31,6 +31,7 @@ final class VocabularyStore {
     private(set) var spokenEditsEnabled = false
     private(set) var emojiEnabled = false
     private(set) var snippetsEnabled = true
+    private(set) var typedSnippetsEnabled = false
     private(set) var replacementsEnabled = true
     private(set) var meetingWordsEnabled = true
 
@@ -456,6 +457,15 @@ final class VocabularyStore {
         )
     }
 
+    func setTypedSnippetsEnabled(_ enabled: Bool) {
+        writeSetting(
+            "set_typed_snippets_enabled",
+            enabled: enabled,
+            failure: "Couldn't change typed shortcuts. Try again.",
+            retry: { [weak self] in self?.setTypedSnippetsEnabled(enabled) }
+        )
+    }
+
     func setReplacementsEnabled(_ enabled: Bool) {
         writeSetting(
             "update_text_replacements_enabled",
@@ -742,6 +752,7 @@ final class VocabularyStore {
         spokenEditsEnabled = settings.spokenEditsEnabled ?? false
         emojiEnabled = settings.emojiReplacementsEnabled ?? false
         snippetsEnabled = settings.snippetsEnabled ?? true
+        typedSnippetsEnabled = settings.typedSnippetsEnabled ?? false
         replacementsEnabled = settings.replacementsEnabled ?? true
         meetingWordsEnabled = settings.meetingVocabularyEnabled ?? true
     }

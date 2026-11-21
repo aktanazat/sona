@@ -970,6 +970,18 @@ pub(super) async fn call(
             })
             .await?
         }
+        "set_typed_snippets_enabled" => {
+            let mut args = Args::parse(params)?;
+            let enabled = args.take("enabled")?;
+            let handle = app.clone();
+            on_main_thread(app, move || {
+                reply(crate::commands::snippets::set_typed_snippets_enabled(
+                    handle.clone(),
+                    enabled,
+                ))
+            })
+            .await?
+        }
         "change_context_policy_ceiling_setting" => {
             let mut args = Args::parse(params)?;
             let ceiling = args.take("ceiling")?;

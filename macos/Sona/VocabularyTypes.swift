@@ -230,6 +230,7 @@ struct VocabularySettingsSnapshot: Decodable {
     let emojiReplacements: [EmojiReplacement]?
     let emojiReplacementsEnabled: Bool?
     let snippetsEnabled: Bool?
+    let typedSnippetsEnabled: Bool?
     let replacementsEnabled: Bool?
     let spokenEditsEnabled: Bool?
     let meetingVocabularyEnabled: Bool?

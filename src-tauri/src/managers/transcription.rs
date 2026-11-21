@@ -4021,7 +4021,12 @@ fn post_process_transcription_text(
         // text the user asked to expand.
         let corrected = apply_spoken_edits(&corrected, output_language, asr.spoken_edits_enabled);
         let corrected = if asr.snippets_enabled {
-            apply_snippets(&corrected, &asr.snippets)
+            crate::snippets::fill_placeholders(
+                &apply_snippets(&corrected, &asr.snippets),
+                &chrono::Local::now(),
+                crate::clipboard::current_text,
+            )
+            .text
         } else {
             corrected
         };

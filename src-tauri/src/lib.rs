@@ -60,6 +60,8 @@ mod shortcut;
 mod signal_handle;
 mod snippets;
 mod transcription_coordinator;
+#[cfg(target_os = "macos")]
+mod typed_snippets;
 mod tray;
 mod tray_i18n;
 mod utils;
@@ -404,6 +406,8 @@ fn start_meeting_detection(
     planning::work::follow::start(app_handle.clone(), Arc::clone(&native_prompts));
     planning::work::cycles::start(app_handle.clone());
     planning::work::loops::start(app_handle.clone());
+    #[cfg(target_os = "macos")]
+    typed_snippets::start_if_enabled(app_handle);
     app_handle.manage(planning::work::watch::WatchNotices(Arc::clone(
         &native_prompts,
     )));
@@ -1623,6 +1627,7 @@ pub fn run(cli_args: CliArgs) {
             commands::snippets::delete_snippet,
             commands::snippets::set_snippet_enabled,
             commands::snippets::set_snippets_enabled,
+            commands::snippets::set_typed_snippets_enabled,
             settings::change_context_policy_ceiling_setting,
             settings::change_context_url_capture_enabled_setting,
             settings::change_dictation_project_root_setting,

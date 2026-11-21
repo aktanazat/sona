@@ -1507,6 +1507,10 @@ pub struct AppSettings {
     pub snippets: Vec<Snippet>,
     #[serde(default = "default_snippets_enabled")]
     pub snippets_enabled: bool,
+    /// Expand shortcuts where they are typed, in any app. Off until turned on:
+    /// it reads key presses system-wide.
+    #[serde(default)]
+    pub typed_snippets_enabled: bool,
     /// Whether the app may ask GitHub for the latest published release. No
     /// update is ever installed automatically.
     #[serde(default = "default_update_check_enabled")]
@@ -2359,6 +2363,7 @@ pub fn get_default_settings() -> AppSettings {
         agent_bridge: AgentBridgeSettings::default(),
         snippets: Vec::new(),
         snippets_enabled: default_snippets_enabled(),
+        typed_snippets_enabled: false,
         update_check_enabled: default_update_check_enabled(),
         agent_panel_enabled: default_agent_panel_enabled(),
         agent_panel_relay_url: None,
