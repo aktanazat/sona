@@ -31,11 +31,15 @@ pub const AUTO_ADD_MIGRATION: &str = "ALTER TABLE planning_cycle_settings
 ALTER TABLE planning_cycle_settings
     ADD COLUMN auto_add_completed INTEGER NOT NULL DEFAULT 0 CHECK(auto_add_completed IN (0, 1));";
 
+/// Optional goal or description for each cycle.
+pub const DESCRIPTION_MIGRATION: &str = "ALTER TABLE planning_cycles ADD COLUMN description TEXT;";
+
 struct Span {
     number: i64,
     start: NaiveDate,
     end: NaiveDate,
     name: Option<String>,
+    description: Option<String>,
 }
 
 fn day_text(day: NaiveDate) -> String {
@@ -48,23 +52,26 @@ fn plus(day: NaiveDate, days: u64) -> Result<NaiveDate> {
 }
 
 fn spans(conn: &Connection) -> Result<Vec<Span>> {
-    let mut statement = conn
-        .prepare("SELECT number, start_day, end_day, name FROM planning_cycles ORDER BY number")?;
+    let mut statement = conn.prepare(
+        "SELECT number, start_day, end_day, name, description FROM planning_cycles ORDER BY number",
+    )?;
     let rows = statement.query_map([], |row| {
         Ok((
             row.get::<_, i64>(0)?,
             row.get::<_, String>(1)?,
             row.get::<_, String>(2)?,
             row.get::<_, Option<String>>(3)?,
+            row.get::<_, Option<String>>(4)?,
         ))
     })?;
     rows.map(|row| {
-        let (number, start, end, name) = row?;
+        let (number, start, end, name, description) = row?;
         Ok(Span {
             number,
             start: NaiveDate::parse_from_str(&start, DAY)?,
             end: NaiveDate::parse_from_str(&end, DAY)?,
             name,
+            description,
         })
     })
     .collect()
@@ -175,6 +182,7 @@ pub(crate) fn advance(conn: &Connection, now_ms: i64) -> Result<Advanced> {
                 start,
                 end,
                 name: None,
+                description: None,
             });
         }
     }
@@ -189,6 +197,7 @@ pub(crate) fn advance(conn: &Connection, now_ms: i64) -> Result<Advanced> {
             start,
             end,
             name: None,
+            description: None,
         });
     }
     for span in all.iter().filter(|span| span.end <= today) {
@@ -285,17 +294,19 @@ pub(crate) fn rollover(conn: &Connection, number: i64, now_ms: i64) -> Result<Ve
     roll(conn, into, |candidate| candidate.number == number, now_ms)
 }
 
-/// What a cycle is renamed or moved to. An empty name clears it.
+/// What a cycle is renamed, described or moved to. An empty name or
+/// description clears it.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct CycleEdit {
     pub(crate) name: Option<String>,
+    pub(crate) description: Option<String>,
     pub(crate) start_day: Option<NaiveDate>,
     pub(crate) end_day: Option<NaiveDate>,
 }
 
-/// Renames a cycle, or moves the days of one not yet over. Days never move
-/// into the past, a cycle under way keeps its start, and no cycle runs
-/// into its neighbours.
+/// Renames a cycle, sets its description, or moves the days of one not yet
+/// over. Days never move into the past, a cycle under way keeps its start,
+/// and no cycle runs into its neighbours.
 pub(crate) fn save_cycle(
     conn: &Connection,
     number: i64,
@@ -314,6 +325,13 @@ pub(crate) fn save_cycle(
         conn.execute(
             "UPDATE planning_cycles SET name = ?2 WHERE number = ?1",
             params![number, (!name.is_empty()).then_some(name)],
+        )?;
+    }
+    if let Some(description) = &edit.description {
+        let description = description.trim();
+        conn.execute(
+            "UPDATE planning_cycles SET description = ?2 WHERE number = ?1",
+            params![number, (!description.is_empty()).then_some(description)],
         )?;
     }
     if edit.start_day.is_none() && edit.end_day.is_none() {
@@ -415,6 +433,14 @@ pub(crate) fn open(conn: &Connection, number: i64, now_ms: i64) -> Result<i64> {
     }
 }
 
+/// Whether cycle `number` exists and has not ended.
+pub(crate) fn is_open(conn: &Connection, number: i64, now_ms: i64) -> Result<bool> {
+    let today = local_today(now_ms)?;
+    Ok(spans(conn)?
+        .iter()
+        .any(|span| span.number == number && today < span.end))
+}
+
 /// What a query's cycle names, read against the cycles as they are now.
 #[derive(Clone, Copy)]
 pub(crate) enum CycleWant {
@@ -471,6 +497,7 @@ fn shown(
     Ok(WorkCycle {
         number: span.number,
         name: span.name.clone(),
+        description: span.description.clone(),
         start_day: day_text(span.start),
         end_day: day_text(span.end),
         starts_at_ms: local_midnight_ms(span.start)?,
@@ -1047,6 +1074,7 @@ pub(crate) fn cycle_save(
     let request = (
         number,
         &edit.name,
+        &edit.description,
         edit.start_day.map(day_text),
         edit.end_day.map(day_text),
     );
@@ -1095,11 +1123,13 @@ pub fn work_cycle_save(
     operation_id: String,
     number: i64,
     name: Option<String>,
+    description: Option<String>,
     start_day: Option<String>,
     end_day: Option<String>,
 ) -> Result<WorkCycles, String> {
     let edit = CycleEdit {
         name,
+        description,
         start_day: day_arg(start_day)?,
         end_day: day_arg(end_day)?,
     };
@@ -1364,6 +1394,7 @@ mod tests {
             start: monday,
             end: plus(monday, 14).expect("two weeks on"),
             name: None,
+            description: None,
         };
 
         let pace: Vec<f64> = target(&span, 10)

@@ -722,6 +722,78 @@ pub(crate) fn remind_subject(
     notify(conn, &notice, now_ms)
 }
 
+/// Sona's word that an active project's update is due: a reminder about the
+/// project, `field` `update`, `to` the time it came due. Each cycle is due
+/// on the local day `weeks` after the last update (or the project's start)
+/// at `update_hour`, and posts once; a cycle missed while the Mac slept
+/// posts when it wakes. True when this call posted one.
+pub(crate) fn post_update_due(conn: &Connection, now_ms: i64) -> Result<bool> {
+    let mut posted = false;
+    let zone = jiff::tz::TimeZone::system();
+    for summary in crate::planning::store::projects(conn, false)? {
+        let project = summary.project;
+        if project.status != crate::planning::ProjectStatus::Active
+            || project.archived_at_ms.is_some()
+            || project.trashed_at_ms.is_some()
+        {
+            continue;
+        }
+        let Some(weeks) = project.update_every_weeks else {
+            continue;
+        };
+        let last_ms = crate::planning::updates::latest(conn, &project.id)?
+            .map_or(project.created_at_ms, |update| update.created_at_ms);
+        let Some(due_ms) = last_cycle_due(&zone, last_ms, weeks, project.update_hour, now_ms)
+        else {
+            continue;
+        };
+        let key = format!("update_due:{}:{due_ms}", project.id);
+        let at = due_ms.to_string();
+        let notice = Notice {
+            field: Some("update"),
+            key: Some(&key),
+            to: Some(&at),
+            ..Notice::about(
+                NotificationKind::Reminder,
+                SubjectKind::Project,
+                &project.id,
+                WorkActor::Sona,
+            )
+        };
+        posted |= notify(conn, &notice, now_ms)?;
+    }
+    Ok(posted)
+}
+
+/// When the latest update cycle at or before `now_ms` came due in `zone`,
+/// if one has. An hour a clock change skips comes due just past the gap.
+fn last_cycle_due(
+    zone: &jiff::tz::TimeZone,
+    last_ms: i64,
+    weeks: u8,
+    hour: u8,
+    now_ms: i64,
+) -> Option<i64> {
+    let span = i64::from(weeks) * super::digest::WEEK_MS;
+    let time = jiff::civil::Time::new(i8::try_from(hour).ok()?, 0, 0, 0).ok()?;
+    let due = |cycle: i64| {
+        let day = jiff::Timestamp::from_millisecond(last_ms + cycle * span)
+            .ok()?
+            .to_zoned(zone.clone())
+            .date();
+        let at = day.to_datetime(time).to_zoned(zone.clone()).ok()?;
+        Some(at.timestamp().as_millisecond())
+    };
+    let mut cycle = (now_ms - last_ms).div_euclid(span).max(0) + 1;
+    while cycle >= 1 {
+        match due(cycle) {
+            Some(due_ms) if due_ms <= now_ms => return Some(due_ms),
+            _ => cycle -= 1,
+        }
+    }
+    None
+}
+
 /// An agent asked the user a question in its session on a task; posted once
 /// per question, `activity_id` naming it.
 pub(crate) fn asked(
@@ -1202,4 +1274,70 @@ pub(crate) fn work_subscribe(
 
 pub(crate) fn work_subscriptions(app: AppHandle) -> Result<Vec<Subscription>, String> {
     reading(&app, subscriptions)
+}
+
+#[cfg(test)]
+mod update_due_tests {
+    use super::super::super::schema;
+    use super::super::super::store::insert_project;
+    use super::{last_cycle_due, post_update_due};
+    use chrono::{Local, TimeZone};
+    use rusqlite::Connection;
+
+    fn local(day: u32, hour: u32, minute: u32) -> i64 {
+        Local
+            .with_ymd_and_hms(2026, 3, day, hour, minute, 0)
+            .earliest()
+            .expect("a local time")
+            .timestamp_millis()
+    }
+
+    #[test]
+    fn an_update_reminder_comes_at_its_hour_once_for_each_missed_cycle() {
+        let conn = Connection::open_in_memory().expect("an in-memory history database");
+        schema::apply_all(&conn).expect("the planner schema");
+        let project = insert_project(&conn, "Harbor", None, local(2, 17, 0))
+            .expect("a project")
+            .id;
+        conn.execute(
+            "UPDATE planning_projects SET status = 'active', update_every_weeks = 1,
+                update_hour = 9 WHERE id = ?1",
+            [&project],
+        )
+        .expect("a weekly reminder at 09:00");
+
+        assert!(!post_update_due(&conn, local(9, 8, 59)).expect("before the hour"));
+        assert!(post_update_due(&conn, local(9, 9, 0)).expect("at the hour"));
+        assert!(!post_update_due(&conn, local(9, 18, 0)).expect("same cycle"));
+        assert!(post_update_due(&conn, local(16, 9, 0)).expect("next missed cycle"));
+        let notices: Vec<(String, String, Option<String>)> = conn
+            .prepare(
+                "SELECT kind, subject_kind, field FROM planning_notifications
+                 WHERE subject_id = ?1 ORDER BY created_at_ms",
+            )
+            .expect("a query")
+            .query_map([&project], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .expect("notices")
+            .collect::<rusqlite::Result<_>>()
+            .expect("rows");
+        let reminder = ("reminder".to_owned(), "project".to_owned(), Some("update".to_owned()));
+        assert_eq!(notices, vec![reminder.clone(), reminder]);
+    }
+
+    #[test]
+    fn an_update_reminder_set_for_an_hour_the_clocks_skip_comes_just_after() {
+        let zone = jiff::tz::TimeZone::get("America/New_York").expect("a time zone");
+        let at = |day: i8, hour: i8| {
+            jiff::civil::date(2026, 3, day)
+                .at(hour, 0, 0, 0)
+                .to_zoned(zone.clone())
+                .expect("a time")
+                .timestamp()
+                .as_millisecond()
+        };
+        let last_ms = at(1, 12);
+
+        assert_eq!(last_cycle_due(&zone, last_ms, 1, 2, at(8, 1)), None);
+        assert_eq!(last_cycle_due(&zone, last_ms, 1, 2, at(8, 3)), Some(at(8, 3)));
+    }
 }

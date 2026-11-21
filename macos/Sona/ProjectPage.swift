@@ -156,6 +156,7 @@ struct ProjectPropertiesPanel: View {
             row("Blocked by") { dependencies(project, blockedBy: true) }
             row("Blocking") { dependencies(project, blockedBy: false) }
             row("Labels") { labelsMenu(project) }
+            row("Updates") { updateReminderMenu(project) }
             row("Look") { lookMenu(project) }
             links(project)
         }
@@ -439,6 +440,39 @@ struct ProjectPropertiesPanel: View {
         }
     }
 
+    private func updateReminderMenu(_ project: PlanningProject) -> some View {
+        let weeks = project.updateEveryWeeks
+        let hour = project.updateHour ?? 9
+        let hourText = String(format: "%02d:00", hour)
+        let label = weeks.map { w in w == 1 ? "Weekly at \(hourText)" : "Every \(w) weeks at \(hourText)" } ?? "Off"
+        return Menu {
+            Button("Off") { save(PlanningProjectSave(updateEveryWeeks: .clear)) }
+                .disabled(weeks == nil)
+            Divider()
+            ForEach([1, 2, 3, 4], id: \.self) { count in
+                Button(count == 1 ? "Every week" : "Every \(count) weeks") {
+                    save(PlanningProjectSave(updateEveryWeeks: .set(count)))
+                }
+            }
+            if weeks != nil {
+                Divider()
+                Menu("Reminder hour (\(hourText))") {
+                    ForEach([8, 9, 10, 12, 14, 17, 18], id: \.self) { h in
+                        Button(String(format: "%02d:00", h)) {
+                            save(PlanningProjectSave(updateHour: h))
+                        }
+                    }
+                }
+            }
+        } label: {
+            menuLabel(label, muted: weeks == nil)
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .accessibilityLabel("Update reminders: \(label)")
+    }
+
     private func lookMenu(_ project: PlanningProject) -> some View {
         HStack(spacing: 8) {
             Button { pickingHue = true } label: {
@@ -676,6 +710,7 @@ struct ProjectUpdatesView: View {
     @State private var editHealth: PlanningProjectHealth = .onTrack
     @State private var editBody = ""
     @State private var editError: String?
+    @State private var openComments: Set<String> = []
 
     var body: some View {
         let projectId = detail.project.id
@@ -966,18 +1001,37 @@ struct ProjectUpdatesView: View {
         if editing == update.id {
             editor(update)
         } else {
-            ProjectUpdateCard(update: update, now: now)
-                .contextMenu {
-                    if update.author.kind == .me {
-                        Button("Edit update") {
-                            editHealth = update.health
-                            editBody = update.body ?? ""
-                            editError = nil
-                            editing = update.id
-                        }
-                        Button("Delete update", role: .destructive) { Task { await store.deleteUpdate(update) } }
-                    }
+            let showingComments = openComments.contains(update.id)
+            let subject = PlanningCommentSubject(kind: .update, id: update.id)
+            let commentCount = store.comments.threads[subject]?.count ?? 0
+            VStack(alignment: .leading, spacing: 8) {
+                ProjectUpdateCard(update: update, now: now, projectTitle: detail.project.title,
+                                  commentCount: commentCount,
+                                  toggleComments: {
+                                      if showingComments { openComments.remove(update.id) } else { openComments.insert(update.id) }
+                                  })
+                if showingComments {
+                    PlanningCommentsView(threads: store.comments, subject: subject)
+                        .padding(14)
+                        .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusCard, style: .continuous))
+                        .overlay(RoundedRectangle(cornerRadius: Theme.radiusCard, style: .continuous).strokeBorder(Theme.border, lineWidth: 1))
                 }
+            }
+            .contextMenu {
+                Button("Copy as Markdown") {
+                    copyUpdateMarkdown(title: detail.project.title, health: update.health, progress: update.progress,
+                                       createdAtMs: update.createdAtMs, body: update.body)
+                }
+                if update.author.kind == .me {
+                    Button("Edit update") {
+                        editHealth = update.health
+                        editBody = update.body ?? ""
+                        editError = nil
+                        editing = update.id
+                    }
+                    Button("Delete update", role: .destructive) { Task { await store.deleteUpdate(update) } }
+                }
+            }
         }
     }
 
@@ -1036,6 +1090,9 @@ private enum ProjectTimelineEntry: Identifiable {
 struct ProjectUpdateCard: View {
     let update: PlanningProjectUpdate
     let now: Int64
+    var projectTitle: String?
+    var commentCount: Int = 0
+    var toggleComments: (() -> Void)?
 
     var body: some View {
         let author = switch update.author.kind {
@@ -1057,6 +1114,31 @@ struct ProjectUpdateCard: View {
             if let body = update.body, !body.isEmpty {
                 MarkdownBody(source: body, toggle: nil)
                     .textSelection(.enabled)
+            }
+            if toggleComments != nil || projectTitle != nil {
+                HStack(spacing: 12) {
+                    if let toggleComments {
+                        Button(action: toggleComments) {
+                            Label(commentCount > 0 ? "Comments (\(commentCount))" : "Comments", systemImage: "bubble.left")
+                                .font(TypeScale.label(12))
+                                .foregroundStyle(Theme.inkSecondary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    if let projectTitle {
+                        Button {
+                            copyUpdateMarkdown(title: projectTitle, health: update.health, progress: update.progress,
+                                               createdAtMs: update.createdAtMs, body: update.body)
+                        } label: {
+                            Label("Copy as Markdown", systemImage: "doc.on.doc")
+                                .font(TypeScale.label(12))
+                                .foregroundStyle(Theme.inkSecondary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    Spacer()
+                }
+                .padding(.top, 2)
             }
         }
         .padding(14)

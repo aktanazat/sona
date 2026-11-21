@@ -498,6 +498,7 @@ struct ScratchNoteActions: View {
     var share: (() -> Void)?
     let showHistory: () -> Void
     let confirmDelete: () -> Void
+    @Environment(AppModel.self) private var model
 
     var body: some View {
         HStack(spacing: 8) {
@@ -510,6 +511,14 @@ struct ScratchNoteActions: View {
                 .buttonStyle(.icon)
                 .help(saved.pinned ? "Unpin" : "Pin")
                 .accessibilityLabel(saved.pinned ? "Unpin" : "Pin")
+                let starred = model.work.isFavorite(.note, saved.id)
+                Button { model.work.setFavorite(.note, saved.id, !starred) } label: {
+                    Image(systemName: starred ? "star.fill" : "star")
+                        .foregroundStyle(starred ? Theme.accent : Theme.inkSecondary)
+                }
+                .buttonStyle(.icon)
+                .help(starred ? "Remove from Favorites" : "Add to Favorites")
+                .accessibilityLabel(starred ? "Remove from Favorites" : "Add to Favorites")
                 Button(action: showHistory) {
                     Image(systemName: "clock.arrow.circlepath")
                 }

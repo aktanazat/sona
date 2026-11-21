@@ -171,6 +171,34 @@ final class WorkStore {
         await write(on: itemId, "work_comment_delete", OperationIdParams(operationId: Self.newId(), id: id))
     }
 
+    /// Copies a task beside it, with its sub-tasks when asked; hands back
+    /// the copy.
+    func copyTask(_ id: String, withSubtasks: Bool) async -> WorkItem? {
+        do {
+            let copies: [WorkItem] = try await core.request("work_copy", CopyParams(
+                operationId: Self.newId(), id: id, withSubtasks: withSubtasks))
+            mutationError = nil
+            return copies.first
+        } catch {
+            mutationError = error.localizedDescription
+            return nil
+        }
+    }
+
+    /// Puts the user's emoji on a comment or a task, or takes it off;
+    /// hands back every reaction on it.
+    func react(_ subject: WorkReactionSubject, _ id: String, _ emoji: String, on: Bool) async -> [WorkReaction]? {
+        do {
+            let reactions: [WorkReaction] = try await core.request("work_react", ReactParams(
+                operationId: Self.newId(), subject: subject, id: id, emoji: emoji, on: on))
+            mutationError = nil
+            return reactions
+        } catch {
+            mutationError = error.localizedDescription
+            return nil
+        }
+    }
+
     func resolveComment(_ id: String, on itemId: String, resolved: Bool) async -> Bool {
         await write(on: itemId, "work_comment_resolve", CommentResolveParams(
             operationId: Self.newId(), id: id, resolved: resolved))
@@ -422,6 +450,12 @@ final class WorkStore {
             operationId: Self.newId(), number: number, name: name.trimmingCharacters(in: .whitespacesAndNewlines)))
     }
 
+    /// Sets a cycle's goal/description; an empty string clears it.
+    func describeCycle(_ number: Int64, to description: String) {
+        changeCycles("work_cycle_save", CycleDescribeParams(
+            operationId: Self.newId(), number: number, description: description.trimmingCharacters(in: .whitespacesAndNewlines)))
+    }
+
     /// Moves a cycle's unfinished work into the cycle under way, or the next.
     func rolloverCycle(_ number: Int64) {
         changeCycles("work_cycle_rollover", CycleNumberParams(operationId: Self.newId(), number: number))
@@ -654,7 +688,8 @@ final class WorkStore {
         let id = id ?? Self.newId()
         let before = labels.first { $0.id == id }
         place(WorkLabel(id: id, name: name, hue: hue, revision: before?.revision ?? 0,
-                        group: before?.group, retiredAtMs: before?.retiredAtMs, scope: before?.scope ?? .all))
+                        group: before?.group, retiredAtMs: before?.retiredAtMs, scope: before?.scope ?? .all,
+                        description: before?.description, groupMulti: before?.groupMulti ?? false))
         enqueue {
             do {
                 let saved: WorkLabel = try await self.core.request("work_label_save", LabelParams(
@@ -666,6 +701,19 @@ final class WorkStore {
             }
         }
         return id
+    }
+
+    /// Says what a label is for; an empty text clears it. Label suggestions
+    /// read it.
+    func describeLabel(_ id: String, _ text: String) {
+        guard var shown = labels.first(where: { $0.id == id }) else { return }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let value = trimmed.isEmpty ? nil : trimmed
+        guard value != shown.description else { return }
+        let before = shown
+        shown.description = value
+        changeLabel(before, to: shown, "work_label_save", LabelParams(
+            operationId: Self.newId(), id: id, name: shown.name, hue: shown.hue, description: trimmed))
     }
 
     func deleteLabel(_ id: String) {
@@ -683,14 +731,85 @@ final class WorkStore {
         }
     }
 
-    func groupLabel(_ id: String, into group: String?) {
+    /// Moves a label into `group`, or out of its group with `nil`. `settle`
+    /// makes the group one label per item, and each item holding several of
+    /// its labels keeps the first by name; without it the core refuses a
+    /// move that would leave an item holding two, archived and binned ones
+    /// included, and `crowded` gets what would lose a label.
+    func groupLabel(
+        _ id: String, into group: String?, settle: Bool = false, crowded: @escaping (LabelCrowding) -> Void = { _ in }
+    ) {
         guard var shown = labels.first(where: { $0.id == id }) else { return }
         let name = group?.trimmingCharacters(in: .whitespacesAndNewlines)
         let value = name?.isEmpty == false ? name : nil
         guard value != shown.group else { return }
         let before = shown
         shown.group = value
-        changeLabel(before, to: shown, "work_label_group", LabelGroupParams(operationId: Self.newId(), id: id, group: value))
+        shown.groupMulti = settle ? false : value.flatMap { group in
+            labels.first { $0.group == group && $0.id != id }?.groupMulti
+        } ?? false
+        let params = LabelGroupParams(
+            operationId: Self.newId(), id: id, group: value, multi: settle && value != nil ? false : nil)
+        let refusable = value != nil && !settle && !shown.groupMulti
+        if !refusable { place(shown) }
+        enqueue {
+            do {
+                let saved: WorkLabel = try await self.core.request("work_label_group", params)
+                self.place(saved)
+            } catch {
+                self.place(before)
+                if let refusal = (error as? CoreError)?.remote(as: LabelGroupRefusal.self) {
+                    crowded(refusal.crowded)
+                } else {
+                    self.mutationError = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    /// Lets a task carry several labels of `group`, or only one.
+    func setGroupMulti(_ group: String, _ multi: Bool) {
+        let members = labels.filter { $0.group == group }
+        guard let first = members.first, first.groupMulti != multi else { return }
+        let before = members
+        for member in members {
+            var shown = member
+            shown.groupMulti = multi
+            place(shown)
+        }
+        enqueue {
+            do {
+                let saved: WorkLabel = try await self.core.request("work_label_group", LabelGroupParams(
+                    operationId: Self.newId(), id: first.id, group: group, multi: multi))
+                self.place(saved)
+            } catch {
+                before.forEach(self.place)
+                self.mutationError = error.localizedDescription
+            }
+        }
+    }
+
+    /// Moves every task, project and initiative from one label to another
+    /// and retires the first, which stays in the list on nothing.
+    func mergeLabel(_ from: String, into: String) {
+        guard from != into, var merged = labels.first(where: { $0.id == from }), labels.contains(where: { $0.id == into }) else { return }
+        merged.retiredAtMs = merged.retiredAtMs ?? ProjectsStore.milliseconds(.now)
+        place(merged)
+        let wearing = (items ?? []).filter { $0.labelIds.contains(from) }.map(\.id)
+        edit(Set(wearing)) { row in
+            row.labelIds.removeAll { $0 == from }
+            if !row.labelIds.contains(into) { row.labelIds.append(into) }
+        }
+        enqueue {
+            do {
+                let saved: WorkLabel = try await self.core.request("work_label_merge", LabelMergeParams(
+                    operationId: Self.newId(), fromId: from, intoId: into))
+                self.place(saved)
+            } catch {
+                self.mutationError = error.localizedDescription
+                self.reloadWhenIdle = true
+            }
+        }
     }
 
     func retireLabel(_ id: String, _ retired: Bool) {
@@ -1783,6 +1902,11 @@ private struct CycleSaveParams: Encodable, Sendable {
     let number: Int64
     let name: String
 }
+private struct CycleDescribeParams: Encodable, Sendable {
+    let operationId: String
+    let number: Int64
+    let description: String
+}
 private struct CycleMoveParams: Encodable, Sendable {
     let operationId: String
     let number: Int64
@@ -1826,6 +1950,34 @@ private struct LabelGroupParams: Encodable {
     let operationId: String
     let id: String
     let group: String?
+    let multi: Bool?
+}
+/// What a label move would leave holding two labels of a one-label group,
+/// by id.
+struct LabelCrowding: Decodable {
+    let tasks: [String]
+    let projects: [String]
+    let initiatives: [String]
+}
+private struct LabelGroupRefusal: Decodable {
+    let crowded: LabelCrowding
+}
+private struct LabelMergeParams: Encodable {
+    let operationId: String
+    let fromId: String
+    let intoId: String
+}
+private struct CopyParams: Encodable {
+    let operationId: String
+    let id: String
+    let withSubtasks: Bool
+}
+private struct ReactParams: Encodable {
+    let operationId: String
+    let subject: WorkReactionSubject
+    let id: String
+    let emoji: String
+    let on: Bool
 }
 private struct LabelRetireParams: Encodable {
     let operationId: String
@@ -1898,6 +2050,7 @@ private struct LabelParams: Encodable {
     let id: String
     let name: String
     let hue: Double
+    var description: String?
 }
 private struct ViewParams: Encodable {
     let operationId: String

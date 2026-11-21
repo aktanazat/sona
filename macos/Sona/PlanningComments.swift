@@ -2,7 +2,7 @@ import SwiftUI
 
 /// What a comment thread off the task list is on.
 struct PlanningCommentSubject: Hashable {
-    enum Kind: String, Encodable { case project, milestone, meeting, note }
+    enum Kind: String, Encodable { case project, milestone, meeting, note, initiative, update }
 
     let kind: Kind
     let id: String
@@ -249,6 +249,7 @@ private struct PlanningCommentEntry: View {
                                             autofocus: true) { editing = false }
                 } else if let body = comment.body {
                     MarkdownBody(source: body, toggle: nil).textSelection(.enabled)
+                    ReactionStrip(subject: .comment, id: comment.id, reactions: comment.reactions)
                 }
                 if let failure { Text(failure).metaText(Theme.live).lineLimit(2) }
             }

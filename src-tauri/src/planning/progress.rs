@@ -275,7 +275,10 @@ pub(crate) fn outlook(conn: &Connection, project: &Project, now_ms: i64) -> Resu
         .min(project.created_at_ms);
     let progress = history(&timelines, &week_starts(since, now_ms)?, now_ms);
     let latest_update = updates::latest(conn, &project.id)?;
-    let quiet_ms = i64::from(cycles::settings(conn)?.weeks) * WEEK_MS + 3 * DAY_MS;
+    let quiet_ms = match project.update_every_weeks {
+        Some(weeks) => i64::from(weeks) * WEEK_MS,
+        None => i64::from(cycles::settings(conn)?.weeks) * WEEK_MS + 3 * DAY_MS,
+    };
     let last_ms = latest_update
         .as_ref()
         .map_or(project.created_at_ms, |update| update.created_at_ms);

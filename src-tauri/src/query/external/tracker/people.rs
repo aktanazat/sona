@@ -1822,7 +1822,7 @@ mod tests {
                 "id": id, "title": id, "status": "active", "revision": 1,
                 "createdAtMs": 0, "updatedAtMs": 0, "leadPersonId": lead, "leadIsSelf": false,
                 "memberPersonIds": members, "membersIncludeSelf": false, "priority": 0,
-                "labelIds": [], "links": [],
+                "labelIds": [], "links": [], "updateHour": 9,
                 "archivedAtMs": archived.then_some(1), "trashedAtMs": trashed.then_some(1),
             }))
             .unwrap()

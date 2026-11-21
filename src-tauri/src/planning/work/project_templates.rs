@@ -811,7 +811,7 @@ mod tests {
     fn a_project_from_a_template_dates_its_milestones_from_the_new_start() {
         let conn = Connection::open_in_memory().expect("an in-memory history database");
         schema::apply_all(&conn).expect("the planner schema");
-        let venue = items::save_label(&conn, None, "Venue", 30.0, AT).expect("a label");
+        let venue = items::save_label(&conn, None, "Venue", 30.0, None, AT).expect("a label");
         let source = catalog::save_project(
             &conn,
             None,

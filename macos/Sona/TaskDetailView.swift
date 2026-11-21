@@ -219,6 +219,8 @@ private struct DetailMain: View {
             if row.status == .triage {
                 DetailSuggestions(itemId: row.id, suggestions: detail?.suggestions ?? model.work.suggestions[row.id] ?? [])
             }
+            ReactionStrip(subject: .task, id: row.id, reactions: detail?.reactions ?? [])
+                .padding(.top, 12)
             DetailEvidence(row: row, links: detail?.evidence ?? [])
             DetailActivity(row: row, activity: detail?.activity)
                 .padding(.top, 32)
@@ -1571,6 +1573,7 @@ private struct CommentEntry: View {
                 } else if let body = comment.body {
                     MarkdownBody(source: body, toggle: nil)
                         .textSelection(.enabled)
+                    ReactionStrip(subject: .comment, id: comment.id, reactions: comment.reactions)
                 }
                 if !files.isEmpty, !editing {
                     CommentFiles(files: files)

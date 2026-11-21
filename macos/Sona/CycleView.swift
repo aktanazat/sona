@@ -101,6 +101,7 @@ struct CycleSummary: View {
     @State private var progress: WorkCycleProgress?
     @State private var failed = false
     @State private var renaming: String?
+    @State private var describing: String?
     @State private var dating: Dates?
     @State private var notes: [ScratchNote] = []
 
@@ -115,16 +116,55 @@ struct CycleSummary: View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .firstTextBaseline, spacing: 16) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Button { renaming = cycle.name ?? "" } label: {
-                        Text(cycle.title).headlineText()
-                    }
-                    .buttonStyle(.plain)
-                    .help("Rename cycle")
-                    .accessibilityLabel("\(cycle.title). Rename")
-                    .popover(isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
-                        renameForm
+                    HStack(spacing: 6) {
+                        Button { renaming = cycle.name ?? "" } label: {
+                            Text(cycle.title).headlineText()
+                        }
+                        .buttonStyle(.plain)
+                        .help("Rename cycle")
+                        .accessibilityLabel("\(cycle.title). Rename")
+                        .popover(isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
+                            renameForm
+                        }
+                        let starred = model.work.isFavorite(.cycle, String(cycle.number))
+                        Button { model.work.setFavorite(.cycle, String(cycle.number), !starred) } label: {
+                            Image(systemName: starred ? "star.fill" : "star")
+                                .font(.system(size: 12))
+                                .foregroundStyle(starred ? Theme.accent : Theme.inkTertiary)
+                        }
+                        .buttonStyle(.plain)
+                        .help(starred ? "Remove from Favorites" : "Add to Favorites")
+                        .accessibilityLabel(starred ? "Remove \(cycle.title) from Favorites" : "Add \(cycle.title) to Favorites")
                     }
                     Text(subtitle(now: now)).metaText()
+                    if let editing = describing {
+                        HStack(spacing: 6) {
+                            TextField("Cycle goal or description…", text: Binding(get: { editing }, set: { describing = $0 }))
+                                .textFieldStyle(.roundedBorder)
+                                .font(TypeScale.body(12.5))
+                                .frame(maxWidth: 420)
+                                .onSubmit {
+                                    model.work.describeCycle(cycle.number, to: editing)
+                                    describing = nil
+                                }
+                            Button("Save") {
+                                model.work.describeCycle(cycle.number, to: editing)
+                                describing = nil
+                            }
+                            .buttonStyle(PrimaryButton(compact: true))
+                            Button("Cancel") { describing = nil }
+                                .buttonStyle(QuietButton(compact: true))
+                        }
+                    } else {
+                        let text = cycle.description.flatMap { $0.isEmpty ? nil : $0 }
+                        Button { describing = text ?? "" } label: {
+                            Text(text ?? "Add a cycle description…")
+                                .bodyText(12.5, text == nil ? Theme.inkTertiary : Theme.inkSecondary)
+                                .lineLimit(2)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Edit cycle description")
+                    }
                 }
                 Spacer(minLength: 0)
                 actions

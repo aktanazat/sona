@@ -5377,6 +5377,60 @@ pub(super) async fn call(
             })
             .await?
         }
+        "work_copy" => {
+            let mut args = Args::parse(params)?;
+            let operation_id = args.take("operationId")?;
+            let id = args.take("id")?;
+            let with_subtasks = args.take("withSubtasks")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::planning::work::work_copy(
+                    handle.clone(),
+                    operation_id,
+                    id,
+                    with_subtasks,
+                ))
+            })
+            .await?
+        }
+        "work_reactions" => {
+            let mut args = Args::parse(params)?;
+            let subject: crate::planning::work::types::WorkReactionSubject =
+                args.take("subject")?;
+            let id: String = args.take("id")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::planning::work::reactions::listed(
+                    &handle, subject, &id,
+                ))
+            })
+            .await?
+        }
+        "work_react" => {
+            let mut args = Args::parse(params)?;
+            let operation_id: String = args.take("operationId")?;
+            let subject: crate::planning::work::types::WorkReactionSubject =
+                args.take("subject")?;
+            let id: String = args.take("id")?;
+            let emoji: String = args.take("emoji")?;
+            let on: bool = args.take("on")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::planning::work::reactions::react_as(
+                    &handle,
+                    crate::planning::work::comments::Author {
+                        actor: crate::planning::work::types::WorkActor::Me,
+                        agent: None,
+                    },
+                    &operation_id,
+                    subject,
+                    &id,
+                    &emoji,
+                    on,
+                ))
+            })
+            .await?
+        }
         "work_comments" => {
             let mut args = Args::parse(params)?;
             let item_id = args.take("itemId")?;
@@ -5560,6 +5614,7 @@ pub(super) async fn call(
             let id = args.take("id")?;
             let name = args.take("name")?;
             let hue = args.take("hue")?;
+            let description: Option<String> = args.take("description")?;
             let handle = app.clone();
             off_main_thread(move || {
                 reply(crate::planning::work::work_label_save(
@@ -5568,6 +5623,7 @@ pub(super) async fn call(
                     id,
                     name,
                     hue,
+                    description,
                 ))
             })
             .await?
@@ -5591,14 +5647,38 @@ pub(super) async fn call(
             let operation_id: String = args.take("operationId")?;
             let id: String = args.take("id")?;
             let group: Option<String> = args.take("group")?;
+            let multi: Option<bool> = args.take("multi")?;
             let handle = app.clone();
             off_main_thread(move || {
-                reply(crate::planning::work::routines::label_group_as(
-                    &handle,
-                    &operation_id,
-                    &id,
-                    group.as_deref(),
-                ))
+                reply(
+                    crate::planning::work::routines::label_group_as(
+                        &handle,
+                        &operation_id,
+                        &id,
+                        group.as_deref(),
+                        multi,
+                    )
+                    .map(|(label, _)| label),
+                )
+            })
+            .await?
+        }
+        "work_label_merge" => {
+            let mut args = Args::parse(params)?;
+            let operation_id: String = args.take("operationId")?;
+            let from_id: String = args.take("fromId")?;
+            let into_id: String = args.take("intoId")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(
+                    crate::planning::work::routines::label_merge_as(
+                        &handle,
+                        &operation_id,
+                        &from_id,
+                        &into_id,
+                    )
+                    .map(|(label, _)| label),
+                )
             })
             .await?
         }
@@ -5935,6 +6015,7 @@ pub(super) async fn call(
             let operation_id = args.take("operationId")?;
             let number = args.take("number")?;
             let name = args.take("name")?;
+            let description = args.take("description")?;
             let start_day = args.take("startDay")?;
             let end_day = args.take("endDay")?;
             let handle = app.clone();
@@ -5944,6 +6025,7 @@ pub(super) async fn call(
                     operation_id,
                     number,
                     name,
+                    description,
                     start_day,
                     end_day,
                 ))
@@ -6221,6 +6303,84 @@ pub(super) async fn call(
                     &handle,
                     &operation_id,
                     &project_id,
+                ))
+            })
+            .await?
+        }
+        "planning_initiative_updates" => {
+            let mut args = Args::parse(params)?;
+            let initiative_id: String = args.take("initiativeId")?;
+            let limit: Option<u32> = args.take("limit")?;
+            let cursor: Option<String> = args.take("cursor")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::planning::work::initiatives::updates_listed(
+                    &handle,
+                    &initiative_id,
+                    limit,
+                    cursor.as_deref(),
+                ))
+            })
+            .await?
+        }
+        "planning_initiative_update_add" => {
+            let mut args = Args::parse(params)?;
+            let operation_id: String = args.take("operationId")?;
+            let initiative_id: String = args.take("initiativeId")?;
+            let health: crate::planning::ProjectHealth = args.take("health")?;
+            let body: String = args.take("body")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::planning::work::initiatives::update_add_written(
+                    &handle,
+                    crate::planning::work::comments::Author {
+                        actor: crate::planning::work::types::WorkActor::Me,
+                        agent: None,
+                    },
+                    &operation_id,
+                    &initiative_id,
+                    health,
+                    &body,
+                ))
+            })
+            .await?
+        }
+        "planning_initiative_update_edit" => {
+            let mut args = Args::parse(params)?;
+            let operation_id: String = args.take("operationId")?;
+            let id: String = args.take("id")?;
+            let health: Option<crate::planning::ProjectHealth> = args.take("health")?;
+            let body: Option<String> = args.take("body")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::planning::work::initiatives::update_edit_written(
+                    &handle,
+                    crate::planning::work::comments::Author {
+                        actor: crate::planning::work::types::WorkActor::Me,
+                        agent: None,
+                    },
+                    &operation_id,
+                    &id,
+                    health,
+                    body.as_deref(),
+                ))
+            })
+            .await?
+        }
+        "planning_initiative_update_delete" => {
+            let mut args = Args::parse(params)?;
+            let operation_id: String = args.take("operationId")?;
+            let id: String = args.take("id")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::planning::work::initiatives::update_delete_written(
+                    &handle,
+                    crate::planning::work::comments::Author {
+                        actor: crate::planning::work::types::WorkActor::Me,
+                        agent: None,
+                    },
+                    &operation_id,
+                    &id,
                 ))
             })
             .await?

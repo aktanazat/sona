@@ -60,21 +60,27 @@ pub struct VersionRestoreArgs {
     pub write: WriteArgs,
 }
 
-/// One favorite: a task, or a project, saved view or person by flag.
+/// One favorite: a task, or a project, saved view, person, cycle or note by flag.
 #[derive(Args, Clone, Debug, Eq, PartialEq)]
 pub struct FavoriteTarget {
     /// A task: S-12, 12, or its id.
-    #[arg(value_parser = task_ref, value_name = "TASK", required_unless_present_any = ["project", "view", "person"], conflicts_with_all = ["project", "view", "person"])]
+    #[arg(value_parser = task_ref, value_name = "TASK", required_unless_present_any = ["project", "view", "person", "cycle", "note"], conflicts_with_all = ["project", "view", "person", "cycle", "note"])]
     pub task: Option<TaskRef>,
     /// A project, by name or id.
-    #[arg(long, value_name = "PROJECT", conflicts_with_all = ["view", "person"])]
+    #[arg(long, value_name = "PROJECT", conflicts_with_all = ["view", "person", "cycle", "note"])]
     pub project: Option<String>,
     /// A saved view, by name or id.
-    #[arg(long, value_name = "VIEW", conflicts_with = "person")]
+    #[arg(long, value_name = "VIEW", conflicts_with_all = ["person", "cycle", "note"])]
     pub view: Option<String>,
     /// A person: a name, another name they go by, or their id.
-    #[arg(long, value_name = "PERSON")]
+    #[arg(long, value_name = "PERSON", conflicts_with_all = ["cycle", "note"])]
     pub person: Option<String>,
+    /// A cycle: current, next, or its number.
+    #[arg(long, value_parser = super::cycle_ref, value_name = "CYCLE", conflicts_with = "note")]
+    pub cycle: Option<crate::planning::work::types::WorkCycleRef>,
+    /// A note, by its id.
+    #[arg(long, value_name = "NOTE")]
+    pub note: Option<Uuid>,
 }
 
 #[derive(Args, Clone, Debug, Eq, PartialEq)]
@@ -470,7 +476,8 @@ pub struct ExternalNotification {
     /// For `changed`: what changed, as the task history names it (due,
     /// priority, details, owner, labels, project, parent, relation,
     /// attachment) or `reminder`. For `project`: update or status. For
-    /// `view`: added, done or canceled.
+    /// `view`: added, done or canceled. For `reminder`: `update` when a
+    /// project's update is due.
     pub field: Option<String>,
     /// For `automation`: which automation ran, and its error when it failed.
     pub automation: Option<ExternalNoticeAutomation>,
@@ -1126,6 +1133,40 @@ impl Tracker<'_> {
                 handle: None,
             });
         }
+        if let Some(cycle) = target.cycle {
+            let cycles = planning::history(self.history, |conn| {
+                crate::planning::work::cycles::all(conn, now_ms())
+            })
+            .map_err(|message| refusal(self.history, message))?;
+            let number = super::named_cycle(&cycles, cycle)?;
+            let name = cycles
+                .iter()
+                .find(|c| c.number == number)
+                .and_then(|c| c.name.clone())
+                .unwrap_or_else(|| format!("Cycle {number}"));
+            return Ok(ExternalFavorite {
+                kind: FavoriteKind::Cycle,
+                id: number.to_string(),
+                name,
+                handle: None,
+            });
+        }
+        if let Some(note) = target.note {
+            let id = note.to_string();
+            let found = planning::history(self.history, |conn| {
+                crate::scratchpad::note_with_connection(conn, &id)
+            })
+            .map_err(|message| refusal(self.history, message))?
+            .ok_or_else(|| {
+                ExternalError::new(ExternalErrorCode::NotFound, format!("No note {note}."))
+            })?;
+            return Ok(ExternalFavorite {
+                kind: FavoriteKind::Note,
+                id: found.id,
+                name: found.title,
+                handle: None,
+            });
+        }
         let view = self.view_named(target.view.as_deref().unwrap_or_default())?;
         Ok(ExternalFavorite {
             kind: FavoriteKind::View,
@@ -1339,6 +1380,14 @@ impl Tracker<'_> {
     pub(super) async fn favorites(&self) -> Result<WorkAnswer, ExternalError> {
         let board = self.board().await?;
         let views = self.all_views()?;
+        let cycles = planning::history(self.history, |conn| {
+            crate::planning::work::cycles::all(conn, now_ms())
+        })
+        .map_err(|message| refusal(self.history, message))?;
+        let notes = planning::history(self.history, |conn| {
+            crate::scratchpad::list_notes_with_connection(conn, "")
+        })
+        .map_err(|message| refusal(self.history, message))?;
         let saved = self.saved_favorites()?;
         let named = |favorite: &favorites::Favorite| match favorite.kind {
             FavoriteKind::Task => board.row(&favorite.target_id).map(|row| ExternalFavorite {
@@ -1376,6 +1425,31 @@ impl Tracker<'_> {
                     name: person.name.clone(),
                     handle: None,
                 }),
+            FavoriteKind::Cycle => favorite
+                .target_id
+                .parse::<i64>()
+                .ok()
+                .and_then(|number| cycles.iter().find(|c| c.number == number))
+                .map(|cycle| ExternalFavorite {
+                    kind: favorite.kind,
+                    id: cycle.number.to_string(),
+                    name: cycle
+                        .name
+                        .clone()
+                        .unwrap_or_else(|| format!("Cycle {}", cycle.number)),
+                    handle: None,
+                }),
+            FavoriteKind::Note => {
+                notes
+                    .iter()
+                    .find(|note| note.id == favorite.target_id)
+                    .map(|note| ExternalFavorite {
+                        kind: favorite.kind,
+                        id: note.id.clone(),
+                        name: note.title.clone(),
+                        handle: None,
+                    })
+            }
         };
         let favorites = saved
             .top()
