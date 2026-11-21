@@ -25,8 +25,8 @@
 //!
 //! [Model2Vec]: https://github.com/MinishLab/model2vec
 
+use crate::managers::model::public_hf_api;
 use anyhow::{anyhow, Context, Result};
-use hf_hub::api::tokio::ApiBuilder;
 use hf_hub::{Repo, RepoType};
 use log::{debug, info, warn};
 use model2vec_rs::model::StaticModel;
@@ -182,7 +182,7 @@ impl SemanticModel {
     /// a half-written download is never loadable.
     pub(crate) async fn install(directory: &Path) -> Result<()> {
         let manifest = model_manifest();
-        let api = ApiBuilder::from_env().build()?;
+        let api = public_hf_api().build()?;
         let repository = api.repo(Repo::with_revision(
             manifest.id.clone(),
             RepoType::Model,

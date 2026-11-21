@@ -337,6 +337,13 @@ fn lock_model_state<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     }
 }
 
+/// A Hugging Face client for the public repositories Sona fetches models
+/// from. The saved Hugging Face token is never sent: no fetch needs it, and a
+/// stale one can make an otherwise public download fail authentication.
+pub(crate) fn public_hf_api() -> ApiBuilder {
+    ApiBuilder::from_env().with_token(None)
+}
+
 /// The Hugging Face caches Sona resolves models from, in lookup order.
 ///
 /// `own` lives in Sona's data directory and receives every download. `shared`
@@ -2433,11 +2440,8 @@ impl ModelManager {
 
             // Fresh client per attempt so a wedged connection from the previous
             // try can't poison the retry.
-            let api = ApiBuilder::from_env()
+            let api = public_hf_api()
                 .with_cache_dir(self.hf_caches.own.path().clone())
-                // Ignore cached and environment-provided credentials. A stale token
-                // can make otherwise-public downloads fail authentication.
-                .with_token(None)
                 .with_progress(false)
                 .with_max_files(stream_count)
                 .build()
@@ -3127,6 +3131,65 @@ mod tests {
             crate::modes::AsrPlan::from_mode(&settings, &settings.modes[2].asr).model_id,
             "installed-model"
         );
+    }
+
+    /// A stale saved token can fail a public download, so none is sent.
+    #[tokio::test]
+    async fn a_public_model_fetch_sends_no_saved_hugging_face_token() -> Result<()> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let hf_home = TempDir::new()?;
+        fs::write(hf_home.path().join("token"), "hf_stale")?;
+        let previous_home = std::env::var_os("HF_HOME");
+        std::env::set_var("HF_HOME", hf_home.path());
+        let builder = public_hf_api();
+        match previous_home {
+            Some(previous) => std::env::set_var("HF_HOME", previous),
+            None => std::env::remove_var("HF_HOME"),
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let endpoint = format!("http://{}", listener.local_addr()?);
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await?;
+            let mut head = Vec::new();
+            let mut byte = [0u8; 1];
+            while !head.ends_with(b"\r\n\r\n") && socket.read_exact(&mut byte).await.is_ok() {
+                head.push(byte[0]);
+            }
+            socket
+                .write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await?;
+            Ok::<String, std::io::Error>(String::from_utf8_lossy(&head).to_lowercase())
+        });
+
+        let api = builder
+            .with_endpoint(endpoint)
+            .with_cache_dir(hf_home.path().join("hub"))
+            .with_progress(false)
+            .build()?;
+        let fetch = api
+            .repo(Repo::with_revision(
+                "org/model".to_string(),
+                RepoType::Model,
+                "main".to_string(),
+            ))
+            .get("model.bin")
+            .await;
+        assert!(fetch.is_err(), "the scripted server answers 404");
+
+        let head = tokio::time::timeout(Duration::from_secs(5), server).await???;
+        assert!(
+            head.contains("/org/model/resolve/main/model.bin"),
+            "the fetch reached the server: {head}"
+        );
+        assert!(
+            !head.contains("authorization:"),
+            "a public fetch sent credentials: {head}"
+        );
+        Ok(())
     }
 
     fn write_cache_file(temp_dir: &TempDir, bytes: &[u8]) -> Result<PathBuf> {
