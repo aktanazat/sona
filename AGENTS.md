@@ -26,7 +26,21 @@ bun run format            # Prettier + cargo fmt
 bun run format:check      # Check formatting without changes
 bun run format:backend    # cargo fmt only
 bun run lint:backend      # cargo clippy
-bun run lint:anti-slop    # oxlint against tools/oxlint/baseline.json (CI gate)
+bun run lint:anti-slop    # oxlint against tools/oxlint/baseline.json
+```
+
+**Checks by area (run the ones your change touches):**
+
+```bash
+bun run check:identity    # any change: no unclassified "Handy" references
+bun run test:scripts      # scripts/
+bun run typecheck:mcp     # tools/sona-mcp/
+bun run test:mcp          # tools/sona-mcp/
+bun run check:onboarding  # macos/: onboarding
+bun run check:library     # macos/: Library
+bun run check:recorder    # macos/: recorder
+bun run check:theme       # macos/: theme, text and control contrast
+(cd cloudflare/sona-companion && bun run test)  # cloudflare/sona-companion/ and share-site/viewer.js
 ```
 
 **Verifying a change against a running Sona:**

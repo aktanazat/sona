@@ -462,4 +462,4 @@ bunx tsc --noEmit # type checking
 ```
 
 Both run from the repo root as `bun run test:mcp` and `bun run typecheck:mcp`,
-which install this package first; CI runs them in `code-quality.yml`.
+which install this package first.
