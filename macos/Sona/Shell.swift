@@ -184,7 +184,7 @@ struct Shell: View {
             case .loops:
                 LoopsScreen()
             case .initiatives:
-                InitiativesScreen(store: model.projects, people: model.plannerPeople, openProject: model.openProject)
+                InitiativesScreen(store: model.projects, people: model.plannerPeople, labels: model.work.labels, openProject: model.openProject)
             case .updates:
                 UpdatesScreen()
             }
@@ -509,6 +509,11 @@ struct Sidebar: View {
                 && model.work.views.contains { $0.id == favorite.targetId }
         case .person:
             return model.place == .people && model.people.route == .person(favorite.targetId)
+        case .cycle:
+            return model.place == .tasks && model.workFocus.tab == .cycle
+                && Int64(favorite.targetId) == model.cycleShown?.number
+        case .note:
+            return model.place == .scratchpad && model.scratchpad.saved?.id == favorite.targetId
         case .unknown:
             return false
         }
@@ -648,6 +653,21 @@ struct Sidebar: View {
             if let person = model.people.entries?.first(where: { $0.person.id == favorite.targetId })?.person {
                 SidebarItem(icon: "star", title: person.displayName, selected: favoriteOpen(favorite)) {
                     model.openPerson(person.id)
+                }
+            }
+        case .cycle:
+            if let number = Int64(favorite.targetId),
+               let cycle = model.work.cycles.first(where: { $0.number == number }) {
+                SidebarItem(icon: "star", title: cycle.title, selected: favoriteOpen(favorite)) {
+                    model.go(.tasks)
+                    focus.switchTab(.cycle)
+                    CycleList.open(number, model)
+                }
+            }
+        case .note:
+            if let note = model.scratchpad.notes.first(where: { $0.id == favorite.targetId }) {
+                SidebarItem(icon: "star", title: note.title, selected: favoriteOpen(favorite)) {
+                    model.open(link: "sona://note/\(note.id)")
                 }
             }
         case .unknown:
