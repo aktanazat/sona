@@ -22,6 +22,8 @@ use super::machine::{
 };
 use crate::meeting::context::ConversationLocation;
 
+mod links;
+
 /// How far ahead to look for the next event. Wide enough that a tick can never
 /// step over an event's start, narrow enough that the query stays trivial.
 const LOOKAHEAD_MS: i64 = 2 * 60 * 60 * 1000;
@@ -378,6 +380,7 @@ pub use macos::EventKitCalendar;
 
 #[cfg(target_os = "macos")]
 mod macos {
+    use super::links::calendar_join_url;
     use super::{
         calendar_place, event_text, named_attendee_with_email, occurrence_key, occurrence_start,
         participation_status, select_event, CalendarAccess, CalendarEventSummary,
@@ -720,6 +723,7 @@ mod macos {
         // SAFETY: a plain property read on a live event.
         let notes = unsafe { event.notes() };
         summary.notes = event_text(notes.map(|notes| notes.to_string()));
+        summary.url = calendar_join_url(summary.url.take(), summary.notes.as_deref());
     }
 
     /// Everything a row can show about who is coming and where the event lives.
@@ -769,11 +773,14 @@ mod macos {
         // SAFETY: `title` is a plain property read on a live calendar.
         summary.calendar_name =
             event_text(calendar.map(|calendar| unsafe { calendar.title() }.to_string()));
-        summary.url = event_text(
-            url.and_then(|url| url.absoluteString())
-                .map(|absolute| absolute.to_string()),
-        );
         summary.location = event_text(location.map(|location| location.to_string()));
+        summary.url = calendar_join_url(
+            event_text(
+                url.and_then(|url| url.absoluteString())
+                    .map(|absolute| absolute.to_string()),
+            ),
+            summary.location.as_deref(),
+        );
         // SAFETY: plain property reads on a live event, its structured
         // location and that location's pin.
         summary.place = unsafe {
