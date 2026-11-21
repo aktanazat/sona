@@ -1333,6 +1333,7 @@ final class AppModel {
             case CoreEvent.streamText:
                 let text: StreamText = try Core.payload(line)
                 liveText = text.tentative.isEmpty ? text.committed : text.committed + " " + text.tentative
+                if slowConnectionStage == .transcription { slowConnectionStage = nil }
             case CoreEvent.micLevel:
                 let buckets: [Float] = try Core.payload(line)
                 meter.push(buckets)
@@ -1434,7 +1435,8 @@ final class AppModel {
             case CoreEvent.dictationMeetingSuggestion:
                 if case .recording = capture { meetingSuggested = true }
             case CoreEvent.cloudConnectionSlow:
-                let event: SlowConnectionEvent = try Core.payload(line)
+                // A stage this shell does not know yet is not worth an error.
+                guard let event: SlowConnectionEvent = try? Core.payload(line) else { break }
                 if capture != .idle { slowConnectionStage = event.stage }
             default:
                 break

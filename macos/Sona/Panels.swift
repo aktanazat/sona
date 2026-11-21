@@ -113,11 +113,18 @@ struct HUDPill: View {
                 control("Cancel", symbol: "xmark") { model.cancelCapture() }
                 switch presentation.capture {
                 case .recording:
-                    RecordingWaveform(meter: model.meter)
-                        .frame(width: 55, height: 18)
-                    status
-                        .font(.system(size: 11, weight: .medium))
-                        .frame(minWidth: 32)
+                    if model.slowConnectionStage == nil {
+                        RecordingWaveform(meter: model.meter)
+                            .frame(width: 55, height: 18)
+                        status
+                            .font(.system(size: 11, weight: .medium))
+                            .frame(minWidth: 32)
+                    } else {
+                        Text(Self.slowConnection)
+                            .font(.system(size: 12, weight: .medium))
+                            .lineLimit(1)
+                            .frame(maxWidth: .infinity)
+                    }
                     control("Stop recording", symbol: "stop.fill") { model.stopCapture() }
                 case let .working(kind):
                     HStack(spacing: 8) {
@@ -210,7 +217,7 @@ struct HUDPill: View {
     }
 
     private var liveWords: some View {
-        Text(model.liveText.isEmpty ? liveWordsPlaceholder : model.liveText)
+        Text(model.liveText.isEmpty ? "Listening…" : model.liveText)
             .font(.system(size: 13))
             .foregroundStyle(model.liveText.isEmpty ? Theme.hudInkSecondary : Theme.hudInk)
             .lineLimit(2)
@@ -221,12 +228,7 @@ struct HUDPill: View {
             .overlay(RoundedRectangle(cornerRadius: Theme.radiusDialog).strokeBorder(Theme.hudBorder, lineWidth: 1))
     }
 
-    /// The live words' place before any arrive: a slow connection is why
-    /// none have.
-    private var liveWordsPlaceholder: String {
-        model.slowConnectionStage == nil ? "Listening…" : Self.slowConnection
-    }
-
+    /// The pill's status while the network holds up a cloud stage.
     private static let slowConnection = "Slow connection"
 
     @ViewBuilder private var status: some View {
