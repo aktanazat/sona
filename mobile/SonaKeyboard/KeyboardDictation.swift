@@ -97,12 +97,26 @@ struct KeyboardDictation {
         case review
     }
 
+    /// What the keyboard knows of the field a dictation is for. Some hosts never name their
+    /// fields, so without ids the field counts as the same one until something says
+    /// otherwise: the keyboard hid or showed, the text before the cursor changed, or the
+    /// field asked for different keys.
+    struct FieldMark: Equatable {
+        var id: UUID?
+        /// Counts the keyboard hiding and showing.
+        var shown: Int
+        var before: String
+        var traits: String
+    }
+
     /// Where a finished dictation goes: typed into the field it was heard for, or held for
-    /// review when review is on, or the keyboard is in another field by now, as after a
-    /// style that finished late, or either field is unknown.
-    static func landing(heardFor field: UUID?, now current: UUID?, reviews: Bool) -> Landing {
-        guard !reviews, let field, field == current else { return .review }
-        return .write
+    /// review when review is on or the keyboard is in another field by now, as after a
+    /// style that finished late.
+    static func landing(heardFor field: FieldMark, now current: FieldMark, reviews: Bool) -> Landing {
+        if reviews { return .review }
+        if let id = field.id, let now = current.id { return id == now ? .write : .review }
+        let same = field.shown == current.shown && field.before == current.before && field.traits == current.traits
+        return same ? .write : .review
     }
 
     /// The text on review once another dictation lands while one is showing: both, the

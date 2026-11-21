@@ -70,8 +70,8 @@ final class KeyboardTools {
     @ObservationIgnored var field: () -> FieldText? = { nil }
     /// Applies a change the way a key does, so the field memory sees it.
     @ObservationIgnored var apply: (FieldText.Step) -> Void = { _ in }
-    /// The field the keyboard types into now.
-    @ObservationIgnored var fieldID: () -> UUID? = { nil }
+    /// What the keyboard knows of the field it types into now.
+    @ObservationIgnored var fieldMark: () -> KeyboardDictation.FieldMark = { KeyboardDictation.FieldMark(shown: 0, before: "", traits: "") }
     @ObservationIgnored var canCopy: () -> Bool = { false }
     @ObservationIgnored var snippetsChanged: () -> Void = {}
     #if DEBUG
@@ -84,7 +84,7 @@ final class KeyboardTools {
     @ObservationIgnored private var answering = false
     /// The dictation being styled, the field it was heard for and any dictation already
     /// waiting on review; it goes in as heard if the style stops.
-    @ObservationIgnored private var unstyled: (text: String, field: UUID?, earlier: String?)?
+    @ObservationIgnored private var unstyled: (text: String, field: KeyboardDictation.FieldMark, earlier: String?)?
     @ObservationIgnored private var warmFix: LanguageModelSession?
     @ObservationIgnored private var noticeTimer: Task<Void, Never>?
 
@@ -283,10 +283,10 @@ final class KeyboardTools {
     /// waits on the panel for Insert. The recording's choices end with it.
     func deliver(_ text: String, styled: Bool) {
         let style = styled ? nil : effectiveStyle
-        let field = fieldID()
         recordingStyle = nil
         recordingLanguage = nil
         cancelWork()
+        let field = fieldMark()
         let earlier = waitingReview
         guard let style, KeyboardAI.unavailable == nil else { return land(text, heardFor: field, earlier: earlier) }
         start(.style(style), on: text) { [weak self] styledText in
@@ -305,12 +305,12 @@ final class KeyboardTools {
     /// A dictation goes into the field it was heard for; in any other field it waits for
     /// Insert instead of landing in text it was not meant for. One that lands while an
     /// `earlier` dictation waits on review joins it there.
-    private func land(_ text: String, heardFor field: UUID?, earlier: String?) {
+    private func land(_ text: String, heardFor field: KeyboardDictation.FieldMark, earlier: String?) {
         if earlier != nil {
             page = .review(KeyboardDictation.reviewing(text, after: earlier))
             return say("dictation.reviewJoined")
         }
-        switch KeyboardDictation.landing(heardFor: field, now: fieldID(), reviews: reviewsDictation) {
+        switch KeyboardDictation.landing(heardFor: field, now: fieldMark(), reviews: reviewsDictation) {
         case .review:
             page = .review(text)
         case .write:

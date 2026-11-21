@@ -50,16 +50,27 @@ struct KeyboardDictationTests {
 
     @Test("a dictation styled after the keyboard moved to another field waits for Insert instead of typing there")
     func lateDictationInAnotherFieldWaitsForReview() {
-        let heardFor = UUID(), other = UUID()
+        let heardFor = KeyboardDictation.FieldMark(id: UUID(), shown: 1, before: "Hi", traits: "0 0")
+        var other = heardFor
+        other.id = UUID()
         #expect(KeyboardDictation.landing(heardFor: heardFor, now: other, reviews: false) == .review)
         #expect(KeyboardDictation.landing(heardFor: heardFor, now: heardFor, reviews: false) == .write)
         #expect(KeyboardDictation.landing(heardFor: heardFor, now: heardFor, reviews: true) == .review)
     }
 
-    @Test("a dictation whose field the host never named waits for Insert, since it may not be the same field")
-    func unknownFieldWaitsForReview() {
-        #expect(KeyboardDictation.landing(heardFor: nil, now: nil, reviews: false) == .review)
-        #expect(KeyboardDictation.landing(heardFor: UUID(), now: nil, reviews: false) == .review)
+    @Test("in a host that names no fields, a dictation is typed unless something since says the field changed")
+    func unnamedFieldIsTheSameUntilSomethingChanges() {
+        let heardFor = KeyboardDictation.FieldMark(id: nil, shown: 1, before: "Hi", traits: "0 0")
+        #expect(KeyboardDictation.landing(heardFor: heardFor, now: heardFor, reviews: false) == .write)
+        var hidden = heardFor
+        hidden.shown = 2
+        #expect(KeyboardDictation.landing(heardFor: heardFor, now: hidden, reviews: false) == .review)
+        var edited = heardFor
+        edited.before = "Hi there"
+        #expect(KeyboardDictation.landing(heardFor: heardFor, now: edited, reviews: false) == .review)
+        var keys = heardFor
+        keys.traits = "7 0"
+        #expect(KeyboardDictation.landing(heardFor: heardFor, now: keys, reviews: false) == .review)
     }
 
     @Test("a dictation landing while another waits on review joins it below, never replaces it")

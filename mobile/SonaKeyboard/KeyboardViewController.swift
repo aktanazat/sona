@@ -45,6 +45,8 @@ final class KeyboardViewController: UIInputViewController {
     /// True from the keyboard's own edit until the main loop next turns.
     private var ownEditInFlight = false
     private var editedField: UUID?
+    /// Counts the keyboard showing and hiding, which may bring it to another field.
+    private var shownCount = 0
     private let haptic = UIImpactFeedbackGenerator(style: .light)
     #if DEBUG
     private let frames = FrameMeter()
@@ -81,7 +83,14 @@ final class KeyboardViewController: UIInputViewController {
             return FieldText(hostBefore: textBefore, hostAfter: textAfter, selection: textDocumentProxy.selectedText, echo: echo)
         }
         tools.apply = { [weak self] step in self?.applyTool(step) }
-        tools.fieldID = { [weak self] in self?.documentID }
+        tools.fieldMark = { [weak self] in
+            guard let self else { return KeyboardDictation.FieldMark(shown: -1, before: "", traits: "") }
+            let proxy = textDocumentProxy
+            return KeyboardDictation.FieldMark(
+                id: documentID, shown: shownCount, before: joiningBefore,
+                traits: "\(proxy.keyboardType?.rawValue ?? -1) \(proxy.returnKeyType?.rawValue ?? -1)"
+            )
+        }
         tools.canCopy = { [weak self] in self?.hasFullAccess ?? false }
         tools.snippetsChanged = { [weak self] in self?.applySnippets() }
         #if DEBUG
@@ -127,6 +136,7 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     override func viewWillAppear(_ animated: Bool) {
+        shownCount += 1
         super.viewWillAppear(animated)
         echo.forget()
         let languages = KeyboardLanguages.shared().enabled
@@ -169,6 +179,7 @@ final class KeyboardViewController: UIInputViewController {
 
     override func viewDidDisappear(_ animated: Bool) {
         super.viewDidDisappear(animated)
+        shownCount += 1
         dictate(.hidden)
         tools.keyboardHidden()
         visible = false
