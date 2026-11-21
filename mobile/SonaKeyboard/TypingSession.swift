@@ -69,8 +69,9 @@ struct TypingSession {
     /// What the strip offers at the cursor: right after a swipe, the other words the path
     /// could have meant; at the end of a word corrected earlier, the word as it was typed;
     /// while a word is typed, its corrections, completions and emoji; after a space, the
-    /// words likely to come next.
-    func suggestions(before text: String) -> Suggestions? {
+    /// words likely to come next. Without `guessing`, a word being typed gets completions and
+    /// emoji but no spelling guesses.
+    func suggestions(before text: String, guessing: Bool = true) -> Suggestions? {
         if case let .swiped(word, _, others) = lastKey(before: text), !others.isEmpty {
             return Suggestions(typed: word, correction: nil, others: others)
         }
@@ -79,7 +80,7 @@ struct TypingSession {
             return Suggestions(typed: String(word), correction: nil, others: [], restore: corrected.correction.typed)
         }
         let found = emoji(String(word))
-        guard var offer = corrector?.suggestions(before: text, lexicon: lexicon) else {
+        guard var offer = corrector?.suggestions(before: text, lexicon: lexicon, guessing: guessing) else {
             return found.map { Suggestions(typed: String(word), correction: nil, others: [], emoji: $0) }
         }
         offer.emoji = found
@@ -353,14 +354,22 @@ extension UITextDocumentProxy {
         if !edit.insert.isEmpty { insertText(edit.insert) }
     }
 
-    /// What one stretch of a slide on delete takes, returned so sliding back can put it back.
-    /// Selected text goes first and by itself. It is typed over itself, which leaves the cursor
-    /// after it, then deleted a character at a time: delete on a selection lets a host such as
-    /// Messages take the space beside it too, which sliding back could not restore. After
-    /// that, the word before the cursor, counted from the text the host shows now; while the
-    /// host is still behind the keyboard's last edit it takes nothing.
+    /// What one stretch of a slide on delete takes, returned so sliding back can put it back;
+    /// "" when it took something it cannot put back. Selected text goes first and by itself.
+    /// A selection longer than 40 characters, or holding a picture, goes in one delete with
+    /// nothing to put back: typing it back over itself would be thousands of edits after
+    /// Select All, and a picture would come back as a placeholder character.
+    /// A short one is typed over itself, which leaves the cursor after it, then deleted a
+    /// character at a time: delete on a selection lets a host such as Messages take the space
+    /// beside it too, which sliding back could not restore. After that, the word before the
+    /// cursor, counted from the text the host shows now; while the host is still behind the
+    /// keyboard's last edit it takes nothing.
     func takeWord(echo: inout FieldEcho) -> String? {
         if let selected = selectedText, !selected.isEmpty {
+            guard selected.count <= 40, !selected.contains("\u{FFFC}") else {
+                deleteBackward()
+                return ""
+            }
             insertText(selected)
             apply(TypingSession.Edit(deleteCount: selected.count), echo: &echo)
             return selected

@@ -92,11 +92,14 @@ final class TypingCorrector {
     private var completionCache: [String: [String]] = [:]
     /// Prefixes whose completions came from the common words, Apple's dictionary having none.
     private var fromCommon: Set<String> = []
+    /// The last word's guesses, so space reuses what the strip already worked out.
+    private var lastGuesses: (typed: String, guesses: [Guess])?
     /// The language's common words, for completions and guesses Apple's dictionary leaves out.
     var common: CommonWords? {
         didSet {
             completionCache = [:]
             fromCommon = []
+            lastGuesses = nil
         }
     }
 
@@ -121,14 +124,16 @@ final class TypingCorrector {
     }
 
     /// What the strip offers for the word `text` ends with; nil when no word is being typed
-    /// or nothing but the word as typed is on offer.
-    func suggestions(before text: String, lexicon: TypingLexicon) -> Suggestions? {
+    /// or nothing but the word as typed is on offer. Without `guessing`, only completions:
+    /// Apple's guesses cost milliseconds on the main thread, where its checker must run, so
+    /// the strip asks for them once typing pauses.
+    func suggestions(before text: String, lexicon: TypingLexicon, guessing: Bool = true) -> Suggestions? {
         guard let word = TypingText.word(before: text) else { return nil }
-        let offer = offer(for: word, after: text, lexicon: lexicon)
+        let offer = offer(for: word, after: text, lexicon: lexicon, guessing: guessing)
         return offer.correction == nil && offer.others.isEmpty ? nil : offer
     }
 
-    private func offer(for word: Substring, after text: String, lexicon: TypingLexicon) -> Suggestions {
+    private func offer(for word: Substring, after text: String, lexicon: TypingLexicon, guessing: Bool) -> Suggestions {
         let typed = String(word)
         let names = lexicon.names(startingWith: typed)
         let completions = names + completions(of: typed)
@@ -138,12 +143,16 @@ final class TypingCorrector {
         if language.hasPrefix("en"), !lexicon.contains(word), typed == "i" || typed.hasPrefix("i'") || typed.hasPrefix("i’") {
             return Suggestions(typed: typed, correction: "I" + typed.dropFirst(), others: Self.distinct(completions, from: typed))
         }
-        guard needsCorrection(word, after: text, lexicon: lexicon) else {
+        guard guessing, needsCorrection(word, after: text, lexicon: lexicon) else {
             return Suggestions(typed: typed, correction: nil, others: Self.distinct(completions, from: typed))
         }
         let guesses = rankedGuesses(for: typed)
         let words = guesses.map { Self.matchCase(of: typed, in: $0.word) }
-        let clear = guesses.count < 2 || guesses[1].score - guesses[0].score >= Self.margin
+        /* Where Apple's dictionary cannot even complete the language (Russian on the
+         * simulator), a word of three letters or fewer is too often chat ("ок", "спс", "мб")
+         * that it does not know: the strip offers a fix, and space leaves the word alone. */
+        let short = typed.count <= 3 && thinDictionary(for: typed)
+        let clear = !short && (guesses.count < 2 || guesses[1].score - guesses[0].score >= Self.margin)
         return Suggestions(
             typed: typed,
             correction: clear ? words.first : nil,
@@ -155,25 +164,33 @@ final class TypingCorrector {
     static let margin = 0.025
 
     /* Apple's guesses come in dictionary order, not typing order: for "mettings" it offers
-     * "nettings" before "meetings". Its guesses can also miss the obvious word ("превет"
-     * gets "пресет" and "ревет" but not "привет"), so the language's common words of about
-     * the same length join them. Each guess is scored by how a thumb could have produced
-     * the typed word from it plus how common it is, and only close guesses are kept. */
+     * "nettings" before "meetings". Where its dictionary is thin (Russian on the simulator)
+     * its guesses can also miss the obvious word ("превет" gets "пресет" and "ревет" but not
+     * "привет"), so there the most common words of about the same length and the same first
+     * letters join them (at most 180), for words of four letters or more: a short word has
+     * too many close neighbours ("ок" is one key from "он") for a guess to be safe. Each
+     * guess is scored by how a thumb could have produced the typed word from it plus how
+     * common it is, and only close guesses are kept. */
     func rankedGuesses(for typed: String) -> [Guess] {
+        if let lastGuesses, lastGuesses.typed == typed { return lastGuesses.guesses }
         let letters = Array(typed.lowercased())
         let budget = letters.count <= 4 ? 1.0 : 2.0
         let apple = checker.guesses(
             forWordRange: NSRange(location: 0, length: typed.utf16.count), in: typed, language: language
         ) ?? []
         let known = Set(apple.map { $0.lowercased() } + [typed.lowercased()])
-        let extra = (common?.candidates(near: typed.lowercased(), limit: 400) ?? []).filter { !known.contains($0) }
+        let listed = letters.count < 4 || !thinDictionary(for: typed) ? []
+            : common?.candidates(near: typed.lowercased(), perBucket: 20) ?? []
+        let extra = listed.filter { !known.contains($0) }
         let close = (apple + extra).enumerated().compactMap { rank, guess -> Guess? in
             guard !guess.contains(" "), !guess.contains("-") else { return nil }
             let cost = TypingText.slipCost(from: letters, to: Array(guess.lowercased()), centres: centres)
             guard cost <= budget else { return nil }
             return Guess(word: guess, score: cost + rarity(of: guess) + Double(min(rank, apple.count)) * 0.01)
         }
-        return (close + splits(of: typed)).sorted { $0.score < $1.score }
+        let guesses = (close + splits(of: typed)).sorted { $0.score < $1.score }
+        lastGuesses = (typed, guesses)
+        return guesses
     }
 
     /// A missed space bar: two common words run together, such as "alot" or "inthe". The
@@ -187,9 +204,11 @@ final class TypingCorrector {
         }
     }
 
+    /// A word in the language's common words is one people write, such as "щас" or "комп",
+    /// even where Apple's dictionary does not know it.
     private func needsCorrection(_ word: Substring, after text: String, lexicon: TypingLexicon) -> Bool {
         guard word.count > 1, !word.dropFirst().contains(where: \.isUppercase), !lexicon.contains(word),
-              !TypingText.isStretched(word)
+              !TypingText.isStretched(word), common?.rarity(of: word.lowercased()) == nil
         else { return false }
         if word.first?.isUppercase == true, !TypingText.startsSentence(before: text[..<word.startIndex]) {
             return false
@@ -231,8 +250,7 @@ final class TypingCorrector {
     /// it is the word's place in that list, and a word the list lacks is rarer than any in it.
     private func rarity(of word: String) -> Double {
         let lower = word.lowercased()
-        let first = String(lower.prefix(1))
-        if let common, !completions(of: first).isEmpty, fromCommon.contains(first) {
+        if let common, thinDictionary(for: lower) {
             return common.rarity(of: lower) ?? 1.3
         }
         for length in 1...max(1, min(4, lower.count)) {
@@ -242,6 +260,14 @@ final class TypingCorrector {
             }
         }
         return 1
+    }
+
+    /// Whether Apple's dictionary has no completions for words starting as `word` does, so
+    /// the common words stand in for it.
+    private func thinDictionary(for word: String) -> Bool {
+        let first = String(word.lowercased().prefix(1))
+        _ = completions(of: first)
+        return fromCommon.contains(first)
     }
 
     private static func distinct(_ words: [String], from typed: String) -> [String] {

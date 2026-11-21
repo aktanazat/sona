@@ -83,6 +83,16 @@ struct KeyboardLearningTests {
         #expect(field.text == "see you at noon")
     }
 
+    @Test("a slide on delete over a long selection takes it in one delete, with nothing to put back")
+    func slideOverLongSelection() throws {
+        let note = String(repeating: "a long note ", count: 100)
+        let field = FieldDouble(before: "keep ", selected: note)
+        var echo = FieldEcho()
+        #expect(field.takeWord(echo: &echo) == "")
+        #expect(field.edits == 1)
+        #expect(field.text == "keep")
+    }
+
     @Test("the typed form of a correction is offered only at that word, so a later same word cannot teach the typo")
     func restoreOnlyAtCorrectedWord() throws {
         var session = try session()
@@ -164,6 +174,27 @@ struct RussianTypingTests {
         #expect(table.next(after: [], limit: 3) == ["я", "ты", "он"])
         #expect(table.next(after: ["как"], limit: 3) == ["ты", "вы", "я"])
     }
+
+    @Test("Russian chat words stay as typed", arguments: ["щас", "чё", "чел", "комп", "прога", "пж", "ок", "мб", "спс", "кст", "оч"])
+    func chatWordsStay(word: String) async throws {
+        var session = try await session()
+        var text = "ну " + word
+        text.apply(session.end(with: " ", before: text, corrects: true))
+        #expect(text == "ну \(word) ")
+    }
+}
+
+@MainActor
+struct EnglishChatWordTests {
+    @Test("English chat words stay as typed", arguments: ["lol", "tbh", "gonna"])
+    func chatWordsStay(word: String) async throws {
+        let corrector = try #require(TypingCorrector(language: TypingLanguage.english.rawValue))
+        corrector.common = await CommonWords.list(for: .english)
+        var session = TypingSession(corrector: corrector)
+        var text = "ok " + word
+        text.apply(session.end(with: " ", before: text, corrects: true))
+        #expect(text == "ok \(word) ")
+    }
 }
 
 struct KeyboardLanguagesTests {
@@ -194,6 +225,8 @@ private final class FieldDouble: NSObject, UITextDocumentProxy {
     }
 
     var text: String { head + selection }
+    /// Calls that changed the field.
+    private(set) var edits = 0
     var documentContextBeforeInput: String? { head }
     var documentContextAfterInput: String? { nil }
     var selectedText: String? { selection.isEmpty ? nil : selection }
@@ -202,11 +235,13 @@ private final class FieldDouble: NSObject, UITextDocumentProxy {
     var hasText: Bool { !text.isEmpty }
 
     func insertText(_ text: String) {
+        edits += 1
         selection = ""
         head += text
     }
 
     func deleteBackward() {
+        edits += 1
         if !selection.isEmpty {
             selection = ""
             if head.hasSuffix(" ") { head.removeLast() }

@@ -54,6 +54,8 @@ final class KeyboardViewController: UIInputViewController {
     private var feel = KeyboardFeelPreferences(defaults: .standard)
     /// Suggestions wait for the run loop after a key, so the key's text goes out first.
     private var suggesting: Task<Void, Never>?
+    /// The strip's spelling guesses, worked out once typing pauses.
+    private var guessing: Task<Void, Never>?
     #if DEBUG
     private let frames = FrameMeter()
     private let appearFrames = FrameMeter()
@@ -406,7 +408,9 @@ final class KeyboardViewController: UIInputViewController {
         return taken
     }
 
+    /// Puts back what a slide on delete took; a long selection it took leaves nothing to put back.
     private func restore(_ text: String) {
+        guard !text.isEmpty else { return }
         apply(TypingSession.Edit(insert: text))
         afterKey()
     }
@@ -495,9 +499,30 @@ final class KeyboardViewController: UIInputViewController {
         }
     }
 
-    /// Next words after a space start with a capital where the field wants one.
+    /// Completions show at once; spelling guesses, which cost milliseconds in Apple's checker
+    /// on the main thread, follow when no key has come for 80 ms. Space still corrects at
+    /// once, from the same guesses. Next words after a space start with a capital where the
+    /// field wants one.
     private func refreshSuggestions() {
-        guard corrects, cursorEndsWord, !hostBehind, let found = session.suggestions(before: textBefore) else {
+        showSuggestions(guessing: false)
+        guessing?.cancel()
+        guessing = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(80))
+            guard !Task.isCancelled else { return }
+            self?.showSuggestions(guessing: true)
+        }
+    }
+
+    private func showSuggestions(guessing: Bool) {
+        let before = textBefore
+        let offer = corrects && cursorEndsWord && !hostBehind ? session.suggestions(before: before, guessing: guessing) : nil
+        // A correction on show stays while the word goes on, until the guesses for the new
+        // letter replace it, so the strip does not blink on every key.
+        if !guessing, typing.suggestions?.correction != nil, offer?.correction == nil,
+           TypingText.word(before: before) != nil {
+            return
+        }
+        guard let found = offer else {
             typing.suggestions = nil
             return
         }

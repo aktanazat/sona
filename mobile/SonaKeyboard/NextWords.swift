@@ -4,24 +4,18 @@ import Foundation
 /// (built by mobile/scripts/build-next-words.ts from Tatoeba's sentences). A context is the
 /// last two words, the last word, or nothing at the start of a sentence.
 final class NextWords: Sendable {
-    private static let english = Task.detached(priority: .userInitiated) { bundled("en") }
-    private static let russian = Task.detached(priority: .userInitiated) { bundled("ru") }
-
     private let table: [Substring: [Substring]]
 
-    /// The bundled table for `language`, parsed once per process and off the main thread.
+    /// The bundled table for `language`, parsed off the main thread. Only the keyboard's
+    /// current language is kept: switching languages lets the last one go.
     static func table(for language: TypingLanguage) async -> NextWords? {
-        switch language {
-        case .english: await english.value
-        case .russian: await russian.value
-        }
-    }
-
-    private static func bundled(_ name: String) -> NextWords? {
-        guard let url = Bundle(for: NextWords.self).url(forResource: name, withExtension: "tsv", subdirectory: "NextWords"),
-              let contents = try? String(contentsOf: url, encoding: .utf8)
-        else { return nil }
-        return NextWords(contents: contents)
+        await Task.detached(priority: .userInitiated) {
+            guard let url = Bundle(for: NextWords.self)
+                .url(forResource: language.code.lowercased(), withExtension: "tsv", subdirectory: "NextWords"),
+                let contents = try? String(contentsOf: url, encoding: .utf8)
+            else { return nil }
+            return NextWords(contents: contents)
+        }.value
     }
 
     init(contents: String) {
@@ -57,70 +51,91 @@ final class NextWords: Sendable {
 /// own dictionary offers nothing: on the simulator Apple's checker completes no Russian word
 /// and its guesses for "превет" leave out "привет".
 final class CommonWords: Sendable {
-    private static let english = Task.detached(priority: .userInitiated) { bundled("en") }
-    private static let russian = Task.detached(priority: .userInitiated) { bundled("ru") }
-
-    /// Every word with its frequency rank and length, in alphabetical order for prefix lookups.
-    private let sorted: [(word: String, rank: Int, length: Int)]
-
-    /// The bundled list for `language`, read once per process and off the main thread.
-    static func list(for language: TypingLanguage) async -> CommonWords? {
-        switch language {
-        case .english: await english.value
-        case .russian: await russian.value
-        }
+    /// Words of one length that start with `start`; a leading space stands for any first letter.
+    private struct Bucket: Hashable {
+        let start: String
+        let length: Int
     }
 
-    private static func bundled(_ name: String) -> CommonWords? {
-        guard let url = Bundle(for: CommonWords.self)
-            .url(forResource: "\(name)-words", withExtension: "txt", subdirectory: "NextWords"),
-            let contents = try? String(contentsOf: url, encoding: .utf8)
-        else { return nil }
-        return CommonWords(contents: contents)
+    /// The words, most common first; a word's index is its frequency rank.
+    private let words: [String]
+    /// Ranks in alphabetical order of their words, for prefix lookups.
+    private let alphabetical: [Int32]
+    /// Ranks, most common first, by length and by first letter, first two letters, or second
+    /// letter.
+    private let buckets: [Bucket: [Int32]]
+
+    /// The bundled list for `language`, read off the main thread. Only the keyboard's
+    /// current language is kept: switching languages lets the last one go.
+    static func list(for language: TypingLanguage) async -> CommonWords? {
+        await Task.detached(priority: .userInitiated) {
+            guard let url = Bundle(for: CommonWords.self)
+                .url(forResource: "\(language.code.lowercased())-words", withExtension: "txt", subdirectory: "NextWords"),
+                let contents = try? String(contentsOf: url, encoding: .utf8)
+            else { return nil }
+            return CommonWords(contents: contents)
+        }.value
     }
 
     init(contents: String) {
-        sorted = contents.split(separator: "\n", omittingEmptySubsequences: true).enumerated()
-            .map { (word: String($0.element), rank: $0.offset, length: $0.element.count) }
-            .sorted { $0.word < $1.word }
+        let words = contents.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
+        var buckets: [Bucket: [Int32]] = [:]
+        for (rank, word) in words.enumerated() {
+            for start in Self.starts(of: Array(word)) {
+                buckets[Bucket(start: start, length: word.count), default: []].append(Int32(rank))
+            }
+        }
+        self.words = words
+        alphabetical = words.indices.sorted { words[$0] < words[$1] }.map(Int32.init)
+        self.buckets = buckets
+    }
+
+    /// The bucket starts a word is filed under: its first letter, its first two, and its
+    /// second after a space.
+    private static func starts(of letters: [Character]) -> [String] {
+        guard let first = letters.first else { return [] }
+        guard letters.count > 1 else { return [String(first)] }
+        return [String(first), String(letters[0...1]), " " + String(letters[1])]
     }
 
     /// Up to `limit` words that start with `prefix` and are longer than it, most common first.
     func completions(of prefix: String, limit: Int) -> [String] {
-        sorted[firstIndex(notBefore: prefix)...].prefix { $0.word.hasPrefix(prefix) }
-            .filter { $0.length > prefix.count }
-            .sorted { $0.rank < $1.rank }
-            .prefix(limit).map(\.word)
+        alphabetical[firstIndex(notBefore: prefix)...].prefix { words[Int($0)].hasPrefix(prefix) }
+            .filter { words[Int($0)] != prefix }
+            .sorted()
+            .prefix(limit).map { words[Int($0)] }
     }
 
     /// 0 for the most common word, rising on a log scale to 1 for the least common in the
     /// list; nil for a word the list does not have.
     func rarity(of word: String) -> Double? {
         let index = firstIndex(notBefore: word)
-        guard index < sorted.count, sorted[index].word == word else { return nil }
-        return log(Double(sorted[index].rank + 2)) / log(Double(sorted.count + 2))
+        guard index < alphabetical.count, words[Int(alphabetical[index])] == word else { return nil }
+        return log(Double(alphabetical[index]) + 2) / log(Double(words.count + 2))
     }
 
     private func firstIndex(notBefore word: String) -> Int {
-        var low = 0, high = sorted.count
+        var low = 0, high = alphabetical.count
         while low < high {
             let middle = (low + high) / 2
-            if sorted[middle].word < word { low = middle + 1 } else { high = middle }
+            if words[Int(alphabetical[middle])] < word { low = middle + 1 } else { high = middle }
         }
         return low
     }
 
-    /// Up to `limit` words a thumb could have meant by `typed`, most common first: one letter
-    /// longer or shorter at most, and starting with its first or second letter.
-    func candidates(near typed: String, limit: Int) -> [String] {
+    /// Words a thumb could have meant by `typed`, most common first: one letter longer or
+    /// shorter at most, and starting with its first letter, its first two, or its second.
+    /// Each bucket is already in frequency order, so only its top `perBucket` are taken: at
+    /// most nine buckets, never the whole list.
+    func candidates(near typed: String, perBucket: Int) -> [String] {
         let letters = Array(typed)
-        guard let first = letters.first else { return [] }
-        let second = letters.dropFirst().first
-        return sorted.filter { entry in
-            abs(entry.length - letters.count) <= 1
-                && (entry.word.first == first || entry.word.dropFirst().first == second)
+        guard !letters.isEmpty else { return [] }
+        var picked: Set<Int32> = []
+        for length in max(1, letters.count - 1)...(letters.count + 1) {
+            for start in Self.starts(of: letters) {
+                picked.formUnion(buckets[Bucket(start: start, length: length)]?.prefix(perBucket) ?? [])
+            }
         }
-        .sorted { $0.rank < $1.rank }
-        .prefix(limit).map(\.word)
+        return picked.sorted().map { words[Int($0)] }
     }
 }

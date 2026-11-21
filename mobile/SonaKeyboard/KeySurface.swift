@@ -321,15 +321,14 @@ final class KeyTouchView: UIView {
     }
 
     /// Held, delete starts repeating; after a dozen characters it takes whole words, as the
-    /// system keyboard speeds up.
+    /// system keyboard speeds up. While the field is still behind the keyboard's last edit no
+    /// word is taken, so it goes on a character at a time.
     private func repeatDelete(_ finger: Finger) -> Task<Void, Never> {
         Task { [model] in
             try? await Task.sleep(for: .seconds(0.45))
             while !Task.isCancelled {
-                if finger.repeats < 12 {
+                if finger.repeats < 12 || model.deleteWord() == nil {
                     model.press(.delete)
-                } else if model.deleteWord() == nil {
-                    return
                 }
                 finger.repeats += 1
                 try? await Task.sleep(for: .seconds(finger.repeats < 12 ? 0.09 : 0.22))
