@@ -72,9 +72,8 @@ private struct ScratchNoteListPage: View {
                     } primaryAction: {
                         Task { await store.newNote() }
                     }
-                    .menuStyle(.button)
-                    .buttonStyle(.icon)
-                    .menuIndicator(.hidden)
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.visible)
                     .fixedSize()
                     .help("New")
                     .accessibilityLabel("New")
