@@ -13,7 +13,7 @@ import {
   uploadSession,
 } from "./db";
 import { ApiProblem, logMaintenance, problem } from "./errors";
-import { isJsonRecord, isJsonString } from "./validation";
+import { isJsonRecord, isJsonString } from "./json";
 import type { Env, MaintenanceJobRow, UploadSessionRow } from "./types";
 
 interface StoredChunkRow {

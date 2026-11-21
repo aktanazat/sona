@@ -68,6 +68,13 @@ import {
   logRequest,
   problem,
 } from "./errors";
+import {
+  isJsonArray,
+  isJsonInteger,
+  isJsonRecord,
+  isJsonString,
+  type JsonValue,
+} from "./json";
 import { LIVE_VERIFIER_HEADER } from "./live";
 import { maintenanceQueueMessage, runMaintenance } from "./maintenance";
 import type {
@@ -86,10 +93,6 @@ import {
   canonicalQuery,
   digest,
   fixedBase64Url,
-  isJsonArray,
-  isJsonInteger,
-  isJsonRecord,
-  isJsonString,
   optionalOpaqueId,
   parseJsonBody,
   readLimitedBody,
@@ -98,7 +101,6 @@ import {
   requiredOpaqueId,
   requiredString,
   routeId,
-  type JsonValue,
 } from "./validation";
 
 const emptyDigest = "47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU";
