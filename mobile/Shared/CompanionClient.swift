@@ -173,7 +173,10 @@ actor CompanionClient {
         idempotencyKey: String,
         plan: ObjectUploadPlan
     ) async throws -> UploadCreatedResponse {
-        guard let body = try? JSONEncoder().encode(plan) else { throw CompanionError.signing }
+        /* A retry under the same idempotency key must be the same bytes: key order fixed. */
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        guard let body = try? encoder.encode(plan) else { throw CompanionError.signing }
         return try await json(
             identity: identity,
             vaultId: vaultId,

@@ -66,6 +66,10 @@ struct QueuedObject: Codable, Equatable, Identifiable {
     var lastError: String?
     /// Set when the Worker refused in a way no retry can change.
     var parked: Bool
+    /// The plan's writer signature, made once per staged revision and kept. CryptoKit's
+    /// Ed25519 signatures are randomized, so signing again for a retry would change the
+    /// create body and the Worker would refuse it as an idempotency conflict forever.
+    var writerSignature: String? = nil
 
     var id: String { objectId }
 
@@ -273,8 +277,12 @@ actor UploadQueue {
         credentials: VaultCredentials,
         client: CompanionClient
     ) async throws {
-        let item = try stage(item, credentials: credentials)
+        var item = try stage(item, credentials: credentials)
         let plan = try plan(item, credentials: credentials)
+        if item.writerSignature == nil {
+            item.writerSignature = plan.writerSignature
+            try save(item)
+        }
         let scope = idempotencyScope(item)
         let created = try await client.createObjectUpload(
             identity: identity,
@@ -380,6 +388,7 @@ actor UploadQueue {
         item.stagedForVaultId = credentials.vaultId
         item.chunkSizes = sizes
         item.chunkDigests = digests
+        item.writerSignature = nil
         try save(item)
         return item
     }
@@ -404,7 +413,7 @@ actor UploadQueue {
             )
         }
         let totalBytes = item.chunkSizes.reduce(0, +)
-        let signature = try signEd25519(
+        let signature = try item.writerSignature ?? Base64URL.encode(signEd25519(
             signingSeed: identity.signingSeed,
             message: canonicalUploadEnvelopeBytes(
                 CanonicalUploadEnvelopeInput(
@@ -424,7 +433,7 @@ actor UploadQueue {
                     }
                 )
             )
-        )
+        ))
         return ObjectUploadPlan(
             version: SonaProtocol.protocolVersion,
             cryptoVersion: SonaProtocol.cryptoVersion,
@@ -436,7 +445,7 @@ actor UploadQueue {
             chunks: chunks,
             chunkCount: chunks.count,
             totalBytes: totalBytes,
-            writerSignature: Base64URL.encode(signature)
+            writerSignature: signature
         )
     }
 
@@ -620,6 +629,7 @@ actor UploadQueue {
         stored.stagedForVaultId = nil
         stored.chunkSizes = []
         stored.chunkDigests = []
+        stored.writerSignature = nil
         stored.attempts += 1
         stored.lastError = String(describing: UploadQueueError.uploadGone)
         stored.parked = false

@@ -110,8 +110,33 @@ final class OutboxDrainTests: XCTestCase {
         XCTAssertEqual(after, .left)
     }
 
-    private func makeQueue(_ worker: FakeWorker) throws -> UploadQueue {
+    /// A connection dropped after the create: the retry later sends the create again
+    /// under the same key, so it must be the same bytes. Signing the plan again (CryptoKit
+    /// signatures are randomized) made the Worker refuse it as an idempotency conflict.
+    func testCreateRetriedAfterADroppedConnectionIsTheSameRequest() async throws {
+        let worker = try await FakeWorker.start()
+        defer { worker.stop() }
+        worker.dropFirstChunk = true
         let root = FileManager.default.temporaryDirectory.appending(path: "outbox-\(UUID().uuidString)")
+        let queue = try makeQueue(worker, root: root)
+        let item = try await queue.enqueue(ask: ask("Dropped once"), askedAtUtcMs: 1)
+        await queue.drain()
+
+        /* The retry the dropped connection scheduled comes due. */
+        let file = root.appending(path: item.objectId).appending(path: "item.json")
+        var stored = try JSONDecoder().decode(QueuedObject.self, from: Data(contentsOf: file))
+        stored.nextAttemptUtcMs = 0
+        try JSONEncoder().encode(stored).write(to: file)
+        await queue.drain()
+
+        XCTAssertEqual(worker.refusals, [])
+        XCTAssertEqual(worker.committedObjects, [item.objectId])
+    }
+
+    private func makeQueue(
+        _ worker: FakeWorker,
+        root: URL = FileManager.default.temporaryDirectory.appending(path: "outbox-\(UUID().uuidString)")
+    ) throws -> UploadQueue {
         addTeardownBlock { try? FileManager.default.removeItem(at: root) }
         let credentials = VaultCredentials(
             endpoint: "http://127.0.0.1:\(worker.port)",
@@ -150,6 +175,11 @@ private final class FakeWorker: @unchecked Sendable {
         set { lock.withLock { holdsFirstChunk = newValue } }
     }
     var isHolding: Bool { lock.withLock { held != nil } }
+    /// The first chunk upload is cut off before an answer, as a dropped connection does.
+    var dropFirstChunk: Bool {
+        get { lock.withLock { dropsFirstChunk } }
+        set { lock.withLock { dropsFirstChunk = newValue } }
+    }
 
     private let listener: NWListener
     private let lock = NSLock()
@@ -162,6 +192,7 @@ private final class FakeWorker: @unchecked Sendable {
     private var purgesFirstUpload = false
     private var objectOf: [String: String] = [:]
     private var holdsFirstChunk = false
+    private var dropsFirstChunk = false
     private var held: (() -> Void)?
 
     private init(listener: NWListener, port: UInt16) {
@@ -222,6 +253,15 @@ private final class FakeWorker: @unchecked Sendable {
             var buffer = buffer
             if let data { buffer.append(data) }
             if let request = Request(buffer) {
+                let drop = lock.withLock {
+                    guard request.method == "PUT", dropsFirstChunk else { return false }
+                    dropsFirstChunk = false
+                    return true
+                }
+                if drop {
+                    connection.cancel()
+                    return
+                }
                 let (status, body) = answer(request)
                 let respond = {
                     connection.send(content: Self.response(status, body), completion: .contentProcessed { _ in
