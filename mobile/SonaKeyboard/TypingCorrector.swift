@@ -184,9 +184,10 @@ final class TypingCorrector {
         let known = Set(apple.map { $0.lowercased() } + [typed.lowercased()])
         let listed = letters.count < 4 ? [] : common?.candidates(near: typed.lowercased(), perBucket: 20) ?? []
         let extra = listed.filter { !known.contains($0) }
+        var slips = SlipCost(typed: letters, centres: centres)
         let close = (apple + extra).enumerated().compactMap { rank, guess -> Guess? in
             guard !guess.contains(" "), !guess.contains("-") else { return nil }
-            let cost = TypingText.slipCost(from: letters, to: Array(guess.lowercased()), centres: centres)
+            let cost = slips.cost(to: Array(guess.lowercased()))
             guard cost <= budget else { return nil }
             return Guess(word: guess, score: cost + rarity(of: guess) + Double(min(rank, apple.count)) * 0.01)
         }
@@ -303,59 +304,94 @@ enum TypingText {
         guard let mark = text.last(where: { $0 != " " }) else { return true }
         return mark.isNewline || ".!?".contains(mark)
     }
+}
 
-    /* Costs of the slips a thumb makes on this layout. A neighbouring key, a swapped pair,
-     * a doubled or dropped repeat, and a missing apostrophe cost less than an unrelated
-     * letter, so among equally close guesses the likelier slip wins. */
-    static func slipCost(
-        from typed: [Character], to intended: [Character],
-        centres: [Character: (x: Double, y: Double)] = englishCentres
-    ) -> Double {
-        var cost = Array(repeating: Array(repeating: 0.0, count: intended.count + 1), count: typed.count + 1)
-        for i in typed.indices { cost[i + 1][0] = cost[i][0] + extraCost(typed, i, centres) }
-        for j in intended.indices { cost[0][j + 1] = cost[0][j] + missingCost(intended, j) }
-        for i in typed.indices {
-            for j in intended.indices {
-                var best = min(cost[i][j + 1] + extraCost(typed, i, centres), cost[i + 1][j] + missingCost(intended, j))
-                best = min(best, cost[i][j] + substitutionCost(typed[i], intended[j], centres))
-                if i > 0, j > 0, typed[i] == intended[j - 1], typed[i - 1] == intended[j] {
-                    best = min(best, cost[i - 1][j - 1] + 0.6)
-                }
-                cost[i + 1][j + 1] = best
+/* Costs of the slips a thumb makes on this layout. A neighbouring key, a swapped pair, a
+ * doubled or dropped repeat, and a missing apostrophe cost less than an unrelated letter, so
+ * among equally close guesses the likelier slip wins. One typed word is scored against every
+ * guess, so its letters, their keys and their extra-key costs are worked out once, letters
+ * compare as small integers, and the three rows of the comparison are reused. */
+struct SlipCost {
+    private typealias Position = (x: Double, y: Double)
+
+    private let centres: [Character: Position]
+    /// A small integer for each letter seen so far.
+    private var codes: [Character: Int] = [:]
+    private var typed: [Int] = []
+    private var typedKeys: [Position?] = []
+    /// What an extra typed letter costs at each place in the typed word.
+    private var extra: [Double] = []
+    private var intended: [Int] = []
+    private var intendedKeys: [Position?] = []
+    private var missing: [Double] = []
+    private var beforePrevious: [Double] = []
+    private var previous: [Double] = []
+    private var current: [Double] = []
+
+    init(typed letters: [Character], centres: [Character: (x: Double, y: Double)]) {
+        self.centres = centres
+        for letter in letters {
+            typed.append(code(letter))
+            typedKeys.append(centres[letter])
+        }
+        for index in typed.indices {
+            if index > 0, typed[index - 1] == typed[index] {
+                extra.append(0.5)
+            } else {
+                let beside = [index - 1, index + 1].filter(typed.indices.contains)
+                extra.append(beside.contains { Self.adjacent(typedKeys[index], typedKeys[$0]) } ? 0.7 : 1)
             }
         }
-        return cost[typed.count][intended.count]
     }
 
-    static let englishCentres = TypingLanguage.english.keyCentres
-
-    private static func extraCost(
-        _ typed: [Character], _ index: Int, _ centres: [Character: (x: Double, y: Double)]
-    ) -> Double {
-        let letter = typed[index]
-        if index > 0, typed[index - 1] == letter { return 0.5 }
-        let neighbours = [index - 1, index + 1].filter(typed.indices.contains).map { typed[$0] }
-        return neighbours.contains { adjacent(letter, $0, centres) } ? 0.7 : 1
+    /// The cheapest run of slips that turns `word`, as meant, into the typed word.
+    mutating func cost(to word: [Character]) -> Double {
+        intended.removeAll(keepingCapacity: true)
+        intendedKeys.removeAll(keepingCapacity: true)
+        missing.removeAll(keepingCapacity: true)
+        for (index, letter) in word.enumerated() {
+            intended.append(code(letter))
+            intendedKeys.append(centres[letter])
+            if letter == "'" || letter == "’" {
+                missing.append(0.3)
+            } else {
+                missing.append(index > 0 && intended[index - 1] == intended[index] ? 0.5 : 1)
+            }
+        }
+        let width = intended.count + 1
+        if previous.count < width {
+            beforePrevious = Array(repeating: 0, count: width)
+            previous = beforePrevious
+            current = beforePrevious
+        }
+        previous[0] = 0
+        for j in intended.indices { previous[j + 1] = previous[j] + missing[j] }
+        for i in typed.indices {
+            current[0] = previous[0] + extra[i]
+            for j in intended.indices {
+                var best = min(previous[j + 1] + extra[i], current[j] + missing[j])
+                let substitution = typed[i] == intended[j] ? 0 : Self.adjacent(typedKeys[i], intendedKeys[j]) ? 0.6 : 1
+                best = min(best, previous[j] + substitution)
+                if i > 0, j > 0, typed[i] == intended[j - 1], typed[i - 1] == intended[j] {
+                    best = min(best, beforePrevious[j - 1] + 0.6)
+                }
+                current[j + 1] = best
+            }
+            swap(&beforePrevious, &previous)
+            swap(&previous, &current)
+        }
+        return previous[intended.count]
     }
 
-    private static func missingCost(_ intended: [Character], _ index: Int) -> Double {
-        let letter = intended[index]
-        if letter == "'" || letter == "’" { return 0.3 }
-        return index > 0 && intended[index - 1] == letter ? 0.5 : 1
+    private mutating func code(_ letter: Character) -> Int {
+        if let known = codes[letter] { return known }
+        codes[letter] = codes.count
+        return codes.count - 1
     }
 
-    private static func substitutionCost(
-        _ typed: Character, _ intended: Character, _ centres: [Character: (x: Double, y: Double)]
-    ) -> Double {
-        if typed == intended { return 0 }
-        return adjacent(typed, intended, centres) ? 0.6 : 1
-    }
-
-    private static func adjacent(
-        _ first: Character, _ second: Character, _ centres: [Character: (x: Double, y: Double)]
-    ) -> Bool {
-        guard let a = centres[first], let b = centres[second] else { return false }
-        let dx = a.x - b.x, dy = a.y - b.y
+    private static func adjacent(_ first: Position?, _ second: Position?) -> Bool {
+        guard let first, let second else { return false }
+        let dx = first.x - second.x, dy = first.y - second.y
         return dx * dx + dy * dy < 2.1
     }
 }

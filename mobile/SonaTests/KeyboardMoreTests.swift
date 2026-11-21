@@ -75,12 +75,24 @@ struct KeyboardLearningTests {
         let field = FieldDouble(before: "see you at ", selected: "noon")
         var echo = FieldEcho()
         let first = try #require(field.takeWord(echo: &echo))
+        echo.hostNoticed()
         let second = try #require(field.takeWord(echo: &echo))
         #expect(first == "noon")
         #expect(field.text == "see you ")
         field.apply(TypingSession.Edit(insert: second), echo: &echo)
         field.apply(TypingSession.Edit(insert: first), echo: &echo)
         #expect(field.text == "see you at noon")
+    }
+
+    @Test("after a selection, a slide on delete takes the next word only once the host has reported the change")
+    func slideWaitsForHostAfterSelection() throws {
+        let field = FieldDouble(before: "see you at ", selected: "noon")
+        var echo = FieldEcho()
+        #expect(field.takeWord(echo: &echo) == "noon")
+        #expect(field.takeWord(echo: &echo) == nil)
+        #expect(field.text == "see you at ")
+        echo.hostNoticed()
+        #expect(field.takeWord(echo: &echo) == "at ")
     }
 
     @Test("a slide on delete over a long selection takes it in one delete, with nothing to put back")

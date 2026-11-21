@@ -194,6 +194,7 @@ final class KeyboardViewController: UIInputViewController {
 
     override func textDidChange(_ textInput: (any UITextInput)?) {
         super.textDidChange(textInput)
+        echo.hostNoticed()
         hostChanged()
         reload()
         refreshTyping(startingField: false)
@@ -206,15 +207,19 @@ final class KeyboardViewController: UIInputViewController {
 
     override func selectionDidChange(_ textInput: (any UITextInput)?) {
         super.selectionDidChange(textInput)
+        echo.hostNoticed()
         hostChanged()
     }
 
     /// A report that arrives while the keyboard's own edit is still going through is that
-    /// edit; any other change, or another field, was not the keyboard's doing.
+    /// edit. Text the keyboard did not write, or another field, empties the strip until it
+    /// is worked out again for the field as it is now; a cursor move alone does not.
     private func hostChanged() {
         let own = ownEditInFlight && documentID == editedField
         echo.hostReported(before: textBefore, after: textAfter, ownEdit: own)
-        if !own { session.hostChanged(field: documentID, text: fieldText) }
+        guard !own, session.hostChanged(field: documentID, text: fieldText) else { return }
+        typing.suggestions = nil
+        scheduleSuggestions()
     }
 
     private var textBefore: String { textDocumentProxy.documentContextBeforeInput ?? "" }
@@ -525,11 +530,15 @@ final class KeyboardViewController: UIInputViewController {
 
     private func showSuggestions(guessing: Bool) {
         let before = textBefore
-        let offer = corrects && cursorEndsWord && !hostBehind ? session.suggestions(before: before, guessing: guessing) : nil
-        // A correction on show stays while the word goes on, until the guesses for the new
-        // letter replace it, so the strip does not blink on every key.
-        if !guessing, typing.suggestions?.correction != nil, offer?.correction == nil,
-           TypingText.word(before: before) != nil {
+        let ready = corrects && cursorEndsWord && !hostBehind
+        let offer = ready ? session.suggestions(before: before, guessing: guessing) : nil
+        /* A correction on show stays while the same word goes on, with the word as now typed
+         * in its quoted slot, until the guesses for the new letter replace it, so the strip
+         * does not blink on every key. A change the keyboard did not make, which includes
+         * another field, has emptied the strip, so nothing is kept across one. */
+        if !guessing, ready, offer?.correction == nil, let shown = typing.suggestions, shown.correction != nil,
+           let word = TypingText.word(before: before), word.hasPrefix(shown.typed) {
+            typing.suggestions = Suggestions(typed: String(word), correction: shown.correction, others: shown.others)
             return
         }
         guard let found = offer else {

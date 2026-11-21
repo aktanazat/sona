@@ -229,11 +229,14 @@ struct TypingSession {
 
     /// The host reports `field` reading `text` around the cursor. Another field, or text the
     /// keyboard did not write, such as a sent message clearing the field, forgets every
-    /// correction the strip could take back; a cursor move alone keeps them.
-    mutating func hostChanged(field: UUID?, text: String) {
-        if field != self.field || text != fieldText { corrections = [] }
+    /// correction the strip could take back, and returns true; a cursor move alone keeps them.
+    @discardableResult
+    mutating func hostChanged(field: UUID?, text: String) -> Bool {
+        let changed = field != self.field || text != fieldText
+        if changed { corrections = [] }
         self.field = field
         fieldText = text
+        return changed
     }
 
     private mutating func keep(_ word: String) {
@@ -296,6 +299,18 @@ struct FieldEcho {
     /// A host that never updates keeps showing the oldest, so a long burst drops the second.
     private var versions: [Report] = []
     private static let versionLimit = 64
+    /// A slide on delete took a selection and waits for the host to report the field before
+    /// it takes the next word, so a selection the host still shows is not taken twice.
+    private(set) var awaitingHost = false
+
+    mutating func awaitHost() {
+        awaitingHost = true
+    }
+
+    /// The host said its text or selection did change.
+    mutating func hostNoticed() {
+        awaitingHost = false
+    }
 
     /// The keyboard changed the field, which the host showed as `before` and `after` the
     /// cursor: it deleted `deleting` characters before the cursor and inserted `inserting`.
@@ -322,6 +337,7 @@ struct FieldEcho {
     /// The field the keyboard types into is a different one.
     mutating func forget() {
         versions = []
+        awaitingHost = false
     }
 
     /// Whether the host shows a version of the field older than the keyboard's latest, and
@@ -361,17 +377,25 @@ extension UITextDocumentProxy {
     /// Select All, and a picture would come back as a placeholder character.
     /// A short one is typed over itself, which leaves the cursor after it, then deleted a
     /// character at a time: delete on a selection lets a host such as Messages take the space
-    /// beside it too, which sliding back could not restore. After that, the word before the
-    /// cursor, counted from the text the host shows now; while the host is still behind the
-    /// keyboard's last edit it takes nothing.
+    /// beside it too, which sliding back could not restore. That ends the stretch: the next
+    /// word waits for the host's text or selection notice, or, failing one, for a later stretch
+    /// once the host no longer shows the selection. After that, the word before the cursor,
+    /// counted from the text the host shows now; while the host is still behind the keyboard's
+    /// last edit it takes nothing.
     func takeWord(echo: inout FieldEcho) -> String? {
+        if echo.awaitingHost {
+            if selectedText?.isEmpty ?? true { echo.hostNoticed() }
+            return nil
+        }
         if let selected = selectedText, !selected.isEmpty {
             guard selected.count <= 40, !selected.contains("\u{FFFC}") else {
                 deleteBackward()
+                echo.awaitHost()
                 return ""
             }
             insertText(selected)
             apply(TypingSession.Edit(deleteCount: selected.count), echo: &echo)
+            echo.awaitHost()
             return selected
         }
         let before = documentContextBeforeInput ?? ""
