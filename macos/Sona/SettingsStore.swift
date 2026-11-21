@@ -548,10 +548,10 @@ final class SettingsStore {
         await refresh()
     }
 
-    func setMuteWhileRecording(_ enabled: Bool) async {
+    func setPlaybackWhileRecording(_ behavior: PlaybackWhileRecording) async {
         await write(
-            \.muteWhileRecording, enabled, "change_mute_while_recording_setting",
-            ["enabled": .bool(enabled)], key: "mute_while_recording"
+            \.playbackWhileRecording, behavior, "change_playback_while_recording_setting",
+            ["behavior": .string(behavior.rawValue)], key: "playback_while_recording"
         )
     }
 

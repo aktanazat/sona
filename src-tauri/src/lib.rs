@@ -32,9 +32,11 @@ mod launch_trace;
 mod llm_client;
 mod local_cleanup;
 mod managers;
+mod media_playback;
 pub mod meeting;
 #[cfg(target_os = "macos")]
 pub mod meeting_macos;
+mod meeting_vocabulary;
 mod memory;
 mod modes;
 mod native_bridge;
@@ -1599,6 +1601,9 @@ pub fn run(cli_args: CliArgs) {
             commands::vocabulary::update_emoji_replacements,
             commands::vocabulary::update_emoji_replacements_enabled,
             commands::vocabulary::add_vocabulary_correction,
+            commands::vocabulary::change_meeting_vocabulary_enabled_setting,
+            commands::vocabulary::meeting_vocabulary_words,
+            commands::vocabulary::undo_learned_word,
             commands::vocabulary::get_text_replacements,
             commands::vocabulary::save_text_replacements,
             commands::vocabulary::reset_text_replacements,
@@ -1676,7 +1681,7 @@ pub fn run(cli_args: CliArgs) {
             modes::set_post_process_selected_prompt,
             shortcut::suspend_all_bindings,
             shortcut::resume_all_bindings,
-            shortcut::change_mute_while_recording_setting,
+            shortcut::change_playback_while_recording_setting,
             shortcut::change_append_trailing_space_setting,
             shortcut::change_lazy_stream_close_setting,
             shortcut::change_vad_enabled_setting,

@@ -4,7 +4,9 @@ use crate::meeting::loop_types::MeetingLoopId;
 use crate::meeting::people_types::PersonId;
 use crate::meeting::types::{MeetingSessionId, SpeakerId};
 use crate::query::tools::{ToolCall, TOOL_ARGS};
-use crate::settings::{EnglishSpelling, OverlayPosition, OverlayStyle, Theme};
+use crate::settings::{
+    EnglishSpelling, OverlayPosition, OverlayStyle, PlaybackWhileRecording, Theme,
+};
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use std::collections::{BTreeMap, BTreeSet};
@@ -144,7 +146,7 @@ pub(crate) const MAX_TOOL_ROUNDS: usize = 3;
 /// result. Mirrored by `MAX_SONA_TOOL_CALL_ID_CHARS`.
 const MAX_TOOL_CALL_ID_CHARS: usize = 32;
 
-const PROPOSAL_SCHEMA_JSON: &str = r#"{"$id":"SonaConfigProposalV1","type":"object","additionalProperties":false,"required":["version","summary","rationale","actions","follow_up_question","source_settings_revision"],"properties":{"version":{"const":"SonaConfigProposalV1"},"summary":{"type":"string","minLength":1,"maxLength":2048},"rationale":{"type":"string","minLength":1,"maxLength":4096},"actions":{"type":"array","maxItems":32,"items":{"type":"object","additionalProperties":false,"required":["key","value"],"properties":{"key":{"enum":["audio_feedback","audio_output_device_id","audio_volume","default_transcription_model","language","local_retention_period","material_preference","microphone_excluded_ids","microphone_favorite_order","microphone_id","mode_selection","mode_toggles","mute_while_recording","overlay_position","overlay_style","spelling_behavior","start_hidden","theme","tray_visibility","update_note_visibility"]},"value":{"type":["string","number","boolean","array","object"]}}}},"follow_up_question":{"type":["string","null"],"maxLength":2048},"source_settings_revision":{"type":"integer","minimum":0}}}"#;
+const PROPOSAL_SCHEMA_JSON: &str = r#"{"$id":"SonaConfigProposalV1","type":"object","additionalProperties":false,"required":["version","summary","rationale","actions","follow_up_question","source_settings_revision"],"properties":{"version":{"const":"SonaConfigProposalV1"},"summary":{"type":"string","minLength":1,"maxLength":2048},"rationale":{"type":"string","minLength":1,"maxLength":4096},"actions":{"type":"array","maxItems":32,"items":{"type":"object","additionalProperties":false,"required":["key","value"],"properties":{"key":{"enum":["audio_feedback","audio_output_device_id","audio_volume","default_transcription_model","language","local_retention_period","material_preference","microphone_excluded_ids","microphone_favorite_order","microphone_id","mode_selection","mode_toggles","overlay_position","overlay_style","playback_while_recording","spelling_behavior","start_hidden","theme","tray_visibility","update_note_visibility"]},"value":{"type":["string","number","boolean","array","object"]}}}},"follow_up_question":{"type":["string","null"],"maxLength":2048},"source_settings_revision":{"type":"integer","minimum":0}}}"#;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "snake_case")]
@@ -202,7 +204,7 @@ pub struct SonaOverlaySnapshotV1 {
 pub struct SonaAudioSnapshotV1 {
     pub feedback_enabled: bool,
     pub volume: f32,
-    pub mute_while_recording: bool,
+    pub playback_while_recording: PlaybackWhileRecording,
     pub output_device_id: String,
     pub available_output_device_ids: Vec<String>,
 }
@@ -505,7 +507,7 @@ pub enum SonaSettingChangeV1 {
     OverlayPosition(OverlayPosition),
     AudioFeedback(bool),
     AudioVolume(f32),
-    MuteWhileRecording(bool),
+    PlaybackWhileRecording(PlaybackWhileRecording),
     AudioOutputDeviceId(String),
     MicrophoneId(String),
     DefaultTranscriptionModel(String),
@@ -1135,7 +1137,7 @@ impl SonaSettingChangeV1 {
             Self::LocalRetentionPeriod(_) => SonaConfirmationClassV1::Explicit,
             Self::AudioFeedback(_)
             | Self::AudioVolume(_)
-            | Self::MuteWhileRecording(_)
+            | Self::PlaybackWhileRecording(_)
             | Self::AudioOutputDeviceId(_)
             | Self::MicrophoneId(_)
             | Self::DefaultTranscriptionModel(_)
@@ -1160,7 +1162,7 @@ impl SonaSettingChangeV1 {
             Self::OverlayPosition(_) => "overlay_position",
             Self::AudioFeedback(_) => "audio_feedback",
             Self::AudioVolume(_) => "audio_volume",
-            Self::MuteWhileRecording(_) => "mute_while_recording",
+            Self::PlaybackWhileRecording(_) => "playback_while_recording",
             Self::AudioOutputDeviceId(_) => "audio_output_device_id",
             Self::MicrophoneId(_) => "microphone_id",
             Self::DefaultTranscriptionModel(_) => "default_transcription_model",
@@ -1296,7 +1298,7 @@ mod tests {
                 audio: SonaAudioSnapshotV1 {
                     feedback_enabled: true,
                     volume: 0.5,
-                    mute_while_recording: false,
+                    playback_while_recording: PlaybackWhileRecording::Pause,
                     output_device_id: "output-1".to_string(),
                     available_output_device_ids: vec!["output-1".to_string()],
                 },

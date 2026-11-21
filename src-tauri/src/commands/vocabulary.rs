@@ -523,6 +523,94 @@ pub fn update_spoken_edits_enabled(app: AppHandle, enabled: bool) -> Result<(), 
     Ok(())
 }
 
+#[tauri::command]
+#[specta::specta]
+pub fn change_meeting_vocabulary_enabled_setting(
+    app: AppHandle,
+    enabled: bool,
+) -> Result<(), String> {
+    settings::update_settings(&app, |settings| {
+        settings.meeting_vocabulary_enabled = enabled;
+    })?;
+    Ok(())
+}
+
+/// The names and words dictation takes from meetings, read afresh.
+#[tauri::command]
+#[specta::specta]
+pub async fn meeting_vocabulary_words(app: AppHandle) -> Result<Vec<String>, String> {
+    use std::sync::Arc;
+    use tauri::Manager;
+    let meetings = app
+        .state::<Arc<crate::meeting::session::MeetingSessionManager>>()
+        .inner()
+        .clone();
+    let history = app
+        .state::<Arc<crate::managers::history::HistoryManager>>()
+        .inner()
+        .clone();
+    let store = meetings
+        .store()
+        .await
+        .map_err(|_| "Conversations could not be opened.".to_string())?;
+    let own = crate::meeting::workflow_engine::known_vocabulary(Some(&app));
+    let words = crate::meeting_vocabulary::read(&store, &history, &own, &Default::default())?;
+    crate::meeting_vocabulary::remember(words.clone());
+    Ok(words)
+}
+
+/// A spelling learned from a fix made right after dictating, with the entry
+/// it replaced, so Undo restores exactly what was there.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize, Type)]
+pub struct LearnedWord {
+    pub learned: VocabularyEntry,
+    pub replaced: Option<VocabularyEntry>,
+}
+
+pub(crate) fn learn_word_in(
+    settings: &mut AppSettings,
+    spoken: &str,
+    written: &str,
+) -> Result<LearnedWord, String> {
+    let key = vocabulary_spoken_key(spoken);
+    let replaced = settings
+        .custom_words
+        .iter()
+        .find(|entry| vocabulary_spoken_key(&entry.spoken) == key)
+        .cloned();
+    let learned = add_correction_in(
+        settings,
+        &VocabularyScope::Global,
+        spoken.to_owned(),
+        written.to_owned(),
+    )?;
+    Ok(LearnedWord { learned, replaced })
+}
+
+/// Takes a learned spelling back out. Left alone when it was changed since.
+fn undo_learned_word_in(settings: &mut AppSettings, word: &LearnedWord) {
+    let Some(index) = settings
+        .custom_words
+        .iter()
+        .position(|entry| entry == &word.learned)
+    else {
+        return;
+    };
+    match &word.replaced {
+        Some(previous) => settings.custom_words[index] = previous.clone(),
+        None => {
+            settings.custom_words.remove(index);
+        }
+    }
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn undo_learned_word(app: AppHandle, word: LearnedWord) -> Result<(), String> {
+    settings::update_settings(&app, |settings| undo_learned_word_in(settings, &word))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -533,6 +621,20 @@ mod tests {
             spoken: spoken.to_string(),
             written: written.to_string(),
         }
+    }
+
+    #[test]
+    fn undoing_a_learned_name_puts_back_the_spelling_it_replaced() {
+        let mut settings = crate::settings::get_default_settings();
+        settings.custom_words = vec![entry("okafor", "Okafore")];
+        let learned = learn_word_in(&mut settings, "okafor", "Okafor").unwrap();
+        assert_eq!(settings.custom_words, vec![entry("okafor", "Okafor")]);
+        undo_learned_word_in(&mut settings, &learned);
+        assert_eq!(settings.custom_words, vec![entry("okafor", "Okafore")]);
+
+        let fresh = learn_word_in(&mut settings, "stefan", "Stephen").unwrap();
+        undo_learned_word_in(&mut settings, &fresh);
+        assert_eq!(settings.custom_words, vec![entry("okafor", "Okafore")]);
     }
 
     #[test]

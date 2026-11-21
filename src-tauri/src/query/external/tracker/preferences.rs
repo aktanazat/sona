@@ -41,8 +41,8 @@ use crate::query::external::{
 use crate::query::{KeptLocal, QueryError, QUERY_SCHEMA_VERSION};
 use crate::settings::{
     self, AppSettings, AppearanceMaterial, DigestDay, EnglishSpelling, HudPillEdge, LLMPrompt,
-    LogLevel, OverlayStyle, PasteMethod, PersonaSample, SoundTheme, Theme, VocabularyEntry,
-    LOCAL_CLEANUP_PROVIDER_ID,
+    LogLevel, OverlayStyle, PasteMethod, PersonaSample, PlaybackWhileRecording, SoundTheme, Theme,
+    VocabularyEntry, LOCAL_CLEANUP_PROVIDER_ID,
 };
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
@@ -129,8 +129,11 @@ pub enum SettingKey {
     AudioFeedbackVolume,
     /// marimba, pop or custom.
     SoundTheme,
-    /// Mute other audio while dictating: true or false.
-    MuteWhileRecording,
+    /// Other apps' sound while dictating: keep, pause, lower or mute.
+    PlaybackWhileRecording,
+    /// Dictation also knows people met, project titles and words heard in
+    /// meetings (`work meeting-words`): true or false.
+    MeetingWords,
     /// Pick up quiet speech: true or false.
     QuietSpeech,
     /// The command mode shortcut: true or false.
@@ -765,9 +768,17 @@ fn setting_change<'a>(args: &'a SettingArgs) -> SettingsChange<'a> {
                 Ok(())
             }),
         ),
-        SettingKey::MuteWhileRecording => (
-            show(|s| json!(s.mute_while_recording)),
-            apply(move |s| Ok(s.mute_while_recording = flag(value)?)),
+        SettingKey::PlaybackWhileRecording => (
+            show(|s| json!(s.playback_while_recording)),
+            apply(move |s| {
+                s.playback_while_recording =
+                    named::<PlaybackWhileRecording>(value, "keep, pause, lower, mute")?;
+                Ok(())
+            }),
+        ),
+        SettingKey::MeetingWords => (
+            show(|s| json!(s.meeting_vocabulary_enabled)),
+            apply(move |s| Ok(s.meeting_vocabulary_enabled = flag(value)?)),
         ),
         SettingKey::QuietSpeech => (
             show(|s| json!(s.quiet_speech_enabled)),
@@ -1054,7 +1065,8 @@ struct DictationView<'a> {
     audio_feedback: bool,
     audio_feedback_volume: f32,
     sound_theme: SoundTheme,
-    mute_while_recording: bool,
+    playback_while_recording: PlaybackWhileRecording,
+    meeting_words: bool,
     quiet_speech: bool,
     command_mode: bool,
     command_answers_in_chat: bool,
@@ -1162,7 +1174,8 @@ fn settings_view(
             audio_feedback: settings.audio_feedback,
             audio_feedback_volume: settings.audio_feedback_volume,
             sound_theme: settings.sound_theme,
-            mute_while_recording: settings.mute_while_recording,
+            playback_while_recording: settings.playback_while_recording,
+            meeting_words: settings.meeting_vocabulary_enabled,
             quiet_speech: settings.quiet_speech_enabled,
             command_mode: settings.command_mode_enabled,
             command_answers_in_chat: settings.command_answers_in_chat,

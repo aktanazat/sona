@@ -1682,14 +1682,14 @@ pub(super) async fn call(
             })
             .await?
         }
-        "change_mute_while_recording_setting" => {
+        "change_playback_while_recording_setting" => {
             let mut args = Args::parse(params)?;
-            let enabled = args.take("enabled")?;
+            let behavior = args.take("behavior")?;
             let handle = app.clone();
             on_main_thread(app, move || {
-                reply(crate::shortcut::change_mute_while_recording_setting(
+                reply(crate::shortcut::change_playback_while_recording_setting(
                     handle.clone(),
-                    enabled,
+                    behavior,
                 ))
             })
             .await?
@@ -3960,6 +3960,35 @@ pub(super) async fn call(
                         enabled,
                     ),
                 )
+            })
+            .await?
+        }
+        "change_meeting_vocabulary_enabled_setting" => {
+            let mut args = Args::parse(params)?;
+            let enabled = args.take("enabled")?;
+            let handle = app.clone();
+            on_main_thread(app, move || {
+                reply(
+                    crate::commands::vocabulary::change_meeting_vocabulary_enabled_setting(
+                        handle.clone(),
+                        enabled,
+                    ),
+                )
+            })
+            .await?
+        }
+        "meeting_vocabulary_words" => {
+            reply(crate::commands::vocabulary::meeting_vocabulary_words(app.clone()).await)
+        }
+        "undo_learned_word" => {
+            let mut args = Args::parse(params)?;
+            let word = args.take("word")?;
+            let handle = app.clone();
+            on_main_thread(app, move || {
+                reply(crate::commands::vocabulary::undo_learned_word(
+                    handle.clone(),
+                    word,
+                ))
             })
             .await?
         }

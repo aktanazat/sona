@@ -144,13 +144,16 @@ impl Target {
                     // the changed words keeps a reworded passage out, but it does
                     // not keep out a short field replaced whole: three tokens or
                     // fewer still yields a pair. Recurrence is what that case has
-                    // to clear.
+                    // to clear, unless the pair respells a name: that is learned
+                    // now, with an Undo on the pill.
                     if let Some((spoken, written)) =
                         crate::meeting::store::learning::rewrite_span(original, &last)
                     {
-                        crate::meeting::learning::notify_dictation_corrected(
-                            app, &spoken, &written,
-                        );
+                        if !crate::meeting::learning::learn_corrected_name(app, &spoken, &written) {
+                            crate::meeting::learning::notify_dictation_corrected(
+                                app, &spoken, &written,
+                            );
+                        }
                     }
                 }
                 return;

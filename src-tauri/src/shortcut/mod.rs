@@ -1535,9 +1535,12 @@ pub async fn discover_post_process_model_catalog(
 
 #[tauri::command]
 #[specta::specta]
-pub fn change_mute_while_recording_setting(app: AppHandle, enabled: bool) -> Result<(), String> {
+pub fn change_playback_while_recording_setting(
+    app: AppHandle,
+    behavior: settings::PlaybackWhileRecording,
+) -> Result<(), String> {
     settings::update_settings(&app, |settings| {
-        settings.mute_while_recording = enabled;
+        settings.playback_while_recording = behavior;
     })?;
     Ok(())
 }

@@ -1876,6 +1876,23 @@ pub(crate) async fn process_transcription_output(
     }
 }
 
+/// Re-reads the meeting words in the background for the next dictation; this
+/// one already has its vocabulary.
+fn refresh_meeting_vocabulary(app: &AppHandle) {
+    if !get_settings(app).meeting_vocabulary_enabled {
+        return;
+    }
+    let meetings = app
+        .state::<Arc<crate::meeting::session::MeetingSessionManager>>()
+        .inner()
+        .clone();
+    let history = app.state::<Arc<HistoryManager>>().inner().clone();
+    let own = crate::meeting::workflow_engine::known_vocabulary(Some(app));
+    std::thread::spawn(move || {
+        crate::meeting_vocabulary::refresh(meetings.open_store(), &history, &own);
+    });
+}
+
 impl TranscribeAction {
     fn start(&self, app: &AppHandle, binding_id: &str, _shortcut_str: &str) -> bool {
         let start_time = Instant::now();
@@ -1895,6 +1912,7 @@ impl TranscribeAction {
             let _ = app.emit("recording-error", RecordingErrorEvent::typed(error_type));
             return false;
         }
+        refresh_meeting_vocabulary(app);
         let cloud_requested = self.run.cloud().is_some();
 
         let binding_id = binding_id.to_string();
@@ -2035,12 +2053,12 @@ impl TranscribeAction {
                     // The start chime is a readiness cue, so it must follow the
                     // first real input callback rather than Stream::play() or a
                     // fixed delay. The helper returns immediately when feedback
-                    // is disabled; mute still follows the same readiness point.
+                    // is disabled; the playback hold follows the same readiness point.
                     if rm_clone.is_recording_readiness_current(generation) {
                         play_feedback_sound_blocking(&app_clone, SoundType::Start);
                     }
                     if rm_clone.is_recording_readiness_current(generation) {
-                        rm_clone.apply_mute(generation);
+                        rm_clone.hold_playback(generation);
                     }
                 });
             }
@@ -2112,8 +2130,8 @@ impl TranscribeAction {
             show_transcribing_overlay(app);
         }
 
-        // Unmute before playing audio feedback so the stop sound is audible
-        rm.remove_mute();
+        // Put playback back before the stop sound so it is audible
+        rm.release_playback();
 
         // Play audio feedback for recording stop
         play_feedback_sound(app, SoundType::Stop);

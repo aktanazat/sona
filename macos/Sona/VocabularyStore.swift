@@ -32,6 +32,7 @@ final class VocabularyStore {
     private(set) var emojiEnabled = false
     private(set) var snippetsEnabled = true
     private(set) var replacementsEnabled = true
+    private(set) var meetingWordsEnabled = true
 
     // MARK: Writing samples
 
@@ -46,6 +47,9 @@ final class VocabularyStore {
     /// Names Sona keeps hearing in meetings that no spelling covers yet. A
     /// kept word becomes a spelling, which the core then leaves off this list.
     private(set) var heardWords: [HeardWord] = []
+    /// What dictation knows from meetings: people met lately, project
+    /// titles, then words heard in the most meetings.
+    private(set) var meetingWords: [String] = []
 
     // MARK: State
 
@@ -95,6 +99,12 @@ final class VocabularyStore {
         } catch {
             heardWords = []
         }
+    }
+
+    /// Read on every visit, like the heard words. Empty when the meetings
+    /// cannot be opened.
+    func loadMeetingWords() async {
+        meetingWords = (try? await core.request("meeting_vocabulary_words")) ?? []
     }
 
     /// Keeps a heard word as Sona already writes it. The spelling is the
@@ -419,6 +429,15 @@ final class VocabularyStore {
         )
     }
 
+    func setMeetingWordsEnabled(_ enabled: Bool) {
+        writeSetting(
+            "change_meeting_vocabulary_enabled_setting",
+            enabled: enabled,
+            failure: "Couldn't change names and words from meetings. Try again.",
+            retry: { [weak self] in self?.setMeetingWordsEnabled(enabled) }
+        )
+    }
+
     func setEmojiEnabled(_ enabled: Bool) {
         writeSetting(
             "update_emoji_replacements_enabled",
@@ -724,6 +743,7 @@ final class VocabularyStore {
         emojiEnabled = settings.emojiReplacementsEnabled ?? false
         snippetsEnabled = settings.snippetsEnabled ?? true
         replacementsEnabled = settings.replacementsEnabled ?? true
+        meetingWordsEnabled = settings.meetingVocabularyEnabled ?? true
     }
 
     /// `settings-changed` carries no useful payload, and the CLI writes

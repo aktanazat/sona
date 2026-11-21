@@ -2015,7 +2015,10 @@ impl RunPlan {
         {
             cleanup_level = Some(CleanupLevel::Light);
         }
-        let asr = AsrPlan::from_mode(settings, &mode.asr);
+        let mut asr = AsrPlan::from_mode(settings, &mode.asr);
+        if settings.meeting_vocabulary_enabled {
+            asr.custom_words = crate::meeting_vocabulary::with_meeting_words(asr.custom_words);
+        }
         let requested_engine = mode.asr.requested_engine;
         let (cloud, local_fallback) = match requested_engine.cloud_provider() {
             None => (None, None),

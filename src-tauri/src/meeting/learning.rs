@@ -51,6 +51,55 @@ pub(crate) fn notify_dictation_corrected(app: &AppHandle, spoken: &str, written:
     });
 }
 
+/// The event that puts "Learned" with an Undo on the pill.
+pub(crate) const WORD_LEARNED_EVENT: &str = "dictation-word-learned";
+
+/// A name fixed right after dictating is learned at once into the
+/// vocabulary, and the pill offers to undo it. Anything else stays with the
+/// learning loop. True when it was learned here.
+#[cfg(target_os = "macos")]
+pub(crate) fn learn_corrected_name(app: &AppHandle, spoken: &str, written: &str) -> bool {
+    use tauri::Emitter;
+    if !is_name_fix(spoken, written) {
+        return false;
+    }
+    let learned = crate::settings::try_update_settings(app, |settings| {
+        crate::commands::vocabulary::learn_word_in(settings, spoken, written)
+    });
+    match learned {
+        Ok(word) => {
+            let _ = app.emit(WORD_LEARNED_EVENT, &word);
+            true
+        }
+        Err(error) => {
+            log::warn!("Corrected name not learned: {error}");
+            false
+        }
+    }
+}
+
+/// Whether an edit respells a name rather than rewording: one to three
+/// words, no more than were heard, each written with a capital, and spelled
+/// close to what was heard. Collapsing "cube control" into "Kubectl" counts.
+pub(crate) fn is_name_fix(spoken: &str, written: &str) -> bool {
+    let heard = spoken.split_whitespace().count();
+    let fixed: Vec<&str> = written.split_whitespace().collect();
+    if spoken == written || heard == 0 || heard > 3 || fixed.len() > heard {
+        return false;
+    }
+    if !fixed
+        .iter()
+        .all(|word| word.chars().next().is_some_and(char::is_uppercase))
+    {
+        return false;
+    }
+    let (heard, fixed) = (
+        vocabulary_spoken_key(spoken),
+        vocabulary_spoken_key(written),
+    );
+    strsim::normalized_levenshtein(&heard, &fixed) >= 0.5
+}
+
 /// Biases one session's transcription with its priming blob.
 ///
 /// The entries go into the run's own [`AsrPlan`], which is a per-run value built
@@ -163,5 +212,28 @@ impl LearningInputs for NoInputs {
 
     fn active_mode_id(&self) -> Option<String> {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_name_fix;
+
+    #[test]
+    fn a_respelled_name_is_a_fix() {
+        assert!(is_name_fix("Stefan Okafor", "Stephen Okafor"));
+        assert!(is_name_fix("nolan", "Nolan"));
+        assert!(is_name_fix("cube control", "Kubectl"));
+    }
+
+    #[test]
+    fn a_rewording_or_a_lowercase_word_is_not() {
+        assert!(!is_name_fix("John", "Mary"));
+        assert!(!is_name_fix("their", "there"));
+        assert!(!is_name_fix("Nolan", "Nolan"));
+        assert!(!is_name_fix(
+            "send it to the team today",
+            "Send It To The Team Today"
+        ));
     }
 }

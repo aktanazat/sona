@@ -767,6 +767,7 @@ sona work vocabulary-add "sona" "Sona" [--mode <MODE_ID>]
 sona work vocabulary-remove "sona" [--mode <MODE_ID>]
 sona work vocabulary-csv words.csv [--mode <MODE_ID>]
 sona work heard-words                               # words meetings keep using that the vocabulary lacks
+sona work meeting-words                             # names and words dictation knows from meetings
 sona work snippet-save "my address" --text "1 Harbor Way" [--id <SNIPPET_ID>] [--off]
 sona work snippet-enable <SNIPPET_ID> [--off]
 sona work snippet-delete <SNIPPET_ID>
@@ -1001,6 +1002,7 @@ claude mcp add sona -- bun /absolute/path/to/sona/tools/sona-mcp/src/index.ts
 | `sona_vocabulary_remove` *(opt-in)* | `spoken`, `mode?`, `dry_run?` — writes, takes away         |
 | `sona_vocabulary_csv`             | `file`, `mode?`, `dry_run?` — writes                         |
 | `sona_heard_words`                | none                                                         |
+| `sona_meeting_words`              | none                                                         |
 | `sona_snippet_save`, `sona_snippet_enable` | `trigger`, `text`, `id?`, `off?` or `id`, `off?`; `dry_run?` — writes |
 | `sona_rewrite_save`, `sona_rewrite_enable` | `spoken`, `written`, `off?` or `spoken`, `off?`; `dry_run?` — writes |
 | `sona_emoji_save`                 | `spoken`, `emoji`, `dry_run?` — writes                       |

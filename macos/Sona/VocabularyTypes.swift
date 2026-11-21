@@ -232,6 +232,7 @@ struct VocabularySettingsSnapshot: Decodable {
     let snippetsEnabled: Bool?
     let replacementsEnabled: Bool?
     let spokenEditsEnabled: Bool?
+    let meetingVocabularyEnabled: Bool?
 }
 
 /// The keys the core matches by, so the editor can refuse exactly what the
