@@ -319,6 +319,14 @@ fn action_word(action: ImportAction) -> &'static str {
     }
 }
 
+fn counted(count: u32, noun: &str) -> String {
+    if count == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{count} {noun}s")
+    }
+}
+
 fn report_text(text: &mut String, dry_run: bool, report: &ImportReport) {
     let verb = if dry_run { "Would import" } else { "Imported" };
     let found = report.totals.found;
@@ -394,14 +402,15 @@ pub(super) fn text(answer: &WorkAnswer, text: &mut String) {
                     ""
                 };
                 let tasks = record.totals.tasks;
+                let projects = record.totals.projects;
                 let _ = writeln!(
                     text,
-                    "{} · {} · {} · {} tasks, {} projects{undone}",
+                    "{} · {} · {} · {}, {}{undone}",
                     record.id,
                     record.source.name(),
                     record.name,
-                    tasks.made + tasks.archived,
-                    record.totals.projects.made + record.totals.projects.archived,
+                    counted(tasks.made + tasks.archived, "task"),
+                    counted(projects.made + projects.archived, "project"),
                 );
             }
         }

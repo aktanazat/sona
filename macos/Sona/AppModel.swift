@@ -71,7 +71,7 @@ enum Place: Int, CaseIterable, Identifiable {
 /// Settings' pages, in the order its list shows them.
 enum SettingsPlace: Int, CaseIterable, Identifiable {
     case profile, essentials, dictation, models, modes, vocabulary, prompts, workflows, meetings
-    case agents, sync, privacy, importing, documents, about, debug
+    case agents, sync, privacy, importing, workImport, documents, about, debug
     case connections, tasks
 
     var id: Int { rawValue }
@@ -90,7 +90,8 @@ enum SettingsPlace: Int, CaseIterable, Identifiable {
         case .agents: "Agents"
         case .sync: "Sync"
         case .privacy: "Privacy"
-        case .importing: "Import"
+        case .importing: "Import audio"
+        case .workImport: "Import work"
         case .documents: "Documents"
         case .about: "About"
         case .debug: "Debug"
@@ -353,6 +354,7 @@ final class AppModel {
     let connections: ConnectionsStore
     let privacy: PrivacyStore
     let imports: ImportStore
+    let workImport: WorkImportStore
     let documents: DocumentStore
     let query: QueryStore
     let recorder: RecorderStore
@@ -429,6 +431,7 @@ final class AppModel {
         connections = ConnectionsStore(core: core)
         privacy = PrivacyStore(core: core)
         imports = ImportStore(core: core)
+        workImport = WorkImportStore(core: core)
         documents = DocumentStore(core: core)
         query = QueryStore(core: core)
         recorder = RecorderStore(core: core)
@@ -767,6 +770,10 @@ final class AppModel {
             imports.add(paths: [path])
             reveal()
             showSettings(.importing)
+        } else if ext == "csv" || ext == "json" {
+            workImport.add([url])
+            reveal()
+            showSettings(.workImport)
         }
     }
 
