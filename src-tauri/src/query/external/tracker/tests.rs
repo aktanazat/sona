@@ -1,12 +1,14 @@
 use super::{
-    cursor, page, pick_person, project_task, Board, Fence, OrderArg, PageArgs, ShowArgs,
-    TaskField, TaskRef, WorkPersonChoice, WorkVerb,
+    cursor, cycle_line, external_cycles, page, pick_person, project_cycle, project_task, Board,
+    Fence, OrderArg, PageArgs, ShowArgs, TaskField, TaskRef, WorkAnswer, WorkPersonChoice,
+    WorkVerb,
 };
 use crate::cli::{CliArgs, Command};
 use crate::meeting::processing::MeetingLivePromise;
 use crate::meeting::types::MeetingSessionId;
 use crate::planning::schema;
 use crate::planning::work::capture::{attach, WorkCaptureSource};
+use crate::planning::work::cycles;
 use crate::planning::work::items::{self, NewItem};
 use crate::planning::work::live;
 use crate::planning::work::types::{
@@ -517,4 +519,43 @@ fn the_fields_a_list_offers_are_the_keys_of_a_task() {
         .map(|value| value.get_name().to_owned())
         .collect();
     assert_eq!(offered, keys);
+}
+
+/// A cycle's description, set with `work cycle-save --details`, reads back
+/// from `work cycles` and `work cycle N`, as text and as JSON.
+#[test]
+fn a_cycle_shows_its_description() {
+    let conn = Connection::open_in_memory().expect("an in-memory history database");
+    schema::apply_all(&conn).expect("the planner schema");
+    let now = chrono::Utc::now().timestamp_millis();
+    cycles::advance(&conn, now).expect("cycles made");
+    let edit = cycles::CycleEdit {
+        name: None,
+        description: Some("Ship the venue contract\nBook the hall".to_owned()),
+        start_day: None,
+        end_day: None,
+    };
+    cycles::save_cycle(&conn, 1, &edit, now).expect("cycle 1 described");
+
+    let listing = WorkAnswer::Cycles(external_cycles(
+        &cycles::listing(&conn, now).expect("cycles"),
+    ));
+    let progress = cycles::progress(&conn, 1, now).expect("cycle 1");
+    let one = project_cycle(&progress.cycle);
+    let json = serde_json::to_value(&one).expect("a cycle");
+
+    assert_eq!(
+        json["description"],
+        "Ship the venue contract\nBook the hall"
+    );
+    for text in [listing.text(), {
+        let mut line = String::new();
+        cycle_line(&mut line, &one);
+        line
+    }] {
+        assert!(
+            text.contains("\n          Ship the venue contract\n          Book the hall\n"),
+            "{text}"
+        );
+    }
 }

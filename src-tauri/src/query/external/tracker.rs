@@ -2949,6 +2949,7 @@ pub struct ExternalWorkCycles {
 pub struct ExternalWorkCycle {
     pub number: i64,
     pub name: Option<String>,
+    pub description: Option<String>,
     pub state: WorkCycleState,
     /// The local days it runs, YYYY-MM-DD, both included.
     pub first_day: String,
@@ -6365,6 +6366,7 @@ fn project_cycle(cycle: &WorkCycle) -> ExternalWorkCycle {
     ExternalWorkCycle {
         number: cycle.number,
         name: cycle.name.clone(),
+        description: cycle.description.clone(),
         state: cycle.state,
         first_day: cycle.start_day.clone(),
         last_day,
@@ -7129,6 +7131,13 @@ fn cycle_line(text: &mut String, cycle: &ExternalWorkCycle) {
         cycle.done,
         cycle.scope
     );
+    for line in cycle
+        .description
+        .iter()
+        .flat_map(|description| description.lines())
+    {
+        let _ = writeln!(text, "          {line}");
+    }
 }
 
 fn task_line(text: &mut String, task: &ExternalWorkItem, today: &Today) {
