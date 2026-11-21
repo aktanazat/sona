@@ -336,6 +336,12 @@ pub(crate) static MIGRATIONS: &[M] = &[
             DELETE FROM dictation_import_history WHERE history_id = old.id;
         END;",
     ),
+    // History pages read newest spoken first, and an import adds old rows
+    // with new ids, so the order is by time rather than by id.
+    M::up(
+        "CREATE INDEX transcription_history_spoken
+            ON transcription_history(timestamp DESC, id DESC);",
+    ),
 ];
 
 const MAX_HISTORY_PAGE_SIZE: usize = 100;
@@ -345,6 +351,14 @@ const DEFAULT_HISTORY_SEARCH_PAGE_SIZE: usize = 50;
 pub struct PaginatedHistory {
     pub entries: Vec<HistoryEntry>,
     pub has_more: bool,
+}
+
+/// One page of history, or word that the cursor's dictation was deleted: the
+/// page after it cannot be placed in time, so the reader starts over.
+#[derive(Debug)]
+pub enum HistoryPage {
+    Entries(PaginatedHistory),
+    CursorGone,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Type, tauri_specta::Event)]
@@ -2404,7 +2418,8 @@ impl HistoryManager {
             let mut stmt = conn.prepare(&format!(
                 "SELECT h.id AS id, h.file_name AS file_name FROM transcription_history h
                  WHERE h.saved = 0 AND h.has_audio = 1 AND h.timestamp < ?1
-                   AND NOT {KEPT_DICTATION}"
+                   AND NOT {KEPT_DICTATION}
+                 ORDER BY h.id"
             ))?;
             let rows = stmt.query_map(params![cutoff_timestamp], |row| {
                 Ok((row.get::<_, i64>("id")?, row.get::<_, String>("file_name")?))
@@ -2840,9 +2855,27 @@ impl HistoryManager {
         &self,
         cursor: Option<i64>,
         limit: Option<usize>,
-    ) -> Result<PaginatedHistory> {
-        self.storage
-            .with_connection(|conn| Self::history_page_with_connection(conn, cursor, limit))
+    ) -> Result<HistoryPage> {
+        self.storage.with_connection(|conn| {
+            Self::page_or_gone_with_connection(conn, cursor, |conn| {
+                Self::history_page_with_connection(conn, cursor, limit)
+            })
+        })
+    }
+
+    /// The page `read` makes, unless the cursor names a dictation that is no
+    /// longer in history.
+    fn page_or_gone_with_connection(
+        conn: &Connection,
+        cursor: Option<i64>,
+        read: impl FnOnce(&Connection) -> Result<PaginatedHistory>,
+    ) -> Result<HistoryPage> {
+        if let Some(id) = cursor {
+            if cursor_timestamp_with_connection(conn, id)?.is_none() {
+                return Ok(HistoryPage::CursorGone);
+            }
+        }
+        read(conn).map(HistoryPage::Entries)
     }
 
     /// One page of history, newest spoken first. An imported row keeps the
@@ -2857,14 +2890,7 @@ impl HistoryManager {
         let limit = limit.map(|l| l.min(MAX_HISTORY_PAGE_SIZE));
         let mut entries: Vec<HistoryEntry> = match (cursor, limit) {
             (Some(cursor_id), Some(lim)) => {
-                let cursor_timestamp: i64 = conn
-                    .query_row(
-                        "SELECT timestamp FROM transcription_history WHERE id = ?1",
-                        params![cursor_id],
-                        |row| row.get(0),
-                    )
-                    .optional()?
-                    .ok_or_else(|| anyhow!("history cursor {cursor_id} is no longer in history"))?;
+                let cursor_timestamp = present_cursor_timestamp_with_connection(conn, cursor_id)?;
                 let fetch_count = i64::try_from(lim + 1)?;
                 let mut stmt = conn.prepare(
                     "SELECT id, file_name, timestamp, saved, title, transcription_text, post_processed_text, post_process_requested, parent_id,
@@ -2936,21 +2962,25 @@ impl HistoryManager {
         query: &str,
         cursor: Option<i64>,
         limit: Option<usize>,
-    ) -> Result<PaginatedHistory> {
+    ) -> Result<HistoryPage> {
         self.ensure_storage_unlocked().await;
         let model = self.semantic.model();
         let page = self.storage.with_connection(|conn| {
-            Self::search_history_entries_with_connection(
-                conn,
-                query,
-                cursor,
-                limit,
-                model.as_deref(),
-            )
+            Self::page_or_gone_with_connection(conn, cursor, |conn| {
+                Self::search_history_entries_with_connection(
+                    conn,
+                    query,
+                    cursor,
+                    limit,
+                    model.as_deref(),
+                )
+            })
         })?;
         // Demand-driven: only a search that ran out of lexical matches is
         // evidence that this user would benefit from the recall model.
-        if model.is_none() && page.entries.is_empty() {
+        if model.is_none()
+            && matches!(&page, HistoryPage::Entries(found) if found.entries.is_empty())
+        {
             self.semantic.ensure_fetch_started();
         }
         Ok(page)
@@ -2971,12 +3001,12 @@ impl HistoryManager {
     ///
     /// Three rules make the blend safe rather than clever:
     ///
-    /// 1. **One order, not two.** The merged list stays strictly `id DESC`, the
-    ///    order this search already had, so `cursor` (the last returned id)
-    ///    keeps its exact meaning and the next page can neither repeat nor skip
-    ///    a row. Ranking a semantic tail by similarity instead would need a
-    ///    compound cursor — a wire change — and `similarity_floor`, not
-    ///    position, is what keeps weak matches out.
+    /// 1. **One order, not two.** The merged list is strictly newest spoken
+    ///    first, `timestamp DESC, id DESC`, the order the unfiltered list
+    ///    has, so `cursor` (the last returned id, placed by its row's time)
+    ///    lets the next page neither repeat nor skip a row. Ranking a semantic
+    ///    tail by similarity instead would need a compound cursor — a wire
+    ///    change — and `similarity_floor`, not position, keeps weak matches out.
     /// 2. **Lexical wins the row.** A row FTS5 matched is reported as
     ///    [`HistoryMatchKind::Text`] even when its embedding also clears the
     ///    floor, and is excluded from the semantic candidate set, so the two
@@ -3008,8 +3038,13 @@ impl HistoryManager {
             .unwrap_or(DEFAULT_HISTORY_SEARCH_PAGE_SIZE)
             .clamp(1, MAX_HISTORY_PAGE_SIZE);
         let fetch_count = i64::try_from(limit + 1)?;
-        let mut entries: Vec<HistoryEntry> = match cursor {
-            Some(cursor_id) => {
+        let position = cursor
+            .map(|id| {
+                present_cursor_timestamp_with_connection(conn, id).map(|timestamp| (timestamp, id))
+            })
+            .transpose()?;
+        let mut entries: Vec<HistoryEntry> = match position {
+            Some((cursor_timestamp, cursor_id)) => {
                 let mut stmt = conn.prepare(
                     "SELECT
                         h.id,
@@ -3026,12 +3061,12 @@ impl HistoryManager {
                      JOIN transcription_history AS h
                        ON h.id = transcription_history_fts.rowid
                      WHERE transcription_history_fts MATCH ?1
-                       AND h.id < ?2
-                     ORDER BY h.id DESC
-                     LIMIT ?3",
+                       AND (h.timestamp, h.id) < (?2, ?3)
+                     ORDER BY h.timestamp DESC, h.id DESC
+                     LIMIT ?4",
                 )?;
                 let rows = stmt.query_map(
-                    params![match_query, cursor_id, fetch_count],
+                    params![match_query, cursor_timestamp, cursor_id, fetch_count],
                     Self::map_history_entry,
                 )?;
                 rows.collect::<std::result::Result<Vec<_>, _>>()?
@@ -3053,7 +3088,7 @@ impl HistoryManager {
                      JOIN transcription_history AS h
                        ON h.id = transcription_history_fts.rowid
                      WHERE transcription_history_fts MATCH ?1
-                     ORDER BY h.id DESC
+                     ORDER BY h.timestamp DESC, h.id DESC
                      LIMIT ?2",
                 )?;
                 let rows =
@@ -3072,11 +3107,13 @@ impl HistoryManager {
             let matched: HashSet<i64> = entries.iter().map(|entry| entry.id).collect();
             if let Some(vector) = model.encode(query) {
                 let recalled = semantic_candidates_with_connection(
-                    conn, model, &vector, cursor, limit, &matched,
+                    conn, model, &vector, position, limit, &matched,
                 )?;
                 if !recalled.is_empty() {
                     entries.extend(recalled);
-                    entries.sort_unstable_by(|left, right| right.id.cmp(&left.id));
+                    entries.sort_unstable_by_key(|entry| {
+                        std::cmp::Reverse((entry.timestamp, entry.id))
+                    });
                     entries.truncate(limit + 1);
                 }
             }
@@ -3402,7 +3439,7 @@ fn semantic_candidates_with_connection(
     conn: &Connection,
     model: &SemanticModel,
     query_vector: &[f32],
-    cursor: Option<i64>,
+    position: Option<(i64, i64)>,
     limit: usize,
     lexically_matched: &HashSet<i64>,
 ) -> Result<Vec<HistoryEntry>> {
@@ -3410,7 +3447,7 @@ fn semantic_candidates_with_connection(
         conn,
         model,
         query_vector,
-        cursor,
+        position,
         limit + 1,
         lexically_matched,
     )?;
@@ -3433,9 +3470,9 @@ fn semantic_candidates_with_connection(
 /// Ids of the newest rows whose stored vector clears [`SIMILARITY_FLOOR`], and
 /// how many rows were actually compared.
 ///
-/// The scan reads `id` and the vector and nothing else. It walks `id DESC` and
-/// stops once it holds `wanted` candidates, because the merged page is ordered
-/// by id: no row it has not reached can outrank one it already has.
+/// The scan reads `id` and the vector and nothing else. It walks newest spoken
+/// first and stops once it holds `wanted` candidates, because the merged page
+/// has that order: no row it has not reached can outrank one it already has.
 ///
 /// `semantic_model_revision = ?` is not decoration. Two models produce vectors
 /// of the same width and no shared meaning, so a vector written by a different
@@ -3447,7 +3484,7 @@ fn semantic_candidate_ids_with_connection(
     conn: &Connection,
     model: &SemanticModel,
     query_vector: &[f32],
-    cursor: Option<i64>,
+    position: Option<(i64, i64)>,
     wanted: usize,
     lexically_matched: &HashSet<i64>,
 ) -> Result<(Vec<i64>, usize)> {
@@ -3456,10 +3493,14 @@ fn semantic_candidate_ids_with_connection(
          FROM transcription_history
          WHERE semantic_embedding IS NOT NULL
            AND semantic_model_revision = ?1
-           AND (?2 IS NULL OR id < ?2)
-         ORDER BY id DESC",
+           AND (?2 IS NULL OR (timestamp, id) < (?2, ?3))
+         ORDER BY timestamp DESC, id DESC",
     )?;
-    let mut rows = statement.query(params![model.revision(), cursor])?;
+    let mut rows = statement.query(params![
+        model.revision(),
+        position.map(|(timestamp, _)| timestamp),
+        position.map(|(_, id)| id)
+    ])?;
     let mut ids = Vec::with_capacity(wanted);
     let mut compared = 0_usize;
     while let Some(row) = rows.next()? {
@@ -3483,6 +3524,24 @@ fn semantic_candidate_ids_with_connection(
     Ok((ids, compared))
 }
 
+/// When the cursor's dictation was spoken, the point a next page starts below.
+fn cursor_timestamp_with_connection(conn: &Connection, cursor_id: i64) -> Result<Option<i64>> {
+    Ok(conn
+        .query_row(
+            "SELECT timestamp FROM transcription_history WHERE id = ?1",
+            params![cursor_id],
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
+/// [`cursor_timestamp_with_connection`] for a cursor the caller already
+/// found in history.
+fn present_cursor_timestamp_with_connection(conn: &Connection, cursor_id: i64) -> Result<i64> {
+    cursor_timestamp_with_connection(conn, cursor_id)?
+        .ok_or_else(|| anyhow!("history cursor {cursor_id} is no longer in history"))
+}
+
 /// Load full history rows for an explicit id list, newest first.
 fn entries_by_ids_with_connection(conn: &Connection, ids: &[i64]) -> Result<Vec<HistoryEntry>> {
     let placeholders = vec!["?"; ids.len()].join(",");
@@ -3500,7 +3559,7 @@ fn entries_by_ids_with_connection(conn: &Connection, ids: &[i64]) -> Result<Vec<
             (SELECT source FROM dictation_import_history WHERE history_id = transcription_history.id) AS imported_from
          FROM transcription_history
          WHERE id IN ({placeholders})
-         ORDER BY id DESC"
+         ORDER BY timestamp DESC, id DESC"
     ))?;
     let rows = statement.query_map(
         rusqlite::params_from_iter(ids.iter()),
@@ -5568,6 +5627,94 @@ mod tests {
             vec![imported_oldest]
         );
         assert!(!second_page.has_more);
+    }
+
+    #[test]
+    fn a_history_page_after_a_deleted_dictation_says_the_cursor_is_gone() {
+        let conn = setup_conn();
+        insert_entry(&conn, 300, "spoken today", None);
+        let cursor = insert_entry(&conn, 200, "deleted before the next page", None);
+        conn.execute(
+            "DELETE FROM transcription_history WHERE id = ?1",
+            params![cursor],
+        )
+        .expect("delete the cursor row");
+
+        let listed = HistoryManager::page_or_gone_with_connection(&conn, Some(cursor), |conn| {
+            HistoryManager::history_page_with_connection(conn, Some(cursor), Some(2))
+        })
+        .expect("a deleted cursor is an answer, not a failed read");
+        assert!(matches!(listed, HistoryPage::CursorGone));
+
+        let searched = HistoryManager::page_or_gone_with_connection(&conn, Some(cursor), |conn| {
+            HistoryManager::search_history_entries_with_connection(
+                conn,
+                "spoken",
+                Some(cursor),
+                Some(2),
+                None,
+            )
+        })
+        .expect("a deleted cursor is an answer in a search too");
+        assert!(matches!(searched, HistoryPage::CursorGone));
+    }
+
+    #[test]
+    fn history_search_pages_list_imported_older_dictations_by_when_they_were_spoken() {
+        let conn = setup_conn();
+        let newest = insert_entry(&conn, 300, "lantern today", None);
+        let imported_oldest = insert_entry(&conn, 100, "lantern last year", None);
+        let imported_middle = insert_entry(&conn, 200, "lantern last month", None);
+        let ids = |page: &PaginatedHistory| {
+            page.entries
+                .iter()
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>()
+        };
+
+        let first_page = HistoryManager::search_history_entries_with_connection(
+            &conn,
+            "lantern",
+            None,
+            Some(2),
+            None,
+        )
+        .expect("search the first page");
+        assert_eq!(ids(&first_page), vec![newest, imported_middle]);
+        assert!(first_page.has_more);
+
+        let second_page = HistoryManager::search_history_entries_with_connection(
+            &conn,
+            "lantern",
+            first_page.entries.last().map(|entry| entry.id),
+            Some(2),
+            None,
+        )
+        .expect("search the second page");
+        assert_eq!(ids(&second_page), vec![imported_oldest]);
+        assert!(!second_page.has_more);
+    }
+
+    #[test]
+    fn a_history_page_reads_in_spoken_order_without_sorting_the_whole_table() {
+        let conn = setup_conn();
+        let plan = conn
+            .prepare(
+                "EXPLAIN QUERY PLAN
+                 SELECT id FROM transcription_history
+                 WHERE (timestamp, id) < (?1, ?2)
+                 ORDER BY timestamp DESC, id DESC
+                 LIMIT ?3",
+            )
+            .expect("prepare the plan")
+            .query_map(params![300, 3, 21], |row| row.get::<_, String>(3))
+            .expect("read the plan")
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .expect("collect the plan");
+        assert!(
+            plan.iter().all(|step| !step.contains("TEMP B-TREE")),
+            "the page sorts the table instead of walking an index: {plan:?}"
+        );
     }
 
     #[test]

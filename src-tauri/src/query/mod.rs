@@ -45,7 +45,7 @@ mod tests;
 pub mod tools;
 
 use crate::managers::history::semantic::SemanticModel;
-use crate::managers::history::{HistoryEntry, HistoryManager};
+use crate::managers::history::{HistoryEntry, HistoryManager, HistoryPage};
 use crate::meeting::loop_types::MeetingLoopId;
 use crate::meeting::people_types::{PersonId, PersonListEntry, PersonMeetingHeadline};
 use crate::meeting::session::MeetingSessionManager;
@@ -236,8 +236,8 @@ pub struct QueryRow {
 /// Where the next page resumes.
 ///
 /// Every field is a position in the page order — `when_utc_ms` descending,
-/// `(kind, id)` breaking ties — except `dictation_id`, which carries the one
-/// source that pages by row id rather than by time. Handing back a cursor from
+/// `(kind, id)` breaking ties — except `dictation_id`, the row the dictation
+/// source resumes below, which it pages by itself. Handing back a cursor from
 /// a different query is not meaningful and not supported; the page order
 /// depends on the query text that produced it.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
@@ -587,7 +587,7 @@ pub async fn search(
     // Dictations are the one source behind an async API, and the only read the
     // assembly below cannot do itself, so it happens here.
     let dictations = if scope.includes(QueryRowKind::Dictation) {
-        history
+        let page = history
             .search_history_entries(
                 query,
                 cursor.as_ref().and_then(|cursor| cursor.dictation_id),
@@ -603,8 +603,11 @@ pub async fn search(
                 } else {
                     QueryError::Unavailable
                 }
-            })?
-            .entries
+            })?;
+        match page {
+            HistoryPage::Entries(page) => page.entries,
+            HistoryPage::CursorGone => return Err(QueryError::UnknownCursor),
+        }
     } else {
         Vec::new()
     };

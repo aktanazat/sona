@@ -132,11 +132,11 @@ struct MeetingAppImportResult: Decodable {
     let unreadable: Int
 
     var sentence: String {
-        var skipped: [String] = []
-        if alreadyImported > 0 { skipped.append("\(alreadyImported.formatted()) already imported") }
-        if unreadable > 0 { skipped.append("\(unreadable.formatted()) Sona couldn't read") }
-        let imported = "Imported \(ImportCount.meetings(imported))"
-        return skipped.isEmpty ? imported : imported + ". Skipped " + skipped.joined(separator: " and ")
+        let added = "Imported \(ImportCount.meetings(imported))"
+        let skippedCount = alreadyImported + unreadable
+        guard skippedCount > 0 else { return added }
+        let skipped = "Already here or not supported: \(ImportCount.meetings(skippedCount))"
+        return imported == 0 ? skipped : added + ". " + skipped
     }
 }
 
