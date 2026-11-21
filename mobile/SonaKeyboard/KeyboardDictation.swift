@@ -97,10 +97,11 @@ struct KeyboardDictation {
         case review
     }
 
-    /// What the keyboard knows of the field a dictation is for. Some hosts never name their
-    /// fields, so without ids the field counts as the same one until something says
-    /// otherwise: the keyboard hid or showed, the text before the cursor changed, or the
-    /// field asked for different keys.
+    /// What the keyboard knows of the field a dictation is for. A host's field id is not
+    /// enough: some hosts name no fields, and Messages gives its message box the same id in
+    /// every conversation. So the field counts as the same one only while nothing says
+    /// otherwise: the keyboard did not hide or show, the text before the cursor did not
+    /// change, and the field asks for the same keys.
     struct FieldMark: Equatable, Codable {
         var id: UUID?
         /// Counts the keyboard hiding and showing.
@@ -110,11 +111,11 @@ struct KeyboardDictation {
     }
 
     /// Where a finished dictation goes: typed into the field it was heard for, or held for
-    /// review when review is on or the keyboard is in another field by now, as after a
+    /// review when review is on or the keyboard may be in another field by now, as after a
     /// style that finished late.
     static func landing(heardFor field: FieldMark, now current: FieldMark, reviews: Bool) -> Landing {
         if reviews { return .review }
-        if let id = field.id, let now = current.id { return id == now ? .write : .review }
+        if let id = field.id, let now = current.id, id != now { return .review }
         let same = field.shown == current.shown && field.before == current.before && field.traits == current.traits
         return same ? .write : .review
     }

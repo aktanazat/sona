@@ -58,6 +58,15 @@ struct KeyboardDictationTests {
         #expect(KeyboardDictation.landing(heardFor: heardFor, now: heardFor, reviews: true) == .review)
     }
 
+    @Test("a field id the host reuses, as Messages does across conversations, still needs nothing to have changed")
+    func sameIdWithChangedTextWaitsForReview() {
+        let heardFor = KeyboardDictation.FieldMark(id: UUID(), shown: 1, before: "See you at 6", traits: "0 0")
+        var otherConversation = heardFor
+        otherConversation.before = ""
+        #expect(KeyboardDictation.landing(heardFor: heardFor, now: otherConversation, reviews: false) == .review)
+        #expect(KeyboardDictation.landing(heardFor: heardFor, now: heardFor, reviews: false) == .write)
+    }
+
     @Test("in a host that names no fields, a dictation is typed unless something since says the field changed")
     func unnamedFieldIsTheSameUntilSomethingChanges() {
         let heardFor = KeyboardDictation.FieldMark(id: nil, shown: 1, before: "Hi", traits: "0 0")
