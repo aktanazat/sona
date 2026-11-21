@@ -14,8 +14,10 @@ use crate::planning;
 use crate::planning::store as plans;
 use crate::planning::work::agents;
 use crate::planning::work::comments::{self, Author};
+use crate::planning::work::reactions;
 use crate::planning::work::types::{
-    WorkActor, WorkComment, WorkCommentSubject, WorkItemInput, WorkOwner, WorkPatch,
+    WorkActor, WorkComment, WorkCommentSubject, WorkItemInput, WorkOwner, WorkPatch, WorkReaction,
+    WorkReactionSubject,
 };
 use crate::planning::work::{self};
 use crate::planning::{Milestone, Project};
@@ -77,10 +79,16 @@ pub struct CommentOnArgs {
     /// A note's id.
     #[arg(long, value_name = "NOTE_ID")]
     pub note: Option<Uuid>,
+    /// An initiative's name or id.
+    #[arg(long, value_name = "INITIATIVE")]
+    pub initiative: Option<String>,
+    /// A project update's or an initiative update's id.
+    #[arg(long, value_name = "UPDATE_ID")]
+    pub update: Option<Uuid>,
 }
 
 #[derive(Args, Clone, Debug, Eq, PartialEq)]
-#[command(group(ArgGroup::new("on").required(true).args(["task", "project", "meeting", "note"])))]
+#[command(group(ArgGroup::new("on").required(true).args(["task", "project", "meeting", "note", "initiative", "update"])))]
 pub struct CommentAddArgs {
     /// S-12, 12, or the task's id.
     #[arg(value_parser = task_ref, value_name = "TASK")]
@@ -151,7 +159,7 @@ pub struct CommentResolveArgs {
 }
 
 #[derive(Args, Clone, Debug, Eq, PartialEq)]
-#[command(group(ArgGroup::new("on").required(true).args(["task", "project", "meeting", "note"])))]
+#[command(group(ArgGroup::new("on").required(true).args(["task", "project", "meeting", "note", "initiative", "update"])))]
 pub struct CommentsArgs {
     /// S-12, 12, or the task's id.
     #[arg(value_parser = task_ref, value_name = "TASK")]
@@ -196,6 +204,49 @@ pub struct SubtaskArgs {
     pub write: WriteArgs,
 }
 
+#[derive(Args, Clone, Debug, Eq, PartialEq)]
+pub struct CopyArgs {
+    /// The task to copy: S-12, 12, or its id.
+    #[arg(value_parser = task_ref, value_name = "TASK")]
+    pub task: TaskRef,
+    /// Copy its sub-tasks too, each under its parent's copy.
+    #[arg(long)]
+    pub with_subtasks: bool,
+    /// Print what would change and write nothing.
+    #[arg(long)]
+    pub dry_run: bool,
+    #[command(flatten)]
+    pub write: WriteArgs,
+}
+
+#[derive(Args, Clone, Debug, Eq, PartialEq)]
+pub struct ReactArgs {
+    /// A comment's id, or a task: S-12, 12, or its id.
+    pub target: String,
+    /// One emoji, such as the thumbs up.
+    pub emoji: String,
+    /// Take your reaction off instead.
+    #[arg(long)]
+    pub remove: bool,
+    /// Print what would change and write nothing.
+    #[arg(long)]
+    pub dry_run: bool,
+    #[command(flatten)]
+    pub write: WriteArgs,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ExternalWorkReactions {
+    pub schema_version: u32,
+    pub dry_run: bool,
+    pub operation_id: String,
+    /// `comment` or `task`.
+    pub on: WorkReactionSubject,
+    pub id: String,
+    /// Every reaction on it after this change, each emoji with who used it.
+    pub reactions: Vec<WorkReaction>,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct ExternalCommentAuthor {
     pub kind: WorkActor,
@@ -204,7 +255,8 @@ pub struct ExternalCommentAuthor {
 }
 
 /// The id of what a comment is on, under its kind's key: `task_id`,
-/// `project_id`, `milestone_id`, `meeting_id` or `note_id`.
+/// `project_id`, `milestone_id`, `meeting_id`, `note_id`, `initiative_id`
+/// or `update_id`.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExternalCommentOnId {
@@ -213,6 +265,8 @@ pub enum ExternalCommentOnId {
     MilestoneId(String),
     MeetingId(String),
     NoteId(String),
+    InitiativeId(String),
+    UpdateId(String),
 }
 
 /// One comment. A thread's first comment carries its replies and whether
@@ -235,6 +289,9 @@ pub struct ExternalWorkComment {
     /// on a task's comment that is not deleted.
     pub link: Option<String>,
     pub replies: Vec<ExternalWorkComment>,
+    /// Emoji reactions, each with who put it there.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub reactions: Vec<WorkReaction>,
 }
 
 pub(super) fn project_comment(comment: WorkComment) -> ExternalWorkComment {
@@ -249,6 +306,8 @@ pub(super) fn project_comment(comment: WorkComment) -> ExternalWorkComment {
             WorkCommentSubject::Milestone => ExternalCommentOnId::MilestoneId(id),
             WorkCommentSubject::Meeting => ExternalCommentOnId::MeetingId(id),
             WorkCommentSubject::Note => ExternalCommentOnId::NoteId(id),
+            WorkCommentSubject::Initiative => ExternalCommentOnId::InitiativeId(id),
+            WorkCommentSubject::Update => ExternalCommentOnId::UpdateId(id),
         },
         reply_to: comment.parent_id,
         author: ExternalCommentAuthor {
@@ -262,6 +321,7 @@ pub(super) fn project_comment(comment: WorkComment) -> ExternalWorkComment {
         deleted: comment.deleted,
         link,
         replies: comment.replies.into_iter().map(project_comment).collect(),
+        reactions: comment.reactions,
     }
 }
 
@@ -278,8 +338,16 @@ pub struct ExternalCommentMilestoneRef {
     pub project: ExternalProjectRef,
 }
 
+/// An update and what it is on: a project or an initiative.
+#[derive(Clone, Debug, Serialize)]
+pub struct ExternalCommentUpdateRef {
+    pub id: String,
+    pub project: Option<ExternalProjectRef>,
+    pub initiative: Option<ExternalProjectRef>,
+}
+
 /// What threads are on, under its kind's key: `task`, `project`,
-/// `milestone`, `meeting` or `note`.
+/// `milestone`, `meeting`, `note`, `initiative` or `update`.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExternalCommentOn {
@@ -288,6 +356,8 @@ pub enum ExternalCommentOn {
     Milestone(ExternalCommentMilestoneRef),
     Meeting(ExternalCommentSubjectRef),
     Note(ExternalCommentSubjectRef),
+    Initiative(ExternalProjectRef),
+    Update(ExternalCommentUpdateRef),
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -373,6 +443,17 @@ impl Subject {
         }
     }
 
+    fn initiative(id: &str, name: &str) -> Self {
+        Self {
+            kind: WorkCommentSubject::Initiative,
+            id: id.to_owned(),
+            on: ExternalCommentOn::Initiative(ExternalProjectRef {
+                id: id.to_owned(),
+                name: name.to_owned(),
+            }),
+        }
+    }
+
     /// "The task", "The project" and so on, for a refusal.
     fn the(&self) -> &'static str {
         match self.kind {
@@ -381,6 +462,8 @@ impl Subject {
             WorkCommentSubject::Milestone => "The milestone",
             WorkCommentSubject::Meeting => "The meeting",
             WorkCommentSubject::Note => "The note",
+            WorkCommentSubject::Initiative => "The initiative",
+            WorkCommentSubject::Update => "The update",
         }
     }
 }
@@ -427,9 +510,54 @@ impl Tracker<'_> {
                 ExternalError::new(ExternalErrorCode::NotFound, format!("No note {note}."))
             });
         }
+        if let Some(initiative) = &on.initiative {
+            let all = self.all_initiatives()?;
+            let initiative = Self::pick_initiative(initiative, &all)?;
+            return Ok(Subject::initiative(&initiative.id, &initiative.name));
+        }
+        if let Some(update) = on.update {
+            return self.update_subject(&update.to_string())?.ok_or_else(|| {
+                ExternalError::new(ExternalErrorCode::NotFound, format!("No update {update}."))
+            });
+        }
         Err(ExternalError::invalid(
-            "Name a task, or pass --project, --meeting or --note.",
+            "Name a task, or pass --project, --meeting, --note, --initiative or --update.",
         ))
+    }
+
+    /// A project's or an initiative's update not deleted.
+    fn update_subject(&self, id: &str) -> Result<Option<Subject>, ExternalError> {
+        let found = planning::history(self.history, |conn| {
+            if let Ok(update) = crate::planning::updates::update(conn, id) {
+                let project = plans::project(conn, &update.project_id)?;
+                return Ok(Some(ExternalCommentUpdateRef {
+                    id: update.id,
+                    project: Some(ExternalProjectRef {
+                        id: project.id,
+                        name: project.title,
+                    }),
+                    initiative: None,
+                }));
+            }
+            let Ok(update) = work::initiatives::update(conn, id) else {
+                return Ok(None);
+            };
+            let initiative = work::initiatives::initiative(conn, &update.initiative_id)?;
+            Ok(Some(ExternalCommentUpdateRef {
+                id: update.id,
+                project: None,
+                initiative: Some(ExternalProjectRef {
+                    id: initiative.id,
+                    name: initiative.name,
+                }),
+            }))
+        })
+        .map_err(|message| refusal(self.history, message))?;
+        Ok(found.map(|update| Subject {
+            kind: WorkCommentSubject::Update,
+            id: update.id.clone(),
+            on: ExternalCommentOn::Update(update),
+        }))
     }
 
     /// A meeting the caller may see; one kept on this Mac reads as absent.
@@ -495,6 +623,12 @@ impl Tracker<'_> {
                 Err(_) => None,
             },
             WorkCommentSubject::Note => self.note_subject(id)?,
+            WorkCommentSubject::Initiative => {
+                planning::history(self.history, |conn| work::initiatives::initiative(conn, id))
+                    .ok()
+                    .map(|initiative| Subject::initiative(&initiative.id, &initiative.name))
+            }
+            WorkCommentSubject::Update => self.update_subject(id)?,
         })
     }
 
@@ -921,6 +1055,153 @@ impl Tracker<'_> {
             evidence_url: None,
         }))
     }
+
+    pub(super) async fn copy(&self, args: &CopyArgs) -> Result<WorkAnswer, ExternalError> {
+        let board = self.board().await?;
+        let original = board.task(&args.task)?;
+        let source = handle(original.item.number);
+        let operation_id = args.write.operation_id(
+            "copy",
+            &(
+                &original.item.id,
+                original.item.revision,
+                args.with_subtasks,
+            ),
+        )?;
+        let hidden = planning::history(self.history, |history| board.fence.hidden_tasks(history))
+            .map_err(|message| refusal(self.history, message))?;
+        if args.dry_run {
+            let copies = self.rehearse(|conn| {
+                crate::planning::work::items::copy(
+                    conn,
+                    &original.item.id,
+                    args.with_subtasks,
+                    &hidden,
+                    WorkActor::Agent,
+                    now_ms(),
+                )
+            })?;
+            let changes = copies
+                .iter()
+                .map(|copy| {
+                    let field = if copy.parent_id == original.item.parent_id {
+                        ExternalFieldChange {
+                            field: "copy_of",
+                            from: "none".to_owned(),
+                            to: source.clone(),
+                        }
+                    } else {
+                        ExternalFieldChange {
+                            field: "parent",
+                            from: "none".to_owned(),
+                            to: copies
+                                .iter()
+                                .find(|parent| Some(&parent.id) == copy.parent_id.as_ref())
+                                .map_or_else(|| "none".to_owned(), |parent| parent.title.clone()),
+                        }
+                    };
+                    ExternalWorkPlanned {
+                        id: String::new(),
+                        handle: "new".to_owned(),
+                        title: copy.title.clone(),
+                        fields: vec![field],
+                        commitment: None,
+                        skipped: None,
+                    }
+                })
+                .collect();
+            return Ok(WorkAnswer::Preview(ExternalWorkPreview {
+                schema_version: QUERY_SCHEMA_VERSION,
+                dry_run: true,
+                action: WorkAction::Created,
+                operation_id: Some(operation_id),
+                changes,
+            }));
+        }
+        self.applies("copying a task")?;
+        let started_ms = now_ms();
+        let items = agents::copy_as(
+            self.app,
+            &args.write.agent(),
+            &operation_id,
+            &original.item.id,
+            args.with_subtasks,
+            &hidden,
+        )
+        .map_err(|message| self.write_refusal(message, &operation_id, &source))?;
+        let replayed = items.iter().all(|item| item.created_at_ms < started_ms);
+        Ok(WorkAnswer::Change(ExternalWorkChange {
+            schema_version: QUERY_SCHEMA_VERSION,
+            action: WorkAction::Created,
+            operation_id: Some(operation_id),
+            tasks: items
+                .into_iter()
+                .map(|item| board.project_item(item))
+                .collect(),
+            skipped: Vec::new(),
+            proposed: Vec::new(),
+            replayed,
+            evidence_url: None,
+        }))
+    }
+
+    pub(super) async fn react(&self, args: &ReactArgs) -> Result<WorkAnswer, ExternalError> {
+        let target = args.target.trim();
+        let comment = match Uuid::parse_str(target) {
+            Ok(id) => planning::history(self.history, |conn| {
+                let id = id.to_string();
+                let found: bool = conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM planning_task_comments
+                                   WHERE id = ?1 AND deleted_at_ms IS NULL)
+                         OR EXISTS(SELECT 1 FROM planning_comments
+                                   WHERE id = ?1 AND deleted_at_ms IS NULL
+                                     AND subject_kind != 'meeting')",
+                    [&id],
+                    |row| row.get(0),
+                )?;
+                Ok(found.then_some(id))
+            })
+            .map_err(|message| refusal(self.history, message))?,
+            Err(_) => None,
+        };
+        let (on, id) = match comment {
+            Some(id) => (WorkReactionSubject::Comment, id),
+            None => {
+                let board = self.board().await?;
+                let task = task_ref(target).map_err(ExternalError::invalid)?;
+                (
+                    WorkReactionSubject::Task,
+                    board.task(&task)?.item.id.clone(),
+                )
+            }
+        };
+        if reactions::emoji(&args.emoji).is_err() {
+            return Err(ExternalError::invalid(
+                "Name one emoji, such as a thumbs up; words and letters are not reactions.",
+            ));
+        }
+        let add = !args.remove;
+        let operation_id = args
+            .write
+            .operation_id("react", &(on, &id, args.emoji.trim(), add))?;
+        let author = Self::author(&args.write);
+        let reactions = if args.dry_run {
+            self.rehearse(|conn| {
+                reactions::react(conn, author, on, &id, &args.emoji, add, now_ms())
+            })?
+        } else {
+            reactions::react_as(self.app, author, &operation_id, on, &id, &args.emoji, add)
+                .map_err(|message| self.write_refusal(message, &operation_id, "It"))?
+        };
+        Ok(WorkAnswer::Reactions(ExternalWorkReactions {
+            schema_version: QUERY_SCHEMA_VERSION,
+            dry_run: args.dry_run,
+            operation_id,
+            on,
+            id,
+            reactions,
+        }))
+    }
 }
 
 /// The open checklist lines of `details` (`- [ ] title`, also with `*` or
@@ -1071,9 +1352,32 @@ fn comment_text(text: &mut String, comment: &ExternalWorkComment, indent: &str) 
     for line in comment.body.as_deref().unwrap_or_default().lines() {
         let _ = writeln!(text, "{indent}  {line}");
     }
+    if !comment.reactions.is_empty() {
+        let _ = writeln!(text, "{indent}  {}", reactions_text(&comment.reactions));
+    }
     for reply in &comment.replies {
         comment_text(text, reply, &format!("{indent}    "));
     }
+}
+
+/// Each emoji with how many used it and who: `+1 x2 (you, claude)`.
+fn reactions_text(reactions: &[WorkReaction]) -> String {
+    reactions
+        .iter()
+        .map(|reaction| {
+            let who: Vec<&str> = reaction
+                .by
+                .iter()
+                .map(|author| match author.kind {
+                    WorkActor::Me => "you",
+                    WorkActor::Sona => "Sona",
+                    WorkActor::Agent => author.name.as_deref().unwrap_or("agent"),
+                })
+                .collect();
+            format!("{} x{} ({})", reaction.emoji, who.len(), who.join(", "))
+        })
+        .collect::<Vec<_>>()
+        .join("  ")
 }
 
 pub(super) fn threads_text(text: &mut String, threads: &[ExternalWorkComment]) {
@@ -1093,6 +1397,12 @@ fn on_text(on: &ExternalCommentOn) -> String {
         ),
         ExternalCommentOn::Meeting(meeting) => format!("meeting {}", meeting.title),
         ExternalCommentOn::Note(note) => format!("note {}", note.title),
+        ExternalCommentOn::Initiative(initiative) => format!("initiative {}", initiative.name),
+        ExternalCommentOn::Update(update) => match (&update.project, &update.initiative) {
+            (Some(project), _) => format!("an update on project {}", project.name),
+            (None, Some(initiative)) => format!("an update on initiative {}", initiative.name),
+            (None, None) => format!("update {}", update.id),
+        },
     }
 }
 
@@ -1142,6 +1452,14 @@ pub(super) fn text(answer: &WorkAnswer, text: &mut String) {
             );
             if let Some(comment) = &change.comment {
                 comment_text(text, comment, "  ");
+            }
+        }
+        WorkAnswer::Reactions(answer) => {
+            let dry = if answer.dry_run { " (dry run)" } else { "" };
+            if answer.reactions.is_empty() {
+                let _ = writeln!(text, "No reactions{dry}");
+            } else {
+                let _ = writeln!(text, "{}{dry}", reactions_text(&answer.reactions));
             }
         }
         _ => {}

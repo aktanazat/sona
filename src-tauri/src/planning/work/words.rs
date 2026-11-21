@@ -1051,6 +1051,8 @@ mod tests {
             group: None,
             retired_at_ms: None,
             scope: Default::default(),
+            description: None,
+            group_multi: false,
         };
         let project = |id: &str, title: &str| WorkProjectChoice {
             id: id.to_owned(),

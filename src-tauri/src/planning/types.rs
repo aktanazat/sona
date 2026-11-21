@@ -178,6 +178,10 @@ pub struct Project {
     pub summary: Option<String>,
     /// The custom status name it sits under, inside its status's category.
     pub status_name_id: Option<String>,
+    /// Weeks between update reminders (1–12), or none when off.
+    pub update_every_weeks: Option<u8>,
+    /// Local hour of day (0–23) when an update reminder lands.
+    pub update_hour: u8,
 }
 
 /// A name of the owner's for a project status, inside one of the six

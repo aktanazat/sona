@@ -197,8 +197,12 @@ pub enum WorkVerb {
     /// Delete a label. Its tasks lose only that label.
     LabelDelete(LabelDeleteArgs),
     /// Put a label in a group, or none to take it out of one. A task keeps
-    /// one label per group: adding another from it replaces the first.
+    /// one label per group unless the group is --multi: adding another from
+    /// a single-select group replaces the first.
     LabelGroup(routines::LabelGroupArgs),
+    /// Merge one label into another: its tasks, projects and initiatives
+    /// move to the label kept, and the merged label is deleted.
+    LabelMerge(routines::LabelMergeArgs),
     /// Retire a label: its tasks keep it, pickers leave it out. --restore
     /// brings it back.
     LabelRetire(routines::LabelRetireArgs),
@@ -309,6 +313,14 @@ pub enum WorkVerb {
     InitiativeAddProject(initiatives::InitiativeProjectArgs),
     /// Take a project out of its initiative.
     InitiativeRemoveProject(initiatives::InitiativeProjectArgs),
+    /// Post an update on an initiative: its health and how it is going.
+    InitiativeUpdatePost(initiatives::InitiativeUpdatePostArgs),
+    /// An initiative's updates, newest first.
+    InitiativeUpdateList(initiatives::InitiativeUpdateListArgs),
+    /// Change an initiative update you posted.
+    InitiativeUpdateEdit(initiatives::InitiativeUpdateEditArgs),
+    /// Delete an initiative update you posted.
+    InitiativeUpdateDelete(initiatives::InitiativeUpdateDeleteArgs),
     /// Project templates, with their milestones and tasks.
     ProjectTemplateList,
     /// Save a project as a template: its description, lead, members,
@@ -371,6 +383,13 @@ pub enum WorkVerb {
     /// Make sub-tasks under a task, one per title. Each takes the parent's
     /// project and priority unless told otherwise.
     Subtask(threads::SubtaskArgs),
+    /// Copy a task beside it with its fields: title, description, status,
+    /// priority, project, owner, due date, labels and more. --with-subtasks
+    /// copies its sub-tasks too.
+    Copy(threads::CopyArgs),
+    /// Put an emoji on a comment (by its id) or a task, or take yours off
+    /// with --remove.
+    React(threads::ReactArgs),
     /// Attach a file (copied into Sona) or a link to a task. The same file
     /// or link on the same task lands once.
     Attach(attachments::AttachArgs),
@@ -933,6 +952,9 @@ pub struct LabelSaveArgs {
     /// Color: degrees on the color wheel, 0 to 360.
     #[arg(long, value_parser = clap::value_parser!(u16).range(0..=360))]
     pub hue: Option<u16>,
+    /// Description guiding people and label suggestions; empty or none clears it.
+    #[arg(long)]
+    pub description: Option<String>,
     /// Show the label as it would be saved; nothing changes.
     #[arg(long)]
     pub dry_run: bool,
@@ -1753,6 +1775,8 @@ impl WorkVerb {
             | Self::CommentDelete(threads::CommentDeleteArgs { dry_run: true, .. })
             | Self::CommentResolve(threads::CommentResolveArgs { dry_run: true, .. })
             | Self::Subtask(threads::SubtaskArgs { dry_run: true, .. })
+            | Self::Copy(threads::CopyArgs { dry_run: true, .. })
+            | Self::React(threads::ReactArgs { dry_run: true, .. })
             | Self::Attachments(_)
             | Self::Attach(attachments::AttachArgs { dry_run: true, .. })
             | Self::Detach(attachments::DetachArgs { dry_run: true, .. })
@@ -1771,6 +1795,7 @@ impl WorkVerb {
             | Self::LoopDelete(agent_loops::LoopArgs { dry_run: true, .. })
             | Self::Reminders(_)
             | Self::LabelGroup(routines::LabelGroupArgs { dry_run: true, .. })
+            | Self::LabelMerge(routines::LabelMergeArgs { dry_run: true, .. })
             | Self::LabelRetire(routines::LabelRetireArgs { dry_run: true, .. })
             | Self::LabelScope(routines::LabelScopeArgs { dry_run: true, .. })
             | Self::Milestone(_)
@@ -1788,6 +1813,19 @@ impl WorkVerb {
             | Self::InitiativeAddProject(initiatives::InitiativeProjectArgs { dry_run: true, .. })
             | Self::InitiativeRemoveProject(initiatives::InitiativeProjectArgs {
                 dry_run: true, ..
+            })
+            | Self::InitiativeUpdateList(_)
+            | Self::InitiativeUpdatePost(initiatives::InitiativeUpdatePostArgs {
+                dry_run: true,
+                ..
+            })
+            | Self::InitiativeUpdateEdit(initiatives::InitiativeUpdateEditArgs {
+                dry_run: true,
+                ..
+            })
+            | Self::InitiativeUpdateDelete(initiatives::InitiativeUpdateDeleteArgs {
+                dry_run: true,
+                ..
             })
             | Self::ProjectTemplateList
             | Self::ProjectTemplateSave(project_templates::ProjectTemplateSaveArgs {
@@ -1935,6 +1973,7 @@ impl WorkVerb {
             | Self::LabelSave(_)
             | Self::LabelDelete(_)
             | Self::LabelGroup(_)
+            | Self::LabelMerge(_)
             | Self::LabelRetire(_)
             | Self::LabelScope(_)
             | Self::MilestoneToProject(_)
@@ -1945,6 +1984,9 @@ impl WorkVerb {
             | Self::InitiativeDelete(_)
             | Self::InitiativeAddProject(_)
             | Self::InitiativeRemoveProject(_)
+            | Self::InitiativeUpdatePost(_)
+            | Self::InitiativeUpdateEdit(_)
+            | Self::InitiativeUpdateDelete(_)
             | Self::ProjectTemplateSave(_)
             | Self::ProjectTemplateDelete(_)
             | Self::ProjectNew(_)
@@ -1983,6 +2025,8 @@ impl WorkVerb {
             | Self::CommentDelete(_)
             | Self::CommentResolve(_)
             | Self::Subtask(_)
+            | Self::Copy(_)
+            | Self::React(_)
             | Self::Attach(_)
             | Self::ProjectUpdate(_)
             | Self::ProjectUpdateEdit(_)
@@ -2129,8 +2173,13 @@ impl WorkVerb {
             Self::CycleSettings(args) if !args.changes_something() => {
                 "Name a change: --weeks, --start-weekday, --cooldown, --upcoming, --auto-add-started or --auto-add-completed."
             }
-            Self::CycleSave(args) if args.name.is_none() && args.start.is_none() && args.end.is_none() => {
-                "Name a change: --name, --start or --end."
+            Self::CycleSave(args)
+                if args.name.is_none()
+                    && args.details.is_none()
+                    && args.start.is_none()
+                    && args.end.is_none() =>
+            {
+                "Name a change: --name, --details, --start or --end."
             }
             Self::Ask(args) if args.take.contains(&0) => "Answer lines count from 1.",
             Self::Watch(args) if args.topic.join(" ").trim().is_empty() => {
@@ -2217,6 +2266,7 @@ pub enum WorkAnswer {
     Labels(ExternalWorkLabels),
     Label(ExternalWorkLabelChange),
     LabelEdit(routines::ExternalWorkLabelEdit),
+    LabelMerge(routines::ExternalWorkLabelMerge),
     Templates(routines::ExternalWorkTemplates),
     Template(Box<routines::ExternalWorkTemplateChange>),
     Reminders(routines::ExternalWorkReminders),
@@ -2244,6 +2294,7 @@ pub enum WorkAnswer {
     MeetingDetail(Box<catalog::ExternalWorkMeetingDetail>),
     Comments(threads::ExternalWorkComments),
     Comment(Box<threads::ExternalWorkCommentChange>),
+    Reactions(threads::ExternalWorkReactions),
     Attachments(attachments::ExternalWorkAttachments),
     Attachment(Box<attachments::ExternalWorkAttachmentChange>),
     ProjectDetail(Box<roadmap::ExternalWorkProjectDetail>),
@@ -2252,6 +2303,8 @@ pub enum WorkAnswer {
     Initiatives(initiatives::ExternalWorkInitiatives),
     InitiativeDetail(Box<initiatives::ExternalWorkInitiativeDetail>),
     InitiativeChange(Box<initiatives::ExternalWorkInitiativeChange>),
+    InitiativeUpdates(initiatives::ExternalWorkInitiativeUpdates),
+    InitiativeUpdateChange(Box<initiatives::ExternalWorkInitiativeUpdateChange>),
     ProjectTemplates(project_templates::ExternalWorkProjectTemplates),
     ProjectTemplate(Box<project_templates::ExternalWorkProjectTemplateChange>),
     ProjectNew(Box<project_templates::ExternalWorkProjectNew>),
@@ -2541,6 +2594,8 @@ pub struct ExternalWorkDetail {
     pub comments: Vec<threads::ExternalWorkComment>,
     /// Files, images and links, oldest first.
     pub attachments: Vec<attachments::ExternalWorkAttachment>,
+    /// Emoji reactions on the task, each with who put it there.
+    pub reactions: Vec<crate::planning::work::types::WorkReaction>,
     /// When Sona reminds the user of it, if a reminder is set.
     pub reminder: Option<routines::ExternalWorkReminder>,
     /// Agent sessions working on it, newest first.
@@ -2770,6 +2825,12 @@ pub struct ExternalWorkLabel {
     pub retired_at_ms: Option<i64>,
     /// What it may go on: all, tasks or projects.
     pub scope: crate::planning::LabelScope,
+    /// Optional description guiding people and label suggestions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// True when its group allows several labels on one item at once.
+    #[serde(default)]
+    pub group_multi: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -3013,6 +3074,7 @@ pub(super) async fn answer(
         WorkVerb::LabelSave(args) => tracker.label_save(args),
         WorkVerb::LabelDelete(args) => tracker.label_delete(args),
         WorkVerb::LabelGroup(args) => tracker.label_group(args),
+        WorkVerb::LabelMerge(args) => tracker.label_merge(args),
         WorkVerb::LabelRetire(args) => tracker.label_retire(args),
         WorkVerb::LabelScope(args) => tracker.label_scope(args),
         WorkVerb::Templates => tracker.templates().await,
@@ -3049,6 +3111,10 @@ pub(super) async fn answer(
         WorkVerb::InitiativeDelete(args) => tracker.initiative_delete(args).await,
         WorkVerb::InitiativeAddProject(args) => tracker.initiative_add_project(args).await,
         WorkVerb::InitiativeRemoveProject(args) => tracker.initiative_remove_project(args).await,
+        WorkVerb::InitiativeUpdatePost(args) => tracker.initiative_update_post(args),
+        WorkVerb::InitiativeUpdateList(args) => tracker.initiative_update_list(args),
+        WorkVerb::InitiativeUpdateEdit(args) => tracker.initiative_update_edit(args),
+        WorkVerb::InitiativeUpdateDelete(args) => tracker.initiative_update_delete(args),
         WorkVerb::ProjectTemplateList => tracker.project_template_list().await,
         WorkVerb::ProjectTemplateSave(args) => tracker.project_template_save(args).await,
         WorkVerb::ProjectTemplateDelete(args) => tracker.project_template_delete(args).await,
@@ -3093,6 +3159,8 @@ pub(super) async fn answer(
         WorkVerb::CommentDelete(args) => tracker.comment_delete(args).await,
         WorkVerb::CommentResolve(args) => tracker.comment_resolve(args).await,
         WorkVerb::Subtask(args) => tracker.subtask(args).await,
+        WorkVerb::Copy(args) => tracker.copy(args).await,
+        WorkVerb::React(args) => tracker.react(args).await,
         WorkVerb::Attach(args) => tracker.attach(args).await,
         WorkVerb::Attachments(args) => tracker.attachments(args).await,
         WorkVerb::Detach(args) => tracker.detach(args).await,
@@ -4653,10 +4721,25 @@ impl Tracker<'_> {
                 taken.name
             )));
         }
+        let description = args.description.as_deref().map(|d| {
+            let d = d.trim();
+            if d.is_empty() || d.eq_ignore_ascii_case("none") {
+                String::new()
+            } else {
+                d.to_owned()
+            }
+        });
         let (id, hue, operation_id) = match existing {
             Some(label) => {
                 let hue = args.hue.map_or(label.hue, f64::from);
-                if label.name == name && label.hue.to_bits() == hue.to_bits() {
+                let desc_unchanged = match &description {
+                    None => true,
+                    Some(d) => {
+                        let next = (!d.is_empty()).then_some(d.as_str());
+                        label.description.as_deref() == next
+                    }
+                };
+                if label.name == name && label.hue.to_bits() == hue.to_bits() && desc_unchanged {
                     return Ok(WorkAnswer::Label(ExternalWorkLabelChange {
                         schema_version: QUERY_SCHEMA_VERSION,
                         dry_run: args.dry_run,
@@ -4665,9 +4748,10 @@ impl Tracker<'_> {
                         label: project_label(label.clone()),
                     }));
                 }
-                let operation_id = args
-                    .write
-                    .operation_id("label-save", &(&label.id, label.revision, name, hue))?;
+                let operation_id = args.write.operation_id(
+                    "label-save",
+                    &(&label.id, label.revision, name, hue, &description),
+                )?;
                 (Some(label.id.clone()), hue, operation_id)
             }
             None => (
@@ -4677,7 +4761,16 @@ impl Tracker<'_> {
             ),
         };
         let label = if args.dry_run {
-            self.rehearse(|conn| items::save_label(conn, id.as_deref(), name, hue, now_ms()))?
+            self.rehearse(|conn| {
+                items::save_label(
+                    conn,
+                    id.as_deref(),
+                    name,
+                    hue,
+                    description.as_deref(),
+                    now_ms(),
+                )
+            })?
         } else {
             self.applies("saving a label")?;
             work::work_label_save(
@@ -4686,6 +4779,7 @@ impl Tracker<'_> {
                 id,
                 name.to_owned(),
                 hue,
+                description,
             )
             .map_err(|message| self.write_refusal(message, &operation_id, "The label"))?
         };
@@ -5703,7 +5797,7 @@ impl Board {
         items::keep_one_per_group(ids, kept, |id| {
             self.labels
                 .iter()
-                .find(|label| label.id == id)
+                .find(|label| label.id == id && !label.group_multi)
                 .and_then(|label| label.group.clone())
         })
     }
@@ -5875,6 +5969,7 @@ impl Board {
                 .into_iter()
                 .map(attachments::project_attachment)
                 .collect(),
+            reactions: detail.reactions,
             reminder: None,
             sessions: Vec::new(),
             schema_version: QUERY_SCHEMA_VERSION,
@@ -6409,6 +6504,8 @@ fn project_label(label: WorkLabel) -> ExternalWorkLabel {
         group: label.group,
         retired_at_ms: label.retired_at_ms,
         scope: label.scope,
+        description: label.description,
+        group_multi: label.group_multi,
     }
 }
 
@@ -6695,13 +6792,19 @@ impl WorkAnswer {
             Self::ProjectDependencies(_) | Self::ProjectDependency(_) => {
                 dependencies::text(self, &mut text);
             }
-            Self::Initiatives(_) | Self::InitiativeDetail(_) | Self::InitiativeChange(_) => {
+            Self::Initiatives(_)
+            | Self::InitiativeDetail(_)
+            | Self::InitiativeChange(_)
+            | Self::InitiativeUpdates(_)
+            | Self::InitiativeUpdateChange(_) => {
                 initiatives::text(self, &mut text);
             }
             Self::ProjectTemplates(_) | Self::ProjectTemplate(_) | Self::ProjectNew(_) => {
                 project_templates::text(self, &mut text);
             }
-            Self::Comments(_) | Self::Comment(_) => threads::text(self, &mut text),
+            Self::Comments(_) | Self::Comment(_) | Self::Reactions(_) => {
+                threads::text(self, &mut text);
+            }
             Self::Attachments(_) | Self::Attachment(_) => attachments::text(self, &mut text),
             Self::Organize(_) | Self::Day(_) | Self::Brief(_) => organize::text(self, &mut text),
             Self::Speaker(_) => speakers::text(self, &mut text),
@@ -6735,6 +6838,7 @@ impl WorkAnswer {
             | Self::InboxSettings(_) => lifecycle::text(self, &mut text),
             Self::Updates(_) | Self::Feeds(_) | Self::Feed(_) => feed::text(self, &mut text),
             Self::LabelEdit(_)
+            | Self::LabelMerge(_)
             | Self::Templates(_)
             | Self::Template(_)
             | Self::Reminders(_)
@@ -6911,6 +7015,7 @@ impl WorkAnswer {
             | Self::Labels(_)
             | Self::Label(_)
             | Self::LabelEdit(_)
+            | Self::LabelMerge(_)
             | Self::Templates(_)
             | Self::Template(_)
             | Self::Reminders(_)
@@ -6944,6 +7049,8 @@ impl WorkAnswer {
             | Self::Initiatives(_)
             | Self::InitiativeDetail(_)
             | Self::InitiativeChange(_)
+            | Self::InitiativeUpdates(_)
+            | Self::InitiativeUpdateChange(_)
             | Self::ProjectTemplates(_)
             | Self::ProjectTemplate(_)
             | Self::ProjectNew(_)
@@ -6955,6 +7062,7 @@ impl WorkAnswer {
             | Self::MeetingDetail(_)
             | Self::Comments(_)
             | Self::Comment(_)
+            | Self::Reactions(_)
             | Self::Attachments(_)
             | Self::Attachment(_)
             | Self::Organize(_)

@@ -55,6 +55,42 @@ CREATE TRIGGER planning_favorite_view_delete AFTER DELETE ON planning_views BEGI
     DELETE FROM planning_favorites WHERE kind = 'view' AND target_id = old.id;
 END;";
 
+/// Cycles and notes can be favorited too. Deleting a cycle clears its
+/// favorite; notes live outside the planner's tables, so a deleted note's
+/// favorite stays and drops out of the list when it is read.
+pub(crate) const FAVORITE_CYCLES_NOTES_MIGRATION: &str =
+    "DROP TRIGGER planning_task_lifecycle_delete;
+DROP TRIGGER planning_favorite_project_delete;
+DROP TRIGGER planning_favorite_view_delete;
+CREATE TABLE planning_favorites_next (
+    kind TEXT NOT NULL CHECK(kind IN ('task', 'project', 'view', 'person', 'cycle', 'note')),
+    target_id TEXT NOT NULL,
+    folder_id TEXT,
+    position INTEGER NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (kind, target_id)
+);
+INSERT INTO planning_favorites_next (kind, target_id, folder_id, position, created_at_ms)
+    SELECT kind, target_id, folder_id, position, created_at_ms
+    FROM planning_favorites;
+DROP TABLE planning_favorites;
+ALTER TABLE planning_favorites_next RENAME TO planning_favorites;
+CREATE TRIGGER planning_task_lifecycle_delete AFTER DELETE ON planning_tasks BEGIN
+    DELETE FROM planning_task_versions WHERE task_id = old.id;
+    DELETE FROM planning_task_subscriptions WHERE task_id = old.id;
+    DELETE FROM planning_notifications WHERE task_id = old.id;
+    DELETE FROM planning_favorites WHERE kind = 'task' AND target_id = old.id;
+END;
+CREATE TRIGGER planning_favorite_project_delete AFTER DELETE ON planning_projects BEGIN
+    DELETE FROM planning_favorites WHERE kind = 'project' AND target_id = old.id;
+END;
+CREATE TRIGGER planning_favorite_view_delete AFTER DELETE ON planning_views BEGIN
+    DELETE FROM planning_favorites WHERE kind = 'view' AND target_id = old.id;
+END;
+CREATE TRIGGER planning_favorite_cycle_delete AFTER DELETE ON planning_cycles BEGIN
+    DELETE FROM planning_favorites WHERE kind = 'cycle' AND target_id = CAST(old.number AS TEXT);
+END;";
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FavoriteKind {
@@ -62,6 +98,8 @@ pub enum FavoriteKind {
     Project,
     View,
     Person,
+    Cycle,
+    Note,
 }
 
 crate::planning::types::sql_enum!(FavoriteKind {
@@ -69,6 +107,8 @@ crate::planning::types::sql_enum!(FavoriteKind {
     Project => "project",
     View => "view",
     Person => "person",
+    Cycle => "cycle",
+    Note => "note",
 });
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -149,6 +189,17 @@ impl Favorites {
     }
 }
 
+fn target_key(kind: FavoriteKind, id: &str) -> Result<String> {
+    match kind {
+        FavoriteKind::Cycle => id
+            .trim()
+            .parse::<i64>()
+            .map(|n| n.to_string())
+            .map_err(|_| Refusal::Invalid.into()),
+        _ => store::uuid(id),
+    }
+}
+
 fn exists(
     conn: &Connection,
     meetings: Option<&Connection>,
@@ -166,6 +217,16 @@ fn exists(
         FavoriteKind::Person => {
             return sources::person(meetings.ok_or(ConversationsClosed)?, id);
         }
+        FavoriteKind::Cycle => {
+            let number: i64 = id.parse().map_err(|_| Refusal::Invalid)?;
+            let found: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM planning_cycles WHERE number = ?1)",
+                [number],
+                |row| row.get(0),
+            )?;
+            return Ok(found.then(|| number.to_string()));
+        }
+        FavoriteKind::Note => "SELECT EXISTS(SELECT 1 FROM scratch_notes WHERE id = ?1)",
     };
     let found: bool = conn.query_row(sql, [id], |row| row.get(0))?;
     Ok(found.then(|| id.to_owned()))
@@ -195,7 +256,7 @@ pub(crate) fn set(
     on: bool,
     now_ms: i64,
 ) -> Result<bool> {
-    let id = store::uuid(id)?;
+    let id = target_key(kind, id)?;
     if !on {
         return Ok(conn.execute(
             "DELETE FROM planning_favorites WHERE kind = ?1 AND target_id = ?2",
@@ -370,7 +431,7 @@ pub(crate) fn move_entry(
     let entry = match entry {
         FavoriteEntry::Favorite { kind, id } => FavoriteEntry::Favorite {
             kind: *kind,
-            id: store::uuid(id)?,
+            id: target_key(*kind, id)?,
         },
         FavoriteEntry::Folder { id } => FavoriteEntry::Folder {
             id: store::uuid(id)?,

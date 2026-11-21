@@ -359,7 +359,7 @@ fn adding_a_second_label_from_a_group_replaces_the_first_in_the_dry_run_too() {
     let history = Connection::open_in_memory().expect("an in-memory history database");
     schema::apply_all(&history).expect("the planner schema");
     let label = |name: &str, group: Option<&str>| {
-        let id = items::save_label(&history, None, name, 0.0, 0)
+        let id = items::save_label(&history, None, name, 0.0, None, 0)
             .expect("a label")
             .id;
         history

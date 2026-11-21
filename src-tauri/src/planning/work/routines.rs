@@ -600,21 +600,221 @@ fn label(conn: &Connection, id: &str) -> StorageResult<WorkLabel> {
     .ok_or_else(|| Refusal::NotFound.into())
 }
 
+/// Label descriptions and multi-select label groups.
+pub(crate) const LABEL_EXTRAS_MIGRATION: &str =
+    "ALTER TABLE planning_labels ADD COLUMN description TEXT;
+     ALTER TABLE planning_labels ADD COLUMN group_multi INTEGER NOT NULL DEFAULT 0
+         CHECK(group_multi IN (0, 1));";
+
 /// Puts a label in a group, or with `None` takes it out of its group.
-fn group_label(
+/// When `multi` is given for a group, every label in that group shares it.
+/// When the group ends up allowing one label, each task, project and
+/// initiative holding several from it keeps the first by name. Returns the
+/// label and the tasks that lost one.
+pub(crate) fn group_label(
     conn: &Connection,
     id: &str,
     group: Option<&str>,
+    multi: Option<bool>,
     now_ms: i64,
-) -> StorageResult<WorkLabel> {
+) -> StorageResult<(WorkLabel, Vec<String>)> {
     let id = store::uuid(id)?;
     label(conn, &id)?;
+    let group = trimmed(group);
+    let effective_multi = match (&group, multi) {
+        (None, _) => false,
+        (Some(_), Some(m)) => m,
+        (Some(name), None) => conn
+            .query_row(
+                "SELECT group_multi FROM planning_labels
+                 WHERE lower(group_name) = lower(?1) AND id != ?2 LIMIT 1",
+                params![name, &id],
+                |row| row.get::<_, bool>(0),
+            )
+            .optional()?
+            .unwrap_or(false),
+    };
     conn.execute(
-        "UPDATE planning_labels SET group_name = ?2, revision = revision + 1, updated_at_ms = ?3
+        "UPDATE planning_labels SET group_name = ?2, group_multi = ?3,
+            revision = revision + 1, updated_at_ms = ?4
          WHERE id = ?1",
-        params![id, trimmed(group), now_ms],
+        params![id, group, effective_multi, now_ms],
     )?;
-    label(conn, &id)
+    if let (Some(name), Some(m)) = (&group, multi) {
+        conn.execute(
+            "UPDATE planning_labels SET group_multi = ?2, updated_at_ms = ?3
+             WHERE lower(group_name) = lower(?1) AND id != ?4",
+            params![name, m, now_ms, id],
+        )?;
+    }
+    let settled = match &group {
+        Some(name) if !effective_multi => keep_one_from(conn, name)?,
+        _ => Vec::new(),
+    };
+    Ok((label(conn, &id)?, settled))
+}
+
+/// Leaves each item holding several labels from `group` with the first by
+/// name. Returns the tasks that lost one.
+fn keep_one_from(conn: &Connection, group: &str) -> StorageResult<Vec<String>> {
+    let mut settled = Vec::new();
+    for (table, owner) in LABELED {
+        let crowded = format!(
+            "SELECT x.{owner}, x.label_id FROM {table} x
+                 JOIN planning_labels l ON l.id = x.label_id
+             WHERE lower(l.group_name) = lower(?1)
+               AND EXISTS (SELECT 1 FROM {table} y
+                   JOIN planning_labels m ON m.id = y.label_id
+                   WHERE y.{owner} = x.{owner} AND lower(m.group_name) = lower(?1)
+                     AND (lower(m.name), m.id) < (lower(l.name), l.id))"
+        );
+        if table == "planning_task_labels" {
+            let mut statement =
+                conn.prepare(&format!("SELECT DISTINCT {owner} FROM ({crowded}) ORDER BY 1"))?;
+            settled = statement
+                .query_map([group], |row| row.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+        }
+        conn.execute(
+            &format!("DELETE FROM {table} WHERE ({owner}, label_id) IN ({crowded})"),
+            [group],
+        )?;
+    }
+    Ok(settled)
+}
+
+/// The tables that put a label on something, with the column naming it.
+const LABELED: [(&str, &str); 3] = [
+    ("planning_task_labels", "task_id"),
+    ("planning_project_labels", "project_id"),
+    ("planning_initiative_labels", "initiative_id"),
+];
+
+/// The saved JSON that can name a label: views' filters, automations'
+/// triggers and conditions, and task and project templates.
+const LABEL_REFERENCES: [(&str, &str); 5] = [
+    ("planning_views", "query_json"),
+    ("planning_loops", "trigger_json"),
+    ("planning_loops", "conditions_json"),
+    ("planning_task_templates", "fields"),
+    ("planning_project_templates", "fields"),
+];
+
+/// Merges `from_id` into `into_id`: whatever carried `from_id` carries
+/// `into_id`, saved views, automations and templates that named it name
+/// `into_id`, and `from_id` is retired, so it can be restored. Tasks move
+/// without a label-added change, so no automation runs for the merge.
+/// Refused when `into_id` may not go where `from_id` is, or when a task,
+/// project or initiative would hold two labels from a group that allows
+/// one. Returns the surviving label and the tasks that had `from_id`.
+pub(crate) fn merge_labels(
+    conn: &Connection,
+    from_id: &str,
+    into_id: &str,
+    now_ms: i64,
+) -> StorageResult<(WorkLabel, Vec<String>)> {
+    let from_id = store::uuid(from_id)?;
+    let into_id = store::uuid(into_id)?;
+    if from_id == into_id {
+        return Err(Refusal::Invalid.into());
+    }
+    label(conn, &from_id)?;
+    let into = label(conn, &into_id)?;
+    let mut stmt = conn
+        .prepare("SELECT task_id FROM planning_task_labels WHERE label_id = ?1 ORDER BY task_id")?;
+    let tasks: Vec<String> = stmt
+        .query_map([&from_id], |row| row.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    let on_projects: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM planning_project_labels WHERE label_id = ?1)
+             OR EXISTS(SELECT 1 FROM planning_initiative_labels WHERE label_id = ?1)",
+        [&from_id],
+        |row| row.get(0),
+    )?;
+    let leaves_out = match into.scope {
+        LabelScope::All => false,
+        LabelScope::Tasks => on_projects,
+        LabelScope::Projects => !tasks.is_empty(),
+    };
+    if leaves_out {
+        return Err(Refusal::LabelScope.into());
+    }
+    if let (Some(group), false) = (&into.group, into.group_multi) {
+        for (table, owner) in LABELED {
+            let clash: bool = conn.query_row(
+                &format!(
+                    "SELECT EXISTS(SELECT 1 FROM {table} f
+                         JOIN {table} o ON o.{owner} = f.{owner}
+                         JOIN planning_labels l ON l.id = o.label_id
+                     WHERE f.label_id = ?1 AND o.label_id NOT IN (?1, ?2)
+                       AND lower(l.group_name) = lower(?3))"
+                ),
+                params![&from_id, &into_id, group],
+                |row| row.get(0),
+            )?;
+            if clash {
+                return Err(Refusal::LabelGroup.into());
+            }
+        }
+    }
+    for (table, owner) in LABELED {
+        conn.execute(
+            &format!(
+                "UPDATE {table} SET label_id = ?2 WHERE label_id = ?1
+                   AND {owner} NOT IN (SELECT {owner} FROM {table} WHERE label_id = ?2)"
+            ),
+            params![&from_id, &into_id],
+        )?;
+        conn.execute(&format!("DELETE FROM {table} WHERE label_id = ?1"), [&from_id])?;
+    }
+    for (table, column) in LABEL_REFERENCES {
+        let mut statement = conn.prepare(&format!(
+            "SELECT rowid, {column} FROM {table} WHERE instr({column}, ?1) > 0"
+        ))?;
+        let saved = statement
+            .query_map([&from_id], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for (rowid, json) in saved {
+            let mut value: serde_json::Value = serde_json::from_str(&json)?;
+            rename_label(&mut value, &from_id, &into_id);
+            conn.execute(
+                &format!("UPDATE {table} SET {column} = ?2 WHERE rowid = ?1"),
+                params![rowid, value.to_string()],
+            )?;
+        }
+    }
+    conn.execute(
+        "UPDATE planning_labels SET retired_at_ms = COALESCE(retired_at_ms, ?2),
+            revision = revision + 1, updated_at_ms = ?2
+         WHERE id = ?1",
+        params![&from_id, now_ms],
+    )?;
+    conn.execute(
+        "UPDATE planning_labels SET revision = revision + 1, updated_at_ms = ?2 WHERE id = ?1",
+        params![&into_id, now_ms],
+    )?;
+    Ok((label(conn, &into_id)?, tasks))
+}
+
+/// Puts `into` wherever `from` is in saved JSON, keeping one `into` in a
+/// list that then names it twice.
+fn rename_label(value: &mut serde_json::Value, from: &str, into: &str) {
+    match value {
+        serde_json::Value::String(text) if text == from => into.clone_into(text),
+        serde_json::Value::Array(values) => {
+            values.iter_mut().for_each(|value| rename_label(value, from, into));
+            let mut seen = false;
+            values.retain(|value| {
+                let again = seen && value.as_str() == Some(into);
+                seen |= value.as_str() == Some(into);
+                !again
+            });
+        }
+        serde_json::Value::Object(fields) => {
+            fields.values_mut().for_each(|value| rename_label(value, from, into));
+        }
+        _ => {}
+    }
 }
 
 /// Sets what a label may go on. Narrowing it is refused while it sits on
@@ -889,24 +1089,60 @@ pub(crate) fn reminders_notified(
 }
 
 /// Puts a label in a group or out of one. The app's `work_label_group`.
+/// Also returns the tasks that kept one label from a group that now allows
+/// one.
 pub(crate) fn label_group_as(
     app: &AppHandle,
     operation_id: &str,
     id: &str,
     group: Option<&str>,
-) -> Result<WorkLabel, String> {
+    multi: Option<bool>,
+) -> Result<(WorkLabel, Vec<String>), String> {
     let now = now_ms();
     run_history(app, |history| {
         store::mutate(
             history,
             operation_id,
             "work_label_group",
-            &(id, group),
+            &(id, group, multi),
             now,
             |tx| {
+                let (label, settled) = group_label(tx, id, group, multi, now)?;
                 Ok(Done {
-                    value: group_label(tx, id, group, now)?,
-                    effects: Effects::default(),
+                    value: (label, settled.clone()),
+                    effects: Effects {
+                        items: settled,
+                        ..Effects::default()
+                    },
+                })
+            },
+        )
+    })
+}
+
+/// Merges `from_id` into `into_id` (see [`merge_labels`]).
+pub(crate) fn label_merge_as(
+    app: &AppHandle,
+    operation_id: &str,
+    from_id: &str,
+    into_id: &str,
+) -> Result<(WorkLabel, Vec<String>), String> {
+    let now = now_ms();
+    run_history(app, |history| {
+        store::mutate(
+            history,
+            operation_id,
+            "work_label_merge",
+            &(from_id, into_id),
+            now,
+            |tx| {
+                let (label, items) = merge_labels(tx, from_id, into_id, now)?;
+                Ok(Done {
+                    value: (label, items.clone()),
+                    effects: Effects {
+                        items,
+                        ..Effects::default()
+                    },
                 })
             },
         )
@@ -1075,5 +1311,175 @@ mod tests {
 
         bin::untrash(&conn, &task, WorkActor::Me, AT).expect("the task restored");
         assert_eq!(due(&conn, AT), vec![task]);
+    }
+}
+
+#[cfg(test)]
+mod label_tests {
+    use super::super::super::schema;
+    use super::super::items::{self, NewItem};
+    use super::super::types::{WorkActivityKind, WorkActor, WorkOwner, WorkPatch, WorkStatus};
+    use super::{group_label, merge_labels, scope_label};
+    use crate::planning::store::Refusal;
+    use crate::planning::types::LabelScope;
+    use rusqlite::Connection;
+
+    const AT: i64 = 1_700_000_000_000;
+
+    fn planner() -> Connection {
+        let conn = Connection::open_in_memory().expect("an in-memory history database");
+        schema::apply_all(&conn).expect("the planner schema");
+        conn
+    }
+
+    fn label(conn: &Connection, name: &str) -> String {
+        items::save_label(conn, None, name, 0.0, None, AT)
+            .expect("a label")
+            .id
+    }
+
+    fn task(conn: &Connection, labels: &[String]) -> String {
+        items::insert(
+            conn,
+            &NewItem {
+                title: "Ship the brochure",
+                details: None,
+                status: WorkStatus::NotStarted,
+                priority: 0,
+                project_id: None,
+                milestone_id: None,
+                owner: &WorkOwner::Nobody,
+                due_at_ms: None,
+                label_ids: labels,
+                source_loop_id: None,
+                recurrence: None,
+            },
+            WorkActor::Me,
+            AT,
+        )
+        .expect("a task")
+        .id
+    }
+
+    fn labelled(conn: &Connection, id: &str, labels: &[String]) -> Vec<String> {
+        let patch = WorkPatch {
+            label_ids: Some(labels.to_vec()),
+            ..WorkPatch::default()
+        };
+        let changed = items::apply(
+            conn,
+            id,
+            &patch,
+            WorkActivityKind::Status,
+            WorkActor::Me,
+            AT,
+        )
+        .expect("labelled");
+        changed.after.label_ids
+    }
+
+    #[test]
+    fn a_multi_select_group_keeps_several_of_its_labels_on_a_task() {
+        let conn = planner();
+        let print = label(&conn, "Print");
+        let web = label(&conn, "Web");
+        group_label(&conn, &print, Some("Channel"), None, AT).expect("grouped");
+        group_label(&conn, &web, Some("Channel"), None, AT).expect("grouped");
+        let id = task(&conn, &[]);
+        let both = [print.clone(), web.clone()];
+
+        assert_eq!(labelled(&conn, &id, &both).len(), 1);
+        group_label(&conn, &web, Some("Channel"), Some(true), AT).expect("multi");
+
+        let mut kept = labelled(&conn, &id, &both);
+        kept.sort();
+        let mut expected = both.to_vec();
+        expected.sort();
+        assert_eq!(kept, expected);
+    }
+
+    #[test]
+    fn a_group_back_to_one_label_leaves_each_task_the_first_by_name() {
+        let conn = planner();
+        let web = label(&conn, "Web");
+        let print = label(&conn, "Print");
+        group_label(&conn, &web, Some("Channel"), Some(true), AT).expect("multi");
+        group_label(&conn, &print, Some("Channel"), None, AT).expect("grouped");
+        let id = task(&conn, &[web.clone(), print.clone()]);
+        assert_eq!(items::item(&conn, &id).expect("task").label_ids.len(), 2);
+
+        let (_, settled) =
+            group_label(&conn, &web, Some("Channel"), Some(false), AT).expect("one per task");
+
+        assert_eq!(settled, vec![id.clone()]);
+        assert_eq!(items::item(&conn, &id).expect("task").label_ids, vec![print]);
+    }
+
+    fn retired(conn: &Connection, id: &str) -> bool {
+        items::labels(conn)
+            .expect("labels")
+            .iter()
+            .any(|label| label.id == id && label.retired_at_ms.is_some())
+    }
+
+    fn refusal(error: &anyhow::Error) -> Option<&Refusal> {
+        error.downcast_ref::<Refusal>()
+    }
+
+    #[test]
+    fn merging_a_label_moves_its_tasks_and_names_and_retires_it_quietly() {
+        let conn = planner();
+        let bug = label(&conn, "Bug");
+        let defect = label(&conn, "Defect");
+        let only_bug = task(&conn, std::slice::from_ref(&bug));
+        let both = task(&conn, &[bug.clone(), defect.clone()]);
+        conn.execute(
+            "INSERT INTO planning_task_templates (id, name, fields, revision, created_at_ms,
+                updated_at_ms) VALUES ('t', 'Triage', ?1, 1, 0, 0)",
+            [serde_json::json!({ "labelIds": [bug, defect] }).to_string()],
+        )
+        .expect("a template naming both");
+        let changes = |task: &str| -> i64 {
+            conn.query_row(
+                "SELECT count(*) FROM planning_changes WHERE task_id = ?1",
+                [task],
+                |row| row.get(0),
+            )
+            .expect("changes")
+        };
+        let before = changes(&only_bug);
+
+        let (kept, moved) = merge_labels(&conn, &bug, &defect, AT + 1).expect("merged");
+
+        assert_eq!(kept.id, defect);
+        assert_eq!(moved.len(), 2);
+        for id in [&only_bug, &both] {
+            assert_eq!(items::item(&conn, id).expect("task").label_ids, vec![defect.clone()]);
+        }
+        assert_eq!(changes(&only_bug), before);
+        let fields: String = conn
+            .query_row("SELECT fields FROM planning_task_templates", [], |row| row.get(0))
+            .expect("the template");
+        assert_eq!(fields, serde_json::json!({ "labelIds": [defect] }).to_string());
+        assert!(retired(&conn, &bug));
+    }
+
+    #[test]
+    fn a_merge_that_breaks_scope_or_a_one_label_group_is_refused() {
+        let conn = planner();
+        let bug = label(&conn, "Bug");
+        let defect = label(&conn, "Defect");
+        let urgent = label(&conn, "Urgent");
+        task(&conn, &[bug.clone(), urgent.clone()]);
+        scope_label(&conn, &defect, LabelScope::Projects, AT).expect("projects only");
+        let scoped = merge_labels(&conn, &bug, &defect, AT).expect_err("scope");
+        assert!(matches!(refusal(&scoped), Some(Refusal::LabelScope)));
+
+        scope_label(&conn, &defect, LabelScope::All, AT).expect("anywhere");
+        group_label(&conn, &defect, Some("Kind"), None, AT).expect("grouped");
+        group_label(&conn, &urgent, Some("Kind"), None, AT).expect("grouped");
+        let crowded = merge_labels(&conn, &bug, &defect, AT).expect_err("group");
+        assert!(matches!(refusal(&crowded), Some(Refusal::LabelGroup)));
+        assert!(!retired(&conn, &bug));
     }
 }

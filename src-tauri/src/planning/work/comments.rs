@@ -9,7 +9,7 @@ use super::agents;
 use super::items;
 use super::types::{
     WorkActivityKind, WorkActor, WorkComment, WorkCommentAuthor, WorkCommentPage,
-    WorkCommentSubject,
+    WorkCommentSubject, WorkReactionSubject,
 };
 use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension, Row};
@@ -49,6 +49,79 @@ END;";
 pub(crate) const NOTE_COMMENTS_MIGRATION: &str =
     "CREATE TRIGGER planning_comments_note_delete AFTER DELETE ON scratch_notes BEGIN
     DELETE FROM planning_comments WHERE subject_kind = 'note' AND subject_id = old.id;
+END;";
+
+/// Initiatives and updates, a project's or an initiative's, take threads
+/// too, and they leave with them. The table is rebuilt for the wider kind,
+/// so the change-stream triggers on it are made again.
+pub(crate) const INITIATIVE_UPDATE_COMMENTS_MIGRATION: &str = "PRAGMA legacy_alter_table = ON;
+CREATE TABLE planning_comments_next (
+    id TEXT PRIMARY KEY NOT NULL,
+    subject_kind TEXT NOT NULL CHECK(subject_kind IN ('project', 'milestone', 'meeting', 'note',
+        'initiative', 'update')),
+    subject_id TEXT NOT NULL,
+    parent_comment_id TEXT,
+    author_kind TEXT NOT NULL CHECK(author_kind IN ('me', 'sona', 'agent')),
+    author_name TEXT CHECK(author_name IS NULL OR length(trim(author_name)) > 0),
+    body TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    edited_at_ms INTEGER,
+    resolved_at_ms INTEGER,
+    deleted_at_ms INTEGER,
+    CHECK(deleted_at_ms IS NOT NULL OR length(trim(body)) > 0),
+    CHECK(parent_comment_id IS NULL OR resolved_at_ms IS NULL),
+    CHECK(parent_comment_id IS NULL OR parent_comment_id != id)
+);
+INSERT INTO planning_comments_next (rowid, id, subject_kind, subject_id, parent_comment_id,
+        author_kind, author_name, body, created_at_ms, edited_at_ms, resolved_at_ms,
+        deleted_at_ms)
+    SELECT rowid, id, subject_kind, subject_id, parent_comment_id, author_kind, author_name,
+        body, created_at_ms, edited_at_ms, resolved_at_ms, deleted_at_ms
+    FROM planning_comments;
+DROP TABLE planning_comments;
+ALTER TABLE planning_comments_next RENAME TO planning_comments;
+PRAGMA legacy_alter_table = OFF;
+CREATE INDEX planning_comments_subject
+    ON planning_comments(subject_kind, subject_id, created_at_ms, id);
+CREATE INDEX planning_comments_thread ON planning_comments(parent_comment_id);
+CREATE TRIGGER planning_comments_initiative_delete AFTER DELETE ON planning_initiatives BEGIN
+    DELETE FROM planning_comments WHERE subject_kind = 'initiative' AND subject_id = old.id;
+END;
+CREATE TRIGGER planning_comments_project_update_delete AFTER DELETE ON planning_project_updates
+BEGIN
+    DELETE FROM planning_comments WHERE subject_kind = 'update' AND subject_id = old.id;
+END;
+CREATE TRIGGER planning_comments_initiative_update_delete
+    AFTER DELETE ON planning_initiative_updates
+BEGIN
+    DELETE FROM planning_comments WHERE subject_kind = 'update' AND subject_id = old.id;
+END;
+CREATE TRIGGER planning_changes_subject_comment_create AFTER INSERT ON planning_comments BEGIN
+    INSERT INTO planning_changes (at_ms, entity, entity_id, action, data, sources)
+    VALUES (CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER), 'comment', new.id,
+        'create', json_object('subject_kind', new.subject_kind, 'subject_id', new.subject_id,
+            'author_kind', new.author_kind, 'author_name', new.author_name,
+            'parent_id', new.parent_comment_id),
+        CASE WHEN new.subject_kind = 'meeting'
+            THEN json_array(json_array('meeting', new.subject_id)) END);
+END;
+CREATE TRIGGER planning_changes_subject_comment_update AFTER UPDATE ON planning_comments
+WHEN old.body IS NOT new.body OR old.resolved_at_ms IS NOT new.resolved_at_ms
+    OR old.deleted_at_ms IS NOT new.deleted_at_ms
+BEGIN
+    INSERT INTO planning_changes (at_ms, entity, entity_id, action, updated_from, data, sources)
+    SELECT CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER), 'comment', new.id,
+        'update', json_group_object(field, value),
+        json_object('subject_kind', new.subject_kind, 'subject_id', new.subject_id),
+        CASE WHEN new.subject_kind = 'meeting'
+            THEN json_array(json_array('meeting', new.subject_id)) END
+    FROM (
+        SELECT 'body' AS field, old.body AS value WHERE old.body IS NOT new.body
+        UNION ALL SELECT 'resolved_at_ms', old.resolved_at_ms
+            WHERE old.resolved_at_ms IS NOT new.resolved_at_ms
+        UNION ALL SELECT 'deleted_at_ms', old.deleted_at_ms
+            WHERE old.deleted_at_ms IS NOT new.deleted_at_ms
+    );
 END;";
 
 pub(crate) const PAGE: usize = 50;
@@ -107,6 +180,8 @@ fn on(subject: WorkCommentSubject) -> &'static str {
         WorkCommentSubject::Milestone => "c.subject_kind = 'milestone' AND c.subject_id = ?1",
         WorkCommentSubject::Meeting => "c.subject_kind = 'meeting' AND c.subject_id = ?1",
         WorkCommentSubject::Note => "c.subject_kind = 'note' AND c.subject_id = ?1",
+        WorkCommentSubject::Initiative => "c.subject_kind = 'initiative' AND c.subject_id = ?1",
+        WorkCommentSubject::Update => "c.subject_kind = 'update' AND c.subject_id = ?1",
     }
 }
 
@@ -132,6 +207,11 @@ fn subject_id(conn: &Connection, subject: WorkCommentSubject, id: &str) -> Resul
             .map(|note| note.id)
             .ok_or_else(|| Refusal::NotFound.into()),
         WorkCommentSubject::Meeting => Ok(id),
+        WorkCommentSubject::Initiative => Ok(super::initiatives::initiative(conn, &id)?.id),
+        WorkCommentSubject::Update => match super::super::updates::update(conn, &id) {
+            Ok(update) => Ok(update.id),
+            Err(_) => Ok(super::initiatives::update(conn, &id)?.id),
+        },
     }
 }
 
@@ -152,6 +232,7 @@ fn read(row: &Row<'_>) -> rusqlite::Result<WorkComment> {
         resolved_at_ms: row.get(9)?,
         deleted,
         replies: Vec::new(),
+        reactions: Vec::new(),
     })
 }
 
@@ -169,7 +250,7 @@ fn comment(conn: &Connection, id: &str) -> Result<WorkComment> {
     .ok_or_else(|| Refusal::NotFound.into())
 }
 
-fn live(conn: &Connection, id: &str) -> Result<WorkComment> {
+pub(crate) fn live(conn: &Connection, id: &str) -> Result<WorkComment> {
     let found = comment(conn, id)?;
     if found.deleted {
         return Err(Refusal::NotFound.into());
@@ -202,6 +283,10 @@ pub(crate) fn thread(conn: &Connection, id: &str) -> Result<WorkComment> {
     root.replies = statement
         .query_map([&root.id], read)?
         .collect::<rusqlite::Result<_>>()?;
+    root.reactions = super::reactions::of(conn, WorkReactionSubject::Comment, &root.id)?;
+    for reply in &mut root.replies {
+        reply.reactions = super::reactions::of(conn, WorkReactionSubject::Comment, &reply.id)?;
+    }
     Ok(root)
 }
 
