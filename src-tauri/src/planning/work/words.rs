@@ -517,6 +517,10 @@ fn joined(kept: WorkFilterOp, next: WorkFilterOp, field: WorkFilterField) -> Opt
     })
 }
 
+/// Terms that hold together, each with its words: one term, or a range's
+/// two. "or" joins whole units.
+type Unit = Vec<(Range<usize>, Term)>;
+
 struct Reader<'a, Tz: TimeZone> {
     text: &'a str,
     toks: Vec<Tok>,
@@ -527,7 +531,7 @@ struct Reader<'a, Tz: TimeZone> {
 
 impl<Tz: TimeZone> Reader<'_, Tz> {
     fn read(&self) -> WorkWhere {
-        let mut units: Vec<Vec<(Range<usize>, Term)>> = Vec::new();
+        let mut units: Vec<Unit> = Vec::new();
         let mut unread: Vec<(Range<usize>, Vec<String>)> = Vec::new();
         let mut glue = vec![false; self.toks.len()];
         let mut not: Option<Range<usize>> = None;
@@ -619,7 +623,7 @@ impl<Tz: TimeZone> Reader<'_, Tz> {
             }
             runs.push((span, could_be));
         }
-        let mut groups: Vec<Vec<Vec<(Range<usize>, Term)>>> = Vec::new();
+        let mut groups: Vec<Vec<Unit>> = Vec::new();
         for (at, unit) in units.into_iter().enumerate() {
             match groups.last_mut().filter(|_| either.contains(&at)) {
                 Some(members) => members.push(unit),
