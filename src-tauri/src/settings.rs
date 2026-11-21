@@ -2248,6 +2248,18 @@ pub fn get_default_settings() -> AppSettings {
             current_binding: "ctrl+option+shift+t".to_string(),
         },
     );
+    #[cfg(target_os = "macos")]
+    bindings.insert(
+        crate::scratchpad::DICTATE_NOTE_BINDING_ID.to_string(),
+        ShortcutBinding {
+            id: crate::scratchpad::DICTATE_NOTE_BINDING_ID.to_string(),
+            name: "Dictate into a new note".to_string(),
+            description: "What you say becomes a new note instead of text in the app in front."
+                .to_string(),
+            default_binding: "ctrl+option+shift+n".to_string(),
+            current_binding: "ctrl+option+shift+n".to_string(),
+        },
+    );
 
     let mut settings = AppSettings {
         settings_schema_version: default_settings_schema_version(),

@@ -581,6 +581,20 @@ pub(crate) fn emit_changed(app: &AppHandle, note_id: &str, deleted: bool) {
     .emit(app);
 }
 
+/// The shortcut held to dictate into a new note instead of the app in front.
+pub(crate) const DICTATE_NOTE_BINDING_ID: &str = "dictate_note";
+
+/// Files a finished dictation as a new note. Blank words make no note.
+pub(crate) fn file_dictation(app: &AppHandle, history: &HistoryManager, words: &str) {
+    match run(history, |conn| create_note_with_connection(conn, words, now_ms())) {
+        Ok(note) => emit_changed(app, &note.id, false),
+        Err(error) => log::warn!(
+            "{}",
+            failure_sentence(history, error, "The dictation could not be saved as a note.")
+        ),
+    }
+}
+
 /// One note by id, for another slice that holds an id and needs the words:
 /// `None` when it has been deleted.
 pub fn read_note(app: &AppHandle, id: &str) -> Result<Option<ScratchNote>, String> {

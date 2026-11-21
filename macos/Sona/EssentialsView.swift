@@ -30,6 +30,7 @@ struct EssentialsView<MeetingRows: View>: View {
                 )
                 ShortcutCaptureRow(store: store, id: "work_quick_entry")
                 ShortcutCaptureRow(store: store, id: "work_ramble")
+                ShortcutCaptureRow(store: store, id: "dictate_note")
                 MicrophoneRow(store: store)
                 /// The spoken language, beside the microphone that hears it.
                 /// The list narrows to what the loaded model can recognize,

@@ -2433,6 +2433,19 @@ impl TranscribeAction {
                                         processed.final_text,
                                         Arc::clone(&completed_pcm),
                                     );
+                                } else if run.note() {
+                                    let history_id = unclaimed.claimed_by(history_entry.save(&hm));
+                                    persist_delivery_attempt(
+                                        &hm,
+                                        history_id,
+                                        run.run_id,
+                                        DeliveryReceipt::not_dispatched(),
+                                    );
+                                    crate::scratchpad::file_dictation(
+                                        &ah,
+                                        &hm,
+                                        &processed.final_text,
+                                    );
                                 } else if processed.final_text.is_empty() {
                                     let history_id = unclaimed.claimed_by(history_entry.save(&hm));
                                     persist_delivery_attempt(

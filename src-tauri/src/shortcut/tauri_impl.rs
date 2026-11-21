@@ -186,6 +186,7 @@ mod tests {
         let cases = [
             (COMMAND_BINDING_ID, TranscriptionIntent::Command),
             (RAMBLE_BINDING_ID, TranscriptionIntent::Tasks),
+            (crate::scratchpad::DICTATE_NOTE_BINDING_ID, TranscriptionIntent::Note),
             (
                 "mode/email/transcribe",
                 TranscriptionIntent::Mode {
