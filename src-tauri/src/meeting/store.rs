@@ -1,4 +1,5 @@
 pub(crate) mod analysis_export;
+mod app_imports;
 #[cfg(test)]
 mod artifact_trace_tests;
 mod audio_retention;
@@ -1627,6 +1628,7 @@ static MIGRATIONS: &[M] = &[
     M::up(include_str!("store/live_docs.sql")),
     M::up(include_str!("store/live_changes.sql")),
     M::up(include_str!("store/live_rooms.sql")),
+    M::up(include_str!("store/app_imports.sql")),
 ];
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StoreError {

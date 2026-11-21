@@ -723,6 +723,7 @@ mod tests {
             post_process_requested: true,
             parent_id: None,
             match_kind: Some(HistoryMatchKind::Text),
+            imported_from: None,
         }
     }
 

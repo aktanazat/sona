@@ -4,7 +4,7 @@
 
 use super::library::{file_made, made_before, told, Change, Gate};
 use super::{Tracker, WorkAnswer, READ_SCOPES, WRITE_SCOPES};
-use crate::managers::history::{HistoryEntry, HistoryManager, HistoryRunReceipt};
+use crate::managers::history::{HistoryEntry, HistoryManager, HistoryPage, HistoryRunReceipt};
 use crate::query::external::{label, ExternalError, ExternalErrorCode, ExternalScope};
 use crate::query::QUERY_SCHEMA_VERSION;
 use clap::{Args, Subcommand};
@@ -22,7 +22,7 @@ pub struct DictationsArgs {
     pub search: Option<String>,
     #[arg(long)]
     pub limit: Option<usize>,
-    /// Entries older than this id, for the next page.
+    /// The `next_before` id from the last page: entries spoken before that one.
     #[arg(long, value_name = "ID")]
     pub before: Option<i64>,
 }
@@ -164,6 +164,14 @@ fn missing(id: i64) -> ExternalError {
         .hint("List them with: sona work dictations")
 }
 
+fn cursor_gone() -> ExternalError {
+    ExternalError::new(
+        ExternalErrorCode::NotFound,
+        "The --before dictation is gone, so the next page cannot be placed.",
+    )
+    .hint("List again without --before")
+}
+
 fn shown(entry: HistoryEntry) -> ExternalDictation {
     ExternalDictation {
         id: entry.id,
@@ -201,6 +209,9 @@ pub(super) async fn list(
         None => history.get_history_entries(args.before, limit).await,
     }
     .map_err(|_| unreadable(history))?;
+    let HistoryPage::Entries(page) = page else {
+        return Err(cursor_gone());
+    };
     let next_before = page
         .has_more
         .then(|| page.entries.last().map(|entry| entry.id))

@@ -17,7 +17,10 @@ use super::follow_up::{
     MeetingFollowUpDraft, MeetingFollowUpMail, MeetingFollowUpMailBody, MeetingFollowUpMailRequest,
     MeetingFollowUpSource, FOLLOW_UP_MAX_TOKENS,
 };
-use super::import_formats::{read_transcript_export, resolve_spans, ImportedSegment};
+use super::import_formats::{
+    read_app_meetings, read_transcript_export, resolve_spans, ImportedSegment, ImportedTranscript,
+    MeetingApp, MeetingAppImportResult,
+};
 use super::keep_awake::MeetingKeepAwake;
 use super::ledger;
 use super::local_generator::{MeetingLocalEngineStatus, MeetingTextEngineChoice};
@@ -2678,6 +2681,77 @@ impl MeetingSessionManager {
             MeetingCommandError::ImportUnreadable
         })?;
         let store = self.store().await?;
+        let recorded_at_utc_ms = parsed
+            .started_at_utc_ms
+            .or_else(|| file_modified_utc_ms(&path))
+            .unwrap_or_else(utc_now_ms);
+        self.import_parsed_transcript(store, &parsed, recorded_at_utc_ms)
+            .await
+    }
+
+    /// Every meeting in one app's export that an earlier import did not
+    /// already bring in, each through the same path as one transcript export.
+    /// A meeting without a transcript, or a file that is not the app's, is
+    /// counted and left out; a store failure stops the run where it is, with
+    /// the meetings before it kept.
+    pub async fn import_from_app(
+        &self,
+        app: MeetingApp,
+        path: PathBuf,
+    ) -> Result<MeetingAppImportResult, MeetingCommandError> {
+        let _activity = crate::planning::quiet::foreground_activity();
+        let read = tokio::task::spawn_blocking(move || {
+            read_app_meetings(app, &path).map_err(|error| {
+                log::warn!(
+                    "Meeting import from {app:?} refused {}: {}",
+                    path.display(),
+                    error.0
+                );
+                MeetingCommandError::ImportUnreadable
+            })
+        })
+        .await
+        .map_err(|_| MeetingCommandError::ImportUnreadable)??;
+        let store = self.store().await?;
+        let mut result = MeetingAppImportResult {
+            imported: 0,
+            already_imported: 0,
+            unreadable: read.unreadable,
+        };
+        for meeting in read.meetings {
+            if store
+                .app_import_exists(app.as_str(), &meeting.source_key)
+                .map_err(map_store_error)?
+            {
+                result.already_imported = result.already_imported.saturating_add(1);
+                continue;
+            }
+            let recorded_at_utc_ms = meeting
+                .transcript
+                .started_at_utc_ms
+                .unwrap_or_else(utc_now_ms);
+            let snapshot = self
+                .import_parsed_transcript(
+                    Arc::clone(&store),
+                    &meeting.transcript,
+                    recorded_at_utc_ms,
+                )
+                .await?;
+            store
+                .remember_app_import(app.as_str(), &meeting.source_key, snapshot.session_id)
+                .map_err(map_store_error)?;
+            result.imported = result.imported.saturating_add(1);
+        }
+        Ok(result)
+    }
+
+    /// One parsed export as a meeting, its notes as the meeting's own notes.
+    async fn import_parsed_transcript(
+        &self,
+        store: Arc<MeetingStore>,
+        parsed: &ImportedTranscript,
+        recorded_at_utc_ms: i64,
+    ) -> Result<MeetingSessionSnapshot, MeetingCommandError> {
         let spans = resolve_spans(&parsed.segments);
         let duration_ns = spans
             .last()
@@ -2686,13 +2760,28 @@ impl MeetingSessionManager {
             .open_imported_session(
                 &store,
                 parsed.title.clone(),
-                parsed
-                    .started_at_utc_ms
-                    .or_else(|| file_modified_utc_ms(&path))
-                    .unwrap_or_else(utc_now_ms),
+                recorded_at_utc_ms,
                 &RecordingOrigin::LocalFile,
             )
             .await?;
+        if let Some(notes) = &parsed.notes {
+            let saved = store
+                .notes_template_fallback(session_id, self.default_notes_template())
+                .and_then(|choice| {
+                    store.save_user_notes(
+                        session_id,
+                        notes,
+                        choice.template,
+                        choice.custom_template_id,
+                        0,
+                    )
+                });
+            if let Err(error) = saved {
+                return Err(self
+                    .abandon_import(session_id, map_store_error(error))
+                    .await);
+            }
+        }
         let track_id =
             match self.create_import_track(&store, session_id, &RecordingOrigin::LocalFile) {
                 Ok(track_id) => track_id,
@@ -8251,6 +8340,65 @@ pub(crate) mod tests {
             review.transcript[0].assigned_speaker_id,
             review.transcript[1].assigned_speaker_id
         );
+    }
+
+    #[test]
+    fn app_meeting_import_preserves_notes_dates_speakers_and_deduplicates_reimports() {
+        let (files, manager) = importing_manager();
+        let path = files.path().join("granola_export.csv");
+        std::fs::write(&path, include_str!("fixtures/granola_export.csv")).unwrap();
+
+        let first =
+            tauri::async_runtime::block_on(manager.import_from_app(MeetingApp::Granola, path.clone()))
+                .expect("Granola CSV imports");
+        assert_eq!(
+            first,
+            MeetingAppImportResult {
+                imported: 2,
+                already_imported: 0,
+                unreadable: 1,
+            }
+        );
+
+        let second =
+            tauri::async_runtime::block_on(manager.import_from_app(MeetingApp::Granola, path))
+                .expect("re-import succeeds with deduplication");
+        assert_eq!(
+            second,
+            MeetingAppImportResult {
+                imported: 0,
+                already_imported: 2,
+                unreadable: 1,
+            }
+        );
+
+        let listed = tauri::async_runtime::block_on(manager.list(
+            None,
+            10,
+            MeetingListFilter::default(),
+        ))
+        .expect("list meetings");
+        assert_eq!(listed.entries.len(), 2);
+        let pricing = listed
+            .entries
+            .iter()
+            .find(|item| item.title == "Pricing, packaging review")
+            .expect("pricing meeting present");
+        let review = tauri::async_runtime::block_on(manager.get(pricing.session_id))
+            .expect("review readable");
+        assert_eq!(review.session.started_at_utc_ms, Some(1_792_852_480_866));
+        assert_eq!(review.session.phase, MeetingPhase::ReviewReady);
+        let notes = tauri::async_runtime::block_on(manager.user_notes_get(pricing.session_id))
+            .expect("Granola notes and summary saved");
+        assert!(notes.body.contains("Ask about annual billing."));
+        assert!(notes.body.contains("Keep the Team plan"));
+        let mut speakers: Vec<&str> = review
+            .speakers
+            .iter()
+            .map(|speaker| speaker.display_name.as_str())
+            .collect();
+        speakers.sort_unstable();
+        assert_eq!(speakers, vec!["Me", "Them"]);
     }
 
     /// Refusal is the whole contract for bad input: a typed error, and nothing
