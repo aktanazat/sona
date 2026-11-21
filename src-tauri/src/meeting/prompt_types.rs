@@ -82,8 +82,28 @@ pub struct SavedPrompt {
     pub body: String,
     pub output: PromptOutput,
     pub target: PromptTarget,
+    /// Whether Talk to Sona and automations may call it by its name, as
+    /// instructions to follow rather than a question about one meeting.
+    #[serde(default)]
+    pub skill: bool,
     pub created_at_utc_ms: i64,
     pub updated_at_utc_ms: i64,
+}
+
+impl SavedPromptList {
+    /// The prompts marked as skills.
+    pub fn skills(&self) -> impl Iterator<Item = &SavedPrompt> {
+        self.prompts.iter().filter(|prompt| prompt.skill)
+    }
+
+    /// The skill called `name`, matched as a person would type it: case and
+    /// surrounding spaces ignored. Skill names are unique, so there is at
+    /// most one.
+    pub fn skill(&self, name: &str) -> Option<&SavedPrompt> {
+        let name = name.trim();
+        self.skills()
+            .find(|prompt| prompt.name.trim().eq_ignore_ascii_case(name))
+    }
 }
 
 /// The prompts on this machine, and the fence a write against them carries.
@@ -232,6 +252,9 @@ pub struct SavedPromptSaveRequest {
     pub body: String,
     pub output: PromptOutput,
     pub target: PromptTarget,
+    /// A skill's name may not be another skill's: a skill is called by it.
+    #[serde(default)]
+    pub skill: bool,
     pub expected_revision: u64,
 }
 
@@ -370,6 +393,7 @@ mod tests {
             body: body.to_string(),
             output,
             target: PromptTarget::Meeting,
+            skill: false,
             expected_revision: 0,
         }
     }

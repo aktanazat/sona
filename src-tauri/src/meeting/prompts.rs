@@ -329,6 +329,7 @@ mod tests {
                     body: "List the decisions.".to_string(),
                     output,
                     target: PromptTarget::Meeting,
+                    skill: false,
                     expected_revision: revision,
                 },
                 NOW,
@@ -364,6 +365,7 @@ mod tests {
                     body: "List the blockers.".to_string(),
                     output: PromptOutput::Text,
                     target: PromptTarget::Series,
+                    skill: false,
                     expected_revision: after_save.revision,
                 },
                 NOW + 1,
@@ -403,6 +405,7 @@ mod tests {
                     body: "List the risks.".to_string(),
                     output: PromptOutput::Text,
                     target: PromptTarget::Meeting,
+                    skill: false,
                     expected_revision: 0,
                 },
                 NOW,
@@ -433,6 +436,7 @@ mod tests {
                         json_schema: "{not json".to_string(),
                     },
                     target: PromptTarget::Meeting,
+                    skill: false,
                     expected_revision: revision,
                 },
                 NOW,
@@ -440,6 +444,51 @@ mod tests {
             .expect_err("an unparseable schema");
 
         assert_eq!(error, crate::meeting::store::StoreError::Invalid);
+    }
+
+    #[test]
+    fn skills_are_unique_by_name_and_looked_up_case_insensitively() {
+        let (_directory, store) = store();
+        let revision = store.saved_prompts().unwrap().revision;
+        let first = store
+            .save_saved_prompt(
+                &SavedPromptSaveRequest {
+                    operation_id: MeetingOperationId::new(),
+                    prompt_id: None,
+                    name: "Weekly Review".to_string(),
+                    body: "Summarize tasks and blockers.".to_string(),
+                    output: PromptOutput::Text,
+                    target: PromptTarget::Meeting,
+                    skill: true,
+                    expected_revision: revision,
+                },
+                NOW,
+            )
+            .expect("first skill");
+        assert_eq!(
+            first
+                .prompts
+                .skill("  weekly review ")
+                .map(|s| s.name.as_str()),
+            Some("Weekly Review")
+        );
+
+        let duplicate = store
+            .save_saved_prompt(
+                &SavedPromptSaveRequest {
+                    operation_id: MeetingOperationId::new(),
+                    prompt_id: None,
+                    name: "weekly review".to_string(),
+                    body: "Different body.".to_string(),
+                    output: PromptOutput::Text,
+                    target: PromptTarget::Meeting,
+                    skill: true,
+                    expected_revision: first.prompts.revision,
+                },
+                NOW + 1,
+            )
+            .expect_err("duplicate skill name");
+        assert_eq!(duplicate, crate::meeting::store::StoreError::Invalid);
     }
 
     #[test]

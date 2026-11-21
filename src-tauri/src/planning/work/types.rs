@@ -125,18 +125,20 @@ sql_enum!(WorkActor {
     Agent => "agent",
 });
 
-/// How an agent reached Sona: through the MCP server, or the command line
-/// run some other way.
+/// How an agent reached Sona: through the MCP server, the command line run
+/// some other way, or Talk to Sona once the owner pressed Apply on its card.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkVia {
     Mcp,
     Cli,
+    Chat,
 }
 
 sql_enum!(WorkVia {
     Mcp => "mcp",
     Cli => "cli",
+    Chat => "chat",
 });
 
 impl WorkVia {
@@ -144,6 +146,7 @@ impl WorkVia {
         match self {
             Self::Mcp => "MCP",
             Self::Cli => "CLI",
+            Self::Chat => "chat",
         }
     }
 }

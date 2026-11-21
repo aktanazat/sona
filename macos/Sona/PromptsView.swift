@@ -28,9 +28,10 @@ struct PromptDraft: Identifiable {
     /// checked against. Unused by the dictation library.
     var schema: String?
     var target: PromptTarget
+    var skill: Bool
 
     static func blank(_ library: PromptTab) -> PromptDraft {
-        PromptDraft(library: library, promptId: nil, name: "", body: "", schema: nil, target: .meeting)
+        PromptDraft(library: library, promptId: nil, name: "", body: "", schema: nil, target: .meeting, skill: false)
     }
 
     static func of(_ prompt: SavedPrompt) -> PromptDraft {
@@ -40,7 +41,8 @@ struct PromptDraft: Identifiable {
             name: prompt.name,
             body: prompt.body,
             schema: prompt.output.schemaText,
-            target: prompt.target
+            target: prompt.target,
+            skill: prompt.skill
         )
     }
 
@@ -51,7 +53,8 @@ struct PromptDraft: Identifiable {
             name: entry.name,
             body: entry.prompt,
             schema: nil,
-            target: .meeting
+            target: .meeting,
+            skill: false
         )
     }
 
@@ -322,7 +325,8 @@ struct PromptRow: View {
 
     private var fact: String {
         let updated = promptRelativeTime(prompt.updatedAtUtcMs)
-        return "\(prompt.target.label) · edited \(updated)"
+        let prefix = prompt.skill ? "Skill · \(prompt.target.label)" : prompt.target.label
+        return "\(prefix) · edited \(updated)"
     }
 
     private var runTitle: String {
@@ -526,6 +530,13 @@ struct PromptEditorSheet: View {
             .controlSize(.large)
             .frame(maxWidth: 260, alignment: .leading)
         }
+        Toggle(isOn: $draft.skill) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Use as skill").bodyText(14)
+                Text("Let Talk to Sona and automations call this prompt by its name.").metaText()
+            }
+        }
+        .toggleStyle(.switch)
     }
 
     private var title: String {

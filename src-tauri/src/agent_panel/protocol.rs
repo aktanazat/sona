@@ -396,6 +396,19 @@ pub struct SonaChatTurnV2 {
     pub reply_is_json: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_selection: Option<AgentModelSelectionV1>,
+    /// The Sona tools catalogue this build runs
+    /// ([`crate::query::tools::TOOL_CATALOGUE_VERSION`]). The relay offers
+    /// the model only the tools and card kinds of the catalogue a turn names,
+    /// and a turn that names none gets `sona-tools/1`, so a relay ahead of an
+    /// installed app never asks it for a tool it lacks. Checked apart from the
+    /// exact field set like `reply_is_json`, but a relay older than the
+    /// declaration refuses it: the relay ships before the app that sends it.
+    pub tool_catalogue: &'static str,
+    /// Where the outside answers sit in `context_pack`. Never sent: it is how
+    /// [`PanelTurnV1::cited_pack`] leaves an outside server's text out of
+    /// what a card's ids may cite.
+    #[serde(skip)]
+    pub outside_answers: Option<std::ops::Range<usize>>,
 }
 
 /// One turn, addressed to one workspace. Untagged because the workspace is
@@ -456,11 +469,18 @@ impl PanelTurnV1 {
         }
     }
 
-    pub(crate) fn context_pack(&self) -> Option<&str> {
-        match self {
-            Self::Config(_) => None,
-            Self::Chat(turn) => turn.context_pack.as_deref(),
-        }
+    /// The pack less the outside answers in it: what a card's ids may cite.
+    /// An outside server's text is that server's word, so an id it printed
+    /// names nothing this Mac showed the model.
+    pub(crate) fn cited_pack(&self) -> Option<std::borrow::Cow<'_, str>> {
+        let Self::Chat(turn) = self else {
+            return None;
+        };
+        let pack = turn.context_pack.as_deref()?;
+        let Some(range) = &turn.outside_answers else {
+            return Some(pack.into());
+        };
+        Some(format!("{}{}", pack.get(..range.start)?, pack.get(range.end..)?).into())
     }
 
     /// Whether this turn let the model ask for Sona tools. A config turn
@@ -622,6 +642,56 @@ pub enum SonaChatActionV1 {
         connection_id: String,
         session_id: MeetingSessionId,
     },
+    CreateTask {
+        reason: String,
+        title: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        details: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        priority: Option<u8>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        due: Option<String>,
+    },
+    UpdateTask {
+        reason: String,
+        task_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        details: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        priority: Option<u8>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        due: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project_id: Option<String>,
+    },
+    SaveProject {
+        reason: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project_id: Option<String>,
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+    },
+    EditNote {
+        reason: String,
+        note_id: String,
+        body: String,
+    },
+    /// One call to an owner-enabled read-only tool on an outside MCP server.
+    /// `arguments` is one JSON object as text. Its result rides in the next
+    /// turn's pack.
+    CallOutsideTool {
+        reason: String,
+        server: String,
+        tool: String,
+        arguments: String,
+    },
 }
 
 impl SonaChatActionV1 {
@@ -635,7 +705,12 @@ impl SonaChatActionV1 {
             | Self::DraftEmail { reason, .. }
             | Self::PostSlack { reason, .. }
             | Self::CreateCalendarEvent { reason, .. }
-            | Self::SendNotes { reason, .. } => reason,
+            | Self::SendNotes { reason, .. }
+            | Self::CreateTask { reason, .. }
+            | Self::UpdateTask { reason, .. }
+            | Self::SaveProject { reason, .. }
+            | Self::EditNote { reason, .. }
+            | Self::CallOutsideTool { reason, .. } => reason,
         }
     }
 
@@ -744,6 +819,127 @@ impl SonaChatActionV1 {
                     return Err(ProposalValidationError::InvalidAction);
                 }
                 vec![connection_id.clone(), session_id.uuid().to_string()]
+            }
+            Self::CreateTask {
+                title,
+                details,
+                project_id,
+                priority,
+                due,
+                ..
+            } => {
+                if !is_message_text(title, MAX_ACTION_TEXT_BYTES)
+                    || title.contains(['\n', '\t'])
+                    || details.as_deref().is_some_and(|d| {
+                        !d.is_empty() && !is_message_text(d, MAX_ACTION_BODY_BYTES)
+                    })
+                    || priority.is_some_and(|p| p > 4)
+                    || due
+                        .as_deref()
+                        .is_some_and(|d| crate::planning::work::chat::DueEdit::named(d).is_none())
+                {
+                    return Err(ProposalValidationError::InvalidAction);
+                }
+                if let Some(pid) = project_id {
+                    if uuid::Uuid::parse_str(pid).is_err() {
+                        return Err(ProposalValidationError::InvalidAction);
+                    }
+                    vec![pid.clone()]
+                } else {
+                    Vec::new()
+                }
+            }
+            Self::UpdateTask {
+                task_id,
+                title,
+                details,
+                status,
+                priority,
+                due,
+                project_id,
+                ..
+            } => {
+                if uuid::Uuid::parse_str(task_id).is_err()
+                    || (title.is_none()
+                        && details.is_none()
+                        && status.is_none()
+                        && priority.is_none()
+                        && due.is_none()
+                        && project_id.is_none())
+                    || title.as_deref().is_some_and(|t| {
+                        !is_message_text(t, MAX_ACTION_TEXT_BYTES) || t.contains(['\n', '\t'])
+                    })
+                    || details.as_deref().is_some_and(|d| {
+                        !d.is_empty() && !is_message_text(d, MAX_ACTION_BODY_BYTES)
+                    })
+                    || status
+                        .as_deref()
+                        .is_some_and(|s| crate::planning::work::chat::status_named(s).is_none())
+                    || priority.is_some_and(|p| p > 4)
+                    || due
+                        .as_deref()
+                        .is_some_and(|d| crate::planning::work::chat::DueEdit::named(d).is_none())
+                {
+                    return Err(ProposalValidationError::InvalidAction);
+                }
+                let mut ids = vec![task_id.clone()];
+                if let Some(pid) = project_id.as_deref().filter(|pid| *pid != "none") {
+                    if uuid::Uuid::parse_str(pid).is_err() {
+                        return Err(ProposalValidationError::InvalidAction);
+                    }
+                    ids.push(pid.to_owned());
+                }
+                ids
+            }
+            Self::SaveProject {
+                project_id,
+                name,
+                description,
+                ..
+            } => {
+                if !is_message_text(name, MAX_ACTION_TEXT_BYTES)
+                    || name.contains(['\n', '\t'])
+                    || description.as_deref().is_some_and(|d| {
+                        !d.is_empty() && !is_message_text(d, MAX_ACTION_BODY_BYTES)
+                    })
+                {
+                    return Err(ProposalValidationError::InvalidAction);
+                }
+                if let Some(pid) = project_id {
+                    if uuid::Uuid::parse_str(pid).is_err() {
+                        return Err(ProposalValidationError::InvalidAction);
+                    }
+                    vec![pid.clone()]
+                } else {
+                    Vec::new()
+                }
+            }
+            Self::EditNote { note_id, body, .. } => {
+                if uuid::Uuid::parse_str(note_id).is_err()
+                    || (!body.is_empty() && !is_message_text(body, MAX_ACTION_BODY_BYTES))
+                {
+                    return Err(ProposalValidationError::InvalidAction);
+                }
+                vec![note_id.clone()]
+            }
+            Self::CallOutsideTool {
+                server,
+                tool,
+                arguments,
+                ..
+            } => {
+                let single_line = |text: &str| {
+                    is_message_text(text, MAX_ACTION_TEXT_BYTES) && !text.contains(['\n', '\t'])
+                };
+                if !single_line(server)
+                    || !single_line(tool)
+                    || arguments.len() > MAX_ACTION_BODY_BYTES
+                    || !serde_json::from_str::<serde_json::Value>(arguments)
+                        .is_ok_and(|value| value.is_object())
+                {
+                    return Err(ProposalValidationError::InvalidAction);
+                }
+                Vec::new()
             }
         };
         for id in cited {
@@ -855,8 +1051,9 @@ impl SonaAgentResponseV1 {
                  * that checked out and dropping the rest would leave the
                  * reader a card set that no longer matches what the assistant
                  * said it would do. */
+                let cited = turn.cited_pack();
                 for action in actions {
-                    action.validate(turn.context_pack())?;
+                    action.validate(cited.as_deref())?;
                 }
                 Ok(())
             }
@@ -1435,20 +1632,21 @@ mod tests {
             locale: "en".to_string(),
             app_version: "1.0.0".to_string(),
             reply_is_json: false,
+            tool_catalogue: crate::query::tools::TOOL_CATALOGUE_VERSION,
+            outside_answers: None,
         }
     }
 
     #[test]
     fn a_chat_turn_carries_a_pack_where_the_config_turn_carries_a_snapshot() {
-        let turn = chat_turn();
+        let mut turn = chat_turn();
+        turn.outside_answers = Some(0..4);
         assert_eq!(turn.validate(), Ok(()));
         let wire = serde_json::to_value(PanelTurnV1::Chat(turn)).expect("chat turn serializes");
         let object = wire.as_object().expect("turn is an object");
-        /* Nine required fields plus one declaration. The relay checks the nine
-         * exactly and checks `reply_is_json` apart from them, treating absence
-         * as false — which is why this one could be added without bumping the
-         * protocol version, and why a relay that predates it is not broken by
-         * a client that sends it. */
+        /* Nine required fields plus two declarations. The relay checks the
+         * nine exactly and checks `reply_is_json` and `tool_catalogue` apart
+         * from them. Where the outside answers sit in the pack stays here. */
         assert_eq!(
             object.keys().map(String::as_str).collect::<BTreeSet<_>>(),
             BTreeSet::from([
@@ -1462,6 +1660,7 @@ mod tests {
                 "locale",
                 "app_version",
                 "reply_is_json",
+                "tool_catalogue",
             ])
         );
         assert_eq!(
@@ -1469,6 +1668,41 @@ mod tests {
             "a panel turn is read by a person, so it asks for no shape"
         );
         assert_eq!(object["protocol_version"], SONA_CHAT_TURN_VERSION);
+        assert_eq!(
+            object["tool_catalogue"], "sona-tools/2",
+            "the relay offers only the tools and cards of the catalogue a turn names"
+        );
+    }
+
+    /// An id an outside server printed names nothing Sona showed the model,
+    /// so a card citing it is refused like an invented one.
+    #[test]
+    fn a_card_may_not_cite_an_id_only_an_outside_answer_printed() {
+        let shown = "3c9e8f1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b";
+        let printed = "7f0c2d4e-1b2a-4c3d-8e9f-a0b1c2d3e4f5";
+        let evidence = format!("note sona://note/{shown}");
+        let answers = format!("outside tool results\n{{\"text\":\"note {printed}\"}}");
+        let mut turn = chat_turn();
+        turn.context_pack = Some(format!("{evidence}\n\n{answers}"));
+        let start = evidence.len() + 2;
+        turn.outside_answers = Some(start..start + answers.len());
+        let turn = PanelTurnV1::Chat(turn);
+        let edit = |note_id: &str| SonaAgentResponseV1::Text {
+            message: "Here is the note with the date added.".to_string(),
+            actions: vec![SonaChatActionV1::EditNote {
+                reason: "You asked me to add the date.".to_string(),
+                note_id: note_id.to_string(),
+                body: "Launch on the 27th.".to_string(),
+            }],
+            steps: Vec::new(),
+        };
+        let allowed = SonaAllowedValuesV1::default();
+
+        assert_eq!(edit(shown).validate(&turn, &allowed), Ok(()));
+        assert_eq!(
+            edit(printed).validate(&turn, &allowed),
+            Err(ProposalValidationError::ForeignActionId)
+        );
     }
 
     fn config_turn() -> SonaAgentTurnV1 {
@@ -1612,6 +1846,8 @@ mod tests {
             locale: dense("en-GB-oxendict-", 64),
             app_version: dense("1.0.0-rc.1+build.", 128),
             reply_is_json: true,
+            tool_catalogue: crate::query::tools::TOOL_CATALOGUE_VERSION,
+            outside_answers: None,
         };
         assert_eq!(
             turn.user_message.len()
@@ -2103,5 +2339,122 @@ mod tests {
                 Err(ProposalValidationError::InvalidAction)
             );
         }
+    }
+
+    #[test]
+    fn work_actions_validate_fields_and_require_cited_ids() {
+        let task_id = "11111111-1111-4111-8111-111111111111".to_string();
+        let project_id = "22222222-2222-4222-8222-222222222222".to_string();
+        let note_id = "33333333-3333-4333-8333-333333333333".to_string();
+        let foreign = "99999999-9999-4999-8999-999999999999".to_string();
+        let pack = format!("task {task_id} project {project_id} note {note_id}");
+
+        let create = SonaChatActionV1::CreateTask {
+            reason: "You asked to track it.".into(),
+            title: "Ship release".into(),
+            details: Some("Check changelog.".into()),
+            project_id: Some(project_id.clone()),
+            priority: Some(2),
+            due: Some("2026-12-01".into()),
+        };
+        assert_eq!(create.validate(Some(&pack)), Ok(()));
+        assert_eq!(
+            create.validate(None),
+            Err(ProposalValidationError::ForeignActionId)
+        );
+
+        let update = SonaChatActionV1::UpdateTask {
+            reason: "Mark it done.".into(),
+            task_id: task_id.clone(),
+            title: None,
+            details: None,
+            status: Some("done".into()),
+            priority: None,
+            due: Some("none".into()),
+            project_id: None,
+        };
+        assert_eq!(update.validate(Some(&pack)), Ok(()));
+        let empty_update = SonaChatActionV1::UpdateTask {
+            reason: "Nothing changes.".into(),
+            task_id: task_id.clone(),
+            title: None,
+            details: None,
+            status: None,
+            priority: None,
+            due: None,
+            project_id: None,
+        };
+        assert_eq!(
+            empty_update.validate(Some(&pack)),
+            Err(ProposalValidationError::InvalidAction)
+        );
+        let foreign_update = SonaChatActionV1::UpdateTask {
+            reason: "Mark it done.".into(),
+            task_id: foreign.clone(),
+            title: None,
+            details: None,
+            status: Some("done".into()),
+            priority: None,
+            due: None,
+            project_id: None,
+        };
+        assert_eq!(
+            foreign_update.validate(Some(&pack)),
+            Err(ProposalValidationError::ForeignActionId)
+        );
+
+        let save_project = SonaChatActionV1::SaveProject {
+            reason: "Update summary.".into(),
+            project_id: Some(project_id),
+            name: "Q4 Launch".into(),
+            description: Some("Updated scope.".into()),
+        };
+        assert_eq!(save_project.validate(Some(&pack)), Ok(()));
+
+        let edit_note = SonaChatActionV1::EditNote {
+            reason: "Add meeting takeaways.".into(),
+            note_id,
+            body: "# Notes\n- Done".into(),
+        };
+        assert_eq!(edit_note.validate(Some(&pack)), Ok(()));
+        let foreign_note = SonaChatActionV1::EditNote {
+            reason: "Add meeting takeaways.".into(),
+            note_id: foreign,
+            body: "# Notes\n- Done".into(),
+        };
+        assert_eq!(
+            foreign_note.validate(Some(&pack)),
+            Err(ProposalValidationError::ForeignActionId)
+        );
+    }
+
+    #[test]
+    fn an_outside_call_card_carries_one_json_object_of_arguments() {
+        let call = |arguments: &str| SonaChatActionV1::CallOutsideTool {
+            reason: "You asked about S-12.".into(),
+            server: "Linear Docs".into(),
+            tool: "search".into(),
+            arguments: arguments.into(),
+        };
+
+        assert_eq!(call("{\"q\":\"S-12\"}").validate(None), Ok(()));
+        assert_eq!(call("{}").validate(None), Ok(()));
+        for bad in ["[1, 2]", "\"text\"", "{", ""] {
+            assert_eq!(
+                call(bad).validate(None),
+                Err(ProposalValidationError::InvalidAction),
+                "{bad:?}"
+            );
+        }
+        let multi_line = SonaChatActionV1::CallOutsideTool {
+            reason: "You asked.".into(),
+            server: "Linear\nDocs".into(),
+            tool: "search".into(),
+            arguments: "{}".into(),
+        };
+        assert_eq!(
+            multi_line.validate(None),
+            Err(ProposalValidationError::InvalidAction)
+        );
     }
 }

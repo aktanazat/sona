@@ -1512,6 +1512,10 @@ pub struct AppSettings {
     pub agent_panel_safe_appearance_auto_apply: bool,
     #[serde(default)]
     pub agent_panel_model_selection: Option<crate::agent_panel::AgentModelSelectionV1>,
+    /// Outside MCP servers Talk to Sona may call read-only. Tokens stay in
+    /// Keychain under each server's id; settings keep only whether one is saved.
+    #[serde(default)]
+    pub agent_mcp_servers: Vec<crate::agent_panel::AgentMcpServer>,
     /// Literal phrase lists scanned against every finished meeting transcript.
     /// Empty means no tracker is watching, which is the shipped state.
     #[serde(default)]
@@ -2346,6 +2350,7 @@ pub fn get_default_settings() -> AppSettings {
         agent_panel_last_successful_connection_at: None,
         agent_panel_safe_appearance_auto_apply: false,
         agent_panel_model_selection: None,
+        agent_mcp_servers: Vec::new(),
         trackers_list: Vec::new(),
         meeting_notes_template: MeetingNotesTemplate::General,
         meeting_notes_custom_template_id: None,
@@ -3507,7 +3512,9 @@ pub fn change_dictation_languages_setting(
     app: AppHandle,
     languages: Vec<String>,
 ) -> Result<(), String> {
-    update_settings(&app, |settings| apply_dictation_languages(settings, languages))?;
+    update_settings(&app, |settings| {
+        apply_dictation_languages(settings, languages)
+    })?;
     Ok(())
 }
 

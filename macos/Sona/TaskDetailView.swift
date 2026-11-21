@@ -2384,6 +2384,7 @@ enum WorkActivityText {
             switch entry.via {
             case "mcp"?: "\(entry.agent ?? "An agent") via MCP"
             case "cli"?: "\(entry.agent ?? "An agent") via the command line"
+            case "chat"?: "\(entry.agent ?? "Talk to Sona"), approved by you in chat,"
             default: entry.agent ?? "An agent"
             }
         }

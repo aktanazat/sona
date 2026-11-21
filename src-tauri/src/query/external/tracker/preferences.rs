@@ -34,9 +34,7 @@ use crate::modes::{self, ModeDefinition, RequestedEngine};
 use crate::planning;
 use crate::query::external::{
     beacon, command_error, kept_local, meeting_refusal, person_id, session_id, store,
-    visible_meeting,
-    ExternalError,
-    ExternalErrorCode, ExternalScope, READ_SCOPES, WRITE_SCOPES,
+    visible_meeting, ExternalError, ExternalErrorCode, ExternalScope, READ_SCOPES, WRITE_SCOPES,
 };
 use crate::query::{KeptLocal, QueryError, QUERY_SCHEMA_VERSION};
 use crate::settings::{
@@ -116,6 +114,8 @@ pub enum SettingsVerb {
     /// The connections, their automatic-send rules, and recent sends. Never
     /// a token.
     Connections,
+    /// Outside MCP servers listed for Talk to Sona. Never a token.
+    McpServers,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum, Serialize)]
@@ -232,7 +232,12 @@ pub struct SettingArgs {
 #[derive(Args, Clone, Debug, Eq, PartialEq)]
 pub struct ProfilePhotoArgs {
     /// A PNG or JPEG. Cropped to its middle square, at most 512 pixels across.
-    #[arg(long, value_name = "PATH", required_unless_present = "remove", conflicts_with = "remove")]
+    #[arg(
+        long,
+        value_name = "PATH",
+        required_unless_present = "remove",
+        conflicts_with = "remove"
+    )]
     pub file: Option<PathBuf>,
     /// Take the photo off.
     #[arg(long)]
@@ -400,6 +405,12 @@ pub struct SavedPromptSaveArgs {
     /// The saved prompt to change.
     #[arg(long)]
     pub id: Option<Uuid>,
+    /// Make it a skill: Talk to Sona and automations may call it by name.
+    #[arg(long, conflicts_with = "no_skill")]
+    pub skill: bool,
+    /// Stop it being a skill. Without either flag it stays as it is.
+    #[arg(long)]
+    pub no_skill: bool,
     #[command(flatten)]
     pub change: Change,
 }
@@ -448,7 +459,11 @@ pub struct SeriesTemplateArgs {
     /// A meeting in the series.
     #[arg(value_name = "MEETING_ID")]
     pub meeting: String,
-    #[arg(value_enum, required_unless_present = "custom", conflicts_with = "custom")]
+    #[arg(
+        value_enum,
+        required_unless_present = "custom",
+        conflicts_with = "custom"
+    )]
     pub template: Option<SeriesTemplateChoice>,
     /// One of your own templates, by id.
     #[arg(long)]
@@ -557,11 +572,7 @@ impl FilingArgs {
 impl SettingsVerb {
     pub(super) const fn required_scopes(&self) -> &'static [ExternalScope] {
         match self.change() {
-            None
-            | Some(Change {
-                dry_run: true,
-                ..
-            }) => READ_SCOPES,
+            None | Some(Change { dry_run: true, .. }) => READ_SCOPES,
             Some(_) => WRITE_SCOPES,
         }
     }
@@ -574,7 +585,8 @@ impl SettingsVerb {
             | Self::SavedPromptRuns(_)
             | Self::Series(_)
             | Self::Evening
-            | Self::Connections => None,
+            | Self::Connections
+            | Self::McpServers => None,
             Self::Setting(SettingArgs { change, .. })
             | Self::SettingReset(SettingResetArgs { change, .. })
             | Self::ProfilePhoto(ProfilePhotoArgs { change, .. })
@@ -619,6 +631,7 @@ impl SettingsVerb {
             Self::Evening => "evening",
             Self::Filing(_) => "filing",
             Self::Connections => "connections",
+            Self::McpServers => "mcp-servers",
         }
     }
 }
@@ -686,7 +699,9 @@ fn log_level(value: &str) -> Result<LogLevel, String> {
         "info" => Ok(LogLevel::Info),
         "warn" => Ok(LogLevel::Warn),
         "error" => Ok(LogLevel::Error),
-        other => Err(format!("{other} is not one of: trace, debug, info, warn, error.")),
+        other => Err(format!(
+            "{other} is not one of: trace, debug, info, warn, error."
+        )),
     }
 }
 
@@ -855,7 +870,9 @@ fn setting_change<'a>(args: &'a SettingArgs) -> SettingsChange<'a> {
             }),
         ),
         SettingKey::DictationLanguages => (
-            show(|s| json!({ "languages": s.dictation_languages, "selected": s.selected_language })),
+            show(
+                |s| json!({ "languages": s.dictation_languages, "selected": s.selected_language }),
+            ),
             apply(move |s| {
                 let languages: Vec<String> = value
                     .split(',')
@@ -1044,8 +1061,9 @@ fn run_view(run: &WorkflowRunReceipt) -> RunView<'_> {
 }
 
 fn workflow_id(value: &str) -> Result<WorkflowId, ExternalError> {
-    serde_json::from_value(json!(value.trim()))
-        .map_err(|_| ExternalError::invalid(format!("No workflow {value}. See: sona work workflows.")))
+    serde_json::from_value(json!(value.trim())).map_err(|_| {
+        ExternalError::invalid(format!("No workflow {value}. See: sona work workflows."))
+    })
 }
 
 #[derive(Serialize)]
@@ -1255,7 +1273,8 @@ impl Tracker<'_> {
             SettingsVerb::Setting(args) => {
                 let change = setting_change(args);
                 let cleared_briefs = args.key == SettingKey::MeetingPrep;
-                self.change_settings(&args.change, change, cleared_briefs).await
+                self.change_settings(&args.change, change, cleared_briefs)
+                    .await
             }
             SettingsVerb::SettingReset(args) => {
                 let change = reset_change(args)?;
@@ -1263,8 +1282,8 @@ impl Tracker<'_> {
             }
             SettingsVerb::ProfilePhoto(args) => self.profile_photo(args).await,
             SettingsVerb::ModeSave(args) => {
-                let mode: ModeDefinition = parsed("--mode-json", &args.mode_json)
-                    .map_err(ExternalError::invalid)?;
+                let mode: ModeDefinition =
+                    parsed("--mode-json", &args.mode_json).map_err(ExternalError::invalid)?;
                 let change = SettingsChange {
                     what: verb.name().to_owned(),
                     request: json!({ "mode": mode }),
@@ -1382,7 +1401,14 @@ impl Tracker<'_> {
             SettingsVerb::SeriesDigest(args) => self.series_digest(args).await,
             SettingsVerb::Evening => Ok(read(verb.name(), &self.evening_card().await?)),
             SettingsVerb::Filing(args) => self.filing_decide(args).await,
-            SettingsVerb::Connections => Ok(read(verb.name(), &connections(&*store(self.meetings).await?)?)),
+            SettingsVerb::Connections => Ok(read(
+                verb.name(),
+                &connections(&*store(self.meetings).await?)?,
+            )),
+            SettingsVerb::McpServers => Ok(read(
+                verb.name(),
+                &json!({ "servers": crate::agent_panel::mcp_servers::list(self.app) }),
+            )),
         }
     }
 
@@ -1410,9 +1436,7 @@ impl Tracker<'_> {
                 self.meetings
                     .store()
                     .await
-                    .map_err(|_| {
-                        refusal(self.history, planning::CONVERSATIONS_CLOSED.to_owned())
-                    })?
+                    .map_err(|_| refusal(self.history, planning::CONVERSATIONS_CLOSED.to_owned()))?
                     .clear_briefs()
                     .map_err(|_| {
                         ExternalError::new(
@@ -1466,7 +1490,11 @@ impl Tracker<'_> {
             return Ok(None);
         };
         Ok(self
-            .settings_replay(&operation_id.to_string(), &ledger(what), &request.to_string())?
+            .settings_replay(
+                &operation_id.to_string(),
+                &ledger(what),
+                &request.to_string(),
+            )?
             .map(|answer| WorkAnswer::Settings(Box::new(answer))))
     }
 
@@ -1630,7 +1658,10 @@ impl Tracker<'_> {
         Ok(read("workflows", &value))
     }
 
-    async fn workflow_enable(&self, args: &WorkflowEnableArgs) -> Result<WorkAnswer, ExternalError> {
+    async fn workflow_enable(
+        &self,
+        args: &WorkflowEnableArgs,
+    ) -> Result<WorkAnswer, ExternalError> {
         let id = workflow_id(&args.workflow)?;
         let enabled = !args.off;
         let request = json!({ "workflow_id": id, "enabled": enabled });
@@ -1674,13 +1705,18 @@ impl Tracker<'_> {
         .await
     }
 
-    async fn saved_prompt_save(&self, args: &SavedPromptSaveArgs) -> Result<WorkAnswer, ExternalError> {
+    async fn saved_prompt_save(
+        &self,
+        args: &SavedPromptSaveArgs,
+    ) -> Result<WorkAnswer, ExternalError> {
         let request = json!({
             "id": args.id,
             "name": args.name,
             "body": args.body,
             "about": format!("{:?}", args.about),
             "schema": args.schema,
+            "skill": args.skill,
+            "no_skill": args.no_skill,
         });
         if let Some(done) = self.settings_replayed("saved-prompt-save", &args.change, &request)? {
             return Ok(done);
@@ -1704,11 +1740,20 @@ impl Tracker<'_> {
             output: args
                 .schema
                 .clone()
-                .map_or(PromptOutput::Text, |json_schema| PromptOutput::Schema { json_schema }),
+                .map_or(PromptOutput::Text, |json_schema| PromptOutput::Schema {
+                    json_schema,
+                }),
             target: match args.about {
                 PromptAbout::Meeting => PromptTarget::Meeting,
                 PromptAbout::Person => PromptTarget::Person,
                 PromptAbout::Series => PromptTarget::Series,
+            },
+            skill: if args.skill {
+                true
+            } else if args.no_skill {
+                false
+            } else {
+                before.is_some_and(|prompt| prompt.skill)
             },
             expected_revision: list.revision,
         };
@@ -1717,23 +1762,39 @@ impl Tracker<'_> {
                 "A saved prompt needs a name up to 120 bytes, a body up to 4 KB, and a schema that is one JSON object.",
             )
         })?;
+        if save.skill
+            && list
+                .skill(&name)
+                .is_some_and(|other| Some(other.prompt_id) != prompt_id)
+        {
+            return Err(ExternalError::invalid(format!(
+                "Another skill is already called \"{name}\". Skills are called by name, so pick another one."
+            )));
+        }
         let plan = StoreChange {
             what: "saved-prompt-save",
             doing: "saving prompts",
             change: &args.change,
             before: json!(before),
-            after: json!({ "prompt_id": prompt_id, "name": name, "body": body, "output": output, "target": save.target }),
+            after: json!({ "prompt_id": prompt_id, "name": name, "body": body, "output": output, "target": save.target, "skill": save.skill }),
             request,
         };
         self.store_change(plan, |operation_id| async move {
             save.operation_id = operation_id;
-            let saved = self.meetings.save_saved_prompt(save).await.map_err(meeting_error)?;
+            let saved = self
+                .meetings
+                .save_saved_prompt(save)
+                .await
+                .map_err(meeting_error)?;
             Ok(saved.prompts)
         })
         .await
     }
 
-    async fn saved_prompt_delete(&self, args: &SavedPromptDeleteArgs) -> Result<WorkAnswer, ExternalError> {
+    async fn saved_prompt_delete(
+        &self,
+        args: &SavedPromptDeleteArgs,
+    ) -> Result<WorkAnswer, ExternalError> {
         let request = json!({ "id": args.id });
         if let Some(done) = self.settings_replayed("saved-prompt-delete", &args.change, &request)? {
             return Ok(done);
@@ -1772,7 +1833,10 @@ impl Tracker<'_> {
     /// The answers saved prompts gave about one noun. A person who was in a
     /// meeting kept on this Mac has their answers left out, since an answer
     /// may quote that meeting.
-    async fn saved_prompt_runs(&self, args: &SavedPromptRunsArgs) -> Result<WorkAnswer, ExternalError> {
+    async fn saved_prompt_runs(
+        &self,
+        args: &SavedPromptRunsArgs,
+    ) -> Result<WorkAnswer, ExternalError> {
         let mut left_out = false;
         let target = match (&args.meeting, &args.person, &args.series) {
             (Some(meeting), _, _) => {
@@ -1782,7 +1846,9 @@ impl Tracker<'_> {
                 store
                     .session_snapshot(session)
                     .map_err(|error| meeting_refusal(session, error))?;
-                PromptTargetRef::Meeting { session_id: session }
+                PromptTargetRef::Meeting {
+                    session_id: session,
+                }
             }
             (_, Some(person), _) => {
                 let person_id = person_id(&self.board().await?.person(person)?.id)?;
@@ -1809,7 +1875,10 @@ impl Tracker<'_> {
         let runs = if left_out {
             Vec::new()
         } else {
-            self.meetings.prompt_runs(target).await.map_err(meeting_error)?
+            self.meetings
+                .prompt_runs(target)
+                .await
+                .map_err(meeting_error)?
         };
         Ok(read(
             "saved-prompt-runs",
@@ -1839,7 +1908,10 @@ impl Tracker<'_> {
         Ok((key, preferences))
     }
 
-    async fn series_template(&self, args: &SeriesTemplateArgs) -> Result<WorkAnswer, ExternalError> {
+    async fn series_template(
+        &self,
+        args: &SeriesTemplateArgs,
+    ) -> Result<WorkAnswer, ExternalError> {
         let template = args.template.and_then(SeriesTemplateChoice::notes_template);
         let custom = args.custom.map(MeetingTemplateId::from_uuid);
         let request = json!({ "meeting": args.meeting, "template": template, "custom": custom });
@@ -1911,7 +1983,14 @@ impl Tracker<'_> {
             .home_evening(self.history)
             .await
             .map_err(|message| ExternalError::new(ExternalErrorCode::Failed, message))?;
-        evening_view(&store, &hidden, card.local_day, card.lines.map(|lines| lines.lines), card.has_activity, card.unfiled)
+        evening_view(
+            &store,
+            &hidden,
+            card.local_day,
+            card.lines.map(|lines| lines.lines),
+            card.has_activity,
+            card.unfiled,
+        )
     }
 
     async fn filing_decide(&self, args: &FilingArgs) -> Result<WorkAnswer, ExternalError> {
@@ -2139,12 +2218,13 @@ fn connections(store: &MeetingStore) -> Result<ConnectionsView, ExternalError> {
     let series_preferences = store
         .series_preferences_many(&rule_series)
         .map_err(store_failed)?;
-    let (rules, kept): (Vec<_>, Vec<_>) = all_rules.into_iter().partition(|rule| match &rule.scope {
-        SendScope::Series(key) => !series_preferences
-            .get(key.trim())
-            .is_some_and(|preferences| preferences.remote_intelligence_opt_out),
-        SendScope::All | SendScope::Folder(_) => true,
-    });
+    let (rules, kept): (Vec<_>, Vec<_>) =
+        all_rules.into_iter().partition(|rule| match &rule.scope {
+            SendScope::Series(key) => !series_preferences
+                .get(key.trim())
+                .is_some_and(|preferences| preferences.remote_intelligence_opt_out),
+            SendScope::All | SendScope::Folder(_) => true,
+        });
     let rules = rules
         .into_iter()
         .map(|rule| RuleView {
@@ -2246,7 +2326,10 @@ fn reset_change(args: &SettingResetArgs) -> Result<SettingsChange<'_>, ExternalE
                 what: "shortcut-reset".to_owned(),
                 request: json!({ "reset": "shortcut", "id": id }),
                 show: show(move |s| {
-                    json!(s.bindings.get(&shown).map(|binding| binding.current_binding.clone()))
+                    json!(s
+                        .bindings
+                        .get(&shown)
+                        .map(|binding| binding.current_binding.clone()))
                 }),
                 apply: apply(move |s| {
                     let default = s
@@ -2255,7 +2338,9 @@ fn reset_change(args: &SettingResetArgs) -> Result<SettingsChange<'_>, ExternalE
                         .map(|binding| binding.default_binding.clone())
                         .ok_or_else(|| format!("No shortcut {id}."))?;
                     if let Some(other) = s.bindings.values().find(|binding| {
-                        binding.id != id && !default.is_empty() && binding.current_binding == default
+                        binding.id != id
+                            && !default.is_empty()
+                            && binding.current_binding == default
                     }) {
                         return Err(format!(
                             "{default} is {}'s shortcut now. Change that one first.",
@@ -2378,7 +2463,11 @@ pub(super) fn text(answer: &WorkAnswer, text: &mut String) {
     }
     match &answer.before {
         Some(_) if answer.unchanged => {
-            let lead = if answer.dry_run { "Nothing would change" } else { "Nothing changed" };
+            let lead = if answer.dry_run {
+                "Nothing would change"
+            } else {
+                "Nothing changed"
+            };
             match &answer.value {
                 Value::Object(_) | Value::Array(_) => {
                     let _ = writeln!(text, "{lead}: {} is already as asked.", answer.what);
@@ -2393,7 +2482,11 @@ pub(super) fn text(answer: &WorkAnswer, text: &mut String) {
             }
         }
         Some(before) => {
-            let verb = if answer.dry_run { "Would change" } else { "Changed" };
+            let verb = if answer.dry_run {
+                "Would change"
+            } else {
+                "Changed"
+            };
             let _ = writeln!(text, "{verb} {}.", answer.what);
             write_value(text, 0, "before", before);
             write_value(text, 0, "after", &answer.value);
@@ -2424,7 +2517,12 @@ mod tests {
 
     /// A library with one open meeting and one whose series is kept on this
     /// Mac.
-    async fn library() -> (TempDir, Arc<MeetingStore>, MeetingSessionId, MeetingSessionId) {
+    async fn library() -> (
+        TempDir,
+        Arc<MeetingStore>,
+        MeetingSessionId,
+        MeetingSessionId,
+    ) {
         let directory = TempDir::new().unwrap();
         let secrets = Arc::new(SecretManager::with_backend(Arc::new(
             MemorySecretBackend::new(),
@@ -2511,7 +2609,11 @@ mod tests {
             .unwrap();
             assert_eq!(card.lines, None);
             assert!(card.lines_left_out);
-            let shown: Vec<_> = card.unfiled.iter().map(|recording| recording.session_id).collect();
+            let shown: Vec<_> = card
+                .unfiled
+                .iter()
+                .map(|recording| recording.session_id)
+                .collect();
             assert_eq!(shown, [open]);
         });
     }
@@ -2693,7 +2795,11 @@ mod tests {
                     .unwrap();
             }
             let listed = connections(&store).unwrap();
-            let sent: Vec<_> = listed.receipts.iter().map(|receipt| receipt.id.as_str()).collect();
+            let sent: Vec<_> = listed
+                .receipts
+                .iter()
+                .map(|receipt| receipt.id.as_str())
+                .collect();
             assert_eq!(sent, ["sent-open"]);
             let rules: Vec<_> = listed.rules.iter().map(|rule| rule.id.as_str()).collect();
             assert_eq!(rules, ["rule-all", "rule-pricing"]);
@@ -2787,7 +2893,11 @@ mod tests {
         asked.id = "agent-made".to_owned();
         save_mode(&asked, &mut settings).unwrap();
 
-        let made = settings.modes.iter().find(|mode| mode.id == "agent-made").unwrap();
+        let made = settings
+            .modes
+            .iter()
+            .find(|mode| mode.id == "agent-made")
+            .unwrap();
         assert_eq!(made.asr.requested_engine, RequestedEngine::Local);
         assert_eq!(made.delivery.paste_method, PasteMethod::default());
         assert_eq!(made.delivery.external_script_path, None);

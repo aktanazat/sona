@@ -31,6 +31,20 @@ use crate::meeting::types::{
 };
 use rusqlite::{params, Connection, OptionalExtension};
 
+/// Whether another skill than `prompt_id` already goes by `name`.
+fn skill_name_taken(
+    connection: &Connection,
+    prompt_id: SavedPromptId,
+    name: &str,
+) -> Result<bool, StoreError> {
+    Ok(connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM saved_prompts
+                        WHERE skill = 1 AND lower(trim(name)) = lower(?2) AND prompt_id != ?1)",
+        params![id(prompt_id), name.trim()],
+        |row| row.get(0),
+    )?)
+}
+
 /// How many meetings a person or series prompt reads from. A prompt about a
 /// recurring meeting is about the recent ones; reading every meeting a person
 /// ever attended would spend the whole evidence budget on the oldest of them.
@@ -56,7 +70,7 @@ impl MeetingStore {
         connection
             .query_row(
                 "SELECT prompt_id, name, body, output_kind, json_schema, target,
-                        created_at_utc_ms, updated_at_utc_ms
+                        created_at_utc_ms, updated_at_utc_ms, skill
                    FROM saved_prompts WHERE prompt_id = ?1",
                 params![id(prompt_id)],
                 prompt_columns,
@@ -93,17 +107,21 @@ impl MeetingStore {
             },
             prompts_in,
             |connection, now| {
+                if request.skill && skill_name_taken(connection, prompt_id, &name)? {
+                    return Err(StoreError::Invalid);
+                }
                 connection.execute(
                     "INSERT INTO saved_prompts (
                         prompt_id, name, body, output_kind, json_schema, target,
-                        created_at_utc_ms, updated_at_utc_ms
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
+                        created_at_utc_ms, updated_at_utc_ms, skill
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, ?8)
                      ON CONFLICT(prompt_id) DO UPDATE SET
                         name = excluded.name,
                         body = excluded.body,
                         output_kind = excluded.output_kind,
                         json_schema = excluded.json_schema,
                         target = excluded.target,
+                        skill = excluded.skill,
                         updated_at_utc_ms = excluded.updated_at_utc_ms",
                     params![
                         id(prompt_id),
@@ -112,7 +130,8 @@ impl MeetingStore {
                         output_kind,
                         json_schema,
                         request.target.as_str(),
-                        now
+                        now,
+                        request.skill
                     ],
                 )?;
                 Ok(())
@@ -314,7 +333,7 @@ fn prompts_in(connection: &Connection) -> Result<SavedPromptList, StoreError> {
     let revision = prompts_revision_in(connection)?;
     let mut statement = connection.prepare(
         "SELECT prompt_id, name, body, output_kind, json_schema, target,
-                created_at_utc_ms, updated_at_utc_ms
+                created_at_utc_ms, updated_at_utc_ms, skill
            FROM saved_prompts
           ORDER BY created_at_utc_ms ASC, prompt_id ASC",
     )?;
@@ -331,8 +350,8 @@ fn prompts_in(connection: &Connection) -> Result<SavedPromptList, StoreError> {
     })
 }
 
-/// `(prompt_id, name, body, output_kind, json_schema, target, created, updated)`,
-/// still as SQLite spelled them.
+/// `(prompt_id, name, body, output_kind, json_schema, target, created, updated,
+/// skill)`, still as SQLite spelled them.
 type PromptColumns = (
     String,
     String,
@@ -342,6 +361,7 @@ type PromptColumns = (
     String,
     i64,
     i64,
+    bool,
 );
 
 fn prompt_columns(row: &rusqlite::Row<'_>) -> rusqlite::Result<PromptColumns> {
@@ -354,13 +374,15 @@ fn prompt_columns(row: &rusqlite::Row<'_>) -> rusqlite::Result<PromptColumns> {
         row.get(5)?,
         row.get(6)?,
         row.get(7)?,
+        row.get(8)?,
     ))
 }
 
 /// One row, or the corruption it is. A stored output kind or target this build
 /// does not know is an error rather than a silently dropped prompt.
 fn prompt_from_columns(columns: PromptColumns) -> Result<SavedPrompt, StoreError> {
-    let (prompt_id, name, body, output_kind, json_schema, target, created, updated) = columns;
+    let (prompt_id, name, body, output_kind, json_schema, target, created, updated, skill) =
+        columns;
     let output = match (output_kind.as_str(), json_schema) {
         ("text", _) => PromptOutput::Text,
         ("schema", Some(json_schema)) => PromptOutput::Schema { json_schema },
@@ -372,6 +394,7 @@ fn prompt_from_columns(columns: PromptColumns) -> Result<SavedPrompt, StoreError
         body,
         output,
         target: PromptTarget::from_str(&target).ok_or(StoreError::Corrupt)?,
+        skill,
         created_at_utc_ms: created,
         updated_at_utc_ms: updated,
     })

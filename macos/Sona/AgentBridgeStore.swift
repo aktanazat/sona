@@ -46,6 +46,12 @@ final class AgentBridgeStore {
     /// The composer: which session a reply is for, and its words.
     var replySessionId = ""
     var replyText = ""
+    /// Outside MCP servers Talk to Sona may call read-only.
+    private(set) var mcpServers: [AgentMcpServerSummary] = []
+    private(set) var mcpTools: [String: [AgentMcpToolSummary]] = [:]
+    private(set) var mcpToolsLoading: Set<String> = []
+    private(set) var mcpBusy = false
+    private(set) var mcpError: String?
 
     @ObservationIgnored private let core: Core
 
@@ -80,6 +86,7 @@ final class AgentBridgeStore {
         await refresh()
         await loadSettings()
         await loadHookSnippet()
+        await loadMcpServers()
     }
 
     /// The Refresh button: the observations, the policy, and one more try at
@@ -89,6 +96,82 @@ final class AgentBridgeStore {
             await refresh()
             await loadSettings()
             await loadHookSnippet()
+            await loadMcpServers()
+        }
+    }
+
+    func loadMcpServers() async {
+        do {
+            mcpServers = try await core.request("agent_mcp_servers_list")
+            mcpError = nil
+        } catch {
+            mcpError = Self.reason(error)
+        }
+    }
+
+    func addMcpServer(name: String, url: String, token: String) async -> Bool {
+        mcpBusy = true
+        mcpError = nil
+        defer { mcpBusy = false }
+        let trimmedToken = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        do {
+            mcpServers = try await core.request(
+                "agent_mcp_server_add",
+                [
+                    "name": JSONValue.string(name),
+                    "url": .string(url),
+                    "token": trimmedToken.isEmpty ? .null : .string(trimmedToken),
+                ])
+            return true
+        } catch {
+            mcpError = Self.reason(error)
+            return false
+        }
+    }
+
+    func removeMcpServer(_ id: String) {
+        mcpBusy = true
+        mcpError = nil
+        Task {
+            defer { mcpBusy = false }
+            do {
+                mcpServers = try await core.request("agent_mcp_server_remove", ["id": JSONValue.string(id)])
+                mcpTools.removeValue(forKey: id)
+            } catch {
+                mcpError = Self.reason(error)
+            }
+        }
+    }
+
+    func inspectMcpTools(_ id: String) {
+        guard !mcpToolsLoading.contains(id) else { return }
+        mcpToolsLoading.insert(id)
+        mcpError = nil
+        Task {
+            defer { mcpToolsLoading.remove(id) }
+            do {
+                let tools: [AgentMcpToolSummary] = try await core.request(
+                    "agent_mcp_server_tools", ["id": JSONValue.string(id)])
+                mcpTools[id] = tools
+            } catch {
+                mcpError = Self.reason(error)
+            }
+        }
+    }
+
+    func setMcpTool(_ id: String, tool: String, enabled: Bool) {
+        mcpError = nil
+        Task {
+            do {
+                try await core.request(
+                    "agent_mcp_server_tool_set",
+                    ["id": JSONValue.string(id), "tool": .string(tool), "enabled": .bool(enabled)])
+                if let index = mcpTools[id]?.firstIndex(where: { $0.name == tool }) {
+                    mcpTools[id]?[index].enabled = enabled
+                }
+            } catch {
+                mcpError = Self.reason(error)
+            }
         }
     }
 

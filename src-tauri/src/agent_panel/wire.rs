@@ -92,6 +92,46 @@ pub struct AgentPanelActionV1 {
     pub operation_id: Option<String>,
     pub can_undo: bool,
     pub detail: Option<String>,
+    /// What the card acts on, read on this Mac when the card arrived: the
+    /// consent screen names its target, not only the model's reason.
+    pub context: Option<AgentPanelActionContextV1>,
+}
+
+/// What one card acts on, as this Mac holds it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AgentPanelActionContextV1 {
+    /// The task an `update_task` changes. `project` is the one it is in now;
+    /// `to_project` the one a move puts it in.
+    Task {
+        handle: String,
+        title: String,
+        project: Option<String>,
+        to_project: Option<String>,
+    },
+    /// The project `save_project` renames, or the one `create_task` files
+    /// the new task in.
+    Project {
+        name: String,
+    },
+    Note {
+        title: String,
+    },
+    /// A `call_outside_tool`'s arguments decoded and indented, and every
+    /// string in them longer than a search query.
+    OutsideCall {
+        arguments: String,
+        long_values: Vec<AgentPanelLongValueV1>,
+    },
+}
+
+/// A string argument longer than a search query, by where it sits in the
+/// arguments (`query`, `filter.ids[2]`) and its length in characters.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(deny_unknown_fields)]
+pub struct AgentPanelLongValueV1 {
+    pub path: String,
+    pub chars: u32,
 }
 
 /// One row of the sheet's "Worked for Ns" disclosure.
