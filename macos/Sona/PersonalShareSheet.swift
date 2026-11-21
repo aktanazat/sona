@@ -143,8 +143,10 @@ struct PersonalShareSheet: View {
                 CardRow {
                     Picker("Move to", selection: $destination) {
                         Text("Choose a project or cycle").tag(MoveDestination?.none)
-                        Section("Projects") {
-                            ForEach(projects) { Text($0.title).tag(MoveDestination?.some(.project($0.id))) }
+                        if !projects.isEmpty {
+                            Section("Projects") {
+                                ForEach(projects) { Text($0.title).tag(MoveDestination?.some(.project($0.id))) }
+                            }
                         }
                         if !cycles.isEmpty {
                             Section("Cycles") {

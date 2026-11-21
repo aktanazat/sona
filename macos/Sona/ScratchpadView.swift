@@ -69,6 +69,8 @@ private struct ScratchNoteListPage: View {
                         Button("New personal document") { Task { await store.newPersonalDocument() } }
                     } label: {
                         Image(systemName: "plus")
+                    } primaryAction: {
+                        Task { await store.newNote() }
                     }
                     .menuStyle(.button)
                     .buttonStyle(.icon)
@@ -231,9 +233,13 @@ private struct ScratchNoteEditorPage: View {
         }
     }
 
-    /// What making the open note private undoes, named by what it is filed under.
+    /// What making the open note private undoes, named by what it is filed
+    /// under once that is known.
     private var privateConsequence: String {
-        let filed = (store.memory?.documents ?? []).map(\.title)
+        guard let memory = store.memory else {
+            return "Removes it from its projects and cycles, and from agents' reads"
+        }
+        let filed = memory.documents.map(\.title)
         guard !filed.isEmpty else { return "Agents can no longer read it" }
         return "Removes it from \(filed.formatted(.list(type: .and))) and from agents' reads"
     }
