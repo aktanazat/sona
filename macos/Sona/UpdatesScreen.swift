@@ -8,11 +8,58 @@ struct WorkFeedFilter: Codable, Equatable {
     var initiativeIds: [String] = []
     var labelIds: [String] = []
     var healths: [PlanningProjectHealth] = []
-    var sinceMs: Int64?
+    var since: WorkFeedSince? = .lastDays(7)
 
     /// Whether a project, initiative, label or health narrows it.
     var narrows: Bool {
         !projectIds.isEmpty || !initiativeIds.isEmpty || !labelIds.isEmpty || !healths.isEmpty
+    }
+}
+
+/// Where the feed starts: a fixed moment, or so many days back from each
+/// time it is read. None reaches back to the first update.
+enum WorkFeedSince: Codable, Hashable {
+    case at(Int64)
+    case lastDays(Int)
+
+    /// The starts the Since menu offers.
+    static let choices: [WorkFeedSince?] = [.lastDays(7), .lastDays(30), nil]
+
+    static func title(_ since: WorkFeedSince?) -> String {
+        switch since {
+        case let .at(atMs): "Since \(PlanningFormat.day(atMs))"
+        case let .lastDays(days): days == 1 ? "Last day" : "Last \(days) days"
+        case nil: "All time"
+        }
+    }
+
+    /// "in the last 7 days", "since Nov 3".
+    var span: String {
+        switch self {
+        case let .at(atMs): "since \(PlanningFormat.day(atMs))"
+        case let .lastDays(days): days == 1 ? "in the last day" : "in the last \(days) days"
+        }
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case at, lastDays
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        if let atMs = try container.decodeIfPresent(Int64.self, forKey: .at) {
+            self = .at(atMs)
+        } else {
+            self = .lastDays(try container.decode(Int.self, forKey: .lastDays))
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case let .at(atMs): try container.encode(atMs, forKey: .at)
+        case let .lastDays(days): try container.encode(days, forKey: .lastDays)
+        }
     }
 }
 
@@ -74,38 +121,6 @@ enum WorkUpdateEntry: Decodable, Identifiable, Equatable {
     }
 }
 
-/// How far back the feed reaches.
-enum UpdatesSince: CaseIterable {
-    case week, month, all
-
-    /// The nearest choice to a saved feed's start.
-    init(_ sinceMs: Int64?, now: Int64) {
-        guard let sinceMs else {
-            self = .all
-            return
-        }
-        self = now - sinceMs <= 8 * Self.day ? .week : .month
-    }
-
-    var title: String {
-        switch self {
-        case .week: "Last 7 days"
-        case .month: "Last 30 days"
-        case .all: "All time"
-        }
-    }
-
-    func start(now: Int64) -> Int64? {
-        switch self {
-        case .week: now - 7 * Self.day
-        case .month: now - 30 * Self.day
-        case .all: nil
-        }
-    }
-
-    private static let day: Int64 = 86_400_000
-}
-
 /// The projects' updates and weekly digests, newest first, as the filters
 /// or a saved feed narrow them. Reads once Updates first shows, then again
 /// whenever work or planning changes.
@@ -117,9 +132,7 @@ final class UpdatesStore {
     private(set) var error: String?
     /// The saved feed showing, until a filter is changed.
     private(set) var feedId: String?
-    /// The filters, apart from how far back: `since` holds that.
     private(set) var filter = WorkFeedFilter()
-    private(set) var since = UpdatesSince.week
 
     @ObservationIgnored private let core: Core
     @ObservationIgnored private var started = false
@@ -147,10 +160,8 @@ final class UpdatesStore {
     func load() async {
         ticket += 1
         let mine = ticket
-        var asked = filter
-        asked.sinceMs = since.start(now: TaskDates.now())
         do {
-            let read: [WorkUpdateEntry] = try await core.request("work_updates", UpdatesParams(filter: asked, limit: nil))
+            let read: [WorkUpdateEntry] = try await core.request("work_updates", UpdatesParams(filter: filter, limit: nil))
             guard mine == ticket else { return }
             entries = read.sorted { $0.createdAtMs > $1.createdAtMs }
             error = nil
@@ -174,29 +185,23 @@ final class UpdatesStore {
         Task { await load() }
     }
 
-    func show(since: UpdatesSince) {
-        guard self.since != since else { return }
-        self.since = since
-        feedId = nil
-        Task { await load() }
+    func show(since: WorkFeedSince?) {
+        guard filter.since != since else { return }
+        edit { $0.since = since }
     }
 
     /// Shows a saved feed, or every update when nil.
     func pick(_ feed: WorkFeed?) {
         feedId = feed?.id
         filter = feed?.filter ?? WorkFeedFilter()
-        filter.sinceMs = nil
-        since = feed.map { UpdatesSince($0.filter.sinceMs, now: TaskDates.now()) } ?? .week
         Task { await load() }
     }
 
     /// Saves the filters showing as a new feed, and shows it.
     func saveFeed(named name: String) async -> Bool {
-        var saved = filter
-        saved.sinceMs = since.start(now: TaskDates.now())
         do {
             let feed: WorkFeed = try await core.request("work_feed_save", FeedSaveParams(
-                operationId: Self.newId(), id: nil, name: name, filter: saved))
+                operationId: Self.newId(), id: nil, name: name, filter: filter))
             feeds = Self.sorted(feeds.filter { $0.id != feed.id } + [feed])
             feedId = feed.id
             error = nil
@@ -264,8 +269,7 @@ struct UpdatesScreen: View {
             if let entries = store.entries {
                 if entries.isEmpty {
                     TaskEmpty(line: store.filter.narrows ? "No updates match."
-                        : store.since == .all ? "No updates yet."
-                        : "No updates in the \(store.since.title.lowercased()).")
+                        : store.filter.since.map { "No updates \($0.span)." } ?? "No updates yet.")
                 } else {
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 0) {
@@ -364,21 +368,26 @@ private struct UpdatesFilterBar: View {
             menu("Label", model.work.labels.filter { $0.retiredAtMs == nil }.map { UpdatesChoice(id: $0.id, name: $0.name) },
                  \.labelIds)
             menu("Health", PlanningProjectHealth.allCases.map { UpdatesChoice(id: $0, name: $0.label) }, \.healths)
+            let since = store.filter.since
+            let title = WorkFeedSince.title(since)
             Menu {
-                ForEach(UpdatesSince.allCases, id: \.self) { since in
-                    Toggle(since.title, isOn: Binding(get: { store.since == since }, set: { _ in store.show(since: since) }))
+                let choices = WorkFeedSince.choices.contains(since) ? WorkFeedSince.choices
+                    : [since] + WorkFeedSince.choices
+                ForEach(choices, id: \.self) { choice in
+                    Toggle(WorkFeedSince.title(choice), isOn: Binding(get: { since == choice },
+                                                                      set: { _ in store.show(since: choice) }))
                 }
             } label: {
-                Text(store.since.title).lineLimit(1)
+                Text(title).lineLimit(1)
             }
             .menuStyle(.button)
-            .buttonStyle(UpdatesChip(on: store.since != .week))
+            .buttonStyle(UpdatesChip(on: since != .lastDays(7)))
             .menuIndicator(.hidden)
             .fixedSize()
-            .accessibilityLabel("Since, \(store.since.title)")
+            .accessibilityLabel("Since, \(title)")
             Spacer(minLength: 8)
             if store.filter.narrows {
-                Button("Clear filters") { store.edit { $0 = WorkFeedFilter() } }
+                Button("Clear filters") { store.edit { $0 = WorkFeedFilter(since: $0.since) } }
                     .buttonStyle(QuietButton(compact: true))
             }
         }

@@ -10,10 +10,10 @@ use super::roadmap::{
 use super::{iso_day, pick, refusal, Board, Tracker, WorkAnswer, WriteArgs};
 use crate::planning;
 use crate::planning::work::digest::ProjectDigest;
-use crate::planning::work::feed::{self, Feed, FeedEntry, FeedFilter};
+use crate::planning::work::feed::{self, Feed, FeedEntry, FeedFilter, FeedSince};
 use crate::query::external::ExternalError;
 use crate::query::QUERY_SCHEMA_VERSION;
-use chrono::{Days, Local, NaiveDate, TimeZone};
+use chrono::{Local, NaiveDate, TimeZone};
 use clap::Args;
 use serde::Serialize;
 use std::fmt::Write as _;
@@ -32,7 +32,8 @@ pub struct FeedFilterArgs {
     /// Only updates of this health; repeat for more. Leaves digests out.
     #[arg(long = "health", value_enum, value_name = "HEALTH")]
     pub healths: Vec<Health>,
-    /// Only since this day: YYYY-MM-DD, or 7d for the last seven days.
+    /// Only since this day, YYYY-MM-DD, or over the last N days, Nd, counted
+    /// back from each time a saved feed is read.
     #[arg(long, value_name = "DAY")]
     pub since: Option<String>,
 }
@@ -119,7 +120,10 @@ pub struct ExternalFeed {
     pub initiative_ids: Vec<String>,
     pub label_ids: Vec<String>,
     pub healths: Vec<Health>,
+    /// A fixed start, when the feed has one.
     pub since_ms: Option<i64>,
+    /// How many days back from each read the feed reaches, when it does.
+    pub since_days: Option<u32>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -152,21 +156,28 @@ fn external_feed(feed: Feed) -> ExternalFeed {
         initiative_ids: feed.filter.initiative_ids,
         label_ids: feed.filter.label_ids,
         healths: feed.filter.healths.into_iter().map(Health::of).collect(),
-        since_ms: feed.filter.since_ms,
+        since_ms: match feed.filter.since {
+            Some(FeedSince::At(at_ms)) => Some(at_ms),
+            _ => None,
+        },
+        since_days: match feed.filter.since {
+            Some(FeedSince::LastDays(days)) => Some(days),
+            _ => None,
+        },
     }
 }
 
-/// The start of a day, or of the day `N` days back for `Nd`.
-fn since(value: &str) -> Result<i64, ExternalError> {
-    let today = Local::now().date_naive();
+/// The start of a day, or the last `N` days for `Nd`.
+fn since(value: &str) -> Result<FeedSince, ExternalError> {
     let value = value.trim();
-    let day = match value.strip_suffix('d').map(str::parse::<u64>) {
-        Some(Ok(days)) => today.checked_sub_days(Days::new(days)),
-        _ => NaiveDate::parse_from_str(value, "%Y-%m-%d").ok(),
-    };
-    day.and_then(|day| day.and_hms_opt(0, 0, 0))
+    if let Some(Ok(days)) = value.strip_suffix('d').map(str::parse::<u32>) {
+        return Ok(FeedSince::LastDays(days));
+    }
+    NaiveDate::parse_from_str(value, "%Y-%m-%d")
+        .ok()
+        .and_then(|day| day.and_hms_opt(0, 0, 0))
         .and_then(|at| Local.from_local_datetime(&at).earliest())
-        .map(|at| at.timestamp_millis())
+        .map(|at| FeedSince::At(at.timestamp_millis()))
         .ok_or_else(|| ExternalError::invalid("--since takes YYYY-MM-DD or 7d."))
 }
 
@@ -251,7 +262,7 @@ impl Tracker<'_> {
     ) -> Result<FeedFilter, ExternalError> {
         let mut filter = FeedFilter {
             healths: args.healths.iter().map(|health| health.health()).collect(),
-            since_ms: args.since.as_deref().map(since).transpose()?,
+            since: args.since.as_deref().map(since).transpose()?,
             ..FeedFilter::default()
         };
         for project in &args.projects {
@@ -296,7 +307,7 @@ impl Tracker<'_> {
         let quotes_shown = self.quotes_shown().await?;
         let projects = self.every_project()?;
         let found = planning::history(self.history, |conn| {
-            feed::entries(conn, &filter, args.limit)
+            feed::entries(conn, &filter, args.limit, super::now_ms())
         })
         .map_err(|message| refusal(self.history, message))?;
         let entries = found

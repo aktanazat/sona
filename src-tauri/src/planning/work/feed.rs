@@ -35,7 +35,25 @@ pub(crate) struct FeedFilter {
     pub(crate) initiative_ids: Vec<String>,
     pub(crate) label_ids: Vec<String>,
     pub(crate) healths: Vec<ProjectHealth>,
-    pub(crate) since_ms: Option<i64>,
+    pub(crate) since: Option<FeedSince>,
+}
+
+/// Where a feed starts: a fixed moment, or so many days back from when it
+/// is read, so a saved "last 7 days" stays seven days long.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum FeedSince {
+    At(i64),
+    LastDays(u32),
+}
+
+impl FeedSince {
+    pub(crate) fn start(self, now_ms: i64) -> i64 {
+        match self {
+            Self::At(at_ms) => at_ms,
+            Self::LastDays(days) => now_ms - i64::from(days) * 24 * 60 * 60 * 1000,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -136,14 +154,15 @@ fn read_update(row: &Row<'_>) -> rusqlite::Result<FeedEntry> {
     })
 }
 
-/// The feed, newest first, at most `limit` long.
+/// The feed at `now_ms`, newest first, at most `limit` long.
 pub(crate) fn entries(
     conn: &Connection,
     filter: &FeedFilter,
     limit: usize,
+    now_ms: i64,
 ) -> Result<Vec<FeedEntry>> {
     let wanted = projects(conn, filter)?;
-    let since = filter.since_ms.unwrap_or(i64::MIN);
+    let since = filter.since.map_or(i64::MIN, |since| since.start(now_ms));
     let mut statement = conn.prepare(
         "SELECT u.id, u.project_id, u.health, u.body, u.progress, u.author_kind, u.author_name,
                 u.created_at_ms, u.edited_at_ms, p.title
@@ -304,7 +323,9 @@ pub(crate) fn work_updates(
     filter: FeedFilter,
     limit: Option<usize>,
 ) -> Result<Vec<FeedEntry>, String> {
-    reading(&app, |conn| entries(conn, &filter, limit.unwrap_or(200)))
+    reading(&app, |conn| {
+        entries(conn, &filter, limit.unwrap_or(200), now_ms())
+    })
 }
 
 /// Every saved feed. The app's `work_feeds`.
@@ -353,4 +374,51 @@ pub(crate) fn feed_delete_as(
             })
         })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::super::schema;
+    use super::{entries, feed, save_feed, FeedEntry, FeedFilter, FeedSince};
+    use rusqlite::{params, Connection};
+
+    const AT: i64 = 1_700_000_000_000;
+    const DAY: i64 = 24 * 60 * 60 * 1000;
+
+    fn update(conn: &Connection, project_id: &str, body: &str, at_ms: i64) {
+        conn.execute(
+            "INSERT INTO planning_project_updates
+                (id, project_id, health, body, progress, author_kind, created_at_ms)
+             VALUES (?1, ?2, 'onTrack', ?1, 0, 'agent', ?3)",
+            params![body, project_id, at_ms],
+        )
+        .expect("an update");
+    }
+
+    #[test]
+    fn a_saved_last_seven_days_feed_stays_seven_days_long() {
+        let conn = Connection::open_in_memory().expect("an in-memory history database");
+        schema::apply_all(&conn).expect("the planner schema");
+        let project = crate::planning::store::insert_project(&conn, "Harbor launch", None, AT)
+            .expect("a project")
+            .id;
+        let filter = FeedFilter {
+            since: Some(FeedSince::LastDays(7)),
+            ..FeedFilter::default()
+        };
+        let saved = save_feed(&conn, None, "This week", &filter, AT).expect("the feed saved");
+        update(&conn, &project, "venue booked", AT + DAY);
+        update(&conn, &project, "badges printed", AT + 9 * DAY);
+
+        let read = feed(&conn, &saved.id).expect("the feed");
+        let shown: Vec<String> = entries(&conn, &read.filter, 50, AT + 10 * DAY)
+            .expect("the entries")
+            .into_iter()
+            .filter_map(|entry| match entry {
+                FeedEntry::Update { update, .. } => update.body,
+                FeedEntry::Digest { .. } => None,
+            })
+            .collect();
+        assert_eq!(shown, ["badges printed"]);
+    }
 }

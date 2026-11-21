@@ -4097,7 +4097,7 @@ export const TOOLS: readonly ToolDefinition[] = [
   {
     name: "sona_feed_list",
     title: "List Sona's saved update feeds",
-    description: "List saved feeds of project updates: id, name and the project, initiative and label ids, healths and start they narrow to.",
+    description: "List saved feeds of project updates: id, name and the project, initiative and label ids and healths they narrow to, and where they start: since_ms, a fixed day, or since_days, that many days back from each read.",
     optIn: true,
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     argv: () => ["work", "feeds", "--json"],
@@ -4117,7 +4117,7 @@ export const TOOLS: readonly ToolDefinition[] = [
         initiative: { type: "string", description: "The projects of these initiatives, comma-separated." },
         label: { type: "string", description: "Projects with these labels, comma-separated." },
         health: { type: "string", description: "Healths, comma-separated: on-track, at-risk, off-track." },
-        since: { type: "string", description: "Only since this day: YYYY-MM-DD, or 7d." },
+        since: { type: "string", description: "Only since this day, YYYY-MM-DD, or over the last N days, Nd, counted back from each time the feed is read." },
         dry_run: DRY_RUN,
         operation_id: OPERATION_ID,
       },
