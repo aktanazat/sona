@@ -45,6 +45,49 @@ final class OutboxDrainTests: XCTestCase {
         XCTAssertFalse(worker.purged.contains(committed))
     }
 
+    /// A question asked while a long upload is in flight goes right after it, ahead of
+    /// older items the pass already found, so it is not counted as not sent.
+    func testQuestionAskedDuringALongUploadGoesNext() async throws {
+        let worker = try await FakeWorker.start()
+        defer { worker.stop() }
+        worker.holdFirstChunk = true
+        let queue = try makeQueue(worker)
+        let long = try await queue.enqueue(thought: thought("Long"), capturedAtUtcMs: 1, files: [])
+        let older = try await queue.enqueue(thought: thought("Older"), capturedAtUtcMs: 2, files: [])
+
+        let pass = Task { await queue.drain() }
+        try await worker.waitUntilHolding()
+        let question = try await queue.enqueue(ask: ask("Asked meanwhile"), askedAtUtcMs: 3)
+        worker.release()
+        await pass.value
+
+        XCTAssertEqual(worker.committedObjects, [long.objectId, question.objectId, older.objectId])
+    }
+
+    /// An item being sent cannot be withdrawn: its commit may already be on the way.
+    /// Anything else can, and then never reaches the Worker.
+    func testWithdrawRefusesTheItemBeingSent() async throws {
+        let worker = try await FakeWorker.start()
+        defer { worker.stop() }
+        worker.holdFirstChunk = true
+        let queue = try makeQueue(worker)
+        let sending = try await queue.enqueue(ask: ask("First question"), askedAtUtcMs: 1)
+        let waiting = try await queue.enqueue(ask: ask("Second question"), askedAtUtcMs: 2)
+
+        let pass = Task { await queue.drain() }
+        try await worker.waitUntilHolding()
+        let refused = await queue.withdraw(objectId: sending.objectId)
+        let taken = await queue.withdraw(objectId: waiting.objectId)
+        worker.release()
+        await pass.value
+
+        XCTAssertFalse(refused)
+        XCTAssertTrue(taken)
+        XCTAssertEqual(worker.committedObjects, [sending.objectId])
+        let left = await queue.items()
+        XCTAssertEqual(left, [])
+    }
+
     private func makeQueue(_ worker: FakeWorker) throws -> UploadQueue {
         let root = FileManager.default.temporaryDirectory.appending(path: "outbox-\(UUID().uuidString)")
         addTeardownBlock { try? FileManager.default.removeItem(at: root) }
@@ -59,6 +102,10 @@ final class OutboxDrainTests: XCTestCase {
     private func ask(_ question: String) -> QueuedAsk {
         QueuedAsk(conversationId: "conversation", question: question, recentTurns: [])
     }
+
+    private func thought(_ text: String) -> QueuedThought {
+        QueuedThought(origin: .typed, text: text, link: nil, attachments: [])
+    }
 }
 
 /// Idempotency keys replay their first body and refuse another, a chunk must match the
@@ -72,6 +119,15 @@ private final class FakeWorker: @unchecked Sendable {
     var refusals: [String] { lock.withLock { refusalCodes } }
     var committed: [String] { lock.withLock { committedUploads } }
     var purged: Set<String> { lock.withLock { purgedUploads } }
+    /// Object ids in the order their uploads committed.
+    var committedObjects: [String] { lock.withLock { committedUploads.compactMap { objectOf[$0] } } }
+    /// The first chunk's answer waits for `release()`, so a test can act while an upload
+    /// is in flight.
+    var holdFirstChunk: Bool {
+        get { lock.withLock { holdsFirstChunk } }
+        set { lock.withLock { holdsFirstChunk = newValue } }
+    }
+    var isHolding: Bool { lock.withLock { held != nil } }
 
     private let listener: NWListener
     private let lock = NSLock()
@@ -82,6 +138,9 @@ private final class FakeWorker: @unchecked Sendable {
     private var refusalCodes: [String] = []
     private var uploadsSeen = 0
     private var purgesFirstUpload = false
+    private var objectOf: [String: String] = [:]
+    private var holdsFirstChunk = false
+    private var held: (() -> Void)?
 
     private init(listener: NWListener, port: UInt16) {
         self.listener = listener
@@ -119,19 +178,43 @@ private final class FakeWorker: @unchecked Sendable {
 
     func stop() { listener.cancel() }
 
+    func release() {
+        let respond = lock.withLock {
+            defer { held = nil }
+            return held
+        }
+        respond?()
+    }
+
+    /// Waits until the held chunk has arrived.
+    func waitUntilHolding(within seconds: Double = 5) async throws {
+        let deadline = Date().addingTimeInterval(seconds)
+        while !isHolding {
+            guard Date() < deadline else { throw CancellationError() }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+    }
+
     private func read(_ connection: NWConnection, buffer: Data) {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 1 << 20) { [self] data, _, done, error in
             var buffer = buffer
             if let data { buffer.append(data) }
             if let request = Request(buffer) {
                 let (status, body) = answer(request)
-                /* A Worker answer takes a little while; the delay opens the window two
-                 * passes would share. */
-                DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(30)) {
+                let respond = {
                     connection.send(content: Self.response(status, body), completion: .contentProcessed { _ in
                         connection.cancel()
                     })
                 }
+                let hold = lock.withLock {
+                    guard request.method == "PUT", holdsFirstChunk else { return false }
+                    holdsFirstChunk = false
+                    held = respond
+                    return true
+                }
+                /* A Worker answer takes a little while; the delay opens the window two
+                 * passes would share. */
+                if !hold { DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(30), execute: respond) }
             } else if error == nil, !done {
                 read(connection, buffer: buffer)
             } else {
@@ -156,6 +239,7 @@ private final class FakeWorker: @unchecked Sendable {
                 guard let plan = try? JSONDecoder().decode(Plan.self, from: request.body)
                 else { return refuse(400, "invalid_request") }
                 let uploadId = plan.uploadId
+                objectOf[uploadId] = plan.objectId
                 if chunkDigests[uploadId] == nil {
                     uploadsSeen += 1
                     if purgesFirstUpload, uploadsSeen == 1 { purgedUploads.insert(uploadId) }
@@ -197,6 +281,7 @@ private final class FakeWorker: @unchecked Sendable {
         }
 
         let uploadId: String
+        let objectId: String
         let chunks: [Chunk]
     }
 

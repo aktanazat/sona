@@ -149,12 +149,73 @@ final class PhoneAgentTests: XCTestCase {
         XCTAssertEqual(transport.withdrawn, transport.sent)
     }
 
+    /// A question the outbox is sending cannot be taken back, so it is not marked not
+    /// sent: it is about to leave.
+    @MainActor
+    func testQuestionBeingSentIsNotMarkedNotSent() async throws {
+        let transport = FakeTransport()
+        transport.sending = true
+        var clock = Date(timeIntervalSince1970: 1_000)
+        let chat = PhoneAgentChat(transport: transport, file: scratchFile(), now: { clock })
+        let sent = await chat.ask("Summarize my last meeting")
+        let asked = try XCTUnwrap(sent)
+        clock += PhoneAgentChat.sendWindow + 1
+        await chat.check()
+        XCTAssertEqual(turn(chat, asked.turn)?.status, .queued)
+        XCTAssertEqual(transport.withdrawn, [])
+    }
+
+    /// A deleted question that was being sent still reaches the vault; the chat keeps
+    /// following it and deletes the ask at once and the reply once the Mac finishes.
+    @MainActor
+    func testDeletedQuestionThatStillLeavesIsDeletedFromTheVault() async throws {
+        let transport = FakeTransport()
+        transport.sending = true
+        let file = scratchFile()
+        let chat = PhoneAgentChat(transport: transport, file: file)
+        let sent = await chat.ask("Summarize my last meeting")
+        let asked = try XCTUnwrap(sent)
+        await chat.delete(asked.conversation)
+        XCTAssertEqual(chat.orphans.map(\.askObjectId), transport.sent)
+        XCTAssertEqual(PhoneAgentChat(transport: transport, file: file).orphans, chat.orphans)
+
+        transport.sending = false
+        transport.outboxState = .left
+        await chat.check()
+        XCTAssertEqual(transport.forgotten, transport.sent)
+        await chat.check()
+        XCTAssertEqual(transport.forgotten, transport.sent)
+
+        transport.answers[transport.sent[0]] = AgentReplyManifest(
+            answer: "Done", ask_object_id: transport.sent[0], device_id: "mac", failure: nil,
+            format_version: 1, kind: AgentAskObject.replyKind, state: .answered, updated_at_utc_ms: 2
+        )
+        await chat.check()
+        XCTAssertEqual(transport.forgotten, transport.sent + transport.sent)
+        XCTAssertEqual(chat.orphans, [])
+    }
+
     /// A meeting holds other people's words, so iPhone search never shows it.
     func testMeetingsStayOutOfIPhoneSearch() {
         let note = { (kind: PhoneNote.Kind) in
             PhoneNote(id: UUID(), kind: kind, date: Date(), title: "Pricing", text: "Pricing deck")
         }
         XCTAssertEqual(PhoneNote.Kind.allCases.filter { note($0).isSearchable }, [.note, .dictation])
+    }
+
+    /// A note saved while the phone is locked cannot be written to the protected index;
+    /// until a write succeeds it stays planned, so the write after unlocking sends it.
+    func testANoteWhoseIndexWriteFailedIsSentAgain() {
+        let saved = PhoneNote(id: UUID(), kind: .note, date: Date(), title: "Pilot", text: "Pilot in January")
+        var book = SearchIndexBook()
+        let locked = book.plan([saved])
+        XCTAssertEqual(locked.changed, [saved])
+
+        let unlocked = book.plan([saved])
+        XCTAssertEqual(unlocked.changed, [saved])
+        book.confirm(unlocked)
+        XCTAssertTrue(book.plan([saved]).isEmpty)
+        XCTAssertEqual(book.plan([]).removed, [saved.id])
     }
 
     @MainActor
@@ -172,6 +233,8 @@ private final class FakeTransport: AgentTransport {
     var sent: [String] = []
     var outboxState: AskOutbox = .waiting
     var withdrawn: [String] = []
+    /// The outbox is sending every question, so none can be withdrawn.
+    var sending = false
     var answers: [String: AgentReplyManifest] = [:]
     var forgotten: [String] = []
 
@@ -183,7 +246,11 @@ private final class FakeTransport: AgentTransport {
 
     func outbox(_ askObjectId: String) async -> AskOutbox { outboxState }
 
-    func withdraw(_ askObjectId: String) async { withdrawn.append(askObjectId) }
+    func withdraw(_ askObjectId: String) async -> Bool {
+        guard !sending else { return false }
+        withdrawn.append(askObjectId)
+        return true
+    }
 
     func replies() async throws -> [String: AgentReplyManifest] { answers }
 

@@ -86,6 +86,8 @@ actor UploadQueue {
     /// passes never stage and send the same item side by side.
     private var draining = false
     private var drainAgain = false
+    /// The item the pass is sending; it cannot be withdrawn until the send ends.
+    private var sending: String?
 
     init(root: URL, identity: DeviceIdentity, credentials: VaultCredentials?) {
         self.root = root
@@ -192,10 +194,11 @@ actor UploadQueue {
         }
         self.client = client
         let now = Int64(Date().timeIntervalSince1970 * 1000)
-        let waiting = items()
-        for item in waiting.filter(\.isAsk) + waiting.filter({ !$0.isAsk }) where
-            (!item.parked && item.nextAttemptUtcMs <= now) || needsThoughtRestaging(item)
-        {
+        var tried: Set<String> = []
+        while let item = nextDue(now: now, skipping: tried) {
+            tried.insert(item.objectId)
+            sending = item.objectId
+            defer { sending = nil }
             do {
                 try await upload(item, credentials: credentials, client: client)
             } catch UploadQueueError.uploadGone {
@@ -206,6 +209,24 @@ actor UploadQueue {
                 if retryable { return }
             }
         }
+    }
+
+    /// Read from disk after every upload, so a question asked during a long upload goes
+    /// next instead of after everything the pass found when it started.
+    private func nextDue(now: Int64, skipping tried: Set<String>) -> QueuedObject? {
+        let due = items().filter { item in
+            !tried.contains(item.objectId)
+                && ((!item.parked && item.nextAttemptUtcMs <= now) || needsThoughtRestaging(item))
+        }
+        return due.first(where: \.isAsk) ?? due.first
+    }
+
+    /// Take an item back unless it is being sent right now: its commit may already be on
+    /// the way, so the caller keeps following it instead.
+    func withdraw(objectId: String) -> Bool {
+        guard sending != objectId else { return false }
+        discard(objectId: objectId)
+        return true
     }
 
     /// Clear every refusal so the next drain tries again.

@@ -899,9 +899,10 @@ extension AppModel: AgentTransport {
         return item.parked ? .refused : .waiting
     }
 
-    func withdraw(_ askObjectId: String) async {
-        await queue.discard(objectId: askObjectId)
+    func withdraw(_ askObjectId: String) async -> Bool {
+        let taken = await queue.withdraw(objectId: askObjectId)
         await refresh()
+        return taken
     }
 
     func replies() async throws -> [String: AgentReplyManifest] {

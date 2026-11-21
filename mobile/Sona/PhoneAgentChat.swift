@@ -59,7 +59,8 @@ enum AskOutbox: Equatable {
 protocol AgentTransport: AnyObject {
     func send(_ ask: QueuedAsk, askedAt: Date) async throws -> String
     func outbox(_ askObjectId: String) async -> AskOutbox
-    func withdraw(_ askObjectId: String) async
+    /// False while the question is being sent: it may still reach the vault.
+    func withdraw(_ askObjectId: String) async -> Bool
     func replies() async throws -> [String: AgentReplyManifest]
     func forget(_ askObjectId: String) async
 }
@@ -86,6 +87,15 @@ final class PhoneAgentChat: ObservableObject {
     private let file: URL
     private let now: () -> Date
     private var watcher: Task<Void, Never>?
+    /// Questions taken off the screen while they were being sent. Each may still reach
+    /// the vault, so its ask and reply are deleted there once they show up.
+    private(set) var orphans: [Orphan] = []
+
+    struct Orphan: Codable, Equatable {
+        let askObjectId: String
+        let since: Date
+        var askDeleted = false
+    }
 
     init(transport: AgentTransport, file: URL, now: @escaping () -> Date = Date.init) {
         self.transport = transport
@@ -96,7 +106,14 @@ final class PhoneAgentChat: ObservableObject {
         {
             conversations = stored
         }
+        if let bytes = try? Data(contentsOf: orphanFile),
+           let stored = try? JSONDecoder().decode([Orphan].self, from: bytes)
+        {
+            orphans = stored
+        }
     }
+
+    private var orphanFile: URL { file.appendingPathExtension("withdrawn") }
 
     var isWaiting: Bool { conversations.contains { $0.turns.contains(where: \.isWaiting) } }
 
@@ -147,7 +164,12 @@ final class PhoneAgentChat: ObservableObject {
             .filter { $0.status == .queued }.compactMap(\.askObjectId) ?? []
         conversations.removeAll { $0.id == conversationID }
         save()
-        for objectId in queued { await transport.withdraw(objectId) }
+        for objectId in queued {
+            if await transport.withdraw(objectId) { continue }
+            orphans.append(Orphan(askObjectId: objectId, since: now()))
+        }
+        saveOrphans()
+        watch()
     }
 
     /// The settled question `turnID`, waiting at most `timeout`.
@@ -163,9 +185,9 @@ final class PhoneAgentChat: ObservableObject {
     /// Keeps checking while any question waits: every two seconds while the Mac is
     /// expected to act, every fifteen once it is overdue.
     func watch() {
-        guard watcher == nil, isWaiting else { return }
+        guard watcher == nil, isWaiting || !orphans.isEmpty else { return }
         watcher = Task { [weak self] in
-            while let self, !Task.isCancelled, self.isWaiting {
+            while let self, !Task.isCancelled, self.isWaiting || !self.orphans.isEmpty {
                 await self.check()
                 let overdue = self.conversations.allSatisfy { conversation in
                     conversation.turns.allSatisfy { !$0.isWaiting || $0.status == .unanswered }
@@ -178,6 +200,7 @@ final class PhoneAgentChat: ObservableObject {
 
     /// One look at the outbox and the vault.
     func check() async {
+        await followOrphans()
         for turn in waiting where turn.status == .queued {
             guard let objectId = turn.askObjectId else { continue }
             switch await transport.outbox(objectId) {
@@ -208,11 +231,53 @@ final class PhoneAgentChat: ObservableObject {
         }
     }
 
-    /// Takes the question back from the outbox and offers Try again.
+    /// Takes the question back from the outbox and offers Try again. One being sent stays
+    /// as it is: it is about to leave.
     private func notSent(_ turn: AgentTurn, _ objectId: String) async {
-        await transport.withdraw(objectId)
+        guard await transport.withdraw(objectId) else { return }
         update(turn.id) { $0.status = .failed("not_sent") }
         settle(turn.id, reply: find(turn.id))
+    }
+
+    /// An orphan still in the outbox is taken back once it is no longer being sent. One
+    /// that reached the vault has its ask deleted at once, so a Mac that has not started
+    /// drops it, and its reply deleted when the Mac finishes; it is let go after the
+    /// Mac's own windows.
+    private func followOrphans() async {
+        guard !orphans.isEmpty else { return }
+        let replies = try? await transport.replies()
+        var kept: [Orphan] = []
+        for var orphan in orphans {
+            let objectId = orphan.askObjectId
+            switch await transport.outbox(objectId) {
+            case .waiting, .refused:
+                if await transport.withdraw(objectId) { continue }
+            case .left:
+                if let state = replies?[objectId]?.state, state != .working {
+                    await transport.forget(objectId)
+                    continue
+                }
+                if !orphan.askDeleted {
+                    await transport.forget(objectId)
+                    orphan.askDeleted = true
+                }
+                if now().timeIntervalSince(orphan.since) > Self.pickUpWindow + Self.answerWindow { continue }
+            }
+            kept.append(orphan)
+        }
+        if kept != orphans {
+            orphans = kept
+            saveOrphans()
+        }
+    }
+
+    private func saveOrphans() {
+        if orphans.isEmpty {
+            try? FileManager.default.removeItem(at: orphanFile)
+            return
+        }
+        try? JSONEncoder().encode(orphans)
+            .write(to: orphanFile, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
     }
 
     private func apply(_ reply: AgentReplyManifest, to turn: AgentTurn) async {

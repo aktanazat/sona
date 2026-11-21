@@ -19,6 +19,36 @@ struct PhoneNote: Codable, Identifiable, Equatable, Sendable {
     var isSearchable: Bool { kind != .meeting }
 }
 
+/// What iPhone search holds of the library, as far as a finished write says. A write
+/// that fails (the protected index is closed while the phone is locked) confirms
+/// nothing, so the next pass sends the same notes again.
+struct SearchIndexBook {
+    struct Plan: Equatable {
+        let changed: [PhoneNote]
+        let removed: [UUID]
+
+        var isEmpty: Bool { changed.isEmpty && removed.isEmpty }
+    }
+
+    private var indexed: [UUID: PhoneNote] = [:]
+
+    func plan(_ notes: [PhoneNote]) -> Plan {
+        let searchable = notes.filter(\.isSearchable)
+        let kept = Set(searchable.map(\.id))
+        return Plan(
+            changed: searchable.filter { indexed[$0.id] != $0 },
+            removed: indexed.keys.filter { !kept.contains($0) }.sorted { $0.uuidString < $1.uuidString }
+        )
+    }
+
+    mutating func confirm(_ plan: Plan) {
+        for id in plan.removed { indexed[id] = nil }
+        for note in plan.changed { indexed[note.id] = note }
+    }
+
+    mutating func clear() { indexed = [:] }
+}
+
 private final class PhoneLibraryDisk: @unchecked Sendable {
     struct Snapshot: Sendable {
         let revision: UInt64

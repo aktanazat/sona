@@ -2,6 +2,7 @@ import AppIntents
 import Combine
 import CoreSpotlight
 import Foundation
+import UIKit
 
 /// A dictation, note or recording in the phone's library, as Spotlight, Siri and
 /// Shortcuts see it.
@@ -119,12 +120,22 @@ final class PhoneNoteSpotlight {
 
     private let index = CSSearchableIndex(name: "sona.notes", protectionClass: .complete)
     private let library: PhoneLibrary
-    private var indexed: [UUID: PhoneNote] = [:]
+    private var book = SearchIndexBook()
     private var watch: AnyCancellable?
+    private var unlock: AnyCancellable?
+    /// The write in flight; the next one waits for it, so a quick off and on lands in
+    /// order.
+    private var writing: Task<Void, Never>?
 
     init(library: PhoneLibrary) {
         self.library = library
         watch = library.$notes.sink { [weak self] notes in self?.reflect(notes) }
+        unlock = NotificationCenter.default
+            .publisher(for: UIApplication.protectedDataDidBecomeAvailableNotification)
+            .sink { [weak self] _ in
+                guard let self else { return }
+                reflect(library.notes)
+            }
     }
 
     func setEnabled(_ enabled: Bool) {
@@ -133,19 +144,29 @@ final class PhoneNoteSpotlight {
     }
 
     private func reflect(_ notes: [PhoneNote]) {
-        guard Self.isEnabled else {
-            indexed = [:]
-            Task { [index] in try? await index.deleteAllSearchableItems() }
+        let enabled = Self.isEnabled
+        let previous = writing
+        writing = Task { [weak self] in
+            await previous?.value
+            await self?.write(notes, enabled: enabled)
+        }
+    }
+
+    private func write(_ notes: [PhoneNote], enabled: Bool) async {
+        guard enabled else {
+            if (try? await index.deleteAllSearchableItems()) != nil { book.clear() }
             return
         }
-        let searchable = notes.filter(\.isSearchable)
-        let next = Dictionary(uniqueKeysWithValues: searchable.map { ($0.id, $0) })
-        let changed = searchable.filter { indexed[$0.id] != $0 }.map(Self.item)
-        let removed = indexed.keys.filter { next[$0] == nil }.map(\.uuidString)
-        indexed = next
-        Task { [index] in
-            if !removed.isEmpty { try? await index.deleteSearchableItems(withIdentifiers: removed) }
-            if !changed.isEmpty { try? await index.indexSearchableItems(changed) }
+        let plan = book.plan(notes)
+        guard !plan.isEmpty else { return }
+        do {
+            if !plan.removed.isEmpty {
+                try await index.deleteSearchableItems(withIdentifiers: plan.removed.map(\.uuidString))
+            }
+            if !plan.changed.isEmpty { try await index.indexSearchableItems(plan.changed.map(Self.item)) }
+            book.confirm(plan)
+        } catch {
+            /* Locked: the protected index is closed. Unlocking sends the same plan again. */
         }
     }
 
