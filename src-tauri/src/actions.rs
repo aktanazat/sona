@@ -79,6 +79,12 @@ pub(crate) struct PasteErrorEvent {
     focus_moved: bool,
 }
 
+#[derive(Clone, serde::Serialize)]
+struct NoteDictationFailedEvent {
+    text: String,
+    error: String,
+}
+
 pub(crate) const DICTATION_DELIVERY_EVENT: &str = "dictation-delivery";
 
 /// `dictation-delivery`: where the words ended up once delivery returned,
@@ -2433,6 +2439,35 @@ impl TranscribeAction {
                                         processed.final_text,
                                         Arc::clone(&completed_pcm),
                                     );
+                                } else if run.note() {
+                                    let history_id = unclaimed.claimed_by(history_entry.save(&hm));
+                                    if let Some(event) = RewriteSkippedEvent::for_outcome(
+                                        history_id,
+                                        processed.rewrite,
+                                    ) {
+                                        let _ = ah.emit("rewrite-skipped", event);
+                                    }
+                                    persist_delivery_attempt(
+                                        &hm,
+                                        history_id,
+                                        run.run_id,
+                                        DeliveryReceipt::not_dispatched(),
+                                    );
+                                    if !processed.final_text.trim().is_empty() {
+                                        if let Err(error) = crate::scratchpad::create_note(
+                                            &ah,
+                                            &hm,
+                                            &processed.final_text,
+                                        ) {
+                                            let _ = ah.emit(
+                                                "note-dictation-failed",
+                                                NoteDictationFailedEvent {
+                                                    text: processed.final_text,
+                                                    error,
+                                                },
+                                            );
+                                        }
+                                    }
                                 } else if processed.final_text.is_empty() {
                                     let history_id = unclaimed.claimed_by(history_entry.save(&hm));
                                     persist_delivery_attempt(

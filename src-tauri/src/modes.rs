@@ -30,12 +30,16 @@ static NEXT_RUN_ID: AtomicU64 = AtomicU64::new(1);
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize, Type)]
 #[serde(rename_all = "snake_case")]
 pub enum Tone {
+    /// Lowercase, no closing periods: a quick text to a friend.
+    VeryCasual,
     Casual,
     SemiCasual,
     #[default]
     Balanced,
     SemiFormal,
     Formal,
+    /// Upbeat wording, off the casual-to-formal scale.
+    Excited,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize, Type)]
@@ -432,6 +436,9 @@ pub enum TranscriptionIntent {
     /// Start or stop a spoken task list: each task said goes to the
     /// tracker's Triage, and nothing is pasted.
     Tasks,
+    /// Start or stop a dictation that becomes a new note under the active
+    /// mode's rewrite, and nothing is pasted.
+    Note,
 }
 
 impl TranscriptionIntent {
@@ -444,6 +451,9 @@ impl TranscriptionIntent {
         }
         if binding_id == crate::planning::work::capture::RAMBLE_BINDING_ID {
             return Some(Self::Tasks);
+        }
+        if binding_id == crate::scratchpad::DICTATE_NOTE_BINDING_ID {
+            return Some(Self::Note);
         }
 
         match parse_mode_shortcut_id(binding_id) {
@@ -459,6 +469,7 @@ impl TranscriptionIntent {
             Self::Mode { mode_id } => transcribe_binding_id(mode_id),
             Self::Command => crate::command_mode::COMMAND_BINDING_ID.to_string(),
             Self::Tasks => crate::planning::work::capture::RAMBLE_BINDING_ID.to_string(),
+            Self::Note => crate::scratchpad::DICTATE_NOTE_BINDING_ID.to_string(),
         }
     }
 }
@@ -1735,6 +1746,8 @@ pub struct RunPlan {
     /// Set exactly for a spoken task list, whose words are filed as tasks
     /// instead of delivered.
     tasks: bool,
+    /// Set exactly for a dictation filed as a new note instead of delivered.
+    note: bool,
 }
 
 fn matching_app_activation_mode<'a>(
@@ -1809,6 +1822,9 @@ impl RunPlan {
         if matches!(intent, TranscriptionIntent::Tasks) {
             return Self::for_tasks(settings);
         }
+        if matches!(intent, TranscriptionIntent::Note) {
+            return Self::for_note(settings);
+        }
         let frontmost_application_id = context::frontmost_application_identifier();
         let website_rules_enabled = matches!(
             intent,
@@ -1841,6 +1857,7 @@ impl RunPlan {
             // that early return.
             TranscriptionIntent::Command => return Self::for_command(settings),
             TranscriptionIntent::Tasks => return Self::for_tasks(settings),
+            TranscriptionIntent::Note => return Self::for_note(settings),
             TranscriptionIntent::Mode { mode_id } => (
                 settings.modes.iter().find(|mode| mode.id == *mode_id),
                 None,
@@ -1924,6 +1941,7 @@ impl RunPlan {
             cloud: None,
             command: None,
             tasks: false,
+            note: false,
         })
     }
 
@@ -2118,6 +2136,7 @@ impl RunPlan {
             mode_selection_source,
             command: None,
             tasks: false,
+            note: false,
         })
     }
 
@@ -2218,6 +2237,25 @@ impl RunPlan {
         Ok(run)
     }
 
+    /// A dictation that becomes a new note: the active mode's rewrite still
+    /// applies, and nothing is read from the screen, since no app receives it.
+    fn for_note(settings: &AppSettings) -> Result<Self, RunPlanError> {
+        let mut mode = active_mode(settings)
+            .cloned()
+            .ok_or(RunPlanError::NoMatchingMode)?;
+        mode.context_policy = ContextPolicy::None;
+        let mut run = Self::for_mode(
+            settings,
+            mode,
+            None,
+            ModeSelectionSource::ActiveMode,
+            false,
+            None,
+        )?;
+        run.note = true;
+        Ok(run)
+    }
+
     /// Freeze a stored recording for reprocessing under an explicitly chosen
     /// mode. Unlike [`Self::for_retry`], which repeats the original run under
     /// whatever mode is active now, this exists to run the same audio through a
@@ -2299,6 +2337,11 @@ impl RunPlan {
     /// Whether this run's words are filed as tasks instead of delivered.
     pub fn tasks(&self) -> bool {
         self.tasks
+    }
+
+    /// Whether this run's words become a new note instead of being delivered.
+    pub fn note(&self) -> bool {
+        self.note
     }
 
     pub fn mode_receipt(&self) -> ModeReceipt {
@@ -2524,6 +2567,21 @@ mod tests {
         assert_eq!(run.prompt().cleanup_level, None);
         assert!(!run.post_process_requested());
         assert_eq!(run.mode_receipt().rewrite, RewriteOutcome::NotRequested);
+    }
+
+    #[test]
+    fn a_note_dictation_keeps_the_mode_rewrite_and_is_filed_not_delivered() {
+        let mut settings = configured_settings();
+        settings.modes[0].llm.enabled = true;
+        settings.context_policy_ceiling = ContextPolicy::Full;
+        settings.modes[0].context_policy = ContextPolicy::Full;
+        let note = RunPlan::for_intent(&settings, &TranscriptionIntent::Note).unwrap();
+        let tasks = RunPlan::for_intent(&settings, &TranscriptionIntent::Tasks).unwrap();
+
+        assert!(note.note() && !note.tasks());
+        assert!(note.post_process_requested());
+        assert_eq!(note.context_plan().effective_policy(), ContextPolicy::None);
+        assert!(!tasks.note() && !tasks.post_process_requested());
     }
 
     #[test]
