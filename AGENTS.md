@@ -29,6 +29,19 @@ bun run lint:backend      # cargo clippy
 bun run lint:anti-slop    # oxlint against tools/oxlint/baseline.json
 ```
 
+**Checks by area (run the ones your change touches):**
+
+```bash
+bun run check:identity    # any change: no unclassified "Handy" references
+bun run test:scripts      # scripts/
+bun run typecheck:mcp     # tools/sona-mcp/
+bun run test:mcp          # tools/sona-mcp/
+bun run check:onboarding  # macos/: onboarding
+bun run check:library     # macos/: Library
+bun run check:recorder    # macos/: recorder
+bun run check:theme       # macos/: theme, text and control contrast
+```
+
 **Verifying a change against a running Sona:**
 
 Never verify against the installed app or a `cargo run` that uses the default
