@@ -978,9 +978,94 @@ fn spoken_punctuation_at(
     }
 }
 
+/// Words before `period` or `full stop` that make it the noun rather than the
+/// mark even at the end of an utterance: "the trial period", "came to a full stop".
+const MARK_AS_WORD_BEFORE: &[&str] = &[
+    "a",
+    "an",
+    "the",
+    "each",
+    "every",
+    "any",
+    "per",
+    "my",
+    "your",
+    "our",
+    "their",
+    "his",
+    "its",
+    "same",
+    "whole",
+    "entire",
+    "trial",
+    "grace",
+    "waiting",
+    "billing",
+    "notice",
+    "probation",
+    "cooling",
+    "class",
+];
+
+/// Words that can either modify `period` ("that period was hard") or end a
+/// sentence before a spoken period ("I liked that period"). Only treat
+/// `period` as the noun when another word follows it.
+const MARK_AS_WORD_BEFORE_IF_FOLLOWED: &[&str] =
+    &["this", "that", "her", "one", "free", "time", "last", "next"];
+
+/// A word without the marks a transcriber attached to its end, and those marks.
+fn split_trailing_marks(word: &str) -> (&str, &str) {
+    let core = word.trim_end_matches(['.', ',', '!', '?', ';', ':']);
+    (core, &word[core.len()..])
+}
+
+/// Whether `period` or `full stop` at `index` names the thing rather than
+/// asking for the mark: a determiner or a compound noun before it, or `of`
+/// after it ("a period of time").
+fn mark_meant_as_word(words: &[&str], index: usize, consumed: usize) -> bool {
+    let before = index
+        .checked_sub(1)
+        .map(|previous| split_trailing_marks(words[previous]).0.to_ascii_lowercase());
+    let after = words
+        .get(index + consumed)
+        .map(|next| split_trailing_marks(next).0.to_ascii_lowercase());
+    before.as_deref().is_some_and(|word| {
+        MARK_AS_WORD_BEFORE.contains(&word)
+            || (after.is_some() && MARK_AS_WORD_BEFORE_IF_FOLLOWED.contains(&word))
+    }) || after.is_some_and(|word| word == "of")
+}
+
+/// Where the `end quote` or `unquote` closing a quotation opened at `open`
+/// starts, and how many words it spans. Only a closer with words between it
+/// and the opener counts: without one, `quote` is just the word.
+fn quotation_close(words: &[&str], open: usize) -> Option<(usize, usize)> {
+    let core = |index: usize| {
+        words
+            .get(index)
+            .map(|word| split_trailing_marks(word).0.to_ascii_lowercase())
+    };
+    (open + 2..words.len()).find_map(|index| {
+        let word = core(index)?;
+        if word == "unquote" {
+            Some((index, 1))
+        } else if words[index].eq_ignore_ascii_case("end")
+            && core(index + 1).is_some_and(|next| next == "quote")
+        {
+            Some((index, 2))
+        } else {
+            None
+        }
+    })
+}
+
 /// Converts a conservative English spoken-punctuation table before vocabulary
 /// correction. A user vocabulary phrase reserves its own words, and a literal
-/// mention such as "the word comma itself" remains text.
+/// mention such as "the word comma itself" remains text, as does `period` or
+/// `full stop` used as a noun.
+///
+/// `quote ... end quote` (or `unquote`) wraps the words between in quotes,
+/// and a dictated numbered list is written one numbered line per item; see
+/// [`number_dictated_list`].
 pub fn apply_literal_punctuation(
     text: &str,
     language: &OutputLanguageEvidence,
@@ -998,10 +1083,44 @@ pub fn apply_literal_punctuation(
 
     let mut output = String::with_capacity(text.len());
     let mut index = 0;
+    // The closer of the open quotation: where it starts and its word count.
+    let mut quotation: Option<(usize, usize)> = None;
+    // The next word follows an opening quote with no space.
+    let mut glued = false;
     while index < words.len() {
         let mention = index > 0 && words[index - 1].eq_ignore_ascii_case("word");
+        if let Some((close, consumed)) = quotation.filter(|(close, _)| *close == index) {
+            while output.ends_with([' ', ',']) {
+                output.pop();
+            }
+            output.push('"');
+            output.push_str(split_trailing_marks(words[close + consumed - 1]).1);
+            quotation = None;
+            index += consumed;
+            continue;
+        }
+        let (core, _) = split_trailing_marks(words[index]);
+        let opener = index == 0
+            || !["open", "close", "end", "word"]
+                .iter()
+                .any(|before| words[index - 1].eq_ignore_ascii_case(before));
+        if quotation.is_none()
+            && opener
+            && core.eq_ignore_ascii_case("quote")
+            && !vocabulary_reserves_phrase(vocabulary, "quote")
+        {
+            if let Some(close) = quotation_close(&words, index) {
+                append_literal_word(&mut output, "\"");
+                glued = true;
+                quotation = Some(close);
+                index += 1;
+                continue;
+            }
+        }
         if let Some((phrase, consumed, replacement)) = spoken_punctuation_at(&words, index) {
-            if !mention && !vocabulary_reserves_phrase(vocabulary, phrase) {
+            let word_sense = matches!(phrase, "period" | "full stop")
+                && mark_meant_as_word(&words, index, consumed);
+            if !mention && !word_sense && !vocabulary_reserves_phrase(vocabulary, phrase) {
                 while output.ends_with(' ') {
                     output.pop();
                 }
@@ -1021,10 +1140,200 @@ pub fn apply_literal_punctuation(
                 continue;
             }
         }
-        append_literal_word(&mut output, words[index]);
+        if glued {
+            output.push_str(words[index]);
+            glued = false;
+        } else {
+            append_literal_word(&mut output, words[index]);
+        }
         index += 1;
     }
-    output
+    number_dictated_list(&output).unwrap_or(output)
+}
+
+/// How a dictated list numbers its items.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ListStyle {
+    /// `one`, `two`, ...
+    Cardinal,
+    /// `first`, `second`, ...
+    Ordinal,
+    /// `number one`, `number two`, ...
+    Spelled,
+    /// `1.`, `2.`, ... as the transcriber wrote them.
+    Digits,
+}
+
+const CARDINALS: &[&str] = &[
+    "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+];
+const ORDINALS: &[&str] = &[
+    "first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth",
+];
+
+/// One spoken item number: its value, its style, how many words it takes,
+/// and whether the transcriber heard a pause after it.
+#[derive(Clone, Copy, Debug)]
+struct ItemNumber {
+    value: usize,
+    style: ListStyle,
+    words: usize,
+    paused: bool,
+}
+
+fn item_number(words: &[&str], index: usize) -> Option<ItemNumber> {
+    let (core, marks) = split_trailing_marks(words[index]);
+    let lower = core.to_ascii_lowercase();
+    let position = |table: &[&str], word: &str| table.iter().position(|entry| *entry == word);
+    if let Some(found) = position(CARDINALS, &lower) {
+        return Some(ItemNumber {
+            value: found + 1,
+            style: ListStyle::Cardinal,
+            words: 1,
+            paused: !marks.is_empty(),
+        });
+    }
+    let ordinal = lower.strip_suffix("ly").unwrap_or(&lower);
+    if let Some(found) = position(ORDINALS, ordinal) {
+        return Some(ItemNumber {
+            value: found + 1,
+            style: ListStyle::Ordinal,
+            words: 1,
+            paused: !marks.is_empty(),
+        });
+    }
+    if lower == "number" && marks.is_empty() {
+        let (next, next_marks) = split_trailing_marks(words.get(index + 1)?);
+        let next = next.to_ascii_lowercase();
+        let value = position(CARDINALS, &next)
+            .map(|found| found + 1)
+            .or_else(|| next.parse().ok())?;
+        return Some(ItemNumber {
+            value,
+            style: ListStyle::Spelled,
+            words: 2,
+            paused: !next_marks.is_empty(),
+        });
+    }
+    let digits = core.strip_suffix(')').unwrap_or(core);
+    if !digits.is_empty()
+        && digits.bytes().all(|byte| byte.is_ascii_digit())
+        && (core.ends_with(')') || marks.starts_with('.') || marks.starts_with(':'))
+    {
+        return Some(ItemNumber {
+            value: digits.parse().ok()?,
+            style: ListStyle::Digits,
+            words: 1,
+            paused: true,
+        });
+    }
+    None
+}
+
+/// Whether the word at `index` opens a sentence or a line: the transcript's
+/// start, or a word after a sentence end, a colon, or a line break.
+fn opens_clause(output: &str, word_start: usize) -> bool {
+    output[..word_start]
+        .trim_end_matches(' ')
+        .chars()
+        .next_back()
+        .is_none_or(|previous| matches!(previous, '.' | '!' | '?' | ':' | '\n'))
+}
+
+/// Rewrites a dictated numbered list as one `1. Item` line per item, the
+/// words before the list kept on their own line.
+///
+/// Numbers are words people also say for other reasons ("one thing I need
+/// is two chairs"), so a list needs evidence. Numbers spoken as `number one`
+/// or written as `1.` are evidence on their own. Spoken `one, two` or
+/// `first, second` count from two items when each number after the first
+/// opens a sentence or line or is followed by a pause the transcriber
+/// punctuated ("One, buy milk. Two, call mom."). Without any such pause, the
+/// list has to start the dictation and run to at least three items.
+fn number_dictated_list(output: &str) -> Option<String> {
+    let spans: Vec<(usize, &str)> = output
+        .split_whitespace()
+        .map(|word| (word.as_ptr().addr() - output.as_ptr().addr(), word))
+        .collect();
+    let words: Vec<&str> = spans.iter().map(|(_, word)| *word).collect();
+
+    for start in 0..words.len() {
+        let Some(first) = item_number(&words, start) else {
+            continue;
+        };
+        if first.value != 1 || !opens_clause(output, spans[start].0) {
+            continue;
+        }
+        let after_newline =
+            |word_start: usize| output[..word_start].trim_end_matches(' ').ends_with('\n');
+        let evident = |number: &ItemNumber, index: usize| {
+            matches!(number.style, ListStyle::Spelled | ListStyle::Digits)
+                || (first.paused && number.paused)
+                || after_newline(spans[index].0)
+        };
+        let mut strict = vec![(start, first)];
+        let mut loose = vec![(start, first)];
+        for index in start + 1..words.len() {
+            let Some(number) = item_number(&words, index) else {
+                continue;
+            };
+            if number.style != first.style {
+                continue;
+            }
+            if number.value == strict.len() + 1 && evident(&number, index) {
+                strict.push((index, number));
+            }
+            if number.value == loose.len() + 1 {
+                loose.push((index, number));
+            }
+        }
+        let markers = if strict.len() >= 2 {
+            strict
+        } else if start == 0 && loose.len() >= 3 {
+            loose
+        } else {
+            continue;
+        };
+        return write_numbered_list(output, &spans, &markers);
+    }
+    None
+}
+
+fn write_numbered_list(
+    output: &str,
+    spans: &[(usize, &str)],
+    markers: &[(usize, ItemNumber)],
+) -> Option<String> {
+    let item_start = |marker: usize| {
+        let (index, number) = markers[marker];
+        let last = &spans[index + number.words - 1];
+        last.0 + last.1.len()
+    };
+    let mut list = String::with_capacity(output.len() + markers.len() * 4);
+    let intro = output[..spans[markers[0].0].0].trim_end();
+    if !intro.is_empty() {
+        list.push_str(intro);
+        list.push('\n');
+    }
+    for marker in 0..markers.len() {
+        let end = markers
+            .get(marker + 1)
+            .map_or(output.len(), |(index, _)| spans[*index].0);
+        let item = output[item_start(marker)..end]
+            .trim_start_matches(|c: char| {
+                c.is_whitespace() || matches!(c, ',' | '.' | ':' | ')' | '-')
+            })
+            .trim_end_matches(|c: char| c.is_whitespace() || matches!(c, ',' | '.' | ';'));
+        let mut chars = item.chars();
+        let first = chars.next()?;
+        if marker > 0 {
+            list.push('\n');
+        }
+        list.push_str(&format!("{}. ", marker + 1));
+        list.extend(first.to_uppercase());
+        list.push_str(chars.as_str());
+    }
+    Some(list)
 }
 
 /// Filler tokens that are not lexical words in any language Sona's models can
@@ -2052,6 +2361,97 @@ mod tests {
             apply_emoji_replacements("Smiler face and xsmiley face", &emoji),
             "Smiler face and xsmiley face"
         );
+    }
+
+    fn spoken(text: &str) -> String {
+        let english = OutputLanguageEvidence::UserSelected("en-US".to_string());
+        apply_literal_punctuation(text, &english, true, &[])
+    }
+
+    #[test]
+    fn quote_and_end_quote_wrap_the_words_between() {
+        assert_eq!(
+            spoken("she said quote see you soon end quote and left"),
+            "she said \"see you soon\" and left"
+        );
+        assert_eq!(
+            spoken("She said, quote, see you soon, end quote."),
+            "She said, \"see you soon\"."
+        );
+        assert_eq!(
+            spoken("he called it quote done unquote period"),
+            "he called it \"done\"."
+        );
+        assert_eq!(
+            spoken("my favorite quote is short"),
+            "my favorite quote is short",
+            "without a closer quote is the word"
+        );
+    }
+
+    #[test]
+    fn a_dictated_list_keeps_its_numbering() {
+        assert_eq!(
+            spoken("One, buy milk. Two, call mom."),
+            "1. Buy milk\n2. Call mom"
+        );
+        assert_eq!(
+            spoken("first comma buy milk period second comma call mom"),
+            "1. Buy milk\n2. Call mom"
+        );
+        assert_eq!(
+            spoken("Groceries: number one milk number two eggs"),
+            "Groceries:\n1. Milk\n2. Eggs"
+        );
+        assert_eq!(
+            spoken("one buy milk new line two call mom"),
+            "1. Buy milk\n2. Call mom"
+        );
+        assert_eq!(
+            spoken("one buy milk two call mom three pay rent"),
+            "1. Buy milk\n2. Call mom\n3. Pay rent"
+        );
+    }
+
+    #[test]
+    fn numbers_said_in_passing_are_not_a_list() {
+        assert_eq!(
+            spoken("One thing I need is two more chairs."),
+            "One thing I need is two more chairs."
+        );
+        assert_eq!(
+            spoken("First of all, the second option is better."),
+            "First of all, the second option is better."
+        );
+        assert_eq!(
+            spoken("One day I will visit. Two weeks is enough."),
+            "One day I will visit. Two weeks is enough."
+        );
+        assert_eq!(
+            spoken("One was red. Two were blue."),
+            "One was red. Two were blue."
+        );
+    }
+
+    #[test]
+    fn period_and_full_stop_said_as_nouns_stay_words() {
+        assert_eq!(
+            spoken("the trial period ends today period"),
+            "the trial period ends today."
+        );
+        assert_eq!(
+            spoken("the car came to a full stop full stop"),
+            "the car came to a full stop."
+        );
+        assert_eq!(
+            spoken("for a period of time comma we waited"),
+            "for a period of time, we waited"
+        );
+        assert_eq!(spoken("I liked that period"), "I liked that.");
+        assert_eq!(spoken("Give it to her period"), "Give it to her.");
+        assert_eq!(spoken("We ran out of time period"), "We ran out of time.");
+        assert_eq!(spoken("I'll take one period"), "I'll take one.");
+        assert_eq!(spoken("that period was hard"), "that period was hard");
     }
     #[test]
     fn literal_punctuation_is_english_only_opt_in_and_respects_vocabulary() {

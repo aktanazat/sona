@@ -57,72 +57,94 @@ pub fn init_shortcuts(app: &AppHandle) {
     }
 }
 
-/// Which cancel keys the recording in flight owns.
+/// The binding that ends the dictation in flight, pastes it, and presses the
+/// submit key for that one dictation.
+pub const SEND_BINDING_ID: &str = "send";
+
+/// Bindings that act on the recording in flight. Each is registered only
+/// while a recording is open, so its keys are never swallowed otherwise.
+const RECORDING_KEY_IDS: [&str; 2] = ["cancel", SEND_BINDING_ID];
+
+pub(crate) fn is_recording_key(id: &str) -> bool {
+    RECORDING_KEY_IDS.contains(&id)
+}
+
+/// The recording key a registered id belongs to: the key itself, or one of
+/// its modifier variants such as `cancel#option+escape`.
+pub(super) fn recording_key_of(binding_id: &str) -> Option<&'static str> {
+    let key = binding_id
+        .split_once('#')
+        .map_or(binding_id, |(key, _)| key);
+    RECORDING_KEY_IDS.iter().copied().find(|id| *id == key)
+}
+
+/// Which recording keys the recording in flight owns.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CancelKeys {
-    /// A held chord keeps the recording open: the bare key and every
-    /// modifier variant cancel.
+enum RecordingKeys {
+    /// A held chord keeps the recording open: the bare keys and every
+    /// modifier variant work.
     Held,
     /// Nothing holds the recording open (a latched tap, toggle mode, a
     /// signal), so the user is typing in other apps meanwhile and a bare
-    /// Escape there must not end it. Only the modifier variants cancel,
-    /// unless there are none: then the bare key stays, or no key would.
+    /// Escape there must not end it. Only the modifier variants work,
+    /// unless there are none: then the bare keys stay, or no key would.
     HandsFree,
 }
 
-/// The cancel keys the open recording should own; `None` while nothing records.
-static CANCEL_KEYS: Mutex<Option<CancelKeys>> = Mutex::new(None);
-/// The cancel bindings registered right now, each with the backend holding it.
+/// The recording keys the open recording should own; `None` while nothing
+/// records.
+static RECORDING_KEYS: Mutex<Option<RecordingKeys>> = Mutex::new(None);
+/// The recording-key bindings registered right now, each with the backend
+/// holding it.
 #[cfg(not(target_os = "linux"))]
-static REGISTERED_CANCEL: Mutex<Vec<(KeyboardImplementation, ShortcutBinding)>> =
+static REGISTERED_RECORDING_KEYS: Mutex<Vec<(KeyboardImplementation, ShortcutBinding)>> =
     Mutex::new(Vec::new());
 
-/// Register the cancel shortcut (called when recording starts)
-pub fn register_cancel_shortcut(app: &AppHandle) {
+/// Register cancel and send (called when recording starts)
+pub fn register_recording_keys(app: &AppHandle) {
     let keys = if get_settings(app).push_to_talk {
-        CancelKeys::Held
+        RecordingKeys::Held
     } else {
-        CancelKeys::HandsFree
+        RecordingKeys::HandsFree
     };
-    *handy_keys::lock_recover(&CANCEL_KEYS) = Some(keys);
-    cancel_keys_changed(app);
+    *handy_keys::lock_recover(&RECORDING_KEYS) = Some(keys);
+    recording_keys_changed(app);
 }
 
-/// Give up the bare cancel key once a tap latches the recording open.
-pub fn release_bare_cancel_key(app: &AppHandle) {
+/// Give up the bare recording keys once a tap latches the recording open.
+pub fn release_bare_recording_keys(app: &AppHandle) {
     {
-        let mut keys = handy_keys::lock_recover(&CANCEL_KEYS);
-        if *keys != Some(CancelKeys::Held) {
+        let mut keys = handy_keys::lock_recover(&RECORDING_KEYS);
+        if *keys != Some(RecordingKeys::Held) {
             return;
         }
-        *keys = Some(CancelKeys::HandsFree);
+        *keys = Some(RecordingKeys::HandsFree);
     }
-    cancel_keys_changed(app);
+    recording_keys_changed(app);
 }
 
-/// Unregister the cancel shortcut (called when recording stops)
-pub fn unregister_cancel_shortcut(app: &AppHandle) {
-    *handy_keys::lock_recover(&CANCEL_KEYS) = None;
-    cancel_keys_changed(app);
+/// Unregister cancel and send (called when recording stops)
+pub fn unregister_recording_keys(app: &AppHandle) {
+    *handy_keys::lock_recover(&RECORDING_KEYS) = None;
+    recording_keys_changed(app);
 }
 
-/// The cancel bindings the open recording owns now, empty while nothing
-/// records.
-pub(crate) fn active_cancel_bindings(settings: &AppSettings) -> Vec<ShortcutBinding> {
-    let Some(keys) = *handy_keys::lock_recover(&CANCEL_KEYS) else {
+/// The recording-key bindings the open recording owns now, empty while
+/// nothing records.
+pub(crate) fn active_recording_key_bindings(settings: &AppSettings) -> Vec<ShortcutBinding> {
+    let Some(keys) = *handy_keys::lock_recover(&RECORDING_KEYS) else {
         return Vec::new();
     };
-    let mut bindings = cancel_bindings_for_registration(settings);
-    if keys == CancelKeys::HandsFree && bindings.iter().any(|binding| binding.id != "cancel") {
-        bindings.retain(|binding| {
-            binding.id != "cancel" || modifier_prefix(&binding.current_binding).is_some()
-        });
+    let mut bindings = recording_key_bindings(settings);
+    if keys == RecordingKeys::HandsFree && bindings.iter().any(|binding| binding.id.contains('#')) {
+        bindings
+            .retain(|binding| binding.id.contains('#') || holds_modifier(&binding.current_binding));
     }
     bindings
 }
 
-fn cancel_keys_changed(app: &AppHandle) {
-    crate::secure_input::cancel_keys_changed(app);
+fn recording_keys_changed(app: &AppHandle) {
+    crate::secure_input::recording_keys_changed(app);
 
     // Dynamic registration is unstable on Linux in both backends.
     #[cfg(target_os = "linux")]
@@ -133,19 +155,20 @@ fn cancel_keys_changed(app: &AppHandle) {
     #[cfg(not(target_os = "linux"))]
     {
         let app = app.clone();
-        tauri::async_runtime::spawn_blocking(move || sync_cancel_shortcuts(&app));
+        tauri::async_runtime::spawn_blocking(move || sync_recording_keys(&app));
     }
 }
 
-/// Bring the registered cancel bindings in line with [`active_cancel_bindings`].
-/// Each binding is unregistered from the backend that registered it, and only
-/// once, whatever order the lifecycle changes that scheduled this run in.
+/// Bring the registered recording keys in line with
+/// [`active_recording_key_bindings`]. Each binding is unregistered from the
+/// backend that registered it, and only once, whatever order the lifecycle
+/// changes that scheduled this run in.
 #[cfg(not(target_os = "linux"))]
-fn sync_cancel_shortcuts(app: &AppHandle) {
-    let mut registered = handy_keys::lock_recover(&REGISTERED_CANCEL);
+fn sync_recording_keys(app: &AppHandle) {
+    let mut registered = handy_keys::lock_recover(&REGISTERED_RECORDING_KEYS);
     let settings = get_settings(app);
     let implementation = settings.keyboard_implementation;
-    let wanted = active_cancel_bindings(&settings);
+    let wanted = active_recording_key_bindings(&settings);
 
     registered.retain(|(held_by, binding)| {
         if *held_by == implementation && wanted.contains(binding) {
@@ -158,7 +181,7 @@ fn sync_cancel_shortcuts(app: &AppHandle) {
             }
         };
         if let Err(e) = result {
-            warn!("Failed to unregister cancel shortcut '{}': {e}", binding.id);
+            warn!("Failed to unregister recording key '{}': {e}", binding.id);
         }
         false
     });
@@ -178,7 +201,7 @@ fn sync_cancel_shortcuts(app: &AppHandle) {
         };
         match result {
             Ok(()) => registered.push((implementation, binding)),
-            Err(e) => error!("Failed to register cancel shortcut '{}': {e}", binding.id),
+            Err(e) => error!("Failed to register recording key '{}': {e}", binding.id),
         }
     }
 }
@@ -202,14 +225,14 @@ pub fn unregister_shortcut(app: &AppHandle, binding: ShortcutBinding) -> Result<
 }
 
 /// Return the full persisted registration set in a deterministic order. The
-/// cancel key is registered only while a recording is active, and the command
-/// chord only while command mode is on — a disabled feature must release its
-/// chord to the rest of the system rather than swallow it.
+/// recording keys are registered only while a recording is active, and the
+/// command chord only while command mode is on — a disabled feature must
+/// release its chord to the rest of the system rather than swallow it.
 pub(crate) fn bindings_for_registration(settings: &AppSettings) -> Vec<ShortcutBinding> {
     let mut bindings: Vec<_> = settings
         .bindings
         .iter()
-        .filter(|(id, _)| id.as_str() != "cancel")
+        .filter(|(id, _)| !is_recording_key(id))
         .filter(|(id, _)| {
             settings.command_mode_enabled || id.as_str() != crate::command_mode::COMMAND_BINDING_ID
         })
@@ -219,62 +242,78 @@ pub(crate) fn bindings_for_registration(settings: &AppSettings) -> Vec<ShortcutB
     bindings
 }
 
-/// The cancel key's full registration set for a recording held open by its
-/// chord; [`active_cancel_bindings`] narrows it for a hands-free one.
+/// The recording keys' full registration set for a recording held open by
+/// its chord; [`active_recording_key_bindings`] narrows it for a hands-free
+/// one.
 ///
 /// The stored chord is a bare key, and both backends match a hotkey's
 /// modifiers exactly — so an Escape struck while a push-to-talk chord is still
 /// down arrives carrying that chord's modifiers and is not the cancel hotkey.
 /// That left cancel deaf for exactly as long as a recording was held open,
-/// which is when it is reached for. The key is therefore also registered under
-/// each modifier prefix a recording can be held by: never a combination the
-/// user has not already dedicated to Sona, and only for the length of a
-/// recording.
+/// which is when it is reached for. Each recording key is therefore also
+/// registered under each modifier prefix a recording can be held by: never a
+/// combination the user has not already dedicated to Sona, and only for the
+/// length of a recording.
 ///
 /// Each variant carries its own id, because registrations are keyed by binding
 /// id: reusing `cancel` would leak every variant but the last and leave its
 /// chord swallowed for the life of the process.
-pub(crate) fn cancel_bindings_for_registration(settings: &AppSettings) -> Vec<ShortcutBinding> {
-    let Some(cancel) = settings.bindings.get("cancel") else {
-        return Vec::new();
-    };
-
-    let mut prefixes: Vec<String> = settings
+pub(crate) fn recording_key_bindings(settings: &AppSettings) -> Vec<ShortcutBinding> {
+    let mut prefixes: Vec<::handy_keys::Modifiers> = settings
         .bindings
         .iter()
         .filter(|(id, _)| {
             settings.command_mode_enabled || id.as_str() != crate::command_mode::COMMAND_BINDING_ID
         })
         .filter(|(id, _)| crate::modes::TranscriptionIntent::from_binding(id).is_some())
-        .filter_map(|(_, binding)| modifier_prefix(&binding.current_binding))
+        .filter_map(|(_, binding)| handy_keys::parse_shortcut(&binding.current_binding).ok())
+        .map(|parsed| parsed.hotkey.modifiers)
+        .filter(|modifiers| !modifiers.is_empty())
         .collect();
-    prefixes.sort_unstable();
+    prefixes.sort_unstable_by_key(|modifiers| modifiers.bits());
     prefixes.dedup();
 
-    let mut bindings = Vec::with_capacity(prefixes.len() + 1);
-    bindings.push(cancel.clone());
-    bindings.extend(prefixes.into_iter().map(|prefix| ShortcutBinding {
-        id: format!("cancel#{prefix}"),
-        current_binding: format!("{prefix}+{}", cancel.current_binding),
-        ..cancel.clone()
-    }));
+    let mut bindings = Vec::new();
+    for key in RECORDING_KEY_IDS {
+        let Some(base) = settings.bindings.get(key) else {
+            continue;
+        };
+        bindings.push(base.clone());
+        let Ok(parsed) = handy_keys::parse_shortcut(&base.current_binding) else {
+            continue;
+        };
+        let mut variants: Vec<String> = prefixes
+            .iter()
+            .filter_map(|prefix| {
+                ::handy_keys::Hotkey::new(*prefix | parsed.hotkey.modifiers, parsed.hotkey.key).ok()
+            })
+            .filter(|hotkey| *hotkey != parsed.hotkey)
+            .map(|hotkey| {
+                let chord = hotkey.to_handy_string();
+                if parsed.double_tap {
+                    format!("{}{chord}", handy_keys::DOUBLE_TAP_PREFIX)
+                } else {
+                    chord
+                }
+            })
+            .collect();
+        variants.sort_unstable();
+        variants.dedup();
+        bindings.extend(variants.into_iter().map(|chord| ShortcutBinding {
+            id: format!("{key}#{chord}"),
+            current_binding: chord,
+            ..base.clone()
+        }));
+    }
     bindings
 }
 
-/// The modifiers a key struck during `chord` arrives with, in the canonical
-/// order the stored format uses. `None` when the chord holds no modifier,
-/// which the bare cancel key already covers.
-///
-/// The stored format is handy-keys' own, so its parser is what decides which
-/// parts are modifiers — the same authority `validate_shortcut` defers to,
-/// rather than a second modifier-name table to keep in step with it.
-fn modifier_prefix(chord: &str) -> Option<String> {
-    let hotkey: ::handy_keys::Hotkey = chord.parse().ok()?;
-    // A modifier-only hotkey renders as exactly the prefix, and an empty
-    // modifier set cannot build one — so this rejects bare keys for free.
-    ::handy_keys::Hotkey::new(hotkey.modifiers, None::<::handy_keys::Key>)
-        .ok()
-        .map(|modifiers| modifiers.to_handy_string())
+/// Whether a stored chord holds a modifier. The stored format is handy-keys'
+/// own, so its parser is what decides which parts are modifiers — the same
+/// authority `validate_shortcut` defers to, rather than a second
+/// modifier-name table to keep in step with it.
+fn holds_modifier(chord: &str) -> bool {
+    handy_keys::parse_shortcut(chord).is_ok_and(|parsed| !parsed.hotkey.modifiers.is_empty())
 }
 
 // ============================================================================
@@ -329,9 +368,10 @@ pub fn change_binding(
         }
     };
 
-    // If this is the cancel binding, just update the settings and return
-    // It's managed dynamically, so we don't register/unregister here
-    if id == "cancel" {
+    // Cancel and send are registered only while a recording is open, so a
+    // change is checked and saved here and registered at the next recording.
+    if is_recording_key(&id) {
+        validate_shortcut_for_implementation(&binding, settings.keyboard_implementation)?;
         let updated = settings::update_settings(&app, |settings| {
             settings
                 .bindings
@@ -417,11 +457,11 @@ pub fn reset_binding(app: AppHandle, id: String) -> Result<BindingResponse, Stri
 
 /// Unregister every binding while the user is recording a new shortcut in
 /// the UI, so no existing shortcut can fire — or swallow the keystrokes —
-/// mid-capture. The "cancel" binding is untouched: it is managed dynamically
+/// mid-capture. Cancel and send are untouched: they are managed dynamically
 /// by the recording lifecycle.
 pub fn suspend_all_shortcuts(app: &AppHandle) {
     for (id, binding) in settings::get_bindings(app) {
-        if id == "cancel" {
+        if is_recording_key(&id) {
             continue;
         }
         if let Err(e) = unregister_shortcut(app, binding) {
@@ -457,7 +497,7 @@ pub fn reconcile_mode_shortcuts(
     current: &std::collections::HashMap<String, ShortcutBinding>,
 ) {
     for (id, binding) in previous {
-        if id == "cancel" {
+        if is_recording_key(id) {
             continue;
         }
         if current.get(id) == Some(binding) {
@@ -469,7 +509,7 @@ pub fn reconcile_mode_shortcuts(
     }
 
     for (id, binding) in current {
-        if id == "cancel" {
+        if is_recording_key(id) {
             continue;
         }
         if previous.get(id) == Some(binding) {
@@ -623,8 +663,8 @@ fn unregister_all_shortcuts(app: &AppHandle, implementation: KeyboardImplementat
     let bindings = settings::get_bindings(app);
 
     for (id, binding) in bindings {
-        // Skip cancel shortcut as it's dynamically registered
-        if id == "cancel" {
+        // Cancel and send are registered by the recording lifecycle
+        if is_recording_key(&id) {
             continue;
         }
 
@@ -758,6 +798,7 @@ pub fn change_sound_theme_setting(app: AppHandle, theme: String) -> Result<(), S
     let parsed = match theme.as_str() {
         "marimba" => SoundTheme::Marimba,
         "pop" => SoundTheme::Pop,
+        "mechanical" => SoundTheme::Mechanical,
         "custom" => SoundTheme::Custom,
         other => {
             warn!("Invalid sound theme '{}', defaulting to marimba", other);
@@ -1353,7 +1394,9 @@ pub fn update_post_process_prompt(
     name: String,
     prompt: String,
 ) -> Result<(), String> {
-    settings::try_update_settings(&app, |settings| update_prompt_in(settings, &id, name, prompt))
+    settings::try_update_settings(&app, |settings| {
+        update_prompt_in(settings, &id, name, prompt)
+    })
 }
 
 pub(crate) fn update_prompt_in(
@@ -1378,7 +1421,10 @@ pub fn delete_post_process_prompt(app: AppHandle, id: String) -> Result<(), Stri
     settings::try_update_settings(&app, |settings| delete_prompt_in(settings, &id))
 }
 
-pub(crate) fn delete_prompt_in(settings: &mut settings::AppSettings, id: &str) -> Result<(), String> {
+pub(crate) fn delete_prompt_in(
+    settings: &mut settings::AppSettings,
+    id: &str,
+) -> Result<(), String> {
     if settings.post_process_prompts.len() <= 1 {
         return Err("Cannot delete the last prompt".to_string());
     }
@@ -1746,10 +1792,7 @@ mod tests {
                 .map_err(|error| format!("'{chord}' is not a handy-keys chord: {error}"))
         };
 
-        let cancel_set = cancel_bindings_for_registration(&settings)
-            .into_iter()
-            .map(|binding| binding.current_binding)
-            .collect::<Vec<_>>();
+        let cancel_set = chords_of("cancel", recording_key_bindings(&settings));
         // The default chords differ by platform, so the prefixes in use do too.
         #[cfg(target_os = "macos")]
         assert_eq!(
@@ -1807,16 +1850,13 @@ mod tests {
     fn a_hands_free_recording_gives_up_only_a_bare_cancel_key() {
         let mut settings = settings::get_default_settings();
         ensure_mode_settings(&mut settings);
-        let chords = |settings: &AppSettings, keys: Option<CancelKeys>| {
-            *handy_keys::lock_recover(&CANCEL_KEYS) = keys;
-            active_cancel_bindings(settings)
-                .into_iter()
-                .map(|binding| binding.current_binding)
-                .collect::<Vec<_>>()
+        let chords = |settings: &AppSettings, keys: Option<RecordingKeys>| {
+            *handy_keys::lock_recover(&RECORDING_KEYS) = keys;
+            chords_of("cancel", active_recording_key_bindings(settings))
         };
 
-        let held = chords(&settings, Some(CancelKeys::Held));
-        let hands_free = chords(&settings, Some(CancelKeys::HandsFree));
+        let held = chords(&settings, Some(RecordingKeys::Held));
+        let hands_free = chords(&settings, Some(RecordingKeys::HandsFree));
         assert!(held.iter().any(|chord| chord == "escape"));
         assert!(!hands_free.is_empty());
         assert_eq!(
@@ -1831,10 +1871,10 @@ mod tests {
             .get_mut("cancel")
             .expect("default cancel binding")
             .current_binding = "command+period".to_string();
-        let held = chords(&settings, Some(CancelKeys::Held));
+        let held = chords(&settings, Some(RecordingKeys::Held));
         assert!(held.iter().any(|chord| chord == "command+period"));
         assert_eq!(
-            chords(&settings, Some(CancelKeys::HandsFree)),
+            chords(&settings, Some(RecordingKeys::HandsFree)),
             held,
             "a cancel chord with a modifier still cancels a hands-free recording"
         );
@@ -1850,12 +1890,59 @@ mod tests {
             binding.current_binding = format!("f{key}");
         }
         assert_eq!(
-            chords(&settings, Some(CancelKeys::HandsFree)),
+            chords(&settings, Some(RecordingKeys::HandsFree)),
             vec!["escape"],
             "with no other cancel key a hands-free recording keeps the bare one"
         );
 
         assert!(chords(&settings, None).is_empty());
+    }
+
+    /// The chords of one recording key's bindings, in registration order.
+    fn chords_of(key: &str, bindings: Vec<ShortcutBinding>) -> Vec<String> {
+        bindings
+            .into_iter()
+            .filter(|binding| recording_key_of(&binding.id) == Some(key))
+            .map(|binding| binding.current_binding)
+            .collect()
+    }
+
+    /// Send is pressed while a push-to-talk chord is still down, so like
+    /// cancel it has to fire with that chord's modifiers held — including a
+    /// double-tapped modifier held on its second tap.
+    #[test]
+    fn the_send_key_fires_while_any_recording_chord_is_held() -> Result<(), String> {
+        let mut settings = settings::get_default_settings();
+        ensure_mode_settings(&mut settings);
+        settings
+            .bindings
+            .get_mut("transcribe")
+            .ok_or("default transcribe binding")?
+            .current_binding = "double:option_right".to_string();
+
+        let send =
+            handy_keys::parse_shortcut(&settings.bindings[SEND_BINDING_ID].current_binding)?.hotkey;
+        let send_set = chords_of(SEND_BINDING_ID, recording_key_bindings(&settings))
+            .iter()
+            .map(|chord| handy_keys::parse_shortcut(chord).map(|parsed| parsed.hotkey))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        for (id, binding) in &settings.bindings {
+            if crate::modes::TranscriptionIntent::from_binding(id).is_none() {
+                continue;
+            }
+            let held = handy_keys::parse_shortcut(&binding.current_binding)?
+                .hotkey
+                .modifiers
+                | send.modifiers;
+            assert!(
+                send_set
+                    .iter()
+                    .any(|chord| chord.modifiers.matches(held) && chord.key == send.key),
+                "no send hotkey fires while '{id}' is held"
+            );
+        }
+        Ok(())
     }
 
     /// The handy-keys recorder persists what the macOS listener saw, and that

@@ -117,8 +117,8 @@ struct CaptureScreen: View {
                     }
                     HStack(spacing: 8) {
                         if let chord = model.settings.binding("transcribe")?.currentBinding {
-                            Button { model.showSettings(.essentials) } label: {
-                                Shortcut(chord)
+                            Button { model.showSettings(.shortcuts) } label: {
+                                BindingChord(chord)
                             }
                             .buttonStyle(.plain)
                             .accessibilityLabel("Change recording shortcut")

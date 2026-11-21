@@ -54,9 +54,8 @@ struct DictationSettingsView<DataRows: View>: View {
                     CardLine("Dictations can last up to 20 minutes. Sona warns you with one minute left, then stops and transcribes what you said.")
                 }
             }
-            PageSection("Shortcuts and commands") {
+            PageSection("Commands") {
                 Card {
-                    ShortcutCaptureRow(store: store, id: "cancel")
                     ToggleRow(
                         title: "Voice command mode",
                         detail: "Hold the command shortcut and say what to change about the text you have selected, or ask a question.",

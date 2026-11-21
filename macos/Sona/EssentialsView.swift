@@ -20,16 +20,12 @@ struct EssentialsView<MeetingRows: View>: View {
                 ShortcutCaptureRow(store: store, id: "transcribe")
                 ToggleRow(
                     title: "Push to talk",
-                    detail: store.settings.pushToTalk
-                        ? "Hold the shortcut to talk and let go to stop. For a long stretch, tap it once and talk hands-free, then tap it again to stop."
-                        : "Tap the shortcut to start, and tap it again to stop.",
+                    detail: BindingCopy.pushToTalkDetail(store.settings.pushToTalk),
                     isOn: Binding(
                         get: { store.settings.pushToTalk },
                         set: { value in Task { await store.setPushToTalk(value) } }
                     )
                 )
-                ShortcutCaptureRow(store: store, id: "work_quick_entry")
-                ShortcutCaptureRow(store: store, id: "work_ramble")
                 MicrophoneRow(store: store)
                 /// The spoken language, beside the microphone that hears it.
                 /// The list narrows to what the loaded model can recognize,

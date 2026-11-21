@@ -25,7 +25,9 @@ use tauri::{AppHandle, Manager};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 
 use super::{evaluate, send_chord, take_auto_submit_key, TxState, WaitDecision};
-use crate::clipboard::{send_return_key, PasteboardSnapshot};
+use crate::clipboard::{
+    clipboard_after_paste, send_return_key, ClipboardAfterPaste, PasteboardSnapshot,
+};
 use crate::input::EnigoState;
 use crate::settings::{AutoSubmitKey, ClipboardHandling, PasteMethod};
 
@@ -135,12 +137,13 @@ fn settle(
 
     let auto_submit = p.auto_submit;
     let configured_submit_key = p.auto_submit_key;
-    let (ownership_lost, submit_key) = match p.state.lock() {
+    let (ownership_lost, injection_failed, submit_key) = match p.state.lock() {
         Ok(mut state) => (
             state.ownership_lost,
+            state.injection_failed,
             take_auto_submit_key(&mut state, auto_submit, configured_submit_key),
         ),
-        Err(_) => (true, None),
+        Err(_) => (true, false, None),
     };
 
     // A reliable transaction owns its submit only after a post-injection
@@ -162,17 +165,20 @@ fn settle(
 
     let still_ours =
         !ownership_lost && NSPasteboard::generalPasteboard().changeCount() == p.change_count;
-    if !still_ours {
-        info!("[reliable-paste] clipboard changed externally; leaving it untouched");
-    } else if p.preserve_transcript {
-        // The user asked for the transcript to stay on the clipboard: replace
-        // the concealed promise with plain text so clipboard managers record
-        // it and it survives this app exiting.
-        let _ = app_handle.clipboard().write_text(&p.transcript);
-        info!("[reliable-paste] left transcript on clipboard as plain text");
-    } else {
-        p.saved.restore(&NSPasteboard::generalPasteboard());
-        info!("[reliable-paste] restored previous clipboard");
+    match clipboard_after_paste(still_ours, !injection_failed, p.preserve_transcript) {
+        ClipboardAfterPaste::Untouched => {
+            info!("[reliable-paste] clipboard changed externally; leaving it untouched");
+        }
+        ClipboardAfterPaste::KeepDictation => {
+            // Replace the concealed promise with plain text so clipboard
+            // managers record it and it survives this app exiting.
+            let _ = app_handle.clipboard().write_text(&p.transcript);
+            info!("[reliable-paste] left transcript on clipboard as plain text");
+        }
+        ClipboardAfterPaste::Restore => {
+            p.saved.restore(&NSPasteboard::generalPasteboard());
+            info!("[reliable-paste] restored previous clipboard");
+        }
     }
 
     // Release the owner; any outstanding promise dies with the pasteboard
@@ -236,7 +242,7 @@ fn spawn_waiter(pending: Arc<Mutex<MacPending>>, app_handle: AppHandle) {
         } else if receipt_seen {
             info!("[reliable-paste] settling: reads went quiet");
         } else if injection_failed {
-            info!("[reliable-paste] settling: chord injection failed, restoring quickly");
+            info!("[reliable-paste] settling: chord injection failed, keeping the transcript");
         } else {
             info!("[reliable-paste] settling: no read within timeout, restoring anyway");
         }
@@ -305,8 +311,8 @@ pub(super) fn run(
             info!("[reliable-paste] paste chord sent ({paste_method:?})");
         }
         Err(e) => {
-            // Keep the transaction alive: the waiter restores the clipboard
-            // after the short failed-injection timeout.
+            // Keep the transaction alive: the waiter settles it after the
+            // short failed-injection timeout, leaving the transcript to paste.
             if let Ok(mut st) = state.lock() {
                 st.injection_failed = true;
             }

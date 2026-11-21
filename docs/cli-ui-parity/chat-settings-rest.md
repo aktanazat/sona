@@ -200,7 +200,7 @@ Already inventoried in meetings-notes-search.md §16 (Notes, 22 rows) and §17 (
 | Catalog Refresh | ModesView.swift:746 | discover_post_process_model_catalog | — | missing |
 | Context policy picker | ModesView.swift:771 | upsert_mode (on save) | — | missing |
 | Translate to English toggle | ModesView.swift:795 | upsert_mode (on save) | — | missing |
-| Literal punctuation toggle | ModesView.swift:799 | upsert_mode (on save) | — | missing |
+| Spoken punctuation and lists toggle | ModesView.swift:799 | upsert_mode (on save) | — | missing |
 | Remove filler words toggle | ModesView.swift:800 | upsert_mode (on save) | — | missing |
 | VAD toggle | ModesView.swift:801 | upsert_mode (on save) | — | missing |
 | Clipboard handling picker | ModesView.swift:816 | upsert_mode (on save) | — | missing |

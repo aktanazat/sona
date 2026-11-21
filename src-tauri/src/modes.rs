@@ -597,8 +597,13 @@ fn mode_shortcuts(settings: &AppSettings, mode: &ModeDefinition, index: usize) -
 }
 
 pub fn default_modes(settings: &AppSettings) -> Vec<ModeDefinition> {
+    // Message mode follows spoken commands ("new line", "quote ... end
+    // quote", a numbered list) from the start; a stored mode keeps its own
+    // choice.
+    let mut message = ModeDefinition::from_legacy(settings, DEFAULT_MODE_ID, "Message");
+    message.asr.literal_punctuation = true;
     vec![
-        ModeDefinition::from_legacy(settings, DEFAULT_MODE_ID, "Message"),
+        message,
         ModeDefinition::specialist(settings, "email", "Email", PromptPreset::Email),
         ModeDefinition::specialist(settings, "meeting", "Meeting", PromptPreset::Meeting),
         ModeDefinition::specialist(settings, "notes", "Notes", PromptPreset::Notes),
@@ -2282,6 +2287,12 @@ impl RunPlan {
         &self.delivery
     }
 
+    /// Press the submit key after this run's words are delivered, whatever
+    /// its mode says.
+    pub fn submit_after_delivery(&mut self) {
+        self.delivery.auto_submit = true;
+    }
+
     pub fn context(&self) -> &ContextSnapshot {
         self.context.snapshot()
     }
@@ -3055,7 +3066,7 @@ mod tests {
         mode.llm.model_id = "after-provider-model".to_string();
         mode.prompt.custom_prompt = Some("after-prompt".to_string());
         mode.delivery.append_trailing_space = true;
-        mode.asr.literal_punctuation = true;
+        mode.asr.literal_punctuation = false;
         settings.english_spelling = EnglishSpelling::British;
         settings.context_policy_ceiling = ContextPolicy::Full;
         settings.modes_revision += 1;
@@ -3066,8 +3077,8 @@ mod tests {
         assert_eq!(first.asr().language, "auto");
         assert_ne!(first.asr().custom_words, second.asr().custom_words);
         assert!(first.asr().filler_word_removal_enabled);
-        assert!(!first.asr().literal_punctuation);
-        assert!(second.asr().literal_punctuation);
+        assert!(first.asr().literal_punctuation);
+        assert!(!second.asr().literal_punctuation);
         assert_eq!(first.asr().english_spelling, EnglishSpelling::AsSpoken);
         assert_eq!(second.asr().english_spelling, EnglishSpelling::British);
         assert_ne!(

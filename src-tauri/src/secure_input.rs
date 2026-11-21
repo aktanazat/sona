@@ -13,7 +13,7 @@
 //! - while secure input is sustained, shadow-registers vulnerable *keyed*
 //!   bindings through the Carbon-backed Tauri global-shortcut path, which is
 //!   not affected by secure input (modifier-only bindings need no fallback)
-//! - dynamically shadows the cancel keys the open recording owns, so they
+//! - dynamically shadows the recording keys the open recording owns, so they
 //!   remain available under secure input
 //! - exposes a count-only keyboard diagnostic for the debug window. Only
 //!   event *kinds* are counted — key identity is never logged or returned.
@@ -84,9 +84,9 @@ pub fn note_recorder_blocked(app: &AppHandle) {
     imp::note_recorder_blocked(app)
 }
 
-/// Re-shadow the cancel keys after the open recording's set changed.
-pub fn cancel_keys_changed(app: &AppHandle) {
-    imp::cancel_keys_changed(app)
+/// Re-shadow the recording keys after the open recording's set changed.
+pub fn recording_keys_changed(app: &AppHandle) {
+    imp::recording_keys_changed(app)
 }
 
 /// Rebuild Carbon fallback registrations from the current settings and
@@ -494,7 +494,8 @@ mod imp {
         binding: &ShortcutBinding,
         fallback: &mut FallbackState,
     ) -> bool {
-        let Ok(hotkey) = binding.current_binding.parse::<handy_keys::Hotkey>() else {
+        let Ok(parsed) = crate::shortcut::handy_keys::parse_shortcut(&binding.current_binding)
+        else {
             warn!(
                 "SecureInput fallback: '{}' has unparseable binding '{}', skipping",
                 id, binding.current_binding
@@ -502,6 +503,7 @@ mod imp {
             fallback.uncovered.push(id.to_string());
             return false;
         };
+        let hotkey = parsed.hotkey;
 
         match &hotkey.key {
             None => {
@@ -519,6 +521,15 @@ mod imp {
                 return true;
             }
             Some(_) => {}
+        }
+
+        if parsed.double_tap {
+            warn!(
+                "SecureInput fallback: '{}' ('{}') is a double tap Carbon cannot express",
+                id, binding.current_binding
+            );
+            fallback.uncovered.push(id.to_string());
+            return false;
         }
 
         let Some((carbon_binding, degraded)) = carbon_equivalent(&hotkey) else {
@@ -616,14 +627,14 @@ mod imp {
         let mut next = FallbackState::default();
         let mut immune = 0usize;
         if eligible {
-            let cancel_bindings = crate::shortcut::active_cancel_bindings(&settings);
+            let recording_keys = crate::shortcut::active_recording_key_bindings(&settings);
             let bindings = settings
                 .bindings
                 .iter()
-                .filter(|(id, _)| id.as_str() != "cancel")
+                .filter(|(id, _)| !crate::shortcut::is_recording_key(id))
                 .map(|(id, binding)| (id.as_str(), binding))
                 .chain(
-                    cancel_bindings
+                    recording_keys
                         .iter()
                         .map(|binding| (binding.id.as_str(), binding)),
                 );
@@ -669,7 +680,7 @@ mod imp {
         });
     }
 
-    pub fn cancel_keys_changed(app: &AppHandle) {
+    pub fn recording_keys_changed(app: &AppHandle) {
         let state = app.state::<SecureInputState>();
         // Without sustained Secure Input there are no Carbon shadows to
         // update. The monitor performs reconciliation when sustained mode is
@@ -873,7 +884,7 @@ mod imp {
 
     pub fn note_recorder_blocked(_app: &AppHandle) {}
 
-    pub fn cancel_keys_changed(_app: &AppHandle) {}
+    pub fn recording_keys_changed(_app: &AppHandle) {}
 
     pub fn reconcile_fallback(_app: &AppHandle) {}
 
