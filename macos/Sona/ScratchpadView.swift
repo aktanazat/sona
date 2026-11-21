@@ -497,6 +497,12 @@ struct ScratchNoteActions: View {
 
     var body: some View {
         HStack(spacing: 8) {
+            if store.error != nil && store.hasPendingSave {
+                Button("Retry save") {
+                    Task { await store.flush() }
+                }
+                .buttonStyle(.secondary)
+            }
             if let saved = store.saved {
                 Button {
                     Task { await store.togglePin() }

@@ -37,7 +37,7 @@ use crate::tray::DICTATION_ACTIVITY_EVENT;
 
 /// The events the managers emit by string name rather than through a specta
 /// type. The typed ones are listed in [`dispatch::TYPED_EVENTS`].
-const NAMED_EVENTS: [&str; 30] = [
+const NAMED_EVENTS: [&str; 31] = [
     DICTATION_ACTIVITY_EVENT,
     DICTATION_DELIVERY_EVENT,
     DICTATION_KEPT_EVENT,
@@ -58,6 +58,7 @@ const NAMED_EVENTS: [&str; 30] = [
     "model-verification-completed",
     "model-verification-started",
     "models-updated",
+    "note-dictation-failed",
     "onboarding-practice-expired",
     "paste-error",
     "recording-error",

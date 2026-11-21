@@ -584,15 +584,19 @@ pub(crate) fn emit_changed(app: &AppHandle, note_id: &str, deleted: bool) {
 /// The shortcut held to dictate into a new note instead of the app in front.
 pub(crate) const DICTATE_NOTE_BINDING_ID: &str = "dictate_note";
 
-/// Files a finished dictation as a new note. Blank words make no note.
-pub(crate) fn file_dictation(app: &AppHandle, history: &HistoryManager, words: &str) {
-    match run(history, |conn| create_note_with_connection(conn, words, now_ms())) {
-        Ok(note) => emit_changed(app, &note.id, false),
-        Err(error) => log::warn!(
-            "{}",
-            failure_sentence(history, error, "The dictation could not be saved as a note.")
-        ),
-    }
+pub(crate) fn create_note(
+    app: &AppHandle,
+    history: &HistoryManager,
+    words: &str,
+) -> Result<ScratchNote, String> {
+    let note = run(history, |conn| {
+        create_note_with_connection(conn, words, now_ms())
+    })
+    .map_err(|error| {
+        failure_sentence(history, error, "The note could not be saved. Retry saving.")
+    })?;
+    emit_changed(app, &note.id, false);
+    Ok(note)
 }
 
 /// One note by id, for another slice that holds an id and needs the words:
@@ -755,12 +759,7 @@ pub fn scratchpad_create(
     history: State<'_, Arc<HistoryManager>>,
     body: String,
 ) -> Result<ScratchNote, String> {
-    let note = run(&history, |conn| {
-        create_note_with_connection(conn, &body, now_ms())
-    })
-    .map_err(|error| failure_sentence(&history, error, "The note could not be saved."))?;
-    emit_changed(&app, &note.id, false);
-    Ok(note)
+    create_note(&app, &history, &body)
 }
 
 #[tauri::command(async)]

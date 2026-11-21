@@ -510,12 +510,10 @@ enum BindingCopy {
         }
     }
 
-    /// Only the transcribe row carries a hint: that a shortcut can be held
-    /// as well as tapped is the one thing about it nothing else shows.
     static func detail(_ record: BindingRecord) -> String? {
         switch record.id {
         case "transcribe": "Tap to toggle, hold to talk. Works with any shortcut."
-        case "cancel", "command", "transcribe_with_post_process": nil
+        case "cancel", "command", "transcribe_with_post_process", "dictate_note": nil
         default: record.description.isEmpty ? nil : record.description
         }
     }

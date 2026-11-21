@@ -138,6 +138,11 @@ struct PasteErrorEvent: Decodable {
     let focusMoved: Bool
 }
 
+struct NoteDictationFailedEvent: Decodable {
+    let text: String
+    let error: String
+}
+
 /// `rewrite-skipped`: the mode asked for a rewrite and the words went out
 /// as spoken. `historyId` is the entry that keeps the receipt, or nil when
 /// history is off.
@@ -240,6 +245,7 @@ extension CoreEvent {
     static let showMainWindow = "show-main-window"
     static let dictationDelivery = "dictation-delivery"
     static let dictationKept = "dictation-kept"
+    static let noteDictationFailed = "note-dictation-failed"
     /// Sent once per dictation when it reaches three minutes.
     static let dictationMeetingSuggestion = "dictation-meeting-suggestion"
 }
@@ -455,7 +461,7 @@ final class AppModel {
             CoreEvent.transcriptionError, CoreEvent.settingsChanged, CoreEvent.modesChanged,
             CoreEvent.meetingNavigationRequested, CoreEvent.dictationDurationWarning,
             CoreEvent.commandAnswered, CoreEvent.showMainWindow, CoreEvent.dictationDelivery,
-            CoreEvent.dictationKept, CoreEvent.dictationMeetingSuggestion,
+            CoreEvent.dictationKept, CoreEvent.dictationMeetingSuggestion, CoreEvent.noteDictationFailed,
         ] {
             core.observe(name) { [weak self] line in self?.handle(name, line) }
         }
@@ -1412,6 +1418,11 @@ final class AppModel {
                     text: "Cancelled. The \(length) recording is kept in the Library for 14 days.",
                     dictation: event.historyId)
                 showPillFeedback(.kept)
+            case CoreEvent.noteDictationFailed:
+                let event: NoteDictationFailedEvent = try Core.payload(line)
+                scratchpad.retainDictation(event.text, error: event.error)
+                go(.scratchpad)
+                reveal()
             case CoreEvent.dictationMeetingSuggestion:
                 if case .recording = capture { meetingSuggested = true }
             default:

@@ -2719,6 +2719,30 @@ fn get_settings_locked<R: tauri::Runtime>(app: &AppHandle<R>) -> AppSettings {
     settings
 }
 
+fn merge_missing_bindings(settings: &mut AppSettings) -> bool {
+    let mut updated = false;
+    for (key, mut value) in get_default_settings().bindings {
+        if settings.bindings.contains_key(&key) {
+            continue;
+        }
+        if value
+            .current_binding
+            .parse::<handy_keys::Hotkey>()
+            .is_ok_and(|chord| {
+                settings.bindings.values().any(|existing| {
+                    existing.current_binding.parse::<handy_keys::Hotkey>().ok() == Some(chord)
+                })
+            })
+        {
+            value.current_binding.clear();
+        }
+        debug!("Adding missing binding: {key}");
+        settings.bindings.insert(key, value);
+        updated = true;
+    }
+    updated
+}
+
 fn read_settings_from_store<R: tauri::Runtime>(file: &SettingsFile<R>) -> AppSettings {
     let store = &file.store;
     let mut wrote_settings = false;
@@ -2738,13 +2762,8 @@ fn read_settings_from_store<R: tauri::Runtime>(file: &SettingsFile<R>) -> AppSet
             updated = true;
         }
 
-        // Merge in any bindings added since this store was written.
-        for (key, value) in get_default_settings().bindings {
-            if let std::collections::hash_map::Entry::Vacant(entry) = settings.bindings.entry(key) {
-                debug!("Adding missing binding: {}", entry.key());
-                entry.insert(value);
-                updated = true;
-            }
+        if merge_missing_bindings(&mut settings) {
+            updated = true;
         }
 
         if ensure_mode_settings(&mut settings) {
@@ -5887,5 +5906,28 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn adding_the_note_shortcut_keeps_an_existing_chord_owner() {
+        let mut settings = get_default_settings();
+        settings
+            .bindings
+            .remove(crate::scratchpad::DICTATE_NOTE_BINDING_ID);
+        let existing = "shift+alt+ctrl+n";
+        settings
+            .bindings
+            .get_mut("transcribe")
+            .unwrap()
+            .current_binding = existing.to_string();
+
+        assert!(merge_missing_bindings(&mut settings));
+        assert_eq!(settings.bindings["transcribe"].current_binding, existing);
+        assert!(
+            settings.bindings[crate::scratchpad::DICTATE_NOTE_BINDING_ID]
+                .current_binding
+                .is_empty()
+        );
+        assert!(!merge_missing_bindings(&mut settings));
     }
 }

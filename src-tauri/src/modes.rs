@@ -2240,12 +2240,18 @@ impl RunPlan {
     /// A dictation that becomes a new note: the active mode's rewrite still
     /// applies, and nothing is read from the screen, since no app receives it.
     fn for_note(settings: &AppSettings) -> Result<Self, RunPlanError> {
-        let mode = active_mode(settings)
+        let mut mode = active_mode(settings)
             .cloned()
             .ok_or(RunPlanError::NoMatchingMode)?;
-        let mut run =
-            Self::for_mode(settings, mode, None, ModeSelectionSource::ActiveMode, false, None)?;
-        run.context.without_live_capture();
+        mode.context_policy = ContextPolicy::None;
+        let mut run = Self::for_mode(
+            settings,
+            mode,
+            None,
+            ModeSelectionSource::ActiveMode,
+            false,
+            None,
+        )?;
         run.note = true;
         Ok(run)
     }
@@ -2567,11 +2573,14 @@ mod tests {
     fn a_note_dictation_keeps_the_mode_rewrite_and_is_filed_not_delivered() {
         let mut settings = configured_settings();
         settings.modes[0].llm.enabled = true;
+        settings.context_policy_ceiling = ContextPolicy::Full;
+        settings.modes[0].context_policy = ContextPolicy::Full;
         let note = RunPlan::for_intent(&settings, &TranscriptionIntent::Note).unwrap();
         let tasks = RunPlan::for_intent(&settings, &TranscriptionIntent::Tasks).unwrap();
 
         assert!(note.note() && !note.tasks());
         assert!(note.post_process_requested());
+        assert_eq!(note.context_plan().effective_policy(), ContextPolicy::None);
         assert!(!tasks.note() && !tasks.post_process_requested());
     }
 
