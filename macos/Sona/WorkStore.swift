@@ -731,17 +731,22 @@ final class WorkStore {
         }
     }
 
-    func groupLabel(_ id: String, into group: String?) {
+    /// Moves a label into `group`, or out of its group with `nil`. `settle`
+    /// makes the group one label per item, and each item holding several of
+    /// its labels keeps the first by name; without it the core refuses a
+    /// move that would leave an item holding two.
+    func groupLabel(_ id: String, into group: String?, settle: Bool = false) {
         guard var shown = labels.first(where: { $0.id == id }) else { return }
         let name = group?.trimmingCharacters(in: .whitespacesAndNewlines)
         let value = name?.isEmpty == false ? name : nil
         guard value != shown.group else { return }
         let before = shown
         shown.group = value
-        shown.groupMulti = value.flatMap { group in
+        shown.groupMulti = settle ? false : value.flatMap { group in
             labels.first { $0.group == group && $0.id != id }?.groupMulti
         } ?? false
-        changeLabel(before, to: shown, "work_label_group", LabelGroupParams(operationId: Self.newId(), id: id, group: value, multi: nil))
+        changeLabel(before, to: shown, "work_label_group", LabelGroupParams(
+            operationId: Self.newId(), id: id, group: value, multi: settle && value != nil ? false : nil))
     }
 
     /// Lets a task carry several labels of `group`, or only one.
@@ -767,10 +772,11 @@ final class WorkStore {
     }
 
     /// Moves every task, project and initiative from one label to another
-    /// and deletes the first.
+    /// and retires the first, which stays in the list on nothing.
     func mergeLabel(_ from: String, into: String) {
-        guard from != into, labels.contains(where: { $0.id == from }), labels.contains(where: { $0.id == into }) else { return }
-        labels.removeAll { $0.id == from }
+        guard from != into, var merged = labels.first(where: { $0.id == from }), labels.contains(where: { $0.id == into }) else { return }
+        merged.retiredAtMs = merged.retiredAtMs ?? ProjectsStore.milliseconds(.now)
+        place(merged)
         let wearing = (items ?? []).filter { $0.labelIds.contains(from) }.map(\.id)
         edit(Set(wearing)) { row in
             row.labelIds.removeAll { $0 == from }

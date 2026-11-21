@@ -156,9 +156,10 @@ struct CycleSummary: View {
                                 .buttonStyle(QuietButton(compact: true))
                         }
                     } else {
-                        Button { describing = cycle.description ?? "" } label: {
-                            Text(cycle.description?.isEmpty == false ? cycle.description! : "Add a cycle description…")
-                                .bodyText(12.5, cycle.description?.isEmpty == false ? Theme.inkSecondary : Theme.inkTertiary)
+                        let text = cycle.description.flatMap { $0.isEmpty ? nil : $0 }
+                        Button { describing = text ?? "" } label: {
+                            Text(text ?? "Add a cycle description…")
+                                .bodyText(12.5, text == nil ? Theme.inkTertiary : Theme.inkSecondary)
                                 .lineLimit(2)
                         }
                         .buttonStyle(.plain)

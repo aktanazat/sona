@@ -188,7 +188,11 @@ struct TasksSettingsView: View {
             labels
             templates
         }
-        .task { await model.routines.loadTemplates() }
+        .task {
+            await model.routines.loadTemplates()
+            if model.projects.projects == nil { await model.projects.loadProjects() }
+            await model.projects.loadInitiatives()
+        }
     }
 
     @ViewBuilder private var labels: some View {
@@ -264,6 +268,7 @@ private struct LabelSettingsRow: View {
     @State private var describing = false
     @State private var description = ""
     @State private var merging: WorkLabel?
+    @State private var crowding: Crowding?
 
     var body: some View {
         let work = model.work
@@ -287,7 +292,7 @@ private struct LabelSettingsRow: View {
                 Menu(label.group ?? "Group") {
                     ForEach(groups, id: \.self) { group in
                         Button {
-                            work.groupLabel(label.id, into: group)
+                            move(into: group)
                         } label: {
                             if label.group == group { Label(group, systemImage: "checkmark") } else { Text(group) }
                         }
@@ -359,7 +364,55 @@ private struct LabelSettingsRow: View {
             Button("Merge") { work.mergeLabel(label.id, into: into.id) }
             Button("Cancel", role: .cancel) {}
         } message: { into in
-            Text("Its tasks, projects and initiatives get “\(into.name)” instead, and “\(label.name)” is retired.")
+            Text("Its tasks, projects and initiatives get “\(into.name)” instead. “\(label.name)” stays in this list, retired and on nothing.")
+        }
+        .confirmationDialog(
+            "Move “\(label.name)” into “\(crowding?.group ?? "")”?",
+            isPresented: Binding(get: { crowding != nil }, set: { if !$0 { crowding = nil } }),
+            presenting: crowding
+        ) { crowding in
+            Button("Move") { work.groupLabel(label.id, into: crowding.group, settle: true) }
+            Button("Cancel", role: .cancel) {}
+        } message: { crowding in
+            Text("\(crowding.items) already \(crowding.count == 1 ? "has" : "have") another “\(crowding.group)” label. Each keeps the first by name.")
+        }
+    }
+
+    /// What a move into a one-label group would take a label off.
+    struct Crowding {
+        let group: String
+        let tasks: Int
+        let projects: Int
+        let initiatives: Int
+
+        var count: Int { tasks + projects + initiatives }
+
+        /// "2 tasks and 1 project".
+        var items: String {
+            let parts = [(tasks, "task", "tasks"), (projects, "project", "projects"), (initiatives, "initiative", "initiatives")]
+                .filter { $0.0 > 0 }
+                .map { "\($0.0) \($0.0 == 1 ? $0.1 : $0.2)" }
+            return parts.count > 1 ? parts.dropLast().joined(separator: ", ") + " and " + parts[parts.count - 1] : parts.joined()
+        }
+    }
+
+    /// Moves the label into `group`, first asking when the group allows one
+    /// label and something carries this one and another of the group's.
+    private func move(into group: String) {
+        let members = others.filter { $0.group == group }
+        let siblings = Set(members.map(\.id))
+        let crowded: ([String]) -> Bool = { ids in
+            ids.contains(label.id) && ids.contains(where: siblings.contains)
+        }
+        let crowding = Crowding(
+            group: group,
+            tasks: (model.work.items ?? []).filter { crowded($0.labelIds) }.count,
+            projects: (model.projects.projects ?? []).filter { crowded($0.project.labelIds ?? []) }.count,
+            initiatives: model.projects.initiatives.filter { crowded($0.labelIds) }.count)
+        if members.first?.groupMulti == true || crowding.count == 0 {
+            model.work.groupLabel(label.id, into: group)
+        } else {
+            self.crowding = crowding
         }
     }
 }
