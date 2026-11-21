@@ -120,11 +120,14 @@ struct KeyboardDictation {
         return same ? .write : .review
     }
 
-    /// A dictation waiting on review: its text, the field it was heard for and when.
+    /// A dictation waiting on review: its text, the field it was heard for and when, and
+    /// whether it came from the app, whose drafts the Notes queue does not hold.
     struct KeptReview: Equatable, Codable {
+        var id = UUID()
         var text: String
         var field: FieldMark
         var date: Date
+        var fromApp = false
 
         /// Another dictation joins this one only from the same field and while this one is
         /// recent; otherwise it is shown on its own and this one waits behind the button.
@@ -135,15 +138,32 @@ struct KeyboardDictation {
 
         /// Both texts, this one first, a paragraph apart, under the newer one's field and time.
         func joined(with next: KeptReview) -> KeptReview {
-            KeptReview(text: text + "\n\n" + next.text, field: next.field, date: next.date)
+            KeptReview(id: id, text: text + "\n\n" + next.text, field: next.field, date: next.date, fromApp: fromApp || next.fromApp)
         }
+
+        /// How long it is kept: a day for words the keyboard heard, which the Notes queue
+        /// also keeps; seven days, as long as that queue, for the app's drafts.
+        var lifetime: TimeInterval { (fromApp ? 7 : 1) * 24 * 60 * 60 }
+    }
+
+    enum Placement: Equatable {
+        case write
+        case review
+        /// Joins the newest kept review on the review page.
+        case join
+    }
+
+    /// Where a finished dictation goes. A kept review holds it back only when it would join
+    /// that review; otherwise it is typed or reviewed as if nothing were kept.
+    static func placing(_ review: KeptReview, newestKept: KeptReview?, now current: FieldMark, reviews: Bool) -> Placement {
+        if let newestKept, newestKept.joins(review) { return .join }
+        return landing(heardFor: review.field, now: current, reviews: reviews) == .write ? .write : .review
     }
 
     /// Reviews kept across the keyboard being ended: in a file only the keyboard reads,
-    /// locked while the phone is, and forgotten after a day. The dictations themselves
-    /// also wait in the Notes queue for seven days.
+    /// locked while the phone is, each forgotten after its lifetime. Every keyboard copy
+    /// (one per app) reads the file again before it writes, so none drops another's.
     struct KeptReviewStore {
-        static let lifetime: TimeInterval = 24 * 60 * 60
         let url: URL
 
         static func shared() -> Self? {
@@ -152,17 +172,27 @@ struct KeyboardDictation {
             return Self(url: folder.appendingPathComponent("kept-reviews.json"))
         }
 
-        func load(at now: Date) -> [KeptReview] {
+        /// The kept reviews still in their lifetime: none when there is no file, nil when the
+        /// file cannot be read.
+        func load(at now: Date) -> [KeptReview]? {
+            guard FileManager.default.fileExists(atPath: url.path) else { return [] }
             guard let data = try? Data(contentsOf: url),
-                  let reviews = try? JSONDecoder().decode([KeptReview].self, from: data) else { return [] }
-            return reviews.filter { now.timeIntervalSince($0.date) < Self.lifetime }
+                  let reviews = try? JSONDecoder().decode([KeptReview].self, from: data) else { return nil }
+            return reviews.filter { now.timeIntervalSince($0.date) < $0.lifetime }
         }
 
-        func save(_ reviews: [KeptReview]) {
-            guard !reviews.isEmpty, let data = try? JSONEncoder().encode(reviews) else {
+        /// Writes `mine` over the reviews with the same ids, drops `ended`, and keeps every
+        /// other review another keyboard copy saved. A file it cannot read, as while the
+        /// phone is locked, is left as it is.
+        func save(_ mine: [KeptReview], ended: Set<UUID>, at now: Date) {
+            guard let others = load(at: now) else { return }
+            let ids = Set(mine.map(\.id))
+            let all = others.filter { !ids.contains($0.id) && !ended.contains($0.id) } + mine
+            guard !all.isEmpty else {
                 try? FileManager.default.removeItem(at: url)
                 return
             }
+            guard let data = try? JSONEncoder().encode(all.sorted { $0.date < $1.date }) else { return }
             try? data.write(to: url, options: [.atomic, .completeFileProtection])
         }
     }

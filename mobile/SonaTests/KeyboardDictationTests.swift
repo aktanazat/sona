@@ -97,18 +97,55 @@ struct KeyboardDictationTests {
         #expect(!kept.joins(elsewhere))
     }
 
-    @Test("kept reviews survive the keyboard ending for a day, then are gone")
-    func keptReviewsExpireAfterADay() {
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent("kept-\(UUID().uuidString).json")
-        defer { try? FileManager.default.removeItem(at: url) }
-        let store = KeyboardDictation.KeptReviewStore(url: url)
+    @Test("a kept review from another field does not hold back a normal dictation")
+    func keptReviewElsewhereLetsADictationBeTyped() {
+        let here = KeyboardDictation.FieldMark(id: UUID(), shown: 1, before: "Hi", traits: "0 0")
+        var elsewhere = here
+        elsewhere.id = UUID()
+        let kept = KeyboardDictation.KeptReview(text: "Old.", field: elsewhere, date: Date(timeIntervalSince1970: 0))
+        let new = KeyboardDictation.KeptReview(text: "New.", field: here, date: Date(timeIntervalSince1970: 60))
+        #expect(KeyboardDictation.placing(new, newestKept: kept, now: here, reviews: false) == .write)
+        let recentHere = KeyboardDictation.KeptReview(text: "Old.", field: here, date: Date(timeIntervalSince1970: 0))
+        #expect(KeyboardDictation.placing(new, newestKept: recentHere, now: here, reviews: false) == .join)
+    }
+
+    @Test("kept reviews last a day for heard words and a week for app drafts")
+    func keptReviewsExpireByWhereTheyCameFrom() {
+        let store = KeyboardDictation.KeptReviewStore(url: Self.scratchURL())
+        defer { try? FileManager.default.removeItem(at: store.url) }
         let field = KeyboardDictation.FieldMark(id: nil, shown: 1, before: "", traits: "")
-        let kept = KeyboardDictation.KeptReview(text: "Kept.", field: field, date: Date(timeIntervalSince1970: 1_000_000))
-        store.save([kept])
-        #expect(store.load(at: kept.date.addingTimeInterval(23 * 60 * 60)) == [kept])
-        #expect(store.load(at: kept.date.addingTimeInterval(25 * 60 * 60)).isEmpty)
-        store.save([])
-        #expect(!FileManager.default.fileExists(atPath: url.path))
+        let start = Date(timeIntervalSince1970: 1_000_000)
+        let heard = KeyboardDictation.KeptReview(text: "Heard.", field: field, date: start)
+        let draft = KeyboardDictation.KeptReview(text: "Draft.", field: field, date: start, fromApp: true)
+        store.save([heard, draft], ended: [], at: start)
+        #expect(store.load(at: start.addingTimeInterval(23 * 60 * 60)) == [heard, draft])
+        #expect(store.load(at: start.addingTimeInterval(2 * 24 * 60 * 60)) == [draft])
+        #expect(store.load(at: start.addingTimeInterval(8 * 24 * 60 * 60)) == [])
+    }
+
+    @Test("two keyboard copies keep each other's reviews, and an unreadable file is left alone")
+    func keptReviewsFromTwoCopiesMerge() throws {
+        let store = KeyboardDictation.KeptReviewStore(url: Self.scratchURL())
+        defer { try? FileManager.default.removeItem(at: store.url) }
+        let field = KeyboardDictation.FieldMark(id: nil, shown: 1, before: "", traits: "")
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        let mail = KeyboardDictation.KeptReview(text: "In Mail.", field: field, date: now)
+        let notes = KeyboardDictation.KeptReview(text: "In Notes.", field: field, date: now.addingTimeInterval(1))
+        store.save([mail], ended: [], at: now)
+        store.save([notes], ended: [], at: now)
+        #expect(store.load(at: now) == [mail, notes])
+        store.save([], ended: [mail.id], at: now)
+        #expect(store.load(at: now) == [notes])
+        store.save([], ended: [notes.id], at: now)
+        #expect(!FileManager.default.fileExists(atPath: store.url.path))
+        try Data("not json".utf8).write(to: store.url)
+        store.save([], ended: [], at: now)
+        store.save([mail], ended: [], at: now)
+        #expect(try Data(contentsOf: store.url) == Data("not json".utf8))
+    }
+
+    private static func scratchURL() -> URL {
+        FileManager.default.temporaryDirectory.appendingPathComponent("kept-\(UUID().uuidString).json")
     }
 }
 

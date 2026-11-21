@@ -137,6 +137,7 @@ final class KeyboardViewController: UIInputViewController {
 
     override func viewWillAppear(_ animated: Bool) {
         shownCount += 1
+        tools.reloadReviews()
         super.viewWillAppear(animated)
         echo.forget()
         let languages = KeyboardLanguages.shared().enabled

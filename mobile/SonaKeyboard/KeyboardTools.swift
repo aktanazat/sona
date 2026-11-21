@@ -85,11 +85,13 @@ final class KeyboardTools {
     @ObservationIgnored private var work: Task<Void, Never>?
     @ObservationIgnored private var deadline: Task<Void, Never>?
     @ObservationIgnored private var answering = false
-    /// The dictation being styled and the field it was heard for; it goes in as heard if
-    /// the style stops.
-    @ObservationIgnored private var unstyled: (text: String, field: KeyboardDictation.FieldMark)?
+    /// The dictation being styled, the field it was heard for and whether the app sent it;
+    /// it goes in as heard if the style stops.
+    @ObservationIgnored private var unstyled: (text: String, field: KeyboardDictation.FieldMark, fromApp: Bool)?
     /// The dictation on the review page.
     @ObservationIgnored private var shownReview: KeyboardDictation.KeptReview?
+    /// Reviews this copy of the keyboard inserted, discarded or joined, to drop from the file.
+    @ObservationIgnored private var endedReviews: Set<UUID> = []
     @ObservationIgnored private let reviewStore: KeyboardDictation.KeptReviewStore?
     @ObservationIgnored private var warmFix: LanguageModelSession?
     @ObservationIgnored private var noticeTimer: Task<Void, Never>?
@@ -130,8 +132,6 @@ final class KeyboardTools {
             saveReviews()
         } else if open {
             page = .closed
-        } else if !heldReviews.isEmpty {
-            showHeldReview()
         } else {
             page = .browse(lastTab, nil)
             if lastTab == .ai { prewarm() }
@@ -158,6 +158,7 @@ final class KeyboardTools {
         shownReview = nil
         if let last = heldReviews.last, last.joins(shown) {
             heldReviews[heldReviews.count - 1] = last.joined(with: shown)
+            endedReviews.insert(shown.id)
         } else {
             heldReviews.append(shown)
         }
@@ -165,12 +166,19 @@ final class KeyboardTools {
 
     /// Insert or Discard ends the review on the page.
     private func endShownReview() {
+        if let shown = shownReview { endedReviews.insert(shown.id) }
         shownReview = nil
         saveReviews()
     }
 
     private func saveReviews() {
-        reviewStore?.save(heldReviews + [shownReview].compactMap { $0 })
+        reviewStore?.save(heldReviews + [shownReview].compactMap { $0 }, ended: endedReviews, at: Date())
+    }
+
+    /// The keyboard appeared, perhaps after another app's copy of it kept reviews too.
+    func reloadReviews() {
+        guard let saved = reviewStore?.load(at: Date()) else { return }
+        heldReviews = saved.filter { $0.id != shownReview?.id }
     }
 
     func show(_ tab: Tab, _ menu: Menu? = nil) {
@@ -349,34 +357,31 @@ final class KeyboardTools {
             parkShownReview()
             saveReviews()
         }
-        guard let style, KeyboardAI.unavailable == nil else { return land(text, heardFor: field) }
+        guard let style, KeyboardAI.unavailable == nil else { return land(text, heardFor: field, fromApp: styled) }
         start(.style(style), on: text) { [weak self] styledText in
             guard let self else { return }
             if styledText == nil { say("dictation.styleFailed") }
-            land(styledText ?? text, heardFor: field)
+            land(styledText ?? text, heardFor: field, fromApp: styled)
         }
-        unstyled = (text, field)
+        unstyled = (text, field, styled)
     }
 
     /// A dictation goes into the field it was heard for; in any other field it waits for
-    /// Insert instead of landing in text it was not meant for. While another waits behind
-    /// the button it goes on review too, so the two are never out of order.
-    private func land(_ text: String, heardFor field: KeyboardDictation.FieldMark) {
-        if heldReviews.isEmpty, KeyboardDictation.landing(heardFor: field, now: fieldMark(), reviews: reviewsDictation) == .write {
+    /// Insert instead of landing in text it was not meant for. It joins the newest kept
+    /// review when that one is recent and from the same field.
+    private func land(_ text: String, heardFor field: KeyboardDictation.FieldMark, fromApp: Bool) {
+        let review = KeyboardDictation.KeptReview(text: text, field: field, date: Date(), fromApp: fromApp)
+        switch KeyboardDictation.placing(review, newestKept: heldReviews.last, now: fieldMark(), reviews: reviewsDictation) {
+        case .write:
             write(text)
             page = .closed
-            return
+        case .review:
+            showReview(review)
+        case .join:
+            let held = heldReviews.removeLast()
+            showReview(held.joined(with: review))
+            say("dictation.reviewJoined")
         }
-        putOnReview(KeyboardDictation.KeptReview(text: text, field: field, date: Date()))
-    }
-
-    /// A dictation for review joins the one kept behind the button when that one is recent
-    /// and from the same field; otherwise it shows on its own and the kept one stays.
-    private func putOnReview(_ review: KeyboardDictation.KeptReview) {
-        guard let held = heldReviews.last, held.joins(review) else { return showReview(review) }
-        heldReviews.removeLast()
-        showReview(held.joined(with: review))
-        say("dictation.reviewJoined")
     }
 
     /// The keyboard went away: a dictation still being styled stops and waits for Insert,
@@ -385,7 +390,13 @@ final class KeyboardTools {
         guard let pending = unstyled else { return }
         unstyled = nil
         cancelWork()
-        putOnReview(KeyboardDictation.KeptReview(text: pending.text, field: pending.field, date: Date()))
+        let review = KeyboardDictation.KeptReview(text: pending.text, field: pending.field, date: Date(), fromApp: pending.fromApp)
+        if let held = heldReviews.last, held.joins(review) {
+            heldReviews.removeLast()
+            showReview(held.joined(with: review))
+        } else {
+            showReview(review)
+        }
     }
 
     // MARK: The model at work
@@ -442,7 +453,7 @@ final class KeyboardTools {
         let pending = unstyled
         unstyled = nil
         cancelWork()
-        if let pending { land(pending.text, heardFor: pending.field) } else { page = .browse(.ai, nil) }
+        if let pending { land(pending.text, heardFor: pending.field, fromApp: pending.fromApp) } else { page = .browse(.ai, nil) }
     }
 
     /// Ends the model's work. A dictation it was styling goes in as it was heard.
@@ -453,7 +464,7 @@ final class KeyboardTools {
         deadline = nil
         if let pending = unstyled {
             unstyled = nil
-            land(pending.text, heardFor: pending.field)
+            land(pending.text, heardFor: pending.field, fromApp: pending.fromApp)
         }
     }
 
