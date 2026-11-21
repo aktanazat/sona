@@ -19,7 +19,7 @@ use crate::planning::types::Project;
 use crate::scratchpad::{self, Author, ScratchNote};
 use anyhow::Result;
 use chrono::{Local, NaiveDate, TimeZone};
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -399,6 +399,57 @@ pub(crate) fn note(conn: &Connection, note_id: &str) -> Result<Option<Value>> {
         "truncated": truncated,
         "link": crate::query::note_link(&note.id),
     })))
+}
+
+/* ----------------------------------------------------------- card targets */
+
+/// A task as a card names it: its handle, its title and the name of the
+/// project it is in. `None` when no task has this id.
+pub(crate) fn task_named(
+    conn: &Connection,
+    id: &str,
+) -> Result<Option<(String, String, Option<String>)>> {
+    let Ok(id) = store::uuid(id) else {
+        return Ok(None);
+    };
+    let Some((number, title, project_id)) = conn
+        .query_row(
+            "SELECT number, title, project_id FROM planning_tasks WHERE id = ?1",
+            [&id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            },
+        )
+        .optional()?
+    else {
+        return Ok(None);
+    };
+    let project = match project_id {
+        Some(project_id) => project_named(conn, &project_id)?,
+        None => None,
+    };
+    Ok(Some((handle(number), title, project)))
+}
+
+pub(crate) fn project_named(conn: &Connection, id: &str) -> Result<Option<String>> {
+    let Ok(id) = store::uuid(id) else {
+        return Ok(None);
+    };
+    Ok(conn
+        .query_row(
+            "SELECT title FROM planning_projects WHERE id = ?1",
+            [&id],
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
+pub(crate) fn note_named(conn: &Connection, id: &str) -> Result<Option<String>> {
+    Ok(scratchpad::note_with_connection(conn, id)?.map(|note| note.title))
 }
 
 /* ---------------------------------------------------------------- changes */

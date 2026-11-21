@@ -633,17 +633,22 @@ private struct ChatActionCard: View {
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
             VStack(alignment: .leading, spacing: 4) {
-                Text(action.action.line(naming: store.people))
+                Text(action.line(naming: store.people))
                     .bodyText(14)
                     .fixedSize(horizontal: false, vertical: true)
                 Text(action.action.reason)
                     .metaText()
                     .fixedSize(horizontal: false, vertical: true)
-                ForEach(Array(action.action.changes.enumerated()), id: \.offset) { _, change in
+                ForEach(Array(action.changes.enumerated()), id: \.offset) { _, change in
                     Text(change)
                         .bodyText(13)
                         .fixedSize(horizontal: false, vertical: true)
                         .textSelection(.enabled)
+                }
+                ForEach(Array(action.warnings.enumerated()), id: \.offset) { _, warning in
+                    Text(warning)
+                        .bodyText(13, Theme.dueSoon)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 if let detail = action.detail {
                     Text(detail).bodyText(13, Theme.inkSecondary).textSelection(.enabled)

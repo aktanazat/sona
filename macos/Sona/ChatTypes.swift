@@ -342,6 +342,52 @@ enum AgentPanelActionState: String, Decodable {
     case pending, applied, dismissed, failed
 }
 
+/// What a card acts on, as this Mac held it when the card arrived.
+enum AgentPanelActionContext: Decodable {
+    case task(handle: String, title: String, project: String?, toProject: String?)
+    case project(name: String)
+    case note(title: String)
+    case outsideCall(arguments: String, longValues: [LongValue])
+
+    /// A string argument longer than a search query.
+    struct LongValue: Decodable {
+        let path: String
+        let chars: Int
+    }
+
+    private enum Key: String, CodingKey {
+        case kind, handle, title, project, toProject, name, arguments, longValues
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: Key.self)
+        let kind = try container.decode(String.self, forKey: .kind)
+        switch kind {
+        case "task":
+            self = .task(
+                handle: try container.decode(String.self, forKey: .handle),
+                title: try container.decode(String.self, forKey: .title),
+                project: try container.decodeIfPresent(String.self, forKey: .project),
+                toProject: try container.decodeIfPresent(String.self, forKey: .toProject))
+        case "project": self = .project(name: try container.decode(String.self, forKey: .name))
+        case "note": self = .note(title: try container.decode(String.self, forKey: .title))
+        case "outside_call":
+            self = .outsideCall(
+                arguments: try container.decode(String.self, forKey: .arguments),
+                longValues: try container.decode([LongValue].self, forKey: .longValues))
+        default:
+            throw DecodingError.dataCorruptedError(
+                forKey: .kind, in: container, debugDescription: "unknown action context \(kind)")
+        }
+    }
+
+    /// An outside call's arguments with escapes decoded, one field a line.
+    var decodedArguments: String? {
+        if case let .outsideCall(arguments, _) = self { return arguments }
+        return nil
+    }
+}
+
 /// A task a card creates or changes. A field left out stays as it is; on a
 /// change, `none` clears a due day or takes the task out of its project.
 struct ChatTaskChange: Decodable {
@@ -353,7 +399,7 @@ struct ChatTaskChange: Decodable {
     let due: String?
     let projectId: String?
 
-    func lines(includingTitle: Bool) -> [String] {
+    func lines(includingTitle: Bool, context: AgentPanelActionContext?) -> [String] {
         var lines: [String] = []
         if includingTitle, let title { lines.append(String(localized: "Title: \(title)")) }
         if let details {
@@ -366,10 +412,17 @@ struct ChatTaskChange: Decodable {
             lines.append(due == "none" ? String(localized: "Due date: cleared") : String(localized: "Due: \(due)"))
         }
         if let projectId {
-            lines.append(
-                projectId == "none"
-                    ? String(localized: "Project: none")
-                    : String(localized: "Project: changed"))
+            let none = String(localized: "none")
+            switch context {
+            case let .task(_, _, from, to):
+                let target = projectId == "none" ? none : to ?? String(localized: "not found")
+                lines.append(String(localized: "Project: \(from ?? none) → \(target)"))
+            case let .project(name):
+                lines.append(String(localized: "Project: \(name)"))
+            default:
+                lines.append(
+                    projectId == "none" ? String(localized: "Project: none") : String(localized: "Project: not found"))
+            }
         }
         return lines
     }
@@ -484,36 +537,40 @@ enum AgentChatAction: Decodable {
         return nil
     }
 
-    /// What the card says it will change. The kind of change, never the row
-    /// id: an id is a digest, and printing one would tell the reader nothing.
-    /// An owner is named when the people list has a name for the id.
-    func line(naming people: [String: String]) -> String {
-        switch self {
-        case .resolveLoop: "Mark a commitment done"
-        case let .assignLoop(_, personId):
+    /// What the card says it will change. The kind of change and the task,
+    /// note or project it acts on by name, never the row id: an id is a
+    /// digest, and printing one would tell the reader nothing. An owner is
+    /// named when the people list has a name for the id.
+    func line(naming people: [String: String], context: AgentPanelActionContext?) -> String {
+        switch (self, context) {
+        case (.resolveLoop, _): "Mark a commitment done"
+        case let (.assignLoop(_, personId), _):
             people[personId].map { "Give a commitment to \($0)" } ?? "Give a commitment an owner"
-        case let .setSeriesTemplate(_, template): "Use the \(template) template for this series"
-        case let .addVocabularyTerm(_, term): "Add \"\(term)\" to your vocabulary"
-        case let .renameSpeaker(_, name): "Rename a speaker to \(name)"
-        case .draftEmail: "Draft an email in Mail"
-        case .postSlack: "Post a message to Slack"
-        case .createCalendarEvent: "Create a calendar event"
-        case .sendNotes: "Send generated meeting notes"
-        case let .createTask(change): "Create task \"\(change.title ?? "")\""
-        case .updateTask: "Update a task"
-        case let .saveProject(_, name, _, isNew):
-            isNew ? "Create project \"\(name)\"" : "Update project \"\(name)\""
-        case .editNote: "Replace a note's text"
-        case let .callOutsideTool(_, server, _, _): "Ask \(server)"
+        case let (.setSeriesTemplate(_, template), _): "Use the \(template) template for this series"
+        case let (.addVocabularyTerm(_, term), _): "Add \"\(term)\" to your vocabulary"
+        case let (.renameSpeaker(_, name), _): "Rename a speaker to \(name)"
+        case (.draftEmail, _): "Draft an email in Mail"
+        case (.postSlack, _): "Post a message to Slack"
+        case (.createCalendarEvent, _): "Create a calendar event"
+        case (.sendNotes, _): "Send generated meeting notes"
+        case let (.createTask(change), _): String(localized: "Create task \"\(change.title ?? "")\"")
+        case let (.updateTask, .task(handle, title, _, _)): String(localized: "Update \(handle) \"\(title)\"")
+        case (.updateTask, _): String(localized: "Update a task")
+        case let (.saveProject(_, name, _, true), _): String(localized: "Create project \"\(name)\"")
+        case let (.saveProject, .project(current)): String(localized: "Update project \"\(current)\"")
+        case let (.saveProject(_, name, _, _), _): String(localized: "Update project \"\(name)\"")
+        case let (.editNote, .note(title)): String(localized: "Replace the text of \"\(title)\"")
+        case (.editNote, _): String(localized: "Replace a note's text")
+        case let (.callOutsideTool(_, server, _, _), _): String(localized: "Ask \(server)")
         }
     }
 
     /// Every field the card changes, with the value it sets, so nothing
     /// happens on Apply that the card did not show.
-    var changes: [String] {
+    func changes(context: AgentPanelActionContext?) -> [String] {
         switch self {
-        case let .createTask(change): change.lines(includingTitle: false)
-        case let .updateTask(change): change.lines(includingTitle: true)
+        case let .createTask(change): change.lines(includingTitle: false, context: context)
+        case let .updateTask(change): change.lines(includingTitle: true, context: context)
         case let .saveProject(_, name, description, _):
             [String(localized: "Name: \(name)")]
                 + (description.map {
@@ -524,9 +581,18 @@ enum AgentChatAction: Decodable {
             [
                 String(localized: "Server: \(server)"),
                 String(localized: "Tool: \(tool)"),
-                String(localized: "Arguments: \(arguments)"),
+                String(localized: "Arguments:\n\(context?.decodedArguments ?? arguments)"),
             ]
         default: []
+        }
+    }
+
+    /// What the owner should check before pressing: every argument of an
+    /// outside call longer than a search query.
+    func warnings(context: AgentPanelActionContext?) -> [String] {
+        guard case let .outsideCall(_, longValues) = context else { return [] }
+        return longValues.map {
+            String(localized: "Long value in \($0.path): \($0.chars.formatted()) characters")
         }
     }
 
@@ -567,8 +633,14 @@ struct AgentPanelAction: Decodable, Identifiable {
     let operationId: String?
     let canUndo: Bool
     let detail: String?
+    /// What it acts on, as the core read it when the card arrived.
+    let context: AgentPanelActionContext?
 
     var id: UInt32 { actionIndex }
+
+    func line(naming people: [String: String]) -> String { action.line(naming: people, context: context) }
+    var changes: [String] { action.changes(context: context) }
+    var warnings: [String] { action.warnings(context: context) }
 }
 
 struct AgentPanelTurnStatus: Decodable {

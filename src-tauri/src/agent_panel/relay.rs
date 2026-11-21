@@ -1273,7 +1273,7 @@ mod tests {
     ) -> PanelState {
         let turn_id = turn.turn_id().to_string();
         let workspace = turn.workspace();
-        let base_pack = turn.context_pack().map(str::to_string);
+        let base_pack = turn.cited_pack().map(std::borrow::Cow::into_owned);
         let mut state = PanelState::default();
         state.relay_status = AgentPanelRelayStatusV1::Ready;
         state.turn = Some(ActiveTurn {
@@ -1591,6 +1591,8 @@ mod tests {
             locale: "en".to_string(),
             app_version: env!("CARGO_PKG_VERSION").to_string(),
             reply_is_json: false,
+            tool_catalogue: crate::query::tools::TOOL_CATALOGUE_VERSION,
+            outside_answers: None,
         })
     }
 
@@ -2569,7 +2571,7 @@ mod tests {
                 .submit_turn(idempotency_key, &turn, SONA_MODEL_ALIAS)
                 .await
                 .expect("accept signed relay response");
-            let accepted = accept_job_in_state(&mut state, "config-e2e", job, false)
+            let accepted = accept_job_in_state(&mut state, "config-e2e", job, Vec::new(), false)
                 .expect("accept valid proposal into panel state");
             server.await.expect("relay server task");
             assert_eq!(accepted.turn_state, AgentPanelTurnStateV1::Succeeded);
@@ -2662,6 +2664,8 @@ The deck was sent.",
                 locale: "en".to_string(),
                 app_version: env!("CARGO_PKG_VERSION").to_string(),
                 reply_is_json: false,
+                tool_catalogue: crate::query::tools::TOOL_CATALOGUE_VERSION,
+                outside_answers: None,
             });
             turn.validate().expect("valid chat turn");
             let idempotency_key = "action-e2e-key";
@@ -2688,7 +2692,7 @@ The deck was sent.",
                 .submit_turn(idempotency_key, &turn, SONA_MODEL_ALIAS)
                 .await
                 .expect("accept signed relay response");
-            let accepted = accept_job_in_state(&mut state, "action-e2e", job, false)
+            let accepted = accept_job_in_state(&mut state, "action-e2e", job, Vec::new(), false)
                 .expect("accept valid action into panel state");
             server.await.expect("relay server task");
             assert_eq!(accepted.turn_state, AgentPanelTurnStateV1::Succeeded);

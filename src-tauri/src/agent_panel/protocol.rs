@@ -396,6 +396,19 @@ pub struct SonaChatTurnV2 {
     pub reply_is_json: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_selection: Option<AgentModelSelectionV1>,
+    /// The Sona tools catalogue this build runs
+    /// ([`crate::query::tools::TOOL_CATALOGUE_VERSION`]). The relay offers
+    /// the model only the tools and card kinds of the catalogue a turn names,
+    /// and a turn that names none gets `sona-tools/1`, so a relay ahead of an
+    /// installed app never asks it for a tool it lacks. Checked apart from the
+    /// exact field set like `reply_is_json`, but a relay older than the
+    /// declaration refuses it: the relay ships before the app that sends it.
+    pub tool_catalogue: &'static str,
+    /// Where the outside answers sit in `context_pack`. Never sent: it is how
+    /// [`PanelTurnV1::cited_pack`] leaves an outside server's text out of
+    /// what a card's ids may cite.
+    #[serde(skip)]
+    pub outside_answers: Option<std::ops::Range<usize>>,
 }
 
 /// One turn, addressed to one workspace. Untagged because the workspace is
@@ -456,11 +469,18 @@ impl PanelTurnV1 {
         }
     }
 
-    pub(crate) fn context_pack(&self) -> Option<&str> {
-        match self {
-            Self::Config(_) => None,
-            Self::Chat(turn) => turn.context_pack.as_deref(),
-        }
+    /// The pack less the outside answers in it: what a card's ids may cite.
+    /// An outside server's text is that server's word, so an id it printed
+    /// names nothing this Mac showed the model.
+    pub(crate) fn cited_pack(&self) -> Option<std::borrow::Cow<'_, str>> {
+        let Self::Chat(turn) = self else {
+            return None;
+        };
+        let pack = turn.context_pack.as_deref()?;
+        let Some(range) = &turn.outside_answers else {
+            return Some(pack.into());
+        };
+        Some(format!("{}{}", pack.get(..range.start)?, pack.get(range.end..)?).into())
     }
 
     /// Whether this turn let the model ask for Sona tools. A config turn
@@ -1031,8 +1051,9 @@ impl SonaAgentResponseV1 {
                  * that checked out and dropping the rest would leave the
                  * reader a card set that no longer matches what the assistant
                  * said it would do. */
+                let cited = turn.cited_pack();
                 for action in actions {
-                    action.validate(turn.context_pack())?;
+                    action.validate(cited.as_deref())?;
                 }
                 Ok(())
             }
@@ -1611,20 +1632,21 @@ mod tests {
             locale: "en".to_string(),
             app_version: "1.0.0".to_string(),
             reply_is_json: false,
+            tool_catalogue: crate::query::tools::TOOL_CATALOGUE_VERSION,
+            outside_answers: None,
         }
     }
 
     #[test]
     fn a_chat_turn_carries_a_pack_where_the_config_turn_carries_a_snapshot() {
-        let turn = chat_turn();
+        let mut turn = chat_turn();
+        turn.outside_answers = Some(0..4);
         assert_eq!(turn.validate(), Ok(()));
         let wire = serde_json::to_value(PanelTurnV1::Chat(turn)).expect("chat turn serializes");
         let object = wire.as_object().expect("turn is an object");
-        /* Nine required fields plus one declaration. The relay checks the nine
-         * exactly and checks `reply_is_json` apart from them, treating absence
-         * as false — which is why this one could be added without bumping the
-         * protocol version, and why a relay that predates it is not broken by
-         * a client that sends it. */
+        /* Nine required fields plus two declarations. The relay checks the
+         * nine exactly and checks `reply_is_json` and `tool_catalogue` apart
+         * from them. Where the outside answers sit in the pack stays here. */
         assert_eq!(
             object.keys().map(String::as_str).collect::<BTreeSet<_>>(),
             BTreeSet::from([
@@ -1638,6 +1660,7 @@ mod tests {
                 "locale",
                 "app_version",
                 "reply_is_json",
+                "tool_catalogue",
             ])
         );
         assert_eq!(
@@ -1645,6 +1668,41 @@ mod tests {
             "a panel turn is read by a person, so it asks for no shape"
         );
         assert_eq!(object["protocol_version"], SONA_CHAT_TURN_VERSION);
+        assert_eq!(
+            object["tool_catalogue"], "sona-tools/2",
+            "the relay offers only the tools and cards of the catalogue a turn names"
+        );
+    }
+
+    /// An id an outside server printed names nothing Sona showed the model,
+    /// so a card citing it is refused like an invented one.
+    #[test]
+    fn a_card_may_not_cite_an_id_only_an_outside_answer_printed() {
+        let shown = "3c9e8f1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b";
+        let printed = "7f0c2d4e-1b2a-4c3d-8e9f-a0b1c2d3e4f5";
+        let evidence = format!("note sona://note/{shown}");
+        let answers = format!("outside tool results\n{{\"text\":\"note {printed}\"}}");
+        let mut turn = chat_turn();
+        turn.context_pack = Some(format!("{evidence}\n\n{answers}"));
+        let start = evidence.len() + 2;
+        turn.outside_answers = Some(start..start + answers.len());
+        let turn = PanelTurnV1::Chat(turn);
+        let edit = |note_id: &str| SonaAgentResponseV1::Text {
+            message: "Here is the note with the date added.".to_string(),
+            actions: vec![SonaChatActionV1::EditNote {
+                reason: "You asked me to add the date.".to_string(),
+                note_id: note_id.to_string(),
+                body: "Launch on the 27th.".to_string(),
+            }],
+            steps: Vec::new(),
+        };
+        let allowed = SonaAllowedValuesV1::default();
+
+        assert_eq!(edit(shown).validate(&turn, &allowed), Ok(()));
+        assert_eq!(
+            edit(printed).validate(&turn, &allowed),
+            Err(ProposalValidationError::ForeignActionId)
+        );
     }
 
     fn config_turn() -> SonaAgentTurnV1 {
@@ -1788,6 +1846,8 @@ mod tests {
             locale: dense("en-GB-oxendict-", 64),
             app_version: dense("1.0.0-rc.1+build.", 128),
             reply_is_json: true,
+            tool_catalogue: crate::query::tools::TOOL_CATALOGUE_VERSION,
+            outside_answers: None,
         };
         assert_eq!(
             turn.user_message.len()
