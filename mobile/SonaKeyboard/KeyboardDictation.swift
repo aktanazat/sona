@@ -214,8 +214,12 @@ struct KeyboardDictation {
         func sync(_ mine: [KeptReview], ended: Set<UUID>, at now: Date) -> Saved? {
             guard var saved = read(at: now) else { return nil }
             for id in ended { saved.done[id] = now }
-            let ids = Set(mine.map(\.id))
-            saved.reviews = (saved.reviews.filter { !ids.contains($0.id) } + mine)
+            /* The same review in memory and in the file: the later copy, as a join made it. */
+            var byID = Dictionary(saved.reviews.map { ($0.id, $0) }) { first, _ in first }
+            for review in mine where byID[review.id].map({ review.date >= $0.date }) ?? true {
+                byID[review.id] = review
+            }
+            saved.reviews = Array(byID.values)
                 .filter { saved.done[$0.id] == nil && now.timeIntervalSince($0.date) < $0.lifetime }
                 .sorted { $0.date < $1.date }
             guard !saved.reviews.isEmpty || !saved.done.isEmpty else {

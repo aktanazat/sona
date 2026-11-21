@@ -149,6 +149,18 @@ struct KeyboardDictationTests {
         #expect(store.sync([review], ended: [], at: now)?.reviews == [])
     }
 
+    @Test("when memory and the file hold the same review, the later copy wins")
+    func laterCopyOfAReviewWins() {
+        let store = KeyboardDictation.KeptReviewStore(url: Self.scratchURL())
+        defer { try? FileManager.default.removeItem(at: store.url) }
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        let first = KeyboardDictation.KeptReview(text: "First.", field: KeyboardDictation.FieldMark(id: nil, shown: 1, before: "", traits: ""), date: now)
+        let second = KeyboardDictation.KeptReview(text: "Second.", field: first.field, date: now.addingTimeInterval(60))
+        let joined = first.joined(with: second)
+        store.sync([joined], ended: [], at: now)
+        #expect(store.sync([first], ended: [], at: now)?.reviews == [joined])
+    }
+
     @Test("a review kept while the file was locked is saved once it opens again")
     func reviewKeptWhileLockedIsSavedOnReappear() throws {
         let store = KeyboardDictation.KeptReviewStore(url: Self.scratchURL())
