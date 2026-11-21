@@ -220,6 +220,14 @@ struct EnglishWordListTests {
         #expect(corrector.correction(before: text, lexicon: TypingLexicon())?.replacement == intended)
     }
 
+    @Test("a proper noun typed in lowercase is capitalized, not changed into another word", arguments: [
+        ("see you monday", "Monday"), ("in december", "December"), ("from texas", "Texas"),
+    ])
+    func capitalizesProperNouns(text: String, intended: String) async throws {
+        let corrector = try await corrector()
+        #expect(corrector.correction(before: text, lexicon: TypingLexicon())?.replacement == intended)
+    }
+
     @Test("completions and swipe words from the English list are all words the spell checker accepts")
     func listHoldsNoMisspellings() async throws {
         let corrector = try await corrector()

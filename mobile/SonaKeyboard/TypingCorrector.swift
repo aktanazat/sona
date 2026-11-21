@@ -187,10 +187,11 @@ final class TypingCorrector {
         var slips = SlipCost(typed: letters, centres: centres)
         let close = (apple + extra).enumerated().compactMap { rank, guess -> Guess? in
             guard !guess.contains(" "), !guess.contains("-") else { return nil }
-            /* A guess that only capitalizes the typed word ("Occassion" for "occassion") is
-             * a change too, not a perfect match. */
+            /* A guess that only capitalizes the typed word costs a little, so "Occassion"
+             * does not tie with "occasion", but far less than a slip, so "monday" becomes
+             * "Monday", not "money". */
             let caseOnly = guess != typed && guess.lowercased() == typed.lowercased()
-            let cost = caseOnly ? 1 : slips.cost(to: Array(guess.lowercased()))
+            let cost = caseOnly ? 0.1 : slips.cost(to: Array(guess.lowercased()))
             guard cost <= budget else { return nil }
             return Guess(word: guess, score: cost + rarity(of: guess) + Double(min(rank, apple.count)) * 0.01)
         }
