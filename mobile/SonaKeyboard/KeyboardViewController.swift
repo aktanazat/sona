@@ -637,7 +637,7 @@ private struct KeyboardView: View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
                 ToolsButton(tools: tools)
-                if !tools.isOpen, tools.heldReview != nil {
+                if !tools.isOpen, !tools.heldReviews.isEmpty {
                     HeldReviewButton(tools: tools)
                 }
                 if let purpose = tools.composing {

@@ -101,7 +101,7 @@ struct KeyboardDictation {
     /// fields, so without ids the field counts as the same one until something says
     /// otherwise: the keyboard hid or showed, the text before the cursor changed, or the
     /// field asked for different keys.
-    struct FieldMark: Equatable {
+    struct FieldMark: Equatable, Codable {
         var id: UUID?
         /// Counts the keyboard hiding and showing.
         var shown: Int
@@ -119,11 +119,51 @@ struct KeyboardDictation {
         return same ? .write : .review
     }
 
-    /// The text on review once another dictation lands while one is showing: both, the
-    /// earlier first, a paragraph apart.
-    static func reviewing(_ text: String, after showing: String?) -> String {
-        guard let showing, !showing.isEmpty else { return text }
-        return showing + "\n\n" + text
+    /// A dictation waiting on review: its text, the field it was heard for and when.
+    struct KeptReview: Equatable, Codable {
+        var text: String
+        var field: FieldMark
+        var date: Date
+
+        /// Another dictation joins this one only from the same field and while this one is
+        /// recent; otherwise it is shown on its own and this one waits behind the button.
+        func joins(_ next: KeptReview) -> Bool {
+            next.date.timeIntervalSince(date) < 5 * 60
+                && KeyboardDictation.landing(heardFor: field, now: next.field, reviews: false) == .write
+        }
+
+        /// Both texts, this one first, a paragraph apart, under the newer one's field and time.
+        func joined(with next: KeptReview) -> KeptReview {
+            KeptReview(text: text + "\n\n" + next.text, field: next.field, date: next.date)
+        }
+    }
+
+    /// Reviews kept across the keyboard being ended: in a file only the keyboard reads,
+    /// locked while the phone is, and forgotten after a day. The dictations themselves
+    /// also wait in the Notes queue for seven days.
+    struct KeptReviewStore {
+        static let lifetime: TimeInterval = 24 * 60 * 60
+        let url: URL
+
+        static func shared() -> Self? {
+            guard let folder = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return nil }
+            try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            return Self(url: folder.appendingPathComponent("kept-reviews.json"))
+        }
+
+        func load(at now: Date) -> [KeptReview] {
+            guard let data = try? Data(contentsOf: url),
+                  let reviews = try? JSONDecoder().decode([KeptReview].self, from: data) else { return [] }
+            return reviews.filter { now.timeIntervalSince($0.date) < Self.lifetime }
+        }
+
+        func save(_ reviews: [KeptReview]) {
+            guard !reviews.isEmpty, let data = try? JSONEncoder().encode(reviews) else {
+                try? FileManager.default.removeItem(at: url)
+                return
+            }
+            try? data.write(to: url, options: [.atomic, .completeFileProtection])
+        }
     }
 }
 

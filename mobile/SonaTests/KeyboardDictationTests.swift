@@ -73,10 +73,33 @@ struct KeyboardDictationTests {
         #expect(KeyboardDictation.landing(heardFor: heardFor, now: keys, reviews: false) == .review)
     }
 
-    @Test("a dictation landing while another waits on review joins it below, never replaces it")
-    func secondDictationJoinsTheReview() {
-        #expect(KeyboardDictation.reviewing("Second.", after: "First.") == "First.\n\nSecond.")
-        #expect(KeyboardDictation.reviewing("Only.", after: nil) == "Only.")
+    @Test("a dictation joins a kept review only from the same field and within five minutes")
+    func dictationJoinsOnlyARecentReviewFromTheSameField() {
+        let field = KeyboardDictation.FieldMark(id: UUID(), shown: 1, before: "Hi", traits: "0 0")
+        let kept = KeyboardDictation.KeptReview(text: "First.", field: field, date: Date(timeIntervalSince1970: 0))
+        let soon = KeyboardDictation.KeptReview(text: "Second.", field: field, date: Date(timeIntervalSince1970: 4 * 60))
+        #expect(kept.joins(soon))
+        #expect(kept.joined(with: soon).text == "First.\n\nSecond.")
+        var later = soon
+        later.date = Date(timeIntervalSince1970: 6 * 60)
+        #expect(!kept.joins(later))
+        var elsewhere = soon
+        elsewhere.field.id = UUID()
+        #expect(!kept.joins(elsewhere))
+    }
+
+    @Test("kept reviews survive the keyboard ending for a day, then are gone")
+    func keptReviewsExpireAfterADay() {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("kept-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let store = KeyboardDictation.KeptReviewStore(url: url)
+        let field = KeyboardDictation.FieldMark(id: nil, shown: 1, before: "", traits: "")
+        let kept = KeyboardDictation.KeptReview(text: "Kept.", field: field, date: Date(timeIntervalSince1970: 1_000_000))
+        store.save([kept])
+        #expect(store.load(at: kept.date.addingTimeInterval(23 * 60 * 60)) == [kept])
+        #expect(store.load(at: kept.date.addingTimeInterval(25 * 60 * 60)).isEmpty)
+        store.save([])
+        #expect(!FileManager.default.fileExists(atPath: url.path))
     }
 }
 
