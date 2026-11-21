@@ -439,9 +439,68 @@ pub struct ExternalWorkLabelEdit {
     pub dry_run: bool,
     pub operation_id: Option<String>,
     pub label: ExternalWorkLabel,
-    /// Tasks that kept the first label by name from a group that now allows
-    /// one, as S-12.
-    pub settled_tasks: Vec<String>,
+    /// What kept the first label by name from a group that now allows one.
+    #[serde(flatten)]
+    pub settled: ExternalLabeled,
+}
+
+/// Tasks as S-12, projects and initiatives by name.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct ExternalLabeled {
+    #[serde(rename = "settled_tasks")]
+    pub tasks: Vec<String>,
+    #[serde(rename = "settled_projects")]
+    pub projects: Vec<String>,
+    #[serde(rename = "settled_initiatives")]
+    pub initiatives: Vec<String>,
+}
+
+impl ExternalLabeled {
+    fn of(conn: &rusqlite::Connection, labeled: &routines::Labeled) -> anyhow::Result<Self> {
+        Ok(Self {
+            tasks: labeled
+                .tasks
+                .iter()
+                .map(|id| {
+                    planning::work::items::item(conn, id).map(|item| format!("S-{}", item.number))
+                })
+                .collect::<anyhow::Result<_>>()?,
+            projects: labeled
+                .projects
+                .iter()
+                .map(|id| planning::store::project(conn, id).map(|project| project.title))
+                .collect::<anyhow::Result<_>>()?,
+            initiatives: labeled
+                .initiatives
+                .iter()
+                .map(|id| {
+                    planning::work::initiatives::initiative(conn, id)
+                        .map(|initiative| initiative.name)
+                })
+                .collect::<anyhow::Result<_>>()?,
+        })
+    }
+
+    /// "2 tasks (S-1, S-4) and 1 project (Harbor)".
+    fn counted(&self) -> String {
+        let parts: Vec<String> = [
+            (&self.tasks, "task", "tasks"),
+            (&self.projects, "project", "projects"),
+            (&self.initiatives, "initiative", "initiatives"),
+        ]
+        .into_iter()
+        .filter(|(names, _, _)| !names.is_empty())
+        .map(|(names, one, many)| {
+            let noun = if names.len() == 1 { one } else { many };
+            format!("{} {noun} ({})", names.len(), names.join(", "))
+        })
+        .collect();
+        match parts.as_slice() {
+            [] => String::new(),
+            [only] => only.clone(),
+            [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -995,7 +1054,7 @@ impl Tracker<'_> {
         operation_id: Option<String>,
         label: WorkLabel,
     ) -> WorkAnswer {
-        Self::label_settled(action, dry_run, operation_id, label, Vec::new())
+        Self::label_settled(action, dry_run, operation_id, label, ExternalLabeled::default())
     }
 
     fn label_settled(
@@ -1003,7 +1062,7 @@ impl Tracker<'_> {
         dry_run: bool,
         operation_id: Option<String>,
         label: WorkLabel,
-        settled_tasks: Vec<String>,
+        settled: ExternalLabeled,
     ) -> WorkAnswer {
         WorkAnswer::LabelEdit(ExternalWorkLabelEdit {
             schema_version: QUERY_SCHEMA_VERSION,
@@ -1011,7 +1070,7 @@ impl Tracker<'_> {
             dry_run,
             operation_id,
             label: project_label(label),
-            settled_tasks,
+            settled,
         })
     }
 
@@ -1041,18 +1100,22 @@ impl Tracker<'_> {
         let operation_id = args
             .write
             .operation_id("label-group", &(&label.id, label.revision, &group, multi))?;
-        let handles = |conn: &rusqlite::Connection, ids: &[String]| {
-            ids.iter()
-                .map(|id| {
-                    planning::work::items::item(conn, id).map(|item| format!("S-{}", item.number))
-                })
-                .collect::<anyhow::Result<Vec<_>>>()
-        };
+        let crowded = planning::history(self.history, |conn| {
+            let clash = routines::group_clash(conn, &label.id, group.as_deref(), multi)?;
+            Ok(ExternalLabeled::of(conn, &clash)?.counted())
+        })
+        .map_err(|message| refusal(self.history, message))?;
+        if let (false, Some(name)) = (crowded.is_empty(), &group) {
+            return Err(ExternalError::invalid(format!(
+                "Moving {} into {name} would leave {crowded} with two labels from {name}, which allows one. Add --single to keep the first label by name on each, or --multi to let the group allow several.",
+                label.name
+            )));
+        }
         if args.dry_run {
             let (rehearsed, settled) = self.rehearse(|conn| {
                 let (label, settled) =
                     routines::group_label(conn, &label.id, group.as_deref(), multi, now_ms())?;
-                Ok((label, handles(conn, &settled)?))
+                Ok((label, ExternalLabeled::of(conn, &settled)?))
             })?;
             return Ok(Self::label_settled(
                 action,
@@ -1066,7 +1129,7 @@ impl Tracker<'_> {
         let (saved, settled) =
             routines::label_group_as(self.app, &operation_id, &label.id, group.as_deref(), multi)
                 .map_err(|message| self.write_refusal(message, &operation_id, "The label"))?;
-        let settled = planning::history(self.history, |conn| handles(conn, &settled))
+        let settled = planning::history(self.history, |conn| ExternalLabeled::of(conn, &settled))
             .map_err(|message| refusal(self.history, message))?;
         Ok(Self::label_settled(
             action,
@@ -1284,11 +1347,12 @@ pub(super) fn text(answer: &WorkAnswer, text: &mut String) {
             let dry = if merge.dry_run { " (dry run)" } else { "" };
             let _ = writeln!(
                 text,
-                "Merged{dry}: {} into {}, {} task{} moved",
+                "Merged{dry}: {} into {}, {} task{} moved; {} is retired and on nothing, kept for history",
                 merge.from.name,
                 merge.into.name,
                 merge.tasks_moved,
-                if merge.tasks_moved == 1 { "" } else { "s" }
+                if merge.tasks_moved == 1 { "" } else { "s" },
+                merge.from.name
             );
         }
         WorkAnswer::Templates(list) => {
@@ -1362,12 +1426,9 @@ pub(super) fn text(answer: &WorkAnswer, text: &mut String) {
                 action_text(change.action),
                 label_text(&change.label)
             );
-            if !change.settled_tasks.is_empty() {
-                let _ = writeln!(
-                    text,
-                    "  Kept the first label by name from the group on {}",
-                    change.settled_tasks.join(", ")
-                );
+            let settled = change.settled.counted();
+            if !settled.is_empty() {
+                let _ = writeln!(text, "  Kept the first label by name from the group on {settled}");
             }
         }
         _ => {}

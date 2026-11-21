@@ -172,6 +172,17 @@ BEGIN
         UNION ALL SELECT 'parent', old.parent_id WHERE old.parent_id IS NOT new.parent_id
         UNION ALL SELECT 'priority', old.priority WHERE old.priority IS NOT new.priority
     );
+END;
+CREATE TRIGGER planning_notifications_initiative_delete AFTER DELETE ON planning_initiatives
+BEGIN
+    DELETE FROM planning_notifications WHERE subject_kind = 'initiative'
+        AND subject_id = old.id;
+END;
+CREATE TRIGGER planning_subject_reminders_initiative_delete AFTER DELETE
+    ON planning_initiatives
+BEGIN
+    DELETE FROM planning_subject_reminders WHERE subject_kind = 'initiative'
+        AND subject_id = old.id;
 END;";
 
 /// Where an initiative stands, as Linear names it.
@@ -1029,5 +1040,38 @@ mod tests {
                 (venue.as_str(), Some(serde_json::json!({ "initiative": hiring.id }))),
             ]
         );
+    }
+
+    #[test]
+    fn deleting_an_initiative_takes_its_notices_and_reminder() {
+        let conn = Connection::open_in_memory().expect("a history database");
+        schema::apply_all(&conn).expect("the planner schema");
+        let launch = named(&conn, "Spring launch");
+        let kind = super::super::inbox::SubjectKind::Initiative;
+        super::super::routines::set_subject_reminder(
+            &conn,
+            kind,
+            &launch.id,
+            Some(10),
+            super::super::types::WorkActor::Me,
+            None,
+            3,
+        )
+        .expect("a reminder");
+        assert!(super::super::inbox::remind_subject(&conn, kind, &launch.id, 10, 3, 11)
+            .expect("a notice"));
+        let left = |table: &str| -> i64 {
+            conn.query_row(
+                &format!("SELECT count(*) FROM {table} WHERE subject_id = ?1"),
+                [&launch.id],
+                |row| row.get(0),
+            )
+            .expect("a count")
+        };
+        assert_eq!((left("planning_notifications"), left("planning_subject_reminders")), (1, 1));
+
+        delete(&conn, &launch.id).expect("deleted");
+
+        assert_eq!((left("planning_notifications"), left("planning_subject_reminders")), (0, 0));
     }
 }

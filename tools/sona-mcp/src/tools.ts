@@ -3904,7 +3904,7 @@ export const TOOLS: readonly ToolDefinition[] = [
   {
     name: "sona_work_label_group",
     title: "Group a Sona label",
-    description: `Put a label in a label group, or take it out of its group with group none. A task keeps one label per group unless the group allows several (multi: true): adding another label from a single-select group replaces the one it had. multi applies to the whole group. Switching a group back to one label per task leaves each task holding several with the first by name; the answer lists those tasks. ${WRITES}`,
+    description: `Put a label in a label group, or take it out of its group with group none. A task keeps one label per group unless the group allows several (multi: true): adding another label from a single-select group replaces the one it had. multi applies to the whole group. Moving a label into a group that allows one is refused while a task, project or initiative would hold two of its labels; the refusal names them. multi: false then keeps the first label by name on each, and so does switching a group back to one label; the answer lists the tasks, projects and initiatives that lost one. ${WRITES}`,
     mutates: "changes",
     optIn: true,
     inputSchema: {
@@ -3941,7 +3941,7 @@ export const TOOLS: readonly ToolDefinition[] = [
   {
     name: "sona_work_label_merge",
     title: "Merge Sona labels",
-    description: `Merge one label into another: every task, project and initiative with the merged label gets the kept label instead, saved views, automations and templates that named it name the kept label, and the merged label is retired, so it can be restored. Refused when the kept label cannot go on those items, or when one would hold two labels from a group that allows one. ${WRITES}`,
+    description: `Merge one label into another: every task, project and initiative with the merged label gets the kept label instead, saved views, automations and templates that named it name the kept label, and the merged label is retired: it carries nothing and stays in the label list for history, where it can be restored. Refused when the kept label cannot go on those items, or when one would hold two labels from a group that allows one. ${WRITES}`,
     mutates: "destroys",
     optIn: true,
     inputSchema: {

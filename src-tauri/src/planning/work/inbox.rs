@@ -729,6 +729,7 @@ pub(crate) fn remind_subject(
 /// posts when it wakes. True when this call posted one.
 pub(crate) fn post_update_due(conn: &Connection, now_ms: i64) -> Result<bool> {
     let mut posted = false;
+    let zone = jiff::tz::TimeZone::system();
     for summary in crate::planning::store::projects(conn, false)? {
         let project = summary.project;
         if project.status != crate::planning::ProjectStatus::Active
@@ -742,7 +743,8 @@ pub(crate) fn post_update_due(conn: &Connection, now_ms: i64) -> Result<bool> {
         };
         let last_ms = crate::planning::updates::latest(conn, &project.id)?
             .map_or(project.created_at_ms, |update| update.created_at_ms);
-        let Some(due_ms) = last_cycle_due(last_ms, weeks, project.update_hour, now_ms) else {
+        let Some(due_ms) = last_cycle_due(&zone, last_ms, weeks, project.update_hour, now_ms)
+        else {
             continue;
         };
         let key = format!("update_due:{}:{due_ms}", project.id);
@@ -763,14 +765,24 @@ pub(crate) fn post_update_due(conn: &Connection, now_ms: i64) -> Result<bool> {
     Ok(posted)
 }
 
-/// When the latest update cycle at or before `now_ms` came due, if one has.
-fn last_cycle_due(last_ms: i64, weeks: u8, hour: u8, now_ms: i64) -> Option<i64> {
-    use chrono::{Local, TimeZone};
+/// When the latest update cycle at or before `now_ms` came due in `zone`,
+/// if one has. An hour a clock change skips comes due just past the gap.
+fn last_cycle_due(
+    zone: &jiff::tz::TimeZone,
+    last_ms: i64,
+    weeks: u8,
+    hour: u8,
+    now_ms: i64,
+) -> Option<i64> {
     let span = i64::from(weeks) * super::digest::WEEK_MS;
+    let time = jiff::civil::Time::new(i8::try_from(hour).ok()?, 0, 0, 0).ok()?;
     let due = |cycle: i64| {
-        let day = Local.timestamp_millis_opt(last_ms + cycle * span).single()?.date_naive();
-        let at = day.and_hms_opt(u32::from(hour), 0, 0)?;
-        Local.from_local_datetime(&at).earliest().map(|at| at.timestamp_millis())
+        let day = jiff::Timestamp::from_millisecond(last_ms + cycle * span)
+            .ok()?
+            .to_zoned(zone.clone())
+            .date();
+        let at = day.to_datetime(time).to_zoned(zone.clone()).ok()?;
+        Some(at.timestamp().as_millisecond())
     };
     let mut cycle = (now_ms - last_ms).div_euclid(span).max(0) + 1;
     while cycle >= 1 {
@@ -1268,7 +1280,7 @@ pub(crate) fn work_subscriptions(app: AppHandle) -> Result<Vec<Subscription>, St
 mod update_due_tests {
     use super::super::super::schema;
     use super::super::super::store::insert_project;
-    use super::post_update_due;
+    use super::{last_cycle_due, post_update_due};
     use chrono::{Local, TimeZone};
     use rusqlite::Connection;
 
@@ -1310,5 +1322,22 @@ mod update_due_tests {
             .expect("rows");
         let reminder = ("reminder".to_owned(), "project".to_owned(), Some("update".to_owned()));
         assert_eq!(notices, vec![reminder.clone(), reminder]);
+    }
+
+    #[test]
+    fn an_update_reminder_set_for_an_hour_the_clocks_skip_comes_just_after() {
+        let zone = jiff::tz::TimeZone::get("America/New_York").expect("a time zone");
+        let at = |day: i8, hour: i8| {
+            jiff::civil::date(2026, 3, day)
+                .at(hour, 0, 0, 0)
+                .to_zoned(zone.clone())
+                .expect("a time")
+                .timestamp()
+                .as_millisecond()
+        };
+        let last_ms = at(1, 12);
+
+        assert_eq!(last_cycle_due(&zone, last_ms, 1, 2, at(8, 1)), None);
+        assert_eq!(last_cycle_due(&zone, last_ms, 1, 2, at(8, 3)), Some(at(8, 3)));
     }
 }
