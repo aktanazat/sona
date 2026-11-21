@@ -97,7 +97,9 @@ pub(crate) fn is_name_fix(spoken: &str, written: &str) -> bool {
         vocabulary_spoken_key(spoken),
         vocabulary_spoken_key(written),
     );
-    strsim::normalized_levenshtein(&heard, &fixed) >= 0.5
+    // A sentence-start "Their" fixed to "There" is a word swap, not a name.
+    let common = |key: &str| crate::query::tools::STOPWORDS.binary_search(&key).is_ok();
+    !common(&heard) && !common(&fixed) && strsim::normalized_levenshtein(&heard, &fixed) >= 0.5
 }
 
 /// Biases one session's transcription with its priming blob.
@@ -230,6 +232,8 @@ mod tests {
     fn a_rewording_or_a_lowercase_word_is_not() {
         assert!(!is_name_fix("John", "Mary"));
         assert!(!is_name_fix("their", "there"));
+        assert!(!is_name_fix("Their", "There"));
+        assert!(!is_name_fix("Then", "Than"));
         assert!(!is_name_fix("Nolan", "Nolan"));
         assert!(!is_name_fix(
             "send it to the team today",

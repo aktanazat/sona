@@ -47,18 +47,24 @@ pub(crate) fn remember(words: Vec<String>) {
 
 /// The list as it stands in the stores: people met most recently first,
 /// then projects being worked on, then words heard in the most meetings.
-/// Nothing comes from the `hidden` meetings.
+/// Nothing comes from the `hidden` meetings or from series kept on this Mac.
 pub(crate) fn read(
     store: &MeetingStore,
     history: &HistoryManager,
     own: &[String],
     hidden: &HashSet<MeetingSessionId>,
 ) -> Result<Vec<String>, String> {
+    let mut hidden = hidden.clone();
+    hidden.extend(
+        store
+            .kept_local_sessions()
+            .map_err(|error| format!("{error:?}"))?,
+    );
     let people = store
-        .people_list_without(hidden)
+        .people_list_without(&hidden)
         .map_err(|error| format!("{error:?}"))?;
     let mined = store
-        .vocabulary_candidates_without(own, hidden)
+        .vocabulary_candidates_without(own, &hidden)
         .map_err(|error| format!("{error:?}"))?;
     let projects: Vec<String> = history
         .with_connection(|connection| crate::planning::store::projects_by_activity(connection))
@@ -69,19 +75,19 @@ pub(crate) fn read(
     Ok(words_from(&people.entries, &projects, &mined.entries, own))
 }
 
-/// `vocabulary` with the meeting words in front of it. The user's own entries
-/// stay last, where the Whisper prompt keeps them first, and a meeting word
-/// he already has is left out.
-pub(crate) fn with_meeting_words(vocabulary: Vec<VocabularyEntry>) -> Vec<VocabularyEntry> {
-    prepend(current(), vocabulary)
+/// The meeting words a dictation primes its decode with, leaving out any
+/// he already has. They are never correction entries: a contact named
+/// "Will" must not turn every dictated "will" into a name.
+pub(crate) fn prompt_entries(own: &[VocabularyEntry]) -> Vec<VocabularyEntry> {
+    entries_beside(current(), own)
 }
 
-fn prepend(words: Vec<String>, vocabulary: Vec<VocabularyEntry>) -> Vec<VocabularyEntry> {
-    let own: HashSet<String> = vocabulary
+fn entries_beside(words: Vec<String>, own: &[VocabularyEntry]) -> Vec<VocabularyEntry> {
+    let own: HashSet<String> = own
         .iter()
         .map(|entry| vocabulary_spoken_key(&entry.spoken))
         .collect();
-    let mut entries: Vec<VocabularyEntry> = words
+    words
         .into_iter()
         .filter(|word| !own.contains(&vocabulary_spoken_key(word)))
         .rev()
@@ -89,9 +95,7 @@ fn prepend(words: Vec<String>, vocabulary: Vec<VocabularyEntry>) -> Vec<Vocabula
             spoken: word.clone(),
             written: word,
         })
-        .collect();
-    entries.extend(vocabulary);
-    entries
+        .collect()
 }
 
 fn words_from(
@@ -196,20 +200,20 @@ mod tests {
     }
 
     #[test]
-    fn his_own_vocabulary_stays_last_where_the_prompt_keeps_it() {
+    fn meeting_words_leave_out_his_own_and_keep_the_most_important_last() {
         let own = vec![VocabularyEntry {
             spoken: "nolan".to_string(),
             written: "Nolan".to_string(),
         }];
-        let entries = prepend(
+        let entries = entries_beside(
             vec![
                 "Stephen".to_string(),
                 "Nolan".to_string(),
                 "Tauri".to_string(),
             ],
-            own,
+            &own,
         );
         let written: Vec<&str> = entries.iter().map(|entry| entry.written.as_str()).collect();
-        assert_eq!(written, ["Tauri", "Stephen", "Nolan"]);
+        assert_eq!(written, ["Tauri", "Stephen"]);
     }
 }
