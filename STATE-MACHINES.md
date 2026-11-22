@@ -698,7 +698,7 @@ The map's first unchecked invariant ("whisper saw the whole `vocabulary_initial_
 | DecodedNothing (Detected, the model wrote nothing) | `transcription-error`, failed row with the WAV, not-dispatched receipt | A:2272-2280, A:471-490 |
 | NoSpeech (Undetected or Unknown, the model wrote nothing) | no-speech receipt and a `recording-error` notice | A:2244-2271 |
 | Err | `transcription-error`, failed row with the WAV | A:2444, A:471-490 |
-| text ready, focus moved since stop | `DefinitelyNotDispatched`, `paste-error` with `focus_moved`, text in the Library and held for "Paste here", no submit | D:151-166, A:1366-1376 |
+| text ready, focus moved since stop | `DefinitelyNotDispatched`, `paste-error` with reason `focus_moved`, text in the Library when enabled and held for "Paste here", no submit | `delivery::deliver`, `actions::deliver_dictation` |
 | held, "Paste here" clicked | the held words go to the control focused now, never submitted; a new dictation or another refusal drops them | A:1397-1403, A:1338-1349, A:1996 |
 
 #### M10. Delivery and the reliable paste transaction
@@ -2054,3 +2054,43 @@ Logs default off. Selected logs are read from a regular, non-symlink file and
 limited to the newest 500 KiB; raw logs can contain work text and file paths.
 Nothing uploads automatically. The explicit GitHub link opens a blank issue
 without the report, description or logs in its URL.
+
+## Spoken send
+
+`spoken_send_enabled` is a separate, off-by-default choice for live Mac
+dictation. It does not change a mode's existing automatic-submit setting.
+Import, retry, reprocessing, task and command plans do not enable the keyword.
+
+The local, streaming and cloud finalizers recognize a trailing complete English
+`send` before vocabulary, replacements, snippets or rewriting can author text.
+Only a selected language or the recognition model can establish English for this
+action. Guessed, unknown and translated language cannot enable it.
+
+| Condition                                                                                          | Result                                                                                                                                      |
+| -------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| The choice is off, the language is not established English, or the plan is not live dictation      | No keyword handling; the ordinary text and delivery rules remain unchanged                                                                  |
+| A valid trailing keyword has a body                                                                | Remove the keyword, clean up the body normally and deliver it through the existing one-shot path                                            |
+| A valid keyword has no body                                                                        | Request Enter once without creating a text insertion                                                                                        |
+| The original editable field cannot be confirmed, or protected input is active before body delivery | Insert nothing; hold the words for an explicit non-submitting "Paste here"                                                                  |
+| A submit becomes due                                                                               | Check protected input and the original editable field again at the actual key sender; reliable paste also requires a post-injection receipt |
+| An insertion backend reports an error                                                              | Keep the insertion unconfirmed, refuse Enter and do not retry the text                                                                      |
+| The key backend starts                                                                             | Report "Enter requested" or uncertainty, never that a message was sent; do not retry an uncertain request                                   |
+
+Cancellation is checked before dispatch. A reliable paste owns its submit only
+after a receipt, and takes that request once. A missing receipt or a failed
+target check refuses Enter rather than sending a key into another field.
+
+Held words clear the entire submit request. Their recovery offer remains
+available with the recording overlay hidden and does not expire while the words
+wait. An explicit paste, a new recording, cancellation or a stopped core clears
+the offer.
+
+Each dictation's start identifies its run. Body delivery, held-word and delayed
+spoken-submit events carry that run. The native shell ignores their outcomes
+after a different run starts, so an older paste cannot replace the current
+recovery offer.
+
+A bare command records a `submit_key` attempt with no target-app acknowledgement.
+A body retains its actual insertion receipt. Its key feedback is separate from
+the ordinary paste result, so that result cannot overwrite a refusal or uncertain
+Enter request.

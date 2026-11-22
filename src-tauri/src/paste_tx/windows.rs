@@ -25,10 +25,11 @@ use windows::Win32::Foundation::{
     SetLastError, ERROR_SUCCESS, HANDLE, HGLOBAL, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM,
 };
 
-use super::{evaluate, send_chord, take_auto_submit_key, TxState, WaitDecision};
+use super::{evaluate, send_chord, take_submit_request, TxState, WaitDecision};
 use crate::clipboard::send_return_key;
+use crate::delivery::{SubmitOutcome, SubmitRefusal, SubmitRequest};
 use crate::input::EnigoState;
-use crate::settings::{AutoSubmitKey, ClipboardHandling, PasteMethod};
+use crate::settings::{ClipboardHandling, PasteMethod};
 use windows::Win32::Foundation::GlobalFree;
 use windows::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, EnumClipboardFormats, GetClipboardData, GetClipboardOwner,
@@ -71,8 +72,7 @@ pub(super) struct WinTxShared {
     saved_bitmap: Mutex<Option<HANDLE>>,
     sequence: Mutex<u32>,
     app_handle: tauri::AppHandle,
-    auto_submit: bool,
-    auto_submit_key: AutoSubmitKey,
+    submit: Option<SubmitRequest>,
     /// ClipboardHandling::CopyToClipboard — settle by leaving the transcript
     /// on the clipboard as plain text instead of restoring the snapshot.
     preserve_transcript: bool,
@@ -124,29 +124,32 @@ unsafe fn shared_ptr(hwnd: HWND) -> *const WinTxShared {
 }
 
 /// Sends the owed auto-submit Enter, if one is owed. Whether it is owed lives
-/// entirely in `take_auto_submit_key`; this function only owns the input lock.
+/// entirely in `take_submit_request`; this function only owns the input lock.
 /// It uses `try_lock` because the paste caller may currently hold that lock
 /// while waiting for this worker.
 fn send_auto_submit(shared: &WinTxShared) {
-    let submit_key = {
+    let request = {
         let mut state = match transaction_state(shared) {
             Ok(state) => state,
             Err(_) => return,
         };
-        take_auto_submit_key(&mut state, shared.auto_submit, shared.auto_submit_key)
+        take_submit_request(&mut state, shared.submit)
     };
-    let Some(submit_key) = submit_key else {
+    let Some(request) = request else {
         return;
     };
 
-    if let Some(enigo_state) = shared.app_handle.try_state::<EnigoState>() {
-        match enigo_state.0.try_lock() {
-            Ok(mut enigo) => {
-                let _ = send_return_key(&mut enigo, submit_key);
+    let outcome = match shared.app_handle.try_state::<EnigoState>() {
+        Some(state) => match state.0.try_lock() {
+            Ok(mut enigo) => send_return_key(&mut enigo, request),
+            Err(_) => {
+                warn!("[reliable-paste] skipping auto-submit: input state busy");
+                SubmitOutcome::Refused(SubmitRefusal::InputUnavailable)
             }
-            Err(_) => warn!("[reliable-paste] skipping auto-submit: input state busy"),
-        }
-    }
+        },
+        None => SubmitOutcome::Refused(SubmitRefusal::InputUnavailable),
+    };
+    crate::clipboard::report_submit_outcome(&shared.app_handle, request, outcome);
 }
 
 /// Renders the promised transcript into the clipboard, which must already be
@@ -641,8 +644,7 @@ pub(super) fn run(
     app_handle: &tauri::AppHandle,
     paste_method: &PasteMethod,
     enigo: &mut enigo::Enigo,
-    auto_submit: bool,
-    auto_submit_key: AutoSubmitKey,
+    submit: Option<SubmitRequest>,
     clipboard_handling: ClipboardHandling,
 ) -> Result<(), String> {
     let shared = Arc::new(WinTxShared {
@@ -652,8 +654,7 @@ pub(super) fn run(
         saved_bitmap: Mutex::new(None),
         sequence: Mutex::new(0),
         app_handle: app_handle.clone(),
-        auto_submit,
-        auto_submit_key,
+        submit,
         preserve_transcript: clipboard_handling == ClipboardHandling::CopyToClipboard,
     });
 

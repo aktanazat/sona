@@ -56,6 +56,8 @@ pub(crate) struct RecordingErrorEvent {
     /// it empty so arbitrary OS or provider text cannot cross the event boundary.
     #[serde(skip_serializing_if = "Option::is_none")]
     detail: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    run_id: Option<u64>,
 }
 
 impl RecordingErrorEvent {
@@ -64,19 +66,27 @@ impl RecordingErrorEvent {
             error_type: error_type.to_string(),
             cloud_kind: None,
             detail: None,
+            run_id: None,
         }
     }
 }
 
-/// `paste-error`: the words were transcribed and kept, but never left Sona.
-/// The id says which history entry holds them, so a shell can open it; it is
-/// `None` when history is off and nothing was kept. `focus_moved` says the
-/// window changed while the words were transcribed, so they wait for "Paste
-/// here".
+/// `paste-error`: nothing was dispatched. The history id locates saved words;
+/// a focus refusal also keeps them in memory for an explicit non-submitting paste.
 #[derive(Clone, serde::Serialize)]
 pub(crate) struct PasteErrorEvent {
     history_id: Option<i64>,
-    focus_moved: bool,
+    reason: PasteErrorReason,
+    run_id: u64,
+}
+
+#[derive(Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum PasteErrorReason {
+    Failed,
+    FocusMoved,
+    FocusUnconfirmed,
+    ProtectedInput,
 }
 
 pub(crate) const DICTATION_DELIVERY_EVENT: &str = "dictation-delivery";
@@ -86,21 +96,29 @@ pub(crate) const DICTATION_DELIVERY_EVENT: &str = "dictation-delivery";
 /// confirmed; `sent` is a paste or keystrokes Sona issued that nothing can
 /// acknowledge, which includes a backend that failed partway through.
 #[derive(Clone, serde::Serialize)]
-#[serde(tag = "outcome", rename_all = "snake_case")]
-enum DictationDeliveryEvent {
+struct DictationDeliveryEvent {
+    run_id: u64,
+    outcome: DictationDeliveryOutcome,
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum DictationDeliveryOutcome {
     Pasted,
     Sent,
+    EnterRequested,
 }
 
 impl DictationDeliveryEvent {
     /// Secure Event Input drops synthetic keys before an application sees them.
-    fn for_outcome(outcome: DeliveryOutcome) -> Option<Self> {
-        match outcome {
-            DeliveryOutcome::Delivered => Some(Self::Pasted),
-            DeliveryOutcome::DispatchedButUnconfirmed => Some(Self::Sent),
+    fn for_outcome(run_id: u64, outcome: DeliveryOutcome) -> Option<Self> {
+        let outcome = match outcome {
+            DeliveryOutcome::Delivered => DictationDeliveryOutcome::Pasted,
+            DeliveryOutcome::DispatchedButUnconfirmed => DictationDeliveryOutcome::Sent,
             DeliveryOutcome::DispatchedUnderSecureInput
-            | DeliveryOutcome::DefinitelyNotDispatched => None,
-        }
+            | DeliveryOutcome::DefinitelyNotDispatched => return None,
+        };
+        Some(Self { run_id, outcome })
     }
 }
 
@@ -205,6 +223,7 @@ fn emit_cloud_run_error(app: &AppHandle, error: CloudRunError) {
             error_type: "cloud_unavailable".to_string(),
             cloud_kind: Some(kind),
             detail: None,
+            run_id: None,
         },
     );
 }
@@ -545,6 +564,7 @@ enum FrozenTranscript {
         /// `text` can be empty while this is true, which is a delivered-nothing
         /// run and not a silent capture.
         model_produced_text: bool,
+        spoken_send: bool,
     },
     HeldCloudUnavailable,
 }
@@ -562,15 +582,15 @@ where
 {
     match finalization {
         CloudStreamFinalization::Final(text) => {
-            // The provider's own words decide whether it produced text; the
-            // user's passes below may legitimately empty them.
-            let model_produced_text = !text.trim().is_empty();
+            let decode =
+                crate::managers::transcription::finalize_cloud_text(text, run.asr(), cloud);
             Ok(FrozenTranscript::Final {
-                text: crate::managers::transcription::finalize_cloud_text(text, run.asr(), cloud),
+                text: decode.text,
                 engine_used: run.requested_engine(),
                 cloud_status: CloudReceiptStatus::Final,
                 realtime_factor: None,
-                model_produced_text,
+                model_produced_text: decode.model_produced_text,
+                spoken_send: decode.spoken_send,
             })
         }
         CloudStreamFinalization::Failed { failure, .. } => {
@@ -586,6 +606,7 @@ where
                 cloud_status: CloudReceiptStatus::Fallback,
                 realtime_factor: decode.realtime_factor,
                 model_produced_text: decode.model_produced_text,
+                spoken_send: decode.spoken_send,
             })
         }
     }
@@ -622,6 +643,7 @@ fn transcribe_frozen_run(
             cloud_status: CloudReceiptStatus::NotRequested,
             realtime_factor: decode.realtime_factor,
             model_produced_text: decode.model_produced_text,
+            spoken_send: decode.spoken_send,
         })
     }
 }
@@ -646,6 +668,7 @@ fn transcribe_frozen_run(
             cloud_status: CloudReceiptStatus::NotRequested,
             realtime_factor: decode.realtime_factor,
             model_produced_text: decode.model_produced_text,
+            spoken_send: decode.spoken_send,
         })
     }
 }
@@ -1329,6 +1352,11 @@ struct DictationWords {
     run_id: u64,
 }
 
+enum DictationDispatch {
+    Words(DictationWords),
+    SpokenSend,
+}
+
 /// The words of the last dictation refused because keyboard focus moved
 /// while they were transcribed. They wait for "Paste here" until it is used,
 /// the next dictation starts, or another refusal replaces them.
@@ -1339,7 +1367,7 @@ impl HeldDictation {
     /// "Paste here" pastes into whatever window is in front, so the held
     /// words never press that window's submit key.
     fn hold(&self, mut words: DictationWords) {
-        words.plan.auto_submit = false;
+        words.plan.submit = None;
         *self.0.lock().unwrap_or_else(PoisonError::into_inner) = Some(words);
     }
 
@@ -1363,8 +1391,12 @@ fn deliver_dictation(
         history_id,
         run_id,
     } = words;
-    let (receipt, focus_moved) = match delivery::deliver(app, text, &plan, stopped_at) {
-        Delivery::Attempted(receipt) => (receipt, false),
+    let spoken_submit = plan
+        .submit
+        .and_then(delivery::SubmitRequest::spoken_target)
+        .is_some();
+    let (receipt, reason) = match delivery::deliver(app, text, &plan, stopped_at) {
+        Delivery::Attempted(receipt) => (receipt, PasteErrorReason::Failed),
         Delivery::FocusMoved { receipt, text } => {
             app.state::<HeldDictation>().hold(DictationWords {
                 text,
@@ -1372,11 +1404,32 @@ fn deliver_dictation(
                 history_id,
                 run_id,
             });
-            (receipt, true)
+            (receipt, PasteErrorReason::FocusMoved)
+        }
+        Delivery::SubmitRefused {
+            receipt,
+            text,
+            refusal,
+        } => {
+            app.state::<HeldDictation>().hold(DictationWords {
+                text,
+                plan,
+                history_id,
+                run_id,
+            });
+            let reason = match refusal {
+                delivery::SubmitRefusal::FocusUnconfirmed => PasteErrorReason::FocusUnconfirmed,
+                delivery::SubmitRefusal::SecureInput => PasteErrorReason::ProtectedInput,
+                delivery::SubmitRefusal::InputUnavailable
+                | delivery::SubmitRefusal::PasteUnconfirmed => PasteErrorReason::Failed,
+            };
+            (receipt, reason)
         }
     };
-    if let Some(event) = DictationDeliveryEvent::for_outcome(receipt.outcome) {
-        let _ = app.emit(DICTATION_DELIVERY_EVENT, event);
+    if !spoken_submit {
+        if let Some(event) = DictationDeliveryEvent::for_outcome(run_id, receipt.outcome) {
+            let _ = app.emit(DICTATION_DELIVERY_EVENT, event);
+        }
     }
     if receipt.method != DeliveryMethod::None
         && receipt.outcome == DeliveryOutcome::DefinitelyNotDispatched
@@ -1385,11 +1438,52 @@ fn deliver_dictation(
             "paste-error",
             PasteErrorEvent {
                 history_id,
-                focus_moved,
+                reason,
+                run_id,
             },
         );
     }
     persist_delivery_attempt(history, history_id, run_id, receipt);
+}
+
+fn deliver_spoken_send(
+    app: &AppHandle,
+    history: &HistoryManager,
+    history_id: Option<i64>,
+    run_id: u64,
+    stopped_at: delivery::KeyboardFocus,
+) {
+    let outcome = delivery::submit_spoken(app, stopped_at, run_id);
+    persist_delivery_attempt(history, history_id, run_id, outcome.receipt());
+}
+
+pub(crate) fn report_spoken_submit(app: &AppHandle, run_id: u64, outcome: delivery::SubmitOutcome) {
+    use delivery::{SubmitOutcome, SubmitRefusal};
+    let error_type = match outcome {
+        SubmitOutcome::Requested => {
+            let _ = app.emit(
+                DICTATION_DELIVERY_EVENT,
+                DictationDeliveryEvent {
+                    run_id,
+                    outcome: DictationDeliveryOutcome::EnterRequested,
+                },
+            );
+            return;
+        }
+        SubmitOutcome::Refused(SubmitRefusal::FocusUnconfirmed) => "spoken_send_focus_unconfirmed",
+        SubmitOutcome::Refused(SubmitRefusal::SecureInput) => "spoken_send_secure_input",
+        SubmitOutcome::Refused(SubmitRefusal::InputUnavailable) => "spoken_send_input_unavailable",
+        SubmitOutcome::Refused(SubmitRefusal::PasteUnconfirmed) => "spoken_send_paste_unconfirmed",
+        SubmitOutcome::Unconfirmed => "spoken_send_unconfirmed",
+    };
+    log::warn!("Spoken submit was not confirmed: {error_type}");
+    let _ = app.emit(
+        "recording-error",
+        RecordingErrorEvent {
+            run_id: Some(run_id),
+            ..RecordingErrorEvent::typed(error_type)
+        },
+    );
 }
 
 /// "Paste here": the held words go to the control that has keyboard focus
@@ -1992,7 +2086,7 @@ impl TranscribeAction {
                 // The recorder has accepted this session and its state machine
                 // is already Recording, so the tray's Stop action is correct
                 // from here on.
-                set_tray_state(app, TrayIconState::Recording);
+                set_tray_state(app, TrayIconState::Recording, Some(self.run.run_id));
                 app.state::<HeldDictation>().take();
                 #[cfg(target_os = "macos")]
                 delivery::copy_clipboard_aside(self.run.delivery());
@@ -2059,7 +2153,7 @@ impl TranscribeAction {
             // Revert UI state so we don't stay stuck in the recording overlay.
             tm.cancel_stream();
             utils::hide_recording_overlay(app);
-            set_tray_state(app, TrayIconState::Idle);
+            set_tray_state(app, TrayIconState::Idle, Some(self.run.run_id));
             if let Some(err) = recording_error {
                 let error_type = if is_microphone_access_denied(&err) {
                     "microphone_permission_denied"
@@ -2096,7 +2190,7 @@ impl TranscribeAction {
         let tm = Arc::clone(&app.state::<Arc<TranscriptionManager>>());
         let hm = Arc::clone(&app.state::<Arc<HistoryManager>>());
 
-        set_tray_state(app, TrayIconState::Transcribing);
+        set_tray_state(app, TrayIconState::Transcribing, Some(self.run.run_id));
         // Stop should give immediate visual feedback. Live streaming can keep
         // the larger panel, but it still switches from listening to a working
         // spinner while the stream finalizes. Non-streaming paths use the
@@ -2135,7 +2229,11 @@ impl TranscribeAction {
             context_plan.effective_policy()
         );
         let cancel_generation = rm.cancel_generation();
-        let stopped_at = delivery::KeyboardFocus::now();
+        let stopped_at = if run.asr().spoken_send_enabled {
+            delivery::KeyboardFocus::for_spoken_send()
+        } else {
+            delivery::KeyboardFocus::now()
+        };
         #[cfg(target_os = "macos")]
         delivery::copy_clipboard_aside(self.run.delivery());
 
@@ -2317,6 +2415,7 @@ impl TranscribeAction {
                                 cloud_status,
                                 realtime_factor,
                                 model_produced_text,
+                                spoken_send,
                             }) => {
                                 debug!(
                                     "Transcription completed in {:?}",
@@ -2378,23 +2477,33 @@ impl TranscribeAction {
                                         return;
                                     }
                                 }
-                                if post_process {
+                                let submit_only = spoken_send && transcription.is_empty();
+                                if post_process && !submit_only {
                                     if use_streaming_overlay {
                                         tm.emit_stream_working(StreamWorkKind::Polishing);
                                     } else {
                                         show_processing_overlay(&ah);
                                     }
                                 }
-                                let Some(processed) = complete_unless_cancelled(
-                                    process_transcription_output(&ah, &transcription, &run),
-                                    || rm.was_cancelled_since(cancel_generation),
-                                )
-                                .await
-                                else {
-                                    debug!(
-                                        "Transcription operation cancelled during output handling"
-                                    );
-                                    return;
+                                let processed = if submit_only {
+                                    ProcessedTranscription {
+                                        final_text: String::new(),
+                                        post_processed_text: None,
+                                        rewrite: RewriteOutcome::NotRequested,
+                                    }
+                                } else {
+                                    let Some(processed) = complete_unless_cancelled(
+                                        process_transcription_output(&ah, &transcription, &run),
+                                        || rm.was_cancelled_since(cancel_generation),
+                                    )
+                                    .await
+                                    else {
+                                        debug!(
+                                            "Transcription operation cancelled during output handling"
+                                        );
+                                        return;
+                                    };
+                                    processed
                                 };
 
                                 if rm.was_cancelled_since(cancel_generation) {
@@ -2433,7 +2542,7 @@ impl TranscribeAction {
                                         processed.final_text,
                                         Arc::clone(&completed_pcm),
                                     );
-                                } else if processed.final_text.is_empty() {
+                                } else if processed.final_text.is_empty() && !spoken_send {
                                     let history_id = unclaimed.claimed_by(history_entry.save(&hm));
                                     persist_delivery_attempt(
                                         &hm,
@@ -2452,12 +2561,14 @@ impl TranscribeAction {
                                     ) {
                                         let _ = ah.emit("rewrite-skipped", event);
                                     }
-                                    if let Some(history_id) = history_id {
-                                        crate::planning::work::watch::after_dictation(
-                                            &ah,
-                                            history_id,
-                                            &processed.final_text,
-                                        );
+                                    if !processed.final_text.is_empty() {
+                                        if let Some(history_id) = history_id {
+                                            crate::planning::work::watch::after_dictation(
+                                                &ah,
+                                                history_id,
+                                                &processed.final_text,
+                                            );
+                                        }
                                     }
                                     let ah_clone = ah.clone();
                                     let hm_for_main = Arc::clone(&hm);
@@ -2465,12 +2576,25 @@ impl TranscribeAction {
                                     let history_for_fallback = history_id;
                                     let run_id = run.run_id;
                                     let paste_time = Instant::now();
-                                    let words = DictationWords {
-                                        text: processed.final_text,
-                                        plan: run.delivery().clone(),
-                                        history_id,
-                                        run_id,
-                                    };
+                                    let dispatch_request =
+                                        if spoken_send && processed.final_text.is_empty() {
+                                            DictationDispatch::SpokenSend
+                                        } else {
+                                            let mut plan = run.delivery().clone();
+                                            if spoken_send {
+                                                plan.submit =
+                                                    Some(delivery::SubmitRequest::SpokenEnter {
+                                                        target: stopped_at,
+                                                        run_id,
+                                                    });
+                                            }
+                                            DictationDispatch::Words(DictationWords {
+                                                text: processed.final_text,
+                                                plan,
+                                                history_id,
+                                                run_id,
+                                            })
+                                        };
                                     let rm_for_paste = Arc::clone(&rm);
                                     let finish_for_main = Arc::clone(&finish);
                                     let dispatch = ah.run_on_main_thread(move || {
@@ -2481,19 +2605,28 @@ impl TranscribeAction {
                                             );
                                             persist_delivery_attempt(
                                                 &hm_for_main,
-                                                words.history_id,
-                                                words.run_id,
+                                                history_id,
+                                                run_id,
                                                 DeliveryReceipt::not_dispatched(),
                                             );
                                             return;
                                         }
 
-                                        deliver_dictation(
-                                            &ah_clone,
-                                            &hm_for_main,
-                                            words,
-                                            stopped_at,
-                                        );
+                                        match dispatch_request {
+                                            DictationDispatch::Words(words) => deliver_dictation(
+                                                &ah_clone,
+                                                &hm_for_main,
+                                                words,
+                                                stopped_at,
+                                            ),
+                                            DictationDispatch::SpokenSend => deliver_spoken_send(
+                                                &ah_clone,
+                                                &hm_for_main,
+                                                history_id,
+                                                run_id,
+                                                stopped_at,
+                                            ),
+                                        }
                                         debug!(
                                             "Text delivery completed in {:?}",
                                             paste_time.elapsed()
@@ -2831,6 +2964,7 @@ mod tests {
                 text: "batch result".to_string(),
                 realtime_factor: Some(13.8),
                 model_produced_text: true,
+                spoken_send: false,
             })
         });
 
@@ -2848,6 +2982,7 @@ mod tests {
                 text: "streamed text".to_string(),
                 realtime_factor: None,
                 model_produced_text: true,
+                spoken_send: false,
             })),
             &[0.25, -0.5],
             |_| panic!("a usable stream final must not batch-decode"),
@@ -2869,6 +3004,7 @@ mod tests {
                 text: String::new(),
                 realtime_factor: None,
                 model_produced_text: true,
+                spoken_send: false,
             })),
             &[0.25, -0.5],
             |_| panic!("a stream that produced text must not batch-decode again"),
@@ -2888,6 +3024,7 @@ mod tests {
                 text: String::new(),
                 realtime_factor: None,
                 model_produced_text: false,
+                spoken_send: false,
             })),
             &[0.25, -0.5],
             |_| {
@@ -2895,6 +3032,7 @@ mod tests {
                     text: "batch recovered it".to_string(),
                     realtime_factor: Some(9.0),
                     model_produced_text: true,
+                    spoken_send: false,
                 })
             },
         )
@@ -2945,6 +3083,63 @@ mod tests {
             &TranscriptionIntent::ActiveMode,
         )
         .expect("valid cloud run")
+    }
+
+    #[cfg(all(feature = "cloud-realtime", target_os = "macos"))]
+    #[test]
+    fn spoken_send_is_not_created_by_replacement_text() {
+        use crate::managers::transcription::finalize_cloud_text;
+        use crate::modes::{RunPlan, TranscriptionIntent};
+        use crate::settings::ReplacementRule;
+
+        let mut settings = cloud_settings(false);
+        settings.spoken_send_enabled = true;
+        settings.modes[0].asr.language = "en".to_string();
+        settings.replacements_enabled = true;
+        settings.replacements_rules = vec![ReplacementRule {
+            spoken: "hello".to_string(),
+            written: "Send".to_string(),
+            enabled: true,
+        }];
+        let run = RunPlan::for_intent(&settings, &TranscriptionIntent::ActiveMode).unwrap();
+        let decoded = finalize_cloud_text("hello.".to_string(), run.asr(), run.cloud().unwrap());
+        assert_eq!(decoded.text, "Send.");
+        assert!(!decoded.spoken_send);
+    }
+
+    #[cfg(all(feature = "cloud-realtime", target_os = "macos"))]
+    #[test]
+    fn spoken_send_removes_only_the_keyword_before_rewriting_the_body() {
+        use crate::managers::transcription::finalize_cloud_text;
+        use crate::modes::{RunPlan, TranscriptionIntent};
+        use crate::settings::ReplacementRule;
+
+        let mut settings = cloud_settings(false);
+        settings.spoken_send_enabled = true;
+        settings.modes[0].asr.language = "en".to_string();
+        settings.replacements_enabled = true;
+        settings.replacements_rules = vec![
+            ReplacementRule {
+                spoken: "send".to_string(),
+                written: "Unrelated words".to_string(),
+                enabled: true,
+            },
+            ReplacementRule {
+                spoken: "hello".to_string(),
+                written: "Ready".to_string(),
+                enabled: true,
+            },
+        ];
+        let run = RunPlan::for_intent(&settings, &TranscriptionIntent::ActiveMode).unwrap();
+        for (raw, body) in [
+            ("Send.", ""),
+            ("hello. Send.", "Ready."),
+            ("hello send", "Ready"),
+        ] {
+            let decoded = finalize_cloud_text(raw.to_string(), run.asr(), run.cloud().unwrap());
+            assert_eq!(decoded.text, body, "{raw}");
+            assert!(decoded.spoken_send, "{raw}");
+        }
     }
 
     /// A local run whose model cannot load can only fail after the microphone
@@ -3021,8 +3216,10 @@ mod tests {
                 cloud_status,
                 realtime_factor,
                 model_produced_text,
+                spoken_send,
             } => {
                 assert!(model_produced_text);
+                assert!(!spoken_send);
                 assert_eq!(text, "Deepgram final");
                 assert_eq!(engine_used, RequestedEngine::DeepgramNova3);
                 assert_eq!(cloud_status, CloudReceiptStatus::Final);
@@ -3061,6 +3258,7 @@ mod tests {
                     text: "local fallback transcript".to_string(),
                     realtime_factor: Some(12.5),
                     model_produced_text: true,
+                    spoken_send: false,
                 })
             },
         )
@@ -3074,8 +3272,10 @@ mod tests {
                 cloud_status,
                 realtime_factor,
                 model_produced_text,
+                spoken_send,
             } => {
                 assert!(model_produced_text);
+                assert!(!spoken_send);
                 assert_eq!(text, "local fallback transcript");
                 assert_eq!(engine_used, RequestedEngine::Local);
                 assert_eq!(cloud_status, CloudReceiptStatus::Fallback);
@@ -3109,6 +3309,7 @@ mod tests {
                     text: "must not be delivered".to_string(),
                     realtime_factor: Some(9.0),
                     model_produced_text: true,
+                    spoken_send: false,
                 })
             },
         )
@@ -3213,7 +3414,9 @@ mod tests {
         let mut plan = active_run(&crate::settings::get_default_settings())
             .delivery()
             .clone();
-        plan.auto_submit = true;
+        plan.submit = Some(crate::delivery::SubmitRequest::Configured(
+            crate::settings::AutoSubmitKey::Enter,
+        ));
         let held = HeldDictation::default();
         held.hold(DictationWords {
             text: "hello".to_string(),
@@ -3224,7 +3427,7 @@ mod tests {
 
         let words = held.take().expect("the refused words are held");
         assert_eq!(words.text, "hello");
-        assert!(!words.plan.auto_submit);
+        assert!(words.plan.submit.is_none());
         assert!(held.take().is_none());
     }
 
@@ -3269,6 +3472,7 @@ mod tests {
                 error_type: "cloud_unavailable".to_string(),
                 cloud_kind: Some(kind),
                 detail: None,
+                run_id: None,
             })
             .expect("cloud payload");
             assert_eq!(

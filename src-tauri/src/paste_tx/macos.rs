@@ -24,10 +24,11 @@ use objc2_foundation::{NSArray, NSInteger, NSObject, NSString};
 use tauri::{AppHandle, Manager};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 
-use super::{evaluate, send_chord, take_auto_submit_key, TxState, WaitDecision};
+use super::{evaluate, send_chord, take_submit_request, TxState, WaitDecision};
 use crate::clipboard::{send_return_key, PasteboardSnapshot};
+use crate::delivery::{SubmitOutcome, SubmitRefusal, SubmitRequest};
 use crate::input::EnigoState;
-use crate::settings::{AutoSubmitKey, ClipboardHandling, PasteMethod};
+use crate::settings::{ClipboardHandling, PasteMethod};
 
 /// Concealment marker types declared alongside the text so that well-behaved
 /// third-party clipboard managers (Maccy, Paste, ...) skip the transcript.
@@ -100,8 +101,7 @@ struct MacPending {
     saved: PasteboardSnapshot,
     change_count: NSInteger,
     provider: Option<Retained<SonaPasteProvider>>,
-    auto_submit: bool,
-    auto_submit_key: AutoSubmitKey,
+    submit: Option<SubmitRequest>,
     /// ClipboardHandling::CopyToClipboard — instead of restoring, settle by
     /// re-writing the transcript as plain text (without the concealment
     /// markers), so clipboard managers record it and it outlives the promise.
@@ -133,31 +133,35 @@ fn settle(
     }
     p.settled = true;
 
-    let auto_submit = p.auto_submit;
-    let configured_submit_key = p.auto_submit_key;
-    let (ownership_lost, submit_key) = match p.state.lock() {
+    let configured_submit = p.submit;
+    let (ownership_lost, submit_request) = match p.state.lock() {
         Ok(mut state) => (
             state.ownership_lost,
-            take_auto_submit_key(&mut state, auto_submit, configured_submit_key),
+            take_submit_request(&mut state, configured_submit),
         ),
         Err(_) => (true, None),
     };
 
     // A reliable transaction owns its submit only after a post-injection
     // receipt, and the transaction state makes that ownership one-shot.
-    if let Some(submit_key) = submit_key {
-        match enigo {
-            Some(e) => {
-                let _ = send_return_key(e, submit_key);
-            }
-            None => {
-                if let Some(enigo_state) = app_handle.try_state::<EnigoState>() {
-                    if let Ok(mut e) = enigo_state.0.lock() {
-                        let _ = send_return_key(&mut e, submit_key);
-                    }
-                }
-            }
-        }
+    if let Some(request) = submit_request {
+        let outcome = match enigo {
+            Some(enigo) => send_return_key(enigo, request),
+            None => match app_handle.try_state::<EnigoState>() {
+                Some(state) => match state.0.lock() {
+                    Ok(mut enigo) => send_return_key(&mut enigo, request),
+                    Err(_) => SubmitOutcome::Refused(SubmitRefusal::InputUnavailable),
+                },
+                None => SubmitOutcome::Refused(SubmitRefusal::InputUnavailable),
+            },
+        };
+        crate::clipboard::report_submit_outcome(app_handle, request, outcome);
+    } else if let Some(request) = configured_submit {
+        crate::clipboard::report_submit_outcome(
+            app_handle,
+            request,
+            SubmitOutcome::Refused(SubmitRefusal::PasteUnconfirmed),
+        );
     }
 
     let still_ours =
@@ -263,8 +267,7 @@ pub(super) fn run(
     app_handle: &AppHandle,
     paste_method: &PasteMethod,
     enigo: &mut enigo::Enigo,
-    auto_submit: bool,
-    auto_submit_key: AutoSubmitKey,
+    submit: Option<SubmitRequest>,
     clipboard_handling: ClipboardHandling,
 ) -> Result<(), String> {
     // Settle any previous transaction first so the snapshot below captures the
@@ -319,8 +322,7 @@ pub(super) fn run(
         saved,
         change_count,
         provider: Some(provider),
-        auto_submit,
-        auto_submit_key,
+        submit,
         preserve_transcript: clipboard_handling == ClipboardHandling::CopyToClipboard,
         transcript: text.to_string(),
         settled: false,

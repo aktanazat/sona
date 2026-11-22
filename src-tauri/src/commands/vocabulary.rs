@@ -523,6 +523,15 @@ pub fn update_spoken_edits_enabled(app: AppHandle, enabled: bool) -> Result<(), 
     Ok(())
 }
 
+#[tauri::command]
+#[specta::specta]
+pub fn update_spoken_send_enabled(app: AppHandle, enabled: bool) -> Result<(), String> {
+    settings::update_settings(&app, |settings| {
+        settings.spoken_send_enabled = enabled;
+    })?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

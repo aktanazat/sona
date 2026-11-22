@@ -279,8 +279,7 @@ impl ModeDeliverySettings {
 pub struct DeliveryPlan {
     pub paste_method: PasteMethod,
     pub clipboard_handling: ClipboardHandling,
-    pub auto_submit: bool,
-    pub auto_submit_key: AutoSubmitKey,
+    pub submit: Option<crate::delivery::SubmitRequest>,
     pub append_trailing_space: bool,
     pub paste_delay_ms: u64,
     pub paste_delay_after_ms: u64,
@@ -294,8 +293,11 @@ impl From<&ModeDeliverySettings> for DeliveryPlan {
         Self {
             paste_method: settings.paste_method,
             clipboard_handling: settings.clipboard_handling,
-            auto_submit: settings.auto_submit,
-            auto_submit_key: settings.auto_submit_key,
+            submit: settings
+                .auto_submit
+                .then_some(crate::delivery::SubmitRequest::Configured(
+                    settings.auto_submit_key,
+                )),
             append_trailing_space: settings.append_trailing_space,
             paste_delay_ms: settings.paste_delay_ms,
             paste_delay_after_ms: settings.paste_delay_after_ms,
@@ -1316,6 +1318,7 @@ pub struct AsrPlan {
     pub replacements_rules: Vec<ReplacementRule>,
     pub replacements_enabled: bool,
     pub spoken_edits_enabled: bool,
+    pub spoken_send_enabled: bool,
 }
 
 impl AsrPlan {
@@ -1354,6 +1357,7 @@ impl AsrPlan {
             replacements_rules: settings.replacements_rules.clone(),
             replacements_enabled: settings.replacements_enabled,
             spoken_edits_enabled: settings.spoken_edits_enabled,
+            spoken_send_enabled: false,
         }
     }
 
@@ -1383,6 +1387,7 @@ impl AsrPlan {
             replacements_rules: settings.replacements_rules.clone(),
             replacements_enabled: settings.replacements_enabled,
             spoken_edits_enabled: settings.spoken_edits_enabled,
+            spoken_send_enabled: false,
         }
     }
 
@@ -1867,14 +1872,28 @@ impl RunPlan {
             }
         };
         let mode = mode.cloned().ok_or(RunPlanError::NoMatchingMode)?;
-        Self::for_mode(
+        let mut run = Self::for_mode(
             settings,
             mode,
             post_process_override,
             mode_selection_source,
             false,
             settings.dictation_project_root.as_deref(),
-        )
+        )?;
+        run.asr.spoken_send_enabled = cfg!(target_os = "macos")
+            && settings.spoken_send_enabled
+            && !run.asr.translate_to_english
+            && matches!(
+                run.delivery.paste_method,
+                PasteMethod::CtrlV
+                    | PasteMethod::CtrlShiftV
+                    | PasteMethod::ShiftInsert
+                    | PasteMethod::Direct
+            );
+        if let Some(fallback) = run.local_fallback.as_mut() {
+            fallback.spoken_send_enabled = run.asr.spoken_send_enabled;
+        }
+        Ok(run)
     }
 
     /// Freeze the active mode for a file import without capturing application
@@ -2190,7 +2209,7 @@ impl RunPlan {
         // A rewritten selection is a replacement, not an insertion: a trailing
         // space or a submit key would corrupt the text it replaced.
         run.delivery.append_trailing_space = false;
-        run.delivery.auto_submit = false;
+        run.delivery.submit = None;
         run.command = Some(if answers_in_chat {
             CommandPlan::answering_in_chat(selection)
         } else {
@@ -2484,6 +2503,70 @@ mod tests {
         let mut settings = get_default_settings();
         ensure_mode_settings(&mut settings);
         settings
+    }
+
+    #[test]
+    fn spoken_send_is_frozen_only_for_live_app_dictation() {
+        let mut settings = configured_settings();
+        assert!(
+            !RunPlan::for_intent(&settings, &TranscriptionIntent::ActiveMode)
+                .unwrap()
+                .asr()
+                .spoken_send_enabled
+        );
+        settings.spoken_send_enabled = true;
+        let live = RunPlan::for_intent(&settings, &TranscriptionIntent::ActiveMode).unwrap();
+        assert_eq!(live.asr().spoken_send_enabled, cfg!(target_os = "macos"));
+        assert!(
+            !RunPlan::for_media_import(&settings)
+                .unwrap()
+                .asr()
+                .spoken_send_enabled
+        );
+        assert!(
+            !RunPlan::for_retry(&settings, false)
+                .unwrap()
+                .asr()
+                .spoken_send_enabled
+        );
+        assert!(
+            !RunPlan::for_reprocess(&settings, DEFAULT_MODE_ID)
+                .unwrap()
+                .asr()
+                .spoken_send_enabled
+        );
+        assert!(
+            !RunPlan::for_intent(&settings, &TranscriptionIntent::Tasks)
+                .unwrap()
+                .asr()
+                .spoken_send_enabled
+        );
+        assert!(!AsrPlan::from_settings(&settings).spoken_send_enabled);
+        settings.spoken_send_enabled = false;
+        assert_eq!(live.asr().spoken_send_enabled, cfg!(target_os = "macos"));
+    }
+
+    #[test]
+    fn spoken_send_does_not_apply_to_translation_or_delegated_delivery() {
+        let mut settings = configured_settings();
+        settings.spoken_send_enabled = true;
+        settings.modes[0].asr.translate_to_english = true;
+        assert!(
+            !RunPlan::for_intent(&settings, &TranscriptionIntent::ActiveMode)
+                .unwrap()
+                .asr()
+                .spoken_send_enabled
+        );
+        settings.modes[0].asr.translate_to_english = false;
+        for method in [PasteMethod::None, PasteMethod::ExternalScript] {
+            settings.modes[0].delivery.paste_method = method;
+            assert!(
+                !RunPlan::for_intent(&settings, &TranscriptionIntent::ActiveMode)
+                    .unwrap()
+                    .asr()
+                    .spoken_send_enabled
+            );
+        }
     }
 
     #[test]

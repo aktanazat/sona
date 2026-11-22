@@ -756,7 +756,7 @@ fn execute(app: &AppHandle, state: &mut CoordinatorState, effect: Effect) {
         }
         Effect::Settled(next) => {
             hide_recording_overlay(app);
-            set_tray_state(app, TrayIconState::Idle);
+            set_tray_state(app, TrayIconState::Idle, None);
             if let Some(request) = next {
                 begin(app, state, request);
             }

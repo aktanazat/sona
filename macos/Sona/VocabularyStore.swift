@@ -29,6 +29,7 @@ final class VocabularyStore {
     // MARK: Switches
 
     private(set) var spokenEditsEnabled = false
+    private(set) var spokenSendEnabled = false
     private(set) var emojiEnabled = false
     private(set) var snippetsEnabled = true
     private(set) var replacementsEnabled = true
@@ -408,7 +409,7 @@ final class VocabularyStore {
         savedEntryCount = list.count
     }
 
-    // MARK: The four switches
+    // MARK: Switches
 
     func setSpokenEdits(_ enabled: Bool) {
         writeSetting(
@@ -416,6 +417,15 @@ final class VocabularyStore {
             enabled: enabled,
             failure: "Couldn't change spoken editing commands. Try again.",
             retry: { [weak self] in self?.setSpokenEdits(enabled) }
+        )
+    }
+
+    func setSpokenSend(_ enabled: Bool) {
+        writeSetting(
+            "update_spoken_send_enabled",
+            enabled: enabled,
+            failure: "Couldn't change spoken Send. Try again.",
+            retry: { [weak self] in self?.setSpokenSend(enabled) }
         )
     }
 
@@ -721,6 +731,7 @@ final class VocabularyStore {
         )
         savedEntryCount = savedWords.count
         spokenEditsEnabled = settings.spokenEditsEnabled ?? false
+        spokenSendEnabled = settings.spokenSendEnabled ?? false
         emojiEnabled = settings.emojiReplacementsEnabled ?? false
         snippetsEnabled = settings.snippetsEnabled ?? true
         replacementsEnabled = settings.replacementsEnabled ?? true

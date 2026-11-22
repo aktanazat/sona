@@ -1545,6 +1545,9 @@ pub struct AppSettings {
     /// [`crate::audio_toolkit::apply_spoken_edits`].
     #[serde(default)]
     pub spoken_edits_enabled: bool,
+    /// Consent to press Enter after a trailing "send" in live English dictation.
+    #[serde(default)]
+    pub spoken_send_enabled: bool,
     /// Samples of the user's own writing, injected into every rewrite prompt as
     /// voice-matching examples. Empty means the rewrite behaves exactly as it
     /// did before, which is the shipped state.
@@ -2359,6 +2362,7 @@ pub fn get_default_settings() -> AppSettings {
         replacements_enabled: default_replacements_enabled(),
         replacements_rules: default_replacement_rules(),
         spoken_edits_enabled: false,
+        spoken_send_enabled: false,
         persona_samples: Vec::new(),
         hud_pill_enabled: false,
         hud_pill_position: default_hud_pill_position(),

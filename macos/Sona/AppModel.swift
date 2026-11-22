@@ -128,15 +128,22 @@ struct HudPillState: Decodable {
 /// the frame is shown.
 struct RecordingErrorEvent: Decodable {
     let errorType: String
+    let runId: UInt64?
 }
 
-/// `paste-error`: the words were kept but never left Sona. `historyId` is
-/// the entry that holds them, or nil when history is off. `focusMoved` says
-/// the window changed while they were transcribed, so the core holds them
-/// for "Paste here".
+/// `paste-error`: the words stayed in Sona, with the reason and a saved
+/// history entry when history is enabled.
 struct PasteErrorEvent: Decodable {
     let historyId: Int64?
-    let focusMoved: Bool
+    let reason: PasteErrorReason
+    let runId: UInt64
+}
+
+enum PasteErrorReason: String, Decodable {
+    case failed
+    case focusMoved = "focus_moved"
+    case focusUnconfirmed = "focus_unconfirmed"
+    case protectedInput = "protected_input"
 }
 
 /// `rewrite-skipped`: the mode asked for a rewrite and the words went out
@@ -170,10 +177,12 @@ struct DictationDurationWarningEvent: Decodable {
 
 enum DictationDeliveryOutcome: String, Decodable {
     case pasted, sent
+    case enterRequested = "enter_requested"
 }
 
 struct DictationDeliveryEvent: Decodable {
     let outcome: DictationDeliveryOutcome
+    let runId: UInt64
 }
 
 /// `dictation-kept`: a cancel kept the recording as a Library entry instead
@@ -186,6 +195,8 @@ struct DictationKeptEvent: Decodable {
 enum PillFeedback: Equatable {
     case delivered(DictationDeliveryOutcome)
     case failed
+    case sendRefused
+    case sendUnconfirmed
     case kept
     /// The words wait for a click to paste them into the window in front.
     case held
@@ -194,7 +205,10 @@ enum PillFeedback: Equatable {
         switch self {
         case .delivered(.pasted): "Pasted"
         case .delivered(.sent): "Sent"
+        case .delivered(.enterRequested): "Enter requested"
         case .failed: "Couldn't paste"
+        case .sendRefused: "Enter not sent"
+        case .sendUnconfirmed: "Check the app"
         case .kept: "Recording kept"
         case .held: "Paste here"
         }
@@ -204,19 +218,20 @@ enum PillFeedback: Equatable {
         switch self {
         case .delivered(.pasted): "checkmark"
         case .delivered(.sent): "arrow.up.right"
+        case .delivered(.enterRequested): "return"
         case .failed: "exclamationmark"
+        case .sendRefused, .sendUnconfirmed: "exclamationmark"
         case .kept: "tray.and.arrow.down"
         case .held: "doc.on.clipboard"
         }
     }
 
-    /// How long the pill holds it. A line that needs reading stays longer,
-    /// and an offer stays long enough to click into a field first.
-    var holdMilliseconds: Int {
+    /// A held-word offer waits for an action rather than expiring.
+    var holdMilliseconds: Int? {
         switch self {
         case .delivered: 900
-        case .failed, .kept: 2200
-        case .held: 10_000
+        case .failed, .sendRefused, .sendUnconfirmed, .kept: 2200
+        case .held: nil
         }
     }
 }
@@ -390,6 +405,7 @@ final class AppModel {
     /// The ended hide this shell last asked the core to clear.
     @ObservationIgnored private var pillClearedAt: Int64?
     @ObservationIgnored private var feedbackDismissal: Task<Void, Never>?
+    @ObservationIgnored private var dictationRunID: UInt64?
     /// Presents the main window, as the scene's `openWindow` does. Only a
     /// view reaches that action, and the window stays closed at launch, so
     /// the menu bar mark hands it over when it first appears. Observed, so a
@@ -919,7 +935,7 @@ final class AppModel {
     }
 
     private func showPillFeedback(_ feedback: PillFeedback) {
-        guard settings.settings.overlayStyle != .none else { return }
+        guard feedback == .held || settings.settings.overlayStyle != .none else { return }
         // A kept recording is announced as its cancel ends the recording.
         if case .recording = capture, feedback != .kept { return }
         feedbackDismissal?.cancel()
@@ -931,10 +947,10 @@ final class AppModel {
     }
 
     private func dismissPillFeedbackAfterDelay() {
-        guard let feedback = pillFeedback else { return }
+        guard let feedback = pillFeedback, let duration = feedback.holdMilliseconds else { return }
         feedbackDismissal?.cancel()
         feedbackDismissal = Task { [weak self] in
-            try? await Task.sleep(for: .milliseconds(feedback.holdMilliseconds))
+            try? await Task.sleep(for: .milliseconds(duration))
             guard !Task.isCancelled else { return }
             self?.pillFeedback = nil
             self?.feedbackDismissal = nil
@@ -1083,6 +1099,7 @@ final class AppModel {
     /// and says the core needs a restart.
     private func coreClosed() {
         coreStopped = true
+        dictationRunID = nil
         liveText = ""
         clearPillFeedback()
         setCapture(.idle)
@@ -1181,7 +1198,7 @@ final class AppModel {
 
     private func syncPill() {
         let record = settings.settings
-        if record.overlayStyle == .none, pillFeedback != nil {
+        if record.overlayStyle == .none, pillFeedback != nil, pillFeedback != .held {
             clearPillFeedback()
         }
         let anew: Bool
@@ -1196,7 +1213,7 @@ final class AppModel {
         if coreStopped {
             pill.hide()
         } else if capture != .idle || pillFeedback != nil {
-            if record.overlayStyle == .none, pillWarningSeconds == nil {
+            if record.overlayStyle == .none, pillWarningSeconds == nil, pillFeedback != .held {
                 pill.hide()
             } else {
                 pillPresentation = PillPresentation(capture: capture, feedback: pillFeedback)
@@ -1312,6 +1329,7 @@ final class AppModel {
             switch name {
             case CoreEvent.activity:
                 let activity: DictationActivity = try Core.payload(line)
+                if let runID = activity.runId { dictationRunID = runID }
                 switch activity.state {
                 case "recording":
                     liveText = ""
@@ -1390,14 +1408,25 @@ final class AppModel {
                 pillWarningSeconds = event.remainingSeconds
             case CoreEvent.recordingError:
                 let event: RecordingErrorEvent = try Core.payload(line)
+                if let runID = event.runId, runID != dictationRunID { return }
                 notice = CaptureNotice(text: Self.recordingErrorText(event.errorType))
+                switch event.errorType {
+                case "spoken_send_focus_unconfirmed", "spoken_send_secure_input",
+                     "spoken_send_input_unavailable":
+                    showPillFeedback(.sendRefused)
+                case "spoken_send_unconfirmed", "spoken_send_paste_unconfirmed":
+                    showPillFeedback(.sendUnconfirmed)
+                default:
+                    break
+                }
             case CoreEvent.pasteError:
                 let event: PasteErrorEvent = try Core.payload(line)
-                let offered = event.focusMoved && settings.settings.overlayStyle != .none
+                guard event.runId == dictationRunID else { return }
+                let offered = event.reason != .failed
                 notice = CaptureNotice(
                     text: Self.pasteErrorText(event, offered: offered),
                     dictation: event.historyId)
-                showPillFeedback(event.focusMoved ? .held : .failed)
+                showPillFeedback(offered ? .held : .failed)
             case CoreEvent.rewriteSkipped:
                 let event: RewriteSkippedEvent = try Core.payload(line)
                 if let text = event.outcome.skippedText {
@@ -1415,6 +1444,7 @@ final class AppModel {
                 reveal()
             case CoreEvent.dictationDelivery:
                 let event: DictationDeliveryEvent = try Core.payload(line)
+                guard event.runId == dictationRunID else { return }
                 showPillFeedback(.delivered(event.outcome))
             case CoreEvent.dictationKept:
                 let event: DictationKeptEvent = try Core.payload(line)
@@ -1466,6 +1496,16 @@ final class AppModel {
             "Cloud unavailable."
         case "cloud_transcription_held":
             "Sona held the cloud result: nothing trustworthy came back and no local model was available."
+        case "spoken_send_focus_unconfirmed":
+            "Enter was not sent because Sona could not confirm the original text field. Focus the field and try again."
+        case "spoken_send_secure_input":
+            "Enter was not sent while protected keyboard input was active."
+        case "spoken_send_unconfirmed":
+            "Sona could not confirm the Enter request. Check the app before trying again."
+        case "spoken_send_input_unavailable":
+            "Enter was not sent because keyboard input was unavailable. Focus the text field and try again."
+        case "spoken_send_paste_unconfirmed":
+            "Enter was not sent because Sona could not confirm that the app received the words. Check the app before trying again."
         default:
             "Couldn't start recording: Unknown error. Try again."
         }
@@ -1474,15 +1514,22 @@ final class AppModel {
     /// Why the words stayed in Sona, and where they are now. `offered` says
     /// the pill shows "Paste here".
     private static func pasteErrorText(_ event: PasteErrorEvent, offered: Bool) -> String {
-        guard event.focusMoved else {
+        let reason: String
+        switch event.reason {
+        case .failed:
             return event.historyId == nil
                 ? "The words could not be pasted into the app in front. Focus a text field and try again."
                 : "The words could not be pasted into the app in front. They are kept in the Library."
+        case .focusMoved:
+            reason = "The text field changed before the words were ready, so they were not pasted."
+        case .focusUnconfirmed:
+            reason = "Sona could not confirm the original text field, so the words were not pasted and Enter was not sent."
+        case .protectedInput:
+            reason = "macOS is protecting keyboard input, so the words were not pasted and Enter was not sent."
         }
-        return [
-            "You switched windows before the words were ready, so they weren't pasted.",
-            offered ? "Click Paste here on the pill to paste them where you are now." : nil,
-            event.historyId == nil ? nil : "They are kept in the Library.",
-        ].compactMap { $0 }.joined(separator: " ")
+        var text = reason
+        if offered { text += " Click Paste here on the pill to paste them where you are now." }
+        if event.historyId != nil { text += " They are kept in the Library." }
+        return text
     }
 }

@@ -1317,6 +1317,7 @@ const SETTING_KEYS = [
   "snippets",
   "text-replacements",
   "spoken-edits",
+  "spoken-send",
   "emoji",
   "mode",
   "dictation-prompt",

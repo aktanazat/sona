@@ -419,6 +419,7 @@ mod tests {
             text: String::new(),
             realtime_factor: None,
             model_produced_text: true,
+            spoken_send: false,
         };
         assert_eq!(replay_transcript(&emptied), Ok(""));
         let silent = BatchDecode {

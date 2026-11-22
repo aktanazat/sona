@@ -79,7 +79,7 @@ struct VocabularyView: View {
         return "Sona's starter list replaces \(mine). Vocabulary, shortcuts, and emoji rules stay. This cannot be undone."
     }
 
-    // MARK: The four switches
+    // MARK: Switches
 
     private var switches: some View {
         Card {
@@ -89,6 +89,14 @@ struct VocabularyView: View {
                 isOn: Binding(
                     get: { store.spokenEditsEnabled },
                     set: { store.setSpokenEdits($0) }
+                )
+            )
+            ToggleRow(
+                title: "Say “send” to press Enter",
+                detail: "End an English dictation with “send” to press Enter. The word is not typed. Pressing Enter can send a message, submit a form, or run a command.",
+                isOn: Binding(
+                    get: { store.spokenSendEnabled },
+                    set: { store.setSpokenSend($0) }
                 )
             )
             ToggleRow(

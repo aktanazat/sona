@@ -172,6 +172,35 @@ pub fn apply_spoken_edits(text: &str, language: &OutputLanguageEvidence, enabled
     output
 }
 
+pub(crate) fn spoken_send_prefix<'text>(
+    text: &'text str,
+    language: &OutputLanguageEvidence,
+) -> Option<&'text str> {
+    if !matches!(
+        language,
+        OutputLanguageEvidence::UserSelected(_)
+            | OutputLanguageEvidence::ModelConstrained(_)
+            | OutputLanguageEvidence::ModelDetected(_)
+    ) || !language.is_english()
+    {
+        return None;
+    }
+    let trimmed = text.trim_end_matches(|character: char| {
+        character.is_whitespace() || SEGMENT_BOUNDARY_MARKS.contains(&character)
+    });
+    let start = trimmed.len().checked_sub("send".len())?;
+    if !trimmed.get(start..)?.eq_ignore_ascii_case("send") {
+        return None;
+    }
+    let prefix = &trimmed[..start];
+    if prefix.chars().next_back().is_some_and(|character| {
+        !character.is_whitespace() && !SEGMENT_BOUNDARY_MARKS.contains(&character)
+    }) {
+        return None;
+    }
+    Some(prefix.trim_end())
+}
+
 /// Only whole integers are deterministic here. Units, dates, decimal values,
 /// names, and unpunctuated phrase restatements need the full language context.
 static NUMERIC_BACKTRACK: Lazy<Regex> = Lazy::new(|| {
@@ -539,6 +568,63 @@ mod tests {
     fn spoken_edits(text: &str) -> String {
         let english = OutputLanguageEvidence::UserSelected("en-US".to_string());
         apply_spoken_edits(text, &english, true)
+    }
+
+    #[test]
+    fn spoken_send_removes_only_a_trailing_complete_keyword() {
+        let english = OutputLanguageEvidence::UserSelected("en".to_string());
+        for (text, expected) in [
+            ("send", ""),
+            ("SEND.", ""),
+            ("  Send! \n", ""),
+            ("Thanks. Send.", "Thanks."),
+            ("Please send.", "Please"),
+            ("The draft is ready,send!", "The draft is ready,"),
+        ] {
+            assert_eq!(
+                spoken_send_prefix(text, &english),
+                Some(expected),
+                "{text:?}"
+            );
+        }
+        for text in [
+            "",
+            "Send help.",
+            "\"Send.\"",
+            "'send'",
+            "send\nhelp",
+            "send, please",
+            "send2",
+            "resend",
+            "a_send",
+            "re-send",
+        ] {
+            assert_eq!(spoken_send_prefix(text, &english), None, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn spoken_send_never_infers_a_command_from_translated_or_guessed_language() {
+        for language in [
+            OutputLanguageEvidence::UserSelected("en-US".to_string()),
+            OutputLanguageEvidence::ModelConstrained("en".to_string()),
+            OutputLanguageEvidence::ModelDetected("en".to_string()),
+        ] {
+            assert_eq!(
+                spoken_send_prefix("Send.", &language),
+                Some(""),
+                "{language:?}"
+            );
+        }
+        for language in [
+            OutputLanguageEvidence::Unknown,
+            OutputLanguageEvidence::TranslatedToEnglish,
+            OutputLanguageEvidence::TextDetected("en".to_string()),
+            OutputLanguageEvidence::UserSelected("ru".to_string()),
+            OutputLanguageEvidence::ModelDetected("de".to_string()),
+        ] {
+            assert_eq!(spoken_send_prefix("Send.", &language), None, "{language:?}");
+        }
     }
 
     #[test]
