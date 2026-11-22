@@ -78,6 +78,8 @@ when the original conversation is deleted or its transcript expires, its saved e
 
 In Settings > Agents, enable connections and OpenCode, authorize a project folder, then select OpenCode under Setup code. Add the copied `plugins` entry to OpenCode's `opencode.json` and restart OpenCode. Sona checks for the OpenCode command without launching it and never edits agent files. OpenCode answers and replies show as sent only after OpenCode accepts them. Question answers stay in the window until that acceptance; if the request closes, copy them back to OpenCode.
 
+Under Sessions, turn off Voice replies to pause one conversation without changing another conversation or its agent. Turn it back on for new requests; old held previews stay copy-only. Replies already handed off still wait for their delivery receipt.
+
 ### Phone and watch
 
 - `mobile/` holds one iPhone app with an embedded Apple Watch companion and keyboard extension. They pair with your Mac through the same end-to-end encrypted vault the desktop syncs through, record in-person conversations, and hand them to the Mac as meetings. The iPhone app requires iOS 26; its Watch companion targets watchOS 10 or later. On iPhone, Sona offers to record a note when a call ends; iOS gives no app access to ordinary call audio.

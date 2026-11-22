@@ -1552,6 +1552,7 @@ pub fn run(cli_args: CliArgs) {
             agent_bridge::get_agent_bridge_pending_messages,
             agent_bridge::set_agent_bridge_master,
             agent_bridge::set_agent_bridge_agent_enabled,
+            agent_bridge::set_agent_bridge_session_voice,
             agent_bridge::authorize_agent_bridge_project,
             agent_bridge::remove_agent_bridge_project,
             agent_bridge::create_agent_bridge_reply_preview,

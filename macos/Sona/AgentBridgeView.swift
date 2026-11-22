@@ -159,7 +159,20 @@ struct AgentBridgeView: View {
                                     AgentBridgeHash(session.canonicalProjectHash)
                                 }
                             } trailing: {
-                                Text("Seen \(session.lastSeen.time)").metaText()
+                                VStack(alignment: .trailing, spacing: 4) {
+                                    Text("Seen \(session.lastSeen.time)").metaText()
+                                    Toggle(
+                                        "Voice replies",
+                                        isOn: Binding(
+                                            get: { session.voiceEnabled },
+                                            set: { store.setSessionVoice(session.id, enabled: $0) }
+                                        )
+                                    )
+                                    .toggleStyle(.switch)
+                                    .tint(Theme.accent)
+                                    .controlSize(.small)
+                                    .accessibilityLabel("Voice replies")
+                                }
                             }
                         }
                     }
@@ -250,7 +263,7 @@ private struct AgentBridgeRequestRow: View {
         CardRow {
             VStack(alignment: .leading, spacing: 4) {
                 Text(request.headline).bodyText()
-                if request.agent == .opencode {
+                if request.agent == .opencode || request.state == .withdrawing || request.state == .withdrawalFailed {
                     Text(request.stateLabel).metaText()
                 }
                 if let message = request.message, !message.isEmpty {

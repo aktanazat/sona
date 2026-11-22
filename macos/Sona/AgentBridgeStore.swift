@@ -188,6 +188,14 @@ final class AgentBridgeStore {
         }
     }
 
+    func setSessionVoice(_ sessionId: String, enabled: Bool) {
+        act {
+            try await self.core.request(
+                "set_agent_bridge_session_voice",
+                ["sessionId": JSONValue.string(sessionId), "enabled": .bool(enabled)])
+        }
+    }
+
     /// The folder picker the webview reached through a Tauri plugin. Only the
     /// path leaves this window: the core hashes it and keeps the hash. The
     /// panel runs without blocking the run loop, so the button stays busy
@@ -586,6 +594,7 @@ final class AgentBridgeStore {
 
     private static let refusals: [String: String] = [
         "Disabled": "agent connections are off",
+        "VoiceDisabled": "voice replies are off for that conversation",
         "RuntimeUnavailable": "the bridge is not running",
         "InteractiveUnsupported": "replies aren't available",
         "AppLockHeld": "another Sona instance is active",

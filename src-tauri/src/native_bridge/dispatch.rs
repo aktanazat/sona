@@ -252,6 +252,20 @@ pub(super) async fn call(
             })
             .await?
         }
+        "set_agent_bridge_session_voice" => {
+            let mut args = Args::parse(params)?;
+            let session_id = args.take("sessionId")?;
+            let enabled = args.take("enabled")?;
+            let handle = app.clone();
+            on_main_thread(app, move || {
+                reply(crate::agent_bridge::set_agent_bridge_session_voice(
+                    handle.state(),
+                    session_id,
+                    enabled,
+                ))
+            })
+            .await?
+        }
         "authorize_agent_bridge_project" => {
             let mut args = Args::parse(params)?;
             let selected_path = args.take("selectedPath")?;
