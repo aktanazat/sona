@@ -2159,6 +2159,8 @@ impl TranscribeAction {
                     "microphone_permission_denied"
                 } else if is_no_input_device_error(&err) {
                     "no_input_device"
+                } else if err.contains(crate::helpers::clamshell::LID_CLOSED_MICROPHONE) {
+                    "microphone_lid_closed"
                 } else {
                     "unknown"
                 };

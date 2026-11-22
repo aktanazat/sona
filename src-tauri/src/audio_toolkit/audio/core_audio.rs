@@ -4,10 +4,10 @@ use crate::meeting::detection::apps::AudioProcess;
 use objc2_core_audio::{
     kAudioDevicePropertyDeviceIsRunningSomewhere, kAudioDevicePropertyTransportType,
     kAudioDeviceTransportTypeBluetooth, kAudioDeviceTransportTypeBluetoothLE,
-    kAudioHardwarePropertyDefaultOutputDevice, kAudioHardwarePropertyDevices,
-    kAudioHardwarePropertyProcessObjectList, kAudioObjectPropertyElementMain,
-    kAudioObjectPropertyName, kAudioObjectPropertyScopeGlobal, kAudioObjectSystemObject,
-    kAudioProcessPropertyBundleID, kAudioProcessPropertyIsRunningInput,
+    kAudioDeviceTransportTypeBuiltIn, kAudioHardwarePropertyDefaultOutputDevice,
+    kAudioHardwarePropertyDevices, kAudioHardwarePropertyProcessObjectList,
+    kAudioObjectPropertyElementMain, kAudioObjectPropertyName, kAudioObjectPropertyScopeGlobal,
+    kAudioObjectSystemObject, kAudioProcessPropertyBundleID, kAudioProcessPropertyIsRunningInput,
     kAudioProcessPropertyIsRunningOutput, kAudioProcessPropertyPID, AudioObjectGetPropertyData,
     AudioObjectGetPropertyDataSize, AudioObjectID, AudioObjectPropertyAddress,
 };
@@ -53,6 +53,19 @@ pub(crate) fn is_bluetooth_device_named(name: &str) -> bool {
                     || transport == kAudioDeviceTransportTypeBluetoothLE
             }) && read_string(device_id, kAudioObjectPropertyName).as_deref() == Some(name)
         })
+}
+
+pub(crate) fn input_device_is_builtin(name: &str) -> Option<bool> {
+    let mut matching = device_ids()?.into_iter().filter(|device_id| {
+        read_string(*device_id, kAudioObjectPropertyName).as_deref() == Some(name)
+    });
+    let device_id = matching.next()?;
+    if matching.next().is_some() {
+        return None;
+    }
+    input_channel_count(device_id).filter(|channels| *channels > 0)?;
+    read_u32(device_id, kAudioDevicePropertyTransportType)
+        .map(|transport| transport == kAudioDeviceTransportTypeBuiltIn)
 }
 
 pub(crate) fn input_configuration_identity(name: &str) -> Option<[u64; 6]> {

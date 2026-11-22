@@ -1096,6 +1096,15 @@ impl AudioRecordingManager {
         let _ = self.capture_lease.release_owner(CaptureOwner::Dictation);
     }
 
+    fn release_failed_dictation_microphone(&self, token: Option<CaptureLeaseToken>) {
+        if let Some(token) = token {
+            self.capture_lease.release(token);
+        }
+        if matches!(*lock_recover(&self.mode), MicrophoneMode::OnDemand) {
+            self.stop_microphone_stream();
+        }
+    }
+
     /* ---------- microphone life-cycle -------------------------------------- */
 
     /// Applies mute for the still-current recording if mute_while_recording
@@ -1503,7 +1512,7 @@ impl AudioRecordingManager {
         if let Some(token) = token {
             if let Err(error) = self.start_microphone_stream() {
                 let message = error.to_string();
-                self.capture_lease.release(token);
+                self.release_failed_dictation_microphone(Some(token));
                 error!("Failed to open microphone stream: {message}");
                 return Err(message);
             }
@@ -1520,9 +1529,7 @@ impl AudioRecordingManager {
         let receiver = match result {
             Ok(receiver) => receiver,
             Err(error) => {
-                if let Some(token) = token {
-                    self.capture_lease.release(token);
-                }
+                self.release_failed_dictation_microphone(token);
                 return Err(error);
             }
         };
