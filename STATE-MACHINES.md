@@ -2029,3 +2029,17 @@ Chat review cards, after the audit fixes (`agent_panel/mod.rs`).
 | any | edit/apply/dismiss on an unknown turn | turn id does not match | unchanged; UnknownTurn | 1436, 1460, 1489 |
 
 Bridge row (integrations/mod.rs:654): `connections_edit_chat_action` reads the managed `AgentPanelManager`; every request gets a reply.
+
+## Typed shortcuts: keyboard tap ownership
+
+`src-tauri/src/typed_snippets.rs` owns the callback context on the event-tap
+thread. The run-loop source and Mach port are invalidated before that context
+is dropped. Closing its sender lets the consumer finish after queued keys.
+
+| State         | Event                                           | Result                                                                       |
+| ------------- | ----------------------------------------------- | ---------------------------------------------------------------------------- |
+| No tap        | Start while disabled or without keyboard access | Do not create a tap or request permission                                    |
+| No tap        | Start while enabled with access                 | Start the tap thread with its own callback context                           |
+| Tap installed | Disable typed shortcuts                         | Keep the tap installed; skip key data                                        |
+| Tap setup     | Native setup fails                              | Drop local context and sender; clear `STARTED`                               |
+| Tap installed | Run loop returns                                | Invalidate source and port, then release context and sender; clear `STARTED` |

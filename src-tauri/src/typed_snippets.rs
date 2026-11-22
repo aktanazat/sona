@@ -76,15 +76,12 @@ fn run_tap(sender: Sender<Keystroke>) {
     ]
     .iter()
     .fold(0, |mask, kind| mask | (1 << kind.0));
-    // The tap and its context live as long as the process: the thread parks
-    // in the run loop below and never returns.
-    let context = Box::leak(Box::new(TapContext {
+    let mut context = TapContext {
         sender,
         tap: None,
         own_pid: i64::from(std::process::id()),
-    }));
-    // SAFETY: `on_event` matches the tap callback signature and `context`
-    // outlives the tap.
+    };
+    // SAFETY: The callback's stack-owned context outlives the source and tap.
     let tap = unsafe {
         CGEvent::tap_create(
             CGEventTapLocation::SessionEventTap,
@@ -92,7 +89,7 @@ fn run_tap(sender: Sender<Keystroke>) {
             CGEventTapOptions::ListenOnly,
             mask,
             Some(on_event),
-            std::ptr::from_mut(context).cast(),
+            std::ptr::from_mut(&mut context).cast(),
         )
     };
     let Some(tap) = tap else {
@@ -113,6 +110,11 @@ fn run_tap(sender: Sender<Keystroke>) {
     CGEvent::tap_enable(&tap, true);
     context.tap = Some(tap);
     CFRunLoop::run();
+    source.invalidate();
+    if let Some(tap) = &context.tap {
+        tap.invalidate();
+    }
+    STARTED.store(false, Ordering::SeqCst);
 }
 
 unsafe extern "C-unwind" fn on_event(
@@ -121,7 +123,7 @@ unsafe extern "C-unwind" fn on_event(
     event: NonNull<CGEvent>,
     context: *mut c_void,
 ) -> *mut CGEvent {
-    // SAFETY: `context` is the leaked `TapContext` handed to `tap_create`.
+    // SAFETY: `context` is the live `TapContext` handed to `tap_create`.
     let context = unsafe { &*context.cast::<TapContext>() };
     if kind == CGEventType::TapDisabledByTimeout || kind == CGEventType::TapDisabledByUserInput {
         if let Some(tap) = &context.tap {
@@ -138,7 +140,8 @@ unsafe extern "C-unwind" fn on_event(
         let _ = context.sender.send(Keystroke::Reset);
         return event.as_ptr();
     }
-    let source = CGEvent::integer_value_field(Some(event_ref), CGEventField::EventSourceUnixProcessID);
+    let source =
+        CGEvent::integer_value_field(Some(event_ref), CGEventField::EventSourceUnixProcessID);
     if source == context.own_pid {
         return event.as_ptr();
     }
@@ -161,18 +164,23 @@ fn keystrokes(event: &CGEvent) -> Vec<Keystroke> {
         return vec![Keystroke::Reset];
     }
     let mut units = [0u16; 8];
+    let Ok(capacity) = units.len().try_into() else {
+        return vec![Keystroke::Reset];
+    };
     let mut length = 0;
-    // SAFETY: `units` holds `units.len()` code units and `length` is written
-    // with how many were filled.
+    // SAFETY: The writable buffers hold capacity code units and their reported length.
     unsafe {
         CGEvent::keyboard_get_unicode_string(
             Some(event),
-            units.len() as _,
+            capacity,
             &mut length,
             units.as_mut_ptr(),
         );
     }
-    let typed: Vec<Keystroke> = char::decode_utf16(units.iter().copied().take(length as usize))
+    let Ok(length) = usize::try_from(length) else {
+        return vec![Keystroke::Reset];
+    };
+    let typed: Vec<Keystroke> = char::decode_utf16(units.iter().copied().take(length))
         .map(|unit| match unit {
             Ok(character) if !character.is_control() => Keystroke::Text(character),
             _ => Keystroke::Reset,
