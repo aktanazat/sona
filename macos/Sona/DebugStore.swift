@@ -11,6 +11,8 @@ import Foundation
 /// promised too. A rotation (the core keeps one file of 500 KB) shortens the
 /// file, and a shorter file than the last offset is the signal to start over.
 final class LogTailReader: @unchecked Sendable {
+    static let logFileName = "sona.log"
+
     /// The cadence the old panel flushed at, so a burst of logging can never
     /// cost a render per line.
     private static let interval: DispatchTimeInterval = .milliseconds(250)
@@ -26,7 +28,7 @@ final class LogTailReader: @unchecked Sendable {
     private var carried = ""
     private var nextID = 0
 
-    init(directory: String, fileName: String = "sona.log", deliver: @escaping @MainActor ([LogLine]) -> Void) {
+    init(directory: String, fileName: String = LogTailReader.logFileName, deliver: @escaping @MainActor ([LogLine]) -> Void) {
         url = URL(fileURLWithPath: directory).appending(path: fileName)
         self.deliver = deliver
     }
@@ -321,7 +323,7 @@ final class DebugStore {
 
     /// The file the viewer reads, named so a reader knows what they are seeing.
     var logFilePath: String? {
-        logDirectory.map { $0 + "/sona.log" }
+        logDirectory.map { "\($0)/\(LogTailReader.logFileName)" }
     }
 
     var visibleLines: [LogLine] {

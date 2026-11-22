@@ -113,6 +113,7 @@ enum Sheet: Identifiable, Hashable {
     /// The page a meeting would share, by meeting id.
     case share(String)
     case saveTemplate(String)
+    case problemReport(Int64?)
 
     var id: Self { self }
 }
@@ -560,6 +561,16 @@ final class AppModel {
     func openSettings() {
         reveal()
         showSettings(settingsPlace)
+    }
+
+    func reportProblem(_ historyID: Int64? = nil) {
+        reveal()
+        sheet = .problemReport(historyID)
+    }
+
+    func openDictationHistory() {
+        reveal()
+        go(.library)
     }
 
     /// ⌘K: the palette, over the main window.
