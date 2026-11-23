@@ -43,6 +43,20 @@ struct KeyboardLearningTests {
         #expect(session.learning.knows("tomorow"))
     }
 
+    @Test("undoing the second correction leaves the first occurrence available to restore")
+    func undoLeavesEarlierOccurrence() throws {
+        var session = try session()
+        var text = "see you tomorow"
+        text.apply(session.end(with: " ", before: text, corrects: true))
+        #expect(text == "see you tomorrow ")
+        text += "then tomorow"
+        text.apply(session.end(with: " ", before: text, corrects: true))
+        #expect(text == "see you tomorrow then tomorrow ")
+        text.apply(session.backspace(before: text))
+        #expect(text == "see you tomorrow then tomorow")
+        #expect(session.suggestions(before: "see you tomorrow")?.restore == "tomorow")
+    }
+
     @Test("after a space the strip offers the words that usually come next, his own first")
     func nextWords() throws {
         let table = NextWords(contents: "want to\tgo be do\nwant\tto a\n\tI the\n")
