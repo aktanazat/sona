@@ -215,10 +215,17 @@ fn asked(body: &str) -> String {
     let mut stopped = false;
     while let Some((at, letter)) = letters.next() {
         let next = letters.peek().map(|(_, next)| *next);
-        // A closing quote or bracket after a stop belongs to its sentence.
-        stopped = matches!(letter, '.' | '!' | '?')
-            || (stopped && matches!(letter, '"' | '\'' | ')' | ']' | '”' | '’'));
-        let ends = letter == '\n' || (stopped && next.is_none_or(char::is_whitespace));
+        // A closing quote or bracket after a stop belongs to its sentence,
+        // and ends it only when what follows does not carry on in lowercase:
+        // `rename it to "Ready!" before Friday?` is one sentence.
+        let closes = stopped && matches!(letter, '"' | '\'' | ')' | ']' | '”' | '’');
+        stopped = matches!(letter, '.' | '!' | '?') || closes;
+        let carries_on = closes
+            && body[at + letter.len_utf8()..]
+                .trim_start()
+                .starts_with(char::is_lowercase);
+        let ends =
+            letter == '\n' || (stopped && !carries_on && next.is_none_or(char::is_whitespace));
         if ends || next.is_none() {
             let end = at + letter.len_utf8();
             let sentence = body[start..end].trim();
@@ -1241,7 +1248,10 @@ mod tests {
                 inbox::notifications(&history, Shown::default(), START + HOUR).expect("the inbox");
             let read = start.elapsed();
             let context = context(&history).expect("the facts");
-            facts.push((start.elapsed() - read).as_micros());
+            let known = start.elapsed();
+            echoes(&history).expect("the mirrors");
+            let again = start.elapsed() - known;
+            facts.push(again.as_micros());
             assert_eq!(context.echoes.len(), 343);
             let links = stored
                 .iter()
@@ -1249,13 +1259,14 @@ mod tests {
                 .count();
             assert_eq!(links, 686);
             let built = rows(stored, &context);
-            whole.push(start.elapsed().as_micros());
+            // The lookup already ran once inside the facts.
+            whole.push((start.elapsed() - again).as_micros());
             assert!(!built.is_empty());
         }
         facts.sort_unstable();
         whole.sort_unstable();
         println!(
-            "686 stored link notices, 343 mirrors: facts with the mirror lookup median {} us, p95 {} us; read, facts and rows median {} us, p95 {} us",
+            "686 stored link notices, 343 mirrors: the mirror lookup median {} us, p95 {} us; read, facts and rows median {} us, p95 {} us",
             facts[100], facts[190], whole[100], whole[190]
         );
         assert!(whole[100] < 50_000, "median {} us", whole[100]);
@@ -1477,6 +1488,10 @@ mod tests {
                 "The brief says \"ship the long version of the onboarding flow first.\" Should I?"
             ),
             "Should I?"
+        );
+        assert_eq!(
+            asked("Done. Can I rename the label to \"Ready!\" before Friday?"),
+            "Can I rename the label to \"Ready!\" before Friday?"
         );
         let long = format!("Could you {}?", "look at this ".repeat(12));
         let shown = asked(&long);
