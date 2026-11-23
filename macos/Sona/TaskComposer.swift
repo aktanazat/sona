@@ -1,9 +1,19 @@
 import SwiftUI
 
+struct TaskComposition: Identifiable {
+    enum Mode {
+        case standard, template, repeating
+    }
+
+    let id = UUID()
+    let start: WorkPatch
+    var mode: Mode = .standard
+}
+
 /// C: a new task, its properties set before it exists. Return in the title
 /// or ⌘Return anywhere creates it; Esc closes it.
 struct TaskComposer: View {
-    let start: WorkPatch
+    let composition: TaskComposition
     @Environment(AppModel.self) private var model
     @State private var title = ""
     @State private var details = ""
@@ -19,17 +29,22 @@ struct TaskComposer: View {
     @State private var reading = TitleReading()
     @State private var picked: Set<Choice> = []
     @State private var template: WorkTemplate?
-    @State private var fromTemplate = false
+    @State private var repeatRule: String?
+    @State private var repeatPickerShown = false
 
     /// Fields set in their pickers: the title's words no longer set them.
-    private enum Choice { case priority, owner, due, project }
+    private enum Choice { case priority, owner, due, project, recurrence }
 
     var body: some View {
         let work = model.work
+        let preview = words
+        let schedule = repeatRule ?? preview.recurrence
+        let firstDue = picked.contains(.due) ? due : preview.due ?? due
         let ready = !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !creating
+            && (!repeating || (schedule != nil && firstDue != nil))
         let chips = wordChips
         VStack(alignment: .leading, spacing: 0) {
-            Text("New task")
+            Text(repeating ? "New repeating task" : "New task")
                 .font(TypeScale.label(13))
                 .foregroundStyle(Theme.inkSecondary)
                 .padding(.horizontal, Space.l)
@@ -52,8 +67,8 @@ struct TaskComposer: View {
                 .padding(.horizontal, Space.l)
                 .padding(.top, Space.s)
             ChatFlowRow(spacing: Space.s) {
-                if !model.routines.templates.isEmpty {
-                    ComposerChip(title: template?.name ?? "Template", prompt: "Template…", opensAtStart: fromTemplate) {
+                if !repeating, !model.routines.templates.isEmpty {
+                    ComposerChip(title: template?.name ?? "Template", prompt: "Template…", opensAtStart: composition.mode == .template) {
                         Image(systemName: "doc.on.doc").font(.system(size: 11)).foregroundStyle(Theme.inkSecondary)
                     } make: { text in
                         WorkChoices.filtered(templateChoices, by: text, kind: .project)
@@ -86,7 +101,8 @@ struct TaskComposer: View {
                         by: text, kind: .owner)
                 }
                 ComposerChip(
-                    title: chosenDue.map { TaskDates.label($0, now: TaskDates.now()) } ?? "Due date", prompt: "Due date, or type one…",
+                    title: firstDue.map { TaskDates.label($0, now: TaskDates.now()) } ?? (repeating ? "First due" : "Due date"),
+                    prompt: "Due date, or type one…",
                     words: chips.slots[.due], selected: reading.selected, keep: keepAsText
                 ) {
                     Image(systemName: "calendar").font(.system(size: 11)).foregroundStyle(Theme.inkSecondary)
@@ -114,6 +130,9 @@ struct TaskComposer: View {
                         } create: { name in
                             labels.append(work.makeLabel(named: name))
                         }, by: text, kind: .labels)
+                }
+                if repeating {
+                    repeatSchedule(schedule, token: chips.slots[.recurrence])
                 }
                 ForEach(chips.rest) { token in
                     WordChip(token: token, selected: reading.selected == token.id) { keepAsText(token) }
@@ -145,10 +164,8 @@ struct TaskComposer: View {
         .frame(width: 620)
         .background(Theme.elevated)
         .onAppear {
-            take(start)
-            fromTemplate = model.workFocus.composingFromTemplate
-            model.workFocus.composingFromTemplate = false
-            if !fromTemplate { DispatchQueue.main.async { titleFocused = true } }
+            take(composition.start)
+            if composition.mode != .template { DispatchQueue.main.async { titleFocused = true } }
         }
     }
 
@@ -159,7 +176,7 @@ struct TaskComposer: View {
         var rest: [WorkToken] = []
 
         var order: [WorkToken] {
-            [Choice.priority, .owner, .due, .project].compactMap { slots[$0] } + rest
+            [Choice.priority, .owner, .due, .project, .recurrence].compactMap { slots[$0] } + rest
         }
     }
 
@@ -171,7 +188,8 @@ struct TaskComposer: View {
             case .owner: .owner
             case .due: .due
             case .project: .project
-            case .label, .recurrence: nil
+            case .recurrence: repeating ? .recurrence : nil
+            case .label: nil
             }
             if let choice, !picked.contains(choice) { chips.slots[choice] = token }
         }
@@ -220,6 +238,40 @@ struct TaskComposer: View {
         case 1, 2: names.joined(separator: ", ")
         default: "\(names.count) labels"
         }
+    }
+
+    private var repeating: Bool { composition.mode == .repeating }
+
+    private func repeatSchedule(_ schedule: String?, token: WorkToken?) -> some View {
+        let recognized = repeatRule == nil ? token : nil
+        let displayed = schedule.map(Recurrence.display)
+        return HStack(spacing: 0) {
+            Button {
+                repeatPickerShown = true
+            } label: {
+                Label(displayed ?? "Repeat schedule", systemImage: "repeat")
+                    .labelStyle(.titleAndIcon)
+                    .lineLimit(1)
+                    .padding(.horizontal, Space.s)
+                    .frame(maxHeight: .infinity)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Repeat schedule")
+            .accessibilityValue(displayed ?? "Not set")
+            .popover(isPresented: $repeatPickerShown, arrowEdge: .bottom) {
+                RepeatChoices(rule: schedule, allowsClearing: false, set: { repeatRule = $0 }) {
+                    repeatPickerShown = false
+                }
+            }
+            if let recognized {
+                Button { keepAsText(recognized) } label: { ChipCross() }
+                    .buttonStyle(.plain)
+                    .padding(.trailing, Space.xs)
+                    .accessibilityLabel("Keep “\(recognized.text)” as text")
+            }
+        }
+        .chipFace(words: recognized != nil, selected: recognized.map { $0.id == reading.selected } ?? false)
     }
 
     private var words: TitleFields { TitleFields(reading.parse) }
@@ -292,9 +344,27 @@ struct TaskComposer: View {
         failure = nil
         let text = details.trimmingCharacters(in: .whitespacesAndNewlines)
         let typed = title
+        let explicitRepeat = repeatRule
+        let explicitDue = due
+        let duePicked = picked.contains(.due)
+        let start = composition.start
         Task {
+            defer { creating = false }
             let work = model.work
             let words = TitleFields(await reading.settled(typed, in: work))
+            guard model.workFocus.composing?.id == composition.id else { return }
+            let schedule = explicitRepeat ?? words.recurrence
+            let firstDue = duePicked ? explicitDue : words.due ?? explicitDue
+            if repeating {
+                guard schedule != nil else {
+                    failure = "Choose a repeat schedule."
+                    return
+                }
+                guard firstDue != nil else {
+                    failure = "Choose a first due date."
+                    return
+                }
+            }
             let chosenLabels = labels + words.labels(making: work).filter { !labels.contains($0) }
             let item: WorkItem?
             if let template {
@@ -303,10 +373,9 @@ struct TaskComposer: View {
             } else {
                 item = await work.create(
                     title: words.title ?? trimmed, details: text.isEmpty ? nil : text, status: status,
-                    priority: chosenPriority, projectId: chosenProject, owner: chosenOwner, dueAtMs: chosenDue,
-                    labelIds: chosenLabels, recurrence: words.recurrence)
+                    priority: chosenPriority, projectId: chosenProject, owner: chosenOwner,
+                    dueAtMs: repeating ? firstDue : chosenDue, labelIds: chosenLabels, recurrence: schedule)
             }
-            creating = false
             guard let item else {
                 failure = failure ?? model.work.mutationError ?? "The task wasn't created."
                 return
@@ -317,7 +386,7 @@ struct TaskComposer: View {
             }
             if place != WorkPatch() { work.update([item.id], place) }
             model.workFocus.highlightWhenShown(item.id)
-            model.workFocus.composing = nil
+            if model.workFocus.composing?.id == composition.id { model.workFocus.composing = nil }
         }
     }
 
