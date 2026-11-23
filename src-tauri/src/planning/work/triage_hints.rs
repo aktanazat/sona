@@ -463,7 +463,7 @@ impl Pool {
                         std::cmp::Reverse(window.which.as_str()),
                     )
                 });
-            let by_title = Window {
+            let similar = Window {
                 which: similar.which.clone(),
                 tasks: similar.tasks.clone(),
                 weighed,
@@ -473,7 +473,7 @@ impl Pool {
                 .project(&siblings)
                 .map(|found| (found, &siblings))
                 .or(by_people)
-                .or_else(|| self.project(&by_title).map(|found| (found, &by_title)));
+                .or_else(|| self.project(&similar).map(|found| (found, &similar)));
             if let Some(((project_id, reason, _), window)) = chosen {
                 found.push(hint(
                     item,
