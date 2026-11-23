@@ -2,7 +2,7 @@ import CallKit
 import Foundation
 import UserNotifications
 
-/// Watches call state and offers, once per call, to record a note about it.
+/// Watches call state and offers a note after the last connected call ends.
 ///
 /// It never touches call audio: iOS gives no app access to it, and while a call is live
 /// the microphone belongs to the call. `CXCallObserver` needs no permission and reports
@@ -73,12 +73,13 @@ extension CallOfferService: CXCallObserverDelegate {
         let nowUtcMs = Int64(Date().timeIntervalSince1970 * 1000)
         let event: CallEvent? =
             call.hasEnded
-            ? .ended(atUtcMs: nowUtcMs)
-            : (call.hasConnected ? .connected(atUtcMs: nowUtcMs) : nil)
+            ? .ended(id: call.uuid, atUtcMs: nowUtcMs)
+            : (call.hasConnected ? .connected(id: call.uuid, atUtcMs: nowUtcMs) : nil)
         guard let event else { return }
-        Task { @MainActor [weak self] in
-            guard let self, let offer = self.machine.handle(event) else { return }
-            self.post(offer)
+        // The observer delivers to the main queue when setDelegate receives nil.
+        MainActor.assumeIsolated {
+            guard let offer = machine.handle(event) else { return }
+            post(offer)
         }
     }
 }

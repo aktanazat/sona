@@ -107,8 +107,7 @@ final class AppModel: NSObject, ObservableObject {
     /// The conversation a notification or the Action Button asked the chat to show.
     @Published var chatConversation: UUID?
 
-    /// Set when this recording was started from a call notification.
-    private var afterCall = false
+    private var recordingAfterCall = false
     private let queue: UploadQueue
     private let reader: VaultReader
     private let monitor = NWPathMonitor()
@@ -147,11 +146,8 @@ final class AppModel: NSObject, ObservableObject {
             Task { @MainActor in self?.receiveKeyboardCommand() }
         }
         publishKeyboardState()
-        /* Tapping either call notification is the operator asking to record now, and
-         * the note is titled after the call it followed. */
         callOffers.onOfferAccepted = { [weak self] in
-            self?.afterCall = true
-            self?.startRecording()
+            self?.startRecording(during: nil, afterCall: true)
         }
         callOffers.onAgentNotification = { [weak self] conversation in self?.openChat(conversation) }
         startConnectivityWatch()
@@ -354,6 +350,10 @@ final class AppModel: NSObject, ObservableObject {
     private let location = LocationOnce()
 
     func startRecording(during event: DeviceRecordingManifest.CalendarEvent? = nil) {
+        startRecording(during: event, afterCall: false)
+    }
+
+    private func startRecording(during event: DeviceRecordingManifest.CalendarEvent?, afterCall: Bool) {
         guard consentAccepted, !startingRecording, !recorder.isRecording else { return }
         takeMicrophoneFromDictation()
         startingRecording = true
@@ -367,7 +367,7 @@ final class AppModel: NSObject, ObservableObject {
                 recorder.notice = .microphoneOff
                 return
             }
-            beginRecording(during: event)
+            beginRecording(during: event, afterCall: afterCall)
         }
     }
 
@@ -394,7 +394,7 @@ final class AppModel: NSObject, ObservableObject {
     /// Activity shows it, so Live Activities have to be on too.
     func recordWithoutAsking() -> Bool {
         if isRecording { return true }
-        guard consentAccepted, PhoneRecorder.hasPermission,
+        guard consentAccepted, !startingRecording, PhoneRecorder.hasPermission,
               ActivityAuthorizationInfo().areActivitiesEnabled
         else { return false }
         takeMicrophoneFromDictation()
@@ -429,10 +429,12 @@ final class AppModel: NSObject, ObservableObject {
     @discardableResult
     private func beginRecording(
         during event: DeviceRecordingManifest.CalendarEvent?,
+        afterCall: Bool = false,
         requiringActivity: Bool = false
     ) -> Bool {
         do {
             try recorder.start(requiringActivity: requiringActivity)
+            recordingAfterCall = afterCall
             recordingEvent = event
             readPlace(unless: event)
             AppModel.tap()
@@ -462,8 +464,8 @@ final class AppModel: NSObject, ObservableObject {
 
     func stopRecording() {
         guard recorder.isRecording else { return }
-        let wasAfterCall = afterCall
-        afterCall = false
+        let wasAfterCall = recordingAfterCall
+        recordingAfterCall = false
         let notes = meetingNotes
         let chosenTitle = meetingTitle.trimmingCharacters(in: .whitespacesAndNewlines)
         let event = recordingEvent

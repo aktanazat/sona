@@ -2028,3 +2028,14 @@ Chat review cards, after the audit fixes (`agent_panel/mod.rs`).
 | any | edit/apply/dismiss on an unknown turn | turn id does not match | unchanged; UnknownTurn | 1436, 1460, 1489 |
 
 Bridge row (integrations/mod.rs:654): `connections_edit_chat_action` reads the managed `AgentPanelManager`; every request gets a reply.
+
+## Phone call notes
+
+CallKit delivers updates on the main queue. The first connected call opens a call
+group. Further connected calls join by UUID. Repeated connection updates and endings
+for unknown calls do not produce offers. The last connected call ending closes the
+group and offers a note with the group's elapsed time.
+
+A tap on a call notification carries the title choice only on that start request.
+Refused starts do not touch the running recording. A successful microphone start
+keeps the title choice until that recording stops.
