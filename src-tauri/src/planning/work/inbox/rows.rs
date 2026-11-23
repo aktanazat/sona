@@ -129,6 +129,37 @@ pub(crate) fn asks(body: &str) -> bool {
     question || WAITING.iter().any(|phrase| lower.contains(phrase))
 }
 
+/// The words of a comment notice that asks the user for something.
+fn asking<'a>(notice: &Notification, context: &'a Context) -> Option<&'a String> {
+    notice
+        .comment_id
+        .as_ref()
+        .filter(|_| notice.kind == NotificationKind::Comment)
+        .and_then(|id| context.comments.get(id))
+        .filter(|body| asks(body))
+}
+
+/// The sentence of a comment that asks, short enough for one line.
+fn asked(body: &str) -> String {
+    const SHOWN: usize = 80;
+    let sentences: Vec<&str> = body
+        .split_inclusive(['\n', '.', '!', '?'])
+        .map(str::trim)
+        .filter(|sentence| !sentence.is_empty())
+        .collect();
+    let said = sentences
+        .iter()
+        .find(|sentence| asks(sentence))
+        .or(sentences.first())
+        .copied()
+        .unwrap_or_default();
+    if said.chars().count() <= SHOWN {
+        return said.to_owned();
+    }
+    let cut: String = said.chars().take(SHOWN).collect();
+    format!("{}…", cut.trim_end())
+}
+
 fn created(notice: &Notification) -> bool {
     notice.kind == NotificationKind::Assigned
         && notice.actor == WorkActor::Agent
@@ -202,12 +233,7 @@ fn needs<'a>(row: &'a Building, context: &Context) -> Option<(Needs, &'a Notific
                 NotificationKind::Automation if notice.to.as_deref() == Some("failed") => {
                     Some(Needs::Failed)
                 }
-                NotificationKind::Comment => notice
-                    .comment_id
-                    .as_ref()
-                    .and_then(|id| context.comments.get(id))
-                    .filter(|body| asks(body))
-                    .map(|_| Needs::Question),
+                NotificationKind::Comment => asking(notice, context).map(|_| Needs::Question),
                 NotificationKind::Assigned if triage(notice) => Some(Needs::Triage),
                 _ => None,
             };
@@ -313,8 +339,34 @@ fn finish(row: Building, context: &Context) -> Option<InboxRow> {
         .find(|notice| notice.kind == NotificationKind::Status)
         .and_then(|notice| notice.to.as_deref());
     let grouped = row.notices.len() > 1;
+    let asked: Vec<String> = row
+        .notices
+        .iter()
+        .filter_map(|notice| asking(notice, context))
+        .map(|body| format!("\"{}\"", asked(body)))
+        .collect();
     let summary = if row.batch {
         format!("Created {} tasks for you", row.notices.len())
+    } else if let (true, Some((last, others))) = (grouped, asked.split_last()) {
+        // Every ask is named in its own words; the rest counts what is left.
+        let rest: Vec<Part> = parts
+            .iter()
+            .map(|part| Part {
+                what: part.what.clone(),
+                count: part.count - asked.len() * usize::from(part.what == "commented"),
+            })
+            .filter(|part| part.count > 0)
+            .collect();
+        let rest = summary(&rest, status);
+        let mut line = if others.is_empty() {
+            format!("Asked {last}")
+        } else {
+            format!("Asked {} and {last}", others.join(", "))
+        };
+        if let Some(first) = rest.get(..1) {
+            line = format!("{line}, {}{}", first.to_lowercase(), &rest[1..]);
+        }
+        line
     } else if grouped {
         summary(&parts, status)
     } else {
@@ -406,11 +458,14 @@ pub(crate) fn rows(notices: Vec<Notification>, context: &Context) -> Vec<InboxRo
     let mut built: Vec<Building> = Vec::new();
     let mut bursts: HashMap<(String, String), usize> = HashMap::new();
     let mut batches: HashMap<usize, usize> = HashMap::new();
-    // The mirror each kept link notice would have: its task, how it names
-    // the link, the task it would be on, when, and whether it links.
-    let mut links: HashMap<(String, String, String, i64, bool), usize> = HashMap::new();
+    // The mirror the last notice would have, were it a kept link: its task,
+    // how it names the link, the task it links to, when, and whether it
+    // links. An older build stored a mirror right after its link; a link
+    // made back later is not one.
+    let mut awaited: Option<((String, String, String, i64, bool), usize)> = None;
     for notice in oldest_first {
         let at_ms = notice.created_at_ms;
+        let awaited_now = awaited.take();
         if let Some(run) = batch_of.get(&notice.id) {
             let row = *batches.entry(*run).or_insert_with(|| {
                 built.push(Building {
@@ -451,10 +506,9 @@ pub(crate) fn rows(notices: Vec<Notification>, context: &Context) -> Vec<InboxRo
                 notice.to.is_some(),
             )
         });
-        if let Some(told) = &mirror {
-            // One kept notice has one mirror: a second match is another link.
-            if let Some(row) = links.remove(told) {
-                built[row].echoes.push(notice);
+        if let (Some(told), Some((mirror_of_last, row))) = (&mirror, &awaited_now) {
+            if told == mirror_of_last {
+                built[*row].echoes.push(notice);
                 continue;
             }
         }
@@ -473,10 +527,10 @@ pub(crate) fn rows(notices: Vec<Notification>, context: &Context) -> Vec<InboxRo
             }
         };
         if let Some((_, verb, other, at_ms, linked)) = mirror {
-            links.insert(
+            awaited = Some((
                 (other, mirrored(&verb).to_owned(), task, at_ms, linked),
                 row,
-            );
+            ));
         }
         built[row].notices.push(notice);
         built[row].last_at_ms = at_ms;
@@ -1131,8 +1185,8 @@ mod tests {
         // Newest first. Two links at one instant, one made from each task,
         // and the mirror of the first as an older build stored it.
         let notices = vec![
-            on("mirror", "task-051", "blocked_by:task-050"),
             on("second", "task-051", "related:task-050"),
+            on("mirror", "task-051", "blocked_by:task-050"),
             on("first", "task-050", "blocks:task-051"),
         ];
         let built = rows(notices, &context);
@@ -1207,7 +1261,10 @@ mod tests {
             changed("title", "title", "Pick a mockup", START + 4 * MINUTE),
             wrote("note", START + 3 * MINUTE),
             wrote("ask", START + 2 * MINUTE),
-            changed("status", "status", "in_progress", START + MINUTE),
+            Notification {
+                kind: NotificationKind::Status,
+                ..changed("status", "status", "in_progress", START + MINUTE)
+            },
             changed("priority", "priority", "high", START),
         ];
         let built = rows(notices, &context);
@@ -1216,6 +1273,11 @@ mod tests {
         assert_eq!(built[0].needs, Some(Needs::Question));
         assert_eq!(built[0].lead.id, "ask", "the approval request leads");
         assert_eq!(built[0].lead.comment_id.as_deref(), Some("ask"));
+        assert_eq!(
+            built[0].summary,
+            "Asked \"Could you approve the left mockup?\", moved it to in progress, \
+             added a comment, changed the priority and title"
+        );
     }
 
     #[test]
@@ -1268,6 +1330,115 @@ mod tests {
         let mut ids: Vec<_> = stored.into_iter().map(|notice| notice.id).collect();
         ids.sort();
         assert_eq!(shown, ids, "and the rows keep both");
+    }
+
+    #[test]
+    fn an_ask_is_named_by_the_sentence_that_asks() {
+        assert_eq!(
+            asked("Drafted both. Please confirm the venue before I pay. Thanks!"),
+            "Please confirm the venue before I pay."
+        );
+        assert_eq!(asked("Two mockups are up"), "Two mockups are up");
+        let long = format!("Could you {}?", "look at this ".repeat(12));
+        let shown = asked(&long);
+        assert!(shown.chars().count() <= 81, "{shown}");
+        assert!(shown.ends_with('…'));
+    }
+
+    #[test]
+    fn every_ask_in_a_burst_is_named() {
+        let mut context = fixture().context;
+        let said = [
+            ("first", "Could you approve the left mockup?"),
+            ("second", "Please confirm the launch date."),
+        ];
+        for (id, body) in said {
+            context.comments.insert(id.to_owned(), body.to_owned());
+        }
+        let wrote = |id: &str, at_ms: i64| Notification {
+            kind: NotificationKind::Comment,
+            comment_id: Some(id.to_owned()),
+            field: None,
+            ..agent_notice(id, at_ms, false, None)
+        };
+        let title = Notification {
+            field: Some("title".to_owned()),
+            ..agent_notice("title", START + 2 * MINUTE, false, None)
+        };
+        let built = rows(
+            vec![
+                title,
+                wrote("second", START + MINUTE),
+                wrote("first", START),
+            ],
+            &context,
+        );
+        assert_eq!(built.len(), 1);
+        assert_eq!(built[0].needs, Some(Needs::Question));
+        assert_eq!(built[0].lead.id, "second");
+        assert_eq!(
+            built[0].summary,
+            "Asked \"Could you approve the left mockup?\" and \
+             \"Please confirm the launch date.\", changed the title"
+        );
+    }
+
+    #[test]
+    fn a_link_made_back_after_its_removal_keeps_its_notice() {
+        let (history, made) = two_filed();
+        let at = START + MINUTE;
+        let relation = items::add_relation(
+            &history,
+            &made[0],
+            &made[1],
+            WorkRelationKind::Related,
+            WorkActor::Agent,
+            at,
+        )
+        .expect("the first relates to the second");
+        items::remove_relation(&history, &relation.id, WorkActor::Agent, at)
+            .expect("the link removed");
+        items::add_relation(
+            &history,
+            &made[1],
+            &made[0],
+            WorkRelationKind::Related,
+            WorkActor::Agent,
+            at,
+        )
+        .expect("the second relates to the first");
+        let stored = inbox::notifications(&history, Shown::default(), at + MINUTE)
+            .expect("the inbox")
+            .into_iter()
+            .filter(|notice| notice.field.as_deref() == Some("relation"))
+            .collect::<Vec<_>>();
+        let told: Vec<_> = stored
+            .iter()
+            .rev()
+            .map(|notice| {
+                (
+                    notice.item_id.clone(),
+                    notice.from.clone(),
+                    notice.to.clone(),
+                )
+            })
+            .collect();
+        let (first, second) = (Some(made[0].clone()), Some(made[1].clone()));
+        assert_eq!(
+            told,
+            [
+                (first.clone(), None, Some(format!("related:{}", made[1]))),
+                (first, Some(format!("related:{}", made[1])), None),
+                (second, None, Some(format!("related:{}", made[0]))),
+            ],
+            "the link, its removal, and the link made back from the second"
+        );
+        let context = context(&history).expect("the facts");
+        let shown: usize = rows(stored, &context)
+            .iter()
+            .map(|row| row.notice_ids.len())
+            .sum();
+        assert_eq!(shown, 3, "and the rows keep all three");
     }
 
     #[test]

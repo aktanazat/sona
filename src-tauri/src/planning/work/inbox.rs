@@ -336,8 +336,10 @@ fn owned_by_user(conn: &Connection, task_id: &str) -> Result<bool> {
         .unwrap_or(false))
 }
 
-/// Whether a link's other task already told the inbox about it: a link is
-/// history on both tasks and news once, on the task it was made from.
+/// Whether this entry is the other end of a link the inbox was just told
+/// about: a link is history on both tasks and news once, on the task it was
+/// made from. The other end is the entry written right after the link's own,
+/// so a link made back in the same instant is not taken for one.
 fn echoes_a_link(conn: &Connection, entry: &Entry<'_>, now_ms: i64) -> Result<bool> {
     let Some((verb, other)) = entry
         .to
@@ -347,11 +349,14 @@ fn echoes_a_link(conn: &Connection, entry: &Entry<'_>, now_ms: i64) -> Result<bo
         return Ok(false);
     };
     Ok(conn.query_row(
-        "SELECT EXISTS (SELECT 1 FROM planning_notifications
-         WHERE task_id = ?1 AND kind = 'changed' AND field = 'relation' AND actor = ?2
-           AND created_at_ms = ?3 AND coalesce(to_value, from_value) = ?4
-           AND (to_value IS NULL) = ?5)",
+        "SELECT EXISTS (SELECT 1 FROM planning_task_activity made
+            JOIN planning_notifications told ON told.activity_id = made.id
+            WHERE made.rowid = (SELECT rowid FROM planning_task_activity WHERE id = ?1) - 1
+              AND made.task_id = ?2 AND made.kind = 'relation' AND made.actor = ?3
+              AND made.at_ms = ?4 AND coalesce(made.to_value, made.from_value) = ?5
+              AND (made.to_value IS NULL) = ?6)",
         params![
+            entry.activity_id,
             other,
             entry.actor.as_str(),
             now_ms,
@@ -532,7 +537,11 @@ pub(crate) fn automation_ended(conn: &Connection, run_id: &str, now_ms: i64) -> 
         run_id: Some(run_id),
         key: Some(&key),
         to: Some(&status),
-        ..Notice::new(task_id.as_deref(), NotificationKind::Automation, WorkActor::Agent)
+        ..Notice::new(
+            task_id.as_deref(),
+            NotificationKind::Automation,
+            WorkActor::Agent,
+        )
     };
     notify(conn, &notice, now_ms)
 }
@@ -664,7 +673,11 @@ fn read(row: &Row<'_>) -> rusqlite::Result<Notification> {
         .map(|json| serde_json::from_str(&json))
         .transpose()
         .map_err(|error| {
-            rusqlite::Error::FromSqlConversionFailure(17, rusqlite::types::Type::Text, Box::new(error))
+            rusqlite::Error::FromSqlConversionFailure(
+                17,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
         })?;
     Ok(Notification {
         id: row.get(0)?,
