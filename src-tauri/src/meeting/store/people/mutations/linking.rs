@@ -93,6 +93,7 @@ pub(super) fn source_to_db(source: PersonLinkSource) -> &'static str {
         PersonLinkSource::Calendar => "calendar",
         PersonLinkSource::Speaker => "speaker",
         PersonLinkSource::Title => "title",
+        PersonLinkSource::Transcript => "transcript",
         PersonLinkSource::Manual => "manual",
     }
 }
@@ -102,6 +103,7 @@ pub(super) fn source_from_db(value: &str) -> Result<PersonLinkSource, StoreError
         "calendar" => Ok(PersonLinkSource::Calendar),
         "speaker" => Ok(PersonLinkSource::Speaker),
         "title" => Ok(PersonLinkSource::Title),
+        "transcript" => Ok(PersonLinkSource::Transcript),
         "manual" => Ok(PersonLinkSource::Manual),
         _ => Err(StoreError::Corrupt),
     }
@@ -132,8 +134,9 @@ fn confidence_rank(confidence: PersonLinkConfidence) -> u8 {
 fn source_rank(source: PersonLinkSource) -> u8 {
     match source {
         PersonLinkSource::Title => 0,
-        PersonLinkSource::Speaker => 1,
-        PersonLinkSource::Calendar => 2,
-        PersonLinkSource::Manual => 3,
+        PersonLinkSource::Transcript => 1,
+        PersonLinkSource::Speaker => 2,
+        PersonLinkSource::Calendar => 3,
+        PersonLinkSource::Manual => 4,
     }
 }

@@ -13,8 +13,8 @@ use crate::meeting::store::learning::{
 };
 use crate::meeting::store::people::{
     bump_people_revision_in, calendar_context_in, continuity_summary_in, derive_calendar_links_in,
-    derive_speaker_link_in, derive_title_links_in, link_document_mentions_in,
-    recompute_organizations_in, vocabulary_candidates_in,
+    derive_heard_links_in, derive_speaker_link_in, derive_title_links_in,
+    link_document_mentions_in, recompute_organizations_in, vocabulary_candidates_in,
 };
 use crate::meeting::store::{MeetingStore, StoreError};
 use crate::meeting::types::MeetingSessionId;
@@ -242,7 +242,9 @@ fn run_person_linking_in(
     let mut changes = match event.kind {
         WorkflowEventKind::MeetingStarted => {
             let Some(calendar) = calendar_facts_in(connection, session_id)? else {
-                return Ok("person_links:changes=0".to_string());
+                // No invite to read: nothing was examined, which is not the
+                // same as examining a meeting and finding nobody.
+                return Ok("person_links:changes=0,meetings=0,suggestions=0".to_string());
             };
             derive_calendar_links_in(
                 connection,
@@ -275,6 +277,12 @@ fn run_person_linking_in(
                 .optional()?
                 .ok_or(StoreError::NotFound)?;
             derive_title_links_in(connection, session_id, &title, event.occurred_at_utc_ms)?
+                + derive_heard_links_in(
+                    connection,
+                    session_id,
+                    user_name,
+                    event.occurred_at_utc_ms,
+                )?
         }
         _ => return Err(StoreError::Invalid),
     };
@@ -282,7 +290,15 @@ fn run_person_linking_in(
     if changes != 0 {
         bump_people_revision_in(connection)?;
     }
-    Ok(format!("person_links:changes={changes}"))
+    let suggestions: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM meeting_person_links
+          WHERE meeting_id = ?1 AND confidence = 'suggested'",
+        [session_id.uuid().to_string()],
+        |row| row.get(0),
+    )?;
+    Ok(format!(
+        "person_links:changes={changes},meetings=1,suggestions={suggestions}"
+    ))
 }
 
 fn run_briefing_in(

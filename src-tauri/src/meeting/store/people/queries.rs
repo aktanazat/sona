@@ -710,7 +710,8 @@ fn evidence_sources_from_csv(value: &str) -> Result<Vec<PersonLinkSource>, Store
         PersonLinkSource::Calendar => 0,
         PersonLinkSource::Speaker => 1,
         PersonLinkSource::Title => 2,
-        PersonLinkSource::Manual => 3,
+        PersonLinkSource::Transcript => 3,
+        PersonLinkSource::Manual => 4,
     });
     sources.dedup();
     Ok(sources)
@@ -920,6 +921,7 @@ fn source_from_db(value: &str) -> Result<PersonLinkSource, StoreError> {
         "calendar" => Ok(PersonLinkSource::Calendar),
         "speaker" => Ok(PersonLinkSource::Speaker),
         "title" => Ok(PersonLinkSource::Title),
+        "transcript" => Ok(PersonLinkSource::Transcript),
         "manual" => Ok(PersonLinkSource::Manual),
         _ => Err(StoreError::Corrupt),
     }

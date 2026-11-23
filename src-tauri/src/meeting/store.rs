@@ -1627,6 +1627,7 @@ static MIGRATIONS: &[M] = &[
     M::up(include_str!("store/live_docs.sql")),
     M::up(include_str!("store/live_changes.sql")),
     M::up(include_str!("store/live_rooms.sql")),
+    M::up(include_str!("store/person_link_transcript.sql")),
 ];
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StoreError {

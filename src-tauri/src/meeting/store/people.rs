@@ -8,7 +8,7 @@ mod queries;
 mod vocabulary;
 
 pub(super) use mutations::{
-    derive_calendar_links_in, derive_speaker_link_in, derive_title_links_in,
+    derive_calendar_links_in, derive_heard_links_in, derive_speaker_link_in, derive_title_links_in,
     link_document_mentions_in, person_for_named_speaker_in, recompute_organizations_in,
     upsert_link_in,
 };

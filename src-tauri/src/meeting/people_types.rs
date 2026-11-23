@@ -45,6 +45,8 @@ pub enum PersonLinkSource {
     Calendar,
     Speaker,
     Title,
+    /// Said in the meeting, or listed by the call it was held on.
+    Transcript,
     Manual,
 }
 

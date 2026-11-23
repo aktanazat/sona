@@ -1970,6 +1970,7 @@ enum MeetingPersonLinkSource: String, Decodable {
     case calendar
     case speaker
     case title
+    case transcript
     case manual
 
     var label: String {
@@ -1977,6 +1978,7 @@ enum MeetingPersonLinkSource: String, Decodable {
         case .calendar: "from the calendar"
         case .speaker: "from a speaker label"
         case .title: "from the title"
+        case .transcript: "named in the meeting"
         case .manual: "linked by hand"
         }
     }
