@@ -1179,6 +1179,98 @@ mod tests {
     }
 
     #[test]
+    fn an_approval_request_leads_the_edits_around_it() {
+        let mut context = fixture().context;
+        let said = [
+            ("ask", "Could you approve the left mockup?"),
+            (
+                "note",
+                "I left two mockups on the task and can proceed once one is selected.",
+            ),
+        ];
+        for (id, body) in said {
+            context.comments.insert(id.to_owned(), body.to_owned());
+        }
+        let changed = |id: &str, field: &str, to: &str, at_ms: i64| Notification {
+            field: Some(field.to_owned()),
+            to: Some(to.to_owned()),
+            ..agent_notice(id, at_ms, false, None)
+        };
+        let wrote = |id: &str, at_ms: i64| Notification {
+            kind: NotificationKind::Comment,
+            comment_id: Some(id.to_owned()),
+            field: None,
+            ..agent_notice(id, at_ms, false, None)
+        };
+        // Newest first, one minute apart.
+        let notices = vec![
+            changed("title", "title", "Pick a mockup", START + 4 * MINUTE),
+            wrote("note", START + 3 * MINUTE),
+            wrote("ask", START + 2 * MINUTE),
+            changed("status", "status", "in_progress", START + MINUTE),
+            changed("priority", "priority", "high", START),
+        ];
+        let built = rows(notices, &context);
+        assert_eq!(built.len(), 1);
+        assert_eq!(built[0].notice_ids.len(), 5);
+        assert_eq!(built[0].needs, Some(Needs::Question));
+        assert_eq!(built[0].lead.id, "ask", "the approval request leads");
+        assert_eq!(built[0].lead.comment_id.as_deref(), Some("ask"));
+    }
+
+    #[test]
+    fn a_related_link_and_a_block_made_back_at_once_each_keep_their_notice() {
+        let (history, made) = two_filed();
+        let at = START + MINUTE;
+        items::add_relation(
+            &history,
+            &made[0],
+            &made[1],
+            WorkRelationKind::Related,
+            WorkActor::Agent,
+            at,
+        )
+        .expect("the first relates to the second");
+        items::add_relation(
+            &history,
+            &made[1],
+            &made[0],
+            WorkRelationKind::Blocks,
+            WorkActor::Agent,
+            at,
+        )
+        .expect("the second blocks the first");
+        let stored = inbox::notifications(&history, Shown::default(), at + MINUTE)
+            .expect("the inbox")
+            .into_iter()
+            .filter(|notice| notice.field.as_deref() == Some("relation"))
+            .collect::<Vec<_>>();
+        let context = context(&history).expect("the facts");
+        let mut shown: Vec<_> = rows(stored.clone(), &context)
+            .into_iter()
+            .flat_map(|row| row.notice_ids)
+            .collect();
+        shown.sort();
+        let mut told: Vec<_> = stored
+            .iter()
+            .map(|notice| (notice.item_id.clone(), notice.to.clone()))
+            .collect();
+        told.sort();
+        let mut made_from = vec![
+            (Some(made[0].clone()), Some(format!("related:{}", made[1]))),
+            (Some(made[1].clone()), Some(format!("blocks:{}", made[0]))),
+        ];
+        made_from.sort();
+        assert_eq!(
+            told, made_from,
+            "each link is told on the task it was made from"
+        );
+        let mut ids: Vec<_> = stored.into_iter().map(|notice| notice.id).collect();
+        ids.sort();
+        assert_eq!(shown, ids, "and the rows keep both");
+    }
+
+    #[test]
     fn a_link_an_agent_makes_is_news_once_and_history_on_both_tasks() {
         let (history, made) = two_filed();
         let relation = items::add_relation(
