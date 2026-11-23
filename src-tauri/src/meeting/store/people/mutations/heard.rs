@@ -64,9 +64,16 @@ pub(super) fn people_heard<'a>(
     people
         .iter()
         .filter(|person| {
-            // A name that is also the user's is dropped on its own, so a
-            // contact who shares the user's first name is still found by the
-            // rest of theirs.
+            // The user's own entry in People is nobody else, whatever
+            // nickname it also carries.
+            if user_name.is_some_and(|user| {
+                identity_names(person).any(|name| normalized(name) == normalized(user))
+            }) {
+                return false;
+            }
+            // A name that is only the user's first name is dropped on its
+            // own, so a contact who shares it is still found by the rest of
+            // theirs.
             let names = || {
                 identity_names(person)
                     .chain(person.display_name.split_whitespace().next())

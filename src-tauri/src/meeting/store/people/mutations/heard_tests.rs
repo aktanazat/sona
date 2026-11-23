@@ -427,3 +427,17 @@ fn a_contact_who_shares_the_users_first_name_is_found_by_their_full_name() {
         ["Jordan Pryce"]
     );
 }
+
+#[test]
+fn the_users_own_entry_is_not_suggested_by_its_nickname() {
+    let people = [invented("Jordan Vale", &["Jojo"])];
+    let lines = ["Thanks Jojo, that covers it.".to_string()];
+    let listed = ["Jojo".to_string()];
+    let heard = Heard {
+        lines: &lines,
+        listed: &listed,
+    };
+
+    assert!(people_heard(&people, &heard, Some("Jordan Vale")).is_empty());
+    assert_eq!(people_heard(&people, &heard, None).len(), 1);
+}
