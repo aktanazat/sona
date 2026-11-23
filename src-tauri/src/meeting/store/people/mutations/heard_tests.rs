@@ -357,3 +357,73 @@ fn the_users_own_name_and_named_voice_suggest_nobody() {
     assert!(people_heard(&people, &heard, Some("Jordan Vale")).is_empty());
     assert_eq!(people_heard(&people, &heard, None).len(), 1);
 }
+
+fn invented(display_name: &str, aliases: &[&str]) -> Person {
+    Person {
+        id: crate::meeting::people_types::PersonId::new(),
+        display_name: display_name.to_string(),
+        aliases: aliases.iter().map(|alias| (*alias).to_string()).collect(),
+        calendar_emails: Vec::new(),
+        organization: None,
+        summary: None,
+        role: None,
+        notes: None,
+        created_at_utc_ms: 1,
+        updated_at_utc_ms: 1,
+    }
+}
+
+fn names(found: Vec<&Person>) -> Vec<&str> {
+    found
+        .into_iter()
+        .map(|person| person.display_name.as_str())
+        .collect()
+}
+
+#[test]
+fn a_nickname_two_people_could_answer_to_suggests_neither() {
+    let people = [
+        invented("Robin Castell", &["Robin"]),
+        invented("Robin Adeyemi", &[]),
+        invented("Kit", &[]),
+        invented("Kit Morland", &[]),
+    ];
+    let lines = ["Thanks Robin, and thanks Kit.".to_string()];
+    let listed = ["Robin".to_string(), "Kit".to_string()];
+    let vague = Heard {
+        lines: &lines,
+        listed: &listed,
+    };
+    assert!(people_heard(&people, &vague, None).is_empty());
+
+    let full = ["Robin Adeyemi".to_string()];
+    let exact = Heard {
+        lines: &[],
+        listed: &full,
+    };
+    assert_eq!(
+        names(people_heard(&people, &exact, None)),
+        ["Robin Adeyemi"]
+    );
+}
+
+#[test]
+fn a_contact_who_shares_the_users_first_name_is_found_by_their_full_name() {
+    let people = [invented("Jordan Pryce", &["Jordan"])];
+    let said = ["Jordan, can you hear us?".to_string()];
+    let first_name_only = Heard {
+        lines: &said,
+        listed: &[],
+    };
+    assert!(people_heard(&people, &first_name_only, Some("Jordan Vale")).is_empty());
+
+    let listed = ["Jordan Pryce".to_string()];
+    let full_name = Heard {
+        lines: &[],
+        listed: &listed,
+    };
+    assert_eq!(
+        names(people_heard(&people, &full_name, Some("Jordan Vale"))),
+        ["Jordan Pryce"]
+    );
+}

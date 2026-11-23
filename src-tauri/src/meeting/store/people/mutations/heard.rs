@@ -11,7 +11,7 @@ use crate::meeting::store::people::{
     all_people_in, exact_phrase_mentioned, identity_names, normalized,
 };
 use crate::meeting::store::voice_identity::{is_generated_speaker_label, names_user};
-use crate::meeting::store::StoreError;
+use crate::meeting::store::{effective_segments_for_session, StoreError};
 use crate::meeting::types::MeetingSessionId;
 use rusqlite::Connection;
 use std::collections::HashMap;
@@ -43,32 +43,43 @@ pub(super) fn people_heard<'a>(
     heard: &Heard<'_>,
     user_name: Option<&str>,
 ) -> Vec<&'a Person> {
-    let mut first_names = HashMap::<String, usize>::new();
+    // How many people each single word could mean: as a first name, or as a
+    // one-word name or alias. A word that could mean two people names neither.
+    let mut single_words = HashMap::<String, usize>::new();
     for person in people {
-        if let Some(first) = person.display_name.split_whitespace().next() {
-            *first_names.entry(normalized(first)).or_default() += 1;
+        let mut words = identity_names(person)
+            .filter(|name| name.split_whitespace().count() == 1)
+            .chain(person.display_name.split_whitespace().next())
+            .map(normalized)
+            .collect::<Vec<_>>();
+        words.sort();
+        words.dedup();
+        for word in words {
+            *single_words.entry(word).or_default() += 1;
         }
     }
+    let unshared = |name: &&str| {
+        name.split_whitespace().count() > 1 || single_words.get(&normalized(name)) == Some(&1)
+    };
     people
         .iter()
-        .filter(|person| !identity_names(person).any(|name| names_user(name, user_name)))
         .filter(|person| {
-            let only_first_name = person
-                .display_name
-                .split_whitespace()
-                .next()
-                .filter(|first| first_names.get(&normalized(first)) == Some(&1));
-            let listed = heard.listed.iter().any(|listed| {
+            // A name that is also the user's is dropped on its own, so a
+            // contact who shares the user's first name is still found by the
+            // rest of theirs.
+            let names = || {
+                identity_names(person)
+                    .chain(person.display_name.split_whitespace().next())
+                    .filter(|name| !names_user(name, user_name))
+                    .filter(unshared)
+            };
+            heard.listed.iter().any(|listed| {
                 let listed = normalized(listed);
-                identity_names(person).any(|name| normalized(name) == listed)
-                    || only_first_name.is_some_and(|first| normalized(first) == listed)
-            });
-            listed
-                || heard.lines.iter().any(|line| {
-                    identity_names(person)
-                        .chain(only_first_name)
-                        .any(|name| said_in(line, name))
-                })
+                names().any(|name| normalized(name) == listed)
+            }) || heard
+                .lines
+                .iter()
+                .any(|line| names().any(|name| said_in(line, name)))
         })
         .collect()
 }
@@ -117,21 +128,12 @@ pub(in crate::meeting::store) fn derive_heard_links_in(
         return Ok(0);
     }
     let meeting = meeting_id.uuid().to_string();
-    let lines = strings_in(
-        connection,
-        "SELECT COALESCE((SELECT e.replacement_text FROM meeting_segment_edits e
-                           WHERE e.segment_id = s.segment_id
-                           ORDER BY e.edit_sequence DESC LIMIT 1), s.base_text)
-           FROM meeting_sessions m
-           JOIN meeting_transcript_segments s
-             ON s.transcript_revision_id = m.current_transcript_revision_id
-          WHERE m.id = ?1
-            AND COALESCE((SELECT e.removed FROM meeting_segment_edits e
-                           WHERE e.segment_id = s.segment_id
-                           ORDER BY e.edit_sequence DESC LIMIT 1), 0) = 0
-          ORDER BY s.start_offset_ns, s.ordinal",
-        &meeting,
-    )?;
+    // The transcript as Review shows it: edits and learned corrections applied.
+    let lines = effective_segments_for_session(connection, meeting_id)?
+        .into_iter()
+        .filter(|segment| !segment.removed)
+        .map(|segment| segment.replacement_text.unwrap_or(segment.base.text))
+        .collect::<Vec<_>>();
     let own_labels = user_speaker_labels_in(connection, meeting_id, user_name)?;
     let mut listed = strings_in(
         connection,
