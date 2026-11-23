@@ -230,6 +230,33 @@ struct AudioDevice: Decodable, Hashable, Identifiable {
     var id: String { index }
 }
 
+struct MicrophonePreferences: Decodable, Equatable {
+    var useSystemDefault = true
+    var priority: [String] = []
+    var excluded: [String] = []
+}
+
+enum MicrophoneChoice: Hashable {
+    case systemDefault
+    case preferred
+    case device(String)
+}
+
+enum MicrophoneReadState: Equatable {
+    case loading
+    case ready
+    case failed(String)
+}
+
+struct MicrophoneListItem: Identifiable, Equatable {
+    let name: String
+    let rank: Int?
+    let excluded: Bool
+    let connected: Bool?
+
+    var id: String { name }
+}
+
 /// Which custom sound files exist on disk, for the custom theme.
 struct SoundCustomFiles: Decodable {
     let start: Bool
@@ -265,6 +292,7 @@ struct AppSettings: Decodable {
     var selectedModel = ""
     var alwaysOnMicrophone = false
     var selectedMicrophone: String?
+    var microphonePreferences = MicrophonePreferences()
     var selectedChannel: Int?
     var clamshellMicrophone: String?
     var selectedOutputDevice: String?
@@ -309,6 +337,7 @@ struct AppSettings: Decodable {
         case quietSpeechEnabled
         case startHidden, autostartEnabled, selectedModel, alwaysOnMicrophone
         case selectedMicrophone, selectedChannel, clamshellMicrophone, selectedOutputDevice
+        case microphonePreferences
         case translateToEnglish, selectedLanguage, englishSpelling, overlayPosition
         case dictationLanguages
         case overlayStyle, modelUnloadTimeout, muteWhileRecording, appendTrailingSpace
@@ -346,6 +375,7 @@ struct AppSettings: Decodable {
         quietSpeechEnabled = value(.quietSpeechEnabled, quietSpeechEnabled)
         alwaysOnMicrophone = value(.alwaysOnMicrophone, alwaysOnMicrophone)
         selectedMicrophone = try? box.decodeIfPresent(String.self, forKey: .selectedMicrophone)
+        microphonePreferences = value(.microphonePreferences, microphonePreferences)
         selectedChannel = try? box.decodeIfPresent(Int.self, forKey: .selectedChannel)
         clamshellMicrophone = try? box.decodeIfPresent(String.self, forKey: .clamshellMicrophone)
         selectedOutputDevice = try? box.decodeIfPresent(String.self, forKey: .selectedOutputDevice)

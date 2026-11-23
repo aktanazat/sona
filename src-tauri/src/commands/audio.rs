@@ -1,7 +1,7 @@
 use crate::audio_feedback;
 use crate::audio_toolkit::audio::{list_input_devices, list_output_devices};
 use crate::managers::audio::{AudioRecordingManager, MicrophoneMode};
-use crate::settings::{get_settings, update_settings};
+use crate::settings::{get_settings, update_settings, MicrophoneChange};
 use log::warn;
 use serde::{Deserialize, Serialize};
 use specta::Type;
@@ -220,18 +220,19 @@ pub async fn set_selected_microphone(app: AppHandle, device_name: String) -> Res
     } else {
         Some(device_name)
     };
-    update_settings(&app, |settings| {
-        settings.selected_microphone = selected_microphone;
-    })?;
-
-    // Update the audio manager to use the new device. update_selected_device
-    // can restart the cpal stream (blocking CoreAudio) — run it on a blocking
-    // thread, not inline on the webview/main run loop.
-    let rm = app.state::<Arc<AudioRecordingManager>>().inner().clone();
-    tokio::task::spawn_blocking(move || rm.update_selected_device())
+    let manager = app.state::<Arc<AudioRecordingManager>>().inner().clone();
+    tokio::task::spawn_blocking(move || manager.select_microphone(selected_microphone))
         .await
-        .map_err(|e| format!("audio task join failed: {}", e))?
-        .map_err(|e| format!("Failed to update selected device: {}", e))
+        .map_err(|error| format!("audio task join failed: {error}"))?
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn change_microphone(app: AppHandle, change: MicrophoneChange) -> Result<(), String> {
+    let manager = app.state::<Arc<AudioRecordingManager>>().inner().clone();
+    tokio::task::spawn_blocking(move || manager.change_microphone(change))
+        .await
+        .map_err(|error| format!("audio task join failed: {error}"))?
 }
 
 #[tauri::command]
@@ -308,16 +309,16 @@ pub async fn play_test_sound(app: AppHandle, sound_type: String) {
 
 #[tauri::command]
 #[specta::specta]
-pub fn set_clamshell_microphone(app: AppHandle, device_name: String) -> Result<(), String> {
+pub async fn set_clamshell_microphone(app: AppHandle, device_name: String) -> Result<(), String> {
     let clamshell_microphone = if device_name == "default" {
         None
     } else {
         Some(device_name)
     };
-    update_settings(&app, |settings| {
-        settings.clamshell_microphone = clamshell_microphone;
-    })?;
-    Ok(())
+    let manager = app.state::<Arc<AudioRecordingManager>>().inner().clone();
+    tokio::task::spawn_blocking(move || manager.select_clamshell_microphone(clamshell_microphone))
+        .await
+        .map_err(|error| format!("audio task join failed: {error}"))?
 }
 
 #[tauri::command]

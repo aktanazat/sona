@@ -378,8 +378,9 @@ struct MicrophoneClamshellRow: View {
                     get: { selected },
                     set: { name in Task { await store.setClamshellMicrophone(name) } }
                 )) {
-                    ForEach(names, id: \.self) { name in
+                    ForEach(store.clamshellMicrophoneNames, id: \.self) { name in
                         Text(name).tag(name)
+                            .disabled(store.settings.microphonePreferences.excluded.contains(name))
                     }
                 }
                 .labelsHidden()
@@ -393,10 +394,6 @@ struct MicrophoneClamshellRow: View {
 
     private var selected: String { SettingsStore.deviceLabel(store.settings.clamshellMicrophone) }
 
-    private var names: [String] {
-        let listed = store.microphones.map(\.name)
-        return listed.contains(selected) ? listed : [selected] + listed
-    }
 }
 
 /// Which sounds mark the start and the end of a recording, and a way to hear

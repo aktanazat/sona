@@ -1056,6 +1056,10 @@ impl AudioRecorder {
                 .is_some_and(|handle| handle.is_finished())
     }
 
+    pub(crate) fn input_device_name(&self) -> Result<Option<String>, cpal::DeviceNameError> {
+        self.device.as_ref().map(DeviceTrait::name).transpose()
+    }
+
     pub fn close(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(tx) = self.cmd_tx.take() {
             let _ = tx.send(Cmd::Shutdown);

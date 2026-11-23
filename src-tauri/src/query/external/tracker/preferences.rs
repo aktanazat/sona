@@ -41,8 +41,8 @@ use crate::query::external::{
 use crate::query::{KeptLocal, QueryError, QUERY_SCHEMA_VERSION};
 use crate::settings::{
     self, AppSettings, AppearanceMaterial, DigestDay, EnglishSpelling, HudPillEdge, LLMPrompt,
-    LogLevel, OverlayStyle, PasteMethod, PersonaSample, SoundTheme, Theme, VocabularyEntry,
-    LOCAL_CLEANUP_PROVIDER_ID,
+    LogLevel, MicrophoneConfiguration, MicrophonePreferences, OverlayStyle, PasteMethod,
+    PersonaSample, SoundTheme, Theme, VocabularyEntry, LOCAL_CLEANUP_PROVIDER_ID,
 };
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
@@ -147,6 +147,8 @@ pub enum SettingKey {
     /// Dictation languages, comma-separated codes, primary first; "" for
     /// automatic.
     DictationLanguages,
+    /// Microphone selection and preferences as JSON: selected and preferences.
+    Microphones,
     /// Write what is said in English, whatever the language spoken: true or
     /// false.
     TranslateToEnglish,
@@ -976,6 +978,20 @@ fn setting_change<'a>(args: &'a SettingArgs) -> SettingsChange<'a> {
             show(|s| json!(s.post_process_selected_prompt_id)),
             apply(move |s| modes::apply_use_post_process_prompt(s, value.trim())),
         ),
+        SettingKey::Microphones => (
+            show(|settings| {
+                json!({
+                    "selected": settings.selected_microphone,
+                    "preferences": settings.microphone_preferences,
+                    "clamshell": settings.clamshell_microphone,
+                })
+            }),
+            apply(move |settings| {
+                let configuration: MicrophoneConfiguration =
+                    parsed("The microphone configuration", value)?;
+                configuration.apply(settings)
+            }),
+        ),
         SettingKey::KeywordTrackers => (
             show(|s| json!(s.trackers_list)),
             apply(move |s| {
@@ -1074,6 +1090,7 @@ struct DictationView<'a> {
     translate_to_english: bool,
     english_spelling: EnglishSpelling,
     microphone: Option<&'a str>,
+    microphone_preferences: &'a MicrophonePreferences,
     microphones: Vec<String>,
     custom_sounds: CustomSounds,
 }
@@ -1183,6 +1200,7 @@ fn settings_view(
             translate_to_english: settings.translate_to_english,
             english_spelling: settings.english_spelling,
             microphone: settings.selected_microphone.as_deref(),
+            microphone_preferences: &settings.microphone_preferences,
             microphones,
             custom_sounds,
         },

@@ -2161,6 +2161,10 @@ impl TranscribeAction {
                     "no_input_device"
                 } else if err.contains(crate::helpers::clamshell::LID_CLOSED_MICROPHONE) {
                     "microphone_lid_closed"
+                } else if err.contains(crate::managers::audio::MICROPHONE_EXCLUDED) {
+                    "microphone_excluded"
+                } else if err.contains(crate::managers::audio::MICROPHONE_UNAVAILABLE) {
+                    "microphone_unavailable"
                 } else {
                     "unknown"
                 };

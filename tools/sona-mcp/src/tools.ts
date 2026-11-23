@@ -1298,6 +1298,7 @@ const SETTING_KEYS = [
   "hud-pill",
   "hud-pill-position",
   "dictation-languages",
+  "microphones",
   "translate-to-english",
   "english-spelling",
   "app-language",
@@ -7018,7 +7019,7 @@ export const TOOLS: readonly ToolDefinition[] = [
   {
     name: "sona_setting",
     title: "Change one Sona setting",
-    description: `Change one setting as its switch or picker in Settings does: true or false for a switch, a name for a choice (hud-pill-position: top, bottom, left or right; english-spelling: as-spoken or british; appearance-material: solid or glass), HH:MM for evening-digest-time, JSON for keyword-trackers (the whole list) and meeting-prep (the whole object; the mail and web switches stay the user's). mode is the capture mode chip; dictation-prompt uses a prompt. Consent, privacy, API keys and offline cleanup stay in Sona. ${SETTINGS_WRITES}`,
+    description: `Change one setting as its switch or picker in Settings does: true or false for a switch, a name for a choice (hud-pill-position: top, bottom, left or right; english-spelling: as-spoken or british; appearance-material: solid or glass), HH:MM for evening-digest-time, JSON for microphones (selected plus preferences: use_system_default, priority and excluded), keyword-trackers (the whole list) and meeting-prep (the whole object; the mail and web switches stay the user's). mode is the capture mode chip; dictation-prompt uses a prompt. Consent, privacy, API keys and offline cleanup stay in Sona. ${SETTINGS_WRITES}`,
     mutates: "changes",
     inputSchema: {
       type: "object",
