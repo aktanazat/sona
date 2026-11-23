@@ -289,7 +289,9 @@ function prepareProfile(binary: string, workDirectory: string): string {
   mkdirSync(join(profile, "Data", "models"), { recursive: true });
   for (const directory of [workDirectory, profile]) {
     if (statSync(directory).uid !== process.getuid?.()) {
-      throw new Error(`${directory} belongs to another account; pass --work-dir`);
+      throw new Error(
+        `${directory} belongs to another account; pass --work-dir`,
+      );
     }
   }
   copyFileSync(binary, join(profile, "sona"));
@@ -622,7 +624,18 @@ async function main(): Promise<void> {
   log(`per-clip transcripts in ${detailsPath}`);
   console.log(
     JSON.stringify(
-      { commit: commit(), machine: machine(), repeat, results },
+      {
+        commit: commit(),
+        engine: {
+          binary,
+          sha256: createHash("sha256")
+            .update(readFileSync(binary))
+            .digest("hex"),
+        },
+        machine: machine(),
+        repeat,
+        results,
+      },
       null,
       2,
     ),
