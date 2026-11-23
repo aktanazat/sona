@@ -7,7 +7,7 @@ use super::learning::{no_inputs, AppLearningInputs};
 use super::learning_types::{
     LearningDecisionRequest, LearningSuggestion, LearningSuggestionsResult,
 };
-use super::people_types::{Person, PersonBriefingRow, VocabularyCandidatesResult};
+use super::people_types::{Person, PersonBriefingRow, PersonId, VocabularyCandidatesResult};
 use super::session::{MeetingSessionManager, MEETING_EVENT_SCHEMA_VERSION};
 use super::store::{MeetingStore, StoreError};
 use super::types::{
@@ -209,18 +209,35 @@ impl MeetingSessionManager {
         );
     }
 
-    /// Re-reads recent meetings for a person who was just saved.
+    /// Re-reads recent meetings for a person saved under names they did not
+    /// have a moment ago: `before` is the person as they were, `None` for one
+    /// just created.
     ///
-    /// Recorded once per person and set of names, and run only when new: a
-    /// save that changes a role or a note leaves the names as they were and
-    /// raises nothing, so a suggestion the user removed is not put back by
-    /// an unrelated edit.
-    pub(crate) fn record_person_saved(&self, store: Arc<MeetingStore>, person: &Person) {
+    /// A save that leaves the names alone, changing a role or a calendar
+    /// address, raises nothing, so a suggestion the user removed is not put
+    /// back by an unrelated edit.
+    pub(crate) fn record_person_saved(
+        &self,
+        store: Arc<MeetingStore>,
+        before: Option<&Person>,
+        person: &Person,
+    ) {
+        if before.is_some_and(|before| person_names(before) == person_names(person)) {
+            return;
+        }
         let event = person_saved_event(person, now_utc_ms());
         if let Err(error) = dispatch_daily_workflow_event(store, event, self.app_handle().cloned())
         {
             log::warn!("person saved event failed: {error:?}");
         }
+    }
+
+    /// The person as stored now, for comparing against what a save leaves.
+    pub(crate) fn person_before(store: &MeetingStore, person_id: PersonId) -> Option<Person> {
+        store
+            .person_detail(person_id)
+            .ok()
+            .map(|result| result.detail.person)
     }
 
     /// Tells the learning loops that dictation history has moved.
@@ -453,16 +470,28 @@ impl MeetingSessionManager {
     }
 }
 
-/// The event a saved person raises. Its dedupe key is the person and the
-/// names they answer to, whatever their order or case.
-pub(crate) fn person_saved_event(person: &Person, occurred_at_utc_ms: i64) -> NewWorkflowEvent {
-    let mut names = std::iter::once(&person.display_name)
-        .chain(&person.aliases)
+/// The names a person answers to, whatever the case or the order of the
+/// aliases. The display name stays apart from the aliases: only its first
+/// word is matched on its own, so swapping it with an alias is a change.
+pub(crate) fn person_names(person: &Person) -> String {
+    let mut aliases = person
+        .aliases
+        .iter()
         .map(|name| name.trim().to_lowercase())
         .collect::<Vec<_>>();
-    names.sort();
-    names.dedup();
-    let names = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, names.join("\n").as_bytes());
+    aliases.sort();
+    aliases.dedup();
+    format!(
+        "{}\n\n{}",
+        person.display_name.trim().to_lowercase(),
+        aliases.join("\n")
+    )
+}
+
+/// The event a saved person raises. Its dedupe key is the person and the
+/// names they answer to.
+pub(crate) fn person_saved_event(person: &Person, occurred_at_utc_ms: i64) -> NewWorkflowEvent {
+    let names = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, person_names(person).as_bytes());
     NewWorkflowEvent {
         kind: WorkflowEventKind::PersonSaved,
         payload: serde_json::json!({ "person_id": person.id.uuid().to_string() }),

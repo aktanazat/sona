@@ -856,7 +856,15 @@ fn a_save_never_confirms_and_leaves_a_confirmed_link_alone() {
 
 #[test]
 fn only_a_save_that_changes_the_names_reads_meetings_again() {
-    use crate::meeting::workflow_engine::person_saved_event;
+    use crate::meeting::workflow_engine::{person_names, person_saved_event};
+
+    // A role or an address is not a name; which name is the display name is.
+    let mut edited = invented("Dee Whitfield", &["Dana"]);
+    let names = person_names(&edited);
+    edited.role = Some("Buyer".to_string());
+    edited.calendar_emails = vec!["dee@example.invalid".to_string()];
+    assert_eq!(person_names(&edited), names);
+    assert_ne!(person_names(&invented("Dana", &["Dee Whitfield"])), names);
 
     let (_directory, store) = store();
     let now = 200 * DAY_MS;
