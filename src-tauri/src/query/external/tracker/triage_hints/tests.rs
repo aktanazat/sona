@@ -867,3 +867,118 @@ fn a_regular_guest_who_skips_a_meeting_takes_no_suggestion_with_them() {
         ["The last 2 tasks from meetings with Dana Reyes went to Pier Lighting"]
     );
 }
+
+/// A guest whose only tasks came from a lead's meetings carries nothing of
+/// their own: without the lead, the title decides.
+#[test]
+fn a_guest_without_the_lead_does_not_carry_the_leads_project() {
+    let mut desk = Desk::new();
+    let lead = person(&desk.meetings, "Dana Reyes", &[], &[]);
+    let guest = person(&desk.meetings, "Sam Ortiz", &[], &[]);
+    let lighting = desk.project("Pier Lighting");
+    let dredging = desk.project("Harbor Dredging");
+    for title in ["Survey channel depth", "Chart channel depth"] {
+        desk.task(
+            title,
+            WorkStatus::NotStarted,
+            Some(&dredging),
+            &WorkOwner::Nobody,
+            None,
+        );
+    }
+    let alone = meeting(&desk.meetings, "Pier plan", AT);
+    link(&desk.meetings, alone, lead, "calendar", "confirmed");
+    for title in ["Draw the circuit", "Price the poles"] {
+        desk.task(
+            title,
+            WorkStatus::NotStarted,
+            Some(&lighting),
+            &WorkOwner::Nobody,
+            Some(alone),
+        );
+    }
+    for (day, titles) in [
+        (1, ["Order the bulbs", "Fix the ramp"]),
+        (2, ["Paint the posts", "Test the timer"]),
+    ] {
+        let walk = meeting(&desk.meetings, "Pier walk", AT + day * 86_400_000);
+        link(&desk.meetings, walk, lead, "calendar", "confirmed");
+        link(&desk.meetings, walk, guest, "calendar", "confirmed");
+        for title in titles {
+            desk.task(
+                title,
+                WorkStatus::NotStarted,
+                Some(&lighting),
+                &WorkOwner::Nobody,
+                Some(walk),
+            );
+        }
+    }
+    let today = meeting(&desk.meetings, "Harbor sync", AT + 3 * 86_400_000);
+    link(&desk.meetings, today, guest, "calendar", "confirmed");
+    let new = desk.task(
+        "Recheck channel depth",
+        WorkStatus::Triage,
+        None,
+        &WorkOwner::Nobody,
+        Some(today),
+    );
+
+    assert_eq!(
+        reasons(&desk.suggestions(&new), &[WorkSuggestionField::Project]),
+        ["The last 2 tasks with similar titles went to Harbor Dredging"]
+    );
+}
+
+/// Which of two people a project belongs to can come down to how many
+/// meetings each was in. A meeting kept local that was counted there, with no
+/// task of its own, still hides the suggestion from an agent.
+#[test]
+fn a_kept_meeting_counted_only_for_who_was_there_hides_the_suggestion() {
+    let mut desk = Desk::new();
+    let dana = person(&desk.meetings, "Dana Reyes", &[], &[]);
+    let sam = person(&desk.meetings, "Sam Ortiz", &[], &[]);
+    let lighting = desk.project("Pier Lighting");
+    let kept = meeting(&desk.meetings, "Dana one to one", AT);
+    link(&desk.meetings, kept, dana, "calendar", "confirmed");
+    let walk = meeting(&desk.meetings, "Pier walk", AT + 86_400_000);
+    link(&desk.meetings, walk, dana, "calendar", "confirmed");
+    link(&desk.meetings, walk, sam, "calendar", "confirmed");
+    for title in ["Order the bulbs", "Fix the ramp"] {
+        desk.task(
+            title,
+            WorkStatus::NotStarted,
+            Some(&lighting),
+            &WorkOwner::Nobody,
+            Some(walk),
+        );
+    }
+    let today = meeting(&desk.meetings, "Pier sync", AT + 2 * 86_400_000);
+    link(&desk.meetings, today, sam, "calendar", "confirmed");
+    let new = desk.task(
+        "Call the electrician",
+        WorkStatus::Triage,
+        None,
+        &WorkOwner::Nobody,
+        Some(today),
+    );
+
+    let suggestions = desk.suggestions(&new);
+    let read = |fence: &Fence| -> Vec<&str> {
+        suggestions
+            .iter()
+            .filter(|suggestion| suggestion.field == WorkSuggestionField::Project)
+            .filter(|suggestion| !fence.hides_suggestion(suggestion))
+            .map(|suggestion| suggestion.reason.as_str())
+            .collect()
+    };
+
+    assert_eq!(
+        read(&Fence::Open(KeptLocal(HashSet::new()))),
+        ["The last 2 tasks from meetings with Sam Ortiz went to Pier Lighting"]
+    );
+    assert_eq!(
+        read(&Fence::Open(KeptLocal(HashSet::from([kept])))),
+        Vec::<&str>::new()
+    );
+}
