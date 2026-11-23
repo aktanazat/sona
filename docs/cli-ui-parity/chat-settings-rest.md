@@ -234,6 +234,8 @@ Already inventoried in meetings-notes-search.md §16 (Notes, 22 rows) and §17 (
 | Delete model | ModelsScreen.swift:107 | delete_model | — | missing |
 | Download model | ModelsScreen.swift:120 | download_model | — | missing |
 
+After Cancel and Download again, the earlier command's reply cannot replace the new row status or show a failure from the cancelled command.
+
 #### Providers
 | UI action | Swift file:line | bridge method | CLI | class |
 |---|---|---|---|---|
