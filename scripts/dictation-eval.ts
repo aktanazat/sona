@@ -35,6 +35,7 @@ import {
   readFileSync,
   renameSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
@@ -286,6 +287,11 @@ function prepareProfile(binary: string, workDirectory: string): string {
   }
   const profile = join(workDirectory, "profile");
   mkdirSync(join(profile, "Data", "models"), { recursive: true });
+  for (const directory of [workDirectory, profile]) {
+    if (statSync(directory).uid !== process.getuid?.()) {
+      throw new Error(`${directory} belongs to another account; pass --work-dir`);
+    }
+  }
   copyFileSync(binary, join(profile, "sona"));
   writeFileSync(join(profile, "portable"), "Sona Portable Mode");
   return profile;
@@ -366,10 +372,11 @@ function syntheticClips(workDirectory: string): Clip[] {
   for (const fixture of fixtures.clips) {
     const wav = join(directory, `${fixture.id}.wav`);
     const textPath = join(directory, `${fixture.id}.txt`);
+    const spoken = `${fixtures.voice} ${fixtures.rate} ${fixture.text}`;
     const stale =
       !existsSync(wav) ||
       !existsSync(textPath) ||
-      readFileSync(textPath, "utf8") !== fixture.text;
+      readFileSync(textPath, "utf8") !== spoken;
     if (stale) {
       run([
         "say",
@@ -383,7 +390,7 @@ function syntheticClips(workDirectory: string): Clip[] {
         wav,
         fixture.text,
       ]);
-      writeFileSync(textPath, fixture.text);
+      writeFileSync(textPath, spoken);
     }
     clips.push({
       set: "say",
