@@ -608,6 +608,86 @@ fn a_kept_meeting_that_was_only_weighed_still_hides_the_suggestion() {
     );
 }
 
+/// A meeting kept local can rule a person out, and what is suggested in
+/// their place then rests on it: an agent is not shown that either.
+#[test]
+fn a_kept_meeting_that_ruled_a_person_out_hides_what_is_suggested_instead() {
+    let mut desk = Desk::new();
+    let dana = person(&desk.meetings, "Dana Reyes", &[], &[]);
+    let optics = desk.project("Optics");
+    let power = desk.project("Power");
+    for title in ["Replace breaker panel", "Label breaker panel"] {
+        desk.task(
+            title,
+            WorkStatus::NotStarted,
+            Some(&power),
+            &WorkOwner::Nobody,
+            None,
+        );
+    }
+    let kept = meeting(&desk.meetings, "Supply review", AT);
+    link(&desk.meetings, kept, dana, "calendar", "confirmed");
+    for title in [
+        "Order the fuses",
+        "Meter the feed",
+        "Book the outage",
+        "Tag the cables",
+    ] {
+        desk.task(
+            title,
+            WorkStatus::NotStarted,
+            Some(&power),
+            &WorkOwner::Nobody,
+            Some(kept),
+        );
+    }
+    let bench = meeting(&desk.meetings, "Bench review", AT + 86_400_000);
+    link(&desk.meetings, bench, dana, "calendar", "confirmed");
+    for title in [
+        "Align the mirror",
+        "Clean the lens",
+        "Mount the prism",
+        "Shim the rail",
+        "Log the focus",
+    ] {
+        desk.task(
+            title,
+            WorkStatus::NotStarted,
+            Some(&optics),
+            &WorkOwner::Nobody,
+            Some(bench),
+        );
+    }
+    let today = meeting(&desk.meetings, "Bench sync", AT + 2 * 86_400_000);
+    link(&desk.meetings, today, dana, "calendar", "confirmed");
+    let new = desk.task(
+        "Inspect breaker panel",
+        WorkStatus::Triage,
+        None,
+        &WorkOwner::Nobody,
+        Some(today),
+    );
+
+    let suggestions = desk.suggestions(&new);
+    let read = |fence: &Fence| -> Vec<&str> {
+        suggestions
+            .iter()
+            .filter(|suggestion| suggestion.field == WorkSuggestionField::Project)
+            .filter(|suggestion| !fence.hides_suggestion(suggestion))
+            .map(|suggestion| suggestion.reason.as_str())
+            .collect()
+    };
+
+    assert_eq!(
+        read(&Fence::Open(KeptLocal(HashSet::new()))),
+        ["The last 2 tasks with similar titles went to Power"]
+    );
+    assert_eq!(
+        read(&Fence::Open(KeptLocal(HashSet::from([kept])))),
+        Vec::<&str>::new()
+    );
+}
+
 /// A month less tidy than the one above, from a fixed seed: meetings in no
 /// order, one to three items each, two colleagues who drop in on most
 /// meetings, leads who sometimes sit in on each other's, and half the titles
@@ -724,18 +804,66 @@ fn misfiled_after_a_messy_month() -> (usize, usize, usize) {
     (own, other, unfiled)
 }
 
-/// In the messy month fewer than one item in five is filed under the wrong
-/// project, and more than four times as many under the right one. The
-/// counts move a little from run to run, because people get fresh ids and
-/// two people with as much behind them are told apart by id.
+/// In the messy month fewer than one item in sixteen is filed under the
+/// wrong project and nine times as many under the right one. Two people with
+/// as much behind them are told apart by name, so the counts hold from run
+/// to run.
 #[test]
 fn a_messy_month_files_few_items_under_the_wrong_project() {
     let (own, other, unfiled) = misfiled_after_a_messy_month();
     println!(
         "messy month: {own} under their own project, {other} under another, {unfiled} unfiled"
     );
-    assert!(
-        5 * other < own + other + unfiled && own > 4 * other,
-        "{own} own, {other} other, {unfiled} unfiled"
+    assert_eq!((own, other, unfiled), (277, 30, 171));
+}
+
+/// A regular guest who sat in on all of a specialist's meetings, and on
+/// others' too, skips one: the specialist's meetings still say where its
+/// work goes.
+#[test]
+fn a_regular_guest_who_skips_a_meeting_takes_no_suggestion_with_them() {
+    let mut desk = Desk::new();
+    let dana = person(&desk.meetings, "Dana Reyes", &[], &[]);
+    let sam = person(&desk.meetings, "Sam Ortiz", &[], &[]);
+    let tom = person(&desk.meetings, "Tom Hale", &[], &[]);
+    let lighting = desk.project("Pier Lighting");
+    let dredging = desk.project("Harbor Dredging");
+    let walk = meeting(&desk.meetings, "Pier walk", AT);
+    link(&desk.meetings, walk, dana, "calendar", "confirmed");
+    link(&desk.meetings, walk, sam, "calendar", "confirmed");
+    for title in ["Order the bulbs", "Fix the ramp"] {
+        desk.task(
+            title,
+            WorkStatus::NotStarted,
+            Some(&lighting),
+            &WorkOwner::Nobody,
+            Some(walk),
+        );
+    }
+    let channel = meeting(&desk.meetings, "Channel walk", AT + 86_400_000);
+    link(&desk.meetings, channel, tom, "calendar", "confirmed");
+    link(&desk.meetings, channel, sam, "calendar", "confirmed");
+    for title in ["Sound the channel", "Hire the barge"] {
+        desk.task(
+            title,
+            WorkStatus::NotStarted,
+            Some(&dredging),
+            &WorkOwner::Nobody,
+            Some(channel),
+        );
+    }
+    let today = meeting(&desk.meetings, "Pier sync", AT + 2 * 86_400_000);
+    link(&desk.meetings, today, dana, "calendar", "confirmed");
+    let new = desk.task(
+        "Call the electrician",
+        WorkStatus::Triage,
+        None,
+        &WorkOwner::Nobody,
+        Some(today),
+    );
+
+    assert_eq!(
+        reasons(&desk.suggestions(&new), &[WorkSuggestionField::Project]),
+        ["The last 2 tasks from meetings with Dana Reyes went to Pier Lighting"]
     );
 }
