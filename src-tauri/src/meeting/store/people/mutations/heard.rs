@@ -25,6 +25,29 @@ const WORD_NAMES: &[&str] = &[
     "ray", "rob", "rose", "sue", "summer", "will",
 ];
 
+/// Days and months, capitalised wherever they fall in a sentence.
+const CALENDAR_WORDS: &[&str] = &[
+    "monday",
+    "tuesday",
+    "wednesday",
+    "thursday",
+    "friday",
+    "saturday",
+    "sunday",
+    "january",
+    "february",
+    "march",
+    "april",
+    "may",
+    "june",
+    "july",
+    "august",
+    "september",
+    "october",
+    "november",
+    "december",
+];
+
 /// The shortest single word trusted as somebody's name on its own.
 const MIN_SINGLE_NAME_CHARS: usize = 3;
 
@@ -63,7 +86,9 @@ pub(super) fn people_heard<'a>(
             return user.as_deref() != Some(normalized(name).as_str());
         }
         let word = name.trim().to_lowercase();
-        !user_words.contains(&word) && holders.get(&word) == Some(&1)
+        !user_words.contains(&word)
+            && user.as_deref() != Some(word.as_str())
+            && holders.get(&word) == Some(&1)
     };
     people
         .iter()
@@ -100,13 +125,17 @@ fn words(name: &str) -> Vec<String> {
     name.split_whitespace().map(str::to_lowercase).collect()
 }
 
-/// Whether `word` is written as a name would be: capitalised, and not "I".
-fn looks_like_a_name(word: &str) -> bool {
+/// Whether `word`, coming straight after a first name, reads as the rest of
+/// that name: capitalised, and not a word transcripts capitalise anyway.
+fn looks_like_a_surname(word: &str) -> bool {
     let bare = word.trim_matches(|character: char| !character.is_alphanumeric());
+    let shouted = bare.chars().count() > 1 && !bare.chars().any(char::is_lowercase);
     bare.chars().next().is_some_and(char::is_uppercase)
+        && !shouted
         && bare != "I"
         && !bare.starts_with("I'")
         && !bare.starts_with("I\u{2019}")
+        && !CALENDAR_WORDS.contains(&bare.to_lowercase().as_str())
 }
 
 /// Whether `line` says `name` as a name. A name of several words only has to
@@ -132,21 +161,16 @@ fn said_in(line: &str, name: &str) -> bool {
             return false;
         }
         let opens_sentence = index == 0 || words[index - 1].ends_with(['.', '!', '?']);
-        // Part of a longer name ("Dana Okafor", "Priya Dana") is somebody
-        // else: their full name is matched as a whole, never by one word.
+        // Followed by a surname ("Dana Okafor") it is somebody else: their
+        // full name is matched as a whole, never by its first word.
         let ends_here = !word.ends_with(|character: char| character.is_alphanumeric())
             || word.ends_with("'s")
             || word.ends_with("\u{2019}s");
-        let surname_follows = !ends_here
+        if !ends_here
             && words
                 .get(index + 1)
-                .is_some_and(|next| looks_like_a_name(next));
-        let follows_first_name = index > 0
-            && !opens_sentence
-            && words[index - 1].ends_with(|character: char| character.is_alphanumeric())
-            && looks_like_a_name(words[index - 1])
-            && !(index == 1 || words[index - 2].ends_with(['.', '!', '?']));
-        if surname_follows || follows_first_name {
+                .is_some_and(|next| looks_like_a_surname(next))
+        {
             return false;
         }
         if !needs_context {

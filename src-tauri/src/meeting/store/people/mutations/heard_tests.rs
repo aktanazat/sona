@@ -465,8 +465,16 @@ fn a_contact_whose_alias_is_the_users_whole_name_is_found_by_their_own() {
 
 /// What the matching is meant to do, written out the long way so it does not
 /// share code with `people_heard`: the meeting gave exactly `cue`, and a
-/// person is named by it only through a name that is theirs alone.
-fn should_suggest(people: &[Person], person: &Person, cue: &str, user: Option<&str>) -> bool {
+/// person is named by it only through a name that is theirs alone. Said
+/// aloud, a cue also ends on its last word, so a stranger whose surname is a
+/// contact's only-theirs first name still reads as that contact.
+fn should_suggest(
+    people: &[Person],
+    person: &Person,
+    cue: &str,
+    spoken: bool,
+    user: Option<&str>,
+) -> bool {
     let same = |left: &str, right: &str| left.to_lowercase() == right.to_lowercase();
     let words = |name: &str| {
         name.split_whitespace()
@@ -485,16 +493,17 @@ fn should_suggest(people: &[Person], person: &Person, cue: &str, user: Option<&s
     own.extend(person.aliases.iter().cloned());
     own.extend(words(&person.display_name).first().cloned());
     own.iter().any(|name| {
-        if !same(name, cue) {
+        if name.contains(' ') {
+            return same(name, cue);
+        }
+        let ends_on = spoken && cue.split(' ').last().is_some_and(|last| same(name, last));
+        if !same(name, cue) && !ends_on {
             return false;
         }
-        if name.contains(' ') {
-            return true;
-        }
         let word = name.to_lowercase();
-        let users = user
-            .as_deref()
-            .is_some_and(|user| user.split(' ').any(|part| part == word));
+        let users = user.as_deref().is_some_and(|user| {
+            user.split(' ').any(|part| part == word) || user.replace(' ', "") == word
+        });
         let could_mean = people
             .iter()
             .filter(|other| {
@@ -514,6 +523,7 @@ fn every_mix_of_user_name_nicknames_and_shared_names_matches_as_meant() {
         Some("Jordan"),
         Some("Jordan Vale"),
         Some("jordan vale"),
+        Some("Mary Ann"),
     ];
     const FIRST: &[&str] = &[
         "Jordan Vale",
@@ -521,6 +531,7 @@ fn every_mix_of_user_name_nicknames_and_shared_names_matches_as_meant() {
         "Dana Whitfield",
         "Jordan",
         "Vale Morrow",
+        "Maryann Smith",
     ];
     const FIRST_ALIASES: &[&[&str]] = &[
         &[],
@@ -530,6 +541,7 @@ fn every_mix_of_user_name_nicknames_and_shared_names_matches_as_meant() {
         &["Dee"],
         &["Jojo", "Jordan"],
         &["Vale"],
+        &["Jordan Vale", "Jojo"],
     ];
     const SECOND: &[Option<&str>] = &[
         None,
@@ -556,6 +568,7 @@ fn every_mix_of_user_name_nicknames_and_shared_names_matches_as_meant() {
         "Dee",
         "Vale",
         "Priya",
+        "Maryann",
     ];
 
     let mut checked = 0;
@@ -576,6 +589,9 @@ fn every_mix_of_user_name_nicknames_and_shared_names_matches_as_meant() {
                                 vec![format!("I asked {cue} about it.")],
                                 vec![format!("Thanks {cue}, send it over.")],
                                 vec![format!("That was {cue}'s idea.")],
+                                vec![format!("On Monday {cue} joins us.")],
+                                vec![format!("We need {cue} ASAP.")],
+                                vec![format!("So {cue} I think we ship.")],
                                 Vec::new(),
                             ];
                             for (index, lines) in said.iter().enumerate() {
@@ -594,7 +610,13 @@ fn every_mix_of_user_name_nicknames_and_shared_names_matches_as_meant() {
                                     .collect::<Vec<_>>();
                                 for person in &people {
                                     checked += 1;
-                                    let meant = should_suggest(&people, person, cue, *user);
+                                    let meant = should_suggest(
+                                        &people,
+                                        person,
+                                        cue,
+                                        !lines.is_empty(),
+                                        *user,
+                                    );
                                     if found.contains(&person.id) != meant {
                                         wrong.push(format!(
                                             "user {user:?}, people {:?}, cue {cue:?} (form {index}): {} {}",
