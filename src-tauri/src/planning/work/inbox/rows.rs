@@ -176,17 +176,18 @@ fn echoes(conn: &Connection) -> Result<HashMap<String, String>> {
 
 /// Whether a comment asks its reader for something: a question, or one of
 /// the ways an agent says it is waiting.
+const WAITING: [&str; 8] = [
+    "please confirm",
+    "please decide",
+    "need your",
+    "needs your",
+    "waiting on you",
+    "blocked on you",
+    "let me know",
+    "your call",
+];
+
 pub(crate) fn asks(body: &str) -> bool {
-    const WAITING: [&str; 8] = [
-        "please confirm",
-        "please decide",
-        "need your",
-        "needs your",
-        "waiting on you",
-        "blocked on you",
-        "let me know",
-        "your call",
-    ];
     let lower = body.to_lowercase();
     let question = lower
         .split(['\n', '.', '!'])
@@ -204,9 +205,9 @@ fn asking<'a>(notice: &Notification, context: &'a Context) -> Option<&'a String>
         .filter(|body| asks(body))
 }
 
-/// The sentence of a comment that asks, short enough for one line.
-fn asked(body: &str) -> String {
-    const SHOWN: usize = 80;
+/// Every sentence of a comment that asks, each short enough for a line;
+/// its first sentence when no one sentence does.
+fn asked(body: &str) -> Vec<String> {
     // A sentence ends at a line break, or at a stop that white space or the
     // end follows: the stop inside "v2.1" ends nothing.
     let mut sentences = Vec::new();
@@ -235,17 +236,46 @@ fn asked(body: &str) -> String {
             start = end;
         }
     }
-    let said = sentences
+    let asking: Vec<&str> = sentences
         .iter()
-        .find(|sentence| asks(sentence))
-        .or(sentences.first())
         .copied()
-        .unwrap_or_default();
-    if said.chars().count() <= SHOWN {
+        .filter(|sentence| asks(sentence))
+        .collect();
+    if asking.is_empty() {
+        return sentences
+            .first()
+            .map(|said| excerpt(said))
+            .into_iter()
+            .collect();
+    }
+    asking.into_iter().map(excerpt).collect()
+}
+
+/// At most a line of a sentence, cut so that the words that ask stay in it:
+/// the end of a question, or the phrase that says it waits on the reader.
+fn excerpt(said: &str) -> String {
+    const SHOWN: usize = 80;
+    let letters: Vec<char> = said.chars().collect();
+    if letters.len() <= SHOWN {
         return said.to_owned();
     }
-    let cut: String = said.chars().take(SHOWN).collect();
-    format!("{}…", cut.trim_end())
+    let lower = said.to_lowercase();
+    let asks_at = match said.rfind('?') {
+        Some(at) => said[..=at].chars().count(),
+        None => WAITING
+            .iter()
+            .filter_map(|phrase| lower.find(phrase).map(|at| at + phrase.len()))
+            .min()
+            .map_or(0, |end| lower[..end].chars().count()),
+    }
+    .min(letters.len());
+    if asks_at <= SHOWN {
+        let cut: String = letters[..SHOWN].iter().collect();
+        return format!("{}…", cut.trim_end());
+    }
+    let kept: String = letters[asks_at - SHOWN..asks_at].iter().collect();
+    let more = if asks_at < letters.len() { "…" } else { "" };
+    format!("…{}{more}", kept.trim())
 }
 
 fn created(notice: &Notification) -> bool {
@@ -427,11 +457,15 @@ fn finish(row: Building, context: &Context) -> Option<InboxRow> {
         .find(|notice| notice.kind == NotificationKind::Status)
         .and_then(|notice| notice.to.as_deref());
     let grouped = row.notices.len() > 1;
-    let asked: Vec<String> = row
+    let asking: Vec<&String> = row
         .notices
         .iter()
         .filter_map(|notice| asking(notice, context))
-        .map(|body| format!("\"{}\"", asked(body)))
+        .collect();
+    let asked: Vec<String> = asking
+        .iter()
+        .flat_map(|body| asked(body))
+        .map(|said| format!("\"{said}\""))
         .collect();
     let summary = if row.batch {
         format!("Created {} tasks for you", row.notices.len())
@@ -441,7 +475,7 @@ fn finish(row: Building, context: &Context) -> Option<InboxRow> {
             .iter()
             .map(|part| Part {
                 what: part.what.clone(),
-                count: part.count - asked.len() * usize::from(part.what == "commented"),
+                count: part.count - asking.len() * usize::from(part.what == "commented"),
             })
             .filter(|part| part.count > 0)
             .collect();
@@ -548,6 +582,11 @@ pub(crate) fn rows(notices: Vec<Notification>, context: &Context) -> Vec<InboxRo
     let mut batches: HashMap<usize, usize> = HashMap::new();
     // The row each link notice went to, for the mirror an older build stored.
     let mut told: HashMap<String, usize> = HashMap::new();
+    let listed: std::collections::HashSet<String> = oldest_first
+        .iter()
+        .map(|notice| notice.id.clone())
+        .collect();
+    let mut mirrors = Vec::new();
     for notice in oldest_first {
         let at_ms = notice.created_at_ms;
         if let Some(run) = batch_of.get(&notice.id) {
@@ -581,12 +620,14 @@ pub(crate) fn rows(notices: Vec<Notification>, context: &Context) -> Vec<InboxRo
             });
             continue;
         };
-        let row = context
+        // A mirror goes to its link's row once every row is built: the two
+        // share an instant, so either may come first.
+        if context
             .echoes
             .get(&notice.id)
-            .and_then(|made| told.get(made));
-        if let Some(row) = row {
-            built[*row].echoes.push(notice);
+            .is_some_and(|made| listed.contains(made))
+        {
+            mirrors.push(notice);
             continue;
         }
         let key = (task.clone(), agent(&notice));
@@ -608,6 +649,22 @@ pub(crate) fn rows(notices: Vec<Notification>, context: &Context) -> Vec<InboxRo
         }
         built[row].notices.push(notice);
         built[row].last_at_ms = at_ms;
+    }
+    for mirror in mirrors {
+        let row = context
+            .echoes
+            .get(&mirror.id)
+            .and_then(|made| told.get(made));
+        match row {
+            Some(row) => built[*row].echoes.push(mirror),
+            // Its link is listed but joined no row of links: nothing is dropped.
+            None => built.push(Building {
+                last_at_ms: mirror.created_at_ms,
+                notices: vec![mirror],
+                echoes: Vec::new(),
+                batch: false,
+            }),
+        }
     }
 
     let mut rows: Vec<InboxRow> = built
@@ -1346,6 +1403,27 @@ mod tests {
     }
 
     #[test]
+    fn a_stored_mirror_listed_before_its_link_still_folds_into_it() {
+        let mut context = fixture().context;
+        context
+            .echoes
+            .insert("mirror".to_owned(), "link".to_owned());
+        let on = |id: &str, task: &str, to: &str| Notification {
+            item_id: Some(task.to_owned()),
+            ..agent_notice(id, START, false, Some(to))
+        };
+        // Newest first, so the mirror is read before the link it mirrors.
+        let notices = vec![
+            on("link", "task-050", "blocks:task-051"),
+            on("mirror", "task-051", "blocked_by:task-050"),
+        ];
+        let built = rows(notices, &context);
+        assert_eq!(built.len(), 1, "one link, told once");
+        assert_eq!(built[0].item_id.as_deref(), Some("task-050"));
+        assert_eq!(built[0].notice_ids, ["link", "mirror"]);
+    }
+
+    #[test]
     fn a_burst_leads_with_the_ask_a_later_edit_follows() {
         let mut context = fixture().context;
         context.comments.insert(
@@ -1476,27 +1554,82 @@ mod tests {
     fn an_ask_is_named_by_the_sentence_that_asks() {
         assert_eq!(
             asked("Drafted both. Please confirm the venue before I pay. Thanks!"),
-            "Please confirm the venue before I pay."
+            ["Please confirm the venue before I pay."]
         );
-        assert_eq!(asked("Two mockups are up"), "Two mockups are up");
+        assert_eq!(asked("Two mockups are up"), ["Two mockups are up"]);
         assert_eq!(
             asked("Built it. Can you approve v2.1? It ships Friday."),
-            "Can you approve v2.1?"
+            ["Can you approve v2.1?"]
         );
         assert_eq!(
             asked(
                 "The brief says \"ship the long version of the onboarding flow first.\" Should I?"
             ),
-            "Should I?"
+            ["Should I?"]
         );
         assert_eq!(
             asked("Done. Can I rename the label to \"Ready!\" before Friday?"),
-            "Can I rename the label to \"Ready!\" before Friday?"
+            ["Can I rename the label to \"Ready!\" before Friday?"]
         );
         let long = format!("Could you {}?", "look at this ".repeat(12));
         let shown = asked(&long);
-        assert!(shown.chars().count() <= 81, "{shown}");
-        assert!(shown.ends_with('…'));
+        assert_eq!(shown.len(), 1);
+        assert!(shown[0].chars().count() <= 81, "{shown:?}");
+        assert!(shown[0].starts_with('…') && shown[0].ends_with('?'));
+    }
+
+    #[test]
+    fn one_comment_with_two_asks_names_both() {
+        assert_eq!(
+            asked(
+                "Could you approve the left mockup? Also, please confirm the launch date. Thanks!"
+            ),
+            [
+                "Could you approve the left mockup?",
+                "Also, please confirm the launch date."
+            ]
+        );
+        let mut context = fixture().context;
+        context.comments.insert(
+            "both".to_owned(),
+            "Could you approve the left mockup? Please confirm the launch date.".to_owned(),
+        );
+        let comment = Notification {
+            kind: NotificationKind::Comment,
+            comment_id: Some("both".to_owned()),
+            field: None,
+            ..agent_notice("a", START, false, None)
+        };
+        let built = rows(
+            vec![agent_notice("b", START + MINUTE, false, None), comment],
+            &context,
+        );
+        assert_eq!(
+            built[0].summary,
+            "Asked \"Could you approve the left mockup?\" and \"Please confirm the launch date.\", changed the priority"
+        );
+    }
+
+    #[test]
+    fn a_long_sentence_keeps_the_words_that_ask() {
+        // A request in lowercase after a quoted sentence reads as one
+        // sentence; the line still shows the request.
+        let shown = asked(
+            "The brief says \"ship the long version of the onboarding flow before anything else.\" should I go ahead with that?",
+        );
+        assert_eq!(shown.len(), 1);
+        assert!(
+            shown[0].ends_with("should I go ahead with that?"),
+            "{shown:?}"
+        );
+        assert!(shown[0].chars().count() <= 81, "{shown:?}");
+        let waits = format!(
+            "{} and I need your call on the venue.",
+            "I drafted it ".repeat(8)
+        );
+        let shown = asked(&waits);
+        assert!(shown[0].contains("need your"), "{shown:?}");
+        assert!(shown[0].chars().count() <= 82, "{shown:?}");
     }
 
     #[test]
