@@ -174,8 +174,7 @@ private struct InboxList: View {
         }
         .animation(Motion.regular, value: focus.peeking)
         .onChange(of: shown.compactMap(\.itemId), initial: true) { _, ids in
-            var seen = Set<String>()
-            focus.show(ids.filter { seen.insert($0).inserted })
+            focus.show(ids)
         }
     }
 }

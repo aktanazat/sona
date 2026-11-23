@@ -702,7 +702,7 @@ private struct TaskColumn: View {
                     .font(TypeScale.listTitle)
                     .foregroundStyle(Theme.ink)
                     .lineLimit(1)
-                Text("\(group.rows.count)")
+                Text(group.rowSummary)
                     .font(TypeScale.label(12))
                     .monospacedDigit()
                     .foregroundStyle(Theme.inkTertiary)

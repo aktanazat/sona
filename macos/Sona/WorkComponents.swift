@@ -461,6 +461,7 @@ struct TaskGroupHeader: View {
     @State private var hovering = false
 
     var body: some View {
+        let summary = group.rowSummary
         HStack(spacing: 8) {
             Button(action: toggle) {
                 HStack(spacing: 10) {
@@ -477,7 +478,7 @@ struct TaskGroupHeader: View {
                             .font(TypeScale.listTitle)
                             .foregroundStyle(Theme.ink)
                             .lineLimit(1)
-                        Text("\(group.rows.count)")
+                        Text(summary)
                             .font(TypeScale.label(12))
                             .monospacedDigit()
                             .foregroundStyle(Theme.inkTertiary)
@@ -486,7 +487,7 @@ struct TaskGroupHeader: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("\(group.title), \(group.rows.count)")
+            .accessibilityLabel("\(group.title), \(summary)")
             .accessibilityHint(collapsed ? "Expand" : "Collapse")
             Spacer(minLength: 8)
             if let reschedule {

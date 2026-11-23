@@ -7,9 +7,14 @@ struct BulkActionBar: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
+        let ids = model.workTargets
+        let rows = model.workRows(ids)
+        let selected = "\(ids.count) selected"
+        let total = rows.count == ids.count ? TaskEstimate.totalTitle(rows.lazy.map(\.estimate)) : nil
+        let summary = total.map { "\(selected) · \($0)" } ?? selected
         ViewThatFits(in: .horizontal) {
-            bar(compact: false)
-            bar(compact: true)
+            bar(compact: false, ids: ids, rows: rows, summary: summary)
+            bar(compact: true, ids: ids, rows: rows, summary: summary)
         }
         .padding(6)
         .background {
@@ -22,17 +27,14 @@ struct BulkActionBar: View {
         .accessibilityLabel("Selected tasks")
     }
 
-    private func bar(compact: Bool) -> some View {
-        let focus = model.workFocus
-        let ids = model.workTargets
-        let rows = model.workRows(ids)
-        return HStack(spacing: 4) {
-            Text(ids.count == 1 ? "1 selected" : "\(ids.count) selected")
+    private func bar(compact: Bool, ids: [String], rows: [WorkItemRow], summary: String) -> some View {
+        HStack(spacing: 4) {
+            Text(summary)
                 .font(TypeScale.listTitle)
                 .monospacedDigit()
                 .foregroundStyle(Theme.ink)
                 .padding(.leading, 10)
-            WorkBarButton(icon: "xmark", help: "Clear selection  Esc") { focus.clearSelection() }
+            WorkBarButton(icon: "xmark", help: "Clear selection  Esc") { model.workFocus.clearSelection() }
             Hairline(axis: .vertical).frame(height: 18).padding(.horizontal, 4)
             if place == .triage {
                 TriageButtons(ids: ids)

@@ -115,6 +115,12 @@ struct TaskGroup: Identifiable, Equatable {
     var patch: WorkPatch?
     /// The label a task dropped here gains, beside the ones it has.
     var addsLabel: String? = nil
+
+    var rowSummary: String {
+        let count = "\(rows.count)"
+        guard let total = TaskEstimate.totalTitle(rows.lazy.map(\.estimate)) else { return count }
+        return "\(count) · \(total)"
+    }
 }
 
 /// Filtering, ordering and grouping, on the rows the store already holds, so
