@@ -3982,6 +3982,46 @@ impl MeetingSessionManager {
         }
         Ok(result)
     }
+
+    pub(crate) async fn preview_note_edit(
+        &self,
+        request: super::note_edits::NoteEditRequest,
+    ) -> Result<super::note_edits::NoteEditPreview, MeetingCommandError> {
+        let store = self.store().await?;
+        let processing = Arc::clone(&self.processing);
+        tauri::async_runtime::spawn_blocking(move || {
+            let notes = store
+                .finished_note_for_edit(request.source)
+                .map_err(map_store_error)?;
+            let generator = processing
+                .local_text_generator()
+                .ok_or(MeetingCommandError::LocalModelUnavailable)?;
+            super::note_edits::propose(
+                request.source,
+                notes,
+                &request.instruction,
+                generator.as_ref(),
+            )
+        })
+        .await
+        .map_err(|_| MeetingCommandError::EngineFailure)?
+    }
+
+    pub(crate) async fn apply_note_edit(
+        &self,
+        request: super::note_edits::NoteEditApply,
+    ) -> Result<(), MeetingCommandError> {
+        let store = self.store().await?;
+        let session_id = request.source.session_id;
+        store
+            .save_finished_note_edit(request)
+            .map_err(map_store_error)?;
+        if let Ok(snapshot) = store.session_snapshot(session_id) {
+            self.emit_session_changed(&snapshot);
+        }
+        Ok(())
+    }
+
     pub async fn export(
         &self,
         request: MeetingExportRequest,

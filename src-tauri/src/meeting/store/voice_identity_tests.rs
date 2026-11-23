@@ -2008,6 +2008,7 @@ fn an_action_a_voice_took_on_reads_by_that_voices_name_now() -> Result<(), Store
                 }],
             },
             owner_text: Some(owner.to_owned()),
+            owner_edited: false,
             due_text: None,
         }
     };

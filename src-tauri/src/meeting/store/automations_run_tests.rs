@@ -572,6 +572,7 @@ fn a_commitment_the_notes_dated_reaches_reminders_with_that_day() {
                 citations: vec![citation(segment)],
             },
             owner_text: Some("Aktan".to_string()),
+            owner_edited: false,
             due_text: Some("by 2026-04-01".to_string()),
         },
         // Another moment in the same meeting, with a day on it. It must not
@@ -582,6 +583,7 @@ fn a_commitment_the_notes_dated_reaches_reminders_with_that_day() {
                 citations: vec![citation(TranscriptSegmentId::new())],
             },
             owner_text: None,
+            owner_edited: false,
             due_text: Some("2026-04-09".to_string()),
         },
     ];
@@ -621,6 +623,7 @@ fn a_commitment_the_notes_left_undated_becomes_a_reminder_with_no_day() {
             citations: vec![citation(segment)],
         },
         owner_text: None,
+        owner_edited: false,
         due_text: None,
     }];
     store_current_artifact(&store, session_id, &content);

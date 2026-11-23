@@ -10,6 +10,7 @@ use crate::meeting::detection::calendar::CalendarAccess;
 use crate::meeting::detection::DetectionRuntime;
 use crate::meeting::local_generator::{MeetingLocalEngineStatus, MeetingTextEngineChoice};
 use crate::meeting::lone_tail::{self, MeetingRecordingTail};
+use crate::meeting::note_edits::{NoteEditApply, NoteEditPreview, NoteEditRequest};
 use crate::meeting::series_types::{
     MeetingSeriesAlwaysRecordSetRequest, MeetingSeriesDigestSetRequest,
     MeetingSeriesMutationResult, MeetingSeriesPreferences, MeetingSeriesRemoteOptOutSetRequest,
@@ -655,6 +656,24 @@ pub async fn meeting_artifacts_regenerate(
     request: MeetingMutationRequest,
 ) -> Result<MeetingMutationResult, MeetingCommandError> {
     manager.artifacts_regenerate(request).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn meeting_note_edit_preview(
+    manager: State<'_, Arc<MeetingSessionManager>>,
+    request: NoteEditRequest,
+) -> Result<NoteEditPreview, MeetingCommandError> {
+    manager.preview_note_edit(request).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn meeting_note_edit_apply(
+    manager: State<'_, Arc<MeetingSessionManager>>,
+    request: NoteEditApply,
+) -> Result<(), MeetingCommandError> {
+    manager.apply_note_edit(request).await
 }
 
 #[tauri::command]

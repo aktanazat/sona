@@ -1556,6 +1556,20 @@ final class MeetingsStore {
         }
     }
 
+    func previewNoteEdit(
+        _ source: MeetingNoteEditSource, instruction: String
+    ) async throws -> MeetingNoteEditPreview {
+        try await core.request(
+            "meeting_note_edit_preview",
+            ["request": MeetingNoteEditPrompt(source: source, instruction: instruction)])
+    }
+
+    func applyNoteEdit(_ preview: MeetingNoteEditPreview) async throws {
+        let request = MeetingNoteEditApproval(source: preview.source, changes: preview.changes.map(\.change))
+        try await core.request("meeting_note_edit_apply", ["request": request])
+        if isOpen(preview.source.sessionId) { await refreshSnapshot() }
+    }
+
     /// Asks the core to write the notes again. A rewrite that wrote nothing
     /// says why, read from the status the core wrote for the meeting that
     /// was pressed, and whether its earlier notes stay.
@@ -1700,6 +1714,7 @@ final class MeetingsStore {
                     MeetingRequest.actionItemDone(
                         sessionId, artifactId: artifactId, actionIndex: index, done: done)
                 )
+                guard isOpen(sessionId), snapshot?.readableArtifact?.artifactId == artifactId else { return }
                 guard let current = analytics else { return }
                 analytics = MeetingAnalyticsSnapshot(
                     sessionId: current.sessionId,
@@ -1711,6 +1726,10 @@ final class MeetingsStore {
                 )
             } catch {
                 self.error = reason(error)
+                if (error as? CoreError)?.remote(as: MeetingCommandError.self) == .staleRevision,
+                   isOpen(sessionId) {
+                    await refreshSnapshot()
+                }
             }
         }
     }

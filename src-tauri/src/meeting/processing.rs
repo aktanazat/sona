@@ -6419,6 +6419,7 @@ fn validate_artifact_output(
                     cited_words_say(citations, evidence, owner)
                         || commits_in_first_person(citations, evidence, speakers, owner)
                 }),
+                owner_edited: false,
                 due_text: bounded_generated_text(
                     item.due_text.as_deref(),
                     "action_items.due_text",
@@ -10071,6 +10072,7 @@ pub(crate) mod tests {
                     citations: vec![meeting.citation(line)],
                 },
                 owner_text: owner.map(str::to_string),
+                owner_edited: false,
                 due_text: due.map(str::to_string),
             };
         assert_eq!(

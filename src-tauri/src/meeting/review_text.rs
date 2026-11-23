@@ -16,8 +16,7 @@ pub(crate) fn readable_artifact(
     let newest = |state: MeetingArtifactState| {
         artifacts
             .iter()
-            .filter(|artifact| artifact.state == state && artifact.content.is_some())
-            .max_by_key(|artifact| artifact.generated_at_utc_ms)
+            .find(|artifact| artifact.state == state && artifact.content.is_some())
     };
     newest(MeetingArtifactState::Current).or_else(|| newest(MeetingArtifactState::OutOfDate))
 }

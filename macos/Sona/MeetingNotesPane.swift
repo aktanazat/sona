@@ -8,6 +8,7 @@ struct ArtifactPane: View {
     let snapshot: MeetingReviewSnapshot
     /// For naming the person's own template a generation was written with.
     let templates: MeetingTemplatesStore
+    @State private var editingNotes: MeetingNoteEditSource?
 
     var body: some View {
         if let artifact = snapshot.readableArtifact, let content = artifact.content {
@@ -44,6 +45,9 @@ struct ArtifactPane: View {
                 written(artifact)
             }
             .task { await templates.loadIfNeeded() }
+            .sheet(item: $editingNotes) { source in
+                FinishedNoteEditSheet(store: store, source: source)
+            }
         }
     }
 
@@ -147,11 +151,177 @@ struct ArtifactPane: View {
         return HStack(alignment: .firstTextBaseline, spacing: 12) {
             Text("Written \(date.short) at \(date.time)" + (template.map { " · \($0)" } ?? ""))
                 .metaText()
+            if artifact.state == .current,
+               snapshot.session.phase == .reviewReady || snapshot.session.phase == .recoveryRequired {
+                Button("Revise notes…") {
+                    editingNotes = MeetingNoteEditSource(
+                        sessionId: snapshot.session.sessionId,
+                        artifactId: artifact.artifactId,
+                        expectedRevision: snapshot.session.revision)
+                }
+                .buttonStyle(.quiet)
+                .disabled(store.busy)
+            }
             if store.canRegenerate {
                 Button("Write it again") { store.regenerate() }
                     .buttonStyle(.quiet)
                     .disabled(store.busy)
             }
+        }
+    }
+}
+
+private struct FinishedNoteEditSheet: View {
+    private enum Step {
+        case request
+        case preparing
+        case review(MeetingNoteEditPreview)
+        case saving(MeetingNoteEditPreview)
+        case stale
+    }
+
+    let store: MeetingsStore
+    let source: MeetingNoteEditSource
+    @Environment(\.dismiss) private var dismiss
+    @State private var step = Step.request
+    @State private var instruction = ""
+    @State private var error: String?
+    @FocusState private var requestFocused: Bool
+
+    private var saving: Bool { if case .saving = step { true } else { false } }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Space.m) {
+            Text("Revise notes").titleText().accessibilityAddTraits(.isHeader)
+            switch step {
+            case .request, .preparing:
+                TextField("What should change?", text: $instruction, axis: .vertical)
+                    .textFieldStyle(.roundedBorder)
+                    .accessibilityLabel("What should change?")
+                    .lineLimit(3...5)
+                    .focused($requestFocused)
+                    .disabled(preparing)
+            case .review(let preview), .saving(let preview):
+                comparison(preview)
+            case .stale:
+                Text("These notes changed. Open the latest version before revising them.")
+                    .bodyText()
+            }
+            ErrorNote(error)
+            HStack {
+                if preparing || saving { ProgressView().controlSize(.small) }
+                Spacer()
+                Button("Cancel") { dismiss() }
+                    .buttonStyle(.quiet)
+                    .keyboardShortcut(.cancelAction)
+                    .disabled(saving)
+                switch step {
+                case .request, .preparing:
+                    Button("Preview", action: prepare)
+                        .buttonStyle(.primary)
+                        .keyboardShortcut(.defaultAction)
+                        .disabled(preparing || instruction.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                case .review(let preview), .saving(let preview):
+                    Button("Back") {
+                        error = nil
+                        step = .request
+                        requestFocused = true
+                    }
+                    .buttonStyle(.quiet)
+                    .disabled(saving)
+                    Button("Apply changes") { apply(preview) }
+                        .buttonStyle(.primary)
+                        .keyboardShortcut(.defaultAction)
+                        .disabled(saving || preview.changes.isEmpty)
+                case .stale:
+                    Button("Open latest notes") {
+                        dismiss()
+                        Task { await store.refreshSnapshot() }
+                    }
+                    .buttonStyle(.primary)
+                }
+            }
+        }
+        .padding(Space.l)
+        .frame(width: 520)
+        .interactiveDismissDisabled(saving)
+        .onAppear { requestFocused = true }
+    }
+
+    private var preparing: Bool { if case .preparing = step { true } else { false } }
+
+    @ViewBuilder
+    private func comparison(_ preview: MeetingNoteEditPreview) -> some View {
+        if preview.changes.isEmpty {
+            Text("No changes suggested.").bodyText()
+        } else {
+            ScrollView {
+                VStack(alignment: .leading, spacing: Space.m) {
+                    ForEach(preview.changes) { difference in
+                        VStack(alignment: .leading, spacing: Space.s) {
+                            Text(difference.label).headlineText().accessibilityAddTraits(.isHeader)
+                            if let context = difference.context {
+                                Text(context).bodyText().textSelection(.enabled)
+                            }
+                            comparisonLine("Before", text: difference.before)
+                            comparisonLine("After", text: difference.change.text)
+                        }
+                    }
+                }.frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(maxHeight: 370)
+        }
+    }
+
+    private func comparisonLine(_ label: LocalizedStringKey, text: String) -> some View {
+        VStack(alignment: .leading, spacing: Space.xs) {
+            Text(label).metaText()
+            Text(text).bodyText().textSelection(.enabled)
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    private func prepare() {
+        guard case .request = step else { return }
+        step = .preparing
+        error = nil
+        Task {
+            do {
+                step = .review(try await store.previewNoteEdit(source, instruction: instruction))
+            } catch {
+                refuse(error, retry: .request)
+            }
+        }
+    }
+
+    private func apply(_ preview: MeetingNoteEditPreview) {
+        guard case .review = step else { return }
+        step = .saving(preview)
+        error = nil
+        Task {
+            do {
+                try await store.applyNoteEdit(preview)
+                dismiss()
+            } catch {
+                refuse(error, retry: .review(preview))
+            }
+        }
+    }
+
+    private func refuse(_ failure: any Error, retry: Step) {
+        let command = (failure as? CoreError)?.remote(as: MeetingCommandError.self)
+        if command == .staleRevision || command == .notFound {
+            step = .stale
+            return
+        }
+        step = retry
+        error = switch command {
+        case .invalidRequest: "Use a shorter edit request."
+        case .localModelUnavailable: "Choose an available local model in Meetings settings."
+        case .localEvidenceUnavailable: "These notes are too long for the local model."
+        case .safetyBlocked, .modelDeclined: "The local model could not make this edit."
+        case .unsupportedLanguage: "The local model doesn’t support this language."
+        default: "Couldn’t confirm the edit. Check the latest notes before trying again."
         }
     }
 }

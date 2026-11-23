@@ -3053,6 +3053,16 @@ pub(super) async fn call(
                 crate::commands::meeting::meeting_artifacts_regenerate(app.state(), request).await,
             )
         }
+        "meeting_note_edit_preview" => {
+            let mut args = Args::parse(params)?;
+            let request = args.take("request")?;
+            reply(crate::commands::meeting::meeting_note_edit_preview(app.state(), request).await)
+        }
+        "meeting_note_edit_apply" => {
+            let mut args = Args::parse(params)?;
+            let request = args.take("request")?;
+            reply(crate::commands::meeting::meeting_note_edit_apply(app.state(), request).await)
+        }
         "meeting_question_forget" => {
             let mut args = Args::parse(params)?;
             let request = args.take("request")?;
