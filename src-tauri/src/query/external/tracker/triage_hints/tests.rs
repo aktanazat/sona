@@ -423,3 +423,319 @@ fn work_for_projects_with_no_tasks_yet_is_left_for_the_user() {
     println!("686 accepted: {misfiled} under another project, {filed:?} under their own");
     assert_eq!((misfiled, filed), (0, vec![172, 0, 0, 0]));
 }
+
+/// The specialist an independent review raised: in three of the four
+/// meetings with people on them, every task of theirs under one project,
+/// and two tasks elsewhere that share the new item's words. Their meetings
+/// still say where the item goes, and adding unrelated meetings changes
+/// nothing.
+#[test]
+fn a_specialist_in_most_meetings_still_suggests_their_project() {
+    let mut desk = Desk::new();
+    let ines = person(&desk.meetings, "Ines Moreau", &[], &[]);
+    let optics = desk.project("Optics");
+    let power = desk.project("Power");
+    for day in 0..2 {
+        let held = meeting(&desk.meetings, "Bench review", AT + day * 86_400_000);
+        link(&desk.meetings, held, ines, "calendar", "confirmed");
+        for title in ["Align the lens mount", "Polish the mirror"] {
+            desk.task(
+                &format!("{title} {day}"),
+                WorkStatus::NotStarted,
+                Some(&optics),
+                &WorkOwner::Nobody,
+                Some(held),
+            );
+        }
+    }
+    for title in [
+        "Calibrate the bench supply",
+        "Calibrate the bench supply rail",
+    ] {
+        desk.task(
+            title,
+            WorkStatus::NotStarted,
+            Some(&power),
+            &WorkOwner::Nobody,
+            None,
+        );
+    }
+    let other = person(&desk.meetings, "Tom Hale", &[], &[]);
+    let aside = meeting(&desk.meetings, "Budget", AT + 3 * 86_400_000);
+    link(&desk.meetings, aside, other, "calendar", "confirmed");
+    let today = meeting(&desk.meetings, "Bench review", AT + 4 * 86_400_000);
+    link(&desk.meetings, today, ines, "calendar", "confirmed");
+    let new = desk.task(
+        "Calibrate the bench supply meter",
+        WorkStatus::Triage,
+        None,
+        &WorkOwner::Nobody,
+        Some(today),
+    );
+    let project = [WorkSuggestionField::Project];
+    let expected = ["The last 4 tasks from meetings with Ines Moreau went to Optics"];
+
+    assert_eq!(reasons(&desk.suggestions(&new), &project), expected);
+
+    for day in 5..7 {
+        let more = meeting(&desk.meetings, "Budget", AT + day * 86_400_000);
+        link(&desk.meetings, more, other, "calendar", "confirmed");
+    }
+
+    assert_eq!(reasons(&desk.suggestions(&new), &project), expected);
+}
+
+/// Two people whose work goes to different projects: the one with more
+/// tasks behind them decides, as before, and a weaker match on the title
+/// does not win in their place.
+#[test]
+fn of_two_attendees_who_disagree_the_one_with_more_behind_them_decides() {
+    let mut desk = Desk::new();
+    let ines = person(&desk.meetings, "Ines Moreau", &[], &[]);
+    let tom = person(&desk.meetings, "Tom Hale", &[], &[]);
+    let optics = desk.project("Optics");
+    let power = desk.project("Power");
+    let frames = desk.project("Frames");
+    let bench = meeting(&desk.meetings, "Bench review", AT);
+    link(&desk.meetings, bench, ines, "calendar", "confirmed");
+    for title in [
+        "Align the lens mount",
+        "Polish the mirror",
+        "Coat the prism",
+    ] {
+        desk.task(
+            title,
+            WorkStatus::NotStarted,
+            Some(&optics),
+            &WorkOwner::Nobody,
+            Some(bench),
+        );
+    }
+    let supply = meeting(&desk.meetings, "Supply review", AT + 86_400_000);
+    link(&desk.meetings, supply, tom, "calendar", "confirmed");
+    for title in ["Order the fuses", "Test the inverter"] {
+        desk.task(
+            title,
+            WorkStatus::NotStarted,
+            Some(&power),
+            &WorkOwner::Nobody,
+            Some(supply),
+        );
+    }
+    for title in ["Weld the corner bracket", "Weld the corner bracket again"] {
+        desk.task(
+            title,
+            WorkStatus::NotStarted,
+            Some(&frames),
+            &WorkOwner::Nobody,
+            None,
+        );
+    }
+    let today = meeting(&desk.meetings, "Joint review", AT + 2 * 86_400_000);
+    link(&desk.meetings, today, ines, "calendar", "confirmed");
+    link(&desk.meetings, today, tom, "calendar", "confirmed");
+    let new = desk.task(
+        "Weld the corner bracket cover",
+        WorkStatus::Triage,
+        None,
+        &WorkOwner::Nobody,
+        Some(today),
+    );
+
+    assert_eq!(
+        reasons(&desk.suggestions(&new), &[WorkSuggestionField::Project]),
+        ["The last 3 tasks from meetings with Ines Moreau went to Optics"]
+    );
+}
+
+/// What decided that a person's meetings speak for a project is counted
+/// over tasks outside the five the reason names. A meeting kept on this Mac
+/// behind any of them keeps the suggestion from an agent.
+#[test]
+fn a_kept_meeting_that_was_only_weighed_still_hides_the_suggestion() {
+    let mut desk = Desk::new();
+    let dana = person(&desk.meetings, "Dana Reyes", &[], &[]);
+    let tom = person(&desk.meetings, "Tom Hale", &[], &[]);
+    let lighting = desk.project("Pier Lighting");
+    let dredging = desk.project("Harbor Dredging");
+    // Older than the five the reason will name, and elsewhere.
+    let kept = meeting(&desk.meetings, "Channel walk", AT);
+    link(&desk.meetings, kept, tom, "calendar", "confirmed");
+    desk.task(
+        "Sound the channel",
+        WorkStatus::NotStarted,
+        Some(&dredging),
+        &WorkOwner::Nobody,
+        Some(kept),
+    );
+    let walk = meeting(&desk.meetings, "Pier walk", AT + 86_400_000);
+    link(&desk.meetings, walk, dana, "calendar", "confirmed");
+    for title in ["Order the bulbs", "Fix the ramp"] {
+        desk.task(
+            title,
+            WorkStatus::NotStarted,
+            Some(&lighting),
+            &WorkOwner::Nobody,
+            Some(walk),
+        );
+    }
+    let today = meeting(&desk.meetings, "Pier sync", AT + 2 * 86_400_000);
+    link(&desk.meetings, today, dana, "calendar", "confirmed");
+    let new = desk.task(
+        "Call the electrician",
+        WorkStatus::Triage,
+        None,
+        &WorkOwner::Nobody,
+        Some(today),
+    );
+
+    let suggestions = desk.suggestions(&new);
+    let read = |fence: &Fence| -> Vec<&str> {
+        suggestions
+            .iter()
+            .filter(|suggestion| !fence.hides_suggestion(suggestion))
+            .map(|suggestion| suggestion.reason.as_str())
+            .collect()
+    };
+
+    assert_eq!(
+        read(&Fence::Open(KeptLocal(HashSet::new()))),
+        ["The last 2 tasks from meetings with Dana Reyes went to Pier Lighting"]
+    );
+    assert_eq!(
+        read(&Fence::Open(KeptLocal(HashSet::from([kept])))),
+        Vec::<&str>::new()
+    );
+}
+
+/// A month less tidy than the one above, from a fixed seed: meetings in no
+/// order, one to three items each, two colleagues who drop in on most
+/// meetings, leads who sometimes sit in on each other's, and half the titles
+/// sharing a word with another project's. Every project starts with three
+/// tasks. Counts what accepting with suggestions files where.
+fn misfiled_after_a_messy_month() -> (usize, usize, usize) {
+    const MEETINGS: usize = 240;
+    let mut seed: u64 = 0x5eed_0f_a_f1c7;
+    let mut roll = move |sides: u64| {
+        seed = seed
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        // PANIC: a remainder below `sides` fits wherever `sides` came from.
+        usize::try_from((seed >> 33) % sides).expect("a small roll")
+    };
+    let mut desk = Desk::new();
+    let floaters = [
+        (person(&desk.meetings, "Sam Ortiz", &[], &[]), 8),
+        (person(&desk.meetings, "Noor Aziz", &[], &[]), 6),
+    ];
+    let streams: Vec<_> = [
+        ("Pier Lighting", "Dana Reyes", "lamp"),
+        ("Harbor Dredging", "Priya Nair", "silt"),
+        ("Ferry Timetable", "Marco Bell", "ferry"),
+        ("Market Stalls", "Lena Fischer", "stall"),
+    ]
+    .into_iter()
+    .map(|(project, lead, word)| {
+        (
+            desk.project(project),
+            person(&desk.meetings, lead, &[], &[]),
+            word,
+        )
+    })
+    .collect();
+    for (stream, (project, lead, word)) in streams.iter().enumerate() {
+        desk.now += 3_600_000;
+        let kickoff = meeting(&desk.meetings, "Kickoff", desk.now);
+        link(&desk.meetings, kickoff, *lead, "calendar", "confirmed");
+        for task in 0..3 {
+            desk.task(
+                &format!("Plan the {word} work k{stream}{task}"),
+                WorkStatus::NotStarted,
+                Some(project),
+                &WorkOwner::Nobody,
+                Some(kickoff),
+            );
+        }
+    }
+    let (mut own, mut other, mut unfiled) = (0, 0, 0);
+    let mut number = 0;
+    for _ in 0..MEETINGS {
+        let stream = roll(4);
+        desk.now += 3_600_000;
+        let held = meeting(&desk.meetings, "Weekly", desk.now);
+        link(
+            &desk.meetings,
+            held,
+            streams[stream].1,
+            "calendar",
+            "confirmed",
+        );
+        for (floater, of_ten) in floaters {
+            if roll(10) < of_ten {
+                link(&desk.meetings, held, floater, "calendar", "confirmed");
+            }
+        }
+        if roll(100) < 15 {
+            let guest = (stream + 1 + roll(3)) % 4;
+            link(
+                &desk.meetings,
+                held,
+                streams[guest].1,
+                "calendar",
+                "confirmed",
+            );
+        }
+        for _ in 0..=roll(3) {
+            number += 1;
+            let word = if roll(2) == 0 {
+                streams[stream].2
+            } else {
+                streams[roll(4)].2
+            };
+            let item = desk.task(
+                &format!("Chase the {word} quote m{number}a m{number}b"),
+                WorkStatus::Triage,
+                None,
+                &WorkOwner::Nobody,
+                Some(held),
+            );
+            let mut failed = None;
+            let accepted = desk.meetings.with_planning_snapshot(|meetings| {
+                let mut reader = MeetingReader::new(Some(meetings), None);
+                sync::acceptance(&desk.history, &mut reader, &item, true, None)
+                    .and_then(|patch| {
+                        sync::accept(&desk.history, None, &item, &patch, WorkActor::Me, desk.now)
+                    })
+                    .map_err(|error| {
+                        failed = Some(error);
+                        StoreError::Unavailable
+                    })
+            });
+            // PANIC: accepting a fixture's own Triage item cannot fail.
+            let (accepted, _) =
+                accepted.unwrap_or_else(|error| panic!("the acceptance: {failed:?} {error:?}"));
+            match accepted.project_id {
+                Some(project) if project == streams[stream].0 => own += 1,
+                Some(_) => other += 1,
+                None => unfiled += 1,
+            }
+        }
+    }
+    (own, other, unfiled)
+}
+
+/// In the messy month fewer than one item in five is filed under the wrong
+/// project, and more than four times as many under the right one. The
+/// counts move a little from run to run, because people get fresh ids and
+/// two people with as much behind them are told apart by id.
+#[test]
+fn a_messy_month_files_few_items_under_the_wrong_project() {
+    let (own, other, unfiled) = misfiled_after_a_messy_month();
+    println!(
+        "messy month: {own} under their own project, {other} under another, {unfiled} unfiled"
+    );
+    assert!(
+        5 * other < own + other + unfiled && own > 4 * other,
+        "{own} own, {other} other, {unfiled} unfiled"
+    );
+}
