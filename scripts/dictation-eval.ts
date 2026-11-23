@@ -23,9 +23,11 @@
  * is total per-clip median decode time over total audio time, lower is
  * better. WER is corpus-weighted word edits over reference words after NFKC,
  * lowercasing and replacing punctuation and symbols with spaces, with no
- * number verbalization: "27" against "twenty seven" counts as errors. For the
- * synthetic set `written_wer_percent` scores against each clip's written form
- * ("$427.50") where it has one, which is what dictation should paste. */
+ * number verbalization. The reference is what dictation should paste: each
+ * synthetic clip's written form ("$427.50") where it has one, LibriSpeech's
+ * transcript otherwise. `spoken_wer_percent` scores against the words the
+ * voice spoke ("four hundred twenty seven dollars and fifty cents"), so a
+ * model that writes digits scores errors there. */
 import { createHash } from "node:crypto";
 import {
   copyFileSync,
@@ -182,19 +184,19 @@ function round(value: number, digits: number): number {
 export function summarizeSet(results: ClipResult[]) {
   let referenceWords = 0;
   let edits = 0;
-  let writtenWords = 0;
-  let writtenEdits = 0;
+  let spokenWords = 0;
+  let spokenEdits = 0;
   let audioSeconds = 0;
   let decodeSeconds = 0;
   const latencies: number[] = [];
   for (const result of results) {
     const hypothesis = normalizeWords(result.hypothesis);
-    const reference = normalizeWords(result.clip.reference);
-    const written = normalizeWords(result.clip.written);
+    const reference = normalizeWords(result.clip.written);
+    const spoken = normalizeWords(result.clip.reference);
     referenceWords += reference.length;
     edits += wordEdits(reference, hypothesis);
-    writtenWords += written.length;
-    writtenEdits += wordEdits(written, hypothesis);
+    spokenWords += spoken.length;
+    spokenEdits += wordEdits(spoken, hypothesis);
     const latency = median(result.decodeMs);
     latencies.push(latency);
     audioSeconds += result.audioSeconds;
@@ -205,7 +207,7 @@ export function summarizeSet(results: ClipResult[]) {
     reference_words: referenceWords,
     word_edits: edits,
     wer_percent: round((100 * edits) / referenceWords, 2),
-    written_wer_percent: round((100 * writtenEdits) / writtenWords, 2),
+    spoken_wer_percent: round((100 * spokenEdits) / spokenWords, 2),
     latency_ms: {
       median: round(median(latencies), 1),
       p95: percentile(latencies, 95),

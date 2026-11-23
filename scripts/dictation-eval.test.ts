@@ -85,7 +85,7 @@ function result(
 }
 
 describe("summarizeSet", () => {
-  test("weights WER by reference words and RTF by audio time", () => {
+  test("scores the written form, weights by reference words and RTF by audio time", () => {
     const summary = summarizeSet([
       result(
         "pay twenty seven dollars",
@@ -97,10 +97,10 @@ describe("summarizeSet", () => {
       result("hello there", "hello there", "Hello there.", [300, 200, 250], 3),
     ]);
     expect(summary.clips).toBe(2);
-    expect(summary.reference_words).toBe(6);
-    expect(summary.word_edits).toBe(3);
-    expect(summary.wer_percent).toBe(50);
-    expect(summary.written_wer_percent).toBe(0);
+    expect(summary.reference_words).toBe(4);
+    expect(summary.word_edits).toBe(0);
+    expect(summary.wer_percent).toBe(0);
+    expect(summary.spoken_wer_percent).toBe(50);
     expect(summary.latency_ms).toEqual({ median: 180, p95: 250 });
     expect(summary.rtf).toBe(0.072);
   });
