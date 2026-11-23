@@ -441,3 +441,24 @@ fn the_users_own_entry_is_not_suggested_by_its_nickname() {
     assert!(people_heard(&people, &heard, Some("Jordan Vale")).is_empty());
     assert_eq!(people_heard(&people, &heard, None).len(), 1);
 }
+
+#[test]
+fn a_contact_whose_alias_is_the_users_whole_name_is_found_by_their_own() {
+    let people = [invented("Jordan Pryce", &["Jordan"])];
+    let listed = ["Jordan Pryce".to_string()];
+    let lines = ["Jordan, are you there?".to_string()];
+    let full_name = Heard {
+        lines: &lines,
+        listed: &listed,
+    };
+    assert_eq!(
+        names(people_heard(&people, &full_name, Some("Jordan"))),
+        ["Jordan Pryce"]
+    );
+
+    let alias_only = Heard {
+        lines: &lines,
+        listed: &[],
+    };
+    assert!(people_heard(&people, &alias_only, Some("Jordan")).is_empty());
+}
