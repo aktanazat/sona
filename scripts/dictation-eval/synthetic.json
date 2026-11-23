@@ -1,0 +1,98 @@
+{
+  "voice": "Samantha",
+  "rate": 170,
+  "clips": [
+    {
+      "id": "say-01",
+      "text": "Remind me to call Siobhan Nguyen tomorrow morning about the budget."
+    },
+    {
+      "id": "say-02",
+      "text": "Maria, can you move the design review to Thursday afternoon?"
+    },
+    {
+      "id": "say-03",
+      "text": "The meeting with Priya and Joaquin starts at three thirty.",
+      "written": "The meeting with Priya and Joaquin starts at 3:30."
+    },
+    {
+      "id": "say-04",
+      "text": "The order total came to four hundred twenty seven dollars and fifty cents.",
+      "written": "The order total came to $427.50."
+    },
+    {
+      "id": "say-05",
+      "text": "My phone number is five five five, two three four, nine eight seven six.",
+      "written": "My phone number is 555-234-9876."
+    },
+    {
+      "id": "say-06",
+      "text": "We shipped version two point four on March twenty seventh, twenty twenty six.",
+      "written": "We shipped version 2.4 on March 27th, 2026."
+    },
+    {
+      "id": "say-07",
+      "text": "Book a table for six people at seven fifteen on Saturday.",
+      "written": "Book a table for six people at 7:15 on Saturday."
+    },
+    {
+      "id": "say-08",
+      "text": "Thanks, Kenji. I'll review the pull request tonight and reply by noon."
+    },
+    {
+      "id": "say-09",
+      "text": "Our revenue grew eighteen percent, from one point two to one point four million.",
+      "written": "Our revenue grew 18%, from 1.2 to 1.4 million."
+    },
+    {
+      "id": "say-10",
+      "text": "Schedule the dentist appointment for the second of December at nine."
+    },
+    {
+      "id": "say-11",
+      "text": "Hey Anastasia, are we still on for lunch on the twenty first?",
+      "written": "Hey Anastasia, are we still on for lunch on the 21st?"
+    },
+    {
+      "id": "say-12",
+      "text": "Add milk, eggs, bread, and coffee to the shopping list."
+    },
+    {
+      "id": "say-13",
+      "text": "The flight leaves gate thirty two at eleven forty five tonight.",
+      "written": "The flight leaves gate 32 at 11:45 tonight."
+    },
+    {
+      "id": "say-14",
+      "text": "Ask Guillaume whether the contract was signed on January ninth.",
+      "written": "Ask Guillaume whether the contract was signed on January 9th."
+    },
+    {
+      "id": "say-15",
+      "text": "Note to self: the Wi-Fi password changed again, so update the router."
+    },
+    {
+      "id": "say-16",
+      "text": "Please transfer one thousand five hundred euros to Ingrid by the end of the month.",
+      "written": "Please transfer 1,500 euros to Ingrid by the end of the month."
+    },
+    {
+      "id": "say-17",
+      "text": "Quick question: did Rahul finish the quarterly report, or is it still in draft?"
+    },
+    {
+      "id": "say-18",
+      "text": "Meet me at forty two Elm Street, apartment three B, at half past six.",
+      "written": "Meet me at 42 Elm Street, apartment 3B, at half past six."
+    },
+    {
+      "id": "say-19",
+      "text": "Room temperature should stay between sixty eight and seventy two degrees.",
+      "written": "Room temperature should stay between 68 and 72 degrees."
+    },
+    {
+      "id": "say-20",
+      "text": "Great work, everyone! Let's ship it on the fourth of July."
+    }
+  ]
+}
