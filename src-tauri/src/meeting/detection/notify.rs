@@ -629,7 +629,7 @@ mod macos {
         UNAuthorizationOptions, UNAuthorizationStatus, UNMutableNotificationContent,
         UNNotificationAction, UNNotificationActionOptions, UNNotificationCategory,
         UNNotificationCategoryOptions, UNNotificationRequest, UNNotificationResponse,
-        UNUserNotificationCenter, UNUserNotificationCenterDelegate,
+        UNNotificationSettings, UNUserNotificationCenter, UNUserNotificationCenterDelegate,
     };
     use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
     use std::sync::{Arc, Mutex, OnceLock};
@@ -639,6 +639,7 @@ mod macos {
     const ACCESS_NOT_DETERMINED: u8 = 0;
     const ACCESS_AUTHORIZED: u8 = 1;
     const ACCESS_DENIED: u8 = 2;
+    const ACCESS_UNAVAILABLE: u8 = 3;
 
     fn access_code(status: UNAuthorizationStatus) -> u8 {
         match status {
@@ -652,6 +653,7 @@ mod macos {
         match code {
             ACCESS_AUTHORIZED => NotificationAccess::Authorized,
             ACCESS_DENIED => NotificationAccess::Denied,
+            ACCESS_UNAVAILABLE => NotificationAccess::Unavailable,
             _ => NotificationAccess::NotDetermined,
         }
     }
@@ -863,18 +865,22 @@ mod macos {
             }
             let cached_access = Arc::clone(&self.cached_access);
             let query_in_flight = Arc::clone(&self.access_query_in_flight);
-            let completion = RcBlock::new(
-                move |settings: core::ptr::NonNull<
-                    objc2_user_notifications::UNNotificationSettings,
-                >| {
-                    // SAFETY: the system hands a live settings object to this block.
-                    let status = unsafe { settings.as_ref().authorizationStatus() };
-                    cached_access.store(access_code(status), Ordering::Release);
-                    query_in_flight.store(false, Ordering::Release);
-                },
-            );
-            self.center()
-                .getNotificationSettingsWithCompletionHandler(&completion);
+            let completion = RcBlock::new(move |settings: *mut UNNotificationSettings| {
+                // SAFETY: any non-null result is live for this completion.
+                let code = match unsafe { settings.as_ref() } {
+                    Some(settings) => access_code(settings.authorizationStatus()),
+                    None => ACCESS_UNAVAILABLE,
+                };
+                cached_access.store(code, Ordering::Release);
+                query_in_flight.store(false, Ordering::Release);
+            });
+            // The service may return nil, contrary to the generated binding.
+            // SAFETY: this selector takes an Objective-C block with one object pointer.
+            unsafe {
+                let _: () = msg_send![
+                    self.center(), getNotificationSettingsWithCompletionHandler: &*completion
+                ];
+            }
         }
     }
 
