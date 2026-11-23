@@ -298,3 +298,25 @@ fn derived_titles_name_the_topic_on_synthetic_headlines() {
     );
     assert_eq!(right, TITLE_FIXTURES.len());
 }
+
+#[test]
+fn a_calendar_event_named_like_a_holder_keeps_its_title() {
+    let (_directory, store) = store();
+    let session_id = meeting(&store, "Zoom meeting", NOW);
+    store
+        .connection()
+        .unwrap()
+        .execute(
+            "INSERT INTO meeting_calendar_facts(session_id, event_key, event_json)
+             VALUES (?1, 'event', '{\"title\":\"Zoom meeting\"}')",
+            params![session_id.uuid().to_string()],
+        )
+        .unwrap();
+
+    let outcome = store
+        .derive_title_from_headline(session_id, "The call covered hiring plans.")
+        .unwrap();
+
+    assert!(outcome.is_none());
+    assert_eq!(title_of(&store, session_id), "Zoom meeting");
+}

@@ -8740,9 +8740,10 @@ fn derive_title_in(
     // Replaceable: a name Sona made up at the start, or the title this same
     // pass wrote from an earlier revision of the notes. Anything else is a
     // person's or a calendar's answer.
-    if !title::is_placeholder(&current.title)
-        && last_derived_title(transaction, session_id)?.as_deref() != Some(&current.title)
-    {
+    let sona_wrote_it = (title::is_placeholder(&current.title)
+        && calendar_title(transaction, session_id)?.as_deref() != Some(current.title.trim()))
+        || last_derived_title(transaction, session_id)?.as_deref() == Some(&current.title);
+    if !sona_wrote_it {
         return Ok(None);
     }
     let next_revision = current.revision.checked_add(1).ok_or(StoreError::Corrupt)?;
@@ -8788,6 +8789,25 @@ fn derive_title_in(
     };
     insert_operation_receipt(transaction, &receipt, now)?;
     Ok(Some(receipt))
+}
+
+/// The title of the calendar event this meeting was recorded for, if any. An
+/// event that is itself called "Zoom meeting" is the calendar's answer, not a
+/// placeholder.
+fn calendar_title(
+    connection: &Connection,
+    session_id: MeetingSessionId,
+) -> Result<Option<String>, StoreError> {
+    let event_json: Option<String> = connection
+        .query_row(
+            "SELECT event_json FROM meeting_calendar_facts WHERE session_id = ?1",
+            params![id(session_id)],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(event_json
+        .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok())
+        .and_then(|event| Some(event.get("title")?.as_str()?.trim().to_string())))
 }
 
 /// The title this meeting last got from its notes, unless somebody has set
