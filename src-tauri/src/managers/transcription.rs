@@ -55,6 +55,8 @@ mod audio_chunks;
 mod chunked_preview;
 mod diagnosis;
 use audio_chunks::transcribe_windows;
+#[cfg(feature = "cloud-realtime")]
+use chunked_preview::append_preview_segment;
 use chunked_preview::{ChunkedTranscript, SEGMENT_GAP};
 use diagnosis::{seconds, FilterOutcome, NativeRuns, SAMPLING_SEED};
 pub use diagnosis::{DecodeDiagnosis, DecodeSwitches, TextFilter};
@@ -94,8 +96,8 @@ fn engine_panic_model_state_event() -> ModelStateEvent {
 }
 
 /// Live transcription snapshot emitted to the overlay during a streaming run.
-/// `committed` is the append-only, flicker-free prefix; `tentative` is the
-/// volatile suffix the model may still rewrite.
+/// The append-only `committed` prefix and revisable `tentative` suffix
+/// include their own spacing and are concatenated exactly as sent.
 #[derive(Clone, Debug, Serialize, Deserialize, Type, tauri_specta::Event)]
 pub struct StreamTextEvent {
     pub committed: String,
@@ -2173,7 +2175,7 @@ impl TranscriptionManager {
                                 if update.committed_changed || update.tentative_changed {
                                     let text = stream.text();
                                     perf.record_emit();
-                                    self.emit_stream_text(&text.committed, &text.tentative);
+                                    self.emit_stream_text(text.committed, text.tentative);
                                 }
                                 perf.maybe_log();
                             }
@@ -2306,7 +2308,10 @@ impl TranscriptionManager {
             })) {
                 Ok(Ok(decoded)) => {
                     if transcript.apply(due, &decoded.text) {
-                        self.emit_stream_text(transcript.committed(), transcript.tentative());
+                        self.emit_stream_text(
+                            transcript.committed().to_owned(),
+                            transcript.tentative(),
+                        );
                     }
                 }
                 Ok(Err(error)) => {
@@ -2338,16 +2343,19 @@ impl TranscriptionManager {
 
     #[cfg(feature = "cloud-realtime")]
     fn emit_cloud_preview(&self, final_segments: &[String], interim: &str) {
-        let mut preview = final_segments.join(" ");
+        let capacity = final_segments.iter().map(String::len).sum::<usize>()
+            + final_segments.len()
+            + interim.len();
+        let mut preview = String::with_capacity(capacity);
+        for segment in final_segments {
+            append_preview_segment(&mut preview, segment);
+        }
         if !interim.trim().is_empty() {
-            if !preview.is_empty() {
-                preview.push(' ');
-            }
-            preview.push_str(interim);
+            append_preview_segment(&mut preview, interim);
         }
         // Provider text is preview-only. Committed remains empty until the
         // post-stop outcome selects an actual final engine result.
-        self.emit_stream_text("", &preview);
+        self.emit_stream_text(String::new(), preview);
     }
 
     /// Finalize the active cloud worker. Timeout is an external recovery
@@ -2480,16 +2488,16 @@ impl TranscriptionManager {
     pub fn emit_stream_engine(&self, engine: StreamEngine) {
         let _ = StreamEngineEvent { engine }.emit(&self.app_handle);
     }
-    fn emit_stream_text(&self, committed: &str, tentative: &str) {
+    fn emit_stream_text(&self, committed: String, tentative: String) {
         let _ = StreamTextEvent {
-            committed: committed.to_string(),
-            tentative: tentative.to_string(),
+            committed,
+            tentative,
         }
         .emit(&self.app_handle);
     }
     #[cfg(feature = "cloud-realtime")]
     pub fn clear_stream_preview(&self) {
-        self.emit_stream_text("", "");
+        self.emit_stream_text(String::new(), String::new());
     }
     /// Batch-transcribe shared completed PCM without copying it.
     pub fn transcribe_shared(&self, asr: &AsrPlan, audio: &[f32]) -> Result<BatchDecode> {

@@ -13,6 +13,48 @@ const DRAFT_STEP_SAMPLES: usize = 16_000;
 /// Bounds the cost of a redraft while someone talks without pausing.
 const SEGMENT_MAX_SAMPLES: usize = 12 * 16_000;
 
+const CJK_OPEN: &str = "〈《「『【〔〖〘〚（［｛";
+const CJK_CLOSE: &str = "〉》」』】〕〗〙〛）］｝、。，．！？：；";
+
+fn is_unspaced(ch: char) -> bool {
+    matches!(
+        ch,
+        '々' | '〆' | '〇'
+            | '\u{3041}'..='\u{30ff}'
+            | '\u{3105}'..='\u{312f}'
+            | '\u{31a0}'..='\u{31ff}'
+            | '\u{3400}'..='\u{4dbf}'
+            | '\u{4e00}'..='\u{9fff}'
+            | '\u{f900}'..='\u{faff}'
+            | '\u{ff66}'..='\u{ff9f}'
+            | '\u{1b000}'..='\u{1b16f}'
+            | '\u{20000}'..='\u{2fa1f}'
+            | '\u{30000}'..='\u{3347f}'
+    ) || CJK_OPEN.contains(ch)
+        || CJK_CLOSE.contains(ch)
+}
+
+fn segment_separator(previous: &str, next: &str) -> &'static str {
+    let (Some(left), Some(right)) = (previous.chars().next_back(), next.chars().next()) else {
+        return "";
+    };
+    if left.is_whitespace()
+        || right.is_whitespace()
+        || CJK_OPEN.contains(left)
+        || CJK_CLOSE.contains(right)
+        || (is_unspaced(left) && is_unspaced(right))
+    {
+        ""
+    } else {
+        " "
+    }
+}
+
+pub(super) fn append_preview_segment(preview: &mut String, segment: &str) {
+    preview.push_str(segment_separator(preview, segment));
+    preview.push_str(segment);
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Due {
     /// Redraft the open segment; its words may still change.
@@ -65,12 +107,7 @@ impl ChunkedTranscript {
                 true
             }
             Due::Commit => {
-                if !text.is_empty() {
-                    if !self.committed.is_empty() {
-                        self.committed.push(' ');
-                    }
-                    self.committed.push_str(text);
-                }
+                append_preview_segment(&mut self.committed, text);
                 self.segment.clear();
                 self.drafted_samples = 0;
                 let had_tentative = !self.tentative.is_empty();
@@ -84,8 +121,12 @@ impl ChunkedTranscript {
         &self.committed
     }
 
-    pub(super) fn tentative(&self) -> &str {
-        &self.tentative
+    pub(super) fn tentative(&self) -> String {
+        let separator = segment_separator(&self.committed, &self.tentative);
+        let mut tentative = String::with_capacity(separator.len() + self.tentative.len());
+        tentative.push_str(separator);
+        tentative.push_str(&self.tentative);
+        tentative
     }
 }
 
@@ -109,7 +150,7 @@ mod tests {
         assert_eq!(transcript.due(false), Some(Due::Draft));
         assert!(transcript.apply(Due::Draft, " hello wor "));
         assert_eq!(
-            (transcript.committed(), transcript.tentative()),
+            (transcript.committed(), transcript.tentative().as_str()),
             ("", "hello wor")
         );
         assert_eq!(transcript.due(false), None, "the draft covers what arrived");
@@ -119,7 +160,7 @@ mod tests {
         assert_eq!(transcript.due(true), Some(Due::Commit));
         assert!(transcript.apply(Due::Commit, "Hello world."));
         assert_eq!(
-            (transcript.committed(), transcript.tentative()),
+            (transcript.committed(), transcript.tentative().as_str()),
             ("Hello world.", "")
         );
         assert!(transcript.segment().is_empty());
@@ -144,6 +185,32 @@ mod tests {
         transcript.push(&vec![0.1; SECOND]);
         transcript.apply(Due::Commit, "Two.");
         assert_eq!(transcript.committed(), "One. Two.");
+    }
+
+    #[test]
+    fn live_words_keep_their_spacing_when_drafts_become_final() {
+        for (first, next, expected) in [
+            ("明日は", "雨です。", "明日は雨です。"),
+            ("明天", "有雨。", "明天有雨。"),
+            ("明天。", "有雨。", "明天。有雨。"),
+            ("𠮷", "野さん", "𠮷野さん"),
+            ("「", "Sona", "「Sona"),
+            ("Sona", "」です。", "Sona」です。"),
+            ("は", "Sona", "は Sona"),
+            ("Expect", "rain tomorrow.", "Expect rain tomorrow."),
+            ("Завтра", "будет дождь.", "Завтра будет дождь."),
+        ] {
+            let mut preview = ChunkedTranscript::default();
+            assert!(preview.apply(Due::Commit, first));
+            assert!(preview.apply(Due::Draft, next));
+            assert_eq!(
+                format!("{}{}", preview.committed(), preview.tentative()),
+                expected
+            );
+            assert!(preview.apply(Due::Commit, next));
+            assert_eq!(preview.committed(), expected);
+            assert!(preview.tentative().is_empty());
+        }
     }
 
     #[test]

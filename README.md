@@ -16,6 +16,7 @@ Sona is built on [Handy](https://github.com/cjpais/Handy) by CJ Pais, an open-so
 - Searchable local history with delivery receipts and retained recordings.
 - Audio-file transcription, vocabulary corrections, CSV vocabulary tools, and optional emoji replacements.
 - Streaming dictation retains queued opening audio when recognition falls behind. Microphone readiness follows the first audio sample, including a Studio Display microphone, rather than a full scan of its supported formats.
+- Live dictation previews keep Japanese and Chinese text together across pauses without removing spaces between English or Russian words.
 - Context capture from the focused field on your Mac, under a global ceiling. At Off, dictation reads nothing from other apps except the text you select for a command.
 
 - A compact recording pill stays the same size while listening, processing, and reporting delivery. A checkmark means macOS confirmed the paste; an arrow means the input was sent but could not be confirmed.
