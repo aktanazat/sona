@@ -899,7 +899,7 @@ final class FloatingPanel {
 /// One row of the palette that does something: a place to go or a verb.
 struct PaletteAction: Identifiable {
     enum Group {
-        case navigation, actions, work
+        case navigation, actions, work, quicklinks
     }
 
     let id: String
@@ -909,6 +909,7 @@ struct PaletteAction: Identifiable {
     var icon: String? = nil
     /// The key that does the same outside the palette, drawn as key caps.
     var shortcut: String? = nil
+    var detail: String? = nil
 }
 
 /// A task, project, person or label whose name or number matches the field.
@@ -1224,6 +1225,7 @@ struct CommandPalette: View {
         let task = actions.filter { $0.group == .work }.map(PaletteRow.action)
         let navigation = actions.filter { $0.group == .navigation }.map(PaletteRow.action)
         let verbs = actions.filter { $0.group == .actions }.map(PaletteRow.action)
+        let links = trimmed.isEmpty ? [] : actions.filter { $0.group == .quicklinks }.map(PaletteRow.action)
         if !task.isEmpty { sections.append((model.workTargets.count > 1 ? "Tasks" : "Task", task, true)) }
         let matches = model.paletteMatches(trimmed)
         for (label, picked) in [
@@ -1244,6 +1246,7 @@ struct CommandPalette: View {
         if !watching.isEmpty { sections.append(("Watch", watching, true)) }
         if !navigation.isEmpty { sections.append(("Navigation", navigation, true)) }
         if !verbs.isEmpty { sections.append(("Actions", verbs, true)) }
+        if !links.isEmpty { sections.append(("Quicklinks", links, true)) }
         let hits = lookup.earlier.filter {
             switch $0.kind {
             case .person: !named.contains($0.title)
@@ -1692,7 +1695,12 @@ private struct PaletteRowView: View {
                 leading
                 switch row {
                 case let .action(action):
-                    Text(action.title).bodyText()
+                    HStack(spacing: 8) {
+                        Text(action.title).bodyText().lineLimit(1)
+                        if let detail = action.detail {
+                            Text(detail).metaText().lineLimit(1).layoutPriority(-1)
+                        }
+                    }
                 case let .hit(hit):
                     VStack(alignment: .leading, spacing: 2) {
                         Text(hit.title).bodyText().lineLimit(1)

@@ -90,6 +90,7 @@ Local runs keep captured audio on the device. Cloud transcription sends audio on
 - notes can be copied as formatted text or markdown. encrypted browser links require the companion service. named-viewer access, comments, and collaborative editing are not built. external destinations require their own setup and consent.
 - the iphone app adds keyboard recording sessions, shortcuts, language choices, saved meeting notes, and playback. sync requires a paired companion service. optional recorded outgoing calls require a configured calling service; ordinary iphone call audio is not accessible.
 - Optional dictation cleanup has a deadline on both desktop and iPhone and stops when a recording is cancelled. The iPhone saves a recoverable draft before optional history work, so slow history cannot hold the text or its audio hostage.
+- On Mac, save named web addresses in Settings > Quicklinks and find them with Command-K. To prompt for a search term before opening a link, use `{argument}` as a query value, for example `https://example.com/search?q={argument}`. Quicklinks stay on this Mac.
 
 opening several .sona meeting files from finder now imports each one in order.
 if a file fails, sona names it and continues with the others.
