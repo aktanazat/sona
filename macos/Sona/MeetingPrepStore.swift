@@ -86,8 +86,25 @@ struct MeetingBrief: Decodable {
 /// The label and its destination are computed together, so a changing clock
 /// cannot leave a new meeting label opening the previous event's brief.
 struct MeetingMenuSummary {
+    struct Join: Equatable {
+        let eventKey: String
+        let title: String
+        let url: URL
+    }
+
     let label: String
     let event: UpcomingRow?
+
+    var join: Join? {
+        guard let event, let address = event.joinUrl, let parts = URLComponents(string: address),
+              parts.scheme?.lowercased() == "https", let host = parts.host, !host.isEmpty,
+              parts.user == nil, parts.password == nil, let url = parts.url else { return nil }
+        return Join(eventKey: event.eventKey, title: Self.short(event.title), url: url)
+    }
+
+    func confirmedJoinURL(_ displayed: Join) -> URL? {
+        join == displayed ? displayed.url : nil
+    }
 
     static func make(rows: [UpcomingRow], now: Date) -> MeetingMenuSummary {
         let milliseconds = Int64(now.timeIntervalSince1970 * 1_000)
@@ -95,14 +112,12 @@ struct MeetingMenuSummary {
             $0.endUtcMs > milliseconds && $0.attendeeCount > 0
                 && $0.endUtcMs - $0.startUtcMs <= 6 * 60 * 60_000
         }.sorted { $0.startUtcMs < $1.startUtcMs }
-        let next = eligible.first { $0.startUtcMs > milliseconds }
-        if let next, next.startUtcMs - milliseconds <= 10 * 60_000 {
-            let minutes = max(1, (next.startUtcMs - milliseconds + 59_999) / 60_000)
-            return MeetingMenuSummary(label: "\(short(next.title)) · in \(minutes)m", event: next)
-        }
         if let current = eligible.last(where: { $0.startUtcMs <= milliseconds }) {
-            return MeetingMenuSummary(label: "\(short(current.title)) · now", event: current)
+            let minutes = (current.endUtcMs - milliseconds + 59_999) / 60_000
+            let label = String(localized: "\(short(current.title)) · \(minutes)m left")
+            return MeetingMenuSummary(label: label, event: current)
         }
+        let next = eligible.first { $0.startUtcMs > milliseconds }
         guard let next else { return MeetingMenuSummary(label: "Free today", event: nil) }
         let minutes = (next.startUtcMs - milliseconds + 59_999) / 60_000
         if minutes <= 60 {
@@ -145,6 +160,7 @@ final class MeetingPrepStore {
     private(set) var upcoming: UpcomingEvents?
     private(set) var menuLoaded = false
     private(set) var menuError: String?
+    private(set) var joiningFromMenu = false
     /// The minute the menu bar label was last worked out for.
     private(set) var now = Date()
     private var briefRequest = UUID()
@@ -403,6 +419,21 @@ final class MeetingPrepStore {
             menuError = error.localizedDescription
         }
         menuLoaded = true
+    }
+
+    func joinURL(for displayed: MeetingMenuSummary.Join) async -> URL? {
+        guard !joiningFromMenu, !saving, preferences?.menuBarEnabled == true else { return nil }
+        joiningFromMenu = true
+        defer { joiningFromMenu = false }
+        do {
+            let settings: MeetingPrepPreferences = try await core.request("meeting_prep_preferences_get")
+            guard settings.menuBarEnabled else { return nil }
+            let fresh: UpcomingEvents = try await core.request("meeting_upcoming_events", ["days": JSONValue.number(1)])
+            guard fresh.access == .authorized, !saving, preferences?.menuBarEnabled == true else { return nil }
+            return MeetingMenuSummary.make(rows: fresh.rows, now: .now).confirmedJoinURL(displayed)
+        } catch {
+            return nil
+        }
     }
 
     var menuSummary: MeetingMenuSummary {
