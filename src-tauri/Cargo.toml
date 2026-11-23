@@ -213,6 +213,8 @@ objc2-foundation = "0.3"
 objc2-app-kit = "0.3"
 objc2-core-audio-types = "0.3.2"
 objc2-core-graphics = { version = "0.3.2", default-features = false, features = [
+  "CGEvent",
+  "CGEventTypes",
   "CGWindow",
 ] }
 objc2-service-management = "0.3.2"
@@ -231,6 +233,8 @@ objc2-core-foundation = { version = "0.3", default-features = false, features = 
   "std",
   "CFArray",
   "CFDate",
+  "CFMachPort",
+  "CFRunLoop",
   "CFNumber",
   "CFString",
   "CFURL",

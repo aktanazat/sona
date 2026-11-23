@@ -145,6 +145,8 @@ enum Command {
     Finish {
         source: String,
     },
+    #[cfg(target_os = "macos")]
+    InterruptMouseShortcut,
     Cancel,
     /// The pipeline of this run delivered its result or gave up.
     ProcessingFinished {
@@ -254,6 +256,7 @@ fn classify_ptt_event(
 struct CoordinatorState {
     stage: Stage,
     last_press: Option<Instant>,
+    last_mouse_press: Option<Instant>,
     pending_release: Option<PendingRelease>,
     pending_press: Option<PendingPress>,
 }
@@ -263,6 +266,7 @@ impl CoordinatorState {
         Self {
             stage: Stage::Idle,
             last_press: None,
+            last_mouse_press: None,
             pending_release: None,
             pending_press: None,
         }
@@ -344,6 +348,19 @@ impl CoordinatorState {
     }
 
     fn on_input(&mut self, input: InputEvent, now: Instant) -> Option<Effect> {
+        // The tray, HUD and integrations toggle the active mode, not a physical binding.
+        if input.external
+            && input.intent == TranscriptionIntent::ActiveMode
+            && matches!(
+                self.stage,
+                Stage::Recording {
+                    intent: TranscriptionIntent::ActiveModeMouse,
+                    ..
+                }
+            )
+        {
+            return self.on_finish(input.shortcut_label);
+        }
         let pending_release_intent = self.pending_release.as_ref().map(|pending| &pending.intent);
         let recording = self.active_recording(&input.intent, input.at);
 
@@ -376,14 +393,16 @@ impl CoordinatorState {
         // External triggers are exempt: each one is a deliberate edge from the
         // user's own integration, and dropping it desyncs toggle parity.
         if input.is_pressed && !input.external {
-            if self
-                .last_press
-                .is_some_and(|then| now.duration_since(then) < DEBOUNCE)
-            {
+            let last_press = if input.intent == TranscriptionIntent::ActiveModeMouse {
+                &mut self.last_mouse_press
+            } else {
+                &mut self.last_press
+            };
+            if last_press.is_some_and(|then| now.duration_since(then) < DEBOUNCE) {
                 debug!("Debounced transcription intent: {:?}", input.intent);
                 return None;
             }
-            self.last_press = Some(now);
+            *last_press = Some(now);
         }
 
         if matches!(self.stage, Stage::Processing { .. }) {
@@ -567,6 +586,27 @@ impl CoordinatorState {
         self.hand_over_recording(source)
     }
 
+    #[cfg(target_os = "macos")]
+    fn on_mouse_shortcut_interrupted(&mut self) -> Option<Effect> {
+        let mouse = TranscriptionIntent::ActiveModeMouse;
+        self.last_mouse_press = None;
+        if self
+            .pending_press
+            .as_ref()
+            .is_some_and(|press| press.intent == mouse)
+        {
+            self.pending_press = None;
+        }
+        if self
+            .pending_release
+            .as_ref()
+            .is_some_and(|release| release.intent == mouse)
+        {
+            self.pending_release = None;
+        }
+        self.stop_recording(&mouse, "Mouse button".to_string())
+    }
+
     /// Hand the active recording's plan to the executor. Returns None when
     /// `intent` is not the intent currently recording.
     fn stop_recording(
@@ -641,6 +681,8 @@ impl TranscriptionCoordinator {
                     let effect = match cmd {
                         Command::Input(input) => state.on_input(input, Instant::now()),
                         Command::Finish { source } => state.on_finish(source),
+                        #[cfg(target_os = "macos")]
+                        Command::InterruptMouseShortcut => state.on_mouse_shortcut_interrupted(),
                         Command::Cancel => {
                             state.on_cancel();
                             let _ = DictationDurationWarningEvent {
@@ -717,6 +759,13 @@ impl TranscriptionCoordinator {
             })
             .is_err()
         {
+            warn!("Transcription coordinator channel closed");
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn interrupt_mouse_shortcut(&self) {
+        if self.tx.send(Command::InterruptMouseShortcut).is_err() {
             warn!("Transcription coordinator channel closed");
         }
     }
@@ -1222,6 +1271,86 @@ mod tests {
         harness.grace_expired();
         assert_eq!((harness.starts, harness.stops), (1, 1));
         assert!(harness.is_processing());
+    }
+
+    #[test]
+    fn a_mouse_hold_starts_and_stops_on_mouse_release() {
+        let mut harness = Harness::new();
+        let mouse = TranscriptionIntent::ActiveModeMouse;
+        harness.input(mouse.clone(), true, true);
+        assert!(harness.is_recording());
+        harness.advance(Duration::from_millis(800));
+        harness.input(mouse, false, true);
+        harness.advance(RELEASE_GRACE);
+        harness.grace_expired();
+        assert_eq!((harness.starts, harness.stops), (1, 1));
+        assert!(harness.is_processing());
+    }
+
+    #[test]
+    fn a_mouse_release_or_interruption_does_not_stop_a_keyboard_hold() {
+        let mut harness = Harness::new();
+        press_and_hold(&mut harness);
+        harness.advance(Duration::from_millis(800));
+        let mouse = TranscriptionIntent::ActiveModeMouse;
+        harness.input(mouse.clone(), true, true);
+        harness.input(mouse, false, true);
+        #[cfg(target_os = "macos")]
+        {
+            let effect = harness.state.on_mouse_shortcut_interrupted();
+            harness.apply(effect);
+        }
+        harness.advance(RELEASE_GRACE);
+        harness.grace_expired();
+        assert_eq!((harness.starts, harness.stops), (1, 0));
+        assert!(harness.is_recording());
+        harness.input(active_mode(), false, true);
+        harness.advance(RELEASE_GRACE);
+        harness.grace_expired();
+        assert!(harness.is_processing());
+    }
+
+    #[test]
+    fn a_mouse_press_does_not_debounce_the_keyboard_stop() {
+        let mut harness = Harness::new();
+        harness.input(active_mode(), true, false);
+        harness.advance(Duration::from_millis(800));
+        harness.input(TranscriptionIntent::ActiveModeMouse, true, false);
+        harness.input(active_mode(), true, false);
+        assert_eq!((harness.starts, harness.stops), (1, 1));
+        assert!(harness.is_processing());
+    }
+
+    #[test]
+    fn an_explicit_active_mode_toggle_stops_mouse_dictation() {
+        let mut harness = Harness::new();
+        let mouse = TranscriptionIntent::ActiveModeMouse;
+        harness.input(mouse.clone(), true, true);
+        harness.external_press(active_mode(), false);
+        assert!(harness.is_processing());
+        harness.input(mouse, false, true);
+        harness.processing_finished();
+        assert_eq!((harness.starts, harness.stops), (1, 1));
+        assert!(harness.is_idle());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_interrupted_mouse_binding_stops_its_run_and_discards_its_queued_press() {
+        let mut harness = Harness::new();
+        let mouse = TranscriptionIntent::ActiveModeMouse;
+        harness.input(mouse.clone(), true, true);
+        harness.input(mouse.clone(), false, true);
+        let effect = harness.state.on_mouse_shortcut_interrupted();
+        harness.apply(effect);
+        assert!(harness.is_processing());
+        harness.advance(Duration::from_millis(800));
+        harness.input(mouse, true, true);
+        let effect = harness.state.on_mouse_shortcut_interrupted();
+        harness.apply(effect);
+        harness.processing_finished();
+        assert_eq!((harness.starts, harness.stops), (1, 1));
+        assert!(harness.is_idle());
     }
 
     #[test]

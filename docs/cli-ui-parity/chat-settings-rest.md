@@ -102,6 +102,7 @@ Already inventoried in meetings-notes-search.md §16 (Notes, 22 rows) and §17 (
 | custom sounds load | SettingsStore.swift:153 | check_custom_sounds | — | missing |
 | model capabilities load | SettingsStore.swift:158 | get_available_models | --list-models | cli-ok |
 | Push-to-talk toggle | EssentialsView.swift:28 | change_ptt_setting | — | missing |
+| Mouse dictation shortcut | EssentialsView.swift:29 | change_mouse_dictation_button | — | ui-only (permission: macOS Accessibility and a local mouse) |
 | Open Login Items | EssentialsView.swift:75 | (SMAppService) | — | ui-only (runtime: window) |
 | Launch at login toggle | EssentialsView.swift:78 | change_autostart_setting + SMAppService login item | — | ui-only (permission) |
 | Microphone Reset | EssentialsView.swift:110 | set_selected_microphone | — | missing |
