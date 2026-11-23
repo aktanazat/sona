@@ -79,6 +79,19 @@ pub(crate) struct TaskFacts {
 pub(crate) struct Context {
     pub(crate) tasks: HashMap<String, TaskFacts>,
     pub(crate) comments: HashMap<String, String>,
+    /// The local model's verdict on a comment, where it has given one.
+    pub(crate) judged: HashMap<String, bool>,
+}
+
+impl Context {
+    /// Whether a comment waits on the user: the local model's verdict when
+    /// it has judged these words, the rule otherwise.
+    pub(crate) fn asks(&self, comment_id: &str) -> bool {
+        match self.judged.get(comment_id) {
+            Some(asks) => *asks,
+            None => self.comments.get(comment_id).is_some_and(|body| asks(body)),
+        }
+    }
 }
 
 pub(crate) fn context(conn: &Connection) -> Result<Context> {
@@ -105,7 +118,11 @@ pub(crate) fn context(conn: &Connection) -> Result<Context> {
     let comments = comments
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
         .collect::<rusqlite::Result<_>>()?;
-    Ok(Context { tasks, comments })
+    Ok(Context {
+        tasks,
+        comments,
+        judged: super::asks::judged(conn)?,
+    })
 }
 
 /// Whether a comment asks its reader for something: a question, or one of
@@ -188,8 +205,7 @@ fn needs(row: &Building, context: &Context) -> Option<Needs> {
             NotificationKind::Comment => notice
                 .comment_id
                 .as_ref()
-                .and_then(|id| context.comments.get(id))
-                .filter(|body| asks(body))
+                .filter(|id| context.asks(id))
                 .map(|_| Needs::Question),
             NotificationKind::Assigned if triage(notice) => Some(Needs::Triage),
             _ => None,

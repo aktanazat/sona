@@ -21,6 +21,7 @@ use std::sync::Arc;
 use tauri::{AppHandle, Manager};
 use uuid::Uuid;
 
+pub(crate) mod asks;
 pub(crate) mod rows;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -836,6 +837,7 @@ fn reading<T>(app: &AppHandle, work: impl FnOnce(&Connection) -> Result<T>) -> R
 }
 
 pub(crate) fn work_inbox(app: AppHandle, shown: Shown) -> Result<Inbox, String> {
+    asks::catch_up(&app);
     reading(&app, |conn| {
         let now = now_ms();
         let context = rows::context(conn)?;
