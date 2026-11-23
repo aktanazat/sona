@@ -7,7 +7,7 @@ use super::learning::{no_inputs, AppLearningInputs};
 use super::learning_types::{
     LearningDecisionRequest, LearningSuggestion, LearningSuggestionsResult,
 };
-use super::people_types::{PersonBriefingRow, VocabularyCandidatesResult};
+use super::people_types::{Person, PersonBriefingRow, VocabularyCandidatesResult};
 use super::session::{MeetingSessionManager, MEETING_EVENT_SCHEMA_VERSION};
 use super::store::{MeetingStore, StoreError};
 use super::types::{
@@ -207,6 +207,20 @@ impl MeetingSessionManager {
             },
             Some(session_id),
         );
+    }
+
+    /// Re-reads recent meetings for a person who was just saved.
+    ///
+    /// Recorded once per person and set of names, and run only when new: a
+    /// save that changes a role or a note leaves the names as they were and
+    /// raises nothing, so a suggestion the user removed is not put back by
+    /// an unrelated edit.
+    pub(crate) fn record_person_saved(&self, store: Arc<MeetingStore>, person: &Person) {
+        let event = person_saved_event(person, now_utc_ms());
+        if let Err(error) = dispatch_daily_workflow_event(store, event, self.app_handle().cloned())
+        {
+            log::warn!("person saved event failed: {error:?}");
+        }
     }
 
     /// Tells the learning loops that dictation history has moved.
@@ -436,6 +450,25 @@ impl MeetingSessionManager {
 
     pub(crate) fn known_vocabulary(&self) -> Vec<String> {
         known_vocabulary(self.app_handle())
+    }
+}
+
+/// The event a saved person raises. Its dedupe key is the person and the
+/// names they answer to, whatever their order or case.
+pub(crate) fn person_saved_event(person: &Person, occurred_at_utc_ms: i64) -> NewWorkflowEvent {
+    let mut names = std::iter::once(&person.display_name)
+        .chain(&person.aliases)
+        .map(|name| name.trim().to_lowercase())
+        .collect::<Vec<_>>();
+    names.sort();
+    names.dedup();
+    let names = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, names.join("\n").as_bytes());
+    NewWorkflowEvent {
+        kind: WorkflowEventKind::PersonSaved,
+        payload: serde_json::json!({ "person_id": person.id.uuid().to_string() }),
+        occurred_at_utc_ms,
+        source: "people",
+        dedupe_key: format!("person-saved:{}:{names}", person.id.uuid()),
     }
 }
 

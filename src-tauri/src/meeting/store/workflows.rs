@@ -437,7 +437,9 @@ pub(super) fn matching_enabled_workflows_in(
         WorkflowEventKind::MeetingStarted => {
             &[WorkflowId::PersonLinking, WorkflowId::SeriesPriming]
         }
-        WorkflowEventKind::SpeakerRenamed => &[WorkflowId::PersonLinking],
+        WorkflowEventKind::SpeakerRenamed | WorkflowEventKind::PersonSaved => {
+            &[WorkflowId::PersonLinking]
+        }
         WorkflowEventKind::CalendarMeetingDetected => &[WorkflowId::PreMeetingBriefing],
         WorkflowEventKind::DocumentIngested => &[WorkflowId::DocumentLinking],
         WorkflowEventKind::MeetingPromptRecorded

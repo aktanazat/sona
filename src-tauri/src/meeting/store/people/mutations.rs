@@ -7,7 +7,7 @@ pub(in crate::meeting::store) use derivation::{
     link_document_mentions_in, person_for_named_speaker_in, recompute_organizations_in,
 };
 
-pub(in crate::meeting::store) use self::heard::derive_heard_links_in;
+pub(in crate::meeting::store) use self::heard::{derive_heard_links_in, recheck_recent_meetings_in};
 pub(in crate::meeting::store) use self::linking::upsert_link_in;
 use self::linking::{confidence_from_db, repoint_meeting_links_in, source_from_db};
 use super::queries::people_list_in;

@@ -4,6 +4,7 @@ use super::{
 };
 use crate::meeting::detection::machine::CalendarEventSummary;
 use crate::meeting::document_types::DocumentId;
+use crate::meeting::people_types::PersonId;
 use crate::meeting::store::digest::digest_counts_in;
 use crate::meeting::store::documents::{bump_document_revision_in, document_by_id_in};
 use crate::meeting::store::learning::{
@@ -14,7 +15,8 @@ use crate::meeting::store::learning::{
 use crate::meeting::store::people::{
     bump_people_revision_in, calendar_context_in, continuity_summary_in, derive_calendar_links_in,
     derive_heard_links_in, derive_speaker_link_in, derive_title_links_in,
-    link_document_mentions_in, recompute_organizations_in, vocabulary_candidates_in,
+    link_document_mentions_in, recheck_recent_meetings_in, recompute_organizations_in,
+    vocabulary_candidates_in,
 };
 use crate::meeting::store::{MeetingStore, StoreError};
 use crate::meeting::types::MeetingSessionId;
@@ -237,6 +239,18 @@ fn run_person_linking_in(
     event: &StoredWorkflowEvent,
     user_name: Option<&str>,
 ) -> Result<String, StoreError> {
+    if event.kind == WorkflowEventKind::PersonSaved {
+        let person_id = PersonId(payload_uuid(&event.payload, "person_id")?);
+        let found =
+            recheck_recent_meetings_in(connection, person_id, user_name, event.occurred_at_utc_ms)?;
+        if found.changes != 0 {
+            bump_people_revision_in(connection)?;
+        }
+        return Ok(format!(
+            "person_links:changes={},meetings={},suggestions={}",
+            found.changes, found.meetings, found.suggestions
+        ));
+    }
     let session_id = payload_uuid(&event.payload, "session_id")?;
     let session_id = MeetingSessionId::from_uuid(session_id);
     let mut changes = match event.kind {

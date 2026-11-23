@@ -339,6 +339,17 @@ pub(in crate::meeting::store) fn derive_title_links_in(
     title: &str,
     now_utc_ms: i64,
 ) -> Result<usize, StoreError> {
+    derive_title_links_for_in(connection, meeting_id, title, None, now_utc_ms)
+}
+
+/// As [`derive_title_links_in`], for `only` that person when one is given.
+pub(in crate::meeting::store) fn derive_title_links_for_in(
+    connection: &Connection,
+    meeting_id: MeetingSessionId,
+    title: &str,
+    only: Option<PersonId>,
+    now_utc_ms: i64,
+) -> Result<usize, StoreError> {
     let people = all_people_in(connection)?;
     let mut first_names = HashMap::<String, usize>::new();
     for person in &people {
@@ -357,7 +368,7 @@ pub(in crate::meeting::store) fn derive_title_links_in(
                 first_names.get(&normalized(first)) == Some(&1)
                     && exact_phrase_mentioned(title, first)
             });
-        if full_match || first_match {
+        if (full_match || first_match) && only.is_none_or(|only| only == person.id) {
             changed += usize::from(upsert_link_in(
                 connection,
                 meeting_id,

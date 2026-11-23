@@ -646,3 +646,256 @@ fn every_mix_of_user_name_nicknames_and_shared_names_matches_as_meant() {
     }
     assert!(wrong.is_empty());
 }
+
+const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+
+/// Invented recent meetings and whether each names "Dee", the alias the
+/// person is about to be saved under.
+const SAID_BEFORE_THE_SAVE: &[(&str, &[&str], bool)] = &[
+    ("Slack meeting", &["Thanks Dee, send it over."], true),
+    ("Call in Safari", &["I asked Dee about the renewal."], true),
+    ("Dee sync", &["Let's start."], true),
+    ("Zoom meeting", &["Dee, can you share your screen?"], true),
+    ("Slack meeting", &["Let's ship it this week."], false),
+    ("Zoom meeting", &["The deed is signed."], false),
+    ("Slack meeting", &["Priya will send the notes."], false),
+    ("Call in Safari", &["Indeed, that works."], false),
+];
+
+fn person_saved(
+    store: &MeetingStore,
+    person_id: PersonId,
+    at_utc_ms: i64,
+    dedupe_key: &str,
+) -> crate::meeting::workflow_types::WorkflowOutcomeCounts {
+    let mut saved = event(
+        WorkflowEventKind::PersonSaved,
+        serde_json::json!({ "person_id": person_id.uuid().to_string() }),
+        dedupe_key,
+    );
+    saved.occurred_at_utc_ms = at_utc_ms;
+    let dispatch = store
+        .record_and_run_workflow_event(saved, &inputs())
+        .unwrap();
+    dispatch
+        .receipts
+        .iter()
+        .find(|receipt| receipt.workflow_id == WorkflowId::PersonLinking)
+        .unwrap()
+        .outcome_counts
+        .clone()
+}
+
+fn suggested_for(store: &MeetingStore, person_id: PersonId) -> BTreeSet<String> {
+    let connection = store.connection().unwrap();
+    let mut statement = connection
+        .prepare(
+            "SELECT meeting_id FROM meeting_person_links
+              WHERE person_id = ?1 AND confidence = 'suggested'",
+        )
+        .unwrap();
+    let meetings = statement
+        .query_map([person_id.uuid().to_string()], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<BTreeSet<String>, _>>()
+        .unwrap();
+    meetings
+}
+
+#[test]
+fn saving_an_alias_suggests_the_recent_meetings_that_used_it() {
+    let (_directory, store) = store();
+    let now = 200 * DAY_MS;
+    let dana = person(&store, "Dana Whitfield", &[], &[]);
+    person(&store, "Priya Raman", &[], &[]);
+    let meetings = SAID_BEFORE_THE_SAVE
+        .iter()
+        .enumerate()
+        .map(|(index, (title, lines, _))| {
+            let at = now - i64::try_from(index + 1).unwrap() * DAY_MS;
+            let meeting_id = meeting(&store, title, at);
+            transcript_segments(&store, meeting_id, lines);
+            meeting_id
+        })
+        .collect::<Vec<_>>();
+    let expected = SAID_BEFORE_THE_SAVE
+        .iter()
+        .zip(&meetings)
+        .filter(|((_, _, named), _)| *named)
+        .map(|(_, meeting_id)| meeting_id.uuid().to_string())
+        .collect::<BTreeSet<_>>();
+
+    // What a save did before: nothing, so each meeting only has what its own
+    // finalizing found, which ran before the alias existed.
+    {
+        let connection = store.connection().unwrap();
+        for ((title, _, _), meeting_id) in SAID_BEFORE_THE_SAVE.iter().zip(&meetings) {
+            derive_title_links_in(&connection, *meeting_id, title, 10).unwrap();
+            derive_heard_links_in(&connection, *meeting_id, None, 10).unwrap();
+        }
+    }
+    let before = suggested_for(&store, dana);
+
+    store
+        .connection()
+        .unwrap()
+        .execute(
+            "UPDATE persons SET aliases_json = '[\"Dee\"]' WHERE id = ?1",
+            [dana.uuid().to_string()],
+        )
+        .unwrap();
+    let started = Instant::now();
+    let counts = person_saved(&store, dana, now, "saved-dee");
+    let elapsed = started.elapsed();
+    let after = suggested_for(&store, dana);
+
+    println!(
+        "person save: before {}/{} found, {} wrong; after {}/{} found, {} wrong; {} us for {} meetings",
+        before.intersection(&expected).count(),
+        expected.len(),
+        before.difference(&expected).count(),
+        after.intersection(&expected).count(),
+        expected.len(),
+        after.difference(&expected).count(),
+        elapsed.as_micros(),
+        meetings.len(),
+    );
+    assert!(before.is_empty());
+    assert_eq!(after, expected);
+    assert_eq!(
+        (counts.meetings, counts.changes, counts.suggestions),
+        (8, 4, 4)
+    );
+}
+
+#[test]
+fn a_save_reads_only_recent_finished_meetings_and_only_for_that_person() {
+    let (_directory, store) = store();
+    let now = 200 * DAY_MS;
+    let dana = person(&store, "Dana Whitfield", &[], &[]);
+    let priya = person(&store, "Priya Raman", &[], &[]);
+    let old = meeting(&store, "Slack meeting", now - 120 * DAY_MS);
+    transcript_segments(&store, old, &["Thanks Dana, send it over."]);
+    let recording = meeting(&store, "Slack meeting", now - DAY_MS);
+    transcript_segments(&store, recording, &["Thanks Dana, send it over."]);
+    store
+        .connection()
+        .unwrap()
+        .execute(
+            "UPDATE meeting_sessions SET phase = 'processing' WHERE id = ?1",
+            [recording.uuid().to_string()],
+        )
+        .unwrap();
+    let recent = meeting(&store, "Slack meeting", now - 2 * DAY_MS);
+    transcript_segments(&store, recent, &["Dana and Priya Raman both joined."]);
+
+    let counts = person_saved(&store, dana, now, "saved-dana");
+
+    assert_eq!(
+        (counts.meetings, counts.changes, counts.suggestions),
+        (1, 1, 1)
+    );
+    assert_eq!(
+        suggested_for(&store, dana),
+        BTreeSet::from([recent.uuid().to_string()])
+    );
+    assert!(suggested_for(&store, priya).is_empty());
+}
+
+#[test]
+fn a_save_with_no_recent_meetings_says_none_were_read() {
+    let (_directory, store) = store();
+    let dana = person(&store, "Dana Whitfield", &[], &[]);
+
+    let counts = person_saved(&store, dana, 200 * DAY_MS, "saved-nothing");
+
+    assert_eq!(
+        (counts.meetings, counts.changes, counts.suggestions),
+        (0, 0, 0)
+    );
+}
+
+#[test]
+fn a_save_never_confirms_and_leaves_a_confirmed_link_alone() {
+    let (_directory, store) = store();
+    let now = 200 * DAY_MS;
+    let dana = person(&store, "Dana Whitfield", &[], &[]);
+    let meeting_id = meeting(&store, "Slack meeting", now - DAY_MS);
+    transcript_segments(&store, meeting_id, &["Thanks Dana, send it over."]);
+    store
+        .connection()
+        .unwrap()
+        .execute(
+            "INSERT INTO meeting_person_links
+                (meeting_id, person_id, source, confidence, created_at_utc_ms)
+             VALUES (?1, ?2, 'manual', 'confirmed', 1)",
+            params![meeting_id.uuid().to_string(), dana.uuid().to_string()],
+        )
+        .unwrap();
+
+    let counts = person_saved(&store, dana, now, "saved-confirmed");
+
+    assert_eq!(
+        (counts.meetings, counts.changes, counts.suggestions),
+        (1, 0, 0)
+    );
+    let (source, confidence): (String, String) = store
+        .connection()
+        .unwrap()
+        .query_row(
+            "SELECT source, confidence FROM meeting_person_links WHERE meeting_id = ?1",
+            [meeting_id.uuid().to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        (source.as_str(), confidence.as_str()),
+        ("manual", "confirmed")
+    );
+}
+
+#[test]
+fn only_a_save_that_changes_the_names_reads_meetings_again() {
+    use crate::meeting::workflow_engine::person_saved_event;
+
+    let (_directory, store) = store();
+    let now = 200 * DAY_MS;
+    let dana = person(&store, "Dana Whitfield", &[], &[]);
+    let meeting_id = meeting(&store, "Slack meeting", now - DAY_MS);
+    transcript_segments(&store, meeting_id, &["Thanks Dee, send it over."]);
+    let mut saved = invented("Dana Whitfield", &[]);
+    saved.id = dana;
+
+    let first = store
+        .record_and_run_workflow_event(person_saved_event(&saved, now), &inputs())
+        .unwrap();
+    saved.role = Some("Buyer".to_string());
+    let same_names = store
+        .record_and_run_workflow_event(person_saved_event(&saved, now + 1), &inputs())
+        .unwrap();
+    saved.aliases = vec!["dee".to_string()];
+    let lowercase = person_saved_event(&saved, now + 2).dedupe_key;
+    saved.aliases = vec!["Dee".to_string()];
+    store
+        .connection()
+        .unwrap()
+        .execute(
+            "UPDATE persons SET aliases_json = '[\"Dee\"]' WHERE id = ?1",
+            [dana.uuid().to_string()],
+        )
+        .unwrap();
+    let new_alias = person_saved_event(&saved, now + 2);
+    assert_eq!(new_alias.dedupe_key, lowercase);
+    let renamed = store
+        .record_and_run_workflow_event(new_alias, &inputs())
+        .unwrap();
+
+    assert!(first.inserted);
+    // The engine runs an event only when it is new.
+    assert!(!same_names.inserted);
+    assert!(renamed.inserted);
+    assert_eq!(
+        suggested_for(&store, dana),
+        BTreeSet::from([meeting_id.uuid().to_string()])
+    );
+}

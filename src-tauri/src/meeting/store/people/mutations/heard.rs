@@ -4,8 +4,9 @@
 //! Everything here is a suggestion. A name being said is evidence the person
 //! came up, not proof they were in the room, so the user confirms it.
 
+use super::derivation::derive_title_links_for_in;
 use super::linking::upsert_link_in;
-use crate::meeting::people_types::{Person, PersonLinkConfidence, PersonLinkSource};
+use crate::meeting::people_types::{Person, PersonId, PersonLinkConfidence, PersonLinkSource};
 use crate::meeting::store::loops::user_speaker_labels_in;
 use crate::meeting::store::people::{
     all_people_in, exact_phrase_mentioned, identity_names, normalized,
@@ -189,6 +190,18 @@ pub(in crate::meeting::store) fn derive_heard_links_in(
     user_name: Option<&str>,
     now_utc_ms: i64,
 ) -> Result<usize, StoreError> {
+    derive_heard_links_for_in(connection, meeting_id, user_name, None, now_utc_ms)
+}
+
+/// As [`derive_heard_links_in`], for `only` that person when one is given.
+/// Everyone is still read, because a name two people share names neither.
+fn derive_heard_links_for_in(
+    connection: &Connection,
+    meeting_id: MeetingSessionId,
+    user_name: Option<&str>,
+    only: Option<PersonId>,
+    now_utc_ms: i64,
+) -> Result<usize, StoreError> {
     let people = all_people_in(connection)?;
     if people.is_empty() {
         return Ok(0);
@@ -224,7 +237,10 @@ pub(in crate::meeting::store) fn derive_heard_links_in(
         listed: &listed,
     };
     let mut changed = 0;
-    for person in people_heard(&people, &heard, user_name) {
+    for person in people_heard(&people, &heard, user_name)
+        .into_iter()
+        .filter(|person| only.is_none_or(|only| only == person.id))
+    {
         changed += usize::from(upsert_link_in(
             connection,
             meeting_id,
@@ -235,6 +251,72 @@ pub(in crate::meeting::store) fn derive_heard_links_in(
         )?);
     }
     Ok(changed)
+}
+
+/// How far back saving a person looks for meetings that named them.
+const RECHECK_WINDOW_MS: i64 = 90 * 24 * 60 * 60 * 1000;
+/// The most meetings one save re-reads.
+const RECHECK_MEETINGS: i64 = 100;
+
+/// What re-reading recent meetings for one person found.
+pub(in crate::meeting::store) struct Recheck {
+    /// Meetings read.
+    pub meetings: usize,
+    /// Links added or raised.
+    pub changes: usize,
+    /// Of the meetings read, how many now wait on the user to confirm this
+    /// person.
+    pub suggestions: usize,
+}
+
+/// Re-reads recent finished meetings for one person, after they were saved
+/// under names those meetings may have used. Suggests, never confirms.
+pub(in crate::meeting::store) fn recheck_recent_meetings_in(
+    connection: &Connection,
+    person_id: PersonId,
+    user_name: Option<&str>,
+    now_utc_ms: i64,
+) -> Result<Recheck, StoreError> {
+    let mut statement = connection.prepare(
+        "SELECT id, title FROM meeting_sessions
+          WHERE phase = 'review_ready'
+            AND COALESCE(started_at_utc_ms, created_at_utc_ms) >= ?1
+          ORDER BY COALESCE(started_at_utc_ms, created_at_utc_ms) DESC
+          LIMIT ?2",
+    )?;
+    let recent = statement
+        .query_map(
+            rusqlite::params![now_utc_ms - RECHECK_WINDOW_MS, RECHECK_MEETINGS],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+    let mut found = Recheck {
+        meetings: recent.len(),
+        changes: 0,
+        suggestions: 0,
+    };
+    for (meeting, title) in recent {
+        let meeting_id = MeetingSessionId::from_uuid(
+            uuid::Uuid::parse_str(&meeting).map_err(|_| StoreError::Corrupt)?,
+        );
+        found.changes +=
+            derive_title_links_for_in(connection, meeting_id, &title, Some(person_id), now_utc_ms)?
+                + derive_heard_links_for_in(
+                    connection,
+                    meeting_id,
+                    user_name,
+                    Some(person_id),
+                    now_utc_ms,
+                )?;
+        found.suggestions += usize::from(connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM meeting_person_links
+              WHERE meeting_id = ?1 AND person_id = ?2 AND confidence = 'suggested')",
+            rusqlite::params![meeting, person_id.uuid().to_string()],
+            |row| row.get::<_, bool>(0),
+        )?);
+    }
+    Ok(found)
 }
 
 fn strings_in(
