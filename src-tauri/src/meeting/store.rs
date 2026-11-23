@@ -80,6 +80,7 @@ pub(crate) mod series;
 mod series_tests;
 mod snapshot_texts;
 mod snapshots;
+mod title;
 #[cfg(test)]
 mod title_tests;
 pub(crate) mod today;
@@ -5083,9 +5084,12 @@ impl MeetingStore {
 
     /// Title a meeting from what was said in it, once its notes exist.
     ///
-    /// Only the manual default is replaced. A title a person typed and a title
-    /// a calendar event supplied are both somebody's answer to this question
-    /// already, and overwriting either would be the app arguing with its user.
+    /// Only a title Sona wrote itself is replaced: the manual default, a
+    /// holder title such as "Slack meeting" or "Call in Safari"
+    /// (`title::is_placeholder`), or the title this pass derived earlier. A
+    /// title a person typed and a title a calendar event supplied are both
+    /// somebody's answer to this question already, and overwriting either
+    /// would be the app arguing with its user.
     ///
     /// Deliberately not an `edit_session`: this runs immediately after an
     /// artifact revision lands, and `edit_session` marks artifacts out of date.
@@ -8705,6 +8709,8 @@ fn derived_title(headline: &str) -> Option<String> {
     if trimmed.is_empty() {
         return None;
     }
+    // "The meeting addressed X" is a summary line; X is the title.
+    let trimmed = title::topic(trimmed);
     let cut = shortened_to_words(trimmed, MAX_DERIVED_TITLE_CHARS);
     let mut characters = cut.chars();
     let first = characters.next()?;
@@ -8728,7 +8734,15 @@ fn derive_title_in(
         return Ok(None);
     };
     let current = session_row(transaction, session_id)?;
-    if current.title != MANUAL_DEFAULT_TITLE || title == current.title {
+    if title == current.title {
+        return Ok(None);
+    }
+    // Replaceable: a name Sona made up at the start, or the title this same
+    // pass wrote from an earlier revision of the notes. Anything else is a
+    // person's or a calendar's answer.
+    if !title::is_placeholder(&current.title)
+        && last_derived_title(transaction, session_id)?.as_deref() != Some(&current.title)
+    {
         return Ok(None);
     }
     let next_revision = current.revision.checked_add(1).ok_or(StoreError::Corrupt)?;
@@ -8751,7 +8765,7 @@ fn derive_title_in(
         &encode_json(&serde_json::json!({
             "source": "summary_headline",
             "headline": headline.trim(),
-            "from": MANUAL_DEFAULT_TITLE,
+            "from": current.title,
             "to": title,
         }))?,
     )?;
@@ -8774,6 +8788,28 @@ fn derive_title_in(
     };
     insert_operation_receipt(transaction, &receipt, now)?;
     Ok(Some(receipt))
+}
+
+/// The title this meeting last got from its notes, unless somebody has set
+/// one since: a `title_set` after the last `title_derived` ends the claim,
+/// even when it types the same words back.
+fn last_derived_title(
+    connection: &Connection,
+    session_id: MeetingSessionId,
+) -> Result<Option<String>, StoreError> {
+    let latest: Option<(String, String)> = connection
+        .query_row(
+            "SELECT event_kind, details_json FROM meeting_session_events
+             WHERE session_id = ?1 AND event_kind IN ('title_derived', 'title_set')
+             ORDER BY sequence DESC LIMIT 1",
+            params![id(session_id)],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    Ok(latest
+        .filter(|(kind, _)| kind == "title_derived")
+        .and_then(|(_, details)| serde_json::from_str::<serde_json::Value>(&details).ok())
+        .and_then(|details| details.get("to")?.as_str().map(str::to_string)))
 }
 
 /// `text` cut to at most `limit` characters, on a word boundary when there is
