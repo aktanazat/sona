@@ -440,7 +440,7 @@ pub enum RecordingState {
     Idle,
     Recording {
         binding_id: String,
-        spool: CaptureSpool,
+        spool: Option<CaptureSpool>,
     },
     Stopping,
 }
@@ -1509,16 +1509,17 @@ impl AudioRecordingManager {
             }
         }
 
+        let CaptureSpool { path, run } = spool;
         let result = lock_recover(&self.recorder)
             .as_ref()
             .ok_or_else(|| "Recorder not available".to_string())
             .and_then(|recorder| {
                 recorder
-                    .start_spooled(vad_policy, &spool.path)
+                    .start_spooled(vad_policy, path)
                     .map_err(|error| format!("Failed to start recorder: {error}"))
             });
-        let receiver = match result {
-            Ok(receiver) => receiver,
+        let (receiver, path) = match result {
+            Ok(started) => started,
             Err(error) => {
                 if let Some(token) = token {
                     self.capture_lease.release(token);
@@ -1533,7 +1534,7 @@ impl AudioRecordingManager {
             &mut state,
             RecordingState::Recording {
                 binding_id: binding_id.to_string(),
-                spool,
+                spool: path.map(|path| CaptureSpool { path, run }),
             },
         );
         debug!("Recording requested for binding {binding_id}");
@@ -1726,7 +1727,7 @@ impl AudioRecordingManager {
             } if active == binding_id && !self.was_cancelled_since(cancel_generation) => {
                 self.invalidate_recording_readiness();
                 let spool = match self.set_state(&mut state, RecordingState::Stopping) {
-                    RecordingState::Recording { spool, .. } => Some(spool),
+                    RecordingState::Recording { spool, .. } => spool,
                     RecordingState::Idle | RecordingState::Stopping => None,
                 };
                 drop(state);
@@ -1885,7 +1886,7 @@ impl AudioRecordingManager {
         match *state {
             RecordingState::Recording { .. } => {
                 let spool = match self.set_state(&mut state, RecordingState::Idle) {
-                    RecordingState::Recording { spool, .. } => Some(spool),
+                    RecordingState::Recording { spool, .. } => spool,
                     RecordingState::Idle | RecordingState::Stopping => None,
                 };
                 drop(state);

@@ -43,8 +43,12 @@ impl SpoolWriter {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
+        let file = OpenOptions::new().write(true).create_new(true).open(path)?;
+        let writer = WavWriter::new(BufWriter::new(file), SPEC).inspect_err(|_| {
+            let _ = fs::remove_file(path);
+        })?;
         Ok(Self {
-            writer: WavWriter::create(path, SPEC)?,
+            writer,
             path: path.to_path_buf(),
             since_checkpoint: 0,
             failed: false,
