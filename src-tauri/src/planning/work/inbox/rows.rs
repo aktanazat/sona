@@ -5,7 +5,7 @@
 //! from them on every read, so a mark still lands on each notice a row holds.
 
 use super::{Notification, NotificationKind};
-use crate::planning::work::types::WorkActor;
+use crate::planning::work::types::{WorkActor, WorkStatus};
 use anyhow::Result;
 use rusqlite::Connection;
 use serde::Serialize;
@@ -163,7 +163,7 @@ struct Building {
     notices: Vec<Notification>,
     /// The other side of a link a kept notice already tells: marked with
     /// the row, counted nowhere.
-    echoes: Vec<String>,
+    echoes: Vec<Notification>,
     last_at_ms: i64,
     batch: bool,
 }
@@ -222,6 +222,10 @@ fn field_name(field: &str) -> &str {
     }
 }
 
+fn is_status(to: &str) -> bool {
+    serde_json::from_value::<WorkStatus>(serde_json::Value::String(to.to_owned())).is_ok()
+}
+
 fn summary(parts: &[Part], status: Option<&str>) -> String {
     let mut said = Vec::new();
     let mut fields = Vec::new();
@@ -243,7 +247,9 @@ fn summary(parts: &[Part], status: Option<&str>) -> String {
                 plural(part.count, "a comment", "comments")
             )),
             "status" => said.push(match status {
-                Some(to) => format!("moved it to {}", to.replace('_', " ")),
+                Some(to) if is_status(to) => format!("moved it to {}", to.replace('_', " ")),
+                // Marking a duplicate records the task it duplicates, not a status.
+                Some(_) => "marked it a duplicate".to_owned(),
                 None => "changed its status".to_owned(),
             }),
             "archived" | "restored" | "snoozed" => said.push(format!("{} it", part.what)),
@@ -318,7 +324,7 @@ fn finish(row: Building, context: &Context) -> Option<InboxRow> {
             .and_then(|(first, _)| first),
     };
     let mut notice_ids: Vec<String> = row.notices.iter().rev().map(|n| n.id.clone()).collect();
-    notice_ids.extend(row.echoes);
+    notice_ids.extend(row.echoes.iter().map(|n| n.id.clone()));
     Some(InboxRow {
         id: lead.id.clone(),
         notice_ids,
@@ -330,7 +336,11 @@ fn finish(row: Building, context: &Context) -> Option<InboxRow> {
         summary,
         first_at_ms: row.notices.first()?.created_at_ms,
         created_at_ms: lead.created_at_ms,
-        unread: row.notices.iter().any(|notice| notice.read_at_ms.is_none()),
+        unread: row
+            .notices
+            .iter()
+            .chain(&row.echoes)
+            .any(|notice| notice.read_at_ms.is_none()),
         lead,
     })
 }
@@ -408,7 +418,7 @@ pub(crate) fn rows(notices: Vec<Notification>, context: &Context) -> Vec<InboxRo
         if let Some(other) = other_end(&notice) {
             let told = (other.to_owned(), task.clone(), at_ms, notice.to.is_some());
             if let Some(row) = links.get(&told) {
-                built[*row].echoes.push(notice.id);
+                built[*row].echoes.push(notice);
                 continue;
             }
         }
@@ -439,6 +449,14 @@ pub(crate) fn rows(notices: Vec<Notification>, context: &Context) -> Vec<InboxRo
         .collect();
     rows.reverse();
     rows.sort_by_key(|row| (row.needs.is_none(), std::cmp::Reverse(row.created_at_ms)));
+    rows
+}
+
+/// The unread rows among `notices`. Built from read and unread notices
+/// alike, so reading part of a burst does not split what is left of it.
+pub(crate) fn waiting(notices: Vec<Notification>, context: &Context) -> Vec<InboxRow> {
+    let mut rows = rows(notices, context);
+    rows.retain(|row| row.unread);
     rows
 }
 
@@ -899,6 +917,81 @@ mod tests {
         assert_eq!(built[0].project_id.as_deref(), Some("project-0"));
         assert_eq!(built[0].notice_ids.len(), 10);
         assert!(built[0].needs.is_none());
+    }
+
+    fn agent_notice(id: &str, at_ms: i64, read: bool, to: Option<&str>) -> Notification {
+        Notification {
+            id: id.to_owned(),
+            item_id: Some("task-050".to_owned()),
+            kind: NotificationKind::Changed,
+            actor: WorkActor::Agent,
+            agent: Some("Scout".to_owned()),
+            comment_id: None,
+            field: Some(if to.is_some() { "relation" } else { "priority" }.to_owned()),
+            from: None,
+            to: to.map(str::to_owned),
+            created_at_ms: at_ms,
+            read_at_ms: read.then_some(at_ms),
+            ..fixture().notices[0].clone()
+        }
+    }
+
+    #[test]
+    fn reading_the_middle_of_a_burst_leaves_one_unread_row() {
+        let context = fixture().context;
+        // Newest first; the read middle notice bridges a gap over ten minutes.
+        let notices = vec![
+            agent_notice("c", START + 12 * MINUTE, false, None),
+            agent_notice("b", START + 6 * MINUTE, true, None),
+            agent_notice("a", START, false, None),
+        ];
+        let built = waiting(notices, &context);
+        assert_eq!(built.len(), 1);
+        assert_eq!(built[0].notice_ids.len(), 3);
+    }
+
+    #[test]
+    fn a_row_is_unread_while_its_stored_echo_is() {
+        let context = fixture().context;
+        let echo = Notification {
+            item_id: Some("task-001".to_owned()),
+            ..agent_notice("echo", START, false, Some("related:task-050"))
+        };
+        let source = agent_notice("source", START, true, Some("related:task-001"));
+        let built = waiting(vec![echo, source], &context);
+        assert_eq!(built.len(), 1);
+        assert!(built[0].unread);
+        assert_eq!(built[0].notice_ids, ["source", "echo"]);
+    }
+
+    #[test]
+    fn a_duplicate_is_not_named_as_a_status() {
+        let context = fixture().context;
+        let marked = Notification {
+            kind: NotificationKind::Status,
+            field: None,
+            to: Some("0b0e6f0e-6f0e-4b0e-8f0e-0b0e6f0e6f0e".to_owned()),
+            ..agent_notice("b", START + MINUTE, false, None)
+        };
+        let built = rows(
+            vec![marked, agent_notice("a", START, false, None)],
+            &context,
+        );
+        assert_eq!(
+            built[0].summary,
+            "Marked it a duplicate, changed the priority"
+        );
+        let moved = Notification {
+            kind: NotificationKind::Status,
+            field: None,
+            to: Some("in_progress".to_owned()),
+            ..agent_notice("b", START + MINUTE, false, None)
+        };
+        let built = rows(vec![moved, agent_notice("a", START, false, None)], &context);
+        assert_eq!(
+            built[0].summary,
+            "Moved it to in progress, changed the priority"
+        );
     }
 
     #[test]

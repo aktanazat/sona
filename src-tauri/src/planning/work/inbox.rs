@@ -838,18 +838,24 @@ fn reading<T>(app: &AppHandle, work: impl FnOnce(&Connection) -> Result<T>) -> R
 pub(crate) fn work_inbox(app: AppHandle, shown: Shown) -> Result<Inbox, String> {
     reading(&app, |conn| {
         let now = now_ms();
-        let unread = Shown {
-            unread_only: true,
-            ..Shown::default()
-        };
         let context = rows::context(conn)?;
-        let waiting = rows::rows(notifications(conn, unread, now)?, &context);
-        let notifications = notifications(conn, shown, now)?;
+        let waiting = rows::waiting(notifications(conn, Shown::default(), now)?, &context);
+        // Rows are built over read notices too, then narrowed: an unread-only
+        // view must not split a burst at the notices already read.
+        let any = Shown {
+            unread_only: false,
+            ..shown
+        };
+        let rows = if shown.unread_only {
+            rows::waiting(notifications(conn, any, now)?, &context)
+        } else {
+            rows::rows(notifications(conn, any, now)?, &context)
+        };
         Ok(Inbox {
             unread: waiting.len(),
             needs: waiting.iter().filter(|row| row.needs.is_some()).count(),
-            rows: rows::rows(notifications.clone(), &context),
-            notifications,
+            rows,
+            notifications: notifications(conn, shown, now)?,
         })
     })
 }
