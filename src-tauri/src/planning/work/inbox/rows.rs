@@ -59,7 +59,8 @@ pub(crate) struct InboxRow {
     /// "Linked 5 tasks, added 3 comments"; empty for a row of one notice
     /// that the notice already says.
     pub(crate) summary: String,
-    /// The newest notice, for everything a single notice shows.
+    /// The newest notice that needs the user, or the newest one when none
+    /// does, for everything a single notice shows.
     pub(crate) lead: Notification,
     pub(crate) first_at_ms: i64,
     pub(crate) created_at_ms: i64,
@@ -134,13 +135,26 @@ fn created(notice: &Notification) -> bool {
         && notice.from.is_none()
 }
 
-/// The task a relation notice links its own task to.
-fn other_end(notice: &Notification) -> Option<&str> {
+/// How a relation notice links its own task, and the task it links it to.
+fn link(notice: &Notification) -> Option<(&str, &str)> {
     if notice.kind != NotificationKind::Changed || notice.field.as_deref() != Some("relation") {
         return None;
     }
     let mark = notice.to.as_deref().or(notice.from.as_deref())?;
-    mark.split_once(':').map(|(_, other)| other)
+    mark.split_once(':')
+}
+
+fn other_end(notice: &Notification) -> Option<&str> {
+    link(notice).map(|(_, other)| other)
+}
+
+/// How the other task's history names a link this task's names `verb`.
+pub(crate) fn mirrored(verb: &str) -> &str {
+    match verb {
+        "blocks" => "blocked_by",
+        "blocked_by" => "blocks",
+        same => same,
+    }
 }
 
 fn what(notice: &Notification) -> String {
@@ -168,7 +182,8 @@ struct Building {
     batch: bool,
 }
 
-fn needs(row: &Building, context: &Context) -> Option<Needs> {
+/// What the row needs from the user, and the newest notice that needs it.
+fn needs<'a>(row: &'a Building, context: &Context) -> Option<(Needs, &'a Notification)> {
     let triage = |notice: &Notification| {
         notice
             .item_id
@@ -178,23 +193,27 @@ fn needs(row: &Building, context: &Context) -> Option<Needs> {
     };
     row.notices
         .iter()
-        .filter_map(|notice| match notice.kind {
-            NotificationKind::Mention => Some(Needs::Mention),
-            NotificationKind::Reminder => Some(Needs::Reminder),
-            NotificationKind::Due => Some(Needs::Due),
-            NotificationKind::Automation if notice.to.as_deref() == Some("failed") => {
-                Some(Needs::Failed)
-            }
-            NotificationKind::Comment => notice
-                .comment_id
-                .as_ref()
-                .and_then(|id| context.comments.get(id))
-                .filter(|body| asks(body))
-                .map(|_| Needs::Question),
-            NotificationKind::Assigned if triage(notice) => Some(Needs::Triage),
-            _ => None,
+        .rev()
+        .filter_map(|notice| {
+            let needs = match notice.kind {
+                NotificationKind::Mention => Some(Needs::Mention),
+                NotificationKind::Reminder => Some(Needs::Reminder),
+                NotificationKind::Due => Some(Needs::Due),
+                NotificationKind::Automation if notice.to.as_deref() == Some("failed") => {
+                    Some(Needs::Failed)
+                }
+                NotificationKind::Comment => notice
+                    .comment_id
+                    .as_ref()
+                    .and_then(|id| context.comments.get(id))
+                    .filter(|body| asks(body))
+                    .map(|_| Needs::Question),
+                NotificationKind::Assigned if triage(notice) => Some(Needs::Triage),
+                _ => None,
+            };
+            needs.map(|needs| (needs, notice))
         })
-        .min_by_key(|needs| match needs {
+        .min_by_key(|(needs, _)| match needs {
             Needs::Failed => 0,
             Needs::Mention => 1,
             Needs::Question => 2,
@@ -271,7 +290,14 @@ fn summary(parts: &[Part], status: Option<&str>) -> String {
 }
 
 fn finish(row: Building, context: &Context) -> Option<InboxRow> {
-    let needs = needs(&row, context);
+    let needing = needs(&row, context);
+    let newest = row.notices.last()?;
+    // A burst leads with what it needs from the user, not with its last edit.
+    let lead = needing
+        .as_ref()
+        .map_or(newest, |(_, notice)| notice)
+        .clone();
+    let needs = needing.map(|(needs, _)| needs);
     let mut parts: Vec<Part> = Vec::new();
     for notice in &row.notices {
         let what = what(notice);
@@ -286,7 +312,6 @@ fn finish(row: Building, context: &Context) -> Option<InboxRow> {
         .rev()
         .find(|notice| notice.kind == NotificationKind::Status)
         .and_then(|notice| notice.to.as_deref());
-    let lead = row.notices.last()?.clone();
     let grouped = row.notices.len() > 1;
     let summary = if row.batch {
         format!("Created {} tasks for you", row.notices.len())
@@ -326,7 +351,7 @@ fn finish(row: Building, context: &Context) -> Option<InboxRow> {
     let mut notice_ids: Vec<String> = row.notices.iter().rev().map(|n| n.id.clone()).collect();
     notice_ids.extend(row.echoes.iter().map(|n| n.id.clone()));
     Some(InboxRow {
-        id: lead.id.clone(),
+        id: newest.id.clone(),
         notice_ids,
         item_id,
         item_ids,
@@ -335,7 +360,7 @@ fn finish(row: Building, context: &Context) -> Option<InboxRow> {
         parts,
         summary,
         first_at_ms: row.notices.first()?.created_at_ms,
-        created_at_ms: lead.created_at_ms,
+        created_at_ms: newest.created_at_ms,
         unread: row
             .notices
             .iter()
@@ -381,7 +406,9 @@ pub(crate) fn rows(notices: Vec<Notification>, context: &Context) -> Vec<InboxRo
     let mut built: Vec<Building> = Vec::new();
     let mut bursts: HashMap<(String, String), usize> = HashMap::new();
     let mut batches: HashMap<usize, usize> = HashMap::new();
-    let mut links: HashMap<(String, String, i64, bool), usize> = HashMap::new();
+    // The mirror each kept link notice would have: its task, how it names
+    // the link, the task it would be on, when, and whether it links.
+    let mut links: HashMap<(String, String, String, i64, bool), usize> = HashMap::new();
     for notice in oldest_first {
         let at_ms = notice.created_at_ms;
         if let Some(run) = batch_of.get(&notice.id) {
@@ -415,10 +442,19 @@ pub(crate) fn rows(notices: Vec<Notification>, context: &Context) -> Vec<InboxRo
             });
             continue;
         };
-        if let Some(other) = other_end(&notice) {
-            let told = (other.to_owned(), task.clone(), at_ms, notice.to.is_some());
-            if let Some(row) = links.get(&told) {
-                built[*row].echoes.push(notice);
+        let mirror = link(&notice).map(|(verb, other)| {
+            (
+                task.clone(),
+                verb.to_owned(),
+                other.to_owned(),
+                at_ms,
+                notice.to.is_some(),
+            )
+        });
+        if let Some(told) = &mirror {
+            // One kept notice has one mirror: a second match is another link.
+            if let Some(row) = links.remove(told) {
+                built[row].echoes.push(notice);
                 continue;
             }
         }
@@ -436,8 +472,11 @@ pub(crate) fn rows(notices: Vec<Notification>, context: &Context) -> Vec<InboxRo
                 built.len() - 1
             }
         };
-        if let Some(other) = other_end(&notice) {
-            links.insert((task, other.to_owned(), at_ms, notice.to.is_some()), row);
+        if let Some((_, verb, other, at_ms, linked)) = mirror {
+            links.insert(
+                (other, mirrored(&verb).to_owned(), task, at_ms, linked),
+                row,
+            );
         }
         built[row].notices.push(notice);
         built[row].last_at_ms = at_ms;
@@ -1012,8 +1051,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_link_an_agent_makes_is_news_once_and_history_on_both_tasks() {
+    /// A history with two tasks an agent filed for the user.
+    fn two_filed() -> (Connection, [String; 2]) {
         // PANIC: a fixture that cannot open its database is a broken test.
         let mut history = Connection::open_in_memory().expect("an in-memory history database");
         schema::apply_all(&history).expect("the planner schema");
@@ -1037,11 +1076,115 @@ mod tests {
             )
             .expect("a task an agent files for the user")
             .value
+            .id
         });
+        (history, made)
+    }
+
+    #[test]
+    fn two_links_made_at_once_from_either_task_each_keep_their_notice() {
+        let (history, made) = two_filed();
+        let at = START + MINUTE;
+        items::add_relation(
+            &history,
+            &made[0],
+            &made[1],
+            WorkRelationKind::Blocks,
+            WorkActor::Agent,
+            at,
+        )
+        .expect("the first blocks the second");
+        items::add_relation(
+            &history,
+            &made[1],
+            &made[0],
+            WorkRelationKind::Related,
+            WorkActor::Agent,
+            at,
+        )
+        .expect("the second relates to the first");
+        let mut told: Vec<_> = inbox::notifications(&history, Shown::default(), at + MINUTE)
+            .expect("the inbox")
+            .into_iter()
+            .filter(|notice| notice.field.as_deref() == Some("relation"))
+            .map(|notice| (notice.item_id, notice.to))
+            .collect();
+        told.sort();
+        let mut made_from = vec![
+            (Some(made[0].clone()), Some(format!("blocks:{}", made[1]))),
+            (Some(made[1].clone()), Some(format!("related:{}", made[0]))),
+        ];
+        made_from.sort();
+        assert_eq!(
+            told, made_from,
+            "each link is told on the task it was made from"
+        );
+    }
+
+    #[test]
+    fn stored_links_fold_only_their_own_mirror() {
+        let context = fixture().context;
+        let on = |id: &str, task: &str, to: &str| Notification {
+            item_id: Some(task.to_owned()),
+            ..agent_notice(id, START, false, Some(to))
+        };
+        // Newest first. Two links at one instant, one made from each task,
+        // and the mirror of the first as an older build stored it.
+        let notices = vec![
+            on("mirror", "task-051", "blocked_by:task-050"),
+            on("second", "task-051", "related:task-050"),
+            on("first", "task-050", "blocks:task-051"),
+        ];
+        let built = rows(notices, &context);
+        let held = |task: &str| -> Vec<String> {
+            built
+                .iter()
+                .filter(|row| row.item_id.as_deref() == Some(task))
+                .flat_map(|row| row.notice_ids.clone())
+                .collect()
+        };
+        assert_eq!(built.len(), 2);
+        assert_eq!(held("task-050"), ["first", "mirror"]);
+        assert_eq!(held("task-051"), ["second"]);
+        assert!(built
+            .iter()
+            .all(|row| row.parts.iter().map(|p| p.count).sum::<usize>() == 1));
+    }
+
+    #[test]
+    fn a_burst_leads_with_the_ask_a_later_edit_follows() {
+        let mut context = fixture().context;
+        context.comments.insert(
+            "ask".to_owned(),
+            "Please confirm the venue before I pay the deposit.".to_owned(),
+        );
+        let ask = Notification {
+            kind: NotificationKind::Comment,
+            comment_id: Some("ask".to_owned()),
+            field: None,
+            ..agent_notice("ask", START, false, None)
+        };
+        let notices = vec![
+            agent_notice("edit-2", START + 2 * MINUTE, false, None),
+            agent_notice("edit-1", START + MINUTE, false, None),
+            ask,
+        ];
+        let built = rows(notices, &context);
+        assert_eq!(built.len(), 1);
+        assert_eq!(built[0].needs, Some(Needs::Question));
+        assert_eq!(built[0].lead.id, "ask", "the ask leads the row");
+        assert_eq!(built[0].id, "edit-2");
+        assert_eq!(built[0].created_at_ms, START + 2 * MINUTE);
+        assert_eq!(built[0].notice_ids, ["edit-2", "edit-1", "ask"]);
+    }
+
+    #[test]
+    fn a_link_an_agent_makes_is_news_once_and_history_on_both_tasks() {
+        let (history, made) = two_filed();
         let relation = items::add_relation(
             &history,
-            &made[0].id,
-            &made[1].id,
+            &made[0],
+            &made[1],
             WorkRelationKind::Related,
             WorkActor::Agent,
             START + MINUTE,
@@ -1055,7 +1198,7 @@ mod tests {
                 .map(|notice| notice.item_id)
                 .collect::<Vec<_>>()
         };
-        assert_eq!(links(&history), [Some(made[0].id.clone())]);
+        assert_eq!(links(&history), [Some(made[0].clone())]);
         let told: i64 = history
             .query_row(
                 "SELECT count(*) FROM planning_task_activity WHERE kind = 'relation'",
@@ -1069,7 +1212,7 @@ mod tests {
             .expect("the link removed");
         assert_eq!(
             links(&history),
-            [Some(made[0].id.clone()), Some(made[0].id.clone())]
+            [Some(made[0].clone()), Some(made[0].clone())]
         );
 
         let context = context(&history).expect("the context");

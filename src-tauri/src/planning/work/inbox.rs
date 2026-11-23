@@ -339,7 +339,7 @@ fn owned_by_user(conn: &Connection, task_id: &str) -> Result<bool> {
 /// Whether a link's other task already told the inbox about it: a link is
 /// history on both tasks and news once, on the task it was made from.
 fn echoes_a_link(conn: &Connection, entry: &Entry<'_>, now_ms: i64) -> Result<bool> {
-    let Some((_, other)) = entry
+    let Some((verb, other)) = entry
         .to
         .or(entry.from)
         .and_then(|mark| mark.split_once(':'))
@@ -349,13 +349,13 @@ fn echoes_a_link(conn: &Connection, entry: &Entry<'_>, now_ms: i64) -> Result<bo
     Ok(conn.query_row(
         "SELECT EXISTS (SELECT 1 FROM planning_notifications
          WHERE task_id = ?1 AND kind = 'changed' AND field = 'relation' AND actor = ?2
-           AND created_at_ms = ?3 AND coalesce(to_value, from_value) LIKE '%:' || ?4
+           AND created_at_ms = ?3 AND coalesce(to_value, from_value) = ?4
            AND (to_value IS NULL) = ?5)",
         params![
             other,
             entry.actor.as_str(),
             now_ms,
-            entry.task_id,
+            format!("{}:{}", rows::mirrored(verb), entry.task_id),
             entry.to.is_none()
         ],
         |row| row.get(0),
