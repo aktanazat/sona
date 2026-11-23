@@ -1184,9 +1184,14 @@ mod tests {
         // PANIC: a fixture that cannot open its database is a broken test.
         let mut history = Connection::open_in_memory().expect("an in-memory history database");
         schema::apply_all(&history).expect("the planner schema");
-        let made = ["Book the venue", "Pick the caterer"].map(|title| {
+        let made = ["Book the venue", "Pick the caterer"].map(|title| file(&mut history, title));
+        (history, made)
+    }
+
+    fn file(history: &mut Connection, title: &str) -> String {
+        {
             create(
-                &mut history,
+                history,
                 None,
                 by_agent(&uuid::Uuid::new_v4().to_string(), START),
                 &WorkItemInput {
@@ -1205,8 +1210,55 @@ mod tests {
             .expect("a task an agent files for the user")
             .value
             .id
-        });
-        (history, made)
+        }
+    }
+
+    #[test]
+    fn stored_links_are_read_and_built_in_a_few_milliseconds() {
+        // PANIC: a fixture that cannot open its database is a broken test.
+        let mut history = Connection::open_in_memory().expect("an in-memory history database");
+        schema::apply_all(&history).expect("the planner schema");
+        let made: Vec<String> = (0..102)
+            .map(|number| file(&mut history, &format!("Task {number}")))
+            .collect();
+        for number in 0..343 {
+            items::add_relation(
+                &history,
+                &made[number % 102],
+                &made[(number + 1 + number / 102) % 102],
+                WorkRelationKind::Related,
+                WorkActor::Agent,
+                START + MINUTE + number as i64,
+            )
+            .expect("a link");
+        }
+        store_mirrors(&history);
+        let mut facts = Vec::new();
+        let mut whole = Vec::new();
+        for _ in 0..200 {
+            let start = Instant::now();
+            let stored =
+                inbox::notifications(&history, Shown::default(), START + HOUR).expect("the inbox");
+            let read = start.elapsed();
+            let context = context(&history).expect("the facts");
+            facts.push((start.elapsed() - read).as_micros());
+            assert_eq!(context.echoes.len(), 343);
+            let links = stored
+                .iter()
+                .filter(|notice| notice.field.as_deref() == Some("relation"))
+                .count();
+            assert_eq!(links, 686);
+            let built = rows(stored, &context);
+            whole.push(start.elapsed().as_micros());
+            assert!(!built.is_empty());
+        }
+        facts.sort_unstable();
+        whole.sort_unstable();
+        println!(
+            "686 stored link notices, 343 mirrors: facts with the mirror lookup median {} us, p95 {} us; read, facts and rows median {} us, p95 {} us",
+            facts[100], facts[190], whole[100], whole[190]
+        );
+        assert!(whole[100] < 50_000, "median {} us", whole[100]);
     }
 
     #[test]
