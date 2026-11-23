@@ -205,7 +205,7 @@ fn asking<'a>(notice: &Notification, context: &'a Context) -> Option<&'a String>
         .filter(|body| asks(body))
 }
 
-/// Every sentence of a comment that asks, each short enough for a line;
+/// Every sentence of a comment that asks, cut to the parts that ask;
 /// its first sentence when no one sentence does.
 fn asked(body: &str) -> Vec<String> {
     // A sentence ends at a line break, or at a stop that white space or the
@@ -244,38 +244,96 @@ fn asked(body: &str) -> Vec<String> {
     if asking.is_empty() {
         return sentences
             .first()
-            .map(|said| excerpt(said))
+            .and_then(|said| excerpts(said).into_iter().next())
             .into_iter()
             .collect();
     }
-    asking.into_iter().map(excerpt).collect()
+    asking.into_iter().flat_map(excerpts).collect()
 }
 
-/// At most a line of a sentence, cut so that the words that ask stay in it:
-/// the end of a question, or the phrase that says it waits on the reader.
-fn excerpt(said: &str) -> String {
+/// A sentence as it shows in a row's line. One that fits is shown whole.
+/// A longer one is shown as the parts that ask, every one of them: each
+/// question from the start of its clause to its mark, and each phrase that
+/// says it waits on the reader to the end of its clause. Text around them is what gets left out.
+fn excerpts(said: &str) -> Vec<String> {
     const SHOWN: usize = 80;
     let letters: Vec<char> = said.chars().collect();
     if letters.len() <= SHOWN {
-        return said.to_owned();
+        return vec![said.to_owned()];
     }
-    let lower = said.to_lowercase();
-    let asks_at = match said.rfind('?') {
-        Some(at) => said[..=at].chars().count(),
-        None => WAITING
+    let lower: Vec<char> = letters
+        .iter()
+        .map(|letter| letter.to_lowercase().next().unwrap_or(*letter))
+        .collect();
+    // A stop or a comma ends a clause when white space, a closing quote or
+    // the end follows. Each ask is shown as the clause it is said in.
+    let stops = |at: usize| {
+        matches!(letters[at], '.' | '!' | '?' | '\n' | ',' | ';' | ':')
+            && letters
+                .get(at + 1)
+                .is_none_or(|next| next.is_whitespace() || matches!(next, '"' | '\'' | '”' | '’'))
+    };
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    for at in 0..letters.len() {
+        // The same question `asks` counts: its mark ends what is said.
+        let ends_what_is_said = letters[at + 1..]
             .iter()
-            .filter_map(|phrase| lower.find(phrase).map(|at| at + phrase.len()))
-            .min()
-            .map_or(0, |end| lower[..end].chars().count()),
+            .take_while(|letter| !matches!(letter, '\n' | '.' | '!'))
+            .all(|letter| letter.is_whitespace());
+        if letters[at] == '?' && ends_what_is_said {
+            let mut clause = (0..at)
+                .rev()
+                .find(|before| stops(*before))
+                .map_or(0, |stop| stop + 1);
+            while matches!(letters[clause], '"' | '\'' | '”' | '’') {
+                clause += 1;
+            }
+            spans.push((clause.max((at + 1).saturating_sub(SHOWN)), at + 1));
+        }
+        for phrase in WAITING {
+            let phrase: Vec<char> = phrase.chars().collect();
+            if lower[at..].starts_with(&phrase) {
+                let said_by = at + phrase.len();
+                let clause = (said_by.saturating_sub(1)..letters.len())
+                    .find(|after| stops(*after))
+                    .map_or(letters.len(), |stop| {
+                        stop + usize::from(!matches!(letters[stop], ',' | ';' | ':'))
+                    });
+                spans.push((at, clause.min(at + SHOWN)));
+            }
+        }
     }
-    .min(letters.len());
-    if asks_at <= SHOWN {
+    if spans.is_empty() {
         let cut: String = letters[..SHOWN].iter().collect();
-        return format!("{}…", cut.trim_end());
+        return vec![format!("{}…", cut.trim_end())];
     }
-    let kept: String = letters[asks_at - SHOWN..asks_at].iter().collect();
-    let more = if asks_at < letters.len() { "…" } else { "" };
-    format!("…{}{more}", kept.trim())
+    spans.sort_unstable();
+    let mut shown: Vec<(usize, usize)> = Vec::new();
+    for (start, end) in spans {
+        match shown.last_mut() {
+            Some(last) if end.max(last.1) - last.0 <= SHOWN => last.1 = last.1.max(end),
+            // What the part before already shows is not shown twice.
+            Some(last) if start.max(last.1) < end => {
+                let start = start.max(last.1);
+                shown.push((start, end));
+            }
+            Some(_) => {}
+            None => shown.push((start, end)),
+        }
+    }
+    // A lone part takes the words before it as far as the line allows.
+    if let [(start, end)] = shown.as_mut_slice() {
+        *start = (*start).min(end.saturating_sub(SHOWN));
+    }
+    shown
+        .into_iter()
+        .map(|(start, end)| {
+            let kept: String = letters[start..end].iter().collect();
+            let before = if start > 0 { "…" } else { "" };
+            let after = if end < letters.len() { "…" } else { "" };
+            format!("{before}{}{after}", kept.trim())
+        })
+        .collect()
 }
 
 fn created(notice: &Notification) -> bool {
@@ -1630,6 +1688,59 @@ mod tests {
         let shown = asked(&waits);
         assert!(shown[0].contains("need your"), "{shown:?}");
         assert!(shown[0].chars().count() <= 82, "{shown:?}");
+    }
+
+    #[test]
+    fn every_ask_shows_however_long_the_words_around_it() {
+        // The reviewer's case: a quoted question, a long stretch, a request.
+        let shown = asked(
+            "QA wrote \"Is staging ready?\" after the overnight run finished on all four regions and the dashboards went green, please confirm the live release tag.",
+        );
+        assert!(
+            shown
+                .iter()
+                .any(|part| part.contains("please confirm the live release tag.")),
+            "{shown:?}"
+        );
+
+        // Every ask the rule recognises is in the line, whatever surrounds it.
+        let fill = |letters: usize| {
+            "the nightly export ran clean and ".repeat(letters / 33 + 1)[..letters].to_owned()
+        };
+        let asks = [
+            "please confirm the live release tag",
+            "need your sign-off on the budget",
+            "let me know which vendor to book",
+            "your call on the venue",
+        ];
+        for length in [0, 20, 79, 80, 81, 200, 600] {
+            for quote in [
+                "",
+                "QA wrote \"Is staging ready?\" and ",
+                "the brief says \"Ship it!\" and ",
+            ] {
+                for count in 1..=asks.len() {
+                    let mut body = quote.to_owned();
+                    for ask in &asks[..count] {
+                        body.push_str(&fill(length));
+                        body.push_str(ask);
+                        body.push_str(", ");
+                    }
+                    body.push_str(&fill(length));
+                    body.push_str("so should I ship it today?");
+                    let shown = asked(&body);
+                    for ask in asks[..count].iter().chain(&["should I ship it today?"]) {
+                        assert!(
+                            shown.iter().any(|part| part.contains(ask)),
+                            "{ask:?} is missing from {shown:?} for {body:?}"
+                        );
+                    }
+                    for part in &shown {
+                        assert!(part.chars().count() <= 82, "{part:?}");
+                    }
+                }
+            }
+        }
     }
 
     #[test]
