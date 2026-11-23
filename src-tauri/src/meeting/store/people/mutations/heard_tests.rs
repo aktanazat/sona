@@ -462,3 +462,165 @@ fn a_contact_whose_alias_is_the_users_whole_name_is_found_by_their_own() {
     };
     assert!(people_heard(&people, &alias_only, Some("Jordan")).is_empty());
 }
+
+/// What the matching is meant to do, written out the long way so it does not
+/// share code with `people_heard`: the meeting gave exactly `cue`, and a
+/// person is named by it only through a name that is theirs alone.
+fn should_suggest(people: &[Person], person: &Person, cue: &str, user: Option<&str>) -> bool {
+    let same = |left: &str, right: &str| left.to_lowercase() == right.to_lowercase();
+    let words = |name: &str| {
+        name.split_whitespace()
+            .map(str::to_lowercase)
+            .collect::<Vec<_>>()
+    };
+    let user = user.map(|user| words(user).join(" "));
+    let is_user = user.as_deref().is_some_and(|user| {
+        same(&words(&person.display_name).join(" "), user)
+            || (user.contains(' ') && person.aliases.iter().any(|alias| same(alias, user)))
+    });
+    if is_user {
+        return false;
+    }
+    let mut own = vec![person.display_name.clone()];
+    own.extend(person.aliases.iter().cloned());
+    own.extend(words(&person.display_name).first().cloned());
+    own.iter().any(|name| {
+        if !same(name, cue) {
+            return false;
+        }
+        if name.contains(' ') {
+            return true;
+        }
+        let word = name.to_lowercase();
+        let users = user
+            .as_deref()
+            .is_some_and(|user| user.split(' ').any(|part| part == word));
+        let could_mean = people
+            .iter()
+            .filter(|other| {
+                std::iter::once(&other.display_name)
+                    .chain(&other.aliases)
+                    .any(|name| words(name).contains(&word))
+            })
+            .count();
+        !users && could_mean == 1
+    })
+}
+
+#[test]
+fn every_mix_of_user_name_nicknames_and_shared_names_matches_as_meant() {
+    const USERS: &[Option<&str>] = &[
+        None,
+        Some("Jordan"),
+        Some("Jordan Vale"),
+        Some("jordan vale"),
+    ];
+    const FIRST: &[&str] = &[
+        "Jordan Vale",
+        "Jordan Pryce",
+        "Dana Whitfield",
+        "Jordan",
+        "Vale Morrow",
+    ];
+    const FIRST_ALIASES: &[&[&str]] = &[
+        &[],
+        &["Jojo"],
+        &["Jordan"],
+        &["Jordan Vale"],
+        &["Dee"],
+        &["Jojo", "Jordan"],
+        &["Vale"],
+    ];
+    const SECOND: &[Option<&str>] = &[
+        None,
+        Some("Jordan Pryce"),
+        Some("Dana Reed"),
+        Some("Priya Dana"),
+        Some("Joanna Reed"),
+        Some("Jordan Vale"),
+    ];
+    const SECOND_ALIASES: &[&[&str]] = &[&[], &["Jojo"], &["Dee"], &["Jordan"], &["Dana"]];
+    const CUES: &[&str] = &[
+        "Jordan Vale",
+        "Jordan Pryce",
+        "Dana Whitfield",
+        "Dana Reed",
+        "Priya Dana",
+        "Joanna Reed",
+        "Vale Morrow",
+        "Dana Okafor",
+        "Marcus Dana",
+        "Jordan",
+        "Dana",
+        "Jojo",
+        "Dee",
+        "Vale",
+        "Priya",
+    ];
+
+    let mut checked = 0;
+    let mut wrong = Vec::new();
+    for user in USERS {
+        for first in FIRST {
+            for first_aliases in FIRST_ALIASES {
+                for second in SECOND {
+                    for second_aliases in SECOND_ALIASES {
+                        let mut people = vec![invented(first, first_aliases)];
+                        match second {
+                            Some(second) => people.push(invented(second, second_aliases)),
+                            None if !second_aliases.is_empty() => continue,
+                            None => {}
+                        }
+                        for cue in CUES {
+                            let said = [
+                                vec![format!("I asked {cue} about it.")],
+                                vec![format!("Thanks {cue}, send it over.")],
+                                vec![format!("That was {cue}'s idea.")],
+                                Vec::new(),
+                            ];
+                            for (index, lines) in said.iter().enumerate() {
+                                let listed = if lines.is_empty() {
+                                    vec![(*cue).to_string()]
+                                } else {
+                                    Vec::new()
+                                };
+                                let heard = Heard {
+                                    lines,
+                                    listed: &listed,
+                                };
+                                let found = people_heard(&people, &heard, *user)
+                                    .into_iter()
+                                    .map(|person| person.id)
+                                    .collect::<Vec<_>>();
+                                for person in &people {
+                                    checked += 1;
+                                    let meant = should_suggest(&people, person, cue, *user);
+                                    if found.contains(&person.id) != meant {
+                                        wrong.push(format!(
+                                            "user {user:?}, people {:?}, cue {cue:?} (form {index}): {} {}",
+                                            people
+                                                .iter()
+                                                .map(|person| (&person.display_name, &person.aliases))
+                                                .collect::<Vec<_>>(),
+                                            person.display_name,
+                                            if meant { "missed" } else { "wrongly suggested" },
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    println!(
+        "name combinations: {} of {checked} decisions wrong",
+        wrong.len()
+    );
+    for case in wrong.iter().take(12) {
+        println!("  {case}");
+    }
+    assert!(wrong.is_empty());
+}

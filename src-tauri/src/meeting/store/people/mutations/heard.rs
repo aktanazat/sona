@@ -10,7 +10,7 @@ use crate::meeting::store::loops::user_speaker_labels_in;
 use crate::meeting::store::people::{
     all_people_in, exact_phrase_mentioned, identity_names, normalized,
 };
-use crate::meeting::store::voice_identity::{is_generated_speaker_label, names_user};
+use crate::meeting::store::voice_identity::is_generated_speaker_label;
 use crate::meeting::store::{effective_segments_for_session, StoreError};
 use crate::meeting::types::MeetingSessionId;
 use rusqlite::Connection;
@@ -43,40 +43,47 @@ pub(super) fn people_heard<'a>(
     heard: &Heard<'_>,
     user_name: Option<&str>,
 ) -> Vec<&'a Person> {
-    // How many people each single word could mean: as a first name, or as a
-    // one-word name or alias. A word that could mean two people names neither.
-    let mut single_words = HashMap::<String, usize>::new();
+    // How many people each word belongs to, anywhere in any of their names.
+    // A word on its own that could mean two people names neither.
+    let mut holders = HashMap::<String, usize>::new();
     for person in people {
-        let mut words = identity_names(person)
-            .filter(|name| name.split_whitespace().count() == 1)
-            .chain(person.display_name.split_whitespace().next())
-            .map(normalized)
-            .collect::<Vec<_>>();
+        let mut words = identity_names(person).flat_map(words).collect::<Vec<_>>();
         words.sort();
         words.dedup();
         for word in words {
-            *single_words.entry(word).or_default() += 1;
+            *holders.entry(word).or_default() += 1;
         }
     }
-    let unshared = |name: &&str| {
-        name.split_whitespace().count() > 1 || single_words.get(&normalized(name)) == Some(&1)
+    let user = user_name.map(normalized).filter(|user| !user.is_empty());
+    let user_words = user_name.map(words).unwrap_or_default();
+    // A name of several words is its holder's unless it is the user's. One
+    // word has to be nobody else's, and no part of the user's name.
+    let theirs = |name: &&str| {
+        if name.split_whitespace().count() > 1 {
+            return user.as_deref() != Some(normalized(name).as_str());
+        }
+        let word = name.trim().to_lowercase();
+        !user_words.contains(&word) && holders.get(&word) == Some(&1)
     };
     people
         .iter()
         .filter(|person| {
-            // An entry called what the user is called is the user, whatever
-            // nickname it also carries.
-            if user_name.is_some_and(|user| normalized(&person.display_name) == normalized(user)) {
+            // The user's own entry is nobody else, whatever nickname it also
+            // carries: the entry called what the user is called, or one with
+            // the user's full name as an alias. A one-word About me name is
+            // only a first name, which a contact may share.
+            let is_user = user.as_deref().is_some_and(|user| {
+                normalized(&person.display_name) == user
+                    || (user_words.len() > 1
+                        && person.aliases.iter().any(|alias| normalized(alias) == user))
+            });
+            if is_user {
                 return false;
             }
-            // Any other name the user also answers to is dropped on its own,
-            // so a contact who shares it is still found by the rest of
-            // theirs.
             let names = || {
                 identity_names(person)
                     .chain(person.display_name.split_whitespace().next())
-                    .filter(|name| !names_user(name, user_name))
-                    .filter(unshared)
+                    .filter(theirs)
             };
             heard.listed.iter().any(|listed| {
                 let listed = normalized(listed);
@@ -87,6 +94,19 @@ pub(super) fn people_heard<'a>(
                 .any(|line| names().any(|name| said_in(line, name)))
         })
         .collect()
+}
+
+fn words(name: &str) -> Vec<String> {
+    name.split_whitespace().map(str::to_lowercase).collect()
+}
+
+/// Whether `word` is written as a name would be: capitalised, and not "I".
+fn looks_like_a_name(word: &str) -> bool {
+    let bare = word.trim_matches(|character: char| !character.is_alphanumeric());
+    bare.chars().next().is_some_and(char::is_uppercase)
+        && bare != "I"
+        && !bare.starts_with("I'")
+        && !bare.starts_with("I\u{2019}")
 }
 
 /// Whether `line` says `name` as a name. A name of several words only has to
@@ -111,11 +131,28 @@ fn said_in(line: &str, name: &str) -> bool {
         if bare.to_lowercase() != wanted || !bare.chars().next().is_some_and(char::is_uppercase) {
             return false;
         }
+        let opens_sentence = index == 0 || words[index - 1].ends_with(['.', '!', '?']);
+        // Part of a longer name ("Dana Okafor", "Priya Dana") is somebody
+        // else: their full name is matched as a whole, never by one word.
+        let ends_here = !word.ends_with(|character: char| character.is_alphanumeric())
+            || word.ends_with("'s")
+            || word.ends_with("\u{2019}s");
+        let surname_follows = !ends_here
+            && words
+                .get(index + 1)
+                .is_some_and(|next| looks_like_a_name(next));
+        let follows_first_name = index > 0
+            && !opens_sentence
+            && words[index - 1].ends_with(|character: char| character.is_alphanumeric())
+            && looks_like_a_name(words[index - 1])
+            && !(index == 1 || words[index - 2].ends_with(['.', '!', '?']));
+        if surname_follows || follows_first_name {
+            return false;
+        }
         if !needs_context {
             return true;
         }
         let addressed = word.ends_with(',');
-        let opens_sentence = index == 0 || words[index - 1].ends_with(['.', '!', '?']);
         addressed || !opens_sentence
     })
 }
