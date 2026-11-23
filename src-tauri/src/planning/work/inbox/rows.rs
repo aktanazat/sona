@@ -142,11 +142,24 @@ fn asking<'a>(notice: &Notification, context: &'a Context) -> Option<&'a String>
 /// The sentence of a comment that asks, short enough for one line.
 fn asked(body: &str) -> String {
     const SHOWN: usize = 80;
-    let sentences: Vec<&str> = body
-        .split_inclusive(['\n', '.', '!', '?'])
-        .map(str::trim)
-        .filter(|sentence| !sentence.is_empty())
-        .collect();
+    // A sentence ends at a line break, or at a stop that white space or the
+    // end follows: the stop inside "v2.1" ends nothing.
+    let mut sentences = Vec::new();
+    let mut start = 0;
+    let mut letters = body.char_indices().peekable();
+    while let Some((at, letter)) = letters.next() {
+        let next = letters.peek().map(|(_, next)| *next);
+        let ends = letter == '\n'
+            || (matches!(letter, '.' | '!' | '?') && next.is_none_or(char::is_whitespace));
+        if ends || next.is_none() {
+            let end = at + letter.len_utf8();
+            let sentence = body[start..end].trim();
+            if !sentence.is_empty() {
+                sentences.push(sentence);
+            }
+            start = end;
+        }
+    }
     let said = sentences
         .iter()
         .find(|sentence| asks(sentence))
@@ -1339,6 +1352,10 @@ mod tests {
             "Please confirm the venue before I pay."
         );
         assert_eq!(asked("Two mockups are up"), "Two mockups are up");
+        assert_eq!(
+            asked("Built it. Can you approve v2.1? It ships Friday."),
+            "Can you approve v2.1?"
+        );
         let long = format!("Could you {}?", "look at this ".repeat(12));
         let shown = asked(&long);
         assert!(shown.chars().count() <= 81, "{shown}");
