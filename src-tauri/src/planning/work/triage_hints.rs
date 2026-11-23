@@ -252,8 +252,8 @@ impl Pool {
     /// tasks are everyone's tasks, and following them files every meeting's
     /// work under whichever project was busiest last. The same goes for a
     /// person whose last few tasks agree only because that project is the
-    /// newest, so the project a window names must also hold most of their
-    /// tasks over all time.
+    /// newest, so the project a window names must also hold most of all their
+    /// tasks that are not archived.
     fn people_windows<'a>(&'a self, item: &'a WorkItem, mine: &[String]) -> Vec<Window<'a>> {
         let mut seen: Vec<&str> = Vec::new();
         for meeting in mine {
