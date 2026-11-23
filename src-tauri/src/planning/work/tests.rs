@@ -2155,3 +2155,85 @@ fn a_view_with_an_empty_group_is_refused_when_saved() {
     items::save_view(&desk.history, None, &input(kept), 0).expect("a group with a member");
     assert_eq!(items::views(&desk.history).expect("the saved views").len(), 1);
 }
+
+#[test]
+fn a_repeat_filter_finds_the_saved_schedule_within_the_list_scope() {
+    let mut desk = desk(&[]);
+    let add = |desk: &mut Desk, title, recurrence: Option<&str>| {
+        let at = desk.tick();
+        let input = WorkItemInput {
+            recurrence: recurrence.map(str::to_owned),
+            ..typed(title)
+        };
+        create(&mut desk.history, None, by_me(&operation(), at), &input)
+            .expect("a stored task")
+            .value
+    };
+    let monday = add(&mut desk, "Monday review", Some("every monday"));
+    let friday = add(&mut desk, "Friday digest", Some("every friday"));
+    let once = add(&mut desk, "Book the room", None);
+    let at = desk.tick();
+    set_archived(
+        &mut desk.history,
+        by_me(&operation(), at),
+        std::slice::from_ref(&friday.id),
+        true,
+    )
+    .expect("archive the digest");
+    let query = |rule, include_archived| WorkQuery {
+        filters: vec![super::filter::WorkCondition {
+            field: super::filter::WorkFilterField::Repeat,
+            op: super::filter::WorkFilterOp::Is,
+            values: vec![String::from(rule)],
+        }
+        .into()],
+        include_archived,
+        ..WorkQuery::default()
+    };
+    let found = |query| {
+        list(&desk.history, None, None, &query, at)
+            .expect("the filtered list")
+            .items
+    };
+    assert_eq!(
+        found(query("set", false))
+            .into_iter()
+            .map(|row| row.item.id)
+            .collect::<Vec<_>>(),
+        [monday.id]
+    );
+    assert_eq!(
+        found(query("none", true))
+            .into_iter()
+            .map(|row| row.item.id)
+            .collect::<Vec<_>>(),
+        [once.id]
+    );
+    let archived = found(query("\nEVERY FRIDAY\n", true));
+    assert_eq!(archived.len(), 1);
+    assert_eq!(archived[0].item.id, friday.id);
+    assert_eq!(
+        archived[0].repeat.as_ref().map(|rule| rule.every.as_str()),
+        Some("every friday")
+    );
+}
+
+#[test]
+fn a_negated_blank_repeat_rule_inside_a_saved_group_is_refused() {
+    let desk = desk(&[]);
+    let input = serde_json::from_str(
+        r#"{"name":"Recurring","query":{"filters":[{"any":[
+            {"field":"status","op":"is","values":["todo"]},
+            {"all":[{"field":"repeat","op":"is_not","values":[" "]}]}
+        ]}]},"display":{"layout":"list","groupBy":"status","orderBy":"priority",
+        "showEmptyGroups":false,"properties":["id"]}}"#,
+    )
+    .expect("a structurally decoded view");
+    let refused = items::save_view(&desk.history, None, &input, AT)
+        .expect_err("a blank rule must not create a view");
+    assert_eq!(
+        refused.downcast_ref::<planning_store::Refusal>(),
+        Some(&planning_store::Refusal::Invalid)
+    );
+    assert!(items::views(&desk.history).expect("saved views").is_empty());
+}

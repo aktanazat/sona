@@ -141,12 +141,19 @@ enum TaskFilters {
     /// The operator a new condition on `field` starts with: one that takes
     /// several values, so picking more widens it.
     static func startingOp(_ field: WorkConditionField) -> WorkConditionOp {
-        field.dated ? .before : field == .label ? .includesAny : field == .cycleScope ? .is : .anyOf
+        switch field {
+        case .label: .includesAny
+        case .cycleScope, .repeat: .is
+        default: field.dated ? .before : .anyOf
+        }
     }
 
     /// Cycle scopes as the panel offers them, in the core's words.
     static let cycleScopes = [ConditionChoice(value: "planned", title: "Planned at start"),
                               ConditionChoice(value: "added", title: "Added after start")]
+
+    private static let anySchedule = ConditionChoice(value: "set", title: "Any schedule")
+    static let repeating = WorkFilter.condition(WorkCondition(field: .repeat, op: .is, values: [anySchedule.value]))
 
     /// Whether `filters` keep only the work of `scope`.
     static func scoped(_ filters: [WorkFilter]?, _ scope: String) -> Bool {
@@ -223,6 +230,10 @@ enum TaskFilters {
                     ConditionChoice(value: "next", title: "Next cycle")]
                 + store.cycles.map { ConditionChoice(value: "\($0.number)", title: $0.title) }
                 + [ConditionChoice(value: "none", title: "No cycle")]
+        case .repeat:
+            let schedules = Set((store.items ?? []).compactMap(\.repeat?.every))
+            return [anySchedule, ConditionChoice(value: "none", title: "No schedule")]
+                + schedules.sorted().map { ConditionChoice(value: $0, title: $0) }
         case .due, .created, .updated:
             let calendar = Calendar.current
             let today = calendar.startOfDay(for: .now)
@@ -243,6 +254,10 @@ enum TaskFilters {
 
     /// "Priority is any of Urgent, High".
     static func text(_ condition: WorkCondition, model: AppModel) -> String {
+        if condition.field == .repeat, condition.op == .is,
+           condition.values.count == 1, condition.values.first == anySchedule.value {
+            return "Repeats"
+        }
         let known = choices(condition.field, model: model)
         let names = condition.values.map { value in
             known.first { $0.value == value || $0.title.caseInsensitiveCompare(value) == .orderedSame }?.title

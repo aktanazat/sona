@@ -94,7 +94,7 @@ enum WorkConditionField: String, Codable, CaseIterable, Hashable, Identifiable {
     case cycleScope = "cycle_scope"
     case due, created, updated, estimate
     case forPerson = "for"
-    case completed
+    case completed, `repeat`
 
     var id: Self { self }
     var label: String {
@@ -102,6 +102,7 @@ enum WorkConditionField: String, Codable, CaseIterable, Hashable, Identifiable {
         case .delegate: "Agent"
         case .cycleScope: "Cycle scope"
         case .forPerson: "For"
+        case .repeat: "Repeats"
         default: rawValue.prefix(1).uppercased() + rawValue.dropFirst()
         }
     }

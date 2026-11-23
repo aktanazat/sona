@@ -138,7 +138,7 @@ enum TaskListing {
         private let filters: [Node]
 
         private enum Value {
-            case none, me, text(String), day(Int64, Int64), at(Int64)
+            case none, me, repeating, text(String), day(Int64, Int64), at(Int64)
             /// Cycle scope: the ids that joined their cycle after it began.
             case planned(Set<String>), added(Set<String>)
         }
@@ -153,10 +153,12 @@ enum TaskListing {
                 field = condition.field
                 op = condition.op
                 values = condition.values.map { [field] raw in
-                    let text = raw.trimmingCharacters(in: .whitespaces).lowercased()
+                    let whitespace: CharacterSet = field == .repeat ? .whitespacesAndNewlines : .whitespaces
+                    let text = raw.trimmingCharacters(in: whitespace).lowercased()
                     if text == "none", field != .priority { return .none }
                     switch field {
                     case .owner where text == "me": return .me
+                    case .repeat where text == "set": return .repeating
                     case .cycleScope:
                         let added = Set(cycles.flatMap { $0.addedAfterStart ?? [] })
                         return text == "added" ? .added(added) : .planned(added)
@@ -168,7 +170,7 @@ enum TaskListing {
                         return .text(names[text] ?? text)
                     case .due, .created, .updated, .completed:
                         return Self.day(text, now: now)
-                    case .status, .delegate: return .text(text)
+                    case .status, .delegate, .repeat: return .text(text)
                     case .owner, .cycle, .project, .milestone, .label, .parent, .estimate, .forPerson:
                         return .text(raw.trimmingCharacters(in: .whitespaces))
                     }
@@ -210,6 +212,7 @@ enum TaskListing {
                 case .cycle, .cycleScope: row.cycle.map { String($0) }
                 case .estimate: row.estimate.map { String($0) }
                 case .forPerson: row.forPersonId
+                case .repeat: row.repeat?.every
                 case .label, .due, .created, .updated, .completed: nil
                 }
             }
@@ -229,6 +232,8 @@ enum TaskListing {
                 case let (.cycleScope, .planned(added)): row.cycle != nil && !added.contains(row.id)
                 case let (.cycleScope, .added(added)): row.cycle != nil && added.contains(row.id)
                 case (_, .planned), (_, .added): false
+                case (.repeat, .repeating): row.repeat != nil
+                case (_, .repeating): false
                 case (.label, .none): row.labelIds.isEmpty
                 case let (.label, .text(id)): row.labelIds.contains(id)
                 case (.owner, .me): row.ownerIsSelf

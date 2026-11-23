@@ -33,6 +33,7 @@ pub enum WorkFilterField {
     Estimate,
     For,
     Completed,
+    Repeat,
 }
 
 impl WorkFilterField {
@@ -54,6 +55,7 @@ impl WorkFilterField {
             Self::Estimate => "estimate",
             Self::For => "for",
             Self::Completed => "completed",
+            Self::Repeat => "repeat",
         }
     }
 }
@@ -105,6 +107,15 @@ pub struct WorkCondition {
     pub values: Vec<String>,
 }
 
+impl WorkCondition {
+    fn invalid_repeat(&self) -> bool {
+        self.field == WorkFilterField::Repeat
+            && (self.values.is_empty()
+                || self.values.iter().any(|value| value.trim().is_empty())
+                || matches!(self.op, WorkFilterOp::Before | WorkFilterOp::After))
+    }
+}
+
 /// A condition, or a group of filters of which any or all must hold. A
 /// query's own list of filters all must hold, so `{"any": [...]}` in it
 /// reads "this or that".
@@ -133,12 +144,22 @@ impl WorkFilter {
             }
         }
     }
+
+    pub(crate) fn has_invalid_repeat(&self) -> bool {
+        match self {
+            Self::Condition(condition) => condition.invalid_repeat(),
+            Self::Any { any: filters } | Self::All { all: filters } => {
+                filters.iter().any(Self::has_invalid_repeat)
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Value {
     None,
     Me,
+    Repeating,
     Text(String),
     /// Local days, from the first one's midnight to the midnight after the
     /// last.
@@ -281,7 +302,7 @@ impl Reader<'_> {
         let (conn, now_ms) = (self.conn, self.now_ms);
         let field = condition.field;
         let ranged = matches!(condition.op, WorkFilterOp::Before | WorkFilterOp::After);
-        if condition.values.is_empty() || (ranged && !dated(field)) {
+        if condition.values.is_empty() || (ranged && !dated(field)) || condition.invalid_repeat() {
             return Err(Refusal::Invalid.into());
         }
         let mut values = Vec::new();
@@ -318,6 +339,10 @@ impl Reader<'_> {
                         agents::agent_name(Some(raw)).to_lowercase(),
                     ));
                 }
+                WorkFilterField::Repeat => values.push(match text.as_str() {
+                    "set" => Value::Repeating,
+                    _ => Value::Text(text),
+                }),
                 WorkFilterField::Parent => {
                     let number = text
                         .strip_prefix("s-")
@@ -406,7 +431,8 @@ fn text_of(field: WorkFilterField, item: &WorkItem, doer: Option<&str>) -> Optio
         | WorkFilterField::Due
         | WorkFilterField::Created
         | WorkFilterField::Updated
-        | WorkFilterField::Completed => None,
+        | WorkFilterField::Completed
+        | WorkFilterField::Repeat => None,
     }
 }
 
@@ -420,7 +446,13 @@ const fn at_of(field: WorkFilterField, item: &WorkItem) -> Option<i64> {
     }
 }
 
-fn hits(field: WorkFilterField, item: &WorkItem, doer: Option<&str>, value: &Value) -> bool {
+fn hits(
+    field: WorkFilterField,
+    item: &WorkItem,
+    doer: Option<&str>,
+    repeat: Option<&str>,
+    value: &Value,
+) -> bool {
     match (field, value) {
         (WorkFilterField::CycleScope, Value::Added(ids)) => {
             item.cycle.is_some() && ids.contains(&item.id)
@@ -429,6 +461,10 @@ fn hits(field: WorkFilterField, item: &WorkItem, doer: Option<&str>, value: &Val
             item.cycle.is_some() && !ids.contains(&item.id)
         }
         (_, Value::Planned(_) | Value::Added(_)) => false,
+        (WorkFilterField::Repeat, Value::Repeating) => repeat.is_some(),
+        (WorkFilterField::Repeat, Value::None) => repeat.is_none(),
+        (WorkFilterField::Repeat, Value::Text(rule)) => repeat == Some(rule.as_str()),
+        (_, Value::Repeating) => false,
         (WorkFilterField::Label, Value::None) => item.label_ids.is_empty(),
         (WorkFilterField::Label, Value::Text(id)) => item.label_ids.contains(id),
         (WorkFilterField::Owner, Value::Me) => item.owner_is_self,
@@ -464,28 +500,38 @@ fn after(field: WorkFilterField, item: &WorkItem, value: &Value) -> bool {
     }
 }
 
-/// Whether `item`, worked by the agent `doer` names, meets every filter.
-pub(crate) fn holds(filters: &[ReadyFilter], item: &WorkItem, doer: Option<&str>) -> bool {
-    filters.iter().all(|filter| meets(filter, item, doer))
+pub(crate) fn holds(
+    filters: &[ReadyFilter],
+    item: &WorkItem,
+    doer: Option<&str>,
+    repeat: Option<&str>,
+) -> bool {
+    filters
+        .iter()
+        .all(|filter| meets(filter, item, doer, repeat))
 }
 
-fn meets(filter: &ReadyFilter, item: &WorkItem, doer: Option<&str>) -> bool {
+fn meets(filter: &ReadyFilter, item: &WorkItem, doer: Option<&str>, repeat: Option<&str>) -> bool {
     let condition = match filter {
         ReadyFilter::One(condition) => condition,
-        ReadyFilter::Any(filters) => return filters.iter().any(|filter| meets(filter, item, doer)),
-        ReadyFilter::All(filters) => return holds(filters, item, doer),
+        ReadyFilter::Any(filters) => {
+            return filters
+                .iter()
+                .any(|filter| meets(filter, item, doer, repeat));
+        }
+        ReadyFilter::All(filters) => return holds(filters, item, doer, repeat),
     };
     let field = condition.field;
     let mut values = condition.values.iter();
     let set = field == WorkFilterField::Label;
     match condition.op {
-        WorkFilterOp::Is if set => values.all(|value| hits(field, item, doer, value)),
-        WorkFilterOp::IncludesAll => values.all(|value| hits(field, item, doer, value)),
+        WorkFilterOp::Is if set => values.all(|value| hits(field, item, doer, repeat, value)),
+        WorkFilterOp::IncludesAll => values.all(|value| hits(field, item, doer, repeat, value)),
         WorkFilterOp::Is | WorkFilterOp::AnyOf | WorkFilterOp::IncludesAny => {
-            values.any(|value| hits(field, item, doer, value))
+            values.any(|value| hits(field, item, doer, repeat, value))
         }
         WorkFilterOp::IsNot | WorkFilterOp::NoneOf => {
-            !values.any(|value| hits(field, item, doer, value))
+            !values.any(|value| hits(field, item, doer, repeat, value))
         }
         WorkFilterOp::Before => values.any(|value| before(field, item, value)),
         WorkFilterOp::After => values.any(|value| after(field, item, value)),
@@ -546,24 +592,33 @@ mod tests {
         assert!(!holds(
             &labels(WorkFilterOp::IncludesAll, &["bug", "ui"]),
             &task,
+            None,
             None
         ));
         assert!(!holds(
             &labels(WorkFilterOp::Is, &["bug", "ui"]),
             &task,
+            None,
             None
         ));
         assert!(holds(
             &labels(WorkFilterOp::IncludesAny, &["bug", "ui"]),
             &task,
+            None,
             None
         ));
         assert!(!holds(
             &labels(WorkFilterOp::NoneOf, &["bug", "ui"]),
             &task,
+            None,
             None
         ));
-        assert!(holds(&labels(WorkFilterOp::NoneOf, &["ui"]), &task, None));
+        assert!(holds(
+            &labels(WorkFilterOp::NoneOf, &["ui"]),
+            &task,
+            None,
+            None
+        ));
     }
 
     #[test]
@@ -573,8 +628,8 @@ mod tests {
             op: WorkFilterOp::Is,
             values: vec![Value::None],
         })];
-        assert!(holds(&no_project, &item(&[], None, None), None));
-        assert!(!holds(&no_project, &item(&[], Some("p"), None), None));
+        assert!(holds(&no_project, &item(&[], None, None), None, None));
+        assert!(!holds(&no_project, &item(&[], Some("p"), None), None, None));
         let day = |op| {
             [ReadyFilter::One(Ready {
                 field: WorkFilterField::Due,
@@ -585,31 +640,37 @@ mod tests {
         assert!(holds(
             &day(WorkFilterOp::Before),
             &item(&[], None, Some(99)),
+            None,
             None
         ));
         assert!(!holds(
             &day(WorkFilterOp::Before),
             &item(&[], None, Some(100)),
+            None,
             None
         ));
         assert!(holds(
             &day(WorkFilterOp::Is),
             &item(&[], None, Some(150)),
+            None,
             None
         ));
         assert!(!holds(
             &day(WorkFilterOp::After),
             &item(&[], None, Some(199)),
+            None,
             None
         ));
         assert!(holds(
             &day(WorkFilterOp::After),
             &item(&[], None, Some(200)),
+            None,
             None
         ));
         assert!(!holds(
             &day(WorkFilterOp::After),
             &item(&[], None, None),
+            None,
             None
         ));
     }
@@ -633,17 +694,33 @@ mod tests {
         };
         let task = item(&[], None, None);
         let codex = delegate(WorkFilterOp::Is, "codex");
-        assert!(holds(&codex, &task, Some("Codex")));
-        assert!(!holds(&codex, &task, Some("Claude Code")));
-        assert!(!holds(&codex, &task, None));
+        assert!(holds(&codex, &task, Some("Codex"), None));
+        assert!(!holds(&codex, &task, Some("Claude Code"), None));
+        assert!(!holds(&codex, &task, None, None));
         assert!(holds(
             &delegate(WorkFilterOp::Is, "claude"),
             &task,
-            Some("Claude Code")
+            Some("Claude Code"),
+            None
         ));
-        assert!(holds(&delegate(WorkFilterOp::Is, "none"), &task, None));
-        assert!(!holds(&delegate(WorkFilterOp::Is, "none"), &task, Some("Codex")));
-        assert!(holds(&delegate(WorkFilterOp::IsNot, "none"), &task, Some("Codex")));
+        assert!(holds(
+            &delegate(WorkFilterOp::Is, "none"),
+            &task,
+            None,
+            None
+        ));
+        assert!(!holds(
+            &delegate(WorkFilterOp::Is, "none"),
+            &task,
+            Some("Codex"),
+            None
+        ));
+        assert!(holds(
+            &delegate(WorkFilterOp::IsNot, "none"),
+            &task,
+            Some("Codex"),
+            None
+        ));
     }
 
     #[test]
@@ -660,11 +737,21 @@ mod tests {
                                 {"field":"label","op":"includes_any","values":["ui"]}]}]}]"#,
         )
         .expect("a group of conditions");
-        assert!(holds(&either, &item(&["bug"], Some("p"), None), None));
-        assert!(holds(&either, &item(&["bug", "ui"], None, None), None));
-        assert!(!holds(&either, &item(&["bug"], None, None), None));
-        assert!(!holds(&either, &item(&["bug"], Some("q"), None), None));
-        assert!(!holds(&either, &item(&["ui"], Some("p"), None), None));
+        assert!(holds(&either, &item(&["bug"], Some("p"), None), None, None));
+        assert!(holds(
+            &either,
+            &item(&["bug", "ui"], None, None),
+            None,
+            None
+        ));
+        assert!(!holds(&either, &item(&["bug"], None, None), None, None));
+        assert!(!holds(
+            &either,
+            &item(&["bug"], Some("q"), None),
+            None,
+            None
+        ));
+        assert!(!holds(&either, &item(&["ui"], Some("p"), None), None, None));
         assert!(read(r#"[{"any":[]}]"#).is_err());
     }
 }

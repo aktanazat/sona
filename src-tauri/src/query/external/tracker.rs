@@ -564,6 +564,9 @@ pub struct ListArgs {
     /// none for tasks no agent works.
     #[arg(long, value_name = "AGENT")]
     pub delegate: Option<String>,
+    /// Only tasks with a repeat rule, within the requested status and scope.
+    #[arg(long)]
+    pub repeating: bool,
     /// Filter in plain words: "high priority bugs due this week that are
     /// mine". Prints what the words were read as and the words it did not
     /// understand.
@@ -1287,12 +1290,12 @@ pub struct Filters {
     /// "is","values":["me"]},{"field":"due","op":"is","values":
     /// ["this_week"]}]}] is mine or due this week. Fields: status,
     /// priority, owner, delegate, project, milestone, label, parent, cycle,
-    /// cycle_scope, due, created, updated, estimate, for, completed. Ops:
-    /// is, is_not, any_of, none_of,
-    /// includes_all, includes_any, before, after. Values are ids, names Sona
-    /// stores, agent names, `me`, `none`, task numbers (S-12) for parent,
-    /// planned or added for cycle_scope, cycle numbers or current/next, and
-    /// days as YYYY-MM-DD/today/tomorrow.
+    /// cycle_scope, due, created, updated, estimate, for, completed, repeat.
+    /// Ops: is, is_not, any_of, none_of, includes_all, includes_any, before, after.
+    /// Values are ids, names Sona stores, agent names, `me`, `none`, task
+    /// numbers (S-12) for parent, planned or added for cycle_scope, cycle
+    /// numbers or current/next, and days as YYYY-MM-DD/today/tomorrow.
+    /// For repeat, use `set`, `none` or an exact rule such as `every monday`.
     #[arg(long, value_parser = conditions, value_name = "JSON")]
     pub filter: Option<ConditionsArg>,
     /// Only the sub-tasks of this task (S-12 or its id); none for tasks
@@ -1365,6 +1368,12 @@ fn conditions(value: &str) -> Result<ConditionsArg, String> {
     };
     if filters.iter().any(WorkFilter::has_empty_group) {
         return Err("A group holds no conditions: put at least one in each {\"any\": [...]} or {\"all\": [...]}.".to_owned());
+    }
+    if filters.iter().any(WorkFilter::has_invalid_repeat) {
+        return Err(
+            "A repeat condition needs set, none or a rule, not a blank value or a date comparison."
+                .to_owned(),
+        );
     }
     Ok(ConditionsArg(filters))
 }
@@ -3744,6 +3753,16 @@ impl Tracker<'_> {
                 op,
                 values: vec![value.to_owned()],
             }.into());
+        }
+        if args.repeating {
+            query.filters.push(
+                WorkCondition {
+                    field: WorkFilterField::Repeat,
+                    op: WorkFilterOp::Is,
+                    values: vec!["set".to_owned()],
+                }
+                .into(),
+            );
         }
         let mut rows = self.listed(&board.fence, query).await?.items;
         if !args.source.is_empty() {

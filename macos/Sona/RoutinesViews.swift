@@ -180,13 +180,31 @@ struct TasksSettingsView: View {
 
     var body: some View {
         Page {
-            PageTitle("Tasks", subtitle: "The weekly project digest, label groups, retired labels and task templates.")
+            PageTitle("Tasks", subtitle: "")
             ErrorNote(model.routines.error ?? model.work.mutationError)
+            Card {
+                CardRow(action: showRepeating) {
+                    Text("Repeating tasks").font(TypeScale.listTitle).foregroundStyle(Theme.ink)
+                } trailing: {
+                    Image(systemName: "chevron.right").font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(Theme.inkTertiary)
+                        .accessibilityHidden(true)
+                }
+            }
+            .padding(.bottom, Space.l)
             ProjectDigestSettings()
             labels
             templates
         }
         .task { await model.routines.loadTemplates() }
+    }
+
+    private func showRepeating() {
+        let focus = model.workFocus
+        focus.open(nil, in: .tasks)
+        focus.switchTab(.all)
+        focus.allQuery = WorkQuery(includeSnoozed: true, filters: [TaskFilters.repeating])
+        model.go(.tasks)
     }
 
     @ViewBuilder private var labels: some View {
