@@ -31,6 +31,8 @@ pub(crate) const GONE: &str = "This suggestion no longer applies. Reload and try
 const NAMESPACE: Uuid = Uuid::from_u128(0x6f3c_9d2e_51a4_4b87_9e0d_c4a1_7b58_2f63);
 const RECENT: usize = 5;
 const ENOUGH: usize = 2;
+/// Meetings with people on them before anyone can be said to be in most.
+const WIDELY: usize = 4;
 const RELATED: usize = 2;
 const COMMON: [&str; 40] = [
     "the", "and", "for", "with", "from", "about", "that", "this", "will", "into", "our", "your",
@@ -245,6 +247,13 @@ impl Pool {
         ))
     }
 
+    /// One window per person in `mine` whose past work says something about
+    /// where this item belongs. A person in most meetings says nothing: their
+    /// tasks are everyone's tasks, and following them files every meeting's
+    /// work under whichever project was busiest last. The same goes for a
+    /// person whose last few tasks agree only because that project is the
+    /// newest, so the project a window names must also hold most of their
+    /// tasks over all time.
     fn people_windows<'a>(&'a self, item: &'a WorkItem, mine: &[String]) -> Vec<Window<'a>> {
         let mut seen: Vec<&str> = Vec::new();
         for meeting in mine {
@@ -259,19 +268,32 @@ impl Pool {
             let (Some(theirs), Some(name)) = (self.met.get(person), self.names.get(person)) else {
                 continue;
             };
-            let tasks: Vec<&Past> = self
+            if self.people.len() >= WIDELY && 2 * theirs.len() > self.people.len() {
+                continue;
+            }
+            let all: Vec<&Past> = self
                 .decided(item)
                 .filter(|task| {
                     let meetings = self.meetings_of(&task.id);
                     !meetings.iter().any(|meeting| mine.contains(meeting))
                         && meetings.iter().any(|meeting| theirs.contains(meeting))
                 })
-                .take(RECENT)
                 .collect();
-            windows.push(Window {
+            let tasks: Vec<&Past> = all.iter().copied().take(RECENT).collect();
+            let window = Window {
                 which: format!("last {} tasks from meetings with {name}", tasks.len()),
                 tasks,
+            };
+            let lasting = self.project(&window).is_none_or(|(project_id, _, _)| {
+                let there = all
+                    .iter()
+                    .filter(|task| task.project_id.as_deref() == Some(project_id.as_str()))
+                    .count();
+                2 * there > all.len()
             });
+            if lasting {
+                windows.push(window);
+            }
         }
         windows
     }
@@ -317,9 +339,17 @@ impl Pool {
         let mut found = Vec::new();
         if item.project_id.is_none() && !has(WorkSuggestionField::Project) {
             let people = self.people_windows(item, mine);
-            let by_people = people
+            let named: Vec<_> = people
                 .iter()
                 .filter_map(|window| self.project(window).map(|found| (found, window)))
+                .collect();
+            // People who point at different projects settle nothing.
+            let agreed = named.iter().all(|((project_id, _, _), _)| {
+                Some(project_id) == named.first().map(|first| &first.0 .0)
+            });
+            let by_people = named
+                .into_iter()
+                .filter(|_| agreed)
                 .max_by_key(|((_, _, count), window)| (*count, usize::MAX - window.tasks.len()));
             let chosen = self
                 .project(&siblings)

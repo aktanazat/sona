@@ -310,3 +310,116 @@ fn the_same_operation_id_answers_with_its_first_decision() {
         Some(ExternalErrorCode::NotFound)
     );
 }
+
+/// The user's 686-item report, rebuilt from invented names: four projects,
+/// each with its own lead, and one colleague who sits in every meeting.
+/// Accepting Triage with Sona's suggestions must file each meeting's work
+/// under its own project or leave it for the user, never under another
+/// project. `started` is how many of the projects already hold tasks.
+fn misfiled_after_a_busy_month(started: usize) -> (usize, Vec<usize>) {
+    const ITEMS: usize = 686;
+    let mut desk = Desk::new();
+    let everywhere = person(&desk.meetings, "Sam Ortiz", &[], &[]);
+    let streams: Vec<_> = [
+        ("Pier Lighting", "Dana Reyes"),
+        ("Harbor Dredging", "Priya Nair"),
+        ("Ferry Timetable", "Marco Bell"),
+        ("Market Stalls", "Lena Fischer"),
+    ]
+    .into_iter()
+    .map(|(project, lead)| {
+        (
+            desk.project(project),
+            person(&desk.meetings, lead, &[], &[]),
+        )
+    })
+    .collect();
+    let held = |desk: &mut Desk, stream: usize, title: &str| {
+        desk.now += 3_600_000;
+        let session = meeting(&desk.meetings, title, desk.now);
+        link(&desk.meetings, session, everywhere, "calendar", "confirmed");
+        link(
+            &desk.meetings,
+            session,
+            streams[stream].1,
+            "calendar",
+            "confirmed",
+        );
+        session
+    };
+    // What the user filed by hand before the month began; the first project
+    // is the busiest and the newest.
+    for stream in (0..started).rev() {
+        let kickoff = held(&mut desk, stream, "Kickoff");
+        for task in 0..if stream == 0 { 3 } else { 2 } {
+            desk.task(
+                &format!("Kickoff s{stream}k{task}a s{stream}k{task}b"),
+                WorkStatus::NotStarted,
+                Some(&streams[stream].0),
+                &WorkOwner::Nobody,
+                Some(kickoff),
+            );
+        }
+    }
+    let mut filed = vec![0; streams.len()];
+    let mut misfiled = 0;
+    let mut session = None;
+    for index in 0..ITEMS {
+        let stream = index % streams.len();
+        // Two items a meeting, the streams taking turns.
+        if index % (2 * streams.len()) < streams.len() {
+            session = None;
+        }
+        let raised_in = match session {
+            Some(sessions) => sessions,
+            None => [0, 1, 2, 3].map(|stream| held(&mut desk, stream, "Weekly")),
+        };
+        session = Some(raised_in);
+        let item = desk.task(
+            &format!("Follow n{index}a n{index}b n{index}c"),
+            WorkStatus::Triage,
+            None,
+            &WorkOwner::Nobody,
+            Some(raised_in[stream]),
+        );
+        let mut failed = None;
+        let accepted = desk.meetings.with_planning_snapshot(|meetings| {
+            let mut reader = MeetingReader::new(Some(meetings), None);
+            sync::acceptance(&desk.history, &mut reader, &item, true, None)
+                .and_then(|patch| {
+                    sync::accept(&desk.history, None, &item, &patch, WorkActor::Me, desk.now)
+                })
+                .map_err(|error| {
+                    failed = Some(error);
+                    StoreError::Unavailable
+                })
+        });
+        // PANIC: accepting a fixture's own Triage item cannot fail.
+        let (accepted, _) =
+            accepted.unwrap_or_else(|error| panic!("the acceptance: {failed:?} {error:?}"));
+        match accepted.project_id {
+            Some(project) if project == streams[stream].0 => filed[stream] += 1,
+            Some(_) => misfiled += 1,
+            None => {}
+        }
+    }
+    (misfiled, filed)
+}
+
+/// With every project already holding a few tasks, a month of Triage lands
+/// on its own project: none of the 686 items is filed under another one.
+#[test]
+fn a_colleague_in_every_meeting_does_not_pull_every_task_into_one_project() {
+    let (misfiled, filed) = misfiled_after_a_busy_month(4);
+    println!("686 accepted: {misfiled} under another project, {filed:?} under their own");
+    assert_eq!((misfiled, filed), (0, vec![172, 172, 171, 171]));
+}
+
+/// With only the first project started, the other three projects' work
+/// stays unfiled for the user to place instead of joining the first.
+#[test]
+fn work_for_projects_with_no_tasks_yet_is_left_for_the_user() {
+    let (misfiled, filed) = misfiled_after_a_busy_month(1);
+    println!("686 accepted: {misfiled} under another project, {filed:?} under their own");
+    assert_eq!((misfiled, filed), (0, vec![172, 0, 0, 0]));
+}
