@@ -428,6 +428,7 @@ async fn download_asset(
     manifest: &'static DiarizationModelManifest,
 ) -> Result<(), DiarizationError> {
     let api = ApiBuilder::from_env()
+        .with_token(None)
         .build()
         .map_err(|_| DiarizationError::DownloadFailed)?;
     let repository = api.repo(Repo::with_revision(
