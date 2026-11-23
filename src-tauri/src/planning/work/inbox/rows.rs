@@ -80,6 +80,9 @@ pub(crate) struct TaskFacts {
 pub(crate) struct Context {
     pub(crate) tasks: HashMap<String, TaskFacts>,
     pub(crate) comments: HashMap<String, String>,
+    /// Link notices an older build stored for a link's other end, each with
+    /// the notice of the link it mirrors.
+    pub(crate) echoes: HashMap<String, String>,
 }
 
 pub(crate) fn context(conn: &Connection) -> Result<Context> {
@@ -106,7 +109,69 @@ pub(crate) fn context(conn: &Connection) -> Result<Context> {
     let comments = comments
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
         .collect::<rusqlite::Result<_>>()?;
-    Ok(Context { tasks, comments })
+    Ok(Context {
+        tasks,
+        comments,
+        echoes: echoes(conn)?,
+    })
+}
+
+/// The stored link notices that mirror another stored notice. A mirror is
+/// known by its history: an older build wrote a link's two entries one after
+/// the other and a notice for each. What is hidden from a list changes
+/// nothing here, and a notice that cannot be shown to be a mirror is kept.
+fn echoes(conn: &Connection) -> Result<HashMap<String, String>> {
+    struct End {
+        notice: String,
+        task: String,
+        at_ms: i64,
+        actor: String,
+        mark: String,
+        links: bool,
+    }
+    let mut ends = conn.prepare(
+        "SELECT a.rowid, n.id, a.task_id, a.at_ms, a.actor,
+                coalesce(a.to_value, a.from_value), a.to_value IS NOT NULL
+         FROM planning_notifications n
+         JOIN planning_task_activity a ON a.id = n.activity_id
+         WHERE a.kind = 'relation' AND coalesce(a.to_value, a.from_value) IS NOT NULL",
+    )?;
+    let ends: HashMap<i64, End> = ends
+        .query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                End {
+                    notice: row.get(1)?,
+                    task: row.get(2)?,
+                    at_ms: row.get(3)?,
+                    actor: row.get(4)?,
+                    mark: row.get(5)?,
+                    links: row.get(6)?,
+                },
+            ))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut echoes = HashMap::new();
+    for (written, end) in &ends {
+        let Some(made) = ends.get(&(written - 1)) else {
+            continue;
+        };
+        let (Some((verb, other)), Some((made_verb, made_other))) =
+            (end.mark.split_once(':'), made.mark.split_once(':'))
+        else {
+            continue;
+        };
+        if other == made.task
+            && made_other == end.task
+            && verb == mirrored(made_verb)
+            && end.at_ms == made.at_ms
+            && end.actor == made.actor
+            && end.links == made.links
+        {
+            echoes.insert(end.notice.clone(), made.notice.clone());
+        }
+    }
+    Ok(echoes)
 }
 
 /// Whether a comment asks its reader for something: a question, or one of
@@ -147,10 +212,13 @@ fn asked(body: &str) -> String {
     let mut sentences = Vec::new();
     let mut start = 0;
     let mut letters = body.char_indices().peekable();
+    let mut stopped = false;
     while let Some((at, letter)) = letters.next() {
         let next = letters.peek().map(|(_, next)| *next);
-        let ends = letter == '\n'
-            || (matches!(letter, '.' | '!' | '?') && next.is_none_or(char::is_whitespace));
+        // A closing quote or bracket after a stop belongs to its sentence.
+        stopped = matches!(letter, '.' | '!' | '?')
+            || (stopped && matches!(letter, '"' | '\'' | ')' | ']' | '”' | '’'));
+        let ends = letter == '\n' || (stopped && next.is_none_or(char::is_whitespace));
         if ends || next.is_none() {
             let end = at + letter.len_utf8();
             let sentence = body[start..end].trim();
@@ -471,14 +539,10 @@ pub(crate) fn rows(notices: Vec<Notification>, context: &Context) -> Vec<InboxRo
     let mut built: Vec<Building> = Vec::new();
     let mut bursts: HashMap<(String, String), usize> = HashMap::new();
     let mut batches: HashMap<usize, usize> = HashMap::new();
-    // The mirror the last notice would have, were it a kept link: its task,
-    // how it names the link, the task it links to, when, and whether it
-    // links. An older build stored a mirror right after its link; a link
-    // made back later is not one.
-    let mut awaited: Option<((String, String, String, i64, bool), usize)> = None;
+    // The row each link notice went to, for the mirror an older build stored.
+    let mut told: HashMap<String, usize> = HashMap::new();
     for notice in oldest_first {
         let at_ms = notice.created_at_ms;
-        let awaited_now = awaited.take();
         if let Some(run) = batch_of.get(&notice.id) {
             let row = *batches.entry(*run).or_insert_with(|| {
                 built.push(Building {
@@ -510,20 +574,13 @@ pub(crate) fn rows(notices: Vec<Notification>, context: &Context) -> Vec<InboxRo
             });
             continue;
         };
-        let mirror = link(&notice).map(|(verb, other)| {
-            (
-                task.clone(),
-                verb.to_owned(),
-                other.to_owned(),
-                at_ms,
-                notice.to.is_some(),
-            )
-        });
-        if let (Some(told), Some((mirror_of_last, row))) = (&mirror, &awaited_now) {
-            if told == mirror_of_last {
-                built[*row].echoes.push(notice);
-                continue;
-            }
+        let row = context
+            .echoes
+            .get(&notice.id)
+            .and_then(|made| told.get(made));
+        if let Some(row) = row {
+            built[*row].echoes.push(notice);
+            continue;
         }
         let key = (task.clone(), agent(&notice));
         let row = match bursts.get(&key) {
@@ -539,11 +596,8 @@ pub(crate) fn rows(notices: Vec<Notification>, context: &Context) -> Vec<InboxRo
                 built.len() - 1
             }
         };
-        if let Some((_, verb, other, at_ms, linked)) = mirror {
-            awaited = Some((
-                (other, mirrored(&verb).to_owned(), task, at_ms, linked),
-                row,
-            ));
+        if link(&notice).is_some() {
+            told.insert(notice.id.clone(), row);
         }
         built[row].notices.push(notice);
         built[row].last_at_ms = at_ms;
@@ -570,14 +624,17 @@ pub(crate) fn waiting(notices: Vec<Notification>, context: &Context) -> Vec<Inbo
 mod tests {
     use super::*;
     use crate::planning::schema;
-    use crate::planning::work::inbox::{self, Shown};
+    use crate::planning::work::inbox::{self, Mark, Shown};
     use crate::planning::work::items;
-    use crate::planning::work::types::{WorkItemInput, WorkOwner, WorkRelationKind};
+    use crate::planning::work::types::{
+        WorkActivityKind, WorkItemInput, WorkOwner, WorkRelationKind,
+    };
     use crate::planning::work::{create, Change};
     use std::collections::BTreeSet;
     use std::time::Instant;
 
     const MINUTE: i64 = 60_000;
+    const HOUR: i64 = 60 * MINUTE;
     const START: i64 = 1_800_000_000_000;
 
     /// A synthetic inbox shaped like the one issue 42 counted: 686 notices
@@ -787,7 +844,7 @@ mod tests {
                         let told = notices.last_mut().expect("the notice");
                         told.field = Some("relation".to_owned());
                         told.to = Some(format!("related:{}", task(other)));
-                        row.insert(id);
+                        row.insert(id.clone());
                         let echo = post(
                             &mut notices,
                             NotificationKind::Changed,
@@ -798,6 +855,7 @@ mod tests {
                         let echoed = notices.last_mut().expect("the notice");
                         echoed.field = Some("relation".to_owned());
                         echoed.to = Some(format!("related:{}", task(number)));
+                        context.echoes.insert(echo.clone(), id);
                         row.insert(echo);
                         links += 1;
                     }
@@ -1058,7 +1116,10 @@ mod tests {
 
     #[test]
     fn a_row_is_unread_while_its_stored_echo_is() {
-        let context = fixture().context;
+        let mut context = fixture().context;
+        context
+            .echoes
+            .insert("echo".to_owned(), "source".to_owned());
         let echo = Notification {
             item_id: Some("task-001".to_owned()),
             ..agent_notice("echo", START, false, Some("related:task-050"))
@@ -1190,7 +1251,10 @@ mod tests {
 
     #[test]
     fn stored_links_fold_only_their_own_mirror() {
-        let context = fixture().context;
+        let mut context = fixture().context;
+        context
+            .echoes
+            .insert("mirror".to_owned(), "first".to_owned());
         let on = |id: &str, task: &str, to: &str| Notification {
             item_id: Some(task.to_owned()),
             ..agent_notice(id, START, false, Some(to))
@@ -1356,6 +1420,12 @@ mod tests {
             asked("Built it. Can you approve v2.1? It ships Friday."),
             "Can you approve v2.1?"
         );
+        assert_eq!(
+            asked(
+                "The brief says \"ship the long version of the onboarding flow first.\" Should I?"
+            ),
+            "Should I?"
+        );
         let long = format!("Could you {}?", "look at this ".repeat(12));
         let shown = asked(&long);
         assert!(shown.chars().count() <= 81, "{shown}");
@@ -1456,6 +1526,168 @@ mod tests {
             .map(|row| row.notice_ids.len())
             .sum();
         assert_eq!(shown, 3, "and the rows keep all three");
+    }
+
+    /// Stores a notice for every link entry that has none, as builds before
+    /// this one did for a link's other end.
+    fn store_mirrors(history: &Connection) {
+        history
+            .execute(
+                "INSERT INTO planning_notifications (id, task_id, kind, actor, activity_id, field,
+                     from_value, to_value, created_at_ms)
+                 SELECT lower(hex(randomblob(16))), a.task_id, 'changed', a.actor, a.id,
+                     'relation', a.from_value, a.to_value, a.at_ms
+                 FROM planning_task_activity a
+                 WHERE a.kind = 'relation' AND NOT EXISTS (
+                     SELECT 1 FROM planning_notifications n WHERE n.activity_id = a.id)
+                 ORDER BY a.rowid",
+                [],
+            )
+            .expect("the mirrors stored");
+    }
+
+    /// Links the first task to the second, removes the link and makes it
+    /// back from the second, all at `at`, with or without an edit written
+    /// in between.
+    fn linked_removed_and_linked_back(
+        history: &Connection,
+        made: &[String; 2],
+        at: i64,
+        edit_between: bool,
+    ) {
+        let relation = items::add_relation(
+            history,
+            &made[0],
+            &made[1],
+            WorkRelationKind::Related,
+            WorkActor::Agent,
+            at,
+        )
+        .expect("the first relates to the second");
+        if edit_between {
+            items::record(
+                history,
+                &made[1],
+                at,
+                WorkActor::Agent,
+                WorkActivityKind::Priority,
+                None,
+                Some("high"),
+            )
+            .expect("an edit in between");
+        }
+        items::remove_relation(history, &relation.id, WorkActor::Agent, at)
+            .expect("the link removed");
+        items::add_relation(
+            history,
+            &made[1],
+            &made[0],
+            WorkRelationKind::Related,
+            WorkActor::Agent,
+            at,
+        )
+        .expect("the second relates to the first");
+    }
+
+    /// How many links and removals the inbox's rows tell, and for which tasks.
+    fn told(history: &Connection, now_ms: i64) -> (usize, usize, Vec<String>) {
+        let stored = inbox::notifications(history, Shown::default(), now_ms).expect("the inbox");
+        let context = context(history).expect("the facts");
+        let built = rows(stored, &context);
+        let count = |what: &str| -> usize {
+            built
+                .iter()
+                .flat_map(|row| &row.parts)
+                .filter(|part| part.what == what)
+                .map(|part| part.count)
+                .sum()
+        };
+        let mut tasks: Vec<String> = built
+            .iter()
+            .filter(|row| row.parts.iter().any(|part| part.what == "linked"))
+            .filter_map(|row| row.item_id.clone())
+            .collect();
+        tasks.sort();
+        (count("linked"), count("unlinked"), tasks)
+    }
+
+    /// The oldest notice of a link, or of a removal, on one task.
+    fn link_notice(history: &Connection, task: &str, links: bool) -> String {
+        inbox::notifications(history, Shown::default(), START + HOUR)
+            .expect("the inbox")
+            .into_iter()
+            .rev()
+            .find(|notice| {
+                notice.field.as_deref() == Some("relation")
+                    && notice.item_id.as_deref() == Some(task)
+                    && notice.to.is_some() == links
+            })
+            .expect("the notice")
+            .id
+    }
+
+    #[test]
+    fn hiding_a_removal_leaves_the_link_and_the_link_made_back_apart() {
+        let cases = [
+            (Mark::Archive, false),
+            (Mark::Archive, true),
+            (Mark::Snooze(Some(START + 2 * HOUR)), false),
+            (Mark::Snooze(Some(START + 2 * HOUR)), true),
+        ];
+        for (hide, edit_between) in cases {
+            let (history, made) = two_filed();
+            linked_removed_and_linked_back(&history, &made, START + MINUTE, edit_between);
+            let mut both = made.to_vec();
+            both.sort();
+            assert_eq!(told(&history, START + HOUR), (2, 1, both.clone()));
+            let removal = link_notice(&history, &made[0], false);
+            inbox::mark(&history, &removal, hide, START + HOUR).expect("the removal hidden");
+            assert_eq!(
+                told(&history, START + HOUR),
+                (2, 0, both),
+                "each link is still told on the task it was made from"
+            );
+        }
+    }
+
+    #[test]
+    fn stored_mirrors_fold_into_their_own_link_whatever_is_hidden() {
+        let (history, made) = two_filed();
+        let at = START + MINUTE;
+        linked_removed_and_linked_back(&history, &made, at, false);
+        store_mirrors(&history);
+        let stored = inbox::notifications(&history, Shown::default(), START + HOUR)
+            .expect("the inbox")
+            .into_iter()
+            .filter(|notice| notice.field.as_deref() == Some("relation"))
+            .count();
+        assert_eq!(stored, 6, "three links or removals, stored from both ends");
+        assert_eq!(context(&history).expect("the facts").echoes.len(), 3);
+        let mut both = made.to_vec();
+        both.sort();
+        assert_eq!(told(&history, START + HOUR), (2, 1, both.clone()));
+
+        // The removal's own notice is archived: its mirror stays, as itself.
+        let removal = link_notice(&history, &made[0], false);
+        inbox::mark(&history, &removal, Mark::Archive, START + HOUR).expect("archived");
+        assert_eq!(told(&history, START + HOUR), (2, 1, both.clone()));
+
+        // The first link's own notice is snoozed: its mirror on the second
+        // task stays, and is not taken for the link made back from there.
+        let first = link_notice(&history, &made[0], true);
+        inbox::mark(
+            &history,
+            &first,
+            Mark::Snooze(Some(START + 2 * HOUR)),
+            START + HOUR,
+        )
+        .expect("snoozed");
+        let (linked, unlinked, _) = told(&history, START + HOUR);
+        assert_eq!(
+            (linked, unlinked),
+            (2, 1),
+            "nothing told is lost or doubled"
+        );
     }
 
     #[test]

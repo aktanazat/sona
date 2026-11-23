@@ -336,33 +336,17 @@ fn owned_by_user(conn: &Connection, task_id: &str) -> Result<bool> {
         .unwrap_or(false))
 }
 
-/// Whether this entry is the other end of a link the inbox was just told
-/// about: a link is history on both tasks and news once, on the task it was
-/// made from. The other end is the entry written right after the link's own,
-/// so a link made back in the same instant is not taken for one.
-fn echoes_a_link(conn: &Connection, entry: &Entry<'_>, now_ms: i64) -> Result<bool> {
-    let Some((verb, other)) = entry
-        .to
-        .or(entry.from)
-        .and_then(|mark| mark.split_once(':'))
-    else {
+/// Whether this entry is the other end of a link the inbox was already
+/// told about: a link is history on both tasks and news once, on the task
+/// it was made from. The code that writes a link names its other end, so
+/// nothing is read from when or how the two entries were written.
+fn echoes_a_link(conn: &Connection, entry: &Entry<'_>) -> Result<bool> {
+    let Some(made) = entry.mirror_of else {
         return Ok(false);
     };
     Ok(conn.query_row(
-        "SELECT EXISTS (SELECT 1 FROM planning_task_activity made
-            JOIN planning_notifications told ON told.activity_id = made.id
-            WHERE made.rowid = (SELECT rowid FROM planning_task_activity WHERE id = ?1) - 1
-              AND made.task_id = ?2 AND made.kind = 'relation' AND made.actor = ?3
-              AND made.at_ms = ?4 AND coalesce(made.to_value, made.from_value) = ?5
-              AND (made.to_value IS NULL) = ?6)",
-        params![
-            entry.activity_id,
-            other,
-            entry.actor.as_str(),
-            now_ms,
-            format!("{}:{}", rows::mirrored(verb), entry.task_id),
-            entry.to.is_none()
-        ],
+        "SELECT EXISTS (SELECT 1 FROM planning_notifications WHERE activity_id = ?1)",
+        [made],
         |row| row.get(0),
     )?)
 }
@@ -375,6 +359,8 @@ pub(crate) struct Entry<'a> {
     pub(crate) kind: WorkActivityKind,
     pub(crate) from: Option<&'a str>,
     pub(crate) to: Option<&'a str>,
+    /// The entry for the other end of the link this entry mirrors.
+    pub(crate) mirror_of: Option<&'a str>,
 }
 
 /// Subscribes and notifies for one history entry as it is written.
@@ -386,6 +372,7 @@ pub(crate) fn on_activity(conn: &Connection, entry: &Entry<'_>, now_ms: i64) -> 
         kind,
         from,
         to,
+        mirror_of: _,
     } = *entry;
     let notice = |kind: NotificationKind| Notice {
         activity_id: Some(activity_id),
@@ -432,7 +419,7 @@ pub(crate) fn on_activity(conn: &Connection, entry: &Entry<'_>, now_ms: i64) -> 
         WorkActivityKind::Comment if actor != WorkActor::Me && subscribed(conn, task_id)? => {
             notify(conn, &notice(NotificationKind::Comment), now_ms)?;
         }
-        WorkActivityKind::Relation if echoes_a_link(conn, entry, now_ms)? => {}
+        WorkActivityKind::Relation if echoes_a_link(conn, entry)? => {}
         WorkActivityKind::Priority
         | WorkActivityKind::Owner
         | WorkActivityKind::Due
