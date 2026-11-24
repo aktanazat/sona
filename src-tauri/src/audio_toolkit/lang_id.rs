@@ -84,6 +84,13 @@ pub fn detect_output_language(text: &str, supported_languages: &[String]) -> Opt
     iso639_1_for_whatlang(info.lang()).map(str::to_string)
 }
 
+/// The English name of the language `text` is written in, under the same
+/// confidence gate as [`detect_output_language`], with no model constraint.
+pub fn detect_language_name(text: &str) -> Option<&'static str> {
+    let info = Detector::new().detect(text)?;
+    (info.is_reliable() && info.confidence() >= MIN_CONFIDENCE).then(|| info.lang().eng_name())
+}
+
 /// Pick one of the user's languages for a complete dictation. An audio model's
 /// detected language wins when selected; otherwise text detection is restricted
 /// to the set. Short or unrepresentable text uses the first (primary) choice.

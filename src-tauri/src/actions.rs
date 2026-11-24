@@ -5,7 +5,7 @@ use crate::audio_toolkit::{is_microphone_access_denied, is_no_input_device_error
 use crate::delivery::{self, Delivery, DeliveryMethod, DeliveryOutcome, DeliveryReceipt};
 use crate::managers::audio::{AudioRecordingManager, CaptureSpool, InputLevel, RecordingStop};
 use crate::managers::history::{CaptureStatus, HistoryManager, KeptDictationReason, NewRunReceipt};
-use crate::managers::model::ModelManager;
+use crate::managers::model::{EngineType, ModelManager};
 #[cfg(feature = "cloud-realtime")]
 use crate::managers::transcription::CloudStreamFinalization;
 #[cfg(feature = "cloud-realtime")]
@@ -898,15 +898,24 @@ async fn post_process_transcription_inner(
         }
     };
 
-    let attempt = request_rewrite(
+    let request = request_rewrite(
         &provider,
         &endpoint,
         secret.as_ref(),
         &model,
         rendered,
         disable_reasoning,
-    )
-    .await;
+    );
+    let attempt = if endpoint.is_remote() {
+        crate::slow_connection::warn_when_slow(
+            request,
+            crate::slow_connection::SLOW_CLEANUP,
+            || crate::slow_connection::announce(app, crate::slow_connection::SlowStage::Cleanup),
+        )
+        .await
+    } else {
+        request.await
+    };
     if attempt.credential_proved {
         crate::settings::mark_post_process_secret_verified(app, &provider.id);
     }
@@ -1911,6 +1920,14 @@ impl TranscribeAction {
             && selected_model_info
                 .as_ref()
                 .is_some_and(|model| model.supports_streaming);
+        // A local model that cannot stream drafts live words from each voice
+        // segment instead, only where the live overlay shows them.
+        let drafts_live_words = !cloud_requested
+            && !model_supports_streaming
+            && ui_settings.overlay_style == OverlayStyle::Live
+            && selected_model_info
+                .as_ref()
+                .is_some_and(|model| matches!(model.engine_type, EngineType::TranscribeCpp));
         let vad_policy = if !asr.vad_enabled {
             VadPolicy::Disabled
         } else if cloud_requested || model_supports_streaming {
@@ -1940,11 +1957,11 @@ impl TranscribeAction {
         #[cfg(feature = "cloud-realtime")]
         if let Some(cloud) = self.run.cloud() {
             tm.arm_cloud_stream_on_first_speech(cloud, cloud_key_source(app, cloud.provider()));
-        } else if model_supports_streaming {
+        } else if model_supports_streaming || drafts_live_words {
             tm.arm_stream_on_first_speech(asr);
         }
         #[cfg(not(feature = "cloud-realtime"))]
-        if model_supports_streaming {
+        if model_supports_streaming || drafts_live_words {
             tm.arm_stream_on_first_speech(asr);
         }
         let plan_elapsed = plan_started.elapsed();
@@ -1954,7 +1971,9 @@ impl TranscribeAction {
         // pill instead of an oversized transparent live window.
         let overlay_started = Instant::now();
         match ui_settings.overlay_style {
-            OverlayStyle::Live if cloud_requested || model_supports_streaming => {
+            OverlayStyle::Live
+                if cloud_requested || model_supports_streaming || drafts_live_words =>
+            {
                 utils::show_streaming_overlay(app)
             }
             OverlayStyle::Live | OverlayStyle::Minimal => show_recording_overlay(app),
