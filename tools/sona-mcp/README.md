@@ -361,7 +361,7 @@ goes by, or its id.
 | `sona_project_template_delete` | `template`, `dry_run?`                                              | `sona work project-template-delete` — **writes** |
 | `sona_project_new`           | `name`, `template`, `start?`, `dry_run?`                               | `sona work project-new` — **writes**     |
 | `sona_cycle_list`            | `cycle?`                                                               | `sona work cycles` or `sona work cycle`  |
-| `sona_cycle_save`            | settings (`weeks?`, `start_weekday?`, `cooldown_weeks?`, `upcoming?`), or `cycle` + (`name?`, `start?`, `end?`), or `start_today` + `cycle?`, or `cycle` + `rollover`; `dry_run?` | `sona work cycle-settings`, `cycle-save`, `cycle-start-today` or `cycle-rollover` — **writes** |
+| `sona_cycle_save`            | settings (`weeks?`, `start_weekday?`, `cooldown_weeks?`, `upcoming?`), or `cycle` + (`name?`, `details?`, `start?`, `end?`), or `start_today` + `cycle?`, or `cycle` + `rollover`; `dry_run?` | `sona work cycle-settings`, `cycle-save`, `cycle-start-today` or `cycle-rollover` — **writes** |
 | `sona_person_list`           | `query?`                                                               | `sona work people [--query …]`           |
 | `sona_person_save`           | `name`, `person?`, `aliases?`, `role?`, `org?`, `email?`, `notes?`     | `sona work person-save` — **writes**     |
 | `sona_person_merge`          | `person`, `into`                                                       | `sona work person-merge` — **writes**    |
@@ -403,6 +403,9 @@ at an `anchor` (`insert_before`, `insert_after`, `replace_text`) or whole
 from a milestone, moves its tasks there and deletes the milestone.
 `sona_cycle_save` does one kind of change per call; settings
 apply to every cycle and take no `cycle`.
+Without an `operation_id`, setting or clearing `details` applies on each
+call. Set `details` to `null` to clear it. Reuse an `operation_id` only to
+retry the same save.
 
 Work raised in a meeting kept on this Mac never appears. While the
 conversations can't be opened, all work from meetings is left out and the

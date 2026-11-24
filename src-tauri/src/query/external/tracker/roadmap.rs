@@ -952,16 +952,20 @@ impl Tracker<'_> {
             start_day: args.start,
             end_day: args.end.map(|end| end + chrono::Days::new(1)),
         };
-        let operation_id = args.write.operation_id(
-            "cycle-save",
-            &(
-                number,
-                &edit.name,
-                &edit.description,
-                args.start.map(|day| day.to_string()),
-                args.end.map(|day| day.to_string()),
-            ),
-        )?;
+        let operation_id = if edit.description.is_some() {
+            args.write.fresh_operation_id()
+        } else {
+            args.write.operation_id(
+                "cycle-save",
+                &(
+                    number,
+                    &edit.name,
+                    &edit.description,
+                    args.start.map(|day| day.to_string()),
+                    args.end.map(|day| day.to_string()),
+                ),
+            )?
+        };
         let listing = if args.dry_run {
             self.rehearse(|conn| {
                 let now = now_ms();
