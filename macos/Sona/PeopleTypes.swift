@@ -279,8 +279,6 @@ struct PersonDetail: Decodable {
     let talkShareAvgPermille: UInt32?
     /// Time recorded across the confirmed meetings, in milliseconds.
     let recordedMs: UInt64?
-    /// What became of the threads across the confirmed meetings.
-    let ledgerOutcomes: LedgerOutcomeCounts?
     let documents: [PersonDocumentSummary]
     let contact: PersonContactCard?
     /// Plans that named this person whose time passed with no recording.
@@ -343,13 +341,6 @@ struct CompaniesListResult: Decodable {
     let revision: UInt64
     /// Most recent meeting first; companies with no meeting yet last.
     let companies: [CompanySummary]
-}
-
-/// Everything still open across the whole corpus, newest first.
-struct PeopleOpenLoopsInbox: Decodable {
-    let schemaVersion: UInt32
-    let revision: UInt64
-    let entries: [PersonOpenLoop]
 }
 
 // MARK: - Briefing

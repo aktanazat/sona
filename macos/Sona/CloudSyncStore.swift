@@ -55,6 +55,10 @@ final class CloudSyncStore {
     /// revocation reads as revoking until the server has acknowledged it.
     private(set) var shares: [String: [CloudShareSummary]] = [:]
     private(set) var importedSessionId: String?
+    /// The command the current `commandError` belongs to, so the Import page
+    /// shows only an import's failure.
+    private var lastAction: Action?
+    var importError: String? { lastAction == .importBundle ? commandError : nil }
     /// True while the panel asks whether to replace the vault this Mac already
     /// belongs to with the one a recovery code named.
     private(set) var recoveryConflict = false
@@ -518,6 +522,7 @@ final class CloudSyncStore {
     /// that has already expired is not a share.
     private func expiry() -> Int64? {
         guard shareExpiry > .now else {
+            lastAction = nil
             commandError = CloudSyncStore.pastExpiry
             return nil
         }
@@ -529,6 +534,7 @@ final class CloudSyncStore {
     private func call(_ action: Action, _ work: () async throws -> Void) async {
         guard pending == nil else { return }
         pending = action
+        lastAction = action
         commandError = nil
         do {
             try await work()

@@ -1330,6 +1330,14 @@ function timelineRow(entry, node) {
   return row;
 }
 
+function markTimelineEdges(list) {
+  list.toggleAttribute("data-above", list.scrollTop > 0);
+  list.toggleAttribute(
+    "data-below",
+    list.scrollHeight - list.scrollTop - list.clientHeight > 1,
+  );
+}
+
 function renderLiveTimeline(page, closed) {
   const { timelineList, timelineEmpty } = page.elements;
   const entries = liveTimeline(page.state.lines, page.state.changes);
@@ -1340,6 +1348,7 @@ function renderLiveTimeline(page, closed) {
     8;
   syncLiveList(timelineList, entries, timelineRow);
   if (atEnd) timelineList.scrollTop = timelineList.scrollHeight;
+  markTimelineEdges(timelineList);
   timelineEmpty.hidden = entries.length > 0;
   setText(
     timelineEmpty,
@@ -1528,8 +1537,18 @@ function liveElements() {
 }
 
 function wireLive(page) {
-  const { nameForm, nameInput, nameHint, rename, addForm, addInput } =
-    page.elements;
+  const {
+    nameForm,
+    nameInput,
+    nameHint,
+    rename,
+    addForm,
+    addInput,
+    timelineList,
+  } = page.elements;
+  const edges = () => markTimelineEdges(timelineList);
+  timelineList.addEventListener("scroll", edges);
+  window.addEventListener("resize", edges);
   nameForm.addEventListener("submit", (event) => {
     event.preventDefault();
     const name = liveName(nameInput.value);

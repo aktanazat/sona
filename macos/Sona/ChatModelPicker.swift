@@ -23,10 +23,12 @@ struct ChatModelPicker: View {
                     .foregroundStyle(Theme.ink)
                     .lineLimit(1)
                     .layoutPriority(1)
-                Text(effortCaption)
-                    .font(TypeScale.body(12))
-                    .foregroundStyle(Theme.inkTertiary)
-                    .lineLimit(1)
+                if let effortCaption {
+                    Text(effortCaption)
+                        .font(TypeScale.body(12))
+                        .foregroundStyle(Theme.inkTertiary)
+                        .lineLimit(1)
+                }
                 Image(systemName: "chevron.down")
                     .font(.system(size: 9, weight: .semibold))
                     .foregroundStyle(Theme.inkTertiary)
@@ -40,8 +42,8 @@ struct ChatModelPicker: View {
         .onHover { hovering = $0 }
         .hoverFade(hovering)
         .disabled(store.modelPickerDisabled)
-        .help("Choose a model and thinking effort")
-        .accessibilityLabel("Model: \(store.selectedModel?.name ?? "Server default"). \(effortCaption)")
+        .help("Choose a model")
+        .accessibilityLabel(["Model: \(store.selectedModel?.name ?? "Server default")", effortCaption].compactMap { $0 }.joined(separator: ". "))
         .popover(isPresented: $presented, arrowEdge: .top) {
             picker
                 .onExitCommand { presented = false }
@@ -57,10 +59,10 @@ struct ChatModelPicker: View {
         }
     }
 
-    private var effortCaption: String {
+    private var effortCaption: String? {
         guard let effort = store.effectiveModelSelection?.thinkingEffort else {
-            guard let model = store.selectedModel else { return "Choose model and thinking" }
-            return model.thinking.isEmpty ? "No adjustable thinking" : "Default thinking"
+            guard let model = store.selectedModel, !model.thinking.isEmpty else { return nil }
+            return "Default thinking"
         }
         return effort == "off" ? "Thinking off" : "\(AgentModel.effortName(effort)) thinking"
     }

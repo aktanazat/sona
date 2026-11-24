@@ -6,7 +6,7 @@ struct ModelsTab: View {
     @State private var showingAvailable = false
 
     var body: some View {
-        PageTitle("Models", subtitle: "\(model.activeModel?.name ?? "No model") is listening. Speech is transcribed on this Mac by the model below. Language models shape the words afterwards and never hear the audio.") {
+        PageTitle("Models", subtitle: "") {
             Button { model.rescanModels() } label: {
                 Image(systemName: "arrow.clockwise")
             }
@@ -14,7 +14,7 @@ struct ModelsTab: View {
             .help("Rescan disk")
             .accessibilityLabel("Rescan disk")
         }
-        PageSection("Speech") {
+        PageSection("Speech to text") {
             Card {
                 if !model.modelsLoaded {
                     CardLine("Reading your models…")
@@ -42,7 +42,7 @@ struct ModelsTab: View {
                     }
                     if !onMac.isEmpty, !available.isEmpty {
                         CardRow(action: { showingAvailable.toggle() }) {
-                            Text(showingAvailable ? "Show fewer" : "\(available.count) more to download")
+                            Text(showingAvailable ? "Show fewer" : "More models")
                                 .bodyText(13, Theme.inkSecondary)
                         } trailing: {
                             Image(systemName: showingAvailable ? "chevron.up" : "chevron.down")

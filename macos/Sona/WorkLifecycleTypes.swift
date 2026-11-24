@@ -269,6 +269,8 @@ struct WorkNotification: Decodable, Identifiable, Equatable {
     var subject: WorkNoticeSubject?
     /// Whether it needs the user, as the core judges by its kind.
     var priority: Bool
+    /// Earlier notices of the same failure this one stands for.
+    var earlier: [String]
 
     /// "Claude Code", "Sona", or "An agent" when it gave no name.
     var who: String {
@@ -301,7 +303,8 @@ struct WorkNotification: Decodable, Identifiable, Equatable {
         case .housekeeping: return to ?? "ran housekeeping"
         case .automation:
             guard to == "done" else {
-                return automation?.error.map { "failed: \($0)" } ?? "failed"
+                let failed = earlier.isEmpty ? "failed" : "failed \(earlier.count + 1) times"
+                return automation?.error.map { "\(failed): \($0)" } ?? failed
             }
             return "finished"
         case .unknown: return "changed it"

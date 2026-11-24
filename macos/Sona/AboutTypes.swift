@@ -55,13 +55,6 @@ enum AppearanceTheme: String, CaseIterable, Hashable, Sendable {
 /// `AppearanceMaterial`: whether Sona's own surfaces are opaque.
 enum AppearanceMaterial: String, CaseIterable, Hashable, Sendable {
     case solid, glass
-
-    var label: String {
-        switch self {
-        case .solid: "Solid"
-        case .glass: "Glass"
-        }
-    }
 }
 
 // MARK: - App language
@@ -74,8 +67,8 @@ struct AppLanguage: Identifiable, Hashable, Sendable {
     let nativeName: String
 
     var id: String { code }
-    /// "简体中文 (Simplified Chinese)", as the old picker printed it.
-    var label: String { "\(nativeName) (\(name))" }
+    /// "简体中文 (Simplified Chinese)"; a name already in English stands alone.
+    var label: String { nativeName == name ? name : "\(nativeName) (\(name))" }
 
     static let all: [AppLanguage] = [
         AppLanguage(code: "en", name: "English", nativeName: "English"),

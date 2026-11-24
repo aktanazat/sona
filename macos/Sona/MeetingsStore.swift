@@ -51,36 +51,6 @@ struct TranscriptTurn: Identifiable {
     var time: String { segments[0].base.startOffsetNs.meetingOffsetClock }
 }
 
-extension TranscriptTurn {
-    /// `turns` cut wherever a change came between two lines of one turn,
-    /// so each change sits among the words heard by its moment.
-    static func cut(_ turns: [TranscriptTurn], at changes: [MeetingLiveChange]) -> [TranscriptTurn] {
-        let moments = changes.compactMap(\.callNs).sorted()
-        guard !moments.isEmpty else { return turns }
-        var next = 0
-        var pieces: [TranscriptTurn] = []
-        for turn in turns {
-            var open: [TranscriptEffectiveSegment] = []
-            for segment in turn.segments {
-                var changed = false
-                while next < moments.count, moments[next] < segment.base.startOffsetNs {
-                    changed = true
-                    next += 1
-                }
-                if changed, let first = open.first {
-                    pieces.append(TranscriptTurn(id: first.base.segmentId, speakerId: turn.speakerId, segments: open))
-                    open = []
-                }
-                open.append(segment)
-            }
-            if let first = open.first {
-                pieces.append(TranscriptTurn(id: first.base.segmentId, speakerId: turn.speakerId, segments: open))
-            }
-        }
-        return pieces
-    }
-}
-
 /// A citation press: which segment to land on, and a count so pressing the
 /// same citation twice moves the reader twice.
 struct SegmentJump: Equatable {
@@ -367,7 +337,6 @@ final class MeetingsStore {
     private(set) var jump: SegmentJump?
     private(set) var focusedNoteId: MeetingNoteId?
     private(set) var originalWording = false
-    private(set) var newNote = ""
 
     // MARK: What a person typed
 
@@ -1024,7 +993,6 @@ final class MeetingsStore {
         searchHits = nil
         jump = nil
         originalWording = false
-        newNote = ""
         userNotes = nil
         notesBody = ""
         notesState = .idle
@@ -1522,21 +1490,6 @@ final class MeetingsStore {
         }
     }
 
-    func setNewNote(_ text: String) {
-        newNote = text
-    }
-
-    func createNote() {
-        let body = newNote.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !body.isEmpty else { return }
-        newNote = ""
-        mutate("Adding the note", "meeting_note_create") { session in
-            MeetingRequest.noteCreate(
-                session.sessionId, revision: session.revision,
-                startOffsetNs: nil, body: body)
-        }
-    }
-
     func updateNote(_ note: MeetingManualNote, body: String) {
         mutate("Saving the note", "meeting_note_update") { session in
             MeetingRequest.noteUpdate(session.sessionId, revision: session.revision, note: note, body: body)
@@ -1744,22 +1697,6 @@ final class MeetingsStore {
         (talk?.speakers ?? [])
             .filter { $0.turnCount > 0 }
             .sorted { $0.sharePermille > $1.sharePermille }
-    }
-
-    /// `formatPatience`: milliseconds under a second, one decimal above it.
-    /// A room of one has no switch to wait through, so it reads nothing.
-    var patience: String? {
-        guard talkShares.count > 1, let gap = talk?.medianSwitchGapMs else { return nil }
-        return gap < 1_000 ? "\(gap)ms" : String(format: "%.1fs", Double(gap) / 1_000)
-    }
-
-    /// How often the room changed hands, while two voices each hold at least
-    /// one turn in twenty. Below that one side is listening, and a count of
-    /// handovers to a listener says nothing.
-    var handovers: Int? {
-        guard let talk, talk.interactionCount > 0 else { return nil }
-        let talkers = talk.speakers.filter { $0.turnCount > 0 && $0.turnCount * 20 >= talk.turnCount }
-        return talkers.count > 1 ? talk.interactionCount : nil
     }
 
     // MARK: - Loops and commitments

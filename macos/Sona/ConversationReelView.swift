@@ -118,11 +118,13 @@ struct ConversationReelView: View {
 
     private var header: some View {
         HStack(spacing: 10) {
-            Button(action: playOrPause) {
-                Label(playTitle, systemImage: audio.playing && current != nil ? "pause.fill" : "play.fill")
+            if playable > 0 {
+                Button(action: playOrPause) {
+                    Label(playTitle, systemImage: audio.playing && current != nil ? "pause.fill" : "play.fill")
+                }
+                .buttonStyle(PrimaryButton(compact: true))
+                .disabled(audio.heldForRecording)
             }
-            .buttonStyle(PrimaryButton(compact: true))
-            .disabled(playable == 0 || audio.heldForRecording)
             Text(meta).metaText(metaColor)
             if playable > 0, !held {
                 Text("·").metaText()
@@ -169,8 +171,6 @@ struct ConversationReelView: View {
                         .multilineTextAlignment(.leading)
                     if moment.said.audioRetained {
                         track(index).padding(.top, 2)
-                    } else {
-                        Text("Audio not kept").metaText()
                     }
                 }
                 Spacer(minLength: 0)

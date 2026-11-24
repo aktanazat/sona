@@ -32,11 +32,11 @@ struct AgentBridgeView: View {
                     ToggleRow(title: agent.label, detail: agent.detail, isOn: enabled(agent))
                         .disabled(!store.bridge.masterEnabled)
                 }
-                if let status = store.status {
+                if let status = statusLabel {
                     CardRow {
                         Text("Status").bodyText()
                     } trailing: {
-                        Text(status.diagnostic.label).metaText()
+                        Text(status).metaText()
                     }
                 }
             }
@@ -108,18 +108,13 @@ struct AgentBridgeView: View {
     }
 
     private var projects: some View {
-        AgentBridgeSection(
-            "Authorized projects",
-            meta: "Sona recognizes a project from its folder without keeping the folder path here."
-        ) {
+        AgentBridgeSection("Authorized projects") {
             Button(store.authorizing ? "Choosing…" : "Authorize folder") { store.authorizeProject() }
                 .buttonStyle(.compact)
                 .disabled(store.authorizing)
         } content: {
-            Card {
-                if store.bridge.allowedProjects.isEmpty {
-                    CardLine("No projects are authorized.")
-                } else {
+            if !store.bridge.allowedProjects.isEmpty {
+                Card {
                     ForEach(store.bridge.allowedProjects) { project in
                         CardRow {
                             AgentBridgeHash(project.canonicalProjectHash)
@@ -183,8 +178,9 @@ struct AgentBridgeView: View {
         }
     }
 
+    @ViewBuilder
     private var activity: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        if !store.sessions.isEmpty {
             PageSection("Sessions") {
                 Card {
                     if store.sessions.isEmpty {
@@ -213,10 +209,14 @@ struct AgentBridgeView: View {
                                     .accessibilityLabel("Voice replies")
                                 }
                             }
+                        } trailing: {
+                            Text("Seen \(session.lastSeen.time)").metaText()
                         }
                     }
                 }
             }
+        }
+        if !store.requests.isEmpty {
             PageSection("Requests") {
                 Card {
                     if store.requests.isEmpty {
@@ -235,25 +235,25 @@ struct AgentBridgeView: View {
         }
     }
 
+    @ViewBuilder
     private var queue: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        if !store.replySessions.isEmpty {
             PageSection("Reply preview") {
                 AgentBridgeComposer(store: store)
             }
+        }
+        if !store.pending.isEmpty {
             PageSection("Pending replies") {
                 Card {
-                    if store.pending.isEmpty {
-                        CardLine("No pending replies.")
-                    } else {
-                        ForEach(store.pending) { message in
-                            AgentBridgePendingRow(store: store, message: message)
-                        }
+                    ForEach(store.pending) { message in
+                        AgentBridgePendingRow(store: store, message: message)
                     }
                 }
             }
         }
     }
 
+    @ViewBuilder
     private var rules: some View {
         AgentBridgeSection(
             "Permission rules",
@@ -278,6 +278,16 @@ struct AgentBridgeView: View {
                 }
             }
         }
+    }
+
+    /// The runtime reports active as soon as connections are on, even with
+    /// every agent switched off, when nothing is being watched.
+    private var statusLabel: String? {
+        guard let status = store.status else { return nil }
+        if status.diagnostic == .active, !AgentBridgeAgent.allCases.contains(where: store.bridge.isEnabled) {
+            return "No agent turned on"
+        }
+        return status.diagnostic.label
     }
 
     private var master: Binding<Bool> {

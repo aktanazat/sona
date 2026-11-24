@@ -76,6 +76,11 @@ extension AppModel {
     func clearReadNotices() {
         work.mark(inboxShown.filter { $0.readAtMs != nil }.map(\.id), .archive)
     }
+
+    /// ⌥U: marks every notice the inbox shows read.
+    func markShownRead() {
+        work.mark(inboxShown.filter { $0.readAtMs == nil }.map(\.id), .read)
+    }
 }
 
 /// When a snoozed notice comes back.
@@ -242,9 +247,9 @@ private struct InboxList: View {
                     .buttonStyle(QuietButton(compact: true))
                     .disabled(!shown.contains { $0.readAtMs != nil })
                     .help("Archive every read notice  ⇧⌫")
-                Button("Mark all read") { store.markAllRead() }
+                Button("Mark all read") { model.markShownRead() }
                     .buttonStyle(QuietButton(compact: true))
-                    .disabled(store.unread == 0)
+                    .disabled(!shown.contains { $0.readAtMs == nil })
                     .help("Mark all read  ⌥U")
             }
             if shown.isEmpty, narrowed {
@@ -260,9 +265,7 @@ private struct InboxList: View {
                     TaskKeyButton(title: "Triage", keys: "g i") { model.go(.triage) }
                 }
             } else if shown.isEmpty {
-                TaskEmpty(line: focus.inboxSnoozed
-                    ? "Nothing snoozed."
-                    : "Nothing new. Agents' changes, reminders, automation runs and the weekly project digest land here.")
+                TaskEmpty(line: focus.inboxSnoozed ? "Nothing snoozed." : "Nothing new.")
             } else {
                 ScrollViewReader { proxy in
                     ScrollView {
@@ -511,7 +514,7 @@ enum InboxKeys {
         let index = focus.inboxHighlighted.flatMap { id in notices.firstIndex { $0.id == id } }
         let notice = index.map { notices[$0] }
         if flags == .option, key == "u" {
-            model.work.markAllRead()
+            model.markShownRead()
             return true
         }
         if flags == .shift, event.keyCode == 51 {

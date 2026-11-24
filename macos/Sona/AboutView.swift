@@ -1,52 +1,15 @@
 import SwiftUI
 
-/// The About page: the once-per-install choices, the running build and the
-/// update preference, the source and its licenses, and the two paths that get
-/// opened when something has gone wrong.
+/// The About page: the running build and the update preference, the source
+/// and its licenses, and the two paths that get opened when something has
+/// gone wrong.
 struct AboutView: View {
     let store: AboutStore
 
     var body: some View {
         Page {
-            PageTitle("About Sona", subtitle: "What this build is, where it came from, and where it keeps things.")
+            PageTitle("About Sona", subtitle: "")
             ErrorNote(store.error)
-
-            PageSection("Appearance") {
-                Card {
-                    ChoiceRow(
-                        title: "Language",
-                        detail: "The language the assistant answers in and the menu bar menu uses. This window stays in English.",
-                        choices: AppLanguage.all,
-                        label: { $0.label },
-                        selection: Binding(
-                            get: { store.language },
-                            set: { store.setLanguage($0.code) }
-                        )
-                    )
-                    ChoiceRow(
-                        title: "Appearance",
-                        choices: AppearanceTheme.allCases,
-                        label: { $0.label },
-                        selection: Binding(
-                            get: { store.theme },
-                            set: { store.setTheme($0) }
-                        )
-                    )
-                    ContrastRow()
-                    ChoiceRow(
-                        title: "Material",
-                        detail: store.material == store.materialChoice
-                            ? "Glass applies to the sidebar, the command palette and floating bars."
-                            : "Solid while Reduce Transparency or Increase Contrast is on.",
-                        choices: AppearanceMaterial.allCases,
-                        label: { $0.label },
-                        selection: Binding(
-                            get: { store.materialChoice },
-                            set: { store.setMaterial($0) }
-                        )
-                    )
-                }
-            }
 
             PageSection("Version and updates") {
                 Card {
@@ -153,35 +116,6 @@ private struct AboutVersionRow: View {
                     .buttonStyle(.compact)
                     .disabled(store.checking)
             }
-        }
-    }
-}
-
-/// The contrast every color is generated at. While Increase Contrast is on,
-/// the system's highest setting wins and the slider has nothing to move.
-private struct ContrastRow: View {
-    @Bindable private var theme = ThemeStore.shared
-    @Environment(\.colorSchemeContrast) private var schemeContrast
-
-    var body: some View {
-        let increased = schemeContrast == .increased
-        CardRow {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Contrast").bodyText()
-                if increased {
-                    Text("Highest while Increase Contrast is on.").metaText()
-                } else {
-                    Text("\(Int(theme.contrast.rounded()))")
-                        .font(TypeScale.mono(12))
-                        .foregroundStyle(Theme.inkTertiary)
-                }
-            }
-        } trailing: {
-            Slider(value: $theme.contrast, in: ThemeStore.contrastRange, step: 1)
-                .frame(width: 128)
-                .tint(Theme.accent)
-                .disabled(increased)
-                .accessibilityLabel("Contrast")
         }
     }
 }

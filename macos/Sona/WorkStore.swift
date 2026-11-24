@@ -1313,10 +1313,6 @@ final class WorkStore {
         }
     }
 
-    func markAllRead() {
-        mark(inbox.filter { $0.readAtMs == nil }.map(\.id), .read)
-    }
-
     func descriptionVersions(_ id: String) async -> [WorkDescriptionVersion] {
         do {
             return try await core.request("work_description_versions", IdParams(id: id))

@@ -24,13 +24,13 @@ struct ContextSuggestionsView: View {
                         FilingReasonsLine(sessionId: sessionId, reasons: suggestion.reasons, showLive: showLive)
                     }
                     Spacer(minLength: 8)
-                    Button("Not this") { decide(suggestion, accept: false) }
+                    Button("No") { decide(suggestion, accept: false) }
                         .buttonStyle(.quiet)
                     if case .meeting = suggestion.target {
                         Button("Change") { changing = suggestion }
                             .buttonStyle(.quiet)
                     }
-                    Button("Use") { decide(suggestion, accept: true) }
+                    Button("Yes") { decide(suggestion, accept: true) }
                         .buttonStyle(QuietButton(compact: true))
                 }
                 .disabled(deciding)

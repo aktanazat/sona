@@ -366,7 +366,7 @@ private struct AttachmentTile<Menu: View>: View {
                 .clipped()
             Rectangle().fill(Theme.hairline).frame(height: 1)
             VStack(alignment: .leading, spacing: 2) {
-                Text(attachment.title)
+                Text(name)
                     .font(TypeScale.label(12))
                     .foregroundStyle(Theme.ink)
                     .lineLimit(1)
@@ -411,11 +411,20 @@ private struct AttachmentTile<Menu: View>: View {
         .accessibilityAction(named: "Open", open)
     }
 
+    /// A link saved without a title shows its address without the scheme.
+    private var name: String {
+        guard attachment.kind == .link, attachment.title == attachment.url,
+              let url = attachment.linkURL, let host = url.host() else { return attachment.title }
+        let path = url.path()
+        return path.isEmpty || path == "/" ? host : host + path
+    }
+
     private var meta: String {
         let who = attachment.createdBy.display(me: model.myName)
         let what: String?
         if attachment.kind == .link {
-            what = attachment.linkURL.flatMap { $0.host() ?? ($0.scheme == "mailto" ? "Email" : nil) }
+            let host = attachment.linkURL.flatMap { $0.host() ?? ($0.scheme == "mailto" ? "Email" : nil) }
+            what = host.flatMap { name.hasPrefix($0) ? nil : $0 }
         } else {
             what = attachment.size.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) }
         }

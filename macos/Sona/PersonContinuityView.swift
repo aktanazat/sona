@@ -225,7 +225,7 @@ struct PersonContinuityView<Profile: View>: View {
                 }
             }
             if !catchUp.contributionIds.isEmpty {
-                PageSection("Their words") {
+                PageSection("Quotes") {
                     Card {
                         ForEach(snapshot.contributions.filter { catchUp.contributionIds.contains($0.id) }) { row in
                             CardRow { PersonMemoryContributionRow(row: row, open: self.open) }
@@ -431,7 +431,7 @@ struct PersonContinuityView<Profile: View>: View {
         switch filter {
         case .all: "No linked history yet."
         case .conversations: "No linked conversations."
-        case .contributions: "No attributed words."
+        case .contributions: "No quotes."
         case .notes: "No related notes."
         case .commitments: "No sourced commitments."
         }

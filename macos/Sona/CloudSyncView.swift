@@ -97,7 +97,7 @@ struct CloudSyncView: View {
                 }
                 if let deletions = store.overview?.pendingDeletions, deletions > 0 {
                     CardRow {
-                        Text("Removals waiting to reach the vault").bodyText()
+                        Text("Removals waiting to sync").bodyText()
                     } trailing: {
                         Text("\(deletions)").metaText()
                     }
@@ -129,30 +129,18 @@ struct CloudSyncView: View {
                         }
                     }
                 }
-                CloudSyncDisclosure(
-                    label: "Set up sync",
-                    detail: "Deploy your companion Worker first, then use its address and setup secret."
-                ) {
+                CloudSyncDisclosure(label: "Set up sync") {
                     setupFields
                 }
-                CloudSyncDisclosure(
-                    label: "Recover a sync account",
-                    detail: "Use the recovery code from the device that set the vault up."
-                ) {
+                CloudSyncDisclosure(label: "Recover a sync account") {
                     recoveryFields
                 }
                 if store.overview?.enabled == true {
-                    CloudSyncDisclosure(
-                        label: "Add a device to this vault",
-                        detail: "Approve the code an iPhone, Watch, or another Mac shows while it joins."
-                    ) {
+                    CloudSyncDisclosure(label: "Add a device") {
                         PairingApproveField(store: store)
                     }
                 } else {
-                    CloudSyncDisclosure(
-                        label: "Join a vault another device owns",
-                        detail: "This Mac shows a code, the vault's device approves it, and this Mac finishes here."
-                    ) {
+                    CloudSyncDisclosure(label: "Join sync from another device") {
                         joinFields
                     }
                 }
@@ -166,8 +154,8 @@ struct CloudSyncView: View {
         CloudSyncFieldRow(label: "Server address") {
             InputField(prompt: "https://sona.example.workers.dev", text: $store.endpoint)
         }
-        CloudSyncFieldRow(label: "Setup secret") {
-            CloudSyncSecretField(prompt: "Setup secret", text: $store.bootstrapSecret)
+        CloudSyncFieldRow(label: "Setup password") {
+            CloudSyncSecretField(prompt: "Setup password", text: $store.bootstrapSecret)
         }
         CloudSyncTaskAction {
             Button("Set up sync") { Task { await store.bootstrap() } }
@@ -201,8 +189,8 @@ struct CloudSyncView: View {
         CloudSyncFieldRow(label: "Server address") {
             InputField(prompt: "https://sona.example.workers.dev", text: $store.endpoint)
         }
-        CloudSyncFieldRow(label: "Vault ID") {
-            InputField(prompt: "From the device that owns the vault", text: $store.vaultId)
+        CloudSyncFieldRow(label: "Account ID") {
+            InputField(prompt: "Shown on your other device", text: $store.vaultId)
         }
         CloudSyncTaskAction {
             Button(store.offer == nil ? "Create pairing offer" : "Create a new offer") {
@@ -223,18 +211,10 @@ struct CloudSyncView: View {
     private var meetings: some View {
         PageSection("Meetings") {
             Card {
-                ActionRow(
-                    title: "Import a .sona file",
-                    detail: store.importedSessionId.map { "Imported meeting \($0)" },
-                    button: "Choose a file",
-                    busy: store.busy
-                ) {
-                    Task { await store.importBundle() }
-                }
                 if let note = store.statusNote {
                     CloudSyncNote(note, tone: Theme.inkTertiary)
                 } else if store.statuses.isEmpty {
-                    CloudSyncNote("No meetings have reached the vault yet.", tone: Theme.inkTertiary)
+                    CloudSyncNote("No meetings synced yet.", tone: Theme.inkTertiary)
                 } else {
                     ScrollView {
                         LazyVStack(spacing: 0) {
@@ -273,7 +253,9 @@ private struct CloudSyncMeetingRow: View {
             CardRow(action: toggle) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(store.title(for: status.sessionId)).bodyText()
-                    Text(facts).metaText()
+                    if let facts {
+                        Text(facts).metaText()
+                    }
                 }
             } trailing: {
                 HStack(spacing: 10) {
@@ -300,15 +282,15 @@ private struct CloudSyncMeetingRow: View {
 
     /// What the state word cannot say: how many shares exist, and whether a
     /// retry is already scheduled.
-    private var facts: String {
-        var parts = ["\(status.shareCount) \(status.shareCount == 1 ? "share" : "shares")"]
+    private var facts: String? {
+        var parts: [String] = []
+        if status.shareCount > 0 {
+            parts.append("\(status.shareCount) \(status.shareCount == 1 ? "share" : "shares")")
+        }
         if let retryAt = status.retryAt {
             parts.append("retry at \(CloudSyncClock.moment(retryAt))")
         }
-        if let revision = status.remoteRevisionId {
-            parts.append("cloud copy \(revision)")
-        }
-        return parts.joined(separator: " · ")
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
     private var actions: some View {
@@ -504,15 +486,15 @@ private struct CloudVaultReplaceSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Replace this Mac's vault?").headlineText()
+            Text("Switch this Mac to another sync account?").headlineText()
             Text(
-                "This recovery code belongs to a different vault. Replacing drops this Mac's key to its current vault, so anything synced only there can no longer be read from this Mac. Meetings stored on this Mac stay."
+                "This recovery code belongs to a different sync account. Anything synced only to the current account can no longer be read from this Mac. Meetings stored on this Mac stay."
             )
             .bodyText(14, Theme.inkSecondary)
             HStack(spacing: 12) {
                 Spacer()
-                Button("Keep current vault", action: cancel).buttonStyle(.secondary)
-                Button("Replace vault", action: replace).buttonStyle(.primary).disabled(busy)
+                Button("Keep current account", action: cancel).buttonStyle(.secondary)
+                Button("Switch account", action: replace).buttonStyle(.primary).disabled(busy)
             }
         }
         .padding(24)
@@ -547,11 +529,11 @@ private struct PairingOfferCard: View {
                         .accessibilityLabel(Text("Pairing code for device \(offer.deviceId)"))
                 }
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("On the device that owns the vault, scan this or paste the code below, check the fingerprint matches, and approve it.")
+                    Text("On your other device, scan this or paste the code below, check the fingerprint matches, and approve it.")
                         .metaText()
                         .fixedSize(horizontal: false, vertical: true)
                     PairingFact(label: "Fingerprint", value: offer.fingerprint)
-                    PairingFact(label: "Vault", value: offer.vaultId)
+                    PairingFact(label: "Account", value: offer.vaultId)
                     PairingFact(label: "Device", value: offer.deviceId)
                     PairingFact(label: "Expires", value: CloudSyncClock.moment(offer.expiresAt))
                 }
@@ -633,19 +615,13 @@ private struct PairingApproveField: View {
 /// A one-time task, folded away until it is wanted.
 private struct CloudSyncDisclosure<Content: View>: View {
     let label: String
-    var detail: String?
     @ViewBuilder var content: () -> Content
     @State private var open = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             CardRow(action: { open.toggle() }) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(label).bodyText()
-                    if let detail {
-                        Text(detail).metaText()
-                    }
-                }
+                Text(label).bodyText()
             } trailing: {
                 Image(systemName: open ? "chevron.up" : "chevron.down")
                     .font(.system(size: 11, weight: .semibold))

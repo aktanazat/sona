@@ -474,7 +474,7 @@ private struct LabelSettingsRow: View {
             }
         } trailing: {
             HStack(spacing: Space.s) {
-                Menu(label.group ?? "Group") {
+                Menu("Move") {
                     ForEach(groups, id: \.self) { group in
                         Button {
                             move(into: group)
@@ -504,7 +504,7 @@ private struct LabelSettingsRow: View {
                 .fixedSize()
                 .help("Where the label can go")
                 .accessibilityLabel("Use on: \(label.scope.label)")
-                Button(label.retired ? "Restore" : "Retire") {
+                Button(label.retired ? "Show" : "Hide") {
                     work.retireLabel(label.id, !label.retired)
                 }
                 .buttonStyle(.compact)

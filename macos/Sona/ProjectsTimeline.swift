@@ -53,21 +53,35 @@ private struct TimelineRow: Identifiable {
 }
 
 /// A curve from the end of the blocker's bar to the start of the bar it
-/// blocks, with a dot at each end. With `hitWidth`, the band around the
-/// curve a click lands on.
+/// blocks, with a dot at each end. A blocked bar that starts before the
+/// blocker ends is reached in right angles along `lane`, the edge of its
+/// row facing the blocker, so the line never loops back over the bars.
+/// With `hitWidth`, the band around the line a click lands on.
 private struct DependencyLine: Shape {
     let from: CGPoint
     let to: CGPoint
+    var lane: CGFloat?
     var hitWidth: CGFloat?
 
     func path(in rect: CGRect) -> Path {
-        let reach = max(abs(to.x - from.x) / 2, 24)
-        var curve = Path()
-        curve.move(to: from)
-        curve.addCurve(to: to, control1: CGPoint(x: from.x + reach, y: from.y),
-                       control2: CGPoint(x: to.x - reach, y: to.y))
-        if let hitWidth { return curve.strokedPath(StrokeStyle(lineWidth: hitWidth, lineCap: .round)) }
-        var line = curve.strokedPath(StrokeStyle(lineWidth: 1.5, lineCap: .round))
+        var route = Path()
+        route.move(to: from)
+        if let lane, to.x - from.x < 32 {
+            let out = from.x + 12
+            let back = to.x - 12
+            let corners = [CGPoint(x: out, y: from.y), CGPoint(x: out, y: lane), CGPoint(x: back, y: lane),
+                           CGPoint(x: back, y: to.y), to]
+            for (corner, next) in zip(corners, corners.dropFirst()) {
+                route.addArc(tangent1End: corner, tangent2End: next, radius: 6)
+            }
+            route.addLine(to: to)
+        } else {
+            let reach = max(abs(to.x - from.x) / 2, 24)
+            route.addCurve(to: to, control1: CGPoint(x: from.x + reach, y: from.y),
+                           control2: CGPoint(x: to.x - reach, y: to.y))
+        }
+        if let hitWidth { return route.strokedPath(StrokeStyle(lineWidth: hitWidth, lineCap: .round)) }
+        var line = route.strokedPath(StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
         for point in [from, to] {
             line.addEllipse(in: CGRect(x: point.x - 3, y: point.y - 3, width: 6, height: 6))
         }
@@ -384,10 +398,11 @@ struct ProjectsTimeline: View {
                                                                   blockerEnd: blocker.span.end, blockedStart: blocked.span.start)
                     let from = CGPoint(x: axis.x(blocker.span.end) + axis.dayWidth, y: blocker.y)
                     let to = CGPoint(x: axis.x(blocked.span.start), y: blocked.y)
+                    let lane = blocked.y > blocker.y ? blocked.y - middle : blocked.y - middle + Self.rowHeight
                     let title = "\(blocked.row.project.title) waits on \(blocker.row.project.title)"
-                    DependencyLine(from: from, to: to)
+                    DependencyLine(from: from, to: to, lane: lane)
                         .fill(broken ? Theme.live : Self.kept)
-                        .contentShape(DependencyLine(from: from, to: to, hitWidth: 10))
+                        .contentShape(DependencyLine(from: from, to: to, lane: lane, hitWidth: 10))
                         .onTapGesture { pickedLine = dependency.id }
                         .popover(isPresented: Binding(get: { pickedLine == dependency.id },
                                                       set: { if !$0, pickedLine == dependency.id { pickedLine = nil } }),
@@ -454,7 +469,7 @@ struct ProjectsTimeline: View {
             .fill(tint.opacity(0.22))
             .overlay { RoundedRectangle(cornerRadius: Theme.radiusRow).strokeBorder(tint.opacity(0.8), lineWidth: 1) }
             .overlay(alignment: .leading) {
-                if room >= 30 {
+                if Self.textWidth(project.title, size: 12, weight: .medium) <= room {
                     Text(project.title)
                         .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(Theme.ink)
@@ -542,7 +557,7 @@ struct ProjectsTimeline: View {
     private func milestoneMark(_ milestone: PlanningMilestone, _ due: Date, _ tint: Color, _ axis: TimelineAxis, room: CGFloat?) -> some View {
         let x = axis.x(due) + axis.dayWidth / 2
         return ZStack(alignment: .topLeading) {
-            if room.map({ $0 >= 24 }) ?? true {
+            if room.map({ Self.textWidth(milestone.title, size: 10.5, weight: .regular) <= $0 }) ?? true {
                 Text(milestone.title)
                     .font(.system(size: 10.5))
                     .foregroundStyle(Theme.inkSecondary)
@@ -656,6 +671,10 @@ struct ProjectsTimeline: View {
 
     private static func day(_ date: Date) -> String {
         date.formatted(date: .abbreviated, time: .omitted)
+    }
+
+    private static func textWidth(_ text: String, size: CGFloat, weight: NSFont.Weight) -> CGFloat {
+        ceil((text as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: size, weight: weight)]).width)
     }
 }
 

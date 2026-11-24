@@ -67,7 +67,9 @@ struct RecorderSheet: View {
                      * and the core times the recording, not the shell. */
                     Circle().fill(Theme.live).frame(width: 8, height: 8)
                 }
-                Text(store.phase.label).metaText(Theme.inkSecondary)
+                if let label = store.phase.label {
+                    Text(label).metaText(Theme.inkSecondary)
+                }
             }
         }
         .padding(.horizontal, 24)
@@ -99,16 +101,12 @@ struct RecorderSheet: View {
         }
     }
 
-    /// The setup rows: the screen is always required, and each input is a
-    /// switch plus, when there is more than one device, a choice of device.
+    /// The setup rows: each input is a switch plus, when there is more than
+    /// one device, a choice of device. The screen itself is chosen by the
+    /// footer's button.
     private var setup: some View {
         @Bindable var store = store
         return panel {
-            CardRow {
-                Text("Screen").bodyText()
-            } trailing: {
-                Text("Required").metaText()
-            }
             RecorderDeviceRow(
                 title: "Camera",
                 devices: store.cameraDevices,

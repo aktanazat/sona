@@ -117,15 +117,6 @@ enum ModeRequestedEngine: String, Codable, CaseIterable, Hashable, Identifiable 
 
     var id: String { rawValue }
 
-    /// The one fact about a mode's configuration the list carries.
-    var summary: String {
-        switch self {
-        case .local: "Local"
-        case .deepgramNova3: "Deepgram"
-        case .elevenLabsScribeV2: "ElevenLabs"
-        }
-    }
-
     var cloud: ModeCloudProvider? { ModeCloudProvider.all.first { $0.engine == self } }
 }
 
@@ -311,9 +302,7 @@ struct ModeLlm: Codable, Hashable {
         return cleanupLevel == nil ? [nil] + levels : levels
     }
 
-    var cleanupDetail: String {
-        cleanupLevel?.detail ?? "Your current instructions stay unchanged until you choose a level."
-    }
+    var cleanupDetail: String? { cleanupLevel?.detail }
 
     mutating func chooseCleanupLevel(_ level: ModeCleanupLevel) {
         cleanupLevel = level
@@ -415,12 +404,6 @@ struct Mode: Decodable, Identifiable, Hashable {
 
     /// The mode Sona keeps at all times; the only one that cannot be deleted.
     static let defaultId = "message"
-
-    /// The four modes Sona ships with. They are presets, not fixtures: every
-    /// one can be renamed, reordered and (except the default) deleted.
-    static let presetIds: Set<String> = [defaultId, "email", "meeting", "notes"]
-
-    var isPreset: Bool { Self.presetIds.contains(id) }
 
     /// The default mode dictates on the app-wide `transcribe` chord; every
     /// other chord is derived from the mode's ID.
