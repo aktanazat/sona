@@ -1,0 +1,8 @@
+﻿document_id,user_email,document_title,workspace_name,document_created,summary,notes,transcript
+"00000000-0000-4000-8000-000000000001","owner@example.test","Pricing, packaging review","Example Team","2026-10-24T14:34:40.866Z","### Decisions
+- Keep the Team plan at ""fifteen"" per seat","Ask about annual billing.","Me: Morning, everyone.
+Them: Sounds right to me."
+"00000000-0000-4000-8000-000000000002","owner@example.test","","Example Team","2026-10-26T08:15:00Z","**Action Items:**
+1. Rebook the room","","Hello there.
+Great, thanks."
+"00000000-0000-4000-8000-000000000003","owner@example.test","Notes with no call","Example Team","2026-10-27T09:00:00Z","A summary of a note typed without a recording.","",""

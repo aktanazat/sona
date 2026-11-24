@@ -2,12 +2,13 @@ use crate::actions::process_transcription_output;
 use crate::analytics::DashboardTrendRequest;
 use crate::managers::{
     history::{
-        HistoryEntry, HistoryManager, HistorySourceKind, HistoryStats, HistoryStorageStatus,
-        HistoryTrendProjection, HistoryUsageStats, KeptDictations, NewRunReceipt, PaginatedHistory,
+        HistoryEntry, HistoryManager, HistoryPage, HistorySourceKind, HistoryStats,
+        HistoryStorageStatus, HistoryTrendProjection, HistoryUsageStats, KeptDictations,
+        NewRunReceipt, PaginatedHistory,
     },
     transcription::{BatchDecode, SpeechEvidence, TranscriptionManager},
 };
-use log::error;
+use log::{error, info};
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
@@ -77,10 +78,10 @@ pub async fn get_history_entries(
     cursor: Option<i64>,
     limit: Option<usize>,
 ) -> Result<PaginatedHistory, ()> {
-    history_manager
-        .get_history_entries(cursor, limit)
-        .await
-        .map_err(|error| error!("Failed to read history entries: {error:#}"))
+    page_shown(
+        history_manager.get_history_entries(cursor, limit).await,
+        "read history entries",
+    )
 }
 
 #[tauri::command]
@@ -92,10 +93,29 @@ pub async fn search_history_entries(
     cursor: Option<i64>,
     limit: Option<usize>,
 ) -> Result<PaginatedHistory, ()> {
-    history_manager
-        .search_history_entries(&query, cursor, limit)
-        .await
-        .map_err(|error| error!("Failed to search history entries: {error:#}"))
+    page_shown(
+        history_manager
+            .search_history_entries(&query, cursor, limit)
+            .await,
+        "search history entries",
+    )
+}
+
+/// A page for the shell. A cursor whose dictation was deleted fails like a
+/// read does: Library shows its paging error, and Try again pages on from the
+/// last row it still lists.
+fn page_shown(page: anyhow::Result<HistoryPage>, what: &str) -> Result<PaginatedHistory, ()> {
+    match page {
+        Ok(HistoryPage::Entries(page)) => Ok(page),
+        Ok(HistoryPage::CursorGone) => {
+            info!("Could not {what}: the cursor's dictation is gone");
+            Err(())
+        }
+        Err(error) => {
+            error!("Failed to {what}: {error:#}");
+            Err(())
+        }
+    }
 }
 
 #[tauri::command]

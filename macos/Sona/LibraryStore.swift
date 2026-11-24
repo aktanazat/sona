@@ -296,7 +296,11 @@ final class LibraryStore {
             if activeQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 if let row {
                     rows.removeAll { $0.id == row.id }
-                    rows.insert(row, at: 0)
+                    let index = rows.firstIndex { held in
+                        held.item.date < row.item.date || (held.item.date == row.item.date && held.id < row.id)
+                    } ?? rows.endIndex
+                    // A row older than every loaded one arrives with its own page.
+                    if index < rows.endIndex || !hasMore { rows.insert(row, at: index) }
                     rebuildDays()
                 } else {
                     reload()
@@ -403,10 +407,10 @@ final class LibraryStore {
     /// One row open, wherever it is in the log: the search goes, the log is
     /// read from the top, and read on until the page holding the row lands.
     /// A dictation just kept is on the first page; one reached from a search
-    /// result or a notice may be pages down, and ids fall as the pages do, so
-    /// the read stops the moment a page ends past it. A kept recording is
-    /// in its own list, which is read instead. `revealed` ticks when the row
-    /// is on screen, so the feed can scroll to it.
+    /// result or a notice may be pages down, so the read goes on until a page
+    /// holds it or the log ends. A dictation that is gone is not read for at
+    /// all. A kept recording is in its own list, which is read instead.
+    /// `revealed` ticks when the row is on screen, so the feed can scroll to it.
     func reveal(_ id: Int64) {
         searchTask?.cancel()
         query = ""
@@ -419,13 +423,22 @@ final class LibraryStore {
                 if expanded == id { revealed += 1 }
                 return
             }
-            while phase == .ready, hasMore, let last = rows.last, last.id > id, expanded == id {
+            guard await inHistory(id) else { return }
+            while phase == .ready, hasMore, !rows.contains(where: { $0.id == id }), let last = rows.last, expanded == id {
                 await fetchPage(cursor: last.id)
             }
             if expanded == id, rows.contains(where: { $0.id == id }) {
                 revealed += 1
             }
         }
+    }
+
+    /// Whether the dictation is still in the log: a page read from it fails
+    /// once it is gone.
+    private func inHistory(_ id: Int64) async -> Bool {
+        let page: HistoryPage? = try? await core.request(
+            "get_history_entries", HistoryPageParams(cursor: id, limit: 1))
+        return page != nil
     }
 
     private var keptIds: Set<Int64> { Set(kept.map(\.id)) }

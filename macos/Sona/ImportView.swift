@@ -16,41 +16,75 @@ struct ImportView: View {
 
     var body: some View {
         Page {
-            PageTitle("Import audio", subtitle: "Recordings and video from this Mac, transcribed into history.")
+            PageTitle("Import", subtitle: "")
             ErrorNote(store.error)
             routedNotice
             dropZone
             chosenRows
             queue
+            otherApps("Dictations from other apps", ImportSource.dictationApps)
+            otherApps("Meetings from other apps", ImportSource.meetingApps)
+        }
+        .alert(
+            "Delete older dictations to import?",
+            isPresented: Binding(
+                get: { store.removalsToConfirm != nil },
+                set: { if !$0 { store.declineRemovals() } }),
+            presenting: store.removalsToConfirm
+        ) { pending in
+            Button("Import anyway", role: .destructive) {
+                Task {
+                    await store.importExport(
+                        from: pending.source, path: pending.path, removalsAllowed: pending.removals)
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: { pending in
+            Text(UpstreamHistoryRemovals.sentence(pending.removals))
+        }
+    }
+
+    // MARK: - Other apps
+
+    private func otherApps(_ label: String, _ sources: [ImportSource]) -> some View {
+        PageSection(label) {
+            Card {
+                ForEach(sources) { source in
+                    ImportSourceRow(
+                        source: source,
+                        outcome: store.appOutcomes[source],
+                        importing: store.appImporting == source,
+                        busy: store.appImporting != nil
+                    ) {
+                        store.chooseExport(from: source)
+                    }
+                }
+            }
         }
     }
 
     // MARK: - Choosing
 
     private var dropZone: some View {
-        VStack(spacing: 12) {
-            Text("Drag and drop, or choose files to import.")
-                .bodyText(14, Theme.inkSecondary)
-            Button("Choose files") { store.chooseFiles() }
-                .buttonStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 36)
-        .background(
-            RoundedRectangle(cornerRadius: Theme.radiusCard)
-                .fill(dragging ? Theme.selection : Theme.surface))
-        .overlay(
-            RoundedRectangle(cornerRadius: Theme.radiusCard)
-                .strokeBorder(
-                    dragging ? Theme.accent : Theme.border,
-                    style: StrokeStyle(lineWidth: 1, dash: [4, 4])))
-        // An OS drop is native here, where the React window needed a webview
-        // drag event: same files, one fewer layer.
-        .dropDestination(for: URL.self) { urls, _ in
-            store.add(paths: urls.map(\.path))
-            return true
-        } isTargeted: { dragging = $0 }
-        .padding(.bottom, 28)
+        Button("Choose files") { store.chooseFiles() }
+            .buttonStyle(.secondary)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 36)
+            .background(
+                RoundedRectangle(cornerRadius: Theme.radiusCard)
+                    .fill(dragging ? Theme.selection : Theme.surface))
+            .overlay(
+                RoundedRectangle(cornerRadius: Theme.radiusCard)
+                    .strokeBorder(
+                        dragging ? Theme.accent : Theme.border,
+                        style: StrokeStyle(lineWidth: 1, dash: [4, 4])))
+            // An OS drop is native here, where the React window needed a webview
+            // drag event: same files, one fewer layer.
+            .dropDestination(for: URL.self) { urls, _ in
+                store.add(paths: urls.map(\.path))
+                return true
+            } isTargeted: { dragging = $0 }
+            .padding(.bottom, 28)
     }
 
     @ViewBuilder
@@ -132,6 +166,36 @@ struct ImportView: View {
                 }
             }
             .padding(.bottom, 16)
+        }
+    }
+}
+
+/// One app Sona can read: where its export is, what the last import did, and
+/// the button that picks it.
+private struct ImportSourceRow: View {
+    let source: ImportSource
+    let outcome: ImportOutcome?
+    let importing: Bool
+    let busy: Bool
+    let choose: () -> Void
+
+    var body: some View {
+        CardRow {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(source.name).bodyText(14)
+                Text(source.hint)
+                    .metaText(Theme.inkSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let outcome {
+                    Text(outcome.sentence)
+                        .metaText(outcome.failed ? Theme.live : Theme.inkSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        } trailing: {
+            Button(importing ? "Importing…" : "Import…", action: choose)
+                .buttonStyle(.compact)
+                .disabled(busy)
         }
     }
 }

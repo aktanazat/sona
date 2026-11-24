@@ -178,6 +178,22 @@ pub(super) async fn call(
             })
             .await?
         }
+        "import_dictation_app" => {
+            let mut args = Args::parse(params)?;
+            let source = args.take("source")?;
+            let path = args.take("path")?;
+            let removals_allowed = args.take("removalsAllowed")?;
+            reply(
+                crate::dictation_import::import_dictation_app(
+                    app.clone(),
+                    app.state(),
+                    source,
+                    path,
+                    removals_allowed,
+                )
+                .await,
+            )
+        }
         "get_identity_adoption_status" => {
             let handle = app.clone();
             on_main_thread(app, move || {
@@ -2910,6 +2926,14 @@ pub(super) async fn call(
             let mut args = Args::parse(params)?;
             let path = args.take("path")?;
             reply(crate::commands::meeting::meeting_import_transcript(app.state(), path).await)
+        }
+        "meeting_import_from_app" => {
+            let mut args = Args::parse(params)?;
+            let source = args.take("source")?;
+            let path = args.take("path")?;
+            reply(
+                crate::commands::meeting::meeting_import_from_app(app.state(), source, path).await,
+            )
         }
         "meeting_recovery_list" => {
             reply(crate::commands::meeting::meeting_recovery_list(app.state()).await)

@@ -1810,6 +1810,7 @@ mod tests {
             post_process_requested: false,
             parent_id: None,
             match_kind: None,
+            imported_from: None,
         }
     }
 

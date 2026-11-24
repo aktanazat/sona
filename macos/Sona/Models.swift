@@ -133,6 +133,12 @@ extension Date {
         return formatter
     }()
 
+    static let dayInYearFormat: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "EEEE d MMMM yyyy"
+        return formatter
+    }()
+
     static let shortFormat: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateFormat = "d MMM"
@@ -140,7 +146,10 @@ extension Date {
     }()
 
     var time: String { Date.timeFormat.string(from: self) }
-    var dayName: String { Date.dayFormat.string(from: self) }
+    var dayName: String {
+        let thisYear = Calendar.current.isDate(self, equalTo: .now, toGranularity: .year)
+        return (thisYear ? Date.dayFormat : Date.dayInYearFormat).string(from: self)
+    }
     var short: String { Date.shortFormat.string(from: self) }
 
     /// "Today", "Yesterday", or the day name.

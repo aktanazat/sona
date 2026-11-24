@@ -3,6 +3,7 @@ pub mod agent_bridge;
 pub mod agent_hook_wire;
 mod agent_panel;
 mod analytics;
+mod dictation_import;
 pub mod upstream_import;
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -1544,6 +1545,7 @@ pub fn run(cli_args: CliArgs) {
             upstream_import::get_upstream_import_status,
             upstream_import::import_legacy_app,
             upstream_import::revert_upstream_import_settings,
+            dictation_import::import_dictation_app,
             identity_adoption::get_identity_adoption_status,
             identity_adoption::revert_identity_adoption,
             agent_bridge::get_agent_bridge_status,
@@ -1835,6 +1837,7 @@ pub fn run(cli_args: CliArgs) {
             commands::meeting::meeting_discard,
             commands::meeting::meeting_import_recording,
             commands::meeting::meeting_import_transcript,
+            commands::meeting::meeting_import_from_app,
             commands::meeting::meeting_recovery_list,
             commands::meeting::meeting_recovery_finalize,
             commands::meeting::meeting_list,

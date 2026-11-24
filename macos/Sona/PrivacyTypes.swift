@@ -485,14 +485,23 @@ enum UpstreamImportFailure: String, Decodable {
     }
 }
 
-/// The import's one question: the history it brings would take Dictations to
+/// An import's one question: the history it brings would take Dictations to
 /// keep past its limit, so the next cleanup deletes `removals` of the oldest
-/// unsaved dictations. Nothing is imported until the person agrees.
+/// unsaved dictations. Nothing is imported until the person agrees. The
+/// legacy import and the other-app imports ask it the same way.
 struct UpstreamHistoryRemovals: Decodable {
     let historyWouldRemoveOlder: Count
 
     struct Count: Decodable {
         let removals: Int
+    }
+
+    static func sentence(_ removals: Int) -> String {
+        let oldest = removals == 1
+            ? "the oldest unsaved dictation"
+            : "the \(removals.formatted()) oldest unsaved dictations"
+        return "Importing deletes \(oldest). "
+            + "To keep \(removals == 1 ? "it" : "them"), cancel and raise Dictations to keep in Library."
     }
 }
 

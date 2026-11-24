@@ -1,6 +1,7 @@
 use crate::analytics::{DashboardTrendRange, DashboardTrendRequest, LocalCalendarRange};
 use crate::context::ContextReceipt;
 use crate::delivery::{DeliveryMethod, DeliveryOutcome, DeliveryReceipt};
+use crate::dictation_import::{AppDictation, DictationApp};
 use crate::modes::{ModeReceipt, RunPlan};
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Local, NaiveDate, Utc};
@@ -317,6 +318,30 @@ pub(crate) static MIGRATIONS: &[M] = &[
     M::up(crate::planning::work::agents::ESTIMATE_FOR_PROPOSALS_MIGRATION),
     M::up(crate::planning::updates::QUOTED_MEETINGS_MIGRATION),
     M::up(crate::planning::catalog::DEPENDENCY_INITIATIVE_HISTORY_MIGRATION),
+    // The rows another dictation app's import made, by that app's own id, so
+    // a second import adds only what is new and a row says where it came
+    // from. Deleting the row forgets it, as `upstream_import_history` does.
+    M::up(
+        "CREATE TABLE dictation_import_history (
+            source TEXT NOT NULL,
+            source_key TEXT NOT NULL,
+            history_id INTEGER NOT NULL,
+            PRIMARY KEY (source, source_key),
+            FOREIGN KEY(history_id) REFERENCES transcription_history(id)
+        );
+        CREATE INDEX dictation_import_history_history_id
+            ON dictation_import_history(history_id);
+        CREATE TRIGGER dictation_import_history_delete
+        AFTER DELETE ON transcription_history BEGIN
+            DELETE FROM dictation_import_history WHERE history_id = old.id;
+        END;",
+    ),
+    // History pages read newest spoken first, and an import adds old rows
+    // with new ids, so the order is by time rather than by id.
+    M::up(
+        "CREATE INDEX transcription_history_spoken
+            ON transcription_history(timestamp DESC, id DESC);",
+    ),
 ];
 
 const MAX_HISTORY_PAGE_SIZE: usize = 100;
@@ -326,6 +351,14 @@ const DEFAULT_HISTORY_SEARCH_PAGE_SIZE: usize = 50;
 pub struct PaginatedHistory {
     pub entries: Vec<HistoryEntry>,
     pub has_more: bool,
+}
+
+/// One page of history, or word that the cursor's dictation was deleted: the
+/// page after it cannot be placed in time, so the reader starts over.
+#[derive(Debug)]
+pub enum HistoryPage {
+    Entries(PaginatedHistory),
+    CursorGone,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Type, tauri_specta::Event)]
@@ -373,6 +406,9 @@ pub struct HistoryEntry {
     /// id has no match to explain, and claiming one would be false.
     #[serde(default)]
     pub match_kind: Option<HistoryMatchKind>,
+    /// The dictation app this row was imported from. `None` for Sona's own.
+    #[serde(default)]
+    pub imported_from: Option<DictationApp>,
 }
 
 /// Where the captured audio originated. Existing history rows intentionally
@@ -822,6 +858,23 @@ pub(crate) enum UpstreamHistoryImportOutcome {
     Inserted { history_id: i64 },
     Existing { history_id: i64 },
 }
+
+/// What an import from another dictation app did, or why it wrote nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AppDictationImport {
+    Imported { imported: u64, skipped: u64 },
+    HistoryOff,
+    WouldRemoveOlder { removals: u64 },
+}
+
+/// A name for an imported row's recording field that names no file: the other
+/// app's audio stays where it is, and the sweep finds nothing to delete.
+fn app_dictation_file_name(app: DictationApp, source_key: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = crate::fs_util::hex_digest(&Sha256::digest(source_key.as_bytes()));
+    format!("{}-{}", app.as_str(), &digest[..16])
+}
+
 /// One row queued for embedding, carrying the text so the worker never has to
 /// read it back out of the database it is about to write to.
 struct SemanticWork {
@@ -1176,6 +1229,10 @@ impl HistoryManager {
             post_process_requested: row.get("post_process_requested")?,
             parent_id: row.get("parent_id")?,
             match_kind: None,
+            imported_from: row
+                .get::<_, Option<String>>("imported_from")?
+                .as_deref()
+                .and_then(DictationApp::from_stored),
         })
     }
 
@@ -1191,6 +1248,138 @@ impl HistoryManager {
             run.run_started_at_ms / 1_000,
             run.run_id
         ))
+    }
+
+    /// Bring another dictation app's rows into history in one transaction,
+    /// keeping each row's own time. A row an earlier import of the same app
+    /// made is skipped by the app's id.
+    pub(crate) fn import_app_dictations(
+        &self,
+        app: DictationApp,
+        dictations: &[AppDictation],
+        removals_allowed: u64,
+    ) -> Result<AppDictationImport> {
+        let limit = crate::settings::get_settings(&self.app_handle).history_limit;
+        let (outcome, inserted) = self.storage.with_connection(|conn| {
+            Self::import_app_dictations_with_connection(
+                conn,
+                app,
+                dictations,
+                limit,
+                removals_allowed,
+            )
+        })?;
+        for (history_id, index) in inserted {
+            let Some(dictation) = dictations.get(index) else {
+                continue;
+            };
+            let entry = HistoryEntry {
+                id: history_id,
+                file_name: app_dictation_file_name(app, &dictation.source_key),
+                timestamp: dictation.timestamp,
+                saved: false,
+                title: Self::format_timestamp_title(dictation.timestamp),
+                transcription_text: dictation.heard.clone(),
+                post_processed_text: dictation.written.clone(),
+                post_process_requested: dictation.written.is_some(),
+                parent_id: None,
+                match_kind: None,
+                imported_from: Some(app),
+            };
+            self.queue_semantic_embedding(
+                history_id,
+                semantic::embeddable_text(
+                    &entry.transcription_text,
+                    entry.post_processed_text.as_deref(),
+                ),
+            );
+            if let Err(error) = (HistoryUpdatePayload::Added { entry }).emit(&self.app_handle) {
+                error!("Failed to emit imported history update: {error}");
+            }
+        }
+        Ok(outcome)
+    }
+
+    /// The transaction behind [`Self::import_app_dictations`]. Returns the
+    /// outcome and, for each inserted row, its id and its index in
+    /// `dictations`. Nothing is written unless every row can be: history off,
+    /// or more removals than agreed, refuses the whole import, because the
+    /// next sweep would delete the oldest unsaved rows, the person's own among
+    /// them.
+    pub(crate) fn import_app_dictations_with_connection(
+        conn: &mut Connection,
+        app: DictationApp,
+        dictations: &[AppDictation],
+        limit: usize,
+        removals_allowed: u64,
+    ) -> Result<(AppDictationImport, Vec<(i64, usize)>)> {
+        let transaction = conn.transaction()?;
+        let mut fresh = Vec::new();
+        let mut seen = HashSet::new();
+        for (index, dictation) in dictations.iter().enumerate() {
+            let imported: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM dictation_import_history
+                               WHERE source = ?1 AND source_key = ?2)",
+                params![app.as_str(), &dictation.source_key],
+                |row| row.get(0),
+            )?;
+            if !imported && seen.insert(dictation.source_key.as_str()) {
+                fresh.push(index);
+            }
+        }
+        let skipped = u64::try_from(dictations.len() - fresh.len())?;
+        if !fresh.is_empty() {
+            if limit == 0 {
+                return Ok((AppDictationImport::HistoryOff, Vec::new()));
+            }
+            let counted = Self::counted_entries_with_connection(&transaction)?.len();
+            let removals =
+                u64::try_from(counted.saturating_add(fresh.len()).saturating_sub(limit))?;
+            if removals > removals_allowed {
+                return Ok((
+                    AppDictationImport::WouldRemoveOlder { removals },
+                    Vec::new(),
+                ));
+            }
+        }
+        let mut inserted = Vec::with_capacity(fresh.len());
+        for index in fresh {
+            let dictation = &dictations[index];
+            transaction.execute(
+                "INSERT INTO transcription_history (
+                    file_name,
+                    timestamp,
+                    saved,
+                    title,
+                    transcription_text,
+                    post_processed_text,
+                    post_process_requested,
+                    duration_ms,
+                    word_count,
+                    has_audio
+                ) VALUES (?1, ?2, 0, ?3, ?4, ?5, ?6, ?7, ?8, 0)",
+                params![
+                    app_dictation_file_name(app, &dictation.source_key),
+                    dictation.timestamp,
+                    Self::format_timestamp_title(dictation.timestamp),
+                    &dictation.heard,
+                    &dictation.written,
+                    dictation.written.is_some(),
+                    dictation.duration_ms.map(as_sql_i64).transpose()?,
+                    dictation.word_count.map(as_sql_i64).transpose()?,
+                ],
+            )?;
+            let history_id = transaction.last_insert_rowid();
+            transaction.execute(
+                "INSERT INTO dictation_import_history (source, source_key, history_id)
+                 VALUES (?1, ?2, ?3)",
+                params![app.as_str(), &dictation.source_key, history_id],
+            )?;
+            inserted.push((history_id, index));
+        }
+        transaction.commit()?;
+        let imported = u64::try_from(inserted.len())?;
+        Ok((AppDictationImport::Imported { imported, skipped }, inserted))
     }
 
     /// Insert one validated upstream row through this manager's schema. It
@@ -1226,6 +1415,7 @@ impl HistoryManager {
                 post_process_requested: entry.post_process_requested,
                 parent_id: None,
                 match_kind: None,
+                imported_from: None,
             };
             self.queue_semantic_embedding(
                 history_id,
@@ -1703,7 +1893,7 @@ impl HistoryManager {
             receipt
         });
         let timestamp = timestamp.unwrap_or_else(|| Utc::now().timestamp());
-        let title = self.format_timestamp_title(timestamp);
+        let title = Self::format_timestamp_title(timestamp);
         // The insert owns the connection only until it commits. `cleanup_old_entries`
         // below takes the same single connection, and the emit after it must not
         // run while a database lock is held.
@@ -1731,6 +1921,7 @@ impl HistoryManager {
             post_process_requested,
             parent_id: derived_from_history_id,
             match_kind: None,
+            imported_from: None,
         };
 
         debug!("Saved history entry with id {}", entry.id);
@@ -2227,7 +2418,8 @@ impl HistoryManager {
             let mut stmt = conn.prepare(&format!(
                 "SELECT h.id AS id, h.file_name AS file_name FROM transcription_history h
                  WHERE h.saved = 0 AND h.has_audio = 1 AND h.timestamp < ?1
-                   AND NOT {KEPT_DICTATION}"
+                   AND NOT {KEPT_DICTATION}
+                 ORDER BY h.id"
             ))?;
             let rows = stmt.query_map(params![cutoff_timestamp], |row| {
                 Ok((row.get::<_, i64>("id")?, row.get::<_, String>("file_name")?))
@@ -2663,58 +2855,93 @@ impl HistoryManager {
         &self,
         cursor: Option<i64>,
         limit: Option<usize>,
+    ) -> Result<HistoryPage> {
+        self.storage.with_connection(|conn| {
+            Self::page_or_gone_with_connection(conn, cursor, |conn| {
+                Self::history_page_with_connection(conn, cursor, limit)
+            })
+        })
+    }
+
+    /// The page `read` makes, unless the cursor names a dictation that is no
+    /// longer in history.
+    fn page_or_gone_with_connection(
+        conn: &Connection,
+        cursor: Option<i64>,
+        read: impl FnOnce(&Connection) -> Result<PaginatedHistory>,
+    ) -> Result<HistoryPage> {
+        if let Some(id) = cursor {
+            if cursor_timestamp_with_connection(conn, id)?.is_none() {
+                return Ok(HistoryPage::CursorGone);
+            }
+        }
+        read(conn).map(HistoryPage::Entries)
+    }
+
+    /// One page of history, newest spoken first. An imported row keeps the
+    /// time it was spoken but takes a new id, so the order is the timestamp,
+    /// with the id breaking ties. The cursor is the last returned id; the page
+    /// after it starts below that row's time.
+    fn history_page_with_connection(
+        conn: &Connection,
+        cursor: Option<i64>,
+        limit: Option<usize>,
     ) -> Result<PaginatedHistory> {
         let limit = limit.map(|l| l.min(MAX_HISTORY_PAGE_SIZE));
-
-        self.storage.with_connection(|conn| {
-            let mut entries: Vec<HistoryEntry> = match (cursor, limit) {
-                (Some(cursor_id), Some(lim)) => {
-                    let fetch_count = i64::try_from(lim + 1)?;
-                    let mut stmt = conn.prepare(
-                        "SELECT id, file_name, timestamp, saved, title, transcription_text, post_processed_text, post_process_requested, parent_id
-                         FROM transcription_history
-                         WHERE id < ?1
-                         ORDER BY id DESC
-                         LIMIT ?2",
-                    )?;
-                    let result = stmt
-                        .query_map(params![cursor_id, fetch_count], Self::map_history_entry)?
-                        .collect::<std::result::Result<Vec<_>, _>>()?;
-                    result
-                }
-                (None, Some(lim)) => {
-                    let fetch_count = i64::try_from(lim + 1)?;
-                    let mut stmt = conn.prepare(
-                        "SELECT id, file_name, timestamp, saved, title, transcription_text, post_processed_text, post_process_requested, parent_id
-                         FROM transcription_history
-                         ORDER BY id DESC
-                         LIMIT ?1",
-                    )?;
-                    let result = stmt
-                        .query_map(params![fetch_count], Self::map_history_entry)?
-                        .collect::<std::result::Result<Vec<_>, _>>()?;
-                    result
-                }
-                (_, None) => {
-                    let mut stmt = conn.prepare(
-                        "SELECT id, file_name, timestamp, saved, title, transcription_text, post_processed_text, post_process_requested, parent_id
-                         FROM transcription_history
-                         ORDER BY id DESC",
-                    )?;
-                    let result = stmt
-                        .query_map([], Self::map_history_entry)?
-                        .collect::<std::result::Result<Vec<_>, _>>()?;
-                    result
-                }
-            };
-
-            let has_more = limit.is_some_and(|lim| entries.len() > lim);
-            if has_more {
-                entries.pop();
+        let mut entries: Vec<HistoryEntry> = match (cursor, limit) {
+            (Some(cursor_id), Some(lim)) => {
+                let cursor_timestamp = present_cursor_timestamp_with_connection(conn, cursor_id)?;
+                let fetch_count = i64::try_from(lim + 1)?;
+                let mut stmt = conn.prepare(
+                    "SELECT id, file_name, timestamp, saved, title, transcription_text, post_processed_text, post_process_requested, parent_id,
+                            (SELECT source FROM dictation_import_history WHERE history_id = transcription_history.id) AS imported_from
+                     FROM transcription_history
+                     WHERE (timestamp, id) < (?1, ?2)
+                     ORDER BY timestamp DESC, id DESC
+                     LIMIT ?3",
+                )?;
+                let result = stmt
+                    .query_map(
+                        params![cursor_timestamp, cursor_id, fetch_count],
+                        Self::map_history_entry,
+                    )?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                result
             }
+            (None, Some(lim)) => {
+                let fetch_count = i64::try_from(lim + 1)?;
+                let mut stmt = conn.prepare(
+                    "SELECT id, file_name, timestamp, saved, title, transcription_text, post_processed_text, post_process_requested, parent_id,
+                            (SELECT source FROM dictation_import_history WHERE history_id = transcription_history.id) AS imported_from
+                     FROM transcription_history
+                     ORDER BY timestamp DESC, id DESC
+                     LIMIT ?1",
+                )?;
+                let result = stmt
+                    .query_map(params![fetch_count], Self::map_history_entry)?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                result
+            }
+            (_, None) => {
+                let mut stmt = conn.prepare(
+                    "SELECT id, file_name, timestamp, saved, title, transcription_text, post_processed_text, post_process_requested, parent_id,
+                            (SELECT source FROM dictation_import_history WHERE history_id = transcription_history.id) AS imported_from
+                     FROM transcription_history
+                     ORDER BY timestamp DESC, id DESC",
+                )?;
+                let result = stmt
+                    .query_map([], Self::map_history_entry)?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                result
+            }
+        };
 
-            Ok(PaginatedHistory { entries, has_more })
-        })
+        let has_more = limit.is_some_and(|lim| entries.len() > lim);
+        if has_more {
+            entries.pop();
+        }
+
+        Ok(PaginatedHistory { entries, has_more })
     }
 
     /// Search transcription history by raw or post-processed text, with
@@ -2735,21 +2962,25 @@ impl HistoryManager {
         query: &str,
         cursor: Option<i64>,
         limit: Option<usize>,
-    ) -> Result<PaginatedHistory> {
+    ) -> Result<HistoryPage> {
         self.ensure_storage_unlocked().await;
         let model = self.semantic.model();
         let page = self.storage.with_connection(|conn| {
-            Self::search_history_entries_with_connection(
-                conn,
-                query,
-                cursor,
-                limit,
-                model.as_deref(),
-            )
+            Self::page_or_gone_with_connection(conn, cursor, |conn| {
+                Self::search_history_entries_with_connection(
+                    conn,
+                    query,
+                    cursor,
+                    limit,
+                    model.as_deref(),
+                )
+            })
         })?;
         // Demand-driven: only a search that ran out of lexical matches is
         // evidence that this user would benefit from the recall model.
-        if model.is_none() && page.entries.is_empty() {
+        if model.is_none()
+            && matches!(&page, HistoryPage::Entries(found) if found.entries.is_empty())
+        {
             self.semantic.ensure_fetch_started();
         }
         Ok(page)
@@ -2770,12 +3001,12 @@ impl HistoryManager {
     ///
     /// Three rules make the blend safe rather than clever:
     ///
-    /// 1. **One order, not two.** The merged list stays strictly `id DESC`, the
-    ///    order this search already had, so `cursor` (the last returned id)
-    ///    keeps its exact meaning and the next page can neither repeat nor skip
-    ///    a row. Ranking a semantic tail by similarity instead would need a
-    ///    compound cursor — a wire change — and `similarity_floor`, not
-    ///    position, is what keeps weak matches out.
+    /// 1. **One order, not two.** The merged list is strictly newest spoken
+    ///    first, `timestamp DESC, id DESC`, the order the unfiltered list
+    ///    has, so `cursor` (the last returned id, placed by its row's time)
+    ///    lets the next page neither repeat nor skip a row. Ranking a semantic
+    ///    tail by similarity instead would need a compound cursor — a wire
+    ///    change — and `similarity_floor`, not position, keeps weak matches out.
     /// 2. **Lexical wins the row.** A row FTS5 matched is reported as
     ///    [`HistoryMatchKind::Text`] even when its embedding also clears the
     ///    floor, and is excluded from the semantic candidate set, so the two
@@ -2807,8 +3038,13 @@ impl HistoryManager {
             .unwrap_or(DEFAULT_HISTORY_SEARCH_PAGE_SIZE)
             .clamp(1, MAX_HISTORY_PAGE_SIZE);
         let fetch_count = i64::try_from(limit + 1)?;
-        let mut entries: Vec<HistoryEntry> = match cursor {
-            Some(cursor_id) => {
+        let position = cursor
+            .map(|id| {
+                present_cursor_timestamp_with_connection(conn, id).map(|timestamp| (timestamp, id))
+            })
+            .transpose()?;
+        let mut entries: Vec<HistoryEntry> = match position {
+            Some((cursor_timestamp, cursor_id)) => {
                 let mut stmt = conn.prepare(
                     "SELECT
                         h.id,
@@ -2819,17 +3055,18 @@ impl HistoryManager {
                         h.transcription_text,
                         h.post_processed_text,
                         h.post_process_requested,
-                        h.parent_id
+                        h.parent_id,
+                        (SELECT source FROM dictation_import_history WHERE history_id = h.id) AS imported_from
                      FROM transcription_history_fts
                      JOIN transcription_history AS h
                        ON h.id = transcription_history_fts.rowid
                      WHERE transcription_history_fts MATCH ?1
-                       AND h.id < ?2
-                     ORDER BY h.id DESC
-                     LIMIT ?3",
+                       AND (h.timestamp, h.id) < (?2, ?3)
+                     ORDER BY h.timestamp DESC, h.id DESC
+                     LIMIT ?4",
                 )?;
                 let rows = stmt.query_map(
-                    params![match_query, cursor_id, fetch_count],
+                    params![match_query, cursor_timestamp, cursor_id, fetch_count],
                     Self::map_history_entry,
                 )?;
                 rows.collect::<std::result::Result<Vec<_>, _>>()?
@@ -2845,12 +3082,13 @@ impl HistoryManager {
                         h.transcription_text,
                         h.post_processed_text,
                         h.post_process_requested,
-                        h.parent_id
+                        h.parent_id,
+                        (SELECT source FROM dictation_import_history WHERE history_id = h.id) AS imported_from
                      FROM transcription_history_fts
                      JOIN transcription_history AS h
                        ON h.id = transcription_history_fts.rowid
                      WHERE transcription_history_fts MATCH ?1
-                     ORDER BY h.id DESC
+                     ORDER BY h.timestamp DESC, h.id DESC
                      LIMIT ?2",
                 )?;
                 let rows =
@@ -2869,11 +3107,13 @@ impl HistoryManager {
             let matched: HashSet<i64> = entries.iter().map(|entry| entry.id).collect();
             if let Some(vector) = model.encode(query) {
                 let recalled = semantic_candidates_with_connection(
-                    conn, model, &vector, cursor, limit, &matched,
+                    conn, model, &vector, position, limit, &matched,
                 )?;
                 if !recalled.is_empty() {
                     entries.extend(recalled);
-                    entries.sort_unstable_by(|left, right| right.id.cmp(&left.id));
+                    entries.sort_unstable_by_key(|entry| {
+                        std::cmp::Reverse((entry.timestamp, entry.id))
+                    });
                     entries.truncate(limit + 1);
                 }
             }
@@ -2904,7 +3144,8 @@ impl HistoryManager {
                 transcription_text,
                 post_processed_text,
                 post_process_requested,
-                parent_id
+                parent_id,
+                (SELECT source FROM dictation_import_history WHERE history_id = transcription_history.id) AS imported_from
              FROM transcription_history
              WHERE transcription_text != ''
              ORDER BY timestamp DESC
@@ -2940,7 +3181,8 @@ impl HistoryManager {
                     transcription_text,
                     post_processed_text,
                     post_process_requested,
-                    parent_id
+                    parent_id,
+                    (SELECT source FROM dictation_import_history WHERE history_id = transcription_history.id) AS imported_from
                  FROM transcription_history
                  WHERE timestamp >= ?1
                  ORDER BY timestamp DESC
@@ -3045,7 +3287,8 @@ impl HistoryManager {
                 transcription_text,
                 post_processed_text,
                 post_process_requested,
-                parent_id
+                parent_id,
+                (SELECT source FROM dictation_import_history WHERE history_id = transcription_history.id) AS imported_from
              FROM transcription_history
              WHERE id = ?1",
         )?;
@@ -3135,7 +3378,7 @@ impl HistoryManager {
         Ok(())
     }
 
-    fn format_timestamp_title(&self, timestamp: i64) -> String {
+    fn format_timestamp_title(timestamp: i64) -> String {
         if let Some(utc_datetime) = DateTime::from_timestamp(timestamp, 0) {
             // Convert UTC to local timezone
             let local_datetime = utc_datetime.with_timezone(&Local);
@@ -3196,7 +3439,7 @@ fn semantic_candidates_with_connection(
     conn: &Connection,
     model: &SemanticModel,
     query_vector: &[f32],
-    cursor: Option<i64>,
+    position: Option<(i64, i64)>,
     limit: usize,
     lexically_matched: &HashSet<i64>,
 ) -> Result<Vec<HistoryEntry>> {
@@ -3204,7 +3447,7 @@ fn semantic_candidates_with_connection(
         conn,
         model,
         query_vector,
-        cursor,
+        position,
         limit + 1,
         lexically_matched,
     )?;
@@ -3227,9 +3470,9 @@ fn semantic_candidates_with_connection(
 /// Ids of the newest rows whose stored vector clears [`SIMILARITY_FLOOR`], and
 /// how many rows were actually compared.
 ///
-/// The scan reads `id` and the vector and nothing else. It walks `id DESC` and
-/// stops once it holds `wanted` candidates, because the merged page is ordered
-/// by id: no row it has not reached can outrank one it already has.
+/// The scan reads `id` and the vector and nothing else. It walks newest spoken
+/// first and stops once it holds `wanted` candidates, because the merged page
+/// has that order: no row it has not reached can outrank one it already has.
 ///
 /// `semantic_model_revision = ?` is not decoration. Two models produce vectors
 /// of the same width and no shared meaning, so a vector written by a different
@@ -3241,7 +3484,7 @@ fn semantic_candidate_ids_with_connection(
     conn: &Connection,
     model: &SemanticModel,
     query_vector: &[f32],
-    cursor: Option<i64>,
+    position: Option<(i64, i64)>,
     wanted: usize,
     lexically_matched: &HashSet<i64>,
 ) -> Result<(Vec<i64>, usize)> {
@@ -3250,10 +3493,14 @@ fn semantic_candidate_ids_with_connection(
          FROM transcription_history
          WHERE semantic_embedding IS NOT NULL
            AND semantic_model_revision = ?1
-           AND (?2 IS NULL OR id < ?2)
-         ORDER BY id DESC",
+           AND (?2 IS NULL OR (timestamp, id) < (?2, ?3))
+         ORDER BY timestamp DESC, id DESC",
     )?;
-    let mut rows = statement.query(params![model.revision(), cursor])?;
+    let mut rows = statement.query(params![
+        model.revision(),
+        position.map(|(timestamp, _)| timestamp),
+        position.map(|(_, id)| id)
+    ])?;
     let mut ids = Vec::with_capacity(wanted);
     let mut compared = 0_usize;
     while let Some(row) = rows.next()? {
@@ -3277,6 +3524,24 @@ fn semantic_candidate_ids_with_connection(
     Ok((ids, compared))
 }
 
+/// When the cursor's dictation was spoken, the point a next page starts below.
+fn cursor_timestamp_with_connection(conn: &Connection, cursor_id: i64) -> Result<Option<i64>> {
+    Ok(conn
+        .query_row(
+            "SELECT timestamp FROM transcription_history WHERE id = ?1",
+            params![cursor_id],
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
+/// [`cursor_timestamp_with_connection`] for a cursor the caller already
+/// found in history.
+fn present_cursor_timestamp_with_connection(conn: &Connection, cursor_id: i64) -> Result<i64> {
+    cursor_timestamp_with_connection(conn, cursor_id)?
+        .ok_or_else(|| anyhow!("history cursor {cursor_id} is no longer in history"))
+}
+
 /// Load full history rows for an explicit id list, newest first.
 fn entries_by_ids_with_connection(conn: &Connection, ids: &[i64]) -> Result<Vec<HistoryEntry>> {
     let placeholders = vec!["?"; ids.len()].join(",");
@@ -3290,10 +3555,11 @@ fn entries_by_ids_with_connection(conn: &Connection, ids: &[i64]) -> Result<Vec<
             transcription_text,
             post_processed_text,
             post_process_requested,
-            parent_id
+            parent_id,
+            (SELECT source FROM dictation_import_history WHERE history_id = transcription_history.id) AS imported_from
          FROM transcription_history
          WHERE id IN ({placeholders})
-         ORDER BY id DESC"
+         ORDER BY timestamp DESC, id DESC"
     ))?;
     let rows = statement.query_map(
         rusqlite::params_from_iter(ids.iter()),
@@ -5325,6 +5591,130 @@ mod tests {
 
         assert_eq!(entry.timestamp, 100);
         assert_eq!(entry.transcription_text, "completed");
+    }
+
+    #[test]
+    fn history_pages_list_an_imported_older_dictation_by_when_it_was_spoken() {
+        let conn = setup_conn();
+        let newest = insert_entry(&conn, 300, "spoken today", None);
+        let imported_oldest = insert_entry(&conn, 100, "imported from last year", None);
+        let imported_middle = insert_entry(&conn, 200, "imported from last month", None);
+
+        let first_page = HistoryManager::history_page_with_connection(&conn, None, Some(2))
+            .expect("read the first page");
+        assert_eq!(
+            first_page
+                .entries
+                .iter()
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>(),
+            vec![newest, imported_middle]
+        );
+        assert!(first_page.has_more);
+
+        let second_page = HistoryManager::history_page_with_connection(
+            &conn,
+            first_page.entries.last().map(|entry| entry.id),
+            Some(2),
+        )
+        .expect("read the second page");
+        assert_eq!(
+            second_page
+                .entries
+                .iter()
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>(),
+            vec![imported_oldest]
+        );
+        assert!(!second_page.has_more);
+    }
+
+    #[test]
+    fn a_history_page_after_a_deleted_dictation_says_the_cursor_is_gone() {
+        let conn = setup_conn();
+        insert_entry(&conn, 300, "spoken today", None);
+        let cursor = insert_entry(&conn, 200, "deleted before the next page", None);
+        conn.execute(
+            "DELETE FROM transcription_history WHERE id = ?1",
+            params![cursor],
+        )
+        .expect("delete the cursor row");
+
+        let listed = HistoryManager::page_or_gone_with_connection(&conn, Some(cursor), |conn| {
+            HistoryManager::history_page_with_connection(conn, Some(cursor), Some(2))
+        })
+        .expect("a deleted cursor is an answer, not a failed read");
+        assert!(matches!(listed, HistoryPage::CursorGone));
+
+        let searched = HistoryManager::page_or_gone_with_connection(&conn, Some(cursor), |conn| {
+            HistoryManager::search_history_entries_with_connection(
+                conn,
+                "spoken",
+                Some(cursor),
+                Some(2),
+                None,
+            )
+        })
+        .expect("a deleted cursor is an answer in a search too");
+        assert!(matches!(searched, HistoryPage::CursorGone));
+    }
+
+    #[test]
+    fn history_search_pages_list_imported_older_dictations_by_when_they_were_spoken() {
+        let conn = setup_conn();
+        let newest = insert_entry(&conn, 300, "lantern today", None);
+        let imported_oldest = insert_entry(&conn, 100, "lantern last year", None);
+        let imported_middle = insert_entry(&conn, 200, "lantern last month", None);
+        let ids = |page: &PaginatedHistory| {
+            page.entries
+                .iter()
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>()
+        };
+
+        let first_page = HistoryManager::search_history_entries_with_connection(
+            &conn,
+            "lantern",
+            None,
+            Some(2),
+            None,
+        )
+        .expect("search the first page");
+        assert_eq!(ids(&first_page), vec![newest, imported_middle]);
+        assert!(first_page.has_more);
+
+        let second_page = HistoryManager::search_history_entries_with_connection(
+            &conn,
+            "lantern",
+            first_page.entries.last().map(|entry| entry.id),
+            Some(2),
+            None,
+        )
+        .expect("search the second page");
+        assert_eq!(ids(&second_page), vec![imported_oldest]);
+        assert!(!second_page.has_more);
+    }
+
+    #[test]
+    fn a_history_page_reads_in_spoken_order_without_sorting_the_whole_table() {
+        let conn = setup_conn();
+        let plan = conn
+            .prepare(
+                "EXPLAIN QUERY PLAN
+                 SELECT id FROM transcription_history
+                 WHERE (timestamp, id) < (?1, ?2)
+                 ORDER BY timestamp DESC, id DESC
+                 LIMIT ?3",
+            )
+            .expect("prepare the plan")
+            .query_map(params![300, 3, 21], |row| row.get::<_, String>(3))
+            .expect("read the plan")
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .expect("collect the plan");
+        assert!(
+            plan.iter().all(|step| !step.contains("TEMP B-TREE")),
+            "the page sorts the table instead of walking an index: {plan:?}"
+        );
     }
 
     #[test]
