@@ -21,7 +21,7 @@ use crate::meeting::{
 };
 use crate::modes::RunPlan;
 use crate::settings::{
-    get_settings, try_update_settings_committed, update_settings, AppSettings, MicrophoneChange,
+    get_settings, try_update_settings_committed, AppSettings, MicrophoneChange,
     PlaybackWhileRecording,
 };
 use crate::utils;
