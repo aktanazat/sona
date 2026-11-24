@@ -46,6 +46,8 @@ struct Shell: View {
         .frame(minWidth: 900, minHeight: 640)
         .sheet(item: Bindable(model).sheet) { sheet in
             switch sheet {
+            case .shortcuts:
+                ShortcutSheet()
             case .chat:
                 ChatView(
                     store: model.chat,

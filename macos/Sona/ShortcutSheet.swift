@@ -1,8 +1,8 @@
 import SwiftUI
 
-/// ?: every key the task screens answer to.
+/// The keyboard guide for the main window.
 struct ShortcutSheet: View {
-    @Environment(AppModel.self) private var model
+    @Environment(\.dismiss) private var dismiss
 
     private struct Entry: Identifiable {
         let title: String
@@ -37,7 +37,7 @@ struct ShortcutSheet: View {
                 Entry(title: "Display options", keys: ["shift+v"]),
                 Entry(title: "List or board", keys: ["cmd+b"]),
                 Entry(title: "Command menu", keys: ["cmd+k"]),
-                Entry(title: "Shortcuts", keys: ["?"]),
+                Entry(title: "Shortcuts", keys: ["cmd+/", "?"]),
             ]),
         ],
         [
@@ -144,7 +144,7 @@ struct ShortcutSheet: View {
                     .font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(Theme.ink)
                 Spacer(minLength: 0)
-                Button("Done") { model.workFocus.shortcutsShown = false }
+                Button("Done") { dismiss() }
                     .buttonStyle(.quiet)
                     .keyboardShortcut(.cancelAction)
             }

@@ -23,7 +23,7 @@ struct TasksScreen: View {
     }
 }
 
-/// The new-task sheet and the shortcut sheet, for whichever task screen is up.
+/// The new-task sheet, for whichever task screen is up.
 struct WorkSheets: ViewModifier {
     @Environment(AppModel.self) private var model
 
@@ -32,10 +32,6 @@ struct WorkSheets: ViewModifier {
         content
             .sheet(isPresented: Binding(get: { focus.composing != nil }, set: { if !$0 { focus.composing = nil } })) {
                 TaskComposer(start: focus.composing ?? WorkPatch())
-                    .environment(model)
-            }
-            .sheet(isPresented: Binding(get: { focus.shortcutsShown }, set: { focus.shortcutsShown = $0 })) {
-                ShortcutSheet()
                     .environment(model)
             }
     }

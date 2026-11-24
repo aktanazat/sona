@@ -106,6 +106,7 @@ enum Sheet: Identifiable, Hashable {
     case recorder
     case whatsNew
     case brief
+    case shortcuts
     /// The draft that asks someone about a task they owe, by item id.
     case nudge(String)
     /// What is open with the people of a meeting, or with one person.
@@ -521,6 +522,8 @@ final class AppModel {
         actions.append(PaletteAction(id: "import-audio", group: .actions, title: "Import audio") { [weak self] in
             self?.showSettings(.importing)
         })
+        actions.append(PaletteAction(id: "keyboard-shortcuts", group: .actions, title: "Keyboard shortcuts",
+                                     run: { [weak self] in self?.openKeyboardShortcuts() }, shortcut: "cmd+/"))
         return actions
     }
 
@@ -560,6 +563,15 @@ final class AppModel {
     func openSettings() {
         reveal()
         showSettings(settingsPlace)
+    }
+
+    func openKeyboardShortcuts() {
+        guard ready, onboarding.step == .done, sheet == nil,
+              workFocus.composing == nil, NSApp.keyWindow?.isSheet != true,
+              NSApp.mainWindow?.attachedSheet == nil else { return }
+        reveal()
+        paletteShown = false
+        sheet = .shortcuts
     }
 
     /// ⌘K: the palette, over the main window.

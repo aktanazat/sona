@@ -47,6 +47,10 @@ struct SonaApp: App {
                 Button("Search Sona…") { model.toggleSearch() }
                     .keyboardShortcut("k", modifiers: .command)
             }
+            CommandGroup(after: .help) {
+                Button("Keyboard Shortcuts") { model.openKeyboardShortcuts() }
+                    .keyboardShortcut("/", modifiers: .command)
+            }
         }
 
         MenuBarExtra {
