@@ -104,7 +104,10 @@ final class KeyboardViewController: UIInputViewController {
             discard: { [weak self] in self?.discardDraft() }
         )
         let host = UIHostingController(rootView: content)
-        host.view.backgroundColor = .clear
+        /* The system passes a touch through wherever the keyboard draws nothing, so the gaps
+         * between keys and the space around a suggestion took no taps. A fill too faint to
+         * see covers the whole keyboard. */
+        host.view.backgroundColor = UIColor(white: 0, alpha: 0.01)
         addChild(host)
         host.view.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(host.view)
@@ -845,6 +848,7 @@ private struct KeyboardView: View {
                     if state.hasFullAccess, let draft = state.draft {
                         DraftPanel(text: draft.text, insert: insert, discard: discard)
                             .frame(maxWidth: KeyGrid.maxWidth)
+                            .padding(.horizontal, KeyGrid.margin)
                             .frame(height: rowHeight * CGFloat(typing.rowCount - 1))
                         keys([typing.bottomRow(withDelete: true)]).frame(height: rowHeight)
                     } else if typing.layer == .emoji, let catalog = EmojiCatalog.shared {
@@ -853,6 +857,7 @@ private struct KeyboardView: View {
                             typing.layer = .letters
                         }
                         .frame(maxWidth: KeyGrid.maxWidth)
+                        .padding(.horizontal, KeyGrid.margin)
                         .frame(height: proxy.size.height)
                     } else {
                         let rows = typing.rows + [typing.bottomRow(withDelete: false)]
@@ -860,7 +865,6 @@ private struct KeyboardView: View {
                     }
                 }
             }
-            .padding(.horizontal, 3)
             .zIndex(1)
         }
         .padding(.bottom, 4)

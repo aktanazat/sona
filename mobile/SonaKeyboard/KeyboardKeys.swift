@@ -70,8 +70,11 @@ struct KeyPreview: Equatable {
 
 /// Where every key sits: keys share one unit width, each row is centred, and the block is
 /// never wider than `maxWidth`, so a wide display gets centred keys instead of stretched ones.
+/// The keys stand `margin` in from the sides; a touch in that margin types the nearest key,
+/// as at the edges of the system keyboard.
 struct KeyGrid {
     static let maxWidth: CGFloat = 620
+    static let margin: CGFloat = 3
 
     let unit: CGFloat
     let rowHeight: CGFloat
@@ -80,7 +83,7 @@ struct KeyGrid {
 
     init(rows: [[KeyCap]], size: CGSize) {
         let columns = max(10, rows.map { $0.reduce(0) { $0 + $1.units } }.max() ?? 10)
-        let width = min(size.width, Self.maxWidth)
+        let width = max(min(size.width - 2 * Self.margin, Self.maxWidth), 0)
         let unit = width / columns
         let rowHeight = size.height / CGFloat(max(rows.count, 1))
         let origin = CGPoint(x: (size.width - width) / 2, y: 0)
