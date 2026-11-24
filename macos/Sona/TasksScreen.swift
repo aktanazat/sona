@@ -220,12 +220,6 @@ private struct TasksList: View {
         let focus = model.workFocus
         let creationMode = model.taskListCreationMode
         let creationTitle = creationMode == .repeating ? "New repeating task" : "New task"
-        if focus.tab == .owe, model.work.currentCycle != nil {
-            WorkBarToggle(
-                title: "This cycle", icon: "arrow.triangle.2.circlepath",
-                help: "Show only work planned in the current cycle",
-                isOn: Bindable(focus).oweThisCycle)
-        }
         if focus.tab == .cycle {
             CycleNavigation()
             CycleSettingsMenu()

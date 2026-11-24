@@ -103,7 +103,7 @@ struct InitiativesScreen: View {
                 if let health = initiative.latestUpdate?.health {
                     ProjectHealthPill(health: health, compact: true)
                 }
-                Text(InitiativeText.projects(initiative.progress)).metaText(Theme.inkSecondary)
+                Text(InitiativeText.progress(initiative.progress)).metaText(Theme.inkSecondary)
                 ProgressRing(fraction: initiative.progress.fraction)
                 Text(ProgressRing.percent(initiative.progress.fraction))
                     .metaText(Theme.inkSecondary)
@@ -232,7 +232,7 @@ private struct InitiativePage: View {
                 field("Progress") {
                     HStack(spacing: 6) {
                         ProgressRing(fraction: initiative.progress.fraction, size: 14)
-                        Text("\(InitiativeText.projects(initiative.progress)), \(ProgressRing.percent(initiative.progress.fraction)) of tasks")
+                        Text("\(InitiativeText.progress(initiative.progress)), \(ProgressRing.percent(initiative.progress.fraction))")
                             .font(TypeScale.label(12.5))
                     }
                 }

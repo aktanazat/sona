@@ -183,34 +183,28 @@ struct AgentBridgeView: View {
         if !store.sessions.isEmpty {
             PageSection("Sessions") {
                 Card {
-                    if store.sessions.isEmpty {
-                        CardLine("No agent activity yet.")
-                    } else {
-                        ForEach(store.sessions) { session in
-                            CardRow {
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text(session.agent.label).bodyText()
-                                    AgentBridgeHash(session.id)
-                                    AgentBridgeHash(session.canonicalProjectHash)
-                                }
-                            } trailing: {
-                                VStack(alignment: .trailing, spacing: 4) {
-                                    Text("Seen \(session.lastSeen.time)").metaText()
-                                    Toggle(
-                                        "Voice replies",
-                                        isOn: Binding(
-                                            get: { session.voiceEnabled },
-                                            set: { store.setSessionVoice(session.id, enabled: $0) }
-                                        )
-                                    )
-                                    .toggleStyle(.switch)
-                                    .tint(Theme.accent)
-                                    .controlSize(.small)
-                                    .accessibilityLabel("Voice replies")
-                                }
+                    ForEach(store.sessions) { session in
+                        CardRow {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(session.agent.label).bodyText()
+                                AgentBridgeHash(session.id)
+                                AgentBridgeHash(session.canonicalProjectHash)
                             }
                         } trailing: {
-                            Text("Seen \(session.lastSeen.time)").metaText()
+                            VStack(alignment: .trailing, spacing: 4) {
+                                Text("Seen \(session.lastSeen.time)").metaText()
+                                Toggle(
+                                    "Voice replies",
+                                    isOn: Binding(
+                                        get: { session.voiceEnabled },
+                                        set: { store.setSessionVoice(session.id, enabled: $0) }
+                                    )
+                                )
+                                .toggleStyle(.switch)
+                                .tint(Theme.accent)
+                                .controlSize(.small)
+                                .accessibilityLabel("Voice replies")
+                            }
                         }
                     }
                 }
@@ -219,15 +213,11 @@ struct AgentBridgeView: View {
         if !store.requests.isEmpty {
             PageSection("Requests") {
                 Card {
-                    if store.requests.isEmpty {
-                        CardLine("No requests yet.")
-                    } else {
-                        ForEach(store.requests) { request in
-                            if request.isQuestion {
-                                AgentBridgeQuestionRow(store: store, request: request)
-                            } else {
-                                AgentBridgeRequestRow(store: store, request: request)
-                            }
+                    ForEach(store.requests) { request in
+                        if request.isQuestion {
+                            AgentBridgeQuestionRow(store: store, request: request)
+                        } else {
+                            AgentBridgeRequestRow(store: store, request: request)
                         }
                     }
                 }
