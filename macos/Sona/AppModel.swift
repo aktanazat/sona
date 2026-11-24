@@ -316,6 +316,7 @@ final class AppModel {
     /// The phase each model is in beyond the catalog's own record, by id.
     /// The core's events move a phase along; a command's refusal ends it.
     private(set) var modelOperations: [String: ModelOperation] = [:]
+    @ObservationIgnored private var modelCommandIDs: [String: UUID] = [:]
     /// The mode the idle pill records under, as the core names it.
     private(set) var pillMode: String?
     /// Every mode, for the pill's right-click menu.
@@ -1005,11 +1006,13 @@ final class AppModel {
     }
 
     func cancelDownload(_ model: Model) {
+        modelCommandIDs[model.id] = nil
         modelOperations[model.id] = nil
         call { try await self.core.request("cancel_download", ["modelId": model.id]) }
     }
 
     func remove(_ model: Model) {
+        modelCommandIDs[model.id] = nil
         modelOperations[model.id] = nil
         call { try await self.core.request("delete_model", ["modelId": model.id]) }
     }
@@ -1031,17 +1034,26 @@ final class AppModel {
         if modelOperations[id]?.failure != nil { modelOperations[id] = nil }
     }
 
-    /// A model command: its phase goes up at dispatch, and its refusal stays
-    /// on that row, not under the page title. The answer ends whatever phase
-    /// the events did not, because the command returns only when it is done.
+    /// A reply can arrive after Cancel and another Download. Only the current
+    /// command may finish the row's phase or replace it with a refusal.
     private func operate(_ id: String, _ phase: ModelOperation, _ method: String) {
+        let commandID = UUID()
+        modelCommandIDs[id] = commandID
         modelOperations[id] = phase
         Task {
+            let failure: String?
             do {
                 try await core.request(method, ["modelId": id])
-                if modelOperations[id]?.failure == nil { modelOperations[id] = nil }
+                failure = nil
             } catch {
-                modelOperations[id] = .failed(error.localizedDescription)
+                failure = error.localizedDescription
+            }
+            guard modelCommandIDs[id] == commandID else { return }
+            modelCommandIDs[id] = nil
+            if let failure {
+                modelOperations[id] = .failed(failure)
+            } else {
+                endModelPhase(id)
             }
         }
     }
