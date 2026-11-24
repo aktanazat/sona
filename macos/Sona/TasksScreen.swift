@@ -672,6 +672,16 @@ struct WorkActionMenu: View {
                 } label: {
                     Label("Save as template…", systemImage: "doc.on.doc")
                 }
+                Button {
+                    model.duplicateTask(row.id, withSubtasks: false)
+                } label: {
+                    Label("Make a copy", systemImage: "plus.square.on.square")
+                }
+                Button {
+                    model.duplicateTask(row.id, withSubtasks: true)
+                } label: {
+                    Label("Make a copy with sub-tasks", systemImage: "square.stack.3d.up")
+                }
             }
         }
     }

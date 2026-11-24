@@ -1,7 +1,7 @@
 import Foundation
 
 enum WorkFavoriteKind: String, Codable, Hashable {
-    case task, project, view, person
+    case task, project, view, person, cycle, note
     case unknown
 
     init(from decoder: Decoder) throws {
@@ -250,6 +250,7 @@ struct WorkNotification: Decodable, Identifiable, Equatable {
     /// Nil for an automation run about no task, a digest, and a notice
     /// about a subject alone.
     var itemId: String?
+    var projectId: String?
     var kind: WorkNotificationKind
     var actor: WorkActor
     var agent: String?
@@ -290,7 +291,7 @@ struct WorkNotification: Decodable, Identifiable, Equatable {
         case .mention: return "mentioned you"
         case .assigned: return "assigned it to you"
         case .changed: return changed
-        case .reminder: return "reminds you"
+        case .reminder: return field == "update" ? "reminds you an update is due" : "reminds you"
         case .due: return "says it's due today"
         case .digest: return digestSummary
         case .question: return "asks: \(to ?? "")"

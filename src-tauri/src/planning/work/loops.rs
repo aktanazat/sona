@@ -1300,7 +1300,9 @@ fn what_happened(
             let wanted = to.is_none_or(|to| to.as_str() == now);
             wanted.then(|| format!("moved to {}", status_words(now)))
         }
-        LoopTrigger::LabelAdded { label_id } if change.task_update() && change.had("labels") => {
+        LoopTrigger::LabelAdded { label_id }
+            if change.task_update() && change.had("labels") && !change.had("merged_label") =>
+        {
             let before = change
                 .updated_from
                 .get("labels")
@@ -2564,6 +2566,52 @@ mod tests {
             causes,
             [(format!("S-{} moved to Done", task.number), Some(task.id))]
         );
+    }
+
+    #[test]
+    fn merging_labels_runs_no_label_added_automation() {
+        let mut conn = Connection::open_in_memory().expect("a history database");
+        schema::apply_all(&conn).expect("the planner schema");
+        let bug = items::save_label(&conn, None, "Bug", 0.0, None, 0).expect("a label").id;
+        let defect = items::save_label(&conn, None, "Defect", 0.0, None, 0).expect("a label").id;
+        save(
+            &conn,
+            None,
+            &LoopInput {
+                name: "Triage labels".to_owned(),
+                prompt: "Say who should look at it.".to_owned(),
+                trigger: LoopTrigger::LabelAdded { label_id: None },
+                conditions: LoopConditions::default(),
+                tools: Vec::new(),
+            },
+            "you",
+            1,
+        )
+        .expect("a saved loop");
+        items::insert(
+            &conn,
+            &NewItem {
+                title: "Fix the gangway",
+                details: None,
+                status: WorkStatus::NotStarted,
+                priority: 0,
+                project_id: None,
+                milestone_id: None,
+                owner: &WorkOwner::Nobody,
+                due_at_ms: None,
+                label_ids: std::slice::from_ref(&bug),
+                source_loop_id: None,
+                recurrence: None,
+            },
+            WorkActor::Me,
+            0,
+        )
+        .expect("a filed task");
+        assert_eq!(enqueue(&mut conn, 2).expect("the label on the new task"), 1);
+
+        super::super::routines::merge_labels(&conn, &bug, &defect, 3).expect("merged");
+
+        assert_eq!(enqueue(&mut conn, 4).expect("a read after the merge"), 0);
     }
 
     #[test]

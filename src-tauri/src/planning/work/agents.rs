@@ -22,7 +22,7 @@ use anyhow::Result as StorageResult;
 use chrono::{Local, TimeZone};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::sync::{Arc, OnceLock};
 use tauri::{AppHandle, Manager};
@@ -821,6 +821,24 @@ pub(crate) async fn subtask_create_as(
     };
     let items =
         super::subtask_create_as(app, WorkActor::Agent, operation_id, parent_id, &inputs).await?;
+    let ids: Vec<String> = items.iter().map(|item| item.id.clone()).collect();
+    if let Some(since) = items.iter().map(|item| item.created_at_ms).min() {
+        credit_since(app, &ids, since, agent)?;
+    }
+    Ok(items)
+}
+
+/// An agent's copy of a task, and of its sub-tasks when asked, credited to
+/// the agent; sub-tasks in `hidden`, out of the agent's view, stay behind.
+pub(crate) fn copy_as(
+    app: &AppHandle,
+    agent: &str,
+    operation_id: &str,
+    id: &str,
+    with_subtasks: bool,
+    hidden: &HashSet<String>,
+) -> Result<Vec<WorkItem>, String> {
+    let items = super::copy_as(app, WorkActor::Agent, operation_id, id, with_subtasks, hidden)?;
     let ids: Vec<String> = items.iter().map(|item| item.id.clone()).collect();
     if let Some(since) = items.iter().map(|item| item.created_at_ms).min() {
         credit_since(app, &ids, since, agent)?;

@@ -337,6 +337,27 @@ pub struct WorkCommentAuthor {
     pub name: Option<String>,
 }
 
+/// What an emoji reaction is on.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkReactionSubject {
+    Comment,
+    Task,
+}
+
+sql_enum!(WorkReactionSubject {
+    Comment => "comment",
+    Task => "task",
+});
+
+/// One emoji on a comment or a task and who put it there, first first.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkReaction {
+    pub emoji: String,
+    pub by: Vec<WorkCommentAuthor>,
+}
+
 /// What a comment thread is on.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
 #[serde(rename_all = "snake_case")]
@@ -346,6 +367,9 @@ pub enum WorkCommentSubject {
     Milestone,
     Meeting,
     Note,
+    Initiative,
+    /// A project's update or an initiative's.
+    Update,
 }
 
 sql_enum!(WorkCommentSubject {
@@ -354,6 +378,8 @@ sql_enum!(WorkCommentSubject {
     Milestone => "milestone",
     Meeting => "meeting",
     Note => "note",
+    Initiative => "initiative",
+    Update => "update",
 });
 
 /// One comment. A thread's first comment carries its replies, oldest
@@ -376,6 +402,9 @@ pub struct WorkComment {
     pub resolved_at_ms: Option<i64>,
     pub deleted: bool,
     pub replies: Vec<WorkComment>,
+    /// Its emoji reactions, in the order each emoji was first used.
+    #[serde(default)]
+    pub reactions: Vec<WorkReaction>,
 }
 
 /// A page of threads, oldest first; `next_cursor` reads the next page.
@@ -768,6 +797,12 @@ pub struct WorkLabel {
     /// What it may go on: tasks, projects or both.
     #[serde(default)]
     pub scope: LabelScope,
+    /// Optional description guiding people and label suggestions.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// True when its group allows several labels on one item at once.
+    #[serde(default)]
+    pub group_multi: bool,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
@@ -997,6 +1032,7 @@ pub enum WorkCycleState {
 pub struct WorkCycle {
     pub number: i64,
     pub name: Option<String>,
+    pub description: Option<String>,
     pub start_day: String,
     pub end_day: String,
     pub starts_at_ms: i64,
@@ -1074,6 +1110,9 @@ pub struct WorkItemDetail {
     pub comments: Vec<WorkComment>,
     /// Files, images and links, oldest first.
     pub attachments: Vec<WorkAttachment>,
+    /// Emoji reactions on the task itself.
+    #[serde(default)]
+    pub reactions: Vec<WorkReaction>,
 }
 
 /// Sent after every committed change to tracker items, with the items it

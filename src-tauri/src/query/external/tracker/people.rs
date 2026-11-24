@@ -1956,17 +1956,16 @@ mod tests {
 
     #[test]
     fn person_page_lists_projects_they_lead_or_joined() {
-        let project =
-            |id: &str, lead: Option<&str>, members: &[&str], archived: bool, trashed: bool| {
-                serde_json::from_value::<crate::planning::Project>(serde_json::json!({
-                    "id": id, "title": id, "status": "active", "revision": 1,
-                    "createdAtMs": 0, "updatedAtMs": 0, "leadPersonId": lead, "leadIsSelf": false,
-                    "memberPersonIds": members, "membersIncludeSelf": false, "priority": 0,
-                    "labelIds": [], "links": [],
-                    "archivedAtMs": archived.then_some(1), "trashedAtMs": trashed.then_some(1),
-                }))
-                .unwrap()
-            };
+        let project = |id: &str, lead: Option<&str>, members: &[&str], archived: bool, trashed: bool| {
+            serde_json::from_value::<crate::planning::Project>(serde_json::json!({
+                "id": id, "title": id, "status": "active", "revision": 1,
+                "createdAtMs": 0, "updatedAtMs": 0, "leadPersonId": lead, "leadIsSelf": false,
+                "memberPersonIds": members, "membersIncludeSelf": false, "priority": 0,
+                "labelIds": [], "links": [], "updateHour": 9,
+                "archivedAtMs": archived.then_some(1), "trashedAtMs": trashed.then_some(1),
+            }))
+            .unwrap()
+        };
         let listed = person_projects(
             vec![
                 project("Pier", None, &["dana"], true, false),

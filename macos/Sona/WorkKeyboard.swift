@@ -1296,7 +1296,25 @@ extension AppModel {
                 id: "work-favorite", group: .work, title: starred ? "Remove from favorites" : "Add to favorites",
                 run: { [weak self] in _ = self?.toggleFavorite(ids) },
                 icon: starred ? "star.slash" : "star", shortcut: "option+f"),
+            PaletteAction(
+                id: "work-duplicate", group: .work, title: "Make a copy",
+                run: { [weak self] in self?.duplicateTask(id, withSubtasks: false) },
+                icon: "plus.square.on.square", shortcut: nil),
+            PaletteAction(
+                id: "work-duplicate-subtasks", group: .work, title: "Make a copy with sub-tasks",
+                run: { [weak self] in self?.duplicateTask(id, withSubtasks: true) },
+                icon: "square.stack.3d.up", shortcut: nil),
         ]
+    }
+
+    /// Copies a task beside it, with its sub-tasks when asked, and opens
+    /// the copy.
+    func duplicateTask(_ id: String, withSubtasks: Bool) {
+        Task {
+            guard let copy = await work.copyTask(id, withSubtasks: withSubtasks) else { return }
+            workFocus.announce("Copied as #\(copy.number)", undoes: false)
+            openTask(copy.id)
+        }
     }
 
     /// ⇧S: subscribes to every task here unless all of them already are.

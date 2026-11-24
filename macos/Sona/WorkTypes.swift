@@ -275,6 +275,19 @@ struct WorkComment: Codable, Identifiable, Equatable {
     var resolvedAtMs: Int64?
     var deleted: Bool
     var replies: [WorkComment]
+    var reactions: [WorkReaction] = []
+}
+
+/// What an emoji reaction is on.
+enum WorkReactionSubject: String, Codable { case comment, task }
+
+/// One emoji on a comment or a task and who put it there, first first.
+struct WorkReaction: Codable, Equatable, Identifiable {
+    var emoji: String
+    var by: [WorkCommentAuthor]
+
+    var id: String { emoji }
+    var mine: Bool { by.contains { $0.kind == .me } }
 }
 
 enum WorkAttachmentKind: String, Codable, Hashable { case file, image, link }
@@ -335,6 +348,7 @@ enum WorkCycleState: String, Codable, Hashable { case past, current, upcoming }
 struct WorkCycle: Codable, Identifiable, Equatable {
     var number: Int64
     var name: String?
+    var description: String?
     var startDay: String
     var endDay: String
     var startsAtMs: Int64
@@ -444,6 +458,10 @@ struct WorkLabel: Codable, Identifiable, Equatable {
     var group: String?
     var retiredAtMs: Int64?
     var scope: WorkLabelScope = .all
+    /// What the label is for; it guides label suggestions.
+    var description: String?
+    /// Whether a task may carry several labels of its group.
+    var groupMulti = false
 
     var retired: Bool { retiredAtMs != nil }
 }
@@ -459,6 +477,8 @@ extension WorkLabel {
         group = try container.decodeIfPresent(String.self, forKey: .group)
         retiredAtMs = try container.decodeIfPresent(Int64.self, forKey: .retiredAtMs)
         scope = try container.decodeIfPresent(WorkLabelScope.self, forKey: .scope) ?? .all
+        description = try container.decodeIfPresent(String.self, forKey: .description)
+        groupMulti = try container.decodeIfPresent(Bool.self, forKey: .groupMulti) ?? false
     }
 }
 
@@ -665,6 +685,7 @@ struct WorkItemDetail: Decodable, Equatable {
     var subTasks: [WorkItem]
     var comments: [WorkComment]
     var attachments: [WorkAttachment]
+    var reactions: [WorkReaction]
 }
 
 /// The `work-changed` event: the items one committed change touched, or

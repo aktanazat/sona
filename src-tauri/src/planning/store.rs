@@ -15,8 +15,8 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use uuid::Uuid;
 
-const PROJECT_COLUMNS: &str = "id, title, description, status, revision, created_at_ms, updated_at_ms, lead_person_id, target_at_ms, hue, archived_at_ms, priority, start_at_ms, start_resolution, target_resolution, icon, trashed_at_ms, lead_is_self, members_include_self, summary, status_name_id";
-const PROJECT_COLUMN_COUNT: usize = 21;
+const PROJECT_COLUMNS: &str = "id, title, description, status, revision, created_at_ms, updated_at_ms, lead_person_id, target_at_ms, hue, archived_at_ms, priority, start_at_ms, start_resolution, target_resolution, icon, trashed_at_ms, lead_is_self, members_include_self, summary, status_name_id, update_every_weeks, update_hour";
+const PROJECT_COLUMN_COUNT: usize = 23;
 const MILESTONE_COLUMNS: &str =
     "id, project_id, title, due_at_ms, status, revision, created_at_ms, updated_at_ms, description, position";
 /// Milestones in the order the owner set, then by due day.
@@ -46,6 +46,7 @@ pub(crate) enum Refusal {
     TooLarge,
     BadLink,
     LabelScope,
+    LabelGroup,
     DependencyLoop,
 }
 
@@ -71,6 +72,7 @@ impl fmt::Display for Refusal {
             Self::TooLarge => "attachment is over the size cap",
             Self::BadLink => "link scheme is not allowed",
             Self::LabelScope => "label is kept to the other kind of item",
+            Self::LabelGroup => "an item would hold two labels from a one-label group",
             Self::DependencyLoop => "a project cannot wait on itself or on a project waiting on it",
         })
     }
@@ -190,6 +192,8 @@ fn read_project(row: &Row<'_>) -> rusqlite::Result<Project> {
         trashed_at_ms: row.get(16)?,
         summary: row.get(19)?,
         status_name_id: row.get(20)?,
+        update_every_weeks: row.get(21)?,
+        update_hour: row.get(22)?,
     })
 }
 

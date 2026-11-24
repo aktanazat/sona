@@ -236,7 +236,18 @@ pub(crate) struct ProjectEdit {
     /// A custom status name, which sets the status to its category;
     /// `Some(None)` clears the name and keeps the status.
     pub status_name_id: Option<Option<String>>,
+    /// Weeks between update reminders (1–12); `Some(None)` turns reminders off.
+    pub update_every_weeks: Option<Option<u8>>,
+    /// Local hour of day (0–23) for update reminders.
+    pub update_hour: Option<u8>,
 }
+
+/// Project update reminder cadence (in weeks) and local hour of day.
+pub(crate) const PROJECT_UPDATE_REMINDER_MIGRATION: &str =
+    "ALTER TABLE planning_projects
+        ADD COLUMN update_every_weeks INTEGER CHECK(update_every_weeks IS NULL OR update_every_weeks BETWEEN 1 AND 12);
+     ALTER TABLE planning_projects
+        ADD COLUMN update_hour INTEGER NOT NULL DEFAULT 9 CHECK(update_hour BETWEEN 0 AND 23);";
 
 /// A date and how finely it is meant: a date with no resolution reads as a
 /// day, and clearing the date clears its resolution.
@@ -616,6 +627,19 @@ pub(crate) fn save_project(
         (Some(false), _) => None,
         (None, at) => at,
     };
+    let update_every_weeks = match edit.update_every_weeks {
+        Some(Some(weeks)) if (1..=12).contains(&weeks) => Some(weeks),
+        Some(Some(_)) => return Err(Refusal::Invalid.into()),
+        Some(None) => None,
+        None => current.as_ref().and_then(|c| c.update_every_weeks),
+    };
+    let update_hour = edit
+        .update_hour
+        .or_else(|| current.as_ref().map(|c| c.update_hour))
+        .unwrap_or(9);
+    if update_hour > 23 {
+        return Err(Refusal::Invalid.into());
+    }
     let id = match &current {
         Some(current) => {
             conn.execute(
@@ -625,6 +649,7 @@ pub(crate) fn save_project(
                         start_at_ms = ?10, start_resolution = ?11, target_resolution = ?12,
                         icon = ?13, trashed_at_ms = ?14, lead_is_self = ?16,
                         members_include_self = ?17, summary = ?18, status_name_id = ?19,
+                        update_every_weeks = ?20, update_hour = ?21,
                         revision = revision + 1, updated_at_ms = ?15
                   WHERE id = ?1",
                 params![
@@ -646,7 +671,9 @@ pub(crate) fn save_project(
                     lead_is_self,
                     members_include_self,
                     summary,
-                    status_name_id
+                    status_name_id,
+                    update_every_weeks,
+                    update_hour
                 ],
             )?;
             current.id.clone()
@@ -658,9 +685,10 @@ pub(crate) fn save_project(
                     (id, title, description, status, revision, created_at_ms, updated_at_ms,
                      lead_person_id, target_at_ms, hue, archived_at_ms, priority, start_at_ms,
                      start_resolution, target_resolution, icon, trashed_at_ms, lead_is_self,
-                     members_include_self, summary, status_name_id)
+                     members_include_self, summary, status_name_id, update_every_weeks,
+                     update_hour)
                  VALUES (?1, ?2, ?3, ?4, 1, ?5, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-                     ?16, ?17, ?18, ?19)",
+                     ?16, ?17, ?18, ?19, ?20, ?21)",
                 params![
                     id,
                     title,
@@ -680,7 +708,9 @@ pub(crate) fn save_project(
                     lead_is_self,
                     members_include_self,
                     summary,
-                    status_name_id
+                    status_name_id,
+                    update_every_weeks,
+                    update_hour
                 ],
             )?;
             id

@@ -159,6 +159,7 @@ pub(crate) struct Pool {
     names: HashMap<String, String>,
     projects: HashMap<String, String>,
     labels: HashMap<String, String>,
+    label_descriptions: Vec<(String, String, String, HashSet<String>)>,
     dismissed: HashSet<String>,
 }
 
@@ -195,9 +196,24 @@ impl Pool {
         let projects = statement
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
             .collect::<rusqlite::Result<_>>()?;
-        let labels = items::labels(history)?
+        let active_labels: Vec<_> = items::labels(history)?
             .into_iter()
             .filter(|label| label.retired_at_ms.is_none())
+            .collect();
+        let label_descriptions = active_labels
+            .iter()
+            .filter_map(|label| {
+                let desc = label.description.as_deref()?.trim();
+                if desc.is_empty() {
+                    return None;
+                }
+                let kw = words(desc);
+                (!kw.is_empty())
+                    .then(|| (label.id.clone(), label.name.clone(), desc.to_owned(), kw))
+            })
+            .collect();
+        let labels = active_labels
+            .into_iter()
             .map(|label| (label.id, label.name))
             .collect();
         let mut statement = history.prepare("SELECT id FROM planning_dismissed_hints")?;
@@ -212,6 +228,7 @@ impl Pool {
             names,
             projects,
             labels,
+            label_descriptions,
             dismissed,
         })
     }
@@ -414,6 +431,37 @@ impl Pool {
                     format!("{} were labeled {name}", window.share(count)),
                     self.drawn(window, mine),
                     window.sure(count),
+                ));
+            }
+        }
+        let mut item_words = title.clone();
+        if let Some(details) = &item.details {
+            item_words.extend(words(details));
+        }
+        for (label_id, label_name, desc, desc_words) in &self.label_descriptions {
+            if item.label_ids.iter().any(|own| own == label_id) {
+                continue;
+            }
+            let value = WorkSuggestionValue::Id(label_id.clone());
+            let taken = found.iter().any(|suggestion: &WorkFieldSuggestion| {
+                suggestion.field == WorkSuggestionField::Label && suggestion.value == value
+            });
+            if taken {
+                continue;
+            }
+            let shared: usize = item_words.intersection(desc_words).count();
+            let matches = shared >= ENOUGH
+                || (desc_words.len() <= ENOUGH
+                    && item_words
+                        .intersection(desc_words)
+                        .any(|w| w.chars().count() >= 4));
+            if matches {
+                found.push(hint(
+                    item,
+                    WorkSuggestionField::Label,
+                    value,
+                    format!("Matches {label_name}'s description: {desc}"),
+                    Vec::new(),
                 ));
             }
         }

@@ -479,19 +479,36 @@ const COMMENT_ON = {
     type: "string",
     description: "A note's id from sona_notes: the threads are on it, instead of a task.",
   },
+  initiative: {
+    type: "string",
+    description:
+      "An initiative's name or id from sona_initiative_list: the threads are on it, instead of a task.",
+  },
+  update: {
+    type: "string",
+    description:
+      "A project update's id from sona_project_update_list, or an initiative update's from sona_initiative_update_list: the threads are on it, instead of a task.",
+  },
 } as const;
 
 /** What the comments are on: the flags naming a project, a milestone, a
- * meeting or a note, or the task as the trailing argument. Exactly one. */
+ * meeting, a note, an initiative or an update, or the task as the trailing
+ * argument. Exactly one. */
 function commentOn(input: ToolInput) {
   const task = text(input, "task");
   const project = text(input, "project");
   const milestone = text(input, "milestone");
   const meeting = text(input, "meeting");
   const note = text(input, "note");
-  const named = [task, project, meeting, note].filter((value) => value !== null).length;
+  const initiative = text(input, "initiative");
+  const update = text(input, "update");
+  const named = [task, project, meeting, note, initiative, update].filter(
+    (value) => value !== null,
+  ).length;
   if (named !== 1) {
-    throw new SonaInputError("Name exactly one of task, project, meeting or note.");
+    throw new SonaInputError(
+      "Name exactly one of task, project, meeting, note, initiative or update.",
+    );
   }
   if (milestone !== null && project === null) {
     throw new SonaInputError("milestone needs its project.");
@@ -502,6 +519,8 @@ function commentOn(input: ToolInput) {
       ...assigned("--milestone", milestone),
       ...assigned("--meeting", meeting),
       ...assigned("--note", note),
+      ...assigned("--initiative", initiative),
+      ...assigned("--update", update),
     ],
     task: task === null ? [] : [task],
   };
@@ -539,8 +558,22 @@ const INITIATIVE_FIELDS = {
   },
   status: {
     type: "string",
-    enum: ["planned", "active", "completed"],
+    enum: ["backlog", "planned", "active", "paused", "completed", "canceled"],
     description: "Where the initiative stands. New ones start planned.",
+  },
+  parent: {
+    ...INITIATIVE,
+    description: `The initiative it sits under. ${INITIATIVE.description} none or null takes it to the top. An initiative cannot sit under itself or one of its own.`,
+  },
+  priority: {
+    type: "string",
+    enum: ["none", "urgent", "high", "medium", "low"],
+    description: "How urgent it is. null clears it.",
+  },
+  labels: {
+    type: "string",
+    description:
+      "Every label, by name or id from sona_work_labels, comma-separated; labels kept for tasks only are refused. Replaces the list; an empty string or null clears it.",
   },
   dry_run: DRY_RUN,
   operation_id: OPERATION_ID,
@@ -552,6 +585,9 @@ function initiativeFlags(input: ToolInput, agent: string | undefined): string[] 
     ...nullable("--owner", input, "owner", "none"),
     ...nullable("--target", input, "target", "none"),
     ...assigned("--status", text(input, "status")),
+    ...nullable("--parent", input, "parent", "none"),
+    ...nullable("--priority", input, "priority", "none"),
+    ...nullable("--labels", input, "labels", ""),
     ...(flag(input, "dry_run") ? ["--dry-run"] : []),
     ...writing(input, agent),
     "--json",
@@ -854,11 +890,15 @@ const VERSION = {
 } as const;
 
 const FAVORITE_TARGET = {
-  kind: { type: "string", enum: ["task", "project", "view", "person"], description: "What target names." },
+  kind: {
+    type: "string",
+    enum: ["task", "project", "view", "person", "cycle", "note"],
+    description: "What target names.",
+  },
   target: {
     type: "string",
     description:
-      "A task's handle (S-12), number or id; a project's name or id; a saved view's name or id; or a person's name, another name they go by, or id.",
+      "A task's handle (S-12), number or id; a project's name or id; a saved view's name or id; a person's name, another name they go by, or id; a cycle (current, next or number); or a note's id.",
   },
 } as const;
 
@@ -878,8 +918,10 @@ function favoriteNamed(input: ToolInput): string[] {
   const kind = text(input, "kind", true);
   const target = text(input, "target", true);
   if (kind === "task") return ["--", target];
-  if (kind === "project" || kind === "view" || kind === "person") return [`--${kind}=${target}`];
-  throw new SonaInputError("kind must be task, project, view or person.");
+  if (kind === "project" || kind === "view" || kind === "person" || kind === "cycle" || kind === "note") {
+    return [`--${kind}=${target}`];
+  }
+  throw new SonaInputError("kind must be task, project, view, person, cycle or note.");
 }
 
 /** `favorite` and `unfavorite`: one task, project, saved view or person. */
@@ -3376,10 +3418,74 @@ export const TOOLS: readonly ToolDefinition[] = [
     ],
   },
   {
+    name: "sona_work_copy",
+    title: "Copy a Sona task",
+    description: `Copy a task beside it, under the same parent, with its title, description, status, priority, project, milestone, owner, due date, labels, repeat, estimate and cycle while that cycle runs. with_subtasks:true copies its sub-tasks too, each under its parent's copy. The copy comes first in tasks. dry_run:true shows the copies without writing. ${WRITES}`,
+    mutates: "changes",
+    inputSchema: {
+      type: "object",
+      properties: {
+        task: TASK,
+        with_subtasks: { type: "boolean", description: "Copy its sub-tasks too." },
+        dry_run: DRY_RUN,
+        operation_id: OPERATION_ID,
+      },
+      required: ["task"],
+      additionalProperties: false,
+    },
+    argv: (input, agent) => [
+      "work",
+      "copy",
+      ...(flag(input, "with_subtasks") ? ["--with-subtasks"] : []),
+      ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+      ...writing(input, agent),
+      "--json",
+      "--",
+      text(input, "task", true),
+    ],
+  },
+  {
+    name: "sona_work_react",
+    title: "React in Sona",
+    description: `Put an emoji reaction on a comment (by the id sona_comment_list gives) or a task, or take yours off with remove:true; reacting twice with one emoji changes nothing. A thumbs up acknowledges a comment without a reply. Answers with every reaction on it and who put each there. Comments on meetings are not reachable. ${WRITES}`,
+    mutates: "changes",
+    inputSchema: {
+      type: "object",
+      properties: {
+        comment: { type: "string", description: "The comment's id. Give this or task." },
+        task: { ...TASK, description: `The task. Give this or comment. ${TASK.description}` },
+        emoji: { type: "string", description: "One emoji." },
+        remove: { type: "boolean", description: "Take your reaction off instead." },
+        dry_run: DRY_RUN,
+        operation_id: OPERATION_ID,
+      },
+      required: ["emoji"],
+      additionalProperties: false,
+    },
+    argv: (input, agent) => {
+      const comment = text(input, "comment");
+      const task = text(input, "task");
+      if ((comment === null) === (task === null)) {
+        throw new SonaInputError("Give exactly one of comment or task.");
+      }
+      return [
+        "work",
+        "react",
+        ...(flag(input, "remove") ? ["--remove"] : []),
+        ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+        ...writing(input, agent),
+        "--json",
+        "--",
+        comment ?? task ?? "",
+        text(input, "emoji", true),
+      ];
+    },
+  },
+  {
     name: "sona_comment_list",
     title: "Read comments in Sona",
     description:
-      "Read the comment threads on a task, a project, a milestone, a meeting or a note, oldest first: name exactly one of task, project (with milestone for one of its milestones), meeting or note. A personal document's threads show only when it is shared with you. Each comment carries its id, author (me, sona or an agent by name), Markdown body, when it was written, edited and resolved, and its replies. A task's comment also carries link, the sona:// address the app's Copy link gives, which opens the task scrolled to that comment. A deleted comment keeps its place with body null while it has replies. Pass next_cursor back as cursor for the next page.",
+      "Read the comment threads on a task, a project, a milestone, a meeting, a note, an initiative or an update, oldest first: name exactly one of task, project (with milestone for one of its milestones), meeting, note, initiative or update (a project's or an initiative's). A personal document's threads show only when it is shared with you. Each comment carries its id, author (me, sona or an agent by name), Markdown body, when it was written, edited and resolved, and its replies. A task's comment also carries link, the sona:// address the app's Copy link gives, which opens the task scrolled to that comment. A deleted comment keeps its place with body null while it has replies. Pass next_cursor back as cursor for the next page.",
     inputSchema: {
       type: "object",
       properties: {
@@ -3414,7 +3520,7 @@ export const TOOLS: readonly ToolDefinition[] = [
   {
     name: "sona_comment_save",
     title: "Comment in Sona",
-    description: `Without id, add a comment to a task, a project (with milestone, one of its milestones), a meeting or a note: name exactly one of task, project, meeting or note. With reply_to, answer in that comment's thread (a reply to a reply joins the thread's first comment). With id, change the body of a comment you wrote; leave out what it is on and reply_to. The comment is shown as yours. Use it to say what you are doing on a task you claimed, what you found and what is left. The answer's comment carries link on a task, the sona:// address to hand the user. A meeting the user keeps on this Mac answers not_found. dry_run:true shows it without writing. ${COMMENT_WRITES} Agents may comment whether their changes apply or wait for the user.`,
+    description: `Without id, add a comment to a task, a project (with milestone, one of its milestones), a meeting, a note, an initiative or an update: name exactly one of task, project, meeting, note, initiative or update. With reply_to, answer in that comment's thread (a reply to a reply joins the thread's first comment). With id, change the body of a comment you wrote; leave out what it is on and reply_to. The comment is shown as yours. Use it to say what you are doing on a task you claimed, what you found and what is left. The answer's comment carries link on a task, the sona:// address to hand the user. A meeting the user keeps on this Mac answers not_found. dry_run:true shows it without writing. ${COMMENT_WRITES} Agents may comment whether their changes apply or wait for the user.`,
     mutates: "changes",
     inputSchema: {
       type: "object",
@@ -3439,7 +3545,7 @@ export const TOOLS: readonly ToolDefinition[] = [
       const dryRun = flag(input, "dry_run") ? ["--dry-run"] : [];
       if (id !== null) {
         if (
-          ["task", "project", "milestone", "meeting", "note", "reply_to"].some(
+          ["task", "project", "milestone", "meeting", "note", "initiative", "update", "reply_to"].some(
             (key) => text(input, key) !== null,
           )
         ) {
@@ -3750,7 +3856,7 @@ export const TOOLS: readonly ToolDefinition[] = [
     name: "sona_cycle_list",
     title: "Read Sona cycles",
     description:
-      "Read the tracker's cycles: how many weeks each runs, the weekday it starts, the cooldown weeks between cycles, how many are planned ahead, whether started (auto_add_started) and done (auto_add_completed) work with no cycle joins one by itself, and capacity, the tasks a cycle usually finishes (the mean done of the last three ended cycles, null until that mean reaches one task; compare it with an upcoming cycle's scope), then every cycle with its number, name, state (past, current or upcoming), first and last day, scope (tasks planned in it and not dropped), started, done and, once ended, success (done counts 100, started 25, over scope). With cycle, read that one cycle's scope, started and done as each of its days ended, target (where an even pace would have done by each day of the cycle, flat on weekends), and how many tasks were carried over unfinished from earlier cycles. With ics:true, calendar holds every cycle as an iCalendar file's text for a calendar app. Unfinished work moves to the new cycle by itself when one starts.",
+      "Read the tracker's cycles: how many weeks each runs, the weekday it starts, the cooldown weeks between cycles, how many are planned ahead, whether started (auto_add_started) and done (auto_add_completed) work with no cycle joins one by itself, and capacity, the tasks a cycle usually finishes (the mean done of the last three ended cycles, null until that mean reaches one task; compare it with an upcoming cycle's scope), then every cycle with its number, name, description, state (past, current or upcoming), first and last day, scope (tasks planned in it and not dropped), started, done and, once ended, success (done counts 100, started 25, over scope). With cycle, read that one cycle's scope, started and done as each of its days ended, target (where an even pace would have done by each day of the cycle, flat on weekends), and how many tasks were carried over unfinished from earlier cycles. With ics:true, calendar holds every cycle as an iCalendar file's text for a calendar app. Unfinished work moves to the new cycle by itself when one starts.",
     optIn: true,
     inputSchema: {
       type: "object",
@@ -3790,6 +3896,10 @@ export const TOOLS: readonly ToolDefinition[] = [
         name: {
           type: "string",
           description: "The cycle's name. null clears it.",
+        },
+        details: {
+          type: "string",
+          description: "The cycle's goal or description. null clears it.",
         },
         start: {
           type: "string",
@@ -3854,6 +3964,7 @@ export const TOOLS: readonly ToolDefinition[] = [
       ];
       const edit = [
         ...nullable("--name", input, "name", "none"),
+        ...nullable("--details", input, "details", "none"),
         ...assigned("--start", text(input, "start")),
         ...assigned("--end", text(input, "end")),
       ];
@@ -3890,7 +4001,8 @@ export const TOOLS: readonly ToolDefinition[] = [
   {
     name: "sona_work_labels",
     title: "List Sona labels",
-    description: "List the tracker's labels with their ids, colors (hue in degrees), scope (all, tasks or projects) and revisions.",
+    description:
+      "List the tracker's labels with their ids, colors (hue in degrees), descriptions, groups (group_multi true when a task may carry several of the group), scope (all, tasks or projects) and revisions.",
     optIn: true,
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     argv: () => ["work", "labels", "--json"],
@@ -3898,7 +4010,7 @@ export const TOOLS: readonly ToolDefinition[] = [
   {
     name: "sona_work_label_save",
     title: "Save a Sona label",
-    description: `Create a label, or rename or recolor one. Saving a name that exists changes that label; label renames another label to name. ${WRITES}`,
+    description: `Create a label, or rename, recolor or describe one. Saving a name that exists changes that label; label renames another label to name. A description tells people and Sona's label suggestions what the label is for. ${WRITES}`,
     mutates: "changes",
     optIn: true,
     inputSchema: {
@@ -3915,6 +4027,10 @@ export const TOOLS: readonly ToolDefinition[] = [
           maximum: 360,
           description: "Its color as degrees on the color wheel. Chosen from the name when left out.",
         },
+        description: {
+          type: "string",
+          description: "What the label is for; it guides label suggestions. Empty or null clears it.",
+        },
         dry_run: DRY_RUN,
         operation_id: OPERATION_ID,
       },
@@ -3926,6 +4042,7 @@ export const TOOLS: readonly ToolDefinition[] = [
       "label-save",
       ...assigned("--label", text(input, "label")),
       ...assigned("--hue", count(input, "hue")),
+      ...nullable("--description", input, "description", "none"),
       ...(flag(input, "dry_run") ? ["--dry-run"] : []),
       ...writing(input, agent),
       "--json",
@@ -3962,7 +4079,7 @@ export const TOOLS: readonly ToolDefinition[] = [
   {
     name: "sona_work_label_group",
     title: "Group a Sona label",
-    description: `Put a label in a label group, or take it out of its group with group none. A task keeps one label per group: adding another label from the group replaces the one it had. ${WRITES}`,
+    description: `Put a label in a label group, or take it out of its group with group none. A task keeps one label per group unless the group allows several (multi: true): adding another label from a single-select group replaces the one it had. multi applies to the whole group. Moving a label into a group that allows one is refused while a task, project or initiative would hold two of its labels; the refusal names them. multi: false then keeps the first label by name on each, and so does switching a group back to one label; the answer lists the tasks, projects and initiatives that lost one. ${WRITES}`,
     mutates: "changes",
     optIn: true,
     inputSchema: {
@@ -3972,6 +4089,10 @@ export const TOOLS: readonly ToolDefinition[] = [
         group: {
           type: "string",
           description: "The group's name, or none to take the label out of its group.",
+        },
+        multi: {
+          type: "boolean",
+          description: "true lets a task carry several labels of this group; false allows only one. Left out keeps the group's setting.",
         },
         dry_run: DRY_RUN,
         operation_id: OPERATION_ID,
@@ -3983,11 +4104,41 @@ export const TOOLS: readonly ToolDefinition[] = [
       "work",
       "label-group",
       ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+      ...(input.multi === true ? ["--multi"] : []),
+      ...(input.multi === false ? ["--single"] : []),
       ...writing(input, agent),
       "--json",
       "--",
       text(input, "label", true),
       text(input, "group") ?? "none",
+    ],
+  },
+  {
+    name: "sona_work_label_merge",
+    title: "Merge Sona labels",
+    description: `Merge one label into another: every task, project and initiative with the merged label gets the kept label instead, saved views, automations and templates that named it name the kept label, and the merged label is retired: it carries nothing and stays in the label list for history, where it can be restored. Refused when the kept label cannot go on those items, or when one would hold two labels from a group that allows one. ${WRITES}`,
+    mutates: "destroys",
+    optIn: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        label: { type: "string", description: "The label to merge away, by name or id." },
+        into: { type: "string", description: "The label that stays, by name or id." },
+        dry_run: DRY_RUN,
+        operation_id: OPERATION_ID,
+      },
+      required: ["label", "into"],
+      additionalProperties: false,
+    },
+    argv: (input, agent) => [
+      "work",
+      "label-merge",
+      ...assigned("--into", text(input, "into", true)),
+      ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+      ...writing(input, agent),
+      "--json",
+      "--",
+      text(input, "label", true),
     ],
   },
   {
@@ -4833,6 +4984,17 @@ export const TOOLS: readonly ToolDefinition[] = [
           description:
             "A status name from sona_project_status_list; the project takes its category as status. null clears the name and keeps the category. Setting only status to another category clears the name.",
         },
+        update_every: {
+          type: "string",
+          description:
+            "Remind to post a project update every N weeks (e.g. 1w, 2w, up to 12w). none or null turns reminders off.",
+        },
+        update_hour: {
+          type: "integer",
+          minimum: 0,
+          maximum: 23,
+          description: "Local hour of day (0–23) when update reminders land. Defaults to 9.",
+        },
         priority: {
           type: "string",
           enum: ["none", "urgent", "high", "medium", "low"],
@@ -4900,6 +5062,8 @@ export const TOOLS: readonly ToolDefinition[] = [
       ...(input.summary === "" ? ["--summary=none"] : nullable("--summary", input, "summary", "none")),
       ...assigned("--status", text(input, "status")),
       ...nullable("--status-name", input, "status_name", "none"),
+      ...nullable("--update-every", input, "update_every", "none"),
+      ...assigned("--update-hour", count(input, "update_hour")),
       ...nullable("--priority", input, "priority", "none"),
       ...nullable("--lead", input, "lead", "none"),
       ...nullable("--members", input, "members", ""),
@@ -5476,7 +5640,7 @@ export const TOOLS: readonly ToolDefinition[] = [
     name: "sona_initiative_list",
     title: "List Sona initiatives",
     description:
-      "List the initiatives, goals one level above projects, by name: each one's id, name, details, status (planned, active or completed), owner (me or a person), target day, projects (id and name) and progress (projects, completed_projects, open_tasks, done_tasks, percent of tasks done). Archived projects and projects in the bin are left out of projects and progress.",
+      "List the initiatives, goals one level above projects, by name: each one's id, name, details, status (backlog, planned, active, paused, completed or canceled), priority, labels (names), owner (me or a person), target day, parent (the initiative it sits under), children (the initiatives under it), projects (id and name), progress (projects, completed_projects, open_tasks, done_tasks, percent of tasks done) and latest_update (health, body, progress, author). Archived projects and projects in the bin are left out of projects and progress.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     argv: () => ["work", "initiative-list", "--json"],
   },
@@ -5518,7 +5682,7 @@ export const TOOLS: readonly ToolDefinition[] = [
   {
     name: "sona_initiative_update",
     title: "Change a Sona initiative",
-    description: `Change an initiative's name, details, owner, target day or status. Fields left out stay as they are; null clears one. A call that changes nothing answers with action unchanged and operation_id null. ${PLANNING_WRITES}`,
+    description: `Change an initiative's name, details, owner, target day, status, parent, priority or labels. Fields left out stay as they are; null clears one. A call that changes nothing answers with action unchanged and operation_id null. ${PLANNING_WRITES}`,
     mutates: "changes",
     inputSchema: {
       type: "object",
@@ -5617,6 +5781,119 @@ export const TOOLS: readonly ToolDefinition[] = [
       "--",
       text(input, "initiative", true),
       text(input, "project", true),
+    ],
+  },
+  {
+    name: "sona_initiative_update_list",
+    title: "Read a Sona initiative's updates",
+    description:
+      "Read an initiative's posted updates, newest first: each one's id, health (on_track, at_risk or off_track), Markdown body, percent of its projects' tasks done when it was posted, author (me or an agent by name), and when it was posted and edited. Pass next_cursor back as cursor for the next page.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        initiative: INITIATIVE,
+        limit: {
+          type: "integer",
+          minimum: 1,
+          maximum: 100,
+          description: "How many updates to return. Sona defaults to 20 and caps at 100.",
+        },
+        cursor: { type: "string", description: "next_cursor from the page before." },
+      },
+      required: ["initiative"],
+      additionalProperties: false,
+    },
+    argv: (input) => [
+      "work",
+      "initiative-update-list",
+      ...assigned("--limit", count(input, "limit")),
+      ...assigned("--cursor", text(input, "cursor")),
+      "--json",
+      "--",
+      text(input, "initiative", true),
+    ],
+  },
+  {
+    name: "sona_initiative_update_save",
+    title: "Post a Sona initiative update",
+    description: `Without id, post an update on initiative: its health and a Markdown body on how it is going. With id, change the health or body of an update you posted; initiative is then left out. ${PLANNING_WRITES}`,
+    mutates: "changes",
+    inputSchema: {
+      type: "object",
+      properties: {
+        initiative: INITIATIVE,
+        id: {
+          type: "string",
+          description: "The update to change, by its id from sona_initiative_update_list.",
+        },
+        health: { ...HEALTH, description: "How the initiative is going." },
+        body: { type: "string", description: "The update, in Markdown." },
+        dry_run: DRY_RUN,
+        operation_id: OPERATION_ID,
+      },
+      additionalProperties: false,
+    },
+    argv: (input, agent) => {
+      const id = text(input, "id");
+      const tail = [
+        ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+        ...writing(input, agent),
+        "--json",
+        "--",
+      ];
+      if (id !== null) {
+        if (text(input, "initiative") !== null) {
+          throw new SonaInputError("With id, leave initiative out.");
+        }
+        return [
+          "work",
+          "initiative-update-edit",
+          ...assigned("--health", text(input, "health")),
+          ...assigned("--body", text(input, "body")),
+          ...tail,
+          id,
+        ];
+      }
+      const initiative = text(input, "initiative", true);
+      const health = text(input, "health", true);
+      const body = text(input, "body", true);
+      return [
+        "work",
+        "initiative-update-post",
+        `--health=${health}`,
+        `--body=${body}`,
+        ...tail,
+        initiative,
+      ];
+    },
+  },
+  {
+    name: "sona_initiative_update_delete",
+    title: "Delete a Sona initiative update",
+    description: `Delete an initiative update you posted. No tool brings it back. dry_run:true shows the update without deleting it. ${PLANNING_WRITES}`,
+    mutates: "destroys",
+    optIn: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: {
+          type: "string",
+          description: "The update, by its id from sona_initiative_update_list.",
+        },
+        dry_run: DRY_RUN,
+        operation_id: OPERATION_ID,
+      },
+      required: ["id"],
+      additionalProperties: false,
+    },
+    argv: (input, agent) => [
+      "work",
+      "initiative-update-delete",
+      ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+      ...writing(input, agent),
+      "--json",
+      "--",
+      text(input, "id", true),
     ],
   },
   {

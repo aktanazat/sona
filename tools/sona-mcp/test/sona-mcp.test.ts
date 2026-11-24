@@ -973,6 +973,7 @@ const SONA_WRITES = {
   "label-save": true,
   "label-delete": true,
   "label-group": true,
+  "label-merge": true,
   "label-scope": true,
   "label-retire": true,
   "template-save": true,
@@ -1019,6 +1020,9 @@ const SONA_WRITES = {
   "initiative-delete": true,
   "initiative-add-project": true,
   "initiative-remove-project": true,
+  "initiative-update-post": true,
+  "initiative-update-edit": true,
+  "initiative-update-delete": true,
   "project-template-save": true,
   "project-template-delete": true,
   "project-new": true,
@@ -1031,6 +1035,8 @@ const SONA_WRITES = {
   "comment-delete": true,
   "comment-resolve": true,
   subtask: true,
+  copy: true,
+  react: true,
   attach: true,
   delegate: true,
   focus: true,
@@ -1148,6 +1154,7 @@ const SONA_DESTROYS = {
   "my-notes": true,
   "snapshot-delete": true,
   "label-delete": true,
+  "label-merge": true,
   "view-delete": true,
   "project-view-delete": true,
   "favorite-folder-delete": true,
@@ -1157,6 +1164,7 @@ const SONA_DESTROYS = {
   "project-template-delete": true,
   "project-delete": true,
   "initiative-delete": true,
+  "initiative-update-delete": true,
   "project-update-delete": true,
   "person-merge": true,
   "comment-delete": true,
@@ -1197,8 +1205,8 @@ const SONA_DESTROYS = {
 function smallest(tool: ToolDefinition): ToolInput {
   const input: ToolInput = {};
   const names = [...(tool.inputSchema.required ?? [])];
-  for (const optional of ["task", "path", "project", "health", "body", "cycle", "app"]) {
-    if (optional === "project" && names.includes("task")) continue;
+  for (const optional of ["task", "path", "project", "initiative", "health", "body", "cycle", "app"]) {
+    if ((optional === "project" || optional === "initiative") && names.includes("task")) continue;
     if (optional in tool.inputSchema.properties && !names.includes(optional)) names.push(optional);
   }
   for (const name of names) {

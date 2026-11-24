@@ -261,7 +261,8 @@ enum WorkChoices {
         let on = Set(labels.map(\.id).filter(checked))
         let shown = labels.filter { (!$0.retired && $0.scope != .projects) || on.contains($0.id) }
         let choice = { (label: WorkLabel) in
-            WorkChoice(id: label.id, title: label.name, mark: .label(label.hue), detail: text.isEmpty ? nil : label.group,
+            WorkChoice(id: label.id, title: label.name, mark: .label(label.hue),
+                       detail: label.description ?? (text.isEmpty ? nil : label.group),
                        checked: on.contains(label.id)) {
                 toggle(label.id)
             }
@@ -290,8 +291,10 @@ enum WorkChoices {
 
     static func adding(_ label: String, to ids: [String], among labels: [WorkLabel]) -> [String] {
         guard !ids.contains(label) else { return ids }
-        let group = labels.first { $0.id == label }?.group
-        let siblings = Set(labels.filter { group != nil && $0.group == group }.map(\.id))
+        guard let added = labels.first(where: { $0.id == label }), let group = added.group, !added.groupMulti else {
+            return ids + [label]
+        }
+        let siblings = Set(labels.filter { $0.group == group }.map(\.id))
         return ids.filter { !siblings.contains($0) } + [label]
     }
 

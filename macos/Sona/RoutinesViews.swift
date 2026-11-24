@@ -177,6 +177,7 @@ struct SaveTemplateSheet: View {
 
 struct TasksSettingsView: View {
     @Environment(AppModel.self) private var model
+    @State private var narrowing: String?
 
     var body: some View {
         Page {
@@ -224,15 +225,41 @@ struct TasksSettingsView: View {
                 let members = all.filter { $0.group == group }
                     .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
                 if !members.isEmpty {
-                    Text(group ?? "No group").metaText(Theme.inkSecondary)
-                        .padding(.top, Space.xs)
+                    HStack {
+                        Text(group ?? "No group").metaText(Theme.inkSecondary)
+                        if let group {
+                            Spacer()
+                            Toggle("Several per task", isOn: Binding(
+                                get: { members.first?.groupMulti ?? false },
+                                set: { several in
+                                    if several {
+                                        model.work.setGroupMulti(group, true)
+                                    } else {
+                                        narrowing = group
+                                    }
+                                }))
+                                .toggleStyle(.switch)
+                                .controlSize(.mini)
+                        }
+                    }
+                    .padding(.top, Space.xs)
                     Card {
                         ForEach(members) { label in
-                            LabelSettingsRow(label: label, groups: groups)
+                            LabelSettingsRow(label: label, groups: groups, others: all.filter { $0.id != label.id })
                         }
                     }
                 }
             }
+        }
+        .confirmationDialog(
+            "Allow one “\(narrowing ?? "")” label per task?",
+            isPresented: Binding(get: { narrowing != nil }, set: { if !$0 { narrowing = nil } }),
+            presenting: narrowing
+        ) { group in
+            Button("Allow one") { model.work.setGroupMulti(group, false) }
+            Button("Cancel", role: .cancel) {}
+        } message: { _ in
+            Text("A task with several keeps the first by name.")
         }
     }
 
@@ -419,20 +446,30 @@ private struct HousekeepingSettings: View {
 private struct LabelSettingsRow: View {
     let label: WorkLabel
     let groups: [String]
+    let others: [WorkLabel]
     @Environment(AppModel.self) private var model
     @State private var naming = false
     @State private var newGroup = ""
+    @State private var describing = false
+    @State private var description = ""
+    @State private var merging: WorkLabel?
+    @State private var crowding: Crowding?
 
     var body: some View {
         let work = model.work
         let count = (work.items ?? []).filter { $0.archivedAtMs == nil && $0.labelIds.contains(label.id) }.count
         CardRow {
-            HStack(spacing: Space.s) {
-                LabelPill(label: label)
-                    .opacity(label.retired ? 0.55 : 1)
-                Text(count == 1 ? "1 task" : "\(count) tasks").metaText()
-                if label.retired {
-                    Text("Retired").metaText(Theme.inkSecondary)
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: Space.s) {
+                    LabelPill(label: label)
+                        .opacity(label.retired ? 0.55 : 1)
+                    Text(count == 1 ? "1 task" : "\(count) tasks").metaText()
+                    if label.retired {
+                        Text("Retired").metaText(Theme.inkSecondary)
+                    }
+                }
+                if let text = label.description {
+                    Text(text).metaText(Theme.inkSecondary).lineLimit(2)
                 }
             }
         } trailing: {
@@ -440,7 +477,7 @@ private struct LabelSettingsRow: View {
                 Menu(label.group ?? "Group") {
                     ForEach(groups, id: \.self) { group in
                         Button {
-                            work.groupLabel(label.id, into: group)
+                            move(into: group)
                         } label: {
                             if label.group == group { Label(group, systemImage: "checkmark") } else { Text(group) }
                         }
@@ -472,6 +509,24 @@ private struct LabelSettingsRow: View {
                 }
                 .buttonStyle(.compact)
                 .help(label.retired ? "Show it in label lists again" : "Hide it from label lists. Tasks keep it.")
+                Menu {
+                    Button(label.description == nil ? "Add description…" : "Edit description…") {
+                        description = label.description ?? ""
+                        describing = true
+                    }
+                    Menu("Merge into") {
+                        ForEach(others.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }) { other in
+                            Button(other.name) { merging = other }
+                        }
+                    }
+                    .disabled(others.isEmpty)
+                } label: {
+                    Image(systemName: "ellipsis")
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .accessibilityLabel("More for \(label.name)")
             }
         }
         .alert("New group", isPresented: $naming) {
@@ -480,6 +535,60 @@ private struct LabelSettingsRow: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("Moves “\(label.name)” into a new group.")
+        }
+        .alert("Describe “\(label.name)”", isPresented: $describing) {
+            TextField("What it is for", text: $description)
+            Button("Save") { work.describeLabel(label.id, description) }
+            Button("Cancel", role: .cancel) {}
+        }
+        .confirmationDialog(
+            "Merge “\(label.name)” into “\(merging?.name ?? "")”?",
+            isPresented: Binding(get: { merging != nil }, set: { if !$0 { merging = nil } }),
+            presenting: merging
+        ) { into in
+            Button("Merge") { work.mergeLabel(label.id, into: into.id) }
+            Button("Cancel", role: .cancel) {}
+        } message: { into in
+            Text("Its tasks, projects and initiatives get “\(into.name)” instead. “\(label.name)” stays in this list, retired and on nothing.")
+        }
+        .confirmationDialog(
+            "Move “\(label.name)” into “\(crowding?.group ?? "")”?",
+            isPresented: Binding(get: { crowding != nil }, set: { if !$0 { crowding = nil } }),
+            presenting: crowding
+        ) { crowding in
+            Button("Move") { work.groupLabel(label.id, into: crowding.group, settle: true) }
+            Button("Cancel", role: .cancel) {}
+        } message: { crowding in
+            Text("\(crowding.items) already \(crowding.count == 1 ? "has" : "have") another “\(crowding.group)” label. Each keeps the first by name.")
+        }
+    }
+
+    /// What a move into a one-label group would take a label off.
+    struct Crowding {
+        let group: String
+        let crowded: LabelCrowding
+
+        var count: Int { crowded.tasks.count + crowded.projects.count + crowded.initiatives.count }
+
+        /// "2 tasks and 1 project".
+        var items: String {
+            let parts = [
+                (crowded.tasks.count, "task", "tasks"),
+                (crowded.projects.count, "project", "projects"),
+                (crowded.initiatives.count, "initiative", "initiatives")
+            ]
+                .filter { $0.0 > 0 }
+                .map { "\($0.0) \($0.0 == 1 ? $0.1 : $0.2)" }
+            return parts.count > 1 ? parts.dropLast().joined(separator: ", ") + " and " + parts[parts.count - 1] : parts.joined()
+        }
+    }
+
+    /// Moves the label into `group`, first asking when the core finds
+    /// something that would hold this label and another of a one-label
+    /// group's.
+    private func move(into group: String) {
+        model.work.groupLabel(label.id, into: group) { crowded in
+            crowding = Crowding(group: group, crowded: crowded)
         }
     }
 }

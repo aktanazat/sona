@@ -147,6 +147,8 @@ struct PlanningProject: Decodable, Identifiable, Equatable {
     var trashedAtMs: Int64? = nil
     var summary: String? = nil
     var statusNameId: String? = nil
+    var updateEveryWeeks: Int? = nil
+    var updateHour: Int? = nil
 }
 
 /// The owner's own name for a status, kept inside one of the six categories.
@@ -721,12 +723,15 @@ struct PlanningProjectSave: Encodable, Equatable {
     var labelIds: [String]?
     var links: [PlanningProjectLinkInput]?
     var trashed: Bool?
+    var updateEveryWeeks: PlanningFieldChange<Int>?
+    var updateHour: Int?
 
     private enum Key: String, CodingKey {
         case title, summary, description, status, statusNameId, priority, leadPersonId, leadIsSelf
         case memberPersonIds, membersIncludeSelf
         case startAtMs, startResolution
         case targetAtMs, targetResolution, hue, icon, labelIds, links, trashed
+        case updateEveryWeeks, updateHour
     }
 
     func encode(to encoder: Encoder) throws {
@@ -750,6 +755,8 @@ struct PlanningProjectSave: Encodable, Equatable {
         try container.encodeIfPresent(labelIds, forKey: .labelIds)
         try container.encodeIfPresent(links, forKey: .links)
         try container.encodeIfPresent(trashed, forKey: .trashed)
+        try Self.put(updateEveryWeeks, .updateEveryWeeks, &container)
+        try container.encodeIfPresent(updateHour, forKey: .updateHour)
     }
 
     private static func put<Value>(_ change: PlanningFieldChange<Value>?, _ key: Key,
@@ -913,6 +920,10 @@ final class ProjectsStore {
     private(set) var initiatives: [PlanningInitiative] = []
     /// The initiative whose page shows on Initiatives; `nil` shows the list.
     var selectedInitiativeId: String?
+    /// Updates on each initiative whose updates were read, newest first.
+    private(set) var initiativeUpdates: [String: [PlanningInitiativeUpdate]] = [:]
+    private(set) var initiativeUpdatesCursor: [String: String] = [:]
+    private(set) var initiativeUpdatesError: String?
     /// Project templates, by name.
     private(set) var projectTemplates: [PlanningProjectTemplate] = []
     /// The property changes of each project whose updates were read, newest first.
@@ -999,7 +1010,11 @@ final class ProjectsStore {
             await loadDetail(id)
             if updates[id] != nil { await loadUpdates(id) }
             if history[id] != nil { await loadHistory(id) }
-            await comments.reload([.project, .milestone])
+            await comments.reload([.project, .milestone, .update])
+        }
+        if let id = selectedInitiativeId {
+            if initiativeUpdates[id] != nil { await loadInitiativeUpdates(id) }
+            await comments.reload([.initiative, .update])
         }
         if trashed != nil { await loadTrashed() }
         if let range = calendarRange { await loadCalendar(range) }
@@ -1322,6 +1337,55 @@ final class ProjectsStore {
         } catch {
             mutationError = error.localizedDescription
         }
+        await loadInitiatives()
+    }
+
+    func loadInitiativeUpdates(_ initiativeId: String, more: Bool = false) async {
+        let cursor = more ? initiativeUpdatesCursor[initiativeId] : nil
+        if more, cursor == nil { return }
+        do {
+            let page: PlanningInitiativeUpdatePage = try await core.request(
+                "planning_initiative_updates",
+                PlanningInitiativeUpdatesParams(initiativeId: initiativeId, limit: 20, cursor: cursor))
+            initiativeUpdates[initiativeId] = (more ? initiativeUpdates[initiativeId] ?? [] : []) + page.updates.filter { !$0.deleted }
+            initiativeUpdatesCursor[initiativeId] = page.nextCursor
+            initiativeUpdatesError = nil
+        } catch {
+            initiativeUpdatesError = error.localizedDescription
+        }
+    }
+
+    func postInitiativeUpdate(initiativeId: String, health: PlanningProjectHealth, body: String) async throws {
+        try await write {
+            let _: PlanningInitiativeUpdate = try await self.core.request(
+                "planning_initiative_update_add",
+                PlanningInitiativeUpdateAddParams(operationId: UUID().uuidString, initiativeId: initiativeId, health: health, body: body))
+        }
+        await loadInitiativeUpdates(initiativeId)
+        await loadInitiatives()
+    }
+
+    func editInitiativeUpdate(_ update: PlanningInitiativeUpdate, health: PlanningProjectHealth, body: String) async throws {
+        try await write {
+            let _: PlanningInitiativeUpdate = try await self.core.request(
+                "planning_initiative_update_edit",
+                PlanningUpdateEditParams(operationId: UUID().uuidString, id: update.id, health: health, body: body))
+        }
+        await loadInitiativeUpdates(update.initiativeId)
+        await loadInitiatives()
+    }
+
+    func deleteInitiativeUpdate(_ update: PlanningInitiativeUpdate) async {
+        do {
+            try await write {
+                let _: PlanningInitiativeUpdate = try await self.core.request(
+                    "planning_initiative_update_delete",
+                    PlanningOperationParams(operationId: UUID().uuidString, id: update.id))
+            }
+        } catch {
+            mutationError = error.localizedDescription
+        }
+        await loadInitiativeUpdates(update.initiativeId)
         await loadInitiatives()
     }
 
@@ -1978,16 +2042,36 @@ extension PlanningUpdateBefore {
 }
 
 enum PlanningInitiativeStatus: String, Codable, CaseIterable, Identifiable {
-    case planned, active, completed
+    case backlog, planned, active, paused, completed, canceled
 
     var id: String { rawValue }
     var title: String {
         switch self {
+        case .backlog: "Backlog"
         case .planned: "Planned"
         case .active: "Active"
+        case .paused: "Paused"
         case .completed: "Completed"
+        case .canceled: "Canceled"
         }
     }
+}
+
+struct PlanningInitiativeUpdate: Decodable, Identifiable, Equatable {
+    let id: String
+    let initiativeId: String
+    let health: PlanningProjectHealth
+    let body: String?
+    let progress: Int
+    let author: PlanningProjectUpdateAuthor
+    let createdAtMs: Int64
+    let editedAtMs: Int64?
+    let deleted: Bool
+}
+
+struct PlanningInitiativeUpdatePage: Decodable {
+    let updates: [PlanningInitiativeUpdate]
+    let nextCursor: String?
 }
 
 /// A goal one level above projects, holding projects; a project sits in one
@@ -2000,8 +2084,13 @@ struct PlanningInitiative: Decodable, Identifiable, Equatable {
     let ownerIsSelf: Bool
     let targetAtMs: Int64?
     let status: PlanningInitiativeStatus
+    var parentId: String? = nil
+    var priority: Int = 0
+    var labelIds: [String] = []
     let projectIds: [String]
+    var childIds: [String] = []
     let progress: Progress
+    var latestUpdate: PlanningInitiativeUpdate? = nil
 
     struct Progress: Decodable, Equatable {
         let projects: Int
@@ -2029,8 +2118,13 @@ struct PlanningInitiativeSave: Encodable, Equatable {
     var owner: PlanningOwner?
     var targetAtMs: PlanningFieldChange<Int64>?
     var status: PlanningInitiativeStatus?
+    var parentId: PlanningFieldChange<String>?
+    var priority: Int?
+    var labelIds: [String]?
 
-    private enum Key: String, CodingKey { case name, description, owner, targetAtMs, status }
+    private enum Key: String, CodingKey {
+        case name, description, owner, targetAtMs, status, parentId, priority, labelIds
+    }
     private enum OwnerKey: String, CodingKey { case kind, personId }
 
     func encode(to encoder: Encoder) throws {
@@ -2057,6 +2151,13 @@ struct PlanningInitiativeSave: Encodable, Equatable {
         case .clear?: try container.encodeNil(forKey: .targetAtMs)
         }
         try container.encodeIfPresent(status, forKey: .status)
+        switch parentId {
+        case nil: break
+        case let .set(value)?: try container.encode(value, forKey: .parentId)
+        case .clear?: try container.encodeNil(forKey: .parentId)
+        }
+        try container.encodeIfPresent(priority, forKey: .priority)
+        try container.encodeIfPresent(labelIds, forKey: .labelIds)
     }
 }
 
@@ -2070,4 +2171,17 @@ private struct PlanningInitiativeProjectParams: Encodable {
     let operationId: String
     let initiativeId: String?
     let projectId: String
+}
+
+private struct PlanningInitiativeUpdatesParams: Encodable {
+    let initiativeId: String
+    let limit: Int
+    let cursor: String?
+}
+
+private struct PlanningInitiativeUpdateAddParams: Encodable {
+    let operationId: String
+    let initiativeId: String
+    let health: PlanningProjectHealth
+    let body: String
 }

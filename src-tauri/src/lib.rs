@@ -2214,6 +2214,7 @@ pub fn run(cli_args: CliArgs) {
             planning::work::work_relation_add,
             planning::work::work_relation_remove,
             planning::work::work_subtask_create,
+            planning::work::work_copy,
             planning::work::work_set_parent,
             planning::work::work_comments,
             planning::work::work_comment_add,

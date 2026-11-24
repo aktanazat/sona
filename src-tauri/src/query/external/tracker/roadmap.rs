@@ -201,6 +201,9 @@ pub struct CycleSaveArgs {
     /// A name for the cycle; none clears it.
     #[arg(long)]
     pub name: Option<String>,
+    /// Goal or description for the cycle; none clears it.
+    #[arg(long)]
+    pub details: Option<String>,
     /// The first day, YYYY-MM-DD; only a cycle not yet started moves it.
     #[arg(long, value_name = "DAY")]
     pub start: Option<NaiveDate>,
@@ -939,6 +942,13 @@ impl Tracker<'_> {
                     name.trim().to_owned()
                 }
             }),
+            description: args.details.as_deref().map(|details| {
+                if super::catalog::cleared(details) {
+                    String::new()
+                } else {
+                    details.trim().to_owned()
+                }
+            }),
             start_day: args.start,
             end_day: args.end.map(|end| end + chrono::Days::new(1)),
         };
@@ -947,6 +957,7 @@ impl Tracker<'_> {
             &(
                 number,
                 &edit.name,
+                &edit.description,
                 args.start.map(|day| day.to_string()),
                 args.end.map(|day| day.to_string()),
             ),

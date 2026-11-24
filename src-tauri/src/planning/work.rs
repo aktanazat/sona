@@ -35,6 +35,7 @@ pub(crate) mod plans;
 #[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
 mod probe;
 pub(crate) mod project_templates;
+pub(crate) mod reactions;
 pub(crate) mod recur;
 pub(crate) mod routines;
 pub(crate) mod sessions;
@@ -55,10 +56,10 @@ use self::sync::{MeetingReader, People};
 pub use self::types::WorkChanged;
 use self::types::{
     WorkActivityKind, WorkActor, WorkAttachment, WorkAttachmentFile, WorkComment, WorkCommentPage,
-    WorkCommentSubject, WorkCounts, WorkDay, WorkDoer, WorkItem, WorkItemDetail, WorkItemInput,
-    WorkItemRow, WorkLabel, WorkList, WorkOwner, WorkPatch, WorkPlace, WorkProgress,
-    WorkProjectChoice, WorkQuery, WorkRelation, WorkRelationKind, WorkRepeat, WorkSource,
-    WorkStatus, WorkTimeBlock, WorkView, WorkViewInput,
+    WorkCommentSubject, WorkCounts, WorkDay, WorkDisplay, WorkDoer, WorkItem, WorkItemDetail,
+    WorkItemInput, WorkItemRow, WorkLabel, WorkList, WorkOwner, WorkPatch, WorkPlace, WorkProgress,
+    WorkProjectChoice, WorkQuery, WorkReactionSubject, WorkRelation, WorkRelationKind, WorkRepeat,
+    WorkSource, WorkStatus, WorkTimeBlock, WorkView, WorkViewInput,
 };
 use super::catalog;
 use super::sources;
@@ -969,6 +970,7 @@ fn detail(
         sub_tasks: items::sub_tasks(history, &id)?,
         comments: comments::all(history, WorkCommentSubject::Task, &id)?,
         attachments: attachments::list(history, attachment_root, &id)?,
+        reactions: reactions::of(history, WorkReactionSubject::Task, &id)?,
         item: context.row(&mut reader, item)?,
         recurrence: items::recurrence(history, &id)?,
         evidence,
@@ -1284,6 +1286,48 @@ pub async fn work_subtask_create(
     subtask_create_as(&app, WorkActor::Me, &operation_id, &parent_id, &inputs).await
 }
 
+/// [`work_copy`] made by `actor`, leaving out the sub-tasks in `hidden`.
+pub(crate) fn copy_as(
+    app: &AppHandle,
+    actor: WorkActor,
+    operation_id: &str,
+    id: &str,
+    with_subtasks: bool,
+    hidden: &HashSet<String>,
+) -> Result<Vec<WorkItem>, String> {
+    let change = Change::now(operation_id, actor);
+    run_history(app, |history| {
+        store::mutate(
+            history,
+            change.operation_id,
+            "work_copy",
+            &(id, with_subtasks),
+            change.at_ms,
+            |tx| {
+                let value = items::copy(tx, id, with_subtasks, hidden, change.actor, change.at_ms)?;
+                let mut effects = Effects::default();
+                for copy in &value {
+                    effects.item(copy);
+                }
+                Ok(Done { value, effects })
+            },
+        )
+    })
+}
+
+/// Copies a task beside it with its fields; `with_subtasks` brings its
+/// sub-tasks too. The copy comes first in the answer.
+#[tauri::command(async)]
+#[specta::specta]
+pub fn work_copy(
+    app: AppHandle,
+    operation_id: String,
+    id: String,
+    with_subtasks: bool,
+) -> Result<Vec<WorkItem>, String> {
+    copy_as(&app, WorkActor::Me, &operation_id, &id, with_subtasks, &HashSet::new())
+}
+
 /// Puts a task under another, or with `None` makes it a task of its own,
 /// whatever revision it is at.
 #[tauri::command(async)]
@@ -1353,7 +1397,14 @@ fn comment_change(
                 WorkCommentSubject::Milestone => effects
                     .projects
                     .push(store::milestone(tx, &value.item_id)?.project_id),
-                WorkCommentSubject::Meeting | WorkCommentSubject::Note => {}
+                WorkCommentSubject::Update => {
+                    if let Ok(update) = super::updates::update(tx, &value.item_id) {
+                        effects.projects.push(update.project_id);
+                    }
+                }
+                WorkCommentSubject::Meeting
+                | WorkCommentSubject::Note
+                | WorkCommentSubject::Initiative => {}
             }
             Ok(Done { effects, value })
         })
@@ -2295,6 +2346,7 @@ pub fn work_label_save(
     id: Option<String>,
     name: String,
     hue: f64,
+    description: Option<String>,
 ) -> Result<WorkLabel, String> {
     let now = now_ms();
     run_history(&app, |history| {
@@ -2302,11 +2354,18 @@ pub fn work_label_save(
             history,
             &operation_id,
             "work_label_save",
-            &(&id, &name, hue),
+            &(&id, &name, hue, &description),
             now,
             |tx| {
                 Ok(Done {
-                    value: items::save_label(tx, id.as_deref(), &name, hue, now)?,
+                    value: items::save_label(
+                        tx,
+                        id.as_deref(),
+                        &name,
+                        hue,
+                        description.as_deref(),
+                        now,
+                    )?,
                     effects: Effects::default(),
                 })
             },

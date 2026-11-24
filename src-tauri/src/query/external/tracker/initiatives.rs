@@ -1,30 +1,42 @@
 //! `sona work` verbs for initiatives: goals one level above projects.
 
 use super::catalog::{ExternalWorkPersonRef, ExternalWorkProject};
-use super::roadmap::ExternalProjectRef;
-use super::{day_or_none, day_text, pick, refusal, Board, DayArg, Tracker, WorkAnswer, WriteArgs};
-use crate::planning::work::initiatives::{self, Initiative, InitiativeSaveInput, InitiativeStatus};
-use crate::planning::work::types::WorkOwner;
+use super::roadmap::{ExternalProjectRef, ExternalProjectUpdate, ExternalUpdateAuthor, Health};
+use super::{
+    day_or_none, day_text, pick, refusal, Board, DayArg, Priority, Tracker, WorkAnswer, WriteArgs,
+};
+use crate::planning::work::comments::Author;
+use crate::planning::work::initiatives::{
+    self, Initiative, InitiativeSaveInput, InitiativeStatus, InitiativeUpdate,
+};
+use crate::planning::work::types::{WorkActor, WorkLabel, WorkOwner};
 use crate::planning::{self, Project};
 use crate::query::external::{ExternalError, ExternalErrorCode};
 use crate::query::QUERY_SCHEMA_VERSION;
 use clap::{Args, ValueEnum};
 use serde::Serialize;
 use std::fmt::Write as _;
+use uuid::Uuid;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub enum InitiativeState {
+    Backlog,
     Planned,
     Active,
+    Paused,
     Completed,
+    Canceled,
 }
 
 impl From<InitiativeState> for InitiativeStatus {
     fn from(state: InitiativeState) -> Self {
         match state {
+            InitiativeState::Backlog => Self::Backlog,
             InitiativeState::Planned => Self::Planned,
             InitiativeState::Active => Self::Active,
+            InitiativeState::Paused => Self::Paused,
             InitiativeState::Completed => Self::Completed,
+            InitiativeState::Canceled => Self::Canceled,
         }
     }
 }
@@ -49,6 +61,14 @@ pub struct InitiativeNewArgs {
     /// planned unless told.
     #[arg(long, value_enum)]
     pub status: Option<InitiativeState>,
+    /// The initiative it sits under, by name or id.
+    #[arg(long, value_name = "INITIATIVE")]
+    pub parent: Option<String>,
+    #[arg(long, value_enum)]
+    pub priority: Option<Priority>,
+    /// Comma-separated labels that may go on projects.
+    #[arg(long, value_delimiter = ',', value_name = "LABELS")]
+    pub labels: Option<Vec<String>>,
     /// Show the initiative without saving it.
     #[arg(long)]
     pub dry_run: bool,
@@ -74,6 +94,14 @@ pub struct InitiativeUpdateArgs {
     pub target: Option<DayArg>,
     #[arg(long, value_enum)]
     pub status: Option<InitiativeState>,
+    /// The initiative it sits under, by name or id; none takes it to the top.
+    #[arg(long, value_name = "INITIATIVE")]
+    pub parent: Option<String>,
+    #[arg(long, value_enum)]
+    pub priority: Option<Priority>,
+    /// Comma-separated labels that may go on projects; none clears them.
+    #[arg(long, value_delimiter = ',', value_name = "LABELS")]
+    pub labels: Option<Vec<String>>,
     /// Show the change without saving it.
     #[arg(long)]
     pub dry_run: bool,
@@ -105,6 +133,54 @@ pub struct InitiativeProjectArgs {
     pub write: WriteArgs,
 }
 
+#[derive(Args, Clone, Debug, Eq, PartialEq)]
+pub struct InitiativeUpdatePostArgs {
+    /// The initiative, by name or id.
+    pub initiative: String,
+    #[arg(long, value_enum)]
+    pub health: Health,
+    /// Markdown.
+    #[arg(long)]
+    pub body: String,
+    #[arg(long)]
+    pub dry_run: bool,
+    #[command(flatten)]
+    pub write: WriteArgs,
+}
+
+#[derive(Args, Clone, Debug, Eq, PartialEq)]
+pub struct InitiativeUpdateListArgs {
+    /// The initiative, by name or id.
+    pub initiative: String,
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..=100))]
+    pub limit: Option<u32>,
+    /// The last update id of the page before.
+    #[arg(long, value_name = "UPDATE")]
+    pub cursor: Option<Uuid>,
+}
+
+#[derive(Args, Clone, Debug, Eq, PartialEq)]
+pub struct InitiativeUpdateEditArgs {
+    pub update: Uuid,
+    #[arg(long, value_enum)]
+    pub health: Option<Health>,
+    #[arg(long)]
+    pub body: Option<String>,
+    #[arg(long)]
+    pub dry_run: bool,
+    #[command(flatten)]
+    pub write: WriteArgs,
+}
+
+#[derive(Args, Clone, Debug, Eq, PartialEq)]
+pub struct InitiativeUpdateDeleteArgs {
+    pub update: Uuid,
+    #[arg(long)]
+    pub dry_run: bool,
+    #[command(flatten)]
+    pub write: WriteArgs,
+}
+
 /// How far an initiative's projects have come; archived and deleted
 /// projects are left out.
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -129,6 +205,43 @@ pub struct ExternalInitiative {
     pub target_at_ms: Option<i64>,
     pub projects: Vec<ExternalProjectRef>,
     pub progress: ExternalInitiativeProgress,
+    /// The initiative it sits under.
+    pub parent: Option<ExternalProjectRef>,
+    /// The initiatives directly under it.
+    pub children: Vec<ExternalProjectRef>,
+    pub priority: Priority,
+    /// Label names.
+    pub labels: Vec<String>,
+    pub latest_update: Option<ExternalProjectUpdate>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ExternalWorkInitiativeUpdates {
+    pub schema_version: u32,
+    pub initiative: ExternalProjectRef,
+    /// Newest first.
+    pub updates: Vec<ExternalProjectUpdate>,
+    /// Pass as --cursor for the next page; none on the last.
+    pub next_cursor: Option<String>,
+}
+
+/// What an initiative update write did.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InitiativeUpdateAction {
+    Added,
+    Edited,
+    Deleted,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ExternalWorkInitiativeUpdateChange {
+    pub schema_version: u32,
+    pub action: InitiativeUpdateAction,
+    pub dry_run: bool,
+    pub operation_id: Option<String>,
+    pub initiative: ExternalProjectRef,
+    pub update: ExternalProjectUpdate,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -166,9 +279,44 @@ pub struct ExternalWorkInitiativeChange {
     pub project: Option<ExternalProjectRef>,
 }
 
-fn external(initiative: &Initiative, projects: &[Project], board: &Board) -> ExternalInitiative {
+/// What names an initiative's projects, initiatives and labels.
+struct Known {
+    projects: Vec<Project>,
+    initiatives: Vec<Initiative>,
+    labels: Vec<WorkLabel>,
+}
+
+impl Known {
+    fn initiative_ref(&self, id: &str) -> ExternalProjectRef {
+        ExternalProjectRef {
+            id: id.to_owned(),
+            name: self
+                .initiatives
+                .iter()
+                .find(|initiative| initiative.id == id)
+                .map_or_else(|| id.to_owned(), |initiative| initiative.name.clone()),
+        }
+    }
+}
+
+fn external_update(update: InitiativeUpdate) -> ExternalProjectUpdate {
+    ExternalProjectUpdate {
+        id: update.id,
+        health: Health::of(update.health),
+        body: update.body,
+        progress: update.progress,
+        author: ExternalUpdateAuthor {
+            kind: update.author.kind,
+            name: update.author.name,
+        },
+        created_at_ms: update.created_at_ms,
+        edited_at_ms: update.edited_at_ms,
+        deleted: update.deleted,
+    }
+}
+
+fn external(initiative: &Initiative, known: &Known, board: &Board) -> ExternalInitiative {
     let progress = initiative.progress;
-    let tasks = progress.open_tasks + progress.done_tasks;
     ExternalInitiative {
         id: initiative.id.clone(),
         name: initiative.name.clone(),
@@ -193,7 +341,8 @@ fn external(initiative: &Initiative, projects: &[Project], board: &Board) -> Ext
             .iter()
             .map(|id| ExternalProjectRef {
                 id: id.clone(),
-                name: projects
+                name: known
+                    .projects
                     .iter()
                     .find(|project| &project.id == id)
                     .map_or_else(|| id.clone(), |project| project.title.clone()),
@@ -204,12 +353,25 @@ fn external(initiative: &Initiative, projects: &[Project], board: &Board) -> Ext
             completed_projects: progress.completed_projects,
             open_tasks: progress.open_tasks,
             done_tasks: progress.done_tasks,
-            percent: if tasks == 0 {
-                0
-            } else {
-                (progress.done_tasks * 100 + tasks / 2) / tasks
-            },
+            percent: u32::from(initiatives::percent(progress)),
         },
+        parent: initiative
+            .parent_id
+            .as_deref()
+            .map(|id| known.initiative_ref(id)),
+        children: initiative
+            .child_ids
+            .iter()
+            .map(|id| known.initiative_ref(id))
+            .collect(),
+        priority: Priority::of(initiative.priority),
+        labels: initiative
+            .label_ids
+            .iter()
+            .filter_map(|id| known.labels.iter().find(|label| &label.id == id))
+            .map(|label| label.name.clone())
+            .collect(),
+        latest_update: initiative.latest_update.clone().map(external_update),
     }
 }
 
@@ -262,6 +424,85 @@ impl Tracker<'_> {
         }
     }
 
+    fn known(&self) -> Result<Known, ExternalError> {
+        Ok(Known {
+            projects: self.every_project()?,
+            initiatives: self.all_initiatives()?,
+            labels: self.all_labels()?,
+        })
+    }
+
+    /// `--parent` as an id to save: a nested initiative's parent, or none
+    /// for the top. Refused when it would sit under itself.
+    fn parent_input(
+        all: &[Initiative],
+        value: Option<&str>,
+        own_id: Option<&str>,
+    ) -> Result<Option<Option<String>>, ExternalError> {
+        let Some(value) = value else {
+            return Ok(None);
+        };
+        if cleared(value) {
+            return Ok(Some(None));
+        }
+        let parent = Self::pick_initiative(value, all)?;
+        if let Some(own_id) = own_id {
+            let mut at = Some(parent);
+            while let Some(step) = at {
+                if step.id == own_id {
+                    return Err(ExternalError::invalid(
+                        "An initiative cannot sit under itself or one of its own.",
+                    ));
+                }
+                at = step
+                    .parent_id
+                    .as_deref()
+                    .and_then(|id| all.iter().find(|initiative| initiative.id == id));
+            }
+        }
+        Ok(Some(Some(parent.id.clone())))
+    }
+
+    /// `--labels` as ids: names or ids of labels that may go on projects.
+    fn initiative_labels(
+        &self,
+        values: Option<&[String]>,
+    ) -> Result<Option<Vec<String>>, ExternalError> {
+        let Some(values) = values else {
+            return Ok(None);
+        };
+        let names: Vec<&str> = values
+            .iter()
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .collect();
+        if names.iter().any(|name| cleared(name)) {
+            return Ok(Some(Vec::new()));
+        }
+        let labels = self.all_labels()?;
+        let mut ids = Vec::new();
+        for name in names {
+            let label = pick(
+                "label",
+                name,
+                &labels,
+                |label| &label.id,
+                |label| &label.name,
+            )
+            .map_err(|refusal| refusal.hint("List them with: sona work labels"))?;
+            if label.scope == crate::planning::LabelScope::Tasks {
+                return Err(ExternalError::invalid(format!(
+                    "The label {:?} is kept for tasks. Let it on projects with: sona work label-scope {:?} all",
+                    label.name, label.name
+                )));
+            }
+            if !ids.contains(&label.id) {
+                ids.push(label.id.clone());
+            }
+        }
+        Ok(Some(ids))
+    }
+
     fn initiative_answer(
         &self,
         initiative: &Initiative,
@@ -271,14 +512,14 @@ impl Tracker<'_> {
         action: InitiativeAction,
         project: Option<&Project>,
     ) -> Result<WorkAnswer, ExternalError> {
-        let projects = self.every_project()?;
+        let known = self.known()?;
         Ok(WorkAnswer::InitiativeChange(Box::new(
             ExternalWorkInitiativeChange {
                 schema_version: QUERY_SCHEMA_VERSION,
                 dry_run,
                 operation_id,
                 action,
-                initiative: external(initiative, &projects, board),
+                initiative: external(initiative, &known, board),
                 project: project.map(project_ref),
             },
         )))
@@ -286,13 +527,13 @@ impl Tracker<'_> {
 
     pub(super) async fn initiative_list(&self) -> Result<WorkAnswer, ExternalError> {
         let board = self.board().await?;
-        let projects = self.every_project()?;
+        let known = self.known()?;
         Ok(WorkAnswer::Initiatives(ExternalWorkInitiatives {
             schema_version: QUERY_SCHEMA_VERSION,
-            initiatives: self
-                .all_initiatives()?
+            initiatives: known
+                .initiatives
                 .iter()
-                .map(|initiative| external(initiative, &projects, &board))
+                .map(|initiative| external(initiative, &known, &board))
                 .collect(),
         }))
     }
@@ -302,17 +543,16 @@ impl Tracker<'_> {
         args: &InitiativeArgs,
     ) -> Result<WorkAnswer, ExternalError> {
         let board = self.board().await?;
-        let projects = self.every_project()?;
-        let all = self.all_initiatives()?;
-        let initiative = Self::pick_initiative(&args.initiative, &all)?;
+        let known = self.known()?;
+        let initiative = Self::pick_initiative(&args.initiative, &known.initiatives)?;
         Ok(WorkAnswer::InitiativeDetail(Box::new(
             ExternalWorkInitiativeDetail {
                 schema_version: QUERY_SCHEMA_VERSION,
-                initiative: external(initiative, &projects, &board),
+                initiative: external(initiative, &known, &board),
                 projects: initiative
                     .project_ids
                     .iter()
-                    .filter_map(|id| projects.iter().find(|project| &project.id == id))
+                    .filter_map(|id| known.projects.iter().find(|project| &project.id == id))
                     .map(|project| self.project_row(project, &board))
                     .collect(),
             },
@@ -353,8 +593,9 @@ impl Tracker<'_> {
     ) -> Result<WorkAnswer, ExternalError> {
         let board = self.board().await?;
         let operation_id = args.write.fresh_operation_id();
+        let all = self.all_initiatives()?;
         if !self.ran(&operation_id)? {
-            Self::name_free(&self.all_initiatives()?, &args.name, None)?;
+            Self::name_free(&all, &args.name, None)?;
         }
         let input = InitiativeSaveInput {
             name: Some(args.name.clone()),
@@ -362,6 +603,9 @@ impl Tracker<'_> {
             owner: Self::owner(&board, args.owner.as_deref())?,
             target_at_ms: args.target.map(DayArg::ms).transpose()?,
             status: args.status.map(Into::into),
+            parent_id: Self::parent_input(&all, args.parent.as_deref(), None)?,
+            priority: args.priority.map(Priority::value),
+            label_ids: self.initiative_labels(args.labels.as_deref())?,
         };
         let initiative = self.initiative_saved(None, &input, args.dry_run, &operation_id)?;
         self.initiative_answer(
@@ -393,6 +637,9 @@ impl Tracker<'_> {
             owner: Self::owner(&board, args.owner.as_deref())?,
             target_at_ms: args.target.map(DayArg::ms).transpose()?,
             status: args.status.map(Into::into),
+            parent_id: Self::parent_input(&all, args.parent.as_deref(), Some(&current.id))?,
+            priority: args.priority.map(Priority::value),
+            label_ids: self.initiative_labels(args.labels.as_deref())?,
         };
         let after = self.rehearse(|conn| {
             initiatives::save(conn, Some(&current.id), &input, current.updated_at_ms)
@@ -517,18 +764,213 @@ impl Tracker<'_> {
             Some(project),
         )
     }
+
+    fn initiative_update_named(
+        &self,
+        id: &Uuid,
+    ) -> Result<(InitiativeUpdate, Initiative), ExternalError> {
+        planning::history(self.history, |conn| {
+            let update = initiatives::update(conn, &id.to_string())?;
+            let initiative = initiatives::initiative(conn, &update.initiative_id)?;
+            Ok((update, initiative))
+        })
+        .map_err(|_| {
+            ExternalError::new(
+                ExternalErrorCode::NotFound,
+                format!("No initiative update {id}."),
+            )
+            .hint("List them with: sona work initiative-update-list INITIATIVE")
+        })
+    }
+
+    fn initiative_update_answer(
+        action: InitiativeUpdateAction,
+        dry_run: bool,
+        operation_id: String,
+        initiative: &Initiative,
+        update: InitiativeUpdate,
+    ) -> WorkAnswer {
+        WorkAnswer::InitiativeUpdateChange(Box::new(ExternalWorkInitiativeUpdateChange {
+            schema_version: QUERY_SCHEMA_VERSION,
+            action,
+            dry_run,
+            operation_id: Some(operation_id),
+            initiative: ExternalProjectRef {
+                id: initiative.id.clone(),
+                name: initiative.name.clone(),
+            },
+            update: external_update(update),
+        }))
+    }
+
+    fn update_writer(write: &WriteArgs) -> Author<'_> {
+        Author {
+            actor: WorkActor::Agent,
+            agent: write.agent.as_deref(),
+        }
+    }
+
+    pub(super) fn initiative_update_list(
+        &self,
+        args: &InitiativeUpdateListArgs,
+    ) -> Result<WorkAnswer, ExternalError> {
+        let all = self.all_initiatives()?;
+        let initiative = Self::pick_initiative(&args.initiative, &all)?;
+        let limit = args
+            .limit
+            .and_then(|limit| usize::try_from(limit).ok())
+            .unwrap_or(initiatives::UPDATES_PAGE);
+        let cursor = args.cursor.map(|cursor| cursor.to_string());
+        let page = planning::history(self.history, |conn| {
+            initiatives::updates_page(conn, &initiative.id, limit, cursor.as_deref())
+        })
+        .map_err(|message| refusal(self.history, message))?;
+        Ok(WorkAnswer::InitiativeUpdates(
+            ExternalWorkInitiativeUpdates {
+                schema_version: QUERY_SCHEMA_VERSION,
+                initiative: ExternalProjectRef {
+                    id: initiative.id.clone(),
+                    name: initiative.name.clone(),
+                },
+                updates: page.updates.into_iter().map(external_update).collect(),
+                next_cursor: page.next_cursor,
+            },
+        ))
+    }
+
+    pub(super) fn initiative_update_post(
+        &self,
+        args: &InitiativeUpdatePostArgs,
+    ) -> Result<WorkAnswer, ExternalError> {
+        let all = self.all_initiatives()?;
+        let initiative = Self::pick_initiative(&args.initiative, &all)?;
+        let author = Self::update_writer(&args.write);
+        let health = args.health.health();
+        let operation_id = args.write.operation_id(
+            "initiative-update-post",
+            &(
+                &initiative.id,
+                args.health,
+                args.body.trim(),
+                chrono::Local::now().date_naive().to_string(),
+            ),
+        )?;
+        let update = if args.dry_run {
+            self.rehearse(|conn| {
+                initiatives::add_update(
+                    conn,
+                    author,
+                    &initiative.id,
+                    health,
+                    &args.body,
+                    super::now_ms(),
+                )
+            })?
+        } else {
+            self.applies("posting an initiative update")?;
+            initiatives::update_add_written(
+                self.app,
+                author,
+                &operation_id,
+                &initiative.id,
+                health,
+                &args.body,
+            )
+            .map_err(|message| self.write_refusal(message, &operation_id, "The initiative"))?
+        };
+        Ok(Self::initiative_update_answer(
+            InitiativeUpdateAction::Added,
+            args.dry_run,
+            operation_id,
+            initiative,
+            update,
+        ))
+    }
+
+    pub(super) fn initiative_update_edit(
+        &self,
+        args: &InitiativeUpdateEditArgs,
+    ) -> Result<WorkAnswer, ExternalError> {
+        let (update, initiative) = self.initiative_update_named(&args.update)?;
+        let author = Self::update_writer(&args.write);
+        let health = args.health.map(Health::health);
+        let body = args.body.as_deref();
+        let operation_id = args.write.operation_id(
+            "initiative-update-edit",
+            &(&update.id, update.edited_at_ms, health, body.map(str::trim)),
+        )?;
+        let edited = if args.dry_run {
+            self.rehearse(|conn| {
+                initiatives::edit_update(conn, author, &update.id, health, body, super::now_ms())
+            })?
+        } else {
+            self.applies("editing an initiative update")?;
+            initiatives::update_edit_written(
+                self.app,
+                author,
+                &operation_id,
+                &update.id,
+                health,
+                body,
+            )
+            .map_err(|message| self.write_refusal(message, &operation_id, "The update"))?
+        };
+        Ok(Self::initiative_update_answer(
+            InitiativeUpdateAction::Edited,
+            args.dry_run,
+            operation_id,
+            &initiative,
+            edited,
+        ))
+    }
+
+    pub(super) fn initiative_update_delete(
+        &self,
+        args: &InitiativeUpdateDeleteArgs,
+    ) -> Result<WorkAnswer, ExternalError> {
+        let (update, initiative) = self.initiative_update_named(&args.update)?;
+        let author = Self::update_writer(&args.write);
+        let operation_id = args
+            .write
+            .operation_id("initiative-update-delete", &update.id)?;
+        let deleted = if args.dry_run {
+            self.rehearse(|conn| {
+                initiatives::delete_update(conn, author, &update.id, super::now_ms())
+            })?
+        } else {
+            self.applies("deleting an initiative update")?;
+            initiatives::update_delete_written(self.app, author, &operation_id, &update.id)
+                .map_err(|message| self.write_refusal(message, &operation_id, "The update"))?
+        };
+        Ok(Self::initiative_update_answer(
+            InitiativeUpdateAction::Deleted,
+            args.dry_run,
+            operation_id,
+            &initiative,
+            deleted,
+        ))
+    }
 }
 
 fn status_word(status: InitiativeStatus) -> &'static str {
     match status {
+        InitiativeStatus::Backlog => "Backlog",
         InitiativeStatus::Planned => "Planned",
         InitiativeStatus::Active => "Active",
+        InitiativeStatus::Paused => "Paused",
         InitiativeStatus::Completed => "Completed",
+        InitiativeStatus::Canceled => "Canceled",
     }
 }
 
 fn line(initiative: &ExternalInitiative) -> String {
     let mut text = format!("{} · {}", initiative.name, status_word(initiative.status));
+    if initiative.priority != Priority::None {
+        let _ = write!(text, " · {}", initiative.priority.text());
+    }
+    if let Some(parent) = &initiative.parent {
+        let _ = write!(text, " · in {}", parent.name);
+    }
     if initiative.owner_is_self {
         text.push_str(" · owner you");
     } else if let Some(owner) = &initiative.owner {
@@ -537,6 +979,12 @@ fn line(initiative: &ExternalInitiative) -> String {
     if let Some(target) = &initiative.target {
         let _ = write!(text, " · target {target}");
     }
+    if !initiative.labels.is_empty() {
+        let _ = write!(text, " · {}", initiative.labels.join(", "));
+    }
+    if let Some(update) = &initiative.latest_update {
+        let _ = write!(text, " · {}", update.health.text());
+    }
     let progress = &initiative.progress;
     let _ = write!(
         text,
@@ -544,6 +992,23 @@ fn line(initiative: &ExternalInitiative) -> String {
         progress.completed_projects, progress.projects, progress.percent
     );
     text
+}
+
+fn update_text(text: &mut String, update: &ExternalProjectUpdate) {
+    let _ = writeln!(
+        text,
+        "{}  {} · {}% · {} · {}",
+        update.id,
+        update.health.text(),
+        update.progress,
+        update.author.name.as_deref().unwrap_or("You"),
+        day_text(Some(update.created_at_ms))
+    );
+    if let Some(body) = &update.body {
+        for line in body.lines() {
+            let _ = writeln!(text, "  {line}");
+        }
+    }
 }
 
 pub(super) fn text(answer: &WorkAnswer, text: &mut String) {
@@ -571,6 +1036,47 @@ pub(super) fn text(answer: &WorkAnswer, text: &mut String) {
                     project.name, project.status, project.open_tasks, project.done_tasks
                 );
             }
+            for child in &detail.initiative.children {
+                let _ = writeln!(text, "- initiative {}", child.name);
+            }
+        }
+        WorkAnswer::InitiativeUpdates(page) => {
+            let _ = writeln!(text, "Updates on {}", page.initiative.name);
+            if page.updates.is_empty() {
+                text.push_str(
+                    "No updates yet. Post one with: sona work initiative-update-post INITIATIVE --health on-track --body TEXT\n",
+                );
+            }
+            for update in &page.updates {
+                update_text(text, update);
+            }
+            if let Some(cursor) = &page.next_cursor {
+                let _ = writeln!(text, "More: --cursor {cursor}");
+            }
+        }
+        WorkAnswer::InitiativeUpdateChange(change) => {
+            let name = &change.initiative.name;
+            let _ = match (change.action, change.dry_run) {
+                (InitiativeUpdateAction::Added, false) => {
+                    writeln!(text, "Posted an update on {name}.")
+                }
+                (InitiativeUpdateAction::Added, true) => {
+                    writeln!(text, "Dry run. Would post an update on {name}.")
+                }
+                (InitiativeUpdateAction::Edited, false) => {
+                    writeln!(text, "Edited an update on {name}.")
+                }
+                (InitiativeUpdateAction::Edited, true) => {
+                    writeln!(text, "Dry run. Would edit an update on {name}.")
+                }
+                (InitiativeUpdateAction::Deleted, false) => {
+                    writeln!(text, "Deleted an update on {name}.")
+                }
+                (InitiativeUpdateAction::Deleted, true) => {
+                    writeln!(text, "Dry run. Would delete an update on {name}.")
+                }
+            };
+            update_text(text, &change.update);
         }
         WorkAnswer::InitiativeChange(change) => {
             if change.dry_run {

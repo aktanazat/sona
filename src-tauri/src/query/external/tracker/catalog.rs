@@ -232,6 +232,12 @@ pub struct ProjectSaveArgs {
     /// kind. none clears it.
     #[arg(long, value_name = "NAME")]
     pub status_name: Option<String>,
+    /// Remind to post an update every N weeks (e.g. 1w, 2w, or 1–12); none turns it off.
+    #[arg(long, value_name = "WEEKS")]
+    pub update_every: Option<String>,
+    /// Local hour of day (0–23) for update reminders; defaults to 9.
+    #[arg(long, value_parser = clap::value_parser!(u8).range(0..=23), value_name = "HOUR")]
+    pub update_hour: Option<u8>,
     /// Anchored edits to the details or the summary, applied after
     /// --details and --summary, as JSON:
     /// [{"field":"description","op":"insert_after","anchor":"Scope:","value":" phase 2"}].
@@ -489,6 +495,11 @@ pub struct ExternalWorkProject {
     pub milestones: u32,
     /// The initiative it sits in, if any.
     pub initiative: Option<ExternalWorkPersonRef>,
+    /// Update reminder cadence in weeks (1–12), when enabled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub update_every_weeks: Option<u8>,
+    /// Local hour of day (0–23) for update reminders.
+    pub update_hour: u8,
     pub revision: i64,
 }
 
@@ -854,6 +865,8 @@ impl Tracker<'_> {
             done_tasks: done,
             milestones: u32::try_from(milestones).unwrap_or(u32::MAX),
             initiative,
+            update_every_weeks: project.update_every_weeks,
+            update_hour: project.update_hour,
             revision: project.revision,
         }
     }
@@ -1002,6 +1015,32 @@ impl Tracker<'_> {
                 .collect::<Vec<_>>()
         });
         let status_name_id = self.status_named(args)?;
+        let update_every_weeks = match &args.update_every {
+            None => None,
+            Some(raw) => {
+                let raw = raw.trim();
+                if cleared(raw) {
+                    Some(None)
+                } else {
+                    let digits = raw
+                        .strip_suffix('w')
+                        .or_else(|| raw.strip_suffix('W'))
+                        .unwrap_or(raw)
+                        .trim();
+                    let weeks: u8 = digits.parse().map_err(|_| {
+                        ExternalError::invalid(
+                            "--update-every takes 1w to 12w (or 1 to 12), or none.",
+                        )
+                    })?;
+                    if !(1..=12).contains(&weeks) {
+                        return Err(ExternalError::invalid(
+                            "--update-every takes 1w to 12w (or 1 to 12), or none.",
+                        ));
+                    }
+                    Some(Some(weeks))
+                }
+            }
+        };
         let (description, summary) = patched(args, existing)?;
         let edit = ProjectEdit {
             title: (existing.is_none() || args.project.is_some()).then(|| name.to_owned()),
@@ -1029,6 +1068,8 @@ impl Tracker<'_> {
             trashed: None,
             summary,
             status_name_id,
+            update_every_weeks,
+            update_hour: args.update_hour,
         };
         if let Some(current) = existing {
             if !changes_project(current, &edit) {
@@ -1748,6 +1789,12 @@ fn changes_project(current: &Project, edit: &ProjectEdit) -> bool {
             .status_name_id
             .as_ref()
             .is_some_and(|id| *id != current.status_name_id)
+        || edit
+            .update_every_weeks
+            .is_some_and(|weeks| weeks != current.update_every_weeks)
+        || edit
+            .update_hour
+            .is_some_and(|hour| hour != current.update_hour)
         || edit.label_ids.as_ref().is_some_and(|ids| {
             let (mut want, mut have) = (ids.clone(), current.label_ids.clone());
             want.sort();

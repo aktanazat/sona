@@ -344,6 +344,9 @@ pub struct ProjectSaveInput {
     pub summary: Option<Option<String>>,
     #[serde(deserialize_with = "nullable")]
     pub status_name_id: Option<Option<String>>,
+    #[serde(deserialize_with = "nullable")]
+    pub update_every_weeks: Option<Option<u8>>,
+    pub update_hour: Option<u8>,
 }
 
 impl ProjectSaveInput {
@@ -391,6 +394,8 @@ impl ProjectSaveInput {
             status_name_id: self
                 .status_name_id
                 .map(|id| id.filter(|id| !id.trim().is_empty())),
+            update_every_weeks: self.update_every_weeks,
+            update_hour: self.update_hour,
         })
     }
 }

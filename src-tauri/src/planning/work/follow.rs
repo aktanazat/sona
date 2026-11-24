@@ -442,6 +442,9 @@ fn said(notice: &Notification) -> String {
         NotificationKind::Mention => "mentioned you".to_owned(),
         NotificationKind::Assigned => "assigned it to you".to_owned(),
         NotificationKind::Changed => format!("changed the {}", words(notice.field.as_deref())),
+        NotificationKind::Reminder if notice.field.as_deref() == Some("update") => {
+            "An update is due".to_owned()
+        }
         NotificationKind::Reminder => "Reminder".to_owned(),
         NotificationKind::Due => "Due today".to_owned(),
         NotificationKind::Automation if notice.to.as_deref() == Some("done") => {
@@ -1148,7 +1151,9 @@ fn tick(app: &AppHandle, prompts: &dyn PromptPresenter, now_ms: i64) -> Result<(
         routines::reminders_notified(app, &Uuid::new_v4().to_string(), &reminded)
             .map_err(anyhow::Error::msg)?;
     }
-    if super::digest::post_weekly(app, &history, store.as_deref(), now_ms)? {
+    let update_due_posted =
+        history.with_connection(|conn| super::inbox::post_update_due(conn, now_ms))?;
+    if super::digest::post_weekly(app, &history, store.as_deref(), now_ms)? || update_due_posted {
         super::tasks_changed(app, Vec::new());
     }
     let housekeeping = super::hygiene::run_housekeeping_tick(app, &history, now_ms)?;

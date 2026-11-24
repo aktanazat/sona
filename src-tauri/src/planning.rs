@@ -122,6 +122,9 @@ pub(crate) fn failure(error: anyhow::Error) -> String {
         Some(store::Refusal::LabelScope) => {
             "This label is kept to tasks or to projects, or still sits on the other kind. Change where it applies first."
         }
+        Some(store::Refusal::LabelGroup) => {
+            "Something would end up with two labels from a group that allows one. Take one off, or let the group allow several."
+        }
         Some(store::Refusal::DependencyLoop) => {
             "A project cannot wait on itself, or on a project that already waits on it."
         }

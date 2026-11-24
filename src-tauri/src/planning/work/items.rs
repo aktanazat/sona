@@ -13,7 +13,7 @@ use super::types::{
 use anyhow::Result;
 use chrono::{Datelike, Days, Local, NaiveDate, TimeZone};
 use rusqlite::{params, Connection, OptionalExtension, Row};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 const ITEM_COLUMNS: &str = "t.id, t.number, t.title, t.details, t.status, t.priority, t.project_id,
@@ -357,11 +357,15 @@ pub(crate) fn one_per_group(
     kept: &[String],
 ) -> Result<Vec<String>> {
     let mut group_of =
-        conn.prepare_cached("SELECT group_name FROM planning_labels WHERE id = ?1")?;
+        conn.prepare_cached("SELECT group_name, group_multi FROM planning_labels WHERE id = ?1")?;
     let mut groups = Vec::with_capacity(ids.len());
     for id in ids {
         let group: Option<String> = group_of
-            .query_row([id], |row| row.get(0))
+            .query_row([id], |row| {
+                let name: Option<String> = row.get(0)?;
+                let multi: bool = row.get(1)?;
+                Ok(if multi { None } else { name })
+            })
             .optional()?
             .flatten();
         groups.push((id, group));
@@ -546,6 +550,157 @@ pub(crate) fn insert(
     }
     relate_mentions(conn, &id, None, new.details, actor, now_ms)?;
     item(conn, &id)
+}
+
+/// Copies a task beside it, under the same parent, with its fields and its
+/// evidence, so a copy of a task drawn from a meeting is hidden wherever
+/// that meeting is; with `with_subtasks` its sub-tasks come too, each under
+/// its parent's copy, leaving out those in `hidden` and theirs. The copy of
+/// a duplicate starts not started, and a cycle that has ended stays
+/// behind. Returns the copy first, then its sub-tasks' copies.
+pub(crate) fn copy(
+    conn: &Connection,
+    id: &str,
+    with_subtasks: bool,
+    hidden: &HashSet<String>,
+    actor: WorkActor,
+    now_ms: i64,
+) -> Result<Vec<WorkItem>> {
+    let original = item(conn, &store::uuid(id)?)?;
+    let mut copies = Vec::new();
+    copy_under(
+        conn,
+        &original,
+        original.parent_id.as_deref(),
+        with_subtasks.then_some(hidden),
+        actor,
+        now_ms,
+        &mut copies,
+    )?;
+    Ok(copies)
+}
+
+fn copy_under(
+    conn: &Connection,
+    original: &WorkItem,
+    parent_id: Option<&str>,
+    subtasks_but: Option<&HashSet<String>>,
+    actor: WorkActor,
+    now_ms: i64,
+    copies: &mut Vec<WorkItem>,
+) -> Result<()> {
+    let recurrence = recurrence(conn, &original.id)?;
+    let status = match original.status {
+        WorkStatus::Duplicate => WorkStatus::NotStarted,
+        status => status,
+    };
+    let made = insert(
+        conn,
+        &NewItem {
+            title: &original.title,
+            details: original.details.as_deref(),
+            status,
+            priority: original.priority,
+            project_id: original.project_id.as_deref(),
+            milestone_id: original.milestone_id.as_deref(),
+            owner: &original.owner(),
+            due_at_ms: original.due_at_ms,
+            label_ids: &original.label_ids,
+            source_loop_id: None,
+            recurrence: recurrence.as_deref(),
+        },
+        actor,
+        now_ms,
+    )?;
+    copy_evidence(conn, original, &made.id, now_ms)?;
+    let cycle = match original.cycle {
+        Some(number)
+            if made.cycle != Some(number) && super::cycles::is_open(conn, number, now_ms)? =>
+        {
+            Some(Some(number))
+        }
+        _ => None,
+    };
+    let copied = apply(
+        conn,
+        &made.id,
+        &WorkPatch {
+            parent_id: parent_id.map(|parent_id| Some(parent_id.to_owned())),
+            cycle,
+            estimate: original.estimate.map(Some),
+            for_person_id: original.for_person_id.clone().map(Some),
+            ..WorkPatch::default()
+        },
+        WorkActivityKind::Status,
+        actor,
+        now_ms,
+    )?
+    .after;
+    let parent_of_subtasks = copied.id.clone();
+    copies.push(copied);
+    if let Some(hidden) = subtasks_but {
+        for sub_task in sub_tasks(conn, &original.id)? {
+            if hidden.contains(&sub_task.id) {
+                continue;
+            }
+            copy_under(
+                conn,
+                &sub_task,
+                Some(&parent_of_subtasks),
+                Some(hidden),
+                actor,
+                now_ms,
+                copies,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Gives a copy the original's evidence links, and its meeting commitment
+/// as a loop link: only one task tracks a commitment, but every copy draws
+/// on it.
+fn copy_evidence(conn: &Connection, original: &WorkItem, copy_id: &str, now_ms: i64) -> Result<()> {
+    let mut statement = conn.prepare(
+        "SELECT source_kind, source_id, at_ms, meeting_note_id, end_ms, caption
+         FROM planning_evidence_links WHERE target_kind = 'task' AND target_id = ?1",
+    )?;
+    let links = statement
+        .query_map([&original.id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<i64>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<i64>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let commitment = original
+        .source_loop_id
+        .clone()
+        .map(|loop_id| ("loop".to_owned(), loop_id, None, None, None, None));
+    for (kind, source_id, at_ms, note_id, end_ms, caption) in links.into_iter().chain(commitment) {
+        conn.execute(
+            "INSERT OR IGNORE INTO planning_evidence_links (id, target_kind, target_id,
+                source_kind, source_id, at_ms, revision, created_at_ms, meeting_note_id, end_ms,
+                caption)
+             VALUES (?1, 'task', ?2, ?3, ?4, ?5, 1, ?6, ?7, ?8, ?9)",
+            params![
+                Uuid::new_v4().to_string(),
+                copy_id,
+                kind,
+                source_id,
+                at_ms,
+                now_ms,
+                note_id,
+                end_ms,
+                caption
+            ],
+        )?;
+    }
+    Ok(())
 }
 
 /// One item before and after a change; equal when the change asked for
@@ -1383,7 +1538,8 @@ pub(crate) fn remove_relation(
     Ok(relation)
 }
 
-pub(crate) const LABEL_COLUMNS: &str = "id, name, hue, revision, group_name, retired_at_ms, scope";
+pub(crate) const LABEL_COLUMNS: &str =
+    "id, name, hue, revision, group_name, retired_at_ms, scope, description, group_multi";
 
 pub(crate) fn read_label(row: &Row<'_>) -> rusqlite::Result<WorkLabel> {
     Ok(WorkLabel {
@@ -1394,6 +1550,8 @@ pub(crate) fn read_label(row: &Row<'_>) -> rusqlite::Result<WorkLabel> {
         group: row.get(4)?,
         retired_at_ms: row.get(5)?,
         scope: row.get(6)?,
+        description: row.get(7)?,
+        group_multi: row.get(8)?,
     })
 }
 
@@ -1406,12 +1564,14 @@ pub(crate) fn labels(conn: &Connection) -> Result<Vec<WorkLabel>> {
 }
 
 /// Creates a label, or renames and recolors one. Names are unique ignoring
-/// case.
+/// case. A `description` of `None` keeps the one it has; a blank one
+/// clears it.
 pub(crate) fn save_label(
     conn: &Connection,
     id: Option<&str>,
     name: &str,
     hue: f64,
+    description: Option<&str>,
     now_ms: i64,
 ) -> Result<WorkLabel> {
     let name = clean_title(name)?;
@@ -1430,12 +1590,15 @@ pub(crate) fn save_label(
     if taken {
         return Err(Refusal::Invalid.into());
     }
+    let described = description.map(str::trim).filter(|d| !d.is_empty());
     conn.execute(
-        "INSERT INTO planning_labels (id, name, hue, revision, created_at_ms, updated_at_ms)
-         VALUES (?1, ?2, ?3, 1, ?4, ?4)
+        "INSERT INTO planning_labels
+            (id, name, hue, description, revision, created_at_ms, updated_at_ms)
+         VALUES (?1, ?2, ?3, ?4, 1, ?6, ?6)
          ON CONFLICT(id) DO UPDATE SET name = excluded.name, hue = excluded.hue,
+            description = CASE WHEN ?5 THEN excluded.description ELSE description END,
             revision = revision + 1, updated_at_ms = excluded.updated_at_ms",
-        params![id, name, hue, now_ms],
+        params![id, name, hue, described, description.is_some(), now_ms],
     )?;
     Ok(conn.query_row(
         &format!("SELECT {LABEL_COLUMNS} FROM planning_labels WHERE id = ?1"),
@@ -1751,4 +1914,109 @@ pub(crate) fn counts<'a>(
         }
     }
     Ok(counts)
+}
+
+#[cfg(test)]
+mod copy_tests {
+    use super::super::super::schema;
+    use super::super::types::{WorkActivityKind, WorkActor, WorkOwner, WorkPatch, WorkStatus};
+    use super::{apply, copy, insert, item, NewItem};
+    use rusqlite::Connection;
+    use std::collections::HashSet;
+
+    const AT: i64 = 1_700_000_000_000;
+
+    fn task(conn: &Connection, title: &str, priority: u8) -> String {
+        task_from(conn, title, priority, None)
+    }
+
+    fn task_from(conn: &Connection, title: &str, priority: u8, loop_id: Option<&str>) -> String {
+        insert(
+            conn,
+            &NewItem {
+                title,
+                details: Some("Bring the deposit"),
+                status: WorkStatus::InProgress,
+                priority,
+                project_id: None,
+                milestone_id: None,
+                owner: &WorkOwner::Myself,
+                due_at_ms: None,
+                label_ids: &[],
+                source_loop_id: loop_id,
+                recurrence: None,
+            },
+            WorkActor::Me,
+            AT,
+        )
+        .expect("a task")
+        .id
+    }
+
+    fn under(conn: &Connection, child: &str, parent: &str) {
+        let patch = WorkPatch {
+            parent_id: Some(Some(parent.to_owned())),
+            ..WorkPatch::default()
+        };
+        apply(conn, child, &patch, WorkActivityKind::Status, WorkActor::Me, AT).expect("nested");
+    }
+
+    #[test]
+    fn a_copy_of_a_task_from_a_kept_meeting_stays_hidden_and_leaves_hidden_sub_tasks() {
+        let conn = Connection::open_in_memory().expect("an in-memory history database");
+        schema::apply_all(&conn).expect("the planner schema");
+        let parent = task_from(&conn, "Board prep", 2, Some("kept-loop"));
+        let open = task(&conn, "Book the room", 1);
+        let private = task(&conn, "Draft the layoffs memo", 1);
+        under(&conn, &open, &parent);
+        under(&conn, &private, &parent);
+        conn.execute(
+            "INSERT INTO planning_evidence_links (id, target_kind, target_id, source_kind,
+                source_id, revision, created_at_ms)
+             VALUES ('evidence', 'task', ?1, 'meeting', 'kept-meeting', 1, ?2)",
+            rusqlite::params![private, AT],
+        )
+        .expect("evidence from the kept meeting");
+        let kept = |_, id: &str| id == "kept-loop" || id == "kept-meeting";
+
+        let copies = copy(&conn, &parent, true, &HashSet::from([private]), WorkActor::Agent, AT + 1)
+            .expect("copies");
+
+        assert_eq!(
+            copies.iter().map(|copy| copy.title.as_str()).collect::<Vec<_>>(),
+            ["Board prep", "Book the room"]
+        );
+        let hidden = super::super::drawing_on(&conn, kept).expect("the hidden tasks");
+        assert!(hidden.contains(&copies[0].id));
+    }
+
+    #[test]
+    fn a_copy_with_sub_tasks_puts_each_under_its_parents_copy() {
+        let conn = Connection::open_in_memory().expect("an in-memory history database");
+        schema::apply_all(&conn).expect("the planner schema");
+        let parent = task(&conn, "Book the venue", 2);
+        let child = task(&conn, "Pay the deposit", 1);
+        under(&conn, &child, &parent);
+
+        let alone = copy(&conn, &parent, false, &HashSet::new(), WorkActor::Me, AT + 1).expect("a copy");
+        let copies = copy(&conn, &parent, true, &HashSet::new(), WorkActor::Me, AT + 2).expect("copies");
+
+        assert_eq!(alone.len(), 1);
+        assert_eq!(copies.len(), 2);
+        assert_ne!(copies[0].id, parent);
+        assert_eq!(copies[0].title, "Book the venue");
+        assert_eq!(copies[0].priority, 2);
+        assert_eq!(copies[0].status, WorkStatus::InProgress);
+        assert_eq!(copies[0].details.as_deref(), Some("Bring the deposit"));
+        assert_eq!(copies[0].parent_id, None);
+        assert_eq!(copies[1].title, "Pay the deposit");
+        assert_eq!(copies[1].parent_id.as_deref(), Some(copies[0].id.as_str()));
+        assert_eq!(
+            item(&conn, &child)
+                .expect("the original")
+                .parent_id
+                .as_deref(),
+            Some(parent.as_str())
+        );
+    }
 }
