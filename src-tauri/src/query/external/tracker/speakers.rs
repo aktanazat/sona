@@ -7,8 +7,8 @@ use super::{conversations_closed, Fence, Tracker, WorkAnswer, WriteArgs, OPERATI
 use crate::meeting::people_types::PersonId;
 use crate::meeting::session::MeetingSessionManager;
 use crate::meeting::store::voice_identity::{
-    MeetingSpeakerIdentifyDisposition, MeetingSpeakerIdentifyRequest,
-    MeetingSpeakerIdentifyTarget, SameVoiceSpeaker,
+    MeetingSpeakerIdentifyDisposition, MeetingSpeakerIdentifyRequest, MeetingSpeakerIdentifyTarget,
+    SameVoiceSpeaker,
 };
 use crate::meeting::store::MeetingStore;
 use crate::meeting::types::{MeetingOperationId, MeetingSessionId, SpeakerId};
@@ -359,9 +359,7 @@ impl SpeakerPlan {
             .await
             .map_err(command_error(session.uuid()))?;
         change.replayed = result.receipt.expected_revision != expected;
-        change.person_id = result
-            .resolved_person_id
-            .map(|id| id.uuid().to_string());
+        change.person_id = result.resolved_person_id.map(|id| id.uuid().to_string());
         Ok(change)
     }
 }
@@ -410,7 +408,9 @@ impl Tracker<'_> {
             return Ok(WorkAnswer::Speaker(Box::new(plan.answer())));
         }
         self.applies("naming a meeting's speaker")?;
-        Ok(WorkAnswer::Speaker(Box::new(plan.apply(self.meetings).await?)))
+        Ok(WorkAnswer::Speaker(Box::new(
+            plan.apply(self.meetings).await?,
+        )))
     }
 }
 

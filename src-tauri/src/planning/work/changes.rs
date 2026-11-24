@@ -838,8 +838,7 @@ END;";
 /// still leave out every change on work drawn from a meeting kept on this
 /// Mac. Changes on a task already gone that name no source get an
 /// `unknown` one, since nothing says where that task came from.
-pub(crate) const TASK_PURGE_SOURCES_MIGRATION: &str =
-    "DROP TRIGGER planning_changes_task_remove;
+pub(crate) const TASK_PURGE_SOURCES_MIGRATION: &str = "DROP TRIGGER planning_changes_task_remove;
 CREATE TRIGGER planning_changes_task_remove BEFORE DELETE ON planning_tasks BEGIN
     UPDATE planning_changes SET sources = (
         SELECT json_group_array(json_array(kind, id)) FROM (
@@ -869,8 +868,7 @@ WHERE task_id IS NOT NULL AND sources IS NULL
 
 /// The same for notes: a deleted note's meeting links go with it, so its
 /// earlier changes and the comments on it take them as sources first.
-pub(crate) const NOTE_PURGE_SOURCES_MIGRATION: &str =
-    "DROP TRIGGER planning_changes_note_remove;
+pub(crate) const NOTE_PURGE_SOURCES_MIGRATION: &str = "DROP TRIGGER planning_changes_note_remove;
 CREATE TRIGGER planning_changes_note_remove BEFORE DELETE ON scratch_notes BEGIN
     UPDATE planning_changes SET sources = (
         SELECT json_group_array(json_array(kind, id)) FROM (
@@ -1315,7 +1313,10 @@ mod tests {
             seen,
             [
                 ("project", Some(serde_json::json!({ "summary": null }))),
-                ("project", Some(serde_json::json!({ "status_name": "Pilot" }))),
+                (
+                    "project",
+                    Some(serde_json::json!({ "status_name": "Pilot" }))
+                ),
             ]
         );
     }
@@ -1374,9 +1375,24 @@ mod tests {
                     "update",
                     Some(serde_json::json!({ "owner": null, "status": "planned" }))
                 ),
-                (3, "project", "update", Some(serde_json::json!({ "initiative": null }))),
-                (4, "project", "update", Some(serde_json::json!({ "title": "Harbor festival" }))),
-                (5, "project", "update", Some(serde_json::json!({ "initiative": "i1" }))),
+                (
+                    3,
+                    "project",
+                    "update",
+                    Some(serde_json::json!({ "initiative": null }))
+                ),
+                (
+                    4,
+                    "project",
+                    "update",
+                    Some(serde_json::json!({ "title": "Harbor festival" }))
+                ),
+                (
+                    5,
+                    "project",
+                    "update",
+                    Some(serde_json::json!({ "initiative": "i1" }))
+                ),
                 (6, "initiative", "remove", None),
             ]
         );
@@ -1434,7 +1450,11 @@ mod tests {
             seen,
             [
                 ("view", "update", Some(serde_json::json!({ "icon": null }))),
-                ("view", "update", Some(serde_json::json!({ "project_id": null }))),
+                (
+                    "view",
+                    "update",
+                    Some(serde_json::json!({ "project_id": null }))
+                ),
                 ("project_view", "create", None),
                 (
                     "project_view",

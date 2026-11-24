@@ -6,8 +6,8 @@ use super::types::{
     DateResolution, Milestone, Project, ProjectActivity, ProjectStatus, ProjectStatusName,
     TaskStatus,
 };
-use super::work::types::WorkOwner;
 use super::work::attachments;
+use super::work::types::WorkOwner;
 use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::Serialize;
@@ -16,7 +16,8 @@ use uuid::Uuid;
 /// How long a project stays in the bin before it is gone.
 pub(crate) const BIN_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 
-pub(crate) const SELF_LEAD_MIGRATION: &str = "ALTER TABLE planning_projects ADD COLUMN lead_is_self INTEGER NOT NULL DEFAULT 0
+pub(crate) const SELF_LEAD_MIGRATION: &str =
+    "ALTER TABLE planning_projects ADD COLUMN lead_is_self INTEGER NOT NULL DEFAULT 0
     CHECK(lead_is_self IN (0, 1) AND (lead_is_self = 0 OR lead_person_id IS NULL));
 ALTER TABLE planning_projects ADD COLUMN members_include_self INTEGER NOT NULL DEFAULT 0
     CHECK(members_include_self IN (0, 1));";
@@ -24,7 +25,8 @@ ALTER TABLE planning_projects ADD COLUMN members_include_self INTEGER NOT NULL D
 /// Summaries, custom status names, label scope and the history of a
 /// project's properties. Triggers write the history so every writer of a
 /// project or milestone is in it; members are written by `save_project`.
-pub(crate) const PROJECT_CORE_MIGRATION: &str = "ALTER TABLE planning_projects ADD COLUMN summary TEXT
+pub(crate) const PROJECT_CORE_MIGRATION: &str =
+    "ALTER TABLE planning_projects ADD COLUMN summary TEXT
     CHECK(summary IS NULL OR length(trim(summary)) > 0);
 CREATE TABLE planning_project_status_names (
     id TEXT PRIMARY KEY NOT NULL,
@@ -1128,8 +1130,14 @@ mod tests {
         assert_eq!(project.status, ProjectStatus::Active);
         assert_eq!(project.status_name_id.as_deref(), Some(review.id.as_str()));
 
-        let (_, moved) = save_status_name(&conn, Some(&review.id), ProjectStatus::Paused, "In review", 3)
-            .expect("the name moved");
+        let (_, moved) = save_status_name(
+            &conn,
+            Some(&review.id),
+            ProjectStatus::Paused,
+            "In review",
+            3,
+        )
+        .expect("the name moved");
         assert_eq!(moved, [project.id.clone()]);
         let paused = store::project(&conn, &project.id).expect("the project");
         assert_eq!(paused.status, ProjectStatus::Paused);

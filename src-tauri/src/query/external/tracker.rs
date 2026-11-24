@@ -36,9 +36,9 @@ use crate::planning::work::types::{
     WorkDirection, WorkDisplay, WorkDue, WorkFieldSuggestion, WorkGroupBy, WorkItem,
     WorkItemDetail, WorkItemInput, WorkItemRow, WorkLabel, WorkLayout, WorkList, WorkOrderBy,
     WorkOrderDirection, WorkOwner, WorkPatch, WorkPersonChoice, WorkPlace, WorkProgress,
-    WorkProjectChoice, WorkProposal, WorkProposalField,
-    WorkQuery, WorkRelation, WorkRelationKind, WorkRepeat, WorkSource, WorkStatus,
-    WorkSuggestionField, WorkSuggestionValue, WorkVia, WorkView, WorkViewInput,
+    WorkProjectChoice, WorkProposal, WorkProposalField, WorkQuery, WorkRelation, WorkRelationKind,
+    WorkRepeat, WorkSource, WorkStatus, WorkSuggestionField, WorkSuggestionValue, WorkVia,
+    WorkView, WorkViewInput,
 };
 use crate::planning::work::watch::WorkWatch;
 use crate::planning::work::{self, items, parse};
@@ -697,9 +697,9 @@ impl PageArgs {
         if let Some(cursor) = self.cursor {
             let theirs = cursor.order;
             let differs = self.order_by.is_some_and(|order| order != theirs.order)
-                || self
-                    .order_dir
-                    .is_some_and(|dir| (dir.direction() != theirs.order.order().natural()) != theirs.reversed)
+                || self.order_dir.is_some_and(|dir| {
+                    (dir.direction() != theirs.order.order().natural()) != theirs.reversed
+                })
                 || (self.no_priority_first && !theirs.none_first);
             if differs {
                 return Err(ExternalError::new(
@@ -722,7 +722,8 @@ impl PageArgs {
         Ok(RowOrder {
             order,
             reversed: direction != order.order().natural(),
-            none_first: self.no_priority_first || shown.is_some_and(|display| display.no_priority_first),
+            none_first: self.no_priority_first
+                || shown.is_some_and(|display| display.no_priority_first),
         })
     }
 }
@@ -780,7 +781,11 @@ impl fmt::Display for Cursor {
         let [first, second, third] = self.after;
         let order = self.order.order.to_possible_value().ok_or(fmt::Error)?;
         let reversed = if self.order.reversed { ":reversed" } else { "" };
-        let none_first = if self.order.none_first { ":none-first" } else { "" };
+        let none_first = if self.order.none_first {
+            ":none-first"
+        } else {
+            ""
+        };
         write!(
             formatter,
             "{}{reversed}{none_first}~{first}~{second}~{third}",
@@ -1399,10 +1404,11 @@ fn conditions(value: &str) -> Result<ConditionsArg, String> {
         One(WorkFilter),
         Many(Vec<WorkFilter>),
     }
-    let filters = match serde_json::from_str(value).map_err(|error| format!("Not a filter: {error}"))? {
-        OneOrMany::One(filter) => vec![filter],
-        OneOrMany::Many(filters) => filters,
-    };
+    let filters =
+        match serde_json::from_str(value).map_err(|error| format!("Not a filter: {error}"))? {
+            OneOrMany::One(filter) => vec![filter],
+            OneOrMany::Many(filters) => filters,
+        };
     if filters.iter().any(WorkFilter::has_empty_group) {
         return Err("A group holds no conditions: put at least one in each {\"any\": [...]} or {\"all\": [...]}.".to_owned());
     }
@@ -1701,7 +1707,17 @@ impl GroupArg {
 /// A board column's group key: the grouping, a colon, and the group.
 fn column_key(value: &str) -> Result<String, String> {
     let key = value.trim();
-    let kinds = ["status", "owner", "project", "meeting", "due", "priority", "cycle", "label", "milestone"];
+    let kinds = [
+        "status",
+        "owner",
+        "project",
+        "meeting",
+        "due",
+        "priority",
+        "cycle",
+        "label",
+        "milestone",
+    ];
     match key.split_once(':') {
         _ if key.is_empty() => Ok(String::new()),
         Some((kind, group)) if kinds.contains(&kind) && !group.is_empty() => Ok(key.to_owned()),
@@ -1901,8 +1917,13 @@ impl WorkVerb {
             | Self::DescriptionRestore(lifecycle::VersionRestoreArgs { dry_run: true, .. })
             | Self::Favorite(lifecycle::FavoriteArgs { dry_run: true, .. })
             | Self::Unfavorite(lifecycle::FavoriteArgs { dry_run: true, .. })
-            | Self::FavoriteFolderSave(lifecycle::FavoriteFolderSaveArgs { dry_run: true, .. })
-            | Self::FavoriteFolderDelete(lifecycle::FavoriteFolderDeleteArgs { dry_run: true, .. })
+            | Self::FavoriteFolderSave(lifecycle::FavoriteFolderSaveArgs {
+                dry_run: true, ..
+            })
+            | Self::FavoriteFolderDelete(lifecycle::FavoriteFolderDeleteArgs {
+                dry_run: true,
+                ..
+            })
             | Self::FavoriteMove(lifecycle::FavoriteMoveArgs { dry_run: true, .. })
             | Self::Subscribe(lifecycle::SubscribeArgs { dry_run: true, .. })
             | Self::Unsubscribe(lifecycle::SubscribeArgs { dry_run: true, .. })
@@ -1934,14 +1955,8 @@ impl WorkVerb {
                 verb:
                     threads::CommentVerb::Add(threads::CommentAddArgs { dry_run: true, .. })
                     | threads::CommentVerb::Edit(threads::CommentEditArgs { dry_run: true, .. })
-                    | threads::CommentVerb::Delete(threads::CommentDeleteArgs {
-                        dry_run: true,
-                        ..
-                    })
-                    | threads::CommentVerb::Resolve(threads::CommentResolveArgs {
-                        dry_run: true,
-                        ..
-                    }),
+                    | threads::CommentVerb::Delete(threads::CommentDeleteArgs { dry_run: true, .. })
+                    | threads::CommentVerb::Resolve(threads::CommentResolveArgs { dry_run: true, .. }),
             })
             | Self::CommentEdit(threads::CommentEditArgs { dry_run: true, .. })
             | Self::CommentDelete(threads::CommentDeleteArgs { dry_run: true, .. })
@@ -1979,9 +1994,13 @@ impl WorkVerb {
             | Self::InitiativeNew(initiatives::InitiativeNewArgs { dry_run: true, .. })
             | Self::InitiativeUpdate(initiatives::InitiativeUpdateArgs { dry_run: true, .. })
             | Self::InitiativeDelete(initiatives::InitiativeDeleteArgs { dry_run: true, .. })
-            | Self::InitiativeAddProject(initiatives::InitiativeProjectArgs { dry_run: true, .. })
+            | Self::InitiativeAddProject(initiatives::InitiativeProjectArgs {
+                dry_run: true,
+                ..
+            })
             | Self::InitiativeRemoveProject(initiatives::InitiativeProjectArgs {
-                dry_run: true, ..
+                dry_run: true,
+                ..
             })
             | Self::ProjectTemplateList
             | Self::ProjectTemplateSave(project_templates::ProjectTemplateSaveArgs {
@@ -1994,7 +2013,9 @@ impl WorkVerb {
             })
             | Self::ProjectNew(project_templates::ProjectNewArgs { dry_run: true, .. })
             | Self::ProjectStatusSave(catalog::ProjectStatusSaveArgs { dry_run: true, .. })
-            | Self::ProjectStatusDelete(catalog::ProjectStatusDeleteArgs { dry_run: true, .. })
+            | Self::ProjectStatusDelete(catalog::ProjectStatusDeleteArgs {
+                dry_run: true, ..
+            })
             | Self::TemplateSave(routines::TemplateSaveArgs { dry_run: true, .. })
             | Self::TemplateDelete(routines::TemplateDeleteArgs { dry_run: true, .. })
             | Self::TemplateUse(routines::TemplateUseArgs { dry_run: true, .. })
@@ -2010,7 +2031,9 @@ impl WorkVerb {
             | Self::ProjectUpdateDraft(_)
             | Self::ProjectUpdate(roadmap::ProjectUpdateArgs { dry_run: true, .. })
             | Self::ProjectUpdateEdit(roadmap::ProjectUpdateEditArgs { dry_run: true, .. })
-            | Self::ProjectUpdateDelete(roadmap::ProjectUpdateDeleteArgs { dry_run: true, .. })
+            | Self::ProjectUpdateDelete(roadmap::ProjectUpdateDeleteArgs {
+                dry_run: true, ..
+            })
             | Self::ProjectDelete(roadmap::ProjectDeleteArgs { dry_run: true, .. })
             | Self::ProjectSave(catalog::ProjectSaveArgs { dry_run: true, .. })
             | Self::ProjectArchive(catalog::ProjectArchiveArgs { dry_run: true, .. })
@@ -2038,7 +2061,9 @@ impl WorkVerb {
             | Self::PersonSplit(people::PersonSplitArgs { dry_run: true, .. })
             | Self::PersonDelete(people::PersonDeleteArgs { dry_run: true, .. })
             | Self::PersonPhoto(people::PersonPhotoArgs { dry_run: true, .. })
-            | Self::PersonContactRemove(people::PersonContactRemoveArgs { dry_run: true, .. })
+            | Self::PersonContactRemove(people::PersonContactRemoveArgs {
+                dry_run: true, ..
+            })
             | Self::FirstMetAnswer(people::FirstMetArgs { dry_run: true, .. })
             | Self::SpeakerConfirm(voices::SpeakerVoiceArgs { dry_run: true, .. })
             | Self::SpeakerVoiceUndo(voices::SpeakerVoiceArgs { dry_run: true, .. })
@@ -2079,8 +2104,12 @@ impl WorkVerb {
             | Self::LinkAccept(planner::LinkDecideArgs { dry_run: true, .. })
             | Self::LinkDismiss(planner::LinkDecideArgs { dry_run: true, .. })
             | Self::TriageSuggestions(_)
-            | Self::SuggestionAccept(triage_hints::SuggestionDecideArgs { dry_run: true, .. })
-            | Self::SuggestionDismiss(triage_hints::SuggestionDecideArgs { dry_run: true, .. })
+            | Self::SuggestionAccept(triage_hints::SuggestionDecideArgs {
+                dry_run: true, ..
+            })
+            | Self::SuggestionDismiss(triage_hints::SuggestionDecideArgs {
+                dry_run: true, ..
+            })
             | Self::Calendar(_)
             | Self::Trend(_)
             | Self::Today
@@ -2100,9 +2129,7 @@ impl WorkVerb {
             | Self::Watch(WatchArgs { dry_run: true, .. })
             | Self::Unwatch(UnwatchArgs { dry_run: true, .. })
             | Self::Session(_)
-            | Self::Sessions(_) => {
-                READ_SCOPES
-            }
+            | Self::Sessions(_) => READ_SCOPES,
             Self::Ask(AskArgs { take, .. }) if take.is_empty() => READ_SCOPES,
             Self::Export(_)
             | Self::Create(_)
@@ -3826,11 +3853,14 @@ impl Tracker<'_> {
             } else {
                 (WorkFilterOp::Is, delegate)
             };
-            query.filters.push(WorkCondition {
-                field: WorkFilterField::Delegate,
-                op,
-                values: vec![value.to_owned()],
-            }.into());
+            query.filters.push(
+                WorkCondition {
+                    field: WorkFilterField::Delegate,
+                    op,
+                    values: vec![value.to_owned()],
+                }
+                .into(),
+            );
         }
         if args.repeating {
             query.filters.push(
@@ -4777,7 +4807,12 @@ impl Tracker<'_> {
             .filter(|item| ids.contains(&item.id))
             .map(|item| board.project_item(item))
             .collect();
-        Ok(changed(WorkAction::Moved, Some(operation_id), tasks, Vec::new()))
+        Ok(changed(
+            WorkAction::Moved,
+            Some(operation_id),
+            tasks,
+            Vec::new(),
+        ))
     }
 
     async fn relate(&self, args: &RelateArgs) -> Result<WorkAnswer, ExternalError> {
@@ -5117,7 +5152,11 @@ impl Tracker<'_> {
             display.sub_group_by = lanes.group();
         }
         if let Some(hidden) = &args.hidden_columns {
-            display.hidden_columns = hidden.iter().filter(|key| !key.is_empty()).cloned().collect();
+            display.hidden_columns = hidden
+                .iter()
+                .filter(|key| !key.is_empty())
+                .cloned()
+                .collect();
         }
         if let Some(direction) = args.order_dir {
             display.order_direction = direction.direction();
@@ -5216,7 +5255,9 @@ impl Tracker<'_> {
             }));
         }
         let Some(md) = &args.md else {
-            return Err(ExternalError::invalid("Name --md DIR or --csv FILE.".to_owned()));
+            return Err(ExternalError::invalid(
+                "Name --md DIR or --csv FILE.".to_owned(),
+            ));
         };
         rows.sort_by_key(|row| row.item.number);
         std::fs::create_dir_all(md).map_err(|error| failed(md, "created", error))?;
@@ -5224,7 +5265,8 @@ impl Tracker<'_> {
         for row in &rows {
             let task = project_task(row, &board);
             let path = md.join(format!("{}.md", task.handle));
-            std::fs::write(&path, markdown(&task)).map_err(|error| failed(&path, "written", error))?;
+            std::fs::write(&path, markdown(&task))
+                .map_err(|error| failed(&path, "written", error))?;
             files.push(path.display().to_string());
         }
         Ok(WorkAnswer::Export(ExternalWorkExport {
@@ -5326,7 +5368,9 @@ impl Fence {
     /// The tasks it leaves out, by id: each whose own commitment or evidence
     /// names a meeting it hides, whatever the task's row shows of it.
     fn hidden_tasks(&self, history: &Connection) -> anyhow::Result<HashSet<String>> {
-        work::drawing_on(history, |kind, source_id| self.hides_source(kind, source_id))
+        work::drawing_on(history, |kind, source_id| {
+            self.hides_source(kind, source_id)
+        })
     }
 
     fn hides_suggestion(&self, suggestion: &WorkFieldSuggestion) -> bool {
@@ -5478,16 +5522,13 @@ fn page(
         },
         total: rows.len(),
         has_more,
-        next_cursor: shown
-            .last()
-            .filter(|_| has_more)
-            .map(|row| {
-                Cursor {
-                    order,
-                    after: place(row, order),
-                }
-                .to_string()
-            }),
+        next_cursor: shown.last().filter(|_| has_more).map(|row| {
+            Cursor {
+                order,
+                after: place(row, order),
+            }
+            .to_string()
+        }),
         conversations_available: board.fence.is_open(),
         read_as: None,
         groups: None,
@@ -6219,7 +6260,8 @@ impl Board {
                 let mut line = self.activity(entry);
                 if heard && matches!(entry.kind, WorkActivityKind::Created) {
                     line.meeting_id.clone_from(&detail.item.source_meeting_id);
-                    line.meeting_title.clone_from(&detail.item.source_meeting_title);
+                    line.meeting_title
+                        .clone_from(&detail.item.source_meeting_title);
                 }
                 line
             })
@@ -6687,22 +6729,28 @@ impl Filters {
                 ParentArg::Task(task) => board.task(task)?.item.id.clone(),
                 ParentArg::None => "none".to_owned(),
             };
-            query.filters.push(WorkCondition {
-                field: WorkFilterField::Parent,
-                op: WorkFilterOp::Is,
-                values: vec![value],
-            }.into());
+            query.filters.push(
+                WorkCondition {
+                    field: WorkFilterField::Parent,
+                    op: WorkFilterOp::Is,
+                    values: vec![value],
+                }
+                .into(),
+            );
         }
         if let Some(scope) = self.cycle_scope {
             let value = match scope {
                 CycleScopeArg::Planned => "planned",
                 CycleScopeArg::Added => "added",
             };
-            query.filters.push(WorkCondition {
-                field: WorkFilterField::CycleScope,
-                op: WorkFilterOp::Is,
-                values: vec![value.to_owned()],
-            }.into());
+            query.filters.push(
+                WorkCondition {
+                    field: WorkFilterField::CycleScope,
+                    op: WorkFilterOp::Is,
+                    values: vec![value.to_owned()],
+                }
+                .into(),
+            );
         }
         if !self.for_person.is_empty() {
             let values = self
@@ -6710,21 +6758,27 @@ impl Filters {
                 .iter()
                 .map(|person| board.person(person).map(|person| person.id.clone()))
                 .collect::<Result<Vec<_>, _>>()?;
-            query.filters.push(WorkCondition {
-                field: WorkFilterField::For,
-                op: WorkFilterOp::AnyOf,
-                values,
-            }.into());
+            query.filters.push(
+                WorkCondition {
+                    field: WorkFilterField::For,
+                    op: WorkFilterOp::AnyOf,
+                    values,
+                }
+                .into(),
+            );
         }
         if let Some(completed) = &self.completed {
             if self.status.is_empty() {
                 query.statuses = Some(vec![WorkStatus::Done]);
             }
-            query.filters.push(WorkCondition {
-                field: WorkFilterField::Completed,
-                op: WorkFilterOp::Is,
-                values: vec![completed.trim().to_owned()],
-            }.into());
+            query.filters.push(
+                WorkCondition {
+                    field: WorkFilterField::Completed,
+                    op: WorkFilterOp::Is,
+                    values: vec![completed.trim().to_owned()],
+                }
+                .into(),
+            );
         }
         self.scope.narrow(board, query)
     }
@@ -7187,7 +7241,13 @@ impl WorkAnswer {
             }
             Self::FollowUp(follow_up) => text.push_str(&follow_up.text),
             Self::Cycles(listing) if listing.calendar.is_some() => {
-                text.push_str(&listing.calendar.as_deref().unwrap_or_default().replace("\r\n", "\n"));
+                text.push_str(
+                    &listing
+                        .calendar
+                        .as_deref()
+                        .unwrap_or_default()
+                        .replace("\r\n", "\n"),
+                );
             }
             Self::Cycles(listing) => {
                 let _ = writeln!(
@@ -7484,7 +7544,10 @@ fn task_line(text: &mut String, task: &ExternalWorkItem, today: &Today) {
         notes.push(format!("under {}", parent.handle));
     }
     if let Some(progress) = task.sub_tasks {
-        notes.push(format!("{}/{} sub-tasks done", progress.done, progress.total));
+        notes.push(format!(
+            "{}/{} sub-tasks done",
+            progress.done, progress.total
+        ));
     }
     match task.attachment_count {
         0 => {}
@@ -7938,18 +8001,13 @@ mod agent_loops;
 mod dependencies;
 mod dictations;
 mod digest;
+mod feed;
 mod initiatives;
 mod insights;
 mod library;
 mod meeting_review;
 mod meeting_settings;
 mod planner;
-mod triage_hints;
-mod subjects;
-mod dependencies;
-mod initiatives;
-mod digest;
-mod feed;
 mod project_templates;
 mod routines;
 mod sessions;
@@ -7960,9 +8018,9 @@ mod threads;
 mod timeline;
 mod transcript;
 mod triage_hints;
+mod views;
 mod voices;
 mod words;
-mod views;
 
 #[cfg(test)]
 mod tests;

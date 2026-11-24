@@ -6,8 +6,8 @@ use super::organize::sent_before;
 use super::roadmap::ExternalProjectRef;
 use super::{
     handle, now_ms, refusal, status_text, task_ref, task_ref_of, Board, ExternalFieldChange,
-    ExternalWorkChange, ExternalWorkPlanned, ExternalWorkPreview, ExternalWorkRef, ExternalWorkSkip,
-    Priority, TaskRef, Tracker, WorkAction, WorkAnswer, WriteArgs,
+    ExternalWorkChange, ExternalWorkPlanned, ExternalWorkPreview, ExternalWorkRef,
+    ExternalWorkSkip, Priority, TaskRef, Tracker, WorkAction, WorkAnswer, WriteArgs,
 };
 use crate::meeting::types::MeetingSessionId;
 use crate::planning;
@@ -442,7 +442,10 @@ impl Tracker<'_> {
     }
 
     /// A meeting the caller may see; one kept on this Mac reads as absent.
-    async fn meeting_subject(&self, session_id: MeetingSessionId) -> Result<Subject, ExternalError> {
+    async fn meeting_subject(
+        &self,
+        session_id: MeetingSessionId,
+    ) -> Result<Subject, ExternalError> {
         let store = store(self.meetings).await?;
         let review = review(&store, session_id)?;
         let id = session_id.uuid().to_string();
@@ -491,11 +494,11 @@ impl Tracker<'_> {
         let id = comment.item_id.as_str();
         Ok(match comment.subject {
             WorkCommentSubject::Task => board.row(id).map(Subject::task),
-            WorkCommentSubject::Project => planning::history(self.history, |conn| {
-                plans::project(conn, id)
-            })
-            .ok()
-            .map(|project| Subject::project(&project)),
+            WorkCommentSubject::Project => {
+                planning::history(self.history, |conn| plans::project(conn, id))
+                    .ok()
+                    .map(|project| Subject::project(&project))
+            }
             WorkCommentSubject::Milestone => planning::history(self.history, |conn| {
                 let milestone = plans::milestone(conn, id)?;
                 let project = plans::project(conn, &milestone.project_id)?;
@@ -944,9 +947,11 @@ impl Tracker<'_> {
         }
         let mut proposed = Vec::new();
         if let Some(stripped) = &stripped {
-            let checklist_operation =
-                Uuid::new_v5(&Uuid::NAMESPACE_OID, format!("{operation_id}/checklist").as_bytes())
-                    .to_string();
+            let checklist_operation = Uuid::new_v5(
+                &Uuid::NAMESPACE_OID,
+                format!("{operation_id}/checklist").as_bytes(),
+            )
+            .to_string();
             let change = agents::update_as(
                 self.app,
                 &args.write.agent(),
@@ -1149,10 +1154,9 @@ fn on_text(on: &ExternalCommentOn) -> String {
     match on {
         ExternalCommentOn::Task(task) => format!("{} {}", task.handle, task.title),
         ExternalCommentOn::Project(project) => format!("project {}", project.name),
-        ExternalCommentOn::Milestone(milestone) => format!(
-            "milestone {} in {}",
-            milestone.name, milestone.project.name
-        ),
+        ExternalCommentOn::Milestone(milestone) => {
+            format!("milestone {} in {}", milestone.name, milestone.project.name)
+        }
         ExternalCommentOn::Meeting(meeting) => format!("meeting {}", meeting.title),
         ExternalCommentOn::Note(note) => format!("note {}", note.title),
     }
@@ -1263,11 +1267,17 @@ mod tests {
             vec![input("book the venue"), input("Send invites")],
         );
         assert_eq!(
-            unmade.iter().map(|input| input.title.as_str()).collect::<Vec<_>>(),
+            unmade
+                .iter()
+                .map(|input| input.title.as_str())
+                .collect::<Vec<_>>(),
             ["Send invites"]
         );
         assert_eq!(
-            skipped.iter().map(|skip| skip.id.as_str()).collect::<Vec<_>>(),
+            skipped
+                .iter()
+                .map(|skip| skip.id.as_str())
+                .collect::<Vec<_>>(),
             [made.id.as_str()]
         );
     }
@@ -1317,7 +1327,12 @@ mod tests {
         assert!(skipped.is_empty());
         assert!(filed.is_none());
         assert!(after
-            .checklist_request(&conn, &operation_id, &row(parent), vec![input("Send invites")])
+            .checklist_request(
+                &conn,
+                &operation_id,
+                &row(parent),
+                vec![input("Send invites")]
+            )
             .is_err());
     }
 

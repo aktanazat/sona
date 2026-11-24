@@ -2381,12 +2381,7 @@ impl MeetingProcessingService {
             };
             if track.source_kind == SourceKind::Microphone && origin != MeetingOrigin::Import {
                 if self
-                    .label_microphone_lane(
-                        &run,
-                        &mut lane,
-                        &lanes,
-                        user_voice.as_ref(),
-                    )
+                    .label_microphone_lane(&run, &mut lane, &lanes, user_voice.as_ref())
                     .is_err()
                 {
                     let _ = store.set_diarization_status(
@@ -4368,12 +4363,16 @@ fn run_live_pass_worker(
                 if heard.started {
                     let (service, store, live) =
                         (Arc::clone(&service), Arc::clone(&store), Arc::clone(&live));
-                    std::thread::spawn(move || service.read_live_doc_now(&store, session_id, &live));
+                    std::thread::spawn(move || {
+                        service.read_live_doc_now(&store, session_id, &live)
+                    });
                 }
                 if heard.edits {
                     let (service, store, live) =
                         (Arc::clone(&service), Arc::clone(&store), Arc::clone(&live));
-                    std::thread::spawn(move || service.edit_live_doc_by_voice(&store, session_id, &live));
+                    std::thread::spawn(move || {
+                        service.edit_live_doc_by_voice(&store, session_id, &live)
+                    });
                 }
                 if live_card::tick(&service, &store, session_id, &live, live_card::Moment::Pass) {
                     service.emit_current(&store, "meeting:live-card-changed", session_id);
@@ -5957,9 +5956,7 @@ fn live_help_evidence(
         MeetingLiveHelpKind::Questions
         | MeetingLiveHelpKind::Say
         | MeetingLiveHelpKind::Ask
-        | MeetingLiveHelpKind::Recap => {
-            None
-        }
+        | MeetingLiveHelpKind::Recap => None,
     };
     let mut newest_first = Vec::new();
     let mut used = 0_usize;
@@ -7388,7 +7385,13 @@ pub(crate) mod tests {
         let (_directory, store) = store();
         store.set_user_name_source(|| Some("Owner".to_owned()));
         let session_id = reviewable_meeting(&store, "Unconfirmed local voice", 1);
-        spaced_transcript_segments(&store, session_id, &["Earlier revision"], SECOND_NS, SECOND_NS);
+        spaced_transcript_segments(
+            &store,
+            session_id,
+            &["Earlier revision"],
+            SECOND_NS,
+            SECOND_NS,
+        );
         let seed = store.review_snapshot(session_id)?;
         let track = seed.tracks[0].clone();
         let revision = store.begin_transcript_revision(TranscriptRevisionInput {
@@ -7404,15 +7407,17 @@ pub(crate) mod tests {
             (5 * SECOND_NS, 5 * SECOND_NS + 400_000_000, "Okay."),
             (6 * SECOND_NS, 6 * SECOND_NS + 400_000_000, "Thanks."),
         ]
-        .map(|(start_offset_ns, end_offset_ns, text)| TranscriptSegmentInput {
-            track_id: track.track_id,
-            source_kind: SourceKind::Microphone,
-            start_offset_ns,
-            end_offset_ns,
-            text: text.to_owned(),
-            confidence_milli: None,
-            speaker: None,
-        });
+        .map(
+            |(start_offset_ns, end_offset_ns, text)| TranscriptSegmentInput {
+                track_id: track.track_id,
+                source_kind: SourceKind::Microphone,
+                start_offset_ns,
+                end_offset_ns,
+                text: text.to_owned(),
+                confidence_milli: None,
+                speaker: None,
+            },
+        );
         store.append_transcript_segments(session_id, revision, &inputs)?;
         store.complete_transcript_revision(session_id, revision)?;
         let before = store.review_snapshot(session_id)?;
@@ -7544,7 +7549,8 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn shared_words_do_not_delete_microphone_speech_before_voice_evidence() -> Result<(), StoreError> {
+    fn shared_words_do_not_delete_microphone_speech_before_voice_evidence() -> Result<(), StoreError>
+    {
         use crate::meeting::store::workflow_core_tests::{
             recording_tracks, reviewable_meeting, store,
         };
@@ -7557,7 +7563,9 @@ pub(crate) mod tests {
             }
 
             fn plan_for(&self, _run_plan: &MeetingRunPlan) -> Option<AsrPlan> {
-                Some(AsrPlan::from_settings(&crate::settings::AppSettings::default()))
+                Some(AsrPlan::from_settings(
+                    &crate::settings::AppSettings::default(),
+                ))
             }
 
             fn engine_id(&self) -> &'static str {
@@ -8140,10 +8148,20 @@ pub(crate) mod tests {
         let mut offset_ns = 0;
         let mut chunks = feed(&mut chunker, true, 50, &mut offset_ns);
         chunks.extend(chunker.finish(true));
-        chunks.extend(feed(&mut chunker, false, ASR_SILENCE_FRAMES, &mut offset_ns));
+        chunks.extend(feed(
+            &mut chunker,
+            false,
+            ASR_SILENCE_FRAMES,
+            &mut offset_ns,
+        ));
         let resumed_at = offset_ns;
         chunks.extend(feed(&mut chunker, true, 20, &mut offset_ns));
-        chunks.extend(feed(&mut chunker, false, ASR_SILENCE_FRAMES, &mut offset_ns));
+        chunks.extend(feed(
+            &mut chunker,
+            false,
+            ASR_SILENCE_FRAMES,
+            &mut offset_ns,
+        ));
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[1].start_offset_ns, resumed_at);
         assert_eq!(chunks[1].samples.len(), 30 * VAD_FRAME_SAMPLES);
@@ -8162,7 +8180,12 @@ pub(crate) mod tests {
         offset_ns += 55_000_000_000;
         let resumed_at = offset_ns;
         chunks.extend(feed(&mut chunker, true, 20, &mut offset_ns));
-        chunks.extend(feed(&mut chunker, false, ASR_SILENCE_FRAMES, &mut offset_ns));
+        chunks.extend(feed(
+            &mut chunker,
+            false,
+            ASR_SILENCE_FRAMES,
+            &mut offset_ns,
+        ));
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[1].start_offset_ns, resumed_at);
         assert_eq!(chunks[1].samples.len(), 30 * VAD_FRAME_SAMPLES);

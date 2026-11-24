@@ -192,8 +192,14 @@ pub(crate) fn site_file_names() -> Vec<String> {
         ".github/workflows/pages.yml".to_owned(),
         "index.html".to_owned(),
         "404.html".to_owned(),
-        format!("assets/{}", asset_name("viewer", "js", VIEWER_JS.as_bytes())),
-        format!("assets/{}", asset_name("viewer", "css", VIEWER_CSS.as_bytes())),
+        format!(
+            "assets/{}",
+            asset_name("viewer", "js", VIEWER_JS.as_bytes())
+        ),
+        format!(
+            "assets/{}",
+            asset_name("viewer", "css", VIEWER_CSS.as_bytes())
+        ),
         format!("assets/{}", asset_name("card", "png", CARD_PNG)),
     ]
 }

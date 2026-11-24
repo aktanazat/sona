@@ -21,7 +21,9 @@ use crate::meeting::session::{
     MeetingNoteDeleteRequest, MeetingNoteUpdateRequest, MeetingSessionManager,
     MeetingTitleSetRequest, MeetingUserNotesSaveRequest,
 };
-use crate::meeting::snapshots::{MeetingSnapshotId, MeetingSnapshotSummary, MeetingSnapshotTextMoment};
+use crate::meeting::snapshots::{
+    MeetingSnapshotId, MeetingSnapshotSummary, MeetingSnapshotTextMoment,
+};
 use crate::meeting::store::{MeetingStore, StoreError};
 use crate::meeting::types::{
     HeardPlanId, ManualNoteId, MeetingCommandError, MeetingCommandKind, MeetingDeletionJobId,
@@ -644,14 +646,22 @@ fn when(value: &str) -> Result<i64, String> {
         .find_map(|format| NaiveDateTime::parse_from_str(value, format).ok())
         .and_then(|naive| Local.from_local_datetime(&naive).single())
         .map(|at| at.timestamp_millis())
-        .ok_or_else(|| format!("{value:?} is not a time: use YYYY-MM-DD HH:MM, RFC 3339, or epoch milliseconds"))
+        .ok_or_else(|| {
+            format!(
+                "{value:?} is not a time: use YYYY-MM-DD HH:MM, RFC 3339, or epoch milliseconds"
+            )
+        })
 }
 
 pub(super) fn told(dry_run: bool, done: &str, would: &str) -> String {
     (if dry_run { would } else { done }).to_owned()
 }
 
-pub(super) fn change(summary: String, dry_run: bool, operation_id: String) -> ExternalLibraryChange {
+pub(super) fn change(
+    summary: String,
+    dry_run: bool,
+    operation_id: String,
+) -> ExternalLibraryChange {
     ExternalLibraryChange {
         schema_version: QUERY_SCHEMA_VERSION,
         summary,
@@ -747,11 +757,10 @@ pub(super) async fn meeting(
 
 fn folder_error(folder: Uuid) -> impl Fn(MeetingCommandError) -> ExternalError {
     move |error| match error {
-        MeetingCommandError::NotFound => ExternalError::new(
-            ExternalErrorCode::NotFound,
-            format!("No folder {folder}."),
-        )
-        .hint("List them with: sona work folders"),
+        MeetingCommandError::NotFound => {
+            ExternalError::new(ExternalErrorCode::NotFound, format!("No folder {folder}."))
+                .hint("List them with: sona work folders")
+        }
         error => QueryError::from(error).into(),
     }
 }
@@ -982,7 +991,10 @@ pub(super) async fn trash_change(
     };
     if restore {
         gate("restoring a meeting")?;
-        let restored = meetings.trash_restore(entry.job_id).await.map_err(refused)?;
+        let restored = meetings
+            .trash_restore(entry.job_id)
+            .await
+            .map_err(refused)?;
         answer.meeting_id = Some(restored.session_id.uuid());
     } else {
         gate("deleting a meeting for good")?;
@@ -1034,9 +1046,10 @@ pub(super) fn receipt_replayed(
 
 fn plan_error(plan: Uuid) -> impl Fn(StoreError) -> ExternalError {
     move |error| match error {
-        StoreError::NotFound => {
-            ExternalError::new(ExternalErrorCode::NotFound, format!("No heard plan {plan}."))
-        }
+        StoreError::NotFound => ExternalError::new(
+            ExternalErrorCode::NotFound,
+            format!("No heard plan {plan}."),
+        ),
         StoreError::Conflict => ExternalError::invalid(
             "That plan is on the calendar. Take it off the calendar in Sona before changing it.",
         ),
@@ -1056,7 +1069,8 @@ async fn heard_plan(
     let found = store
         .heard_plan(HeardPlanId::from_uuid(plan))
         .map_err(plan_error(plan))?;
-    visible_meeting(&store, found.session_id).map_err(|_| plan_error(plan)(StoreError::NotFound))?;
+    visible_meeting(&store, found.session_id)
+        .map_err(|_| plan_error(plan)(StoreError::NotFound))?;
     Ok((store, found))
 }
 
@@ -1515,8 +1529,11 @@ pub(super) async fn note_add(
 }
 
 fn missing_note(note: Uuid) -> ExternalError {
-    ExternalError::new(ExternalErrorCode::NotFound, format!("No note {note} in this meeting."))
-        .hint("List them with: sona work meeting-notes MEETING")
+    ExternalError::new(
+        ExternalErrorCode::NotFound,
+        format!("No note {note} in this meeting."),
+    )
+    .hint("List them with: sona work meeting-notes MEETING")
 }
 
 pub(super) async fn note_edit(
@@ -1817,11 +1834,9 @@ pub(super) async fn heard_plan_edit(
         }
         (None, Some(end), Some(window)) => (window.start_utc_ms, end),
         (None, None, Some(window)) => (window.start_utc_ms, window.end_utc_ms),
-        (_, _, None) => {
-            return Err(ExternalError::invalid(
-                "Nobody said a day this Mac can place for that plan. Give it both --start and --end.",
-            ))
-        }
+        (_, _, None) => return Err(ExternalError::invalid(
+            "Nobody said a day this Mac can place for that plan. Give it both --start and --end.",
+        )),
     };
     let edit = HeardPlanEdit {
         plan_id: found.plan_id,
@@ -2396,7 +2411,9 @@ mod tests {
     }
 
     fn waiting(what: &str) -> Result<(), ExternalError> {
-        Err(ExternalError::invalid(format!("{what} waits for the user.")))
+        Err(ExternalError::invalid(format!(
+            "{what} waits for the user."
+        )))
     }
 
     struct Corpus {
@@ -2526,7 +2543,11 @@ mod tests {
         session_id
     }
 
-    async fn trash_meeting(meetings: &MeetingSessionManager, store: &MeetingStore, meeting: MeetingSessionId) {
+    async fn trash_meeting(
+        meetings: &MeetingSessionManager,
+        store: &MeetingStore,
+        meeting: MeetingSessionId,
+    ) {
         let revision = store.session_snapshot(meeting).unwrap().revision;
         meetings
             .delete(MeetingMutationRequest {
@@ -2565,21 +2586,33 @@ mod tests {
     fn meeting_rename_writes_once_and_a_dry_run_writes_nothing() {
         tauri::async_runtime::block_on(async {
             let corpus = corpus().await;
-            let dry = rename(&corpus.meetings, &renaming(corpus.pricing, "Q3 pricing", true), &applies)
-                .await
-                .unwrap();
+            let dry = rename(
+                &corpus.meetings,
+                &renaming(corpus.pricing, "Q3 pricing", true),
+                &applies,
+            )
+            .await
+            .unwrap();
             assert!(dry.dry_run && !dry.replayed);
             assert_eq!(title(&corpus, corpus.pricing).await, "Pricing sync");
 
-            let renamed = rename(&corpus.meetings, &renaming(corpus.pricing, "Q3 pricing", false), &applies)
-                .await
-                .unwrap();
+            let renamed = rename(
+                &corpus.meetings,
+                &renaming(corpus.pricing, "Q3 pricing", false),
+                &applies,
+            )
+            .await
+            .unwrap();
             assert!(!renamed.replayed);
             assert_eq!(title(&corpus, corpus.pricing).await, "Q3 pricing");
 
-            let again = rename(&corpus.meetings, &renaming(corpus.pricing, "Q3 pricing", false), &applies)
-                .await
-                .unwrap();
+            let again = rename(
+                &corpus.meetings,
+                &renaming(corpus.pricing, "Q3 pricing", false),
+                &applies,
+            )
+            .await
+            .unwrap();
             assert!(again.replayed);
         });
     }
@@ -2588,13 +2621,19 @@ mod tests {
     fn a_meeting_kept_on_this_mac_is_never_changed_or_exported() {
         tauri::async_runtime::block_on(async {
             let corpus = corpus().await;
-            let refused = rename(&corpus.meetings, &renaming(corpus.kept, "Leaked", false), &applies)
-                .await
-                .unwrap_err();
+            let refused = rename(
+                &corpus.meetings,
+                &renaming(corpus.kept, "Leaked", false),
+                &applies,
+            )
+            .await
+            .unwrap_err();
             assert_eq!(refused.error, ExternalErrorCode::NotFound);
             assert_eq!(title(&corpus, corpus.kept).await, "Board prep");
 
-            let exported = csv(&corpus.meetings, &FileArgs { out: None }, &applies).await.unwrap();
+            let exported = csv(&corpus.meetings, &FileArgs { out: None }, &applies)
+                .await
+                .unwrap();
             let contents = exported.contents.unwrap();
             assert!(contents.contains("Pricing sync"));
             assert!(!contents.contains("Board prep"));
@@ -2609,13 +2648,24 @@ mod tests {
             let path = directory.path().join("meetings.csv");
             std::fs::write(&path, "the user's own file").unwrap();
 
-            let refused = csv(&corpus.meetings, &FileArgs { out: Some(path.clone()) }, &waiting)
-                .await
-                .unwrap_err();
+            let refused = csv(
+                &corpus.meetings,
+                &FileArgs {
+                    out: Some(path.clone()),
+                },
+                &waiting,
+            )
+            .await
+            .unwrap_err();
             assert_eq!(refused.message, "saving a file waits for the user.");
-            assert_eq!(std::fs::read_to_string(&path).unwrap(), "the user's own file");
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                "the user's own file"
+            );
 
-            let answered = csv(&corpus.meetings, &FileArgs { out: None }, &waiting).await.unwrap();
+            let answered = csv(&corpus.meetings, &FileArgs { out: None }, &waiting)
+                .await
+                .unwrap();
             assert!(answered.contents.unwrap().contains("Pricing sync"));
         });
     }
@@ -2633,7 +2683,9 @@ mod tests {
                 change: write(false),
             };
 
-            let refused = export(&corpus.meetings, &asked, &waiting).await.unwrap_err();
+            let refused = export(&corpus.meetings, &asked, &waiting)
+                .await
+                .unwrap_err();
             assert_eq!(refused.message, "exporting a meeting waits for the user.");
             assert!(!path.exists());
 
@@ -2648,7 +2700,10 @@ mod tests {
             let corpus = corpus().await;
             let made = folder_new(
                 &corpus.meetings,
-                &FolderNewArgs { name: "Q3".to_owned(), change: write(false) },
+                &FolderNewArgs {
+                    name: "Q3".to_owned(),
+                    change: write(false),
+                },
                 &applies,
             )
             .await
@@ -2663,10 +2718,12 @@ mod tests {
                 .unwrap();
             assert!(!filed.replayed);
             assert_eq!(filed.folder_id, made.folder_id);
-            assert!(folder_membership(&corpus.meetings, &filing, true, &applies)
-                .await
-                .unwrap()
-                .replayed);
+            assert!(
+                folder_membership(&corpus.meetings, &filing, true, &applies)
+                    .await
+                    .unwrap()
+                    .replayed
+            );
 
             let store = corpus.meetings.store().await.unwrap();
             let folder_id = corpus
@@ -2681,7 +2738,10 @@ mod tests {
                 None,
                 None,
                 25,
-                &MeetingListFilter { folder_id, ..MeetingListFilter::default() },
+                &MeetingListFilter {
+                    folder_id,
+                    ..MeetingListFilter::default()
+                },
             )
             .unwrap();
             let ids: Vec<_> = listed.iter().map(|summary| summary.session_id).collect();
@@ -2702,9 +2762,13 @@ mod tests {
             assert!(!first.replayed);
             let store = corpus.meetings.store().await.unwrap();
             assert!(store.review_snapshot(corpus.pricing).is_err());
-            let refused = rename(&corpus.meetings, &renaming(corpus.pricing, "Back", false), &applies)
-                .await
-                .unwrap_err();
+            let refused = rename(
+                &corpus.meetings,
+                &renaming(corpus.pricing, "Back", false),
+                &applies,
+            )
+            .await
+            .unwrap_err();
             assert_eq!(refused.error, ExternalErrorCode::NotFound);
 
             let again = delete(&corpus.meetings, &args, &applies).await.unwrap();
@@ -2766,7 +2830,10 @@ mod tests {
                 .unwrap();
             receipt_replayed(&landed.receipt, revision).unwrap();
             assert_eq!(landed.receipt.new_revision, Some(revision + 1));
-            assert_eq!(store.session_snapshot(meeting).unwrap().revision, revision + 1);
+            assert_eq!(
+                store.session_snapshot(meeting).unwrap().revision,
+                revision + 1
+            );
         });
     }
 
@@ -2782,7 +2849,11 @@ mod tests {
             trash_meeting(&corpus.meetings, &store, kept).await;
 
             let listed = trash(&corpus.meetings).await.unwrap();
-            let titles: Vec<_> = listed.entries.iter().map(|entry| entry.title.as_str()).collect();
+            let titles: Vec<_> = listed
+                .entries
+                .iter()
+                .map(|entry| entry.title.as_str())
+                .collect();
             assert_eq!(titles, vec!["Roadmap review"]);
 
             let kept_entry = corpus
@@ -2795,7 +2866,10 @@ mod tests {
                 .unwrap()
                 .job_id;
             for restore in [true, false] {
-                let asked = TrashArgs { entry: kept_entry.uuid(), change: write(false) };
+                let asked = TrashArgs {
+                    entry: kept_entry.uuid(),
+                    change: write(false),
+                };
                 let refused = trash_change(&corpus.meetings, &asked, restore, &applies)
                     .await
                     .unwrap_err();
@@ -2803,8 +2877,13 @@ mod tests {
             }
             assert!(store.review_snapshot(kept).is_err());
 
-            let asked = TrashArgs { entry: listed.entries[0].id, change: write(false) };
-            let restored = trash_change(&corpus.meetings, &asked, true, &applies).await.unwrap();
+            let asked = TrashArgs {
+                entry: listed.entries[0].id,
+                change: write(false),
+            };
+            let restored = trash_change(&corpus.meetings, &asked, true, &applies)
+                .await
+                .unwrap();
             assert_eq!(restored.meeting_id, Some(open.uuid()));
 
             corpus.meetings.trash_restore(kept_entry).await.unwrap();

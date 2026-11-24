@@ -212,9 +212,8 @@ fn priority(value: &str) -> Option<&'static str> {
 /// The local days `value` covers: its first day and the day after its last.
 pub(crate) fn span(value: &str, today: NaiveDate) -> Option<(NaiveDate, NaiveDate)> {
     let week = |weeks: i64| {
-        let monday = today.checked_sub_days(Days::new(u64::from(
-            today.weekday().num_days_from_monday(),
-        )))?;
+        let monday =
+            today.checked_sub_days(Days::new(u64::from(today.weekday().num_days_from_monday())))?;
         let start = monday.checked_add_signed(chrono::TimeDelta::weeks(weeks))?;
         Some((start, start.checked_add_days(Days::new(7))?))
     };
@@ -247,7 +246,10 @@ fn day(value: &str, now_ms: i64) -> Result<Value> {
         return Ok(Value::At(value.parse()?));
     }
     let (first, end) = span(value, local_today(now_ms)?).ok_or(Refusal::Invalid)?;
-    Ok(Value::Day(local_midnight_ms(first)?, local_midnight_ms(end)?))
+    Ok(Value::Day(
+        local_midnight_ms(first)?,
+        local_midnight_ms(end)?,
+    ))
 }
 
 /// Reads every filter's values; `merged` gives a person with the ids
@@ -335,9 +337,7 @@ impl Reader<'_> {
                     values.push(Value::Text(points.to_string()));
                 }
                 WorkFilterField::Delegate => {
-                    values.push(Value::Text(
-                        agents::agent_name(Some(raw)).to_lowercase(),
-                    ));
+                    values.push(Value::Text(agents::agent_name(Some(raw)).to_lowercase()));
                 }
                 WorkFilterField::Repeat => values.push(match text.as_str() {
                     "set" => Value::Repeating,

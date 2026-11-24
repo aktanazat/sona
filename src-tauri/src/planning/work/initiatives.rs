@@ -277,9 +277,9 @@ pub(crate) fn save(
         Some(WorkOwner::Myself) => (true, None),
         Some(WorkOwner::Person { person_id }) => (false, present(person_id)),
         Some(WorkOwner::Nobody) => (false, None),
-        None => current
-            .as_ref()
-            .map_or((false, None), |c| (c.owner_is_self, c.owner_person_id.clone())),
+        None => current.as_ref().map_or((false, None), |c| {
+            (c.owner_is_self, c.owner_person_id.clone())
+        }),
     };
     let target = input
         .target_at_ms
@@ -335,7 +335,10 @@ pub(crate) fn save(
 /// in no initiative.
 pub(crate) fn delete(conn: &Connection, id: &str) -> Result<Initiative> {
     let found = initiative(conn, &store::uuid(id)?)?;
-    conn.execute("DELETE FROM planning_initiatives WHERE id = ?1", [&found.id])?;
+    conn.execute(
+        "DELETE FROM planning_initiatives WHERE id = ?1",
+        [&found.id],
+    )?;
     Ok(found)
 }
 
@@ -376,7 +379,9 @@ pub(crate) fn remove_project(conn: &Connection, project_id: &str) -> Result<Init
 
 /// [`initiatives`], read for the app.
 pub(crate) fn listed(app: &AppHandle) -> std::result::Result<Vec<Initiative>, String> {
-    super::super::history(&app.state::<Arc<HistoryManager>>(), |conn| initiatives(conn))
+    super::super::history(&app.state::<Arc<HistoryManager>>(), |conn| {
+        initiatives(conn)
+    })
 }
 
 /// Runs one initiative write under `operation_id` and tells every window.
@@ -406,9 +411,13 @@ pub(crate) fn save_written(
     id: Option<&str>,
     input: &InitiativeSaveInput,
 ) -> std::result::Result<Initiative, String> {
-    write(app, operation_id, "initiative_save", &(id, input), |tx, now| {
-        save(tx, id, input, now)
-    })
+    write(
+        app,
+        operation_id,
+        "initiative_save",
+        &(id, input),
+        |tx, now| save(tx, id, input, now),
+    )
 }
 
 pub(crate) fn delete_written(
@@ -416,7 +425,9 @@ pub(crate) fn delete_written(
     operation_id: &str,
     id: &str,
 ) -> std::result::Result<Initiative, String> {
-    write(app, operation_id, "initiative_delete", &id, |tx, _| delete(tx, id))
+    write(app, operation_id, "initiative_delete", &id, |tx, _| {
+        delete(tx, id)
+    })
 }
 
 pub(crate) fn add_project_written(
@@ -439,9 +450,13 @@ pub(crate) fn remove_project_written(
     operation_id: &str,
     project_id: &str,
 ) -> std::result::Result<Initiative, String> {
-    write(app, operation_id, "initiative_remove_project", &project_id, |tx, _| {
-        remove_project(tx, project_id)
-    })
+    write(
+        app,
+        operation_id,
+        "initiative_remove_project",
+        &project_id,
+        |tx, _| remove_project(tx, project_id),
+    )
 }
 
 #[cfg(test)]
@@ -510,9 +525,18 @@ mod tests {
         assert_eq!(
             moves,
             [
-                (venue.as_str(), Some(serde_json::json!({ "initiative": null }))),
-                (venue.as_str(), Some(serde_json::json!({ "initiative": launch.id }))),
-                (venue.as_str(), Some(serde_json::json!({ "initiative": hiring.id }))),
+                (
+                    venue.as_str(),
+                    Some(serde_json::json!({ "initiative": null }))
+                ),
+                (
+                    venue.as_str(),
+                    Some(serde_json::json!({ "initiative": launch.id }))
+                ),
+                (
+                    venue.as_str(),
+                    Some(serde_json::json!({ "initiative": hiring.id }))
+                ),
             ]
         );
     }

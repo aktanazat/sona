@@ -94,8 +94,10 @@ pub async fn scratchpad_capture_passage(
     let snapshot = store
         .review_snapshot(session_id)
         .map_err(|_| "This conversation is unavailable.".to_string())?;
-    passage(&history, store, snapshot, segment_id, &excerpt, person_id, body)?
-        .save(&app, &history, super::Author::Me)
+    passage(
+        &history, store, snapshot, segment_id, &excerpt, person_id, body,
+    )?
+    .save(&app, &history, super::Author::Me)
 }
 
 /// A passage of a meeting's transcript, checked and worded as the note that

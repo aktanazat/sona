@@ -60,15 +60,37 @@ const OPENERS: &[&str] = &["hey", "hi", "ok", "okay", "so", "and"];
 /// recap so far". Any other word is talk about Sona: "So Sona already files
 /// those".
 const COMMANDS: &[&str] = &[
-    "start", "take", "keep", "make", "show", "open", "put", "recap", "summarize", "summarise",
-    "give", "tell", "find", "look", "search", "pull", "what", "who", "when", "where", "why",
-    "how", "which",
+    "start",
+    "take",
+    "keep",
+    "make",
+    "show",
+    "open",
+    "put",
+    "recap",
+    "summarize",
+    "summarise",
+    "give",
+    "tell",
+    "find",
+    "look",
+    "search",
+    "pull",
+    "what",
+    "who",
+    "when",
+    "where",
+    "why",
+    "how",
+    "which",
 ];
 /// Words that may come before the verb of a spoken edit after a pause:
 /// "Sona, now separate this by aisle". Without a pause only "can you" and
 /// its kin, or "please", may: "And Sona can just drop the old items" is
 /// talk about Sona.
-const EDIT_LEADS: &[&str] = &["please", "now", "also", "then", "and", "just", "actually", "let's", "lets"];
+const EDIT_LEADS: &[&str] = &[
+    "please", "now", "also", "then", "and", "just", "actually", "let's", "lets",
+];
 /// Verbs that open a change to the doc.
 const EDIT_VERBS: &[&str] = &[
     "add", "remove", "delete", "drop", "rename", "change", "replace", "reword", "group", "sort",
@@ -76,7 +98,9 @@ const EDIT_VERBS: &[&str] = &[
 ];
 /// Words that make an ask a question even with an edit verb in it: "Sona,
 /// can you sort out who owns the pricing page?"
-const QUESTION_WORDS: &[&str] = &["who", "what", "when", "where", "why", "how", "which", "whether"];
+const QUESTION_WORDS: &[&str] = &[
+    "who", "what", "when", "where", "why", "how", "which", "whether",
+];
 /// Verbs that change the doc only with "off" after them: "check off the
 /// bread", "cross the eggs off". "Sona, check whether Dana sent it" is a
 /// question.
@@ -487,7 +511,11 @@ fn read(
         let candidates = candidates(written, &request);
         let rewrites: Vec<(&Known, String)> = candidates
             .iter()
-            .filter_map(|candidate| candidate.rewrites.map(|known| (known, candidate.text.clone())))
+            .filter_map(|candidate| {
+                candidate
+                    .rewrites
+                    .map(|known| (known, candidate.text.clone()))
+            })
             .collect();
         let kept = folded(check(generator.as_ref(), live, candidates), rewrites);
         let mut doc = live.doc();
@@ -534,7 +562,11 @@ pub(super) fn hang_up(
     while live.doc().editing {
         std::thread::sleep(Duration::from_millis(250));
     }
-    let before: HashSet<String> = live.doc_points().into_iter().map(|point| point.id).collect();
+    let before: HashSet<String> = live
+        .doc_points()
+        .into_iter()
+        .map(|point| point.id)
+        .collect();
     let recorded: HashSet<String> = live
         .live_changes()
         .into_iter()
@@ -575,10 +607,12 @@ fn after_stop(
 ) -> Vec<MeetingLiveDocPoint> {
     let mut kept: Vec<MeetingLiveDocPoint> = saved
         .into_iter()
-        .map(|point| match read.iter().find(|newer| newer.id == point.id) {
-            Some(newer) if !point.edited => newer.clone(),
-            _ => point,
-        })
+        .map(
+            |point| match read.iter().find(|newer| newer.id == point.id) {
+                Some(newer) if !point.edited => newer.clone(),
+                _ => point,
+            },
+        )
         .collect();
     kept.extend(read.into_iter().filter(|point| !before.contains(&point.id)));
     kept
@@ -602,7 +636,10 @@ fn hear_asks(live: &LiveTranscript, claimed: &mut Heard) -> bool {
         let Some((intent, words)) = voice_ask(&segment.text) else {
             continue;
         };
-        if matches!(intent, MeetingVoiceIntent::StartDoc | MeetingVoiceIntent::Edit) {
+        if matches!(
+            intent,
+            MeetingVoiceIntent::StartDoc | MeetingVoiceIntent::Edit
+        ) {
             claimed.started |= start(&mut doc);
         }
         let sequence = u32::try_from(doc.asks.len() + 1).unwrap_or(u32::MAX);
@@ -647,7 +684,12 @@ pub(crate) fn voice_ask(text: &str) -> Option<(MeetingVoiceIntent, String)> {
     }
     let said: Vec<String> = words.map(|(word, _)| word).collect();
     let edit = is_edit(&said, paused);
-    if !paused && !edit && !said.first().is_some_and(|word| COMMANDS.contains(&word.as_str())) {
+    if !paused
+        && !edit
+        && !said
+            .first()
+            .is_some_and(|word| COMMANDS.contains(&word.as_str()))
+    {
         return None;
     }
     let has = |wanted: &[&str]| said.iter().any(|word| wanted.contains(&word.as_str()));
@@ -721,7 +763,13 @@ fn words(text: &str) -> impl Iterator<Item = (String, usize)> + '_ {
         let word = text[start..from]
             .chars()
             .flat_map(char::to_lowercase)
-            .map(|character| if character == '\u{2019}' { '\'' } else { character })
+            .map(|character| {
+                if character == '\u{2019}' {
+                    '\''
+                } else {
+                    character
+                }
+            })
             .collect();
         Some((word, from))
     })
@@ -893,7 +941,10 @@ fn candidates(written: Vec<Written>, request: &Request) -> Vec<Candidate<'_>> {
                 })
                 .collect::<Option<Vec<&Given>>>()?;
             let first_said = cited.iter().map(|line| line.said_ns).min()?;
-            let text = unlabeled(&written.text).split_whitespace().collect::<Vec<_>>().join(" ");
+            let text = unlabeled(&written.text)
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
             if words(&text).nth(1).is_none()
                 || text.chars().count() > MAX_POINT_CHARS
                 || text.chars().any(char::is_control)
@@ -929,11 +980,20 @@ fn candidates(written: Vec<Written>, request: &Request) -> Vec<Candidate<'_>> {
 /// kept the add, and the doc held both dates. An add that says what a kept
 /// rewrite says goes, and one that says what a dropped rewrite said
 /// replaces that point.
-fn folded<'a>(mut kept: Vec<Candidate<'a>>, rewrites: Vec<(&'a Known, String)>) -> Vec<Candidate<'a>> {
-    let rewritten: Vec<String> =
-        kept.iter().filter(|candidate| candidate.rewrites.is_some()).map(|candidate| candidate.text.clone()).collect();
+fn folded<'a>(
+    mut kept: Vec<Candidate<'a>>,
+    rewrites: Vec<(&'a Known, String)>,
+) -> Vec<Candidate<'a>> {
+    let rewritten: Vec<String> = kept
+        .iter()
+        .filter(|candidate| candidate.rewrites.is_some())
+        .map(|candidate| candidate.text.clone())
+        .collect();
     kept.retain(|candidate| {
-        candidate.rewrites.is_some() || !rewritten.iter().any(|said| says_the_same(said, &candidate.text))
+        candidate.rewrites.is_some()
+            || !rewritten
+                .iter()
+                .any(|said| says_the_same(said, &candidate.text))
     });
     let mut dropped: Vec<(&Known, String)> = rewrites
         .into_iter()
@@ -943,8 +1003,14 @@ fn folded<'a>(mut kept: Vec<Candidate<'a>>, rewrites: Vec<(&'a Known, String)>) 
                 .any(|candidate| candidate.rewrites.is_some_and(|kept| kept.id == known.id))
         })
         .collect();
-    for add in kept.iter_mut().filter(|candidate| candidate.rewrites.is_none()) {
-        if let Some(position) = dropped.iter().position(|(_, said)| says_the_same(said, &add.text)) {
+    for add in kept
+        .iter_mut()
+        .filter(|candidate| candidate.rewrites.is_none())
+    {
+        if let Some(position) = dropped
+            .iter()
+            .position(|(_, said)| says_the_same(said, &add.text))
+        {
             add.replaces = Some(dropped.swap_remove(position).0);
         }
     }
@@ -956,11 +1022,17 @@ fn folded<'a>(mut kept: Vec<Candidate<'a>>, rewrites: Vec<(&'a Known, String)>) 
 /// ferry timetable change goes out with the harbour map" shares only
 /// "harbour" with "The harbour map launch is confirmed for March 21".
 fn says_the_same(said: &str, other: &str) -> bool {
-    let mut long: Vec<String> = words(said).map(|(word, _)| word).filter(|word| is_long(word)).collect();
+    let mut long: Vec<String> = words(said)
+        .map(|(word, _)| word)
+        .filter(|word| is_long(word))
+        .collect();
     long.sort();
     long.dedup();
     let other: Vec<String> = words(other).map(|(word, _)| word).collect();
-    let shared = long.iter().filter(|word| other.iter().any(|heard| related(heard, word))).count();
+    let shared = long
+        .iter()
+        .filter(|word| other.iter().any(|heard| related(heard, word)))
+        .count();
     shared >= 2 && shared * 2 >= long.len()
 }
 
@@ -988,7 +1060,8 @@ fn check<'a>(
     let mut batches: Vec<Vec<Candidate<'a>>> = Vec::new();
     let mut used: usize = 0;
     for candidate in candidates {
-        let bytes = serde_json::to_string(&note(0, &candidate)).map_or(usize::MAX, |json| json.len() + 1);
+        let bytes =
+            serde_json::to_string(&note(0, &candidate)).map_or(usize::MAX, |json| json.len() + 1);
         match batches.last_mut() {
             Some(batch) if used.saturating_add(bytes) <= budget => batch.push(candidate),
             _ => {
@@ -1019,7 +1092,13 @@ fn note<'a>(index: usize, candidate: &'a Candidate<'_>) -> Note<'a> {
             .rewrites
             .map(|known| known.text.as_str())
             .into_iter()
-            .chain(candidate.cited.iter().take(CHECKED_LINES).map(|line| line.text.as_str()))
+            .chain(
+                candidate
+                    .cited
+                    .iter()
+                    .take(CHECKED_LINES)
+                    .map(|line| line.text.as_str()),
+            )
             .collect(),
     }
 }
@@ -1032,13 +1111,18 @@ fn kept_notes(
     batch: &[Candidate<'_>],
 ) -> HashSet<usize> {
     let notes = Notes {
-        notes: batch.iter().enumerate().map(|(index, candidate)| note(index, candidate)).collect(),
+        notes: batch
+            .iter()
+            .enumerate()
+            .map(|(index, candidate)| note(index, candidate))
+            .collect(),
     };
     let Ok(input) = serde_json::to_string(&notes) else {
         return HashSet::new();
     };
     live.doc().requests += 1;
-    let answer = generator.generate_json(CHECK_PROMPT, &input, CHECK_OUTPUT_TOKENS, || &CHECK_SCHEMA);
+    let answer =
+        generator.generate_json(CHECK_PROMPT, &input, CHECK_OUTPUT_TOKENS, || &CHECK_SCHEMA);
     let Ok(Verdicts { notes: verdicts }) = answer
         .map_err(|error| log::info!("A live doc check got no answer: {error:?}"))
         .and_then(|answer| first_json_value::<Verdicts>(answer.trim()))
@@ -1046,10 +1130,19 @@ fn kept_notes(
         return HashSet::new();
     };
     let position = |verdict: &Verdict| {
-        let number = verdict.note.trim().strip_prefix('N')?.parse::<usize>().ok()?;
+        let number = verdict
+            .note
+            .trim()
+            .strip_prefix('N')?
+            .parse::<usize>()
+            .ok()?;
         number.checked_sub(1).filter(|index| *index < batch.len())
     };
-    let dropped: HashSet<usize> = verdicts.iter().filter(|verdict| !verdict.keep).filter_map(position).collect();
+    let dropped: HashSet<usize> = verdicts
+        .iter()
+        .filter(|verdict| !verdict.keep)
+        .filter_map(position)
+        .collect();
     verdicts
         .iter()
         .filter(|verdict| verdict.keep)
@@ -1079,19 +1172,28 @@ fn merge(points: &mut Vec<MeetingLiveDocPoint>, kept: Vec<Candidate<'_>>) -> Vec
         .collect();
     let mut landed = Vec::new();
     for candidate in kept {
-        if points.iter().any(|point| fold(&point.text) == fold(&candidate.text)) {
+        if points
+            .iter()
+            .any(|point| fold(&point.text) == fold(&candidate.text))
+        {
             continue;
         }
         let target = match candidate.rewrites.or(candidate.replaces) {
-            Some(known) => points.iter().position(|point| point.id == known.id && !point.edited),
+            Some(known) => points
+                .iter()
+                .position(|point| point.id == known.id && !point.edited),
             None if points.iter().any(|point| {
-                !point.edited && !rewritten.contains(point.id.as_str()) && runs_inside(&candidate.text, &point.text)
+                !point.edited
+                    && !rewritten.contains(point.id.as_str())
+                    && runs_inside(&candidate.text, &point.text)
             }) =>
             {
                 continue
             }
             None => points.iter().position(|point| {
-                !point.edited && !rewritten.contains(point.id.as_str()) && runs_inside(&point.text, &candidate.text)
+                !point.edited
+                    && !rewritten.contains(point.id.as_str())
+                    && runs_inside(&point.text, &candidate.text)
             }),
         };
         match target {
@@ -1133,9 +1235,7 @@ fn merge(points: &mut Vec<MeetingLiveDocPoint>, kept: Vec<Candidate<'_>>) -> Vec
 /// calendar access first with one sentence behind a flag."
 fn same_topic(before: &str, after: &str) -> bool {
     let before: Vec<String> = words(before).map(|(word, _)| word).collect();
-    words(after).any(|(word, _)| {
-        is_long(&word) && before.iter().any(|said| related(said, &word))
-    })
+    words(after).any(|(word, _)| is_long(&word) && before.iter().any(|said| related(said, &word)))
 }
 
 /// Whether the words of `part` come in a row in `whole` with nothing around
@@ -1151,7 +1251,11 @@ fn runs_inside(part: &str, whole: &str) -> bool {
     let whole: Vec<String> = words(whole).map(|(word, _)| word).collect();
     !part.is_empty()
         && whole.windows(part.len()).enumerate().any(|(at, run)| {
-            run == part.as_slice() && !whole[..at].iter().chain(&whole[at + part.len()..]).any(|word| turns(word))
+            run == part.as_slice()
+                && !whole[..at]
+                    .iter()
+                    .chain(&whole[at + part.len()..])
+                    .any(|word| turns(word))
         })
 }
 
@@ -1159,13 +1263,20 @@ fn runs_inside(part: &str, whole: &str) -> bool {
 /// condition or a doubt.
 fn turns(word: &str) -> bool {
     word.ends_with("n't")
-        || ["not", "no", "never", "cannot", "or", "whether", "if", "unless", "maybe", "might"].contains(&word)
+        || [
+            "not", "no", "never", "cannot", "or", "whether", "if", "unless", "maybe", "might",
+        ]
+        .contains(&word)
 }
 
 /// The same word, or two forms of one: "lamp" and "lamps", "fix" and
 /// "fixed", "schedule" and "scheduling".
 fn related(left: &str, right: &str) -> bool {
-    let common = left.chars().zip(right.chars()).take_while(|(left, right)| left == right).count();
+    let common = left
+        .chars()
+        .zip(right.chars())
+        .take_while(|(left, right)| left == right)
+        .count();
     let shorter = left.chars().count().min(right.chars().count());
     (common == shorter && common >= 3) || common >= 5
 }
@@ -1191,8 +1302,9 @@ fn names_a_label(text: &str, cited: &[&Given]) -> bool {
 
 /// "l1" or "p12": a lowercased word that reads as a line or point label.
 fn is_label(word: &str) -> bool {
-    word.strip_prefix(['l', 'p'])
-        .is_some_and(|number| !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit()))
+    word.strip_prefix(['l', 'p']).is_some_and(|number| {
+        !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit())
+    })
 }
 
 mod spoken;

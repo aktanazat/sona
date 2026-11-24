@@ -544,7 +544,10 @@ fn task_rows(
         .filter(|(item, _)| !hidden.contains(&item.id))
         .map(|(item, snippet)| QueryRow {
             kind: QueryRowKind::Task,
-            title: bounded(&format!("S-{} {}", item.number, item.title), MAX_TITLE_CHARS),
+            title: bounded(
+                &format!("S-{} {}", item.number, item.title),
+                MAX_TITLE_CHARS,
+            ),
             snippet: bounded(&snippet, MAX_SNIPPET_CHARS),
             when_utc_ms: item.updated_at_ms,
             link: task_link(&item.id),
@@ -668,10 +671,9 @@ pub async fn search(
         candidates.extend(notes.iter().map(note_row));
     }
     if includes_tasks {
-        let tasks = crate::planning::history(history, |conn| {
-            task_rows(conn, query, kept_local.as_ref())
-        })
-        .map_err(|_| storage_failure())?;
+        let tasks =
+            crate::planning::history(history, |conn| task_rows(conn, query, kept_local.as_ref()))
+                .map_err(|_| storage_failure())?;
         candidates.extend(tasks);
     }
     let (entries, next_cursor) = merge(candidates, cursor.as_ref(), limit);

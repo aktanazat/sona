@@ -81,7 +81,10 @@ pub(crate) fn documents_of(
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    if documents.iter().any(|document| document.kind == ScratchDocumentKind::Task) {
+    if documents
+        .iter()
+        .any(|document| document.kind == ScratchDocumentKind::Task)
+    {
         let hidden = crate::planning::work::drawing_on(conn, hides)?;
         documents.retain(|document| {
             document.kind != ScratchDocumentKind::Task || !hidden.contains(&document.id)
@@ -152,8 +155,10 @@ pub fn scratchpad_cycle_notes(
     history: State<'_, Arc<HistoryManager>>,
     number: i64,
 ) -> Result<Vec<ScratchNote>, String> {
-    run(&history, |conn| Ok(cycle_notes_with_connection(conn, number)?))
-        .map_err(|error| failure_sentence(&history, error, "The cycle's notes could not be read."))
+    run(&history, |conn| {
+        Ok(cycle_notes_with_connection(conn, number)?)
+    })
+    .map_err(|error| failure_sentence(&history, error, "The cycle's notes could not be read."))
 }
 
 #[tauri::command(async)]
@@ -167,7 +172,13 @@ pub fn scratchpad_link_cycle(
     run(&history, |conn| {
         link_cycle_in(conn, &id, number, chrono::Utc::now().timestamp_millis())
     })
-    .map_err(|error| failure_sentence(&history, error, "The note could not be filed under the cycle."))?;
+    .map_err(|error| {
+        failure_sentence(
+            &history,
+            error,
+            "The note could not be filed under the cycle.",
+        )
+    })?;
     emit_changed(&app, &id, false);
     Ok(())
 }
@@ -180,8 +191,13 @@ pub fn scratchpad_unlink_cycle(
     id: String,
     number: i64,
 ) -> Result<(), String> {
-    run(&history, |conn| unlink_cycle_in(conn, &id, number))
-        .map_err(|error| failure_sentence(&history, error, "The note could not be taken off the cycle."))?;
+    run(&history, |conn| unlink_cycle_in(conn, &id, number)).map_err(|error| {
+        failure_sentence(
+            &history,
+            error,
+            "The note could not be taken off the cycle.",
+        )
+    })?;
     emit_changed(&app, &id, false);
     Ok(())
 }

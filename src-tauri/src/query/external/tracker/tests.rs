@@ -1,6 +1,6 @@
 use super::{
-    cursor, page, pick_person, project_task, Board, Fence, OrderArg, PageArgs, ShowArgs,
-    TaskField, TaskRef, WorkPersonChoice, WorkVerb,
+    cursor, page, pick_person, project_task, Board, Fence, OrderArg, PageArgs, ShowArgs, TaskField,
+    TaskRef, WorkPersonChoice, WorkVerb,
 };
 use crate::cli::{CliArgs, Command};
 use crate::meeting::processing::MeetingLivePromise;
@@ -81,7 +81,8 @@ fn a_task_is_named_by_handle_number_or_id() {
 #[test]
 fn a_dry_run_of_a_claim_duplicate_take_or_watch_needs_only_read_access() {
     use crate::query::external::{READ_SCOPES, WRITE_SCOPES};
-    let scopes = |argv: &[&str]| match CliArgs::try_parse_from(["sona", "work"].iter().chain(argv)) {
+    let scopes = |argv: &[&str]| match CliArgs::try_parse_from(["sona", "work"].iter().chain(argv))
+    {
         Ok(CliArgs {
             command: Some(Command::Work(work)),
             ..
@@ -486,7 +487,12 @@ fn paging_with_the_cursor_reads_every_task_once_in_order() {
             page(rows.clone(), &paging, order, &board).expect("a page")
         };
         let numbers = |listed: &super::ExternalWorkPage| -> Vec<i64> {
-            listed.entries.tasks.iter().map(|task| task.number).collect()
+            listed
+                .entries
+                .tasks
+                .iter()
+                .map(|task| task.number)
+                .collect()
         };
         let whole = numbers(&read(paging(100, None)));
         let mut paged = Vec::new();
@@ -532,14 +538,24 @@ fn a_csv_export_writes_only_a_csv_file_and_never_through_a_link() {
     std::os::unix::fs::symlink(&kept, &link).expect("a link named .csv");
 
     for refused in [kept.clone(), link, folder.path().join("tasks")] {
-        assert!(super::write_csv(&refused, "ID\r\n").is_err(), "{}", refused.display());
+        assert!(
+            super::write_csv(&refused, "ID\r\n").is_err(),
+            "{}",
+            refused.display()
+        );
     }
-    assert_eq!(std::fs::read_to_string(&kept).expect("the document"), "chapter one");
+    assert_eq!(
+        std::fs::read_to_string(&kept).expect("the document"),
+        "chapter one"
+    );
 
     let csv = folder.path().join("Export.CSV");
     super::write_csv(&csv, "first\r\n").expect("a new export");
     super::write_csv(&csv, "second\r\n").expect("an earlier export replaced");
-    assert_eq!(std::fs::read_to_string(&csv).expect("the export"), "second\r\n");
+    assert_eq!(
+        std::fs::read_to_string(&csv).expect("the export"),
+        "second\r\n"
+    );
 }
 
 #[test]
@@ -556,6 +572,11 @@ fn a_csv_names_a_parent_left_out_of_the_export_by_its_number() {
     let every = [row(parent), row(child)];
 
     let csv = crate::planning::work::export::csv(&every[1..], &every, &[]);
-    let fields: Vec<&str> = csv.lines().nth(1).expect("the child's line").split(',').collect();
+    let fields: Vec<&str> = csv
+        .lines()
+        .nth(1)
+        .expect("the child's line")
+        .split(',')
+        .collect();
     assert_eq!(fields[10], "S-7", "{csv}");
 }

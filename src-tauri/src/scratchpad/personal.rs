@@ -284,8 +284,14 @@ pub(crate) fn make_personal_in(
         "DELETE FROM planning_evidence_links WHERE source_kind = 'note' AND source_id = ?1",
         params![id],
     )?;
-    conn.execute("DELETE FROM scratch_note_cycles WHERE note_id = ?1", params![id])?;
-    conn.execute("UPDATE scratch_notes SET personal = 1 WHERE id = ?1", params![id])?;
+    conn.execute(
+        "DELETE FROM scratch_note_cycles WHERE note_id = ?1",
+        params![id],
+    )?;
+    conn.execute(
+        "UPDATE scratch_notes SET personal = 1 WHERE id = ?1",
+        params![id],
+    )?;
     if let Author::Agent(agent) = author {
         if let Some(agent) = named_agent(agent) {
             conn.execute(
@@ -392,13 +398,16 @@ mod tests {
     #[test]
     fn a_personal_document_reaches_no_agent_until_one_is_invited() {
         let conn = connection();
-        let ordinary = super::super::create_note_in(&conn, "An ordinary note", Author::Me, 1)
-            .expect("note");
-        let private = create_in(&conn, "Salary numbers for the board", Author::Me, 2)
-            .expect("personal");
+        let ordinary =
+            super::super::create_note_in(&conn, "An ordinary note", Author::Me, 1).expect("note");
+        let private =
+            create_in(&conn, "Salary numbers for the board", Author::Me, 2).expect("personal");
 
         assert_eq!(reach(&conn, &ordinary.id, None).unwrap(), Some(Reach::Open));
-        assert_eq!(personal_ids(&conn).unwrap(), HashSet::from([private.id.clone()]));
+        assert_eq!(
+            personal_ids(&conn).unwrap(),
+            HashSet::from([private.id.clone()])
+        );
         for agent in [None, Some("Codex"), Some("Claude Code")] {
             assert_eq!(
                 reach(&conn, &private.id, agent).unwrap(),
@@ -406,7 +415,9 @@ mod tests {
                 "{agent:?} reached a document no one was invited to"
             );
         }
-        assert!(shared_with(&conn, Some("Codex"), None, 10).unwrap().is_empty());
+        assert!(shared_with(&conn, Some("Codex"), None, 10)
+            .unwrap()
+            .is_empty());
 
         share_in(&conn, &private.id, "codex", Some(ScratchNoteRole::View), 3).unwrap();
         assert_eq!(
@@ -417,8 +428,14 @@ mod tests {
             reach(&conn, &private.id, Some("Claude Code")).unwrap(),
             Some(Reach::Personal(None))
         );
-        assert_eq!(reach(&conn, &private.id, None).unwrap(), Some(Reach::Personal(None)));
-        assert_eq!(shared_with(&conn, Some("Codex"), None, 10).unwrap().len(), 1);
+        assert_eq!(
+            reach(&conn, &private.id, None).unwrap(),
+            Some(Reach::Personal(None))
+        );
+        assert_eq!(
+            shared_with(&conn, Some("Codex"), None, 10).unwrap().len(),
+            1
+        );
     }
 
     /// Each role holds the ones below it and none above; changing a role
@@ -426,8 +443,13 @@ mod tests {
     #[test]
     fn a_role_is_changed_in_place_and_taken_off_whole() {
         let conn = connection();
-        let note = create_in(&conn, "A draft the agent made", Author::Agent(Some("codex")), 1)
-            .expect("personal");
+        let note = create_in(
+            &conn,
+            "A draft the agent made",
+            Author::Agent(Some("codex")),
+            1,
+        )
+        .expect("personal");
         assert_eq!(
             collaborators(&conn, &note.id).unwrap(),
             vec![ScratchCollaborator {
@@ -447,7 +469,10 @@ mod tests {
             Some(Reach::Personal(Some(ScratchNoteRole::View)))
         );
         assert!(share_in(&conn, &note.id, "Grok", None, 5).unwrap());
-        assert_eq!(reach(&conn, &note.id, Some("Grok")).unwrap(), Some(Reach::Personal(None)));
+        assert_eq!(
+            reach(&conn, &note.id, Some("Grok")).unwrap(),
+            Some(Reach::Personal(None))
+        );
 
         let ordinary = super::super::create_note_in(&conn, "Filed already", Author::Me, 6).unwrap();
         assert!(matches!(
@@ -469,15 +494,24 @@ mod tests {
         )
         .unwrap();
         let note = create_in(&conn, "First words of the plan", Author::Me, 1).unwrap();
-        super::super::update_body_in(&conn, &note.id, "Second words of the plan", Author::Me, 20 * 60_000)
-            .unwrap();
+        super::super::update_body_in(
+            &conn,
+            &note.id,
+            "Second words of the plan",
+            Author::Me,
+            20 * 60_000,
+        )
+        .unwrap();
         share_in(&conn, &note.id, "Codex", Some(ScratchNoteRole::Comment), 2).unwrap();
         comments::add(
             &conn,
             WorkCommentSubject::Note,
             &note.id,
             None,
-            comments::Author { actor: WorkActor::Agent, agent: Some("Codex") },
+            comments::Author {
+                actor: WorkActor::Agent,
+                agent: Some("Codex"),
+            },
             "Looks right",
             3,
         )
@@ -485,10 +519,17 @@ mod tests {
 
         super::super::documents::link_cycle_in(&conn, &note.id, 1, 4).unwrap();
 
-        let moved = super::super::note_with_connection(&conn, &note.id).unwrap().unwrap();
+        let moved = super::super::note_with_connection(&conn, &note.id)
+            .unwrap()
+            .unwrap();
         assert!(!moved.personal);
         assert_eq!(moved.body, "Second words of the plan");
-        assert_eq!(super::super::versions_with_connection(&conn, &note.id).unwrap().len(), 2);
+        assert_eq!(
+            super::super::versions_with_connection(&conn, &note.id)
+                .unwrap()
+                .len(),
+            2
+        );
         assert_eq!(
             comments::page(&conn, WorkCommentSubject::Note, &note.id, 10, None)
                 .unwrap()
@@ -517,7 +558,8 @@ mod tests {
     fn a_deleted_personal_document_leaves_no_change_history() {
         let conn = connection();
         let private = create_in(&conn, "Offer letter draft for Dana", Author::Me, 1).unwrap();
-        let ordinary = super::super::create_note_in(&conn, "Team lunch list", Author::Me, 1).unwrap();
+        let ordinary =
+            super::super::create_note_in(&conn, "Team lunch list", Author::Me, 1).unwrap();
         assert!(change_rows(&conn, &private.id) > 0);
 
         super::super::delete_note_with_connection(&conn, &private.id).unwrap();

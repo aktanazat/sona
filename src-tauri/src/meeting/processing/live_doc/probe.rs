@@ -34,7 +34,10 @@ const EDIT: &str = "Screenshots: Dana redoes them by Thursday (changed by hand)"
 
 fn day(ms: Option<i64>) -> String {
     ms.and_then(|ms| Local.timestamp_millis_opt(ms).single())
-        .map_or_else(|| "no date".to_string(), |at| at.format("%a %-d %b").to_string())
+        .map_or_else(
+            || "no date".to_string(),
+            |at| at.format("%a %-d %b").to_string(),
+        )
 }
 
 fn board_line(promise: &MeetingLivePromise) -> String {
@@ -108,7 +111,9 @@ impl MeetingTextGenerator for Printed {
         max_tokens: i32,
         schema: fn() -> &'static schemars::schema::RootSchema,
     ) -> Result<String, MeetingTextGenerationError> {
-        let answer = self.0.generate_json(system_prompt, evidence, max_tokens, schema);
+        let answer = self
+            .0
+            .generate_json(system_prompt, evidence, max_tokens, schema);
         println!("      given {evidence}\n      reply {answer:?}");
         answer
     }
@@ -118,7 +123,11 @@ impl MeetingTextGenerator for Printed {
 /// microphone, cut where the live pass cut it.
 const PIER: &[(u64, Who, &str)] = &[
     (2, Who::Me, "Hi Priya."),
-    (6, Who::Me, "The pier lamps on berth three still flicker after dark."),
+    (
+        6,
+        Who::Me,
+        "The pier lamps on berth three still flicker after dark.",
+    ),
     (14, Who::Me, "Priya, can you call the electrician tomorrow"),
     (18, Who::Me, "and send the quote by Thursday?"),
     (26, Who::Me, "I will share the map"),
@@ -206,7 +215,11 @@ fn live_doc_replay_probe() {
         for point in doc.points.iter().skip(kept) {
             println!("  stop    • {}", point.text);
         }
-        println!("  {} points from {} readings; the doc at the stop:", doc.points.len(), doc.model_requests);
+        println!(
+            "  {} points from {} readings; the doc at the stop:",
+            doc.points.len(),
+            doc.model_requests
+        );
         for point in &doc.points {
             println!("    • {}", point.text);
         }
@@ -264,7 +277,10 @@ fn live_doc_probe() {
         }
         if edited.is_none() && pass_at >= START_AT_S + 60 {
             if let Some(first) = doc.points.first() {
-                println!("\nat {pass_at} s the first point \"{}\" is changed to \"{EDIT}\"", first.text);
+                println!(
+                    "\nat {pass_at} s the first point \"{}\" is changed to \"{EDIT}\"",
+                    first.text
+                );
                 live.edit_doc(&Author::Owner, Some(&first.id), EDIT)
                     .expect("the edit kept");
                 edited = Some(first.id.clone());
@@ -272,7 +288,13 @@ fn live_doc_probe() {
         }
     }
     let live_seconds = started.elapsed().as_secs_f64();
-    live_card::tick(&service, &store, session_id, &live, live_card::Moment::HangUp);
+    live_card::tick(
+        &service,
+        &store,
+        session_id,
+        &live,
+        live_card::Moment::HangUp,
+    );
     hang_up(&service, &store, session_id, &live);
 
     let doc = live.live_doc(session_id);
@@ -284,11 +306,20 @@ fn live_doc_probe() {
     );
     println!("asks heard:");
     for ask in &doc.asks {
-        println!("  {:?} at {} s: \"{}\"", ask.intent, ask.start_offset_ns / 1_000_000_000, ask.words);
+        println!(
+            "  {:?} at {} s: \"{}\"",
+            ask.intent,
+            ask.start_offset_ns / 1_000_000_000,
+            ask.words
+        );
     }
     println!("doc at the stop:");
     for point in &doc.points {
-        println!("  • {}{}", point.text, if point.edited { "  [yours]" } else { "" });
+        println!(
+            "  • {}{}",
+            point.text,
+            if point.edited { "  [yours]" } else { "" }
+        );
     }
     let kept = edited
         .as_ref()
@@ -300,7 +331,9 @@ fn live_doc_probe() {
         println!("  {}", board_line(&promise));
     }
 
-    let page = store.live_doc_points(session_id).expect("the page reads the doc");
+    let page = store
+        .live_doc_points(session_id)
+        .expect("the page reads the doc");
     println!(
         "meeting page after the stop: {} points ({} yours)",
         page.len(),
@@ -359,7 +392,10 @@ fn live_doc_spoken_edit_probe() {
         }
         let doc = live.live_doc(session_id);
         let outcome = doc.asks.last().and_then(|ask| ask.outcome);
-        println!("\n\"{ask}\"\n  {outcome:?} in {:.1} s", started.elapsed().as_secs_f32());
+        println!(
+            "\n\"{ask}\"\n  {outcome:?} in {:.1} s",
+            started.elapsed().as_secs_f32()
+        );
         let grouped = doc.points.iter().any(|point| point.section.is_some());
         let mut section: Option<Option<String>> = None;
         for point in &doc.points {
@@ -368,12 +404,20 @@ fn live_doc_spoken_edit_probe() {
             }
             section = Some(point.section.clone());
             let mark = if point.done { "[x]" } else { "[ ]" };
-            let typed = if point.edited && !point.spoken { "  (typed)" } else { "" };
+            let typed = if point.edited && !point.spoken {
+                "  (typed)"
+            } else {
+                ""
+            };
             println!("    {mark} {}{typed}", point.text);
         }
         if let Some(out) = &out {
             // PANIC: the doc always serializes, and the directory is the caller's to make writable.
-            std::fs::write(out.join(format!("ask-{}.json", number + 1)), serde_json::to_vec_pretty(&doc).unwrap()).unwrap();
+            std::fs::write(
+                out.join(format!("ask-{}.json", number + 1)),
+                serde_json::to_vec_pretty(&doc).unwrap(),
+            )
+            .unwrap();
         }
     }
 }

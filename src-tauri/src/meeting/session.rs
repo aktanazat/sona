@@ -8368,9 +8368,10 @@ pub(crate) mod tests {
         let path = files.path().join("granola_export.csv");
         std::fs::write(&path, include_str!("fixtures/granola_export.csv")).unwrap();
 
-        let first =
-            tauri::async_runtime::block_on(manager.import_from_app(MeetingApp::Granola, path.clone()))
-                .expect("Granola CSV imports");
+        let first = tauri::async_runtime::block_on(
+            manager.import_from_app(MeetingApp::Granola, path.clone()),
+        )
+        .expect("Granola CSV imports");
         assert_eq!(
             first,
             MeetingAppImportResult {
@@ -8392,12 +8393,9 @@ pub(crate) mod tests {
             }
         );
 
-        let listed = tauri::async_runtime::block_on(manager.list(
-            None,
-            10,
-            MeetingListFilter::default(),
-        ))
-        .expect("list meetings");
+        let listed =
+            tauri::async_runtime::block_on(manager.list(None, 10, MeetingListFilter::default()))
+                .expect("list meetings");
         assert_eq!(listed.entries.len(), 2);
         let pricing = listed
             .entries

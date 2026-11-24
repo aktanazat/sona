@@ -8,14 +8,14 @@ use super::{
     ExternalWorkBlock, ExternalWorkChange, ExternalWorkLine, ExternalWorkRef, Fence, TaskRef,
     Tracker, WorkAction, WorkAnswer, WriteArgs,
 };
+use crate::analytics::{DashboardTrendRange, DashboardTrendRequest};
 use crate::commands::meeting::today_meetings;
+use crate::managers::history::HistoryTrendProjection;
 use crate::meeting::detection::calendar::{CalendarAccess, CalendarSource};
 use crate::meeting::store::today::{HomeToday, TodayCount, TodayMeetings, TodayStoreCounts};
 use crate::meeting::types::MeetingSessionId;
-use crate::meeting::upcoming::upcoming_window;
-use crate::analytics::{DashboardTrendRange, DashboardTrendRequest};
-use crate::managers::history::HistoryTrendProjection;
 use crate::meeting::types::MeetingTrendProjection;
+use crate::meeting::upcoming::upcoming_window;
 use crate::planning::suggestions::{
     self, PlanningSuggestion, PlanningSuggestionAvailability, PlanningSuggestionKind,
     PlanningSuggestionState,
@@ -125,7 +125,12 @@ pub struct TrendArgs {
 pub struct PlanAcceptArgs {
     /// The plan draft as JSON, as Plan with Sona makes it: a file, or - for
     /// standard input.
-    #[arg(long, value_name = "PATH", required_unless_present = "draft", conflicts_with = "draft")]
+    #[arg(
+        long,
+        value_name = "PATH",
+        required_unless_present = "draft",
+        conflicts_with = "draft"
+    )]
     pub draft_file: Option<PathBuf>,
     /// The plan draft as JSON, given inline.
     #[arg(long, value_name = "JSON")]
@@ -413,9 +418,10 @@ impl Tracker<'_> {
         self.applies("booking time")?;
         let operation_id = args.write.fresh_operation_id();
         let started_ms = now_ms();
-        let block = blocks::work_time_block(self.app.clone(), operation_id.clone(), row.item.id.clone())
-            .await
-            .map_err(|message| self.write_refusal(message, &operation_id, "The task"))?;
+        let block =
+            blocks::work_time_block(self.app.clone(), operation_id.clone(), row.item.id.clone())
+                .await
+                .map_err(|message| self.write_refusal(message, &operation_id, "The task"))?;
         self.credit(&args.write, std::slice::from_ref(&row.item.id), started_ms)?;
         Ok(planner(PlannerAnswer::Task(ExternalTaskPlan {
             schema_version: QUERY_SCHEMA_VERSION,
@@ -632,11 +638,13 @@ impl Tracker<'_> {
         if !args.all {
             shown.retain(|suggestion| suggestion.state == PlanningSuggestionState::Pending);
         }
-        Ok(planner(PlannerAnswer::Suggestions(ExternalLinkSuggestions {
-            schema_version: QUERY_SCHEMA_VERSION,
-            suggestions: shown.into_iter().map(project_suggestion).collect(),
-            conversations_available,
-        })))
+        Ok(planner(PlannerAnswer::Suggestions(
+            ExternalLinkSuggestions {
+                schema_version: QUERY_SCHEMA_VERSION,
+                suggestions: shown.into_iter().map(project_suggestion).collect(),
+                conversations_available,
+            },
+        )))
     }
 
     pub(super) async fn link_decide(
@@ -650,8 +658,11 @@ impl Tracker<'_> {
             .into_iter()
             .find(|suggestion| suggestion.id == id)
             .ok_or_else(|| {
-                ExternalError::new(ExternalErrorCode::NotFound, format!("No link suggestion {id}."))
-                    .hint("List them with: sona work link-suggestions")
+                ExternalError::new(
+                    ExternalErrorCode::NotFound,
+                    format!("No link suggestion {id}."),
+                )
+                .hint("List them with: sona work link-suggestions")
             })?;
         let settled = match (action, suggestion.state) {
             (_, PlanningSuggestionState::Pending) => false,
@@ -737,9 +748,10 @@ impl Tracker<'_> {
         let start_ms = day_start_utc_ms(&args.from.format("%Y-%m-%d").to_string())?;
         let end_ms = day_start_utc_ms(&after.format("%Y-%m-%d").to_string())?;
         let board = self.board().await?;
-        let page = planning::planning_calendar(self.app.state(), self.app.state(), start_ms, end_ms)
-            .await
-            .map_err(|message| refusal(self.history, message))?;
+        let page =
+            planning::planning_calendar(self.app.state(), self.app.state(), start_ms, end_ms)
+                .await
+                .map_err(|message| refusal(self.history, message))?;
         let items = page
             .items
             .into_iter()
@@ -826,7 +838,9 @@ impl Tracker<'_> {
                         ))
                     }
                     Ok(_) => None,
-                    Err(error) => Some(TodayCount::read("meetings", Err::<TodayMeetings, _>(error))),
+                    Err(error) => {
+                        Some(TodayCount::read("meetings", Err::<TodayMeetings, _>(error)))
+                    }
                 }
             }
         };
@@ -834,13 +848,15 @@ impl Tracker<'_> {
             "untracked",
             crate::planning::untracked::tally(self.history, self.meetings, &hidden).await,
         );
-        let counts = store.as_ref().map_or(TodayStoreCounts::UNAVAILABLE, |store| {
-            store.today_counts(
-                Local::now().date_naive(),
-                self.meetings.user_name().as_deref(),
-                &hidden,
-            )
-        });
+        let counts = store
+            .as_ref()
+            .map_or(TodayStoreCounts::UNAVAILABLE, |store| {
+                store.today_counts(
+                    Local::now().date_naive(),
+                    self.meetings.user_name().as_deref(),
+                    &hidden,
+                )
+            });
         Ok(planner(PlannerAnswer::Today(ExternalToday {
             schema_version: QUERY_SCHEMA_VERSION,
             today: HomeToday {
@@ -1041,7 +1057,9 @@ pub(super) fn text(answer: &WorkAnswer, text: &mut String) {
                 }
             }
             if !page.conversations_available {
-                text.push_str("Suggestions from meetings are left out while the conversations are closed.\n");
+                text.push_str(
+                    "Suggestions from meetings are left out while the conversations are closed.\n",
+                );
             }
         }
         PlannerAnswer::Decision(decision) => {
@@ -1167,7 +1185,9 @@ fn today_text(today: &HomeToday, text: &mut String) {
     let _ = writeln!(
         text,
         "Speakers nobody named: {}",
-        count_text(Some(&today.unknown_speakers), |tally| tally.count.to_string())
+        count_text(Some(&today.unknown_speakers), |tally| tally
+            .count
+            .to_string())
     );
     let _ = writeln!(
         text,

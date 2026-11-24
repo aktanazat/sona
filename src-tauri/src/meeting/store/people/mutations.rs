@@ -14,8 +14,9 @@ use super::{
     person_by_id_in, require_people_revision_in, SCHEMA_VERSION,
 };
 use crate::meeting::people_types::{
-    PeopleMutationResult, Person, PersonId, PersonLinkConfidence, PersonLinkSource, PersonListEntry,
-    PersonSplitRequest, PersonSplitTarget, PersonSummary, VoiceProfileMergeResolution,
+    PeopleMutationResult, Person, PersonId, PersonLinkConfidence, PersonLinkSource,
+    PersonListEntry, PersonSplitRequest, PersonSplitTarget, PersonSummary,
+    VoiceProfileMergeResolution,
 };
 use crate::meeting::store::documents::bump_document_revision_in;
 use crate::meeting::store::transcript_corrections::{

@@ -3,9 +3,7 @@
 use super::catalog::{ExternalWorkPersonRef, ExternalWorkProject};
 use super::roadmap::ExternalProjectRef;
 use super::{day_or_none, day_text, pick, refusal, Board, DayArg, Tracker, WorkAnswer, WriteArgs};
-use crate::planning::work::initiatives::{
-    self, Initiative, InitiativeSaveInput, InitiativeStatus,
-};
+use crate::planning::work::initiatives::{self, Initiative, InitiativeSaveInput, InitiativeStatus};
 use crate::planning::work::types::WorkOwner;
 use crate::planning::{self, Project};
 use crate::query::external::{ExternalError, ExternalErrorCode};
@@ -176,14 +174,17 @@ fn external(initiative: &Initiative, projects: &[Project], board: &Board) -> Ext
         name: initiative.name.clone(),
         details: initiative.description.clone(),
         status: initiative.status,
-        owner: initiative.owner_person_id.as_ref().map(|id| ExternalWorkPersonRef {
-            id: id.clone(),
-            name: board
-                .people
-                .iter()
-                .find(|person| &person.id == id)
-                .map_or_else(|| id.clone(), |person| person.name.clone()),
-        }),
+        owner: initiative
+            .owner_person_id
+            .as_ref()
+            .map(|id| ExternalWorkPersonRef {
+                id: id.clone(),
+                name: board
+                    .people
+                    .iter()
+                    .find(|person| &person.id == id)
+                    .map_or_else(|| id.clone(), |person| person.name.clone()),
+            }),
         owner_is_self: initiative.owner_is_self,
         target: initiative.target_at_ms.map(|ms| day_text(Some(ms))),
         target_at_ms: initiative.target_at_ms,
@@ -244,7 +245,11 @@ impl Tracker<'_> {
         .map_err(|refusal| refusal.hint("List them with: sona work initiative-list"))
     }
 
-    fn name_free(all: &[Initiative], name: &str, other_than: Option<&str>) -> Result<(), ExternalError> {
+    fn name_free(
+        all: &[Initiative],
+        name: &str,
+        other_than: Option<&str>,
+    ) -> Result<(), ExternalError> {
         match all.iter().find(|initiative| {
             initiative.name.eq_ignore_ascii_case(name.trim())
                 && other_than != Some(initiative.id.as_str())
@@ -393,12 +398,21 @@ impl Tracker<'_> {
             initiatives::save(conn, Some(&current.id), &input, current.updated_at_ms)
         })?;
         if after == *current {
-            return self.initiative_answer(current, &board, args.dry_run, None, InitiativeAction::Unchanged, None);
+            return self.initiative_answer(
+                current,
+                &board,
+                args.dry_run,
+                None,
+                InitiativeAction::Unchanged,
+                None,
+            );
         }
-        let operation_id = args
-            .write
-            .operation_id("initiative-update", &(&current.id, current.updated_at_ms, &input))?;
-        let initiative = self.initiative_saved(Some(&current.id), &input, args.dry_run, &operation_id)?;
+        let operation_id = args.write.operation_id(
+            "initiative-update",
+            &(&current.id, current.updated_at_ms, &input),
+        )?;
+        let initiative =
+            self.initiative_saved(Some(&current.id), &input, args.dry_run, &operation_id)?;
         self.initiative_answer(
             &initiative,
             &board,
@@ -563,21 +577,33 @@ pub(super) fn text(answer: &WorkAnswer, text: &mut String) {
                 text.push_str("Dry run. ");
             }
             let name = &change.initiative.name;
-            let project = change.project.as_ref().map_or("", |project| project.name.as_str());
+            let project = change
+                .project
+                .as_ref()
+                .map_or("", |project| project.name.as_str());
             let _ = match (change.action, change.dry_run) {
                 (InitiativeAction::Created, false) => writeln!(text, "Made initiative {name}."),
-                (InitiativeAction::Created, true) => writeln!(text, "Would make initiative {name}."),
+                (InitiativeAction::Created, true) => {
+                    writeln!(text, "Would make initiative {name}.")
+                }
                 (InitiativeAction::Updated, false) => writeln!(text, "Saved initiative {name}."),
-                (InitiativeAction::Updated, true) => writeln!(text, "Would save initiative {name}."),
+                (InitiativeAction::Updated, true) => {
+                    writeln!(text, "Would save initiative {name}.")
+                }
                 (InitiativeAction::Unchanged, _) => writeln!(text, "Nothing to change in {name}."),
                 (InitiativeAction::Deleted, false) => {
-                    writeln!(text, "Deleted initiative {name}. Its projects stay, in no initiative.")
+                    writeln!(
+                        text,
+                        "Deleted initiative {name}. Its projects stay, in no initiative."
+                    )
                 }
                 (InitiativeAction::Deleted, true) => writeln!(
                     text,
                     "Would delete initiative {name}. Its projects would stay, in no initiative."
                 ),
-                (InitiativeAction::ProjectAdded, false) => writeln!(text, "Put {project} in {name}."),
+                (InitiativeAction::ProjectAdded, false) => {
+                    writeln!(text, "Put {project} in {name}.")
+                }
                 (InitiativeAction::ProjectAdded, true) => {
                     writeln!(text, "Would put {project} in {name}.")
                 }

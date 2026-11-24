@@ -115,7 +115,14 @@ impl Favorites {
         let mut top: Vec<(i64, FavoriteEntry)> = self
             .folders
             .iter()
-            .map(|folder| (folder.position, FavoriteEntry::Folder { id: folder.id.clone() }))
+            .map(|folder| {
+                (
+                    folder.position,
+                    FavoriteEntry::Folder {
+                        id: folder.id.clone(),
+                    },
+                )
+            })
             .chain(
                 self.favorites
                     .iter()
@@ -286,7 +293,11 @@ pub(crate) struct FolderSave {
 }
 
 /// Makes a folder or changes one's name or place.
-pub(crate) fn save_folder(conn: &Connection, save: &FolderSave, now_ms: i64) -> Result<FavoriteFolder> {
+pub(crate) fn save_folder(
+    conn: &Connection,
+    save: &FolderSave,
+    now_ms: i64,
+) -> Result<FavoriteFolder> {
     let name = save.name.as_deref().map(str::trim);
     if name.is_some_and(str::is_empty) {
         return Err(Refusal::Invalid.into());
@@ -317,7 +328,12 @@ pub(crate) fn save_folder(conn: &Connection, save: &FolderSave, now_ms: i64) -> 
         (None, None) => return Err(Refusal::Invalid.into()),
     };
     if let Some(index) = save.index {
-        move_entry(conn, &FavoriteEntry::Folder { id: id.clone() }, None, Some(index))?;
+        move_entry(
+            conn,
+            &FavoriteEntry::Folder { id: id.clone() },
+            None,
+            Some(index),
+        )?;
     }
     Ok(conn.query_row(
         "SELECT id, name, position, created_at_ms FROM planning_favorite_folders WHERE id = ?1",
@@ -387,7 +403,11 @@ pub(crate) fn move_entry(
             all.folders.iter().any(|folder| folder.id == *id)
         }
     };
-    if !found || into.as_deref().is_some_and(|folder| !all.folders.iter().any(|f| f.id == folder)) {
+    if !found
+        || into
+            .as_deref()
+            .is_some_and(|folder| !all.folders.iter().any(|f| f.id == folder))
+    {
         return Err(Refusal::NotFound.into());
     }
     let before = match &into {
@@ -485,7 +505,11 @@ pub(crate) fn save_folder_as(
 }
 
 /// Deletes a folder and keeps its favorites, as one operation.
-pub(crate) fn delete_folder_as(app: &AppHandle, operation_id: &str, id: &str) -> Result<(), String> {
+pub(crate) fn delete_folder_as(
+    app: &AppHandle,
+    operation_id: &str,
+    id: &str,
+) -> Result<(), String> {
     let change = Change::now(operation_id, WorkActor::Me);
     run_history(app, |history| {
         store::mutate(
@@ -617,12 +641,18 @@ mod tests {
         let saved = favorites(&conn).unwrap();
         assert_eq!(saved.top(), [folder.clone(), task(&b)]);
         assert_eq!(
-            saved.inside(&launch.id).map(|favorite| favorite.target_id.clone()).collect::<Vec<_>>(),
+            saved
+                .inside(&launch.id)
+                .map(|favorite| favorite.target_id.clone())
+                .collect::<Vec<_>>(),
             [a.clone(), c.clone()]
         );
 
         assert!(move_entry(&conn, &task(&b), None, Some(0)).unwrap());
         delete_folder(&conn, &launch.id).unwrap();
-        assert_eq!(favorites(&conn).unwrap().top(), [task(&b), task(&a), task(&c)]);
+        assert_eq!(
+            favorites(&conn).unwrap().top(),
+            [task(&b), task(&a), task(&c)]
+        );
     }
 }

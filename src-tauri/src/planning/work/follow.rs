@@ -1012,7 +1012,14 @@ fn upcoming_briefs(
             continue;
         }
         let brief = in_both(store, history, |history, meetings| {
-            brief(history, meetings, Some(&event), &people, &HashSet::new(), now_ms)
+            brief(
+                history,
+                meetings,
+                Some(&event),
+                &people,
+                &HashSet::new(),
+                now_ms,
+            )
         })?;
         if let Some(notice) = brief_notice(&event, &brief, now_ms) {
             notices.push((key, notice));
@@ -1200,15 +1207,21 @@ pub async fn work_brief(
     if runtime.calendar_access() != CalendarAccess::Authorized {
         return Err("Allow Sona to read Calendar in System Settings.".into());
     }
-    let event = tauri::async_runtime::spawn_blocking(move || {
-        runtime.calendar_event_by_key(&event_key)
-    })
-    .await
-    .map_err(|_| "The calendar could not be read.")?
-    .ok_or("This event is no longer on your calendar.")?;
+    let event =
+        tauri::async_runtime::spawn_blocking(move || runtime.calendar_event_by_key(&event_key))
+            .await
+            .map_err(|_| "The calendar could not be read.")?
+            .ok_or("This event is no longer on your calendar.")?;
     let people = attendees(&store, &event).map_err(super::super::failure)?;
     in_both(&store, &history_state, |history, meetings| {
-        brief(history, meetings, Some(&event), &people, &HashSet::new(), now_ms())
+        brief(
+            history,
+            meetings,
+            Some(&event),
+            &people,
+            &HashSet::new(),
+            now_ms(),
+        )
     })
     .map_err(super::super::failure)
 }
@@ -1696,8 +1709,15 @@ mod tests {
             // PANIC: the fixture's own databases are readable.
             desk.meetings
                 .with_planning_snapshot(|meetings| {
-                    let brief = brief(&desk.history, meetings, None, &person_ids, &hidden, at(0, 10))
-                        .expect("the brief");
+                    let brief = brief(
+                        &desk.history,
+                        meetings,
+                        None,
+                        &person_ids,
+                        &hidden,
+                        at(0, 10),
+                    )
+                    .expect("the brief");
                     Ok(brief.last_time.map(|meeting| meeting.title))
                 })
                 .expect("the meeting database")
@@ -1776,7 +1796,11 @@ mod tests {
         assert_eq!(
             notices
                 .iter()
-                .map(|(item_id, notice)| (item_id.as_str(), notice.title.as_str(), opened(&notice.id)))
+                .map(|(item_id, notice)| (
+                    item_id.as_str(),
+                    notice.title.as_str(),
+                    opened(&notice.id)
+                ))
                 .collect::<Vec<_>>(),
             [(
                 due.id.as_str(),

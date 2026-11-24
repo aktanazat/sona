@@ -98,7 +98,12 @@ pub struct PersonSplitArgs {
     /// The person to split.
     pub person: String,
     /// Move the picked parts to this existing person.
-    #[arg(long, value_name = "PERSON", required_unless_present = "new", conflicts_with = "new")]
+    #[arg(
+        long,
+        value_name = "PERSON",
+        required_unless_present = "new",
+        conflicts_with = "new"
+    )]
     pub into: Option<String>,
     /// Move the picked parts to a new person with this name.
     #[arg(long, value_name = "NAME")]
@@ -137,7 +142,12 @@ pub struct PersonDeleteArgs {
 pub struct PersonPhotoArgs {
     pub person: String,
     /// A PNG or JPEG. Cropped to its middle square, at most 512 pixels across.
-    #[arg(long, value_name = "PATH", required_unless_present = "remove", conflicts_with = "remove")]
+    #[arg(
+        long,
+        value_name = "PATH",
+        required_unless_present = "remove",
+        conflicts_with = "remove"
+    )]
     pub file: Option<PathBuf>,
     /// Take the photo off.
     #[arg(long)]
@@ -394,7 +404,9 @@ fn find(store: &MeetingStore, value: &str) -> Result<Found, ExternalError> {
         .map_err(|refusal| refusal.hint("Look people up with: sona work people --query NAME"))?;
     let id = Uuid::parse_str(&found.id)
         .map(PersonId::from_uuid)
-        .map_err(|_| ExternalError::new(ExternalErrorCode::Failed, "A person's id is unreadable."))?;
+        .map_err(|_| {
+            ExternalError::new(ExternalErrorCode::Failed, "A person's id is unreadable.")
+        })?;
     Ok(Found {
         id,
         name: found.name.clone(),
@@ -402,7 +414,11 @@ fn find(store: &MeetingStore, value: &str) -> Result<Found, ExternalError> {
     })
 }
 
-fn detail(store: &MeetingStore, person: &Found, hidden: &KeptLocal) -> Result<PersonDetail, ExternalError> {
+fn detail(
+    store: &MeetingStore,
+    person: &Found,
+    hidden: &KeptLocal,
+) -> Result<PersonDetail, ExternalError> {
     store
         .person_detail_without(person.id, hidden.sessions())
         .map(|result| result.detail)
@@ -617,7 +633,12 @@ pub(super) async fn first_met(
     Ok(answer)
 }
 
-fn change(action: PeopleAction, person: &Found, operation_id: String, dry_run: bool) -> ExternalPeopleChange {
+fn change(
+    action: PeopleAction,
+    person: &Found,
+    operation_id: String,
+    dry_run: bool,
+) -> ExternalPeopleChange {
     ExternalPeopleChange {
         schema_version: QUERY_SCHEMA_VERSION,
         action,
@@ -730,7 +751,9 @@ pub(super) async fn plan_split(
                 return Err(ExternalError::invalid("Split into a different person."));
             }
             (
-                PersonSplitTarget::Existing { person_id: target.id },
+                PersonSplitTarget::Existing {
+                    person_id: target.id,
+                },
                 ExternalPersonRef {
                     id: Some(target.id.uuid().to_string()),
                     name: target.name,
@@ -749,7 +772,11 @@ pub(super) async fn plan_split(
         (None, None) => return Err(ExternalError::invalid("Pass --into PERSON or --new NAME.")),
     };
     let mut meeting_ids = Vec::new();
-    for value in args.meetings.iter().filter(|value| !value.trim().is_empty()) {
+    for value in args
+        .meetings
+        .iter()
+        .filter(|value| !value.trim().is_empty())
+    {
         let session = session_id(value)?;
         if kept.hides(session) {
             return Err(missing_meeting(session));
@@ -763,10 +790,24 @@ pub(super) async fn plan_split(
         }
         meeting_ids.push(session);
     }
-    let aliases = picked(&args.aliases, &page.person.aliases, "other name", &person.name)?;
-    let emails = picked(&args.emails, &page.person.calendar_emails, "email", &person.name)?;
+    let aliases = picked(
+        &args.aliases,
+        &page.person.aliases,
+        "other name",
+        &person.name,
+    )?;
+    let emails = picked(
+        &args.emails,
+        &page.person.calendar_emails,
+        "email",
+        &person.name,
+    )?;
     let mut document_ids = Vec::new();
-    for value in args.documents.iter().filter(|value| !value.trim().is_empty()) {
+    for value in args
+        .documents
+        .iter()
+        .filter(|value| !value.trim().is_empty())
+    {
         let document = Uuid::parse_str(value.trim())
             .map(DocumentId)
             .map_err(|_| ExternalError::invalid(format!("{value:?} is not a document id.")))?;
@@ -778,7 +819,8 @@ pub(super) async fn plan_split(
         }
         document_ids.push(document);
     }
-    if meeting_ids.is_empty() && aliases.is_empty() && emails.is_empty() && document_ids.is_empty() {
+    if meeting_ids.is_empty() && aliases.is_empty() && emails.is_empty() && document_ids.is_empty()
+    {
         return Err(ExternalError::invalid(
             "Pick what moves: --meetings, --aliases, --emails or --documents.",
         ));
@@ -800,7 +842,10 @@ pub(super) async fn plan_split(
     answer.moved_meetings = meeting_ids.iter().map(|id| id.uuid().to_string()).collect();
     answer.moved_aliases.clone_from(&aliases);
     answer.moved_emails.clone_from(&emails);
-    answer.moved_documents = document_ids.iter().map(|id| id.uuid().to_string()).collect();
+    answer.moved_documents = document_ids
+        .iter()
+        .map(|id| id.uuid().to_string())
+        .collect();
     Ok(PeoplePlan {
         write: PeopleWrite::Split(PersonSplitRequest {
             source_person_id: person.id,
@@ -892,7 +937,9 @@ pub(super) fn photo_file(path: &Path) -> Result<PhotoFile, ExternalError> {
     let unreadable = || ExternalError::invalid(format!("{} cannot be read.", path.display()));
     let size = std::fs::metadata(path).map_err(|_| unreadable())?.len();
     if size > PHOTO_MAX_BYTES {
-        return Err(ExternalError::invalid("The photo must be 10 MB or smaller."));
+        return Err(ExternalError::invalid(
+            "The photo must be 10 MB or smaller.",
+        ));
     }
     let original = std::fs::read(path).map_err(|_| unreadable())?;
     let png = portrait(&original)?;
@@ -971,10 +1018,16 @@ pub(super) async fn plan_contact_remove(
     let (store, kept) = opened(meetings).await?;
     let person = find(&store, &args.person)?;
     let attached = detail(&store, &person, &kept)?.contact.is_some();
-    let operation_id = args
-        .write
-        .operation_id("person-contact-remove", &(person.id.uuid(), person.revision))?;
-    let mut answer = change(PeopleAction::ContactRemoved, &person, operation_id, args.dry_run);
+    let operation_id = args.write.operation_id(
+        "person-contact-remove",
+        &(person.id.uuid(), person.revision),
+    )?;
+    let mut answer = change(
+        PeopleAction::ContactRemoved,
+        &person,
+        operation_id,
+        args.dry_run,
+    );
     answer.replayed = !attached;
     Ok(PeoplePlan {
         write: PeopleWrite::Contact(PersonContactSetRequest {
@@ -1031,7 +1084,10 @@ impl PeoplePlan {
     }
 }
 
-fn person_projects(mut projects: Vec<planning::Project>, person_id: &str) -> Vec<ExternalPersonProject> {
+fn person_projects(
+    mut projects: Vec<planning::Project>,
+    person_id: &str,
+) -> Vec<ExternalPersonProject> {
     projects.sort_by_key(|project| project.title.to_lowercase());
     projects
         .into_iter()
@@ -1093,9 +1149,10 @@ impl Tracker<'_> {
             )));
         }
         let suggestion = introduction.suggestion_id.clone();
-        let operation_id = args
-            .write
-            .operation_id("first-met-answer", &(&answer.person_id, &suggestion, accept))?;
+        let operation_id = args.write.operation_id(
+            "first-met-answer",
+            &(&answer.person_id, &suggestion, accept),
+        )?;
         answer.operation_id = Some(operation_id.clone());
         answer.answered = Some(if accept {
             FirstMetAnswer::Took
@@ -1117,34 +1174,69 @@ impl Tracker<'_> {
         Ok(WorkAnswer::FirstMet(Box::new(after)))
     }
 
-    pub(super) async fn person_link(&self, args: &PersonLinkArgs) -> Result<WorkAnswer, ExternalError> {
-        let key = format!("{}\0{}\0{}\0{}", args.person, args.meeting, args.confirm, args.remove);
-        self.people_write("person-link", "linking people to meetings", &args.write, args.dry_run, &key, || {
-            plan_link(self.meetings, args)
-        })
+    pub(super) async fn person_link(
+        &self,
+        args: &PersonLinkArgs,
+    ) -> Result<WorkAnswer, ExternalError> {
+        let key = format!(
+            "{}\0{}\0{}\0{}",
+            args.person, args.meeting, args.confirm, args.remove
+        );
+        self.people_write(
+            "person-link",
+            "linking people to meetings",
+            &args.write,
+            args.dry_run,
+            &key,
+            || plan_link(self.meetings, args),
+        )
         .await
     }
 
-    pub(super) async fn person_split(&self, args: &PersonSplitArgs) -> Result<WorkAnswer, ExternalError> {
+    pub(super) async fn person_split(
+        &self,
+        args: &PersonSplitArgs,
+    ) -> Result<WorkAnswer, ExternalError> {
         let key = format!("{args:?}");
-        self.people_write("person-split", "splitting a person", &args.write, args.dry_run, &key, || {
-            plan_split(self.meetings, args)
-        })
+        self.people_write(
+            "person-split",
+            "splitting a person",
+            &args.write,
+            args.dry_run,
+            &key,
+            || plan_split(self.meetings, args),
+        )
         .await
     }
 
-    pub(super) async fn person_delete(&self, args: &PersonDeleteArgs) -> Result<WorkAnswer, ExternalError> {
-        self.people_write("person-delete", "deleting a person", &args.write, args.dry_run, &args.person, || {
-            plan_delete(self.meetings, args)
-        })
+    pub(super) async fn person_delete(
+        &self,
+        args: &PersonDeleteArgs,
+    ) -> Result<WorkAnswer, ExternalError> {
+        self.people_write(
+            "person-delete",
+            "deleting a person",
+            &args.write,
+            args.dry_run,
+            &args.person,
+            || plan_delete(self.meetings, args),
+        )
         .await
     }
 
-    pub(super) async fn person_photo(&self, args: &PersonPhotoArgs) -> Result<WorkAnswer, ExternalError> {
+    pub(super) async fn person_photo(
+        &self,
+        args: &PersonPhotoArgs,
+    ) -> Result<WorkAnswer, ExternalError> {
         let key = format!("{}\0{:?}\0{}", args.person, args.file, args.remove);
-        self.people_write("person-photo", "changing a person's photo", &args.write, args.dry_run, &key, || {
-            plan_photo(self.meetings, args, now_ms())
-        })
+        self.people_write(
+            "person-photo",
+            "changing a person's photo",
+            &args.write,
+            args.dry_run,
+            &key,
+            || plan_photo(self.meetings, args, now_ms()),
+        )
         .await
     }
 
@@ -1179,7 +1271,9 @@ impl Tracker<'_> {
         F: Future<Output = Result<PeoplePlan, ExternalError>>,
     {
         if let (Some(operation_id), false) = (write.operation_id, dry_run) {
-            if let Some(mut earlier) = self.people_receipt(&operation_id.to_string(), command, key)? {
+            if let Some(mut earlier) =
+                self.people_receipt(&operation_id.to_string(), command, key)?
+            {
                 earlier.replayed = true;
                 return Ok(WorkAnswer::PeopleChange(Box::new(earlier)));
             }
@@ -1294,7 +1388,11 @@ pub(super) fn text(answer: &WorkAnswer, text: &mut String) {
                         "  {}  {}{}  {}",
                         meeting.at,
                         meeting.title,
-                        if meeting.confirmed { "" } else { " (suggested)" },
+                        if meeting.confirmed {
+                            ""
+                        } else {
+                            " (suggested)"
+                        },
                         meeting.meeting_id
                     );
                 }
@@ -1328,7 +1426,9 @@ pub(super) fn text(answer: &WorkAnswer, text: &mut String) {
         }
         WorkAnswer::Companies(list) => {
             if list.companies.is_empty() {
-                text.push_str("No companies yet. Set one with: sona work person-save NAME --org COMPANY\n");
+                text.push_str(
+                    "No companies yet. Set one with: sona work person-save NAME --org COMPANY\n",
+                );
             }
             for company in &list.companies {
                 let _ = writeln!(
@@ -1350,7 +1450,11 @@ pub(super) fn text(answer: &WorkAnswer, text: &mut String) {
                     text,
                     "  {}{}  {}",
                     person.name,
-                    person.role.as_deref().map(|role| format!(", {role}")).unwrap_or_default(),
+                    person
+                        .role
+                        .as_deref()
+                        .map(|role| format!(", {role}"))
+                        .unwrap_or_default(),
                     person.id
                 );
             }
@@ -1384,7 +1488,11 @@ pub(super) fn text(answer: &WorkAnswer, text: &mut String) {
                     text,
                     "  Introduced by {}{}: \"{}\"",
                     introduction.introducer,
-                    if introduction.confirmed { "" } else { " (waiting for yes or no)" },
+                    if introduction.confirmed {
+                        ""
+                    } else {
+                        " (waiting for yes or no)"
+                    },
                     introduction.quote
                 );
             }
@@ -1405,7 +1513,11 @@ pub(super) fn text(answer: &WorkAnswer, text: &mut String) {
                 text,
                 "{}{}",
                 change.action.text(change.dry_run),
-                if change.replayed && !change.dry_run { " (already so)" } else { "" }
+                if change.replayed && !change.dry_run {
+                    " (already so)"
+                } else {
+                    ""
+                }
             );
             let _ = writeln!(text, "  {}  {}", change.name, change.person_id);
             if let Some(meeting) = &change.meeting_id {
@@ -1416,7 +1528,10 @@ pub(super) fn text(answer: &WorkAnswer, text: &mut String) {
                     text,
                     "  into {}{}",
                     into.name,
-                    into.id.as_deref().map(|id| format!("  {id}")).unwrap_or_default()
+                    into.id
+                        .as_deref()
+                        .map(|id| format!("  {id}"))
+                        .unwrap_or_default()
                 );
             }
             for (what, moved) in [
@@ -1436,11 +1551,11 @@ pub(super) fn text(answer: &WorkAnswer, text: &mut String) {
 
 #[cfg(test)]
 mod tests {
+    use super::super::catalog::merge_people;
     use super::{
         companies, company, first_met, person_page, person_projects, plan_delete, plan_link,
         plan_split, PeopleAction, PersonDeleteArgs, PersonLinkArgs, PersonSplitArgs,
     };
-    use super::super::catalog::merge_people;
     use crate::meeting::detection::machine::CalendarEventSummary;
     use crate::meeting::people_types::PersonId;
     use crate::meeting::series_types::MeetingSeriesRemoteOptOutSetRequest;
@@ -1552,7 +1667,12 @@ mod tests {
         }
     }
 
-    fn linking(person: &str, meeting: MeetingSessionId, confirm: bool, remove: bool) -> PersonLinkArgs {
+    fn linking(
+        person: &str,
+        meeting: MeetingSessionId,
+        confirm: bool,
+        remove: bool,
+    ) -> PersonLinkArgs {
         PersonLinkArgs {
             person: person.to_owned(),
             meeting: meeting.uuid().to_string(),
@@ -1627,12 +1747,15 @@ mod tests {
             let page = person_page(&corpus.meetings, "Lee Park").await.unwrap();
             assert!(page.meetings.is_empty());
 
-            let linked = plan_link(&corpus.meetings, &linking("Lee Park", corpus.open, false, false))
-                .await
-                .unwrap()
-                .apply(&corpus.meetings)
-                .await
-                .unwrap();
+            let linked = plan_link(
+                &corpus.meetings,
+                &linking("Lee Park", corpus.open, false, false),
+            )
+            .await
+            .unwrap()
+            .apply(&corpus.meetings)
+            .await
+            .unwrap();
             assert!(!linked.replayed);
             let page = person_page(&corpus.meetings, "Lee Park").await.unwrap();
             assert_eq!(
@@ -1640,17 +1763,23 @@ mod tests {
                 vec![(corpus.open.uuid().to_string(), true)]
             );
 
-            let again = plan_link(&corpus.meetings, &linking("Lee Park", corpus.open, false, false))
-                .await
-                .unwrap();
+            let again = plan_link(
+                &corpus.meetings,
+                &linking("Lee Park", corpus.open, false, false),
+            )
+            .await
+            .unwrap();
             assert!(again.settled());
 
-            plan_link(&corpus.meetings, &linking("Lee Park", corpus.open, false, true))
-                .await
-                .unwrap()
-                .apply(&corpus.meetings)
-                .await
-                .unwrap();
+            plan_link(
+                &corpus.meetings,
+                &linking("Lee Park", corpus.open, false, true),
+            )
+            .await
+            .unwrap()
+            .apply(&corpus.meetings)
+            .await
+            .unwrap();
             let page = person_page(&corpus.meetings, "Lee Park").await.unwrap();
             assert!(page.meetings.is_empty());
 
@@ -1660,12 +1789,15 @@ mod tests {
                 page_meetings(&page),
                 vec![(corpus.kept.uuid().to_string(), false)]
             );
-            plan_link(&corpus.meetings, &linking("Lee Park", corpus.kept, true, false))
-                .await
-                .unwrap()
-                .apply(&corpus.meetings)
-                .await
-                .unwrap();
+            plan_link(
+                &corpus.meetings,
+                &linking("Lee Park", corpus.kept, true, false),
+            )
+            .await
+            .unwrap()
+            .apply(&corpus.meetings)
+            .await
+            .unwrap();
             let page = person_page(&corpus.meetings, "Lee Park").await.unwrap();
             assert_eq!(
                 page_meetings(&page),
@@ -1680,10 +1812,13 @@ mod tests {
             let corpus = corpus().await;
             person(&corpus.store, "Lee Park", &[], &[]);
             keep_on_this_mac(&corpus);
-            let refused = plan_link(&corpus.meetings, &linking("Lee Park", corpus.kept, false, false))
-                .await
-                .err()
-                .unwrap();
+            let refused = plan_link(
+                &corpus.meetings,
+                &linking("Lee Park", corpus.kept, false, false),
+            )
+            .await
+            .err()
+            .unwrap();
             assert_eq!(refused.error, ExternalErrorCode::NotFound);
         });
     }
@@ -1721,7 +1856,8 @@ mod tests {
             let ortiz = person_page(&corpus.meetings, "Dana Ortiz").await.unwrap();
             assert_eq!(split.into.and_then(|into| into.id), Some(ortiz.id.clone()));
             assert_eq!(
-                ortiz.meetings
+                ortiz
+                    .meetings
                     .iter()
                     .map(|meeting| meeting.meeting_id.clone())
                     .collect::<Vec<_>>(),
@@ -1803,7 +1939,10 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(merged.person.aliases, preview.person.aliases);
-            assert_eq!(merged.person.calendar_emails, preview.person.calendar_emails);
+            assert_eq!(
+                merged.person.calendar_emails,
+                preview.person.calendar_emails
+            );
             assert_eq!(merged.meetings_count, preview.meetings_count);
             assert!(!corpus
                 .store
@@ -1817,16 +1956,17 @@ mod tests {
 
     #[test]
     fn person_page_lists_projects_they_lead_or_joined() {
-        let project = |id: &str, lead: Option<&str>, members: &[&str], archived: bool, trashed: bool| {
-            serde_json::from_value::<crate::planning::Project>(serde_json::json!({
-                "id": id, "title": id, "status": "active", "revision": 1,
-                "createdAtMs": 0, "updatedAtMs": 0, "leadPersonId": lead, "leadIsSelf": false,
-                "memberPersonIds": members, "membersIncludeSelf": false, "priority": 0,
-                "labelIds": [], "links": [],
-                "archivedAtMs": archived.then_some(1), "trashedAtMs": trashed.then_some(1),
-            }))
-            .unwrap()
-        };
+        let project =
+            |id: &str, lead: Option<&str>, members: &[&str], archived: bool, trashed: bool| {
+                serde_json::from_value::<crate::planning::Project>(serde_json::json!({
+                    "id": id, "title": id, "status": "active", "revision": 1,
+                    "createdAtMs": 0, "updatedAtMs": 0, "leadPersonId": lead, "leadIsSelf": false,
+                    "memberPersonIds": members, "membersIncludeSelf": false, "priority": 0,
+                    "labelIds": [], "links": [],
+                    "archivedAtMs": archived.then_some(1), "trashedAtMs": trashed.then_some(1),
+                }))
+                .unwrap()
+            };
         let listed = person_projects(
             vec![
                 project("Pier", None, &["dana"], true, false),
@@ -1852,8 +1992,8 @@ mod tests {
 
         // TIFF header and one IFD entry: Orientation (0x0112) = 6, rotate 90° clockwise.
         const ROTATE_CLOCKWISE: [u8; 26] = [
-            b'I', b'I', 0x2A, 0, 8, 0, 0, 0, 1, 0, 0x12, 0x01, 3, 0, 1, 0, 0, 0, 6, 0, 0, 0, 0,
-            0, 0, 0,
+            b'I', b'I', 0x2A, 0, 8, 0, 0, 0, 1, 0, 0x12, 0x01, 3, 0, 1, 0, 0, 0, 6, 0, 0, 0, 0, 0,
+            0, 0,
         ];
         let wide = RgbImage::from_fn(60, 30, |x, _| {
             if x < 30 {
@@ -1864,7 +2004,9 @@ mod tests {
         });
         let mut jpeg = Vec::new();
         let mut encoder = JpegEncoder::new_with_quality(&mut jpeg, 95);
-        encoder.set_exif_metadata(ROTATE_CLOCKWISE.to_vec()).unwrap();
+        encoder
+            .set_exif_metadata(ROTATE_CLOCKWISE.to_vec())
+            .unwrap();
         encoder
             .write_image(wide.as_raw(), 60, 30, ExtendedColorType::Rgb8)
             .unwrap();

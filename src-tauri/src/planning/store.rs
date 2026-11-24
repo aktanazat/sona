@@ -431,7 +431,10 @@ pub(crate) fn records(conn: &Connection, id: &str) -> Result<ProjectRecords> {
     ))?;
     let rows = statement
         .query_map([id], |row| {
-            Ok((read_task(row)?, row.get::<_, WorkStatus>(8)? == WorkStatus::Triage))
+            Ok((
+                read_task(row)?,
+                row.get::<_, WorkStatus>(8)? == WorkStatus::Triage,
+            ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let triage = rows
@@ -517,7 +520,8 @@ fn pulse(
     let mut open = 0_usize;
     let mut overdue = 0_usize;
     let mut owned = HashMap::<&str, usize>::new();
-    let open_task = |task: &PlanningTask| is_open(task.status) && !records.triage.contains(&task.id);
+    let open_task =
+        |task: &PlanningTask| is_open(task.status) && !records.triage.contains(&task.id);
     for task in &records.tasks {
         if task.status == TaskStatus::Done {
             done += 1;
@@ -1103,7 +1107,10 @@ mod tests {
             |row| row.get(0),
         )?;
         assert_eq!(linked, 1);
-        assert_eq!(target_project(&conn, EvidenceTargetKind::Task, &task.id)?, None);
+        assert_eq!(
+            target_project(&conn, EvidenceTargetKind::Task, &task.id)?,
+            None
+        );
         Ok(())
     }
 }

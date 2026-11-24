@@ -213,9 +213,10 @@ pub(crate) fn build(
             target_at_ms: project.target_at_ms,
             latest_update: outlook.latest_update.map(|update| DigestUpdate {
                 health: update.health,
-                excerpt: update.body.as_deref().and_then(|body| {
-                    excerpt(&updates::for_agents(&update.id, body, quotes_shown))
-                }),
+                excerpt: update
+                    .body
+                    .as_deref()
+                    .and_then(|body| excerpt(&updates::for_agents(&update.id, body, quotes_shown))),
                 author: update.author,
                 created_at_ms: update.created_at_ms,
             }),

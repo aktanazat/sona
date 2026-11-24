@@ -783,7 +783,16 @@ pub(crate) fn save_project(
         description: description.map(str::to_owned),
         ..ProjectEdit::default()
     };
-    let project = super::catalog_project_save(app, operation_id, id.map(str::to_owned), &edit)?;
+    let project = super::catalog_project_save(
+        app,
+        super::comments::Author {
+            actor: super::types::WorkActor::Agent,
+            agent: Some(CHAT_AGENT),
+        },
+        operation_id,
+        id.map(str::to_owned),
+        &edit,
+    )?;
     let written = ProjectFields::of(&project);
     Ok((project, prior, written))
 }
@@ -811,7 +820,17 @@ pub(crate) fn restore_project(
             ..ProjectEdit::default()
         },
     };
-    super::catalog_project_save(app, operation_id, Some(id.to_owned()), &edit).map(drop)
+    super::catalog_project_save(
+        app,
+        super::comments::Author {
+            actor: super::types::WorkActor::Agent,
+            agent: Some(CHAT_AGENT),
+        },
+        operation_id,
+        Some(id.to_owned()),
+        &edit,
+    )
+    .map(drop)
 }
 
 /// Who is replacing a note's text, which decides what must hold first.

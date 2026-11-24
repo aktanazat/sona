@@ -118,7 +118,10 @@ impl CloudSyncRuntime {
 
 /// A meeting whose series is kept on this Mac gets no link, as shared
 /// meeting pages refuse it too.
-fn ensure_shareable(store: &MeetingStore, session_id: MeetingSessionId) -> Result<(), CloudRuntimeError> {
+fn ensure_shareable(
+    store: &MeetingStore,
+    session_id: MeetingSessionId,
+) -> Result<(), CloudRuntimeError> {
     let kept = KeptLocal::read(store).map_err(|_| CloudRuntimeError::Storage)?;
     if kept.hides(session_id) {
         return Err(CloudRuntimeError::KeptOnThisMac);
@@ -144,7 +147,11 @@ fn room_page(page: &str, room_id: &str) -> Result<Url, CloudRuntimeError> {
 
 /// Where the Mac feeds the room: the companion's own address, over a
 /// secure socket, with the token only the Mac holds.
-fn room_socket(endpoint: &str, room_id: &str, host_token: &[u8]) -> Result<String, CloudRuntimeError> {
+fn room_socket(
+    endpoint: &str,
+    room_id: &str,
+    host_token: &[u8],
+) -> Result<String, CloudRuntimeError> {
     let mut url = Url::parse(endpoint).map_err(|_| CloudRuntimeError::IntegrityFailure)?;
     url.set_scheme("wss")
         .map_err(|()| CloudRuntimeError::IntegrityFailure)?;
@@ -248,7 +255,9 @@ async fn deliver(
             }
             Err(error) => log::debug!("The live room could not be reached: {error}"),
         }
-        let phase = meeting.map_or(SharePhase::Withdrawn, |meeting| meeting.live().share_phase());
+        let phase = meeting.map_or(SharePhase::Withdrawn, |meeting| {
+            meeting.live().share_phase()
+        });
         if !tries_again(phase, &mut over_since, room) {
             log::warn!("The live room never got the meeting's last state");
             return false;
@@ -270,7 +279,10 @@ fn tries_again(
     match phase {
         SharePhase::Live => true,
         SharePhase::Closing | SharePhase::Ended => {
-            over_since.get_or_insert_with(std::time::Instant::now).elapsed() <= FINAL_TRIES_FOR
+            over_since
+                .get_or_insert_with(std::time::Instant::now)
+                .elapsed()
+                <= FINAL_TRIES_FOR
         }
         SharePhase::Withdrawn => utc_now_ms() < room.expires_at_utc_ms,
     }
@@ -432,7 +444,11 @@ mod tests {
 
     /// A room an earlier launch made for the meeting, fed through a local
     /// socket that stands in for the companion.
-    fn kept_room(store: &MeetingStore, session_id: MeetingSessionId, listener: &TcpListener) -> LiveRoom {
+    fn kept_room(
+        store: &MeetingStore,
+        session_id: MeetingSessionId,
+        listener: &TcpListener,
+    ) -> LiveRoom {
         let room = LiveRoom {
             id: "harbor-room".to_owned(),
             socket: format!(
@@ -471,7 +487,10 @@ mod tests {
     async fn assert_rooms_let_go(store: &MeetingStore) {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         while !store.kept_live_rooms(utc_now_ms()).unwrap().is_empty() {
-            assert!(tokio::time::Instant::now() < deadline, "the emptied room stays kept");
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the emptied room stays kept"
+            );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
@@ -533,8 +552,16 @@ mod tests {
         let failing_since = std::time::Instant::now()
             .checked_sub(FINAL_TRIES_FOR + Duration::from_secs(1))
             .unwrap();
-        assert!(!tries_again(SharePhase::Ended, &mut Some(failing_since), &room));
-        assert!(tries_again(SharePhase::Withdrawn, &mut Some(failing_since), &room));
+        assert!(!tries_again(
+            SharePhase::Ended,
+            &mut Some(failing_since),
+            &room
+        ));
+        assert!(tries_again(
+            SharePhase::Withdrawn,
+            &mut Some(failing_since),
+            &room
+        ));
         let expired = LiveRoom {
             expires_at_utc_ms: utc_now_ms() - 1,
             ..room

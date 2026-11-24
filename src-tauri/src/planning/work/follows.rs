@@ -390,7 +390,7 @@ mod tests {
     use super::super::items::{self, NewItem};
     use super::super::types::{
         WorkActor, WorkDisplay, WorkDue, WorkGroupBy, WorkLayout, WorkOrderBy, WorkOwner,
-        WorkQuery, WorkStatus,
+        WorkQuery, WorkStatus, WorkViewInput,
     };
     use super::{follow, watch_views};
     use rusqlite::Connection;
@@ -415,12 +415,22 @@ mod tests {
             show_sub_tasks: true,
             sub_group_by: WorkGroupBy::None,
             hidden_columns: Vec::new(),
+            order_direction: None,
+            no_priority_first: false,
+            nest_sub_tasks: false,
         };
         let query = WorkQuery {
             due: Some(vec![WorkDue::Today]),
             ..WorkQuery::default()
         };
-        let view = items::save_view(conn, None, name, &query, &display, AT).expect("a view");
+        let input = WorkViewInput {
+            name: name.to_owned(),
+            query,
+            display,
+            icon: None,
+            project_id: None,
+        };
+        let view = items::save_view(conn, None, &input, AT).expect("a view");
         follow(conn, SubjectKind::View, &view.id, true, AT).expect("followed");
         view.id
     }

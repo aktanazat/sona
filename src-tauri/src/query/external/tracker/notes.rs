@@ -420,7 +420,10 @@ impl Tracker<'_> {
         let body = args.body.join(" ");
         let document = match args.cycle {
             Some(cycle) => Some(self.cycle_document(cycle)?.1),
-            None => self.planning_document(args.task.as_deref(), args.project.as_deref()).await?,
+            None => {
+                self.planning_document(args.task.as_deref(), args.project.as_deref())
+                    .await?
+            }
         };
         if args.dry_run {
             let mut answer = Self::note_change(
@@ -449,7 +452,8 @@ impl Tracker<'_> {
             |tx| scratchpad::create_note_in(tx, &body, author, now_ms()),
         )?;
         if let Some(document) = &document {
-            self.file_document(&note.id, document, &operation_id).await?;
+            self.file_document(&note.id, document, &operation_id)
+                .await?;
         }
         let mut answer = Self::note_change(
             NoteAction::Created,
@@ -644,8 +648,10 @@ impl Tracker<'_> {
             ScratchDocumentKind::Milestone => EvidenceTargetKind::Milestone,
             ScratchDocumentKind::Task => EvidenceTargetKind::Task,
         };
-        let link_operation =
-            Uuid::new_v5(&Uuid::NAMESPACE_OID, format!("{operation_id}/document").as_bytes());
+        let link_operation = Uuid::new_v5(
+            &Uuid::NAMESPACE_OID,
+            format!("{operation_id}/document").as_bytes(),
+        );
         planning::planning_link_source(
             self.app.clone(),
             self.app.state(),
@@ -684,13 +690,17 @@ impl Tracker<'_> {
         let settled = present == link;
         if !args.dry_run && !settled {
             self.applies("writing notes")?;
-            scratchpad::immediate(self.history, "The note's cycle could not be changed.", |tx| {
-                if link {
-                    documents::link_cycle_in(tx, &note.id, number, now_ms())
-                } else {
-                    documents::unlink_cycle_in(tx, &note.id, number)
-                }
-            })
+            scratchpad::immediate(
+                self.history,
+                "The note's cycle could not be changed.",
+                |tx| {
+                    if link {
+                        documents::link_cycle_in(tx, &note.id, number, now_ms())
+                    } else {
+                        documents::unlink_cycle_in(tx, &note.id, number)
+                    }
+                },
+            )
             .map_err(|message| refusal(self.history, message))?;
             scratchpad::emit_changed(self.app, &note.id, false);
         }

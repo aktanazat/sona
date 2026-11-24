@@ -724,11 +724,8 @@ pub(crate) fn recap(
     let mut shown = draft.clone();
     shown.include.audio = false;
     let built = build_page(&shown, None)?;
-    let budget = processing::evidence_budget(
-        generator.as_ref(),
-        RECAP_INSTRUCTIONS,
-        RECAP_MAX_TOKENS,
-    );
+    let budget =
+        processing::evidence_budget(generator.as_ref(), RECAP_INSTRUCTIONS, RECAP_MAX_TOKENS);
     let evidence = recap_evidence(built.page(), budget)?;
     let answer = generator
         .generate(
@@ -774,15 +771,13 @@ fn recap_evidence(page: &Page, budget: usize) -> Result<String> {
     if pack.len() > budget {
         shown.transcript = None;
         shown.speakers = None;
-        pack = serde_json::to_string(&shown).map_err(|_| {
-            SharedPagesError::new(Code::Failed, "The page could not be encoded.")
-        })?;
+        pack = serde_json::to_string(&shown)
+            .map_err(|_| SharedPagesError::new(Code::Failed, "The page could not be encoded."))?;
     }
     if pack.len() > budget {
         shown.notes = None;
-        pack = serde_json::to_string(&shown).map_err(|_| {
-            SharedPagesError::new(Code::Failed, "The page could not be encoded.")
-        })?;
+        pack = serde_json::to_string(&shown)
+            .map_err(|_| SharedPagesError::new(Code::Failed, "The page could not be encoded."))?;
     }
     if pack.len() > budget {
         return Err(SharedPagesError::new(
@@ -803,7 +798,10 @@ fn blurb_of(page: &Page) -> Option<String> {
         .char_indices()
         .find(|&(at, mark)| {
             matches!(mark, '.' | '!' | '?')
-                && paragraph[at + 1..].chars().next().is_none_or(char::is_whitespace)
+                && paragraph[at + 1..]
+                    .chars()
+                    .next()
+                    .is_none_or(char::is_whitespace)
         })
         .map_or(paragraph.len(), |(at, _)| at + 1);
     let sentence = paragraph[..end].trim();

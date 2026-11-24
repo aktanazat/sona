@@ -511,8 +511,12 @@ fn organization_detail_in(
     for entry in &people {
         let mut facts = facts_for_person_in(connection, &entry.person, user_name)?;
         gate_continuity_facts_in(connection, &mut facts)?;
-        facts.meetings.retain(|meeting| !hidden.contains(&meeting.id));
-        facts.open_loops.retain(|open| !hidden.contains(&open.meeting_id));
+        facts
+            .meetings
+            .retain(|meeting| !hidden.contains(&meeting.id));
+        facts
+            .open_loops
+            .retain(|open| !hidden.contains(&open.meeting_id));
         for meeting in facts.meetings {
             // Two people from one organization in one meeting is the ordinary
             // case, and the meeting happened once.
@@ -578,8 +582,12 @@ fn companies_list_in(
         }
         let mut facts = facts_for_person_in(connection, &entry.person, user_name)?;
         gate_continuity_facts_in(connection, &mut facts)?;
-        facts.meetings.retain(|meeting| !hidden.contains(&meeting.id));
-        facts.open_loops.retain(|open| !hidden.contains(&open.meeting_id));
+        facts
+            .meetings
+            .retain(|meeting| !hidden.contains(&meeting.id));
+        facts
+            .open_loops
+            .retain(|open| !hidden.contains(&open.meeting_id));
         let tally = tallies.entry(slug).or_insert_with(|| Tally {
             name: name.to_owned(),
             people: 0,

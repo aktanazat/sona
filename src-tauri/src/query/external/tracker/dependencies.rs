@@ -196,7 +196,10 @@ impl Tracker<'_> {
         ))
     }
 
-    pub(super) fn project_relate(&self, args: &ProjectRelateArgs) -> Result<WorkAnswer, ExternalError> {
+    pub(super) fn project_relate(
+        &self,
+        args: &ProjectRelateArgs,
+    ) -> Result<WorkAnswer, ExternalError> {
         let projects = self.every_project()?;
         let (blocker, blocked) = Self::ends(args, &projects)?;
         let operation_id = args.write.fresh_operation_id();
@@ -206,7 +209,13 @@ impl Tracker<'_> {
         })
         .map_err(|message| refusal(self.history, message))?;
         if let Some(existing) = linked {
-            return Ok(change(&existing, &projects, args.dry_run, operation_id, Change::Already));
+            return Ok(change(
+                &existing,
+                &projects,
+                args.dry_run,
+                operation_id,
+                Change::Already,
+            ));
         }
         let dependency = if args.dry_run {
             self.rehearse(|conn| dependencies::add(conn, &blocker.id, &blocked.id, now_ms()))?
@@ -215,7 +224,13 @@ impl Tracker<'_> {
             work::catalog_dependency_add(self.app, &operation_id, &blocker.id, &blocked.id)
                 .map_err(|message| self.write_refusal(message, &operation_id, "The project"))?
         };
-        Ok(change(&dependency, &projects, args.dry_run, operation_id, Change::Added))
+        Ok(change(
+            &dependency,
+            &projects,
+            args.dry_run,
+            operation_id,
+            Change::Added,
+        ))
     }
 
     pub(super) fn project_unrelate(
@@ -244,7 +259,13 @@ impl Tracker<'_> {
             work::catalog_dependency_remove(self.app, &operation_id, &found.id)
                 .map_err(|message| self.write_refusal(message, &operation_id, "The project"))?
         };
-        Ok(change(&dependency, &projects, args.dry_run, operation_id, Change::Removed))
+        Ok(change(
+            &dependency,
+            &projects,
+            args.dry_run,
+            operation_id,
+            Change::Removed,
+        ))
     }
 }
 
@@ -270,7 +291,9 @@ fn standing(
     }
     Ok(dependencies::dependencies(conn)?
         .into_iter()
-        .find(|dependency| dependency.blocker_id == blocker_id && dependency.blocked_id == blocked_id))
+        .find(|dependency| {
+            dependency.blocker_id == blocker_id && dependency.blocked_id == blocked_id
+        }))
 }
 
 fn change(
@@ -361,7 +384,9 @@ mod tests {
                 title: Some(title.to_owned()),
                 ..ProjectEdit::default()
             };
-            catalog::save_project(&conn, None, &edit, 1).expect("a project").id
+            catalog::save_project(&conn, None, &edit, 1)
+                .expect("a project")
+                .id
         };
         let (harbor, ferry) = (project("Harbor"), project("Ferry"));
         let first = Uuid::new_v4().to_string();
@@ -378,6 +403,8 @@ mod tests {
         let other = Uuid::new_v4().to_string();
         let fresh = standing(&conn, Some(&other), &harbor, &ferry).expect("the lookup");
         assert_eq!(fresh.map(|link| link.blocked_id), Some(ferry.clone()));
-        assert!(standing(&conn, None, &harbor, &ferry).expect("the lookup").is_some());
+        assert!(standing(&conn, None, &harbor, &ferry)
+            .expect("the lookup")
+            .is_some());
     }
 }

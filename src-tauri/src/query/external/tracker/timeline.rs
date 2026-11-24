@@ -59,7 +59,9 @@ pub struct ExternalWorkTimelineProject {
 impl Tracker<'_> {
     pub(super) async fn timeline(&self, args: &TimelineArgs) -> Result<WorkAnswer, ExternalError> {
         let today = Local::now().date_naive();
-        let from = args.from.unwrap_or_else(|| today.with_day(1).unwrap_or(today));
+        let from = args
+            .from
+            .unwrap_or_else(|| today.with_day(1).unwrap_or(today));
         let to = match args.to {
             Some(to) => to,
             None => from
@@ -77,9 +79,8 @@ impl Tracker<'_> {
         )?;
         let board = self.board().await?;
         let mut projects = self.every_project()?;
-        projects.retain(|project| {
-            project.trashed_at_ms.is_none() && project.archived_at_ms.is_none()
-        });
+        projects
+            .retain(|project| project.trashed_at_ms.is_none() && project.archived_at_ms.is_none());
         projects.sort_by_key(|project| {
             (
                 project.start_at_ms.or(project.target_at_ms),
@@ -98,7 +99,9 @@ impl Tracker<'_> {
             milestones.sort_by_key(|milestone| milestone.due_at_ms);
             let first = project.start_at_ms.or(project.target_at_ms);
             let last = project.target_at_ms.or(project.start_at_ms);
-            let spans = first.zip(last).is_some_and(|(first, last)| first < end_ms && last >= first_ms);
+            let spans = first
+                .zip(last)
+                .is_some_and(|(first, last)| first < end_ms && last >= first_ms);
             if !spans && milestones.is_empty() {
                 if first.is_none() {
                     undated.push(ExternalWorkPersonRef {

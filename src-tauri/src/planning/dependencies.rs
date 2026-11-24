@@ -129,7 +129,9 @@ pub(crate) fn dependencies(conn: &Connection) -> Result<Vec<ProjectDependency>> 
 
 /// [`dependencies`], read for the app.
 pub(crate) fn listed(app: &AppHandle) -> std::result::Result<Vec<ProjectDependency>, String> {
-    super::history(&app.state::<Arc<HistoryManager>>(), |conn| dependencies(conn))
+    super::history(&app.state::<Arc<HistoryManager>>(), |conn| {
+        dependencies(conn)
+    })
 }
 
 fn dependency(conn: &Connection, id: &str) -> Result<ProjectDependency> {
@@ -206,8 +208,15 @@ mod tests {
     use super::*;
     use crate::planning::schema;
 
-    fn project(conn: &Connection, title: &str, start: Option<&str>, target: Option<&str>) -> String {
-        let id = store::insert_project(conn, title, None, 1).expect("a project").id;
+    fn project(
+        conn: &Connection,
+        title: &str,
+        start: Option<&str>,
+        target: Option<&str>,
+    ) -> String {
+        let id = store::insert_project(conn, title, None, 1)
+            .expect("a project")
+            .id;
         let ms = |day: Option<&str>| {
             day.map(|day| {
                 let day = NaiveDate::parse_from_str(day, "%Y-%m-%d").expect("a day");
@@ -248,11 +257,17 @@ mod tests {
         let broken = add(&conn, &harbor, &ferry, 11).expect("harbor blocks ferry");
         assert!(!kept.broken, "the pilot ends before the harbor starts");
         assert!(broken.broken, "the harbor ends after the ferry starts");
-        assert_eq!(add(&conn, &harbor, &ferry, 12).expect("again").id, broken.id);
+        assert_eq!(
+            add(&conn, &harbor, &ferry, 12).expect("again").id,
+            broken.id
+        );
 
         for (blocker, blocked) in [(&ferry, &pilot), (&ferry, &harbor), (&pilot, &pilot)] {
             let refused = add(&conn, blocker, blocked, 13).expect_err("a loop");
-            assert!(matches!(refused.downcast_ref::<Refusal>(), Some(Refusal::DependencyLoop)));
+            assert!(matches!(
+                refused.downcast_ref::<Refusal>(),
+                Some(Refusal::DependencyLoop)
+            ));
         }
 
         conn.execute(
@@ -262,7 +277,10 @@ mod tests {
         .expect("harbor done");
         let listed = dependencies(&conn).expect("the list");
         assert_eq!(
-            listed.iter().map(|d| (d.id.as_str(), d.broken)).collect::<Vec<_>>(),
+            listed
+                .iter()
+                .map(|d| (d.id.as_str(), d.broken))
+                .collect::<Vec<_>>(),
             [(kept.id.as_str(), false), (broken.id.as_str(), false)]
         );
 

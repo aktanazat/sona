@@ -356,8 +356,7 @@ fn track(
             }
             let mut reader = MeetingReader::new(Some(meetings), user_name);
             let patch = sync::acceptance(tx, &mut reader, &item, true, Some(&project_id))?;
-            let (after, moved) =
-                sync::accept(tx, Some(meetings), &item, &patch, actor, now_ms)?;
+            let (after, moved) = sync::accept(tx, Some(meetings), &item, &patch, actor, now_ms)?;
             store::insert_link(
                 tx,
                 &store::SourceLinkDraft {
@@ -409,8 +408,7 @@ fn dismiss(
             if let Some(item) = sync::tracking_item(tx, meetings, &loop_id)?
                 .filter(|item| item.status == WorkStatus::Triage)
             {
-                let (after, moved) =
-                    sync::decline(tx, Some(meetings), &item, None, actor, now_ms)?;
+                let (after, moved) = sync::decline(tx, Some(meetings), &item, None, actor, now_ms)?;
                 effects.item(&after);
                 effects.loops.extend(moved);
             }
@@ -458,13 +456,9 @@ fn restore(
                     now_ms,
                 )?;
                 effects.changed(&changed);
-                effects.loops.extend(sync::settle(
-                    tx,
-                    Some(meetings),
-                    &item.id,
-                    actor,
-                    now_ms,
-                )?);
+                effects
+                    .loops
+                    .extend(sync::settle(tx, Some(meetings), &item.id, actor, now_ms)?);
             }
             Ok(Done { value: (), effects })
         },
@@ -527,7 +521,10 @@ mod tests {
             .map(|entry| entry.actor)
             .filter(|actor| *actor != WorkActor::Sona)
             .collect();
-        assert!(actors.iter().all(|actor| *actor == WorkActor::Agent), "{actors:?}");
+        assert!(
+            actors.iter().all(|actor| *actor == WorkActor::Agent),
+            "{actors:?}"
+        );
         actors.len()
     }
 

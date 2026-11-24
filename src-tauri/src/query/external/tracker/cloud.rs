@@ -8,12 +8,12 @@ use crate::meeting::cloud_bundle::CloudMeetingBundleV1;
 use crate::meeting::session::MeetingSessionManager;
 use crate::meeting::store::{MeetingStore, StoreError};
 use crate::meeting::types::{MeetingListFilter, MeetingSessionId};
-use crate::settings::CloudSyncSettings;
 use crate::query::external::{
     kept_local, meeting_refusal, session_id, store, visible_meeting, ExternalError,
     ExternalErrorCode, ExternalScope, READ_SCOPES, WRITE_SCOPES,
 };
 use crate::query::{QueryError, QUERY_SCHEMA_VERSION};
+use crate::settings::CloudSyncSettings;
 use clap::{Args, Subcommand};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -99,7 +99,10 @@ impl SharedMeeting {
 }
 
 fn sync_failed(error: &CloudRuntimeError) -> ExternalError {
-    ExternalError::new(ExternalErrorCode::Failed, format!("Sona could not read it: {error}."))
+    ExternalError::new(
+        ExternalErrorCode::Failed,
+        format!("Sona could not read it: {error}."),
+    )
 }
 
 fn unreadable_file() -> ExternalError {
@@ -126,9 +129,11 @@ async fn sync_overview(
         .into_iter()
         .filter(|entry| !hidden.hides(entry.session_id))
         .map(|entry| {
-            meeting_status_in(&store, settings.paused, entry.session_id).map(|status| SyncedMeeting {
-                title: entry.title,
-                status,
+            meeting_status_in(&store, settings.paused, entry.session_id).map(|status| {
+                SyncedMeeting {
+                    title: entry.title,
+                    status,
+                }
             })
         })
         .collect::<Result<Vec<_>, _>>()
@@ -332,7 +337,10 @@ mod tests {
                 .await
                 .unwrap_err();
             assert_eq!(missing.error, ExternalErrorCode::NotFound);
-            assert_eq!(missing.message, format!("No meeting {} in this corpus.", unknown.uuid()));
+            assert_eq!(
+                missing.message,
+                format!("No meeting {} in this corpus.", unknown.uuid())
+            );
 
             let kept_import = already_here(&store, kept).unwrap_err();
             assert_eq!(kept_import.error, ExternalErrorCode::NotFound);

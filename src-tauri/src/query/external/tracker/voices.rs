@@ -6,8 +6,8 @@ use super::speakers::{listed, pick_speaker};
 use super::{Tracker, WorkAnswer, WriteArgs, OPERATION_NAMESPACE};
 use crate::meeting::session::{MeetingSessionManager, MeetingSpeakerRenameRequest};
 use crate::meeting::store::voice_identity::{
-    MeetingSpeakerIdentifyDisposition, MeetingSpeakerIdentifyRequest,
-    MeetingSpeakerIdentifyTarget, VoiceNameResolution,
+    MeetingSpeakerIdentifyDisposition, MeetingSpeakerIdentifyRequest, MeetingSpeakerIdentifyTarget,
+    VoiceNameResolution,
 };
 use crate::meeting::types::{MeetingOperationId, MeetingSessionId, OperationResult, SpeakerId};
 use crate::query::external::{
@@ -460,7 +460,11 @@ pub(super) fn text(answer: &WorkAnswer, text: &mut String) {
                         "  {} -> {}{}  {}",
                         suggestion.speaker,
                         suggestion.name,
-                        if suggestion.person_id.is_none() { " (you)" } else { "" },
+                        if suggestion.person_id.is_none() {
+                            " (you)"
+                        } else {
+                            ""
+                        },
                         suggestion.speaker_id
                     );
                 }
@@ -499,7 +503,11 @@ pub(super) fn text(answer: &WorkAnswer, text: &mut String) {
             let _ = writeln!(
                 text,
                 "{verb}{}",
-                if change.replayed && !change.dry_run { " (already so)" } else { "" }
+                if change.replayed && !change.dry_run {
+                    " (already so)"
+                } else {
+                    ""
+                }
             );
             let _ = writeln!(text, "  {} -> {}", change.was, change.name);
             let _ = writeln!(text, "  speaker {}", change.speaker_id);

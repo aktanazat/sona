@@ -341,7 +341,10 @@ fn link_target(board: &Board, value: &str) -> Result<LinkTarget, ExternalError> 
     })
 }
 
-fn folder(store: &MeetingStore, value: &str) -> Result<(MeetingFolderId, ExternalFolder), ExternalError> {
+fn folder(
+    store: &MeetingStore,
+    value: &str,
+) -> Result<(MeetingFolderId, ExternalFolder), ExternalError> {
     let folders: Vec<(String, String, MeetingFolderId)> = store
         .meeting_folders()
         .map_err(QueryError::from)?
@@ -497,13 +500,17 @@ impl DocumentPlan {
             .await
             .map_err(|error| match (error, self.session) {
                 (MeetingCommandError::NotFound, Some(session)) => missing_meeting(session),
-                (MeetingCommandError::InvalidRequest | MeetingCommandError::ImportUnreadable, _) => {
-                    ExternalError::invalid("Sona could not read the file's text.")
-                }
+                (
+                    MeetingCommandError::InvalidRequest | MeetingCommandError::ImportUnreadable,
+                    _,
+                ) => ExternalError::invalid("Sona could not read the file's text."),
                 (error, _) => command_failed(error),
             })?;
         let document = result.document.ok_or_else(|| {
-            ExternalError::new(ExternalErrorCode::Failed, "The document could not be added.")
+            ExternalError::new(
+                ExternalErrorCode::Failed,
+                "The document could not be added.",
+            )
         })?;
         let replayed = document.summary.created_at_utc_ms < started;
         let meeting = self.session.map(|session| session.uuid().to_string());
@@ -529,7 +536,12 @@ pub(super) async fn deletable(
         .find(|document| document.summary.id.uuid() == id)
         .and_then(|document| {
             let meeting = shown(&kept_local, &placed, document.summary.id)?;
-            Some(ExternalDocument::from_summary(document.summary, meeting, None, None))
+            Some(ExternalDocument::from_summary(
+                document.summary,
+                meeting,
+                None,
+                None,
+            ))
         })
         .map(|document| (document, listed.revision))
         .ok_or_else(|| missing_document(id))
@@ -589,7 +601,9 @@ fn file_delete_receipt(
 impl Tracker<'_> {
     pub(super) async fn sources(&self, verb: &SourcesVerb) -> Result<WorkAnswer, ExternalError> {
         let answer = match verb {
-            SourcesVerb::SourceLink(args) => ExternalSourcesAnswer::Link(self.source_link(args).await?),
+            SourcesVerb::SourceLink(args) => {
+                ExternalSourcesAnswer::Link(self.source_link(args).await?)
+            }
             SourcesVerb::AskPack(args) => ExternalSourcesAnswer::Pack(self.ask_pack(args).await?),
             SourcesVerb::Docs(args) => {
                 let person = match &args.person {
@@ -709,7 +723,10 @@ impl Tracker<'_> {
         .await
     }
 
-    async fn doc_delete(&self, args: &DocDeleteArgs) -> Result<ExternalDocumentChange, ExternalError> {
+    async fn doc_delete(
+        &self,
+        args: &DocDeleteArgs,
+    ) -> Result<ExternalDocumentChange, ExternalError> {
         let operation_id = args.write.fresh_operation_id();
         let request = args.document.to_string();
         let mut change = ExternalDocumentChange {
@@ -993,18 +1010,26 @@ mod tests {
             titles.sort_unstable();
             assert_eq!(titles, ["Handbook", "Shared contract"]);
 
-            let refused = documents(&corpus.meetings, None, Some(&corpus.kept.uuid().to_string()))
-                .await
-                .err()
-                .unwrap();
+            let refused = documents(
+                &corpus.meetings,
+                None,
+                Some(&corpus.kept.uuid().to_string()),
+            )
+            .await
+            .err()
+            .unwrap();
             assert_eq!(refused.error, ExternalErrorCode::NotFound);
 
             let file = corpus.directory.path().join("notes.md");
             std::fs::write(&file, "terms").unwrap();
-            let refused = plan_add(&corpus.meetings, &file, Some(&corpus.kept.uuid().to_string()))
-                .await
-                .err()
-                .unwrap();
+            let refused = plan_add(
+                &corpus.meetings,
+                &file,
+                Some(&corpus.kept.uuid().to_string()),
+            )
+            .await
+            .err()
+            .unwrap();
             assert_eq!(refused.error, ExternalErrorCode::NotFound);
         });
     }
@@ -1039,7 +1064,10 @@ mod tests {
 
             let listed = documents(&corpus.meetings, None, None).await.unwrap();
             assert_eq!(listed.entries.len(), 1);
-            assert_eq!(listed.entries[0].meeting_id.as_deref(), Some(shared.as_str()));
+            assert_eq!(
+                listed.entries[0].meeting_id.as_deref(),
+                Some(shared.as_str())
+            );
         });
     }
 }

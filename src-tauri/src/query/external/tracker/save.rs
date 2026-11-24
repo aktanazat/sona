@@ -10,8 +10,8 @@ use super::{
 use crate::planning;
 use crate::planning::work::agents;
 use crate::planning::work::attachments;
-use crate::planning::work::types::{WorkItemRow, WorkPatch};
 use crate::planning::work::changes::{self, CursorRefusal};
+use crate::planning::work::types::{WorkItemRow, WorkPatch};
 use crate::query::external::{ExternalError, ExternalErrorCode};
 use crate::query::QUERY_SCHEMA_VERSION;
 use clap::{Args, ValueEnum};
@@ -323,7 +323,11 @@ impl Tracker<'_> {
             return Err(ExternalError::invalid("--patch-json names no change."));
         }
         let board = self.board().await?;
-        let row = args.task.as_ref().map(|task| board.task(task)).transpose()?;
+        let row = args
+            .task
+            .as_ref()
+            .map(|task| board.task(task))
+            .transpose()?;
         if row.is_none() && args.expected_revision.is_some() {
             return Err(ExternalError::invalid(
                 "--expected-revision needs a task: a new task has no revision yet.",
@@ -358,7 +362,9 @@ impl Tracker<'_> {
         };
         let mut details = row.and_then(|row| row.item.details.clone());
         let mut details_touched = false;
-        let mut labels = row.map(|row| row.item.label_ids.clone()).unwrap_or_default();
+        let mut labels = row
+            .map(|row| row.item.label_ids.clone())
+            .unwrap_or_default();
         let mut labels_touched = false;
         let mut extras = Vec::new();
         for (at, entry) in entries.iter().enumerate() {
@@ -375,7 +381,10 @@ impl Tracker<'_> {
                 .as_deref()
                 .is_some_and(|op| !ops.is_empty() && !ops.contains(&op))
             {
-                return Err(bad(at, format!("{field} takes no op but {}", ops.join(" or "))));
+                return Err(bad(
+                    at,
+                    format!("{field} takes no op but {}", ops.join(" or ")),
+                ));
             }
             if entry.anchor.is_some() && field != "description" {
                 return Err(bad(at, "only description takes an anchor"));
@@ -490,7 +499,10 @@ impl Tracker<'_> {
             Some(_) => None,
             None => Some(new_task(&update)?),
         };
-        let today = chrono::Local::now().date_naive().format("%Y-%m-%d").to_string();
+        let today = chrono::Local::now()
+            .date_naive()
+            .format("%Y-%m-%d")
+            .to_string();
         let base = args.write.operation_id(
             "save",
             &(row.map(|row| &row.item.id), &args.patch_json, &today),
@@ -541,7 +553,10 @@ impl Tracker<'_> {
                 .first()
                 .map(|task| (task.id.clone(), task.handle.clone()))
                 .ok_or_else(|| {
-                    ExternalError::new(ExternalErrorCode::Failed, "The new task could not be read back.")
+                    ExternalError::new(
+                        ExternalErrorCode::Failed,
+                        "The new task could not be read back.",
+                    )
                 })?,
             (None, _) => {
                 return Err(ExternalError::new(
@@ -581,7 +596,10 @@ impl Tracker<'_> {
             .row(&task_id)
             .map(|row| project_task(row, &board))
             .ok_or_else(|| {
-                ExternalError::new(ExternalErrorCode::Failed, "The task could not be read back.")
+                ExternalError::new(
+                    ExternalErrorCode::Failed,
+                    "The task could not be read back.",
+                )
             })?;
         Ok(match main {
             Some(WorkAnswer::Change(mut change)) => {
@@ -783,9 +801,10 @@ impl Tracker<'_> {
             planning::work::drawing_on(history, |kind, id| meetings.hides(kind, id))
         })
         .map_err(|message| refusal(self.history, message))?;
-        let hidden_notes =
-            planning::history(self.history, |history| Ok(hidden_notes(history, &meetings)?))
-                .map_err(|message| refusal(self.history, message))?;
+        let hidden_notes = planning::history(self.history, |history| {
+            Ok(hidden_notes(history, &meetings)?)
+        })
+        .map_err(|message| refusal(self.history, message))?;
         let quotes_shown = planning::history(self.history, |history| {
             planning::updates::quotes_shown(history, |meeting| meetings.hides_meeting(meeting))
         })
@@ -963,7 +982,10 @@ fn kept_here(
         "comment" if subject("subject_kind") == Some("note") => subject("subject_id"),
         _ => None,
     };
-    change.item_id.as_ref().is_some_and(|id| hidden_tasks.contains(id))
+    change
+        .item_id
+        .as_ref()
+        .is_some_and(|id| hidden_tasks.contains(id))
         || note.is_some_and(|id| hidden_notes.contains(id))
         || (change.entity == "meeting"
             && meetings.hides(planning::EvidenceSourceKind::Meeting, &change.entity_id))
@@ -995,7 +1017,10 @@ pub(super) fn text(answer: &WorkAnswer, text: &mut String) {
                 .and_then(|data| data.get(field))
                 .and_then(serde_json::Value::as_str)
         };
-        let what = match (change.task.as_deref(), data("title").or_else(|| data("name"))) {
+        let what = match (
+            change.task.as_deref(),
+            data("title").or_else(|| data("name")),
+        ) {
             (Some(task), _) => task.to_owned(),
             (None, Some(name)) => format!("“{name}”"),
             (None, None) => match data("subject_kind") {
@@ -1060,7 +1085,8 @@ mod tests {
         };
         let hidden_notes = HashSet::from(["note-7".to_owned()]);
         let none = HashSet::new();
-        let read = |change: &changes::WorkChange| kept_here(change, &meetings, &none, &hidden_notes);
+        let read =
+            |change: &changes::WorkChange| kept_here(change, &meetings, &none, &hidden_notes);
 
         let left_out = [
             change("meeting", None, &[("meeting", private)]),

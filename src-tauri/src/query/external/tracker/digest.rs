@@ -5,8 +5,8 @@
 
 use super::{day_text, now_ms, refusal, MeetingFence, Tracker, WorkAnswer, WriteArgs};
 use crate::planning;
-use crate::planning::ProjectHealth;
 use crate::planning::work::digest::{self, DigestRisk, DigestTask, ProjectDigest};
+use crate::planning::ProjectHealth;
 use crate::query::external::ExternalError;
 use crate::query::QUERY_SCHEMA_VERSION;
 use chrono::{Local, NaiveDate};
@@ -117,10 +117,9 @@ fn risk(risk: &DigestRisk) -> String {
             day_text(Some(*target_at_ms))
         ),
         DigestRisk::Overdue { tasks } => format!("{} overdue: {}", tasks.len(), handles(tasks)),
-        DigestRisk::LateMilestone { title, due_at_ms } => format!(
-            "milestone {title} was due {}",
-            day_text(Some(*due_at_ms))
-        ),
+        DigestRisk::LateMilestone { title, due_at_ms } => {
+            format!("milestone {title} was due {}", day_text(Some(*due_at_ms)))
+        }
         DigestRisk::NoUpdate { last_at_ms } => match last_at_ms {
             Some(at) => format!("no update since {}", day_text(Some(*at))),
             None => "no update yet".to_owned(),

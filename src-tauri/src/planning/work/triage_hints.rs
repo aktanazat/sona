@@ -138,9 +138,7 @@ impl Window<'_> {
                 None => counts.push((value, 1)),
             }
         }
-        counts
-            .into_iter()
-            .find(|(_, count)| self.passes(*count))
+        counts.into_iter().find(|(_, count)| self.passes(*count))
     }
 }
 
@@ -313,7 +311,11 @@ impl Pool {
                 tasks,
             }
         };
-        let has = |field| offered.iter().any(|suggestion: &WorkFieldSuggestion| suggestion.field == field);
+        let has = |field| {
+            offered
+                .iter()
+                .any(|suggestion: &WorkFieldSuggestion| suggestion.field == field)
+        };
         let mut found = Vec::new();
         if item.project_id.is_none() && !has(WorkSuggestionField::Project) {
             let people = self.people_windows(item, mine);
@@ -370,7 +372,9 @@ impl Pool {
             let mut counted: Vec<(&str, usize)> = Vec::new();
             for task in &window.tasks {
                 for label in task.label_ids.iter().map(String::as_str) {
-                    if item.label_ids.iter().any(|own| own == label) || !self.labels.contains_key(label) {
+                    if item.label_ids.iter().any(|own| own == label)
+                        || !self.labels.contains_key(label)
+                    {
                         continue;
                     }
                     match counted.iter_mut().find(|(seen, _)| *seen == label) {
@@ -384,7 +388,9 @@ impl Pool {
                 let taken = found.iter().any(|suggestion: &WorkFieldSuggestion| {
                     suggestion.field == WorkSuggestionField::Label && suggestion.value == value
                 });
-                let Some(name) = self.labels.get(label) else { continue };
+                let Some(name) = self.labels.get(label) else {
+                    continue;
+                };
                 if taken || !window.passes(count) {
                     continue;
                 }
@@ -481,7 +487,9 @@ fn people(meetings: &Connection) -> Result<People> {
     let mut met: HashMap<String, HashSet<String>> = HashMap::new();
     for row in rows {
         let (meeting, person) = row?;
-        met.entry(person.clone()).or_default().insert(meeting.clone());
+        met.entry(person.clone())
+            .or_default()
+            .insert(meeting.clone());
         people.entry(meeting).or_default().push(person);
     }
     let mut statement = meetings.prepare("SELECT id, display_name FROM persons")?;
@@ -607,8 +615,15 @@ pub(crate) async fn accept(
     let (item, suggestion) = offered(app, task_id, suggestion_id).await?;
     match taking(&item, &suggestion) {
         Some(Taking::Patch(patch)) => {
-            super::update_as(app, WorkActor::Me, operation_id, &item.id, item.revision, &patch)
-                .await
+            super::update_as(
+                app,
+                WorkActor::Me,
+                operation_id,
+                &item.id,
+                item.revision,
+                &patch,
+            )
+            .await
         }
         Some(Taking::Duplicate(of_id)) => {
             super::mark_duplicate_as(app, WorkActor::Me, operation_id, &item.id, &of_id).await
@@ -651,10 +666,7 @@ pub(crate) async fn dismiss(
                 )?;
                 let mut effects = Effects::default();
                 effects.item(&item);
-                Ok(Done {
-                    value: (),
-                    effects,
-                })
+                Ok(Done { value: (), effects })
             },
         )
     })?;

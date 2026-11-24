@@ -81,21 +81,23 @@ impl MeetingStore {
             })?
             .collect::<Result<Vec<_>, _>>()?;
         rows.into_iter()
-            .map(|(session_id, room_id, socket, frame_key, expires_at_utc_ms, deleted)| {
-                Ok(KeptLiveRoom {
-                    session_id: MeetingSessionId::from_uuid(parse_uuid(&session_id)?),
-                    room: LiveRoom {
-                        id: room_id,
-                        socket,
-                        frame_key: Zeroizing::new(
-                            <[u8; 32]>::try_from(frame_key.as_slice())
-                                .map_err(|_| StoreError::Corrupt)?,
-                        ),
-                        expires_at_utc_ms,
-                    },
-                    deleted,
-                })
-            })
+            .map(
+                |(session_id, room_id, socket, frame_key, expires_at_utc_ms, deleted)| {
+                    Ok(KeptLiveRoom {
+                        session_id: MeetingSessionId::from_uuid(parse_uuid(&session_id)?),
+                        room: LiveRoom {
+                            id: room_id,
+                            socket,
+                            frame_key: Zeroizing::new(
+                                <[u8; 32]>::try_from(frame_key.as_slice())
+                                    .map_err(|_| StoreError::Corrupt)?,
+                            ),
+                            expires_at_utc_ms,
+                        },
+                        deleted,
+                    })
+                },
+            )
             .collect()
     }
 

@@ -259,19 +259,64 @@ mod tests {
             items::apply(&conn, id, &patch, kind, WorkActor::Me, at_ms).expect("a change");
         };
         let accepted = task("Accepted, then done", WorkStatus::Triage, 10);
-        change(&accepted, WorkStatus::NotStarted, WorkActivityKind::Accepted, NOW - 9 * DAY_MS);
-        change(&accepted, WorkStatus::Done, WorkActivityKind::Status, NOW - 6 * DAY_MS);
+        change(
+            &accepted,
+            WorkStatus::NotStarted,
+            WorkActivityKind::Accepted,
+            NOW - 9 * DAY_MS,
+        );
+        change(
+            &accepted,
+            WorkStatus::Done,
+            WorkActivityKind::Status,
+            NOW - 6 * DAY_MS,
+        );
         let declined = task("Declined", WorkStatus::Triage, 5);
-        change(&declined, WorkStatus::Canceled, WorkActivityKind::Declined, NOW - 5 * DAY_MS + 2 * HOUR_MS);
+        change(
+            &declined,
+            WorkStatus::Canceled,
+            WorkActivityKind::Declined,
+            NOW - 5 * DAY_MS + 2 * HOUR_MS,
+        );
         let twice = task("In triage twice", WorkStatus::Triage, 50);
-        change(&twice, WorkStatus::NotStarted, WorkActivityKind::Accepted, NOW - 45 * DAY_MS);
-        change(&twice, WorkStatus::Triage, WorkActivityKind::Status, NOW - 4 * DAY_MS);
-        change(&twice, WorkStatus::NotStarted, WorkActivityKind::Accepted, NOW - 3 * DAY_MS);
+        change(
+            &twice,
+            WorkStatus::NotStarted,
+            WorkActivityKind::Accepted,
+            NOW - 45 * DAY_MS,
+        );
+        change(
+            &twice,
+            WorkStatus::Triage,
+            WorkActivityKind::Status,
+            NOW - 4 * DAY_MS,
+        );
+        change(
+            &twice,
+            WorkStatus::NotStarted,
+            WorkActivityKind::Accepted,
+            NOW - 3 * DAY_MS,
+        );
         let moved = task("Moved out of triage", WorkStatus::Triage, 8);
-        change(&moved, WorkStatus::Backlog, WorkActivityKind::Status, NOW - 7 * DAY_MS);
-        change(&moved, WorkStatus::Done, WorkActivityKind::Status, NOW - DAY_MS);
+        change(
+            &moved,
+            WorkStatus::Backlog,
+            WorkActivityKind::Status,
+            NOW - 7 * DAY_MS,
+        );
+        change(
+            &moved,
+            WorkStatus::Done,
+            WorkActivityKind::Status,
+            NOW - DAY_MS,
+        );
         let typed = task("Typed in", WorkStatus::NotStarted, 20);
-        change(&typed, WorkStatus::Done, WorkActivityKind::Status, NOW - 2 * DAY_MS);
+        change(
+            &typed,
+            WorkStatus::Done,
+            WorkActivityKind::Status,
+            NOW - 2 * DAY_MS,
+        );
         // PANIC: the fixture's tasks read back.
         let all = items::items(&conn, true).expect("the tasks");
 

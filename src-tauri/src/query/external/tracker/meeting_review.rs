@@ -5,8 +5,8 @@
 //! the names a call offered, and a marked copy of a PDF added to it.
 
 use super::library::{
-    change, changed, file_made, library, made_before, meeting, meeting_operation,
-    receipt_replayed, told, Change, ExternalLibraryChange, Gate, MeetingRef,
+    change, changed, file_made, library, made_before, meeting, meeting_operation, receipt_replayed,
+    told, Change, ExternalLibraryChange, Gate, MeetingRef,
 };
 use super::meeting_settings::day;
 use super::notes::request_json;

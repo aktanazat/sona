@@ -409,7 +409,9 @@ async fn preview(
         {
             let dir = paths.draft_dir(&draft.meeting_id).map_err(refusal)?;
             std::fs::create_dir_all(&dir)
-                .and_then(|()| std::fs::copy(file, shared_pages::draft_audio_path(&dir)).map(|_| ()))
+                .and_then(|()| {
+                    std::fs::copy(file, shared_pages::draft_audio_path(&dir)).map(|_| ())
+                })
                 .map_err(|error| {
                     ExternalError::new(
                         ExternalErrorCode::Failed,
@@ -421,9 +423,7 @@ async fn preview(
         shared_pages::draft_audio(paths, store.as_deref(), &draft).map_err(refusal)?
     } else {
         match &file_audio {
-            Some(path) => {
-                Some(path.clone()).filter(|path| draft.include.audio && path.is_file())
-            }
+            Some(path) => Some(path.clone()).filter(|path| draft.include.audio && path.is_file()),
             None => exported_audio(paths, &draft),
         }
     };

@@ -663,8 +663,7 @@ impl Tracker<'_> {
                     quoted,
                     now_ms(),
                 )?;
-                let shown =
-                    updates::quotes_shown(conn, |meeting| meetings.hides_meeting(meeting))?;
+                let shown = updates::quotes_shown(conn, |meeting| meetings.hides_meeting(meeting))?;
                 Ok((update, shown))
             })?;
             return Ok(Self::update_change(
@@ -1212,7 +1211,14 @@ mod tests {
 
     fn update(health: &str, body: &str) -> ProjectUpdateArgs {
         let argv = [
-            "sona", "work", "project-update", "Harbor launch", "--health", health, "--body", body,
+            "sona",
+            "work",
+            "project-update",
+            "Harbor launch",
+            "--health",
+            health,
+            "--body",
+            body,
         ];
         match CliArgs::try_parse_from(argv) {
             Ok(CliArgs {

@@ -636,15 +636,15 @@ pub(crate) fn rename(
 #[cfg(test)]
 mod tests {
     use super::super::super::schema;
+    use super::super::comments::add;
     use super::super::comments::Author;
     use super::super::items::{self, NewItem};
-    use super::super::types::{WorkActor, WorkOwner, WorkStatus};
-    use super::super::comments::add;
     use super::super::store::Refusal;
     use super::super::types::WorkCommentSubject;
+    use super::super::types::{WorkActor, WorkOwner, WorkStatus};
     use super::{attach_file, attach_link, detach, list, place, stage_bytes, Naming};
-    use std::collections::BTreeMap;
     use rusqlite::Connection;
+    use std::collections::BTreeMap;
     use std::path::Path;
 
     const AT: i64 = 1_700_000_000_000;
@@ -802,20 +802,56 @@ mod tests {
         };
         let red = BTreeMap::from([("status".to_owned(), "red".to_owned())]);
         let green = BTreeMap::from([("status".to_owned(), "green".to_owned())]);
-        let red_facts = Naming { metadata: Some(&red), ..UNNAMED };
-        let green_facts = Naming { metadata: Some(&green), ..UNNAMED };
-        attach_link(&conn, root.path(), &task, link, red_facts, agent("claude"), AT).expect("attached");
+        let red_facts = Naming {
+            metadata: Some(&red),
+            ..UNNAMED
+        };
+        let green_facts = Naming {
+            metadata: Some(&green),
+            ..UNNAMED
+        };
+        attach_link(
+            &conn,
+            root.path(),
+            &task,
+            link,
+            red_facts,
+            agent("claude"),
+            AT,
+        )
+        .expect("attached");
 
-        let refused = attach_link(&conn, root.path(), &task, link, green_facts, agent("codex"), AT + 1);
+        let refused = attach_link(
+            &conn,
+            root.path(),
+            &task,
+            link,
+            green_facts,
+            agent("codex"),
+            AT + 1,
+        );
         assert_eq!(
-            refused.expect_err("another agent").downcast_ref::<Refusal>(),
+            refused
+                .expect_err("another agent")
+                .downcast_ref::<Refusal>(),
             Some(&Refusal::NotAttacher)
         );
-        let replaced = attach_link(&conn, root.path(), &task, link, green_facts, agent("claude"), AT + 2)
-            .expect("replaced");
+        let replaced = attach_link(
+            &conn,
+            root.path(),
+            &task,
+            link,
+            green_facts,
+            agent("claude"),
+            AT + 2,
+        )
+        .expect("replaced");
 
         assert_eq!(replaced.metadata, green);
-        assert_eq!(list(&conn, root.path(), &task).expect("listed")[0].metadata, green);
+        assert_eq!(
+            list(&conn, root.path(), &task).expect("listed")[0].metadata,
+            green
+        );
     }
 
     #[test]
@@ -824,18 +860,58 @@ mod tests {
         let venue = task(&conn, "Book the venue");
         let root = tempfile::tempdir().expect("a scratch folder");
         let link = "https://a.example";
-        let here = add(&conn, WorkCommentSubject::Task, &launch, None, ME, "Trace", AT).expect("here");
-        let there = add(&conn, WorkCommentSubject::Task, &venue, None, ME, "Quote", AT).expect("there");
+        let here = add(
+            &conn,
+            WorkCommentSubject::Task,
+            &launch,
+            None,
+            ME,
+            "Trace",
+            AT,
+        )
+        .expect("here");
+        let there = add(
+            &conn,
+            WorkCommentSubject::Task,
+            &venue,
+            None,
+            ME,
+            "Quote",
+            AT,
+        )
+        .expect("there");
 
-        let crossed = attach_link(&conn, root.path(), &launch, link,
-            Naming { comment_id: Some(&there.id), ..UNNAMED }, ME, AT);
+        let crossed = attach_link(
+            &conn,
+            root.path(),
+            &launch,
+            link,
+            Naming {
+                comment_id: Some(&there.id),
+                ..UNNAMED
+            },
+            ME,
+            AT,
+        );
         assert_eq!(
-            crossed.expect_err("another task's comment").downcast_ref::<Refusal>(),
+            crossed
+                .expect_err("another task's comment")
+                .downcast_ref::<Refusal>(),
             Some(&Refusal::NotFound)
         );
-        let attached = attach_link(&conn, root.path(), &launch, link,
-            Naming { comment_id: Some(&here.id), ..UNNAMED }, ME, AT)
-            .expect("attached");
+        let attached = attach_link(
+            &conn,
+            root.path(),
+            &launch,
+            link,
+            Naming {
+                comment_id: Some(&here.id),
+                ..UNNAMED
+            },
+            ME,
+            AT,
+        )
+        .expect("attached");
 
         assert_eq!(attached.comment_id.as_deref(), Some(here.id.as_str()));
     }

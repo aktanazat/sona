@@ -326,12 +326,70 @@ const PHRASES: &[(&[&str], Fixed)] = &[
 
 /// Words that join the words that say something, and say nothing.
 const GLUE: &[&str] = &[
-    "a", "all", "an", "and", "any", "are", "assigned", "at", "be", "by", "every", "everything",
-    "find", "for", "from", "get", "give", "has", "have", "i", "in", "is", "issue", "issues", "it",
-    "item", "items", "just", "label", "labeled", "labelled", "labels", "list", "of", "on", "ones",
-    "only", "owe", "owed", "owes", "owned", "please", "priority", "project", "show", "tagged",
-    "task", "tasks", "that", "the", "them", "there", "these", "things", "those", "to", "was",
-    "were", "what", "where", "which", "who", "with", "work",
+    "a",
+    "all",
+    "an",
+    "and",
+    "any",
+    "are",
+    "assigned",
+    "at",
+    "be",
+    "by",
+    "every",
+    "everything",
+    "find",
+    "for",
+    "from",
+    "get",
+    "give",
+    "has",
+    "have",
+    "i",
+    "in",
+    "is",
+    "issue",
+    "issues",
+    "it",
+    "item",
+    "items",
+    "just",
+    "label",
+    "labeled",
+    "labelled",
+    "labels",
+    "list",
+    "of",
+    "on",
+    "ones",
+    "only",
+    "owe",
+    "owed",
+    "owes",
+    "owned",
+    "please",
+    "priority",
+    "project",
+    "show",
+    "tagged",
+    "task",
+    "tasks",
+    "that",
+    "the",
+    "them",
+    "there",
+    "these",
+    "things",
+    "those",
+    "to",
+    "was",
+    "were",
+    "what",
+    "where",
+    "which",
+    "who",
+    "with",
+    "work",
 ];
 
 /// Days that move with the calendar, in the condition's words.
@@ -599,11 +657,21 @@ impl<Tz: TimeZone> Reader<'_, Tz> {
                     units.push(vec![(span, term)]);
                 }
                 Reading::Unclear(could_be) => {
-                    unread.extend(not.take().into_iter().chain(or.take()).map(|word| (word, Vec::new())));
+                    unread.extend(
+                        not.take()
+                            .into_iter()
+                            .chain(or.take())
+                            .map(|word| (word, Vec::new())),
+                    );
                     unread.push((span, could_be));
                 }
                 Reading::Unread => {
-                    unread.extend(not.take().into_iter().chain(or.take()).map(|word| (word, Vec::new())));
+                    unread.extend(
+                        not.take()
+                            .into_iter()
+                            .chain(or.take())
+                            .map(|word| (word, Vec::new())),
+                    );
                     unread.push((span, Vec::new()));
                 }
             }
@@ -615,7 +683,9 @@ impl<Tz: TimeZone> Reader<'_, Tz> {
             if let Some((last, kept)) = runs.last_mut() {
                 if kept.is_empty()
                     && could_be.is_empty()
-                    && glue.get(last.end..span.start).is_some_and(|gap| gap.iter().all(|&joins| joins))
+                    && glue
+                        .get(last.end..span.start)
+                        .is_some_and(|gap| gap.iter().all(|&joins| joins))
                 {
                     last.end = span.end;
                     continue;
@@ -640,24 +710,38 @@ impl<Tz: TimeZone> Reader<'_, Tz> {
         let mut terms = Vec::new();
         for mut members in groups {
             if members.len() == 1 {
-                terms.extend(members.remove(0).into_iter().map(|(span, term)| WorkWhereTerm {
-                    text: self.words(span),
-                    label: term.label(),
-                    condition: condition(term),
-                }));
+                terms.extend(
+                    members
+                        .remove(0)
+                        .into_iter()
+                        .map(|(span, term)| WorkWhereTerm {
+                            text: self.words(span),
+                            label: term.label(),
+                            condition: condition(term),
+                        }),
+                );
                 continue;
             }
             let start = members[0][0].0.start;
-            let end = members.last().and_then(|unit| unit.last()).map_or(start, |(span, _)| span.end);
+            let end = members
+                .last()
+                .and_then(|unit| unit.last())
+                .map_or(start, |(span, _)| span.end);
             let label = members
                 .iter()
-                .map(|unit| unit.iter().map(|(_, term)| term.label()).collect::<Vec<_>>().join(" and "))
+                .map(|unit| {
+                    unit.iter()
+                        .map(|(_, term)| term.label())
+                        .collect::<Vec<_>>()
+                        .join(" and ")
+                })
                 .collect::<Vec<_>>()
                 .join(" or ");
             let any = members
                 .into_iter()
                 .map(|unit| {
-                    let mut all: Vec<WorkFilter> = unit.into_iter().map(|(_, term)| condition(term)).collect();
+                    let mut all: Vec<WorkFilter> =
+                        unit.into_iter().map(|(_, term)| condition(term)).collect();
                     if all.len() == 1 {
                         all.remove(0)
                     } else {
@@ -684,7 +768,10 @@ impl<Tz: TimeZone> Reader<'_, Tz> {
     }
 
     fn words(&self, span: Range<usize>) -> String {
-        match (self.toks.get(span.start), span.end.checked_sub(1).and_then(|last| self.toks.get(last))) {
+        match (
+            self.toks.get(span.start),
+            span.end.checked_sub(1).and_then(|last| self.toks.get(last)),
+        ) {
             (Some(first), Some(last)) => self.text[first.core.start..last.core.end].to_owned(),
             _ => String::new(),
         }
@@ -736,7 +823,10 @@ impl<Tz: TimeZone> Reader<'_, Tz> {
             .map(|(words, level)| (words.len(), *level))
             .max_by_key(|(len, _)| *len)
         {
-            offer(len, Self::level(level).map_or(Reading::Unread, Reading::Term));
+            offer(
+                len,
+                Self::level(level).map_or(Reading::Unread, Reading::Term),
+            );
         }
         if let Some(level) = key
             .strip_prefix(['p', '!'])
@@ -793,7 +883,9 @@ impl<Tz: TimeZone> Reader<'_, Tz> {
                             &person.name,
                         )),
                         many => Reading::Unclear(
-                            many.iter().map(|person| format!("for {}", person.name)).collect(),
+                            many.iter()
+                                .map(|person| format!("for {}", person.name))
+                                .collect(),
                         ),
                     };
                     offer(1 + len, reading);
@@ -839,9 +931,12 @@ impl<Tz: TimeZone> Reader<'_, Tz> {
             Fixed::Cycle(value, name) => {
                 Term::one(WorkFilterField::Cycle, WorkFilterOp::Is, value, name)
             }
-            Fixed::NoProject => {
-                Term::one(WorkFilterField::Project, WorkFilterOp::Is, "none", "no project")
-            }
+            Fixed::NoProject => Term::one(
+                WorkFilterField::Project,
+                WorkFilterOp::Is,
+                "none",
+                "no project",
+            ),
             Fixed::NoLabel => {
                 Term::one(WorkFilterField::Label, WorkFilterOp::Is, "none", "no label")
             }
@@ -870,7 +965,9 @@ impl<Tz: TimeZone> Reader<'_, Tz> {
                 .lexicon
                 .labels
                 .iter()
-                .find(|label| label.retired_at_ms.is_none() && plural_of(&parse::key(&label.name), &wanted))
+                .find(|label| {
+                    label.retired_at_ms.is_none() && plural_of(&parse::key(&label.name), &wanted)
+                })
                 .map(|label| Named::Label(label).term()),
             '+' => match parse::project_named(self.lexicon, name)? {
                 WorkField::Project { id, title } => Some(Term::one(
@@ -936,7 +1033,10 @@ impl<Tz: TimeZone> Reader<'_, Tz> {
                 .iter()
                 .filter(|person| {
                     parse::key(&person.name) == joined
-                        || person.aliases.iter().any(|alias| parse::key(alias) == joined)
+                        || person
+                            .aliases
+                            .iter()
+                            .any(|alias| parse::key(alias) == joined)
                 })
                 .collect();
             if called.is_empty() && len == 1 {
@@ -971,7 +1071,10 @@ impl<Tz: TimeZone> Reader<'_, Tz> {
             .parse::<u8>()
             .ok()
             .filter(|points| *points <= MAX_ESTIMATE)?;
-        let unit = usize::from(self.key(at + lead + 1).is_some_and(|word| POINTS.contains(&word)));
+        let unit = usize::from(
+            self.key(at + lead + 1)
+                .is_some_and(|word| POINTS.contains(&word)),
+        );
         let points = points.to_string();
         (lead + unit > 0).then(|| {
             (
@@ -1021,7 +1124,10 @@ impl<Tz: TimeZone> Reader<'_, Tz> {
             if let Some((last_len, last)) = last {
                 let first = term(WorkFilterOp::After, day.preceding(self.today)?);
                 let last_term = term(WorkFilterOp::Before, last.following(self.today)?);
-                return Some((next + 1 + last_len - at, Reading::Range(first, next - at, last_term)));
+                return Some((
+                    next + 1 + last_len - at,
+                    Reading::Range(first, next - at, last_term),
+                ));
             }
         }
         let (op, day) = match relation {
@@ -1068,7 +1174,10 @@ impl<Tz: TimeZone> Reader<'_, Tz> {
                         .timestamp_millis_opt(*due_at)
                         .single()?
                         .date_naive();
-                    return Some((len, Day::On(if past { self.gone_by(day, span) } else { day })));
+                    return Some((
+                        len,
+                        Day::On(if past { self.gone_by(day, span) } else { day }),
+                    ));
                 }
             }
         }
@@ -1078,13 +1187,15 @@ impl<Tz: TimeZone> Reader<'_, Tz> {
     /// `day`, read forward from today, moved back to the last time it came:
     /// a weekday a week back, a day of the year a year back.
     fn gone_by(&self, day: NaiveDate, span: &[Tok]) -> NaiveDate {
-        let year_said = span
-            .iter()
-            .any(|tok| tok.key.len() == 4 && tok.key.chars().all(|character| character.is_ascii_digit()));
+        let year_said = span.iter().any(|tok| {
+            tok.key.len() == 4 && tok.key.chars().all(|character| character.is_ascii_digit())
+        });
         if day <= self.today || year_said {
             return day;
         }
-        let weekday = span.iter().any(|tok| parse::weekday_named(&tok.key).is_some());
+        let weekday = span
+            .iter()
+            .any(|tok| parse::weekday_named(&tok.key).is_some());
         let back = if weekday {
             day.checked_sub_days(Days::new(7))
         } else if (day - self.today).num_days() > 182 {
@@ -1099,9 +1210,9 @@ impl<Tz: TimeZone> Reader<'_, Tz> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::{WorkFilterField as F, WorkFilterOp as O};
     use crate::planning::types::ProjectStatus;
     use chrono::FixedOffset;
-    use super::{WorkFilterField as F, WorkFilterOp as O};
 
     fn lexicon() -> Lexicon {
         let label = |id: &str, name: &str| WorkLabel {
@@ -1143,14 +1254,25 @@ mod tests {
                 WorkFilter::Condition(condition) => Some(condition),
                 WorkFilter::Any { .. } | WorkFilter::All { .. } => None,
             })
-            .map(|condition| (condition.field, condition.op, condition.values.iter().map(String::as_str).collect()))
+            .map(|condition| {
+                (
+                    condition.field,
+                    condition.op,
+                    condition.values.iter().map(String::as_str).collect(),
+                )
+            })
             .collect()
     }
 
     fn unread(read: &WorkWhere) -> Vec<(&str, Vec<&str>)> {
         read.unread
             .iter()
-            .map(|word| (word.text.as_str(), word.could_be.iter().map(String::as_str).collect()))
+            .map(|word| {
+                (
+                    word.text.as_str(),
+                    word.could_be.iter().map(String::as_str).collect(),
+                )
+            })
             .collect()
     }
 
@@ -1168,7 +1290,10 @@ mod tests {
             ),
             (
                 "urgent or high not done",
-                vec![(F::Priority, O::AnyOf, vec!["1", "2"]), (F::Status, O::IsNot, vec!["done"])],
+                vec![
+                    (F::Priority, O::AnyOf, vec!["1", "2"]),
+                    (F::Status, O::IsNot, vec!["done"]),
+                ],
             ),
             (
                 "unassigned overdue tasks in Launch",
@@ -1181,22 +1306,41 @@ mod tests {
             (
                 "open tasks assigned to Dana created since last week",
                 vec![
-                    (F::Status, O::AnyOf, vec!["backlog", "not_started", "in_progress"]),
+                    (
+                        F::Status,
+                        O::AnyOf,
+                        vec!["backlog", "not_started", "in_progress"],
+                    ),
                     (F::Owner, O::Is, vec!["dana"]),
                     (F::Created, O::After, vec!["2026-11-01"]),
                 ],
             ),
             (
                 "due before 2026-12-01 without a project",
-                vec![(F::Due, O::Before, vec!["2026-12-01"]), (F::Project, O::Is, vec!["none"])],
+                vec![
+                    (F::Due, O::Before, vec!["2026-12-01"]),
+                    (F::Project, O::Is, vec!["none"]),
+                ],
             ),
             (
                 "done or canceled this cycle",
-                vec![(F::Status, O::AnyOf, vec!["done", "canceled"]), (F::Cycle, O::Is, vec!["current"])],
+                vec![
+                    (F::Status, O::AnyOf, vec!["done", "canceled"]),
+                    (F::Cycle, O::Is, vec!["current"]),
+                ],
             ),
-            ("completed today", vec![(F::Completed, O::Is, vec!["today"])]),
-            ("done last week", vec![(F::Completed, O::Is, vec!["last_week"])]),
-            ("done since Monday", vec![(F::Completed, O::After, vec!["2026-11-08"])]),
+            (
+                "completed today",
+                vec![(F::Completed, O::Is, vec!["today"])],
+            ),
+            (
+                "done last week",
+                vec![(F::Completed, O::Is, vec!["last_week"])],
+            ),
+            (
+                "done since Monday",
+                vec![(F::Completed, O::After, vec!["2026-11-08"])],
+            ),
             (
                 "completed from Nov 2 to Nov 6",
                 vec![
@@ -1212,11 +1356,14 @@ mod tests {
                     (F::Estimate, O::Is, vec!["4"]),
                 ],
             ),
-            ("8 points due between today and Friday", vec![
-                (F::Estimate, O::Is, vec!["8"]),
-                (F::Due, O::After, vec!["yesterday"]),
-                (F::Due, O::Before, vec!["2026-11-14"]),
-            ]),
+            (
+                "8 points due between today and Friday",
+                vec![
+                    (F::Estimate, O::Is, vec!["8"]),
+                    (F::Due, O::After, vec!["yesterday"]),
+                    (F::Due, O::Before, vec!["2026-11-14"]),
+                ],
+            ),
         ];
         for (text, expected) in phrases {
             let read = words(text);
@@ -1238,7 +1385,10 @@ mod tests {
         let read = words("mobile bugs");
 
         assert_eq!(conditions(&read), [(F::Label, O::Is, vec!["bug"])]);
-        assert_eq!(unread(&read), [("mobile", vec!["label Mobile", "project Mobile"])]);
+        assert_eq!(
+            unread(&read),
+            [("mobile", vec!["label Mobile", "project Mobile"])]
+        );
     }
 
     #[test]
@@ -1256,7 +1406,10 @@ mod tests {
         assert_eq!(
             read.terms[0].condition,
             WorkFilter::Any {
-                any: vec![either(F::Priority, O::Is, "1"), either(F::Due, O::Before, "today")],
+                any: vec![
+                    either(F::Priority, O::Is, "1"),
+                    either(F::Due, O::Before, "today")
+                ],
             }
         );
         assert_eq!(read.terms[0].text, "urgent or overdue");
@@ -1282,8 +1435,14 @@ mod tests {
         let urgent = one(F::Priority, O::Is, "1");
 
         for (text, any) in [
-            ("completed from Nov 2 to Nov 6 or urgent", vec![range.clone(), urgent.clone()]),
-            ("urgent or completed from Nov 2 to Nov 6", vec![urgent.clone(), range.clone()]),
+            (
+                "completed from Nov 2 to Nov 6 or urgent",
+                vec![range.clone(), urgent.clone()],
+            ),
+            (
+                "urgent or completed from Nov 2 to Nov 6",
+                vec![urgent.clone(), range.clone()],
+            ),
         ] {
             let read = words(text);
             assert_eq!(read.terms.len(), 1, "{text}: {:?}", read.terms);

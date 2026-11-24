@@ -922,7 +922,10 @@ pub(crate) fn apply_reorder_modes(
     Ok(())
 }
 
-pub(crate) fn apply_set_active_mode(settings: &mut AppSettings, mode_id: &str) -> Result<(), String> {
+pub(crate) fn apply_set_active_mode(
+    settings: &mut AppSettings,
+    mode_id: &str,
+) -> Result<(), String> {
     if !settings.modes.iter().any(|mode| mode.id == mode_id) {
         return Err(format!("Mode '{mode_id}' does not exist"));
     }
@@ -933,7 +936,10 @@ pub(crate) fn apply_set_active_mode(settings: &mut AppSettings, mode_id: &str) -
 /// "Use" on a library prompt: the active mode's instructions become that
 /// prompt's text, and the mode remembers which one. The selection is kept
 /// too: it is what the first mode is seeded from when modes are created.
-pub(crate) fn apply_use_post_process_prompt(settings: &mut AppSettings, id: &str) -> Result<(), String> {
+pub(crate) fn apply_use_post_process_prompt(
+    settings: &mut AppSettings,
+    id: &str,
+) -> Result<(), String> {
     let prompt = settings
         .post_process_prompts
         .iter()

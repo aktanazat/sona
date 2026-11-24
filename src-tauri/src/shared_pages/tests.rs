@@ -179,30 +179,62 @@ fn checks_flag_only_what_should_be_replaced() {
     let shared_at = Utc.with_ymd_and_hms(2026, 3, 5, 9, 0, 0).unwrap();
     let page = page_from_draft(&draft, None, shared_at).unwrap().page;
 
-    let flags: Vec<(ShareCheckKind, ShareCheckSection, String)> = check_page(
-        &page,
-        &draft.content.speakers,
-        &people,
-    )
-    .into_iter()
-    .map(|check| (check.kind, check.section, check.text))
-    .collect();
+    let flags: Vec<(ShareCheckKind, ShareCheckSection, String)> =
+        check_page(&page, &draft.content.speakers, &people)
+            .into_iter()
+            .map(|check| (check.kind, check.section, check.text))
+            .collect();
 
     let flagged = |kind: ShareCheckKind, section: ShareCheckSection, text: &str| {
         flags
             .iter()
             .any(|(k, s, t)| *k == kind && *s == section && t == text)
     };
-    assert!(flagged(ShareCheckKind::Phone, ShareCheckSection::Summary, "+1 (415) 555-0132"));
-    assert!(flagged(ShareCheckKind::Email, ShareCheckSection::Decisions, "mirela@example.com"));
-    assert!(flagged(ShareCheckKind::Money, ShareCheckSection::Decisions, "$4,500"));
-    assert!(flagged(ShareCheckKind::Number, ShareCheckSection::ActionItems, "9912034"));
-    assert!(flagged(ShareCheckKind::Link, ShareCheckSection::Transcript, "https://example.com/spec"));
-    assert!(flagged(ShareCheckKind::Money, ShareCheckSection::Transcript, "$850"));
-    assert!(flagged(ShareCheckKind::Money, ShareCheckSection::Notes, "$420"));
-    assert!(flagged(ShareCheckKind::Person, ShareCheckSection::Summary, "Al Reiss"));
+    assert!(flagged(
+        ShareCheckKind::Phone,
+        ShareCheckSection::Summary,
+        "+1 (415) 555-0132"
+    ));
+    assert!(flagged(
+        ShareCheckKind::Email,
+        ShareCheckSection::Decisions,
+        "mirela@example.com"
+    ));
+    assert!(flagged(
+        ShareCheckKind::Money,
+        ShareCheckSection::Decisions,
+        "$4,500"
+    ));
+    assert!(flagged(
+        ShareCheckKind::Number,
+        ShareCheckSection::ActionItems,
+        "9912034"
+    ));
+    assert!(flagged(
+        ShareCheckKind::Link,
+        ShareCheckSection::Transcript,
+        "https://example.com/spec"
+    ));
+    assert!(flagged(
+        ShareCheckKind::Money,
+        ShareCheckSection::Transcript,
+        "$850"
+    ));
+    assert!(flagged(
+        ShareCheckKind::Money,
+        ShareCheckSection::Notes,
+        "$420"
+    ));
+    assert!(flagged(
+        ShareCheckKind::Person,
+        ShareCheckSection::Summary,
+        "Al Reiss"
+    ));
     assert_eq!(
-        flags.iter().filter(|(_, _, found)| found == "+1 (415) 555-0132").count(),
+        flags
+            .iter()
+            .filter(|(_, _, found)| found == "+1 (415) 555-0132")
+            .count(),
         1,
         "a repeated number is one flag: {flags:?}"
     );
@@ -213,7 +245,15 @@ fn checks_flag_only_what_should_be_replaced() {
         "no date, time or the page's own person is flagged: {flags:?}"
     );
 
-    for text in ["2026-11-10", "2026-11-12", "10:00", "2026", "1.2.3", "Al", "Ted"] {
+    for text in [
+        "2026-11-10",
+        "2026-11-12",
+        "10:00",
+        "2026",
+        "1.2.3",
+        "Al",
+        "Ted",
+    ] {
         assert!(
             !flags.iter().any(|(_, _, found)| found.as_str() == text),
             "{text} should not be flagged: {flags:?}"
@@ -239,7 +279,10 @@ fn blurb_is_the_first_sentence_within_two_hundred_chars() {
         "Second paragraph.".to_owned(),
     ];
     let page = page_from_draft(&draft, None, shared_at).unwrap().page;
-    assert_eq!(blurb_of(&page).as_deref(), Some("The sensors cost $4.50 each."));
+    assert_eq!(
+        blurb_of(&page).as_deref(),
+        Some("The sensors cost $4.50 each.")
+    );
 
     draft.content.summary = vec!["x".repeat(300)];
     let page = page_from_draft(&draft, None, shared_at).unwrap().page;
@@ -295,7 +338,10 @@ fn deploy_build_keeps_slug_starting_with_dash() {
     write_tree(
         root.path(),
         "https://example.test",
-        &Change::Add { slug, files: &files },
+        &Change::Add {
+            slug,
+            files: &files,
+        },
         WHEN / 1000,
     )
     .unwrap();
@@ -316,7 +362,12 @@ fn deploy_build_keeps_slug_starting_with_dash() {
         .unwrap();
 
     assert!(status.success());
-    assert!(root.path().join("_site").join(slug).join(PAGE_FILE).is_file());
+    assert!(root
+        .path()
+        .join("_site")
+        .join(slug)
+        .join(PAGE_FILE)
+        .is_file());
 }
 
 fn weekly(series_key: &str) -> CalendarEventSummary {

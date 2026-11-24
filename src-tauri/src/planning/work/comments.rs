@@ -567,22 +567,50 @@ mod tests {
     fn a_projects_threads_stay_apart_from_its_tasks_and_leave_with_it() {
         let conn = tracker();
         let task_id = task(&conn, "Launch");
-        let project_id = insert_project(&conn, "Harbor", None, AT).expect("a project").id;
+        let project_id = insert_project(&conn, "Harbor", None, AT)
+            .expect("a project")
+            .id;
         let project = WorkCommentSubject::Project;
         let on_task = add(&conn, TASK, &task_id, None, ME, "On the task", AT).expect("task");
-        let on_project =
-            add(&conn, project, &project_id, None, ME, "On the project", AT + 1).expect("project");
+        let on_project = add(
+            &conn,
+            project,
+            &project_id,
+            None,
+            ME,
+            "On the project",
+            AT + 1,
+        )
+        .expect("project");
 
-        let crossed = add(&conn, project, &project_id, Some(&on_task.id), ME, "x", AT + 2);
+        let crossed = add(
+            &conn,
+            project,
+            &project_id,
+            Some(&on_task.id),
+            ME,
+            "x",
+            AT + 2,
+        );
 
         assert_eq!(
-            crossed.expect_err("a reply across subjects").downcast_ref::<Refusal>(),
+            crossed
+                .expect_err("a reply across subjects")
+                .downcast_ref::<Refusal>(),
             Some(&Refusal::Invalid)
         );
-        let threads = page(&conn, project, &project_id, 10, None).expect("threads").threads;
+        let threads = page(&conn, project, &project_id, 10, None)
+            .expect("threads")
+            .threads;
         assert_eq!(threads.len(), 1);
         assert_eq!(threads[0].body.as_deref(), Some("On the project"));
-        assert_eq!(page(&conn, TASK, &task_id, 10, None).expect("threads").threads.len(), 1);
+        assert_eq!(
+            page(&conn, TASK, &task_id, 10, None)
+                .expect("threads")
+                .threads
+                .len(),
+            1
+        );
         conn.execute("DELETE FROM planning_projects WHERE id = ?1", [&project_id])
             .expect("project deleted");
         assert!(comment(&conn, &on_project.id).is_err());
@@ -598,7 +626,16 @@ mod tests {
             agent: Some("claude"),
         };
         let mine = add(&conn, meeting, id, None, ME, "Pricing slipped", AT).expect("mine");
-        add(&conn, meeting, id, Some(&mine.id), claude, "Read it", AT + 1).expect("reply");
+        add(
+            &conn,
+            meeting,
+            id,
+            Some(&mine.id),
+            claude,
+            "Read it",
+            AT + 1,
+        )
+        .expect("reply");
         add(&conn, meeting, id, None, claude, "Summary", AT + 2).expect("agent thread");
 
         let kept = kept_local(page(&conn, meeting, id, 10, None).expect("threads"));

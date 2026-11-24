@@ -78,7 +78,9 @@ pub struct ProjectTemplateSource {
 impl ProjectTemplateTask {
     /// Whether `hides` holds back a source the task was drawn from.
     pub(crate) fn drawn_from_any(&self, hides: &dyn Fn(EvidenceSourceKind, &str) -> bool) -> bool {
-        self.drawn_from.iter().any(|source| hides(source.kind, &source.id))
+        self.drawn_from
+            .iter()
+            .any(|source| hides(source.kind, &source.id))
     }
 }
 
@@ -352,7 +354,9 @@ fn cleaned(fields: &ProjectTemplateFields) -> Result<ProjectTemplateFields> {
         .map(|task| {
             if task.estimate.is_some_and(|points| points > MAX_ESTIMATE)
                 || task.priority > 4
-                || task.parent.is_some_and(|parent| parent >= fields.tasks.len())
+                || task
+                    .parent
+                    .is_some_and(|parent| parent >= fields.tasks.len())
             {
                 return Err(Refusal::Invalid.into());
             }
@@ -480,7 +484,9 @@ fn present_people(
     };
     let lead = match &fields.lead {
         WorkOwner::Person { person_id } => sources::person(meetings, person_id)?
-            .map_or(WorkOwner::Nobody, |person_id| WorkOwner::Person { person_id }),
+            .map_or(WorkOwner::Nobody, |person_id| WorkOwner::Person {
+                person_id,
+            }),
         other => other.clone(),
     };
     let mut members = Vec::with_capacity(fields.member_person_ids.len());
@@ -647,7 +653,11 @@ pub(crate) fn rehearse_project(
 /// The meetings kept on this Mac, or none when the conversations cannot
 /// say which.
 async fn kept_local(app: &AppHandle) -> Option<KeptLocal> {
-    let store = app.state::<Arc<MeetingSessionManager>>().store().await.ok()?;
+    let store = app
+        .state::<Arc<MeetingSessionManager>>()
+        .store()
+        .await
+        .ok()?;
     KeptLocal::read(&store).ok()
 }
 
@@ -772,8 +782,8 @@ mod tests {
     use super::super::types::{WorkActivityKind, WorkActor, WorkOwner, WorkPatch, WorkStatus};
     use super::super::{Change, Effects};
     use super::{make_project, save_from_project};
-    use crate::planning::types::EvidenceSourceKind;
     use crate::planning::catalog::{self, MilestoneEdit, ProjectEdit};
+    use crate::planning::types::EvidenceSourceKind;
     use chrono::NaiveDate;
     use rusqlite::Connection;
 
@@ -784,7 +794,14 @@ mod tests {
         items::local_midnight_ms(day).expect("a local midnight")
     }
 
-    fn task(conn: &Connection, title: &str, status: WorkStatus, project: &str, milestone: &str, labels: &[String]) -> String {
+    fn task(
+        conn: &Connection,
+        title: &str,
+        status: WorkStatus,
+        project: &str,
+        milestone: &str,
+        labels: &[String],
+    ) -> String {
         items::insert(
             conn,
             &NewItem {
@@ -837,7 +854,14 @@ mod tests {
         )
         .expect("a milestone");
         let labels = [venue.id.clone()];
-        let booked = task(&conn, "Book the venue", WorkStatus::NotStarted, &source.id, &design.id, &labels);
+        let booked = task(
+            &conn,
+            "Book the venue",
+            WorkStatus::NotStarted,
+            &source.id,
+            &design.id,
+            &labels,
+        );
         items::apply(
             &conn,
             &booked,
@@ -850,9 +874,17 @@ mod tests {
             AT,
         )
         .expect("an estimate");
-        task(&conn, "An agent's suggestion", WorkStatus::Triage, &source.id, &design.id, &[]);
+        task(
+            &conn,
+            "An agent's suggestion",
+            WorkStatus::Triage,
+            &source.id,
+            &design.id,
+            &[],
+        );
 
-        let template = save_from_project(&conn, "Launch kit", &source.id, &|_, _| false, AT).expect("a template");
+        let template = save_from_project(&conn, "Launch kit", &source.id, &|_, _| false, AT)
+            .expect("a template");
         let made = make_project(
             &conn,
             None,
@@ -879,7 +911,10 @@ mod tests {
         assert_eq!(made_task.label_ids, labels);
         assert_eq!(made_task.estimate, Some(3));
         assert_eq!(made_task.priority, 2);
-        assert_eq!(made_task.milestone_id.as_deref(), Some(made.milestones[0].id.as_str()));
+        assert_eq!(
+            made_task.milestone_id.as_deref(),
+            Some(made.milestones[0].id.as_str())
+        );
     }
 
     /// While the conversations cannot say which meetings are kept on this
@@ -929,11 +964,18 @@ mod tests {
         let closed = |kind: EvidenceSourceKind, _: &str| {
             matches!(kind, EvidenceSourceKind::Meeting | EvidenceSourceKind::Loop)
         };
-        let template = save_from_project(&conn, "Board prep", &source.id, &closed, AT).expect("a template");
-        let titles: Vec<&str> = template.fields.tasks.iter().map(|task| task.title.as_str()).collect();
+        let template =
+            save_from_project(&conn, "Board prep", &source.id, &closed, AT).expect("a template");
+        let titles: Vec<&str> = template
+            .fields
+            .tasks
+            .iter()
+            .map(|task| task.title.as_str())
+            .collect();
         assert_eq!(titles, ["Book the venue"]);
 
-        let earlier = save_from_project(&conn, "Earlier", &source.id, &|_, _| false, AT).expect("a template");
+        let earlier =
+            save_from_project(&conn, "Earlier", &source.id, &|_, _| false, AT).expect("a template");
         let made = make_project(
             &conn,
             None,
@@ -1001,8 +1043,22 @@ mod tests {
             AT,
         )
         .expect("a task from a meeting");
-        let flights = task(&conn, "Book the flights", WorkStatus::NotStarted, &source.id, &travel.id, &[]);
-        let plan = task(&conn, "Plan the trip", WorkStatus::NotStarted, &source.id, &travel.id, &[]);
+        let flights = task(
+            &conn,
+            "Book the flights",
+            WorkStatus::NotStarted,
+            &source.id,
+            &travel.id,
+            &[],
+        );
+        let plan = task(
+            &conn,
+            "Plan the trip",
+            WorkStatus::NotStarted,
+            &source.id,
+            &travel.id,
+            &[],
+        );
         items::apply(
             &conn,
             &flights,
@@ -1016,7 +1072,8 @@ mod tests {
         )
         .expect("a sub-task");
 
-        let template = save_from_project(&conn, "Offsite", &source.id, &|_, _| false, AT).expect("a template");
+        let template =
+            save_from_project(&conn, "Offsite", &source.id, &|_, _| false, AT).expect("a template");
         let closed = |kind: EvidenceSourceKind, _: &str| {
             matches!(kind, EvidenceSourceKind::Meeting | EvidenceSourceKind::Loop)
         };

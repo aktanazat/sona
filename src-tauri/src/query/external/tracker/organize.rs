@@ -3,11 +3,11 @@
 //! the actions they left untracked, and renaming an attachment.
 
 use super::attachments::{project_attachment, ExternalWorkAttachment};
+use super::notes::{receipt_in, Receipt};
 use super::{
     conversations_closed, day, now_ms, refusal, task_ref, task_ref_of, ExternalWorkRef, Fence,
     TaskRef, Tracker, WorkAnswer, WriteArgs,
 };
-use super::notes::{receipt_in, Receipt};
 use crate::meeting::loop_types::{
     MeetingLoopAssignRequest, MeetingLoopId, MeetingLoopReopenRequest, MeetingLoopRow,
 };
@@ -360,7 +360,11 @@ pub(super) fn ran_in(conn: &rusqlite::Connection, operation_id: &str) -> rusqlit
 /// Where the request a caller gave under `operation_id` is filed, beside
 /// the write it became under the id itself.
 fn asked_id(operation_id: &str) -> String {
-    Uuid::new_v5(&Uuid::NAMESPACE_OID, format!("{operation_id}/asked").as_bytes()).to_string()
+    Uuid::new_v5(
+        &Uuid::NAMESPACE_OID,
+        format!("{operation_id}/asked").as_bytes(),
+    )
+    .to_string()
 }
 
 /// What the first run under `operation_id` sent when asked `asked`: a check
@@ -418,14 +422,19 @@ impl Tracker<'_> {
         asked: &str,
         sent: &impl Serialize,
     ) -> Result<(), ExternalError> {
-        planning::history(self.history, |conn| file_sent(conn, operation_id, command, asked, sent))
-            .map_err(|message| refusal(self.history, message))
+        planning::history(self.history, |conn| {
+            file_sent(conn, operation_id, command, asked, sent)
+        })
+        .map_err(|message| refusal(self.history, message))
     }
 
     pub(super) async fn delegate(&self, args: &DelegateArgs) -> Result<WorkAnswer, ExternalError> {
         let board = self.board().await?;
         let row = board.task(&args.task)?;
-        let agent = args.to.as_deref().map(|name| agents::agent_name(Some(name)));
+        let agent = args
+            .to
+            .as_deref()
+            .map(|name| agents::agent_name(Some(name)));
         let action = if agent.is_some() {
             OrganizeAction::Delegated
         } else {
@@ -510,13 +519,9 @@ impl Tracker<'_> {
             let operation_id = args.write.fresh_operation_id();
             let replayed = before.focus_ids == ids || self.ran(&operation_id)?;
             self.applies("planning the day")?;
-            let plan = work::work_day_plan(
-                self.app.state(),
-                operation_id.clone(),
-                day.clone(),
-                ids,
-            )
-            .map_err(|message| self.write_refusal(message, &operation_id, "The day"))?;
+            let plan =
+                work::work_day_plan(self.app.state(), operation_id.clone(), day.clone(), ids)
+                    .map_err(|message| self.write_refusal(message, &operation_id, "The day"))?;
             (plan, Some(operation_id), replayed)
         };
         Ok(WorkAnswer::Day(ExternalWorkDay {
@@ -823,11 +828,8 @@ impl Tracker<'_> {
             .ok_or_else(|| ExternalError::invalid("Name the project to track it in."))?
             .id
             .clone();
-        let mut change = ExternalOrganizeChange::new(
-            OrganizeAction::ActionTracked,
-            args.dry_run,
-            None,
-        );
+        let mut change =
+            ExternalOrganizeChange::new(OrganizeAction::ActionTracked, args.dry_run, None);
         change.meeting_loop = Some(loop_state(&row));
         if args.dry_run {
             change.operation_id = args.write.operation_id.map(|id| id.to_string());
@@ -916,11 +918,8 @@ impl Tracker<'_> {
                 )
             })?;
         let title = args.title.trim().to_owned();
-        let mut change = ExternalOrganizeChange::new(
-            OrganizeAction::AttachmentRenamed,
-            args.dry_run,
-            None,
-        );
+        let mut change =
+            ExternalOrganizeChange::new(OrganizeAction::AttachmentRenamed, args.dry_run, None);
         change.tasks.push(task_ref_of(row));
         let unchanged = found.title == title;
         if args.dry_run || unchanged {

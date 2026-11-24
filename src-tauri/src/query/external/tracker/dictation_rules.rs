@@ -224,11 +224,7 @@ pub struct ModeRuleRemoveArgs {
 impl DictationRulesVerb {
     pub(super) const fn required_scopes(&self) -> &'static [ExternalScope] {
         match self.change() {
-            None
-            | Some(Change {
-                dry_run: true,
-                ..
-            }) => READ_SCOPES,
+            None | Some(Change { dry_run: true, .. }) => READ_SCOPES,
             Some(_) => WRITE_SCOPES,
         }
     }
@@ -318,12 +314,18 @@ fn save_rewrite(s: &mut AppSettings, args: &RewriteSaveArgs) -> Result<(), Strin
         return Err("A rewrite needs what is heard and what to write.".to_owned());
     }
     let mut rules = s.replacements_rules.clone();
-    match rules.iter_mut().find(|saved| same_phrase(&saved.spoken, &args.spoken)) {
+    match rules
+        .iter_mut()
+        .find(|saved| same_phrase(&saved.spoken, &args.spoken))
+    {
         Some(saved) => *saved = rule,
         None => rules.push(rule),
     }
     let saved = vocabulary::save_text_replacements_in(s, rules);
-    if !saved.iter().any(|saved| same_phrase(&saved.spoken, &args.spoken)) {
+    if !saved
+        .iter()
+        .any(|saved| same_phrase(&saved.spoken, &args.spoken))
+    {
         return Err("Sona keeps no more rewrites. Delete one first.".to_owned());
     }
     Ok(())
@@ -357,7 +359,10 @@ fn save_emoji(s: &mut AppSettings, spoken: &str, emoji: &str) -> Result<(), Stri
         written: emoji.to_owned(),
     };
     let mut list = s.emoji_replacements.clone();
-    match list.iter_mut().find(|saved| same_phrase(&saved.spoken, spoken)) {
+    match list
+        .iter_mut()
+        .find(|saved| same_phrase(&saved.spoken, spoken))
+    {
         Some(saved) => *saved = replacement,
         None => list.push(replacement),
     }
@@ -429,7 +434,10 @@ fn remove_mode_rule(s: &mut AppSettings, args: &ModeRuleRemoveArgs) -> Result<()
             .iter()
             .any(|rule| rule.app_id == *app && rule.mode_id == args.mode)
         {
-            return Err(format!("No rule picks mode {} for the app {app}.", args.mode));
+            return Err(format!(
+                "No rule picks mode {} for the app {app}.",
+                args.mode
+            ));
         }
         return modes::apply_remove_mode_activation_rule(s, app, revision).map_err(mode_error);
     }
@@ -440,10 +448,15 @@ fn remove_mode_rule(s: &mut AppSettings, args: &ModeRuleRemoveArgs) -> Result<()
         HostMatch::Exact => WebsiteHostMatch::Exact,
         HostMatch::Subdomains => WebsiteHostMatch::Suffix,
     };
-    if !s.mode_website_activation_rules.iter().any(|rule| {
-        rule.host == host && rule.match_kind == match_kind && rule.mode_id == args.mode
-    }) {
-        return Err(format!("No rule picks mode {} for the website {host}.", args.mode));
+    if !s
+        .mode_website_activation_rules
+        .iter()
+        .any(|rule| rule.host == host && rule.match_kind == match_kind && rule.mode_id == args.mode)
+    {
+        return Err(format!(
+            "No rule picks mode {} for the website {host}.",
+            args.mode
+        ));
     }
     modes::apply_remove_mode_website_activation_rule(s, &host, match_kind, revision)
         .map_err(mode_error)
@@ -476,7 +489,10 @@ impl Tracker<'_> {
                 let store = store(self.meetings).await?;
                 let hidden = kept_local(&store)?;
                 let heard = store
-                    .vocabulary_candidates_without(&known_vocabulary(Some(self.app)), hidden.sessions())
+                    .vocabulary_candidates_without(
+                        &known_vocabulary(Some(self.app)),
+                        hidden.sessions(),
+                    )
                     .map_err(|error| ExternalError::from(QueryError::from(error)))?;
                 return Ok(read(&what, &heard.entries));
             }
@@ -525,7 +541,9 @@ impl Tracker<'_> {
                     what,
                     request: json!({ "id": args.id, "enabled": !args.off }),
                     show: show(|s| json!(s.snippets)),
-                    apply: apply(|s| snippets::set_snippet_enabled_in(s, &args.id, !args.off, now_ms())),
+                    apply: apply(|s| {
+                        snippets::set_snippet_enabled_in(s, &args.id, !args.off, now_ms())
+                    }),
                 },
             ),
             DictationRulesVerb::SnippetDelete(args) => (

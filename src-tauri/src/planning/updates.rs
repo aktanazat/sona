@@ -380,8 +380,13 @@ pub(crate) fn meeting_mentions(
 /// The words said around a moment of a meeting, as its transcript now
 /// reads, shortened to a quote.
 fn passage(meetings: &Connection, meeting_id: &str, at_ms: i64) -> Result<Option<String>> {
-    let from_ns = at_ms.saturating_sub(PASSAGE_WINDOW_MS).max(0).saturating_mul(1_000_000);
-    let to_ns = at_ms.saturating_add(PASSAGE_WINDOW_MS).saturating_mul(1_000_000);
+    let from_ns = at_ms
+        .saturating_sub(PASSAGE_WINDOW_MS)
+        .max(0)
+        .saturating_mul(1_000_000);
+    let to_ns = at_ms
+        .saturating_add(PASSAGE_WINDOW_MS)
+        .saturating_mul(1_000_000);
     let mut statement = meetings.prepare_cached(
         "SELECT coalesce(
                 (SELECT e.replacement_text FROM meeting_segment_edits e
@@ -701,7 +706,11 @@ mod tests {
     }
 
     fn read_by_agents(update: &ProjectUpdate, shown: &HashSet<String>) -> String {
-        for_agents(&update.id, update.body.as_deref().unwrap_or_default(), shown)
+        for_agents(
+            &update.id,
+            update.body.as_deref().unwrap_or_default(),
+            shown,
+        )
     }
 
     fn shown(history: &Connection, meetings: &MeetingStore) -> HashSet<String> {
@@ -718,7 +727,10 @@ mod tests {
         let open = shown(&posted.history, &posted.meetings);
         assert!(read_by_agents(&posted.drafted, &open).contains("Salary"));
         let written = read_by_agents(&posted.written, &open);
-        assert!(!written.contains("Board prep") && !written.contains("Salary"), "{written}");
+        assert!(
+            !written.contains("Board prep") && !written.contains("Salary"),
+            "{written}"
+        );
         assert!(written.ends_with("- Next: pricing."), "{written}");
 
         keep_series_here(&posted.meetings, posted.board, 1_700_000_100_000);
@@ -784,7 +796,12 @@ mod tests {
         let excerpts: Vec<_> = digest
             .projects
             .iter()
-            .map(|project| project.latest_update.as_ref().and_then(|u| u.excerpt.clone()))
+            .map(|project| {
+                project
+                    .latest_update
+                    .as_ref()
+                    .and_then(|u| u.excerpt.clone())
+            })
             .collect();
         assert_eq!(excerpts.len(), 1, "{excerpts:?}");
         assert!(!format!("{excerpts:?}").contains("Salary"), "{excerpts:?}");

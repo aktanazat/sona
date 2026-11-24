@@ -167,7 +167,15 @@ pub fn planning_project_update_add(
     health: ProjectHealth,
     body: String,
 ) -> Result<ProjectUpdate, String> {
-    update_add_as(&app, ME, &operation_id, &project_id, health, Some(&body), &[])
+    update_add_as(
+        &app,
+        ME,
+        &operation_id,
+        &project_id,
+        health,
+        Some(&body),
+        &[],
+    )
 }
 
 #[tauri::command(async)]
@@ -190,9 +198,8 @@ pub(crate) async fn discussed_lines(
     meetings: &MeetingSessionManager,
     project_id: &str,
 ) -> Result<Vec<updates::Discussed>, String> {
-    let (since_ms, mentions) = super::super::history(history, |conn| {
-        updates::meeting_mentions(conn, project_id)
-    })?;
+    let (since_ms, mentions) =
+        super::super::history(history, |conn| updates::meeting_mentions(conn, project_id))?;
     if mentions.is_empty() {
         return Ok(Vec::new());
     }

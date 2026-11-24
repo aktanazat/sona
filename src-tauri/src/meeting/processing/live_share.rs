@@ -207,7 +207,9 @@ fn joined(segments: impl Iterator<Item = MeetingProvisionalSegment>) -> Vec<Line
                 let line = &mut lines[index];
                 let rest = unrepeated(&line.text, piece);
                 if !rest.is_empty() {
-                    if rest.chars().next().is_some_and(char::is_lowercase) && line.text.ends_with('.') {
+                    if rest.chars().next().is_some_and(char::is_lowercase)
+                        && line.text.ends_with('.')
+                    {
                         line.text.pop();
                     }
                     line.text.push(' ');
@@ -237,7 +239,10 @@ fn joined(segments: impl Iterator<Item = MeetingProvisionalSegment>) -> Vec<Line
 /// a word that both sides then read, so a joined line read "to the to the"
 /// and "the LED. LED fixtures".
 fn unrepeated<'a>(line: &str, piece: &'a str) -> &'a str {
-    let bare = |word: &str| word.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase();
+    let bare = |word: &str| {
+        word.trim_matches(|c: char| !c.is_alphanumeric())
+            .to_lowercase()
+    };
     let tail: Vec<String> = line.split_whitespace().map(bare).collect();
     for count in (1..=REPEATED_WORDS.min(tail.len())).rev() {
         let mut words = piece.splitn(count + 1, ' ');

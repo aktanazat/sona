@@ -62,8 +62,7 @@ static DATE_OR_TIME: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::ne
 });
 static EMAIL: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
     // PANIC: the literal pattern is fixed; Regex has no compile-time constructor.
-    regex::Regex::new(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
-        .expect("email pattern")
+    regex::Regex::new(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}").expect("email pattern")
 });
 static MONEY: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
     // PANIC: the literal pattern is fixed; Regex has no compile-time constructor.
@@ -118,10 +117,7 @@ pub(crate) fn check_page(
         }
         for name in person {
             let folded = single_line_lower(name);
-            if folded.chars().count() < 3
-                || folded.len() > MAX_TEXT_BYTES
-                || !seen.insert(folded)
-            {
+            if folded.chars().count() < 3 || folded.len() > MAX_TEXT_BYTES || !seen.insert(folded) {
                 continue;
             }
             names.push(name.trim());

@@ -32,7 +32,9 @@ fn now_nanos() -> String {
 }
 
 fn stamp(app: &AppHandle, name: &str) {
-    let Some(path) = stamp_path(app, name) else { return };
+    let Some(path) = stamp_path(app, name) else {
+        return;
+    };
     if let Err(error) = std::fs::write(&path, now_nanos()) {
         log::warn!("The change stamp could not be written: {error}");
     }

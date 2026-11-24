@@ -15,10 +15,9 @@ pub(crate) mod comments;
 pub(crate) mod cycles;
 pub(crate) mod digest;
 pub(crate) mod export;
-pub(crate) mod filter;
 pub(crate) mod favorites;
-pub(crate) mod filter;
 pub(crate) mod feed;
+pub(crate) mod filter;
 pub(crate) mod follow;
 pub(crate) mod follows;
 mod hygiene;
@@ -42,8 +41,8 @@ pub(crate) mod sync;
 mod tests;
 pub(crate) mod triage_hints;
 pub mod types;
-pub(crate) mod views;
 pub(crate) mod versions;
+pub(crate) mod views;
 pub(crate) mod watch;
 pub(crate) mod words;
 
@@ -53,8 +52,8 @@ use self::sync::{MeetingReader, People};
 pub use self::types::WorkChanged;
 use self::types::{
     WorkActivityKind, WorkActor, WorkAttachment, WorkAttachmentFile, WorkComment, WorkCommentPage,
-    WorkCommentSubject, WorkCounts, WorkDay, WorkDisplay, WorkDoer, WorkItem, WorkItemDetail,
-    WorkItemInput, WorkItemRow, WorkLabel, WorkList, WorkOwner, WorkPatch, WorkPlace, WorkProgress,
+    WorkCommentSubject, WorkCounts, WorkDay, WorkDoer, WorkItem, WorkItemDetail, WorkItemInput,
+    WorkItemRow, WorkLabel, WorkList, WorkOwner, WorkPatch, WorkPlace, WorkProgress,
     WorkProjectChoice, WorkQuery, WorkRelation, WorkRelationKind, WorkRepeat, WorkSource,
     WorkStatus, WorkTimeBlock, WorkView, WorkViewInput,
 };
@@ -2532,12 +2531,19 @@ pub fn work_view_save(
 ) -> Result<WorkView, String> {
     let now = now_ms();
     run_history(&app, |history| {
-        store::mutate(history, &operation_id, "work_view_save", &(&id, &view), now, |tx| {
-            Ok(Done {
-                value: items::save_view(tx, id.as_deref(), &view, now)?,
-                effects: Effects::default(),
-            })
-        })
+        store::mutate(
+            history,
+            &operation_id,
+            "work_view_save",
+            &(&id, &view),
+            now,
+            |tx| {
+                Ok(Done {
+                    value: items::save_view(tx, id.as_deref(), &view, now)?,
+                    effects: Effects::default(),
+                })
+            },
+        )
     })
 }
 
@@ -2584,13 +2590,20 @@ pub fn work_project_view_delete(
 ) -> Result<(), String> {
     let now = now_ms();
     run_history(&app, |history| {
-        store::mutate(history, &operation_id, "work_project_view_delete", &id, now, |tx| {
-            views::delete_project_view(tx, &id)?;
-            Ok(Done {
-                value: (),
-                effects: Effects::default(),
-            })
-        })
+        store::mutate(
+            history,
+            &operation_id,
+            "work_project_view_delete",
+            &id,
+            now,
+            |tx| {
+                views::delete_project_view(tx, &id)?;
+                Ok(Done {
+                    value: (),
+                    effects: Effects::default(),
+                })
+            },
+        )
     })
 }
 

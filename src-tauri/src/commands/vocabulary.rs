@@ -361,7 +361,8 @@ pub(crate) fn apply_csv_in(
     scope: &VocabularyScope,
     csv_text: &str,
 ) -> Result<Vec<VocabularyEntry>, String> {
-    let updated = apply_vocabulary_csv_to_entries(entries_for_scope_mut(settings, scope)?, csv_text)?;
+    let updated =
+        apply_vocabulary_csv_to_entries(entries_for_scope_mut(settings, scope)?, csv_text)?;
     touch_mode_revision(settings, scope);
     Ok(updated)
 }
@@ -386,7 +387,9 @@ pub fn update_emoji_replacements(
     app: AppHandle,
     replacements: Vec<EmojiReplacement>,
 ) -> Result<Vec<EmojiReplacement>, String> {
-    settings::try_update_settings(&app, |settings| set_emoji_replacements_in(settings, replacements))
+    settings::try_update_settings(&app, |settings| {
+        set_emoji_replacements_in(settings, replacements)
+    })
 }
 
 pub(crate) fn set_emoji_replacements_in(

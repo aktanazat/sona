@@ -733,7 +733,14 @@ impl Tracker<'_> {
                 .map(|initiative| initiative.name),
             SubjectKind::Note => uuid::Uuid::parse_str(id)
                 .ok()
-                .and_then(|id| self.note(&id).ok())
+                .and_then(|id| {
+                    self.note(
+                        &id,
+                        None,
+                        crate::scratchpad::personal::ScratchNoteRole::View,
+                    )
+                    .ok()
+                })
                 .map(|note| note.title),
             SubjectKind::View => None,
         })
@@ -808,7 +815,11 @@ impl Tracker<'_> {
         let id = args.note.ok_or_else(|| {
             ExternalError::invalid("Name a task, --project, --initiative or --note.")
         })?;
-        let note = self.note(&id)?;
+        let note = self.note(
+            &id,
+            args.write.agent.as_deref(),
+            crate::scratchpad::personal::ScratchNoteRole::View,
+        )?;
         Ok(ExternalReminded {
             kind: SubjectKind::Note,
             id: note.id,

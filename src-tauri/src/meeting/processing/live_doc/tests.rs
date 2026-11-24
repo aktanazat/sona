@@ -94,8 +94,11 @@ fn line(track_id: SourceTrackId, source_kind: SourceKind, second: u64, text: &st
 #[test]
 fn a_spoken_start_reads_what_was_said_and_a_hand_edit_outlives_later_readings() {
     let (_directory, store) = workflow_core_tests::store();
-    let session_id =
-        workflow_core_tests::reviewable_meeting(&store, "Launch sync", Local::now().timestamp_millis());
+    let session_id = workflow_core_tests::reviewable_meeting(
+        &store,
+        "Launch sync",
+        Local::now().timestamp_millis(),
+    );
     let (microphone, call) = workflow_core_tests::recording_tracks(&store, session_id);
     let engine = Arc::new(Scripted::default());
     engine.replies.lock().unwrap().extend([
@@ -107,24 +110,55 @@ fn a_spoken_start_reads_what_was_said_and_a_hand_edit_outlives_later_readings() 
     service.set_text_generators(engine.clone(), engine.clone());
     let live = LiveTranscript::new();
 
-    live.append(line(call, SourceKind::SystemAudio, 4, "Sona, start a document."));
-    live.append(line(microphone, SourceKind::Microphone, 10, "The beta ships Friday."));
+    live.append(line(
+        call,
+        SourceKind::SystemAudio,
+        4,
+        "Sona, start a document.",
+    ));
+    live.append(line(
+        microphone,
+        SourceKind::Microphone,
+        10,
+        "The beta ships Friday.",
+    ));
     tick(&service, &store, session_id, &live, Moment::Pass);
     assert!(!hear(&service, &store, session_id, &live).started);
-    assert!(engine.given.lock().unwrap().is_empty(), "nothing is read before the doc is asked for");
+    assert!(
+        engine.given.lock().unwrap().is_empty(),
+        "nothing is read before the doc is asked for"
+    );
 
-    live.append(line(microphone, SourceKind::Microphone, 20, "Okay Sona, start a doc for this plan."));
-    assert!(hear(&service, &store, session_id, &live).started, "a spoken start starts the doc");
-    assert!(!tick(&service, &store, session_id, &live, Moment::Pass), "the start holds the reading");
+    live.append(line(
+        microphone,
+        SourceKind::Microphone,
+        20,
+        "Okay Sona, start a doc for this plan.",
+    ));
+    assert!(
+        hear(&service, &store, session_id, &live).started,
+        "a spoken start starts the doc"
+    );
+    assert!(
+        !tick(&service, &store, session_id, &live, Moment::Pass),
+        "the start holds the reading"
+    );
     service.read_live_doc_now(&store, session_id, &live);
     let doc = live.live_doc(session_id);
     assert_eq!(doc.asks.len(), 1, "the far end cannot ask: {:?}", doc.asks);
     assert_eq!(doc.asks[0].intent, MeetingVoiceIntent::StartDoc);
     let texts: Vec<&str> = doc.points.iter().map(|point| point.text.as_str()).collect();
-    assert_eq!(texts, ["Beta ships Friday"], "a point citing no line it was given is dropped");
+    assert_eq!(
+        texts,
+        ["Beta ships Friday"],
+        "a point citing no line it was given is dropped"
+    );
     let given = engine.given.lock().unwrap().concat();
     assert!(given.contains("The beta ships Friday."), "{given}");
-    assert!(!given.contains("for this plan"), "an ask is never read into the doc: {given}");
+    assert!(
+        !given.contains("for this plan"),
+        "an ask is never read into the doc: {given}"
+    );
 
     let first = doc.points[0].id.clone();
     live.edit_doc(
@@ -133,10 +167,25 @@ fn a_spoken_start_reads_what_was_said_and_a_hand_edit_outlives_later_readings() 
         "Beta ships Monday, not Friday",
     )
     .unwrap();
-    live.append(line(call, SourceKind::SystemAudio, 70, "I'll own the pricing page."));
+    live.append(line(
+        call,
+        SourceKind::SystemAudio,
+        70,
+        "I'll own the pricing page.",
+    ));
     tick(&service, &store, session_id, &live, Moment::Pass);
-    let texts: Vec<String> = live.doc_points().into_iter().map(|point| point.text).collect();
-    assert_eq!(texts, ["Beta ships Monday, not Friday", "Dana owns the pricing page"]);
+    let texts: Vec<String> = live
+        .doc_points()
+        .into_iter()
+        .map(|point| point.text)
+        .collect();
+    assert_eq!(
+        texts,
+        [
+            "Beta ships Monday, not Friday",
+            "Dana owns the pricing page"
+        ]
+    );
 
     let mut page = store.live_doc_points(session_id).unwrap();
     let dana = page[1].id.clone();
@@ -155,7 +204,12 @@ fn a_spoken_start_reads_what_was_said_and_a_hand_edit_outlives_later_readings() 
         ),
     );
     store.save_live_changes(session_id, &changes).unwrap();
-    live.append(line(call, SourceKind::SystemAudio, 90, "Legal signs off next week."));
+    live.append(line(
+        call,
+        SourceKind::SystemAudio,
+        90,
+        "Legal signs off next week.",
+    ));
     hang_up(&service, &store, session_id, &live);
     let saved: Vec<(String, bool)> = store
         .live_doc_points(session_id)
@@ -199,8 +253,11 @@ fn a_spoken_start_reads_what_was_said_and_a_hand_edit_outlives_later_readings() 
 #[test]
 fn a_reading_keeps_only_points_its_lines_say_that_pass_the_check() {
     let (_directory, store) = workflow_core_tests::store();
-    let session_id =
-        workflow_core_tests::reviewable_meeting(&store, "Pier walk", Local::now().timestamp_millis());
+    let session_id = workflow_core_tests::reviewable_meeting(
+        &store,
+        "Pier walk",
+        Local::now().timestamp_millis(),
+    );
     let (microphone, call) = workflow_core_tests::recording_tracks(&store, session_id);
     let engine = Arc::new(Scripted::default());
     engine.replies.lock().unwrap().extend([
@@ -213,19 +270,37 @@ fn a_reading_keeps_only_points_its_lines_say_that_pass_the_check() {
     let live = LiveTranscript::new();
 
     live.append(line(call, SourceKind::SystemAudio, 0, "California."));
-    live.append(line(microphone, SourceKind::Microphone, 10, "The lamps on berth three still flicker after dark."));
+    live.append(line(
+        microphone,
+        SourceKind::Microphone,
+        10,
+        "The lamps on berth three still flicker after dark.",
+    ));
     assert!(live.start_doc());
     service.read_live_doc_now(&store, session_id, &live);
-    let texts: Vec<String> = live.doc_points().into_iter().map(|point| point.text).collect();
+    let texts: Vec<String> = live
+        .doc_points()
+        .into_iter()
+        .map(|point| point.text)
+        .collect();
     assert_eq!(
         texts,
         ["The berth three lamps flicker after dark"],
         "a point about a label, of one word, or one the check drops is not kept; a leading label is set aside"
     );
 
-    live.append(line(call, SourceKind::SystemAudio, 60, "Okay, thanks everyone, talk soon."));
+    live.append(line(
+        call,
+        SourceKind::SystemAudio,
+        60,
+        "Okay, thanks everyone, talk soon.",
+    ));
     assert!(!tick(&service, &store, session_id, &live, Moment::Pass));
-    let texts: Vec<String> = live.doc_points().into_iter().map(|point| point.text).collect();
+    let texts: Vec<String> = live
+        .doc_points()
+        .into_iter()
+        .map(|point| point.text)
+        .collect();
     assert_eq!(
         texts,
         ["The berth three lamps flicker after dark"],
@@ -239,28 +314,49 @@ fn only_a_line_that_opens_with_sona_is_an_ask() {
     let read = voice_ask;
     assert_eq!(
         read("Sona, start a doc for this plan."),
-        Some((MeetingVoiceIntent::StartDoc, "start a doc for this plan.".to_string()))
+        Some((
+            MeetingVoiceIntent::StartDoc,
+            "start a doc for this plan.".to_string()
+        ))
     );
     assert_eq!(
         read("Hey Sona, show me the board"),
         Some((MeetingVoiceIntent::Board, "show me the board".to_string()))
     );
-    assert_eq!(read("OK, Sona: recap so far").map(|ask| ask.0), Some(MeetingVoiceIntent::Recap));
+    assert_eq!(
+        read("OK, Sona: recap so far").map(|ask| ask.0),
+        Some(MeetingVoiceIntent::Recap)
+    );
     assert_eq!(
         read("Sona, what did Dana say about pricing last week?").map(|ask| ask.0),
         Some(MeetingVoiceIntent::Ask)
     );
     assert_eq!(read("We moved Sona to the new pricing page."), None);
-    assert_eq!(read("So Sona already files those in Triage."), None, "talk about Sona asks nothing");
-    assert_eq!(read("Sona recap so far").map(|ask| ask.0), Some(MeetingVoiceIntent::Recap));
-    assert_eq!(read("So and then Sona, start a doc"), None, "at most two words before the name");
+    assert_eq!(
+        read("So Sona already files those in Triage."),
+        None,
+        "talk about Sona asks nothing"
+    );
+    assert_eq!(
+        read("Sona recap so far").map(|ask| ask.0),
+        Some(MeetingVoiceIntent::Recap)
+    );
+    assert_eq!(
+        read("So and then Sona, start a doc"),
+        None,
+        "at most two words before the name"
+    );
     assert_eq!(read("Sona."), None, "a name alone asks nothing");
     assert_eq!(
         read("Sona can you separate this by aisle").map(|ask| ask.0),
         Some(MeetingVoiceIntent::Edit),
         "an edit needs no pause after the name"
     );
-    assert_eq!(read("And Sona can just drop the old pricing items"), None, "talk about Sona edits nothing");
+    assert_eq!(
+        read("And Sona can just drop the old pricing items"),
+        None,
+        "talk about Sona edits nothing"
+    );
     assert_eq!(
         read("Sona, can you sort out who owns the pricing page?").map(|ask| ask.0),
         Some(MeetingVoiceIntent::Ask),
@@ -276,8 +372,11 @@ fn only_a_line_that_opens_with_sona_is_an_ask() {
 #[test]
 fn a_spoken_edit_changes_the_doc_in_place_and_leaves_typed_words_alone() {
     let (_directory, store) = workflow_core_tests::store();
-    let session_id =
-        workflow_core_tests::reviewable_meeting(&store, "Groceries", Local::now().timestamp_millis());
+    let session_id = workflow_core_tests::reviewable_meeting(
+        &store,
+        "Groceries",
+        Local::now().timestamp_millis(),
+    );
     let (microphone, call) = workflow_core_tests::recording_tracks(&store, session_id);
     let engine = Arc::new(Scripted::default());
     engine.replies.lock().unwrap().extend([
@@ -307,18 +406,34 @@ fn a_spoken_edit_changes_the_doc_in_place_and_leaves_typed_words_alone() {
             .map(|point| (point.text, point.done, point.section))
             .collect()
     };
-    let row = |text: &str, done: bool, section: Option<&str>| (text.to_string(), done, section.map(str::to_string));
+    let row = |text: &str, done: bool, section: Option<&str>| {
+        (text.to_string(), done, section.map(str::to_string))
+    };
 
     say(10, "Sona, make a grocery list with milk, eggs and bread.");
     assert_eq!(
         points(),
-        [row("Milk", false, None), row("Eggs", false, None), row("Bread", false, None)],
+        [
+            row("Milk", false, None),
+            row("Eggs", false, None),
+            row("Bread", false, None)
+        ],
         "a spoken list starts the doc with its items"
     );
 
-    live.edit_doc(&Author::Owner, None, "Oat milk, the barista one").unwrap();
-    live.append(line(call, SourceKind::SystemAudio, 20, "Sona, delete everything."));
-    assert_eq!(hear(&service, &store, session_id, &live), Heard::default(), "the far end cannot edit");
+    live.edit_doc(&Author::Owner, None, "Oat milk, the barista one")
+        .unwrap();
+    live.append(line(
+        call,
+        SourceKind::SystemAudio,
+        20,
+        "Sona, delete everything.",
+    ));
+    assert_eq!(
+        hear(&service, &store, session_id, &live),
+        Heard::default(),
+        "the far end cannot edit"
+    );
 
     say(30, "Sona, check off the bread and remove the oat milk.");
     say(40, "Sona, group these by aisle.");
@@ -333,12 +448,20 @@ fn a_spoken_edit_changes_the_doc_in_place_and_leaves_typed_words_alone() {
         "the bread is checked off, the typed point stays, and the point the grouping left out is asked about again"
     );
     let given = engine.given.lock().unwrap();
-    assert!(given[3].contains(r#""items":["Bread"],"sections":["Dairy"]"#), "{}", given[3]);
+    assert!(
+        given[3].contains(r#""items":["Bread"],"sections":["Dairy"]"#),
+        "{}",
+        given[3]
+    );
     drop(given);
 
     say(50, "Sona, add coffee and sort it by aisle again.");
-    let outcomes: Vec<Option<MeetingVoiceOutcome>> =
-        live.live_doc(session_id).asks.into_iter().map(|ask| ask.outcome).collect();
+    let outcomes: Vec<Option<MeetingVoiceOutcome>> = live
+        .live_doc(session_id)
+        .asks
+        .into_iter()
+        .map(|ask| ask.outcome)
+        .collect();
     assert_eq!(
         outcomes,
         [
@@ -348,10 +471,21 @@ fn a_spoken_edit_changes_the_doc_in_place_and_leaves_typed_words_alone() {
             Some(MeetingVoiceOutcome::Partial),
         ]
     );
-    let saved: Vec<String> = store.live_doc_points(session_id).unwrap().into_iter().map(|point| point.text).collect();
+    let saved: Vec<String> = store
+        .live_doc_points(session_id)
+        .unwrap()
+        .into_iter()
+        .map(|point| point.text)
+        .collect();
     assert_eq!(
         saved,
-        ["Milk", "Eggs", "Oat milk, the barista one", "Bread", "Coffee"],
+        [
+            "Milk",
+            "Eggs",
+            "Oat milk, the barista one",
+            "Bread",
+            "Coffee"
+        ],
         "an add whose grouping got no answer is still kept"
     );
 }
@@ -410,14 +544,21 @@ fn a_link_keeps_its_first_room_for_a_later_launch_to_empty() {
     );
     assert_eq!(
         shared
-            .keep_link("https://companion.example/l/second#v=1&k=b".to_owned(), &room("second"))
+            .keep_link(
+                "https://companion.example/l/second#v=1&k=b".to_owned(),
+                &room("second")
+            )
             .unwrap(),
         (first, false)
     );
     let kept = store.kept_live_rooms(now).unwrap();
     assert_eq!(kept.len(), 1);
     assert_eq!(
-        (kept[0].session_id, kept[0].room.id.as_str(), kept[0].deleted),
+        (
+            kept[0].session_id,
+            kept[0].room.id.as_str(),
+            kept[0].deleted
+        ),
         (session_id, "first", false)
     );
 }
@@ -495,8 +636,11 @@ fn a_teammate_cannot_edit_under_the_calls_own_names() {
 #[test]
 fn a_moved_date_replaces_the_point_it_moves_instead_of_adding_a_second() {
     let (_directory, store) = workflow_core_tests::store();
-    let session_id =
-        workflow_core_tests::reviewable_meeting(&store, "Harbor map sync", Local::now().timestamp_millis());
+    let session_id = workflow_core_tests::reviewable_meeting(
+        &store,
+        "Harbor map sync",
+        Local::now().timestamp_millis(),
+    );
     let (microphone, _call) = workflow_core_tests::recording_tracks(&store, session_id);
     let engine = Arc::new(Scripted::default());
     engine.replies.lock().unwrap().extend([
@@ -514,35 +658,83 @@ fn a_moved_date_replaces_the_point_it_moves_instead_of_adding_a_second() {
     let live = LiveTranscript::new();
     assert!(live.start_doc());
 
-    live.append(line(microphone, SourceKind::Microphone, 57, "The public launch of the harbour map moves to March 14."));
+    live.append(line(
+        microphone,
+        SourceKind::Microphone,
+        57,
+        "The public launch of the harbour map moves to March 14.",
+    ));
     service.read_live_doc_now(&store, session_id, &live);
     let launch = live.doc_points()[0].id.clone();
-    live.append(line(microphone, SourceKind::Microphone, 163, "The public launch of the harbour map moves again to March 21."));
-    live.append(line(microphone, SourceKind::Microphone, 170, "Does the ferry timetable change go out with the harbour map?"));
+    live.append(line(
+        microphone,
+        SourceKind::Microphone,
+        163,
+        "The public launch of the harbour map moves again to March 21.",
+    ));
+    live.append(line(
+        microphone,
+        SourceKind::Microphone,
+        170,
+        "Does the ferry timetable change go out with the harbour map?",
+    ));
     service.read_live_doc_now(&store, session_id, &live);
 
-    let points: Vec<(String, String)> = live.doc_points().into_iter().map(|point| (point.id, point.text)).collect();
+    let points: Vec<(String, String)> = live
+        .doc_points()
+        .into_iter()
+        .map(|point| (point.id, point.text))
+        .collect();
     let texts: Vec<&str> = points.iter().map(|(_, text)| text.as_str()).collect();
     assert_eq!(
         texts,
         ["The public launch of the harbour map is now set for March 21", "The ferry timetable change goes out with the harbour map"],
         "the doc never holds both dates, and an add that only shares the map's name stays its own point"
     );
-    assert_eq!(points[0].0, launch, "the new date replaces the launch point rather than adding one");
+    assert_eq!(
+        points[0].0, launch,
+        "the new date replaces the launch point rather than adding one"
+    );
 
-    live.append(line(microphone, SourceKind::Microphone, 200, "The launch slips once more, to March 25."));
+    live.append(line(
+        microphone,
+        SourceKind::Microphone,
+        200,
+        "The launch slips once more, to March 25.",
+    ));
     service.read_live_doc_now(&store, session_id, &live);
-    let texts: Vec<String> = live.doc_points().into_iter().map(|point| point.text).collect();
+    let texts: Vec<String> = live
+        .doc_points()
+        .into_iter()
+        .map(|point| point.text)
+        .collect();
     assert_eq!(
         texts,
-        ["The harbour map launch is set for March 25", "The ferry timetable change goes out with the harbour map"],
+        [
+            "The harbour map launch is set for March 25",
+            "The ferry timetable change goes out with the harbour map"
+        ],
         "an add that repeats a rewrite the check kept goes"
     );
 
-    live.edit_doc(&Author::Owner, Some(&launch), "Launch March 25, pending the council").unwrap();
-    live.append(line(microphone, SourceKind::Microphone, 240, "The council wants another week, so the launch moves to March 28."));
+    live.edit_doc(
+        &Author::Owner,
+        Some(&launch),
+        "Launch March 25, pending the council",
+    )
+    .unwrap();
+    live.append(line(
+        microphone,
+        SourceKind::Microphone,
+        240,
+        "The council wants another week, so the launch moves to March 28.",
+    ));
     service.read_live_doc_now(&store, session_id, &live);
-    let texts: Vec<String> = live.doc_points().into_iter().map(|point| point.text).collect();
+    let texts: Vec<String> = live
+        .doc_points()
+        .into_iter()
+        .map(|point| point.text)
+        .collect();
     assert_eq!(
         texts,
         [
@@ -557,8 +749,11 @@ fn a_moved_date_replaces_the_point_it_moves_instead_of_adding_a_second() {
 #[test]
 fn a_point_said_again_stays_one_point_and_one_that_says_more_takes_its_place() {
     let (_directory, store) = workflow_core_tests::store();
-    let session_id =
-        workflow_core_tests::reviewable_meeting(&store, "Launch sync", Local::now().timestamp_millis());
+    let session_id = workflow_core_tests::reviewable_meeting(
+        &store,
+        "Launch sync",
+        Local::now().timestamp_millis(),
+    );
     let (microphone, _call) = workflow_core_tests::recording_tracks(&store, session_id);
     let engine = Arc::new(Scripted::default());
     engine.replies.lock().unwrap().extend([
@@ -571,35 +766,67 @@ fn a_point_said_again_stays_one_point_and_one_that_says_more_takes_its_place() {
     let live = LiveTranscript::new();
     assert!(live.start_doc());
 
-    live.append(line(microphone, SourceKind::Microphone, 250, "Do we have numbers on step three?"));
+    live.append(line(
+        microphone,
+        SourceKind::Microphone,
+        250,
+        "Do we have numbers on step three?",
+    ));
     service.read_live_doc_now(&store, session_id, &live);
     let numbers = live.doc_points()[0].id.clone();
-    live.append(line(microphone, SourceKind::Microphone, 290, "The support inbox was quiet this week too."));
+    live.append(line(
+        microphone,
+        SourceKind::Microphone,
+        290,
+        "The support inbox was quiet this week too.",
+    ));
     service.read_live_doc_now(&store, session_id, &live);
-    let texts: Vec<String> = live.doc_points().into_iter().map(|point| point.text).collect();
+    let texts: Vec<String> = live
+        .doc_points()
+        .into_iter()
+        .map(|point| point.text)
+        .collect();
     assert_eq!(
         texts,
         ["We need to confirm the numbers for step three."],
         "a point said again in fewer words is not a second point"
     );
 
-    live.append(line(microphone, SourceKind::Microphone, 330, "Can we have the step three numbers by Friday, and step four's too?"));
+    live.append(line(
+        microphone,
+        SourceKind::Microphone,
+        330,
+        "Can we have the step three numbers by Friday, and step four's too?",
+    ));
     service.read_live_doc_now(&store, session_id, &live);
-    let points: Vec<(String, String)> = live.doc_points().into_iter().map(|point| (point.id, point.text)).collect();
+    let points: Vec<(String, String)> = live
+        .doc_points()
+        .into_iter()
+        .map(|point| (point.id, point.text))
+        .collect();
     let texts: Vec<&str> = points.iter().map(|(_, text)| text.as_str()).collect();
     assert_eq!(
         texts,
-        ["We need to confirm the numbers for step three by Friday.", "Confirm the numbers for step four."],
+        [
+            "We need to confirm the numbers for step three by Friday.",
+            "Confirm the numbers for step four."
+        ],
         "a point that says more replaces the one it holds, and one a word apart lands"
     );
-    assert_eq!(points[0].0, numbers, "the point that says more keeps the place of the one it holds");
+    assert_eq!(
+        points[0].0, numbers,
+        "the point that says more keeps the place of the one it holds"
+    );
 }
 
 #[test]
 fn an_add_that_reverses_settles_retimes_or_answers_a_point_lands_beside_it() {
     let (_directory, store) = workflow_core_tests::store();
-    let session_id =
-        workflow_core_tests::reviewable_meeting(&store, "Beta sync", Local::now().timestamp_millis());
+    let session_id = workflow_core_tests::reviewable_meeting(
+        &store,
+        "Beta sync",
+        Local::now().timestamp_millis(),
+    );
     let (microphone, _call) = workflow_core_tests::recording_tracks(&store, session_id);
     let engine = Arc::new(Scripted::default());
     engine.replies.lock().unwrap().extend([
@@ -614,13 +841,27 @@ fn an_add_that_reverses_settles_retimes_or_answers_a_point_lands_beside_it() {
 
     live.append(line(microphone, SourceKind::Microphone, 60, "Not Friday for the beta, the launch is March 21 or 28, maybe the demo moves, the review stays, and standup is 9:30."));
     service.read_live_doc_now(&store, session_id, &live);
-    live.edit_doc(&Author::Owner, None, "Should we cut the mobile app from the launch").unwrap();
+    live.edit_doc(
+        &Author::Owner,
+        None,
+        "Should we cut the mobile app from the launch",
+    )
+    .unwrap();
     live.append(line(microphone, SourceKind::Microphone, 120, "Fine, Friday it is, March 21, the demo is Thursday, the review is Monday, standup at 9, and the mobile app is out."));
     service.read_live_doc_now(&store, session_id, &live);
-    live.append(line(microphone, SourceKind::Microphone, 180, "Can legal clear Friday?"));
+    live.append(line(
+        microphone,
+        SourceKind::Microphone,
+        180,
+        "Can legal clear Friday?",
+    ));
     service.read_live_doc_now(&store, session_id, &live);
 
-    let texts: Vec<String> = live.doc_points().into_iter().map(|point| point.text).collect();
+    let texts: Vec<String> = live
+        .doc_points()
+        .into_iter()
+        .map(|point| point.text)
+        .collect();
     assert_eq!(
         texts,
         [
@@ -645,8 +886,11 @@ fn an_add_that_reverses_settles_retimes_or_answers_a_point_lands_beside_it() {
 #[test]
 fn an_add_that_holds_a_point_the_same_reading_rewrites_lands_on_its_own() {
     let (_directory, store) = workflow_core_tests::store();
-    let session_id =
-        workflow_core_tests::reviewable_meeting(&store, "Hiring sync", Local::now().timestamp_millis());
+    let session_id = workflow_core_tests::reviewable_meeting(
+        &store,
+        "Hiring sync",
+        Local::now().timestamp_millis(),
+    );
     let (microphone, _call) = workflow_core_tests::recording_tracks(&store, session_id);
     let engine = Arc::new(Scripted::default());
     engine.replies.lock().unwrap().extend([
@@ -658,12 +902,21 @@ fn an_add_that_holds_a_point_the_same_reading_rewrites_lands_on_its_own() {
     let live = LiveTranscript::new();
     assert!(live.start_doc());
 
-    live.append(line(microphone, SourceKind::Microphone, 60, "We need a designer. Launch on March 21, demo on March 14."));
+    live.append(line(
+        microphone,
+        SourceKind::Microphone,
+        60,
+        "We need a designer. Launch on March 21, demo on March 14.",
+    ));
     service.read_live_doc_now(&store, session_id, &live);
     live.append(line(microphone, SourceKind::Microphone, 120, "A contract designer for the app launch, and a copywriter too. Launch moves to March 28, the demo stays on March 14."));
     service.read_live_doc_now(&store, session_id, &live);
 
-    let texts: Vec<String> = live.doc_points().into_iter().map(|point| point.text).collect();
+    let texts: Vec<String> = live
+        .doc_points()
+        .into_iter()
+        .map(|point| point.text)
+        .collect();
     assert_eq!(
         texts,
         [
@@ -679,8 +932,11 @@ fn an_add_that_holds_a_point_the_same_reading_rewrites_lands_on_its_own() {
 #[test]
 fn an_add_that_shares_only_a_figure_with_a_rewrite_stays_its_own_point() {
     let (_directory, store) = workflow_core_tests::store();
-    let session_id =
-        workflow_core_tests::reviewable_meeting(&store, "Budget sync", Local::now().timestamp_millis());
+    let session_id = workflow_core_tests::reviewable_meeting(
+        &store,
+        "Budget sync",
+        Local::now().timestamp_millis(),
+    );
     let (microphone, _call) = workflow_core_tests::recording_tracks(&store, session_id);
     let engine = Arc::new(Scripted::default());
     engine.replies.lock().unwrap().extend([
@@ -692,12 +948,21 @@ fn an_add_that_shares_only_a_figure_with_a_rewrite_stays_its_own_point() {
     let live = LiveTranscript::new();
     assert!(live.start_doc());
 
-    live.append(line(microphone, SourceKind::Microphone, 60, "The lobby budget is a million. The LED fixtures came in at forty thousand."));
+    live.append(line(
+        microphone,
+        SourceKind::Microphone,
+        60,
+        "The lobby budget is a million. The LED fixtures came in at forty thousand.",
+    ));
     service.read_live_doc_now(&store, session_id, &live);
     live.append(line(microphone, SourceKind::Microphone, 120, "Lobby is approved and the fixtures are in. The garage gets a million and five hundred, and the cheaper fixture quote is forty thousand too."));
     service.read_live_doc_now(&store, session_id, &live);
 
-    let texts: Vec<String> = live.doc_points().into_iter().map(|point| point.text).collect();
+    let texts: Vec<String> = live
+        .doc_points()
+        .into_iter()
+        .map(|point| point.text)
+        .collect();
     assert_eq!(
         texts,
         [
@@ -717,18 +982,102 @@ fn the_page_shows_a_sentence_cut_in_two_as_one_line() {
     let first = MeetingProvisionalSpeaker::Cluster { index: 0 };
     let unknown = MeetingProvisionalSpeaker::Unknown;
     for (track, kind, speaker, start_ms, end_ms, text) in [
-        (microphone, SourceKind::Microphone, first, 20_000, 23_000, "We should ask the supplier for a cheaper"),
-        (call, SourceKind::SystemAudio, unknown, 21_000, 22_000, "Mm-hmm."),
-        (microphone, SourceKind::Microphone, unknown, 23_000, 25_000, "cheaper fixture."),
-        (microphone, SourceKind::Microphone, first, 30_000, 33_000, "Then the public launch moves to March 14."),
-        (microphone, SourceKind::Microphone, unknown, 33_000, 34_500, "Instead of March 1st."),
-        (microphone, SourceKind::Microphone, first, 36_000, 39_000, "Let's decide next week, once the council answers."),
-        (microphone, SourceKind::Microphone, first, 38_500, 40_000, "council answers about the berths."),
-        (microphone, SourceKind::Microphone, first, 40_500, 42_000, "Let's move on"),
-        (microphone, SourceKind::Microphone, first, 50_000, 53_000, "Okay, next item is the pier lighting."),
-        (microphone, SourceKind::Microphone, first, 60_000, 63_000, "So the lighting budget is"),
-        (call, SourceKind::SystemAudio, unknown, 63_000, 65_000, "Council meets late."),
-        (call, SourceKind::SystemAudio, unknown, 66_000, 67_000, "Agreed."),
+        (
+            microphone,
+            SourceKind::Microphone,
+            first,
+            20_000,
+            23_000,
+            "We should ask the supplier for a cheaper",
+        ),
+        (
+            call,
+            SourceKind::SystemAudio,
+            unknown,
+            21_000,
+            22_000,
+            "Mm-hmm.",
+        ),
+        (
+            microphone,
+            SourceKind::Microphone,
+            unknown,
+            23_000,
+            25_000,
+            "cheaper fixture.",
+        ),
+        (
+            microphone,
+            SourceKind::Microphone,
+            first,
+            30_000,
+            33_000,
+            "Then the public launch moves to March 14.",
+        ),
+        (
+            microphone,
+            SourceKind::Microphone,
+            unknown,
+            33_000,
+            34_500,
+            "Instead of March 1st.",
+        ),
+        (
+            microphone,
+            SourceKind::Microphone,
+            first,
+            36_000,
+            39_000,
+            "Let's decide next week, once the council answers.",
+        ),
+        (
+            microphone,
+            SourceKind::Microphone,
+            first,
+            38_500,
+            40_000,
+            "council answers about the berths.",
+        ),
+        (
+            microphone,
+            SourceKind::Microphone,
+            first,
+            40_500,
+            42_000,
+            "Let's move on",
+        ),
+        (
+            microphone,
+            SourceKind::Microphone,
+            first,
+            50_000,
+            53_000,
+            "Okay, next item is the pier lighting.",
+        ),
+        (
+            microphone,
+            SourceKind::Microphone,
+            first,
+            60_000,
+            63_000,
+            "So the lighting budget is",
+        ),
+        (
+            call,
+            SourceKind::SystemAudio,
+            unknown,
+            63_000,
+            65_000,
+            "Council meets late.",
+        ),
+        (
+            call,
+            SourceKind::SystemAudio,
+            unknown,
+            66_000,
+            67_000,
+            "Agreed.",
+        ),
     ] {
         live.append(LiveSegment {
             speaker,
@@ -738,12 +1087,18 @@ fn the_page_shows_a_sentence_cut_in_two_as_one_line() {
         });
     }
 
-    let state: serde_json::Value = serde_json::from_slice(&shared.state(SharePhase::Live).unwrap()).unwrap();
+    let state: serde_json::Value =
+        serde_json::from_slice(&shared.state(SharePhase::Live).unwrap()).unwrap();
     let lines: Vec<(&str, &str)> = state["lines"]
         .as_array()
         .unwrap()
         .iter()
-        .map(|line| (line["who"].as_str().unwrap(), line["text"].as_str().unwrap()))
+        .map(|line| {
+            (
+                line["who"].as_str().unwrap(),
+                line["text"].as_str().unwrap(),
+            )
+        })
         .collect();
     assert_eq!(
         lines,
@@ -765,10 +1120,10 @@ fn the_page_shows_a_sentence_cut_in_two_as_one_line() {
 
 #[test]
 fn a_link_stops_showing_the_meeting_once_its_series_is_kept_on_this_mac() {
+    use super::super::live_share::REMOVED;
     use crate::meeting::detection::machine::CalendarEventSummary;
     use crate::meeting::series_types::MeetingSeriesRemoteOptOutSetRequest;
     use crate::meeting::types::MeetingOperationId;
-    use super::super::live_share::REMOVED;
 
     let (_directory, store, session_id, live, shared) = shared_meeting();
     let started = Local::now().timestamp_millis();

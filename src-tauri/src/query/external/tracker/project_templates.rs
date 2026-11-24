@@ -158,7 +158,11 @@ fn external(template: &ProjectTemplate, board: &Board) -> ExternalProjectTemplat
             .map(|task| ExternalProjectTemplateTask {
                 title: task.title.clone(),
                 details: task.details.clone(),
-                labels: task.label_ids.iter().map(|id| board.label_name(id)).collect(),
+                labels: task
+                    .label_ids
+                    .iter()
+                    .map(|id| board.label_name(id))
+                    .collect(),
                 estimate: task.estimate,
                 priority: Priority::of(task.priority),
                 milestone: task.milestone.clone(),
@@ -228,9 +232,10 @@ impl Tracker<'_> {
         let board = self.board().await?;
         let templates = self.all_project_templates()?;
         let template = Self::project_template_named(&templates, &args.template)?;
-        let operation_id = args
-            .write
-            .operation_id("project-template-delete", &(&template.id, template.revision))?;
+        let operation_id = args.write.operation_id(
+            "project-template-delete",
+            &(&template.id, template.revision),
+        )?;
         if !args.dry_run {
             self.applies("deleting a project template")?;
             project_templates::template_delete_as(self.app, &operation_id, &template.id)
@@ -239,7 +244,10 @@ impl Tracker<'_> {
         Ok(change(template, &board, args.dry_run, operation_id, true))
     }
 
-    pub(super) async fn project_new(&self, args: &ProjectNewArgs) -> Result<WorkAnswer, ExternalError> {
+    pub(super) async fn project_new(
+        &self,
+        args: &ProjectNewArgs,
+    ) -> Result<WorkAnswer, ExternalError> {
         let name = args.name.trim();
         if name.is_empty() {
             return Err(ExternalError::invalid("A project needs a name."));
@@ -260,8 +268,7 @@ impl Tracker<'_> {
                 )));
             }
         }
-        let start_at_ms =
-            super::midnight(args.start.unwrap_or_else(|| Local::now().date_naive()))?;
+        let start_at_ms = super::midnight(args.start.unwrap_or_else(|| Local::now().date_naive()))?;
         let made = if args.dry_run {
             self.rehearse(|conn| {
                 project_templates::rehearse_project(
@@ -289,7 +296,14 @@ impl Tracker<'_> {
             self.credit(&args.write, &ids, started_ms)?;
             made
         };
-        Ok(project_new(made, &template.name, &board, self, args.dry_run, operation_id))
+        Ok(project_new(
+            made,
+            &template.name,
+            &board,
+            self,
+            args.dry_run,
+            operation_id,
+        ))
     }
 }
 
