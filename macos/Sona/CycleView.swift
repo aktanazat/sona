@@ -35,18 +35,30 @@ enum CycleFormat {
         count == 1 ? "1 week" : "\(count) weeks"
     }
 
-    /// How far off the cycle is: days left in it, days until it starts, or
+    /// How far off the cycle is: weekdays left, days until it starts, or
     /// that it ended.
     static func when(_ cycle: WorkCycle, now: Int64) -> String {
-        let today = Calendar.current.startOfDay(for: PlanningFormat.moment(now))
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: PlanningFormat.moment(now))
         func days(to text: String) -> Int {
-            day(text).flatMap { Calendar.current.dateComponents([.day], from: today, to: $0).day } ?? 0
+            day(text).flatMap { calendar.dateComponents([.day], from: today, to: $0).day } ?? 0
         }
         switch cycle.state {
         case .past: return "Ended"
         case .current:
             let left = days(to: cycle.endDay)
-            return left == 1 ? "Last day" : "\(left) days left"
+            guard left > 0 else { return "Ended" }
+            if left == 1 { return "Last day" }
+            let first = calendar.component(.weekday, from: today)
+            let weekdays = (0..<(left % 7)).reduce(left / 7 * 5) { total, offset in
+                let weekday = (first - 1 + offset) % 7 + 1
+                return total + (weekday == 1 || weekday == 7 ? 0 : 1)
+            }
+            switch weekdays {
+            case 0: return "No weekdays left"
+            case 1: return "1 weekday left"
+            default: return "\(weekdays) weekdays left"
+            }
         case .upcoming:
             let away = days(to: cycle.startDay)
             return away == 1 ? "Starts tomorrow" : "Starts in \(away) days"
@@ -128,9 +140,6 @@ struct CycleSummary: View {
                 }
                 Spacer(minLength: 0)
                 actions
-                if cycle.state == .upcoming, let capacity = model.work.cycleCapacity {
-                    CycleCapacity(scope: tally.scope, capacity: capacity)
-                }
                 VStack(alignment: .trailing, spacing: 4) {
                     Text(success.map { "\($0)%" } ?? "No work yet")
                         .font(success == nil ? TypeScale.list : TypeScale.stat)
@@ -138,6 +147,9 @@ struct CycleSummary: View {
                         .foregroundStyle(success == nil ? Theme.inkSecondary : Theme.ink)
                         .help("Done counts in full, started counts a quarter")
                     Text("\(tally.done) done, \(tally.started) started of \(tally.scope)").metaText()
+                    if cycle.state.showsCapacity, let capacity = model.work.cycleCapacity {
+                        CycleCapacity(scope: tally.scope, capacity: capacity)
+                    }
                 }
             }
             if let chart = CycleChart(cycle: cycle, progress: progress, live: tally, now: now) {
@@ -395,6 +407,15 @@ struct CycleChart: View {
     }
 }
 
+private extension WorkCycleState {
+    var showsCapacity: Bool {
+        switch self {
+        case .current, .upcoming: true
+        case .past: false
+        }
+    }
+}
+
 /// Scope planned in a cycle against what a cycle usually finishes, the
 /// mean done of the last three that ended; a full dial in red means more
 /// is planned than usually gets done.
@@ -601,14 +622,16 @@ private struct CycleRow: View {
     @State private var hovering = false
 
     var body: some View {
+        let timeframe = CycleFormat.when(cycle, now: model.work.now)
+        let capacity = cycle.state.showsCapacity ? model.work.cycleCapacity : nil
         Button { CycleList.open(cycle.number, model) } label: {
             HStack(spacing: 14) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(cycle.title).font(TypeScale.list).foregroundStyle(Theme.ink)
-                    Text("\(CycleFormat.title(cycle)) · \(CycleFormat.when(cycle, now: model.work.now))").metaText()
+                    Text("\(CycleFormat.title(cycle)) · \(timeframe)").metaText()
                 }
                 Spacer(minLength: 12)
-                if cycle.state == .upcoming, let capacity = model.work.cycleCapacity {
+                if let capacity {
                     CycleCapacity(scope: cycle.scope, capacity: capacity)
                 }
                 if let success = cycle.success {
@@ -629,7 +652,8 @@ private struct CycleRow: View {
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
-        .accessibilityLabel("\(cycle.title), \(CycleFormat.title(cycle)), \(cycle.done) done of \(cycle.scope)")
+        .accessibilityLabel("\(cycle.title), \(CycleFormat.title(cycle)), \(timeframe), \(cycle.done) done of \(cycle.scope)")
+        .accessibilityValue(capacity.map { "\($0) usually finished" } ?? "")
     }
 }
 
@@ -684,8 +708,8 @@ struct CyclePeek: View {
                         }
                     }
                     .font(TypeScale.list)
-                    if cycle.state == .upcoming, let capacity = model.work.cycleCapacity {
-                        CycleCapacity(scope: cycle.scope, capacity: capacity)
+                    if cycle.state.showsCapacity, let capacity = model.work.cycleCapacity {
+                        CycleCapacity(scope: tally.scope, capacity: capacity)
                     }
                 }
                 .padding(20)
