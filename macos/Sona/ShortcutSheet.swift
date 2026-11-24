@@ -75,6 +75,7 @@ struct ShortcutSheet: View {
                 Entry(title: "Peek", keys: ["space"]),
                 Entry(title: "Open", keys: ["return"]),
                 Entry(title: "All cycles", keys: ["esc"]),
+                Entry(title: "Change cycle page", keys: ["option+j", "option+k"]),
             ]),
         ],
         [
