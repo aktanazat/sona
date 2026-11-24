@@ -82,6 +82,8 @@ pub enum AgentBridgePendingState {
 #[serde(rename_all = "snake_case")]
 pub enum AgentBridgeRequestState {
     Observed,
+    Withdrawing,
+    WithdrawalFailed,
     Responded,
     Delivered,
     Dismissed,
@@ -139,6 +141,7 @@ pub struct AgentBridgeObservedSession {
     pub session_generation: u64,
     pub policy_generation: u64,
     pub last_seen_at_ms: u64,
+    pub voice_enabled: bool,
     /// Legacy agents take a queued reply at their next turn end. OpenCode
     /// accepts replies only while its plugin holds an explicit input request.
     pub accepts_reply: bool,
@@ -188,6 +191,7 @@ pub struct AgentBridgePendingMessage {
 #[serde(rename_all = "snake_case")]
 pub enum AgentBridgeError {
     Disabled,
+    VoiceDisabled,
     RuntimeUnavailable,
     InteractiveUnsupported,
     AppLockHeld,
@@ -269,6 +273,7 @@ struct ObservedSessionRecord {
     session_generation: u64,
     policy_generation: u64,
     last_seen_at_ms: u64,
+    voice_enabled: bool,
     task: Option<String>,
     reply_target: ReplyTarget,
     last_order: Option<wire::EventOrder>,
@@ -481,10 +486,10 @@ impl AgentBridgeCore {
             self.write_control_state(settings, now_ms)?;
         }
         self.expire_pending(now_ms);
-        self.withdraw_ungranted(settings);
         self.scan_sessions(settings, now_ms)?;
+        let withdrawal = self.withdraw_ungranted(settings, now_ms);
         self.deliver_input_replies(settings, now_ms)?;
-        Ok(())
+        withdrawal
     }
 
     /// How long the worker can sleep before this core has work of its own:
@@ -544,7 +549,9 @@ impl AgentBridgeCore {
                 session_generation: session.session_generation,
                 policy_generation: session.policy_generation,
                 last_seen_at_ms: session.last_seen_at_ms,
-                accepts_reply: !matches!(session.reply_target, ReplyTarget::Unavailable),
+                voice_enabled: session.voice_enabled,
+                accepts_reply: session.voice_enabled
+                    && !matches!(session.reply_target, ReplyTarget::Unavailable),
                 task: session.task.clone(),
             })
             .collect()
@@ -569,6 +576,62 @@ impl AgentBridgeCore {
             .collect()
     }
 
+    pub fn set_session_voice(
+        &mut self,
+        session_id: &str,
+        enabled: bool,
+    ) -> Result<(), AgentBridgeError> {
+        let session = self
+            .observed_sessions
+            .get_mut(session_id)
+            .ok_or(AgentBridgeError::UnknownSession)?;
+        if session.voice_enabled == enabled {
+            return Ok(());
+        }
+        session.voice_enabled = enabled;
+        if !enabled {
+            session.reply_target = ReplyTarget::Unavailable;
+            for pending in self.pending_messages.values_mut() {
+                if pending.public.session_id == session_id
+                    && pending.public.state == AgentBridgePendingState::Held
+                {
+                    pending.public.state = AgentBridgePendingState::CopyOnly;
+                }
+            }
+            for record in self.observed_requests.values_mut() {
+                if record.public.session_id == session_id
+                    && record.public.state == AgentBridgeRequestState::Observed
+                {
+                    record.public.state = if record.public.awaiting_response {
+                        AgentBridgeRequestState::Withdrawing
+                    } else {
+                        AgentBridgeRequestState::Dismissed
+                    };
+                }
+            }
+        }
+        self.touch();
+        Ok(())
+    }
+
+    fn ensure_request_open(&self, record: &ObservedRequestRecord) -> Result<(), AgentBridgeError> {
+        if record.public.state == AgentBridgeRequestState::Observed {
+            return Ok(());
+        }
+        if matches!(
+            record.public.state,
+            AgentBridgeRequestState::Withdrawing | AgentBridgeRequestState::WithdrawalFailed
+        ) && self
+            .observed_sessions
+            .get(&record.public.session_id)
+            .is_some_and(|session| !session.voice_enabled)
+        {
+            Err(AgentBridgeError::VoiceDisabled)
+        } else {
+            Err(AgentBridgeError::AlreadyHandled)
+        }
+    }
+
     pub fn create_reply_preview(
         &mut self,
         session_id: &str,
@@ -584,6 +647,9 @@ impl AgentBridgeCore {
             .observed_sessions
             .get(session_id)
             .ok_or(AgentBridgeError::UnknownSession)?;
+        if !session.voice_enabled {
+            return Err(AgentBridgeError::VoiceDisabled);
+        }
         let target_invocation_id = match &session.reply_target {
             ReplyTarget::Unavailable => return Err(AgentBridgeError::UnknownSession),
             ReplyTarget::NextStop => None,
@@ -765,9 +831,7 @@ impl AgentBridgeCore {
             return Err(AgentBridgeError::PermissionResponseUnsupported);
         }
 
-        if record.public.state != AgentBridgeRequestState::Observed {
-            return Err(AgentBridgeError::AlreadyHandled);
-        }
+        self.ensure_request_open(record)?;
         if record.request.expires_at_ms < now_ms {
             return Err(AgentBridgeError::Expired);
         }
@@ -812,9 +876,7 @@ impl AgentBridgeCore {
         if !record.public.awaiting_response || !record.request.event.is_opencode_question() {
             return Err(AgentBridgeError::PermissionResponseUnsupported);
         }
-        if record.public.state != AgentBridgeRequestState::Observed {
-            return Err(AgentBridgeError::AlreadyHandled);
-        }
+        self.ensure_request_open(record)?;
         if record.request.expires_at_ms < now_ms {
             return Err(AgentBridgeError::Expired);
         }
@@ -968,9 +1030,11 @@ impl AgentBridgeCore {
             && request_peer_alive(request)
     }
 
-    /// OpenCode's live pipe cancels on lost consent. Legacy hooks retain their
-    /// existing deadline behavior.
-    fn withdraw_ungranted(&mut self, settings: &AgentBridgeSettings) {
+    fn withdraw_ungranted(
+        &mut self,
+        settings: &AgentBridgeSettings,
+        now_ms: u64,
+    ) -> Result<(), AgentBridgeError> {
         let before = self.observed_requests.len();
         self.observed_requests.retain(|_, record| {
             record.public.agent == AgentBridgeAgent::OpenCode
@@ -978,9 +1042,33 @@ impl AgentBridgeCore {
                 || policy_grants(settings, &record.request.binding)
         });
         let mut changed = self.observed_requests.len() != before;
+        let mut result = Ok(());
         for record in self.observed_requests.values_mut() {
-            if record.public.agent == AgentBridgeAgent::OpenCode
-                && record.public.state == AgentBridgeRequestState::Observed
+            if matches!(
+                record.public.state,
+                AgentBridgeRequestState::Withdrawing | AgentBridgeRequestState::WithdrawalFailed
+            ) {
+                let state = match persist_hook_response(
+                    &self.paths,
+                    &self.app_instance_id,
+                    &record.request,
+                    "pass_through",
+                    None,
+                    None,
+                    now_ms,
+                ) {
+                    Ok(()) => AgentBridgeRequestState::Dismissed,
+                    Err(error) => {
+                        result = Err(error);
+                        AgentBridgeRequestState::WithdrawalFailed
+                    }
+                };
+                if record.public.state != state {
+                    record.public.state = state;
+                    changed = true;
+                }
+            } else if record.public.state == AgentBridgeRequestState::Observed
+                && record.public.agent == AgentBridgeAgent::OpenCode
                 && !policy_grants(settings, &record.request.binding)
             {
                 record.public.state = AgentBridgeRequestState::Dismissed;
@@ -1013,6 +1101,7 @@ impl AgentBridgeCore {
         if changed {
             self.touch();
         }
+        result
     }
 
     fn observe_request(
@@ -1095,6 +1184,7 @@ impl AgentBridgeCore {
                 session_generation: request.binding.session_generation,
                 policy_generation: request.binding.policy_generation,
                 last_seen_at_ms: now_ms,
+                voice_enabled: true,
                 task: None,
                 reply_target: ReplyTarget::Unavailable,
                 last_order: None,
@@ -1113,19 +1203,21 @@ impl AgentBridgeCore {
             session.policy_generation = request.binding.policy_generation;
             session.last_order = request.event.order.clone();
         }
-        match kind {
-            AgentBridgeRequestKind::UserPromptSubmit => {
-                session.reply_target = if agent == AgentBridgeAgent::OpenCode {
-                    ReplyTarget::Unavailable
-                } else {
-                    ReplyTarget::NextStop
-                };
+        if session.voice_enabled {
+            match kind {
+                AgentBridgeRequestKind::UserPromptSubmit => {
+                    session.reply_target = if agent == AgentBridgeAgent::OpenCode {
+                        ReplyTarget::Unavailable
+                    } else {
+                        ReplyTarget::NextStop
+                    };
+                }
+                AgentBridgeRequestKind::Stop => session.reply_target = ReplyTarget::Unavailable,
+                AgentBridgeRequestKind::InputRequest => {
+                    session.reply_target = ReplyTarget::InputRequest(request.invocation_id.clone());
+                }
+                _ => {}
             }
-            AgentBridgeRequestKind::Stop => session.reply_target = ReplyTarget::Unavailable,
-            AgentBridgeRequestKind::InputRequest => {
-                session.reply_target = ReplyTarget::InputRequest(request.invocation_id.clone());
-            }
-            _ => {}
         }
         if advances_order {
             let started = request.event.prompt.as_deref().and_then(prompt_task);
@@ -1150,14 +1242,20 @@ impl AgentBridgeCore {
                 }
             }
         }
+        let voice_enabled = session.voice_enabled;
         let awaiting_response = request.event.awaits_response();
         let request_id = request.invocation_id.clone();
-        self.observed_requests.insert(
-            request_id.clone(),
-            ObservedRequestRecord::new(request, session_id),
-        );
+        let mut record = ObservedRequestRecord::new(request, session_id);
+        if !voice_enabled {
+            record.public.state = if awaiting_response {
+                AgentBridgeRequestState::Withdrawing
+            } else {
+                AgentBridgeRequestState::Dismissed
+            };
+        }
+        self.observed_requests.insert(request_id.clone(), record);
         self.touch();
-        if kind == AgentBridgeRequestKind::Stop && awaiting_response {
+        if voice_enabled && kind == AgentBridgeRequestKind::Stop && awaiting_response {
             self.respond_to_reply_request(&request_id, now_ms)?;
         }
         Ok(())
@@ -1265,30 +1363,23 @@ impl AgentBridgeCore {
         answers: Option<Vec<wire::HookAnswer>>,
         now_ms: u64,
     ) -> Result<(), AgentBridgeError> {
-        let response = HookResponse {
-            schema_version: SCHEMA_VERSION,
-            protocol_generation: PROTOCOL_GENERATION,
-            app_instance_id: self.app_instance_id.clone(),
-            binding: request.binding.clone(),
-            invocation_id: request.invocation_id.clone(),
-            outcome: outcome.to_string(),
-            issued_at_ms: now_ms,
-            expires_at_ms: request.expires_at_ms,
+        if outcome != "pass_through"
+            && self
+                .observed_sessions
+                .get(&request.binding.session_handle)
+                .is_some_and(|session| !session.voice_enabled)
+        {
+            return Err(AgentBridgeError::VoiceDisabled);
+        }
+        persist_hook_response(
+            &self.paths,
+            &self.app_instance_id,
+            request,
+            outcome,
             reason,
             answers,
-        };
-        let session = self
-            .paths
-            .session(&request.binding)
-            .map_err(|_| AgentBridgeError::PersistenceFailed)?;
-        wire::atomic_write_json(
-            &session
-                .response_path(&response.invocation_id)
-                .map_err(|_| AgentBridgeError::PersistenceFailed)?,
-            &response,
-            WriteMode::CreateNew,
+            now_ms,
         )
-        .map_err(|_| AgentBridgeError::PersistenceFailed)
     }
 
     fn apply_ack(&mut self, ack: &HookAck) {
@@ -1330,8 +1421,12 @@ impl AgentBridgeCore {
         let mut changed = false;
         for observed in self.observed_requests.values_mut() {
             let open_code = observed.public.agent == AgentBridgeAgent::OpenCode;
-            if !(observed.public.state == AgentBridgeRequestState::Observed
-                || (open_code && observed.public.state == AgentBridgeRequestState::Responded))
+            if !(matches!(
+                observed.public.state,
+                AgentBridgeRequestState::Observed
+                    | AgentBridgeRequestState::Withdrawing
+                    | AgentBridgeRequestState::WithdrawalFailed
+            ) || (open_code && observed.public.state == AgentBridgeRequestState::Responded))
             {
                 continue;
             }
@@ -1363,7 +1458,10 @@ impl AgentBridgeCore {
                     .is_none_or(|record| {
                         matches!(
                             record.public.state,
-                            AgentBridgeRequestState::Dismissed | AgentBridgeRequestState::Expired
+                            AgentBridgeRequestState::Dismissed
+                                | AgentBridgeRequestState::Expired
+                                | AgentBridgeRequestState::Withdrawing
+                                | AgentBridgeRequestState::WithdrawalFailed
                         )
                     });
             if pending.public.expires_at_ms >= now_ms && !target_closed {
@@ -1401,6 +1499,40 @@ impl AgentBridgeCore {
             &self.next_id.to_be_bytes(),
         ])
     }
+}
+
+fn persist_hook_response(
+    paths: &RuntimePaths,
+    app_instance_id: &str,
+    request: &HookRequest,
+    outcome: &str,
+    reason: Option<String>,
+    answers: Option<Vec<wire::HookAnswer>>,
+    now_ms: u64,
+) -> Result<(), AgentBridgeError> {
+    let response = HookResponse {
+        schema_version: SCHEMA_VERSION,
+        protocol_generation: PROTOCOL_GENERATION,
+        app_instance_id: app_instance_id.to_owned(),
+        binding: request.binding.clone(),
+        invocation_id: request.invocation_id.clone(),
+        outcome: outcome.to_owned(),
+        issued_at_ms: now_ms,
+        expires_at_ms: request.expires_at_ms,
+        reason,
+        answers,
+    };
+    let session = paths
+        .session(&request.binding)
+        .map_err(|_| AgentBridgeError::PersistenceFailed)?;
+    wire::atomic_write_json(
+        &session
+            .response_path(&response.invocation_id)
+            .map_err(|_| AgentBridgeError::PersistenceFailed)?,
+        &response,
+        WriteMode::CreateNew,
+    )
+    .map_err(|_| AgentBridgeError::PersistenceFailed)
 }
 
 impl Drop for AgentBridgeCore {
@@ -2092,6 +2224,20 @@ pub fn set_agent_bridge_agent_enabled(
 
 #[tauri::command]
 #[specta::specta]
+pub fn set_agent_bridge_session_voice(
+    manager: tauri::State<'_, AgentBridgeManager>,
+    session_id: String,
+    enabled: bool,
+) -> Result<(), String> {
+    let mut core = lock_recover(&manager.core);
+    core.set_session_voice(&session_id, enabled)
+        .map_err(|error| error.to_string())?;
+    wire::send_wake(&core.paths.wake_path());
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
 pub fn authorize_agent_bridge_project(
     app: tauri::AppHandle,
     manager: tauri::State<'_, AgentBridgeManager>,
@@ -2506,6 +2652,448 @@ mod tests {
             .awaits_response()
             .then(|| format!("opencode-request-{sequence}"));
         event
+    }
+
+    struct VoiceTestRoot(PathBuf);
+
+    impl Drop for VoiceTestRoot {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    struct VoiceFixture {
+        core: AgentBridgeCore,
+        paths: RuntimePaths,
+        settings: AgentBridgeSettings,
+        app_id: String,
+        root: VoiceTestRoot,
+        now: u64,
+    }
+
+    impl VoiceFixture {
+        fn new(name: &str) -> Result<Self, Box<dyn Error>> {
+            let root = VoiceTestRoot(test_root(name)?);
+            let paths = RuntimePaths::from_root(root.0.clone(), true)?;
+            let app_id = opaque_hash(&[name.as_bytes()]);
+            let binding = SessionBinding::new(Agent::OpenCode, "first", &root.0, 4, 7)?;
+            let settings = enabled_settings(binding.project_hash);
+            let mut fixture = Self {
+                core: AgentBridgeCore::new(paths.clone(), app_id.clone())?,
+                paths,
+                settings,
+                app_id,
+                root,
+                now: 1_000,
+            };
+            fixture.core.start(&fixture.settings, fixture.now)?;
+            Ok(fixture)
+        }
+
+        fn tick(&mut self) -> Result<(), AgentBridgeError> {
+            self.now += 1;
+            self.core.tick(&self.settings, self.now)
+        }
+
+        fn publish(
+            &mut self,
+            agent: Agent,
+            session_id: &str,
+            kind: CanonicalEventKind,
+            tool: Option<CanonicalTool>,
+        ) -> Result<HookRequest, Box<dyn Error>> {
+            self.now += 1;
+            let mut event = if agent == Agent::OpenCode {
+                opencode_event(kind, &self.root.0, self.now, tool)
+            } else {
+                event(kind, &self.root.0, tool)
+            };
+            event.agent = agent;
+            event.session_id = session_id.to_owned();
+            let raw = serde_json::to_vec(&event)?;
+            let binding = SessionBinding::new(agent, session_id, &self.root.0, 4, 7)?;
+            let request = persist_event(&self.paths, &self.app_id, binding, event, &raw, self.now)?;
+            self.tick()?;
+            Ok(request)
+        }
+
+        fn question(&mut self, session_id: &str) -> Result<HookRequest, Box<dyn Error>> {
+            self.publish(
+                Agent::OpenCode,
+                session_id,
+                CanonicalEventKind::PreToolUse,
+                Some(CanonicalTool {
+                    name: wire::ASK_USER_QUESTION_TOOL.to_owned(),
+                    use_id: None,
+                    input: Some(json!({"questions": [{
+                        "header": "Reply", "question": "What should be sent?",
+                        "options": [], "multi_select": false,
+                        "custom": true, "required": true,
+                    }]})),
+                }),
+            )
+        }
+
+        fn response(&self, request: &HookRequest) -> io::Result<HookResponse> {
+            wire::read_json_bounded(
+                &self
+                    .paths
+                    .session(&request.binding)?
+                    .response_path(&request.invocation_id)?,
+                wire::MAX_RESPONSE_BYTES,
+            )
+        }
+    }
+
+    #[test]
+    fn failed_cancellation_does_not_stop_a_reply_in_another_conversation(
+    ) -> Result<(), Box<dyn Error>> {
+        let mut fixture = VoiceFixture::new("voice-failure-isolation")?;
+        let question = fixture.question("first")?;
+        let input = fixture.publish(
+            Agent::OpenCode,
+            "second",
+            CanonicalEventKind::InputRequest,
+            None,
+        )?;
+        let preview = fixture.core.create_reply_preview(
+            &input.binding.session_handle,
+            "The other conversation still works.".to_owned(),
+            fixture.now,
+            None,
+        )?;
+        fixture.core.confirm_reply_preview(
+            &preview.id,
+            &preview.session_id,
+            &preview.text,
+            fixture.now,
+        )?;
+        let obstacle = fixture
+            .paths
+            .session(&question.binding)?
+            .response_path(&question.invocation_id)?;
+        fs::create_dir(obstacle)?;
+        fixture
+            .core
+            .set_session_voice(&question.binding.session_handle, false)?;
+        assert_eq!(fixture.tick(), Err(AgentBridgeError::PersistenceFailed));
+        let response = fixture.response(&input);
+        assert!(
+            response.is_ok(),
+            "Another conversation's confirmed reply was stalled: {response:?}"
+        );
+        assert_eq!(
+            response?.reason.as_deref(),
+            Some("The other conversation still works.")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn failed_cancellation_cannot_revive_an_old_question_after_reenabling(
+    ) -> Result<(), Box<dyn Error>> {
+        let mut fixture = VoiceFixture::new("voice-failure-resume")?;
+        let question = fixture.question("first")?;
+        let obstacle = fixture
+            .paths
+            .session(&question.binding)?
+            .response_path(&question.invocation_id)?;
+        fs::create_dir(&obstacle)?;
+        fixture
+            .core
+            .set_session_voice(&question.binding.session_handle, false)?;
+        assert_eq!(fixture.tick(), Err(AgentBridgeError::PersistenceFailed));
+        fs::remove_dir(obstacle)?;
+        fixture
+            .core
+            .set_session_voice(&question.binding.session_handle, true)?;
+        assert_eq!(
+            fixture.core.respond_questions(
+                &question.invocation_id,
+                AgentBridgeQuestionResponse::Answer(vec![vec!["Do not revive this.".to_owned()]]),
+                &fixture.settings,
+                fixture.now,
+            ),
+            Err(AgentBridgeError::AlreadyHandled),
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn failed_cancellation_is_visible_on_its_own_request() -> Result<(), Box<dyn Error>> {
+        let mut fixture = VoiceFixture::new("voice-failure-visible")?;
+        let question = fixture.question("first")?;
+        let obstacle = fixture
+            .paths
+            .session(&question.binding)?
+            .response_path(&question.invocation_id)?;
+        fs::create_dir(obstacle)?;
+        fixture
+            .core
+            .set_session_voice(&question.binding.session_handle, false)?;
+        assert_eq!(fixture.tick(), Err(AgentBridgeError::PersistenceFailed));
+        let request = fixture
+            .core
+            .requests()
+            .into_iter()
+            .find(|request| request.id == question.invocation_id)
+            .ok_or("The failed request disappeared")?;
+        assert_eq!(
+            serde_json::to_value(request)?["state"],
+            json!("withdrawal_failed")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn paused_conversation_does_not_send_its_held_reply_or_pause_another(
+    ) -> Result<(), Box<dyn Error>> {
+        let mut fixture = VoiceFixture::new("voice-isolation")?;
+        let first = fixture.publish(
+            Agent::OpenCode,
+            "first",
+            CanonicalEventKind::InputRequest,
+            None,
+        )?;
+        let second = fixture.publish(
+            Agent::OpenCode,
+            "second",
+            CanonicalEventKind::InputRequest,
+            None,
+        )?;
+        let held = fixture.core.create_reply_preview(
+            &first.binding.session_handle,
+            "Do not send after pausing.".to_owned(),
+            fixture.now,
+            None,
+        )?;
+        fixture
+            .core
+            .confirm_reply_preview(&held.id, &held.session_id, &held.text, fixture.now)?;
+        let other = fixture.core.create_reply_preview(
+            &second.binding.session_handle,
+            "Keep the other conversation running.".to_owned(),
+            fixture.now,
+            None,
+        )?;
+        fixture.core.confirm_reply_preview(
+            &other.id,
+            &other.session_id,
+            &other.text,
+            fixture.now,
+        )?;
+        fixture
+            .core
+            .set_session_voice(&first.binding.session_handle, false)?;
+        assert_eq!(
+            fixture
+                .core
+                .confirm_reply_preview(&held.id, &held.session_id, &held.text, fixture.now),
+            Err(AgentBridgeError::AlreadyHandled),
+        );
+        assert!(matches!(
+            fixture.core.create_reply_preview(
+                &first.binding.session_handle,
+                "A new reply must not escape.".to_owned(),
+                fixture.now,
+                None,
+            ),
+            Err(AgentBridgeError::VoiceDisabled),
+        ));
+        fixture.tick()?;
+        assert_eq!(fixture.response(&first)?.outcome, "pass_through");
+        let response = fixture.response(&second)?;
+        assert_eq!(response.outcome, "block");
+        assert_eq!(
+            response.reason.as_deref(),
+            Some("Keep the other conversation running.")
+        );
+        assert_eq!(response.binding, second.binding);
+        Ok(())
+    }
+
+    #[test]
+    fn paused_questions_pass_through_and_resume_requires_a_fresh_question(
+    ) -> Result<(), Box<dyn Error>> {
+        let mut fixture = VoiceFixture::new("voice-question")?;
+        let first = fixture.question("first")?;
+        fixture
+            .core
+            .set_session_voice(&first.binding.session_handle, false)?;
+        assert_eq!(
+            fixture.core.respond_questions(
+                &first.invocation_id,
+                AgentBridgeQuestionResponse::Answer(vec![vec!["Do not send.".to_owned()]]),
+                &fixture.settings,
+                fixture.now,
+            ),
+            Err(AgentBridgeError::VoiceDisabled),
+        );
+        fixture.tick()?;
+        assert_eq!(fixture.response(&first)?.outcome, "pass_through");
+        let muted = fixture.question("first")?;
+        assert_eq!(fixture.response(&muted)?.outcome, "pass_through");
+        fixture
+            .core
+            .set_session_voice(&first.binding.session_handle, true)?;
+        assert_eq!(
+            fixture.core.respond_questions(
+                &first.invocation_id,
+                AgentBridgeQuestionResponse::Reject,
+                &fixture.settings,
+                fixture.now,
+            ),
+            Err(AgentBridgeError::AlreadyHandled),
+        );
+        let fresh = fixture.question("first")?;
+        fixture.core.respond_questions(
+            &fresh.invocation_id,
+            AgentBridgeQuestionResponse::Answer(vec![vec!["Keep this exact answer.".to_owned()]]),
+            &fixture.settings,
+            fixture.now,
+        )?;
+        let response = fixture.response(&fresh)?;
+        assert_eq!(response.outcome, "approve");
+        assert_eq!(
+            response
+                .answers
+                .as_deref()
+                .map(|answers| answers[0].selected.as_slice()),
+            Some(["Keep this exact answer.".to_owned()].as_slice()),
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn pausing_keeps_an_already_written_reply_until_its_receipt() -> Result<(), Box<dyn Error>> {
+        let mut fixture = VoiceFixture::new("voice-written")?;
+        let input = fixture.publish(
+            Agent::OpenCode,
+            "first",
+            CanonicalEventKind::InputRequest,
+            None,
+        )?;
+        let preview = fixture.core.create_reply_preview(
+            &input.binding.session_handle,
+            "Already handed off.".to_owned(),
+            fixture.now,
+            None,
+        )?;
+        fixture.core.confirm_reply_preview(
+            &preview.id,
+            &preview.session_id,
+            &preview.text,
+            fixture.now,
+        )?;
+        fixture.tick()?;
+        fixture
+            .core
+            .set_session_voice(&input.binding.session_handle, false)?;
+        fixture.tick()?;
+        assert_eq!(
+            fixture
+                .core
+                .pending_messages()
+                .iter()
+                .find(|pending| pending.id == preview.id)
+                .map(|pending| pending.state),
+            Some(AgentBridgePendingState::ResponseWritten),
+        );
+        fixture
+            .paths
+            .session(&input.binding)?
+            .persist_ack(&HookAck::response_emitted(&input, fixture.now))?;
+        fixture.tick()?;
+        assert_eq!(
+            fixture
+                .core
+                .pending_messages()
+                .iter()
+                .find(|pending| pending.id == preview.id)
+                .map(|pending| pending.state),
+            Some(AgentBridgePendingState::Emitted),
+        );
+        assert_eq!(
+            fixture.response(&input)?.reason.as_deref(),
+            Some("Already handed off.")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cancellation_write_failure_keeps_voice_paused_until_pending_work_passes_through(
+    ) -> Result<(), Box<dyn Error>> {
+        let mut fixture = VoiceFixture::new("voice-write-failure")?;
+        let question = fixture.question("first")?;
+        let response_path = fixture
+            .paths
+            .session(&question.binding)?
+            .response_path(&question.invocation_id)?;
+        fs::create_dir(&response_path)?;
+        fixture
+            .core
+            .set_session_voice(&question.binding.session_handle, false)?;
+        assert_eq!(fixture.tick(), Err(AgentBridgeError::PersistenceFailed));
+        assert_eq!(
+            fixture.core.respond_questions(
+                &question.invocation_id,
+                AgentBridgeQuestionResponse::Reject,
+                &fixture.settings,
+                fixture.now,
+            ),
+            Err(AgentBridgeError::VoiceDisabled),
+        );
+        fs::remove_dir(response_path)?;
+        fixture.tick()?;
+        let response = fixture.response(&question)?;
+        assert_eq!(response.outcome, "pass_through");
+        assert!(response.reason.is_none());
+        assert!(response.answers.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn paused_legacy_conversation_passes_through_without_losing_another_reply(
+    ) -> Result<(), Box<dyn Error>> {
+        let mut fixture = VoiceFixture::new("voice-legacy")?;
+        let first = fixture.publish(
+            Agent::Omp,
+            "first",
+            CanonicalEventKind::UserPromptSubmit,
+            None,
+        )?;
+        let second = fixture.publish(
+            Agent::Omp,
+            "second",
+            CanonicalEventKind::UserPromptSubmit,
+            None,
+        )?;
+        let preview = fixture.core.create_reply_preview(
+            &second.binding.session_handle,
+            "Only the second conversation.".to_owned(),
+            fixture.now,
+            None,
+        )?;
+        fixture.core.confirm_reply_preview(
+            &preview.id,
+            &preview.session_id,
+            &preview.text,
+            fixture.now,
+        )?;
+        fixture
+            .core
+            .set_session_voice(&first.binding.session_handle, false)?;
+        let first_stop = fixture.publish(Agent::Omp, "first", CanonicalEventKind::Stop, None)?;
+        let second_stop = fixture.publish(Agent::Omp, "second", CanonicalEventKind::Stop, None)?;
+        assert_eq!(fixture.response(&first_stop)?.outcome, "pass_through");
+        let response = fixture.response(&second_stop)?;
+        assert_eq!(response.outcome, "block");
+        assert_eq!(
+            response.reason.as_deref(),
+            Some("Only the second conversation.")
+        );
+        assert_eq!(response.binding, second_stop.binding);
+        Ok(())
     }
 
     #[test]

@@ -82,8 +82,7 @@ struct AgentBridgeObservedSession: Decodable, Identifiable, Sendable {
     let sessionGeneration: UInt64
     let policyGeneration: UInt64
     let lastSeenAtMs: UInt64
-    /// The core's own answer: a prompt was submitted and no stop has been
-    /// seen since, so there is a turn end for a reply to continue.
+    let voiceEnabled: Bool
     let acceptsReply: Bool
     /// The task the session works on, as the agent named it: "S-12" or the
     /// task's id.
@@ -121,6 +120,8 @@ enum AgentBridgeRequestKind: String, Decodable, Sendable {
 
 enum AgentBridgeRequestState: String, Decodable, Sendable {
     case observed
+    case withdrawing
+    case withdrawalFailed = "withdrawal_failed"
     case responded
     case delivered
     case dismissed
@@ -168,6 +169,8 @@ struct AgentBridgeObservedRequest: Decodable, Identifiable, Sendable {
     var stateLabel: String {
         switch state {
         case .observed: awaitingResponse ? "Waiting for you" : "Observed"
+        case .withdrawing: "Closing request"
+        case .withdrawalFailed: "Couldn't close request"
         case .responded: agent == .opencode ? "Waiting for OpenCode" : "Answered"
         case .delivered: "Sent"
         case .dismissed: "No longer waiting"
