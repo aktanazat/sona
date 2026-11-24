@@ -264,6 +264,16 @@ pub struct ShortcutBinding {
     pub current_binding: String,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum MouseDictationButton {
+    #[default]
+    Off,
+    Middle,
+    Button4,
+    Button5,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, Type)]
 pub struct LLMPrompt {
     pub id: String,
@@ -1511,6 +1521,8 @@ pub struct AppSettings {
     pub context_policy_ceiling: ContextPolicy,
     #[serde(default = "default_push_to_talk")]
     pub push_to_talk: bool,
+    #[serde(default)]
+    pub mouse_dictation_button: MouseDictationButton,
     /// Software gain and relaxed speech detection for dictation only.
     #[serde(default)]
     pub quiet_speech_enabled: bool,
@@ -2542,6 +2554,7 @@ pub fn get_default_settings() -> AppSettings {
         mode_website_activation_rules: Vec::new(),
         context_policy_ceiling: ContextPolicy::None,
         push_to_talk: default_push_to_talk(),
+        mouse_dictation_button: MouseDictationButton::Off,
         quiet_speech_enabled: false,
         audio_feedback: false,
         audio_feedback_volume: default_audio_feedback_volume(),

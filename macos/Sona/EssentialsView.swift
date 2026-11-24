@@ -24,6 +24,17 @@ struct EssentialsView<MeetingRows: View>: View {
                         set: { value in Task { await store.setPushToTalk(value) } }
                     )
                 )
+                ChoiceRow(
+                    title: "Mouse shortcut",
+                    detail: "The selected button is reserved for dictation. Requires Accessibility.",
+                    choices: MouseDictationButton.allCases,
+                    label: \.label,
+                    selection: Binding(
+                        get: { store.settings.mouseDictationButton },
+                        set: { value in Task { await store.setMouseDictationButton(value) } }
+                    )
+                )
+                .disabled(store.isBusy("mouse_dictation_button"))
                 MicrophoneRow(store: store)
                 /// The spoken language, beside the microphone that hears it.
                 /// The list narrows to what the loaded model can recognize,

@@ -429,11 +429,14 @@ pub struct ModeView {
 pub enum TranscriptionIntent {
     /// Start or stop the active mode through the stable `transcribe` binding.
     ActiveMode,
+    ActiveModeMouse,
     /// Preserve the old SIGUSR1 / CLI force-post-process behavior without a
     /// second persisted binding ID.
     ActiveModeWithPostProcess,
     /// Start or stop one explicitly addressed mode.
-    Mode { mode_id: String },
+    Mode {
+        mode_id: String,
+    },
     /// Start or stop a voice command run: the transcript is an instruction, and
     /// the text selected when the chord was pressed is what it edits.
     Command,
@@ -468,7 +471,7 @@ impl TranscriptionIntent {
 
     pub fn recording_id(&self) -> String {
         match self {
-            Self::ActiveMode => "transcribe".to_string(),
+            Self::ActiveMode | Self::ActiveModeMouse => "transcribe".to_string(),
             Self::ActiveModeWithPostProcess => "intent/active-mode/post-process".to_string(),
             Self::Mode { mode_id } => transcribe_binding_id(mode_id),
             Self::Command => crate::command_mode::COMMAND_BINDING_ID.to_string(),
@@ -1851,7 +1854,9 @@ impl RunPlan {
         let frontmost_application_id = context::frontmost_application_identifier();
         let website_rules_enabled = matches!(
             intent,
-            TranscriptionIntent::ActiveMode | TranscriptionIntent::ActiveModeWithPostProcess
+            TranscriptionIntent::ActiveMode
+                | TranscriptionIntent::ActiveModeMouse
+                | TranscriptionIntent::ActiveModeWithPostProcess
         ) && website_automation_enabled(settings);
         let website_host = if website_rules_enabled
             && matching_app_activation_mode(settings, frontmost_application_id.as_deref()).is_none()
@@ -1886,7 +1891,9 @@ impl RunPlan {
                 None,
                 ModeSelectionSource::ExplicitModeShortcut,
             ),
-            TranscriptionIntent::ActiveMode | TranscriptionIntent::ActiveModeWithPostProcess => {
+            TranscriptionIntent::ActiveMode
+            | TranscriptionIntent::ActiveModeMouse
+            | TranscriptionIntent::ActiveModeWithPostProcess => {
                 let post_process_override =
                     matches!(intent, TranscriptionIntent::ActiveModeWithPostProcess)
                         .then_some(true);

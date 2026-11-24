@@ -11,6 +11,8 @@
 
 mod handler;
 pub mod handy_keys;
+#[cfg(target_os = "macos")]
+pub(crate) mod mouse;
 pub mod tauri_impl;
 
 use log::{debug, error, info, warn};
@@ -23,8 +25,9 @@ use tauri::{AppHandle, Emitter, Manager};
 use crate::secrets::{SecretAccount, SecretCommandError, SecretManager, SecretRead};
 use crate::settings::{
     self, get_settings, AppSettings, AppearanceMaterial, EnglishSpelling, KeyboardImplementation,
-    LLMPrompt, OverlayPosition, OverlayStyle, PostProcessCatalogSource, PostProcessModelCatalog,
-    PostProcessModelDiscovery, PostProcessModelOption, ShortcutBinding, SoundTheme, Theme,
+    LLMPrompt, MouseDictationButton, OverlayPosition, OverlayStyle, PostProcessCatalogSource,
+    PostProcessModelCatalog, PostProcessModelDiscovery, PostProcessModelOption, ShortcutBinding,
+    SoundTheme, Theme,
 };
 use crate::tray;
 
@@ -55,6 +58,8 @@ pub fn init_shortcuts(app: &AppHandle) {
             }
         }
     }
+    #[cfg(target_os = "macos")]
+    mouse::init(app, user_settings.mouse_dictation_button);
 }
 
 /// The binding that ends the dictation in flight, pastes it, and presses the
@@ -460,6 +465,8 @@ pub fn reset_binding(app: AppHandle, id: String) -> Result<BindingResponse, Stri
 /// mid-capture. Cancel and send are untouched: they are managed dynamically
 /// by the recording lifecycle.
 pub fn suspend_all_shortcuts(app: &AppHandle) {
+    #[cfg(target_os = "macos")]
+    mouse::set_suspended(true);
     for (id, binding) in settings::get_bindings(app) {
         if is_recording_key(&id) {
             continue;
@@ -477,6 +484,8 @@ pub fn suspend_all_shortcuts(app: &AppHandle) {
 /// Registering an already-registered shortcut fails cleanly in both
 /// implementations, so this is idempotent and safe on every exit path.
 pub fn resume_all_shortcuts(app: &AppHandle) {
+    #[cfg(target_os = "macos")]
+    mouse::set_suspended(false);
     let settings = get_settings(app);
     for binding in bindings_for_registration(&settings) {
         if let Err(e) = register_shortcut(app, binding.clone()) {
@@ -772,6 +781,23 @@ pub fn change_ptt_setting(app: AppHandle, enabled: bool) -> Result<(), String> {
         settings.push_to_talk = enabled;
     })?;
     Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn change_mouse_dictation_button(
+    app: AppHandle,
+    button: MouseDictationButton,
+) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        mouse::change_button(&app, button)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, button);
+        Err("Mouse dictation shortcuts are available only on macOS.".into())
+    }
 }
 
 #[tauri::command]

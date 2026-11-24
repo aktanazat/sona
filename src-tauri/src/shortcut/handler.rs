@@ -66,17 +66,13 @@ pub(super) fn handle_shortcut_event(
             }
         }
         ShortcutIntent::StartStop(transcription_intent) => {
-            let settings = get_settings(app);
-            if let Some(coordinator) = app.try_state::<TranscriptionCoordinator>() {
-                coordinator.send_shortcut_input(
-                    transcription_intent.clone(),
-                    shortcut,
-                    is_pressed,
-                    settings.push_to_talk,
-                );
-            } else {
-                warn!("TranscriptionCoordinator is not initialized");
-            }
+            handle_transcription_shortcut(
+                app,
+                transcription_intent.clone(),
+                shortcut,
+                is_pressed,
+                get_settings(app).push_to_talk,
+            );
         }
         ShortcutIntent::Cancel => {
             let audio_manager = app.state::<Arc<AudioRecordingManager>>();
@@ -111,6 +107,20 @@ pub(super) fn handle_shortcut_event(
     }
 
     Some(intent)
+}
+
+pub(super) fn handle_transcription_shortcut(
+    app: &AppHandle,
+    intent: TranscriptionIntent,
+    shortcut: &str,
+    is_pressed: bool,
+    push_to_talk: bool,
+) {
+    if let Some(coordinator) = app.try_state::<TranscriptionCoordinator>() {
+        coordinator.send_shortcut_input(intent, shortcut, is_pressed, push_to_talk);
+    } else {
+        warn!("TranscriptionCoordinator is not initialized");
+    }
 }
 
 #[cfg(test)]

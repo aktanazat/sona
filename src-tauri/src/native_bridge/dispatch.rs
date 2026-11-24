@@ -1419,6 +1419,18 @@ pub(super) async fn call(
             })
             .await?
         }
+        "change_mouse_dictation_button" => {
+            let mut args = Args::parse(params)?;
+            let button = args.take("button")?;
+            let handle = app.clone();
+            on_main_thread(app, move || {
+                reply(crate::shortcut::change_mouse_dictation_button(
+                    handle.clone(),
+                    button,
+                ))
+            })
+            .await?
+        }
         "change_audio_feedback_setting" => {
             let mut args = Args::parse(params)?;
             let enabled = args.take("enabled")?;

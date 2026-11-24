@@ -339,6 +339,11 @@ final class SettingsStore {
         await write(\.pushToTalk, enabled, "change_ptt_setting", ["enabled": .bool(enabled)], key: "push_to_talk")
     }
 
+    func setMouseDictationButton(_ button: MouseDictationButton) async {
+        await send("change_mouse_dictation_button", ["button": .string(button.rawValue)], key: "mouse_dictation_button")
+        await refresh()
+    }
+
     func setQuietSpeechEnabled(_ enabled: Bool) async {
         await write(
             \.quietSpeechEnabled, enabled, "change_quiet_speech_enabled_setting",

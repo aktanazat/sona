@@ -58,6 +58,19 @@ enum DictationSpelling: String, CaseIterable, Hashable, Sendable {
     }
 }
 
+enum MouseDictationButton: String, CaseIterable, Sendable {
+    case off, middle, button4, button5
+
+    var label: String {
+        switch self {
+        case .off: "Off"
+        case .middle: "Middle button"
+        case .button4: "Button 4"
+        case .button5: "Button 5"
+        }
+    }
+}
+
 /// Which screen edge the recording overlay sits on.
 enum OverlayPosition: String, CaseIterable, Hashable, Sendable {
     case top, bottom
@@ -310,6 +323,7 @@ struct SettingsModelCapability: Decodable {
 struct AppSettings: Decodable {
     var bindings: [String: BindingRecord] = [:]
     var pushToTalk = true
+    var mouseDictationButton: MouseDictationButton = .off
     var quietSpeechEnabled = false
     var audioFeedback = false
     var audioFeedbackVolume: Double = 1
@@ -361,6 +375,7 @@ struct AppSettings: Decodable {
 
     private enum Key: String, CodingKey {
         case bindings, pushToTalk, audioFeedback, audioFeedbackVolume, soundTheme
+        case mouseDictationButton
         case quietSpeechEnabled
         case startHidden, autostartEnabled, selectedModel, alwaysOnMicrophone
         case selectedMicrophone, selectedChannel, clamshellMicrophone, selectedOutputDevice
@@ -393,6 +408,7 @@ struct AppSettings: Decodable {
         }
         bindings = value(.bindings, bindings)
         pushToTalk = value(.pushToTalk, pushToTalk)
+        mouseDictationButton = choice(.mouseDictationButton, mouseDictationButton)
         audioFeedback = value(.audioFeedback, audioFeedback)
         audioFeedbackVolume = value(.audioFeedbackVolume, audioFeedbackVolume)
         soundTheme = choice(.soundTheme, soundTheme)
