@@ -1,11 +1,13 @@
 //! `sona-agent-hook`: the Tauri-free bridge between a coding agent's hook
 //! system and the Sona desktop app.
 //!
-//! One invocation reads exactly one bounded JSON event from stdin. Fixture-backed
-//! Claude events can wait for one app response only after the interactive app
-//! lease, heartbeat, and policy projection authorize their exact session.
+//! One invocation reads a bounded event after the interactive app lease,
+//! heartbeat, and policy authorize its exact session. OpenCode's interactive
+//! mode also waits for the plugin's delivery receipt over its private pipe.
 
 mod codec;
+#[cfg(target_os = "macos")]
+mod interactive;
 mod response;
 mod runtime;
 #[path = "../../agent_hook_wire.rs"]
@@ -63,7 +65,9 @@ pub(crate) enum Diagnostic {
 impl Diagnostic {
     pub(crate) fn message(self) -> &'static str {
         match self {
-            Self::Usage => "usage: sona-agent-hook <claude|codex|grok|omp>",
+            Self::Usage => {
+                "usage: sona-agent-hook <claude|codex|grok|omp|opencode> [--interactive]"
+            }
             Self::InputTooLarge => "sona-agent-hook: input exceeds the size limit; passing through",
             Self::InputUnreadable => "sona-agent-hook: input could not be read; passing through",
             Self::InvalidEvent => "sona-agent-hook: invalid event; passing through",
@@ -200,6 +204,33 @@ impl HookRuntime {
         Some((session, request))
     }
 
+    fn request_authorized_until(&self, request: &Request) -> Option<u64> {
+        let now_ms = self.clock.now_ms();
+        let lease = self.paths.read_lease().ok()?;
+        if lease.app_instance_id != request.app_instance_id || !lease.is_valid_at(now_ms) {
+            return None;
+        }
+        let heartbeat = self.paths.read_heartbeat().ok()?;
+        let policy = self.paths.read_policy().ok()?;
+        if !heartbeat.is_fresh_for(&request.app_instance_id, now_ms)
+            || !policy.allows_scope(
+                request.binding.agent,
+                &request.binding.project_hash,
+                &request.app_instance_id,
+                now_ms,
+            )
+        {
+            return None;
+        }
+        Some(
+            lease
+                .expires_at_ms
+                .min(heartbeat.expires_at_ms)
+                .min(policy.expires_at_ms)
+                .min(request.expires_at_ms),
+        )
+    }
+
     fn claim(
         &self,
         session: &SessionPaths,
@@ -228,7 +259,7 @@ impl HookRuntime {
 }
 
 pub(super) fn run_cli() -> i32 {
-    let Some(agent) = parse_agent() else {
+    let Some((agent, interactive)) = parse_agent() else {
         write_stderr(Diagnostic::Usage);
         return USAGE_EXIT_CODE;
     };
@@ -242,6 +273,20 @@ pub(super) fn run_cli() -> i32 {
     };
 
     let hook = HookRuntime::new(paths, workspace, Clock::system(), PollBudget::production());
+    if interactive {
+        #[cfg(target_os = "macos")]
+        {
+            if interactive::run(&hook).is_err() {
+                write_stderr(Diagnostic::InvalidEvent);
+            }
+            return 0;
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            write_stderr(Diagnostic::UnsupportedEvent);
+            return USAGE_EXIT_CODE;
+        }
+    }
     let stdin = io::stdin();
     let stdout = io::stdout();
     let stderr = io::stderr();
@@ -255,13 +300,17 @@ pub(super) fn run_cli() -> i32 {
     0
 }
 
-fn parse_agent() -> Option<Agent> {
+fn parse_agent() -> Option<(Agent, bool)> {
     let mut arguments = env::args_os().skip(1);
     let selector = arguments.next()?;
-    if arguments.next().is_some() {
-        return None;
+    let agent = Agent::parse(selector.to_str()?)?;
+    match (arguments.next(), arguments.next()) {
+        (None, None) => Some((agent, false)),
+        (Some(flag), None) if agent == Agent::OpenCode && flag == "--interactive" => {
+            Some((agent, true))
+        }
+        _ => None,
     }
-    Agent::parse(selector.to_str()?)
 }
 
 fn run_with_runtime<R: Read, W: Write, D: Write>(
@@ -286,6 +335,9 @@ fn run_with_runtime<R: Read, W: Write, D: Write>(
 
     if event.event == CanonicalEventKind::Stop && event.stop_hook_active {
         return Ok(());
+    }
+    if agent == Agent::OpenCode && event.awaits_response() {
+        return write_diagnostic(stderr, Diagnostic::UnsupportedEvent);
     }
 
     let Some((session, request)) = hook.prepare(&event, &raw) else {

@@ -26,12 +26,13 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 #[cfg(unix)]
 use std::os::unix::net::UnixDatagram;
 
-pub const SCHEMA_VERSION: u8 = 3;
-pub const PROTOCOL_GENERATION: u32 = 3;
+pub const SCHEMA_VERSION: u8 = 4;
+pub const PROTOCOL_GENERATION: u32 = 4;
 pub const MAX_REQUEST_BYTES: usize = 64 * 1024;
 pub const MAX_RESPONSE_BYTES: usize = 64 * 1024;
 pub const MAX_POLICY_BYTES: usize = 64 * 1024;
 pub const REQUEST_TTL_MS: u64 = 30_000;
+pub const OPENCODE_REQUEST_TTL_MS: u64 = 30 * 60 * 1_000;
 pub const ASK_USER_QUESTION_TOOL: &str = "AskUserQuestion";
 pub const EXIT_PLAN_MODE_TOOL: &str = "ExitPlanMode";
 /// Grok's `Stop` also fires once at session teardown, where its decision output
@@ -49,6 +50,7 @@ pub enum Agent {
     Codex,
     Grok,
     Omp,
+    OpenCode,
 }
 
 impl Agent {
@@ -58,6 +60,7 @@ impl Agent {
             "codex" => Some(Self::Codex),
             "grok" => Some(Self::Grok),
             "omp" => Some(Self::Omp),
+            "opencode" => Some(Self::OpenCode),
             _ => None,
         }
     }
@@ -68,6 +71,7 @@ impl Agent {
             Self::Codex => "codex",
             Self::Grok => "grok",
             Self::Omp => "omp",
+            Self::OpenCode => "opencode",
         }
     }
 }
@@ -82,6 +86,7 @@ pub enum CanonicalEventKind {
     PostToolUse,
     Stop,
     Notification,
+    InputRequest,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -92,6 +97,20 @@ pub struct CanonicalTool {
     pub use_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub input: Option<Value>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct EventOrder {
+    pub instance_id: String,
+    pub instance_started_at_ms: u64,
+    pub sequence: u64,
+}
+
+impl EventOrder {
+    pub fn is_valid(&self) -> bool {
+        !self.instance_id.trim().is_empty() && self.instance_started_at_ms > 0 && self.sequence > 0
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -113,6 +132,8 @@ pub struct CanonicalEvent {
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order: Option<EventOrder>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -132,6 +153,20 @@ impl CanonicalEvent {
         self.tool.as_ref().map(|tool| tool.name.as_str())
     }
 
+    pub fn is_opencode_question(&self) -> bool {
+        self.agent == Agent::OpenCode
+            && self.event == CanonicalEventKind::PreToolUse
+            && self.tool_name() == Some(ASK_USER_QUESTION_TOOL)
+    }
+
+    pub fn request_ttl_ms(&self) -> u64 {
+        if self.agent == Agent::OpenCode && self.awaits_response() {
+            OPENCODE_REQUEST_TTL_MS
+        } else {
+            REQUEST_TTL_MS
+        }
+    }
+
     /// Whether this invocation is holding its agent open for Sona's answer.
     ///
     /// One table, compiled by both sides: the hook binary waits exactly when
@@ -148,6 +183,9 @@ impl CanonicalEvent {
     /// | Claude | `PreToolUse`        | `permissionDecision` for the two ask tools  |
     /// | Codex  | `PermissionRequest` | `decision.behavior` allow/deny              |
     /// | Grok   | `PreToolUse`        | top-level `decision` allow/deny             |
+    /// | OpenCode | `InputRequest`      | a confirmed prompt after completion        |
+    /// | OpenCode | `PermissionRequest` | one-time allow/reject                      |
+    /// | OpenCode | `PreToolUse`        | answers to an explicit question request   |
     pub fn awaits_response(&self) -> bool {
         match (self.agent, self.event) {
             // Grok also fires `Stop` once at session teardown, where the
@@ -160,10 +198,15 @@ impl CanonicalEvent {
             (Agent::Claude, CanonicalEventKind::PreToolUse) => self
                 .tool_name()
                 .is_some_and(|tool| tool == ASK_USER_QUESTION_TOOL || tool == EXIT_PLAN_MODE_TOOL),
+            (Agent::OpenCode, CanonicalEventKind::InputRequest) => true,
+            (Agent::OpenCode, CanonicalEventKind::PreToolUse) => self.is_opencode_question(),
             // Claude and Codex ask only when a prompt exists; Grok's only
             // gate is the pre-tool one. None can be answered while permissions
             // are bypassed, because no prompt appears to answer.
-            (Agent::Claude | Agent::Codex, CanonicalEventKind::PermissionRequest)
+            (
+                Agent::Claude | Agent::Codex | Agent::OpenCode,
+                CanonicalEventKind::PermissionRequest,
+            )
             | (Agent::Grok, CanonicalEventKind::PreToolUse) => !self.bypass_permissions,
             _ => false,
         }
@@ -227,6 +270,7 @@ pub struct HookRequest {
     pub app_instance_id: String,
     pub binding: SessionBinding,
     pub invocation_id: String,
+    pub publisher_pid: u32,
     pub issued_at_ms: u64,
     pub expires_at_ms: u64,
     pub event: CanonicalEvent,
@@ -250,8 +294,9 @@ impl HookRequest {
             app_instance_id,
             binding,
             invocation_id,
+            publisher_pid: std::process::id(),
             issued_at_ms,
-            expires_at_ms: issued_at_ms.saturating_add(REQUEST_TTL_MS),
+            expires_at_ms: issued_at_ms.saturating_add(event.request_ttl_ms()),
             event: event.clone(),
         };
         // The reader's admission rule is the only authority on validity, so a
@@ -269,6 +314,8 @@ impl HookRequest {
             && is_hex_32(&self.app_instance_id)
             && self.binding.is_well_formed()
             && self.binding.agent == self.event.agent
+            && (self.event.agent != Agent::OpenCode
+                || self.event.order.as_ref().is_some_and(EventOrder::is_valid))
             && is_hex_32(&self.invocation_id)
             && self.issued_at_ms <= now_ms
             && now_ms <= self.expires_at_ms
@@ -326,13 +373,21 @@ pub struct HookAck {
 
 impl HookAck {
     pub fn response_emitted(request: &HookRequest, emitted_at_ms: u64) -> Self {
+        Self::with_outcome(request, "response_emitted", emitted_at_ms)
+    }
+
+    pub fn cancelled(request: &HookRequest, emitted_at_ms: u64) -> Self {
+        Self::with_outcome(request, "request_cancelled", emitted_at_ms)
+    }
+
+    fn with_outcome(request: &HookRequest, outcome: &str, emitted_at_ms: u64) -> Self {
         Self {
             schema_version: SCHEMA_VERSION,
             protocol_generation: PROTOCOL_GENERATION,
             app_instance_id: request.app_instance_id.clone(),
             binding: request.binding.clone(),
             invocation_id: request.invocation_id.clone(),
-            outcome: "response_emitted".to_string(),
+            outcome: outcome.to_string(),
             emitted_at_ms,
         }
     }
@@ -375,10 +430,14 @@ pub struct AppHeartbeat {
 
 impl AppHeartbeat {
     pub fn is_valid_for(&self, lease: &AppLease, now_ms: u64) -> bool {
+        self.policy_generation == lease.policy_generation
+            && self.is_fresh_for(&lease.app_instance_id, now_ms)
+    }
+
+    pub fn is_fresh_for(&self, app_instance_id: &str, now_ms: u64) -> bool {
         self.schema_version == SCHEMA_VERSION
             && self.protocol_generation == PROTOCOL_GENERATION
-            && self.app_instance_id == lease.app_instance_id
-            && self.policy_generation == lease.policy_generation
+            && self.app_instance_id == app_instance_id
             && self.issued_at_ms <= now_ms
             && now_ms <= self.expires_at_ms
     }
@@ -400,17 +459,35 @@ pub struct PolicyProjection {
 
 impl PolicyProjection {
     pub fn allows(&self, binding: &SessionBinding, app_instance_id: &str, now_ms: u64) -> bool {
+        self.generation == binding.policy_generation
+            && self.allows_scope(
+                binding.agent,
+                &binding.project_hash,
+                app_instance_id,
+                now_ms,
+            )
+    }
+
+    pub fn allows_scope(
+        &self,
+        agent: Agent,
+        project_hash: &str,
+        app_instance_id: &str,
+        now_ms: u64,
+    ) -> bool {
         self.schema_version == SCHEMA_VERSION
             && self.protocol_generation == PROTOCOL_GENERATION
             && self.app_instance_id == app_instance_id
-            && self.generation == binding.policy_generation
             && self.master_enabled
-            && self.enabled_agents.contains(&binding.agent)
+            && self.enabled_agents.contains(&agent)
             && self
                 .allowed_project_hashes
                 .iter()
                 .all(|hash| is_hex_32(hash))
-            && self.allowed_project_hashes.contains(&binding.project_hash)
+            && self
+                .allowed_project_hashes
+                .iter()
+                .any(|hash| hash == project_hash)
             && self.issued_at_ms <= now_ms
             && now_ms <= self.expires_at_ms
     }
@@ -461,6 +538,10 @@ impl RuntimePaths {
 
     pub fn interactive_supported(&self) -> bool {
         self.interactive_supported
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
     }
 
     pub fn sessions_root(&self) -> PathBuf {
@@ -525,6 +606,10 @@ impl SessionPaths {
             acks,
             wake,
         })
+    }
+
+    pub fn responses_directory(&self) -> &Path {
+        &self.responses
     }
 
     pub fn request_path(&self, invocation_id: &str) -> io::Result<PathBuf> {
@@ -875,6 +960,7 @@ mod tests {
             request_id: None,
             model: None,
             source: None,
+            order: None,
             prompt: None,
             message: None,
             reason: Some("finished".to_string()),

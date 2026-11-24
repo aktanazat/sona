@@ -72,6 +72,7 @@ pub enum AgentBridgeAgent {
     Codex,
     Grok,
     Omp,
+    OpenCode,
 }
 
 impl AgentBridgeAgent {
@@ -81,6 +82,7 @@ impl AgentBridgeAgent {
             Self::Codex => "codex",
             Self::Grok => "grok",
             Self::Omp => "omp",
+            Self::OpenCode => "opencode",
         }
     }
 }
@@ -128,6 +130,7 @@ pub struct AgentBridgeSettings {
     pub codex_enabled: bool,
     pub grok_enabled: bool,
     pub omp_enabled: bool,
+    pub opencode_enabled: bool,
     #[serde(default = "default_agent_bridge_policy_generation")]
     pub policy_generation: u64,
     pub allowed_projects: Vec<AgentBridgeProjectScope>,
@@ -142,6 +145,7 @@ impl Default for AgentBridgeSettings {
             codex_enabled: false,
             grok_enabled: false,
             omp_enabled: false,
+            opencode_enabled: false,
             policy_generation: default_agent_bridge_policy_generation(),
             allowed_projects: Vec::new(),
             permission_rules: Vec::new(),
@@ -156,6 +160,7 @@ impl AgentBridgeSettings {
             AgentBridgeAgent::Codex => self.codex_enabled,
             AgentBridgeAgent::Grok => self.grok_enabled,
             AgentBridgeAgent::Omp => self.omp_enabled,
+            AgentBridgeAgent::OpenCode => self.opencode_enabled,
         }
     }
 
@@ -165,6 +170,7 @@ impl AgentBridgeSettings {
             AgentBridgeAgent::Codex => self.codex_enabled = enabled,
             AgentBridgeAgent::Grok => self.grok_enabled = enabled,
             AgentBridgeAgent::Omp => self.omp_enabled = enabled,
+            AgentBridgeAgent::OpenCode => self.opencode_enabled = enabled,
         }
     }
 

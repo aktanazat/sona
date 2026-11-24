@@ -179,6 +179,8 @@ bun run test
 
 The native builds and package inspection above are separate from the test suites. Verify recording, socket requests, consent, permissions, pairing, sync, and the native screens in an isolated profile/device before shipping. Inspect matching before/after screens in light and dark appearances; build output is not visual proof.
 
+The two native startup regressions require a scratch app in the isolated test Mac (at most 4 GiB memory and two CPUs). Run `macos/scripts/check-notification-service-startup.py` with the scratch app path to exercise an unavailable notification service. With the native shell running from `/private/var/tmp`, run `macos/scripts/check-native-agent-setup.py --app "$SCRATCH_APP" --socket "$NATIVE_SOCKET"` to check that all five agent configurations point to the bundled resources. Both scripts use only the Python standard library; run them with `uv run --offline --no-project --script`. Do not point them at the installed app.
+
 ### Real meeting acceptance
 
 The active local meeting acceptance is `meeting::processing::real_engine_acceptance::tests::actual_apple_long_meeting_pipeline_and_regeneration`. It requires a ready Apple Intelligence model and uses the real imported-meeting pipeline, not a model substitute. It checks the original long conversation, then checks regenerated notes against the same decisions, owners, revised deadlines, and citations. Requests and results are saved under `.progress/meeting-acceptance/`; the original request and reply-token limits remain enforced at the SDK boundary. A cloud-only pass does not replace this check.

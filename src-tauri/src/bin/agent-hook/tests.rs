@@ -1119,15 +1119,31 @@ fn disabled_policy_and_agent_or_project_mismatch_pass_through() {
 
 #[test]
 fn every_provider_passes_through_when_not_enabled_by_policy() -> Result<(), Box<dyn Error>> {
-    for agent in [Agent::Claude, Agent::Codex, Agent::Grok, Agent::Omp] {
+    let agents = [
+        Agent::Claude,
+        Agent::Codex,
+        Agent::Grok,
+        Agent::Omp,
+        Agent::OpenCode,
+    ];
+    for agent in agents {
         let fixture = fixture(NOW_MS, true);
         let input = match agent {
             Agent::Claude => CLAUDE_LIVE_PERMISSION_INPUT.to_vec(),
             Agent::Codex => in_project(CODEX_PERMISSION_INPUT, &fixture.project),
             Agent::Grok => in_project(GROK_PRE_TOOL_INPUT, &fixture.project),
             Agent::Omp => omp_stop_input(&fixture.project, 1, false)?,
+            Agent::OpenCode => serde_json::to_vec(&json!({
+                "schema_version": 1,
+                "instance_id": "opencode-fixture",
+                "instance_started_at_ms": 1,
+                "sequence": 1,
+                "event": "session_start",
+                "session_id": "opencode-session",
+                "workspace_root": fixture.project,
+            }))?,
         };
-        let enabled_agents = [Agent::Claude, Agent::Codex, Agent::Grok, Agent::Omp]
+        let enabled_agents = agents
             .into_iter()
             .filter(|candidate| *candidate != agent)
             .collect();

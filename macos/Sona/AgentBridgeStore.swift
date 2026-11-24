@@ -1,6 +1,57 @@
 import AppKit
 import Foundation
 
+struct AgentBridgeQuestionAnswerDraft {
+    var selected: Set<String> = []
+    var custom = ""
+}
+
+struct AgentBridgeQuestionDraft {
+    let questions: [AgentBridgeQuestion]
+    var answers: [AgentBridgeQuestionAnswerDraft]
+
+    init(questions: [AgentBridgeQuestion]) {
+        self.questions = questions
+        answers = Array(repeating: AgentBridgeQuestionAnswerDraft(), count: questions.count)
+    }
+
+    var canSend: Bool {
+        !questions.isEmpty && zip(questions, answers).allSatisfy { question, answer in
+            let custom = !answer.custom.isEmpty && !answer.selected.contains(answer.custom)
+            let count = answer.selected.count + (custom ? 1 : 0)
+            return (!question.required || count > 0) && (question.multiSelect || count <= 1)
+                && (!custom || (question.custom && answer.custom.contains { !$0.isWhitespace }))
+        }
+    }
+
+    var values: [[String]] {
+        zip(questions, answers).map { question, answer in
+            var values = question.options.compactMap { answer.selected.contains($0.label) ? $0.label : nil }
+            if !answer.custom.isEmpty && !answer.selected.contains(answer.custom) {
+                values.append(answer.custom)
+            }
+            return values
+        }
+    }
+
+    var text: String {
+        var text = ""
+        for (question, answer) in zip(questions, answers) {
+            text += question.question + "\n"
+            var separator = ""
+            for option in question.options where answer.selected.contains(option.label) {
+                text += separator + option.label
+                separator = ", "
+            }
+            if !answer.custom.isEmpty && !answer.selected.contains(answer.custom) {
+                text += separator + answer.custom
+            }
+            text += "\n\n"
+        }
+        return text
+    }
+}
+
 /// The coding-agent bridge's operator console: what the bridge may do, what it
 /// has been doing, and the replies waiting to be sent.
 ///
@@ -19,7 +70,12 @@ final class AgentBridgeStore {
     private(set) var requests: [AgentBridgeObservedRequest] = []
     private(set) var pending: [AgentBridgePendingMessage] = []
     /// The agent configuration to paste, and why it could not be produced.
-    private(set) var hookSnippet: String?
+    private(set) var hookSnippets: [AgentBridgeAgent: String] = [:]
+    var hookAgent = AgentBridgeAgent.claude {
+        didSet { hookCopied = false }
+    }
+    var hookSnippet: String? { hookSnippets[hookAgent] }
+    private(set) var openCodeInstalled = false
     private(set) var hookError: String?
     private(set) var hookCopied = false
     /// The last thing the core could not do, shown until the next success.
@@ -61,6 +117,8 @@ final class AgentBridgeStore {
     private(set) var mcpToolsLoading: Set<String> = []
     private(set) var mcpBusy = false
     private(set) var mcpError: String?
+    private(set) var questionDrafts: [String: AgentBridgeQuestionDraft] = [:]
+    private(set) var respondingRequests: Set<String> = []
 
     @ObservationIgnored private let core: Core
 
@@ -197,6 +255,9 @@ final class AgentBridgeStore {
             self.sessions = try await sessions
             self.requests = try await requests
             self.pending = try await pending
+            for request in self.requests where request.state == .delivered {
+                questionDrafts.removeValue(forKey: request.id)
+            }
             alignReplySession()
             alignWaiting()
             error = nil
@@ -310,12 +371,20 @@ final class AgentBridgeStore {
         }
     }
 
-    /// Answering a request is two writes: the exact rule that authorizes the
-    /// answer, then the answer itself. The rule is saved even when the answer
-    /// fails to reach the agent, so the policy is re-read either way.
+    /// OpenCode approves only this request. Legacy agents still require an
+    /// exact saved rule before the hook may accept their answer.
     func decidePermission(
         _ request: AgentBridgeObservedRequest, _ decision: AgentBridgePermissionDecision
     ) {
+        if request.agent == .opencode {
+            act(requestId: request.id) {
+                try await self.core.request(
+                    "respond_agent_bridge_permission",
+                    ["requestId": JSONValue.string(request.id), "ruleId": .null,
+                     "decision": .string(decision.rawValue)])
+            }
+            return
+        }
         Task {
             do {
                 let rule: AgentBridgePermissionRule = try await core.request(
@@ -342,6 +411,66 @@ final class AgentBridgeStore {
             } catch {
                 self.error = Self.failure(error)
             }
+        }
+    }
+
+    func setQuestionOption(
+        _ request: AgentBridgeObservedRequest, question: Int, label: String, selected: Bool
+    ) {
+        prepareQuestionDraft(request)
+        if selected && request.questions?[question].multiSelect == false {
+            questionDrafts[request.id]?.answers[question].selected.removeAll(keepingCapacity: true)
+            questionDrafts[request.id]?.answers[question].custom = ""
+        }
+        if selected {
+            questionDrafts[request.id]?.answers[question].selected.insert(label)
+        } else {
+            questionDrafts[request.id]?.answers[question].selected.remove(label)
+        }
+    }
+
+    func setQuestionCustomAnswer(_ request: AgentBridgeObservedRequest, question: Int, text: String) {
+        prepareQuestionDraft(request)
+        questionDrafts[request.id]?.answers[question].custom = text
+        if !text.isEmpty && request.questions?[question].multiSelect == false {
+            questionDrafts[request.id]?.answers[question].selected.removeAll(keepingCapacity: true)
+        }
+    }
+
+    func sendQuestionAnswers(_ request: AgentBridgeObservedRequest) {
+        guard let questions = request.questions else { return }
+        let draft = questionDrafts[request.id] ?? AgentBridgeQuestionDraft(questions: questions)
+        guard draft.canSend else { return }
+        respondQuestions(request, response: .object([
+            "decision": .string("answer"),
+            "answers": .array(draft.values.map { .array($0.map(JSONValue.string)) }),
+        ]))
+    }
+
+    func declineQuestions(_ request: AgentBridgeObservedRequest) {
+        respondQuestions(request, response: .object(["decision": .string("reject")]))
+    }
+
+    func copyQuestionAnswers(_ requestId: String) {
+        guard let draft = questionDrafts[requestId] else { return }
+        let board = NSPasteboard.general
+        board.clearContents()
+        if !board.setString(draft.text, forType: .string) {
+            error = "The answers could not be copied."
+        }
+    }
+
+    private func prepareQuestionDraft(_ request: AgentBridgeObservedRequest) {
+        if questionDrafts[request.id] == nil, let questions = request.questions {
+            questionDrafts[request.id] = AgentBridgeQuestionDraft(questions: questions)
+        }
+    }
+
+    private func respondQuestions(_ request: AgentBridgeObservedRequest, response: JSONValue) {
+        act(requestId: request.id) {
+            try await self.core.request(
+                "respond_agent_bridge_questions",
+                ["requestId": JSONValue.string(request.id), "response": response])
         }
     }
 
@@ -466,10 +595,6 @@ final class AgentBridgeStore {
         }
         hookError = nil
         hookCopied = true
-        Task {
-            try? await Task.sleep(for: .seconds(2))
-            hookCopied = false
-        }
     }
 
     /// The bridge policy and work subset of the app's settings.
@@ -502,13 +627,42 @@ final class AgentBridgeStore {
     /// rather than sitting above it: an unavailable setup code and a setup
     /// code on the same surface contradict each other.
     private func loadHookSnippet() async {
+        openCodeInstalled = Self.detectOpenCode()
+        hookCopied = false
         do {
-            hookSnippet = try await core.request("get_agent_bridge_hook_snippet") as String
+            let raw: String = try await core.request("get_agent_bridge_hook_snippet")
+            let snippets = try JSONDecoder().decode([String: JSONValue].self, from: Data(raw.utf8))
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+            var available: [AgentBridgeAgent: String] = [:]
+            for agent in AgentBridgeAgent.allCases {
+                if let snippet = snippets[agent.rawValue] {
+                    available[agent] = String(decoding: try encoder.encode(snippet), as: UTF8.self)
+                }
+            }
+            hookSnippets = available
             hookError = nil
         } catch {
-            hookSnippet = nil
+            hookSnippets.removeAll(keepingCapacity: true)
             hookError = Self.reason(error)
         }
+    }
+
+    private static func detectOpenCode() -> Bool {
+        let files = FileManager.default
+        func executable(_ path: String) -> Bool {
+            var directory = ObjCBool(false)
+            return files.fileExists(atPath: path, isDirectory: &directory)
+                && !directory.boolValue && files.isExecutableFile(atPath: path)
+        }
+        if let path = ProcessInfo.processInfo.environment["PATH"] {
+            for directory in path.split(separator: ":") {
+                if executable(String(directory) + "/opencode") { return true }
+            }
+        }
+        return executable(files.homeDirectoryForCurrentUser.appending(path: ".opencode/bin/opencode").path)
+            || executable("/opt/homebrew/bin/opencode")
+            || executable("/usr/local/bin/opencode")
     }
 
     private func apply(_ line: Data) {
@@ -532,8 +686,12 @@ final class AgentBridgeStore {
     }
 
     /// A write that answers with nothing the console keeps.
-    private func act(_ work: @escaping @MainActor () async throws -> Void) {
+    private func act(requestId: String? = nil, _ work: @escaping @MainActor () async throws -> Void) {
+        if let requestId, !respondingRequests.insert(requestId).inserted { return }
         Task {
+            defer {
+                if let requestId { respondingRequests.remove(requestId) }
+            }
             do {
                 try await work()
                 error = nil
@@ -587,6 +745,7 @@ final class AgentBridgeStore {
         "RuleRequired": "a permission rule has to exist first",
         "RuleMismatch": "the rule does not match this request",
         "PermissionResponseUnsupported": "nothing is waiting for an answer",
+        "InvalidAnswers": "answer each required question and choose only the allowed number of answers",
         "AlreadyHandled": "it was already handled",
         "Unauthorized": "that project or agent is no longer authorized",
         "PersistenceFailed": "the change could not be saved",

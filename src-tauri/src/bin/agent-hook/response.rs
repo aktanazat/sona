@@ -4,6 +4,7 @@
 //! claim survives every failure until stdout has been flushed and a durable ack
 //! records the emitted response.
 
+use serde::ser::SerializeSeq;
 use serde::Serialize;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -113,8 +114,25 @@ struct PermissionDecision<'a> {
 /// does not block it"; Grok still applies its own permission policy, which is
 /// why Sona's approval cannot skip a prompt there the way Claude's can.
 #[derive(Serialize)]
-struct GrokToolDecision<'a> {
+struct ToolDecision<'a> {
     decision: &'a str,
+}
+
+#[derive(Serialize)]
+struct QuestionDecision<'a> {
+    answers: SelectedAnswers<'a>,
+}
+
+struct SelectedAnswers<'a>(&'a [ClaudeAnswer]);
+
+impl Serialize for SelectedAnswers<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut sequence = serializer.serialize_seq(Some(self.0.len()))?;
+        for answer in self.0 {
+            sequence.serialize_element(&answer.selected)?;
+        }
+        sequence.end()
+    }
 }
 
 /// Claims the app's response for this invocation, if one is already waiting.
@@ -177,9 +195,9 @@ fn encode_outcome(
     event: &CanonicalEvent,
 ) -> Result<Vec<u8>, Diagnostic> {
     match (event.agent, event.event) {
-        // Every agent continues a finished turn the same way, with the reply
-        // text as the reason.
-        (_, CanonicalEventKind::Stop) if outcome == Outcome::Block => {
+        (_, CanonicalEventKind::Stop) | (Agent::OpenCode, CanonicalEventKind::InputRequest)
+            if outcome == Outcome::Block =>
+        {
             let reason = response
                 .reason
                 .as_deref()
@@ -218,9 +236,33 @@ fn encode_outcome(
                 },
             })
         }
+        (Agent::OpenCode, CanonicalEventKind::PermissionRequest) => {
+            let decision = plain_decision(response, outcome)?;
+            serialize(&ToolDecision { decision })
+        }
+        (Agent::OpenCode, CanonicalEventKind::PreToolUse)
+            if event.is_opencode_question() && outcome == Outcome::Reject =>
+        {
+            let decision = plain_decision(response, outcome)?;
+            serialize(&ToolDecision { decision })
+        }
+        (Agent::OpenCode, CanonicalEventKind::PreToolUse)
+            if event.is_opencode_question()
+                && outcome == Outcome::Approve
+                && response.reason.is_none() =>
+        {
+            let answers = response
+                .answers
+                .as_deref()
+                .filter(|answers| !answers.is_empty())
+                .ok_or(Diagnostic::ResponseOutcomeUnsupported)?;
+            serialize(&QuestionDecision {
+                answers: SelectedAnswers(answers),
+            })
+        }
         (Agent::Grok, CanonicalEventKind::PreToolUse) => {
             let decision = plain_decision(response, outcome)?;
-            serialize(&GrokToolDecision { decision })
+            serialize(&ToolDecision { decision })
         }
         _ => Err(Diagnostic::ResponseOutcomeUnsupported),
     }

@@ -393,6 +393,21 @@ pub(super) async fn call(
             })
             .await?
         }
+        "respond_agent_bridge_questions" => {
+            let mut args = Args::parse(params)?;
+            let request_id = args.take("requestId")?;
+            let response = args.take("response")?;
+            let handle = app.clone();
+            on_main_thread(app, move || {
+                reply(crate::agent_bridge::respond_agent_bridge_questions(
+                    handle.clone(),
+                    handle.state(),
+                    request_id,
+                    response,
+                ))
+            })
+            .await?
+        }
         "get_agent_bridge_hook_snippet" => {
             let handle = app.clone();
             on_main_thread(app, move || {

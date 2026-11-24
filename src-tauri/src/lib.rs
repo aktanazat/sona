@@ -1660,6 +1660,7 @@ pub fn run(cli_args: CliArgs) {
             agent_bridge::create_agent_bridge_permission_rule,
             agent_bridge::delete_agent_bridge_permission_rule,
             agent_bridge::respond_agent_bridge_permission,
+            agent_bridge::respond_agent_bridge_questions,
             agent_bridge::get_agent_bridge_hook_snippet,
             chat_voice::chat_voice_start,
             chat_voice::chat_voice_stop,

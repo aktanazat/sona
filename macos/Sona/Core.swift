@@ -198,12 +198,19 @@ final class Core: @unchecked Sendable {
     /// again after the socket closed: the previous child is given its exit
     /// window first, so the new one is the only core that binds the path.
     func start() async throws {
-        let binary = try Self.binary()
+        let binary = try Self.binary().withUnsafeFileSystemRepresentation { path in
+            guard let path, let resolved = realpath(path, nil) else {
+                throw CoreError.missingBinary
+            }
+            defer { free(resolved) }
+            return String(cString: resolved)
+        }
         let previous = process
         let process = Process()
-        process.executableURL = binary
-        process.currentDirectoryURL = binary.deletingLastPathComponent()
-        process.arguments = ["--native-socket", socketPath, "--no-tray", "--start-hidden"]
+        // Process.run rewrites canonical /private paths; env exec preserves them.
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.currentDirectoryURL = URL(fileURLWithPath: binary).deletingLastPathComponent()
+        process.arguments = [binary, "--native-socket", socketPath, "--no-tray", "--start-hidden"]
         self.process = process
         let socket = try await Task.detached(priority: .userInitiated) { [socketPath] in
             Self.end(previous)

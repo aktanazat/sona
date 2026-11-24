@@ -23,6 +23,11 @@ if [[ ! -x "$core" ]]; then
     exit 1
 fi
 
+if [[ ! -f "$root/node_modules/zod/package.json" ]]; then
+    echo "error: Zod runtime is missing; run bun install before bundling" >&2
+    exit 1
+fi
+
 case "${ARCHS:?}" in
     arm64) triple=aarch64-apple-darwin ;;
     x86_64) triple=x86_64-apple-darwin ;;
@@ -45,6 +50,9 @@ cp "$cleanup" "$helper/Contents/MacOS/sona-cleanup"
 chmod 755 "$helper/Contents/MacOS/sona-core" \
     "$helper/Contents/MacOS/sona-agent-hook" "$helper/Contents/MacOS/sona-cleanup"
 /usr/bin/ditto "$root/src-tauri/resources" "$helper/Contents/Resources/resources"
+mkdir -p "$helper/Contents/Resources/resources/agent-bridge/opencode/node_modules"
+/usr/bin/ditto "$(cd "$root/node_modules/zod" && pwd -P)" \
+    "$helper/Contents/Resources/resources/agent-bridge/opencode/node_modules/zod"
 cp "$root/LICENSE" "$root/NOTICE" "$helper/Contents/Resources/_up_/"
 
 cat > "$helper/Contents/Info.plist" <<PLIST
