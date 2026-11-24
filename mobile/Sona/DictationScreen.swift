@@ -68,7 +68,7 @@ struct DictationScreen: View {
                 }
             }
             .safeAreaBar(edge: .bottom) { controls }
-            .sheet(isPresented: $showsSettings) {
+            .sheet(isPresented: $showsSettings.yielding(to: model)) {
                 PhoneDictationSettings(model: model, dictation: dictation)
             }
         }
@@ -238,6 +238,10 @@ private struct PhoneDictationSettings: View {
     @AppStorage(KeyboardFeelPreferences.hapticsKey, store: DictationPreferences.shared) private var keyHaptics = true
     @AppStorage(KeyboardFeelPreferences.soundsKey, store: DictationPreferences.shared) private var keySounds = true
     @State private var learningReset = false
+    @State private var microphone = MicrophoneChoice.preferred
+    @State private var microphones: [MicrophoneChoice] = []
+    @State private var stats = DictationStats.load()
+    @State private var confirmsReset = false
     private static let supportedLanguages = SFSpeechRecognizer.supportedLocales()
         .map(\.identifier).filter(DictationPreferences.offered).sorted { languageName($0).localizedStandardCompare(languageName($1)) == .orderedAscending }
 
@@ -311,6 +315,14 @@ private struct PhoneDictationSettings: View {
                     .foregroundStyle(Theme.textSecondary)
                 }
                 .listRowBackground(Theme.surface)
+                microphoneSection
+                statsSection
+                Section {
+                    Toggle("search.notes", isOn: Binding(
+                        get: { model.notesInSearch }, set: { model.notesInSearch = $0 }
+                    ))
+                }
+                .listRowBackground(Theme.surface)
                 profile
                 Section {
                     DisclosureGroup("dictation.setupTitle") {
@@ -370,6 +382,49 @@ private struct PhoneDictationSettings: View {
             }
         ))
         .disabled(typingLanguages == [language])
+    }
+
+    private var microphoneSection: some View {
+        Section {
+            Picker("dictation.microphone", selection: $microphone) {
+                Text("dictation.microphoneAutomatic").tag(MicrophoneChoice?.none)
+                ForEach(microphones, id: \.uid) { Text($0.name).tag(MicrophoneChoice?.some($0)) }
+                if let microphone, !microphones.contains(where: { $0.uid == microphone.uid }) {
+                    Text("dictation.microphoneAway \(microphone.name)").tag(MicrophoneChoice?.some(microphone))
+                }
+            }
+            .disabled(dictation.isBusy || model.recorder.isRecording)
+            .onChange(of: microphone) { _, choice in MicrophoneChoice.preferred = choice }
+        }
+        .listRowBackground(Theme.surface)
+        .task { microphones = MicrophoneChoice.available() }
+    }
+
+    private var statsSection: some View {
+        Section {
+            LabeledContent("stats.dictations", value: stats.dictations.formatted())
+            LabeledContent("stats.words", value: stats.words.formatted())
+            if let speed = stats.wordsPerMinute {
+                LabeledContent("stats.speed") { Text("stats.wordsPerMinute \(speed)") }
+            }
+            Button("stats.reset", role: .destructive) { confirmsReset = true }
+                .disabled(stats.dictations == 0)
+                .confirmationDialog("stats.resetTitle", isPresented: $confirmsReset, titleVisibility: .visible) {
+                    Button("stats.reset", role: .destructive) {
+                        stats = DictationStats()
+                        stats.save()
+                    }
+                } message: {
+                    Text("stats.resetMessage")
+                }
+        } header: {
+            Text("stats.title")
+        } footer: {
+            Text("stats.since \(stats.since.formatted(date: .abbreviated, time: .omitted))")
+                .foregroundStyle(Theme.textSecondary)
+        }
+        .listRowBackground(Theme.surface)
+        .monospacedDigit()
     }
 
     private var profileIsEmpty: Bool {

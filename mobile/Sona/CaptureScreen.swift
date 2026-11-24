@@ -57,6 +57,7 @@ struct CaptureScreen: View {
             .background(Theme.background)
             .navigationTitle("tab.capture")
             .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .primaryAction) { AskSonaButton(model: model) } }
         }
         .tint(Theme.accent)
         .onChange(of: selection) { _, items in

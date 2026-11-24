@@ -77,7 +77,7 @@ struct RecordingScreen: View {
                     .padding(.horizontal, Theme.pageInset)
                     .padding(.vertical, 8)
             }
-            .sheet(isPresented: $showsPairing) {
+            .sheet(isPresented: $showsPairing.yielding(to: model)) {
                 PairingScreen(model: model)
             }
             .task { await model.refresh(); await calendar.refresh() }

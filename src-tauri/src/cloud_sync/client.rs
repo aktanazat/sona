@@ -310,7 +310,6 @@ impl CloudClient {
         .await
     }
 
-    #[cfg(test)]
     pub(crate) async fn cancel_upload(
         &self,
         credentials: &CloudCredentials<'_>,
@@ -1005,7 +1004,6 @@ pub(crate) struct UploadCommittedResponse {
     pub(crate) share_id: Option<String>,
 }
 
-#[cfg(test)]
 #[derive(Clone, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct UploadCancelledResponse {

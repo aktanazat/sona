@@ -7,6 +7,7 @@ enum BoardObject: Codable, Equatable {
     case dictationProfile(DictationProfile)
     case meeting(PhoneMeeting)
     case memoryIndex(PortableMemoryIndex)
+    case agentReply(AgentReplyManifest)
     /// A recording or a format this build does not know.
     case other
 }
@@ -79,6 +80,19 @@ struct BoardIndex: Codable, Equatable {
             guard case .meeting(let meeting) = head.object else { return nil }
             return meeting
         }.sorted { $0.date > $1.date }
+    }
+
+    /// The Mac's replies to this phone's questions, keyed by the question's object id.
+    /// A reply counts only at the object id derived from its question.
+    var agentReplies: [String: AgentReplyManifest] {
+        var replies: [String: AgentReplyManifest] = [:]
+        for (id, head) in heads {
+            guard case .agentReply(let reply) = head.object,
+                  id == AgentAskObject.replyObjectId(askObjectId: reply.ask_object_id)
+            else { continue }
+            replies[reply.ask_object_id] = reply
+        }
+        return replies
     }
 }
 
@@ -159,6 +173,8 @@ extension BoardIndex {
 enum VaultReaderError: Error, Equatable {
     case notPaired
     case integrity
+    /// The object is not in this iPhone's copy of the vault yet.
+    case notInIndex
 }
 
 /// The phone's read side of the vault: the change feed kept on disk as a head index,
@@ -285,6 +301,15 @@ actor VaultReader {
         try await tombstone(objectId: id)
     }
 
+    /// Tombstone one object of a question for the agent: the ask, or the Mac's reply.
+    /// Throws `notInIndex` until a sync has brought it here, so a caller retries instead
+    /// of taking a missing object for a deleted one.
+    func deleteAgentObject(_ objectId: String) async throws {
+        if let syncing { _ = try? await syncing.value }
+        guard index?.heads[objectId] != nil else { throw VaultReaderError.notInIndex }
+        try await tombstone(objectId: objectId)
+    }
+
     /// Tombstone one object over the head this index holds, and drop it locally.
     private func tombstone(objectId: String) async throws {
         let (credentials, client) = try session()
@@ -395,6 +420,12 @@ actor VaultReader {
            card.kind == CardObject.kind, card.format_version == 1
         {
             return (envelope.chunkCount, .card(card))
+        }
+        if let plaintext = open(AgentAskObject.replySourceFormat),
+           let reply = try? decoder.decode(AgentReplyManifest.self, from: plaintext),
+           reply.kind == AgentAskObject.replyKind, reply.format_version == 1
+        {
+            return (envelope.chunkCount, .agentReply(reply))
         }
         for format in [DictationProfile.sourceFormat, PhoneMeeting.sourceFormat, PhoneMeeting.phoneSourceFormat,
                        PortableMemoryIndex.sourceFormat] {

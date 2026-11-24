@@ -2,6 +2,7 @@ use std::{
     fmt,
     fs::{self, File, OpenOptions},
     io::Write,
+    os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -75,6 +76,9 @@ use super::{
     },
 };
 
+#[path = "agent_asks.rs"]
+mod agent_asks;
+
 #[path = "dictation_profile.rs"]
 mod dictation_profile;
 
@@ -93,6 +97,9 @@ mod phone_thought_manifest;
 
 #[path = "phone_thoughts.rs"]
 pub(crate) mod phone_thoughts;
+
+#[path = "revision_upload.rs"]
+mod revision_upload;
 
 const PROTOCOL_AUDIENCE: &str = "sona-companion";
 const PROTOCOL_VERSION: u32 = 1;
@@ -384,6 +391,7 @@ pub(crate) struct CloudSyncRuntime {
     operational_error: Mutex<Option<CloudSyncErrorKind>>,
     background_scan: BackgroundScanGate,
     phone_thought_gate: Mutex<()>,
+    agent_asks: agent_asks::AskQueue,
 }
 
 struct EndpointClient {
@@ -578,8 +586,11 @@ enum RemoteObject {
     /// A paired device's recording, decrypted to a file this process owns.
     DeviceRecording(DeviceRecordingImport),
     Thought(phone_thoughts::ThoughtImport),
-    /// A device recording this Mac wrote itself. The audio never left, so the
-    /// revision is acknowledged and nothing is imported.
+    /// A question from the phone, for the worker that answers it.
+    AgentAsk(agent_asks::AgentAsk),
+    /// A device recording this Mac wrote itself, or an answer a Mac wrote to
+    /// the phone. Nothing in either is for this Mac to import, so the
+    /// revision is acknowledged and nothing else happens.
     OwnDeviceRecording,
 }
 
@@ -915,6 +926,7 @@ impl CloudSyncRuntime {
             operational_error: Mutex::new(None),
             background_scan: BackgroundScanGate::default(),
             phone_thought_gate: Mutex::new(()),
+            agent_asks: agent_asks::AskQueue::default(),
         }
     }
 
@@ -961,6 +973,7 @@ impl CloudSyncRuntime {
                         }
                     }
                     let _ = tauri::async_runtime::block_on(runtime.sync_once());
+                    runtime.answer_agent_asks();
                     log::debug!(
                         "Cloud sync background scan finished in {:?}",
                         started.elapsed()
@@ -3111,6 +3124,7 @@ impl CloudSyncRuntime {
                 .as_ref()
                 .is_none_or(|head| head.source_session_id.is_none())
         {
+            self.forget_unstarted_agent_ask(access, object_id)?;
             self.delete_phone_thought_source(access, object_id, revision_id, sequence)?;
             return access
                 .store
@@ -3193,6 +3207,9 @@ impl CloudSyncRuntime {
             RemoteObject::Thought(thought) => {
                 self.install_phone_thought(access, object_id, revision_id, sequence, thought)
             }
+            RemoteObject::AgentAsk(ask) => {
+                self.remember_agent_ask(access, object_id, revision_id, sequence, ask)
+            }
             RemoteObject::OwnDeviceRecording => {
                 acknowledge_remote_revision(&access.store, object_id, revision_id, sequence)
             }
@@ -3248,17 +3265,18 @@ impl CloudSyncRuntime {
         if sha256_base64url(&encrypted_manifest) != envelope.manifest_sha256 {
             return Err(CloudRuntimeError::IntegrityFailure);
         }
+        let manifest_context = ObjectRevisionCryptoContext {
+            vault_id: &access.state.vault_id,
+            object_id,
+            revision_id,
+            index: 0,
+            total: u64::from(envelope.chunk_count),
+            content_kind: ObjectContentKind::Manifest,
+            source_format: phone_thought_manifest::SOURCE_FORMAT,
+        };
         if let Some(manifest) = phone_thought_manifest::open_manifest(
             &*access.keys.vault_root,
-            &ObjectRevisionCryptoContext {
-                vault_id: &access.state.vault_id,
-                object_id,
-                revision_id,
-                index: 0,
-                total: u64::from(envelope.chunk_count),
-                content_kind: ObjectContentKind::Manifest,
-                source_format: phone_thought_manifest::SOURCE_FORMAT,
-            },
+            &manifest_context,
             &encrypted_manifest,
         )? {
             return self
@@ -3272,6 +3290,23 @@ impl CloudSyncRuntime {
                 )
                 .await
                 .map(RemoteObject::Thought);
+        }
+        if let Some(ask) = agent_asks::open_ask(
+            &*access.keys.vault_root,
+            &manifest_context,
+            &encrypted_manifest,
+        )? {
+            return self
+                .download_agent_ask(access, object_id, revision_id, &envelope, ask)
+                .await
+                .map(RemoteObject::AgentAsk);
+        }
+        if agent_asks::is_reply(
+            &*access.keys.vault_root,
+            &manifest_context,
+            &encrypted_manifest,
+        ) {
+            return Ok(RemoteObject::OwnDeviceRecording);
         }
         match open_remote_manifest(
             &*access.keys.vault_root,
@@ -4366,6 +4401,7 @@ fn write_staged_file(
         let mut file = OpenOptions::new()
             .create_new(true)
             .write(true)
+            .mode(0o600)
             .open(&temporary)
             .map_err(|_| CloudRuntimeError::File)?;
         file.write_all(bytes).map_err(|_| CloudRuntimeError::File)?;

@@ -21,9 +21,29 @@ struct QueuedThought: Codable, Equatable {
     var attachments: [ThoughtAttachment]
 }
 
+/// A question for Sona's agent waiting to reach the vault.
+struct QueuedAsk: Codable, Equatable {
+    var conversationId: String
+    var question: String
+    var recentTurns: [AgentAskManifest.Turn]
+}
+
+/// Where a question stands in this iPhone's outbox.
+enum AskOutbox: Equatable {
+    /// Uploaded: it left the outbox.
+    case left
+    /// Next to go, with nothing uploading.
+    case waiting
+    /// The outbox is sending, this question or another one: its clock is paused.
+    case busy
+    /// The Worker refused it for good, so it will not leave without a new attempt.
+    case refused
+}
+
 enum QueuedPayload: Codable, Equatable {
     case recording(QueuedRecording)
     case thought(QueuedThought)
+    case ask(QueuedAsk)
 }
 
 /// One object on its way into the vault.
@@ -46,8 +66,17 @@ struct QueuedObject: Codable, Equatable, Identifiable {
     var lastError: String?
     /// Set when the Worker refused in a way no retry can change.
     var parked: Bool
+    /// The plan's writer signature, made once per staged revision and kept. CryptoKit's
+    /// Ed25519 signatures are randomized, so signing again for a retry would change the
+    /// create body and the Worker would refuse it as an idempotency conflict forever.
+    var writerSignature: String? = nil
 
     var id: String { objectId }
+
+    var isAsk: Bool {
+        if case .ask = payload { return true }
+        return false
+    }
 }
 
 enum UploadQueueError: Error, Equatable {
@@ -55,6 +84,9 @@ enum UploadQueueError: Error, Equatable {
     case missingAudio
     case incompleteAttachment
     case commitIncomplete(state: String)
+    /// The Worker no longer holds this upload (purged after its lifetime), so the
+    /// same ids can never complete.
+    case uploadGone
 }
 
 /// The on-disk outbox. Capture writes into it; uploading drains it; nothing else owns
@@ -66,6 +98,12 @@ actor UploadQueue {
     private let identity: DeviceIdentity
     private var credentials: VaultCredentials?
     private var client: CompanionClient?
+    /// A pass is running; another caller only asks it to go round once more, so two
+    /// passes never stage and send the same item side by side.
+    private var draining = false
+    private var drainAgain = false
+    /// The item the pass is sending; it cannot be withdrawn until the send ends.
+    private var sending: String?
 
     init(root: URL, identity: DeviceIdentity, credentials: VaultCredentials?) {
         self.root = root
@@ -136,11 +174,33 @@ actor UploadQueue {
         return item
     }
 
-    /// Try every item that is due, oldest first, one at a time.
+    /// Take a question for the agent.
+    func enqueue(ask: QueuedAsk, askedAtUtcMs: Int64) throws -> QueuedObject {
+        let item = newItem(objectId: randomOpaqueId(), capturedAtUtcMs: askedAtUtcMs, payload: .ask(ask))
+        try save(item)
+        return item
+    }
+
+    /// Try every item that is due, one at a time: questions for the agent first, because
+    /// someone is waiting for their answers, then everything else oldest first.
     ///
-    /// A retryable failure ends the pass: the network or the Worker is unhappy and the
-    /// remaining items would fail the same way.
+    /// One pass at a time. A retryable failure ends the pass: the network or the Worker
+    /// is unhappy and the remaining items would fail the same way. An upload the Worker
+    /// purged starts over under new ids and the pass goes on.
     func drain() async {
+        guard !draining else {
+            drainAgain = true
+            return
+        }
+        draining = true
+        defer { draining = false }
+        repeat {
+            drainAgain = false
+            await drainOnce()
+        } while drainAgain
+    }
+
+    private func drainOnce() async {
         guard let credentials else { return }
         let client: CompanionClient
         do {
@@ -150,17 +210,47 @@ actor UploadQueue {
         }
         self.client = client
         let now = Int64(Date().timeIntervalSince1970 * 1000)
-        for item in items() where
-            (!item.parked && item.nextAttemptUtcMs <= now) || needsThoughtRestaging(item)
-        {
+        var tried: Set<String> = []
+        while let item = nextDue(now: now, skipping: tried) {
+            tried.insert(item.objectId)
+            sending = item.objectId
+            defer { sending = nil }
             do {
                 try await upload(item, credentials: credentials, client: client)
+            } catch UploadQueueError.uploadGone {
+                restart(item)
             } catch {
                 let retryable = (error as? CompanionError)?.isRetryable ?? true
                 record(failure: error, on: item, retryable: retryable)
                 if retryable { return }
             }
         }
+    }
+
+    /// Read from disk after every upload, so a question asked during a long upload goes
+    /// next instead of after everything the pass found when it started.
+    private func nextDue(now: Int64, skipping tried: Set<String>) -> QueuedObject? {
+        let due = items().filter { item in
+            !tried.contains(item.objectId)
+                && ((!item.parked && item.nextAttemptUtcMs <= now) || needsThoughtRestaging(item))
+        }
+        return due.first(where: \.isAsk) ?? due.first
+    }
+
+    /// Take an item back unless it is being sent right now: its commit may already be on
+    /// the way, so the caller keeps following it instead.
+    func withdraw(objectId: String) -> Bool {
+        guard sending != objectId else { return false }
+        discard(objectId: objectId)
+        return true
+    }
+
+    /// Where a question stands. While any item is being sent the question's wait does
+    /// not count: it goes once the outbox is free.
+    func state(of objectId: String) -> AskOutbox {
+        guard let item = loadItem(root.appending(path: directoryName(objectId))) else { return .left }
+        if item.parked { return .refused }
+        return sending == nil ? .waiting : .busy
     }
 
     /// Clear every refusal so the next drain tries again.
@@ -187,8 +277,12 @@ actor UploadQueue {
         credentials: VaultCredentials,
         client: CompanionClient
     ) async throws {
-        let item = try stage(item, credentials: credentials)
+        var item = try stage(item, credentials: credentials)
         let plan = try plan(item, credentials: credentials)
+        if item.writerSignature == nil {
+            item.writerSignature = plan.writerSignature
+            try save(item)
+        }
         let scope = idempotencyScope(item)
         let created = try await client.createObjectUpload(
             identity: identity,
@@ -197,25 +291,30 @@ actor UploadQueue {
             plan: plan
         )
         let accepted = Set(created.acceptedIndexes)
-        for index in item.chunkSizes.indices where !accepted.contains(index) {
-            let ciphertext = try Data(contentsOf: chunkURL(item, index: index))
-            _ = try await client.putChunk(
+        let committed: UploadCommittedResponse
+        do {
+            for index in item.chunkSizes.indices where !accepted.contains(index) {
+                let ciphertext = try Data(contentsOf: chunkURL(item, index: index))
+                _ = try await client.putChunk(
+                    identity: identity,
+                    vaultId: credentials.vaultId,
+                    idempotencyKey: stableIdempotencyKey([
+                        scope, item.objectId, item.revisionId, "chunk-\(index)",
+                    ]),
+                    uploadId: item.uploadId,
+                    index: index,
+                    ciphertext: ciphertext
+                )
+            }
+            committed = try await client.commitUpload(
                 identity: identity,
                 vaultId: credentials.vaultId,
-                idempotencyKey: stableIdempotencyKey([
-                    scope, item.objectId, item.revisionId, "chunk-\(index)",
-                ]),
-                uploadId: item.uploadId,
-                index: index,
-                ciphertext: ciphertext
+                idempotencyKey: stableIdempotencyKey([scope, item.objectId, item.revisionId, "commit"]),
+                uploadId: item.uploadId
             )
+        } catch CompanionError.api(code: "upload_incomplete", _), CompanionError.api(code: "not_found", _) {
+            throw UploadQueueError.uploadGone
         }
-        let committed = try await client.commitUpload(
-            identity: identity,
-            vaultId: credentials.vaultId,
-            idempotencyKey: stableIdempotencyKey([scope, item.objectId, item.revisionId, "commit"]),
-            uploadId: item.uploadId
-        )
         guard committed.state == "committed" else {
             throw UploadQueueError.commitIncomplete(state: committed.state)
         }
@@ -289,6 +388,7 @@ actor UploadQueue {
         item.stagedForVaultId = credentials.vaultId
         item.chunkSizes = sizes
         item.chunkDigests = digests
+        item.writerSignature = nil
         try save(item)
         return item
     }
@@ -313,7 +413,7 @@ actor UploadQueue {
             )
         }
         let totalBytes = item.chunkSizes.reduce(0, +)
-        let signature = try signEd25519(
+        let signature = try item.writerSignature ?? Base64URL.encode(signEd25519(
             signingSeed: identity.signingSeed,
             message: canonicalUploadEnvelopeBytes(
                 CanonicalUploadEnvelopeInput(
@@ -333,7 +433,7 @@ actor UploadQueue {
                     }
                 )
             )
-        )
+        ))
         return ObjectUploadPlan(
             version: SonaProtocol.protocolVersion,
             cryptoVersion: SonaProtocol.cryptoVersion,
@@ -345,7 +445,7 @@ actor UploadQueue {
             chunks: chunks,
             chunkCount: chunks.count,
             totalBytes: totalBytes,
-            writerSignature: Base64URL.encode(signature)
+            writerSignature: signature
         )
     }
 
@@ -373,6 +473,7 @@ actor UploadQueue {
         switch item.payload {
         case .recording: return DeviceRecordingObject.sourceFormat
         case .thought: return ThoughtObject.sourceFormat
+        case .ask: return AgentAskObject.sourceFormat
         }
     }
 
@@ -382,6 +483,7 @@ actor UploadQueue {
         switch item.payload {
         case .recording: return "device-recording"
         case .thought: return "thought"
+        case .ask: return "agent-ask"
         }
     }
 
@@ -391,6 +493,8 @@ actor UploadQueue {
             return DeviceRecordingObject.chunkCount(audioByteLength: recording.audioByteLength)
         case let .thought(thought):
             return ThoughtObject.chunkCount(thought.attachments)
+        case .ask:
+            return 1
         }
     }
 
@@ -422,6 +526,13 @@ actor UploadQueue {
                     attachments: thought.attachments
                 )
             )
+        case let .ask(ask):
+            return try AgentAskObject.encodeManifest(
+                AgentAskObject.manifest(
+                    deviceId: identity.deviceId, askedAtUtcMs: item.capturedAtUtcMs,
+                    conversationId: ask.conversationId, question: ask.question, recentTurns: ask.recentTurns
+                )
+            )
         }
     }
 
@@ -443,6 +554,8 @@ actor UploadQueue {
                 bytes.append(Data(count: size - bytes.count))
             }
             return bytes
+        case .ask:
+            return Data()
         }
     }
 
@@ -500,6 +613,27 @@ actor UploadQueue {
         let delaySeconds = min(60 * (1 << min(stored.attempts - 1, 4)), 900)
         stored.nextAttemptUtcMs =
             Int64(Date().timeIntervalSince1970 * 1000) + Int64(delaySeconds) * 1000
+        try? save(stored)
+    }
+
+    /// Start a purged upload over: drop the staged bytes and mint new revision and
+    /// upload ids, so the next pass seals and sends it under keys the Worker has not
+    /// seen. Due at once; the pass in flight does not try it again.
+    private func restart(_ item: QueuedObject) {
+        guard var stored = loadItem(root.appending(path: directoryName(item.objectId))) else {
+            return
+        }
+        try? removeStagedFiles(stored)
+        stored.revisionId = randomOpaqueId()
+        stored.uploadId = randomOpaqueId()
+        stored.stagedForVaultId = nil
+        stored.chunkSizes = []
+        stored.chunkDigests = []
+        stored.writerSignature = nil
+        stored.attempts += 1
+        stored.lastError = String(describing: UploadQueueError.uploadGone)
+        stored.parked = false
+        stored.nextAttemptUtcMs = 0
         try? save(stored)
     }
 

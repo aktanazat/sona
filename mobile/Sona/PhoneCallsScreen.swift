@@ -175,7 +175,7 @@ struct PhoneCallsScreen: View {
         .background(Theme.background)
         .navigationTitle("calls.title")
         .navigationBarTitleDisplayMode(.inline)
-        .sheet(isPresented: $setup) { CallSetupScreen() }
+        .sheet(isPresented: $setup.yielding(to: model)) { CallSetupScreen() }
         .confirmationDialog("calls.confirm", isPresented: $confirm, titleVisibility: .visible) {
             Button("calls.start") { consent = false; Task { await calls.start(target: target, model: model) } }
         } message: { Text("calls.confirmBody \(target)") }
