@@ -397,7 +397,6 @@ pub(crate) async fn process_command(
                 final_text: String::new(),
                 post_processed_text: None,
                 rewrite: RewriteOutcome::NotRequested,
-                spoken_send: false,
             }
         }
     }
@@ -449,7 +448,6 @@ async fn answer_in_chat(
             final_text: String::new(),
             post_processed_text: None,
             rewrite: RewriteOutcome::NotRequested,
-            spoken_send: false,
         };
     }
     let rendered = render_answer(
@@ -483,7 +481,6 @@ async fn answer_in_chat(
         final_text: String::new(),
         post_processed_text,
         rewrite,
-        spoken_send: false,
     }
 }
 

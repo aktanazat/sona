@@ -518,6 +518,7 @@ mod tests {
             paste_method,
             clipboard_handling: ClipboardHandling::DontModify,
             submit: None,
+            auto_submit_key: AutoSubmitKey::Enter,
             append_trailing_space: false,
             paste_delay_ms: 0,
             paste_delay_after_ms: 0,

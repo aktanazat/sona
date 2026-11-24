@@ -1134,8 +1134,6 @@ pub(crate) struct ProcessedTranscription {
     pub post_processed_text: Option<String>,
     /// How the mode's rewrite ended, for the receipt and the shell's notice.
     pub rewrite: RewriteOutcome,
-    /// The dictation ended with a spoken "send": press the submit key after it.
-    pub spoken_send: bool,
 }
 
 impl ProcessedTranscription {
@@ -1149,13 +1147,11 @@ impl ProcessedTranscription {
                 post_processed_text: Some(text.clone()),
                 final_text: text,
                 rewrite: RewriteOutcome::Applied,
-                spoken_send: false,
             },
             Err(outcome) => Self {
                 final_text: fallback_text,
                 post_processed_text: prior_processed_text,
                 rewrite: outcome,
-                spoken_send: false,
             },
         }
     }
@@ -1910,17 +1906,6 @@ pub(crate) async fn process_transcription_output(
     }
 
     let mut final_text = transcription.to_string();
-    let english = effective_language
-        .split(['-', '_'])
-        .next()
-        .is_some_and(|code| code.eq_ignore_ascii_case("en"));
-    let spoken_send = match crate::audio_toolkit::split_spoken_send(&final_text) {
-        Some(words) if asr.spoken_edits_enabled && english => {
-            final_text = words;
-            true
-        }
-        _ => false,
-    };
     let mut post_processed_text: Option<String> = None;
 
     if let Some(converted_text) =
@@ -1983,10 +1968,7 @@ pub(crate) async fn process_transcription_output(
         } else {
             post_process_transcription(app, run, &rendered, &final_text).await
         };
-        let mut processed =
-            ProcessedTranscription::from_rewrite(result, final_text, post_processed_text);
-        processed.spoken_send = spoken_send;
-        return processed;
+        return ProcessedTranscription::from_rewrite(result, final_text, post_processed_text);
     }
     if final_text != transcription {
         post_processed_text = Some(final_text.clone());
@@ -2000,7 +1982,6 @@ pub(crate) async fn process_transcription_output(
         } else {
             RewriteOutcome::NotRequested
         },
-        spoken_send,
     }
 }
 

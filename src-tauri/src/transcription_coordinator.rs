@@ -1073,7 +1073,7 @@ mod tests {
                 Some(Effect::Stop { run_plan, .. }) => {
                     self.stops += 1;
                     self.handed_over = Some(run_plan.run_id);
-                    self.handed_over_submits = Some(run_plan.delivery().auto_submit);
+                    self.handed_over_submits = Some(run_plan.delivery().submit.is_some());
                 }
                 Some(Effect::Settled(next)) => {
                     self.settles += 1;

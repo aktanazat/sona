@@ -284,6 +284,7 @@ pub struct DeliveryPlan {
     pub paste_method: PasteMethod,
     pub clipboard_handling: ClipboardHandling,
     pub submit: Option<crate::delivery::SubmitRequest>,
+    pub auto_submit_key: AutoSubmitKey,
     pub append_trailing_space: bool,
     pub paste_delay_ms: u64,
     pub paste_delay_after_ms: u64,
@@ -302,6 +303,7 @@ impl From<&ModeDeliverySettings> for DeliveryPlan {
                 .then_some(crate::delivery::SubmitRequest::Configured(
                     settings.auto_submit_key,
                 )),
+            auto_submit_key: settings.auto_submit_key,
             append_trailing_space: settings.append_trailing_space,
             paste_delay_ms: settings.paste_delay_ms,
             paste_delay_after_ms: settings.paste_delay_after_ms,
@@ -2361,7 +2363,9 @@ impl RunPlan {
     /// Press the submit key after this run's words are delivered, whatever
     /// its mode says.
     pub fn submit_after_delivery(&mut self) {
-        self.delivery.auto_submit = true;
+        self.delivery.submit = Some(crate::delivery::SubmitRequest::Configured(
+            self.delivery.auto_submit_key,
+        ));
     }
 
     pub fn context(&self) -> &ContextSnapshot {

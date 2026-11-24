@@ -538,6 +538,8 @@ pub fn change_meeting_vocabulary_enabled_setting(
     Ok(())
 }
 
+#[tauri::command]
+#[specta::specta]
 pub fn update_spoken_send_enabled(app: AppHandle, enabled: bool) -> Result<(), String> {
     settings::update_settings(&app, |settings| {
         settings.spoken_send_enabled = enabled;

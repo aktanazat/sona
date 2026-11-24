@@ -560,21 +560,6 @@ pub fn split_spoken_instruction(text: &str) -> Option<SpokenInstruction> {
     })
 }
 
-/// A dictation whose last sentence is only "send" is words to type followed
-/// by the submit key: returns the words. "Send" anywhere else, after a comma
-/// ("Yes, send."), or a dictation that is only "send", stays text.
-pub fn split_spoken_send(text: &str) -> Option<String> {
-    let body = text.trim_end_matches(|character: char| {
-        character.is_whitespace() || SENTENCE_END_MARKS.contains(&character)
-    });
-    let start = body.rfind(SENTENCE_END_MARKS)?;
-    if !body[start + 1..].trim().eq_ignore_ascii_case("send") {
-        return None;
-    }
-    let kept = body[..=start].trim_end_matches(char::is_whitespace);
-    (!kept.trim_matches(SENTENCE_END_MARKS).trim().is_empty()).then(|| kept.to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
