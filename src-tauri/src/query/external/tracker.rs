@@ -154,18 +154,35 @@ pub enum WorkVerb {
     /// Move a favorite into a folder (--into), out to the top (--top), or
     /// to another place (--position).
     FavoriteMove(lifecycle::FavoriteMoveArgs),
-    /// Subscribe the user to tasks: what others change on them reaches the
-    /// inbox.
-    Subscribe(TasksArgs),
-    /// Unsubscribe the user from tasks.
-    Unsubscribe(TasksArgs),
-    /// The tasks the user is subscribed to.
+    /// Subscribe the user to tasks, or follow a project (--project), saved
+    /// view (--view) or note (--note): what others change on them reaches
+    /// the inbox.
+    Subscribe(lifecycle::SubscribeArgs),
+    /// Unsubscribe the user from tasks, or stop following a project, view or
+    /// note.
+    Unsubscribe(lifecycle::SubscribeArgs),
+    /// The tasks the user is subscribed to, and the projects, views and
+    /// notes followed.
     Subscriptions,
     /// The inbox: status changes, comments, mentions and assignments others
-    /// made on subscribed tasks, with the unread count.
+    /// made on subscribed tasks, with the unread count. --priority shows
+    /// only what needs you; --kind, --project and --task-priority narrow it.
     Inbox(lifecycle::InboxArgs),
     /// Mark notifications read or unread, archive them, or snooze them.
     InboxMark(lifecycle::InboxMarkArgs),
+    /// Which kinds reach the inbox and show a banner, and the quiet hours.
+    InboxSettings,
+    /// Change which kinds reach the inbox (--kinds), show a banner
+    /// (--banners), and when banners keep quiet (--quiet-hours).
+    InboxSettingsSave(lifecycle::InboxSettingsArgs),
+    /// One feed of project updates and weekly digests, newest first.
+    Updates(feed::UpdatesArgs),
+    /// Saved feeds of updates.
+    Feeds,
+    /// Save a feed: the filters `updates` takes, under a name.
+    FeedSave(feed::FeedSaveArgs),
+    /// Delete a saved feed.
+    FeedDelete(feed::FeedDeleteArgs),
     /// The weekly project digest over the last seven days: each project's
     /// status, latest update, tasks done and risks, posted to the inbox.
     Digest(digest::DigestArgs),
@@ -224,9 +241,11 @@ pub enum WorkVerb {
     /// Delete an automation with its versions and runs.
     #[command(name = "automation-delete")]
     LoopDelete(agent_loops::LoopArgs),
-    /// Set when Sona reminds you of a task, or none to clear it.
+    /// Set when Sona reminds you of a task, project (--project), initiative
+    /// (--initiative) or note (--note), or none to clear it.
     Remind(routines::RemindArgs),
-    /// List reminders; --due lists those whose time has come.
+    /// List reminders on tasks, projects, initiatives and notes; --due
+    /// lists those whose time has come.
     Reminders(routines::RemindersArgs),
     /// List saved views.
     Views(ViewsArgs),
@@ -1872,6 +1891,12 @@ impl WorkVerb {
             | Self::Favorites
             | Self::Subscriptions
             | Self::Inbox(_)
+            | Self::InboxSettings
+            | Self::InboxSettingsSave(lifecycle::InboxSettingsArgs { dry_run: true, .. })
+            | Self::Updates(_)
+            | Self::Feeds
+            | Self::FeedSave(feed::FeedSaveArgs { dry_run: true, .. })
+            | Self::FeedDelete(feed::FeedDeleteArgs { dry_run: true, .. })
             | Self::Delete(TasksArgs { dry_run: true, .. })
             | Self::DescriptionRestore(lifecycle::VersionRestoreArgs { dry_run: true, .. })
             | Self::Favorite(lifecycle::FavoriteArgs { dry_run: true, .. })
@@ -1879,8 +1904,8 @@ impl WorkVerb {
             | Self::FavoriteFolderSave(lifecycle::FavoriteFolderSaveArgs { dry_run: true, .. })
             | Self::FavoriteFolderDelete(lifecycle::FavoriteFolderDeleteArgs { dry_run: true, .. })
             | Self::FavoriteMove(lifecycle::FavoriteMoveArgs { dry_run: true, .. })
-            | Self::Subscribe(TasksArgs { dry_run: true, .. })
-            | Self::Unsubscribe(TasksArgs { dry_run: true, .. })
+            | Self::Subscribe(lifecycle::SubscribeArgs { dry_run: true, .. })
+            | Self::Unsubscribe(lifecycle::SubscribeArgs { dry_run: true, .. })
             | Self::InboxMark(lifecycle::InboxMarkArgs { dry_run: true, .. })
             | Self::Digest(digest::DigestArgs { dry_run: true, .. })
             | Self::Ready(_)
@@ -2100,6 +2125,9 @@ impl WorkVerb {
             | Self::Subscribe(_)
             | Self::Unsubscribe(_)
             | Self::InboxMark(_)
+            | Self::InboxSettingsSave(_)
+            | Self::FeedSave(_)
+            | Self::FeedDelete(_)
             | Self::Digest(_)
             | Self::Snooze(_)
             | Self::Relate(_)
@@ -2299,6 +2327,9 @@ impl WorkVerb {
             {
                 "--body cannot be empty."
             }
+            Self::InboxSettingsSave(args) if !args.changes_something() => {
+                "Name a change: --kinds, --banners or --quiet-hours."
+            }
             Self::CycleSettings(args) if !args.changes_something() => {
                 "Name a change: --weeks, --start-weekday, --cooldown, --upcoming, --auto-add-started or --auto-add-completed."
             }
@@ -2394,6 +2425,7 @@ pub enum WorkAnswer {
     Template(Box<routines::ExternalWorkTemplateChange>),
     Reminders(routines::ExternalWorkReminders),
     Reminder(Box<routines::ExternalWorkReminderChange>),
+    SubjectReminder(Box<routines::ExternalSubjectReminderChange>),
     AgentLoops(agent_loops::ExternalAgentLoops),
     AgentLoop(Box<agent_loops::ExternalAgentLoop>),
     AgentLoopChange(Box<agent_loops::ExternalAgentLoopChange>),
@@ -2467,6 +2499,10 @@ pub enum WorkAnswer {
     Favorites(lifecycle::ExternalWorkFavorites),
     Subscriptions(lifecycle::ExternalWorkSubscriptions),
     Inbox(lifecycle::ExternalWorkInbox),
+    InboxSettings(lifecycle::ExternalInboxSettings),
+    Updates(feed::ExternalWorkUpdates),
+    Feeds(feed::ExternalWorkFeeds),
+    Feed(feed::ExternalFeedChange),
     Digest(Box<digest::ExternalWorkDigest>),
 }
 
@@ -3212,6 +3248,12 @@ pub(super) async fn answer(
         WorkVerb::Subscriptions => tracker.subscriptions().await,
         WorkVerb::Inbox(args) => tracker.inbox(args).await,
         WorkVerb::InboxMark(args) => tracker.inbox_mark(args).await,
+        WorkVerb::InboxSettings => tracker.inbox_settings(None),
+        WorkVerb::InboxSettingsSave(args) => tracker.inbox_settings(Some(args)),
+        WorkVerb::Updates(args) => tracker.updates(args).await,
+        WorkVerb::Feeds => tracker.feeds(),
+        WorkVerb::FeedSave(args) => tracker.feed_save(args).await,
+        WorkVerb::FeedDelete(args) => tracker.feed_delete(args),
         WorkVerb::Digest(args) => tracker.digest(args).await,
         WorkVerb::Snooze(args) => tracker.snooze(args).await,
         WorkVerb::Relate(args) => tracker.relate(args).await,
@@ -7074,12 +7116,15 @@ impl WorkAnswer {
             | Self::Versions(_)
             | Self::Favorites(_)
             | Self::Subscriptions(_)
-            | Self::Inbox(_) => lifecycle::text(self, &mut text),
+            | Self::Inbox(_)
+            | Self::InboxSettings(_) => lifecycle::text(self, &mut text),
+            Self::Updates(_) | Self::Feeds(_) | Self::Feed(_) => feed::text(self, &mut text),
             Self::LabelEdit(_)
             | Self::Templates(_)
             | Self::Template(_)
             | Self::Reminders(_)
-            | Self::Reminder(_) => routines::text(self, &mut text),
+            | Self::Reminder(_)
+            | Self::SubjectReminder(_) => routines::text(self, &mut text),
             Self::AgentLoops(_)
             | Self::AgentLoop(_)
             | Self::AgentLoopChange(_)
@@ -7260,6 +7305,10 @@ impl WorkAnswer {
             | Self::Template(_)
             | Self::Reminders(_)
             | Self::Reminder(_)
+            | Self::SubjectReminder(_)
+            | Self::InboxSettings(_)
+            | Self::Feeds(_)
+            | Self::Feed(_)
             | Self::AgentLoops(_)
             | Self::AgentLoop(_)
             | Self::AgentLoopChange(_)
@@ -7331,6 +7380,7 @@ impl WorkAnswer {
             | Self::Favorites(_)
             | Self::Subscriptions(_)
             | Self::Inbox(_)
+            | Self::Updates(_)
             | Self::ProjectAdmin(_) => true,
         }
     }
@@ -7894,6 +7944,12 @@ mod library;
 mod meeting_review;
 mod meeting_settings;
 mod planner;
+mod triage_hints;
+mod subjects;
+mod dependencies;
+mod initiatives;
+mod digest;
+mod feed;
 mod project_templates;
 mod routines;
 mod sessions;

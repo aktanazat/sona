@@ -375,6 +375,17 @@ private struct TaskTabs: View {
                           systemImage: view.icon ?? "line.3.horizontal.decrease.circle")
                 }
             }
+            if let current {
+                let following = model.work.isFollowing(.view, current.id)
+                Divider()
+                Button(following ? "Following “\(current.name)”" : "Follow “\(current.name)”",
+                       systemImage: following ? "bell.fill" : "bell") {
+                    model.work.follow(.view, current.id, !following)
+                }
+                .help(following
+                    ? "Stop hearing in the inbox about tasks that join this view, finish or are canceled"
+                    : "Hear in the inbox about tasks that join this view, finish or are canceled")
+            }
         } label: {
             HStack(spacing: 6) {
                 if let icon = current?.icon {
@@ -383,6 +394,11 @@ private struct TaskTabs: View {
                 Text(current?.name ?? "Views")
                 if let current, focus.viewDrafts[current.id] != nil {
                     Circle().fill(Theme.accent).frame(width: 5, height: 5)
+                }
+                if let current, model.work.isFollowing(.view, current.id) {
+                    Image(systemName: "bell.fill").font(.system(size: 9))
+                        .foregroundStyle(Theme.inkTertiary)
+                        .accessibilityLabel("Following")
                 }
                 Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold))
                     .foregroundStyle(Theme.inkTertiary)

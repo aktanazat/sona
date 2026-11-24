@@ -398,7 +398,11 @@ pub fn planning_project_save(
     id: Option<String>,
     input: ProjectSaveInput,
 ) -> Result<Project, String> {
-    super::catalog_project_save(&app, &operation_id, id, &input.edit()?)
+    let author = super::comments::Author {
+        actor: super::types::WorkActor::Me,
+        agent: None,
+    };
+    super::catalog_project_save(&app, author, &operation_id, id, &input.edit()?)
 }
 
 /// A milestone's fields to set. A key left out keeps its value; `null`

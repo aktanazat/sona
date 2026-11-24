@@ -5,11 +5,13 @@
 
 use super::super::sources;
 use super::super::store::{self, Refusal};
-use super::inbox;
+use super::follows;
+use super::inbox::{self, Notification, NotificationKind};
+use super::inbox_settings;
 use super::items;
 use super::routines;
 use super::sync::People;
-use super::types::{WorkItem, WorkOwner, WorkSource};
+use super::types::{WorkActor, WorkItem, WorkOwner, WorkSource};
 use super::{in_both, now_ms, run_history, with_both, Done, Effects};
 use crate::managers::history::HistoryManager;
 use crate::meeting::detection::calendar::CalendarAccess;
@@ -160,6 +162,8 @@ pub enum WorkReminderKind {
     Due,
     FollowUp,
     Brief,
+    /// New in the inbox: `id` is the notice.
+    Inbox,
 }
 
 impl WorkReminderKind {
@@ -168,11 +172,12 @@ impl WorkReminderKind {
             Self::Due => "due",
             Self::FollowUp => "follow",
             Self::Brief => "brief",
+            Self::Inbox => "inbox",
         }
     }
 
     fn parse(value: &str) -> Option<Self> {
-        [Self::Due, Self::FollowUp, Self::Brief]
+        [Self::Due, Self::FollowUp, Self::Brief, Self::Inbox]
             .into_iter()
             .find(|kind| kind.as_str() == value)
     }
@@ -370,7 +375,9 @@ fn reminder_notices(history: &Connection, now_ms: i64) -> Result<Vec<(String, No
         .collect()
 }
 
-/// Remembers reminders as shown, and forgets ones shown long ago.
+/// Remembers reminders as shown, and forgets ones shown long ago. An
+/// inbox notice's banner is remembered while the notice is still in the
+/// inbox unread, or it would show again.
 fn record(history: &mut Connection, keys: &[String], now_ms: i64) -> Result<()> {
     let tx = history.transaction()?;
     for key in keys {
@@ -380,7 +387,9 @@ fn record(history: &mut Connection, keys: &[String], now_ms: i64) -> Result<()> 
         )?;
     }
     tx.execute(
-        "DELETE FROM planning_reminders WHERE sent_at_ms < ?1",
+        "DELETE FROM planning_reminders WHERE sent_at_ms < ?1
+           AND NOT EXISTS (SELECT 1 FROM planning_notifications n
+                WHERE planning_reminders.key = 'inbox:' || n.id AND n.read_at_ms IS NULL)",
         [now_ms - REMEMBERED_MS],
     )?;
     tx.commit()?;
@@ -411,6 +420,125 @@ fn post_due(history: &mut Connection, due: &[Reminder], now_ms: i64) -> Result<V
     }
     tx.commit()?;
     Ok(posted)
+}
+
+/// Posts the reminders on projects, initiatives and notes whose time came,
+/// and what moved in the followed views. Returns how many notices it
+/// posted.
+fn post_subjects(history: &mut Connection, now_ms: i64) -> Result<usize> {
+    let tx = history.transaction()?;
+    let posted =
+        routines::post_subject_reminders(&tx, now_ms)? + follows::watch_views(&tx, now_ms)?;
+    tx.commit()?;
+    Ok(posted)
+}
+
+/// The words after who did it, for one inbox notice's banner.
+fn said(notice: &Notification) -> String {
+    let words = |value: Option<&str>| value.unwrap_or_default().replace('_', " ");
+    match notice.kind {
+        NotificationKind::Status => format!("moved it to {}", words(notice.to.as_deref())),
+        NotificationKind::Comment => "commented".to_owned(),
+        NotificationKind::Mention => "mentioned you".to_owned(),
+        NotificationKind::Assigned => "assigned it to you".to_owned(),
+        NotificationKind::Changed => format!("changed the {}", words(notice.field.as_deref())),
+        NotificationKind::Reminder => "Reminder".to_owned(),
+        NotificationKind::Due => "Due today".to_owned(),
+        NotificationKind::Automation if notice.to.as_deref() == Some("done") => {
+            "finished".to_owned()
+        }
+        NotificationKind::Automation => "failed".to_owned(),
+        NotificationKind::Digest => "The weekly project digest is in".to_owned(),
+        NotificationKind::Question => format!("asks: {}", words(notice.to.as_deref())),
+        NotificationKind::Project if notice.field.as_deref() == Some("update") => {
+            "posted an update".to_owned()
+        }
+        NotificationKind::Project => format!("moved it to {}", words(notice.to.as_deref())),
+        NotificationKind::View => match notice.field.as_deref() {
+            Some("done") => "finished a task in it".to_owned(),
+            Some("canceled") => "canceled a task in it".to_owned(),
+            _ => "added a task to it".to_owned(),
+        },
+        NotificationKind::Note => "edited it".to_owned(),
+    }
+}
+
+/// What a notice is about, for its banner's title.
+fn about(history: &Connection, notice: &Notification) -> Result<String> {
+    if let Some(id) = &notice.item_id {
+        if let Ok(item) = items::item(history, id) {
+            return Ok(item.title);
+        }
+    }
+    Ok(match (&notice.subject, &notice.automation) {
+        (Some(subject), _) => subject.name.clone().unwrap_or_default(),
+        (None, Some(automation)) => automation.name.clone(),
+        (None, None) => "Inbox".to_owned(),
+    })
+}
+
+fn line(notice: &Notification) -> String {
+    let who = match (notice.kind, notice.agent.as_deref(), notice.actor) {
+        (NotificationKind::Reminder | NotificationKind::Due | NotificationKind::Digest, _, _) => {
+            None
+        }
+        (_, Some(agent), _) => Some(agent.to_owned()),
+        (_, None, WorkActor::Sona) => Some("Sona".to_owned()),
+        (_, None, _) => Some("An agent".to_owned()),
+    };
+    match who {
+        Some(who) => format!("{who} {}", said(notice)),
+        None => said(notice),
+    }
+}
+
+/// One banner for what newly reached the inbox: the notice itself when
+/// there is one, else how many and the first few.
+fn inbox_banner(history: &Connection, due: &[(String, Notification)]) -> Result<Option<Notice>> {
+    Ok(match due {
+        [] => None,
+        [(_, one)] => Some(Notice {
+            id: request_id(WorkReminderKind::Inbox, Some(&one.id)),
+            title: about(history, one)?,
+            body: line(one),
+        }),
+        many => Some(Notice {
+            id: request_id(WorkReminderKind::Inbox, None),
+            title: format!("{} new in Inbox", many.len()),
+            body: named(
+                many.iter()
+                    .map(|(_, notice)| Ok(format!("{}: {}", about(history, notice)?, line(notice))))
+                    .collect::<Result<_>>()?,
+                " · ",
+            ),
+        }),
+    })
+}
+
+/// What the inbox owes banners this minute, unless banners keep quiet.
+struct Banners {
+    quiet: bool,
+    due_days: bool,
+    reminders: bool,
+    inbox: Option<(Notice, Vec<String>)>,
+}
+
+fn banners(history: &mut Connection, sent: &HashSet<String>, now_ms: i64) -> Result<Banners> {
+    let quiet = inbox_settings::quiet_at(history, now_ms)?;
+    let mut due = inbox_settings::banners_due(history, sent, now_ms)?;
+    let mut subjects: Vec<Notification> = due.iter().map(|(_, notice)| notice.clone()).collect();
+    inbox::name_notes(history, &mut subjects)?;
+    for ((_, notice), named) in due.iter_mut().zip(subjects) {
+        *notice = named;
+    }
+    let inbox = inbox_banner(history, &due)?
+        .map(|notice| (notice, due.into_iter().map(|(key, _)| key).collect()));
+    Ok(Banners {
+        quiet,
+        due_days: inbox_settings::banners(history, NotificationKind::Due)?,
+        reminders: inbox_settings::banners(history, NotificationKind::Reminder)?,
+        inbox,
+    })
 }
 
 fn unreadable(error: StoreError) -> anyhow::Error {
@@ -912,33 +1040,74 @@ pub(super) fn probe_inputs(
     }))
 }
 
-/// One minute's look: shows what is due to be said, then remembers what
-/// was shown. Nothing shown is remembered, so a reminder the notification
-/// centre refused is tried again on the next tick.
-fn tick(app: &AppHandle, prompts: &dyn PromptPresenter, now_ms: i64) -> Result<()> {
-    let history = app.state::<Arc<HistoryManager>>();
-    let store = app.state::<Arc<MeetingSessionManager>>().open_store();
-    let (sent, (due, waits), reminded, posted) = history.with_connection(|conn| {
-        let sent = sent(conn)?;
-        let (mut due, mut waits) = pending(conn, &HashSet::new(), now_ms)?;
-        let posted = post_due(conn, &due, now_ms)?;
-        due.retain(|due| !sent.contains(&due.key));
-        waits.retain(|wait| !sent.contains(&wait.key));
-        let reminded = reminder_notices(conn, now_ms)?;
-        Ok((sent, (due, waits), reminded, posted))
-    })?;
-    if !posted.is_empty() {
-        super::tasks_changed(app, posted);
+/// Offers this minute's banners and returns the keys to remember as shown:
+/// those the notification centre took, and a due day's whose banner is
+/// off. While quiet hours hold none is offered, so each waits for them to
+/// end.
+fn offer(
+    prompts: &dyn PromptPresenter,
+    banners: &Banners,
+    due: Vec<Reminder>,
+    follow_ups: Option<(Notice, Vec<String>)>,
+    briefs: Vec<(String, Notice)>,
+) -> Vec<String> {
+    if banners.quiet {
+        return Vec::new();
     }
     let mut shown = Vec::new();
+    let mut unshown = Vec::new();
     let mut show = |notice: &Notice, keys: Vec<String>| {
         if prompts.present_follow_up(&notice.id, &notice.title, &notice.body) {
             shown.extend(keys);
         }
     };
     if let Some(notice) = due_notice(&due) {
-        show(&notice, due.into_iter().map(|due| due.key).collect());
+        let keys = due.into_iter().map(|due| due.key).collect();
+        if banners.due_days {
+            show(&notice, keys);
+        } else {
+            unshown = keys;
+        }
     }
+    if let Some((notice, keys)) = &banners.inbox {
+        show(notice, keys.clone());
+    }
+    if let Some((notice, keys)) = follow_ups {
+        show(&notice, keys);
+    }
+    for (key, notice) in briefs {
+        show(&notice, vec![key]);
+    }
+    shown.extend(unshown);
+    shown
+}
+
+/// One minute's look: shows what is due to be said, then remembers what
+/// was shown. Nothing shown is remembered, so a reminder the notification
+/// centre refused is tried again on the next tick. During quiet hours
+/// banners wait: a due day, reminder or follow-up shows once they end,
+/// while what else reached the inbox stays there without one. A kind whose
+/// banner is off counts as shown.
+fn tick(app: &AppHandle, prompts: &dyn PromptPresenter, now_ms: i64) -> Result<()> {
+    let history = app.state::<Arc<HistoryManager>>();
+    let store = app.state::<Arc<MeetingSessionManager>>().open_store();
+    let (sent, (due, waits), reminded, posted, others, banners) =
+        history.with_connection(|conn| {
+            let sent = sent(conn)?;
+            let (mut due, mut waits) = pending(conn, &HashSet::new(), now_ms)?;
+            let posted = post_due(conn, &due, now_ms)?;
+            let others = post_subjects(conn, now_ms)?;
+            due.retain(|due| !sent.contains(&due.key));
+            waits.retain(|wait| !sent.contains(&wait.key));
+            let reminded = reminder_notices(conn, now_ms)?;
+            let banners = banners(conn, &sent, now_ms)?;
+            Ok((sent, (due, waits), reminded, posted, others, banners))
+        })?;
+    if !posted.is_empty() || others > 0 {
+        super::tasks_changed(app, posted);
+    }
+    let mut follow_ups = None;
+    let mut briefs = Vec::new();
     if let Some(store) = &store {
         if !waits.is_empty() {
             let people = store
@@ -946,22 +1115,27 @@ fn tick(app: &AppHandle, prompts: &dyn PromptPresenter, now_ms: i64) -> Result<(
                     People::read(conn).map_err(|_| StoreError::Unavailable)
                 })
                 .map_err(unreadable)?;
-            if let Some(notice) = follow_notice(&waits, &people) {
-                show(&notice, waits.into_iter().map(|wait| wait.key).collect());
-            }
+            follow_ups = follow_notice(&waits, &people)
+                .map(|notice| (notice, waits.into_iter().map(|wait| wait.key).collect()));
         }
-        for (key, notice) in upcoming_briefs(app, store, &history, &sent, now_ms)? {
-            show(&notice, vec![key]);
-        }
+        briefs = upcoming_briefs(app, store, &history, &sent, now_ms)?;
     }
+    let shown = offer(prompts, &banners, due, follow_ups, briefs);
     if !shown.is_empty() {
         history.with_connection(|conn| record(conn, &shown, now_ms))?;
     }
-    let reminded: Vec<String> = reminded
-        .into_iter()
-        .filter(|(_, notice)| prompts.present_follow_up(&notice.id, &notice.title, &notice.body))
-        .map(|(item_id, _)| item_id)
-        .collect();
+    let reminded: Vec<String> = if banners.quiet {
+        Vec::new()
+    } else {
+        reminded
+            .into_iter()
+            .filter(|(_, notice)| {
+                !banners.reminders
+                    || prompts.present_follow_up(&notice.id, &notice.title, &notice.body)
+            })
+            .map(|(item_id, _)| item_id)
+            .collect()
+    };
     if !reminded.is_empty() {
         routines::reminders_notified(app, &Uuid::new_v4().to_string(), &reminded)
             .map_err(anyhow::Error::msg)?;
@@ -1667,5 +1841,112 @@ mod tests {
                 (inbox::NotificationKind::Due, Some(launch.id)),
             ]
         );
+    }
+
+    /// Takes every banner offered and writes down its id.
+    #[derive(Default)]
+    struct Recorded {
+        offered: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl PromptPresenter for Recorded {
+        fn access(&self) -> crate::meeting::detection::notify::NotificationAccess {
+            crate::meeting::detection::notify::NotificationAccess::Authorized
+        }
+
+        fn request_access(&self) -> crate::meeting::detection::notify::NotificationAccessFuture {
+            Box::pin(async { crate::meeting::detection::notify::NotificationAccess::Authorized })
+        }
+
+        fn present(
+            &self,
+            _prompt_id: &str,
+            _prompt: &crate::meeting::detection::machine::PromptKind,
+        ) -> bool {
+            false
+        }
+
+        fn withdraw(&self, _prompt_id: &str) {}
+
+        fn present_digest(&self, _title: &str, _body: &str) -> bool {
+            false
+        }
+
+        fn present_ritual(&self, _ritual_id: &str, _title: &str) -> bool {
+            false
+        }
+
+        fn present_follow_up(&self, id: &str, _title: &str, _body: &str) -> bool {
+            // PANIC: only this test's thread holds the lock.
+            self.offered
+                .lock()
+                .expect("the offered ids")
+                .push(id.to_owned());
+            true
+        }
+    }
+
+    fn notice(id: &str) -> Notice {
+        Notice {
+            id: id.to_owned(),
+            title: id.to_owned(),
+            body: String::new(),
+        }
+    }
+
+    #[test]
+    fn quiet_hours_hold_follow_ups_and_briefs_until_they_end() {
+        let prompts = Recorded::default();
+        let offer_now = |quiet: bool| {
+            let banners = Banners {
+                quiet,
+                due_days: true,
+                reminders: true,
+                inbox: Some((notice("inbox"), vec!["inbox:n1".to_owned()])),
+            };
+            offer(
+                &prompts,
+                &banners,
+                Vec::new(),
+                Some((notice("follow"), vec!["follow:w1".to_owned()])),
+                vec![("brief:e1".to_owned(), notice("brief"))],
+            )
+        };
+
+        assert!(offer_now(true).is_empty());
+        assert!(prompts.offered.lock().expect("the offered ids").is_empty());
+
+        assert_eq!(offer_now(false), ["inbox:n1", "follow:w1", "brief:e1"]);
+    }
+
+    #[test]
+    fn an_unread_project_reminder_shows_one_banner_however_long_it_waits() {
+        let mut desk = desk();
+        let project = store::insert_project(&desk.history, "Harbor launch", None, at(0, 9))
+            .expect("a project")
+            .id;
+        inbox::remind_subject(
+            &desk.history,
+            inbox::SubjectKind::Project,
+            &project,
+            at(0, 9),
+            at(0, 8),
+            at(0, 9),
+        )
+        .expect("the reminder posted");
+        let banners_at = |desk: &Desk, now_ms: i64| -> Vec<String> {
+            let shown = sent(&desk.history).expect("the banners shown before");
+            inbox_settings::banners_due(&desk.history, &shown, now_ms)
+                .expect("the banners due")
+                .into_iter()
+                .map(|(key, _)| key)
+                .collect()
+        };
+
+        let first = banners_at(&desk, at(0, 9));
+        assert_eq!(first.len(), 1);
+        record(&mut desk.history, &first, at(0, 9)).expect("the banner remembered");
+        record(&mut desk.history, &[], at(61, 9)).expect("old banners forgotten");
+        assert!(banners_at(&desk, at(61, 9)).is_empty());
     }
 }

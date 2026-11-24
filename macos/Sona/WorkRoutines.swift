@@ -37,6 +37,8 @@ struct WorkReminder: Codable, Equatable {
 final class RoutinesStore {
     private(set) var templates: [WorkTemplate] = []
     private(set) var reminders: [String: WorkReminder] = [:]
+    /// Reminders on projects, initiatives and notes.
+    private(set) var subjectReminders: [WorkSubjectRef: WorkSubjectReminder] = [:]
     private(set) var error: String?
 
     @ObservationIgnored private let core: Core
@@ -44,13 +46,17 @@ final class RoutinesStore {
     init(core: Core) {
         self.core = core
         core.observe("work-changed") { [weak self] _ in
-            Task { await self?.loadReminders() }
+            Task {
+                await self?.loadReminders()
+                await self?.loadSubjectReminders()
+            }
         }
     }
 
     func start() async {
         await loadTemplates()
         await loadReminders()
+        await loadSubjectReminders()
     }
 
     func loadTemplates() async {
@@ -65,6 +71,15 @@ final class RoutinesStore {
         do {
             let listed: [WorkReminder] = try await core.request("work_reminders", RemindersParams(dueOnly: false))
             reminders = Dictionary(listed.map { ($0.itemId, $0) }, uniquingKeysWith: { _, last in last })
+        } catch {
+            self.error = error.localizedDescription
+        }
+    }
+
+    func loadSubjectReminders() async {
+        do {
+            let listed: [WorkSubjectReminder] = try await core.request("work_subject_reminders")
+            subjectReminders = Dictionary(listed.map { ($0.subject, $0) }, uniquingKeysWith: { _, last in last })
         } catch {
             self.error = error.localizedDescription
         }
@@ -121,6 +136,17 @@ final class RoutinesStore {
         }
     }
 
+    func setReminder(on subject: WorkSubjectRef, at moment: Int64?) async {
+        error = nil
+        do {
+            let saved: WorkSubjectReminder? = try await core.request("work_subject_reminder_set", SubjectReminderSetParams(
+                operationId: Self.newId(), kind: subject.kind, id: subject.id, atMs: moment))
+            subjectReminders[subject] = saved
+        } catch {
+            self.error = error.localizedDescription
+        }
+    }
+
     private static func sorted(_ templates: [WorkTemplate]) -> [WorkTemplate] {
         templates.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
     }
@@ -152,6 +178,12 @@ private struct TemplateUseParams: Encodable {
 }
 private struct ReminderSetParams: Encodable {
     let operationId: String
+    let id: String
+    let atMs: Int64?
+}
+private struct SubjectReminderSetParams: Encodable {
+    let operationId: String
+    let kind: WorkSubjectKind
     let id: String
     let atMs: Int64?
 }

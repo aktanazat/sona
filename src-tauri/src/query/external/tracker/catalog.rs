@@ -1058,7 +1058,8 @@ impl Tracker<'_> {
         }
         let operation_id = operation_id.unwrap_or_else(|| args.write.fresh_operation_id());
         self.applies("saving a project")?;
-        let project = work::catalog_project_save(self.app, &operation_id, id, &edit)
+        let author = Self::update_author(&args.write);
+        let project = work::catalog_project_save(self.app, author, &operation_id, id, &edit)
             .map_err(|message| self.write_refusal(message, &operation_id, "The project"))?;
         Ok(WorkAnswer::Project(ExternalWorkProjectChange {
             schema_version: QUERY_SCHEMA_VERSION,
@@ -1091,8 +1092,14 @@ impl Tracker<'_> {
                 })?
             } else {
                 self.applies("putting a project away")?;
-                work::catalog_project_save(self.app, &operation_id, Some(current.id.clone()), &edit)
-                    .map_err(|message| self.write_refusal(message, &operation_id, "The project"))?
+                work::catalog_project_save(
+                    self.app,
+                    Self::update_author(&args.write),
+                    &operation_id,
+                    Some(current.id.clone()),
+                    &edit,
+                )
+                .map_err(|message| self.write_refusal(message, &operation_id, "The project"))?
             };
             return Ok(WorkAnswer::Project(ExternalWorkProjectChange {
                 schema_version: QUERY_SCHEMA_VERSION,

@@ -286,13 +286,17 @@ private struct ScratchNoteEditorPage: View {
                 .help("Link a source")
                 .accessibilityLabel("Link a source")
                 .disabled(store.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                if store.saved?.personal == true {
-                    Button("Share") { showingPersonalShare = true }
-                        .buttonStyle(.secondary)
-                        .help("Share with agents, or move it into a project")
-                } else if store.saved != nil {
-                    Button("Make private…") { confirmingPrivate = true }
-                        .buttonStyle(.quiet)
+                if let note = store.saved {
+                    FollowButton(kind: .note, id: note.id)
+                    SubjectReminderMenu(subject: WorkSubjectRef(kind: .note, id: note.id))
+                    if note.personal {
+                        Button("Share") { showingPersonalShare = true }
+                            .buttonStyle(.secondary)
+                            .help("Share with agents, or move it into a project")
+                    } else {
+                        Button("Make private…") { confirmingPrivate = true }
+                            .buttonStyle(.quiet)
+                    }
                 }
                 ScratchNoteActions(
                     store: store,

@@ -193,6 +193,7 @@ struct TasksSettingsView: View {
             }
             .padding(.bottom, Space.l)
             ProjectDigestSettings()
+            InboxNotificationSettings()
             labels
             templates
         }

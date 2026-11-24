@@ -121,6 +121,7 @@ private struct DigestTaskLine: View {
             model.workFocus.peeking = false
             model.workFocus.highlighted = task.id
             model.workFocus.open(task.id, in: .inbox)
+            if model.place != .inbox { model.go(.inbox) }
         } label: {
             HStack(spacing: 6) {
                 Text("#\(task.number)").font(TypeScale.mono(12)).foregroundStyle(Theme.inkTertiary)

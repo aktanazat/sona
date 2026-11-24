@@ -18,9 +18,12 @@ pub(crate) mod export;
 pub(crate) mod filter;
 pub(crate) mod favorites;
 pub(crate) mod filter;
+pub(crate) mod feed;
 pub(crate) mod follow;
+pub(crate) mod follows;
 mod hygiene;
 pub(crate) mod inbox;
+pub(crate) mod inbox_settings;
 pub(crate) mod initiatives;
 pub(crate) mod insights;
 pub(crate) mod items;
@@ -2233,8 +2236,11 @@ pub fn work_label_delete(app: AppHandle, operation_id: String, id: String) -> Re
     })
 }
 
+/// Makes or changes a project as `author`; a status another moved on a
+/// project the user follows reaches the inbox.
 pub(crate) fn catalog_project_save(
     app: &AppHandle,
+    author: comments::Author<'_>,
     operation_id: &str,
     id: Option<String>,
     edit: &catalog::ProjectEdit,
@@ -2248,7 +2254,21 @@ pub(crate) fn catalog_project_save(
             &(&id, edit),
             now,
             |tx| {
+                let before = id
+                    .as_deref()
+                    .map(|id| store::project(tx, &store::uuid(id)?))
+                    .transpose()?;
                 let project = catalog::save_project(tx, id.as_deref(), edit, now)?;
+                if let Some(before) = before {
+                    follows::project_status_changed(
+                        tx,
+                        &project.id,
+                        author,
+                        before.status,
+                        project.status,
+                        now,
+                    )?;
+                }
                 Ok(Done {
                     effects: Effects {
                         projects: vec![project.id.clone()],

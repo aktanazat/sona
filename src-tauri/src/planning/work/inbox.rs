@@ -6,7 +6,9 @@
 //! too: a reminder whose time came, work the user owes that is due today,
 //! and an automation run that finished or failed, and a weekly digest of
 //! the user's projects. Each of those carries a key, so it is posted once
-//! however often it is offered, across restarts.
+//! however often it is offered, across restarts. A notice may be about a
+//! project, initiative, note or saved view instead of a task (its subject),
+//! and a kind the user turned off in the inbox settings is never posted.
 
 use super::digest::ProjectDigest;
 use super::types::{WorkActivityKind, WorkActor};
@@ -36,6 +38,48 @@ pub enum NotificationKind {
     Automation,
     /// A digest of the user's projects; `digest` holds it.
     Digest,
+    /// An agent asked a question in its session on the task and waits for
+    /// the answer; `to` holds the question.
+    Question,
+    /// Something happened to a followed project: `field` is `update` (an
+    /// update posted, `to` its health) or `status` (`from` and `to`).
+    Project,
+    /// A task joined a followed view (`field` `added`), or one in it was
+    /// done or canceled (`field` `done` or `canceled`).
+    View,
+    /// An agent edited a followed note.
+    Note,
+}
+
+impl NotificationKind {
+    pub(crate) const ALL: [Self; 13] = [
+        Self::Status,
+        Self::Comment,
+        Self::Mention,
+        Self::Assigned,
+        Self::Changed,
+        Self::Reminder,
+        Self::Due,
+        Self::Automation,
+        Self::Digest,
+        Self::Question,
+        Self::Project,
+        Self::View,
+        Self::Note,
+    ];
+
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.as_str() == value)
+    }
+
+    /// What needs the user: being mentioned or assigned, a question an
+    /// agent waits on, a reminder, and work due today.
+    pub(crate) const fn priority(self) -> bool {
+        matches!(
+            self,
+            Self::Mention | Self::Assigned | Self::Question | Self::Reminder | Self::Due
+        )
+    }
 }
 
 crate::planning::types::sql_enum!(NotificationKind {
@@ -48,6 +92,10 @@ crate::planning::types::sql_enum!(NotificationKind {
     Due => "due",
     Automation => "automation",
     Digest => "digest",
+    Question => "question",
+    Project => "project",
+    View => "view",
+    Note => "note",
 });
 
 /// Notices without a task, kinds for a field change, Sona's own posts
@@ -139,6 +187,127 @@ CREATE TRIGGER planning_notifications_run_delete AFTER DELETE ON planning_loop_r
     DELETE FROM planning_notifications WHERE run_id = old.id;
 END;";
 
+/// Notices about a project, initiative, note or saved view (their
+/// subject), questions agents ask, the followed projects, views and notes,
+/// and which kinds reach the inbox or show a banner, and when banners keep
+/// quiet. Deleting a subject takes its follows and notices with it.
+pub(crate) const INBOX_SUBJECTS_MIGRATION: &str = "DROP TRIGGER planning_task_lifecycle_delete;
+DROP TRIGGER planning_notifications_run_delete;
+CREATE TABLE planning_notifications_next (
+    id TEXT PRIMARY KEY NOT NULL,
+    task_id TEXT,
+    kind TEXT NOT NULL CHECK(kind IN ('status', 'comment', 'mention', 'assigned', 'changed',
+        'reminder', 'due', 'automation', 'digest', 'question', 'project', 'view', 'note')),
+    actor TEXT NOT NULL CHECK(actor IN ('sona', 'agent')),
+    agent TEXT CHECK(agent IS NULL OR length(trim(agent)) > 0),
+    activity_id TEXT,
+    comment_id TEXT,
+    field TEXT,
+    run_id TEXT,
+    event_key TEXT UNIQUE,
+    from_value TEXT,
+    to_value TEXT,
+    digest TEXT,
+    subject_kind TEXT CHECK(subject_kind IN ('project', 'initiative', 'note', 'view')),
+    subject_id TEXT,
+    created_at_ms INTEGER NOT NULL,
+    read_at_ms INTEGER,
+    snoozed_until_ms INTEGER,
+    archived_at_ms INTEGER,
+    CHECK((subject_kind IS NULL) = (subject_id IS NULL)),
+    CHECK((kind = 'digest') = (digest IS NOT NULL)),
+    CHECK(task_id IS NOT NULL OR run_id IS NOT NULL OR subject_id IS NOT NULL
+        OR kind = 'digest')
+);
+INSERT INTO planning_notifications_next (rowid, id, task_id, kind, actor, agent, activity_id,
+        comment_id, field, run_id, event_key, from_value, to_value, digest, created_at_ms,
+        read_at_ms, snoozed_until_ms, archived_at_ms)
+    SELECT rowid, id, task_id, kind, actor, agent, activity_id, comment_id, field, run_id,
+        event_key, from_value, to_value, digest, created_at_ms, read_at_ms, snoozed_until_ms,
+        archived_at_ms
+    FROM planning_notifications;
+DROP TABLE planning_notifications;
+ALTER TABLE planning_notifications_next RENAME TO planning_notifications;
+CREATE INDEX planning_notifications_created ON planning_notifications(created_at_ms);
+CREATE INDEX planning_notifications_task ON planning_notifications(task_id);
+CREATE INDEX planning_notifications_subject ON planning_notifications(subject_kind, subject_id);
+CREATE TRIGGER planning_task_lifecycle_delete AFTER DELETE ON planning_tasks BEGIN
+    DELETE FROM planning_task_versions WHERE task_id = old.id;
+    DELETE FROM planning_task_subscriptions WHERE task_id = old.id;
+    DELETE FROM planning_notifications WHERE task_id = old.id;
+    DELETE FROM planning_favorites WHERE kind = 'task' AND target_id = old.id;
+END;
+CREATE TRIGGER planning_notifications_run_delete AFTER DELETE ON planning_loop_runs BEGIN
+    DELETE FROM planning_notifications WHERE run_id = old.id;
+END;
+CREATE TABLE planning_follows (
+    kind TEXT NOT NULL CHECK(kind IN ('project', 'view', 'note')),
+    target_id TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    members TEXT,
+    checked_at_ms INTEGER,
+    PRIMARY KEY(kind, target_id)
+);
+CREATE TABLE planning_inbox_kinds (
+    kind TEXT PRIMARY KEY NOT NULL,
+    inbox INTEGER NOT NULL CHECK(inbox IN (0, 1)),
+    banner INTEGER NOT NULL CHECK(banner IN (0, 1))
+);
+CREATE TABLE planning_inbox_quiet (
+    id INTEGER PRIMARY KEY CHECK(id = 1),
+    start_minute INTEGER NOT NULL CHECK(start_minute BETWEEN 0 AND 1439),
+    end_minute INTEGER NOT NULL CHECK(end_minute BETWEEN 0 AND 1439),
+    CHECK(start_minute != end_minute)
+);
+CREATE TRIGGER planning_notifications_project_delete AFTER DELETE ON planning_projects BEGIN
+    DELETE FROM planning_follows WHERE kind = 'project' AND target_id = old.id;
+    DELETE FROM planning_notifications WHERE subject_kind = 'project' AND subject_id = old.id;
+END;
+CREATE TRIGGER planning_notifications_initiative_delete AFTER DELETE ON planning_initiatives
+BEGIN
+    DELETE FROM planning_notifications WHERE subject_kind = 'initiative'
+        AND subject_id = old.id;
+END;
+CREATE TRIGGER planning_notifications_view_delete AFTER DELETE ON planning_views BEGIN
+    DELETE FROM planning_follows WHERE kind = 'view' AND target_id = old.id;
+    DELETE FROM planning_notifications WHERE subject_kind = 'view' AND subject_id = old.id;
+END;";
+
+/// A note deleted for good takes its follow, reminder and notices with it.
+pub(crate) const NOTE_NOTICES_MIGRATION: &str =
+    "CREATE TRIGGER planning_notifications_note_delete AFTER DELETE ON scratch_notes BEGIN
+    DELETE FROM planning_follows WHERE kind = 'note' AND target_id = old.id;
+    DELETE FROM planning_subject_reminders WHERE subject_kind = 'note' AND subject_id = old.id;
+    DELETE FROM planning_notifications WHERE subject_kind = 'note' AND subject_id = old.id;
+END;";
+
+/// What a notice is about when it is not a task.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubjectKind {
+    Project,
+    Initiative,
+    Note,
+    View,
+}
+
+crate::planning::types::sql_enum!(SubjectKind {
+    Project => "project",
+    Initiative => "initiative",
+    Note => "note",
+    View => "view",
+});
+
+/// The project, initiative, note or view a notice is about, with its name
+/// as it is now; none once it is gone.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NoticeSubject {
+    pub(crate) kind: SubjectKind,
+    pub(crate) id: String,
+    pub(crate) name: Option<String>,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SubscribeReason {
@@ -167,7 +336,8 @@ pub(crate) struct Subscription {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Notification {
     pub(crate) id: String,
-    /// None only for an automation run about no task.
+    /// None for an automation run about no task, a digest, and a notice
+    /// about a subject.
     pub(crate) item_id: Option<String>,
     pub(crate) kind: NotificationKind,
     pub(crate) actor: WorkActor,
@@ -185,6 +355,10 @@ pub(crate) struct Notification {
     pub(crate) archived_at_ms: Option<i64>,
     /// For a digest, the projects it covers.
     pub(crate) digest: Option<ProjectDigest>,
+    /// The project, initiative, note or view it is about, when not a task.
+    pub(crate) subject: Option<NoticeSubject>,
+    /// Whether it needs the user; see [`NotificationKind::priority`].
+    pub(crate) priority: bool,
 }
 
 /// The automation run an automation notice is about.
@@ -216,6 +390,21 @@ pub(crate) struct Shown {
     pub(crate) unread_only: bool,
     pub(crate) snoozed: bool,
     pub(crate) archived: bool,
+    /// Only the ones that need the user.
+    pub(crate) priority_only: bool,
+}
+
+/// Narrows a list: any of these kinds, about a task in this project or the
+/// project itself, about a task of any of these priorities (0 none to 4
+/// low). Empty keeps every one.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct InboxFilter {
+    #[serde(default)]
+    pub(crate) kinds: Vec<NotificationKind>,
+    pub(crate) project_id: Option<String>,
+    #[serde(default)]
+    pub(crate) task_priorities: Vec<u8>,
 }
 
 pub(crate) fn subscribed(conn: &Connection, task_id: &str) -> Result<bool> {
@@ -262,23 +451,30 @@ pub(crate) fn subscriptions(conn: &Connection) -> Result<Vec<Subscription>> {
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
-struct Notice<'a> {
-    task_id: Option<&'a str>,
-    kind: NotificationKind,
-    actor: WorkActor,
-    agent: Option<&'a str>,
-    activity_id: Option<&'a str>,
-    comment_id: Option<&'a str>,
-    field: Option<&'a str>,
-    run_id: Option<&'a str>,
-    key: Option<&'a str>,
-    from: Option<&'a str>,
-    to: Option<&'a str>,
-    digest: Option<&'a str>,
+/// One notice as it is posted. Other work modules post their own through
+/// [`notify`].
+pub(super) struct Notice<'a> {
+    pub(super) task_id: Option<&'a str>,
+    pub(super) kind: NotificationKind,
+    pub(super) actor: WorkActor,
+    pub(super) agent: Option<&'a str>,
+    pub(super) activity_id: Option<&'a str>,
+    pub(super) comment_id: Option<&'a str>,
+    pub(super) field: Option<&'a str>,
+    pub(super) run_id: Option<&'a str>,
+    pub(super) key: Option<&'a str>,
+    pub(super) from: Option<&'a str>,
+    pub(super) to: Option<&'a str>,
+    pub(super) digest: Option<&'a str>,
+    pub(super) subject: Option<(SubjectKind, &'a str)>,
 }
 
 impl<'a> Notice<'a> {
-    const fn new(task_id: Option<&'a str>, kind: NotificationKind, actor: WorkActor) -> Self {
+    pub(super) const fn new(
+        task_id: Option<&'a str>,
+        kind: NotificationKind,
+        actor: WorkActor,
+    ) -> Self {
         Self {
             task_id,
             kind,
@@ -292,17 +488,38 @@ impl<'a> Notice<'a> {
             from: None,
             to: None,
             digest: None,
+            subject: None,
+        }
+    }
+
+    /// A notice about a project, initiative, note or view.
+    pub(super) const fn about(
+        kind: NotificationKind,
+        subject: SubjectKind,
+        id: &'a str,
+        actor: WorkActor,
+    ) -> Self {
+        Self {
+            subject: Some((subject, id)),
+            ..Self::new(None, kind, actor)
         }
     }
 }
 
-/// Posts a notice; one with a key already posted is left alone. True when
-/// it was posted.
-fn notify(conn: &Connection, notice: &Notice<'_>, now_ms: i64) -> Result<bool> {
+/// Posts a notice unless its kind is turned off in the inbox settings; one
+/// with a key already posted is left alone. True when it was posted.
+pub(super) fn notify(conn: &Connection, notice: &Notice<'_>, now_ms: i64) -> Result<bool> {
+    if !super::inbox_settings::posts(conn, notice.kind)? {
+        return Ok(false);
+    }
+    let (subject_kind, subject_id) = notice
+        .subject
+        .map_or((None, None), |(kind, id)| (Some(kind.as_str()), Some(id)));
     Ok(conn.execute(
         "INSERT INTO planning_notifications (id, task_id, kind, actor, agent, activity_id,
-            comment_id, field, run_id, event_key, from_value, to_value, digest, created_at_ms)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+            comment_id, field, run_id, event_key, from_value, to_value, digest, subject_kind,
+            subject_id, created_at_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
          ON CONFLICT(event_key) DO NOTHING",
         params![
             Uuid::new_v4().to_string(),
@@ -318,6 +535,8 @@ fn notify(conn: &Connection, notice: &Notice<'_>, now_ms: i64) -> Result<bool> {
             notice.from,
             notice.to,
             notice.digest,
+            subject_kind,
+            subject_id,
             now_ms
         ],
     )? > 0)
@@ -483,6 +702,57 @@ pub(crate) enum Remind {
     Due,
 }
 
+/// Sona's word that a reminder on a project, initiative or note came: `at_ms`
+/// set at `set_at_ms`. Posted once for each; true when this call posted it.
+pub(crate) fn remind_subject(
+    conn: &Connection,
+    subject: SubjectKind,
+    id: &str,
+    at_ms: i64,
+    set_at_ms: i64,
+    now_ms: i64,
+) -> Result<bool> {
+    let key = format!("reminder:{}:{id}:{at_ms}:{set_at_ms}", subject.as_str());
+    let at = at_ms.to_string();
+    let notice = Notice {
+        key: Some(&key),
+        to: Some(&at),
+        ..Notice::about(NotificationKind::Reminder, subject, id, WorkActor::Sona)
+    };
+    notify(conn, &notice, now_ms)
+}
+
+/// An agent asked the user a question in its session on a task; posted once
+/// per question, `activity_id` naming it.
+pub(crate) fn asked(
+    conn: &Connection,
+    task_id: &str,
+    activity_id: &str,
+    agent: Option<&str>,
+    question: &str,
+    now_ms: i64,
+) -> Result<bool> {
+    let key = format!("question:{activity_id}");
+    let notice = Notice {
+        agent,
+        key: Some(&key),
+        to: Some(question),
+        ..Notice::new(Some(task_id), NotificationKind::Question, WorkActor::Agent)
+    };
+    notify(conn, &notice, now_ms)
+}
+
+/// The user answered the questions waiting on a task: their notices are
+/// read.
+pub(crate) fn answered(conn: &Connection, task_id: &str, now_ms: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE planning_notifications SET read_at_ms = coalesce(read_at_ms, ?2)
+         WHERE task_id = ?1 AND kind = 'question'",
+        params![task_id, now_ms],
+    )?;
+    Ok(())
+}
+
 /// An automation run that finished or failed. Posted once per run; a run
 /// still waiting or skipped posts nothing.
 pub(crate) fn automation_ended(conn: &Connection, run_id: &str, now_ms: i64) -> Result<bool> {
@@ -581,11 +851,15 @@ pub(crate) fn mentioned(
         return Ok(());
     }
     subscribe(conn, task_id, SubscribeReason::Mentioned, now_ms)?;
-    let upgraded = conn.execute(
-        "UPDATE planning_notifications SET kind = 'mention'
-         WHERE comment_id = ?1 AND kind = 'comment'",
-        [comment_id],
-    )?;
+    let upgraded = if super::inbox_settings::posts(conn, NotificationKind::Mention)? {
+        conn.execute(
+            "UPDATE planning_notifications SET kind = 'mention'
+             WHERE comment_id = ?1 AND kind = 'comment'",
+            [comment_id],
+        )?
+    } else {
+        0
+    };
     if upgraded == 0 {
         let activity_id: Option<String> = conn
             .query_row(
@@ -611,7 +885,12 @@ pub(crate) fn mentioned(
 
 const COLUMNS: &str = "x.id, x.task_id, x.kind, x.actor, coalesce(a.agent, x.agent), x.comment_id,
     x.field, x.run_id, r.loop_id, l.name, r.error, x.from_value, x.to_value, x.created_at_ms,
-    x.read_at_ms, x.snoozed_until_ms, x.archived_at_ms, x.digest";
+    x.read_at_ms, x.snoozed_until_ms, x.archived_at_ms, x.digest, x.subject_kind, x.subject_id,
+    CASE x.subject_kind
+        WHEN 'project' THEN (SELECT title FROM planning_projects WHERE id = x.subject_id)
+        WHEN 'initiative' THEN (SELECT name FROM planning_initiatives WHERE id = x.subject_id)
+        WHEN 'view' THEN (SELECT name FROM planning_views WHERE id = x.subject_id)
+    END";
 
 const FROM: &str = "planning_notifications x
     LEFT JOIN planning_activity_agents a ON a.activity_id = x.activity_id
@@ -637,10 +916,19 @@ fn read(row: &Row<'_>) -> rusqlite::Result<Notification> {
         .map_err(|error| {
             rusqlite::Error::FromSqlConversionFailure(17, rusqlite::types::Type::Text, Box::new(error))
         })?;
+    let subject = match (row.get::<_, Option<SubjectKind>>(18)?, row.get(19)?) {
+        (Some(kind), Some(id)) => Some(NoticeSubject {
+            kind,
+            id,
+            name: row.get(20)?,
+        }),
+        _ => None,
+    };
+    let kind: NotificationKind = row.get(2)?;
     Ok(Notification {
         id: row.get(0)?,
         item_id: row.get(1)?,
-        kind: row.get(2)?,
+        kind,
         actor: row.get(3)?,
         agent: row.get(4)?,
         comment_id: row.get(5)?,
@@ -653,6 +941,8 @@ fn read(row: &Row<'_>) -> rusqlite::Result<Notification> {
         snoozed_until_ms: row.get(15)?,
         archived_at_ms: row.get(16)?,
         digest,
+        subject,
+        priority: kind.priority(),
     })
 }
 
@@ -662,18 +952,79 @@ pub(crate) fn notifications(
     shown: Shown,
     now_ms: i64,
 ) -> Result<Vec<Notification>> {
+    filtered(conn, shown, &InboxFilter::default(), now_ms)
+}
+
+fn json_list<T: Serialize>(values: &[T]) -> Result<Option<String>> {
+    Ok(if values.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_string(values)?)
+    })
+}
+
+/// Notifications `filter` keeps, newest first.
+pub(crate) fn filtered(
+    conn: &Connection,
+    shown: Shown,
+    filter: &InboxFilter,
+    now_ms: i64,
+) -> Result<Vec<Notification>> {
+    let priority: Vec<NotificationKind> = if shown.priority_only {
+        NotificationKind::ALL
+            .into_iter()
+            .filter(|kind| kind.priority())
+            .collect()
+    } else {
+        Vec::new()
+    };
     let mut statement = conn.prepare(&format!(
         "SELECT {COLUMNS} FROM {FROM}
+            LEFT JOIN planning_tasks t ON t.id = x.task_id
          WHERE (?1 = 0 OR x.read_at_ms IS NULL)
            AND (?2 OR x.snoozed_until_ms IS NULL OR x.snoozed_until_ms <= ?4)
            AND (?3 OR x.archived_at_ms IS NULL)
+           AND (?5 IS NULL OR x.kind IN (SELECT value FROM json_each(?5)))
+           AND (?6 IS NULL OR t.project_id = ?6
+                OR (x.subject_kind = 'project' AND x.subject_id = ?6))
+           AND (?7 IS NULL OR t.priority IN (SELECT value FROM json_each(?7)))
+           AND (?8 IS NULL OR x.kind IN (SELECT value FROM json_each(?8)))
          ORDER BY x.created_at_ms DESC, x.rowid DESC"
     ))?;
     let rows = statement.query_map(
-        params![shown.unread_only, shown.snoozed, shown.archived, now_ms],
+        params![
+            shown.unread_only,
+            shown.snoozed,
+            shown.archived,
+            now_ms,
+            json_list(&filter.kinds)?,
+            filter.project_id,
+            json_list(&filter.task_priorities)?,
+            json_list(&priority)?
+        ],
         read,
     )?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// Fills in the titles of the notes notices are about. Notes live beside
+/// the planner, so this runs only against the whole history database.
+pub(crate) fn name_notes(conn: &Connection, notices: &mut [Notification]) -> Result<()> {
+    let mut notes: Vec<&mut NoticeSubject> = notices
+        .iter_mut()
+        .filter_map(|notice| notice.subject.as_mut())
+        .filter(|subject| subject.kind == SubjectKind::Note)
+        .collect();
+    if notes.is_empty() {
+        return Ok(());
+    }
+    let mut statement = conn.prepare_cached("SELECT title FROM scratch_notes WHERE id = ?1")?;
+    for subject in &mut notes {
+        subject.name = statement
+            .query_row([&subject.id], |row| row.get(0))
+            .optional()?;
+    }
+    Ok(())
 }
 
 fn notification(conn: &Connection, id: &str) -> Result<Notification> {
@@ -802,16 +1153,22 @@ fn reading<T>(app: &AppHandle, work: impl FnOnce(&Connection) -> Result<T>) -> R
     crate::planning::history(&app.state::<Arc<HistoryManager>>(), |conn| work(conn))
 }
 
-pub(crate) fn work_inbox(app: AppHandle, shown: Shown) -> Result<Inbox, String> {
+pub(crate) fn work_inbox(
+    app: AppHandle,
+    shown: Shown,
+    filter: InboxFilter,
+) -> Result<Inbox, String> {
     reading(&app, |conn| {
         let now = now_ms();
         let unread = Shown {
             unread_only: true,
             ..Shown::default()
         };
+        let mut shown = filtered(conn, shown, &filter, now)?;
+        name_notes(conn, &mut shown)?;
         Ok(Inbox {
             unread: notifications(conn, unread, now)?.len(),
-            notifications: notifications(conn, shown, now)?,
+            notifications: shown,
         })
     })
 }

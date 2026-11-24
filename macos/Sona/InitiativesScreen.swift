@@ -178,6 +178,7 @@ private struct InitiativePage: View {
                 }
             }
         } actions: {
+            SubjectReminderMenu(subject: WorkSubjectRef(kind: .initiative, id: initiative.id))
             Button("Delete") { deleting = true }
                 .buttonStyle(.secondary)
                 .confirmationDialog("Delete “\(initiative.name)”?", isPresented: $deleting) {

@@ -339,7 +339,9 @@ fn weekly(
     now_ms: i64,
 ) -> Result<bool> {
     history.with_connection(|conn| {
-        if inbox::digest_since(conn, due_ms)? {
+        if inbox::digest_since(conn, due_ms)?
+            || !super::inbox_settings::posts(conn, inbox::NotificationKind::Digest)?
+        {
             return Ok(false);
         }
         let kept = meetings.and_then(|store| KeptLocal::read(store).ok());

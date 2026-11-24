@@ -70,10 +70,122 @@ struct WorkSubscription: Codable, Equatable {
 
 enum WorkNotificationKind: String, Codable, Hashable {
     case status, comment, mention, assigned, changed, reminder, due, automation, digest
+    case question, project, view, note
     case unknown
 
     init(from decoder: Decoder) throws {
         self = Self(rawValue: try decoder.singleValueContainer().decode(String.self)) ?? .unknown
+    }
+
+    /// Every kind the core posts, in the order its settings list them.
+    static let listed: [WorkNotificationKind] = [
+        .status, .comment, .mention, .assigned, .changed, .reminder, .due, .automation, .digest,
+        .question, .project, .view, .note,
+    ]
+
+    var label: String {
+        switch self {
+        case .status: "Status changes"
+        case .comment: "Comments"
+        case .mention: "Mentions"
+        case .assigned: "Assigned to you"
+        case .changed: "Other task changes"
+        case .reminder: "Reminders"
+        case .due: "Due today"
+        case .automation: "Automation runs"
+        case .digest: "Weekly project digest"
+        case .question: "Agent questions"
+        case .project: "Followed projects"
+        case .view: "Followed views"
+        case .note: "Followed notes"
+        case .unknown: "Other"
+        }
+    }
+}
+
+/// What a notice, a follow or a reminder is about when it is not a task.
+enum WorkSubjectKind: String, Codable, Hashable {
+    case project, initiative, note, view
+    case unknown
+
+    init(from decoder: Decoder) throws {
+        self = Self(rawValue: try decoder.singleValueContainer().decode(String.self)) ?? .unknown
+    }
+}
+
+/// The project, initiative, note or saved view a notice is about, named as
+/// it is now; no name once it is gone.
+struct WorkNoticeSubject: Codable, Equatable {
+    var kind: WorkSubjectKind
+    var id: String
+    var name: String?
+}
+
+/// A project, saved view or note whose news reaches the inbox.
+struct WorkFollow: Codable, Equatable {
+    var kind: WorkSubjectKind
+    var targetId: String
+    var createdAtMs: Int64
+}
+
+/// One project, initiative or note, as a key for its reminder.
+struct WorkSubjectRef: Hashable {
+    var kind: WorkSubjectKind
+    var id: String
+}
+
+struct WorkSubjectReminder: Codable, Equatable {
+    var subjectKind: WorkSubjectKind
+    var subjectId: String
+    var remindAtMs: Int64
+    var setAtMs: Int64
+    var actor: WorkActor
+    var agent: String?
+    var notifiedAtMs: Int64?
+
+    var subject: WorkSubjectRef { WorkSubjectRef(kind: subjectKind, id: subjectId) }
+}
+
+/// Whether a kind reaches the inbox and whether it shows a banner.
+struct WorkInboxKindSetting: Codable, Equatable {
+    var kind: WorkNotificationKind
+    var inbox: Bool
+    var banner: Bool
+}
+
+/// Banners keep quiet from `startMinute` to `endMinute`, minutes after
+/// midnight; the span may cross midnight.
+struct WorkQuietHours: Codable, Equatable {
+    var startMinute: Int
+    var endMinute: Int
+}
+
+struct WorkInboxSettings: Codable, Equatable {
+    var kinds: [WorkInboxKindSetting]
+    var quietHours: WorkQuietHours?
+}
+
+/// A change to the inbox settings. `inbox` and `banners` name every kind
+/// that should be on; nil leaves that list alone. `quietHours` nil keeps
+/// them, `.some(nil)` turns them off.
+struct WorkInboxSettingsChange: Encodable {
+    var inbox: [WorkNotificationKind]?
+    var banners: [WorkNotificationKind]?
+    var quietHours: WorkQuietHours??
+
+    private enum CodingKeys: String, CodingKey {
+        case inbox, banners, quietHours
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(inbox, forKey: .inbox)
+        try container.encodeIfPresent(banners, forKey: .banners)
+        switch quietHours {
+        case let .some(.some(hours)): try container.encode(hours, forKey: .quietHours)
+        case .some(.none): try container.encodeNil(forKey: .quietHours)
+        case .none: break
+        }
     }
 }
 
@@ -129,11 +241,13 @@ struct WorkDigestRisk: Decodable, Equatable {
     var lastAtMs: Int64?
 }
 
-/// Something Sona or an agent did to a task the user follows, a task's
-/// time coming, an automation run ending, or the weekly project digest.
+/// Something Sona or an agent did to a task, project, saved view or note
+/// the user follows, a question an agent waits on, a reminder or due day
+/// coming, an automation run ending, or the weekly project digest.
 struct WorkNotification: Decodable, Identifiable, Equatable {
     var id: String
-    /// Nil only for an automation run about no task.
+    /// Nil for an automation run about no task, a digest, and a notice
+    /// about a subject alone.
     var itemId: String?
     var kind: WorkNotificationKind
     var actor: WorkActor
@@ -148,6 +262,11 @@ struct WorkNotification: Decodable, Identifiable, Equatable {
     var snoozedUntilMs: Int64?
     var archivedAtMs: Int64?
     var digest: WorkProjectDigest?
+    /// The project, initiative, note or view it is about, when not a task;
+    /// a view's notice names its task too.
+    var subject: WorkNoticeSubject?
+    /// Whether it needs the user, as the core judges by its kind.
+    var priority: Bool
 
     /// "Claude Code", "Sona", or "An agent" when it gave no name.
     var who: String {
@@ -173,6 +292,10 @@ struct WorkNotification: Decodable, Identifiable, Equatable {
         case .reminder: return "reminds you"
         case .due: return "says it's due today"
         case .digest: return digestSummary
+        case .question: return "asks: \(to ?? "")"
+        case .project: return projectChange
+        case .view: return viewChange
+        case .note: return "edited it"
         case .automation:
             guard to == "done" else {
                 return automation?.error.map { "failed: \($0)" } ?? "failed"
@@ -200,6 +323,28 @@ struct WorkNotification: Decodable, Identifiable, Equatable {
         case "attachment": "changed its attachments"
         case "reminder": to == nil ? "cleared the reminder" : "set a reminder"
         default: "changed it"
+        }
+    }
+
+    private var projectChange: String {
+        switch field {
+        case "update":
+            let health = to.flatMap(PlanningProjectHealth.init(rawValue:))
+            return health.map { "posted an update: \($0.label)" } ?? "posted an update"
+        case "status":
+            let status = to.flatMap(PlanningProjectStatus.init(rawValue:))
+            return status.map { "moved it to \($0.label)" } ?? "changed its status"
+        default: return "changed it"
+        }
+    }
+
+    private var viewChange: String {
+        let view = subject?.name.map { "“\($0)”" } ?? "a followed view"
+        return switch field {
+        case "added": "brought it into \(view)"
+        case "done": "finished it in \(view)"
+        case "canceled": "canceled it in \(view)"
+        default: "changed it in \(view)"
         }
     }
 

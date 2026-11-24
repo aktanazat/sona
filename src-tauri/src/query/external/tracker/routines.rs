@@ -8,10 +8,13 @@ use super::{
     WorkAnswer, WriteArgs,
 };
 use crate::planning;
-use crate::planning::LabelScope;
+use crate::planning::work::inbox::SubjectKind;
 use crate::planning::work::parse;
-use crate::planning::work::routines::{self, WorkReminder, WorkTemplate, WorkTemplateUse};
+use crate::planning::work::routines::{
+    self, SubjectReminder, WorkReminder, WorkTemplate, WorkTemplateUse,
+};
 use crate::planning::work::types::{WorkActor, WorkLabel, WorkOwner};
+use crate::planning::LabelScope;
 use crate::query::external::{local_time, ExternalError};
 use crate::query::QUERY_SCHEMA_VERSION;
 use chrono::{Local, NaiveDate, NaiveDateTime, TimeZone};
@@ -170,17 +173,46 @@ fn when(value: &str) -> Result<WhenArg, String> {
 
 #[derive(Args, Clone, Debug, Eq, PartialEq)]
 pub struct RemindArgs {
-    /// S-12, 12, or the task's id.
-    #[arg(value_parser = task_ref, value_name = "TASK")]
-    pub task: TaskRef,
-    /// When: 2026-11-12 09:00, tomorrow 9am, friday 3pm; none clears it.
-    #[arg(value_parser = when, value_name = "WHEN")]
-    pub when: WhenArg,
+    /// The task (S-12, 12, or its id) and when; with --project, --initiative
+    /// or --note only when. When: 2026-11-12 09:00, tomorrow 9am, friday
+    /// 3pm; none clears it.
+    #[arg(value_name = "[TASK] WHEN", num_args = 1..=2, required = true)]
+    pub args: Vec<String>,
+    /// Remind of a project, by name or id, in place of a task.
+    #[arg(long, value_name = "PROJECT", conflicts_with_all = ["initiative", "note"])]
+    pub project: Option<String>,
+    /// Remind of an initiative, by name or id.
+    #[arg(long, value_name = "INITIATIVE", conflicts_with = "note")]
+    pub initiative: Option<String>,
+    /// Remind of a note, by id.
+    #[arg(long, value_name = "NOTE")]
+    pub note: Option<uuid::Uuid>,
     /// Print what would change and write nothing.
     #[arg(long)]
     pub dry_run: bool,
     #[command(flatten)]
     pub write: WriteArgs,
+}
+
+impl RemindArgs {
+    const fn names_subject(&self) -> bool {
+        self.project.is_some() || self.initiative.is_some() || self.note.is_some()
+    }
+
+    /// The task named, none for a project, initiative or note, and when.
+    fn read(&self) -> Result<(Option<TaskRef>, WhenArg), ExternalError> {
+        let (task, at) = match (self.names_subject(), self.args.as_slice()) {
+            (true, [at]) => (None, at),
+            (false, [task, at]) => (Some(task_ref(task).map_err(ExternalError::invalid)?), at),
+            (true, _) => {
+                return Err(ExternalError::invalid(
+                    "With --project, --initiative or --note, name only when.",
+                ))
+            }
+            (false, _) => return Err(ExternalError::invalid("Name the task and when.")),
+        };
+        Ok((task, when(at).map_err(ExternalError::invalid)?))
+    }
 }
 
 #[derive(Args, Clone, Debug, Eq, PartialEq)]
@@ -310,11 +342,34 @@ pub struct ExternalWorkReminder {
     pub due: bool,
 }
 
+/// The project, initiative or note a reminder is on.
+#[derive(Clone, Debug, Serialize)]
+pub struct ExternalReminded {
+    pub kind: SubjectKind,
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ExternalSubjectReminder {
+    pub subject: ExternalReminded,
+    pub remind_at_ms: i64,
+    pub remind_at: String,
+    pub set_by: WorkActor,
+    pub agent: Option<String>,
+    /// When Sona posted it to the inbox; none until then.
+    pub notified_at_ms: Option<i64>,
+    pub due: bool,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct ExternalWorkReminders {
     pub schema_version: u32,
     pub due_only: bool,
+    /// Reminders on tasks.
     pub reminders: Vec<ExternalWorkReminder>,
+    /// Reminders on projects, initiatives and notes.
+    pub subjects: Vec<ExternalSubjectReminder>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -326,6 +381,33 @@ pub struct ExternalWorkReminderChange {
     pub task: ExternalWorkRef,
     /// None once cleared.
     pub reminder: Option<ExternalWorkReminder>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ExternalSubjectReminderChange {
+    pub schema_version: u32,
+    pub action: RoutineAction,
+    pub dry_run: bool,
+    pub operation_id: Option<String>,
+    pub subject: ExternalReminded,
+    /// None once cleared.
+    pub reminder: Option<ExternalSubjectReminder>,
+}
+
+fn subject_reminder_of(
+    subject: ExternalReminded,
+    reminder: SubjectReminder,
+    now: i64,
+) -> ExternalSubjectReminder {
+    ExternalSubjectReminder {
+        subject,
+        remind_at: local_time(reminder.remind_at_ms),
+        due: reminder.notified_at_ms.is_none() && reminder.remind_at_ms <= now,
+        remind_at_ms: reminder.remind_at_ms,
+        set_by: reminder.actor,
+        agent: reminder.agent,
+        notified_at_ms: reminder.notified_at_ms,
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -636,20 +718,60 @@ impl Tracker<'_> {
         }))
     }
 
+    /// The name a project, initiative or note goes by now; none once gone.
+    fn reminded_name(&self, kind: SubjectKind, id: &str) -> Result<Option<String>, ExternalError> {
+        Ok(match kind {
+            SubjectKind::Project => self
+                .every_project()?
+                .into_iter()
+                .find(|project| project.id == id)
+                .map(|project| project.title),
+            SubjectKind::Initiative => self
+                .all_initiatives()?
+                .into_iter()
+                .find(|initiative| initiative.id == id)
+                .map(|initiative| initiative.name),
+            SubjectKind::Note => uuid::Uuid::parse_str(id)
+                .ok()
+                .and_then(|id| self.note(&id).ok())
+                .map(|note| note.title),
+            SubjectKind::View => None,
+        })
+    }
+
     pub(super) async fn reminders(
         &self,
         args: &RemindersArgs,
     ) -> Result<WorkAnswer, ExternalError> {
         let board = self.board().await?;
         let now = now_ms();
-        let found = planning::history(self.history, |conn| {
-            if args.due {
-                routines::due_reminders(conn, now)
+        let (found, others) = planning::history(self.history, |conn| {
+            Ok(if args.due {
+                (
+                    routines::due_reminders(conn, now)?,
+                    routines::due_subject_reminders(conn, now)?,
+                )
             } else {
-                routines::reminders(conn)
-            }
+                (
+                    routines::reminders(conn)?,
+                    routines::subject_reminders(conn)?,
+                )
+            })
         })
         .map_err(|message| refusal(self.history, message))?;
+        let mut subjects = Vec::new();
+        for reminder in others {
+            let Some(name) = self.reminded_name(reminder.subject_kind, &reminder.subject_id)?
+            else {
+                continue;
+            };
+            let subject = ExternalReminded {
+                kind: reminder.subject_kind,
+                id: reminder.subject_id.clone(),
+                name,
+            };
+            subjects.push(subject_reminder_of(subject, reminder, now));
+        }
         Ok(WorkAnswer::Reminders(ExternalWorkReminders {
             schema_version: QUERY_SCHEMA_VERSION,
             due_only: args.due,
@@ -660,18 +782,120 @@ impl Tracker<'_> {
                     Some(reminder_of(row, reminder, now))
                 })
                 .collect(),
+            subjects,
         }))
     }
 
+    /// The project, initiative or note `args` names.
+    async fn reminded(&self, args: &RemindArgs) -> Result<ExternalReminded, ExternalError> {
+        if let Some(project) = &args.project {
+            let project = self.project_named(project)?;
+            return Ok(ExternalReminded {
+                kind: SubjectKind::Project,
+                id: project.id,
+                name: project.title,
+            });
+        }
+        if let Some(initiative) = &args.initiative {
+            let all = self.all_initiatives()?;
+            let initiative = Self::pick_initiative(initiative, &all)?;
+            return Ok(ExternalReminded {
+                kind: SubjectKind::Initiative,
+                id: initiative.id.clone(),
+                name: initiative.name.clone(),
+            });
+        }
+        let id = args.note.ok_or_else(|| {
+            ExternalError::invalid("Name a task, --project, --initiative or --note.")
+        })?;
+        let note = self.note(&id)?;
+        Ok(ExternalReminded {
+            kind: SubjectKind::Note,
+            id: note.id,
+            name: note.title,
+        })
+    }
+
+    async fn remind_subject(
+        &self,
+        args: &RemindArgs,
+        at_ms: Option<i64>,
+    ) -> Result<WorkAnswer, ExternalError> {
+        let subject = self.reminded(args).await?;
+        let now = now_ms();
+        let current = planning::history(self.history, |conn| routines::subject_reminders(conn))
+            .map_err(|message| refusal(self.history, message))?
+            .into_iter()
+            .find(|reminder| {
+                reminder.subject_kind == subject.kind && reminder.subject_id == subject.id
+            });
+        let action = if at_ms.is_some() {
+            RoutineAction::Set
+        } else {
+            RoutineAction::Cleared
+        };
+        let operation_id = args.write.operation_id(
+            "remind",
+            &(
+                subject.kind,
+                &subject.id,
+                at_ms,
+                current.as_ref().map(|reminder| reminder.set_at_ms),
+            ),
+        )?;
+        let agent = args.write.agent();
+        let reminder = if args.dry_run {
+            at_ms.map(|at| SubjectReminder {
+                subject_kind: subject.kind,
+                subject_id: subject.id.clone(),
+                remind_at_ms: at,
+                set_at_ms: now,
+                actor: WorkActor::Agent,
+                agent: Some(agent.clone()),
+                notified_at_ms: None,
+            })
+        } else {
+            self.applies(match action {
+                RoutineAction::Set => "setting a reminder",
+                _ => "clearing a reminder",
+            })?;
+            routines::subject_reminder_set_as(
+                self.app,
+                WorkActor::Agent,
+                Some(&agent),
+                &operation_id,
+                subject.kind,
+                &subject.id,
+                at_ms,
+            )
+            .map_err(|message| self.write_refusal(message, &operation_id, "What you named"))?
+        };
+        Ok(WorkAnswer::SubjectReminder(Box::new(
+            ExternalSubjectReminderChange {
+                schema_version: QUERY_SCHEMA_VERSION,
+                action,
+                dry_run: args.dry_run,
+                operation_id: Some(operation_id),
+                reminder: reminder
+                    .map(|reminder| subject_reminder_of(subject.clone(), reminder, now)),
+                subject,
+            },
+        )))
+    }
+
     pub(super) async fn remind(&self, args: &RemindArgs) -> Result<WorkAnswer, ExternalError> {
+        let (task, when) = args.read()?;
+        let at_ms = when.ms();
+        let Some(task) = task else {
+            return self.remind_subject(args, at_ms).await;
+        };
         let board = self.board().await?;
-        let row = board.task(&args.task)?;
+        let row = board.task(&task)?;
         let now = now_ms();
         let current = planning::history(self.history, |conn| routines::reminders(conn))
             .map_err(|message| refusal(self.history, message))?
             .into_iter()
             .find(|reminder| reminder.item_id == row.item.id);
-        let at_ms = args.when.ms();
         let action = if at_ms.is_some() {
             RoutineAction::Set
         } else {
@@ -912,6 +1136,21 @@ fn reminder_text(text: &mut String, reminder: &ExternalWorkReminder) {
     );
 }
 
+fn subject_reminder_text(text: &mut String, reminder: &ExternalSubjectReminder) {
+    let state = match (reminder.notified_at_ms, reminder.due) {
+        (Some(_), _) => "  (posted)",
+        (None, true) => "  (due)",
+        (None, false) => "",
+    };
+    let _ = writeln!(
+        text,
+        "{} {}  {}{state}",
+        reminder.subject.kind.as_str(),
+        reminder.remind_at,
+        reminder.subject.name
+    );
+}
+
 pub(super) fn label_text(label: &ExternalWorkLabel) -> String {
     let mut line = format!("{}  (hue {})", label.name, label.hue);
     if let Some(group) = &label.group {
@@ -944,7 +1183,7 @@ pub(super) fn text(answer: &WorkAnswer, text: &mut String) {
             template_text(text, &change.template);
         }
         WorkAnswer::Reminders(list) => {
-            if list.reminders.is_empty() {
+            if list.reminders.is_empty() && list.subjects.is_empty() {
                 text.push_str(if list.due_only {
                     "No reminders due.\n"
                 } else {
@@ -953,6 +1192,27 @@ pub(super) fn text(answer: &WorkAnswer, text: &mut String) {
             }
             for reminder in &list.reminders {
                 reminder_text(text, reminder);
+            }
+            for reminder in &list.subjects {
+                subject_reminder_text(text, reminder);
+            }
+        }
+        WorkAnswer::SubjectReminder(change) => {
+            let dry = if change.dry_run { " (dry run)" } else { "" };
+            match &change.reminder {
+                Some(reminder) => {
+                    let _ = write!(text, "{}{dry}: ", action_text(change.action));
+                    subject_reminder_text(text, reminder);
+                }
+                None => {
+                    let _ = writeln!(
+                        text,
+                        "{}{dry}: {} {} has no reminder",
+                        action_text(change.action),
+                        change.subject.kind.as_str(),
+                        change.subject.name
+                    );
+                }
             }
         }
         WorkAnswer::Reminder(change) => {

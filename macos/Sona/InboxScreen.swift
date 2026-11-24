@@ -23,9 +23,18 @@ struct InboxScreen: View {
 }
 
 extension AppModel {
-    /// The notices the inbox lists now, awake or snoozed.
+    /// The notices the inbox lists now, awake or snoozed, as its filters
+    /// narrow them: the ones that need the user first, then the others.
     var inboxShown: [WorkNotification] {
-        workFocus.inboxSnoozed ? work.snoozedNotices : work.inbox
+        let focus = workFocus
+        let filter = focus.inboxFilter
+        let tasks = filter.readsTasks
+            ? Dictionary((work.items ?? []).map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first }) : [:]
+        let shown = (focus.inboxSnoozed ? work.snoozedNotices : work.inbox).filter { notice in
+            (!focus.inboxPriorityOnly || notice.priority)
+                && filter.matches(notice, task: notice.itemId.flatMap { tasks[$0] })
+        }
+        return shown.filter(\.priority) + shown.filter { !$0.priority }
     }
 
     func openNotice(_ notice: WorkNotification) {
@@ -33,7 +42,9 @@ extension AppModel {
         workFocus.inboxHighlighted = notice.id
         workFocus.peeking = notice.digest != nil
         guard let itemId = notice.itemId else {
-            if let automation = notice.automation {
+            if let subject = notice.subject {
+                openSubject(subject)
+            } else if let automation = notice.automation {
                 go(.loops)
                 loops.select(automation.id)
             }
@@ -88,32 +99,122 @@ enum InboxSnooze: CaseIterable {
     }
 }
 
-/// Inbox's three faces as the start of its bar, Triage among them: what
-/// meetings promised waits there for a yes or no.
+/// Inbox's faces as the start of its bar, Triage among them: what
+/// meetings promised waits there for a yes or no; Updates gathers the
+/// projects' updates and digests.
 struct InboxTabs: View {
     @Environment(AppModel.self) private var model
 
-    private enum Face: Hashable { case inbox, triage, snoozed }
+    private enum Face: Hashable { case inbox, triage, snoozed, updates }
 
     var body: some View {
         let focus = model.workFocus
-        let onTriage = model.place == .triage
-        let waiting = onTriage ? 0 : model.work.counts?.triage ?? 0
-        let face: Face = onTriage ? .triage : focus.inboxSnoozed ? .snoozed : .inbox
+        let place = model.place
+        let waiting = place == .triage ? 0 : model.work.counts?.triage ?? 0
+        let face: Face = switch place {
+        case .triage: .triage
+        case .updates: .updates
+        default: focus.inboxSnoozed ? .snoozed : .inbox
+        }
         SegmentedSwitch(
             items: [SwitchItem(id: Face.inbox, title: "Inbox", icon: "bell"),
-                    SwitchItem(id: Face.triage, title: waiting > 0 ? "Triage \(waiting)" : "Triage", icon: "tray")]
-                + (onTriage ? [] : [SwitchItem(id: Face.snoozed, title: "Snoozed", icon: "moon.zzz")]),
+                    SwitchItem(id: Face.triage, title: waiting > 0 ? "Triage \(waiting)" : "Triage", icon: "tray"),
+                    SwitchItem(id: Face.snoozed, title: "Snoozed", icon: "moon.zzz"),
+                    SwitchItem(id: Face.updates, title: "Updates", icon: Place.updates.icon)],
             selection: face
         ) { picked in
             switch picked {
             case .triage:
                 model.go(.triage)
+            case .updates:
+                model.go(.updates)
             case .inbox, .snoozed:
                 focus.inboxSnoozed = picked == .snoozed
                 model.go(.inbox)
             }
         }
+    }
+}
+
+/// What the inbox narrows its notices to; an empty set keeps every one.
+/// A project keeps the notices about its tasks and about the project
+/// itself; a task priority keeps only notices about tasks.
+struct InboxFilter: Equatable {
+    var kinds: Set<WorkNotificationKind> = []
+    var projectId: String?
+    var taskPriorities: Set<TaskPriority> = []
+    var unreadOnly = false
+
+    var isEmpty: Bool { self == InboxFilter() }
+
+    /// Whether matching needs the tasks behind the notices.
+    var readsTasks: Bool { projectId != nil || !taskPriorities.isEmpty }
+
+    func matches(_ notice: WorkNotification, task: WorkItemRow?) -> Bool {
+        if unreadOnly, notice.readAtMs != nil { return false }
+        if !kinds.isEmpty, !kinds.contains(notice.kind) { return false }
+        if let projectId {
+            let about = notice.subject?.kind == .project ? notice.subject?.id : task?.projectId
+            if about != projectId { return false }
+        }
+        if !taskPriorities.isEmpty {
+            guard let task, taskPriorities.contains(TaskPriority(task.priority)) else { return false }
+        }
+        return true
+    }
+}
+
+private struct InboxFilterMenu: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        let focus = model.workFocus
+        let filter = focus.inboxFilter
+        Menu {
+            Toggle("Unread only", isOn: Binding(get: { filter.unreadOnly }, set: { focus.inboxFilter.unreadOnly = $0 }))
+            Menu("Kind") {
+                ForEach(WorkNotificationKind.listed, id: \.self) { kind in
+                    Toggle(kind.label, isOn: member(kind, of: \.kinds))
+                }
+            }
+            Menu("Project") {
+                Toggle("Any project", isOn: Binding(get: { filter.projectId == nil },
+                                                    set: { _ in focus.inboxFilter.projectId = nil }))
+                ForEach(model.work.projects) { project in
+                    Toggle(project.title, isOn: Binding(get: { filter.projectId == project.id },
+                                                        set: { on in focus.inboxFilter.projectId = on ? project.id : nil }))
+                }
+            }
+            Menu("Task priority") {
+                ForEach(TaskPriority.menuOrder) { priority in
+                    Toggle(priority.label, isOn: member(priority, of: \.taskPriorities))
+                }
+            }
+            Divider()
+            Button("Clear filters") { focus.inboxFilter = InboxFilter() }
+                .disabled(filter.isEmpty)
+        } label: {
+            Image(systemName: "line.3.horizontal.decrease")
+        }
+        .menuStyle(.button)
+        .buttonStyle(IconButton(on: !filter.isEmpty))
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("Filter")
+        .accessibilityLabel("Filter the inbox")
+    }
+
+    private func member<Value: Hashable>(
+        _ value: Value, of set: WritableKeyPath<InboxFilter, Set<Value>>
+    ) -> Binding<Bool> {
+        let focus = model.workFocus
+        return Binding(get: { focus.inboxFilter[keyPath: set].contains(value) }, set: { on in
+            if on {
+                focus.inboxFilter[keyPath: set].insert(value)
+            } else {
+                focus.inboxFilter[keyPath: set].remove(value)
+            }
+        })
     }
 }
 
@@ -125,10 +226,18 @@ private struct InboxList: View {
         let store = model.work
         let focus = model.workFocus
         let shown = model.inboxShown
+        let urgent = shown.filter(\.priority)
+        let other = shown.filter { !$0.priority }
+        let narrowed = focus.inboxPriorityOnly || !focus.inboxFilter.isEmpty
         VStack(spacing: 0) {
             WorkBar {
                 InboxTabs()
             } trailing: {
+                WorkBarToggle(
+                    title: "Priority", icon: "exclamationmark.circle",
+                    help: "Show only what needs you: mentions, assignments, agents' questions, reminders and work due today",
+                    isOn: Binding(get: { focus.inboxPriorityOnly }, set: { focus.inboxPriorityOnly = $0 }))
+                InboxFilterMenu()
                 Button("Clear read") { model.clearReadNotices() }
                     .buttonStyle(QuietButton(compact: true))
                     .disabled(!shown.contains { $0.readAtMs != nil })
@@ -138,7 +247,15 @@ private struct InboxList: View {
                     .disabled(store.unread == 0)
                     .help("Mark all read  ⌥U")
             }
-            if shown.isEmpty, !focus.inboxSnoozed, let waiting = store.counts?.triage, waiting > 0 {
+            if shown.isEmpty, narrowed {
+                TaskEmpty(line: "No notices match.") {
+                    Button("Show all") {
+                        focus.inboxPriorityOnly = false
+                        focus.inboxFilter = InboxFilter()
+                    }
+                    .buttonStyle(.secondary)
+                }
+            } else if shown.isEmpty, !focus.inboxSnoozed, let waiting = store.counts?.triage, waiting > 0 {
                 TaskEmpty(line: "Nothing new. \(waiting) waiting in Triage.") {
                     TaskKeyButton(title: "Triage", keys: "g i") { model.go(.triage) }
                 }
@@ -149,10 +266,20 @@ private struct InboxList: View {
             } else {
                 ScrollViewReader { proxy in
                     ScrollView {
-                        LazyVStack(spacing: 0) {
-                            ForEach(shown) { notice in
-                                InboxRow(notice: notice, highlighted: focus.inboxHighlighted == notice.id)
-                                    .id(notice.id)
+                        LazyVStack(alignment: .leading, spacing: 0) {
+                            if !urgent.isEmpty {
+                                InboxSectionTitle(title: "Priority")
+                                ForEach(urgent) { notice in
+                                    InboxRow(notice: notice, highlighted: focus.inboxHighlighted == notice.id)
+                                        .id(notice.id)
+                                }
+                            }
+                            if !other.isEmpty {
+                                InboxSectionTitle(title: "Other")
+                                ForEach(other) { notice in
+                                    InboxRow(notice: notice, highlighted: focus.inboxHighlighted == notice.id)
+                                        .id(notice.id)
+                                }
                             }
                         }
                         .padding(.vertical, 6)
@@ -180,6 +307,19 @@ private struct InboxList: View {
     }
 }
 
+private struct InboxSectionTitle: View {
+    let title: String
+
+    var body: some View {
+        Text(title)
+            .sectionLabel()
+            .padding(.horizontal, 24)
+            .padding(.top, 10)
+            .padding(.bottom, 4)
+            .accessibilityAddTraits(.isHeader)
+    }
+}
+
 private struct InboxRow: View {
     let notice: WorkNotification
     let highlighted: Bool
@@ -199,6 +339,10 @@ private struct InboxRow: View {
                 TaskStatusIcon(status: row.status)
             } else if deleted != nil {
                 Image(systemName: "trash").font(.system(size: 12)).foregroundStyle(Theme.inkTertiary)
+                    .frame(width: 14)
+            } else if notice.itemId == nil, let about = notice.subject {
+                Image(systemName: about.kind.icon).font(.system(size: 12))
+                    .foregroundStyle(Theme.inkSecondary)
                     .frame(width: 14)
             } else if notice.kind == .automation {
                 Image(systemName: "arrow.triangle.2.circlepath").font(.system(size: 12))
@@ -254,6 +398,9 @@ private struct InboxRow: View {
 
     /// The row's title when no task stands behind it.
     private var subject: String {
+        if notice.itemId == nil, let about = notice.subject {
+            return about.name ?? "A \(about.kind.noun) deleted"
+        }
         if notice.itemId == nil, let automation = notice.automation { return automation.name }
         if notice.digest != nil { return "Weekly project digest" }
         return "A task deleted for good"
@@ -262,6 +409,7 @@ private struct InboxRow: View {
     private var icon: String? {
         switch notice.kind {
         case .reminder: "alarm"
+        case .question: "questionmark.bubble"
         case .due: "calendar"
         case .automation: nil
         default: notice.actor == .agent ? "sparkle" : nil
@@ -314,6 +462,8 @@ private struct InboxRow: View {
             } else if model.workRows([itemId]).first != nil {
                 Button("Open task", systemImage: "arrow.up.right.square") { model.openNotice(notice) }
             }
+        } else if let about = notice.subject, about.kind != .unknown {
+            Button("Open \(about.kind.noun)", systemImage: "arrow.up.right.square") { model.openNotice(notice) }
         } else if notice.automation != nil {
             Button("Open automation", systemImage: "arrow.up.right.square") { model.openNotice(notice) }
         } else if notice.digest != nil {

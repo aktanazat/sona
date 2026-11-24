@@ -8,7 +8,7 @@ import SwiftUI
 /// only the rest; Automations sits at its foot beside Settings.
 enum Place: Int, CaseIterable, Identifiable {
     case capture, library, meetings, people, scratchpad, projects, calendar, tasks, triage, today, inbox, archive, loops, initiatives
-    case activity, shared
+    case activity, shared, updates
 
     static let sidebar: [Place] = [.capture, .inbox, .tasks, .meetings, .scratchpad, .people, .projects, .shared]
 
@@ -19,7 +19,7 @@ enum Place: Int, CaseIterable, Identifiable {
         switch self {
         case .library, .activity: .capture
         case .calendar, .initiatives: .projects
-        case .triage: .inbox
+        case .triage, .updates: .inbox
         case .today, .archive: .tasks
         case .capture, .meetings, .people, .scratchpad, .projects, .tasks, .inbox, .loops, .shared: self
         }
@@ -39,6 +39,7 @@ enum Place: Int, CaseIterable, Identifiable {
         case .triage: "Triage"
         case .today: "Today"
         case .shared: "Shared"
+        case .updates: "Updates"
         case .inbox: "Inbox"
         case .archive: "Archive"
         case .loops: "Automations"
@@ -60,6 +61,7 @@ enum Place: Int, CaseIterable, Identifiable {
         case .triage: "tray"
         case .today: "sun.max"
         case .shared: "link"
+        case .updates: "newspaper"
         case .inbox: "bell"
         case .archive: "archivebox"
         case .loops: "repeat"
@@ -376,6 +378,7 @@ final class AppModel {
     let spotlight: SpotlightStore
     let work: WorkStore
     let routines: RoutinesStore
+    let updatesFeed: UpdatesStore
     let loops: LoopsStore
     let workFocus = WorkFocus()
     let rituals: RitualStore
@@ -453,6 +456,7 @@ final class AppModel {
         spotlight = SpotlightStore(core: core)
         work = WorkStore(core: core)
         routines = RoutinesStore(core: core)
+        updatesFeed = UpdatesStore(core: core)
         loops = LoopsStore(core: core)
         rituals = RitualStore(core: core)
         heard = LiveCardStore(core: core)
