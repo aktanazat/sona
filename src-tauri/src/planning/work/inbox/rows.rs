@@ -794,6 +794,7 @@ mod tests {
                 digest: None,
                 priority: kind.priority(),
                 subject: None,
+                earlier: Vec::new(),
             });
             id
         };

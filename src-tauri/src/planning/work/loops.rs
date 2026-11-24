@@ -2697,6 +2697,7 @@ mod tests {
                 trigger: LoopTrigger::MeetingEnded,
                 conditions: LoopConditions::default(),
                 tools: Vec::new(),
+                reasoning: None,
             },
             "you",
             1,
