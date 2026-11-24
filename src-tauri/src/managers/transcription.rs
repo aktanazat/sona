@@ -988,6 +988,7 @@ pub struct BatchDecode {
     /// `text` means either "nothing was said" or "everything said was
     /// removed", and those are different outcomes for the capture receipt.
     pub model_produced_text: bool,
+    pub spoken_send: bool,
 }
 
 impl BatchDecode {
@@ -997,6 +998,7 @@ impl BatchDecode {
             model_produced_text: !text.trim().is_empty(),
             text,
             realtime_factor: None,
+            spoken_send: false,
         }
     }
 }
@@ -2447,8 +2449,14 @@ impl TranscriptionManager {
         // Streaming models do not receive a decode prompt, so custom words
         // always go through the shared fuzzy post-correction path.
         let model_produced_text = !finalized.text.trim().is_empty();
-        let filtered = post_process_transcription_text(
+        let (text, spoken_send) = take_spoken_send(
             finalized.text,
+            asr,
+            &finalized.output_language,
+            model_produced_text,
+        );
+        let filtered = post_process_transcription_text(
+            text,
             asr,
             None,
             &finalized.output_language,
@@ -2460,6 +2468,7 @@ impl TranscriptionManager {
             text: filtered,
             realtime_factor: None,
             model_produced_text,
+            spoken_send,
         }))
     }
 
@@ -2980,6 +2989,12 @@ impl TranscriptionManager {
                 FilterOutcome::whole(chars, repeats_only_vocabulary(&result, &asr.custom_words))
             };
         }
+        let (result, spoken_send) = take_spoken_send(
+            result,
+            asr,
+            &output_language,
+            model_produced_text && switches.keeps(TextFilter::PostProcessing),
+        );
         let filtered_result = if switches.keeps(TextFilter::PostProcessing) {
             post_process_transcription_text(
                 result,
@@ -3052,6 +3067,7 @@ impl TranscriptionManager {
             text: final_result,
             realtime_factor: finite_realtime_factor(speedup),
             model_produced_text,
+            spoken_send,
         })
     }
 }
@@ -4131,15 +4147,45 @@ fn transcribe_cpp_run_plan(
 /// taking the cloud route. The provider already received the vocabulary as
 /// keyterms, so entries are matched exactly, as after a prompted local decode.
 #[cfg(feature = "cloud-realtime")]
-pub(crate) fn finalize_cloud_text(text: String, asr: &AsrPlan, cloud: &CloudRunPlan) -> String {
+pub(crate) fn finalize_cloud_text(
+    text: String,
+    asr: &AsrPlan,
+    cloud: &CloudRunPlan,
+) -> BatchDecode {
     let evidence = resolve_output_language_evidence(asr, cloud.language(), &[], false);
-    post_process_transcription_text(
+    let model_produced_text = !text.trim().is_empty();
+    let (text, spoken_send) = take_spoken_send(text, asr, &evidence, model_produced_text);
+    let text = post_process_transcription_text(
         text,
         asr,
         (!cloud.keyterms().is_empty()).then_some(0),
         &evidence,
         &[],
-    )
+    );
+    BatchDecode {
+        text,
+        realtime_factor: None,
+        model_produced_text,
+        spoken_send,
+    }
+}
+
+fn take_spoken_send(
+    mut text: String,
+    asr: &AsrPlan,
+    language: &OutputLanguageEvidence,
+    eligible: bool,
+) -> (String, bool) {
+    let prefix_length = (eligible && asr.spoken_send_enabled && !asr.translate_to_english)
+        .then(|| crate::audio_toolkit::spoken_edits::spoken_send_prefix(&text, language))
+        .flatten()
+        .map(str::len);
+    if let Some(length) = prefix_length {
+        text.truncate(length);
+        (text, true)
+    } else {
+        (text, false)
+    }
 }
 
 /// `prompted_from` is the first of `asr.custom_words` the decode was prompted

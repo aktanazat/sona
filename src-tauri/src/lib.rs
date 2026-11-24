@@ -1708,6 +1708,7 @@ pub fn run(cli_args: CliArgs) {
             commands::vocabulary::reset_text_replacements,
             commands::vocabulary::update_text_replacements_enabled,
             commands::vocabulary::update_spoken_edits_enabled,
+            commands::vocabulary::update_spoken_send_enabled,
             commands::hud::hud_pill_state,
             commands::hud::set_hud_pill_enabled,
             commands::hud::set_hud_pill_position,

@@ -67,6 +67,7 @@ struct HandyKeysEvent: Decodable {
 struct DictationActivity: Decodable {
     /// "idle", "recording", or "transcribing".
     let state: String
+    let runId: UInt64?
 }
 
 struct StreamText: Decodable {

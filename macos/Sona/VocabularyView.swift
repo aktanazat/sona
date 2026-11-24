@@ -103,6 +103,14 @@ struct VocabularyView: View {
                 )
             )
             ToggleRow(
+                title: "Say “send” to press Enter",
+                detail: "End an English dictation with “send” to press Enter. The word is not typed. Pressing Enter can send a message, submit a form, or run a command.",
+                isOn: Binding(
+                    get: { store.spokenSendEnabled },
+                    set: { store.setSpokenSend($0) }
+                )
+            )
+            ToggleRow(
                 title: "Write emoji when you name one",
                 detail: "Replace only exact spoken tokens, after vocabulary correction.",
                 isOn: Binding(

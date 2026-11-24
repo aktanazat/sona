@@ -507,16 +507,19 @@ pub const DICTATION_ACTIVITY_EVENT: &str = "dictation-activity";
 #[derive(Clone, Serialize)]
 struct DictationActivity {
     state: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    run_id: Option<u64>,
 }
 
 /// Sets the current dictation activity shown by the tray.
-pub fn set_tray_state(app: &AppHandle, state: TrayIconState) {
+pub fn set_tray_state(app: &AppHandle, state: TrayIconState, run_id: Option<u64>) {
     let activity = DictationActivity {
         state: match state {
             TrayIconState::Idle => "idle",
             TrayIconState::Recording => "recording",
             TrayIconState::Transcribing => "transcribing",
         },
+        run_id,
     };
     if let Err(error) = app.emit(DICTATION_ACTIVITY_EVENT, activity) {
         error!("Failed to emit {DICTATION_ACTIVITY_EVENT}: {error}");

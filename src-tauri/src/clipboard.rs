@@ -1,3 +1,4 @@
+use crate::delivery::{SubmitOutcome, SubmitRefusal, SubmitRequest};
 use crate::input::{self, EnigoState};
 use crate::modes::DeliveryPlan;
 #[cfg(target_os = "linux")]
@@ -823,7 +824,7 @@ fn paste_direct(
     with_enigo(app_handle, |enigo| input::paste_text_direct(enigo, text))
 }
 
-pub(crate) fn send_return_key(enigo: &mut Enigo, key_type: AutoSubmitKey) -> Result<(), String> {
+fn dispatch_return_key(enigo: &mut Enigo, key_type: AutoSubmitKey) -> Result<(), String> {
     match key_type {
         AutoSubmitKey::Enter => {
             enigo
@@ -866,13 +867,41 @@ pub(crate) fn send_return_key(enigo: &mut Enigo, key_type: AutoSubmitKey) -> Res
     Ok(())
 }
 
-/// Sends the mode's submit key. Delivery decides whether a route earns this;
-/// this function only owns the input lock.
-pub(crate) fn send_auto_submit(
-    app_handle: &AppHandle,
-    key_type: AutoSubmitKey,
-) -> Result<(), String> {
-    with_enigo(app_handle, |enigo| send_return_key(enigo, key_type))
+pub(crate) fn send_return_key(enigo: &mut Enigo, request: SubmitRequest) -> SubmitOutcome {
+    if let Some(refusal) = request
+        .spoken_target()
+        .and_then(crate::delivery::spoken_submit_refusal)
+    {
+        return SubmitOutcome::Refused(refusal);
+    }
+    match dispatch_return_key(enigo, request.key()) {
+        Ok(()) => SubmitOutcome::Requested,
+        Err(error) => {
+            log::warn!("Submit request could not be confirmed; it will not be retried: {error}");
+            SubmitOutcome::Unconfirmed
+        }
+    }
+}
+
+pub(crate) fn report_submit_outcome(
+    app: &AppHandle,
+    request: SubmitRequest,
+    outcome: SubmitOutcome,
+) {
+    if let SubmitRequest::SpokenEnter { run_id, .. } = request {
+        crate::actions::report_spoken_submit(app, run_id, outcome);
+    }
+}
+
+/// Dispatches one frozen submit request under the input lock.
+pub(crate) fn send_auto_submit(app: &AppHandle, request: SubmitRequest) -> SubmitOutcome {
+    let outcome =
+        with_enigo(app, |enigo| Ok(send_return_key(enigo, request))).unwrap_or_else(|error| {
+            log::warn!("Submit input could not start: {error}");
+            SubmitOutcome::Refused(SubmitRefusal::InputUnavailable)
+        });
+    report_submit_outcome(app, request, outcome);
+    outcome
 }
 
 /// What the non-Accessibility delivery path can prove about dispatch, and what
@@ -928,22 +957,25 @@ pub(crate) fn paste_frozen(
         PasteMethod::None => ClipboardDispatch::DefinitelyNotDispatched(
             "Text delivery is disabled for this mode".to_string(),
         ),
-        PasteMethod::Direct => {
-            // An input backend can fail after accepting part of a string. Once
-            // it has been invoked we must not retry through the clipboard. It
-            // has the same unconfirmed-dispatch certainty as a successful
-            // direct request, so delivery still performs this method's
-            // configured finishing.
-            if let Err(error) = paste_direct(
-                text,
-                app_handle,
-                #[cfg(target_os = "linux")]
-                settings.typing_tool,
-            ) {
+        PasteMethod::Direct => match paste_direct(
+            text,
+            app_handle,
+            #[cfg(target_os = "linux")]
+            settings.typing_tool,
+        ) {
+            Ok(()) => ClipboardDispatch::Dispatched,
+            Err(error) => {
                 log::warn!("Direct typing may have been dispatched before failure: {error}");
+                if let Some(request) = settings.submit {
+                    report_submit_outcome(
+                        app_handle,
+                        request,
+                        SubmitOutcome::Refused(SubmitRefusal::PasteUnconfirmed),
+                    );
+                }
+                ClipboardDispatch::DispatchedWithBackendError
             }
-            ClipboardDispatch::Dispatched
-        }
+        },
         PasteMethod::ExternalScript => {
             let Some(script_path) = settings
                 .external_script_path
@@ -1220,8 +1252,7 @@ fn paste_via_clipboard_frozen(
                 app_handle,
                 &settings.paste_method,
                 enigo,
-                settings.auto_submit,
-                settings.auto_submit_key,
+                settings.submit,
                 settings.clipboard_handling,
             )
         }) {

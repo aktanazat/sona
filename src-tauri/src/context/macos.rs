@@ -284,17 +284,34 @@ pub(crate) fn frontmost_application_identifier() -> Option<String> {
 /// the element because the element type is not `Send`, and this value travels
 /// from the thread that stops a recording to the main thread that delivers it.
 pub(crate) fn keyboard_focus() -> KeyboardFocus {
+    capture_keyboard_focus(false)
+}
+
+pub(crate) fn keyboard_focus_for_spoken_send() -> KeyboardFocus {
+    capture_keyboard_focus(true)
+}
+
+fn capture_keyboard_focus(require_editable: bool) -> KeyboardFocus {
     let pid = NSWorkspace::sharedWorkspace()
         .frontmostApplication()
         .map(|application| application.processIdentifier());
-    let element = (accessibility_access() == AccessibilityAccess::Granted)
-        .then(|| focused_element(CaptureDeadline::starting_now()).ok())
-        .flatten()
-        .map(|element| {
-            let element: &CFType = &element;
-            CFHash(Some(element))
+    let deadline = CaptureDeadline::starting_now();
+    let focused = (accessibility_access() == AccessibilityAccess::Granted)
+        .then(|| focused_element(deadline).ok())
+        .flatten();
+    let editable = require_editable
+        && focused.as_ref().is_some_and(|element| {
+            !is_secure_field(element, deadline) && is_editable_role(element, deadline)
         });
-    KeyboardFocus { pid, element }
+    let element = focused.map(|element| {
+        let element: &CFType = &element;
+        CFHash(Some(element))
+    });
+    KeyboardFocus {
+        pid,
+        element,
+        editable,
+    }
 }
 
 /// Reads just the browser host needed to select a local mode. The captured URL

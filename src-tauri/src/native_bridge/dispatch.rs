@@ -875,6 +875,18 @@ pub(super) async fn call(
             })
             .await?
         }
+        "update_spoken_send_enabled" => {
+            let mut args = Args::parse(params)?;
+            let enabled = args.take("enabled")?;
+            let handle = app.clone();
+            on_main_thread(app, move || {
+                reply(crate::commands::vocabulary::update_spoken_send_enabled(
+                    handle.clone(),
+                    enabled,
+                ))
+            })
+            .await?
+        }
         "hud_pill_state" => {
             let handle = app.clone();
             on_main_thread(app, move || {

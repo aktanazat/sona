@@ -26,6 +26,7 @@ pub enum DeliveryMethod {
     AccessibilityInsertion,
     ClipboardPaste,
     DirectTyping,
+    SubmitKey,
     ExternalScript,
 }
 
@@ -83,6 +84,11 @@ pub enum Delivery {
         receipt: DeliveryReceipt,
         text: String,
     },
+    SubmitRefused {
+        receipt: DeliveryReceipt,
+        text: String,
+        refusal: SubmitRefusal,
+    },
 }
 
 /// The control keyboard input went to when the recording stopped. Delivery
@@ -96,6 +102,7 @@ pub struct KeyboardFocus {
     /// `CFHash` of the focused accessibility element. Equal elements hash
     /// equally, so the same control always matches itself.
     pub(crate) element: Option<usize>,
+    pub(crate) editable: bool,
 }
 
 impl KeyboardFocus {
@@ -111,6 +118,26 @@ impl KeyboardFocus {
         {
             Self::default()
         }
+    }
+
+    pub(crate) fn for_spoken_send() -> Self {
+        #[cfg(target_os = "macos")]
+        {
+            crate::context::macos::keyboard_focus_for_spoken_send()
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Self::default()
+        }
+    }
+
+    fn confirms_text_field(self, current: Self) -> bool {
+        self.editable
+            && current.editable
+            && self.pid.is_some()
+            && self.pid == current.pid
+            && self.element.is_some()
+            && self.element == current.element
     }
 
     /// Whether `current` is known to be another control. A part either read
@@ -136,9 +163,23 @@ pub fn deliver(
     settings: &DeliveryPlan,
     stopped_at: KeyboardFocus,
 ) -> Delivery {
+    if let Some(refusal) = settings
+        .submit
+        .and_then(SubmitRequest::spoken_target)
+        .and_then(spoken_submit_refusal)
+    {
+        return Delivery::SubmitRefused {
+            receipt: DeliveryReceipt::new(
+                primary_method(settings),
+                DeliveryOutcome::DefinitelyNotDispatched,
+            ),
+            text,
+            refusal,
+        };
+    }
     let composed = compose_final_text(&text, settings);
     #[cfg(target_os = "macos")]
-    let observation = if !settings.auto_submit
+    let observation = if settings.submit.is_none()
         && !matches!(
             settings.paste_method,
             PasteMethod::None | PasteMethod::ExternalScript
@@ -167,6 +208,77 @@ pub fn deliver(
     } else {
         Delivery::Attempted(receipt)
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SubmitRequest {
+    Configured(crate::settings::AutoSubmitKey),
+    SpokenEnter { target: KeyboardFocus, run_id: u64 },
+}
+
+impl SubmitRequest {
+    pub(crate) fn key(self) -> crate::settings::AutoSubmitKey {
+        match self {
+            Self::Configured(key) => key,
+            Self::SpokenEnter { .. } => crate::settings::AutoSubmitKey::Enter,
+        }
+    }
+
+    pub(crate) fn spoken_target(self) -> Option<KeyboardFocus> {
+        match self {
+            Self::Configured(_) => None,
+            Self::SpokenEnter { target, .. } => Some(target),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SubmitRefusal {
+    FocusUnconfirmed,
+    SecureInput,
+    InputUnavailable,
+    PasteUnconfirmed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SubmitOutcome {
+    Refused(SubmitRefusal),
+    Requested,
+    Unconfirmed,
+}
+
+impl SubmitOutcome {
+    pub(crate) fn receipt(self) -> DeliveryReceipt {
+        let outcome = match self {
+            Self::Refused(_) => DeliveryOutcome::DefinitelyNotDispatched,
+            Self::Requested | Self::Unconfirmed => DeliveryOutcome::DispatchedButUnconfirmed,
+        };
+        DeliveryReceipt::new(DeliveryMethod::SubmitKey, outcome)
+    }
+}
+
+pub(crate) fn spoken_submit_refusal(stopped_at: KeyboardFocus) -> Option<SubmitRefusal> {
+    if secure_input_holds_keys_now() {
+        Some(SubmitRefusal::SecureInput)
+    } else if !stopped_at.confirms_text_field(KeyboardFocus::for_spoken_send()) {
+        Some(SubmitRefusal::FocusUnconfirmed)
+    } else {
+        None
+    }
+}
+
+pub(crate) fn submit_spoken(
+    app: &AppHandle,
+    stopped_at: KeyboardFocus,
+    run_id: u64,
+) -> SubmitOutcome {
+    clipboard::send_auto_submit(
+        app,
+        SubmitRequest::SpokenEnter {
+            target: stopped_at,
+            run_id,
+        },
+    )
 }
 
 /// Begins copying the clipboard aside while the words are still spoken, for
@@ -337,7 +449,7 @@ fn clipboard_dispatch_owes_finishing(dispatch: &ClipboardDispatch) -> bool {
 /// What Sona still owes the user after a route dispatched text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Finishing {
-    auto_submit: bool,
+    submit: Option<SubmitRequest>,
     copy_final_to_clipboard: bool,
 }
 
@@ -348,7 +460,7 @@ struct Finishing {
 fn finishing_plan(settings: &DeliveryPlan) -> Finishing {
     let handy_inserted = sona_inserts(settings.paste_method);
     Finishing {
-        auto_submit: handy_inserted && settings.auto_submit,
+        submit: handy_inserted.then_some(settings.submit).flatten(),
         copy_final_to_clipboard: handy_inserted
             && settings.clipboard_handling == ClipboardHandling::CopyToClipboard,
     }
@@ -368,11 +480,9 @@ const AUTO_SUBMIT_DELAY_MS: u64 = 50;
 fn finish_after_dispatch(app: &AppHandle, settings: &DeliveryPlan, text: &str) {
     let finishing = finishing_plan(settings);
 
-    if finishing.auto_submit {
+    if let Some(request) = finishing.submit {
         std::thread::sleep(std::time::Duration::from_millis(AUTO_SUBMIT_DELAY_MS));
-        if let Err(error) = clipboard::send_auto_submit(app, settings.auto_submit_key) {
-            log::warn!("Delivery dispatched, but auto-submit failed: {error}");
-        }
+        let _ = clipboard::send_auto_submit(app, request);
     }
     if finishing.copy_final_to_clipboard {
         if let Err(error) = clipboard::write_text_to_clipboard(app, text) {
@@ -407,14 +517,87 @@ mod tests {
         DeliveryPlan {
             paste_method,
             clipboard_handling: ClipboardHandling::DontModify,
-            auto_submit: false,
-            auto_submit_key: AutoSubmitKey::Enter,
+            submit: None,
             append_trailing_space: false,
             paste_delay_ms: 0,
             paste_delay_after_ms: 0,
             reliable_paste: false,
             typing_tool: TypingTool::Auto,
             external_script_path: None,
+        }
+    }
+
+    #[test]
+    fn spoken_send_requires_a_known_unchanged_text_field() {
+        let stopped = KeyboardFocus {
+            pid: Some(100),
+            element: Some(7),
+            editable: true,
+        };
+        assert!(stopped.confirms_text_field(stopped));
+        for current in [
+            KeyboardFocus::default(),
+            KeyboardFocus {
+                pid: None,
+                ..stopped
+            },
+            KeyboardFocus {
+                element: None,
+                ..stopped
+            },
+            KeyboardFocus {
+                pid: Some(200),
+                ..stopped
+            },
+            KeyboardFocus {
+                element: Some(8),
+                ..stopped
+            },
+            KeyboardFocus {
+                editable: false,
+                ..stopped
+            },
+        ] {
+            assert!(!stopped.confirms_text_field(current), "{current:?}");
+        }
+        assert!(!KeyboardFocus {
+            editable: false,
+            ..stopped
+        }
+        .confirms_text_field(stopped));
+    }
+
+    #[test]
+    fn spoken_send_receipts_never_claim_the_target_submitted() {
+        for (result, expected) in [
+            (
+                SubmitOutcome::Refused(SubmitRefusal::FocusUnconfirmed),
+                DeliveryOutcome::DefinitelyNotDispatched,
+            ),
+            (
+                SubmitOutcome::Refused(SubmitRefusal::SecureInput),
+                DeliveryOutcome::DefinitelyNotDispatched,
+            ),
+            (
+                SubmitOutcome::Refused(SubmitRefusal::InputUnavailable),
+                DeliveryOutcome::DefinitelyNotDispatched,
+            ),
+            (
+                SubmitOutcome::Refused(SubmitRefusal::PasteUnconfirmed),
+                DeliveryOutcome::DefinitelyNotDispatched,
+            ),
+            (
+                SubmitOutcome::Requested,
+                DeliveryOutcome::DispatchedButUnconfirmed,
+            ),
+            (
+                SubmitOutcome::Unconfirmed,
+                DeliveryOutcome::DispatchedButUnconfirmed,
+            ),
+        ] {
+            let receipt = result.receipt();
+            assert_eq!(receipt.method, DeliveryMethod::SubmitKey);
+            assert_eq!(receipt.outcome, expected);
         }
     }
 
@@ -472,12 +655,12 @@ mod tests {
             PasteMethod::Direct,
         ] {
             let mut settings = plan(method);
-            settings.auto_submit = true;
+            settings.submit = Some(SubmitRequest::Configured(AutoSubmitKey::Enter));
             settings.clipboard_handling = ClipboardHandling::CopyToClipboard;
             assert_eq!(
                 finishing_plan(&settings),
                 Finishing {
-                    auto_submit: true,
+                    submit: settings.submit,
                     copy_final_to_clipboard: true,
                 },
                 "finishing for {method:?}"
@@ -489,12 +672,12 @@ mod tests {
     fn external_script_and_disabled_delivery_never_finish_in_handy() {
         for method in [PasteMethod::ExternalScript, PasteMethod::None] {
             let mut settings = plan(method);
-            settings.auto_submit = true;
+            settings.submit = Some(SubmitRequest::Configured(AutoSubmitKey::Enter));
             settings.clipboard_handling = ClipboardHandling::CopyToClipboard;
             assert_eq!(
                 finishing_plan(&settings),
                 Finishing {
-                    auto_submit: false,
+                    submit: None,
                     copy_final_to_clipboard: false,
                 },
                 "finishing for {method:?}"
@@ -508,7 +691,7 @@ mod tests {
             assert_eq!(
                 finishing_plan(&plan(method)),
                 Finishing {
-                    auto_submit: false,
+                    submit: None,
                     copy_final_to_clipboard: false,
                 },
                 "finishing for {method:?}"
@@ -540,19 +723,23 @@ mod tests {
         let stopped_at = KeyboardFocus {
             pid: Some(100),
             element: Some(7),
+            editable: false,
         };
         let moved = [
             KeyboardFocus {
                 pid: Some(200),
                 element: Some(9),
+                editable: false,
             },
             KeyboardFocus {
                 pid: Some(100),
                 element: Some(8),
+                editable: false,
             },
             KeyboardFocus {
                 pid: Some(200),
                 element: None,
+                editable: false,
             },
         ];
         let unproven = [
@@ -560,13 +747,14 @@ mod tests {
             KeyboardFocus {
                 pid: Some(100),
                 element: None,
+                editable: false,
             },
             KeyboardFocus::default(),
         ];
 
         for method in EVERY_METHOD {
             let mut settings = plan(method);
-            settings.auto_submit = true;
+            settings.submit = Some(SubmitRequest::Configured(AutoSubmitKey::Enter));
             for current in moved {
                 assert_eq!(
                     focus_left(&settings, stopped_at, || current),

@@ -161,6 +161,7 @@ enum MeetingConsentDeliveryMethod: String, Decodable {
     case accessibilityInsertion = "accessibility_insertion"
     case clipboardPaste = "clipboard_paste"
     case directTyping = "direct_typing"
+    case submitKey = "submit_key"
     case externalScript = "external_script"
 }
 

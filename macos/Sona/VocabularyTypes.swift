@@ -223,8 +223,7 @@ struct VocabularyRule: Identifiable, Equatable {
     var enabled: Bool?
 }
 
-/// The part of `get_app_settings` this surface reads. The four switches and
-/// the two lists the settings file owns.
+/// The settings switches and lists this surface reads.
 struct VocabularySettingsSnapshot: Decodable {
     let customWords: [VocabularyEntry]?
     let emojiReplacements: [EmojiReplacement]?
@@ -234,6 +233,7 @@ struct VocabularySettingsSnapshot: Decodable {
     let replacementsEnabled: Bool?
     let spokenEditsEnabled: Bool?
     let meetingVocabularyEnabled: Bool?
+    let spokenSendEnabled: Bool?
 }
 
 /// The keys the core matches by, so the editor can refuse exactly what the

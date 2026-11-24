@@ -403,6 +403,7 @@ enum ReceiptDeliveryMethod: String, Decodable {
     case accessibilityInsertion = "accessibility_insertion"
     case clipboardPaste = "clipboard_paste"
     case directTyping = "direct_typing"
+    case submitKey = "submit_key"
     case externalScript = "external_script"
 
     var label: String {
@@ -411,6 +412,7 @@ enum ReceiptDeliveryMethod: String, Decodable {
         case .accessibilityInsertion: "Accessibility insertion"
         case .clipboardPaste: "Clipboard paste"
         case .directTyping: "Direct typing"
+        case .submitKey: "Enter key"
         case .externalScript: "External script"
         }
     }

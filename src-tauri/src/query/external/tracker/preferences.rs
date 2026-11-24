@@ -210,6 +210,8 @@ pub enum SettingKey {
     TextReplacements,
     /// Spoken edits such as "scratch that": true or false.
     SpokenEdits,
+    /// Submit after a trailing English "send": true or false.
+    SpokenSend,
     /// Emoji replacements: true or false.
     Emoji,
     /// The active mode's id: the capture mode chip.
@@ -914,6 +916,13 @@ fn setting_change<'a>(args: &'a SettingArgs) -> SettingsChange<'a> {
             show(|s| json!(s.spoken_edits_enabled)),
             apply(move |s| Ok(s.spoken_edits_enabled = flag(value)?)),
         ),
+        SettingKey::SpokenSend => (
+            show(|s| json!(s.spoken_send_enabled)),
+            apply(move |s| {
+                s.spoken_send_enabled = flag(value)?;
+                Ok(())
+            }),
+        ),
         SettingKey::Emoji => (
             show(|s| json!(s.emoji_replacements_enabled)),
             apply(move |s| Ok(s.emoji_replacements_enabled = flag(value)?)),
@@ -1225,6 +1234,7 @@ struct SettingsView<'a> {
     snippets: bool,
     text_replacements: bool,
     spoken_edits: bool,
+    spoken_send: bool,
     emoji: bool,
     persona_samples: &'a [PersonaSample],
     shortcuts: Vec<ShortcutView<'a>>,
@@ -1314,6 +1324,7 @@ fn settings_view(
         snippets: settings.snippets_enabled,
         text_replacements: settings.replacements_enabled,
         spoken_edits: settings.spoken_edits_enabled,
+        spoken_send: settings.spoken_send_enabled,
         emoji: settings.emoji_replacements_enabled,
         persona_samples: &settings.persona_samples,
         shortcuts,

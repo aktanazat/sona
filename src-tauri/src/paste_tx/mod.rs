@@ -128,21 +128,21 @@ impl TxState {
         self.last_receipt_after_injection().is_some()
     }
 }
-/// Takes the configured submit key exactly once, and only after a receipt
+/// Takes the frozen submit request exactly once, and only after a receipt
 /// proves the paste chord reached a reader after injection. Pressing Enter
 /// behind an unconfirmed paste could submit stale content, so each platform
 /// asks here instead of keeping its own copy of that rule.
-pub(crate) fn take_auto_submit_key(
+pub(crate) fn take_submit_request(
     state: &mut TxState,
-    enabled: bool,
-    key: crate::settings::AutoSubmitKey,
-) -> Option<crate::settings::AutoSubmitKey> {
-    if !enabled || state.auto_submit_sent || !state.any_receipt_after_injection() {
+    request: Option<crate::delivery::SubmitRequest>,
+) -> Option<crate::delivery::SubmitRequest> {
+    let request = request?;
+    if state.auto_submit_sent || !state.any_receipt_after_injection() {
         return None;
     }
 
     state.auto_submit_sent = true;
-    Some(key)
+    Some(request)
 }
 
 pub(crate) enum WaitDecision {
@@ -213,8 +213,7 @@ pub(crate) fn try_reliable_paste(
     app_handle: &tauri::AppHandle,
     paste_method: &crate::settings::PasteMethod,
     enigo: &mut enigo::Enigo,
-    auto_submit: bool,
-    auto_submit_key: crate::settings::AutoSubmitKey,
+    submit: Option<crate::delivery::SubmitRequest>,
     clipboard_handling: crate::settings::ClipboardHandling,
 ) -> Result<(), String> {
     platform::run(
@@ -222,8 +221,7 @@ pub(crate) fn try_reliable_paste(
         app_handle,
         paste_method,
         enigo,
-        auto_submit,
-        auto_submit_key,
+        submit,
         clipboard_handling,
     )
 }
@@ -298,28 +296,42 @@ mod tests {
         assert!(matches!(evaluate(&s, Instant::now()), WaitDecision::Finish));
     }
     #[test]
-    fn confirmed_reliable_paste_takes_each_submit_key_once() {
-        for key in [
-            crate::settings::AutoSubmitKey::Enter,
-            crate::settings::AutoSubmitKey::CtrlEnter,
-            crate::settings::AutoSubmitKey::CmdEnter,
+    fn confirmed_reliable_paste_takes_each_submit_request_once() {
+        use crate::delivery::{KeyboardFocus, SubmitRequest};
+        use crate::settings::AutoSubmitKey;
+        for request in [
+            SubmitRequest::Configured(AutoSubmitKey::Enter),
+            SubmitRequest::Configured(AutoSubmitKey::CtrlEnter),
+            SubmitRequest::Configured(AutoSubmitKey::CmdEnter),
+            SubmitRequest::SpokenEnter {
+                target: KeyboardFocus {
+                    pid: Some(100),
+                    element: Some(7),
+                    editable: true,
+                },
+                run_id: 3,
+            },
         ] {
             let mut state = TxState::new();
             let injected = Instant::now();
             state.injected_at = Some(injected);
             state.record_receipt(injected);
 
-            assert_eq!(take_auto_submit_key(&mut state, true, key), Some(key));
-            assert_eq!(take_auto_submit_key(&mut state, true, key), None);
+            assert_eq!(
+                take_submit_request(&mut state, Some(request)),
+                Some(request)
+            );
+            assert_eq!(take_submit_request(&mut state, Some(request)), None);
         }
     }
 
     #[test]
     fn unconfirmed_reliable_paste_never_takes_a_submit_key() {
-        let key = crate::settings::AutoSubmitKey::Enter;
+        let request =
+            crate::delivery::SubmitRequest::Configured(crate::settings::AutoSubmitKey::Enter);
         let mut no_receipt = TxState::new();
         no_receipt.injected_at = Some(Instant::now());
-        assert_eq!(take_auto_submit_key(&mut no_receipt, true, key), None);
+        assert_eq!(take_submit_request(&mut no_receipt, Some(request)), None);
         assert!(!no_receipt.auto_submit_sent);
 
         let mut pre_injection_receipt = TxState::new();
@@ -327,7 +339,7 @@ mod tests {
         pre_injection_receipt.injected_at = Some(injected);
         pre_injection_receipt.record_receipt(injected - Duration::from_millis(1));
         assert_eq!(
-            take_auto_submit_key(&mut pre_injection_receipt, true, key),
+            take_submit_request(&mut pre_injection_receipt, Some(request)),
             None
         );
         assert!(!pre_injection_receipt.auto_submit_sent);
