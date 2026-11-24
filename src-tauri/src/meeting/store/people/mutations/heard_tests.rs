@@ -463,18 +463,88 @@ fn a_contact_whose_alias_is_the_users_whole_name_is_found_by_their_own() {
     assert!(people_heard(&people, &alias_only, Some("Jordan")).is_empty());
 }
 
+#[test]
+fn a_contact_whose_alias_is_the_users_full_name_is_found_by_their_own_name() {
+    let people = [
+        invented("Zelia Morse", &[]),
+        invented("Tamsin Krill", &["Zelia Morse"]),
+    ];
+    let said = ["Can you ask Tamsin Krill about the contract?".to_string()];
+    let spoken = Heard {
+        lines: &said,
+        listed: &[],
+    };
+    assert_eq!(
+        names(people_heard(&people, &spoken, Some("Zelia Morse"))),
+        ["Tamsin Krill"]
+    );
+
+    let listed = ["Tamsin Krill".to_string()];
+    let roster = Heard {
+        lines: &[],
+        listed: &listed,
+    };
+    assert_eq!(
+        names(people_heard(&people, &roster, Some("Zelia Morse"))),
+        ["Tamsin Krill"]
+    );
+}
+
+#[test]
+fn a_stranger_whose_surname_is_a_contacts_first_name_is_not_that_contact() {
+    let people = [invented("Dana Whitfield", &[])];
+    for line in [
+        "I asked Marcus Dana about the budget.",
+        "Thanks Marcus Dana, send it over.",
+        "That was Marcus Dana's idea.",
+        "On Monday Marcus Dana joins us.",
+    ] {
+        let lines = [line.to_string()];
+        let heard = Heard {
+            lines: &lines,
+            listed: &[],
+        };
+        assert!(people_heard(&people, &heard, None).is_empty(), "{line}");
+    }
+
+    let lines = ["Thanks Dana, send it over.".to_string()];
+    let heard = Heard {
+        lines: &lines,
+        listed: &[],
+    };
+    assert_eq!(
+        names(people_heard(&people, &heard, None)),
+        ["Dana Whitfield"]
+    );
+}
+
+#[test]
+fn a_shared_multiword_name_or_a_name_with_a_suffix_suggests_nobody() {
+    let people = [
+        invented("Tess Nolan", &["Nolan Family"]),
+        invented("Ben Ostrow", &["Nolan Family"]),
+    ];
+    let listed = ["Nolan Family".to_string()];
+    let lines = ["Thanks Nolan Family, that covers it.".to_string()];
+    let heard = Heard {
+        lines: &lines,
+        listed: &listed,
+    };
+    assert!(people_heard(&people, &heard, None).is_empty());
+
+    let people = [invented("Tess Nolan", &[])];
+    let suffixed = ["Thanks Tess Nolan Junior, that covers it.".to_string()];
+    let heard = Heard {
+        lines: &suffixed,
+        listed: &[],
+    };
+    assert!(people_heard(&people, &heard, None).is_empty());
+}
+
 /// What the matching is meant to do, written out the long way so it does not
 /// share code with `people_heard`: the meeting gave exactly `cue`, and a
-/// person is named by it only through a name that is theirs alone. Said
-/// aloud, a cue also ends on its last word, so a stranger whose surname is a
-/// contact's only-theirs first name still reads as that contact.
-fn should_suggest(
-    people: &[Person],
-    person: &Person,
-    cue: &str,
-    spoken: bool,
-    user: Option<&str>,
-) -> bool {
+/// person is named by it only through a name that is theirs alone.
+fn should_suggest(people: &[Person], person: &Person, cue: &str, user: Option<&str>) -> bool {
     let same = |left: &str, right: &str| left.to_lowercase() == right.to_lowercase();
     let words = |name: &str| {
         name.split_whitespace()
@@ -482,10 +552,9 @@ fn should_suggest(
             .collect::<Vec<_>>()
     };
     let user = user.map(|user| words(user).join(" "));
-    let is_user = user.as_deref().is_some_and(|user| {
-        same(&words(&person.display_name).join(" "), user)
-            || (user.contains(' ') && person.aliases.iter().any(|alias| same(alias, user)))
-    });
+    let is_user = user
+        .as_deref()
+        .is_some_and(|user| same(&words(&person.display_name).join(" "), user));
     if is_user {
         return false;
     }
@@ -494,10 +563,19 @@ fn should_suggest(
     own.extend(words(&person.display_name).first().cloned());
     own.iter().any(|name| {
         if name.contains(' ') {
-            return same(name, cue);
+            let holders = people
+                .iter()
+                .filter(|other| {
+                    std::iter::once(&other.display_name)
+                        .chain(&other.aliases)
+                        .any(|held| held.contains(' ') && same(held, cue))
+                })
+                .count();
+            return same(name, cue)
+                && holders == 1
+                && !user.as_deref().is_some_and(|user| same(user, cue));
         }
-        let ends_on = spoken && cue.split(' ').last().is_some_and(|last| same(name, last));
-        if !same(name, cue) && !ends_on {
+        if !same(name, cue) {
             return false;
         }
         let word = name.to_lowercase();
@@ -610,13 +688,7 @@ fn every_mix_of_user_name_nicknames_and_shared_names_matches_as_meant() {
                                     .collect::<Vec<_>>();
                                 for person in &people {
                                     checked += 1;
-                                    let meant = should_suggest(
-                                        &people,
-                                        person,
-                                        cue,
-                                        !lines.is_empty(),
-                                        *user,
-                                    );
+                                    let meant = should_suggest(&people, person, cue, *user);
                                     if found.contains(&person.id) != meant {
                                         wrong.push(format!(
                                             "user {user:?}, people {:?}, cue {cue:?} (form {index}): {} {}",
