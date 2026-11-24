@@ -12,9 +12,7 @@ struct EssentialsView<MeetingRows: View>: View {
 
     var body: some View {
         Page {
-            PageTitle("Essentials", subtitle: "The handful of settings worth deciding once.") {
-                EmptyView()
-            }
+            PageTitle("Essentials", subtitle: "")
             ErrorNote(store.error)
             Card {
                 ShortcutCaptureRow(store: store, id: "transcribe")
@@ -84,16 +82,12 @@ struct LoginItemRow: View {
     }
 }
 
-/// The microphone, and a way back to the system default.
-///
-/// The row keeps naming the configured device even when the enumeration does
-/// not contain it: a mic gets unplugged, a list has not resolved yet, and in
-/// both states the honest answer is still the name that is stored.
 struct MicrophoneRow: View {
     let store: SettingsStore
+    @State private var managing = false
 
     var body: some View {
-        CardRow {
+        CardRow(action: { managing = true }) {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Microphone").bodyText()
                 if store.channelCount > 1 {
@@ -102,35 +96,199 @@ struct MicrophoneRow: View {
             }
         } trailing: {
             HStack(spacing: 10) {
-                if selected != "Default" {
-                    Button("Reset") { Task { await store.resetMicrophone() } }
-                        .buttonStyle(.quiet)
-                        .disabled(store.isBusy("selected_microphone"))
-                }
-                Picker("Microphone", selection: Binding(
-                    get: { selected },
-                    set: { name in Task { await store.setMicrophone(name) } }
+                MicrophoneChoiceLabel(choice: store.microphoneChoice)
+                    .bodyText(14, Theme.inkSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .multilineTextAlignment(.trailing)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Theme.inkTertiary)
+                    .accessibilityHidden(true)
+            }
+            .frame(maxWidth: Theme.contentMax / 2, alignment: .trailing)
+        }
+        .sheet(isPresented: $managing) {
+            MicrophonePreferencesSheet(store: store, open: $managing)
+        }
+    }
+}
+
+private struct MicrophoneChoiceLabel: View {
+    let choice: MicrophoneChoice
+
+    var body: some View {
+        switch choice {
+        case .systemDefault: Text("System default")
+        case .preferred: Text("Preferred microphones")
+        case let .device(name): Text(name)
+        }
+    }
+}
+
+private struct MicrophonePreferencesSheet: View {
+    let store: SettingsStore
+    @Binding var open: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Microphones").headlineText()
+            ErrorNote(store.error)
+            HStack(spacing: 16) {
+                Text("Use").bodyText()
+                Spacer()
+                Picker("Microphone selection", selection: Binding(
+                    get: { store.microphoneChoice },
+                    set: { choice in Task { await store.selectMicrophone(choice) } }
                 )) {
-                    ForEach(names, id: \.self) { name in
-                        Text(name).tag(name)
+                    ForEach(store.microphoneChoices, id: \.self) { choice in
+                        MicrophoneChoiceLabel(choice: choice)
+                            .tag(choice)
+                            .disabled(!store.microphoneChoiceAvailable(choice))
                     }
                 }
                 .labelsHidden()
                 .pickerStyle(.menu)
-                .controlSize(.large)
-                .fixedSize()
-                .disabled(store.isBusy("selected_microphone"))
+            }
+            .disabled(store.isBusy("microphone_configuration"))
+            MicrophonePreferencesList(store: store)
+            HStack(spacing: 12) {
+                if store.isBusy("microphone_configuration") {
+                    ProgressView().controlSize(.small)
+                        .accessibilityLabel("Saving microphone preferences")
+                }
+                Spacer()
+                Button("Done") { open = false }
+                    .buttonStyle(.primary)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(store.isBusy("microphone_configuration"))
+            }
+        }
+        .padding(24)
+        .frame(width: 600, height: 540)
+        .background(Theme.page)
+        .interactiveDismissDisabled(store.isBusy("microphone_configuration"))
+        .onExitCommand {
+            if !store.isBusy("microphone_configuration") { open = false }
+        }
+    }
+}
+
+private struct MicrophonePreferencesList: View {
+    let store: SettingsStore
+
+    var body: some View {
+        let preferred = store.preferredMicrophones
+        switch store.microphoneReadState {
+        case .loading:
+            ProgressView("Reading microphones…")
+                .controlSize(.small)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        case let .failed(message):
+            VStack(alignment: .leading, spacing: 12) {
+                ErrorNote(message)
+                Button("Retry") { Task { await store.refreshMicrophones() } }
+                    .buttonStyle(.secondary)
+                Spacer()
+            }
+        case .ready:
+            if preferred.isEmpty && store.otherMicrophones.isEmpty && store.excludedMicrophones.isEmpty {
+                Text("No microphones connected.").metaText()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            } else {
+                List {
+                    if !preferred.isEmpty {
+                        Section("Preferred") {
+                            ForEach(preferred) { row in
+                                MicrophonePreferenceRow(store: store, row: row)
+                                    .contextMenu {
+                                        Button("Move up") { Task { await store.moveMicrophone(row.name, by: -1) } }
+                                            .disabled(store.microphoneChoice != .preferred || row.rank == 1 || store.isBusy("microphone_configuration"))
+                                        Button("Move down") { Task { await store.moveMicrophone(row.name, by: 1) } }
+                                            .disabled(store.microphoneChoice != .preferred || row.rank == preferred.count || store.isBusy("microphone_configuration"))
+                                    }
+                            }
+                            .onMove { indices, destination in
+                                var names = preferred.map(\.name)
+                                names.move(fromOffsets: indices, toOffset: destination)
+                                Task { await store.reorderMicrophones(names) }
+                            }
+                            .moveDisabled(store.microphoneChoice != .preferred || store.isBusy("microphone_configuration"))
+                        }
+                    }
+                    if !store.otherMicrophones.isEmpty {
+                        Section("Other microphones") {
+                            ForEach(store.otherMicrophones) { row in
+                                MicrophonePreferenceRow(store: store, row: row)
+                            }
+                        }
+                    }
+                    if !store.excludedMicrophones.isEmpty {
+                        Section("Excluded") {
+                            ForEach(store.excludedMicrophones) { row in
+                                MicrophonePreferenceRow(store: store, row: row)
+                            }
+                        }
+                    }
+                }
+                .listStyle(.plain)
+                .scrollContentBackground(.hidden)
+                .disabled(store.isBusy("microphone_configuration"))
             }
         }
     }
+}
 
-    private var selected: String { SettingsStore.deviceLabel(store.settings.selectedMicrophone) }
+private struct MicrophonePreferenceRow: View {
+    let store: SettingsStore
+    let row: MicrophoneListItem
 
-    /// The enumeration, plus the stored device when this list does not have
-    /// it: a picker with no item for its own value renders empty.
-    private var names: [String] {
-        let listed = store.microphones.map(\.name)
-        return listed.contains(selected) ? listed : [selected] + listed
+    var body: some View {
+        CardRow {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                if let rank = row.rank {
+                    Text(rank, format: .number).metaText()
+                }
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(row.name).bodyText(14, row.excluded ? Theme.inkSecondary : Theme.ink)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if row.connected == false && row.excluded {
+                        Text("Disconnected, excluded").metaText()
+                    } else if row.excluded {
+                        Text("Excluded").metaText()
+                    } else if row.connected == false {
+                        Text("Disconnected").metaText()
+                    }
+                }
+            }
+        } trailing: {
+            HStack(spacing: 8) {
+                Button {
+                    Task { await store.preferMicrophone(row.name, preferred: row.rank == nil) }
+                } label: {
+                    if row.rank == nil {
+                        Label("Prefer microphone", systemImage: "star")
+                    } else {
+                        Label("Remove from favourites", systemImage: "star.fill")
+                    }
+                }
+                .labelStyle(.iconOnly)
+                .buttonStyle(.quiet)
+                Button {
+                    Task { await store.excludeMicrophone(row.name, excluded: !row.excluded) }
+                } label: {
+                    if row.excluded {
+                        Label("Allow microphone", systemImage: "checkmark.circle")
+                    } else {
+                        Label("Exclude microphone", systemImage: "minus.circle")
+                    }
+                }
+                .labelStyle(.iconOnly)
+                .buttonStyle(.quiet)
+            }
+        }
+        .listRowSeparator(.hidden)
+        .listRowInsets(EdgeInsets())
+        .listRowBackground(Color.clear)
     }
 }
 

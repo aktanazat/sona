@@ -1222,6 +1222,202 @@ pub enum OrtAcceleratorSetting {
     Rocm,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Type)]
+#[serde(default)]
+pub struct MicrophonePreferences {
+    pub use_system_default: bool,
+    pub priority: Vec<String>,
+    pub excluded: Vec<String>,
+}
+
+impl Default for MicrophonePreferences {
+    fn default() -> Self {
+        Self {
+            use_system_default: true,
+            priority: Vec::new(),
+            excluded: Vec::new(),
+        }
+    }
+}
+
+impl MicrophonePreferences {
+    pub fn excludes(&self, name: &str) -> bool {
+        self.excluded.iter().any(|excluded| excluded == name)
+    }
+
+    pub(crate) fn device_index<'a>(
+        &self,
+        selected: Option<&str>,
+        devices: impl Iterator<Item = (&'a str, bool)>,
+    ) -> Option<usize> {
+        let mut best: Option<(usize, (usize, bool))> = None;
+        for (index, (name, is_default)) in devices.enumerate() {
+            if self.excludes(name) {
+                continue;
+            }
+            if selected == Some(name) {
+                return Some(index);
+            }
+            let priority = if self.use_system_default {
+                usize::MAX
+            } else {
+                self.priority
+                    .iter()
+                    .position(|preferred| preferred == name)
+                    .unwrap_or(usize::MAX)
+            };
+            let rank = (priority, !is_default);
+            if best.as_ref().is_none_or(|(_, current)| rank < *current) {
+                best = Some((index, rank));
+            }
+        }
+        best.map(|(index, _)| index)
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        Self::validate_names(&self.priority)?;
+        Self::validate_names(&self.excluded)
+    }
+
+    fn validate_names(names: &[String]) -> Result<(), String> {
+        if names.iter().any(|name| name.trim().is_empty()) {
+            return Err("Remove the empty microphone name.".into());
+        }
+        if names
+            .iter()
+            .enumerate()
+            .any(|(index, name)| names[..index].contains(name))
+        {
+            return Err("Remove duplicate microphone names.".into());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_selected(&self, selected: Option<&str>) -> Result<(), String> {
+        if let Some(name) = selected {
+            if name.trim().is_empty() {
+                return Err("Choose a microphone or use the system default.".into());
+            }
+            if self.excludes(name) {
+                return Err(
+                    "The selected microphone is excluded. Allow it or choose another microphone."
+                        .into(),
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, Type)]
+#[serde(default)]
+pub struct MicrophoneConfiguration {
+    pub selected: Option<String>,
+    pub preferences: MicrophonePreferences,
+}
+
+impl MicrophoneConfiguration {
+    pub fn apply(self, settings: &mut AppSettings) -> Result<(), String> {
+        self.preferences.validate()?;
+        self.preferences
+            .validate_selected(self.selected.as_deref())?;
+        if settings
+            .clamshell_microphone
+            .as_deref()
+            .is_some_and(|name| self.preferences.excludes(name))
+        {
+            settings.clamshell_microphone = None;
+        }
+        settings.selected_microphone = self.selected;
+        settings.microphone_preferences = self.preferences;
+        Ok(())
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Type)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MicrophoneChange {
+    SystemDefault,
+    Preferred,
+    Select { name: String },
+    Favourite { name: String, preferred: bool },
+    Exclude { name: String, excluded: bool },
+    Reorder { names: Vec<String> },
+}
+
+impl MicrophoneChange {
+    pub fn apply(self, settings: &mut AppSettings) -> Result<(), String> {
+        let name = match &self {
+            Self::SystemDefault | Self::Preferred | Self::Reorder { .. } => None,
+            Self::Select { name } | Self::Favourite { name, .. } | Self::Exclude { name, .. } => {
+                Some(name)
+            }
+        };
+        if name.is_some_and(|name| name.trim().is_empty()) {
+            return Err("Remove the empty microphone name.".into());
+        }
+        match self {
+            Self::SystemDefault => {
+                settings.selected_microphone = None;
+                settings.microphone_preferences.use_system_default = true;
+            }
+            Self::Preferred => {
+                settings.selected_microphone = None;
+                settings.microphone_preferences.use_system_default = false;
+            }
+            Self::Select { name } => {
+                settings
+                    .microphone_preferences
+                    .validate_selected(Some(&name))?;
+                settings.selected_microphone = Some(name);
+            }
+            Self::Favourite { name, preferred } => {
+                let preferences = &mut settings.microphone_preferences;
+                if preferred {
+                    if !preferences.priority.contains(&name) {
+                        preferences.priority.push(name);
+                    }
+                    preferences.use_system_default = false;
+                    settings.selected_microphone = None;
+                } else {
+                    preferences.priority.retain(|candidate| candidate != &name);
+                }
+            }
+            Self::Exclude { name, excluded } => {
+                let preferences = &mut settings.microphone_preferences;
+                if excluded {
+                    if settings.selected_microphone.as_deref() == Some(name.as_str()) {
+                        settings.selected_microphone = None;
+                    }
+                    if settings.clamshell_microphone.as_deref() == Some(name.as_str()) {
+                        settings.clamshell_microphone = None;
+                    }
+                    if !preferences.excludes(&name) {
+                        preferences.excluded.push(name);
+                    }
+                } else {
+                    preferences.excluded.retain(|candidate| candidate != &name);
+                }
+            }
+            Self::Reorder { names } => {
+                MicrophonePreferences::validate_names(&names)?;
+                let preferences = &mut settings.microphone_preferences;
+                if names.len() != preferences.priority.len()
+                    || names
+                        .iter()
+                        .any(|name| !preferences.priority.contains(name))
+                {
+                    return Err("Microphone order changed. Try again.".into());
+                }
+                preferences.priority = names;
+                preferences.use_system_default = false;
+                settings.selected_microphone = None;
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Whether final English output preserves the model's spelling or applies the
 /// user's requested British spelling table.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq, Type)]
@@ -1344,6 +1540,8 @@ pub struct AppSettings {
     pub always_on_microphone: bool,
     #[serde(default)]
     pub selected_microphone: Option<String>,
+    #[serde(default)]
+    pub microphone_preferences: MicrophonePreferences,
     /// Which input channel to use on the selected microphone device.
     /// None means "average all channels" (original behavior).
     #[serde(default)]
@@ -2356,6 +2554,7 @@ pub fn get_default_settings() -> AppSettings {
         onboarding_completed: false,
         always_on_microphone: false,
         selected_microphone: None,
+        microphone_preferences: MicrophonePreferences::default(),
         selected_channel: None,
         clamshell_microphone: None,
         selected_output_device: None,
@@ -6069,5 +6268,139 @@ mod tests {
                 .is_empty()
         );
         assert!(!merge_missing_bindings(&mut settings));
+    }
+}
+
+#[cfg(test)]
+mod microphone_preference_tests {
+    use super::{get_default_settings, MicrophoneChange, MicrophonePreferences};
+
+    #[test]
+    fn available_preferred_input_beats_an_excluded_system_default() {
+        let preferences = MicrophonePreferences {
+            use_system_default: false,
+            priority: vec!["Disconnected".into(), "Desk".into()],
+            excluded: vec!["Virtual".into()],
+        };
+        let devices = [("Virtual", true), ("Headset", false), ("Desk", false)];
+        let chosen = preferences.device_index(None, devices.into_iter());
+        assert_eq!(chosen.map(|index| devices[index].0), Some("Desk"));
+    }
+
+    #[test]
+    fn excluding_every_connected_input_refuses_even_an_explicit_selection() {
+        let preferences = MicrophonePreferences {
+            excluded: vec!["Virtual".into(), "Desk".into()],
+            ..MicrophonePreferences::default()
+        };
+        let devices = [("Virtual", true), ("Desk", false)];
+        assert_eq!(
+            preferences.device_index(Some("Desk"), devices.into_iter()),
+            None
+        );
+    }
+
+    #[test]
+    fn system_default_keeps_the_order_for_switching_back_to_preferred_inputs() {
+        let mut settings = get_default_settings();
+        MicrophoneChange::Favourite {
+            name: "Desk".into(),
+            preferred: true,
+        }
+        .apply(&mut settings)
+        .unwrap();
+        let devices = [("Virtual", true), ("Desk", false)];
+        let chosen = settings
+            .microphone_preferences
+            .device_index(None, devices.into_iter());
+        assert_eq!(chosen.map(|index| devices[index].0), Some("Desk"));
+        MicrophoneChange::SystemDefault
+            .apply(&mut settings)
+            .unwrap();
+        let stored = serde_json::to_value(&settings).unwrap();
+        let mut restored = serde_json::from_value::<super::AppSettings>(stored).unwrap();
+        let chosen = restored
+            .microphone_preferences
+            .device_index(None, devices.into_iter());
+        assert_eq!(chosen.map(|index| devices[index].0), Some("Virtual"));
+        MicrophoneChange::Preferred.apply(&mut restored).unwrap();
+        let chosen = restored
+            .microphone_preferences
+            .device_index(None, devices.into_iter());
+        assert_eq!(chosen.map(|index| devices[index].0), Some("Desk"));
+    }
+
+    #[test]
+    fn exclusion_removes_regular_and_closed_lid_choices_and_rejects_reselection() {
+        let mut settings = get_default_settings();
+        settings.selected_microphone = Some("Virtual".into());
+        settings.clamshell_microphone = Some("Virtual".into());
+        MicrophoneChange::Exclude {
+            name: "Virtual".into(),
+            excluded: true,
+        }
+        .apply(&mut settings)
+        .unwrap();
+        let saved = serde_json::to_value(&settings).unwrap();
+        assert!(saved["selected_microphone"].is_null());
+        assert!(saved["clamshell_microphone"].is_null());
+        let refused = MicrophoneChange::Select {
+            name: "Virtual".into(),
+        }
+        .apply(&mut settings);
+        assert!(refused.is_err());
+        assert_eq!(serde_json::to_value(&settings).unwrap(), saved);
+        MicrophoneChange::Select {
+            name: "Desk".into(),
+        }
+        .apply(&mut settings)
+        .unwrap();
+        let devices = [("Virtual", true), ("Desk", false)];
+        let chosen = settings
+            .microphone_preferences
+            .device_index(settings.selected_microphone.as_deref(), devices.into_iter());
+        assert_eq!(chosen.map(|index| devices[index].0), Some("Desk"));
+    }
+
+    #[test]
+    fn reorder_preserves_a_separate_exclusion_and_refuses_changed_membership() {
+        let mut settings = get_default_settings();
+        for name in ["Desk", "Headset"] {
+            MicrophoneChange::Favourite {
+                name: name.into(),
+                preferred: true,
+            }
+            .apply(&mut settings)
+            .unwrap();
+        }
+        MicrophoneChange::Exclude {
+            name: "Virtual".into(),
+            excluded: true,
+        }
+        .apply(&mut settings)
+        .unwrap();
+        MicrophoneChange::Reorder {
+            names: vec!["Headset".into(), "Desk".into()],
+        }
+        .apply(&mut settings)
+        .unwrap();
+        let devices = [("Virtual", true), ("Desk", false), ("Headset", false)];
+        let chosen = settings
+            .microphone_preferences
+            .device_index(None, devices.into_iter());
+        assert_eq!(chosen.map(|index| devices[index].0), Some("Headset"));
+        assert_eq!(
+            settings
+                .microphone_preferences
+                .device_index(None, [("Virtual", true)].into_iter()),
+            None
+        );
+        let saved = serde_json::to_value(&settings).unwrap();
+        let refused = MicrophoneChange::Reorder {
+            names: vec!["Desk".into()],
+        }
+        .apply(&mut settings);
+        assert!(refused.is_err());
+        assert_eq!(serde_json::to_value(&settings).unwrap(), saved);
     }
 }

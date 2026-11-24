@@ -286,8 +286,8 @@ mod runtime {
             let detector = create_voice_detector(&self.app, TURN_SILENCE_FRAMES)
                 .map_err(|error| format!("Voice detection is unavailable: {error}"))?;
             let jobs = self.job_sender()?;
-            let (voice, reader) =
-                native::NativeVoice::start(self.audio.native_microphone_name().as_deref())?;
+            let microphone = self.audio.native_microphone_name()?;
+            let (voice, reader) = native::NativeVoice::start(microphone.as_deref())?;
             let session = Arc::new(Session {
                 id,
                 app: self.app.clone(),

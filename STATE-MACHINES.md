@@ -2145,3 +2145,35 @@ The refusal travels as `microphone_lid_closed`, with a dedicated native message.
 An ambiguous device-name lookup leaves the input type unconfirmed. Failed starts
 release their own capture lease and close an unowned on-demand stream; always-on
 streams and streams held by a meeting remain open.
+
+## Preferred and excluded microphones
+
+`microphone_preferences` stores the automatic selection mode, ordered preferred
+names and excluded names. Disconnected names remain saved. An explicit regular or
+closed-lid choice takes precedence only when allowed and connected. Automatic
+selection uses the first connected preferred input when enabled, then the allowed
+system default, then another allowed input. No allowed input means capture refuses;
+it never falls through to an excluded operating-system default.
+
+Native edits are named actions under the recording-state lock. They refuse while a
+capture owns the input. Reordering requires the current preferred membership, so a
+stale sheet cannot discard a separately added favourite. Excluding a name clears
+matching regular and closed-lid selections. Explicit CLI/MCP configuration updates
+validate the complete object before changing it.
+
+Idle warm streams are reconciled before a new capture acquires its lease. A settings
+change does not restart a meeting-owned stream. Shared dictation checks the actual
+open input against exclusions. External settings and agent changes reconcile only
+an idle stream; busy captures keep their stream, and the next start reads the new
+preferences. The explicit screen-recorder device UID remains a separate choice.
+
+The native microphone sheet keeps saved disconnected names and distinguishes a
+failed device read from an empty device list. Excluded inputs are disabled in device
+pickers. The sheet, CLI settings view and MCP setting tool use the same stored
+preferences.
+
+An unavailable manual selection also stays saved. Resolving or opening a fallback
+input never resets that selection or writes another settings revision. Only an
+explicit configuration change clears it. An unavailable preferred-input policy
+at Always-on startup leaves the manager closed and available for settings; capture
+still refuses until an allowed input exists.

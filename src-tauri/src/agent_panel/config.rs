@@ -105,7 +105,7 @@ pub(crate) enum SettingUndo {
     AudioVolume(f32),
     PlaybackWhileRecording(crate::settings::PlaybackWhileRecording),
     OutputDevice(Option<String>),
-    Microphone(Option<String>),
+    Microphone(Option<String>, bool),
     DefaultModel {
         model_id: String,
         onboarding_completed: bool,
@@ -137,7 +137,7 @@ impl SettingUndo {
             Self::AudioVolume(_) => SettingKind::AudioVolume,
             Self::PlaybackWhileRecording(_) => SettingKind::PlaybackWhileRecording,
             Self::OutputDevice(_) => SettingKind::OutputDevice,
-            Self::Microphone(_) => SettingKind::Microphone,
+            Self::Microphone(..) => SettingKind::Microphone,
             Self::DefaultModel { .. } => SettingKind::DefaultModel,
             Self::Language { .. } => SettingKind::Language,
             Self::Spelling(_) => SettingKind::Spelling,
@@ -510,6 +510,14 @@ pub(super) fn undo_changes_to_settings(
     if settings.settings_revision != expected_revision {
         return Err(ConfigError::StaleRevision);
     }
+    for change in undo {
+        if let SettingUndo::Microphone(value, _) = change {
+            settings
+                .microphone_preferences
+                .validate_selected(value.as_deref())
+                .map_err(|_| ConfigError::InvalidSetting)?;
+        }
+    }
     for change in undo.iter().rev() {
         restore_setting(settings, change)?;
     }
@@ -602,6 +610,14 @@ fn mutate_settings(
     if settings.settings_revision != expected_revision {
         return Err(ConfigError::StaleRevision);
     }
+    for change in changes {
+        if let ResolvedChange::Microphone(value) = change {
+            settings
+                .microphone_preferences
+                .validate_selected(value.as_deref())
+                .map_err(|_| ConfigError::InvalidSetting)?;
+        }
+    }
     let mut undo = Vec::with_capacity(changes.len());
     for change in changes {
         let prior = match change {
@@ -641,7 +657,13 @@ fn mutate_settings(
                 prior
             }
             ResolvedChange::Microphone(value) => {
-                let prior = SettingUndo::Microphone(settings.selected_microphone.clone());
+                let prior = SettingUndo::Microphone(
+                    settings.selected_microphone.clone(),
+                    settings.microphone_preferences.use_system_default,
+                );
+                if value.is_none() {
+                    settings.microphone_preferences.use_system_default = true;
+                }
                 settings.selected_microphone = value.clone();
                 prior
             }
@@ -760,7 +782,10 @@ fn restore_setting(settings: &mut AppSettings, undo: &SettingUndo) -> Result<(),
         SettingUndo::AudioVolume(value) => settings.audio_feedback_volume = *value,
         SettingUndo::PlaybackWhileRecording(value) => settings.playback_while_recording = *value,
         SettingUndo::OutputDevice(value) => settings.selected_output_device = value.clone(),
-        SettingUndo::Microphone(value) => settings.selected_microphone = value.clone(),
+        SettingUndo::Microphone(value, use_system_default) => {
+            settings.selected_microphone = value.clone();
+            settings.microphone_preferences.use_system_default = *use_system_default;
+        }
         SettingUndo::DefaultModel {
             model_id,
             onboarding_completed,
@@ -822,6 +847,15 @@ fn apply_runtime_effects(app: &AppHandle, kinds: &[SettingKind]) {
     let mut unique = BTreeSet::new();
     unique.extend(kinds.iter().copied().map(setting_kind_index));
     let settings = settings::get_settings(app);
+    if unique.contains(&setting_kind_index(SettingKind::Microphone)) {
+        if let Some(recorder) =
+            app.try_state::<std::sync::Arc<crate::managers::audio::AudioRecordingManager>>()
+        {
+            if let Err(error) = recorder.update_selected_device() {
+                log::warn!("Microphone preferences will apply to the next capture: {error}");
+            }
+        }
+    }
     if unique.contains(&setting_kind_index(SettingKind::Theme)) {
         #[cfg(any(target_os = "windows", target_os = "macos"))]
         crate::shortcut::apply_window_theme(app, settings.theme);

@@ -18,11 +18,27 @@ import ServiceManagement
 final class SettingsStore {
     /// The settings record. Starts at the core's own defaults so no row
     /// claims "off" for something that ships on, before the first read.
-    private(set) var settings = AppSettings()
+    private(set) var settings = AppSettings() {
+        didSet {
+            if settings.selectedMicrophone != oldValue.selectedMicrophone
+                || settings.clamshellMicrophone != oldValue.clamshellMicrophone
+                || settings.microphonePreferences != oldValue.microphonePreferences {
+                rebuildMicrophoneRows()
+            }
+        }
+    }
     /// `get_default_settings`, which is what a reset row writes back.
     private(set) var defaults = AppSettings()
     private(set) var loaded = false
     private(set) var microphones: [AudioDevice] = []
+    private(set) var microphoneReadState: MicrophoneReadState = .loading
+    private(set) var microphoneChoice: MicrophoneChoice = .systemDefault
+    private(set) var microphoneChoices: [MicrophoneChoice] = [.systemDefault, .preferred]
+    private(set) var clamshellMicrophoneNames: [String] = ["Default"]
+    private(set) var preferredMicrophones: [MicrophoneListItem] = []
+    private(set) var otherMicrophones: [MicrophoneListItem] = []
+    private(set) var excludedMicrophones: [MicrophoneListItem] = []
+    private var availableMicrophoneNames: Set<String> = []
     /// Channels on the selected microphone. One means no channel row.
     private(set) var channelCount = 1
     /// Whether this machine has a lid, which is the only thing the clamshell
@@ -128,24 +144,35 @@ final class SettingsStore {
     /// A write landed somewhere. Re-read the record, and when a microphone was
     /// reset, the enumeration that write invalidates.
     private func reload(after setting: String?) async {
+        let selected = settings.selectedMicrophone
+        let preferences = settings.microphonePreferences
         await refresh()
         if setting == "selected_microphone" {
             await refreshMicrophones()
+        }
+        if selected != settings.selectedMicrophone || preferences != settings.microphonePreferences {
             await refreshChannels()
         }
     }
 
     func refreshMicrophones() async {
-        await ask { self.microphones = try await self.core.request("get_available_microphones") }
+        microphoneReadState = .loading
+        rebuildMicrophoneRows()
+        do {
+            microphones = try await core.request("get_available_microphones")
+            microphoneReadState = .ready
+        } catch {
+            microphoneReadState = .failed(error.localizedDescription)
+        }
+        rebuildMicrophoneRows()
     }
 
-    /// How many channels the selected microphone has. The device the core
-    /// enumerates as "Default" is stored as the `default` sentinel.
+    /// The resolved capture input includes fallback for a disconnected choice.
     func refreshChannels() async {
-        let device = Self.deviceName(settings.selectedMicrophone)
         channelCount = 1
+        guard case .ready = microphoneReadState, !availableMicrophoneNames.isEmpty else { return }
         await ask {
-            self.channelCount = try await self.core.request("get_microphone_channels", ["deviceName": JSONValue.string(device)])
+            self.channelCount = try await self.core.request("get_microphone_channels", ["deviceName": JSONValue.string("default")])
         }
     }
 
@@ -319,16 +346,94 @@ final class SettingsStore {
         )
     }
 
-    func setMicrophone(_ name: String) async {
-        await write(
-            \.selectedMicrophone, name, "set_selected_microphone",
-            ["deviceName": .string(Self.deviceName(name))], key: "selected_microphone"
-        )
+    private func rebuildMicrophoneRows() {
+        let preferences = settings.microphonePreferences
+        let connected = Set(microphones.lazy.filter { $0.index != "default" }.map(\.name))
+        var seen: Set<String> = []
+        var available: Set<String> = []
+        var preferred: [MicrophoneListItem] = []
+        var other: [MicrophoneListItem] = []
+        var excluded: [MicrophoneListItem] = []
+        var choices: [MicrophoneChoice] = [.systemDefault, .preferred]
+        var clamshellNames = ["Default"]
+        func include(_ name: String) {
+            guard seen.insert(name).inserted else { return }
+            let present: Bool?
+            if case .ready = microphoneReadState { present = connected.contains(name) }
+            else { present = nil }
+            let hidden = preferences.excluded.contains(name)
+            let rank = preferences.priority.firstIndex(of: name).map { $0 + 1 }
+            let row = MicrophoneListItem(name: name, rank: rank, excluded: hidden, connected: present)
+            if rank != nil { preferred.append(row) }
+            else if hidden { excluded.append(row) }
+            else { other.append(row) }
+            if present == true && !hidden { available.insert(name) }
+            if (present == true && !hidden) || settings.selectedMicrophone == name {
+                choices.append(.device(name))
+            }
+            if (present == true && !hidden) || settings.clamshellMicrophone == name {
+                clamshellNames.append(name)
+            }
+        }
+        for name in preferences.priority { include(name) }
+        for device in microphones where device.index != "default" { include(device.name) }
+        for name in preferences.excluded { include(name) }
+        if let name = settings.selectedMicrophone { include(name) }
+        if let name = settings.clamshellMicrophone { include(name) }
+        availableMicrophoneNames = available
+        preferredMicrophones = preferred
+        otherMicrophones = other
+        excludedMicrophones = excluded
+        microphoneChoices = choices
+        clamshellMicrophoneNames = clamshellNames
+        if let name = settings.selectedMicrophone { microphoneChoice = .device(name) }
+        else { microphoneChoice = preferences.useSystemDefault ? .systemDefault : .preferred }
+    }
+
+    func microphoneChoiceAvailable(_ choice: MicrophoneChoice) -> Bool {
+        if case let .device(name) = choice { return availableMicrophoneNames.contains(name) }
+        return true
+    }
+
+    private func changeMicrophone(_ change: [String: JSONValue]) async {
+        guard !isBusy("microphone_configuration") else { return }
+        await send("change_microphone", ["change": .object(change)], key: "microphone_configuration")
+        await refresh()
         await refreshChannels()
     }
 
-    func resetMicrophone() async {
-        await setMicrophone(Self.deviceLabel(defaults.selectedMicrophone))
+    func selectMicrophone(_ choice: MicrophoneChoice) async {
+        let change: [String: JSONValue]
+        switch choice {
+        case .systemDefault: change = ["kind": .string("system_default")]
+        case .preferred: change = ["kind": .string("preferred")]
+        case let .device(name): change = ["kind": .string("select"), "name": .string(name)]
+        }
+        await changeMicrophone(change)
+    }
+
+    func preferMicrophone(_ name: String, preferred: Bool) async {
+        await changeMicrophone(["kind": .string("favourite"), "name": .string(name), "preferred": .bool(preferred)])
+    }
+
+    func excludeMicrophone(_ name: String, excluded: Bool) async {
+        await changeMicrophone(["kind": .string("exclude"), "name": .string(name), "excluded": .bool(excluded)])
+    }
+
+    func reorderMicrophones(_ names: [String]) async {
+        await changeMicrophone(["kind": .string("reorder"), "names": .array(names.map(JSONValue.string))])
+    }
+
+    func moveMicrophone(_ name: String, by offset: Int) async {
+        var names = settings.microphonePreferences.priority
+        guard let index = names.firstIndex(of: name) else {
+            refuse("Microphone order changed. Try again.")
+            return
+        }
+        let destination = index + offset
+        guard names.indices.contains(destination) else { return }
+        names.swapAt(index, destination)
+        await reorderMicrophones(names)
     }
 
     func setClamshellMicrophone(_ name: String) async {

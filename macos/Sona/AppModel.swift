@@ -1601,6 +1601,10 @@ final class AppModel {
             "No audio input device was detected. Connect a microphone and try again."
         case "microphone_lid_closed":
             "The lid is closed. Open it or choose another microphone."
+        case "microphone_excluded":
+            "This microphone is excluded. Allow it or choose another microphone in Settings."
+        case "microphone_unavailable":
+            "Microphone information is unavailable. Reconnect it or choose another microphone in Settings."
         case "no_speech_detected":
             "No speech was detected. A sample of the recording was saved to History."
         case "no_model_selected":

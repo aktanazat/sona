@@ -94,6 +94,18 @@ fn follow_settings(app: &AppHandle) {
     let Some((before, after)) = crate::settings::reload_after_external_write(app) else {
         return;
     };
+    if before.selected_microphone != after.selected_microphone
+        || before.clamshell_microphone != after.clamshell_microphone
+        || before.microphone_preferences != after.microphone_preferences
+    {
+        if let Some(recorder) =
+            app.try_state::<std::sync::Arc<crate::managers::audio::AudioRecordingManager>>()
+        {
+            if let Err(error) = recorder.update_selected_device() {
+                log::warn!("Microphone preferences will apply to the next capture: {error}");
+            }
+        }
+    }
     crate::shortcut::reconcile_mode_shortcuts(app, &before.bindings, &after.bindings);
     crate::modes::emit_modes_changed(app, &crate::modes::mode_settings_snapshot(&after));
     if before.theme != after.theme {

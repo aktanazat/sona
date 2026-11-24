@@ -2293,6 +2293,11 @@ pub(super) async fn call(
             let device_name = args.take("deviceName")?;
             reply(crate::commands::audio::set_selected_microphone(app.clone(), device_name).await)
         }
+        "change_microphone" => {
+            let mut args = Args::parse(params)?;
+            let change = args.take("change")?;
+            reply(crate::commands::audio::change_microphone(app.clone(), change).await)
+        }
         "get_selected_microphone" => {
             let handle = app.clone();
             on_main_thread(app, move || {
@@ -2344,14 +2349,7 @@ pub(super) async fn call(
         "set_clamshell_microphone" => {
             let mut args = Args::parse(params)?;
             let device_name = args.take("deviceName")?;
-            let handle = app.clone();
-            on_main_thread(app, move || {
-                reply(crate::commands::audio::set_clamshell_microphone(
-                    handle.clone(),
-                    device_name,
-                ))
-            })
-            .await?
+            reply(crate::commands::audio::set_clamshell_microphone(app.clone(), device_name).await)
         }
         "get_clamshell_microphone" => {
             let handle = app.clone();
