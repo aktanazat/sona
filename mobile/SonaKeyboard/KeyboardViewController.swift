@@ -35,6 +35,7 @@ final class KeyboardViewController: UIInputViewController {
     private let state = KeyboardState()
     private let typing = TypingModel()
     private let emoji = EmojiModel()
+    private let tools = KeyboardTools()
     private var corrector: TypingCorrector?
     private var session = TypingSession(corrector: nil)
     /// How many times Reset in the app had run when the learning was read, so a reset made
@@ -45,12 +46,13 @@ final class KeyboardViewController: UIInputViewController {
     private var ticker: Task<Void, Never>?
     private var dictation = KeyboardDictation()
     private var microphone: KeyboardMicrophone?
-    private var profile = DictationProfile.empty
     private var echo = FieldEcho()
     /// True from the keyboard's own edit until the main loop next turns.
     private var ownEditInFlight = false
     private var editedField: UUID?
     private var lastReloadedDocumentID: UUID?
+    /// Counts the keyboard showing and hiding, which may bring it to another field.
+    private var shownCount = 0
     private let haptic = UIImpactFeedbackGenerator(style: .light)
     private var feel = KeyboardFeelPreferences(defaults: .standard)
     /// Suggestions wait for the run loop after a key, so the key's text goes out first.
@@ -61,6 +63,7 @@ final class KeyboardViewController: UIInputViewController {
     #if DEBUG
     private let frames = FrameMeter()
     private let appearFrames = FrameMeter()
+    private let panelFrames = FrameMeter()
     #endif
     private var visible = false
     private var requestedAt: Date?
@@ -91,11 +94,37 @@ final class KeyboardViewController: UIInputViewController {
                 entries.forEach { self?.session.lexicon.add(shortcut: $0.shortcut, text: $0.text) }
             }
         }
+        tools.field = { [weak self] in
+            guard let self else { return nil }
+            return FieldText(hostBefore: textBefore, hostAfter: textAfter, selection: textDocumentProxy.selectedText, echo: echo)
+        }
+        tools.apply = { [weak self] step in self?.applyTool(step) }
+        tools.fieldMark = { [weak self] in
+            guard let self else { return KeyboardDictation.FieldMark(shown: -1, before: "", traits: "") }
+            let proxy = textDocumentProxy
+            return KeyboardDictation.FieldMark(
+                id: documentID, shown: shownCount, before: joiningBefore,
+                traits: "\(proxy.keyboardType?.rawValue ?? -1) \(proxy.returnKeyType?.rawValue ?? -1)"
+            )
+        }
+        tools.canCopy = { [weak self] in self?.hasFullAccess ?? false }
+        tools.snippetsChanged = { [weak self] in self?.applySnippets() }
+        #if DEBUG
+        tools.toggled = { [weak self] in
+            guard let self else { return }
+            panelFrames.begin(label: "tools panel")
+            Task { [panelFrames] in
+                try? await Task.sleep(for: .milliseconds(600))
+                panelFrames.end()
+            }
+        }
+        #endif
         let content = KeyboardView(
             state: state,
             typing: typing,
             prepare: { [weak self] in self?.prepareMicrophone() },
             emoji: emoji,
+            tools: tools,
             microphone: { [weak self] in self?.start() },
             stop: { [weak self] in self?.finish() },
             insert: { [weak self] in self?.insertDraft() },
@@ -123,11 +152,14 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     override func viewWillAppear(_ animated: Bool) {
+        shownCount += 1
+        tools.syncReviews()
         super.viewWillAppear(animated)
         echo.forget()
         let languages = KeyboardLanguages.shared().enabled
         typing.showsLanguageKey = languages.count > 1
         if !languages.contains(typing.language) { setLanguage(languages[0]) }
+        tools.languages = languages
         feel = hasFullAccess ? KeyboardFeelPreferences.shared() : KeyboardFeelPreferences(defaults: .standard)
         typing.numberRow = feel.numberRow
         haptic.prepare()
@@ -183,7 +215,9 @@ final class KeyboardViewController: UIInputViewController {
 
     override func viewDidDisappear(_ animated: Bool) {
         super.viewDidDisappear(animated)
+        shownCount += 1
         dictate(.hidden)
+        tools.keyboardHidden()
         visible = false
         ticker?.cancel()
         ticker = nil
@@ -265,6 +299,7 @@ final class KeyboardViewController: UIInputViewController {
             corrector: corrector, lexicon: session.lexicon, learning: session.learning,
             emoji: { catalog?.emoji(for: $0) }
         )
+        applySnippets()
         session.hostChanged(field: documentID, text: fieldText)
         Task { [weak self] in
             async let table = NextWords.table(for: language)
@@ -289,6 +324,7 @@ final class KeyboardViewController: UIInputViewController {
             }
         }
         primaryLanguage = language.rawValue
+        tools.typingLanguage = language.rawValue
         state.startURL = DictationLink.keyboardURL(documentID: documentID, language: language)
         UserDefaults.standard.set(language.rawValue, forKey: Self.languageKey)
         refreshShift()
@@ -296,10 +332,15 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private func press(_ key: Key) {
+        if typing.emojiQuery != nil, search(key) { return }
+        if tools.type(key, face: typing.face(of:)) {
+            if typing.shift == .once { typing.shift = .off }
+            return
+        }
         typing.hasTyped = true
         if state.notice != nil { state.notice = nil }
+        if tools.notice != nil { tools.notice = nil }
         if state.seenMessage != state.session.message { state.seenMessage = state.session.message }
-        if typing.emojiQuery != nil, search(key) { return }
         switch key {
         case let .character(text):
             let character = typing.face(of: text)
@@ -365,6 +406,10 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private func insertEmoji(_ glyph: String) {
+        if tools.type(.character(glyph), face: { $0 }) {
+            feedback(for: .character(glyph))
+            return
+        }
         typing.hasTyped = true
         apply(TypingSession.Edit(insert: glyph))
         feedback(for: .character(glyph))
@@ -382,8 +427,10 @@ final class KeyboardViewController: UIInputViewController {
             for: path, dictionary: corrector.completions(of:), names: session.lexicon.names + session.lexicon.learned
         )
         guard !words.isEmpty else { return }
+        if tools.composing != nil { return tools.type(word: words[0]) }
         typing.hasTyped = true
         state.notice = nil
+        tools.notice = nil
         state.seenMessage = state.session.message
         let before = joiningBefore
         let landing = before + TypingSession.joiningSpace(before: before)
@@ -412,6 +459,7 @@ final class KeyboardViewController: UIInputViewController {
     /// Moves the cursor by up to `offset` characters, as far as the text the field shares
     /// goes; returns how far it went.
     private func moveCursor(by offset: Int) -> Int {
+        guard tools.composing == nil else { return 0 }
         let room = offset < 0 ? -textBefore.count : textDocumentProxy.documentContextAfterInput?.count ?? 0
         let moved = offset < 0 ? max(offset, room) : min(offset, room)
         guard moved != 0 else { return 0 }
@@ -422,6 +470,7 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private func deleteWord() -> String? {
+        guard tools.composing == nil else { return nil }
         markOwnEdit()
         guard let taken = textDocumentProxy.takeWord(echo: &echo) else { return nil }
         session.edited(field: documentID, text: fieldText)
@@ -431,7 +480,7 @@ final class KeyboardViewController: UIInputViewController {
 
     /// Puts back what a slide on delete took; a long selection it took leaves nothing to put back.
     private func restore(_ text: String) {
-        guard !text.isEmpty else { return }
+        guard tools.composing == nil, !text.isEmpty else { return }
         apply(TypingSession.Edit(insert: text))
         afterKey()
     }
@@ -451,6 +500,17 @@ final class KeyboardViewController: UIInputViewController {
         case .delete: AudioServicesPlaySystemSound(1155)
         default: AudioServicesPlaySystemSound(1156)
         }
+    }
+
+    /// A change from the tools, applied as a key's edit is so the field memory sees it. A
+    /// move to the end of the field first is the host's own report from then on.
+    private func applyTool(_ step: FieldText.Step) {
+        if step.move > 0 {
+            echo.forget()
+            textDocumentProxy.adjustTextPosition(byCharacterOffset: step.move)
+        }
+        apply(step.edit)
+        afterKey()
     }
 
     /// A word with letters right after the cursor is being edited in the middle, so ending
@@ -562,7 +622,7 @@ final class KeyboardViewController: UIInputViewController {
     private func loadVocabulary() {
         do {
             let store = try KeyboardVocabularyStore.shared()
-            profile = try store.profile()
+            tools.profile = try store.profile()
             try store.load().forEach { session.lexicon.addName($0) }
         } catch { show(error) }
     }
@@ -574,6 +634,11 @@ final class KeyboardViewController: UIInputViewController {
             self?.session.replaceLearning(stored.learning)
             self?.learningResets = stored.resets
         }
+    }
+
+    /// Keywords he saved in the keyboard expand as he types them.
+    private func applySnippets() {
+        session.snippets = Dictionary(tools.snippets.map { ($0.trigger.lowercased(), $0.expansion) }) { _, newer in newer }
     }
 
     private func reload() {
@@ -608,7 +673,7 @@ final class KeyboardViewController: UIInputViewController {
             case .waiting(let draft):
                 state.draft = draft
                 // Never send a delayed result to a different text field or app.
-                if let documentID, draft.documentID == documentID { insertDraft() }
+                if let documentID, draft.documentID == documentID { insertDraft(arriving: true) }
             case .expired:
                 state.draft = nil
                 state.notice = KeyboardDraftError.expired.localizedDescription
@@ -636,7 +701,8 @@ final class KeyboardViewController: UIInputViewController {
         do {
             try KeyboardSessionStore.shared().send(KeyboardCommand(
                 id: UUID(), action: .start, requestID: id,
-                documentID: documentID, createdAt: Date(), language: typing.language.rawValue
+                documentID: documentID, createdAt: Date(),
+                language: tools.recordingLanguage ?? typing.language.rawValue, style: tools.recordingStyle
             ))
         } catch { state.waiting = false; show(error) }
     }
@@ -670,8 +736,9 @@ final class KeyboardViewController: UIInputViewController {
             ?? NSLocalizedString("keyboard.storageFailed", comment: "")
     }
 
+    /// The recognizer language for the next recording: the one picked for it, else the typing language.
     private var dictationLanguage: String {
-        DictationPreferences.recognitionLanguage(for: typing.language.rawValue)
+        DictationPreferences.recognitionLanguage(for: tools.recordingLanguage ?? typing.language.rawValue)
     }
 
     /// Where Dictate goes changes only between dictations, so a Finish always reaches the
@@ -693,7 +760,7 @@ final class KeyboardViewController: UIInputViewController {
                 #if DEBUG
                 frames.begin()
                 #endif
-                microphone?.start(language: dictationLanguage, hints: profile.recognitionHints + session.lexicon.names)
+                microphone?.start(language: dictationLanguage, hints: tools.profile.recognitionHints + session.lexicon.names)
             case .endCapture:
                 microphone?.end()
             case .abandon:
@@ -715,12 +782,10 @@ final class KeyboardViewController: UIInputViewController {
 
     /// The one step every dictation the keyboard heard goes through: the phone's cleanup and
     /// the Mac profile's replacements, vocabulary and snippets, as dictation in the app
-    /// applies them, then the field, then the queue Sona keeps in Notes.
+    /// applies them, then the queue Sona keeps in Notes, then the recording's style and
+    /// review on the way to the field.
     private func insertDictation(_ heard: String) {
-        let text = profile.apply(to: DictationCleanup.clean(heard, language: dictationLanguage))
-        apply(TypingSession.Edit(insert: TypingSession.joiningSpace(before: joiningBefore) + text))
-        refreshShift()
-        refreshSuggestions()
+        guard let text = KeyboardDictation.text(of: heard, profile: tools.profile, language: dictationLanguage) else { return }
         do {
             let queue = try KeyboardDictationQueue.shared()
             try queue.enqueue(KeyboardDictationRecord(
@@ -730,6 +795,7 @@ final class KeyboardViewController: UIInputViewController {
                 try? queue.trimAudio(maxBytes: 32_000_000, maxAge: 7 * 24 * 60 * 60)
             }
         } catch { show(error) }
+        tools.deliver(text, styled: false)
     }
 
     /// A stop sent before the app has answered the start, as a quick hold-to-talk release
@@ -752,12 +818,18 @@ final class KeyboardViewController: UIInputViewController {
         } catch { show(error) }
     }
 
-    private func insertDraft() {
+    /// A draft that `arriving` from the app goes through the recording's style and review; one
+    /// he tapped Insert on goes straight in.
+    private func insertDraft(arriving: Bool = false) {
         guard visible, hasFullAccess, let draft = state.draft else { return }
         do {
             let text = try KeyboardDraftStore.shared().take(id: draft.id)
             state.draft = nil
-            apply(TypingSession.Edit(insert: TypingSession.joiningSpace(before: joiningBefore) + text))
+            if arriving {
+                tools.deliver(text, styled: true)
+            } else {
+                apply(TypingSession.Edit(insert: TypingSession.joiningSpace(before: joiningBefore) + text))
+            }
         } catch { state.draft = nil; show(error) }
     }
 
@@ -777,6 +849,7 @@ private struct KeyboardView: View {
     let typing: TypingModel
     let prepare: () -> Void
     let emoji: EmojiModel
+    let tools: KeyboardTools
     let microphone: () -> Void
     let stop: () -> Void
     let insert: () -> Void
@@ -798,6 +871,12 @@ private struct KeyboardView: View {
                             .frame(maxWidth: KeyGrid.maxWidth)
                             .frame(height: rowHeight * CGFloat(typing.rowCount - 1))
                         keys([typing.bottomRow(withDelete: true)]).frame(height: rowHeight)
+                    } else if tools.isOpen, tools.composing == nil {
+                        ToolsPanel(tools: tools, canCopy: state.hasFullAccess)
+                            .frame(maxWidth: KeyGrid.maxWidth)
+                            .frame(height: rowHeight * CGFloat(typing.rowCount - 1))
+                            .transition(.opacity.combined(with: .scale(scale: 0.98, anchor: .bottom)))
+                        keys([typing.bottomRow(withDelete: false)]).frame(height: rowHeight)
                     } else if typing.layer == .emoji, let catalog = EmojiCatalog.shared {
                         EmojiPanel(catalog: catalog, model: emoji, typing: typing) {
                             typing.emojiQuery = ""
@@ -830,15 +909,24 @@ private struct KeyboardView: View {
             )
         } else {
             HStack(spacing: 8) {
-                status.frame(maxWidth: .infinity, alignment: .leading)
-                if state.hasFullAccess {
-                    control
+                ToolsButton(tools: tools)
+                if !tools.isOpen, !tools.heldReviews.isEmpty {
+                    HeldReviewButton(tools: tools)
+                }
+                if let purpose = tools.composing {
+                    ComposeBar(tools: tools, purpose: purpose)
                 } else {
-                    Link("keyboard.openApp", destination: DictationLink.url)
-                        .font(.footnote.weight(.semibold))
-                        .frame(minHeight: 44)
+                    status.frame(maxWidth: .infinity, alignment: .leading)
+                    if state.hasFullAccess {
+                        control
+                    } else {
+                        Link("keyboard.openApp", destination: DictationLink.url)
+                            .font(.footnote.weight(.semibold))
+                            .frame(minHeight: 44)
+                    }
                 }
             }
+            .animation(.snappy(duration: 0.24), value: tools.notice)
         }
     }
 
@@ -878,7 +966,9 @@ private struct KeyboardView: View {
                 .contentTransition(.opacity)
                 .animation(.easeOut(duration: 0.15), value: heard)
                 .accessibilityIdentifier("keyboard-heard")
-        } else if let suggestions = typing.suggestions, state.newMessage == nil {
+        } else if tools.notice != nil {
+            ToolsNotice(tools: tools)
+        } else if !tools.isOpen, let suggestions = typing.suggestions, state.newMessage == nil {
             SuggestionStrip(suggestions: suggestions, choose: typing.choose)
         } else if state.hasFullAccess, let notice = state.session.message ?? state.notice {
             Text(notice).font(.caption).foregroundStyle(Theme.textSecondary).lineLimit(2)

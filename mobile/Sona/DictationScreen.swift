@@ -8,7 +8,7 @@ struct DictationScreen: View {
      * does not republish it. */
     @ObservedObject var recorder: PhoneRecorder
     @AppStorage(DictationPreferences.keyboardKey, store: DictationPreferences.shared) private var keyboardEnabled = false
-    @AppStorage(DictationPreferences.styleKey) private var style = ""
+    @AppStorage(DictationPreferences.styleKey, store: DictationPreferences.shared) private var style = ""
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ScaledMetric(relativeTo: .body) private var controlSize: CGFloat = 60
     @State private var saveError: String?
@@ -229,7 +229,7 @@ private struct PhoneDictationSettings: View {
     @Environment(\.dismiss) private var dismiss
     @AppStorage(DictationPreferences.keyboardKey, store: DictationPreferences.shared) private var keyboardEnabled = false
     @AppStorage(DictationPreferences.minutesKey) private var minutes = 5
-    @AppStorage(DictationPreferences.styleKey) private var style = ""
+    @AppStorage(DictationPreferences.styleKey, store: DictationPreferences.shared) private var style = ""
     @State private var languages = DictationPreferences.languages
     @State private var activeLanguage = DictationPreferences.activeLanguage
     @State private var choosesLanguages = false
@@ -295,6 +295,10 @@ private struct PhoneDictationSettings: View {
                         ForEach(dictation.profile.styles) { Text($0.name).tag($0.id) }
                     }
                     .disabled(dictation.isBusy || !PhoneDictation.stylesAvailable)
+                    if PhoneDictation.stylesAvailable, DictationTone.styleIDs.contains(style),
+                       let chosen = dictation.profile.styles.first(where: { $0.id == style }) {
+                        ToneSlider(style: chosen).id(chosen.id)
+                    }
                 } footer: {
                     VStack(alignment: .leading, spacing: 8) {
                         if !PhoneDictation.stylesAvailable {

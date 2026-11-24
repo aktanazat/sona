@@ -111,8 +111,9 @@ final class PhoneDictation: ObservableObject {
 
     deinit { for observer in observers { NotificationCenter.default.removeObserver(observer) } }
 
-    /// `language` is the keyboard's typing language when the keyboard asked for this dictation.
-    func start(keepingAudio: Bool = false, keyboard: Bool = false, language: String? = nil) {
+    /// `language` is the keyboard's typing language when the keyboard asked for this dictation;
+    /// `style` is a style id one recording asked for, empty for none, nil for the chosen style.
+    func start(keepingAudio: Bool = false, keyboard: Bool = false, language: String? = nil, style: String? = nil) {
         guard !isBusy else { return }
         let id = UUID()
         sessionID = id
@@ -124,8 +125,10 @@ final class PhoneDictation: ObservableObject {
         startedAt = Date()
         sessionProfile = profile
         sessionLanguage = DictationPreferences.recognitionLanguage(for: language)
-        let styleID = UserDefaults.standard.string(forKey: DictationPreferences.styleKey)
-        sessionStyle = profile.styles.first { $0.id == styleID }
+        let styleID = style ?? DictationPreferences.style
+        sessionStyle = profile.styles.first { $0.id == styleID }.map {
+            DictationProfile.Style(id: $0.id, name: $0.name, prompt: DictationTone.prompt(of: $0))
+        }
         onStateChanged?()
         preparation = Task { [weak self] in
             guard let self else { return }
