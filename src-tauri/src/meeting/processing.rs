@@ -1286,6 +1286,19 @@ impl MeetingProcessingService {
             .filter(|generator| generator.is_available())
     }
 
+    /// Automatic inbox judgments must not use endpoints that can forward comments.
+    pub(crate) fn inbox_apple_text_generator(&self) -> Option<impl MeetingTextGenerator> {
+        let app = self.app.as_ref()?;
+        if !matches!(
+            crate::settings::get_settings(app).meeting_local_engine,
+            crate::settings::MeetingLocalEngine::AppleIntelligence
+        ) {
+            return None;
+        }
+        let generator = AppleIntelligenceGenerator;
+        generator.is_available().then_some(generator)
+    }
+
     /// Hold a reading that follows the notes while anything records, as every
     /// notes request is held: the request in flight finishes, and the next
     /// waits for the stop.

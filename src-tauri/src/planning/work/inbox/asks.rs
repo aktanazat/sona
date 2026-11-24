@@ -2,8 +2,8 @@
 //! model and kept. The rule in [`super::rows::asks`] answers until a comment
 //! is judged, and for good when no local model is ready.
 //!
-//! A comment's words go only to the engine `local_text_generator` returns:
-//! Apple Intelligence or the loopback endpoint chosen in Meeting settings.
+//! New judgments use only on-device Apple Intelligence when it is selected
+//! and available. The inbox does not send comments to configured endpoints.
 
 use crate::managers::history::HistoryManager;
 use crate::meeting::processing::{first_json_value, MeetingTextGenerator, ReplyShape};
@@ -26,6 +26,17 @@ pub(crate) const ASKS_MIGRATION: &str = "CREATE TABLE planning_comment_asks (
 CREATE TRIGGER planning_comment_asks_delete AFTER DELETE ON planning_task_comments BEGIN
     DELETE FROM planning_comment_asks WHERE comment_id = old.id;
 END;";
+
+pub(crate) const ASK_DELETION_MIGRATION: &str = "CREATE TRIGGER planning_comment_asks_soft_delete
+AFTER UPDATE OF deleted_at_ms ON planning_task_comments
+WHEN new.deleted_at_ms IS NOT NULL
+BEGIN
+    DELETE FROM planning_comment_asks WHERE comment_id = new.id;
+END;
+DELETE FROM planning_comment_asks
+WHERE comment_id IN (
+    SELECT id FROM planning_task_comments WHERE deleted_at_ms IS NOT NULL
+);";
 
 /// Comments judged in one pass, so a first read of a long inbox does not
 /// hold the model for minutes; the next read takes the next ones.
@@ -63,12 +74,13 @@ pub(crate) struct Comment {
     said_at_ms: i64,
 }
 
-/// Each judged comment's verdict, for comments not edited since.
+/// Verdicts for live comments whose words have not changed.
 pub(crate) fn judged(conn: &Connection) -> Result<HashMap<String, bool>> {
     let mut statement = conn.prepare(
         "SELECT a.comment_id, a.asks FROM planning_comment_asks a
          JOIN planning_task_comments c ON c.id = a.comment_id
-         WHERE a.said_at_ms = coalesce(c.edited_at_ms, c.created_at_ms)",
+         WHERE c.deleted_at_ms IS NULL
+           AND a.said_at_ms = coalesce(c.edited_at_ms, c.created_at_ms)",
     )?;
     let verdicts = statement
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
@@ -178,7 +190,7 @@ pub(crate) fn catch_up(app: &AppHandle) {
             if waiting.is_empty() || crate::utils::capture_running(&app) {
                 return None;
             }
-            let generator = processing.local_text_generator()?;
+            let generator = processing.inbox_apple_text_generator()?;
             let model = generator.model_version();
             let mut missed = 0;
             for comment in waiting {
@@ -187,7 +199,7 @@ pub(crate) fn catch_up(app: &AppHandle) {
                 }
                 // A comment the model cannot answer keeps the rule; three in
                 // a row means the model is not answering at all.
-                let Some(asks) = judge(generator.as_ref(), &comment.body) else {
+                let Some(asks) = judge(&generator, &comment.body) else {
                     missed += 1;
                     if missed == 3 {
                         return None;

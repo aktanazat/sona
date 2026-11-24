@@ -225,8 +225,14 @@ fn a_verdict_is_kept_for_the_words_it_judged_and_dropped_with_them() {
 
     // The model's verdict wins over the rule in both directions.
     let context = rows::context(&history).expect("the context");
-    assert!(context.asks("a"), "no question mark, no stock phrase");
-    assert!(!context.asks("b"), "a stock phrase the user may ignore");
+    assert!(
+        context.asking_comment("a").is_some(),
+        "no question mark, no stock phrase"
+    );
+    assert!(
+        context.asking_comment("b").is_none(),
+        "a stock phrase the user may ignore"
+    );
     assert!(!rows::asks("I can't proceed without the signed NDA."));
     assert!(rows::asks("Let me know if anything looks off."));
 
@@ -239,7 +245,10 @@ fn a_verdict_is_kept_for_the_words_it_judged_and_dropped_with_them() {
         .expect("the edit");
     assert_eq!(judged(&history).expect("the verdicts").get("a"), None);
     assert!(!keep(&history, &waiting[1], true, "m", 21).expect("refused"));
-    assert!(!rows::context(&history).expect("the context").asks("a"));
+    assert!(rows::context(&history)
+        .expect("the context")
+        .asking_comment("a")
+        .is_none());
     assert_eq!(unjudged(&history, 10).expect("waiting again").len(), 1);
 
     history

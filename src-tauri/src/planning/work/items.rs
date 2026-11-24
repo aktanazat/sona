@@ -397,19 +397,25 @@ pub(crate) fn record(
     from: Option<&str>,
     to: Option<&str>,
 ) -> Result<String> {
+    record_end(conn, task_id, now_ms, actor, kind, (from, to), None)
+}
+
+/// Records one end of a link. `mirror_of` is the entry already written for
+/// its other end: the link is history on both tasks and one piece of news.
+fn record_end(
+    conn: &Connection,
+    task_id: &str,
+    now_ms: i64,
+    actor: WorkActor,
+    kind: WorkActivityKind,
+    (from, to): (Option<&str>, Option<&str>),
+    mirror_of: Option<&str>,
+) -> Result<String> {
     let id = Uuid::new_v4().to_string();
     conn.execute(
         "INSERT INTO planning_task_activity (id, task_id, at_ms, actor, kind, from_value, to_value)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        params![
-            id,
-            task_id,
-            now_ms,
-            actor.as_str(),
-            kind.as_str(),
-            from,
-            to
-        ],
+        params![id, task_id, now_ms, actor.as_str(), kind.as_str(), from, to],
     )?;
     super::inbox::on_activity(
         conn,
@@ -420,6 +426,7 @@ pub(crate) fn record(
             kind,
             from,
             to,
+            mirror_of,
         },
         now_ms,
     )?;
@@ -911,7 +918,9 @@ pub(crate) fn place_manually(
 ) -> Result<Vec<Changed>> {
     let order = conn
         .prepare("SELECT id, sort_order FROM planning_tasks ORDER BY sort_order, number")?
-        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?)))?
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
+        })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let (moving, mut rest): (Vec<_>, Vec<_>) =
         order.iter().cloned().partition(|(id, _)| ids.contains(id));
@@ -956,7 +965,10 @@ pub(crate) fn place_manually(
             .map(|(index, (id, _))| (id.clone(), f64::from(index) * 1024.0))
             .collect()
     };
-    let was: HashMap<&str, f64> = order.iter().map(|(id, sort)| (id.as_str(), *sort)).collect();
+    let was: HashMap<&str, f64> = order
+        .iter()
+        .map(|(id, sort)| (id.as_str(), *sort))
+        .collect();
     let mut changed = Vec::new();
     for (id, sort) in placed {
         if was.get(id.as_str()) == Some(&sort) {
@@ -1208,7 +1220,7 @@ pub(crate) fn add_relation(
     )?;
     let outgoing = relation_mark(kind, true, &to_id);
     let incoming = relation_mark(kind, false, &from_id);
-    record(
+    let made = record(
         conn,
         &from_id,
         now_ms,
@@ -1217,14 +1229,14 @@ pub(crate) fn add_relation(
         None,
         Some(&outgoing),
     )?;
-    record(
+    record_end(
         conn,
         &to_id,
         now_ms,
         actor,
         WorkActivityKind::Relation,
-        None,
-        Some(&incoming),
+        (None, Some(&incoming)),
+        Some(&made),
     )?;
     Ok(WorkRelation {
         id,
@@ -1249,8 +1261,8 @@ fn mentioned(text: &str) -> Vec<i64> {
             .position(|byte| !byte.is_ascii_digit())
             .map_or(bytes.len(), |length| digits + length);
         at = digits;
-        let bounded = (start == 0 || !word(bytes[start - 1]))
-            && (end == bytes.len() || !word(bytes[end]));
+        let bounded =
+            (start == 0 || !word(bytes[start - 1])) && (end == bytes.len() || !word(bytes[end]));
         if end == digits || !bounded {
             continue;
         }
@@ -1333,7 +1345,7 @@ pub(crate) fn remove_relation(
     )?;
     let outgoing = relation_mark(relation.kind, true, &relation.to_id);
     let incoming = relation_mark(relation.kind, false, &relation.from_id);
-    record(
+    let removed = record(
         conn,
         &relation.from_id,
         now_ms,
@@ -1342,14 +1354,14 @@ pub(crate) fn remove_relation(
         Some(&outgoing),
         None,
     )?;
-    record(
+    record_end(
         conn,
         &relation.to_id,
         now_ms,
         actor,
         WorkActivityKind::Relation,
-        Some(&incoming),
-        None,
+        (Some(&incoming), None),
+        Some(&removed),
     )?;
     Ok(relation)
 }

@@ -318,6 +318,7 @@ pub(crate) static MIGRATIONS: &[M] = &[
     M::up(crate::planning::updates::QUOTED_MEETINGS_MIGRATION),
     M::up(crate::planning::catalog::DEPENDENCY_INITIATIVE_HISTORY_MIGRATION),
     M::up(crate::planning::work::inbox::asks::ASKS_MIGRATION),
+    M::up(crate::planning::work::inbox::asks::ASK_DELETION_MIGRATION),
 ];
 
 const MAX_HISTORY_PAGE_SIZE: usize = 100;
