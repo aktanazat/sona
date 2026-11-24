@@ -197,12 +197,20 @@ struct DictationKeptEvent: Decodable {
     let durationMs: UInt64
 }
 
+/// A name respelled right after dictating, learned at once; Undo puts back
+/// what the vocabulary held before.
+struct LearnedWord: Codable, Equatable {
+    let learned: VocabularyEntry
+    let replaced: VocabularyEntry?
+}
+
 enum PillFeedback: Equatable {
     case delivered(DictationDeliveryOutcome)
     case failed
     case kept
     /// The words wait for a click to paste them into the window in front.
     case held
+    case learned(LearnedWord)
 
     var label: String {
         switch self {
@@ -211,6 +219,7 @@ enum PillFeedback: Equatable {
         case .failed: "Couldn't paste"
         case .kept: "Recording kept"
         case .held: "Paste here"
+        case let .learned(word): "Learned \(word.learned.written)"
         }
     }
 
@@ -221,6 +230,7 @@ enum PillFeedback: Equatable {
         case .failed: "exclamationmark"
         case .kept: "tray.and.arrow.down"
         case .held: "doc.on.clipboard"
+        case .learned: "character.book.closed"
         }
     }
 
@@ -230,6 +240,7 @@ enum PillFeedback: Equatable {
         switch self {
         case .delivered: 900
         case .failed, .kept: 2200
+        case .learned: 6000
         case .held: 10_000
         }
     }
@@ -238,6 +249,10 @@ enum PillFeedback: Equatable {
 struct PillPresentation: Equatable {
     let capture: CaptureState
     let feedback: PillFeedback?
+}
+
+extension CoreEvent {
+    static let wordLearned = "dictation-word-learned"
 }
 
 extension CoreEvent {
@@ -479,6 +494,7 @@ final class AppModel {
             CoreEvent.meetingNavigationRequested, CoreEvent.dictationDurationWarning,
             CoreEvent.commandAnswered, CoreEvent.showMainWindow, CoreEvent.dictationDelivery,
             CoreEvent.dictationKept, CoreEvent.dictationMeetingSuggestion, CoreEvent.cloudConnectionSlow,
+            CoreEvent.wordLearned,
         ] {
             core.observe(name) { [weak self] line in self?.handle(name, line) }
         }
@@ -1002,6 +1018,18 @@ final class AppModel {
         pillFeedback = nil
     }
 
+    /// Takes back a name the pill just said was learned.
+    func undoLearnedWord(_ word: LearnedWord) {
+        clearPillFeedback()
+        Task {
+            do {
+                try await core.request("undo_learned_word", ["word": word])
+            } catch {
+                notice = CaptureNotice(text: "Couldn't undo learning \(word.learned.written). Remove it in Vocabulary.")
+            }
+        }
+    }
+
     // MARK: Models
 
     func use(_ model: Model) {
@@ -1458,6 +1486,9 @@ final class AppModel {
             case CoreEvent.recordingError:
                 let event: RecordingErrorEvent = try Core.payload(line)
                 notice = CaptureNotice(text: Self.recordingErrorText(event.errorType))
+            case CoreEvent.wordLearned:
+                let word: LearnedWord = try Core.payload(line)
+                showPillFeedback(.learned(word))
             case CoreEvent.pasteError:
                 let event: PasteErrorEvent = try Core.payload(line)
                 let offered = event.focusMoved && settings.settings.overlayStyle != .none

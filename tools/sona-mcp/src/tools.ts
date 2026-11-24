@@ -1537,7 +1537,8 @@ const SETTING_KEYS = [
   "audio-feedback",
   "audio-feedback-volume",
   "sound-theme",
-  "mute-while-recording",
+  "playback-while-recording",
+  "meeting-words",
   "quiet-speech",
   "command-mode",
   "command-answers-in-chat",
@@ -8559,6 +8560,14 @@ export const TOOLS: readonly ToolDefinition[] = [
       "Words heard again and again in meetings that the vocabulary lacks, with how often and in how many meetings. Meetings kept on this Mac are left out. Add one with sona_vocabulary_add.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     argv: () => ["work", "heard-words", "--json"],
+  },
+  {
+    name: "sona_meeting_words",
+    title: "Words dictation knows from meetings",
+    description:
+      "The names and words dictation adds to its vocabulary: people met lately, project titles, then words heard in the most meetings. Meetings kept on this Mac are left out. Turn it off with the setting meeting-words.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    argv: () => ["work", "meeting-words", "--json"],
   },
   {
     name: "sona_mode_rule_remove",

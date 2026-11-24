@@ -59,6 +59,10 @@ pub enum DictationRulesVerb {
     /// Words heard again and again in meetings that the vocabulary lacks,
     /// with how often. Meetings kept on this Mac are left out.
     HeardWords,
+    /// What dictation knows from meetings beyond the vocabulary: people met
+    /// lately, project titles, then words heard in the most meetings.
+    /// Meetings kept on this Mac are left out.
+    MeetingWords,
     /// Remove the rule that picks a mode for an app or a website.
     ModeRuleRemove(ModeRuleRemoveArgs),
 }
@@ -231,7 +235,7 @@ impl DictationRulesVerb {
 
     const fn change(&self) -> Option<&Change> {
         match self {
-            Self::Vocabulary(_) | Self::HeardWords => None,
+            Self::Vocabulary(_) | Self::HeardWords | Self::MeetingWords => None,
             Self::VocabularyRemove(VocabularyRemoveArgs { change, .. })
             | Self::SnippetSave(SnippetSaveArgs { change, .. })
             | Self::SnippetEnable(SnippetEnableArgs { change, .. })
@@ -262,6 +266,7 @@ impl DictationRulesVerb {
             Self::PersonaSampleSave(_) => "persona-sample-save",
             Self::PersonaSampleDelete(_) => "persona-sample-delete",
             Self::HeardWords => "heard-words",
+            Self::MeetingWords => "meeting-words",
             Self::ModeRuleRemove(_) => "mode-rule-remove",
         }
     }
@@ -495,6 +500,18 @@ impl Tracker<'_> {
                     )
                     .map_err(|error| ExternalError::from(QueryError::from(error)))?;
                 return Ok(read(&what, &heard.entries));
+            }
+            DictationRulesVerb::MeetingWords => {
+                let store = store(self.meetings).await?;
+                let hidden = kept_local(&store)?;
+                let words = crate::meeting_vocabulary::read(
+                    &store,
+                    self.history,
+                    &known_vocabulary(Some(self.app)),
+                    hidden.sessions(),
+                )
+                .map_err(|_| ExternalError::from(QueryError::Failed))?;
+                return Ok(read(&what, &words));
             }
             DictationRulesVerb::VocabularyRemove(args) => {
                 let scope = scope(args.mode.as_deref());

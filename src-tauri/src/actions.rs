@@ -1105,6 +1105,8 @@ pub(crate) struct ProcessedTranscription {
     pub post_processed_text: Option<String>,
     /// How the mode's rewrite ended, for the receipt and the shell's notice.
     pub rewrite: RewriteOutcome,
+    /// The dictation ended with a spoken "send": press the submit key after it.
+    pub spoken_send: bool,
 }
 
 impl ProcessedTranscription {
@@ -1118,11 +1120,13 @@ impl ProcessedTranscription {
                 post_processed_text: Some(text.clone()),
                 final_text: text,
                 rewrite: RewriteOutcome::Applied,
+                spoken_send: false,
             },
             Err(outcome) => Self {
                 final_text: fallback_text,
                 post_processed_text: prior_processed_text,
                 rewrite: outcome,
+                spoken_send: false,
             },
         }
     }
@@ -1806,6 +1810,17 @@ pub(crate) async fn process_transcription_output(
     }
 
     let mut final_text = transcription.to_string();
+    let english = effective_language
+        .split(['-', '_'])
+        .next()
+        .is_some_and(|code| code.eq_ignore_ascii_case("en"));
+    let spoken_send = match crate::audio_toolkit::split_spoken_send(&final_text) {
+        Some(words) if asr.spoken_edits_enabled && english => {
+            final_text = words;
+            true
+        }
+        _ => false,
+    };
     let mut post_processed_text: Option<String> = None;
 
     if let Some(converted_text) =
@@ -1868,7 +1883,10 @@ pub(crate) async fn process_transcription_output(
         } else {
             post_process_transcription(app, run, &rendered, &final_text).await
         };
-        return ProcessedTranscription::from_rewrite(result, final_text, post_processed_text);
+        let mut processed =
+            ProcessedTranscription::from_rewrite(result, final_text, post_processed_text);
+        processed.spoken_send = spoken_send;
+        return processed;
     }
     if final_text != transcription {
         post_processed_text = Some(final_text.clone());
@@ -1882,7 +1900,25 @@ pub(crate) async fn process_transcription_output(
         } else {
             RewriteOutcome::NotRequested
         },
+        spoken_send,
     }
+}
+
+/// Re-reads the meeting words in the background for the next dictation; this
+/// one already has its vocabulary.
+fn refresh_meeting_vocabulary(app: &AppHandle) {
+    if !get_settings(app).meeting_vocabulary_enabled {
+        return;
+    }
+    let meetings = app
+        .state::<Arc<crate::meeting::session::MeetingSessionManager>>()
+        .inner()
+        .clone();
+    let history = app.state::<Arc<HistoryManager>>().inner().clone();
+    let own = crate::meeting::workflow_engine::known_vocabulary(Some(app));
+    std::thread::spawn(move || {
+        crate::meeting_vocabulary::refresh(meetings.open_store(), &history, &own);
+    });
 }
 
 impl TranscribeAction {
@@ -1904,6 +1940,7 @@ impl TranscribeAction {
             let _ = app.emit("recording-error", RecordingErrorEvent::typed(error_type));
             return false;
         }
+        refresh_meeting_vocabulary(app);
         let cloud_requested = self.run.cloud().is_some();
 
         let binding_id = binding_id.to_string();
@@ -2054,12 +2091,12 @@ impl TranscribeAction {
                     // The start chime is a readiness cue, so it must follow the
                     // first real input callback rather than Stream::play() or a
                     // fixed delay. The helper returns immediately when feedback
-                    // is disabled; mute still follows the same readiness point.
+                    // is disabled; the playback hold follows the same readiness point.
                     if rm_clone.is_recording_readiness_current(generation) {
                         play_feedback_sound_blocking(&app_clone, SoundType::Start);
                     }
                     if rm_clone.is_recording_readiness_current(generation) {
-                        rm_clone.apply_mute(generation);
+                        rm_clone.hold_playback(generation);
                     }
                 });
             }
@@ -2131,8 +2168,8 @@ impl TranscribeAction {
             show_transcribing_overlay(app);
         }
 
-        // Unmute before playing audio feedback so the stop sound is audible
-        rm.remove_mute();
+        // Put playback back before the stop sound so it is audible
+        rm.release_playback();
 
         // Play audio feedback for recording stop
         play_feedback_sound(app, SoundType::Stop);
@@ -2484,9 +2521,11 @@ impl TranscribeAction {
                                     let history_for_fallback = history_id;
                                     let run_id = run.run_id;
                                     let paste_time = Instant::now();
+                                    let mut plan = run.delivery().clone();
+                                    plan.auto_submit |= processed.spoken_send;
                                     let words = DictationWords {
                                         text: processed.final_text,
-                                        plan: run.delivery().clone(),
+                                        plan,
                                         history_id,
                                         run_id,
                                     };

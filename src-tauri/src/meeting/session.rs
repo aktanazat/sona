@@ -53,6 +53,7 @@ use crate::audio_toolkit::constants::WHISPER_SAMPLE_RATE;
 use crate::managers::media_import::{
     decode_media_into, validate_media_path, AudioImportError, DecodeFailure, ValidatedMediaPath,
 };
+use crate::media_playback::PlaybackChange;
 use crate::planning::work::sync::People;
 use crate::planning::work::types::WorkOwner;
 use crate::secrets::{SecretManager, SecretResolveError};
@@ -613,24 +614,39 @@ impl Drop for CaptureLease {
     }
 }
 
-/// Everything a capture holds beyond its lanes: the Mac kept awake,
-/// processing parked, and the lease. It belongs to the capture and goes with
-/// it, so no other meeting's command can let go of any part of it.
+/// Everything a capture holds beyond its lanes: the Mac kept awake, other
+/// apps' playback paused, processing parked, and the lease. It belongs to the
+/// capture and goes with it, so no other meeting's command can let go of any
+/// part of it.
 struct CaptureHold {
     keep_awake: MeetingKeepAwake,
+    playback: Option<PlaybackChange>,
     // Before the lease, so the next capture's park cannot be lifted by this one.
     _processing: CaptureGate,
     _lease: CaptureLease,
 }
 
 impl CaptureHold {
-    fn new(lease: CaptureLease, processing: &MeetingProcessingService) -> Self {
+    fn new(
+        lease: CaptureLease,
+        processing: &MeetingProcessingService,
+        pause_playback: bool,
+    ) -> Self {
         let mut keep_awake = MeetingKeepAwake::new();
         keep_awake.acquire();
         Self {
             keep_awake,
+            playback: pause_playback.then(PlaybackChange::pause).flatten(),
             _processing: processing.park_for_capture(),
             _lease: lease,
+        }
+    }
+}
+
+impl Drop for CaptureHold {
+    fn drop(&mut self) {
+        if let Some(playback) = self.playback.take() {
+            playback.restore();
         }
     }
 }
@@ -1955,7 +1971,11 @@ impl MeetingSessionManager {
             drop(actor);
             return self.result_for_receipt(store, receipt, request.session_id);
         }
-        let hold = CaptureHold::new(capture_lease, &self.processing);
+        let pause_playback = self.app.as_ref().is_some_and(|app| {
+            crate::settings::get_settings(app).playback_while_recording
+                == crate::settings::PlaybackWhileRecording::Pause
+        });
+        let hold = CaptureHold::new(capture_lease, &self.processing, pause_playback);
         let audibility = CaptureAudibility::new();
         let mut sources = HashMap::new();
         let began =

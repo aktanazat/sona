@@ -34,9 +34,11 @@ mod launch_trace;
 mod llm_client;
 mod local_cleanup;
 mod managers;
+mod media_playback;
 pub mod meeting;
 #[cfg(target_os = "macos")]
 pub mod meeting_macos;
+mod meeting_vocabulary;
 mod memory;
 mod modes;
 mod native_bridge;
@@ -61,6 +63,8 @@ mod signal_handle;
 mod slow_connection;
 mod snippets;
 mod transcription_coordinator;
+#[cfg(target_os = "macos")]
+mod typed_snippets;
 mod tray;
 mod tray_i18n;
 mod utils;
@@ -405,6 +409,8 @@ fn start_meeting_detection(
     planning::work::follow::start(app_handle.clone(), Arc::clone(&native_prompts));
     planning::work::cycles::start(app_handle.clone());
     planning::work::loops::start(app_handle.clone());
+    #[cfg(target_os = "macos")]
+    typed_snippets::start_if_enabled(app_handle);
     app_handle.manage(planning::work::watch::WatchNotices(Arc::clone(
         &native_prompts,
     )));
@@ -1692,6 +1698,9 @@ pub fn run(cli_args: CliArgs) {
             commands::vocabulary::update_emoji_replacements,
             commands::vocabulary::update_emoji_replacements_enabled,
             commands::vocabulary::add_vocabulary_correction,
+            commands::vocabulary::change_meeting_vocabulary_enabled_setting,
+            commands::vocabulary::meeting_vocabulary_words,
+            commands::vocabulary::undo_learned_word,
             commands::vocabulary::get_text_replacements,
             commands::vocabulary::save_text_replacements,
             commands::vocabulary::reset_text_replacements,
@@ -1711,6 +1720,7 @@ pub fn run(cli_args: CliArgs) {
             commands::snippets::delete_snippet,
             commands::snippets::set_snippet_enabled,
             commands::snippets::set_snippets_enabled,
+            commands::snippets::set_typed_snippets_enabled,
             settings::change_context_policy_ceiling_setting,
             settings::change_context_url_capture_enabled_setting,
             settings::change_dictation_project_root_setting,
@@ -1769,7 +1779,7 @@ pub fn run(cli_args: CliArgs) {
             modes::set_post_process_selected_prompt,
             shortcut::suspend_all_bindings,
             shortcut::resume_all_bindings,
-            shortcut::change_mute_while_recording_setting,
+            shortcut::change_playback_while_recording_setting,
             shortcut::change_append_trailing_space_setting,
             shortcut::change_lazy_stream_close_setting,
             shortcut::change_vad_enabled_setting,

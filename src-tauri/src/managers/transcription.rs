@@ -2653,8 +2653,24 @@ impl TranscriptionManager {
                             && speech != SpeechEvidence::Undetected)
                             .then(|| {
                                 let model = session.model();
-                                vocabulary_initial_prompt(&asr.custom_words, |prompt| {
+                                // Meeting words go in front, where the prompt
+                                // drops first, and only prime: `first_entry`
+                                // is re-counted over his own words, which alone
+                                // receive correction.
+                                let primed: Vec<VocabularyEntry> = asr
+                                    .meeting_words
+                                    .iter()
+                                    .chain(&asr.custom_words)
+                                    .cloned()
+                                    .collect();
+                                vocabulary_initial_prompt(&primed, |prompt| {
                                     whisper_prompt_fits(&model, prompt)
+                                })
+                                .map(|mut prompt| {
+                                    prompt.first_entry = prompt
+                                        .first_entry
+                                        .saturating_sub(asr.meeting_words.len());
+                                    prompt
                                 })
                             })
                             .flatten();
@@ -4216,7 +4232,12 @@ fn post_process_transcription_text(
         // text the user asked to expand.
         let corrected = apply_spoken_edits(&corrected, output_language, asr.spoken_edits_enabled);
         let corrected = if asr.snippets_enabled {
-            apply_snippets(&corrected, &asr.snippets)
+            crate::snippets::fill_placeholders(
+                &apply_snippets(&corrected, &asr.snippets),
+                &chrono::Local::now(),
+                crate::clipboard::current_text,
+            )
+            .text
         } else {
             corrected
         };

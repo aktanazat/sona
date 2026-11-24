@@ -104,6 +104,27 @@ struct HUDPill: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityHint("Pastes the words into the window in front.")
+            } else if case let .learned(word) = feedback {
+                HStack(spacing: 6) {
+                    Text(word.learned.written)
+                        .font(.system(size: 12, weight: .medium))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .accessibilityLabel(feedback.label)
+                    Spacer(minLength: 4)
+                    Button { model.undoLearnedWord(word) } label: {
+                        Text("Undo")
+                            .font(.system(size: 12, weight: .medium))
+                            .padding(.horizontal, 10)
+                            .frame(height: 24)
+                            .background(Theme.hudControl, in: Capsule())
+                            .contentShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityHint("Removes the spelling Sona just learned.")
+                }
+                .padding(.leading, 14)
+                .padding(.trailing, 6)
             } else {
                 feedbackLabel(feedback)
                     .accessibilityElement(children: .combine)

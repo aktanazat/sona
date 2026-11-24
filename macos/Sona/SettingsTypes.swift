@@ -112,6 +112,32 @@ enum OverlayStyle: String, CaseIterable, Hashable, Sendable {
     }
 }
 
+/// What happens to other apps' sound while you dictate.
+enum PlaybackWhileRecording: String, CaseIterable, Hashable, Sendable {
+    case keep
+    case pause
+    case lower
+    case mute
+
+    var label: String {
+        switch self {
+        case .keep: "Keep playing"
+        case .pause: "Pause"
+        case .lower: "Lower volume"
+        case .mute: "Mute"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .keep: "Sound plays on while you dictate."
+        case .pause: "Music and videos pause during dictations and meetings, then play again."
+        case .lower: "Sound drops to a quarter during dictations, then comes back."
+        case .mute: "The Mac goes silent during dictations. Sound you muted yourself stays muted."
+        }
+    }
+}
+
 /// How long a loaded model stays in memory after the last dictation.
 enum DictationUnloadTimeout: String, CaseIterable, Hashable, Sendable {
     case never
@@ -276,7 +302,7 @@ struct AppSettings: Decodable {
     var overlayPosition: OverlayPosition = .bottom
     var overlayStyle: OverlayStyle = .live
     var modelUnloadTimeout: DictationUnloadTimeout = .min5
-    var muteWhileRecording = false
+    var playbackWhileRecording: PlaybackWhileRecording = .pause
     var appendTrailingSpace = false
     var experimentalEnabled = false
     var lazyStreamClose = false
@@ -312,7 +338,7 @@ struct AppSettings: Decodable {
         case selectedMicrophone, selectedChannel, clamshellMicrophone, selectedOutputDevice
         case translateToEnglish, selectedLanguage, englishSpelling, overlayPosition
         case dictationLanguages
-        case overlayStyle, modelUnloadTimeout, muteWhileRecording, appendTrailingSpace
+        case overlayStyle, modelUnloadTimeout, playbackWhileRecording, appendTrailingSpace
         case experimentalEnabled, lazyStreamClose, keyboardImplementation, showTrayIcon
         case typingTool, externalScriptPath, fillerWordRemovalEnabled, vadEnabled
         case commandModeEnabled, transcribeAccelerator, ortAccelerator, transcribeGpuDevice
@@ -357,7 +383,7 @@ struct AppSettings: Decodable {
         overlayPosition = choice(.overlayPosition, overlayPosition)
         overlayStyle = choice(.overlayStyle, overlayStyle)
         modelUnloadTimeout = choice(.modelUnloadTimeout, modelUnloadTimeout)
-        muteWhileRecording = value(.muteWhileRecording, muteWhileRecording)
+        playbackWhileRecording = choice(.playbackWhileRecording, playbackWhileRecording)
         appendTrailingSpace = value(.appendTrailingSpace, appendTrailingSpace)
         experimentalEnabled = value(.experimentalEnabled, experimentalEnabled)
         lazyStreamClose = value(.lazyStreamClose, lazyStreamClose)

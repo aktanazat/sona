@@ -41,15 +41,17 @@ struct DictationSettingsView<DataRows: View>: View {
                     if store.channelCount > 1 {
                         AudioChannelRow(store: store)
                     }
-                    ToggleRow(
-                        title: "Mute other audio while dictating",
-                        detail: "Turns the Mac's sound off while you record, when something is playing, and back on when you stop. Sound you muted yourself stays muted.",
-                        isOn: Binding(
-                            get: { store.settings.muteWhileRecording },
-                            set: { value in Task { await store.setMuteWhileRecording(value) } }
+                    ChoiceRow(
+                        title: "Other audio while recording",
+                        detail: store.settings.playbackWhileRecording.detail,
+                        choices: PlaybackWhileRecording.allCases,
+                        label: \.label,
+                        selection: Binding(
+                            get: { store.settings.playbackWhileRecording },
+                            set: { value in Task { await store.setPlaybackWhileRecording(value) } }
                         )
                     )
-                    .disabled(store.isBusy("mute_while_recording"))
+                    .disabled(store.isBusy("playback_while_recording"))
                     dataRows()
                     CardLine("Dictations can last up to 20 minutes. Sona warns you with one minute left, then stops and transcribes what you said.")
                 }
