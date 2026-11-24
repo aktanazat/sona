@@ -295,13 +295,16 @@ struct VocabularyView: View {
                     focus: $focus,
                     invalid: false,
                     fillsOnFocus: false,
+                    multiline: newKind == .replacement,
                     onSubmit: addRule
                 )
                 .disabled(store.busy)
                 Button(action: addRule) {
                     HStack(spacing: 6) {
                         Text("Add")
-                        KeyCap("↩")
+                        if newKind != .replacement {
+                            KeyCap("↩")
+                        }
                     }
                 }
                 .buttonStyle(.quiet)
@@ -485,17 +488,18 @@ private struct VocabularyInput: View {
     @FocusState.Binding var focus: VocabularyFocus?
     var invalid = false
     var fillsOnFocus = true
+    var multiline = false
     let onSubmit: () -> Void
 
     var body: some View {
-        TextField(prompt, text: $text, prompt: Text(prompt).foregroundStyle(Theme.inkTertiary))
+        editor
             .textFieldStyle(.plain)
             .font(TypeScale.body(14))
             .foregroundStyle(Theme.ink)
             .focused($focus, equals: key)
-            .onSubmit(onSubmit)
+            .padding(.vertical, multiline ? 4 : 0)
             .padding(.horizontal, 8)
-            .frame(height: 28)
+            .frame(minHeight: 28)
             .background(
                 fillsOnFocus && focus == key ? Theme.inset : .clear,
                 in: RoundedRectangle(cornerRadius: Theme.radiusControl)
@@ -504,6 +508,19 @@ private struct VocabularyInput: View {
                 RoundedRectangle(cornerRadius: Theme.radiusControl)
                     .strokeBorder(invalid ? Theme.live : .clear, lineWidth: 1)
             )
+    }
+
+    @ViewBuilder
+    private var editor: some View {
+        let placeholder = Text(prompt).foregroundStyle(Theme.inkTertiary)
+        if multiline {
+            TextField(prompt, text: $text, prompt: placeholder, axis: .vertical)
+                .lineLimit(1...4)
+        } else {
+            TextField(prompt, text: $text, prompt: placeholder)
+                .onSubmit(onSubmit)
+                .frame(height: 28)
+        }
     }
 }
 
@@ -537,6 +554,7 @@ private struct VocabularyRuleRow: View {
                     text: Binding(get: { rule.right }, set: { onEdit(.right, $0) }),
                     key: .ruleRight(rule.id),
                     focus: $focus,
+                    multiline: rule.kind == .replacement,
                     onSubmit: onCommit
                 )
                 .disabled(busy),
