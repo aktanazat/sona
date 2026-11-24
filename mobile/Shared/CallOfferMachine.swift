@@ -6,8 +6,8 @@ import Foundation
 /// audio, so this is the whole of what the phone can know: a call became live, and a
 /// call stopped being live.
 enum CallEvent: Equatable {
-    case connected(atUtcMs: Int64)
-    case ended(atUtcMs: Int64)
+    case connected(id: UUID, atUtcMs: Int64)
+    case ended(id: UUID, atUtcMs: Int64)
 }
 
 /// The one thing the phone offers the operator about a call.
@@ -24,26 +24,23 @@ enum CallOffer: Equatable {
 /// simulator, and a state machine driven by real telephony is a state machine nobody
 /// can exercise.
 struct CallOfferMachine {
-    private var connectedAtUtcMs: Int64?
+    private var activeCalls: Set<UUID> = []
+    private var connectedAtUtcMs: Int64 = 0
 
     mutating func handle(_ event: CallEvent) -> CallOffer? {
         switch event {
-        case let .connected(atUtcMs):
-            /* `CXCallObserver` reports every change on a call, and a second line can
-             * connect while the first is live. One live call is one offer. */
-            guard connectedAtUtcMs == nil else { return nil }
+        case let .connected(id, atUtcMs):
+            let wasIdle = activeCalls.isEmpty
+            guard activeCalls.insert(id).inserted, wasIdle else { return nil }
             connectedAtUtcMs = atUtcMs
             return .onCall
-        case let .ended(atUtcMs):
-            /* A call that never connected — declined, missed, cancelled — is not
-             * something to write a note about. */
-            guard let connectedAtUtcMs else { return nil }
-            self.connectedAtUtcMs = nil
+        case let .ended(id, atUtcMs):
+            guard activeCalls.remove(id) != nil, activeCalls.isEmpty else { return nil }
             return .afterCall(minutes: CallOfferMachine.minutes(from: connectedAtUtcMs, to: atUtcMs))
         }
     }
 
-    var isOnCall: Bool { connectedAtUtcMs != nil }
+    var isOnCall: Bool { !activeCalls.isEmpty }
 
     /// Whole minutes, and never zero: a call the operator remembers taking should not
     /// be reported as having lasted no time at all.
