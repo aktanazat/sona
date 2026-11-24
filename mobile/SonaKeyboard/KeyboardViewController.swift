@@ -818,6 +818,8 @@ final class KeyboardViewController: UIInputViewController {
 
 private struct KeyboardView: View {
     static let barHeight: CGFloat = 46
+    /// The whole keyboard, whose top is as high as anything may be drawn.
+    private static let space = "keyboard"
 
     @ObservedObject var state: KeyboardState
     let typing: TypingModel
@@ -862,6 +864,7 @@ private struct KeyboardView: View {
             .zIndex(1)
         }
         .padding(.bottom, 4)
+        .coordinateSpace(.named(Self.space))
         .foregroundStyle(Theme.textPrimary).tint(Theme.accent)
     }
 
@@ -908,11 +911,12 @@ private struct KeyboardView: View {
             }
             .overlay(alignment: .topLeading) {
                 GeometryReader { proxy in
-                    if let preview = typing.preview { KeyPreviewBalloon(preview: preview, bounds: proxy.size) }
+                    let room = proxy.frame(in: .named(Self.space)).minY
+                    if let preview = typing.preview {
+                        KeyPreviewBalloon(preview: preview, bounds: proxy.size, room: room)
+                    }
+                    if let choice = typing.accentChoice { AccentPopup(choice: choice, room: room) }
                 }
-            }
-            .overlay(alignment: .topLeading) {
-                if let choice = typing.accentChoice { AccentPopup(choice: choice) }
             }
     }
 

@@ -360,17 +360,20 @@ struct KeyFace: ViewModifier {
 }
 
 /// The letter under a finger, enlarged above its key as the system keyboard shows it: the
-/// key's own shape grows a wider head with the letter in it.
+/// key's own shape grows a wider head with the letter in it. A keyboard cannot draw above
+/// its own top, so over the top row the head sits lower and shorter, inside the `room`
+/// above the keys.
 struct KeyPreviewBalloon: View {
     let preview: KeyPreview
     let bounds: CGSize
+    let room: CGFloat
 
     var body: some View {
         let key = preview.frame.insetBy(dx: KeyFace.gap / 2, dy: KeyFace.rowGap / 2)
         let headWidth = key.width + 22
-        let headHeight = key.height + 10
+        let top = max(key.minY - (key.height + 10) - 8, 1 - room)
+        let headHeight = min(key.height + 10, key.minY - 3 - top)
         let headX = min(max(key.midX - headWidth / 2, 1), bounds.width - headWidth - 1)
-        let top = key.minY - headHeight - 8
         let shape = KeyBalloon(key: key, head: CGRect(x: headX, y: top, width: headWidth, height: headHeight))
         ZStack(alignment: .topLeading) {
             shape.fill(KeyFace.fill)
@@ -423,9 +426,11 @@ private struct KeyBalloon: Shape {
     }
 }
 
-/// A held key's choices above it; the finger slides to one and lets go.
+/// A held key's choices above it, no higher than the `room` above the keys; the finger
+/// slides to one and lets go.
 struct AccentPopup: View {
     let choice: AccentChoice
+    let room: CGFloat
 
     var body: some View {
         let padding: CGFloat = 4
@@ -446,7 +451,7 @@ struct AccentPopup: View {
         .background(KeyFace.fill, in: RoundedRectangle(cornerRadius: radius, style: .continuous))
         .shadow(color: .black.opacity(0.18), radius: 3, y: 1)
         .shadow(color: .black.opacity(0.1), radius: 12, y: 4)
-        .offset(x: choice.originX - 4, y: choice.anchor.minY - choice.anchor.height + 2)
+        .offset(x: choice.originX - 4, y: max(choice.anchor.minY - choice.anchor.height + 2, 1 - room))
         .allowsHitTesting(false)
         .accessibilityHidden(true)
     }
