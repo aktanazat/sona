@@ -66,15 +66,6 @@ struct KeyboardLevel: Codable, Sendable {
         self.requestID == requestID && uptime > previous && uptime <= now && now - uptime < 0.4
             && (0...1).contains(level)
     }
-
-    static func append(_ level: Float, to recent: SIMD16<Float>) -> SIMD16<Float> {
-        var next = recent
-        for index in 0..<(next.scalarCount - 1) {
-            next[index] = recent[index + 1]
-        }
-        next[next.scalarCount - 1] = level
-        return next
-    }
 }
 
 struct KeyboardSessionStore {

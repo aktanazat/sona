@@ -18,6 +18,7 @@ enum Theme {
     static let border = dynamic(light: 0xE0E0E0, dark: 0x333333)
     static let accent = dynamic(light: 0x007AFF, dark: 0x0A84FF)
     static let recordingFill = dynamic(light: 0xE5372B, dark: 0x5E160F)
+    static let recordingWarm = dynamic(light: 0xF2683A, dark: 0xFF8E5E)
     static let onRecording = dynamic(light: 0xFFFFFF, dark: 0xFF5A4A)
 
     static let pageInset: CGFloat = 20
