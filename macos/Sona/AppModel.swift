@@ -1593,15 +1593,14 @@ final class AppModel {
         if modelOperations[id]?.failure == nil { modelOperations[id] = nil }
     }
 
-    /// One sentence each: the cause, then the way out. The same sentences
-    /// `App.tsx` showed as toasts; the three the web app never named get the
-    /// HUD's short form.
     private static func recordingErrorText(_ errorType: String) -> String {
         switch errorType {
         case "microphone_permission_denied":
             "Grant microphone access in System Settings → Privacy & Security → Microphone."
         case "no_input_device":
             "No audio input device was detected. Connect a microphone and try again."
+        case "microphone_lid_closed":
+            "The lid is closed. Open it or choose another microphone."
         case "no_speech_detected":
             "No speech was detected. A sample of the recording was saved to History."
         case "no_model_selected":

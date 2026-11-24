@@ -236,6 +236,7 @@ objc2-core-foundation = { version = "0.3", default-features = false, features = 
   "std",
   "CFArray",
   "CFDate",
+  "CFNumber",
   "CFString",
   "CFURL",
   "CFUserNotification",

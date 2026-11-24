@@ -2119,3 +2119,29 @@ A bare command records a `submit_key` attempt with no target-app acknowledgement
 A body retains its actual insertion receipt. Its key feedback is separate from
 the ordinary paste result, so that result cannot overwrite a refusal or uncertain
 Enter request.
+
+## Closed-lid microphone refusal
+
+Mac dictation and microphone practice check the recorder's actual open input
+before queuing a spool or recording-start command. A confirmed built-in input
+with the lid closed returns an error asking the user to open the lid or choose
+another microphone. This also covers an already-open always-on or meeting stream;
+refusing dictation does not close a meeting's stream.
+
+| Capture request                            | Actual input and lid                 | Result                                             |
+| ------------------------------------------ | ------------------------------------ | -------------------------------------------------- |
+| Dictation or practice                      | Lid open, or no lid property         | Existing start path                                |
+| Dictation or practice                      | Lid closed, confirmed built-in input | Refuse before spool/start; existing error delivery |
+| Dictation or practice                      | Lid closed, another input            | Existing start path                                |
+| Dictation or practice                      | Lid property has an unexpected type  | Refuse with the metadata error                     |
+| Meeting-only, spoken chat, screen recorder | Separate capture boundary            | No new reconfiguration                             |
+
+The lid helper reads the typed IOKit property and releases both its service and
+property references. CoreAudio's transport property identifies built-in input;
+the warning does not infer hardware type from a device name. Existing selected
+and clamshell microphone preferences are unchanged.
+
+The refusal travels as `microphone_lid_closed`, with a dedicated native message.
+An ambiguous device-name lookup leaves the input type unconfirmed. Failed starts
+release their own capture lease and close an unowned on-demand stream; always-on
+streams and streams held by a meeting remain open.

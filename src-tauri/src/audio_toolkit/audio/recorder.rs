@@ -866,7 +866,7 @@ impl AudioRecorder {
         &self,
         vad_policy: VadPolicy,
     ) -> Result<mpsc::Receiver<()>, Box<dyn std::error::Error>> {
-        self.start_capture(vad_policy, true)
+        self.start_capture(vad_policy, true, None)
     }
 
     /// [`Self::start`] for a dictation that also writes every 16 kHz sample,
@@ -877,47 +877,60 @@ impl AudioRecorder {
         vad_policy: VadPolicy,
         spool: &Path,
     ) -> Result<mpsc::Receiver<()>, Box<dyn std::error::Error>> {
-        let tx = self
-            .cmd_tx
-            .as_ref()
-            .ok_or_else(|| Error::other("Recorder is not open"))?;
-        match SpoolWriter::create(spool) {
-            Ok(writer) => tx.send(Cmd::Spool(writer)).map_err(|_| {
-                let _ = std::fs::remove_file(spool);
-                Error::other("Recorder is not open")
-            })?,
-            Err(error) => log::error!(
-                "Recording without a spool; {} could not be created: {error}",
-                spool.display()
-            ),
-        }
-        let started = self.start(vad_policy);
-        if started.is_err() {
-            let _ = std::fs::remove_file(spool);
-        }
-        started
+        self.start_capture(vad_policy, true, Some(spool))
     }
 
     pub(crate) fn start_practice(&self) -> Result<mpsc::Receiver<()>, Box<dyn std::error::Error>> {
-        self.start_capture(VadPolicy::Disabled, false)
+        self.start_capture(VadPolicy::Disabled, false, None)
     }
 
     fn start_capture(
         &self,
         vad_policy: VadPolicy,
         forward_audio: bool,
+        spool: Option<&Path>,
     ) -> Result<mpsc::Receiver<()>, Box<dyn std::error::Error>> {
         let tx = self
             .cmd_tx
             .as_ref()
             .ok_or_else(|| Error::other("Recorder is not open"))?;
+        #[cfg(target_os = "macos")]
+        if crate::helpers::clamshell::is_clamshell().map_err(Error::other)?
+            && self
+                .device
+                .as_ref()
+                .and_then(|device| device.name().ok())
+                .is_some_and(|name| super::core_audio::input_device_is_builtin(&name) == Some(true))
+        {
+            return Err(Box::new(Error::other(
+                crate::helpers::clamshell::LID_CLOSED_MICROPHONE,
+            )));
+        }
+        if let Some(spool) = spool {
+            match SpoolWriter::create(spool) {
+                Ok(writer) => tx.send(Cmd::Spool(writer)).map_err(|_| {
+                    let _ = std::fs::remove_file(spool);
+                    Error::other("Recorder is not open")
+                })?,
+                Err(error) => log::error!(
+                    "Recording without a spool; {} could not be created: {error}",
+                    spool.display()
+                ),
+            }
+        }
         let (ready_tx, ready_rx) = mpsc::channel();
-        tx.send(Cmd::Start(
+        let started = tx.send(Cmd::Start(
             vad_policy,
             Instant::now(),
             ready_tx,
             forward_audio,
-        ))?;
+        ));
+        if started.is_err() {
+            if let Some(spool) = spool {
+                let _ = std::fs::remove_file(spool);
+            }
+        }
+        started?;
         Ok(ready_rx)
     }
 
