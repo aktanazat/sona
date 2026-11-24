@@ -7,9 +7,7 @@
 use super::linking::upsert_link_in;
 use crate::meeting::people_types::{Person, PersonLinkConfidence, PersonLinkSource};
 use crate::meeting::store::loops::user_speaker_labels_in;
-use crate::meeting::store::people::{
-    all_people_in, exact_phrase_mentioned, identity_names, normalized,
-};
+use crate::meeting::store::people::{all_people_in, identity_names, normalized};
 use crate::meeting::store::voice_identity::is_generated_speaker_label;
 use crate::meeting::store::{effective_segments_for_session, StoreError};
 use crate::meeting::types::MeetingSessionId;
@@ -69,12 +67,23 @@ pub(super) fn people_heard<'a>(
     // How many people each word belongs to, anywhere in any of their names.
     // A word on its own that could mean two people names neither.
     let mut holders = HashMap::<String, usize>::new();
+    // How many people carry each name of several words, as a whole.
+    let mut full_holders = HashMap::<String, usize>::new();
     for person in people {
         let mut words = identity_names(person).flat_map(words).collect::<Vec<_>>();
         words.sort();
         words.dedup();
         for word in words {
             *holders.entry(word).or_default() += 1;
+        }
+        let mut full = identity_names(person)
+            .filter(|name| name.split_whitespace().count() > 1)
+            .map(normalized)
+            .collect::<Vec<_>>();
+        full.sort();
+        full.dedup();
+        for name in full {
+            *full_holders.entry(name).or_default() += 1;
         }
     }
     let user = user_name.map(normalized).filter(|user| !user.is_empty());
@@ -83,7 +92,8 @@ pub(super) fn people_heard<'a>(
     // word has to be nobody else's, and no part of the user's name.
     let theirs = |name: &&str| {
         if name.split_whitespace().count() > 1 {
-            return user.as_deref() != Some(normalized(name).as_str());
+            let full = normalized(name);
+            return user.as_deref() != Some(full.as_str()) && full_holders.get(&full) == Some(&1);
         }
         let word = name.trim().to_lowercase();
         !user_words.contains(&word)
@@ -94,14 +104,11 @@ pub(super) fn people_heard<'a>(
         .iter()
         .filter(|person| {
             // The user's own entry is nobody else, whatever nickname it also
-            // carries: the entry called what the user is called, or one with
-            // the user's full name as an alias. A one-word About me name is
-            // only a first name, which a contact may share.
-            let is_user = user.as_deref().is_some_and(|user| {
-                normalized(&person.display_name) == user
-                    || (user_words.len() > 1
-                        && person.aliases.iter().any(|alias| normalized(alias) == user))
-            });
+            // carries: the entry called what the user is called. A one-word
+            // About me name is only a first name, which a contact may share.
+            let is_user = user
+                .as_deref()
+                .is_some_and(|user| normalized(&person.display_name) == user);
             if is_user {
                 return false;
             }
@@ -138,12 +145,13 @@ fn looks_like_a_surname(word: &str) -> bool {
         && !CALENDAR_WORDS.contains(&bare.to_lowercase().as_str())
 }
 
-/// Whether `line` says `name` as a name. A name of several words only has to
-/// appear; one word must be capitalised the way a transcript writes a name.
+/// Whether `line` says `name` as a name. A name of several words has to be
+/// said whole and not run into a surname; one word must be capitalised the
+/// way a transcript writes a name.
 fn said_in(line: &str, name: &str) -> bool {
     let name = name.trim();
     if name.split_whitespace().count() > 1 {
-        return exact_phrase_mentioned(line, name);
+        return full_name_said_in(line, name);
     }
     if name.chars().count() < MIN_SINGLE_NAME_CHARS {
         return false;
@@ -161,15 +169,21 @@ fn said_in(line: &str, name: &str) -> bool {
             return false;
         }
         let opens_sentence = index == 0 || words[index - 1].ends_with(['.', '!', '?']);
-        // Followed by a surname ("Dana Okafor") it is somebody else: their
-        // full name is matched as a whole, never by its first word.
+        // A name a surname comes before ("Marcus Dana"), or one a surname comes
+        // after ("Dana Okafor"), is somebody else: their full name is matched
+        // as a whole, never by its first word.
+        let surname_before = index >= 2
+            && !words[index - 2].ends_with(['.', '!', '?'])
+            && words[index - 1].ends_with(char::is_alphanumeric)
+            && looks_like_a_surname(words[index - 1]);
         let ends_here = !word.ends_with(|character: char| character.is_alphanumeric())
             || word.ends_with("'s")
             || word.ends_with("\u{2019}s");
-        if !ends_here
-            && words
-                .get(index + 1)
-                .is_some_and(|next| looks_like_a_surname(next))
+        if surname_before
+            || (!ends_here
+                && words
+                    .get(index + 1)
+                    .is_some_and(|next| looks_like_a_surname(next)))
         {
             return false;
         }
@@ -179,6 +193,35 @@ fn said_in(line: &str, name: &str) -> bool {
         let addressed = word.ends_with(',');
         addressed || !opens_sentence
     })
+}
+
+/// Whether `line` says every word of `name`, in order, with no capitalised
+/// surname straight after ("Tess Nolan Junior" is not Tess Nolan).
+fn full_name_said_in(line: &str, name: &str) -> bool {
+    let wanted = name_tokens(name)
+        .into_iter()
+        .map(str::to_lowercase)
+        .collect::<Vec<_>>();
+    let said = name_tokens(line);
+    !wanted.is_empty()
+        && said
+            .windows(wanted.len())
+            .enumerate()
+            .any(|(index, window)| {
+                window
+                    .iter()
+                    .map(|word| word.to_lowercase())
+                    .eq(wanted.iter().cloned())
+                    && !said
+                        .get(index + wanted.len())
+                        .is_some_and(|next| looks_like_a_surname(next))
+            })
+}
+
+fn name_tokens(text: &str) -> Vec<&str> {
+    text.split(|character: char| !character.is_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .collect()
 }
 
 /// Suggests a link for every person the meeting's transcript or call roster
