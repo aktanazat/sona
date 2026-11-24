@@ -117,6 +117,11 @@ impl Past {
 struct Window<'a> {
     tasks: Vec<&'a Past>,
     which: String,
+    /// Tasks outside the window that were counted to decide whether it
+    /// speaks at all; what it says is drawn from their meetings too.
+    weighed: Vec<&'a Past>,
+    /// Meetings whose attendance alone was counted, for the same reason.
+    attended: Vec<&'a String>,
 }
 
 impl Window<'_> {
@@ -245,7 +250,12 @@ impl Pool {
 
     fn drawn(&self, window: &Window<'_>, mine: &[String]) -> Vec<String> {
         let mut drawn: Vec<String> = mine.to_vec();
-        for task in &window.tasks {
+        for meeting in &window.attended {
+            if !drawn.contains(meeting) {
+                drawn.push((*meeting).clone());
+            }
+        }
+        for task in window.tasks.iter().chain(&window.weighed) {
             for meeting in self.meetings_of(&task.id) {
                 if !drawn.contains(meeting) {
                     drawn.push(meeting.clone());
@@ -269,7 +279,23 @@ impl Pool {
         ))
     }
 
-    fn people_windows<'a>(&'a self, item: &'a WorkItem, mine: &[String]) -> Vec<Window<'a>> {
+    /// One window per person in `mine` whose past work says something about
+    /// where this item belongs. Someone in every meeting has tasks wherever
+    /// the work is, and following them files each meeting's work under
+    /// whichever project was busiest last. So the project a person's last
+    /// tasks agree on counts only when their work leans toward it more than
+    /// everyone's does (its share of their filed tasks is more than halfway
+    /// from its share of all filed tasks to all of them), and when it did not
+    /// simply follow someone else who is not in this meeting.
+    ///
+    /// The other two values are every task, and every meeting without one,
+    /// that was counted to rule a person out. Whatever is suggested once a
+    /// person was ruled out is drawn from those too.
+    fn people_windows<'a>(
+        &'a self,
+        item: &'a WorkItem,
+        mine: &[String],
+    ) -> (Vec<Window<'a>>, Vec<&'a Past>, Vec<&'a String>) {
         let mut seen: Vec<&str> = Vec::new();
         for meeting in mine {
             for person in self.people.get(meeting).into_iter().flatten() {
@@ -278,8 +304,18 @@ impl Pool {
                 }
             }
         }
+        let filed: Vec<&Past> = self
+            .decided(item)
+            .filter(|task| {
+                task.project_id
+                    .as_deref()
+                    .is_some_and(|id| self.projects.contains_key(id))
+            })
+            .collect();
         let mut windows = Vec::new();
-        for person in seen {
+        let mut ruled_out = false;
+        let mut attended: Vec<&String> = Vec::new();
+        for person in seen.iter().copied() {
             let (Some(theirs), Some(name)) = (self.met.get(person), self.names.get(person)) else {
                 continue;
             };
@@ -292,12 +328,106 @@ impl Pool {
                 })
                 .take(RECENT)
                 .collect();
-            windows.push(Window {
+            let mut window = Window {
                 which: format!("last {} tasks from meetings with {name}", tasks.len()),
                 tasks,
-            });
+                weighed: Vec::new(),
+                attended: Vec::new(),
+            };
+            let Some((project_id, _, _)) = self.project(&window) else {
+                windows.push(window);
+                continue;
+            };
+            let there = |task: &&&Past| task.project_id.as_deref() == Some(project_id.as_str());
+            let with_them = |task: &&&Past| {
+                self.meetings_of(&task.id)
+                    .iter()
+                    .any(|meeting| theirs.contains(meeting))
+            };
+            let (theirs_there, theirs_all, all_there) = (
+                filed.iter().filter(with_them).filter(there).count(),
+                filed.iter().filter(with_them).count(),
+                filed.iter().filter(there).count(),
+            );
+            // With work filed elsewhere to compare against:
+            // theirs_there / theirs_all - all_there / all
+            //     > (1 - all_there / all) / 2, without dividing.
+            let leans = all_there == filed.len()
+                || 2 * theirs_there * filed.len() > theirs_all * (filed.len() + all_there);
+            // Someone whose own filed work leans toward the project more than
+            // this person's does, who was at every meeting that tied this
+            // person to it and is not at this one: the project followed them.
+            // As much, and the one with more work there has it; as much of
+            // that too, and the one in fewer meetings does, which is the only
+            // place meetings without filed tasks are counted.
+            let mut counted: Vec<&'a String> = Vec::new();
+            let mut more_theirs = |other: &str| {
+                let Some(met) = self.met.get(other) else {
+                    return false;
+                };
+                let with_other = |task: &&&Past| {
+                    self.meetings_of(&task.id)
+                        .iter()
+                        .any(|meeting| met.contains(meeting))
+                };
+                let other_there = filed.iter().filter(with_other).filter(there).count();
+                let other_all = filed.iter().filter(with_other).count();
+                let (one, two) = (other_there * theirs_all, theirs_there * other_all);
+                if one != two {
+                    return one > two;
+                }
+                if other_there != theirs_there {
+                    return other_there > theirs_there;
+                }
+                counted.extend(met.iter().chain(theirs));
+                met.len() < theirs.len()
+            };
+            let mut followed: Option<Vec<&str>> = None;
+            for meeting in filed
+                .iter()
+                .filter(with_them)
+                .filter(there)
+                .flat_map(|task| self.meetings_of(&task.id))
+                .filter(|meeting| theirs.contains(*meeting))
+            {
+                let at: Vec<&str> = self
+                    .people
+                    .get(meeting)
+                    .into_iter()
+                    .flatten()
+                    .map(String::as_str)
+                    .filter(|other| !seen.contains(other))
+                    .collect();
+                followed = Some(match followed {
+                    Some(so_far) => so_far.into_iter().filter(|one| at.contains(one)).collect(),
+                    None => at,
+                });
+            }
+            // A regular guest who skipped this one took nothing with them.
+            let followed = followed
+                .into_iter()
+                .flatten()
+                .any(&mut more_theirs);
+            for meeting in counted {
+                if !attended.contains(&meeting) {
+                    attended.push(meeting);
+                }
+            }
+            if leans && !followed {
+                window.weighed.clone_from(&filed);
+                windows.push(window);
+            } else {
+                ruled_out = true;
+            }
         }
-        windows
+        for window in &mut windows {
+            window.attended.clone_from(&attended);
+        }
+        if ruled_out {
+            (windows, filed, attended)
+        } else {
+            (windows, Vec::new(), Vec::new())
+        }
     }
 
     fn hints(
@@ -324,6 +454,8 @@ impl Pool {
             Window {
                 which: format!("{} other tasks from this meeting", tasks.len()),
                 tasks,
+                weighed: Vec::new(),
+                attended: Vec::new(),
             }
         };
         let similar = {
@@ -335,6 +467,8 @@ impl Pool {
             Window {
                 which: format!("last {} tasks with similar titles", tasks.len()),
                 tasks,
+                weighed: Vec::new(),
+                attended: Vec::new(),
             }
         };
         let has = |field| {
@@ -344,11 +478,25 @@ impl Pool {
         };
         let mut found = Vec::new();
         if item.project_id.is_none() && !has(WorkSuggestionField::Project) {
-            let people = self.people_windows(item, mine);
+            let (people, weighed, attended) = self.people_windows(item, mine);
             let by_people = people
                 .iter()
                 .filter_map(|window| self.project(window).map(|found| (found, window)))
-                .max_by_key(|((_, _, count), window)| (*count, usize::MAX - window.tasks.len()));
+                // Equal people are told apart by name, not by the order
+                // their ids happen to sort in.
+                .max_by_key(|((_, _, count), window)| {
+                    (
+                        *count,
+                        usize::MAX - window.tasks.len(),
+                        std::cmp::Reverse(window.which.as_str()),
+                    )
+                });
+            let similar = Window {
+                which: similar.which.clone(),
+                tasks: similar.tasks.clone(),
+                weighed,
+                attended,
+            };
             let chosen = self
                 .project(&siblings)
                 .map(|found| (found, &siblings))
