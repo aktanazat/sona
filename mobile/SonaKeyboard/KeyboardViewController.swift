@@ -329,7 +329,7 @@ final class KeyboardViewController: UIInputViewController {
         case .delete:
             let context = textContext
             apply(
-                session.backspace(before: context.before, hostBehind: isHostBehind(context)),
+                session.backspace(before: knownBefore(context)),
                 to: context
             )
         case .shift:
@@ -350,8 +350,7 @@ final class KeyboardViewController: UIInputViewController {
     private func endWord(with separator: String) {
         let context = textContext
         apply(session.end(
-            with: separator, before: context.before,
-            corrects: mayCorrect(context), hostBehind: isHostBehind(context)
+            with: separator, before: knownBefore(context), corrects: mayCorrect(context)
         ), to: context)
     }
 
@@ -379,7 +378,7 @@ final class KeyboardViewController: UIInputViewController {
         typing.hasTyped = true
         if EmojiCatalog.shared?.entry(for: word) != nil { emoji.memory.used(word) }
         let context = textContext
-        apply(session.choose(word, before: context.before, hostBehind: isHostBehind(context)), to: context)
+        apply(session.choose(word, before: knownBefore(context)), to: context)
         afterKey()
     }
 
@@ -491,8 +490,11 @@ final class KeyboardViewController: UIInputViewController {
         corrects && context.after.first.map(TypingText.isWordCharacter) != true
     }
 
-    private func isHostBehind(_ context: TextContext) -> Bool {
-        echo.behind(before: context.before, after: context.after)
+    /// The text before the cursor as the keyboard's own edits leave it. A host still behind
+    /// those edits applies the next one after them, in order, so a word is corrected as
+    /// typed rather than as the host last reported it.
+    private func knownBefore(_ context: TextContext) -> String {
+        echo.joining(before: context.before, after: context.after)
     }
 
     private func toggleShift() {
@@ -571,8 +573,8 @@ final class KeyboardViewController: UIInputViewController {
 
     private func showSuggestions(guessing: Bool) {
         let context = textContext
-        let before = context.before
-        let ready = mayCorrect(context) && !isHostBehind(context)
+        let before = knownBefore(context)
+        let ready = mayCorrect(context)
         let offer = ready ? session.suggestions(before: before, guessing: guessing) : nil
         /* A correction on show stays while the same word goes on, with the word as now typed
          * in its quoted slot, until the guesses for the new letter replace it, so the strip

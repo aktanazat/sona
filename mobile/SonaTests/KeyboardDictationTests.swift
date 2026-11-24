@@ -87,6 +87,8 @@ struct DictationJoiningTests {
         var text: String { history[history.count - 1] }
         var shown: String { lag.map { history[max(0, history.count - 1 - $0)] } ?? history[0] }
         var behind: Bool { echo.behind(before: shown, after: "") }
+        /// The field as the keyboard's own edits leave it, which is what its next edit lands on.
+        var known: String { echo.joining(before: shown, after: "") }
 
         mutating func keyboard(_ edit: TypingSession.Edit) {
             echo.edited(before: shown, after: "", deleting: edit.deleteCount, inserting: edit.insert)
@@ -141,7 +143,7 @@ struct DictationJoiningTests {
                 self = Host(lag: lag, history: history, echo: echo, session: session)
                 echo.hostReported(before: shown, after: "", ownEdit: true)
             case .space:
-                keyboard(session.end(with: " ", before: shown, corrects: true, hostBehind: behind))
+                keyboard(session.end(with: " ", before: known, corrects: true))
             case let .silently(text): appSilently(sets: text)
             case let .announced(text): app(sets: text)
             case let .newField(text):
@@ -341,14 +343,17 @@ struct DictationJoiningTests {
         #expect(host.text == "Call Dauren école Meet me.")
     }
 
-    @Test("while the host is behind, even after two quick keys, a space does not correct the stale word it reports", arguments: [1, 2, nil] as [Int?])
-    func laggingHostGetsNoCorrection(lag: Int?) throws {
-        var session = TypingSession(corrector: try #require(TypingCorrector(language: "en-US")))
-        var host = Host(lag: lag, text: "I said beca")
-        host.keyboard(session.type("u"))
-        host.keyboard(session.type("s"))
+    @Test("while the host is behind, even after two quick keys, a space corrects the word as typed and the field ends right", arguments: [1, 2, nil] as [Int?])
+    func laggingHostGetsTheTypedWordCorrected(lag: Int?) async throws {
+        let corrector = try #require(TypingCorrector(language: TypingLanguage.english.rawValue))
+        corrector.common = await CommonWords.list(for: .english)
+        var session = TypingSession(corrector: corrector)
+        var host = Host(lag: lag, text: "after schoo")
+        host.keyboard(session.type("o"))
+        host.keyboard(session.type("l"))
         #expect(host.behind)
-        #expect(session.end(with: " ", before: host.shown, corrects: true, hostBehind: host.behind) == TypingSession.Edit(insert: " "))
+        host.keyboard(session.end(with: " ", before: host.known, corrects: true))
+        #expect(host.text == "after school ")
     }
 
     @Test("a host that shows the edit ends the memory, so a field it clears without a word starts fresh")
