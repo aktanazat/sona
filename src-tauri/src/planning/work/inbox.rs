@@ -23,6 +23,8 @@ use std::sync::Arc;
 use tauri::{AppHandle, Manager};
 use uuid::Uuid;
 
+pub(crate) mod rows;
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NotificationKind {
@@ -648,6 +650,21 @@ fn owned_by_user(conn: &Connection, task_id: &str) -> Result<bool> {
         .unwrap_or(false))
 }
 
+/// Whether this entry is the other end of a link the inbox was already
+/// told about: a link is history on both tasks and news once, on the task
+/// it was made from. The code that writes a link names its other end, so
+/// nothing is read from when or how the two entries were written.
+fn echoes_a_link(conn: &Connection, entry: &Entry<'_>) -> Result<bool> {
+    let Some(made) = entry.mirror_of else {
+        return Ok(false);
+    };
+    Ok(conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM planning_notifications WHERE activity_id = ?1)",
+        [made],
+        |row| row.get(0),
+    )?)
+}
+
 /// One history entry as it is written.
 pub(crate) struct Entry<'a> {
     pub(crate) task_id: &'a str,
@@ -656,6 +673,8 @@ pub(crate) struct Entry<'a> {
     pub(crate) kind: WorkActivityKind,
     pub(crate) from: Option<&'a str>,
     pub(crate) to: Option<&'a str>,
+    /// The entry for the other end of the link this entry mirrors.
+    pub(crate) mirror_of: Option<&'a str>,
 }
 
 /// Subscribes and notifies for one history entry as it is written.
@@ -667,6 +686,7 @@ pub(crate) fn on_activity(conn: &Connection, entry: &Entry<'_>, now_ms: i64) -> 
         kind,
         from,
         to,
+        mirror_of: _,
     } = *entry;
     let notice = |kind: NotificationKind| Notice {
         activity_id: Some(activity_id),
@@ -713,6 +733,7 @@ pub(crate) fn on_activity(conn: &Connection, entry: &Entry<'_>, now_ms: i64) -> 
         WorkActivityKind::Comment if actor != WorkActor::Me && subscribed(conn, task_id)? => {
             notify(conn, &notice(NotificationKind::Comment), now_ms)?;
         }
+        WorkActivityKind::Relation if echoes_a_link(conn, entry)? => {}
         WorkActivityKind::Priority
         | WorkActivityKind::Owner
         | WorkActivityKind::Due
@@ -1380,8 +1401,12 @@ pub(crate) fn subscribe_as(
 /// are unread.
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct Inbox {
+    /// Unread rows, not unread notices: a burst counts once.
     unread: usize,
+    /// Unread rows that need the user.
+    needs: usize,
     notifications: Vec<Notification>,
+    rows: Vec<rows::InboxRow>,
 }
 
 fn reading<T>(app: &AppHandle, work: impl FnOnce(&Connection) -> Result<T>) -> Result<T, String> {
@@ -1395,14 +1420,27 @@ pub(crate) fn work_inbox(
 ) -> Result<Inbox, String> {
     reading(&app, |conn| {
         let now = now_ms();
-        let unread = Shown {
-            unread_only: true,
-            ..Shown::default()
+        let context = rows::context(conn)?;
+        let waiting = rows::waiting(notifications(conn, Shown::default(), now)?, &context);
+        // Rows are built over read notices too, then narrowed: an unread-only
+        // view must not split a burst at the notices already read.
+        let any = Shown {
+            unread_only: false,
+            ..shown
+        };
+        let mut all = filtered(conn, any, &filter, now)?;
+        name_notes(conn, &mut all)?;
+        let rows = if shown.unread_only {
+            rows::waiting(all, &context)
+        } else {
+            rows::rows(all, &context)
         };
         let mut shown = filtered(conn, shown, &filter, now)?;
         name_notes(conn, &mut shown)?;
         Ok(Inbox {
-            unread: notifications(conn, unread, now)?.len(),
+            unread: waiting.len(),
+            needs: waiting.iter().filter(|row| row.needs.is_some()).count(),
+            rows,
             notifications: shown,
         })
     })
