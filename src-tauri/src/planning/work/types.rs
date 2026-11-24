@@ -902,6 +902,9 @@ impl WorkDisplay {
             show_sub_tasks: true,
             sub_group_by: WorkGroupBy::None,
             hidden_columns: Vec::new(),
+            order_direction: None,
+            no_priority_first: false,
+            nest_sub_tasks: false,
         }
     }
 }

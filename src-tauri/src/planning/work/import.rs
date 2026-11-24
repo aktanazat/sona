@@ -20,6 +20,7 @@ use self::sheets::CsvMap;
 use super::comments::{self, Author};
 use super::initiatives::{self, InitiativeSaveInput};
 use super::items::{self, NewItem};
+use super::types::WorkViewInput;
 use super::types::{
     WorkActivityKind, WorkActor, WorkCommentSubject, WorkDisplay, WorkOwner, WorkPatch, WorkQuery,
     WorkStatus,
@@ -528,10 +529,17 @@ impl Writer<'_> {
             None,
             name,
             hue.unwrap_or_else(|| default_hue(name)),
+            None,
             self.change.at_ms,
         )?;
         if let Some(group) = group {
-            super::routines::group_label(self.tx, &made.id, Some(group), self.change.at_ms)?;
+            super::routines::group_label(
+                self.tx,
+                &made.id,
+                Some(group),
+                None,
+                self.change.at_ms,
+            )?;
         }
         self.keep(ImportKind::Label, source_id, &made.id, true)?;
         self.row(ImportKind::Label, name, ImportAction::Made, None);
@@ -597,6 +605,7 @@ impl Writer<'_> {
                     owner: None,
                     target_at_ms: Some(initiative.target_at_ms),
                     status: initiative.status,
+                    ..Default::default()
                 },
                 self.change.at_ms,
             )?;
@@ -1198,9 +1207,13 @@ impl Writer<'_> {
             let made = items::save_view(
                 self.tx,
                 None,
-                &view.name,
-                &query,
-                &WorkDisplay::standard(),
+                &WorkViewInput {
+                    name: view.name.clone(),
+                    query,
+                    display: WorkDisplay::standard(),
+                    icon: None,
+                    project_id: None,
+                },
                 self.change.at_ms,
             )?;
             self.keep(ImportKind::View, &view.id, &made.id, true)?;
