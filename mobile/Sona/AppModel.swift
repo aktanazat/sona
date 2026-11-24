@@ -78,6 +78,8 @@ final class AppModel: NSObject, ObservableObject {
     let calls = PhoneCalls()
     private var keyboardSignal: KeyboardSignal?
     private var keyboardTicker: Task<Void, Never>?
+    private var keyboardMeter: AnyCancellable?
+    private var keyboardLevels: AsyncStream<KeyboardLevel>.Continuation?
     private var keyboardRequestID: UUID?
     private var keyboardRequestDocumentID: UUID?
     private var lastKeyboardRequestID: UUID?
@@ -122,6 +124,15 @@ final class AppModel: NSObject, ObservableObject {
         DictationPreferences.moveKeyboardSwitchToSharedContainer()
         dictation.onEnded = { [weak self] capture in self?.collectDictation(capture) }
         dictation.onStateChanged = { [weak self] in self?.publishKeyboardState() }
+        keyboardMeter = dictation.meter.$levels.sink { [weak self] levels in
+            guard let self, dictation.phase == .listening,
+                  let requestID = keyboardRequestID, let level = levels.last
+            else { return }
+            if keyboardLevels == nil { keyboardLevels = KeyboardSessionStore.levelPublisher() }
+            keyboardLevels?.yield(KeyboardLevel(
+                requestID: requestID, uptime: ProcessInfo.processInfo.systemUptime, level: level
+            ))
+        }
         keyboardSignal = KeyboardSignal(.command) { [weak self] in
             Task { @MainActor in self?.receiveKeyboardCommand() }
         }
@@ -277,6 +288,10 @@ final class AppModel: NSObject, ObservableObject {
             keyboardRequestID = nil
             keyboardRequestDocumentID = nil
             phase = dictation.isWarm ? .ready : (dictation.notice == nil ? .off : .failed)
+        }
+        if phase != .listening {
+            keyboardLevels?.finish()
+            keyboardLevels = nil
         }
         do {
             try KeyboardSessionStore.shared().publish(KeyboardSessionState(

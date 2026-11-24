@@ -36,10 +36,14 @@ final class InputLevelMeter: ObservableObject {
 
     func push(_ level: Float) {
         let now = ContinuousClock.now
-        if let lastPush, now - lastPush < .milliseconds(66) { return }
+        if let lastPush, now - lastPush < KeyboardLevel.interval { return }
         lastPush = now
-        levels.removeFirst()
-        levels.append(level)
+        levels.withUnsafeMutableBufferPointer { recent in
+            for index in 0..<(recent.count - 1) {
+                recent[index] = recent[index + 1]
+            }
+            recent[recent.count - 1] = level
+        }
     }
 
     func reset() {
@@ -52,8 +56,7 @@ final class InputLevelMeter: ObservableObject {
         guard let samples = buffer.floatChannelData?[0], buffer.frameLength > 0 else { return 0 }
         var rms: Float = 0
         vDSP_rmsqv(samples, 1, &rms, vDSP_Length(buffer.frameLength))
-        guard rms > 0 else { return 0 }
-        return min(max((20 * log10(rms) + 50) / 50, 0), 1)
+        return KeyboardLevel.normalized(rms: rms)
     }
 }
 

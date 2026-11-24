@@ -64,4 +64,15 @@ final class KeyboardSessionTests {
         _ = try #require(try store.takeCommand())
         #expect(try store.cancelPendingStart(requestID: requestID) == false)
     }
+
+    @Test("the waveform accepts only fresh, newer levels from the current keyboard request")
+    func rejectsLevelsFromAnEarlierRequest() {
+        let request = UUID()
+        let sample = KeyboardLevel(requestID: request, uptime: 10, level: 0.75)
+        #expect(sample.isCurrent(for: request, after: 9, at: 10.1))
+        #expect(!sample.isCurrent(for: UUID(), after: 9, at: 10.1))
+        #expect(!sample.isCurrent(for: request, after: 9, at: 10.5))
+        #expect(!sample.isCurrent(for: request, after: 10, at: 10.1))
+        #expect(!sample.isCurrent(for: request, after: 9, at: 9.9))
+    }
 }

@@ -1,3 +1,4 @@
+import Accelerate
 import AVFoundation
 import OSLog
 import Speech
@@ -51,6 +52,7 @@ final class KeyboardMicrophone {
 
     var onEvent: ((KeyboardDictation.Event) -> Void)?
     var onNotice: ((String) -> Void)?
+    var onLevel: ((Float) -> Void)?
 
     private let page: CapturePage
     private let recognize: Recognize
@@ -67,6 +69,7 @@ final class KeyboardMicrophone {
     private var heartbeat: Timer?
     private var deadline: Task<Void, Never>?
     private var samples = 0
+    private var measuredAt: ContinuousClock.Instant?
     private var audio: KeyboardAudioFile?
     #if DEBUG
     private var script: [String]?
@@ -105,6 +108,7 @@ final class KeyboardMicrophone {
         request.taskHint = .dictation
         request.contextualStrings = Array(hints.prefix(100))
         samples = 0
+        measuredAt = nil
         let report: @Sendable (String?, Bool, String?) -> Void = { [weak self] text, final, failure in
             Task { @MainActor in self?.recognized(text: text, final: final, failure: failure, run: run) }
         }
@@ -289,6 +293,15 @@ final class KeyboardMicrophone {
         samples += frames
         request.append(buffer)
         try? audio?.append(data)
+        if !draining, let onLevel {
+            let now = ContinuousClock.now
+            if measuredAt.map({ now - $0 >= KeyboardLevel.interval }) ?? true {
+                measuredAt = now
+                var rms: Float = 0
+                vDSP_rmsqv(channel, 1, &rms, vDSP_Length(frames))
+                onLevel(KeyboardLevel.normalized(rms: rms))
+            }
+        }
         #if DEBUG
         if let script, samples / 8_000 != (samples - frames) / 8_000 {
             onEvent?(.heard(scriptedText(script), final: false))
