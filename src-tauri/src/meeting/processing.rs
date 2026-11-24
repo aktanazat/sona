@@ -3262,7 +3262,7 @@ impl MeetingProcessingService {
         // The title first, because it is read out of the artifact and must not
         // invalidate it — `derive_title_from_headline` is the one title write
         // that leaves artifacts current, and it only fires when the meeting
-        // still carries the manual default. Only for the pipeline: a rewrite's
+        // still carries a title Sona wrote itself. Only for the pipeline: a rewrite's
         // title is derived when its receipt is recorded, because a title
         // written here moved the revision the press was checked against.
         //
