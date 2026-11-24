@@ -61,9 +61,9 @@ enum TaskFilters {
         if let cycle = query.cycle {
             chips.append(TaskFilterChip(id: "cycle", text: title(cycle)) { $0.cycle = nil })
         }
-        for (index, condition) in (query.filters ?? []).enumerated() {
-            chips.append(TaskFilterChip(id: "condition-\(index)", text: text(condition, model: model)) {
-                $0.filters = TaskFilters.removing(index, from: $0.filters)
+        for (index, filter) in (query.filters ?? []).enumerated() {
+            chips.append(TaskFilterChip(id: "condition-\(index)", text: text(filter, model: model)) {
+                $0.filters = TaskFilters.editing($0.filters, at: [index]) { $0 = nil }
             })
         }
         if query.includeSnoozed {
@@ -113,11 +113,29 @@ enum TaskFilters {
         return list.isEmpty ? nil : list
     }
 
-    /// The conditions with the one at `index` gone; nil once none are left.
-    static func removing(_ index: Int, from filters: [WorkCondition]?) -> [WorkCondition]? {
-        guard var filters, filters.indices.contains(index) else { return filters }
-        filters.remove(at: index)
+    /// `filters` with the filter at `path` changed, a path leading through
+    /// groups; one changed to nil goes, a group left empty goes with it,
+    /// and nil once none are left.
+    static func editing(_ filters: [WorkFilter]?, at path: [Int], _ change: (inout WorkFilter?) -> Void) -> [WorkFilter]? {
+        guard var filters, let first = path.first, filters.indices.contains(first) else { return filters }
+        var target: WorkFilter? = filters[first]
+        if path.count == 1 {
+            change(&target)
+        } else if let members = target?.members {
+            let edited = editing(members, at: Array(path.dropFirst()), change)
+            target = edited.flatMap { target?.with($0) }
+        }
+        if let target { filters[first] = target } else { filters.remove(at: first) }
         return filters.isEmpty ? nil : filters
+    }
+
+    /// `filters` with `added` at the end of the group at `path`, or of the
+    /// list itself for an empty path.
+    static func adding(_ added: WorkFilter, to filters: [WorkFilter]?, at path: [Int]) -> [WorkFilter]? {
+        guard !path.isEmpty else { return (filters ?? []) + [added] }
+        return editing(filters, at: path) { group in
+            group = group.map { $0.with(($0.members ?? []) + [added]) }
+        }
     }
 
     /// The operator a new condition on `field` starts with: one that takes
@@ -131,14 +149,15 @@ enum TaskFilters {
                               ConditionChoice(value: "added", title: "Added after start")]
 
     /// Whether `filters` keep only the work of `scope`.
-    static func scoped(_ filters: [WorkCondition]?, _ scope: String) -> Bool {
-        filters?.contains { $0.field == .cycleScope && $0.op == .is && $0.values == [scope] } == true
+    static func scoped(_ filters: [WorkFilter]?, _ scope: String) -> Bool {
+        filters?.contains { $0.condition.map { $0.field == .cycleScope && $0.op == .is && $0.values == [scope] } == true } == true
     }
 
     /// `filters` keeping only `scope`, or no scope when it was already kept.
-    static func toggledScope(_ filters: [WorkCondition]?, _ scope: String) -> [WorkCondition]? {
-        let others = (filters ?? []).filter { $0.field != .cycleScope }
-        let next = scoped(filters, scope) ? others : others + [WorkCondition(field: .cycleScope, op: .is, values: [scope])]
+    static func toggledScope(_ filters: [WorkFilter]?, _ scope: String) -> [WorkFilter]? {
+        let others = (filters ?? []).filter { $0.condition?.field != .cycleScope }
+        let kept = WorkFilter.condition(WorkCondition(field: .cycleScope, op: .is, values: [scope]))
+        let next = scoped(filters, scope) ? others : others + [kept]
         return next.isEmpty ? nil : next
     }
 
@@ -232,6 +251,20 @@ enum TaskFilters {
         return "\(condition.field.label) \(condition.op.label) \(list(names))"
     }
 
+    /// "Priority is Urgent or Due before Today"; a group within a group is
+    /// bracketed.
+    static func text(_ filter: WorkFilter, model: AppModel) -> String {
+        switch filter {
+        case let .condition(condition): text(condition, model: model)
+        case let .any(members): members.map { bracketed($0, model: model) }.joined(separator: " or ")
+        case let .all(members): members.map { bracketed($0, model: model) }.joined(separator: " and ")
+        }
+    }
+
+    private static func bracketed(_ member: WorkFilter, model: AppModel) -> String {
+        member.condition == nil ? "(\(text(member, model: model)))" : text(member, model: model)
+    }
+
     private static func dayString(_ date: Date) -> String {
         let parts = Calendar.current.dateComponents([.year, .month, .day], from: date)
         return String(format: "%04d-%02d-%02d", parts.year ?? 0, parts.month ?? 0, parts.day ?? 0)
@@ -278,6 +311,7 @@ private struct TaskFilterPanel: View {
     var body: some View {
         let store = model.work
         let query = model.listing?.query ?? WorkQuery()
+        let counts = FilterCounts(model: model, query: query)
         VStack(spacing: 0) {
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass")
@@ -299,7 +333,8 @@ private struct TaskFilterPanel: View {
                     conditions(query)
                     section("Status") {
                         ForEach([WorkStatus.triage, .backlog, .notStarted, .inProgress, .done, .canceled, .duplicate]) { status in
-                            option(status.label, on: query.statuses?.contains(status) == true) {
+                            option(status.label, on: query.statuses?.contains(status) == true,
+                                   count: counts.status[status, default: 0]) {
                                 TaskStatusIcon(status: status)
                             } toggle: {
                                 model.editListing { $0.query.statuses = TaskFilters.toggled($0.query.statuses, status) }
@@ -308,7 +343,8 @@ private struct TaskFilterPanel: View {
                     }
                     section("Priority") {
                         ForEach([TaskPriority.urgent, .high, .medium, .low, .none]) { priority in
-                            option(priority.label, on: query.priorities?.contains(priority.rawValue) == true) {
+                            option(priority.label, on: query.priorities?.contains(priority.rawValue) == true,
+                                   count: counts.priority[priority.rawValue, default: 0]) {
                                 PriorityIcon(priority: priority)
                             } toggle: {
                                 model.editListing { $0.query.priorities = TaskFilters.toggled($0.query.priorities, priority.rawValue) }
@@ -316,18 +352,19 @@ private struct TaskFilterPanel: View {
                         }
                     }
                     section("Owner") {
-                        option("Me", on: query.direction == .mine) {
+                        option("Me", on: query.direction == .mine, count: counts.owner["me", default: 0]) {
                             Avatar(face: AvatarFace(kind: .me, name: "Me"), size: 16, revision: model.people.photoRevision)
                         } toggle: {
                             owner(direction: .mine, current: query)
                         }
-                        option("No owner", on: query.direction == .unattributed) {
+                        option("No owner", on: query.direction == .unattributed, count: counts.owner["none", default: 0]) {
                             Avatar(face: AvatarFace(kind: .unassigned, name: "No owner"), size: 16, revision: model.people.photoRevision)
                         } toggle: {
                             owner(direction: .unattributed, current: query)
                         }
                         ForEach(store.people.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }) { person in
-                            option(person.name, on: query.ownerPersonIds?.contains(person.id) == true) {
+                            option(person.name, on: query.ownerPersonIds?.contains(person.id) == true,
+                                   count: counts.owner[person.id, default: 0]) {
                                 Avatar(face: AvatarFace(kind: .person(person.id), name: person.name), size: 16,
                                        revision: model.people.photoRevision)
                             } toggle: {
@@ -341,13 +378,15 @@ private struct TaskFilterPanel: View {
                     if !store.projects.isEmpty {
                         section("Project") {
                             ForEach(store.projects.filter { $0.status != .completed }) { project in
-                                option(project.title, on: query.projectIds?.contains(project.id) == true) {
+                                option(project.title, on: query.projectIds?.contains(project.id) == true,
+                                       count: counts.project[project.id, default: 0]) {
                                     symbol("folder")
                                 } toggle: {
                                     model.editListing { $0.query.projectIds = TaskFilters.toggled($0.query.projectIds, project.id) }
                                 }
                             }
-                            option("No project", on: query.projectIds?.contains("none") == true) {
+                            option("No project", on: query.projectIds?.contains("none") == true,
+                                   count: counts.project["none", default: 0]) {
                                 symbol("folder.badge.minus")
                             } toggle: {
                                 model.editListing { $0.query.projectIds = TaskFilters.toggled($0.query.projectIds, "none") }
@@ -357,7 +396,8 @@ private struct TaskFilterPanel: View {
                     if !store.labels.isEmpty {
                         section("Label") {
                             ForEach(store.labels) { label in
-                                option(label.name, on: query.labelIds?.contains(label.id) == true) {
+                                option(label.name, on: query.labelIds?.contains(label.id) == true,
+                                       count: counts.label[label.id, default: 0]) {
                                     Circle().fill(Theme.label(hue: label.hue)).frame(width: 9, height: 9)
                                 } toggle: {
                                     model.editListing { $0.query.labelIds = TaskFilters.toggled($0.query.labelIds, label.id) }
@@ -413,39 +453,133 @@ private struct TaskFilterPanel: View {
         }
     }
 
-    /// Field, operator and values for each condition, then a menu to add one.
+    /// Field, operator and values for each condition, groups where any or
+    /// all of their conditions must hold, then a menu to add either.
     private func conditions(_ query: WorkQuery) -> some View {
         let filters = query.filters ?? []
         return section("Conditions") {
-            ForEach(Array(filters.enumerated()), id: \.offset) { index, condition in
-                conditionRow(condition, index: index)
+            ForEach(Array(filters.enumerated()), id: \.offset) { index, filter in
+                filterRow(filter, path: [index])
             }
-            Menu {
-                ForEach(WorkConditionField.allCases) { field in
-                    Menu(field.label) {
-                        ForEach(TaskFilters.choices(field, model: model)) { choice in
-                            Button(choice.title) {
-                                let added = WorkCondition(field: field, op: TaskFilters.startingOp(field), values: [choice.value])
-                                model.editListing { $0.query.filters = ($0.query.filters ?? []) + [added] }
-                            }
-                        }
-                    }
-                }
-            } label: {
-                Label("Add condition", systemImage: "plus")
-                    .font(TypeScale.body(13))
-                    .foregroundStyle(Theme.inkSecondary)
+            addMenu("Add condition", depth: 0) { added in
+                model.editListing { $0.query.filters = TaskFilters.adding(added, to: $0.query.filters, at: []) }
             }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .fixedSize()
-            .padding(.horizontal, 14)
-            .frame(height: 28)
-            .accessibilityLabel("Add condition")
         }
     }
 
-    private func conditionRow(_ condition: WorkCondition, index: Int) -> some View {
+    private func filterRow(_ filter: WorkFilter, path: [Int]) -> AnyView {
+        switch filter {
+        case let .condition(condition):
+            AnyView(conditionRow(condition, path: path))
+        case let .any(members), let .all(members):
+            AnyView(groupBox(filter, members: members, path: path))
+        }
+    }
+
+    /// A group: whether any or all of it must hold, its filters, and a menu
+    /// adding one to it.
+    private func groupBox(_ group: WorkFilter, members: [WorkFilter], path: [Int]) -> some View {
+        let any = if case .any = group { true } else { false }
+        let depth = path.count
+        return VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 6) {
+                Menu {
+                    Button {
+                        regroup(path, any: true)
+                    } label: {
+                        if any { Label("Any of these", systemImage: "checkmark") } else { Text("Any of these") }
+                    }
+                    Button {
+                        regroup(path, any: false)
+                    } label: {
+                        if any { Text("All of these") } else { Label("All of these", systemImage: "checkmark") }
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Text(any ? "Any of these" : "All of these")
+                        Image(systemName: "chevron.up.chevron.down").font(.system(size: 9))
+                    }
+                    .font(TypeScale.body(13).weight(.medium))
+                    .foregroundStyle(Theme.inkSecondary)
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .accessibilityLabel(any ? "Group: any of these" : "Group: all of these")
+                Spacer(minLength: 0)
+                removeButton(path, label: "Remove group")
+            }
+            .padding(.leading, 14 + CGFloat(depth - 1) * 12)
+            .padding(.trailing, 14)
+            .frame(height: 28)
+            ForEach(Array(members.enumerated()), id: \.offset) { index, member in
+                filterRow(member, path: path + [index])
+            }
+            addMenu(any ? "Or…" : "And…", depth: depth) { added in
+                model.editListing { $0.query.filters = TaskFilters.adding(added, to: $0.query.filters, at: path) }
+            }
+        }
+        .overlay(alignment: .leading) {
+            Rectangle().fill(Theme.border).frame(width: 2)
+                .padding(.leading, 6 + CGFloat(depth - 1) * 12)
+                .padding(.vertical, 4)
+        }
+    }
+
+    private func regroup(_ path: [Int], any: Bool) {
+        model.editListing { draft in
+            draft.query.filters = TaskFilters.editing(draft.query.filters, at: path) { group in
+                guard let members = group?.members else { return }
+                group = any ? .any(members) : .all(members)
+            }
+        }
+    }
+
+    /// Every field's choices as a condition, or as a group starting with one.
+    private func addMenu(_ title: String, depth: Int, add: @escaping (WorkFilter) -> Void) -> some View {
+        Menu {
+            fieldMenus { add(.condition($0)) }
+            Divider()
+            Menu("Any of these…") { fieldMenus { add(.any([.condition($0)])) } }
+            Menu("All of these…") { fieldMenus { add(.all([.condition($0)])) } }
+        } label: {
+            Label(title, systemImage: "plus")
+                .font(TypeScale.body(13))
+                .foregroundStyle(Theme.inkSecondary)
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .padding(.leading, 14 + CGFloat(depth) * 12)
+        .padding(.trailing, 14)
+        .frame(height: 28)
+        .accessibilityLabel(title)
+    }
+
+    private func fieldMenus(_ add: @escaping (WorkCondition) -> Void) -> some View {
+        ForEach(WorkConditionField.allCases) { field in
+            Menu(field.label) {
+                ForEach(TaskFilters.choices(field, model: model)) { choice in
+                    Button(choice.title) {
+                        add(WorkCondition(field: field, op: TaskFilters.startingOp(field), values: [choice.value]))
+                    }
+                }
+            }
+        }
+    }
+
+    private func removeButton(_ path: [Int], label: String) -> some View {
+        Button {
+            model.editListing { $0.query.filters = TaskFilters.editing($0.query.filters, at: path) { $0 = nil } }
+        } label: {
+            Image(systemName: "xmark").font(.system(size: 9, weight: .bold)).frame(width: 16, height: 16)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(Theme.inkTertiary)
+        .accessibilityLabel(label)
+    }
+
+    private func conditionRow(_ condition: WorkCondition, path: [Int]) -> some View {
         let choices = TaskFilters.choices(condition.field, model: model)
         let names = condition.values.map { value in choices.first { $0.value == value }?.title ?? value }
         return HStack(spacing: 6) {
@@ -455,7 +589,7 @@ private struct TaskFilterPanel: View {
             Menu {
                 ForEach(condition.field.operators) { op in
                     Button {
-                        change(index) { changed in
+                        change(path) { changed in
                             changed.op = op
                             if TaskFilters.takesOneValue(op) { changed.values = Array(changed.values.prefix(1)) }
                         }
@@ -474,7 +608,7 @@ private struct TaskFilterPanel: View {
                 ForEach(choices) { choice in
                     let on = condition.values.contains(choice.value)
                     Button {
-                        pick(choice.value, in: condition, at: index)
+                        pick(choice.value, in: condition, at: path)
                     } label: {
                         if on { Label(choice.title, systemImage: "checkmark") } else { Text(choice.title) }
                     }
@@ -489,41 +623,37 @@ private struct TaskFilterPanel: View {
             .menuIndicator(.hidden)
             .accessibilityLabel("Values: \(names.joined(separator: ", "))")
             Spacer(minLength: 0)
-            Button {
-                model.editListing { $0.query.filters = TaskFilters.removing(index, from: $0.query.filters) }
-            } label: {
-                Image(systemName: "xmark").font(.system(size: 9, weight: .bold)).frame(width: 16, height: 16)
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(Theme.inkTertiary)
-            .accessibilityLabel("Remove condition")
+            removeButton(path, label: "Remove condition")
         }
-        .padding(.horizontal, 14)
+        .padding(.leading, 14 + CGFloat(path.count - 1) * 12)
+        .padding(.trailing, 14)
         .frame(height: 28)
     }
 
     /// One-value operators swap the value; the others add or drop it, and
     /// dropping the last removes the condition.
-    private func pick(_ value: String, in condition: WorkCondition, at index: Int) {
+    private func pick(_ value: String, in condition: WorkCondition, at path: [Int]) {
         if TaskFilters.takesOneValue(condition.op) {
-            change(index) { $0.values = [value] }
+            change(path) { $0.values = [value] }
             return
         }
         let values = TaskFilters.toggled(condition.values, value)
         model.editListing { draft in
-            if let values {
-                draft.query.filters?[index].values = values
-            } else {
-                draft.query.filters = TaskFilters.removing(index, from: draft.query.filters)
+            draft.query.filters = TaskFilters.editing(draft.query.filters, at: path) { filter in
+                guard case var .condition(changed)? = filter else { return }
+                changed.values = values ?? []
+                filter = values == nil ? nil : .condition(changed)
             }
         }
     }
 
-    private func change(_ index: Int, _ edit: (inout WorkCondition) -> Void) {
+    private func change(_ path: [Int], _ edit: (inout WorkCondition) -> Void) {
         model.editListing { draft in
-            guard var filters = draft.query.filters, filters.indices.contains(index) else { return }
-            edit(&filters[index])
-            draft.query.filters = filters
+            draft.query.filters = TaskFilters.editing(draft.query.filters, at: path) { filter in
+                guard case var .condition(changed)? = filter else { return }
+                edit(&changed)
+                filter = .condition(changed)
+            }
         }
     }
 
@@ -540,7 +670,7 @@ private struct TaskFilterPanel: View {
     }
 
     private func option<Mark: View>(
-        _ title: String, on: Bool, @ViewBuilder mark: () -> Mark, toggle: @escaping () -> Void
+        _ title: String, on: Bool, count: Int? = nil, @ViewBuilder mark: () -> Mark, toggle: @escaping () -> Void
     ) -> some View {
         Button(action: toggle) {
             HStack(spacing: 10) {
@@ -553,6 +683,13 @@ private struct TaskFilterPanel: View {
                     .foregroundStyle(Theme.ink)
                     .lineLimit(1)
                 Spacer(minLength: 0)
+                if let count {
+                    Text("\(count)")
+                        .font(TypeScale.label(12))
+                        .monospacedDigit()
+                        .foregroundStyle(Theme.inkTertiary)
+                        .accessibilityLabel(count == 1 ? "1 task" : "\(count) tasks")
+                }
             }
             .padding(.horizontal, 14)
             .frame(height: 28)
@@ -564,6 +701,46 @@ private struct TaskFilterPanel: View {
 
     private func symbol(_ name: String) -> some View {
         Image(systemName: name).font(.system(size: 12)).foregroundStyle(Theme.inkSecondary)
+    }
+}
+
+/// How many tasks each choice in the filter panel would keep beside the
+/// list's other filters, as Linear counts each value.
+@MainActor
+private struct FilterCounts {
+    let status: [WorkStatus: Int]
+    let priority: [Int: Int]
+    /// By person id, with `me` and `none` for the two directions.
+    let owner: [String: Int]
+    /// By project id, with `none` for work in no project.
+    let project: [String: Int]
+    let label: [String: Int]
+
+    init(model: AppModel, query: WorkQuery) {
+        let now = model.work.now
+        let cycles = model.work.cycles
+        let project = model.listedProject
+        let base = (model.work.items ?? []).filter { row in project.map { row.projectId == $0 } ?? true }
+        func kept(_ clear: (inout WorkQuery) -> Void) -> [WorkItemRow] {
+            var widened = query
+            clear(&widened)
+            let triage = widened.statuses?.contains(.triage) == true
+            let filter = TaskListing.Filter(widened, now: now, cycles: cycles)
+            return base.filter { ($0.status != .triage || triage) && filter.matches($0) }
+        }
+        func tally<Key: Hashable>(_ rows: [WorkItemRow], _ keys: (WorkItemRow) -> [Key]) -> [Key: Int] {
+            rows.reduce(into: [:]) { counts, row in
+                for key in keys(row) { counts[key, default: 0] += 1 }
+            }
+        }
+        status = tally(kept { $0.statuses = nil }) { [$0.status] }
+        priority = tally(kept { $0.priorities = nil }) { [$0.priority] }
+        owner = tally(kept { $0.ownerPersonIds = nil; $0.direction = nil }) { row in
+            let direction = row.direction == .mine ? ["me"] : row.direction == .unattributed ? ["none"] : []
+            return direction + (row.ownerPersonId.map { [$0] } ?? [])
+        }
+        self.project = tally(kept { $0.projectIds = nil }) { [$0.projectId ?? "none"] }
+        label = tally(kept { $0.labelIds = nil }) { $0.labelIds }
     }
 }
 
@@ -583,6 +760,7 @@ struct TaskFilterBar: View {
     @Environment(AppModel.self) private var model
     @State private var naming = false
     @State private var name = ""
+    @State private var icon: String?
     @State private var unread: [WorkWhereWord] = []
 
     var body: some View {
@@ -618,49 +796,28 @@ struct TaskFilterBar: View {
             }
             .padding(.trailing, 8)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .alignmentGuide(.firstChipRow) { _ in Theme.compactHeight / 2 }
-            switch model.listedProject == nil ? focus.tab : nil {
-            case .all?:
-                if !chips.isEmpty {
-                    Button("Clear") { model.editListing { $0.query = WorkQuery() } }
+            let opened = openedView
+            if model.listedProject == nil, !Self.listsTasks(focus.tab) {
+                EmptyView()
+            } else if let opened {
+                if edited(opened) {
+                    Button("Revert") { revert(opened) }
                         .buttonStyle(QuietButton(compact: true))
-                    Button("Save view") {
-                        name = ""
-                        naming = true
-                    }
-                    .buttonStyle(.compact)
-                    .popover(isPresented: $naming, arrowEdge: .bottom) { namer }
-                }
-            case let .view(id)?:
-                if focus.viewDrafts[id] != nil {
-                    Button("Revert") { focus.viewDrafts[id] = nil }
-                        .buttonStyle(QuietButton(compact: true))
-                    Button("Save") { save(id) }
+                    Button("Save") { save(opened) }
                         .buttonStyle(.compact)
                 }
-                if let view = model.work.views.first(where: { $0.id == id }) {
-                    let favorite = model.work.isFavorite(.view, id)
-                    Menu {
-                        Button(favorite ? "Remove from favorites" : "Add to favorites",
-                               systemImage: favorite ? "star.slash" : "star") {
-                            model.work.setFavorite(.view, id, !favorite)
-                        }
-                        Button("Delete view", systemImage: "trash", role: .destructive) { delete(view) }
-                    } label: {
-                        Image(systemName: favorite ? "star.fill" : "ellipsis")
-                    }
-                    .menuStyle(.button)
+                options(opened)
+            } else if !chips.isEmpty {
+                Button("Clear") { model.editListing { $0.query = WorkQuery() } }
                     .buttonStyle(QuietButton(compact: true))
-                    .menuIndicator(.hidden)
-                    .fixedSize()
-                    .accessibilityLabel("\(view.name) options")
+                Button("Save view") {
+                    name = ""
+                    icon = nil
+                    naming = true
                 }
-            case .owe?, .waiting?, .cycle?:
-                EmptyView()
-            case nil:
-                if !chips.isEmpty {
-                    Button("Clear") { model.editListing { $0.query = WorkQuery() } }
-                        .buttonStyle(QuietButton(compact: true))
+                .buttonStyle(.compact)
+                .popover(isPresented: $naming, arrowEdge: .bottom) {
+                    ViewNamer(name: $name, icon: $icon, save: create)
                 }
             }
         }
@@ -671,38 +828,148 @@ struct TaskFilterBar: View {
         .overlay(alignment: .bottom) { Hairline() }
     }
 
-    private var namer: some View {
-        let trimmed = name.trimmingCharacters(in: .whitespaces)
-        return HStack(spacing: 8) {
-            TextField("", text: $name, prompt: Text("View name").foregroundStyle(Theme.inkTertiary))
-                .textFieldStyle(.plain)
-                .font(TypeScale.body(13))
-                .frame(width: 180)
-                .onSubmit(create)
-            Button("Save", action: create)
-                .buttonStyle(PrimaryButton(compact: true))
-                .disabled(trimmed.isEmpty)
+    /// Whether a Tasks page tab lists tasks by filters: All and the views.
+    private static func listsTasks(_ tab: TasksTab) -> Bool {
+        switch tab {
+        case .all, .view: true
+        case .owe, .waiting, .cycle: false
         }
-        .padding(12)
+    }
+
+    /// The saved view the list in front shows: the Tasks page's view tab,
+    /// or the view picked on a project's Tasks tab.
+    private var openedView: WorkView? {
+        let id: String? = if let project = model.listedProject {
+            model.workFocus.projectViews[project]
+        } else if case let .view(id) = model.workFocus.tab {
+            id
+        } else {
+            nil
+        }
+        return id.flatMap { id in model.work.views.first { $0.id == id } }
+    }
+
+    private func edited(_ view: WorkView) -> Bool {
+        draft != WorkViewDraft(query: view.query, display: view.display)
+    }
+
+    private func revert(_ view: WorkView) {
+        if let project = model.listedProject {
+            model.workFocus.projectDrafts[project] = WorkViewDraft(query: view.query, display: view.display)
+        } else {
+            model.workFocus.viewDrafts[view.id] = nil
+        }
+    }
+
+    private func options(_ view: WorkView) -> some View {
+        let favorite = model.work.isFavorite(.view, view.id)
+        return Menu {
+            Button(favorite ? "Remove from favorites" : "Add to favorites",
+                   systemImage: favorite ? "star.slash" : "star") {
+                model.work.setFavorite(.view, view.id, !favorite)
+            }
+            Menu("Icon") {
+                ForEach(ViewNamer.icons, id: \.self) { symbol in
+                    Button(symbol, systemImage: symbol) { change(view) { $0.icon = symbol } }
+                }
+                Button("No icon") { change(view) { $0.icon = nil } }
+            }
+            Button("Copy link", systemImage: "link") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(WorkView.link(view.id), forType: .string)
+            }
+            Button("Delete view", systemImage: "trash", role: .destructive) { delete(view) }
+        } label: {
+            Image(systemName: favorite ? "star.fill" : "ellipsis")
+        }
+        .menuStyle(.button)
+        .buttonStyle(QuietButton(compact: true))
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .accessibilityLabel("\(view.name) options")
     }
 
     private func create() {
         let trimmed = name.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { return }
-        model.work.saveView(id: nil, name: trimmed, query: draft.query, display: draft.display)
+        let project = model.listedProject
+        let id = model.work.saveView(id: nil, name: trimmed, query: draft.query, display: draft.display,
+                                     icon: icon, projectId: project)
+        if let project { model.workFocus.projectViews[project] = id }
         naming = false
     }
 
-    private func save(_ id: String) {
-        guard let view = model.work.views.first(where: { $0.id == id }) else { return }
-        model.work.saveView(id: id, name: view.name, query: draft.query, display: draft.display)
-        model.workFocus.viewDrafts[id] = nil
+    private func save(_ view: WorkView) {
+        model.work.saveView(id: view.id, name: view.name, query: draft.query, display: draft.display,
+                            icon: view.icon, projectId: view.projectId)
+        model.workFocus.viewDrafts[view.id] = nil
+    }
+
+    /// Saves what the view keeps beside its filters, its filters as saved.
+    private func change(_ view: WorkView, _ edit: (inout WorkView) -> Void) {
+        var changed = view
+        edit(&changed)
+        model.work.saveView(id: view.id, name: changed.name, query: view.query, display: view.display,
+                            icon: changed.icon, projectId: changed.projectId)
     }
 
     private func delete(_ view: WorkView) {
         let focus = model.workFocus
         if focus.tab == .view(view.id) { focus.switchTab(.all) }
+        if let project = view.projectId, focus.projectViews[project] == view.id {
+            focus.projectViews[project] = nil
+            focus.projectDrafts[project] = nil
+        }
         focus.viewDrafts[view.id] = nil
         model.work.deleteView(view.id)
+    }
+}
+
+/// A new view's name and the symbol shown beside it.
+struct ViewNamer: View {
+    @Binding var name: String
+    @Binding var icon: String?
+    let save: () -> Void
+
+    /// The symbols a view can show; the core keeps any SF Symbol name.
+    static let icons = [
+        "line.3.horizontal.decrease.circle", "star", "flame", "bolt", "flag", "exclamationmark.triangle",
+        "checkmark.circle", "clock", "calendar", "person", "folder", "tag", "ant", "sparkles", "target", "tray",
+    ]
+
+    var body: some View {
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                TextField("", text: $name, prompt: Text("View name").foregroundStyle(Theme.inkTertiary))
+                    .textFieldStyle(.plain)
+                    .font(TypeScale.body(13))
+                    .frame(width: 180)
+                    .onSubmit(save)
+                Button("Save", action: save)
+                    .buttonStyle(PrimaryButton(compact: true))
+                    .disabled(trimmed.isEmpty)
+            }
+            LazyVGrid(columns: Array(repeating: GridItem(.fixed(26), spacing: 4), count: 8), spacing: 4) {
+                ForEach(Self.icons, id: \.self) { symbol in
+                    let on = icon == symbol
+                    Button {
+                        icon = on ? nil : symbol
+                    } label: {
+                        Image(systemName: symbol)
+                            .font(.system(size: 12))
+                            .foregroundStyle(on ? Theme.accent : Theme.inkSecondary)
+                            .frame(width: 26, height: 26)
+                            .background(on ? Theme.selection : .clear, in: RoundedRectangle(cornerRadius: Theme.radiusKey))
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help(symbol)
+                    .accessibilityLabel("Icon \(symbol)")
+                    .accessibilityAddTraits(on ? .isSelected : [])
+                }
+            }
+        }
+        .padding(12)
     }
 }

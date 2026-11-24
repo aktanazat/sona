@@ -13,6 +13,7 @@ pub(crate) mod command;
 pub(crate) mod comments;
 pub(crate) mod cycles;
 pub(crate) mod digest;
+pub(crate) mod export;
 pub(crate) mod filter;
 pub(crate) mod favorites;
 pub(crate) mod follow;
@@ -37,6 +38,7 @@ mod tests;
 pub(crate) mod triage_hints;
 pub(crate) mod versions;
 pub mod types;
+pub(crate) mod views;
 pub(crate) mod watch;
 pub(crate) mod words;
 
@@ -46,10 +48,10 @@ use self::sync::{MeetingReader, People};
 pub use self::types::WorkChanged;
 use self::types::{
     WorkActivityKind, WorkActor, WorkAttachment, WorkAttachmentFile, WorkComment, WorkCommentPage,
-    WorkCommentSubject, WorkCounts, WorkDay, WorkDisplay,
+    WorkCommentSubject, WorkCounts, WorkDay,
     WorkDoer, WorkItem, WorkItemDetail, WorkItemInput, WorkItemRow, WorkLabel, WorkList,
     WorkOwner, WorkPatch, WorkPlace, WorkProgress, WorkProjectChoice, WorkQuery, WorkRelation,
-    WorkRelationKind, WorkRepeat, WorkSource, WorkStatus, WorkTimeBlock, WorkView,
+    WorkRelationKind, WorkRepeat, WorkSource, WorkStatus, WorkTimeBlock, WorkView, WorkViewInput,
 };
 use super::catalog;
 use super::sources;
@@ -2467,26 +2469,101 @@ pub fn work_view_save(
     app: AppHandle,
     operation_id: String,
     id: Option<String>,
-    name: String,
-    query: WorkQuery,
-    display: WorkDisplay,
+    view: WorkViewInput,
 ) -> Result<WorkView, String> {
+    let now = now_ms();
+    run_history(&app, |history| {
+        store::mutate(history, &operation_id, "work_view_save", &(&id, &view), now, |tx| {
+            Ok(Done {
+                value: items::save_view(tx, id.as_deref(), &view, now)?,
+                effects: Effects::default(),
+            })
+        })
+    })
+}
+
+#[tauri::command(async)]
+#[specta::specta]
+pub fn work_project_views(
+    history_state: State<'_, Arc<HistoryManager>>,
+) -> Result<Vec<views::ProjectView>, String> {
+    super::history(&history_state, |history| views::project_views(history))
+}
+
+#[tauri::command(async)]
+#[specta::specta]
+pub fn work_project_view_save(
+    app: AppHandle,
+    operation_id: String,
+    id: Option<String>,
+    view: views::ProjectViewInput,
+) -> Result<views::ProjectView, String> {
     let now = now_ms();
     run_history(&app, |history| {
         store::mutate(
             history,
             &operation_id,
-            "work_view_save",
-            &(&id, &name, &query, &display),
+            "work_project_view_save",
+            &(&id, &view),
             now,
             |tx| {
                 Ok(Done {
-                    value: items::save_view(tx, id.as_deref(), &name, &query, &display, now)?,
+                    value: views::save_project_view(tx, id.as_deref(), &view, now)?,
                     effects: Effects::default(),
                 })
             },
         )
     })
+}
+
+#[tauri::command(async)]
+#[specta::specta]
+pub fn work_project_view_delete(
+    app: AppHandle,
+    operation_id: String,
+    id: String,
+) -> Result<(), String> {
+    let now = now_ms();
+    run_history(&app, |history| {
+        store::mutate(history, &operation_id, "work_project_view_delete", &id, now, |tx| {
+            views::delete_project_view(tx, &id)?;
+            Ok(Done {
+                value: (),
+                effects: Effects::default(),
+            })
+        })
+    })
+}
+
+/// The tasks named, in the order named, as a CSV file's text.
+#[tauri::command]
+#[specta::specta]
+pub async fn work_csv(
+    history_state: State<'_, Arc<HistoryManager>>,
+    meetings: State<'_, Arc<MeetingSessionManager>>,
+    ids: Vec<String>,
+) -> Result<String, String> {
+    let user_name = meetings.user_name();
+    let now = now_ms();
+    with_meetings(&history_state, &meetings, |history, meeting_conn| {
+        let query = WorkQuery {
+            include_archived: true,
+            include_snoozed: true,
+            ..WorkQuery::default()
+        };
+        let listed = list(history, meeting_conn, user_name.as_deref(), &query, now)?;
+        let mut by_id: HashMap<&str, &WorkItemRow> = listed
+            .items
+            .iter()
+            .map(|row| (row.item.id.as_str(), row))
+            .collect();
+        let rows: Vec<WorkItemRow> = ids
+            .iter()
+            .filter_map(|id| by_id.remove(id.as_str()).cloned())
+            .collect();
+        Ok(export::csv(&rows, &listed.items, &listed.labels))
+    })
+    .await
 }
 
 #[tauri::command(async)]

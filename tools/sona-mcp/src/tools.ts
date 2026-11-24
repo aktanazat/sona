@@ -31,6 +31,21 @@ const CONDITION = z
   })
   .strict();
 
+/* A condition, or a group of them of which any or all must hold, nested to
+ * any depth. */
+type FilterNode =
+  | z.infer<typeof CONDITION>
+  | { readonly any: readonly FilterNode[] }
+  | { readonly all: readonly FilterNode[] };
+
+const FILTER_NODE: z.ZodType<FilterNode> = z.lazy(() =>
+  z.union([
+    CONDITION,
+    z.object({ any: z.array(FILTER_NODE).min(1) }).strict(),
+    z.object({ all: z.array(FILTER_NODE).min(1) }).strict(),
+  ]),
+);
+
 /* The one shape an argv can be built out of: a flat object of JSON scalars
  * and lists of strings, keyed by field name, plus lists of filter conditions.
  * Nothing here re-checks a value it can turn into an argument — Sona owns
@@ -46,7 +61,7 @@ export const TOOL_INPUT = z.record(
     z.boolean(),
     z.null(),
     z.array(z.string()),
-    z.array(CONDITION),
+    z.array(FILTER_NODE),
     z.array(
       z.record(
         z.string(),
@@ -110,6 +125,28 @@ const CONDITION_SCHEMA = {
   additionalProperties: false,
 } as const;
 
+/** The JSON schema of a filter group: conditions or further groups, any or
+ * all of which must hold. */
+const GROUP_SCHEMA = {
+  type: "object",
+  properties: {
+    any: {
+      type: "array",
+      items: { type: "object" },
+      description: "Conditions or groups, any one of which must hold.",
+    },
+    all: {
+      type: "array",
+      items: { type: "object" },
+      description: "Conditions or groups, every one of which must hold.",
+    },
+  },
+  additionalProperties: false,
+} as const;
+
+/** One entry of a filter list: a condition or a group. */
+const FILTER_ITEM = { type: "object", anyOf: [CONDITION_SCHEMA, GROUP_SCHEMA] } as const;
+
 /** One JSON-schema property as this server publishes it: a flat string,
  * number, integer or boolean field, optionally enumerated and bounded, a
  * list of strings, or a list of filter conditions. Typed so readers get the
@@ -120,7 +157,7 @@ export interface ToolProperty {
   readonly enum?: readonly string[];
   readonly minimum?: number;
   readonly maximum?: number;
-  readonly items?: { readonly type: "string" } | typeof CONDITION_SCHEMA | ObjectSchema;
+  readonly items?: { readonly type: "string" } | typeof FILTER_ITEM | ObjectSchema;
   readonly minItems?: number;
 }
 
@@ -261,11 +298,23 @@ function strings(input: ToolInput, key: string): string[] {
 function conditions(input: ToolInput): string[] {
   const value = input.filter;
   if (value === undefined || value === null) return [];
-  const parsed = z.array(CONDITION).safeParse(value);
+  const parsed = z.array(FILTER_NODE).safeParse(value);
   if (!parsed.success) {
-    throw new SonaInputError("filter must be a list of {field, op, values} conditions.");
+    throw new SonaInputError(
+      "filter must be a list of {field, op, values} conditions and {any: [...]} or {all: [...]} groups.",
+    );
   }
   return [`--filter=${JSON.stringify(parsed.data)}`];
+}
+
+/** Where an export goes: a Markdown folder or a CSV file, exactly one. */
+function exportTarget(input: ToolInput): string[] {
+  const directory = text(input, "directory");
+  const path = text(input, "path");
+  if ((directory === null) === (path === null)) {
+    throw new SonaInputError("Name exactly one of directory (Markdown) or path (CSV).");
+  }
+  return directory === null ? [`--csv=${path}`] : [`--md=${directory}`];
 }
 
 /** A list of objects as the one JSON argument `flag` reads; Sona checks
@@ -373,9 +422,9 @@ const PLANNING_WRITES =
 
 const FILTER = {
   type: "array",
-  items: CONDITION_SCHEMA,
+  items: FILTER_ITEM,
   description:
-    'Conditions that must all hold, on top of the other filters: [{"field":"label","op":"includes_all","values":["bug","ui"]}, {"field":"due","op":"before","values":["today"]}].',
+    'Conditions that must all hold, on top of the other filters: [{"field":"label","op":"includes_all","values":["bug","ui"]}, {"field":"due","op":"before","values":["today"]}]. A group {"any":[...]} holds when any of its conditions or groups does, {"all":[...]} when every one does, nested as deep as needed: [{"any":[{"field":"owner","op":"is","values":["me"]},{"field":"due","op":"is","values":["this_week"]}]}] is work that is mine or due this week.',
 } as const;
 
 const HEALTH = {
@@ -2756,6 +2805,37 @@ export const TOOLS: readonly ToolDefinition[] = [
           description:
             "Only these fields of each task, comma-separated, such as title,status,due_date; id and handle always come. Field names are the keys a task has in the answer.",
         },
+        order_dir: {
+          type: "string",
+          enum: ["asc", "desc"],
+          description:
+            "Which way order_by runs: priority desc is urgent first, due asc soonest first, updated and created desc newest first. Each order runs its own way unless given.",
+        },
+        no_priority_first: {
+          type: "boolean",
+          description: "Ordered by priority, put work with no priority first instead of last.",
+        },
+        group_by: {
+          type: "string",
+          enum: ["status", "owner", "project", "meeting", "due", "priority", "cycle", "label", "milestone", "none"],
+          description:
+            "Group the page's tasks as the app's list does; groups lists each group's key (status:done), title, count and task handles. With view, the view's grouping unless given. Not with ready.",
+        },
+        sub_group_by: {
+          type: "string",
+          enum: ["status", "owner", "project", "meeting", "due", "priority", "cycle", "label", "milestone", "none"],
+          description: "Split each group again by a second grouping, in each group's groups. Not with ready.",
+        },
+        nested: {
+          type: "boolean",
+          description:
+            "Put each sub-task in its parent's children when both are on the page, at any depth, instead of listing it on its own. Not with ready.",
+        },
+        facets: {
+          type: "string",
+          description:
+            "Count the matching tasks, before limit, by each value of these fields, comma-separated: status, priority, owner, project, label, cycle, milestone, estimate, delegate. facets gives each value as filter takes it, its name and its count, most first. Not with ready.",
+        },
       },
       additionalProperties: false,
     },
@@ -2778,6 +2858,12 @@ export const TOOLS: readonly ToolDefinition[] = [
       ...(flag(input, "ready") ? [] : assigned("--where", text(input, "where"))),
       ...assigned("--limit", count(input, "limit")),
       ...assigned("--order-by", text(input, "order_by")),
+      ...assigned("--order-dir", text(input, "order_dir")),
+      ...(flag(input, "no_priority_first") ? ["--no-priority-first"] : []),
+      ...(flag(input, "ready") ? [] : assigned("--group-by", text(input, "group_by"))),
+      ...(flag(input, "ready") ? [] : assigned("--sub-group-by", text(input, "sub_group_by"))),
+      ...(flag(input, "ready") || !flag(input, "nested") ? [] : ["--tree"]),
+      ...(flag(input, "ready") ? [] : assigned("--facets", text(input, "facets"))),
       ...assigned("--cursor", text(input, "cursor")),
       ...assigned("--fields", text(input, "fields")),
       "--json",
@@ -2813,9 +2899,9 @@ export const TOOLS: readonly ToolDefinition[] = [
   },
   {
     name: "sona_work_export",
-    title: "Export Sona tasks as Markdown",
+    title: "Export Sona tasks as Markdown or CSV",
     description:
-      "Write the tasks that match the filters into a folder on this Mac as Markdown, one S-12.md file per task with its fields, details and meeting quote, replacing files of the same name; the folder is made when missing. Without status it writes triage and open work. Returns the folder and the files written. It needs Settings > Agents > External access and External mutations; with either off Sona refuses with consent_required and names the setting.",
+      "Write the tasks that match the filters to this Mac: with directory, into a folder as Markdown, one S-12.md file per task with its fields, details and meeting quote, replacing files of the same name, the folder made when missing; with path, as one CSV file a spreadsheet opens, a row per task in the order the list shows them (ID, title, status, priority, owner, project, labels, due, cycle, estimate, parent, created, updated, completed, link), replacing that file. Name exactly one. Without status it writes triage and open work; view starts from a saved view's filters and order. Returns the format, the files written and the task count. It needs Settings > Agents > External access and External mutations; with either off Sona refuses with consent_required and names the setting.",
     mutates: "changes",
     optIn: true,
     idempotent: true,
@@ -2824,7 +2910,16 @@ export const TOOLS: readonly ToolDefinition[] = [
       properties: {
         directory: {
           type: "string",
-          description: "The folder to write into, as an absolute path.",
+          description: "The folder to write Markdown files into, as an absolute path.",
+        },
+        path: {
+          type: "string",
+          description:
+            "The CSV file to write, as an absolute path ending in .csv. Sona replaces only a .csv file there, never a link or another kind of file.",
+        },
+        view: {
+          type: "string",
+          description: "Start from a saved view's filters and order, by name or id; the other filters narrow it.",
         },
         status: {
           type: "string",
@@ -2849,13 +2944,13 @@ export const TOOLS: readonly ToolDefinition[] = [
         snoozed: { type: "boolean", description: "Include snoozed work." },
         filter: FILTER,
       },
-      required: ["directory"],
       additionalProperties: false,
     },
     argv: (input) => [
       "work",
       "export",
-      `--md=${text(input, "directory", true)}`,
+      ...exportTarget(input),
+      ...assigned("--view", text(input, "view")),
       ...scopeFlags(input),
       ...assigned("--status", text(input, "status")),
       ...assigned("--parent", text(input, "parent")),
@@ -3941,10 +4036,17 @@ export const TOOLS: readonly ToolDefinition[] = [
   {
     name: "sona_work_views",
     title: "List saved Sona views",
-    description: "List saved task views with their filters, layout, grouping and order.",
+    description:
+      "List saved task views with their filters, layout, grouping, order and its direction (order_direction), whether work with no priority comes first, icon, the project whose page shows it (project_id, null for the Tasks page), and a sona://tasks?view= link (link) that opens it in Sona.",
     optIn: true,
-    inputSchema: { type: "object", properties: {}, additionalProperties: false },
-    argv: () => ["work", "views", "--json"],
+    inputSchema: {
+      type: "object",
+      properties: {
+        project: { ...PROJECT, description: `Only the views on this project's page. ${PROJECT.description}` },
+      },
+      additionalProperties: false,
+    },
+    argv: (input) => ["work", "views", ...assigned("--project", text(input, "project")), "--json"],
   },
   {
     name: "sona_work_view_save",
@@ -4010,6 +4112,28 @@ export const TOOLS: readonly ToolDefinition[] = [
             "The properties each row shows, in order: id, priority, labels, project, owner, due, meeting or updated.",
         },
         filter: FILTER,
+        order_dir: {
+          type: "string",
+          enum: ["asc", "desc", "natural"],
+          description:
+            "Which way order_by runs: priority desc is urgent first, due asc soonest first, updated and created desc newest first; natural for the order's own way.",
+        },
+        no_priority_first: {
+          type: "boolean",
+          description: "Ordered by priority, work with no priority comes first instead of last.",
+        },
+        nest_sub_tasks: {
+          type: "boolean",
+          description: "In a list, sub-tasks sit under their parent instead of in rows of their own.",
+        },
+        icon: {
+          type: "string",
+          description: "An SF Symbol shown beside the view's name, such as exclamationmark.triangle; empty clears it.",
+        },
+        on_project: {
+          ...PROJECT,
+          description: `Show the view on this project's page instead of the Tasks page; none moves it back. ${PROJECT.description}`,
+        },
         dry_run: DRY_RUN,
         operation_id: OPERATION_ID,
       },
@@ -4039,6 +4163,13 @@ export const TOOLS: readonly ToolDefinition[] = [
         ? []
         : [`--properties=${strings(input, "properties").join(",")}`]),
       ...conditions(input),
+      ...assigned("--order-dir", text(input, "order_dir")),
+      ...(input.no_priority_first === undefined
+        ? []
+        : [`--no-priority-first=${flag(input, "no_priority_first")}`]),
+      ...(input.nest_sub_tasks === undefined ? [] : [`--nest-sub-tasks=${flag(input, "nest_sub_tasks")}`]),
+      ...cleared("--icon", input, "icon"),
+      ...assigned("--on-project", text(input, "on_project")),
       ...(flag(input, "dry_run") ? ["--dry-run"] : []),
       ...writing(input, agent),
       "--json",
@@ -4218,6 +4349,11 @@ export const TOOLS: readonly ToolDefinition[] = [
           type: "string",
           description: "An initiative, by name or id from sona_initiative_list: only its projects. none keeps the projects in no initiative.",
         },
+        view: {
+          type: "string",
+          description:
+            "A saved project view, by name or id from sona_project_view_list: only the projects it keeps, with groups listing them by the view's grouping.",
+        },
       },
       additionalProperties: false,
     },
@@ -4229,7 +4365,96 @@ export const TOOLS: readonly ToolDefinition[] = [
       ...assigned("--update-before", text(input, "update_before")),
       ...assigned("--link", text(input, "link")),
       ...assigned("--initiative", text(input, "initiative")),
+      ...assigned("--view", text(input, "view")),
       "--json",
+    ],
+  },
+  {
+    name: "sona_project_view_list",
+    title: "List saved Sona project views",
+    description:
+      "List the saved views of the Projects page: each one's id, name, icon, filter (status, overdue_only, mine_only, update_before, link, initiative), layout (list, board, timeline), group_by (status, lead, priority, quarter, none), revision and a sona://projects?view= link.",
+    optIn: true,
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    argv: () => ["work", "project-views", "--json"],
+  },
+  {
+    name: "sona_project_view_save",
+    title: "Save a Sona project view",
+    description: `Save named project filters the Projects page shows as a tab and sona_project_list reads with view. Saving a name that exists changes that view; fields left out keep what it had. ${PLANNING_WRITES}`,
+    mutates: "changes",
+    optIn: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "The view's name." },
+        view: { type: "string", description: "The project view to rename to name, by name or id." },
+        icon: { type: "string", description: "An SF Symbol shown beside its name; empty clears it." },
+        status: {
+          type: "string",
+          enum: ["any", "backlog", "planned", "active", "paused", "completed", "canceled"],
+          description: "Only projects in this status.",
+        },
+        overdue: { type: "boolean", description: "Only projects with an open task past its due day." },
+        mine: { type: "boolean", description: "Only projects with open work the user owns." },
+        update_before: {
+          type: "string",
+          description: "Only projects whose latest update is older than 1w, 2w or 1m, or from before a day (YYYY-MM-DD), and those with none; any for all.",
+        },
+        link: { type: "string", enum: ["any", "blocked", "blocking", "broken"], description: "Only projects on that side of a dependency." },
+        initiative: { ...INITIATIVE, description: `Only its projects; none for projects in no initiative, any for all. ${INITIATIVE.description}` },
+        layout: { type: "string", enum: ["list", "board", "timeline"], description: "How the Projects page shows it." },
+        group_by: { type: "string", enum: ["status", "lead", "priority", "quarter", "none"], description: "How it groups projects; quarter is the target day's." },
+        dry_run: DRY_RUN,
+        operation_id: OPERATION_ID,
+      },
+      required: ["name"],
+      additionalProperties: false,
+    },
+    argv: (input, agent) => [
+      "work",
+      "project-view-save",
+      ...assigned("--view", text(input, "view")),
+      ...cleared("--icon", input, "icon"),
+      ...assigned("--status", text(input, "status")),
+      ...(input.overdue === undefined ? [] : [`--overdue=${flag(input, "overdue")}`]),
+      ...(input.mine === undefined ? [] : [`--mine=${flag(input, "mine")}`]),
+      ...assigned("--update-before", text(input, "update_before")),
+      ...assigned("--link", text(input, "link")),
+      ...assigned("--initiative", text(input, "initiative")),
+      ...assigned("--layout", text(input, "layout")),
+      ...assigned("--group-by", text(input, "group_by")),
+      ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+      ...writing(input, agent),
+      "--json",
+      "--",
+      text(input, "name", true),
+    ],
+  },
+  {
+    name: "sona_project_view_delete",
+    title: "Delete a saved Sona project view",
+    description: `Delete a saved project view. No project changes. ${PLANNING_WRITES}`,
+    mutates: "destroys",
+    optIn: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        view: { type: "string", description: "The project view's name or id." },
+        dry_run: DRY_RUN,
+        operation_id: OPERATION_ID,
+      },
+      required: ["view"],
+      additionalProperties: false,
+    },
+    argv: (input, agent) => [
+      "work",
+      "project-view-delete",
+      ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+      ...writing(input, agent),
+      "--json",
+      "--",
+      text(input, "view", true),
     ],
   },
   {
@@ -7011,7 +7236,7 @@ export const TOOLS: readonly ToolDefinition[] = [
     name: "sona_work_changes",
     title: "Follow changes in Sona's tracker",
     description:
-      "What changed on tasks, projects, milestones, cycles, views, labels, project updates, notes, meetings Sona took work from, comments and agent sessions, oldest first, each with a seq, what changed, and under updated_from the fields' values before the change. Pass the answer's next_cursor as since to read only what came after; has_more says another page is waiting. Changes are kept 30 days: an older cursor is refused as expired, and the fix is to read the tasks again and follow from a fresh start. A comment on a project, milestone, meeting or note names it in data.subject_kind and data.subject_id; a note's text is left out, so read it with sona_note. Anything tied to a meeting kept on this Mac is left out.",
+      "What changed on tasks, projects, milestones, cycles, views (of the Tasks and Projects pages), labels, project updates, notes, meetings Sona took work from, comments and agent sessions, oldest first, each with a seq, what changed, and under updated_from the fields' values before the change. Pass the answer's next_cursor as since to read only what came after; has_more says another page is waiting. Changes are kept 30 days: an older cursor is refused as expired, and the fix is to read the tasks again and follow from a fresh start. A comment on a project, milestone, meeting or note names it in data.subject_kind and data.subject_id; a note's text is left out, so read it with sona_note. Anything tied to a meeting kept on this Mac is left out.",
     inputSchema: {
       type: "object",
       properties: {

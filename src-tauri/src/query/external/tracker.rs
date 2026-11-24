@@ -30,19 +30,21 @@ use crate::planning::work::agents::{self, AgentChange};
 use crate::planning::work::ask::WorkAnswerLine;
 use crate::planning::work::capture::{self, WorkCaptureSource, WorkTakenLine};
 use crate::planning::work::command::WorkCommandChange;
-use crate::planning::work::filter::{WorkCondition, WorkFilterField, WorkFilterOp};
+use crate::planning::work::filter::{WorkCondition, WorkFilter, WorkFilterField, WorkFilterOp};
 use crate::planning::work::types::{
     WorkActivity, WorkActivityKind, WorkActor, WorkCycle, WorkCycleRef, WorkCycleState, WorkCycles,
     WorkDirection, WorkDisplay, WorkDue, WorkFieldSuggestion, WorkGroupBy, WorkItem,
     WorkItemDetail, WorkItemInput, WorkItemRow, WorkLabel, WorkLayout, WorkList, WorkOrderBy,
-    WorkOwner, WorkPatch, WorkPersonChoice, WorkPlace, WorkProgress, WorkProjectChoice, WorkProposal,
-    WorkProposalField,
+    WorkOrderDirection, WorkOwner, WorkPatch, WorkPersonChoice, WorkPlace, WorkProgress,
+    WorkProjectChoice, WorkProposal, WorkProposalField,
     WorkQuery, WorkRelation, WorkRelationKind, WorkRepeat, WorkSource, WorkStatus,
-    WorkSuggestionField, WorkSuggestionValue, WorkVia, WorkView,
+    WorkSuggestionField, WorkSuggestionValue, WorkVia, WorkView, WorkViewInput,
 };
 use crate::planning::work::watch::WorkWatch;
 use crate::planning::work::{self, items, parse};
-use crate::query::{loop_link, task_link, KeptLocal, QueryAudience, QUERY_SCHEMA_VERSION};
+use crate::query::{
+    loop_link, task_link, view_link, KeptLocal, QueryAudience, QUERY_SCHEMA_VERSION,
+};
 use crate::settings::WorkAutonomy;
 use chrono::{Local, NaiveDate, TimeDelta, Timelike};
 use clap::{Args, Subcommand, ValueEnum};
@@ -227,7 +229,7 @@ pub enum WorkVerb {
     /// List reminders; --due lists those whose time has come.
     Reminders(routines::RemindersArgs),
     /// List saved views.
-    Views,
+    Views(ViewsArgs),
     /// Save a view: named filters that the app and `list --view` use.
     ViewSave(ViewSaveArgs),
     /// Delete a saved view.
@@ -539,6 +541,8 @@ pub enum WorkVerb {
     MeetingReview(meeting_review::MeetingReviewVerb),
     #[command(flatten)]
     MeetingSettings(meeting_settings::MeetingSettingsVerb),
+    #[command(flatten)]
+    ProjectViews(views::ProjectViewVerb),
     /// One session: state, plan, question, and every activity.
     Session(sessions::SessionShowArgs),
     /// Agent sessions, newest first: one task's or every task's.
@@ -583,6 +587,23 @@ pub struct ListArgs {
     /// understand.
     #[arg(long = "where", value_name = "WORDS")]
     pub where_words: Option<String>,
+    /// Group the page's tasks, as the app's list does; with --view, the
+    /// view's grouping unless given.
+    #[arg(long, value_enum)]
+    pub group_by: Option<GroupArg>,
+    /// Split each group again by a second grouping.
+    #[arg(long, value_enum)]
+    pub sub_group_by: Option<GroupArg>,
+    /// Print sub-tasks under their parent when both are on the page; JSON
+    /// nests them in the parent's children. A --view that nests its
+    /// sub-tasks does this too.
+    #[arg(long)]
+    pub tree: bool,
+    /// Count the matching tasks by each value of these fields,
+    /// comma-separated: status, priority, owner, project, label, cycle,
+    /// milestone, estimate, delegate.
+    #[arg(long, value_enum, value_delimiter = ',', value_name = "FIELD")]
+    pub facets: Vec<views::FacetArg>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -613,7 +634,7 @@ pub struct ReadyArgs {
 }
 
 /// How a task list is ordered, paged and trimmed.
-#[derive(Args, Clone, Debug, Eq, PartialEq)]
+#[derive(Args, Clone, Debug, Default, Eq, PartialEq)]
 pub struct PageArgs {
     /// Rows to print, at most 100.
     #[arg(long, value_parser = limit)]
@@ -623,6 +644,14 @@ pub struct PageArgs {
     /// (the order tasks were dragged into).
     #[arg(long, value_enum)]
     pub order_by: Option<OrderArg>,
+    /// asc or desc. Priority runs urgent first as desc, due soonest first
+    /// as asc, updated and created newest first as desc; each order's own
+    /// way unless given.
+    #[arg(long, value_enum, value_name = "DIRECTION")]
+    pub order_dir: Option<OrderDirArg>,
+    /// Ordered by priority, put work with no priority first, not last.
+    #[arg(long)]
+    pub no_priority_first: bool,
     /// The next_cursor of the page before, to read the rows after it. Keep
     /// the same filters; the cursor keeps its order.
     #[arg(long, value_parser = cursor, value_name = "CURSOR")]
@@ -640,42 +669,123 @@ pub struct PageArgs {
 }
 
 impl PageArgs {
-    /// The order rows are read in: the cursor's, which --order-by must match.
-    fn order(&self) -> Result<OrderArg, ExternalError> {
-        match (self.order_by, self.cursor) {
-            (Some(order), Some(cursor)) if order != cursor.order => Err(ExternalError::new(
-                ExternalErrorCode::InvalidRequest,
-                "That cursor is from a list in another order. Drop --order-by, or start again without --cursor.",
-            )),
-            (Some(order), _) => Ok(order),
-            (None, Some(cursor)) => Ok(cursor.order),
-            (None, None) => Ok(OrderArg::Priority),
+    /// The order rows are read in: the cursor's, which the order flags must
+    /// match; else the flags, then the view's display, then priority.
+    fn row_order(&self, view: Option<&WorkDisplay>) -> Result<RowOrder, ExternalError> {
+        if let Some(cursor) = self.cursor {
+            let theirs = cursor.order;
+            let differs = self.order_by.is_some_and(|order| order != theirs.order)
+                || self
+                    .order_dir
+                    .is_some_and(|dir| (dir.direction() != theirs.order.order().natural()) != theirs.reversed)
+                || (self.no_priority_first && !theirs.none_first);
+            if differs {
+                return Err(ExternalError::new(
+                    ExternalErrorCode::InvalidRequest,
+                    "That cursor is from a list in another order. Drop the order flags, or start again without --cursor.",
+                ));
+            }
+            return Ok(theirs);
+        }
+        let order = self
+            .order_by
+            .or_else(|| view.map(|display| OrderArg::of(display.order_by)))
+            .unwrap_or(OrderArg::Priority);
+        let shown = view.filter(|display| OrderArg::of(display.order_by) == order);
+        let direction = self
+            .order_dir
+            .map(OrderDirArg::direction)
+            .or_else(|| shown.and_then(|display| display.order_direction))
+            .unwrap_or_else(|| order.order().natural());
+        Ok(RowOrder {
+            order,
+            reversed: direction != order.order().natural(),
+            none_first: self.no_priority_first || shown.is_some_and(|display| display.no_priority_first),
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum OrderDirArg {
+    Asc,
+    Desc,
+}
+
+impl OrderDirArg {
+    const fn direction(self) -> WorkOrderDirection {
+        match self {
+            Self::Asc => WorkOrderDirection::Ascending,
+            Self::Desc => WorkOrderDirection::Descending,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum ViewOrderDirArg {
+    Asc,
+    Desc,
+    Natural,
+}
+
+impl ViewOrderDirArg {
+    const fn direction(self) -> Option<WorkOrderDirection> {
+        match self {
+            Self::Asc => Some(WorkOrderDirection::Ascending),
+            Self::Desc => Some(WorkOrderDirection::Descending),
+            Self::Natural => None,
+        }
+    }
+}
+
+/// How a page is ordered: by what, whether against that order's natural
+/// way, and whether work with no priority leads when ordered by priority.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RowOrder {
+    order: OrderArg,
+    reversed: bool,
+    none_first: bool,
 }
 
 /// Where a page ended: the order it was read in and the last row's place.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Cursor {
-    order: OrderArg,
+    order: RowOrder,
     after: [i64; 3],
 }
 
 impl fmt::Display for Cursor {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let [first, second, third] = self.after;
-        let order = self.order.to_possible_value().ok_or(fmt::Error)?;
-        write!(formatter, "{}~{first}~{second}~{third}", order.get_name())
+        let order = self.order.order.to_possible_value().ok_or(fmt::Error)?;
+        let reversed = if self.order.reversed { ":reversed" } else { "" };
+        let none_first = if self.order.none_first { ":none-first" } else { "" };
+        write!(
+            formatter,
+            "{}{reversed}{none_first}~{first}~{second}~{third}",
+            order.get_name()
+        )
     }
 }
 
 fn cursor(value: &str) -> Result<Cursor, String> {
     let unread = || "expected the next_cursor of an earlier page".to_owned();
     let mut parts = value.trim().split('~');
-    let order = parts
-        .next()
-        .and_then(|name| OrderArg::from_str(name, false).ok())
-        .ok_or_else(unread)?;
+    let mut ordering = parts.next().ok_or_else(unread)?.split(':');
+    let mut order = RowOrder {
+        order: ordering
+            .next()
+            .and_then(|name| OrderArg::from_str(name, false).ok())
+            .ok_or_else(unread)?,
+        reversed: false,
+        none_first: false,
+    };
+    for flag in ordering {
+        match flag {
+            "reversed" => order.reversed = true,
+            "none-first" => order.none_first = true,
+            _ => return Err(unread()),
+        }
+    }
     let mut after = [0; 3];
     for place in &mut after {
         *place = parts
@@ -974,13 +1084,33 @@ pub struct ViewSaveArgs {
     /// Show sub-tasks as rows of their own: true or false.
     #[arg(long, value_name = "BOOL")]
     pub show_sub_tasks: Option<bool>,
-    /// Board swimlanes: rows of columns, one per group; none for one row.
+    /// A second grouping: the board's swimlanes, the list's sub-groups;
+    /// none for neither.
     #[arg(long, value_enum)]
     pub sub_group_by: Option<GroupArg>,
     /// The board columns to leave out, comma-separated group keys such as
     /// status:done or priority:4; an empty value shows them all again.
     #[arg(long, value_delimiter = ',', value_parser = column_key, value_name = "KEY")]
     pub hidden_columns: Option<Vec<String>>,
+    /// asc or desc; natural for the order's own way.
+    #[arg(long, value_enum, value_name = "DIRECTION")]
+    pub order_dir: Option<ViewOrderDirArg>,
+    /// Ordered by priority, work with no priority comes first: true or
+    /// false.
+    #[arg(long, value_name = "BOOL")]
+    pub no_priority_first: Option<bool>,
+    /// In a list, sub-tasks sit under their parent instead of in rows of
+    /// their own: true or false.
+    #[arg(long, value_name = "BOOL")]
+    pub nest_sub_tasks: Option<bool>,
+    /// An SF Symbol to show beside the view's name, such as
+    /// exclamationmark.triangle; an empty value clears it.
+    #[arg(long, value_name = "SYMBOL")]
+    pub icon: Option<String>,
+    /// Show the view on this project's page instead of the Tasks page, by
+    /// name or id; none moves it back to the Tasks page.
+    #[arg(long, value_name = "PROJECT")]
+    pub on_project: Option<String>,
     /// Show the view as it would be saved; nothing changes.
     #[arg(long)]
     pub dry_run: bool,
@@ -1025,12 +1155,29 @@ pub struct ViewDeleteArgs {
 }
 
 #[derive(Args, Clone, Debug, Eq, PartialEq)]
+#[command(group(clap::ArgGroup::new("format").required(true).args(["md", "csv"])))]
 pub struct ExportArgs {
     /// The folder to write S-<number>.md files into.
     #[arg(long, value_name = "DIR")]
-    pub md: PathBuf,
+    pub md: Option<PathBuf>,
+    /// One CSV file with a row per task, in the order the list shows them;
+    /// a spreadsheet opens it. The name ends in .csv; an earlier export there
+    /// is replaced.
+    #[arg(long, value_name = "FILE")]
+    pub csv: Option<PathBuf>,
+    /// Start from a saved view's filters and order (name or id); other
+    /// flags narrow it.
+    #[arg(long)]
+    pub view: Option<String>,
     #[command(flatten)]
     pub filters: Filters,
+}
+
+#[derive(Args, Clone, Debug, Eq, PartialEq)]
+pub struct ViewsArgs {
+    /// Only the views on this project's page, by name or id.
+    #[arg(long, value_name = "PROJECT")]
+    pub project: Option<String>,
 }
 
 #[derive(Args, Clone, Debug, Eq, PartialEq)]
@@ -1151,9 +1298,13 @@ pub struct Filters {
     /// Include snoozed work.
     #[arg(long)]
     pub snoozed: bool,
-    /// Conditions as JSON, one object or a list: {"field":"label","op":
-    /// "includes_all","values":["bug","ui"]}. Fields: status, priority,
-    /// owner, delegate, project, milestone, label, parent, cycle,
+    /// Conditions as JSON, one object or a list, all of which must hold:
+    /// {"field":"label","op":"includes_all","values":["bug","ui"]}. A group
+    /// {"any":[...]} holds when one of its conditions or groups does, and
+    /// {"all":[...]} when every one does: [{"any":[{"field":"owner","op":
+    /// "is","values":["me"]},{"field":"due","op":"is","values":
+    /// ["this_week"]}]}] is mine or due this week. Fields: status,
+    /// priority, owner, delegate, project, milestone, label, parent, cycle,
     /// cycle_scope, due, created, updated, estimate, for, completed. Ops:
     /// is, is_not, any_of, none_of,
     /// includes_all, includes_any, before, after. Values are ids, names Sona
@@ -1217,19 +1368,23 @@ pub enum CycleScopeArg {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ConditionsArg(Vec<WorkCondition>);
+pub struct ConditionsArg(Vec<WorkFilter>);
 
 fn conditions(value: &str) -> Result<ConditionsArg, String> {
     #[derive(serde::Deserialize)]
     #[serde(untagged)]
     enum OneOrMany {
-        One(WorkCondition),
-        Many(Vec<WorkCondition>),
+        One(WorkFilter),
+        Many(Vec<WorkFilter>),
     }
-    match serde_json::from_str(value).map_err(|error| format!("Not a filter: {error}"))? {
-        OneOrMany::One(condition) => Ok(ConditionsArg(vec![condition])),
-        OneOrMany::Many(conditions) => Ok(ConditionsArg(conditions)),
+    let filters = match serde_json::from_str(value).map_err(|error| format!("Not a filter: {error}"))? {
+        OneOrMany::One(filter) => vec![filter],
+        OneOrMany::Many(filters) => filters,
+    };
+    if filters.iter().any(WorkFilter::has_empty_group) {
+        return Err("A group holds no conditions: put at least one in each {\"any\": [...]} or {\"all\": [...]}.".to_owned());
     }
+    Ok(ConditionsArg(filters))
 }
 
 /// What a new task starts with, or what an update sets.
@@ -1550,6 +1705,17 @@ impl OrderArg {
             Self::Manual => WorkOrderBy::Manual,
         }
     }
+
+    const fn of(order: WorkOrderBy) -> Self {
+        match order {
+            WorkOrderBy::Priority => Self::Priority,
+            WorkOrderBy::Due => Self::Due,
+            WorkOrderBy::Updated => Self::Updated,
+            WorkOrderBy::Created => Self::Created,
+            WorkOrderBy::Status => Self::Status,
+            WorkOrderBy::Manual => Self::Manual,
+        }
+    }
 }
 
 fn task_ref(value: &str) -> Result<TaskRef, String> {
@@ -1688,6 +1854,7 @@ impl WorkVerb {
             Self::Cloud(verb) => verb.required_scopes(),
             Self::MeetingReview(verb) => verb.required_scopes(),
             Self::MeetingSettings(verb) => verb.required_scopes(),
+            Self::ProjectViews(verb) => verb.required_scopes(),
             Self::List(_)
             | Self::Bin
             | Self::ArchiveList
@@ -1714,7 +1881,7 @@ impl WorkVerb {
             | Self::Cycle(_)
             | Self::Show(_)
             | Self::Labels
-            | Self::Views
+            | Self::Views(_)
             | Self::FollowUp(_)
             | Self::Projects(_)
             | Self::Milestones(_)
@@ -2271,6 +2438,7 @@ pub enum WorkAnswer {
     Dictations(Box<dictations::ExternalDictationAnswer>),
     MeetingReview(Box<meeting_review::ExternalMeetingReviewAnswer>),
     MeetingSettings(Box<meeting_settings::ExternalMeetingSettingsAnswer>),
+    ProjectViews(Box<views::ExternalProjectViewAnswer>),
     Day(organize::ExternalWorkDay),
     Brief(Box<organize::ExternalWorkBrief>),
     Note(Box<notes::ExternalNoteChange>),
@@ -2397,6 +2565,9 @@ pub struct ExternalWorkItem {
     pub attachment_count: u32,
     /// Opens the task in Sona: `sona://task/<id>`.
     pub link: String,
+    /// With `--tree`, its sub-tasks on the same page, nested under it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<ExternalWorkItem>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -2450,6 +2621,13 @@ pub struct ExternalWorkPage {
     /// What `--where` was read as.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub read_as: Option<words::ExternalWorkWhere>,
+    /// The page's tasks by group, as `--group-by` or the view groups them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub groups: Option<Vec<views::ExternalWorkGroup>>,
+    /// How many matching tasks hold each value of the fields `--facets`
+    /// names, before `--limit`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub facets: Option<BTreeMap<&'static str, Vec<views::ExternalWorkFacet>>>,
 }
 
 /// A page's tasks, each trimmed to the fields asked for.
@@ -2469,16 +2647,30 @@ impl Serialize for PageTasks {
         let mut list = serializer.serialize_seq(Some(self.tasks.len()))?;
         for task in &self.tasks {
             let mut shown = serde_json::to_value(task).map_err(S::Error::custom)?;
-            if let serde_json::Value::Object(fields) = &mut shown {
-                fields.retain(|key, _| {
-                    key == "id"
-                        || key == "handle"
-                        || self.fields.iter().any(|field| field.names(key))
-                });
-            }
+            self.trim(&mut shown);
             list.serialize_element(&shown)?;
         }
         list.end()
+    }
+}
+
+impl PageTasks {
+    /// Keeps the fields asked for, in the task and in each task nested
+    /// under it.
+    fn trim(&self, task: &mut serde_json::Value) {
+        if let serde_json::Value::Object(fields) = task {
+            fields.retain(|key, _| {
+                key == "id"
+                    || key == "handle"
+                    || key == "children"
+                    || self.fields.iter().any(|field| field.names(key))
+            });
+            if let Some(serde_json::Value::Array(children)) = fields.get_mut("children") {
+                for child in children {
+                    self.trim(child);
+                }
+            }
+        }
     }
 }
 
@@ -2786,16 +2978,28 @@ pub struct ExternalWorkViews {
 pub struct ExternalWorkView {
     pub id: String,
     pub name: String,
+    /// The SF Symbol the app shows beside its name.
+    pub icon: Option<String>,
+    /// The project whose page shows it; none for the Tasks page.
+    pub project_id: Option<String>,
     pub filters: ExternalWorkFilters,
     pub layout: WorkLayout,
     pub group_by: WorkGroupBy,
     pub order_by: WorkOrderBy,
+    /// Which way the order runs.
+    pub order_direction: WorkOrderDirection,
+    /// Ordered by priority, work with no priority comes first.
+    pub no_priority_first: bool,
+    /// In a list, sub-tasks sit under their parent.
+    pub nest_sub_tasks: bool,
     pub show_empty_groups: bool,
     pub properties: Vec<String>,
     pub show_sub_tasks: bool,
     pub sub_group_by: WorkGroupBy,
     pub hidden_columns: Vec<String>,
     pub revision: i64,
+    /// Opens the view in Sona: `sona://tasks?view=<id>`.
+    pub link: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -2814,7 +3018,7 @@ pub struct ExternalWorkFilters {
     pub include_archived: bool,
     pub include_snoozed: bool,
     pub cycle: Option<WorkCycleRef>,
-    pub conditions: Vec<WorkCondition>,
+    pub conditions: Vec<WorkFilter>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -2829,8 +3033,14 @@ pub struct ExternalWorkViewChange {
 #[derive(Clone, Debug, Serialize)]
 pub struct ExternalWorkExport {
     pub schema_version: u32,
-    pub directory: String,
+    /// md or csv.
+    pub format: &'static str,
+    /// The folder the Markdown files went into.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub directory: Option<String>,
     pub files: Vec<String>,
+    /// The tasks written.
+    pub tasks: usize,
     /// False while the conversations can't be opened: work from meetings is
     /// not written.
     pub conversations_available: bool,
@@ -3060,7 +3270,7 @@ pub(super) async fn answer(
         WorkVerb::Company(args) => tracker.company(args).await,
         WorkVerb::Meetings(args) => tracker.meetings(args).await,
         WorkVerb::Meeting(args) => tracker.meeting(args).await,
-        WorkVerb::Views => tracker.views(),
+        WorkVerb::Views(args) => tracker.views(args),
         WorkVerb::ViewSave(args) => tracker.view_save(args).await,
         WorkVerb::ViewDelete(args) => tracker.view_delete(args),
         WorkVerb::Export(args) => tracker.export(args).await,
@@ -3122,6 +3332,7 @@ pub(super) async fn answer(
         WorkVerb::Cloud(verb) => tracker.cloud(verb).await,
         WorkVerb::MeetingReview(verb) => tracker.meeting_review(verb).await,
         WorkVerb::MeetingSettings(verb) => tracker.meeting_settings(verb).await,
+        WorkVerb::ProjectViews(verb) => tracker.project_view_verb(verb).await,
         WorkVerb::NoteEdit(args) => tracker.note_edit(args),
         WorkVerb::NotePin(args) => tracker.note_pin(args),
         WorkVerb::NoteLink(args) => tracker.note_link(args).await,
@@ -3535,13 +3746,18 @@ impl Tracker<'_> {
             Some(text) => Some(self.where_words(text).await?),
             None => None,
         };
-        let base = match &args.view {
-            Some(view) => self.view_named(view)?.query,
-            None => WorkQuery {
+        let view = args
+            .view
+            .as_deref()
+            .map(|view| self.view_named(view))
+            .transpose()?;
+        let base = view.as_ref().map_or_else(
+            || WorkQuery {
                 statuses: Some(OPEN_AND_TRIAGE.to_vec()),
                 ..WorkQuery::default()
             },
-        };
+            |view| view.query.clone(),
+        );
         let mut query = args.filters.narrow(&board, base)?;
         if let Some(read_as) = &read_as {
             if args.view.is_none()
@@ -3563,7 +3779,7 @@ impl Tracker<'_> {
                 field: WorkFilterField::Delegate,
                 op,
                 values: vec![value.to_owned()],
-            });
+            }.into());
         }
         let mut rows = self.listed(&board.fence, query).await?.items;
         if !args.source.is_empty() {
@@ -3577,8 +3793,44 @@ impl Tracker<'_> {
             let cutoff = now_ms() - STALE_AFTER_MS;
             rows.retain(|row| row.item.status.is_open() && row.item.updated_at_ms < cutoff);
         }
-        let mut listed = page(rows, &args.page, &board)?;
+        let display = view.as_ref().map(|view| &view.display);
+        let order = args.page.row_order(display)?;
+        let group_by = args
+            .group_by
+            .map(GroupArg::group)
+            .or_else(|| display.map(|display| display.group_by))
+            .filter(|group| *group != WorkGroupBy::None);
+        let milestones = if group_by.is_some() || !args.facets.is_empty() {
+            self.milestone_titles()?
+        } else {
+            HashMap::new()
+        };
+        let facets = views::facets(&rows, &args.facets, &board, &milestones);
+        let mut listed = page(rows, &args.page, order, &board)?;
         listed.read_as = read_as;
+        listed.facets = facets;
+        let sub_group_by = args
+            .sub_group_by
+            .map(GroupArg::group)
+            .or_else(|| {
+                display
+                    .filter(|_| args.group_by.is_none())
+                    .map(|display| display.sub_group_by)
+            })
+            .filter(|group| *group != WorkGroupBy::None && Some(*group) != group_by);
+        if let Some(group_by) = group_by {
+            listed.groups = Some(views::groups(
+                &listed.entries.tasks,
+                group_by,
+                sub_group_by,
+                &board,
+                &milestones,
+                now_ms(),
+            ));
+        }
+        if args.tree || display.is_some_and(|display| display.nest_sub_tasks) {
+            listed.entries.tasks = views::nest(std::mem::take(&mut listed.entries.tasks));
+        }
         Ok(WorkAnswer::Page(listed))
     }
 
@@ -3593,7 +3845,8 @@ impl Tracker<'_> {
         )?;
         let mut rows = self.listed(&board.fence, query).await?.items;
         rows.retain(|row| row.blocked_by_open_count == 0);
-        Ok(WorkAnswer::Page(page(rows, &args.page, &board)?))
+        let order = args.page.row_order(None)?;
+        Ok(WorkAnswer::Page(page(rows, &args.page, order, &board)?))
     }
 
     async fn mine(&self, args: &MineArgs) -> Result<WorkAnswer, ExternalError> {
@@ -4720,11 +4973,26 @@ impl Tracker<'_> {
         }))
     }
 
-    fn views(&self) -> Result<WorkAnswer, ExternalError> {
+    fn views(&self, args: &ViewsArgs) -> Result<WorkAnswer, ExternalError> {
+        let project = match &args.project {
+            Some(project) => Some(self.project_id_named(project)?),
+            None => None,
+        };
         Ok(WorkAnswer::Views(ExternalWorkViews {
             schema_version: QUERY_SCHEMA_VERSION,
-            views: self.all_views()?.iter().map(project_view).collect(),
+            views: self
+                .all_views()?
+                .iter()
+                .filter(|view| project.is_none() || view.project_id == project)
+                .map(project_view)
+                .collect(),
         }))
+    }
+
+    /// A project's id from its name or id, among every project there is.
+    fn project_id_named(&self, value: &str) -> Result<String, ExternalError> {
+        let projects = self.every_project()?;
+        Ok(Self::pick_project(value, &projects)?.id.clone())
     }
 
     async fn view_save(&self, args: &ViewSaveArgs) -> Result<WorkAnswer, ExternalError> {
@@ -4754,6 +5022,9 @@ impl Tracker<'_> {
                 show_sub_tasks: true,
                 sub_group_by: WorkGroupBy::None,
                 hidden_columns: Vec::new(),
+                order_direction: None,
+                no_priority_first: false,
+                nest_sub_tasks: false,
             },
             |view| view.display.clone(),
         );
@@ -4787,30 +5058,43 @@ impl Tracker<'_> {
         if let Some(hidden) = &args.hidden_columns {
             display.hidden_columns = hidden.iter().filter(|key| !key.is_empty()).cloned().collect();
         }
+        if let Some(direction) = args.order_dir {
+            display.order_direction = direction.direction();
+        }
+        if let Some(first) = args.no_priority_first {
+            display.no_priority_first = first;
+        }
+        if let Some(nest) = args.nest_sub_tasks {
+            display.nest_sub_tasks = nest;
+        }
+        let project_id = match args.on_project.as_deref().map(str::trim) {
+            None => existing.and_then(|view| view.project_id.clone()),
+            Some(none) if none.eq_ignore_ascii_case("none") => None,
+            Some(project) => Some(self.project_id_named(project)?),
+        };
+        let saved = WorkViewInput {
+            name: name.to_owned(),
+            query,
+            display,
+            icon: match &args.icon {
+                Some(icon) => Some(icon.clone()).filter(|icon| !icon.trim().is_empty()),
+                None => existing.and_then(|view| view.icon.clone()),
+            },
+            project_id,
+        };
         let (id, operation_id) = match existing {
             Some(view) => (
                 Some(view.id.clone()),
-                args.write.operation_id(
-                    "view-save",
-                    &(&view.id, view.revision, name, &query, &display),
-                )?,
+                args.write
+                    .operation_id("view-save", &(&view.id, view.revision, &saved))?,
             ),
             None => (None, args.write.fresh_operation_id()),
         };
         let view = if args.dry_run {
-            self.rehearse(|conn| {
-                items::save_view(conn, id.as_deref(), name, &query, &display, now_ms())
-            })?
+            self.rehearse(|conn| items::save_view(conn, id.as_deref(), &saved, now_ms()))?
         } else {
-            work::work_view_save(
-                self.app.clone(),
-                operation_id.clone(),
-                id,
-                name.to_owned(),
-                query,
-                display,
-            )
-            .map_err(|message| self.write_refusal(message, &operation_id, "The view"))?
+            work::work_view_save(self.app.clone(), operation_id.clone(), id, saved)
+                .map_err(|message| self.write_refusal(message, &operation_id, "The view"))?
         };
         Ok(WorkAnswer::View(Box::new(ExternalWorkViewChange {
             schema_version: QUERY_SCHEMA_VERSION,
@@ -4841,30 +5125,52 @@ impl Tracker<'_> {
 
     async fn export(&self, args: &ExportArgs) -> Result<WorkAnswer, ExternalError> {
         let board = self.board().await?;
-        let query = args.filters.narrow(&board, WorkQuery::default())?;
+        let view = args
+            .view
+            .as_deref()
+            .map(|view| self.view_named(view))
+            .transpose()?;
+        let base = view
+            .as_ref()
+            .map_or_else(WorkQuery::default, |view| view.query.clone());
+        let query = args.filters.narrow(&board, base)?;
         let mut rows = self.listed(&board.fence, query).await?.items;
-        rows.sort_by_key(|row| row.item.number);
-        std::fs::create_dir_all(&args.md).map_err(|error| {
+        let failed = |path: &std::path::Path, what: &str, error: std::io::Error| {
             ExternalError::new(
                 ExternalErrorCode::Failed,
-                format!("{} could not be created: {error}", args.md.display()),
+                format!("{} could not be {what}: {error}", path.display()),
             )
-        })?;
+        };
+        if let Some(csv) = &args.csv {
+            let order = PageArgs::default().row_order(view.as_ref().map(|view| &view.display))?;
+            rows.sort_by_cached_key(|row| place(row, order));
+            write_csv(csv, &work::export::csv(&rows, &board.rows, &board.labels))?;
+            return Ok(WorkAnswer::Export(ExternalWorkExport {
+                schema_version: QUERY_SCHEMA_VERSION,
+                format: "csv",
+                directory: None,
+                files: vec![csv.display().to_string()],
+                tasks: rows.len(),
+                conversations_available: board.fence.is_open(),
+            }));
+        }
+        let Some(md) = &args.md else {
+            return Err(ExternalError::invalid("Name --md DIR or --csv FILE.".to_owned()));
+        };
+        rows.sort_by_key(|row| row.item.number);
+        std::fs::create_dir_all(md).map_err(|error| failed(md, "created", error))?;
         let mut files = Vec::with_capacity(rows.len());
         for row in &rows {
             let task = project_task(row, &board);
-            let path = args.md.join(format!("{}.md", task.handle));
-            std::fs::write(&path, markdown(&task)).map_err(|error| {
-                ExternalError::new(
-                    ExternalErrorCode::Failed,
-                    format!("{} could not be written: {error}", path.display()),
-                )
-            })?;
+            let path = md.join(format!("{}.md", task.handle));
+            std::fs::write(&path, markdown(&task)).map_err(|error| failed(&path, "written", error))?;
             files.push(path.display().to_string());
         }
         Ok(WorkAnswer::Export(ExternalWorkExport {
             schema_version: QUERY_SCHEMA_VERSION,
-            directory: args.md.display().to_string(),
+            format: "md",
+            directory: Some(md.display().to_string()),
+            tasks: files.len(),
             files,
             conversations_available: board.fence.is_open(),
         }))
@@ -5039,19 +5345,29 @@ fn urgency(row: &WorkItemRow) -> (u8, i64, i64) {
 }
 
 /// Where `row` sorts in `order`, smallest first; the number breaks ties, so
-/// no two rows share a place.
-fn place(row: &WorkItemRow, order: OrderArg) -> [i64; 3] {
+/// no two rows share a place. Against the natural way every key turns
+/// around; work with no priority stays last unless asked first.
+fn place(row: &WorkItemRow, order: RowOrder) -> [i64; 3] {
     let item = &row.item;
     let (priority, due, number) = urgency(row);
     let priority = i64::from(priority);
-    match order {
+    let natural = match order.order {
         OrderArg::Priority => [priority, due, number],
         OrderArg::Due => [due, priority, number],
         OrderArg::Updated => [-item.updated_at_ms, -number, 0],
         OrderArg::Created => [-item.created_at_ms, -number, 0],
         OrderArg::Status => [status_rank(item.status), priority, number],
         OrderArg::Manual => [sortable(item.sort_order), number, 0],
+    };
+    let mut place = if order.reversed {
+        natural.map(i64::saturating_neg)
+    } else {
+        natural
+    };
+    if order.order == OrderArg::Priority && item.priority == 0 {
+        place[0] = if order.none_first { i64::MIN } else { i64::MAX };
     }
+    place
 }
 
 /// A status's place when a list orders by status: the order the app groups
@@ -5081,9 +5397,9 @@ fn sortable(value: f64) -> i64 {
 fn page(
     mut rows: Vec<WorkItemRow>,
     paging: &PageArgs,
+    order: RowOrder,
     board: &Board,
 ) -> Result<ExternalWorkPage, ExternalError> {
-    let order = paging.order()?;
     rows.sort_by_cached_key(|row| place(row, order));
     let start = paging.cursor.map_or(0, |cursor| {
         rows.partition_point(|row| place(row, order) <= cursor.after)
@@ -5113,6 +5429,8 @@ fn page(
             }),
         conversations_available: board.fence.is_open(),
         read_as: None,
+        groups: None,
+        facets: None,
     })
 }
 
@@ -6089,6 +6407,8 @@ fn project_view(view: &WorkView) -> ExternalWorkView {
     ExternalWorkView {
         id: view.id.clone(),
         name: view.name.clone(),
+        icon: view.icon.clone(),
+        project_id: view.project_id.clone(),
         filters: ExternalWorkFilters {
             statuses: query.statuses.clone(),
             direction: query.direction,
@@ -6114,12 +6434,19 @@ fn project_view(view: &WorkView) -> ExternalWorkView {
         layout: view.display.layout,
         group_by: view.display.group_by,
         order_by: view.display.order_by,
+        order_direction: view
+            .display
+            .order_direction
+            .unwrap_or_else(|| view.display.order_by.natural()),
+        no_priority_first: view.display.no_priority_first,
+        nest_sub_tasks: view.display.nest_sub_tasks,
         show_empty_groups: view.display.show_empty_groups,
         properties: view.display.properties.clone(),
         show_sub_tasks: view.display.show_sub_tasks,
         sub_group_by: view.display.sub_group_by,
         hidden_columns: view.display.hidden_columns.clone(),
         revision: view.revision,
+        link: view_link(&view.id),
     }
 }
 
@@ -6303,7 +6630,7 @@ impl Filters {
                 field: WorkFilterField::Parent,
                 op: WorkFilterOp::Is,
                 values: vec![value],
-            });
+            }.into());
         }
         if let Some(scope) = self.cycle_scope {
             let value = match scope {
@@ -6314,7 +6641,7 @@ impl Filters {
                 field: WorkFilterField::CycleScope,
                 op: WorkFilterOp::Is,
                 values: vec![value.to_owned()],
-            });
+            }.into());
         }
         if !self.for_person.is_empty() {
             let values = self
@@ -6326,7 +6653,7 @@ impl Filters {
                 field: WorkFilterField::For,
                 op: WorkFilterOp::AnyOf,
                 values,
-            });
+            }.into());
         }
         if let Some(completed) = &self.completed {
             if self.status.is_empty() {
@@ -6336,7 +6663,7 @@ impl Filters {
                 field: WorkFilterField::Completed,
                 op: WorkFilterOp::Is,
                 values: vec![completed.trim().to_owned()],
-            });
+            }.into());
         }
         self.scope.narrow(board, query)
     }
@@ -6484,6 +6811,7 @@ fn project_task(row: &WorkItemRow, board: &Board) -> ExternalWorkItem {
         sub_tasks: row.sub_tasks,
         attachment_count: row.attachment_count,
         link: task_link(&item.id),
+        children: Vec::new(),
     }
 }
 
@@ -6613,9 +6941,7 @@ impl WorkAnswer {
                 if page.entries.tasks.is_empty() {
                     text.push_str("No tasks match.\n");
                 }
-                for task in &page.entries.tasks {
-                    task_line(&mut text, task, &today);
-                }
+                views::page_text(&mut text, page, &today);
                 if page.has_more {
                     let _ = writeln!(
                         text,
@@ -6711,6 +7037,7 @@ impl WorkAnswer {
             Self::Dictations(answer) => dictations::text(answer, &mut text),
             Self::MeetingReview(answer) => meeting_review::text(answer, &mut text),
             Self::MeetingSettings(answer) => meeting_settings::text(answer, &mut text),
+            Self::ProjectViews(answer) => views::text(answer, &mut text),
             Self::Settings(_) => preferences::text(self, &mut text),
             Self::Note(_) => notes::text(self, &mut text),
             Self::PersonalDocuments(_) | Self::PersonalDocument(_) => {
@@ -6758,7 +7085,13 @@ impl WorkAnswer {
                     text.push_str("No saved views.\n");
                 }
                 for view in &views.views {
-                    let _ = writeln!(text, "{}  · {}", view.name, filters_text(&view.filters));
+                    let _ = writeln!(
+                        text,
+                        "{}  · {}\n  {}",
+                        view.name,
+                        filters_text(&view.filters),
+                        view.link
+                    );
                 }
             }
             Self::View(change) => {
@@ -6774,16 +7107,15 @@ impl WorkAnswer {
                 );
             }
             Self::Export(export) => {
+                let place = match &export.directory {
+                    Some(directory) => directory.as_str(),
+                    None => export.files.first().map_or("", String::as_str),
+                };
                 let _ = writeln!(
                     text,
-                    "Wrote {} {} to {}.",
-                    export.files.len(),
-                    if export.files.len() == 1 {
-                        "file"
-                    } else {
-                        "files"
-                    },
-                    export.directory
+                    "Wrote {} {} to {place}.",
+                    export.tasks,
+                    if export.tasks == 1 { "task" } else { "tasks" },
                 );
             }
             Self::FollowUp(follow_up) if follow_up.text.is_empty() => {
@@ -6962,6 +7294,7 @@ impl WorkAnswer {
             | Self::Dictations(_)
             | Self::MeetingReview(_)
             | Self::MeetingSettings(_)
+            | Self::ProjectViews(_)
             | Self::Day(_)
             | Self::Brief(_)
             | Self::Note(_)
@@ -7465,19 +7798,58 @@ fn filters_text(filters: &ExternalWorkFilters) -> String {
     if filters.include_archived {
         parts.push("with archived".to_owned());
     }
-    for condition in &filters.conditions {
-        parts.push(format!(
-            "{} {} {}",
-            condition.field.word(),
-            condition.op.word(),
-            condition.values.join(", ")
-        ));
-    }
+    parts.extend(filters.conditions.iter().map(filter_text));
     if parts.is_empty() {
         "everything".to_owned()
     } else {
         parts.join(" · ")
     }
+}
+
+/// "label includes any of bug", or a group in brackets: "(owner is me or
+/// due is this_week)".
+fn filter_text(filter: &WorkFilter) -> String {
+    let (filters, joiner) = match filter {
+        WorkFilter::Condition(condition) => {
+            return format!(
+                "{} {} {}",
+                condition.field.word(),
+                condition.op.word(),
+                condition.values.join(", ")
+            );
+        }
+        WorkFilter::Any { any } => (any, " or "),
+        WorkFilter::All { all } => (all, " and "),
+    };
+    let inner: Vec<String> = filters.iter().map(filter_text).collect();
+    format!("({})", inner.join(joiner))
+}
+
+/// Writes an export to a `.csv` file, new or an earlier export, and never
+/// through a link: an agent naming the path cannot replace a document or a
+/// dotfile with task text.
+fn write_csv(path: &std::path::Path, text: &str) -> Result<(), ExternalError> {
+    if !path
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("csv"))
+    {
+        return Err(ExternalError::invalid(format!(
+            "{} does not end in .csv. Name a .csv file.",
+            path.display()
+        )));
+    }
+    if std::fs::symlink_metadata(path).is_ok_and(|found| !found.is_file()) {
+        return Err(ExternalError::invalid(format!(
+            "{} is a link or a folder. Name a .csv file.",
+            path.display()
+        )));
+    }
+    std::fs::write(path, text).map_err(|error| {
+        ExternalError::new(
+            ExternalErrorCode::Failed,
+            format!("{} could not be written: {error}", path.display()),
+        )
+    })
 }
 
 mod attachments;
@@ -7515,6 +7887,7 @@ mod transcript;
 mod triage_hints;
 mod voices;
 mod words;
+mod views;
 
 #[cfg(test)]
 mod tests;

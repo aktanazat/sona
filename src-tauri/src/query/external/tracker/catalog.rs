@@ -1,6 +1,7 @@
 //! `sona work` verbs for the Projects and People pages, and the read-only
 //! meetings feed: what an organizer agent needs to keep the tracker tidy.
 
+use super::dependencies::LinkFilter;
 use super::notes::request_json;
 use super::organize::sent_before;
 use super::{
@@ -17,6 +18,7 @@ use crate::planning;
 use crate::planning::catalog::{LinkEdit, MilestoneEdit, ProjectEdit};
 use crate::planning::store as plans;
 use crate::planning::work;
+use crate::planning::work::views::ProjectLinkFilter;
 use crate::planning::work::types::{WorkOwner, WorkStatus};
 use crate::planning::{
     DateResolution, Milestone, Project, ProjectLink, ProjectStatus, TaskStatus,
@@ -170,6 +172,10 @@ pub struct ProjectsArgs {
     /// projects in no initiative.
     #[arg(long, value_name = "INITIATIVE")]
     pub initiative: Option<String>,
+    /// Only the projects a saved project view keeps, by name or id, grouped
+    /// as the view groups them; the other flags narrow it.
+    #[arg(long, value_name = "VIEW")]
+    pub view: Option<String>,
 }
 
 fn calendar_day(value: &str) -> Result<NaiveDate, String> {
@@ -491,6 +497,9 @@ pub struct ExternalWorkProject {
 pub struct ExternalWorkProjects {
     pub schema_version: u32,
     pub projects: Vec<ExternalWorkProject>,
+    /// With `--view`, the projects by the view's grouping, by id.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub groups: Option<Vec<super::views::ExternalProjectGroup>>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -895,24 +904,42 @@ impl Tracker<'_> {
                 Some(Some(Self::pick_initiative(value, &all)?.id.clone()))
             }
         };
+        let mut rows: Vec<ExternalWorkProject> = projects
+            .iter()
+            .filter(|project| {
+                links
+                    .as_ref()
+                    .is_none_or(|(filter, all)| filter.keeps(&project.id, all))
+            })
+            .map(|project| self.project_row(project, &board))
+            .filter(|row| {
+                before_ms.is_none_or(|before| {
+                    row.latest_update_at_ms.is_none_or(|latest| latest < before)
+                }) && initiative.as_ref().is_none_or(|wanted| {
+                    row.initiative.as_ref().map(|initiative| &initiative.id) == wanted.as_ref()
+                })
+            })
+            .collect();
+        let mut groups = None;
+        if let Some(view) = &args.view {
+            let view = self.project_view_named(view)?;
+            let dependencies = self.all_dependencies()?;
+            let linked = |filter: ProjectLinkFilter, id: &str| {
+                let filter = match filter {
+                    ProjectLinkFilter::Blocked => LinkFilter::Blocked,
+                    ProjectLinkFilter::Blocking => LinkFilter::Blocking,
+                    ProjectLinkFilter::Broken => LinkFilter::Broken,
+                };
+                filter.keeps(id, &dependencies)
+            };
+            let now = super::now_ms();
+            rows.retain(|row| super::views::project_keeps(&view.filter, row, &board.rows, &linked, now));
+            groups = super::views::project_groups(&rows, view.display.group_by);
+        }
         Ok(WorkAnswer::Projects(ExternalWorkProjects {
             schema_version: QUERY_SCHEMA_VERSION,
-            projects: projects
-                .iter()
-                .filter(|project| {
-                    links
-                        .as_ref()
-                        .is_none_or(|(filter, all)| filter.keeps(&project.id, all))
-                })
-                .map(|project| self.project_row(project, &board))
-                .filter(|row| {
-                    before_ms.is_none_or(|before| {
-                        row.latest_update_at_ms.is_none_or(|latest| latest < before)
-                    }) && initiative.as_ref().is_none_or(|wanted| {
-                        row.initiative.as_ref().map(|initiative| &initiative.id) == wanted.as_ref()
-                    })
-                })
-                .collect(),
+            projects: rows,
+            groups,
         }))
     }
 
@@ -2255,10 +2282,10 @@ pub(super) fn text(answer: &WorkAnswer, text: &mut String) {
             if projects.projects.is_empty() {
                 text.push_str("No projects yet. Make one with: sona work project-save NAME\n");
             }
-            for project in &projects.projects {
+            let line = |text: &mut String, project: &ExternalWorkProject, indent: &str| {
                 let _ = write!(
                     text,
-                    "{}  · {} · {} open, {} done",
+                    "{indent}{}  · {} · {} open, {} done",
                     project.name,
                     project
                         .status_name
@@ -2282,6 +2309,23 @@ pub(super) fn text(answer: &WorkAnswer, text: &mut String) {
                     text.push_str(" · put away");
                 }
                 text.push('\n');
+            };
+            match &projects.groups {
+                Some(groups) => {
+                    for group in groups {
+                        let _ = writeln!(text, "{} ({})", group.title, group.projects.len());
+                        for id in &group.projects {
+                            if let Some(project) = projects.projects.iter().find(|project| &project.id == id) {
+                                line(text, project, "  ");
+                            }
+                        }
+                    }
+                }
+                None => {
+                    for project in &projects.projects {
+                        line(text, project, "");
+                    }
+                }
             }
         }
         WorkAnswer::Project(change) => {

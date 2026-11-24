@@ -52,3 +52,5 @@ jobs:
         run: bash scripts/check-recorder.sh
       - name: Run native theme checks
         run: bash scripts/check-theme.sh
+      - name: Run native saved view checks
+        run: bash scripts/check-work-views.sh

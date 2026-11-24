@@ -350,7 +350,7 @@ private struct TaskTabs: View {
                     tab(.cycle, title: model.work.currentCycle.map { "Cycle \($0.number)" } ?? "Cycles", count: nil)
                 }
                 tab(.all, title: "All", count: nil)
-                if !model.work.views.isEmpty {
+                if model.work.views.contains(where: { $0.projectId == nil }) {
                     views
                 }
             }
@@ -359,20 +359,25 @@ private struct TaskTabs: View {
         .scrollBounceBehavior(.basedOnSize)
     }
 
-    /// The saved views behind one tab that names the view showing.
+    /// The Tasks page's saved views behind one tab that names the view
+    /// showing; a project's views show on its page.
     private var views: some View {
         let focus = model.workFocus
-        let saved = model.work.views
+        let saved = model.work.views.filter { $0.projectId == nil }
         let current = saved.first { focus.tab == .view($0.id) }
         return Menu {
             ForEach(saved) { view in
                 Toggle(isOn: Binding(get: { focus.tab == .view(view.id) },
                                      set: { _ in focus.switchTab(.view(view.id)) })) {
-                    Text(focus.viewDrafts[view.id] != nil ? "\(view.name) (edited)" : view.name)
+                    Label(focus.viewDrafts[view.id] != nil ? "\(view.name) (edited)" : view.name,
+                          systemImage: view.icon ?? "line.3.horizontal.decrease.circle")
                 }
             }
         } label: {
             HStack(spacing: 6) {
+                if let icon = current?.icon {
+                    Image(systemName: icon).font(.system(size: 11)).foregroundStyle(Theme.inkSecondary)
+                }
                 Text(current?.name ?? "Views")
                 if let current, focus.viewDrafts[current.id] != nil {
                     Circle().fill(Theme.accent).frame(width: 5, height: 5)
@@ -406,12 +411,17 @@ private struct TaskTabs: View {
 struct WorkTab: View {
     let title: String
     var count: Int?
+    /// An SF Symbol before the title, as a saved view shows.
+    var icon: String?
     let on: Bool
     let select: () -> Void
 
     var body: some View {
         Button(action: select) {
             HStack(spacing: 6) {
+                if let icon {
+                    Image(systemName: icon).font(.system(size: 11)).foregroundStyle(Theme.inkSecondary)
+                }
                 Text(title)
                 if let count, count > 0 {
                     Text("\(count)").monospacedDigit().foregroundStyle(Theme.inkTertiary)
@@ -445,7 +455,10 @@ struct TaskListBody<Row: View, Lead: View>: View {
 
     var body: some View {
         let focus = model.workFocus
-        let visible = groups.filter { !focus.collapsed.contains($0.id) }.flatMap(\.rows).map(\.id)
+        let open = groups.filter { !focus.collapsed.contains($0.id) }
+        let visible = open.flatMap { group in
+            (group.subgroups?.filter { !focus.collapsed.contains($0.id) } ?? [group]).flatMap { shown($0) }
+        }.map(\.item.id)
         ScrollViewReader { proxy in
             Group {
                 if scrolls {
@@ -455,7 +468,8 @@ struct TaskListBody<Row: View, Lead: View>: View {
                 }
             }
             .onChange(of: focus.scrollTarget) { _, id in
-                guard let id, let group = groups.first(where: { $0.rows.contains { $0.id == id } }) else { return }
+                let holders = groups.flatMap { $0.subgroups ?? [$0] }
+                guard let id, let group = holders.first(where: { $0.rows.contains { $0.id == id } }) else { return }
                 proxy.scrollTo(GroupedRow.key(group: group.id, item: id))
             }
         }
@@ -469,10 +483,18 @@ struct TaskListBody<Row: View, Lead: View>: View {
             ForEach(groups) { group in
                 Section {
                     if !focus.collapsed.contains(group.id) {
-                        ForEach(group.rows.map { GroupedRow(group: group.id, item: $0) }) { entry in
-                            row(entry.item)
-                                .modifier(TaskRowInteractions(id: entry.item.id))
-                                .transition(WorkMotion.insert(reduced: reduceMotion))
+                        if let subgroups = group.subgroups {
+                            ForEach(subgroups) { sub in
+                                TaskGroupHeader(
+                                    group: sub, collapsed: focus.collapsed.contains(sub.id),
+                                    revision: model.people.photoRevision, toggle: { toggle(sub.id) })
+                                    .padding(.leading, 22)
+                                if !focus.collapsed.contains(sub.id) {
+                                    rows(sub)
+                                }
+                            }
+                        } else {
+                            rows(group)
                         }
                     }
                 } header: {
@@ -493,6 +515,61 @@ struct TaskListBody<Row: View, Lead: View>: View {
         .animation(Motion.regular, value: model.work.items?.map(\.id))
     }
 
+    private func rows(_ group: TaskGroup) -> some View {
+        ForEach(shown(group)) { entry in
+            HStack(spacing: 0) {
+                if !group.depth.isEmpty {
+                    nestMark(entry)
+                }
+                row(entry.item)
+            }
+            .modifier(TaskRowInteractions(id: entry.item.id))
+            .transition(WorkMotion.insert(reduced: reduceMotion))
+        }
+    }
+
+    /// Room for a nested sub-task's depth, and on a parent the arrow that
+    /// folds its sub-tasks away.
+    private func nestMark(_ entry: GroupedRow) -> some View {
+        let folded = model.workFocus.collapsed.contains(entry.foldKey)
+        return ZStack(alignment: .trailing) {
+            if entry.parent {
+                Button {
+                    toggle(entry.foldKey)
+                } label: {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(Theme.inkTertiary)
+                        .rotationEffect(.degrees(folded ? 0 : 90))
+                        .frame(width: 18, height: 18)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(folded ? "Show sub-tasks of \(entry.item.title)" : "Hide sub-tasks of \(entry.item.title)")
+            }
+        }
+        .frame(width: 18 + CGFloat(entry.depth) * 22, alignment: .trailing)
+        .padding(.leading, 6)
+    }
+
+    /// A group's rows as the list shows them: the sub-tasks of a folded
+    /// parent left out.
+    private func shown(_ group: TaskGroup) -> [GroupedRow] {
+        let collapsed = model.workFocus.collapsed
+        var entries: [GroupedRow] = []
+        var foldedAt: Int?
+        for (index, item) in group.rows.enumerated() {
+            let depth = group.depth[item.id] ?? 0
+            if let level = foldedAt, depth > level { continue }
+            foldedAt = nil
+            let next = group.rows.indices.contains(index + 1) ? group.depth[group.rows[index + 1].id] ?? 0 : 0
+            let entry = GroupedRow(group: group.id, item: item, depth: depth, parent: next > depth)
+            if entry.parent, collapsed.contains(entry.foldKey) { foldedAt = depth }
+            entries.append(entry)
+        }
+        return entries
+    }
+
     private func toggle(_ group: String) {
         let focus = model.workFocus
         if focus.collapsed.contains(group) { focus.collapsed.remove(group) } else { focus.collapsed.insert(group) }
@@ -511,7 +588,12 @@ extension TaskListBody where Lead == EmptyView {
 private struct GroupedRow: Identifiable {
     let group: String
     let item: WorkItemRow
+    var depth = 0
+    /// Whether its sub-tasks follow it, nested.
+    var parent = false
     var id: String { Self.key(group: group, item: item.id) }
+    /// What `collapsed` holds while its sub-tasks are folded away.
+    var foldKey: String { "nest:\(id)" }
 
     static func key(group: String, item: String) -> String { "\(group)/\(item)" }
 }

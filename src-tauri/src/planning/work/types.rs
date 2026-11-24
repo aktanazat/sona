@@ -678,9 +678,9 @@ pub struct WorkQuery {
     pub include_archived: bool,
     pub include_snoozed: bool,
     pub cycle: Option<WorkCycleRef>,
-    /// Conditions on any field, all of which must hold, beside the filters
-    /// above.
-    pub filters: Vec<super::filter::WorkCondition>,
+    /// Conditions on any field, and groups of them where any or all must
+    /// hold, all of which must hold beside the filters above.
+    pub filters: Vec<super::filter::WorkFilter>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
@@ -796,6 +796,25 @@ pub enum WorkOrderBy {
     Manual,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkOrderDirection {
+    Ascending,
+    Descending,
+}
+
+impl WorkOrderBy {
+    /// The way an order runs unless a list says otherwise: urgent first,
+    /// soonest due first, newest first for updated and created, and work
+    /// under way first for status.
+    pub const fn natural(self) -> WorkOrderDirection {
+        match self {
+            Self::Priority | Self::Updated | Self::Created => WorkOrderDirection::Descending,
+            Self::Due | Self::Status | Self::Manual => WorkOrderDirection::Ascending,
+        }
+    }
+}
+
 /// How a list shows its tasks. Fields added after the first saved views
 /// read their default when a stored view lacks them.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
@@ -815,6 +834,15 @@ pub struct WorkDisplay {
     /// Board columns left out, by group key such as `status:done`.
     #[serde(default)]
     pub hidden_columns: Vec<String>,
+    /// Which way the order runs; none for the order's natural way.
+    #[serde(default)]
+    pub order_direction: Option<WorkOrderDirection>,
+    /// Ordered by priority, work with no priority comes first, not last.
+    #[serde(default)]
+    pub no_priority_first: bool,
+    /// Sub-tasks sit under their parent in a list, not in rows of their own.
+    #[serde(default)]
+    pub nest_sub_tasks: bool,
 }
 
 const fn shown() -> bool {
@@ -843,6 +871,25 @@ pub struct WorkView {
     pub query: WorkQuery,
     pub display: WorkDisplay,
     pub revision: i64,
+    /// An SF Symbol the app shows beside the view's name.
+    #[serde(default)]
+    pub icon: Option<String>,
+    /// The project whose page shows the view; none for the Tasks page.
+    #[serde(default)]
+    pub project_id: Option<String>,
+}
+
+/// A view as it is saved: everything but its id and revision.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkViewInput {
+    pub name: String,
+    pub query: WorkQuery,
+    pub display: WorkDisplay,
+    #[serde(default)]
+    pub icon: Option<String>,
+    #[serde(default)]
+    pub project_id: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, Type)]

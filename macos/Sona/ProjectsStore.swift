@@ -922,6 +922,12 @@ final class ProjectsStore {
     let comments: CommentThreads
     /// What the list is narrowed to. Home sets it when it opens late work.
     var filter = PlanningListFilter()
+    /// What the list groups projects by.
+    var groupBy: ProjectGroupBy = .status
+    /// The Projects page's saved views, by name.
+    private(set) var views: [ProjectView] = []
+    /// The saved view the list shows; nil for none.
+    var openedView: String?
 
     var detail: PlanningProjectDetail? { selectedProjectId.flatMap { details[$0] } }
 
@@ -988,6 +994,7 @@ final class ProjectsStore {
         await loadStatusNames()
         await loadDependencies()
         await loadInitiatives()
+        await loadViews()
         if let id = selectedProjectId {
             await loadDetail(id)
             if updates[id] != nil { await loadUpdates(id) }
@@ -1211,6 +1218,53 @@ final class ProjectsStore {
         } catch {
             mutationError = error.localizedDescription
         }
+    }
+
+    func loadViews() async {
+        do {
+            views = try await core.request("work_project_views")
+        } catch {
+            mutationError = error.localizedDescription
+        }
+    }
+
+    /// Saves the list's filters, layout and grouping as a view, or over
+    /// the view `id`; the list then shows it.
+    func saveView(id: String?, name: String, icon: String?, layout: ProjectsLayout) async {
+        let input = ProjectViewInput(
+            name: name, icon: icon, filter: filter.saved,
+            display: ProjectViewDisplay(layout: ProjectViewLayout(rawValue: layout.rawValue) ?? .list, groupBy: groupBy))
+        do {
+            let saved: ProjectView = try await write {
+                try await self.core.request("work_project_view_save", ProjectViewParams(
+                    operationId: UUID().uuidString, id: id, view: input))
+            }
+            openedView = saved.id
+        } catch {
+            mutationError = error.localizedDescription
+        }
+        await loadViews()
+    }
+
+    func deleteView(_ id: String) async {
+        do {
+            try await write {
+                try await self.core.request("work_project_view_delete", ProjectViewDeleteParams(
+                    operationId: UUID().uuidString, id: id))
+            }
+            if openedView == id { openedView = nil }
+        } catch {
+            mutationError = error.localizedDescription
+        }
+        await loadViews()
+    }
+
+    /// Shows `view`: its filters and grouping; returns its layout.
+    func open(view: ProjectView) -> ProjectsLayout {
+        filter = PlanningListFilter(view.filter)
+        groupBy = view.display.groupBy
+        openedView = view.id
+        return ProjectsLayout(rawValue: view.display.layout.rawValue) ?? .list
     }
 
     /// The initiative a project sits in, if any.
@@ -1852,6 +1906,75 @@ final class ProjectsStore {
     }
 
     nonisolated static func milliseconds(_ date: Date) -> Int64 { Int64((date.timeIntervalSince1970 * 1000).rounded()) }
+}
+
+private struct ProjectViewInput: Encodable {
+    let name: String
+    let icon: String?
+    let filter: ProjectViewFilter
+    let display: ProjectViewDisplay
+}
+
+private struct ProjectViewParams: Encodable {
+    let operationId: String
+    let id: String?
+    let view: ProjectViewInput
+}
+
+private struct ProjectViewDeleteParams: Encodable {
+    let operationId: String
+    let id: String
+}
+
+extension PlanningListFilter {
+    /// The filter a saved view of the Projects page keeps.
+    init(_ saved: ProjectViewFilter) {
+        self.init(
+            status: saved.status.flatMap(PlanningProjectStatus.init(rawValue:)),
+            overdueOnly: saved.overdueOnly, mineOnly: saved.mineOnly,
+            updateBefore: saved.updateBefore.flatMap(PlanningUpdateBefore.init),
+            link: saved.link.flatMap(PlanningLinkFilter.init(rawValue:)),
+            initiative: saved.initiative.map { $0 == "none" ? .outside : .within($0) })
+    }
+
+    var saved: ProjectViewFilter {
+        let initiative: String? = switch initiative {
+        case nil: nil
+        case .outside?: "none"
+        case let .within(id)?: id
+        }
+        return ProjectViewFilter(status: status?.rawValue, overdueOnly: overdueOnly, mineOnly: mineOnly,
+                                 updateBefore: updateBefore?.saved, link: link?.rawValue, initiative: initiative)
+    }
+}
+
+extension PlanningUpdateBefore {
+    init?(_ saved: ProjectUpdateBefore) {
+        switch saved.kind {
+        case "one_week": self = .oneWeek
+        case "two_weeks": self = .twoWeeks
+        case "one_month": self = .oneMonth
+        case "day":
+            let parts = (saved.day ?? "").split(separator: "-").compactMap { Int($0) }
+            guard parts.count == 3,
+                  let day = Calendar.current.date(from: DateComponents(year: parts[0], month: parts[1], day: parts[2]))
+            else { return nil }
+            self = .day(day)
+        default: return nil
+        }
+    }
+
+    var saved: ProjectUpdateBefore {
+        switch self {
+        case .oneWeek: return ProjectUpdateBefore(kind: "one_week")
+        case .twoWeeks: return ProjectUpdateBefore(kind: "two_weeks")
+        case .oneMonth: return ProjectUpdateBefore(kind: "one_month")
+        case let .day(day):
+            let parts = Calendar.current.dateComponents([.year, .month, .day], from: day)
+            let text = String(format: "%04d-%02d-%02d", parts.year ?? 0, parts.month ?? 0, parts.day ?? 0)
+            return ProjectUpdateBefore(kind: "day", day: text)
+        }
+    }
 }
 
 enum PlanningInitiativeStatus: String, Codable, CaseIterable, Identifiable {

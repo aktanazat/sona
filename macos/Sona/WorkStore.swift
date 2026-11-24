@@ -720,18 +720,22 @@ final class WorkStore {
     }
 
     /// Creates or changes a saved view; returns its id, which is in `views`
-    /// at once.
+    /// at once. A view on a project shows on that project's page.
     @discardableResult
-    func saveView(id: String?, name: String, query: WorkQuery, display: WorkDisplay) -> String {
+    func saveView(
+        id: String?, name: String, query: WorkQuery, display: WorkDisplay, icon: String?, projectId: String?
+    ) -> String {
         let id = id ?? Self.newId()
         let index = views.firstIndex { $0.id == id }
         let before = index.map { views[$0] }
-        let shown = WorkView(id: id, name: name, query: query, display: display, revision: before?.revision ?? 0)
+        let shown = WorkView(id: id, name: name, query: query, display: display, revision: before?.revision ?? 0,
+                             icon: icon, projectId: projectId)
         if let index { views[index] = shown } else { views.append(shown) }
         enqueue {
             do {
                 let saved: WorkView = try await self.core.request("work_view_save", ViewParams(
-                    operationId: Self.newId(), id: id, name: name, query: query, display: display))
+                    operationId: Self.newId(), id: id,
+                    view: ViewInput(name: name, query: query, display: display, icon: icon, projectId: projectId)))
                 if let at = self.views.firstIndex(where: { $0.id == id }) { self.views[at] = saved }
             } catch {
                 if let at = self.views.firstIndex(where: { $0.id == id }) {
@@ -754,6 +758,12 @@ final class WorkStore {
                 self.mutationError = error.localizedDescription
             }
         }
+    }
+
+    /// The tasks with these ids as a spreadsheet, one row each in this
+    /// order, as the core writes it.
+    func csv(_ ids: [String]) async throws -> String {
+        try await core.request("work_csv", CsvParams(ids: ids))
     }
 
     /// Waits for earlier changes, so a label made a moment ago exists when
@@ -1865,9 +1875,18 @@ private struct LabelParams: Encodable {
 private struct ViewParams: Encodable {
     let operationId: String
     let id: String
+    let view: ViewInput
+}
+
+private struct ViewInput: Encodable {
     let name: String
     let query: WorkQuery
     let display: WorkDisplay
+    let icon: String?
+    let projectId: String?
+}
+private struct CsvParams: Encodable {
+    let ids: [String]
 }
 private struct DelegateParams: Encodable {
     let operationId: String

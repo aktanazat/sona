@@ -2,7 +2,7 @@
 //! filters by, with the words that were not understood.
 
 use super::{refusal, Tracker};
-use crate::planning::work::filter::{WorkCondition, WorkFilterField};
+use crate::planning::work::filter::{WorkFilter, WorkFilterField};
 use crate::planning::work::words::work_where;
 use crate::query::external::ExternalError;
 use serde::Serialize;
@@ -21,8 +21,9 @@ pub struct ExternalWorkWhere {
 pub struct ExternalWorkWhereTerm {
     pub text: String,
     pub reads_as: String,
-    /// The same condition `--filter` takes.
-    pub condition: WorkCondition,
+    /// The same filter `--filter` takes: a condition, or an `any` group
+    /// for words joined by "or" across fields.
+    pub condition: WorkFilter,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -33,12 +34,21 @@ pub struct ExternalWorkWhereWord {
 }
 
 impl ExternalWorkWhere {
-    pub(super) fn conditions(&self) -> impl Iterator<Item = WorkCondition> + '_ {
+    pub(super) fn conditions(&self) -> impl Iterator<Item = WorkFilter> + '_ {
         self.terms.iter().map(|term| term.condition.clone())
     }
 
     pub(super) fn names(&self, field: WorkFilterField) -> bool {
-        self.terms.iter().any(|term| term.condition.field == field)
+        self.terms.iter().any(|term| names(&term.condition, field))
+    }
+}
+
+fn names(filter: &WorkFilter, field: WorkFilterField) -> bool {
+    match filter {
+        WorkFilter::Condition(condition) => condition.field == field,
+        WorkFilter::Any { any: members } | WorkFilter::All { all: members } => {
+            members.iter().any(|member| names(member, field))
+        }
     }
 }
 

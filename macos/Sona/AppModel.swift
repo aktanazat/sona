@@ -759,7 +759,41 @@ final class AppModel {
             workFocus.composing = draft
             return
         }
+        if openView(link) { return }
         Task { await query.open(link: link) }
+    }
+
+    /// A saved view's link, `sona://tasks?view=` or `sona://projects?view=`:
+    /// the page that shows the view opens on it. False for any other link.
+    private func openView(_ link: String) -> Bool {
+        guard let parts = URLComponents(string: link), parts.scheme?.lowercased() == "sona",
+              let id = parts.queryItems?.first(where: { $0.name == "view" })?.value
+        else { return false }
+        switch parts.host {
+        case "tasks":
+            guard let view = work.views.first(where: { $0.id == id }) else { return false }
+            reveal()
+            if let project = view.projectId {
+                workFocus.projectViews[project] = view.id
+                workFocus.projectDrafts[project] = WorkViewDraft(query: view.query, display: view.display)
+                go(.projects)
+                projects.open(project)
+            } else {
+                go(.tasks)
+                workFocus.open(nil, in: .tasks)
+                workFocus.switchTab(.view(view.id))
+            }
+            return true
+        case "projects":
+            guard let view = projects.views.first(where: { $0.id == id }) else { return false }
+            reveal()
+            go(.projects)
+            projects.closeProject()
+            UserDefaults.standard.set(projects.open(view: view).rawValue, forKey: "projects.layout")
+            return true
+        default:
+            return false
+        }
     }
 
     func open(url: URL) {

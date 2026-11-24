@@ -344,6 +344,8 @@ pub(crate) static MIGRATIONS: &[M] = &[
     ),
     M::up(crate::scratchpad::personal::MIGRATION),
     M::up(crate::planning::work::changes::PERSONAL_NOTES_MIGRATION),
+    M::up(crate::planning::work::views::VIEWS_MIGRATION),
+    M::up(crate::planning::work::changes::VIEW_CHANGES_MIGRATION),
 ];
 
 const MAX_HISTORY_PAGE_SIZE: usize = 100;

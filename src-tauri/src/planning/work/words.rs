@@ -2,7 +2,7 @@
 //! the conditions a list filters by. Every word is read, joins words that
 //! are, or is kept as not understood; none is dropped.
 
-use super::filter::{self, WorkCondition, WorkFilterField, WorkFilterOp};
+use super::filter::{self, WorkCondition, WorkFilter, WorkFilterField, WorkFilterOp};
 use super::items::MAX_ESTIMATE;
 use super::parse::{self, Lexicon, Said, WorkField, WorkToken};
 use super::types::{WorkLabel, WorkPersonChoice, WorkProjectChoice};
@@ -20,6 +20,8 @@ use tauri::State;
 #[serde(rename_all = "camelCase")]
 pub struct WorkWhere {
     /// What the words were read as, in their order; all of them must hold.
+    /// Words joined by "or" across fields read as one group, any of whose
+    /// conditions holds.
     pub terms: Vec<WorkWhereTerm>,
     /// Words read as nothing, in their order.
     pub unread: Vec<WorkWhereWord>,
@@ -30,9 +32,10 @@ pub struct WorkWhere {
 pub struct WorkWhereTerm {
     /// The words as typed.
     pub text: String,
-    /// The condition in words: "Priority is High".
+    /// The condition in words: "Priority is High", or "Priority is Urgent
+    /// or Due is before today" for a group.
     pub label: String,
-    pub condition: WorkCondition,
+    pub condition: WorkFilter,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize, Type)]
@@ -514,6 +517,10 @@ fn joined(kept: WorkFilterOp, next: WorkFilterOp, field: WorkFilterField) -> Opt
     })
 }
 
+/// Terms that hold together, each with its words: one term, or a range's
+/// two. "or" joins whole units.
+type Unit = Vec<(Range<usize>, Term)>;
+
 struct Reader<'a, Tz: TimeZone> {
     text: &'a str,
     toks: Vec<Tok>,
@@ -524,11 +531,12 @@ struct Reader<'a, Tz: TimeZone> {
 
 impl<Tz: TimeZone> Reader<'_, Tz> {
     fn read(&self) -> WorkWhere {
-        let mut terms: Vec<(Range<usize>, Term)> = Vec::new();
+        let mut units: Vec<Unit> = Vec::new();
         let mut unread: Vec<(Range<usize>, Vec<String>)> = Vec::new();
         let mut glue = vec![false; self.toks.len()];
         let mut not: Option<Range<usize>> = None;
         let mut or: Option<Range<usize>> = None;
+        let mut either: Vec<usize> = Vec::new();
         let mut at = 0;
         while at < self.toks.len() {
             let (len, reading) = self.best(at);
@@ -539,9 +547,18 @@ impl<Tz: TimeZone> Reader<'_, Tz> {
                 Reading::Not => unread.extend(not.replace(span).map(|word| (word, Vec::new()))),
                 Reading::Or => unread.extend(or.replace(span).map(|word| (word, Vec::new()))),
                 Reading::Range(first, split, last) => {
-                    unread.extend(not.take().into_iter().chain(or.take()).map(|word| (word, Vec::new())));
-                    terms.push((span.start..span.start + split, first));
-                    terms.push((span.start + split..span.end, last));
+                    unread.extend(not.take().map(|word| (word, Vec::new())));
+                    if let Some(word) = or.take() {
+                        if units.is_empty() {
+                            unread.push((word, Vec::new()));
+                        } else {
+                            either.push(units.len());
+                        }
+                    }
+                    units.push(vec![
+                        (span.start..span.start + split, first),
+                        (span.start + split..span.end, last),
+                    ]);
                 }
                 Reading::Term(mut term) => {
                     let mut span = span;
@@ -555,8 +572,11 @@ impl<Tz: TimeZone> Reader<'_, Tz> {
                         }
                     }
                     if let Some(word) = or.take() {
-                        if let Some((kept_span, kept)) =
-                            terms.last_mut().filter(|(_, kept)| kept.field == term.field)
+                        if let Some((kept_span, kept)) = units
+                            .last_mut()
+                            .filter(|unit| unit.len() == 1)
+                            .and_then(|unit| unit.last_mut())
+                            .filter(|(_, kept)| kept.field == term.field)
                         {
                             if let Some(op) = joined(kept.op, term.op, term.field) {
                                 kept.op = op;
@@ -570,9 +590,13 @@ impl<Tz: TimeZone> Reader<'_, Tz> {
                                 continue;
                             }
                         }
-                        unread.push((word, Vec::new()));
+                        if units.is_empty() {
+                            unread.push((word, Vec::new()));
+                        } else {
+                            either.push(units.len());
+                        }
                     }
-                    terms.push((span, term));
+                    units.push(vec![(span, term)]);
                 }
                 Reading::Unclear(could_be) => {
                     unread.extend(not.take().into_iter().chain(or.take()).map(|word| (word, Vec::new())));
@@ -599,19 +623,56 @@ impl<Tz: TimeZone> Reader<'_, Tz> {
             }
             runs.push((span, could_be));
         }
-        WorkWhere {
-            terms: terms
-                .into_iter()
-                .map(|(span, term)| WorkWhereTerm {
+        let mut groups: Vec<Vec<Unit>> = Vec::new();
+        for (at, unit) in units.into_iter().enumerate() {
+            match groups.last_mut().filter(|_| either.contains(&at)) {
+                Some(members) => members.push(unit),
+                None => groups.push(vec![unit]),
+            }
+        }
+        let condition = |term: Term| {
+            WorkFilter::from(WorkCondition {
+                field: term.field,
+                op: term.op,
+                values: term.values,
+            })
+        };
+        let mut terms = Vec::new();
+        for mut members in groups {
+            if members.len() == 1 {
+                terms.extend(members.remove(0).into_iter().map(|(span, term)| WorkWhereTerm {
                     text: self.words(span),
                     label: term.label(),
-                    condition: WorkCondition {
-                        field: term.field,
-                        op: term.op,
-                        values: term.values,
-                    },
+                    condition: condition(term),
+                }));
+                continue;
+            }
+            let start = members[0][0].0.start;
+            let end = members.last().and_then(|unit| unit.last()).map_or(start, |(span, _)| span.end);
+            let label = members
+                .iter()
+                .map(|unit| unit.iter().map(|(_, term)| term.label()).collect::<Vec<_>>().join(" and "))
+                .collect::<Vec<_>>()
+                .join(" or ");
+            let any = members
+                .into_iter()
+                .map(|unit| {
+                    let mut all: Vec<WorkFilter> = unit.into_iter().map(|(_, term)| condition(term)).collect();
+                    if all.len() == 1 {
+                        all.remove(0)
+                    } else {
+                        WorkFilter::All { all }
+                    }
                 })
-                .collect(),
+                .collect();
+            terms.push(WorkWhereTerm {
+                text: self.words(start..end),
+                label,
+                condition: WorkFilter::Any { any },
+            });
+        }
+        WorkWhere {
+            terms,
             unread: runs
                 .into_iter()
                 .map(|(span, could_be)| WorkWhereWord {
@@ -1078,10 +1139,11 @@ mod tests {
     fn conditions(read: &WorkWhere) -> Vec<(F, O, Vec<&str>)> {
         read.terms
             .iter()
-            .map(|term| {
-                let condition = &term.condition;
-                (condition.field, condition.op, condition.values.iter().map(String::as_str).collect())
+            .filter_map(|term| match &term.condition {
+                WorkFilter::Condition(condition) => Some(condition),
+                WorkFilter::Any { .. } | WorkFilter::All { .. } => None,
             })
+            .map(|condition| (condition.field, condition.op, condition.values.iter().map(String::as_str).collect()))
             .collect()
     }
 
@@ -1177,5 +1239,57 @@ mod tests {
 
         assert_eq!(conditions(&read), [(F::Label, O::Is, vec!["bug"])]);
         assert_eq!(unread(&read), [("mobile", vec!["label Mobile", "project Mobile"])]);
+    }
+
+    #[test]
+    fn or_between_two_fields_reads_as_either_of_them() {
+        let read = words("urgent or overdue bugs");
+        let either = |field, op, value: &str| {
+            WorkFilter::from(WorkCondition {
+                field,
+                op,
+                values: vec![value.to_owned()],
+            })
+        };
+
+        assert_eq!(read.terms.len(), 2, "{:?}", read.terms);
+        assert_eq!(
+            read.terms[0].condition,
+            WorkFilter::Any {
+                any: vec![either(F::Priority, O::Is, "1"), either(F::Due, O::Before, "today")],
+            }
+        );
+        assert_eq!(read.terms[0].text, "urgent or overdue");
+        assert_eq!(conditions(&read), [(F::Label, O::Is, vec!["bug"])]);
+        assert!(read.unread.is_empty(), "{:?}", read.unread);
+    }
+
+    #[test]
+    fn or_joins_a_date_range_whole_on_either_side() {
+        let one = |field, op, value: &str| {
+            WorkFilter::from(WorkCondition {
+                field,
+                op,
+                values: vec![value.to_owned()],
+            })
+        };
+        let range = WorkFilter::All {
+            all: vec![
+                one(F::Completed, O::After, "2026-11-01"),
+                one(F::Completed, O::Before, "2026-11-07"),
+            ],
+        };
+        let urgent = one(F::Priority, O::Is, "1");
+
+        for (text, any) in [
+            ("completed from Nov 2 to Nov 6 or urgent", vec![range.clone(), urgent.clone()]),
+            ("urgent or completed from Nov 2 to Nov 6", vec![urgent.clone(), range.clone()]),
+        ] {
+            let read = words(text);
+            assert_eq!(read.terms.len(), 1, "{text}: {:?}", read.terms);
+            assert_eq!(read.terms[0].condition, WorkFilter::Any { any }, "{text}");
+            assert_eq!(read.terms[0].text, text);
+            assert!(read.unread.is_empty(), "{text}: {:?}", read.unread);
+        }
     }
 }

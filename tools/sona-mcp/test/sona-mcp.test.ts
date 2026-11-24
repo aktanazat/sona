@@ -932,6 +932,8 @@ const SONA_WRITES = {
   remind: true,
   "view-save": true,
   "view-delete": true,
+  "project-view-save": true,
+  "project-view-delete": true,
   say: true,
   watch: true,
   unwatch: true,
@@ -1086,6 +1088,7 @@ const SONA_DESTROYS = {
   "snapshot-delete": true,
   "label-delete": true,
   "view-delete": true,
+  "project-view-delete": true,
   "favorite-folder-delete": true,
   "milestone-delete": true,
   "milestone-to-project": true,
@@ -1361,6 +1364,22 @@ describe("the stdio server", () => {
     }
 
     expect(sona.argv()).toContain(`--filter=${JSON.stringify(filter)}`);
+
+    const either = [
+      {
+        any: [
+          { field: "owner", op: "is", values: ["me"] },
+          { all: [{ field: "due", op: "is", values: ["this_week"] }] },
+        ],
+      },
+    ];
+    const grouped = await connected();
+    try {
+      await grouped.callTool({ name: "sona_work_list", arguments: { filter: either } });
+    } finally {
+      await grouped.close();
+    }
+    expect(sona.argv()).toContain(`--filter=${JSON.stringify(either)}`);
 
     const malformed = await errorOf("sona_work_list", {
       filter: [{ field: "label", op: "is", values: ["bug"], extra: true }],

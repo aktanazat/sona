@@ -757,6 +757,82 @@ BEGIN
     );
 END;";
 
+/// A task view's icon and project page join its update record, and the
+/// Projects page's views join the stream. The rebuild runs with the legacy
+/// rename for the reason `INITIATIVE_CHANGES_MIGRATION` gives.
+pub(crate) const VIEW_CHANGES_MIGRATION: &str = "PRAGMA legacy_alter_table = ON;
+CREATE TABLE planning_changes_next (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    at_ms INTEGER NOT NULL,
+    entity TEXT NOT NULL CHECK(entity IN ('task', 'project', 'comment', 'session',
+        'session_activity', 'milestone', 'cycle', 'view', 'label', 'project_update', 'note',
+        'meeting', 'initiative', 'project_view')),
+    entity_id TEXT NOT NULL,
+    task_id TEXT,
+    action TEXT NOT NULL CHECK(action IN ('create', 'update', 'remove')),
+    updated_from TEXT,
+    data TEXT,
+    sources TEXT
+);
+INSERT INTO planning_changes_next
+    (seq, at_ms, entity, entity_id, task_id, action, updated_from, data, sources)
+    SELECT seq, at_ms, entity, entity_id, task_id, action, updated_from, data, sources
+    FROM planning_changes;
+DELETE FROM sqlite_sequence WHERE name = 'planning_changes_next';
+INSERT INTO sqlite_sequence (name, seq)
+    SELECT 'planning_changes_next', seq FROM sqlite_sequence WHERE name = 'planning_changes';
+DROP TABLE planning_changes;
+ALTER TABLE planning_changes_next RENAME TO planning_changes;
+PRAGMA legacy_alter_table = OFF;
+CREATE INDEX planning_changes_at ON planning_changes(at_ms);
+CREATE TRIGGER planning_changes_prune AFTER INSERT ON planning_changes BEGIN
+    DELETE FROM planning_changes WHERE at_ms < new.at_ms - 2592000000;
+END;
+DROP TRIGGER planning_changes_view_update;
+CREATE TRIGGER planning_changes_view_update AFTER UPDATE ON planning_views
+WHEN old.name IS NOT new.name OR old.query_json IS NOT new.query_json
+    OR old.display_json IS NOT new.display_json OR old.icon IS NOT new.icon
+    OR old.project_id IS NOT new.project_id
+BEGIN
+    INSERT INTO planning_changes (at_ms, entity, entity_id, action, updated_from, data)
+    SELECT CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER), 'view', new.id,
+        'update', json_group_object(field, json(value)), json_object('name', new.name)
+    FROM (
+        SELECT 'name' AS field, json_quote(old.name) AS value WHERE old.name IS NOT new.name
+        UNION ALL SELECT 'query', old.query_json WHERE old.query_json IS NOT new.query_json
+        UNION ALL SELECT 'display', old.display_json
+            WHERE old.display_json IS NOT new.display_json
+        UNION ALL SELECT 'icon', json_quote(old.icon) WHERE old.icon IS NOT new.icon
+        UNION ALL SELECT 'project_id', json_quote(old.project_id)
+            WHERE old.project_id IS NOT new.project_id
+    );
+END;
+CREATE TRIGGER planning_changes_project_view_create AFTER INSERT ON planning_project_views BEGIN
+    INSERT INTO planning_changes (at_ms, entity, entity_id, action, data)
+    VALUES (CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER), 'project_view', new.id,
+        'create', json_object('name', new.name));
+END;
+CREATE TRIGGER planning_changes_project_view_remove AFTER DELETE ON planning_project_views BEGIN
+    INSERT INTO planning_changes (at_ms, entity, entity_id, action, data)
+    VALUES (CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER), 'project_view', old.id,
+        'remove', json_object('name', old.name));
+END;
+CREATE TRIGGER planning_changes_project_view_update AFTER UPDATE ON planning_project_views
+WHEN old.name IS NOT new.name OR old.icon IS NOT new.icon
+    OR old.filter_json IS NOT new.filter_json OR old.display_json IS NOT new.display_json
+BEGIN
+    INSERT INTO planning_changes (at_ms, entity, entity_id, action, updated_from, data)
+    SELECT CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER), 'project_view', new.id,
+        'update', json_group_object(field, json(value)), json_object('name', new.name)
+    FROM (
+        SELECT 'name' AS field, json_quote(old.name) AS value WHERE old.name IS NOT new.name
+        UNION ALL SELECT 'icon', json_quote(old.icon) WHERE old.icon IS NOT new.icon
+        UNION ALL SELECT 'filter', old.filter_json WHERE old.filter_json IS NOT new.filter_json
+        UNION ALL SELECT 'display', old.display_json
+            WHERE old.display_json IS NOT new.display_json
+    );
+END;";
+
 /// A task's meeting and loop links go with it when it is deleted, so the
 /// task's earlier changes take them as sources first: a reader can then
 /// still leave out every change on work drawn from a meeting kept on this
@@ -1302,6 +1378,70 @@ mod tests {
                 (4, "project", "update", Some(serde_json::json!({ "title": "Harbor festival" }))),
                 (5, "project", "update", Some(serde_json::json!({ "initiative": "i1" }))),
                 (6, "initiative", "remove", None),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_view_icon_or_page_and_projects_page_views_are_changes() {
+        let conn = Connection::open_in_memory().expect("a history database");
+        schema::apply_all(&conn).expect("the planner schema");
+        let project = crate::planning::catalog::save_project(
+            &conn,
+            None,
+            &crate::planning::catalog::ProjectEdit {
+                title: Some("Harbor festival".to_owned()),
+                ..Default::default()
+            },
+            1,
+        )
+        .expect("a project");
+        conn.execute(
+            "INSERT INTO planning_views (id, name, query_json, display_json, revision, created_at_ms,
+                 updated_at_ms) VALUES ('v1', 'Bugs', '{}', '{}', 1, 2, 2)",
+            [],
+        )
+        .expect("a view");
+        let before = page(&conn, None, 50).expect("a read").expect("a page");
+
+        conn.execute_batch(&format!(
+            "UPDATE planning_views SET icon = 'ladybug' WHERE id = 'v1';
+             UPDATE planning_views SET project_id = '{id}' WHERE id = 'v1';
+             INSERT INTO planning_project_views (id, name, filter_json, display_json, revision,
+                 created_at_ms, updated_at_ms) VALUES ('p1', 'Active', '{{}}', '{{}}', 1, 3, 3);
+             UPDATE planning_project_views SET icon = 'bolt', filter_json = '{{\"status\":\"active\"}}'
+                 WHERE id = 'p1';
+             DELETE FROM planning_project_views WHERE id = 'p1';",
+            id = project.id
+        ))
+        .expect("view edits");
+        let after = page(&conn, Some(before.next_cursor), 50)
+            .expect("a read")
+            .expect("a page");
+
+        let seen: Vec<_> = after
+            .changes
+            .iter()
+            .map(|change| {
+                (
+                    change.entity.as_str(),
+                    change.action.as_str(),
+                    change.updated_from.clone(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                ("view", "update", Some(serde_json::json!({ "icon": null }))),
+                ("view", "update", Some(serde_json::json!({ "project_id": null }))),
+                ("project_view", "create", None),
+                (
+                    "project_view",
+                    "update",
+                    Some(serde_json::json!({ "icon": null, "filter": {} }))
+                ),
+                ("project_view", "remove", None),
             ]
         );
     }

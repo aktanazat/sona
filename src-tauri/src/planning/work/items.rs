@@ -6,9 +6,9 @@
 use super::super::store::{self, Refusal};
 use super::parse;
 use super::types::{
-    WorkActivity, WorkActivityKind, WorkActor, WorkCounts, WorkDay, WorkDisplay, WorkDue, WorkItem,
-    WorkItemRef, WorkLabel, WorkOwner, WorkPatch, WorkPlace, WorkProgress, WorkQuery, WorkRelation,
-    WorkRelationKind, WorkStatus, WorkView,
+    WorkActivity, WorkActivityKind, WorkActor, WorkCounts, WorkDay, WorkDue, WorkItem,
+    WorkItemRef, WorkLabel, WorkOwner, WorkPatch, WorkPlace, WorkProgress, WorkRelation,
+    WorkRelationKind, WorkStatus, WorkView, WorkViewInput,
 };
 use anyhow::Result;
 use chrono::{Datelike, Days, Local, NaiveDate, TimeZone};
@@ -1433,33 +1433,38 @@ pub(crate) fn delete_label(conn: &Connection, id: &str) -> Result<Vec<String>> {
     Ok(tasks)
 }
 
-fn read_view(row: &Row<'_>) -> rusqlite::Result<(String, String, String, String, i64)> {
+const VIEW_COLUMNS: &str = "id, name, query_json, display_json, revision, icon, project_id";
+
+type ViewRow = (String, String, String, String, i64, Option<String>, Option<String>);
+
+fn read_view(row: &Row<'_>) -> rusqlite::Result<ViewRow> {
     Ok((
         row.get(0)?,
         row.get(1)?,
         row.get(2)?,
         row.get(3)?,
         row.get(4)?,
+        row.get(5)?,
+        row.get(6)?,
     ))
 }
 
-fn view_from(
-    (id, name, query, display, revision): (String, String, String, String, i64),
-) -> Result<WorkView> {
+fn view_from((id, name, query, display, revision, icon, project_id): ViewRow) -> Result<WorkView> {
     Ok(WorkView {
         id,
         name,
         query: serde_json::from_str(&query)?,
         display: serde_json::from_str(&display)?,
         revision,
+        icon,
+        project_id,
     })
 }
 
 pub(crate) fn views(conn: &Connection) -> Result<Vec<WorkView>> {
-    let mut statement = conn.prepare(
-        "SELECT id, name, query_json, display_json, revision FROM planning_views
-         ORDER BY created_at_ms, id",
-    )?;
+    let mut statement = conn.prepare(&format!(
+        "SELECT {VIEW_COLUMNS} FROM planning_views ORDER BY created_at_ms, id"
+    ))?;
     let rows = statement
         .query_map([], read_view)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1469,32 +1474,43 @@ pub(crate) fn views(conn: &Connection) -> Result<Vec<WorkView>> {
 pub(crate) fn save_view(
     conn: &Connection,
     id: Option<&str>,
-    name: &str,
-    query: &WorkQuery,
-    display: &WorkDisplay,
+    view: &WorkViewInput,
     now_ms: i64,
 ) -> Result<WorkView> {
-    let name = clean_title(name)?;
+    if view.query.filters.iter().any(super::filter::WorkFilter::has_empty_group) {
+        return Err(Refusal::Invalid.into());
+    }
+    let name = clean_title(&view.name)?;
+    let icon = super::views::clean_icon(view.icon.as_deref())?;
+    let project_id = view
+        .project_id
+        .as_deref()
+        .map(|project| super::views::existing_project(conn, project))
+        .transpose()?;
     let id = match id {
         Some(id) => store::uuid(id)?,
         None => Uuid::new_v4().to_string(),
     };
     conn.execute(
-        "INSERT INTO planning_views (id, name, query_json, display_json, revision, created_at_ms, updated_at_ms)
-         VALUES (?1, ?2, ?3, ?4, 1, ?5, ?5)
+        "INSERT INTO planning_views (id, name, query_json, display_json, revision, created_at_ms,
+            updated_at_ms, icon, project_id)
+         VALUES (?1, ?2, ?3, ?4, 1, ?5, ?5, ?6, ?7)
          ON CONFLICT(id) DO UPDATE SET name = excluded.name, query_json = excluded.query_json,
             display_json = excluded.display_json, revision = revision + 1,
-            updated_at_ms = excluded.updated_at_ms",
+            updated_at_ms = excluded.updated_at_ms, icon = excluded.icon,
+            project_id = excluded.project_id",
         params![
             id,
             name,
-            serde_json::to_string(query)?,
-            serde_json::to_string(display)?,
-            now_ms
+            serde_json::to_string(&view.query)?,
+            serde_json::to_string(&view.display)?,
+            now_ms,
+            icon,
+            project_id
         ],
     )?;
     view_from(conn.query_row(
-        "SELECT id, name, query_json, display_json, revision FROM planning_views WHERE id = ?1",
+        &format!("SELECT {VIEW_COLUMNS} FROM planning_views WHERE id = ?1"),
         [&id],
         read_view,
     )?)

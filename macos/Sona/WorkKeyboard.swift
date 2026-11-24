@@ -467,6 +467,8 @@ final class WorkFocus {
     var viewDrafts: [String: WorkViewDraft] = [:]
     /// Each project's Tasks tab keeps its own filters and display.
     var projectDrafts: [String: WorkViewDraft] = [:]
+    /// The saved view each project's Tasks tab shows, by project id.
+    var projectViews: [String: String] = [:]
     /// Which source Triage shows; nil shows all of it.
     var triageSplit: WorkSource?
     /// The change the undo toast offers to take back, and a count that
@@ -1247,11 +1249,36 @@ extension AppModel {
         }
         let toggles = rows.count == 1 ? watchToggles(ids) : []
         let overdue = overdueTargets
-        guard !overdue.isEmpty else { return verbs + toggles + copies }
-        return verbs + toggles + copies + [PaletteAction(
+        let reschedule = overdue.isEmpty ? [] : [PaletteAction(
             id: "work-reschedule-overdue", group: .work, title: "Reschedule overdue",
             run: { [weak self] in self?.perform(.due, on: overdue) },
             icon: "calendar.badge.clock", shortcut: nil)]
+        let exports = (place == .tasks || listedProject != nil) && listing != nil && !workFocus.visible.isEmpty
+            ? [PaletteAction(id: "work-export-csv", group: .work, title: "Export CSV…",
+                             run: { [weak self] in self?.exportCSV() }, icon: "tablecells", shortcut: nil)]
+            : []
+        return verbs + toggles + copies + reschedule + exports
+    }
+
+    /// The list in front, or the tasks selected in it, saved as a
+    /// spreadsheet where the person picks, in the list's order.
+    func exportCSV() {
+        let focus = workFocus
+        let ids = focus.selection.isEmpty ? focus.visible : focus.visible.filter(focus.selection.contains)
+        guard !ids.isEmpty else { return }
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.commaSeparatedText]
+        panel.nameFieldStringValue = "Tasks.csv"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        Task {
+            do {
+                let text = try await work.csv(ids)
+                try Data(text.utf8).write(to: url, options: .atomic)
+                focus.announce(ids.count == 1 ? "Exported 1 task" : "Exported \(ids.count) tasks", undoes: false)
+            } catch {
+                focus.announce("Could not export: \(error.localizedDescription)", undoes: false)
+            }
+        }
     }
 
     /// Subscribe and favorite for the one task in front, each named for

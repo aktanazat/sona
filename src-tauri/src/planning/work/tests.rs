@@ -2130,3 +2130,28 @@ fn the_weekly_digest_leaves_out_meeting_work_and_posts_once_a_week() {
         [&digest]
     );
 }
+
+#[test]
+fn a_view_with_an_empty_group_is_refused_when_saved() {
+    let desk = desk(&[]);
+    let input = |filters: &str| -> super::types::WorkViewInput {
+        serde_json::from_str(&format!(
+            r#"{{"name":"Groups","query":{{"filters":{filters}}},"display":{{"layout":"list","groupBy":"status","orderBy":"priority","showEmptyGroups":false,"properties":["id"]}}}}"#
+        ))
+        .expect("a view")
+    };
+    for empty in [
+        r#"[{"any":[]}]"#,
+        r#"[{"all":[{"field":"priority","op":"is","values":["1"]},{"any":[]}]}]"#,
+    ] {
+        let refused = items::save_view(&desk.history, None, &input(empty), 0).expect_err(empty);
+        assert_eq!(
+            refused.downcast_ref::<planning_store::Refusal>(),
+            Some(&planning_store::Refusal::Invalid),
+            "{empty}"
+        );
+    }
+    let kept = r#"[{"any":[{"field":"priority","op":"is","values":["1"]}]}]"#;
+    items::save_view(&desk.history, None, &input(kept), 0).expect("a group with a member");
+    assert_eq!(items::views(&desk.history).expect("the saved views").len(), 1);
+}
