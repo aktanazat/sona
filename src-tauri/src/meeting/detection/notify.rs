@@ -629,7 +629,7 @@ mod macos {
         UNAuthorizationOptions, UNAuthorizationStatus, UNMutableNotificationContent,
         UNNotificationAction, UNNotificationActionOptions, UNNotificationCategory,
         UNNotificationCategoryOptions, UNNotificationRequest, UNNotificationResponse,
-        UNNotificationSettings, UNUserNotificationCenter, UNUserNotificationCenterDelegate,
+        UNUserNotificationCenter, UNUserNotificationCenterDelegate,
     };
     use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
     use std::sync::{Arc, Mutex, OnceLock};
