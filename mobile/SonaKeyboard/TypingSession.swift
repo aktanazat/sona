@@ -160,7 +160,9 @@ struct TypingSession {
         switch lastKey(before: text) {
         case let .corrected(correction, separator):
             keep(correction.typed)
-            corrections.removeAll { $0.correction == correction }
+            let place = text.dropLast(separator.count)
+            let currentField = field
+            corrections.removeAll { $0.field == currentField && $0.place == place }
             let edit = Edit(deleteCount: (correction.replacement + separator).count, insert: correction.typed)
             return remember(.other, edit, on: text)
         case let .swiped(word, spaced, _):
