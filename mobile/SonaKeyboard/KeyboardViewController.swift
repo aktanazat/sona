@@ -33,6 +33,7 @@ private final class KeyboardState: ObservableObject {
 final class KeyboardViewController: UIInputViewController {
     private static let languageKey = "sona.keyboard.language"
     private let state = KeyboardState()
+    private let waveform = KeyboardWaveformLevels()
     private let typing = TypingModel()
     private let emoji = EmojiModel()
     private let tools = KeyboardTools()
@@ -125,6 +126,7 @@ final class KeyboardViewController: UIInputViewController {
             prepare: { [weak self] in self?.prepareMicrophone() },
             emoji: emoji,
             tools: tools,
+            waveform: waveform,
             microphone: { [weak self] in self?.start() },
             stop: { [weak self] in self?.finish() },
             insert: { [weak self] in self?.insertDraft() },
@@ -669,6 +671,10 @@ final class KeyboardViewController: UIInputViewController {
                     state.notice = NSLocalizedString("keyboard.sessionEnded", comment: "")
                 }
             }
+            if dictation.phase == .idle, state.warm, state.session.requestID != nil,
+               state.session.phase == .listening || state.session.phase == .finishing {
+                state.route = .appSession
+            }
             switch try KeyboardDraftStore.shared().load() {
             case .waiting(let draft):
                 state.draft = draft
@@ -725,6 +731,10 @@ final class KeyboardViewController: UIInputViewController {
         let microphone = KeyboardMicrophone()
         microphone.onEvent = { [weak self] event in self?.dictate(event) }
         microphone.onNotice = { [weak self] notice in self?.state.notice = notice }
+        microphone.onLevel = { [weak self] level in
+            guard let self, visible, dictation.phase == .listening else { return }
+            waveform.push(level)
+        }
         microphone.attach(to: view)
         self.microphone = microphone
     }
@@ -755,6 +765,7 @@ final class KeyboardViewController: UIInputViewController {
         for effect in effects {
             switch effect {
             case .beginCapture:
+                waveform.reset()
                 state.notice = nil
                 haptic.impactOccurred()
                 #if DEBUG
@@ -850,6 +861,7 @@ private struct KeyboardView: View {
     let prepare: () -> Void
     let emoji: EmojiModel
     let tools: KeyboardTools
+    let waveform: KeyboardWaveformLevels
     let microphone: () -> Void
     let stop: () -> Void
     let insert: () -> Void
@@ -901,14 +913,14 @@ private struct KeyboardView: View {
     /// keyboard has to say, beside Dictate.
     @ViewBuilder
     private var bar: some View {
-        if let query = typing.emojiQuery, let catalog = EmojiCatalog.shared {
-            EmojiSearchBar(
-                query: query, results: catalog.search(query), memory: emoji.memory,
-                pick: { glyph, base in emoji.pick(glyph, base: base) },
-                close: { typing.emojiQuery = nil; typing.layer = .emoji }
-            )
-        } else {
-            HStack(spacing: 8) {
+        HStack(spacing: 8) {
+            if let query = typing.emojiQuery, let catalog = EmojiCatalog.shared {
+                EmojiSearchBar(
+                    query: query, results: catalog.search(query), memory: emoji.memory,
+                    pick: { glyph, base in emoji.pick(glyph, base: base) },
+                    close: { typing.emojiQuery = nil; typing.layer = .emoji }
+                )
+            } else {
                 ToolsButton(tools: tools)
                 if !tools.isOpen, !tools.heldReviews.isEmpty {
                     HeldReviewButton(tools: tools)
@@ -917,17 +929,26 @@ private struct KeyboardView: View {
                     ComposeBar(tools: tools, purpose: purpose)
                 } else {
                     status.frame(maxWidth: .infinity, alignment: .leading)
-                    if state.hasFullAccess {
-                        control
-                    } else {
-                        Link("keyboard.openApp", destination: DictationLink.url)
-                            .font(.footnote.weight(.semibold))
-                            .frame(minHeight: 44)
-                    }
                 }
             }
-            .animation(.snappy(duration: 0.24), value: tools.notice)
+            let ordinaryBar = typing.emojiQuery == nil && tools.composing == nil
+            if state.hasFullAccess, ordinaryBar || state.dictating || state.waiting {
+                if state.waiting {
+                    KeyboardWaveform()
+                } else if state.dictation == .starting || state.dictation == .listening {
+                    KeyboardWaveform(levels: waveform)
+                } else if state.route == .appSession, state.warm, state.session.phase == .listening,
+                          let request = state.session.requestID {
+                    KeyboardWaveform(request: request).id(request)
+                }
+                control
+            } else if ordinaryBar {
+                Link("keyboard.openApp", destination: DictationLink.url)
+                    .font(.footnote.weight(.semibold))
+                    .frame(minHeight: 44)
+            }
         }
+        .animation(.snappy(duration: 0.24), value: tools.notice)
     }
 
     private func keys(_ rows: [[KeyCap]]) -> some View {
@@ -1015,6 +1036,51 @@ private struct KeyboardView: View {
         }
         .accessibilityLabel(Text("dictation.start"))
         .accessibilityIdentifier("keyboard-open-sona")
+    }
+}
+
+@MainActor
+@Observable
+private final class KeyboardWaveformLevels {
+    private(set) var recent = SIMD16<Float>.zero
+
+    func reset() {
+        if recent != .zero { recent = .zero }
+    }
+
+    func push(_ level: Float) {
+        let next = KeyboardLevel.append(level, to: recent)
+        if next != recent { recent = next }
+    }
+}
+
+private struct KeyboardWaveform: View {
+    var levels: KeyboardWaveformLevels?
+    var request: UUID?
+    @State private var appLevels = SIMD16<Float>.zero
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        let recent = levels?.recent ?? appLevels
+        HStack(spacing: 2) {
+            ForEach(0..<recent.scalarCount, id: \.self) { index in
+                Capsule()
+                    .fill(Theme.recording)
+                    .frame(width: 2, height: 20)
+                    .scaleEffect(x: 1, y: max(0.1, CGFloat(recent[index])))
+            }
+        }
+        .fixedSize()
+        .animation(reduceMotion ? nil : .linear(duration: 0.066), value: recent)
+        .accessibilityHidden(true)
+        .allowsHitTesting(false)
+        .task(id: request) {
+            guard let request else { return }
+            for await sample in KeyboardSessionStore.levelUpdates(for: request) {
+                let next = KeyboardLevel.append(sample.level, to: appLevels)
+                if next != appLevels { appLevels = next }
+            }
+        }
     }
 }
 

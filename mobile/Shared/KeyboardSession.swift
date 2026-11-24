@@ -1,8 +1,8 @@
 import Foundation
 import CoreFoundation
 
-/// Only control messages and the words heard so far cross the extension boundary.
-/// Microphone buffers stay in the app.
+/// Control messages, recent words and a scalar audio level cross the extension boundary.
+/// Microphone buffers stay in the process that captures them.
 struct KeyboardSessionState: Codable, Equatable {
     enum Phase: String, Codable { case off, ready, listening, finishing, finished, failed }
     var phase: Phase = .off
@@ -51,6 +51,32 @@ struct KeyboardCommand: Codable, Equatable {
     }
 }
 
+struct KeyboardLevel: Codable, Sendable {
+    static let interval: Duration = .milliseconds(66)
+    let requestID: UUID
+    let uptime: TimeInterval
+    let level: Float
+
+    static func normalized(rms: Float) -> Float {
+        guard rms.isFinite, rms > 0 else { return 0 }
+        return min(max((20 * log10(rms) + 50) / 50, 0), 1)
+    }
+
+    func isCurrent(for requestID: UUID, after previous: TimeInterval, at now: TimeInterval) -> Bool {
+        self.requestID == requestID && uptime > previous && uptime <= now && now - uptime < 0.4
+            && (0...1).contains(level)
+    }
+
+    static func append(_ level: Float, to recent: SIMD16<Float>) -> SIMD16<Float> {
+        var next = recent
+        for index in 0..<(next.scalarCount - 1) {
+            next[index] = recent[index + 1]
+        }
+        next[next.scalarCount - 1] = level
+        return next
+    }
+}
+
 struct KeyboardSessionStore {
     let directory: URL
     static func shared() throws -> Self {
@@ -64,6 +90,51 @@ struct KeyboardSessionStore {
     func publish(_ state: KeyboardSessionState) throws {
         try write(state, name: "keyboard-session.json")
         KeyboardSignal.post(.state)
+    }
+
+    private var levelFile: URL { directory.appendingPathComponent("keyboard-level.json") }
+
+    static func levelPublisher() -> AsyncStream<KeyboardLevel>.Continuation {
+        let (levels, input) = AsyncStream<KeyboardLevel>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        Task.detached(priority: .utility) {
+            guard let store = try? shared() else { return }
+            let encoder = JSONEncoder()
+            for await level in levels {
+                do {
+                    // Only a single latest frame. Atomic replacement needs no control-file lock.
+                    try encoder.encode(level).write(
+                        to: store.levelFile, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication]
+                    )
+                    KeyboardSignal.post(.level)
+                } catch { continue }
+            }
+        }
+        return input
+    }
+
+    static func levelUpdates(for requestID: UUID) -> AsyncStream<KeyboardLevel> {
+        let (levels, output) = AsyncStream<KeyboardLevel>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        let reader = Task.detached(priority: .utility) {
+            defer { output.finish() }
+            guard let store = try? shared() else { return }
+            let (signals, wake) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+            let observer = KeyboardSignal(.level) { wake.yield(()) }
+            defer { withExtendedLifetime(observer) {} }
+            wake.yield(())
+            let decoder = JSONDecoder()
+            var previous: TimeInterval = 0
+            for await _ in signals {
+                guard !Task.isCancelled else { return }
+                guard let data = try? Data(contentsOf: store.levelFile),
+                      let sample = try? decoder.decode(KeyboardLevel.self, from: data),
+                      sample.isCurrent(for: requestID, after: previous, at: ProcessInfo.processInfo.systemUptime)
+                else { continue }
+                previous = sample.uptime
+                output.yield(sample)
+            }
+        }
+        output.onTermination = { _ in reader.cancel() }
+        return levels
     }
 
     func send(_ command: KeyboardCommand) throws {
@@ -132,6 +203,7 @@ final class KeyboardSignal {
     enum Channel: String {
         case command = "com.aktanazat.sona.keyboard.command"
         case state = "com.aktanazat.sona.keyboard.state"
+        case level = "com.aktanazat.sona.keyboard.level"
     }
     private let channel: Channel
     private let receive: () -> Void
