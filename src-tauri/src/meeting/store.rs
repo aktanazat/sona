@@ -1635,6 +1635,7 @@ static MIGRATIONS: &[M] = &[
     M::up(
         "ALTER TABLE saved_prompts ADD COLUMN skill INTEGER NOT NULL DEFAULT 0 CHECK (skill IN (0, 1));",
     ),
+    M::up(include_str!("store/person_link_transcript.sql")),
 ];
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StoreError {

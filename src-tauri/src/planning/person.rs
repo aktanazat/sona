@@ -219,7 +219,7 @@ fn confirmed_conversations(
          JOIN meeting_sessions m ON m.id = l.meeting_id
          WHERE p.id = ?1 AND l.confidence = 'confirmed'
            AND m.phase != 'deleting' AND m.transcript_purged_at_utc_ms IS NULL
-           AND (l.source IN ('manual', 'title') OR EXISTS(
+           AND (l.source IN ('manual', 'title', 'transcript') OR EXISTS(
                 SELECT 1 FROM meeting_voice_speaker_resolutions r
                 JOIN meeting_speakers s ON s.speaker_id = r.speaker_id
                 WHERE s.session_id = m.id AND s.merged_into_speaker_id IS NULL

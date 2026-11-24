@@ -98,6 +98,7 @@ impl MeetingStore {
                 "calendar" => PersonLinkSource::Calendar,
                 "speaker" => PersonLinkSource::Speaker,
                 "title" => PersonLinkSource::Title,
+                "transcript" => PersonLinkSource::Transcript,
                 "manual" => PersonLinkSource::Manual,
                 _ => return Err(StoreError::Corrupt),
             };

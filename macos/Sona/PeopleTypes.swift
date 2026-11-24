@@ -92,6 +92,7 @@ enum PersonLinkSource: String, Decodable, CaseIterable {
     case calendar
     case speaker
     case title
+    case transcript
     case manual
 
     var label: String {
@@ -99,6 +100,7 @@ enum PersonLinkSource: String, Decodable, CaseIterable {
         case .calendar: "Calendar"
         case .speaker: "Speaker"
         case .title: "Title"
+        case .transcript: "Said in meeting"
         case .manual: "Manual"
         }
     }
