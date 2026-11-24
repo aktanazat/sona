@@ -97,14 +97,16 @@ final class KeyboardViewController: UIInputViewController {
         }
         tools.field = { [weak self] in
             guard let self else { return nil }
-            return FieldText(hostBefore: textBefore, hostAfter: textAfter, selection: textDocumentProxy.selectedText, echo: echo)
+            let (before, after) = textContext
+            return FieldText(hostBefore: before, hostAfter: after, selection: textDocumentProxy.selectedText, echo: echo)
         }
         tools.apply = { [weak self] step in self?.applyTool(step) }
         tools.fieldMark = { [weak self] in
             guard let self else { return KeyboardDictation.FieldMark(shown: -1, before: "", traits: "") }
             let proxy = textDocumentProxy
+            let context = textContext
             return KeyboardDictation.FieldMark(
-                id: documentID, shown: shownCount, before: joiningBefore,
+                id: documentID, shown: shownCount, before: echo.joining(before: context.before, after: context.after),
                 traits: "\(proxy.keyboardType?.rawValue ?? -1) \(proxy.returnKeyType?.rawValue ?? -1)"
             )
         }
@@ -133,7 +135,10 @@ final class KeyboardViewController: UIInputViewController {
             discard: { [weak self] in self?.discardDraft() }
         )
         let host = UIHostingController(rootView: content)
-        host.view.backgroundColor = .clear
+        /* The system passes a touch through wherever the keyboard draws nothing, so the gaps
+         * between keys and the space around a suggestion took no taps. A fill too faint to
+         * see covers the whole keyboard. */
+        host.view.backgroundColor = UIColor(white: 0, alpha: 0.01)
         addChild(host)
         host.view.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(host.view)
@@ -253,20 +258,27 @@ final class KeyboardViewController: UIInputViewController {
     /// edit. Text the keyboard did not write, or another field, empties the strip until it
     /// is worked out again for the field as it is now; a cursor move alone does not.
     private func hostChanged() {
-        let own = ownEditInFlight && documentID == editedField
-        echo.hostReported(before: textBefore, after: textAfter, ownEdit: own)
-        guard !own, session.hostChanged(field: documentID, text: fieldText) else { return }
+        let field = documentID
+        let own = ownEditInFlight && field == editedField
+        let (before, after) = textContext
+        echo.hostReported(before: before, after: after, ownEdit: own)
+        guard !own, session.hostChanged(field: field, text: before + after) else { return }
         typing.suggestions = nil
         scheduleSuggestions()
     }
 
-    private var textBefore: String { textDocumentProxy.documentContextBeforeInput ?? "" }
-    private var textAfter: String { textDocumentProxy.documentContextAfterInput ?? "" }
-    /// The text a word dropped in whole is joined to.
-    private var joiningBefore: String { echo.joining(before: textBefore, after: textAfter) }
-    private var hostBehind: Bool { echo.behind(before: textBefore, after: textAfter) }
-    /// The text around the cursor as the keyboard's last edit left it.
-    private var fieldText: String { joiningBefore + textAfter }
+    private typealias TextContext = (before: String, after: String)
+
+    private var textContext: TextContext {
+        let proxy = textDocumentProxy
+        return (proxy.documentContextBeforeInput ?? "", proxy.documentContextAfterInput ?? "")
+    }
+
+    private var fieldText: String {
+        let (before, after) = textContext
+        return echo.joining(before: before, after: after) + after
+    }
+
     /// UIKit declares this nonnull, yet some fields hand over nil, and Swift's bridge to a
     /// non-optional UUID traps on it. The same getter, declared optional, keeps nil as nil.
     private var documentID: UUID? {
@@ -329,7 +341,7 @@ final class KeyboardViewController: UIInputViewController {
         tools.typingLanguage = language.rawValue
         state.startURL = DictationLink.keyboardURL(documentID: documentID, language: language)
         UserDefaults.standard.set(language.rawValue, forKey: Self.languageKey)
-        refreshShift()
+        refreshShift(textContext)
         view.setNeedsLayout()
     }
 
@@ -347,9 +359,7 @@ final class KeyboardViewController: UIInputViewController {
         case let .character(text):
             let character = typing.face(of: text)
             if ".,!?;:)\"".contains(character) {
-                apply(session.end(
-                    with: character, before: textBefore, corrects: corrects && cursorEndsWord, hostBehind: hostBehind
-                ))
+                endWord(with: character)
             } else {
                 apply(session.type(character))
             }
@@ -357,13 +367,14 @@ final class KeyboardViewController: UIInputViewController {
         case .domain:
             apply(session.type(TypingModel.domains[0]))
         case .space, .newLine:
-            let separator = key == .space ? " " : "\n"
-            apply(session.end(
-                with: separator, before: textBefore, corrects: corrects && cursorEndsWord, hostBehind: hostBehind
-            ))
+            endWord(with: key == .space ? " " : "\n")
             typing.layer = .letters
         case .delete:
-            apply(session.backspace(before: textBefore, hostBehind: hostBehind))
+            let context = textContext
+            apply(
+                session.backspace(before: context.before, hostBehind: isHostBehind(context)),
+                to: context
+            )
         case .shift:
             toggleShift()
             return
@@ -379,9 +390,16 @@ final class KeyboardViewController: UIInputViewController {
         afterKey()
     }
 
+    private func endWord(with separator: String) {
+        let context = textContext
+        apply(session.end(
+            with: separator, before: context.before,
+            corrects: mayCorrect(context), hostBehind: isHostBehind(context)
+        ), to: context)
+    }
+
     private func afterKey() {
         lastKeyAt = Date()
-        refreshShift()
         scheduleSuggestions()
     }
 
@@ -403,7 +421,8 @@ final class KeyboardViewController: UIInputViewController {
     private func choose(_ word: String) {
         typing.hasTyped = true
         if EmojiCatalog.shared?.entry(for: word) != nil { emoji.memory.used(word) }
-        apply(session.choose(word, before: textBefore, hostBehind: hostBehind))
+        let context = textContext
+        apply(session.choose(word, before: context.before, hostBehind: isHostBehind(context)), to: context)
         afterKey()
     }
 
@@ -434,21 +453,32 @@ final class KeyboardViewController: UIInputViewController {
         state.notice = nil
         tools.notice = nil
         state.seenMessage = state.session.message
-        let before = joiningBefore
+        let context = textContext
+        let before = echo.joining(before: context.before, after: context.after)
         let landing = before + TypingSession.joiningSpace(before: before)
         let capital = typing.shift != .off || capitalizes(before: landing)
         let cased = words.map { word in
             if typing.shift == .locked { return word.uppercased() }
             return capital ? word.prefix(1).uppercased() + word.dropFirst() : word
         }
-        apply(session.swipe(cased, before: before))
+        apply(session.swipe(cased, before: before), to: context)
         afterKey()
     }
 
-    private func apply(_ edit: TypingSession.Edit) {
+    private func apply(_ edit: TypingSession.Edit, to context: TextContext? = nil) {
         markOwnEdit()
-        textDocumentProxy.apply(edit, echo: &echo)
-        session.edited(field: documentID, text: fieldText)
+        let (before, after) = context ?? textContext
+        echo.edited(before: before, after: after, deleting: edit.deleteCount, inserting: edit.insert)
+        textDocumentProxy.apply(edit)
+        recordEdit()
+    }
+
+    private func recordEdit() {
+        let context = textContext
+        session.edited(
+            field: documentID, text: echo.joining(before: context.before, after: context.after) + context.after
+        )
+        refreshShift(context)
     }
 
     /// Host reports from now until the main loop next turns are this edit going through.
@@ -462,11 +492,13 @@ final class KeyboardViewController: UIInputViewController {
     /// goes; returns how far it went.
     private func moveCursor(by offset: Int) -> Int {
         guard tools.composing == nil else { return 0 }
-        let room = offset < 0 ? -textBefore.count : textDocumentProxy.documentContextAfterInput?.count ?? 0
+        let proxy = textDocumentProxy
+        let room = offset < 0 ? -(proxy.documentContextBeforeInput?.count ?? 0) : proxy.documentContextAfterInput?.count ?? 0
         let moved = offset < 0 ? max(offset, room) : min(offset, room)
         guard moved != 0 else { return 0 }
-        textDocumentProxy.adjustTextPosition(byCharacterOffset: moved)
+        proxy.adjustTextPosition(byCharacterOffset: moved)
         typing.hasTyped = true
+        refreshShift(textContext)
         afterKey()
         return moved
     }
@@ -475,7 +507,7 @@ final class KeyboardViewController: UIInputViewController {
         guard tools.composing == nil else { return nil }
         markOwnEdit()
         guard let taken = textDocumentProxy.takeWord(echo: &echo) else { return nil }
-        session.edited(field: documentID, text: fieldText)
+        recordEdit()
         afterKey()
         return taken
     }
@@ -517,9 +549,12 @@ final class KeyboardViewController: UIInputViewController {
 
     /// A word with letters right after the cursor is being edited in the middle, so ending
     /// it here must not rewrite it.
-    private var cursorEndsWord: Bool {
-        guard let next = textDocumentProxy.documentContextAfterInput?.first else { return true }
-        return !TypingText.isWordCharacter(next)
+    private func mayCorrect(_ context: TextContext) -> Bool {
+        corrects && context.after.first.map(TypingText.isWordCharacter) != true
+    }
+
+    private func isHostBehind(_ context: TextContext) -> Bool {
+        echo.behind(before: context.before, after: context.after)
     }
 
     private func toggleShift() {
@@ -550,16 +585,16 @@ final class KeyboardViewController: UIInputViewController {
                 typing.layer = .letters
             }
         }
-        refreshShift()
+        refreshShift(textContext)
         scheduleSuggestions()
     }
 
     /// Runs after every edit, so the memory of the edit is checked against what the host
     /// shows as soon as the keyboard reads it again.
-    private func refreshShift() {
-        echo.hostReported(before: textBefore, after: textAfter, ownEdit: true)
+    private func refreshShift(_ context: TextContext) {
+        echo.hostReported(before: context.before, after: context.after, ownEdit: true)
         guard typing.shift != .locked else { return }
-        typing.shift = capitalizes(before: textBefore) ? .once : .off
+        typing.shift = capitalizes(before: context.before) ? .once : .off
     }
 
     /// Whether the field's capitalization asks for a capital after `before`.
@@ -597,8 +632,9 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private func showSuggestions(guessing: Bool) {
-        let before = textBefore
-        let ready = corrects && cursorEndsWord && !hostBehind
+        let context = textContext
+        let before = context.before
+        let ready = mayCorrect(context) && !isHostBehind(context)
         let offer = ready ? session.suggestions(before: before, guessing: guessing) : nil
         /* A correction on show stays while the same word goes on, with the word as now typed
          * in its quoted slot, until the guesses for the new letter replace it, so the strip
@@ -839,7 +875,10 @@ final class KeyboardViewController: UIInputViewController {
             if arriving {
                 tools.deliver(text, styled: true)
             } else {
-                apply(TypingSession.Edit(insert: TypingSession.joiningSpace(before: joiningBefore) + text))
+                let context = textContext
+                let before = echo.joining(before: context.before, after: context.after)
+                apply(TypingSession.Edit(insert: TypingSession.joiningSpace(before: before) + text), to: context)
+                scheduleSuggestions()
             }
         } catch { state.draft = nil; show(error) }
     }
@@ -855,6 +894,8 @@ final class KeyboardViewController: UIInputViewController {
 
 private struct KeyboardView: View {
     static let barHeight: CGFloat = 46
+    /// The whole keyboard, whose top is as high as anything may be drawn.
+    private static let space = "keyboard"
 
     @ObservedObject var state: KeyboardState
     let typing: TypingModel
@@ -881,6 +922,7 @@ private struct KeyboardView: View {
                     if state.hasFullAccess, let draft = state.draft {
                         DraftPanel(text: draft.text, insert: insert, discard: discard)
                             .frame(maxWidth: KeyGrid.maxWidth)
+                            .padding(.horizontal, KeyGrid.margin)
                             .frame(height: rowHeight * CGFloat(typing.rowCount - 1))
                         keys([typing.bottomRow(withDelete: true)]).frame(height: rowHeight)
                     } else if tools.isOpen, tools.composing == nil {
@@ -895,6 +937,7 @@ private struct KeyboardView: View {
                             typing.layer = .letters
                         }
                         .frame(maxWidth: KeyGrid.maxWidth)
+                        .padding(.horizontal, KeyGrid.margin)
                         .frame(height: proxy.size.height)
                     } else {
                         let rows = typing.rows + [typing.bottomRow(withDelete: false)]
@@ -902,10 +945,10 @@ private struct KeyboardView: View {
                     }
                 }
             }
-            .padding(.horizontal, 3)
             .zIndex(1)
         }
         .padding(.bottom, 4)
+        .coordinateSpace(.named(Self.space))
         .foregroundStyle(Theme.textPrimary).tint(Theme.accent)
     }
 
@@ -962,11 +1005,12 @@ private struct KeyboardView: View {
             }
             .overlay(alignment: .topLeading) {
                 GeometryReader { proxy in
-                    if let preview = typing.preview { KeyPreviewBalloon(preview: preview, bounds: proxy.size) }
+                    let room = proxy.frame(in: .named(Self.space)).minY
+                    if let preview = typing.preview {
+                        KeyPreviewBalloon(preview: preview, bounds: proxy.size, room: room)
+                    }
+                    if let choice = typing.accentChoice { AccentPopup(choice: choice, room: room) }
                 }
-            }
-            .overlay(alignment: .topLeading) {
-                if let choice = typing.accentChoice { AccentPopup(choice: choice) }
             }
     }
 

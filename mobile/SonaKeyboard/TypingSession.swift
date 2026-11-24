@@ -393,6 +393,10 @@ extension UITextDocumentProxy {
             before: documentContextBeforeInput ?? "", after: documentContextAfterInput ?? "",
             deleting: edit.deleteCount, inserting: edit.insert
         )
+        apply(edit)
+    }
+
+    func apply(_ edit: TypingSession.Edit) {
         for _ in 0..<edit.deleteCount { deleteBackward() }
         if !edit.insert.isEmpty { insertText(edit.insert) }
     }
