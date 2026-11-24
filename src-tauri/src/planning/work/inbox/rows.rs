@@ -83,6 +83,19 @@ pub(crate) struct Context {
     /// Link notices an older build stored for a link's other end, each with
     /// the notice of the link it mirrors.
     pub(crate) echoes: HashMap<String, String>,
+    /// The local model's verdict on a comment, where it has given one.
+    pub(crate) judged: HashMap<String, bool>,
+}
+
+impl Context {
+    pub(super) fn asking_comment(&self, comment_id: &str) -> Option<&String> {
+        let body = self.comments.get(comment_id)?;
+        self.judged
+            .get(comment_id)
+            .copied()
+            .unwrap_or_else(|| asks(body))
+            .then_some(body)
+    }
 }
 
 pub(crate) fn context(conn: &Connection) -> Result<Context> {
@@ -113,6 +126,7 @@ pub(crate) fn context(conn: &Connection) -> Result<Context> {
         tasks,
         comments,
         echoes: echoes(conn)?,
+        judged: super::asks::judged(conn)?,
     })
 }
 
@@ -201,8 +215,7 @@ fn asking<'a>(notice: &Notification, context: &'a Context) -> Option<&'a String>
         .comment_id
         .as_ref()
         .filter(|_| notice.kind == NotificationKind::Comment)
-        .and_then(|id| context.comments.get(id))
-        .filter(|body| asks(body))
+        .and_then(|id| context.asking_comment(id))
 }
 
 /// Every sentence of a comment that asks, whole;
