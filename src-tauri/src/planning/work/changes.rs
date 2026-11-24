@@ -826,6 +826,35 @@ WHERE sources IS NULL
         OR (entity = 'comment' AND json_extract(data, '$.subject_kind') = 'note'
             AND json_extract(data, '$.subject_id') NOT IN (SELECT id FROM scratch_notes)));";
 
+/// A personal document leaves no trace in the stream once it is deleted:
+/// while it lives, outside readers already skip its changes, but a deleted
+/// note can no longer say it was personal, so its changes and those of the
+/// comments on it go with it and no removal is written.
+pub(crate) const PERSONAL_NOTES_MIGRATION: &str = "DROP TRIGGER planning_changes_note_remove;
+CREATE TRIGGER planning_changes_note_remove BEFORE DELETE ON scratch_notes WHEN old.personal = 0 BEGIN
+    UPDATE planning_changes SET sources = (
+        SELECT json_group_array(json_array(kind, id)) FROM (
+            SELECT json_extract(j.value, '$[0]') AS kind, json_extract(j.value, '$[1]') AS id
+            FROM json_each(coalesce(planning_changes.sources, '[]')) j
+            UNION SELECT 'meeting', target_id FROM scratch_note_sources
+            WHERE note_id = old.id AND kind = 'meeting'))
+    WHERE ((entity = 'note' AND entity_id = old.id)
+            OR (entity = 'comment' AND json_extract(data, '$.subject_kind') = 'note'
+                AND json_extract(data, '$.subject_id') = old.id))
+        AND EXISTS (SELECT 1 FROM scratch_note_sources WHERE note_id = old.id AND kind = 'meeting');
+    INSERT INTO planning_changes (at_ms, entity, entity_id, action, data, sources)
+    VALUES (CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER), 'note', old.id,
+        'remove', json_object('title', old.title),
+        (SELECT nullif(json_group_array(json_array('meeting', target_id)), '[]')
+            FROM scratch_note_sources WHERE note_id = old.id AND kind = 'meeting'));
+END;
+CREATE TRIGGER planning_changes_personal_note_remove BEFORE DELETE ON scratch_notes WHEN old.personal = 1 BEGIN
+    DELETE FROM planning_changes
+    WHERE (entity = 'note' AND entity_id = old.id)
+        OR (entity = 'comment' AND json_extract(data, '$.subject_kind') = 'note'
+            AND json_extract(data, '$.subject_id') = old.id);
+END;";
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkChange {

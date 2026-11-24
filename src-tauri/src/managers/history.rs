@@ -342,6 +342,8 @@ pub(crate) static MIGRATIONS: &[M] = &[
         "CREATE INDEX transcription_history_spoken
             ON transcription_history(timestamp DESC, id DESC);",
     ),
+    M::up(crate::scratchpad::personal::MIGRATION),
+    M::up(crate::planning::work::changes::PERSONAL_NOTES_MIGRATION),
 ];
 
 const MAX_HISTORY_PAGE_SIZE: usize = 100;

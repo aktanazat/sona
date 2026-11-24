@@ -545,6 +545,7 @@ fn old_note(history: &Connection, body: &str, now_ms: i64) -> ScratchNote {
         pinned: false,
         created_at_ms: now_ms,
         updated_at_ms: now_ms,
+        personal: false,
     };
     history
         .execute(

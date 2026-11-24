@@ -930,6 +930,9 @@ pub(super) fn insert_link(
             draft.meeting_note_id
         ],
     )?;
+    if draft.source_kind == EvidenceSourceKind::Note {
+        crate::scratchpad::personal::filed_in(conn, draft.source_id)?;
+    }
     Ok(conn.query_row(
         &format!(
             "SELECT {EVIDENCE_COLUMNS} FROM planning_evidence_links

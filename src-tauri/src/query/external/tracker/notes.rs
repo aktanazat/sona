@@ -7,12 +7,14 @@ use super::transcript::missing_line;
 use super::{
     cycle_ref, named_cycle, now_ms, refusal, task_ref, Fence, Tracker, WorkAnswer, WriteArgs,
 };
-use crate::planning::{self, EvidenceSourceKind, EvidenceTargetKind};
+use crate::planning::work::agents;
 use crate::planning::work::types::WorkCycleRef;
+use crate::planning::{self, EvidenceSourceKind, EvidenceTargetKind};
 use crate::query::external::{ExternalError, ExternalErrorCode};
 use crate::query::QUERY_SCHEMA_VERSION;
 use crate::scratchpad::documents::{self, ScratchDocumentKind, ScratchDocumentOf};
 use crate::scratchpad::links::{self, ScratchSourceKind, ScratchSourceRef};
+use crate::scratchpad::personal::{self, Reach, ScratchNoteRole};
 use crate::scratchpad::{self, passages, Author, ScratchNote, ScratchpadError};
 use clap::{ArgGroup, Args};
 use rusqlite::{Connection, OptionalExtension as _};
@@ -185,9 +187,11 @@ pub struct ExternalNote {
     pub pinned: bool,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
+    /// A personal document, private to Sona and the agents it is shared with.
+    pub personal: bool,
 }
 
-fn project_note(note: ScratchNote) -> ExternalNote {
+pub(super) fn project_note(note: ScratchNote) -> ExternalNote {
     ExternalNote {
         id: note.id,
         title: note.title,
@@ -195,6 +199,7 @@ fn project_note(note: ScratchNote) -> ExternalNote {
         pinned: note.pinned,
         created_at_ms: note.created_at_ms,
         updated_at_ms: note.updated_at_ms,
+        personal: note.personal,
     }
 }
 
@@ -269,17 +274,45 @@ pub(super) fn request_json(request: &impl Serialize) -> Result<String, ExternalE
 }
 
 impl Tracker<'_> {
-    fn note(&self, id: &Uuid) -> Result<ScratchNote, ExternalError> {
+    /// Note `id` when the agent `agent` may act on it at `needed`. An
+    /// ordinary note needs nothing more than the verb's own scope; a
+    /// personal document no role was given on reads as absent, and one
+    /// shared at a lower role is refused naming the role it would need.
+    pub(super) fn note(
+        &self,
+        id: &Uuid,
+        agent: Option<&str>,
+        needed: ScratchNoteRole,
+    ) -> Result<ScratchNote, ExternalError> {
+        let absent = || ExternalError::new(ExternalErrorCode::NotFound, format!("No note {id}."));
+        let reach = planning::history(self.history, |conn| {
+            Ok(personal::reach(conn, &id.to_string(), agent)?)
+        })
+        .map_err(|message| refusal(self.history, message))?
+        .ok_or_else(absent)?;
+        match reach {
+            Reach::Personal(None) => return Err(absent()),
+            Reach::Personal(Some(role)) if role < needed => {
+                return Err(ExternalError::invalid(format!(
+                    "{} can {} this personal document; this needs the {} role.",
+                    agents::agent_name(agent),
+                    role.as_str(),
+                    needed.as_str()
+                ))
+                .hint("The owner changes roles in Sona's Share sheet for the document."))
+            }
+            Reach::Open | Reach::Personal(Some(_)) => {}
+        }
         scratchpad::scratchpad_get(self.app.state(), id.to_string())
             .map_err(|message| refusal(self.history, message))?
-            .ok_or_else(|| ExternalError::new(ExternalErrorCode::NotFound, format!("No note {id}.")))
+            .ok_or_else(absent)
     }
 
-    fn replayed(&self, note_id: &str) -> Result<ScratchNote, ExternalError> {
+    fn replayed(&self, note_id: &str, agent: Option<&str>) -> Result<ScratchNote, ExternalError> {
         let id = Uuid::parse_str(note_id).map_err(|_| {
             ExternalError::new(ExternalErrorCode::Failed, "The earlier run names no note.")
         })?;
-        self.note(&id)
+        self.note(&id, agent, ScratchNoteRole::View)
     }
 
     pub(super) fn receipt(
@@ -298,7 +331,7 @@ impl Tracker<'_> {
     /// one transaction that takes the write lock first, unless a run with
     /// the same operation id got there before: then that run's receipt
     /// answers and nothing is written.
-    fn write_once<T>(
+    pub(super) fn write_once<T>(
         &self,
         operation_id: &str,
         command: &str,
@@ -324,7 +357,7 @@ impl Tracker<'_> {
 
     /// Runs `change` once per operation id: a second run with the same id
     /// and request answers with the note the first one wrote.
-    fn once(
+    pub(super) fn once(
         &self,
         write: &WriteArgs,
         command: &str,
@@ -336,7 +369,13 @@ impl Tracker<'_> {
         let request = request_json(request)?;
         match self.receipt(&operation_id, command, &request)? {
             Receipt::New(()) => {}
-            Receipt::Replay(note_id) => return Ok((operation_id, self.replayed(&note_id)?, true)),
+            Receipt::Replay(note_id) => {
+                return Ok((
+                    operation_id,
+                    self.replayed(&note_id, write.agent.as_deref())?,
+                    true,
+                ))
+            }
             Receipt::Conflict => return Err(conflict(&operation_id)),
         }
         self.applies("writing notes")?;
@@ -348,7 +387,11 @@ impl Tracker<'_> {
                 scratchpad::emit_changed(self.app, &note.id, false);
                 Ok((operation_id, note, false))
             }
-            Receipt::Replay(note_id) => Ok((operation_id, self.replayed(&note_id)?, true)),
+            Receipt::Replay(note_id) => Ok((
+                operation_id,
+                self.replayed(&note_id, write.agent.as_deref())?,
+                true,
+            )),
             Receipt::Conflict => Err(conflict(&operation_id)),
         }
     }
@@ -458,7 +501,12 @@ impl Tracker<'_> {
         };
         match self.receipt(&operation_id, "cli_note_passage", &request)? {
             Receipt::New(()) => {}
-            Receipt::Replay(note_id) => return Ok(created(self.replayed(&note_id)?, true)),
+            Receipt::Replay(note_id) => {
+                return Ok(created(
+                    self.replayed(&note_id, args.write.agent.as_deref())?,
+                    true,
+                ))
+            }
             Receipt::Conflict => return Err(conflict(&operation_id)),
         }
         let line = review
@@ -518,7 +566,7 @@ impl Tracker<'_> {
     }
 
     /// The task `--task` or the project `--project` names.
-    async fn planning_document(
+    pub(super) async fn planning_document(
         &self,
         task: Option<&str>,
         project: Option<&str>,
@@ -547,7 +595,7 @@ impl Tracker<'_> {
     }
 
     /// The cycle `--cycle` names: its number, and how it reads as a document.
-    fn cycle_document(
+    pub(super) fn cycle_document(
         &self,
         cycle: WorkCycleRef,
     ) -> Result<(i64, ScratchDocumentOf), ExternalError> {
@@ -572,7 +620,7 @@ impl Tracker<'_> {
 
     /// Files note `note_id` as a document of `document`. Filing it again
     /// changes nothing.
-    async fn file_document(
+    pub(super) async fn file_document(
         &self,
         note_id: &str,
         document: &ScratchDocumentOf,
@@ -618,10 +666,14 @@ impl Tracker<'_> {
     /// `note-link --cycle` and `note-unlink --cycle`: files the note under
     /// a cycle or takes it off. Both settle on the same state when run twice.
     fn note_cycle(&self, args: &NoteLinkArgs, link: bool) -> Result<WorkAnswer, ExternalError> {
-        let note = self.note(&args.note)?;
-        let cycle = args
-            .cycle
-            .ok_or_else(|| ExternalError::invalid("Name a meeting, a person, a note or a cycle."))?;
+        let note = self.note(
+            &args.note,
+            args.write.agent.as_deref(),
+            ScratchNoteRole::Edit,
+        )?;
+        let cycle = args.cycle.ok_or_else(|| {
+            ExternalError::invalid("Name a meeting, a person, a note or a cycle.")
+        })?;
         let (number, document) = self.cycle_document(cycle)?;
         let present = planning::history(self.history, |conn| {
             documents::documents_of(conn, &note.id, |_, _| false)
@@ -660,7 +712,11 @@ impl Tracker<'_> {
     }
 
     pub(super) fn note_edit(&self, args: &NoteEditArgs) -> Result<WorkAnswer, ExternalError> {
-        let note = self.note(&args.note)?;
+        let note = self.note(
+            &args.note,
+            args.write.agent.as_deref(),
+            ScratchNoteRole::Edit,
+        )?;
         let unchanged = note.body == args.body;
         if args.dry_run || unchanged {
             let mut shown = note;
@@ -698,7 +754,11 @@ impl Tracker<'_> {
     }
 
     pub(super) fn note_pin(&self, args: &NotePinArgs) -> Result<WorkAnswer, ExternalError> {
-        let note = self.note(&args.note)?;
+        let note = self.note(
+            &args.note,
+            args.write.agent.as_deref(),
+            ScratchNoteRole::Edit,
+        )?;
         let pinned = !args.unpin;
         let action = if pinned {
             NoteAction::Pinned
@@ -734,12 +794,20 @@ impl Tracker<'_> {
     }
 
     pub(super) async fn note_link(&self, args: &NoteLinkArgs) -> Result<WorkAnswer, ExternalError> {
-        let note = self.note(&args.note)?;
+        let note = self.note(
+            &args.note,
+            args.write.agent.as_deref(),
+            ScratchNoteRole::Edit,
+        )?;
         let Some(source) = args.source() else {
             return self.note_cycle(args, true);
         };
         if source.kind == ScratchSourceKind::Note {
-            self.note(&args.other.unwrap_or_default())?;
+            self.note(
+                &args.other.unwrap_or_default(),
+                args.write.agent.as_deref(),
+                ScratchNoteRole::View,
+            )?;
         }
         let memory = links::scratchpad_memory(self.app.state(), self.app.state(), note.id.clone())
             .await
@@ -865,7 +933,11 @@ impl Tracker<'_> {
             }
             Receipt::Conflict => return Err(conflict(&operation_id)),
         }
-        let note = self.note(&args.note)?;
+        let note = self.note(
+            &args.note,
+            args.write.agent.as_deref(),
+            ScratchNoteRole::Edit,
+        )?;
         if args.dry_run {
             return Ok(Self::note_change(
                 NoteAction::Deleted,
@@ -895,7 +967,11 @@ impl Tracker<'_> {
     }
 
     pub(super) fn note_restore(&self, args: &NoteRestoreArgs) -> Result<WorkAnswer, ExternalError> {
-        let note = self.note(&args.note)?;
+        let note = self.note(
+            &args.note,
+            args.write.agent.as_deref(),
+            ScratchNoteRole::Edit,
+        )?;
         let versions = scratchpad::scratchpad_versions(self.app.state(), note.id.clone())
             .map_err(|message| refusal(self.history, message))?;
         let body = versions
@@ -932,7 +1008,7 @@ impl Tracker<'_> {
                     NoteAction::Restored,
                     false,
                     Some(operation_id),
-                    Some(self.replayed(&note_id)?),
+                    Some(self.replayed(&note_id, args.write.agent.as_deref())?),
                     true,
                 ))
             }
@@ -961,7 +1037,11 @@ impl Tracker<'_> {
         &self,
         args: &NoteLinkArgs,
     ) -> Result<WorkAnswer, ExternalError> {
-        let note = self.note(&args.note)?;
+        let note = self.note(
+            &args.note,
+            args.write.agent.as_deref(),
+            ScratchNoteRole::Edit,
+        )?;
         let Some(source) = args.source() else {
             return self.note_cycle(args, false);
         };
@@ -1035,7 +1115,11 @@ impl Tracker<'_> {
         .await
         .map_err(|message| refusal(self.history, message))?;
         self.file_receipt(&operation_id, "cli_note_unlink", &request, &note.id)?;
-        let now = self.note(&args.note)?;
+        let now = self.note(
+            &args.note,
+            args.write.agent.as_deref(),
+            ScratchNoteRole::View,
+        )?;
         Ok(answer(false, Some(operation_id), now, false, unlinked))
     }
 }

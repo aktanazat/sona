@@ -60,7 +60,7 @@ pub(crate) fn read(
         let subject = conn.query_row("SELECT id, title, current_note_id, created_at_ms FROM scratch_subjects WHERE id = ?1", params![id], subject_row).optional()?;
         let Some(subject) = subject else { return Ok(None) };
         let current = subject.current_note_id.as_deref().map(|id| note_with_connection(conn, id)).transpose()?.flatten();
-        let mut statement = conn.prepare("SELECT n.id, n.title, n.body, n.pinned, n.created_at_ms, n.updated_at_ms FROM scratch_notes n JOIN scratch_subject_notes s ON s.note_id = n.id WHERE s.subject_id = ?1 ORDER BY s.added_at_ms DESC, n.id")?;
+        let mut statement = conn.prepare("SELECT n.id, n.title, n.body, n.pinned, n.created_at_ms, n.updated_at_ms, n.personal FROM scratch_notes n JOIN scratch_subject_notes s ON s.note_id = n.id WHERE s.subject_id = ?1 ORDER BY s.added_at_ms DESC, n.id")?;
         let history = statement.query_map(params![id], super::read_note_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(Some(ScratchSubjectPage { subject, current, history }))
     }).map_err(|_| "The subject could not be read.".to_string())

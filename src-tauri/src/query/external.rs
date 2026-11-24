@@ -72,7 +72,7 @@ use crate::scratchpad::{self, ScratchNote, ScratchNoteMemory, ScratchNoteVersion
 use crate::settings::AppSettings;
 use chrono::{DateTime, Datelike, Days, Local, NaiveDate, TimeZone};
 use serde::Serialize;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -1620,13 +1620,19 @@ pub async fn answer(
             Ok(ExternalResponse::Notes(notes_page(history, *limit)?))
         }
         ExternalRequest::Note { id } => {
+            let personal = personal_documents(history)?;
+            if personal.contains(id) {
+                return Err(missing_note(id));
+            }
             let store = store(meetings).await?;
             let kept_local = kept_local(&store)?;
-            let memory = scratchpad::read_note_with_sources(history, &store, id, |kind, source_id| {
-                evidence_kept_local(kind, source_id, &kept_local)
-            })
-            .map_err(|message| note_read_error(history, message))?
-            .ok_or_else(|| missing_note(id))?;
+            let memory =
+                scratchpad::read_note_with_sources(history, &store, id, |kind, source_id| {
+                    evidence_kept_local(kind, source_id, &kept_local)
+                        || (kind == EvidenceSourceKind::Note && personal.contains(source_id))
+                })
+                .map_err(|message| note_read_error(history, message))?
+                .ok_or_else(|| missing_note(id))?;
             Ok(ExternalResponse::Note(ExternalNoteDetail {
                 schema_version: QUERY_SCHEMA_VERSION,
                 memory,
@@ -1646,14 +1652,20 @@ pub async fn answer(
             .await?;
             let store = store(meetings).await?;
             let kept_local = kept_local(&store)?;
+            let personal = personal_documents(history)?;
             let mut entries = Vec::with_capacity(page.entries.len());
             for row in page.entries {
-                let memory =
-                    scratchpad::read_note_with_sources(history, &store, &row.id, |kind, source_id| {
+                let memory = scratchpad::read_note_with_sources(
+                    history,
+                    &store,
+                    &row.id,
+                    |kind, source_id| {
                         evidence_kept_local(kind, source_id, &kept_local)
-                    })
-                    .map_err(|message| note_read_error(history, message))?
-                    .ok_or_else(|| missing_note(&row.id))?;
+                            || (kind == EvidenceSourceKind::Note && personal.contains(source_id))
+                    },
+                )
+                .map_err(|message| note_read_error(history, message))?
+                .ok_or_else(|| missing_note(&row.id))?;
                 entries.push(ExternalNoteContextEntry {
                     note: memory.note,
                     matched_text: row.snippet,
@@ -2809,7 +2821,7 @@ fn project_evidence(evidence: planning::EvidenceLink) -> ExternalPlanningEvidenc
 }
 
 fn notes_page(history: &HistoryManager, limit: usize) -> Result<ExternalNotesPage, ExternalError> {
-    let mut notes = scratchpad::search_notes(history, "", None, limit + 1)
+    let mut notes = scratchpad::search_notes_after(history, "", None, None, limit + 1, false)
         .map_err(|message| note_read_error(history, message))?;
     let has_more = notes.len() > limit;
     notes.truncate(limit);
@@ -2834,9 +2846,21 @@ fn note_versions(
     history: &HistoryManager,
     id: &str,
 ) -> Result<Vec<ScratchNoteVersion>, ExternalError> {
+    if personal_documents(history)?.contains(id) {
+        return Err(missing_note(id));
+    }
     scratchpad::read_versions(history, id)
         .map_err(|message| note_read_error(history, message))?
         .ok_or_else(|| missing_note(id))
+}
+
+/// The personal documents: no reader of this plane sees them, nor learns
+/// that they exist. Agents reach the ones shared with them by name through
+/// `sona work personal`.
+fn personal_documents(history: &HistoryManager) -> Result<HashSet<String>, ExternalError> {
+    history
+        .with_connection(|conn| Ok(scratchpad::personal::personal_ids(conn)?))
+        .map_err(|_| note_read_error(history, "Notes could not be read.".to_string()))
 }
 
 fn note_diff(id: &str, from: &ScratchNoteVersion, to: &ScratchNoteVersion) -> ExternalNoteDiff {

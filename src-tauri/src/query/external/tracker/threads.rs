@@ -21,10 +21,10 @@ use crate::planning::work::{self};
 use crate::planning::{Milestone, Project};
 use crate::query::external::{local_time, review, store, ExternalError, ExternalErrorCode};
 use crate::query::QUERY_SCHEMA_VERSION;
-use crate::scratchpad;
+use crate::scratchpad::personal::ScratchNoteRole;
 use chrono::{Local, NaiveDate};
-use rusqlite::Connection;
 use clap::{ArgGroup, Args, Subcommand};
+use rusqlite::Connection;
 use serde::Serialize;
 use std::fmt::Write as _;
 use uuid::Uuid;
@@ -164,6 +164,10 @@ pub struct CommentsArgs {
     /// The `next_cursor` of the page before.
     #[arg(long, value_name = "COMMENT")]
     pub cursor: Option<Uuid>,
+    /// Who is reading, as Sona shows agents; a personal document's threads
+    /// show only to an agent it is shared with.
+    #[arg(long, value_name = "NAME")]
+    pub agent: Option<String>,
 }
 
 #[derive(Args, Clone, Debug, Eq, PartialEq)]
@@ -393,12 +397,15 @@ impl Tracker<'_> {
         }
     }
 
-    /// What TASK or `on` names, refused when the caller may not see it.
+    /// What TASK or `on` names, refused when the caller may not see it; a
+    /// personal document also needs the agent `agent` to hold `needed` on it.
     async fn subject(
         &self,
         board: &Board,
         task: Option<&TaskRef>,
         on: &CommentOnArgs,
+        agent: Option<&str>,
+        needed: ScratchNoteRole,
     ) -> Result<Subject, ExternalError> {
         if let Some(task) = task {
             return Ok(Subject::task(board.task(task)?));
@@ -423,9 +430,11 @@ impl Tracker<'_> {
                 .await;
         }
         if let Some(note) = on.note {
-            return self.note_subject(&note.to_string())?.ok_or_else(|| {
-                ExternalError::new(ExternalErrorCode::NotFound, format!("No note {note}."))
-            });
+            return self
+                .note_subject(&note.to_string(), agent, needed)?
+                .ok_or_else(|| {
+                    ExternalError::new(ExternalErrorCode::NotFound, format!("No note {note}."))
+                });
         }
         Err(ExternalError::invalid(
             "Name a task, or pass --project, --meeting or --note.",
@@ -447,12 +456,21 @@ impl Tracker<'_> {
         })
     }
 
-    fn note_subject(&self, id: &str) -> Result<Option<Subject>, ExternalError> {
-        let note = planning::history(self.history, |conn| {
-            scratchpad::note_with_connection(conn, id)
-        })
-        .map_err(|message| refusal(self.history, message))?;
-        Ok(note.map(|note| Subject {
+    fn note_subject(
+        &self,
+        id: &str,
+        agent: Option<&str>,
+        needed: ScratchNoteRole,
+    ) -> Result<Option<Subject>, ExternalError> {
+        let Ok(uuid) = Uuid::parse_str(id) else {
+            return Ok(None);
+        };
+        let note = match self.note(&uuid, agent, needed) {
+            Ok(note) => note,
+            Err(error) if error.error == ExternalErrorCode::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        Ok(Some(Subject {
             kind: WorkCommentSubject::Note,
             id: note.id.clone(),
             on: ExternalCommentOn::Note(ExternalCommentSubjectRef {
@@ -467,6 +485,8 @@ impl Tracker<'_> {
         &self,
         board: &Board,
         comment: &WorkComment,
+        agent: Option<&str>,
+        needed: ScratchNoteRole,
     ) -> Result<Option<Subject>, ExternalError> {
         let id = comment.item_id.as_str();
         Ok(match comment.subject {
@@ -494,7 +514,7 @@ impl Tracker<'_> {
                 },
                 Err(_) => None,
             },
-            WorkCommentSubject::Note => self.note_subject(id)?,
+            WorkCommentSubject::Note => self.note_subject(id, agent, needed)?,
         })
     }
 
@@ -504,11 +524,13 @@ impl Tracker<'_> {
         &self,
         board: &Board,
         id: &Uuid,
+        agent: Option<&str>,
+        needed: ScratchNoteRole,
     ) -> Result<(WorkComment, Subject), ExternalError> {
         let found = planning::history(self.history, |conn| comments::thread(conn, &id.to_string()))
             .map_err(|_| missing_comment(id))?;
         let subject = self
-            .subject_of(board, &found)
+            .subject_of(board, &found, agent, needed)
             .await?
             .ok_or_else(|| missing_comment(id))?;
         let comment = if found.id == id.to_string() {
@@ -544,7 +566,15 @@ impl Tracker<'_> {
 
     pub(super) async fn comments(&self, args: &CommentsArgs) -> Result<WorkAnswer, ExternalError> {
         let board = self.board().await?;
-        let subject = self.subject(&board, args.task.as_ref(), &args.on).await?;
+        let subject = self
+            .subject(
+                &board,
+                args.task.as_ref(),
+                &args.on,
+                args.agent.as_deref(),
+                ScratchNoteRole::View,
+            )
+            .await?;
         let limit = args
             .limit
             .and_then(|limit| usize::try_from(limit).ok())
@@ -567,9 +597,20 @@ impl Tracker<'_> {
         args: &CommentAddArgs,
     ) -> Result<WorkAnswer, ExternalError> {
         let board = self.board().await?;
-        let subject = self.subject(&board, args.task.as_ref(), &args.on).await?;
+        let agent = args.write.agent.as_deref();
+        let subject = self
+            .subject(
+                &board,
+                args.task.as_ref(),
+                &args.on,
+                agent,
+                ScratchNoteRole::Comment,
+            )
+            .await?;
         if let Some(reply_to) = &args.reply_to {
-            let (to, _) = self.comment_on(&board, reply_to).await?;
+            let (to, _) = self
+                .comment_on(&board, reply_to, agent, ScratchNoteRole::Comment)
+                .await?;
             if to.subject != subject.kind || to.item_id != subject.id {
                 return Err(ExternalError::invalid(format!(
                     "Comment {reply_to} is on something else."
@@ -615,7 +656,14 @@ impl Tracker<'_> {
         args: &CommentEditArgs,
     ) -> Result<WorkAnswer, ExternalError> {
         let board = self.board().await?;
-        let (comment, subject) = self.comment_on(&board, &args.comment).await?;
+        let (comment, subject) = self
+            .comment_on(
+                &board,
+                &args.comment,
+                args.write.agent.as_deref(),
+                ScratchNoteRole::Comment,
+            )
+            .await?;
         let operation_id = args.write.operation_id(
             "comment-edit",
             &(&comment.id, comment.edited_at_ms, args.body.trim()),
@@ -657,7 +705,14 @@ impl Tracker<'_> {
         args: &CommentDeleteArgs,
     ) -> Result<WorkAnswer, ExternalError> {
         let board = self.board().await?;
-        let (comment, subject) = self.comment_on(&board, &args.comment).await?;
+        let (comment, subject) = self
+            .comment_on(
+                &board,
+                &args.comment,
+                args.write.agent.as_deref(),
+                ScratchNoteRole::Comment,
+            )
+            .await?;
         let operation_id = args.write.operation_id("comment-delete", &comment.id)?;
         if args.dry_run {
             return Ok(Self::comment_change(
@@ -696,7 +751,14 @@ impl Tracker<'_> {
             CommentAction::Resolved
         };
         let board = self.board().await?;
-        let (comment, subject) = self.comment_on(&board, &args.comment).await?;
+        let (comment, subject) = self
+            .comment_on(
+                &board,
+                &args.comment,
+                args.write.agent.as_deref(),
+                ScratchNoteRole::Comment,
+            )
+            .await?;
         let thread = planning::history(self.history, |conn| comments::thread(conn, &comment.id))
             .map_err(|message| refusal(self.history, message))?;
         let operation_id = args.write.operation_id(

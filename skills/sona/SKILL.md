@@ -399,6 +399,12 @@ sona work note-unlink <NOTE_ID> --meeting <MEETING_ID> # takes a source off the 
 sona work note-delete <NOTE_ID>                # the note and its versions; cannot be undone
 sona work note-restore <NOTE_ID> <VERSION_ID>  # versions: sona --note-versions <NOTE_ID>
 sona work note-passage <MEETING_ID> <SEGMENT_ID> --excerpt "keep the free tier" [--person "Dana Reyes"] [--body "…"]   # the transcript's Save passage
+sona work personal --agent "Codex"             # personal documents shared with you, with your role (view, comment, edit)
+sona work personal-show <NOTE_ID> --agent "Codex"   # one of them: words, your role, who else it is shared with
+sona work personal-new "Draft offer for Dana" --agent "Codex"   # private to the user; you get the edit role
+sona work personal-share <NOTE_ID> --with "Claude Code" --role comment --agent "Codex"   # --role none takes them off; needs edit
+sona work personal-move <NOTE_ID> --project "Hiring" --agent "Codex"   # or --task, --cycle: an ordinary note now; sharing ends
+sona work personal-private <NOTE_ID> --agent "Codex"   # a filed note back to personal, shared with you at edit
 sona work subjects                             # read-only
 sona work subject-new "Pricing"
 sona work subject-note <SUBJECT_ID> <NOTE_ID> [--current | --remove]

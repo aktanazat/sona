@@ -4779,6 +4779,61 @@ pub(super) async fn call(
             })
             .await?
         }
+        "scratchpad_create_personal" => {
+            let mut args = Args::parse(params)?;
+            let body = args.take("body")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::scratchpad::personal::scratchpad_create_personal(
+                    handle.clone(),
+                    handle.state(),
+                    body,
+                ))
+            })
+            .await?
+        }
+        "scratchpad_make_personal" => {
+            let mut args = Args::parse(params)?;
+            let id = args.take("id")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::scratchpad::personal::scratchpad_make_personal(
+                    handle.clone(),
+                    handle.state(),
+                    id,
+                ))
+            })
+            .await?
+        }
+        "scratchpad_collaborators" => {
+            let mut args = Args::parse(params)?;
+            let id = args.take("id")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::scratchpad::personal::scratchpad_collaborators(
+                    handle.state(),
+                    id,
+                ))
+            })
+            .await?
+        }
+        "scratchpad_share" => {
+            let mut args = Args::parse(params)?;
+            let id = args.take("id")?;
+            let agent = args.take("agent")?;
+            let role = args.take("role")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::scratchpad::personal::scratchpad_share(
+                    handle.clone(),
+                    handle.state(),
+                    id,
+                    agent,
+                    role,
+                ))
+            })
+            .await?
+        }
         "scratchpad_synthesize" => {
             let mut args = Args::parse(params)?;
             let sources = args.take("sources")?;

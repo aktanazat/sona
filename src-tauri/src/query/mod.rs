@@ -145,6 +145,12 @@ impl QueryAudience {
         self != Self::Remote
     }
 
+    /// Personal documents: only this app's own screens; agents reach the
+    /// ones shared with them through `sona work personal`.
+    fn reads_personal_documents(self) -> bool {
+        self == Self::Local
+    }
+
     /// D14 for this audience: the series kept on this Mac are hidden from
     /// every reader but the app's own screens.
     pub(crate) fn kept_local(self, store: &MeetingStore) -> Result<Option<KeptLocal>, StoreError> {
@@ -650,6 +656,7 @@ pub async fn search(
                 .filter(|cursor| cursor.kind == QueryRowKind::Note)
                 .map(|cursor| cursor.id.as_str()),
             limit + 1,
+            audience.reads_personal_documents(),
         )
         .map_err(|_| storage_failure())?;
         candidates.extend(notes.iter().map(note_row));

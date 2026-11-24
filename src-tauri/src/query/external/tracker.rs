@@ -438,6 +438,24 @@ pub enum WorkVerb {
     /// Save a passage of a meeting's transcript as a note, the way the
     /// transcript's "Save passage" does.
     NotePassage(notes::NotePassageArgs),
+    /// Personal documents shared with the agent named by --agent, with its
+    /// role on each, newest changed first.
+    Personal(personal::PersonalListArgs),
+    /// One personal document shared with the agent named by --agent: its
+    /// words, the agent's role and who else it is shared with.
+    PersonalShow(personal::PersonalShowArgs),
+    /// Make a personal document: private, shared with the agent making it
+    /// at the edit role.
+    PersonalNew(personal::PersonalNewArgs),
+    /// Share a personal document with an agent at view, comment or edit, or
+    /// take it off with --role none. Needs the edit role on it.
+    PersonalShare(personal::PersonalShareArgs),
+    /// Move a personal document into a task, a project or a cycle, as an
+    /// ordinary note with its words and versions. Needs the edit role.
+    PersonalMove(personal::PersonalMoveArgs),
+    /// Make a note private again: off every project, task and cycle it was
+    /// filed under, a personal document shared with the agent doing it.
+    PersonalPrivate(personal::PersonalPrivateArgs),
     /// The subjects notes gather under.
     Subjects,
     /// Make a note subject.
@@ -1834,6 +1852,12 @@ impl WorkVerb {
             | Self::NoteDelete(notes::NoteDeleteArgs { dry_run: true, .. })
             | Self::NoteRestore(notes::NoteRestoreArgs { dry_run: true, .. })
             | Self::NotePassage(notes::NotePassageArgs { dry_run: true, .. })
+            | Self::Personal(_)
+            | Self::PersonalShow(_)
+            | Self::PersonalNew(personal::PersonalNewArgs { dry_run: true, .. })
+            | Self::PersonalShare(personal::PersonalShareArgs { dry_run: true, .. })
+            | Self::PersonalMove(personal::PersonalMoveArgs { dry_run: true, .. })
+            | Self::PersonalPrivate(personal::PersonalPrivateArgs { dry_run: true, .. })
             | Self::Subjects
             | Self::SubjectNew(subjects::SubjectNewArgs { dry_run: true, .. })
             | Self::SubjectNote(subjects::SubjectNoteArgs { dry_run: true, .. })
@@ -1987,6 +2011,10 @@ impl WorkVerb {
             | Self::NoteDelete(_)
             | Self::NoteRestore(_)
             | Self::NotePassage(_)
+            | Self::PersonalNew(_)
+            | Self::PersonalShare(_)
+            | Self::PersonalMove(_)
+            | Self::PersonalPrivate(_)
             | Self::SubjectNew(_)
             | Self::SubjectNote(_)
             | Self::SubjectDelete(_)
@@ -2246,6 +2274,8 @@ pub enum WorkAnswer {
     Day(organize::ExternalWorkDay),
     Brief(Box<organize::ExternalWorkBrief>),
     Note(Box<notes::ExternalNoteChange>),
+    PersonalDocuments(personal::ExternalPersonalDocuments),
+    PersonalDocument(Box<personal::ExternalPersonalDocument>),
     Subjects(Box<subjects::ExternalSubjects>),
     Planner(Box<planner::PlannerAnswer>),
     TriageHints(Box<triage_hints::TriageHintsAnswer>),
@@ -3099,6 +3129,12 @@ pub(super) async fn answer(
         WorkVerb::NoteDelete(args) => tracker.note_delete(args).await,
         WorkVerb::NoteRestore(args) => tracker.note_restore(args),
         WorkVerb::NotePassage(args) => tracker.note_passage(args).await,
+        WorkVerb::Personal(args) => tracker.personal_list(args),
+        WorkVerb::PersonalShow(args) => tracker.personal_show(args),
+        WorkVerb::PersonalNew(args) => tracker.personal_new(args),
+        WorkVerb::PersonalShare(args) => tracker.personal_share(args),
+        WorkVerb::PersonalMove(args) => tracker.personal_move(args).await,
+        WorkVerb::PersonalPrivate(args) => tracker.personal_private(args),
         WorkVerb::Subjects => tracker.subjects(),
         WorkVerb::SubjectNew(args) => tracker.subject_new(args),
         WorkVerb::SubjectNote(args) => tracker.subject_note(args),
@@ -6677,6 +6713,9 @@ impl WorkAnswer {
             Self::MeetingSettings(answer) => meeting_settings::text(answer, &mut text),
             Self::Settings(_) => preferences::text(self, &mut text),
             Self::Note(_) => notes::text(self, &mut text),
+            Self::PersonalDocuments(_) | Self::PersonalDocument(_) => {
+                personal::text(self, &mut text)
+            }
             Self::Subjects(_) => subjects::text(self, &mut text),
             Self::Planner(_) => planner::text(self, &mut text),
             Self::TriageHints(_) => triage_hints::text(self, &mut text),
@@ -6926,6 +6965,8 @@ impl WorkAnswer {
             | Self::Day(_)
             | Self::Brief(_)
             | Self::Note(_)
+            | Self::PersonalDocuments(_)
+            | Self::PersonalDocument(_)
             | Self::Subjects(_)
             | Self::Planner(_)
             | Self::Settings(_)
@@ -7441,37 +7482,38 @@ fn filters_text(filters: &ExternalWorkFilters) -> String {
 
 mod attachments;
 mod catalog;
-mod preferences;
 mod cloud;
 mod dictation_rules;
 mod lifecycle;
 mod notes;
 mod organize;
 mod people;
+mod personal;
+mod preferences;
 mod roadmap;
 mod save;
 pub(crate) use save::MeetingFence;
-mod speakers;
-mod voices;
-mod sources;
-mod library;
-mod transcript;
+mod agent_loops;
+mod dependencies;
 mod dictations;
+mod digest;
+mod initiatives;
+mod insights;
+mod library;
 mod meeting_review;
 mod meeting_settings;
-mod sessions;
-mod routines;
-mod agent_loops;
-mod threads;
 mod planner;
-mod triage_hints;
-mod subjects;
-mod dependencies;
-mod initiatives;
-mod digest;
 mod project_templates;
+mod routines;
+mod sessions;
+mod sources;
+mod speakers;
+mod subjects;
+mod threads;
 mod timeline;
-mod insights;
+mod transcript;
+mod triage_hints;
+mod voices;
 mod words;
 
 #[cfg(test)]
