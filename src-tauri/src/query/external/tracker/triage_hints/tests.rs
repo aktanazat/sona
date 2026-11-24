@@ -982,3 +982,83 @@ fn a_kept_meeting_counted_only_for_who_was_there_hides_the_suggestion() {
         Vec::<&str>::new()
     );
 }
+
+/// Five Optics tasks back Ines Moreau, and two Power tasks share the title of
+/// the one to file. With `older` set, four older Power tasks came from a
+/// meeting Ines attended and this Mac keeps, which weighs against her.
+fn ines_offer(older: bool) -> (Vec<WorkFieldSuggestion>, Option<MeetingSessionId>) {
+    let mut desk = Desk::new();
+    let ines = person(&desk.meetings, "Ines Moreau", &[], &[]);
+    let optics = desk.project("Optics");
+    let power = desk.project("Power");
+    let kept = older.then(|| {
+        let held = meeting(&desk.meetings, "Supply review", AT);
+        link(&desk.meetings, held, ines, "calendar", "confirmed");
+        for title in [
+            "Order the fuses",
+            "Meter the feed",
+            "Book the outage",
+            "Tag the cables",
+        ] {
+            desk.task(
+                title,
+                WorkStatus::NotStarted,
+                Some(&power),
+                &WorkOwner::Nobody,
+                Some(held),
+            );
+        }
+        held
+    });
+    for day in 1..6 {
+        let held = meeting(&desk.meetings, "Bench review", AT + day * 86_400_000);
+        link(&desk.meetings, held, ines, "calendar", "confirmed");
+        desk.task(
+            &format!("Align the lens mount {day}"),
+            WorkStatus::NotStarted,
+            Some(&optics),
+            &WorkOwner::Nobody,
+            Some(held),
+        );
+    }
+    for title in [
+        "Calibrate the bench supply",
+        "Calibrate the bench supply rail",
+    ] {
+        desk.task(
+            title,
+            WorkStatus::NotStarted,
+            Some(&power),
+            &WorkOwner::Nobody,
+            None,
+        );
+    }
+    let today = meeting(&desk.meetings, "Bench review", AT + 7 * 86_400_000);
+    link(&desk.meetings, today, ines, "calendar", "confirmed");
+    let new = desk.task(
+        "Calibrate the bench supply meter",
+        WorkStatus::Triage,
+        None,
+        &WorkOwner::Nobody,
+        Some(today),
+    );
+    (desk.suggestions(&new), kept)
+}
+
+#[test]
+fn a_kept_meeting_that_drew_on_the_offer_hides_it_and_never_turns_it_into_another_project() {
+    let project = [WorkSuggestionField::Project];
+    let expected = ["The last 5 tasks from meetings with Ines Moreau went to Optics"];
+    let (without, _) = ines_offer(false);
+    assert_eq!(reasons(&without, &project), expected);
+
+    let (with, kept) = ines_offer(true);
+    let fence = Fence::Open(KeptLocal(HashSet::from([kept.expect("a kept meeting")])));
+    let shown: Vec<&str> = with
+        .iter()
+        .filter(|suggestion| suggestion.field == WorkSuggestionField::Project)
+        .filter(|suggestion| !fence.hides_suggestion(suggestion))
+        .map(|suggestion| suggestion.reason.as_str())
+        .collect();
+    assert!(shown.is_empty() || shown == expected, "shown: {shown:?}");
+}
