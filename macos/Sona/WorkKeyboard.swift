@@ -695,6 +695,7 @@ final class WorkKeys {
     private var relatePressedAt: TimeInterval?
     private static let destinations: [String: Place] = [
         "h": .capture, "d": .today, "m": .meetings, "t": .tasks, "i": .triage, "p": .people, "j": .projects,
+        "n": .inbox, "x": .archive,
     ]
     /// O then a letter: a recent task, a person or a label to go to.
     private static let openers: [String: WorkPicker.Kind] = ["i": .recent, "u": .person, "l": .label]

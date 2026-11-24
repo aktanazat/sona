@@ -17,9 +17,11 @@ struct ShortcutSheet: View {
                 Entry(title: "Today", keys: ["g d"]),
                 Entry(title: "Meetings", keys: ["g m"]),
                 Entry(title: "Tasks", keys: ["g t"]),
+                Entry(title: "Inbox", keys: ["g n"]),
                 Entry(title: "Triage", keys: ["g i"]),
                 Entry(title: "People", keys: ["g p"]),
                 Entry(title: "Projects", keys: ["g j"]),
+                Entry(title: "Archive", keys: ["g x"]),
             ]),
             ("Open", [
                 Entry(title: "Recent task", keys: ["o i"]),
