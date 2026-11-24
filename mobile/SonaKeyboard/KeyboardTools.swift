@@ -225,6 +225,7 @@ final class KeyboardTools {
         switch key {
         case let .character(text): composeText += face(text)
         case .space: composeText += " "
+        case .domain: composeText += TypingModel.domains[0]
         case .delete: if !composeText.isEmpty { composeText.removeLast() }
         case .newLine: submit()
         case .shift, .layer, .nextKeyboard, .language: return false
