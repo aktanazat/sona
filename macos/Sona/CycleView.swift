@@ -754,18 +754,26 @@ struct CyclePeek: View {
 }
 
 /// Keys on the Cycle tab. In the list J, K and the arrows move, Space
-/// peeks, Return opens and Esc closes the peek; on a cycle's page Esc goes
-/// back to the list once nothing else on the page is open.
+/// peeks, Return opens and Esc closes the peek. On a page, Option-J/K
+/// step through cycles by date and Esc returns to the list.
 @MainActor
 enum CycleKeys {
     static func handle(_ event: NSEvent, key: String, flags: NSEvent.ModifierFlags, _ model: AppModel) -> Bool {
         let focus = model.workFocus
-        guard flags.isEmpty else { return false }
-        if model.cycleShown != nil {
-            guard event.keyCode == 53 else { return false }
+        if let shown = model.cycleShown {
+            if flags == .option, key == "j" || key == "k" {
+                let cycles = model.work.cycles
+                if let index = cycles.firstIndex(where: { $0.number == shown.number }) {
+                    let next = index + (key == "j" ? 1 : -1)
+                    if cycles.indices.contains(next) { CycleList.open(cycles[next].number, model) }
+                }
+                return true
+            }
+            guard flags.isEmpty, event.keyCode == 53 else { return false }
             if !focus.escape(in: .tasks) { CycleList.show(model) }
             return true
         }
+        guard flags.isEmpty else { return false }
         let cycles = CycleList.ordered(model.work.cycles)
         let index = focus.cycleHighlighted.flatMap { number in cycles.firstIndex { $0.number == number } }
         func move(_ delta: Int) -> Bool {

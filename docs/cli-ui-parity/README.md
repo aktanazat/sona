@@ -222,6 +222,7 @@ The MCP column says whether an agent over MCP can do it; `—` means no tool.
 | Move a cycle's days (cycle page › Dates: last day of the one under way, first and last day of one ahead) | `work_cycle_save` (`startDay`, `endDay`) | `work cycle-save CYCLE --start --end` | `sona_cycle_save` (`start`, `end`) *(opt-in)* | both |
 | Export every cycle as a calendar file (Cycle tab › All cycles › Export calendar…) | `work_cycle_calendar` | `work cycles --ics` | `sona_cycle_list` (`ics`) *(opt-in)* | both |
 | Cycles on the project timeline, as bands behind the lanes | `work_cycles` | `work timeline` (`cycles`) | `sona_project_timeline` (`cycles`) | both |
+| Cycle pages: Option-J opens the next cycle by date, Option-K opens the previous one | — | — | — | Mac shortcuts |
 | Roll unfinished work forward | `work_cycle_rollover` | `work cycle-rollover CYCLE` | `sona_cycle_save` (`rollover`) *(opt-in)* | both |
 | Start the next cycle today | `work_cycle_start_today` | `work cycle-start-today [CYCLE]` | `sona_cycle_save` (`start_today`) *(opt-in)* | both |
 | Put a task in a cycle | `work_update` | `work update --cycle current\|next\|N\|none` | `sona_work_update` (`cycle`) | both |
