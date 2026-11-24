@@ -17,6 +17,7 @@ struct ShortcutSheet: View {
                 Entry(title: "Today", keys: ["g d"]),
                 Entry(title: "Meetings", keys: ["g m"]),
                 Entry(title: "Tasks", keys: ["g t"]),
+                Entry(title: "Current cycle", keys: ["g v"]),
                 Entry(title: "Inbox", keys: ["g n"]),
                 Entry(title: "Triage", keys: ["g i"]),
                 Entry(title: "People", keys: ["g p"]),
