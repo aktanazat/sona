@@ -196,7 +196,6 @@ The MCP column says whether an agent over MCP can do it; `—` means no tool.
 | UI action | core/bridge method | CLI command | MCP tool | status |
 |---|---|---|---|---|
 | Cycle list: every cycle under way, ahead and ended, each opening its own page (Cycle tab › All cycles; J/K move, Space peeks, Return opens, Esc on a page goes back) | `work_cycles` | `work cycles` | `sona_cycle_list` *(opt-in)* | both |
-| Cycle pages: Option-J opens the next cycle by date, Option-K opens the previous one | — | — | — | Mac shortcuts |
 | Capacity: what a cycle usually finishes, the mean done of the last three ended; a dial on upcoming cycles against their scope | `work_cycles` (`capacity`) | `work cycles` (`capacity`) | `sona_cycle_list` (`capacity`) *(opt-in)* | both |
 | Cycle page graph: scope, started, done, daily finished bars and a target line flat on weekends | `work_cycle` (`days`, `target`) | `work cycle current\|next\|N` (`days`, `target`) | `sona_cycle_list` (`cycle`) *(opt-in)* | both |
 | Cycle settings: length, start day, cooldown, how many ahead, auto-add started and finished work with no cycle | `work_cycle_settings_save` | `work cycle-settings --weeks --start-weekday --cooldown --upcoming --auto-add-started BOOL --auto-add-completed BOOL` | `sona_cycle_save` (`auto_add_started`, `auto_add_completed`) *(opt-in)* | both |
@@ -204,6 +203,7 @@ The MCP column says whether an agent over MCP can do it; `—` means no tool.
 | Move a cycle's days (cycle page › Dates: last day of the one under way, first and last day of one ahead) | `work_cycle_save` (`startDay`, `endDay`) | `work cycle-save CYCLE --start --end` | `sona_cycle_save` (`start`, `end`) *(opt-in)* | both |
 | Export every cycle as a calendar file (Cycle tab › All cycles › Export calendar…) | `work_cycle_calendar` | `work cycles --ics` | `sona_cycle_list` (`ics`) *(opt-in)* | both |
 | Cycles on the project timeline, as bands behind the lanes | `work_cycles` | `work timeline` (`cycles`) | `sona_project_timeline` (`cycles`) | both |
+| Cycle pages: Option-J opens the next cycle by date, Option-K opens the previous one | — | — | — | Mac shortcuts |
 | Roll unfinished work forward | `work_cycle_rollover` | `work cycle-rollover CYCLE` | `sona_cycle_save` (`rollover`) *(opt-in)* | both |
 | Start the next cycle today | `work_cycle_start_today` | `work cycle-start-today [CYCLE]` | `sona_cycle_save` (`start_today`) *(opt-in)* | both |
 | Put a task in a cycle | `work_update` | `work update --cycle current\|next\|N\|none` | `sona_work_update` (`cycle`) | both |
