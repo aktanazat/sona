@@ -144,6 +144,7 @@ repeated operation id replays the first answer.
 - `work cycle-save CYCLE [--name N|none] [--details TEXT|none] [--start DAY]
   [--end DAY]` (end inclusive). Set or clear `--details` again to apply it
   again. Pass the same `--operation-id` only when retrying the same save.
+  Actual description changes are recorded in cycle history with the prior text.
 - `work cycle-rollover CYCLE`, `work cycle-start-today [CYCLE]`.
 - `work list --filter JSON` and `work view-save NAME --filter JSON`: one
   condition object or a list.

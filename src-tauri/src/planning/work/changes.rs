@@ -230,6 +230,24 @@ BEGIN
     );
 END;";
 
+pub(crate) const CYCLE_DESCRIPTION_CHANGES_MIGRATION: &str =
+    "DROP TRIGGER planning_changes_cycle_update;
+CREATE TRIGGER planning_changes_cycle_update AFTER UPDATE ON planning_cycles
+WHEN old.name IS NOT new.name OR old.start_day IS NOT new.start_day
+    OR old.end_day IS NOT new.end_day OR old.description IS NOT new.description
+BEGIN
+    INSERT INTO planning_changes (at_ms, entity, entity_id, action, updated_from, data)
+    SELECT CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER), 'cycle',
+        CAST(new.number AS TEXT), 'update', json_group_object(field, value),
+        json_object('number', new.number, 'name', new.name)
+    FROM (
+        SELECT 'name' AS field, old.name AS value WHERE old.name IS NOT new.name
+        UNION ALL SELECT 'start_day', old.start_day WHERE old.start_day IS NOT new.start_day
+        UNION ALL SELECT 'end_day', old.end_day WHERE old.end_day IS NOT new.end_day
+        UNION ALL SELECT 'description', old.description WHERE old.description IS NOT new.description
+    );
+END;";
+
 /// Milestones, cycles, views, label definitions, project updates and the
 /// comments on projects, milestones, meetings and notes join the stream.
 /// SQLite cannot widen a CHECK in place, so the stream is rebuilt with
