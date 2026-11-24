@@ -1,6 +1,6 @@
 use std::{
     io::Error,
-    path::Path,
+    path::PathBuf,
     sync::{
         atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering},
         mpsc, Arc, Mutex, MutexGuard,
@@ -866,29 +866,56 @@ impl AudioRecorder {
         &self,
         vad_policy: VadPolicy,
     ) -> Result<mpsc::Receiver<()>, Box<dyn std::error::Error>> {
-        self.start_capture(vad_policy, true, None)
+        self.start_capture(vad_policy, true)
     }
 
     /// [`Self::start`] for a dictation that also writes every 16 kHz sample,
     /// before voice-activity filtering, to a new WAV file at `spool`. A spool
     /// that cannot be created leaves the recording without one.
-    pub fn start_spooled(
+    pub(crate) fn start_spooled(
         &self,
         vad_policy: VadPolicy,
-        spool: &Path,
-    ) -> Result<mpsc::Receiver<()>, Box<dyn std::error::Error>> {
-        self.start_capture(vad_policy, true, Some(spool))
+        spool: PathBuf,
+    ) -> Result<(mpsc::Receiver<()>, Option<PathBuf>), Box<dyn std::error::Error>> {
+        let tx = self
+            .cmd_tx
+            .as_ref()
+            .ok_or_else(|| Error::other("Recorder is not open"))?;
+        let owned = match SpoolWriter::create(&spool) {
+            Ok(writer) => {
+                tx.send(Cmd::Spool(writer)).map_err(|_| {
+                    let _ = std::fs::remove_file(&spool);
+                    Error::other("Recorder is not open")
+                })?;
+                Some(spool)
+            }
+            Err(error) => {
+                log::error!(
+                    "Recording without a spool; {} could not be created: {error}",
+                    spool.display()
+                );
+                None
+            }
+        };
+        match self.start(vad_policy) {
+            Ok(receiver) => Ok((receiver, owned)),
+            Err(error) => {
+                if let Some(path) = owned {
+                    let _ = std::fs::remove_file(path);
+                }
+                Err(error)
+            }
+        }
     }
 
     pub(crate) fn start_practice(&self) -> Result<mpsc::Receiver<()>, Box<dyn std::error::Error>> {
-        self.start_capture(VadPolicy::Disabled, false, None)
+        self.start_capture(VadPolicy::Disabled, false)
     }
 
     fn start_capture(
         &self,
         vad_policy: VadPolicy,
         forward_audio: bool,
-        spool: Option<&Path>,
     ) -> Result<mpsc::Receiver<()>, Box<dyn std::error::Error>> {
         let tx = self
             .cmd_tx
@@ -906,31 +933,13 @@ impl AudioRecorder {
                 crate::helpers::clamshell::LID_CLOSED_MICROPHONE,
             )));
         }
-        if let Some(spool) = spool {
-            match SpoolWriter::create(spool) {
-                Ok(writer) => tx.send(Cmd::Spool(writer)).map_err(|_| {
-                    let _ = std::fs::remove_file(spool);
-                    Error::other("Recorder is not open")
-                })?,
-                Err(error) => log::error!(
-                    "Recording without a spool; {} could not be created: {error}",
-                    spool.display()
-                ),
-            }
-        }
         let (ready_tx, ready_rx) = mpsc::channel();
-        let started = tx.send(Cmd::Start(
+        tx.send(Cmd::Start(
             vad_policy,
             Instant::now(),
             ready_tx,
             forward_audio,
-        ));
-        if started.is_err() {
-            if let Some(spool) = spool {
-                let _ = std::fs::remove_file(spool);
-            }
-        }
-        started?;
+        ))?;
         Ok(ready_rx)
     }
 
@@ -2932,6 +2941,28 @@ mod tests {
         let recorder = AudioRecorder::new().expect("recorder");
         recorder.stream_error.store(true, Ordering::Relaxed);
         assert!(recorder.needs_reopen());
+    }
+
+    #[test]
+    fn failed_start_leaves_an_earlier_recording_intact() {
+        let directory = tempfile::tempdir().expect("recordings directory");
+        let path = directory.path().join("sona-1767225600-42.wav");
+        let mut earlier = super::SpoolWriter::create(&path).expect("existing recording");
+        earlier.write(&[0.2, -0.2]);
+        earlier.finish();
+        let original = std::fs::read(&path).expect("read recorded audio");
+        let (sender, worker) = mpsc::channel();
+        drop(worker);
+        let mut recorder = AudioRecorder::new().expect("recorder");
+        recorder.cmd_tx = Some(sender);
+
+        assert!(recorder
+            .start_spooled(VadPolicy::Offline, path.clone())
+            .is_err());
+        assert_eq!(
+            std::fs::read(path).ok().as_deref(),
+            Some(original.as_slice())
+        );
     }
 
     fn test_config(sample_rate: u32) -> cpal::SupportedStreamConfig {

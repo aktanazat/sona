@@ -179,7 +179,7 @@ Owner: `managers/audio.rs`.
 
 | from | event | guard | to | path:line |
 |---|---|---|---|---|
-| Idle | try_start_recording | stream closed / already open | open the stream, then Recording{spool} plus a readiness thread / Recording almost at once | 1478-1544; actions.rs 1871-1931 |
+| Idle | try_start_recording | stream closed / already open | open the stream, then Recording with an owned spool if one could be created, plus the readiness thread | `AudioRecordingManager::try_start_recording` |
 | Recording | stop_recording | same binding, and no cancel since the stop was requested | readiness invalidated, Stopping (spool taken), extra buffer, `rec.stop()`, then Idle | 1719-1855 (guard 1726, invalidation 1727) |
 | Recording | stop_recording | a cancel came since (an abandoned run's late stop) | untouched; returns no outcome | 1726, 1856-1860 |
 | Stopping | stop outcome | cancelled / Err / overrun / VAD none / complete | None+spool / None+spool / Overrun / NoSpeech / Complete | 1777-1855 |
@@ -249,13 +249,14 @@ Invariants:
 #### M5. Spool and crash recovery
 Owners: `actions.rs` (`SpoolClaim` drop 1429-1459, `keep_cancelled_capture` 1463-1496) and `managers/history.rs` (`spool_path` 1132-1138, `recover_interrupted_dictations` 1459-1532, `settle_interrupted_with_connection` 1540-1579, `list_interrupted` 3327-3355). Startup calls recovery at lib.rs 2374.
 
-Invariants, both now held across a crash:
+Invariants:
 - J1: a spool never sits beside a row that holds its run receipt.
 - J2: every file in recordings is referenced by a row.
+- J3: a recording can pass a spool to stop or cancel only if it created that exact file. Start failures cannot truncate or remove an earlier spool.
 
 | from | event | guard | to | path:line |
 |---|---|---|---|---|
-| — | start | — | Writing (`sona-{start second}-{run}.wav`) | 1132-1138; actions.rs 1871-1875 |
+| — | start | new spool opened, or spool creation failed | Writing (`sona-{start second}-{run}.wav`), or capture continues in memory with no spool to clean up | `SpoolWriter::create`; `AudioRecorder::start_spooled` |
 | Writing | cancel_recording | under 10 s / 10 s or more | Removed / Kept as Cancelled | utils.rs 86; actions.rs 1463-1496 |
 | Finished | SpoolClaim drop | receipt exists / cancelled since gen / limit 0 / otherwise | Removed / Kept as Cancelled / Removed / Left | actions.rs 1429-1459 |
 | Left or crash orphan | launch | listed when HistoryManager is built, with the copies a decode left in recordings (`sona-{T}-{R}.wav`, T ≥ the spool's start second) | queued | 811, 3327-3355 |
