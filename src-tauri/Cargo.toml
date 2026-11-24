@@ -153,7 +153,7 @@ tauri-plugin-single-instance = "2.3.2"
 # prebuilt ONNX Runtime which is compiled with a global /arch:AVX2 baseline that
 # executes BMI2/AVX in a static initializer and crashes at process startup on any
 # pre-Haswell CPU (Sandy/Ivy Bridge, older AMD). Dropping the feature means we
-# link a baseline ONNX Runtime (dynamically, via ORT_LIB_LOCATION in build.yml)
+# link a baseline ONNX Runtime (dynamically, via ORT_LIB_LOCATION)
 # with proper runtime CPU dispatch. Base `transcribe-rs` (features = ["onnx"])
 # is inherited here, so Parakeet/Moonshine/etc. still run on CPU.
 windows = { version = "0.61.3", features = [
@@ -191,8 +191,8 @@ winreg = "0.55"
 # just a single portable CPU module shipped as a DLL. So ARM links transcribe-cpp
 # STATICALLY (no features = static CPU-only): the one CPU backend is compiled into
 # sona.exe and we ship zero DLLs, which sidesteps the installer's per-DLL
-# signtool verify entirely. CI pins -DGGML_NATIVE=OFF (see build.yml) so the
-# static build targets a portable ARM baseline, not the build runner's CPU.
+# signtool verify entirely. The build must pin -DGGML_NATIVE=OFF so the
+# static build targets a portable ARM baseline, not the build machine's CPU.
 [target.'cfg(all(windows, target_arch = "x86_64"))'.dependencies]
 transcribe-cpp = { version = "0.2.0", default-features = false, features = [
   "dynamic-backends",
