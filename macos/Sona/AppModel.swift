@@ -1332,7 +1332,7 @@ final class AppModel {
                 }
             case CoreEvent.streamText:
                 let text: StreamText = try Core.payload(line)
-                liveText = text.tentative.isEmpty ? text.committed : text.committed + " " + text.tentative
+                liveText = text.committed + text.tentative
                 if slowConnectionStage == .transcription { slowConnectionStage = nil }
             case CoreEvent.micLevel:
                 let buckets: [Float] = try Core.payload(line)
