@@ -785,11 +785,16 @@ fn list(
             || search
                 .as_deref()
                 .is_some_and(|search| !found(item, search, said.get(&item.id)))
-            || !filter::holds(
-                &filters,
-                item,
-                context.doers.get(&item.id).map(|doer| doer.agent.as_str()),
-            )
+            || (!filters.is_empty()
+                && !filter::holds(
+                    &filters,
+                    item,
+                    context.doers.get(&item.id).map(|doer| doer.agent.as_str()),
+                    context
+                        .repeats
+                        .get(&item.id)
+                        .map(|repeat| repeat.every.as_str()),
+                ))
         {
             continue;
         }

@@ -96,6 +96,7 @@ const CONDITION_SCHEMA = {
         "estimate",
         "for",
         "completed",
+        "repeat",
       ],
       description: "The task field the condition reads.",
     },
@@ -118,7 +119,7 @@ const CONDITION_SCHEMA = {
       type: "array",
       items: { type: ["string", "integer"] },
       description:
-        "Ids or names; stored statuses (todo, in_progress, ...); priorities 0-4 or urgent, high, medium, low, none; me for the user; agent names (claude, codex, ...) for delegate; a task id or S-12 for parent; planned or added (joined its cycle after it began) for cycle_scope; points 0-64 for estimate; a person's id for for, the person the work is owed to; none for an empty field; cycle numbers, current or next; days as YYYY-MM-DD, today, tomorrow, yesterday, this_week, last_week, this_month, last_month or epoch ms (completed is the day it was marked done).",
+        "Ids or names; stored statuses (todo, in_progress, ...); priorities 0-4 or urgent, high, medium, low, none; me for the user; agent names (claude, codex, ...) for delegate; a task id or S-12 for parent; planned or added (joined its cycle after it began) for cycle_scope; points 0-64 for estimate; a person's id for for, the person the work is owed to; none for an empty field; cycle numbers, current or next; days as YYYY-MM-DD, today, tomorrow, yesterday, this_week, last_week, this_month, last_month or epoch ms (completed is the day it was marked done). For repeat, use set, none or the exact stored rule (for example, every monday).",
     },
   },
   required: ["field", "op", "values"],
@@ -2782,6 +2783,10 @@ export const TOOLS: readonly ToolDefinition[] = [
           description:
             "Only work delegated to this agent, by the name it gave; any for every delegated task, none for work no agent has. Not with ready.",
         },
+        repeating: {
+          type: "boolean",
+          description: "True keeps only tasks with a repeat rule. False leaves the list unchanged. Not with ready.",
+        },
         filter: FILTER,
         where: {
           type: "string",
@@ -2850,6 +2855,7 @@ export const TOOLS: readonly ToolDefinition[] = [
       ...(flag(input, "ready") ? [] : assigned("--source", text(input, "source"))),
       ...(flag(input, "ready") || !flag(input, "stale") ? [] : ["--stale"]),
       ...(flag(input, "ready") ? [] : assigned("--delegate", text(input, "delegate"))),
+      ...(flag(input, "repeating") ? ["--repeating"] : []),
       ...(flag(input, "ready") ? [] : assigned("--parent", text(input, "parent"))),
       ...(flag(input, "ready") ? [] : assigned("--cycle-scope", text(input, "cycle_scope"))),
       ...(flag(input, "ready") ? [] : assigned("--for", text(input, "for"))),

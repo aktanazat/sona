@@ -234,9 +234,9 @@ pub(crate) fn next_of(conn: &Connection, id: &str) -> Result<Option<String>> {
 /// of it.
 pub(crate) fn repeats(conn: &Connection, now_ms: i64) -> Result<HashMap<String, WorkRepeat>> {
     let mut statement = conn.prepare(
-        "SELECT id, recurrence, coalesce(series_id, id), status, due_at_ms, status_changed_at_ms
-         FROM planning_tasks
-         WHERE recurrence IS NOT NULL AND archived_at_ms IS NULL AND status != 'duplicate'",
+        "SELECT id, recurrence, coalesce(series_id, id), status, due_at_ms, status_changed_at_ms,
+                archived_at_ms IS NOT NULL
+         FROM planning_tasks WHERE recurrence IS NOT NULL",
     )?;
     let rows = statement
         .query_map([], |row| {
@@ -247,11 +247,15 @@ pub(crate) fn repeats(conn: &Connection, now_ms: i64) -> Result<HashMap<String, 
                 row.get::<_, WorkStatus>(3)?,
                 row.get::<_, Option<i64>>(4)?,
                 row.get::<_, i64>(5)?,
+                row.get::<_, bool>(6)?,
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let mut series: HashMap<&str, (u32, u32)> = HashMap::new();
-    for (_, _, key, status, due, changed) in &rows {
+    for (_, _, key, status, due, changed, archived) in &rows {
+        if *archived || *status == WorkStatus::Duplicate {
+            continue;
+        }
         let day_ends = due
             .map(|due| local_today(due).and_then(|day| day_start_ms(day, 1)))
             .transpose()?;

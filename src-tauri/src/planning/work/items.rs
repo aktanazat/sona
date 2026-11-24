@@ -1477,7 +1477,12 @@ pub(crate) fn save_view(
     view: &WorkViewInput,
     now_ms: i64,
 ) -> Result<WorkView> {
-    if view.query.filters.iter().any(super::filter::WorkFilter::has_empty_group) {
+    if view
+        .query
+        .filters
+        .iter()
+        .any(|filter| filter.has_empty_group() || filter.has_invalid_repeat())
+    {
         return Err(Refusal::Invalid.into());
     }
     let name = clean_title(&view.name)?;
