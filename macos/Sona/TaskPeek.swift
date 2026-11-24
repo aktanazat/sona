@@ -51,6 +51,7 @@ struct TaskPeek: View {
                         QuoteCard(quote: quote, speaker: row.sourceSpeaker, meetingTitle: row.sourceMeetingTitle,
                                   meetingId: row.sourceMeetingId, atMs: row.sourceAtMs)
                     }
+                    subtasks
                     TaskPropertyList(row: row)
                 }
                 .padding(20)
@@ -66,5 +67,32 @@ struct TaskPeek: View {
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Peek at #\(row.number)")
+    }
+
+    @ViewBuilder
+    private var subtasks: some View {
+        let children = {
+            var rows = model.work.items?.filter { $0.parentId == row.id && $0.archivedAtMs == nil } ?? []
+            rows.sort { $0.number < $1.number }
+            return rows
+        }()
+        if !children.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Sub-tasks")
+                    .font(TypeScale.label(12))
+                    .foregroundStyle(Theme.inkSecondary)
+                    .accessibilityAddTraits(.isHeader)
+                ForEach(children) { child in
+                    HStack(alignment: .top, spacing: 8) {
+                        TaskStatusIcon(status: child.status).padding(.top, 1)
+                        Text(child.title)
+                            .bodyText(13, Theme.ink)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Spacer(minLength: 4)
+                    }
+                    .accessibilityElement(children: .combine)
+                }
+            }
+        }
     }
 }
