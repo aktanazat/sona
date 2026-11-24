@@ -61,6 +61,10 @@ export function randomId(byteLength = 24): string {
   return base64UrlEncode(value);
 }
 
+export function encodeChangeCursor(sequence: number): string {
+  return `c.${base64UrlEncode(utf8(JSON.stringify({ v: 1, a: sequence })))}`;
+}
+
 export async function sha256Base64Url(value: Uint8Array): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", value);
   return base64UrlEncode(new Uint8Array(digest));

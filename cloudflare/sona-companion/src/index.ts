@@ -50,6 +50,7 @@ import {
   base64UrlDecode,
   base64UrlEncode,
   decodeUtf8,
+  encodeChangeCursor,
   equalBytes,
   equalSecret,
   isIdempotencyKey,
@@ -67,6 +68,13 @@ import {
   logRequest,
   problem,
 } from "./errors";
+import {
+  isJsonArray,
+  isJsonInteger,
+  isJsonRecord,
+  isJsonString,
+  type JsonValue,
+} from "./json";
 import { LIVE_VERIFIER_HEADER } from "./live";
 import { maintenanceQueueMessage, runMaintenance } from "./maintenance";
 import type {
@@ -85,10 +93,6 @@ import {
   canonicalQuery,
   digest,
   fixedBase64Url,
-  isJsonArray,
-  isJsonInteger,
-  isJsonRecord,
-  isJsonString,
   optionalOpaqueId,
   parseJsonBody,
   readLimitedBody,
@@ -97,7 +101,6 @@ import {
   requiredOpaqueId,
   requiredString,
   routeId,
-  type JsonValue,
 } from "./validation";
 
 const emptyDigest = "47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU";
@@ -398,10 +401,6 @@ function parseLimit(
   const limit = Number(value);
   if (limit > maximum) throw problem("invalid_request");
   return limit;
-}
-
-function encodeChangeCursor(sequence: number): string {
-  return `c.${base64UrlEncode(utf8(JSON.stringify({ v: 1, a: sequence })))}`;
 }
 
 function decodeChangeCursor(value: string | null): number {

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { isJsonArray, isJsonRecord, isJsonString } from "../src/json";
 
 interface MigrationEntry {
   checksum: string;
@@ -12,30 +13,6 @@ interface MigrationEntry {
 interface MigrationManifest {
   migrations: MigrationEntry[];
   version: number;
-}
-type JsonValue = JsonRecord | JsonValue[] | boolean | null | number | string;
-
-interface JsonRecord {
-  [key: string]: JsonValue;
-}
-
-function isJsonRecord<Value>(value: Value): value is Value & JsonRecord {
-  return (
-    !Array.isArray(value) &&
-    !(value instanceof Function) &&
-    Object(value) === value
-  );
-}
-
-function isJsonArray<Value>(value: Value): value is Value & JsonValue[] {
-  return Array.isArray(value);
-}
-
-function isJsonString(value: JsonValue | undefined): value is string {
-  return (
-    Object.prototype.toString.call(value) === "[object String]" &&
-    !(value instanceof String)
-  );
 }
 
 const migrationsDirectory = join(

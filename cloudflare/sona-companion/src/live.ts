@@ -5,13 +5,13 @@ import {
   MAX_LIVE_HOST_FRAME_BYTES,
 } from "./constants";
 import { byteLength, equalSecret } from "./encoding";
-import type { Env } from "./types";
 import {
   isJsonInteger,
   isJsonRecord,
   isJsonString,
   type JsonValue,
-} from "./validation";
+} from "./json";
+import type { Env } from "./types";
 
 export const LIVE_VERIFIER_HEADER = "x-sona-live-verifier";
 

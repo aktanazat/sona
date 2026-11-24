@@ -139,14 +139,7 @@ async function shareKey(root, shareId, index, total, domain) {
   );
 }
 
-export async function decryptPayload(
-  root,
-  shareId,
-  index,
-  total,
-  domain,
-  payload,
-) {
+async function decryptPayload(root, shareId, index, total, domain, payload) {
   requireValue(root.length === 32 && payload.length >= 28);
   const key = await shareKey(root, shareId, index, total, domain);
   const decrypted = await crypto.subtle.decrypt(
