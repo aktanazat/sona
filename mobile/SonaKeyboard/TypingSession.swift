@@ -126,11 +126,9 @@ struct TypingSession {
 
     /// Space, return or punctuation, which ends the word before the cursor and corrects it
     /// when the field allows. A second space after a word ends the sentence. Where the field
-    /// allows correction, the word is also learned. A host still behind the keyboard's last
-    /// edit gets only plain edits: nothing is corrected, replaced or deleted beyond one
-    /// character on text it may not hold.
-    mutating func end(with separator: String, before text: String, corrects: Bool, hostBehind: Bool = false) -> Edit {
-        if hostBehind { return remember(.other, Edit(insert: separator), on: text) }
+    /// allows correction, the word is also learned. `text` is the field as the keyboard's
+    /// own edits leave it, even while the host has not shown them yet.
+    mutating func end(with separator: String, before text: String, corrects: Bool) -> Edit {
         let previous = lastKey(before: text)
         if separator == " ", previous.endsWithSpace, Self.endsWord(text) {
             return remember(.other, Edit(deleteCount: 1, insert: ". "), on: text)
@@ -165,8 +163,7 @@ struct TypingSession {
     /// Right after a correction, backspace puts the typed word back and keeps it from then
     /// on; right after a swipe it deletes the whole word and its space; otherwise it deletes
     /// one character.
-    mutating func backspace(before text: String, hostBehind: Bool = false) -> Edit {
-        if hostBehind { return remember(.other, Edit(deleteCount: 1), on: text) }
+    mutating func backspace(before text: String) -> Edit {
         switch lastKey(before: text) {
         case let .corrected(correction, separator):
             keep(correction.typed)
@@ -198,8 +195,7 @@ struct TypingSession {
     /// word as typed, or the typed form of a word corrected earlier, keeps it from then on.
     /// After a swipe, the candidate swaps in for the swiped word and still goes in one
     /// backspace. With no word at the cursor the candidate is the next word.
-    mutating func choose(_ candidate: String, before text: String, hostBehind: Bool = false) -> Edit {
-        if hostBehind { return Edit() }
+    mutating func choose(_ candidate: String, before text: String) -> Edit {
         if case let .swiped(word, spaced, others) = lastKey(before: text) {
             let swapped = [word] + others.filter { $0 != candidate }
             return remember(
@@ -300,16 +296,16 @@ struct TypingSession {
     }
 }
 
-/// The text a word dropped in whole is joined to, for the space in front of it only. Some
-/// hosts keep reporting the text from before the keyboard's last edit until the next one
-/// comes in, and a word joined to that stale text either glues on ("écoleMeet") or
-/// doubles its space ("Dauren  école").
+/// The field as the keyboard's own edits leave it. Some hosts keep reporting the text from
+/// before the keyboard's last edit until the next one comes in. A word joined to that stale
+/// text glues on ("écoleMeet") or doubles its space ("Dauren  école"), and a space would
+/// correct the word as it was a key ago, or not at all. The host applies the keyboard's
+/// edits in order, so the keyboard's own latest version is what the next edit lands on.
 ///
-/// It never decides what to delete. The keyboard keeps each version of the field from the
-/// one the host last showed to its own latest. The host is behind while it shows one of
-/// those versions other than the latest; showing any remembered version lets the older ones
-/// go, and showing anything else, a change the keyboard did not make, or a new field ends
-/// the memory.
+/// The keyboard keeps each version of the field from the one the host last showed to its
+/// own latest. The host is behind while it shows one of those versions other than the
+/// latest; showing any remembered version lets the older ones go, and showing anything
+/// else, a change the keyboard did not make, or a new field ends the memory.
 ///
 /// One case is left. An app that both lags and clears the field after Send without a word
 /// can show, after the clear, text the memory holds as an older version. The keyboard then

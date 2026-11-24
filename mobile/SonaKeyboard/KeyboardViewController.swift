@@ -372,7 +372,7 @@ final class KeyboardViewController: UIInputViewController {
         case .delete:
             let context = textContext
             apply(
-                session.backspace(before: context.before, hostBehind: isHostBehind(context)),
+                session.backspace(before: knownBefore(context)),
                 to: context
             )
         case .shift:
@@ -393,8 +393,7 @@ final class KeyboardViewController: UIInputViewController {
     private func endWord(with separator: String) {
         let context = textContext
         apply(session.end(
-            with: separator, before: context.before,
-            corrects: mayCorrect(context), hostBehind: isHostBehind(context)
+            with: separator, before: knownBefore(context), corrects: mayCorrect(context)
         ), to: context)
     }
 
@@ -422,7 +421,7 @@ final class KeyboardViewController: UIInputViewController {
         typing.hasTyped = true
         if EmojiCatalog.shared?.entry(for: word) != nil { emoji.memory.used(word) }
         let context = textContext
-        apply(session.choose(word, before: context.before, hostBehind: isHostBehind(context)), to: context)
+        apply(session.choose(word, before: knownBefore(context)), to: context)
         afterKey()
     }
 
@@ -553,8 +552,11 @@ final class KeyboardViewController: UIInputViewController {
         corrects && context.after.first.map(TypingText.isWordCharacter) != true
     }
 
-    private func isHostBehind(_ context: TextContext) -> Bool {
-        echo.behind(before: context.before, after: context.after)
+    /// The text before the cursor as the keyboard's own edits leave it. A host still behind
+    /// those edits applies the next one after them, in order, so a word is corrected as
+    /// typed rather than as the host last reported it.
+    private func knownBefore(_ context: TextContext) -> String {
+        echo.joining(before: context.before, after: context.after)
     }
 
     private func toggleShift() {
@@ -633,8 +635,8 @@ final class KeyboardViewController: UIInputViewController {
 
     private func showSuggestions(guessing: Bool) {
         let context = textContext
-        let before = context.before
-        let ready = mayCorrect(context) && !isHostBehind(context)
+        let before = knownBefore(context)
+        let ready = mayCorrect(context)
         let offer = ready ? session.suggestions(before: before, guessing: guessing) : nil
         /* A correction on show stays while the same word goes on, with the word as now typed
          * in its quoted slot, until the guesses for the new letter replace it, so the strip
@@ -1083,12 +1085,14 @@ private struct KeyboardView: View {
     }
 }
 
-/// The last levels heard, newest last, and when the newest came, so the bars can glide left
-/// between samples instead of stepping.
+/// The last levels heard, newest last, when the newest came, and how far apart they have
+/// been coming, so the bars glide left at the pace the levels arrive instead of stepping
+/// or stalling between them.
 private struct LevelHistory: Equatable {
     static let count = 32
     private(set) var levels = [Float](repeating: 0, count: count)
     private(set) var at: TimeInterval = 0
+    private(set) var pace = Double(KeyboardLevel.interval.components.attoseconds) / 1e18
 
     /// A loud sound shows at once; a falling one eases off over a few samples.
     func appending(_ level: Float, at time: TimeInterval) -> Self {
@@ -1096,6 +1100,9 @@ private struct LevelHistory: Equatable {
         let eased = max(level, (levels.last ?? 0) * 0.6)
         next.levels.removeFirst()
         next.levels.append(min(max(eased, 0), 1))
+        if at > 0 {
+            next.pace = pace * 0.8 + min(max(time - at, 0.03), 0.25) * 0.2
+        }
         next.at = time
         return next
     }
@@ -1121,7 +1128,6 @@ private final class KeyboardWaveformLevels {
 private struct KeyboardWaveform: View {
     private static let pitch: CGFloat = 3.5
     private static let bar: CGFloat = 2.25
-    private static let interval = Double(KeyboardLevel.interval.components.attoseconds) / 1e18
 
     var levels: KeyboardWaveformLevels?
     var request: UUID?
@@ -1137,7 +1143,7 @@ private struct KeyboardWaveform: View {
                 if connecting {
                     drawConnecting(at: now, in: &context, size: size)
                 } else {
-                    draw(recent, at: reduceMotion ? recent.at + Self.interval : now, in: &context, size: size)
+                    draw(recent, at: reduceMotion ? recent.at + recent.pace : now, in: &context, size: size)
                 }
             }
         }
@@ -1153,7 +1159,7 @@ private struct KeyboardWaveform: View {
     }
 
     private func draw(_ history: LevelHistory, at now: TimeInterval, in context: inout GraphicsContext, size: CGSize) {
-        let glide = CGFloat(min(max((now - history.at) / Self.interval, 0), 1))
+        let glide = CGFloat(min(max((now - history.at) / history.pace, 0), 1))
         let count = history.levels.count
         var path = Path()
         for (index, level) in history.levels.enumerated() {
