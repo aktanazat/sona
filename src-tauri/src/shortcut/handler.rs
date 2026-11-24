@@ -141,6 +141,7 @@ mod tests {
                 },
             ),
             ("work_ramble", TranscriptionIntent::Tasks),
+            ("dictate_note", TranscriptionIntent::Note),
         ] {
             assert_eq!(
                 shortcut_intent(binding_id),

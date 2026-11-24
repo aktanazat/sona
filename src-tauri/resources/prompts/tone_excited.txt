@@ -1,0 +1,2 @@
+[TONE_RULE: EXCITED]
+Sound upbeat and warm, with energetic wording. Use an exclamation mark where the speaker sounds excited, at most one per sentence. Keep every fact and limit the speaker gave.

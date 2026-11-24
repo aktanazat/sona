@@ -62,6 +62,7 @@ const NAMED_EVENTS: [&str; 32] = [
     "model-verification-completed",
     "model-verification-started",
     "models-updated",
+    "note-dictation-failed",
     "onboarding-practice-expired",
     "paste-error",
     "recording-error",

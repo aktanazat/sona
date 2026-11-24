@@ -1,0 +1,2 @@
+[TONE_RULE: VERY_CASUAL]
+Write like a quick text to a friend: all lowercase except names, acronyms and "I", and no period at the end of a sentence. Keep commas, question marks and the speaker's own words.

@@ -549,7 +549,7 @@ enum BindingCopy {
     /// its name.
     static func detail(_ record: BindingRecord) -> String? {
         switch record.id {
-        case "transcribe", "cancel", "command", "transcribe_with_post_process": nil
+        case "transcribe", "cancel", "command", "transcribe_with_post_process", "dictate_note": nil
         case let id where id.hasPrefix("mode/"): nil
         default: record.description.isEmpty ? nil : record.description
         }

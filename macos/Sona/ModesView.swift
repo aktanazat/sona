@@ -673,7 +673,7 @@ struct ModeRewriteBlock: View {
                     }
                 }
                 .labelsHidden()
-                .pickerStyle(.segmented)
+                .pickerStyle(.menu)
                 .disabled(!mode.llm.rewriteEnabled || store.usesOfflineCleanup)
             }
             ChoiceRow(

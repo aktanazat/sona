@@ -494,6 +494,17 @@ final class ScratchpadStore {
         draftPersonal = true
     }
 
+    func retainDictation(_ text: String, error message: String) {
+        guard !isBlank(text) else { return }
+        if !hasPendingSave { take(nil) }
+        saveTask?.cancel()
+        saveTask = nil
+        body = isBlank(body) ? text : body + "\n\n" + text
+        saveState = .unsaved
+        error = message
+        focusRequest += 1
+    }
+
     private func take(_ note: ScratchNote?) {
         session = UUID()
         viewedVersion = nil
