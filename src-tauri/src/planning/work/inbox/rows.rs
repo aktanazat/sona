@@ -779,6 +779,8 @@ mod tests {
                 snoozed_until_ms: None,
                 archived_at_ms: None,
                 digest: None,
+                priority: kind.priority(),
+                subject: None,
             });
             id
         };
