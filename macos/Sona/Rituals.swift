@@ -372,7 +372,7 @@ enum RitualKeys {
             return true
         }
         if flags == .shift, key == "?" || key == "/" {
-            model.workFocus.shortcutsShown = true
+            model.openKeyboardShortcuts()
             return true
         }
         guard flags.isEmpty else { return false }
@@ -413,7 +413,7 @@ enum RitualKeys {
             guard let id = rituals.cursor else { return false }
             model.togglePick(id)
         case (_, "?"):
-            model.workFocus.shortcutsShown = true
+            model.openKeyboardShortcuts()
         default:
             return false
         }

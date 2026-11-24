@@ -446,7 +446,6 @@ final class WorkFocus {
     var composing: TaskComposition?
     /// The milestones of the project the milestone picker's tasks share.
     var milestones: [PlanningMilestone] = []
-    var shortcutsShown = false
     var displayShown = false
     var collapsed: Set<String> = []
     var tab: TasksTab = .owe
@@ -951,7 +950,7 @@ final class WorkKeys {
                 focus.displayShown.toggle()
                 return true
             case "?", "/":
-                focus.shortcutsShown = true
+                model.openKeyboardShortcuts()
                 return true
             default:
                 return false
@@ -1002,7 +1001,7 @@ final class WorkKeys {
         case "y": return answer(.acceptProposal)
         case "n": return answer(.rejectProposal)
         case "?":
-            focus.shortcutsShown = true
+            model.openKeyboardShortcuts()
             return true
         default:
             return false

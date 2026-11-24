@@ -52,6 +52,9 @@ struct SonaApp: App {
                 Divider()
                 Button("Report Issue…") { model.reportProblem() }
                     .disabled(model.sheet != nil)
+                Divider()
+                Button("Keyboard Shortcuts") { model.openKeyboardShortcuts() }
+                    .keyboardShortcut("/", modifiers: .command)
             }
         }
 
