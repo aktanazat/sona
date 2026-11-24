@@ -178,6 +178,7 @@ private struct TasksList: View {
         } else if focus.tab == .cycle, let cycle = model.cycleShown {
             TaskListBody(groups: groups, lead: {
                 CycleSummary(cycle: cycle, tally: CycleTally(model.cycleRows))
+                    .id(cycle.number)
                 if groups.allSatisfy(\.rows.isEmpty) {
                     Text("Nothing planned in this cycle. Press ⇧C on a task to add it.")
                         .bodyText(13, Theme.inkSecondary)
