@@ -50,6 +50,7 @@ final class KeyboardViewController: UIInputViewController {
     /// True from the keyboard's own edit until the main loop next turns.
     private var ownEditInFlight = false
     private var editedField: UUID?
+    private var lastReloadedDocumentID: UUID?
     private let haptic = UIImpactFeedbackGenerator(style: .light)
     private var feel = KeyboardFeelPreferences(defaults: .standard)
     /// Suggestions wait for the run loop after a key, so the key's text goes out first.
@@ -197,7 +198,7 @@ final class KeyboardViewController: UIInputViewController {
         super.textDidChange(textInput)
         echo.hostNoticed()
         hostChanged()
-        reload()
+        if documentID != lastReloadedDocumentID { reload() }
         refreshTyping(startingField: false)
     }
 
@@ -296,8 +297,8 @@ final class KeyboardViewController: UIInputViewController {
 
     private func press(_ key: Key) {
         typing.hasTyped = true
-        state.notice = nil
-        state.seenMessage = state.session.message
+        if state.notice != nil { state.notice = nil }
+        if state.seenMessage != state.session.message { state.seenMessage = state.session.message }
         if typing.emojiQuery != nil, search(key) { return }
         switch key {
         case let .character(text):
@@ -488,7 +489,7 @@ final class KeyboardViewController: UIInputViewController {
             }
         }
         refreshShift()
-        refreshSuggestions()
+        scheduleSuggestions()
     }
 
     /// Runs after every edit, so the memory of the edit is checked against what the host
@@ -577,8 +578,9 @@ final class KeyboardViewController: UIInputViewController {
 
     private func reload() {
         guard visible else { return }
+        lastReloadedDocumentID = documentID
         state.hasFullAccess = hasFullAccess
-        state.startURL = DictationLink.keyboardURL(documentID: documentID, language: typing.language)
+        state.startURL = DictationLink.keyboardURL(documentID: lastReloadedDocumentID, language: typing.language)
         guard hasFullAccess else {
             state.draft = nil
             state.session = KeyboardSessionState()
