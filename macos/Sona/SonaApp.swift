@@ -47,6 +47,12 @@ struct SonaApp: App {
                 Button("Search Sona…") { model.toggleSearch() }
                     .keyboardShortcut("k", modifiers: .command)
             }
+            CommandGroup(replacing: .help) {
+                Button("Sona Help") { model.about.openRepository() }
+                Divider()
+                Button("Report Issue…") { model.reportProblem() }
+                    .disabled(model.sheet != nil)
+            }
         }
 
         MenuBarExtra {
@@ -342,6 +348,8 @@ struct MenuBarMenu: View {
         }
         Divider()
         Button("Open Sona") { model.reveal() }
+        Button("Dictation History") { model.openDictationHistory() }
+            .disabled(model.sheet != nil)
         Button("Settings…") { model.openSettings() }
             .keyboardShortcut(",", modifiers: .command)
         Divider()

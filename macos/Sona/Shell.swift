@@ -86,6 +86,8 @@ struct Shell: View {
                 ShareSheet(meetingId: meetingId).environment(model)
             case let .saveTemplate(id):
                 SaveTemplateSheet(id: id).environment(model)
+            case let .problemReport(historyID):
+                ProblemReportSheet(historyID: historyID).environment(model)
             }
         }
     }

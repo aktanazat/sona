@@ -288,12 +288,11 @@ private struct LibraryKeptSection: View {
     }
 }
 
-/// One kept recording: when, how long, why, and the three things to do
-/// with it.
 private struct KeptDictationRow: View {
     let store: LibraryStore
     let entry: KeptDictation
 
+    @Environment(AppModel.self) private var model
     @State private var confirmingDelete = false
 
     private var retrying: Bool { store.retrying.contains(entry.id) }
@@ -325,6 +324,8 @@ private struct KeptDictationRow: View {
                 Button("Delete") { confirmingDelete = true }
                     .buttonStyle(.compact)
                     .disabled(busy)
+                Button("Report a Problem…") { model.reportProblem(entry.id) }
+                    .buttonStyle(.compact)
                 Spacer(minLength: 0)
             }
         }
@@ -664,6 +665,7 @@ private struct HistoryRowDetail: View {
     let shown: String
     let correct: (HistoryRow) -> Void
     let processAgain: (HistoryRow) -> Void
+    @Environment(AppModel.self) private var model
 
     /// The receipt names the reason; an entry whose receipt has not loaded
     /// or that predates the field gets the neutral line.
@@ -714,6 +716,7 @@ private struct HistoryRowDetail: View {
                 .disabled(busy)
                 Button("Process again") { processAgain(row) }
                     .disabled(busy || store.replayRefusal != nil)
+                Button("Report a Problem…") { model.reportProblem(row.id) }
                 Divider()
                 Button("Delete", role: .destructive) { confirmingDelete = true }
                     .disabled(busy)

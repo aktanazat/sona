@@ -2054,3 +2054,28 @@ is dropped. Closing its sender lets the consumer finish after queued keys.
 | Tap installed | Disable typed shortcuts                         | Keep the tap installed; skip key data                                        |
 | Tap setup     | Native setup fails                              | Drop local context and sender; clear `STARTED`                               |
 | Tap installed | Run loop returns                                | Invalidate source and port, then release context and sender; clear `STARTED` |
+
+## Native problem reports
+
+`ProblemReportSheet` owns the draft and presentation. `ProblemReportFile` owns
+the local file and its commit boundary. The core owns the optional log location
+through `get_log_dir_path`.
+
+| From                     | Event                                                          | To                                                                                                              |
+| ------------------------ | -------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| Editing, Failed or Saved | Save Report                                                    | Saving; snapshot the description, log choice and selected dictation id                                          |
+| Saving                   | Requested log read, directory creation or write fails          | Failed; retain the draft and allow another save or a changed log choice                                         |
+| Saving                   | Private temporary file is flushed and cancellation has not won | Rename within the reports folder; Saved with the actual file URL                                                |
+| Saving                   | The sheet closes before commit                                 | Cancel the operation and its worker; check cancellation before rename and remove the uncommitted temporary file |
+| Saved                    | The description or log choice changes                          | Editing                                                                                                         |
+
+Reports are uniquely named files in `Application Support/Sona/Problem Reports`.
+The folder is private (`0700`), and each file is private (`0600`). A cancellation
+after the atomic rename does not undo an already-committed save.
+
+Metadata contains only version, build, OS, creation time and an optional selected
+dictation id. No model/mode settings, transcript field or audio file is collected.
+Logs default off. Selected logs are read from a regular, non-symlink file and
+limited to the newest 500 KiB; raw logs can contain work text and file paths.
+Nothing uploads automatically. The explicit GitHub link opens a blank issue
+without the report, description or logs in its URL.
