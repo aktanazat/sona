@@ -1022,6 +1022,24 @@ pub(crate) fn place_in_cycle(
     Ok(())
 }
 
+/// Gives a task made from another tracker the day it was made there and,
+/// when it is done, the moment it was finished there.
+pub(crate) fn backdate(
+    conn: &Connection,
+    id: &str,
+    created_at_ms: Option<i64>,
+    completed_at_ms: Option<i64>,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE planning_tasks
+            SET created_at_ms = coalesce(?2, created_at_ms),
+                completed_at_ms = CASE WHEN status = 'done' THEN coalesce(?3, completed_at_ms) END
+          WHERE id = ?1",
+        params![id, created_at_ms, completed_at_ms],
+    )?;
+    Ok(())
+}
+
 /// Hides an item from every list, or brings it back. Its status, and the
 /// loop it tracks, stay as they were.
 pub(crate) fn set_archived(

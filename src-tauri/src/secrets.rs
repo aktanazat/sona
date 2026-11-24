@@ -64,6 +64,12 @@ impl SecretAccount {
         }
     }
 
+    pub(crate) fn linear_import() -> Self {
+        Self {
+            account: "work_import/linear-api".to_string(),
+        }
+    }
+
     pub(crate) fn meeting_brave_search() -> Self {
         Self {
             account: "meeting_prep/brave-search".to_string(),

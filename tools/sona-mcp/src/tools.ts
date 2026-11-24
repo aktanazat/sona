@@ -5989,6 +5989,132 @@ export const TOOLS: readonly ToolDefinition[] = [
     ],
   },
   {
+    name: "sona_work_import",
+    title: "Import into Sona from another tracker",
+    description: `Import tasks from another tracker's export files on this Mac: Linear (its issues, projects or initiatives CSV, or a saved API answer as .json with issues, comments, projects, milestones, cycles, initiatives, labels, documents and views), a CSV sheet (Sona's columns from sona_work_import_template, its usual synonyms, or map), Jira's or Asana's or Shortcut's CSV, GitHub issues JSON (gh issue list --json), or a Trello board's JSON. Tasks keep their status, priority, estimate, due day, labels, project, milestone, parent and dates; Linear cycles still running land in Sona's cycle covering the same days; comments keep their authors; documents become notes; views whose filters Sona can hold become saved views. A project, label or initiative with a name Sona already has is used as it is. Open work untouched for six months and finished work land archived. A second import skips what the first brought in unless update_existing. Each new task gets the Migrated label unless label says otherwise. Call with dry_run:true first: the answer counts what was read as active, stale and completed and lists what each record would become. The answer's id undoes it with sona_work_import_revert. ${PLANNING_WRITES}`,
+    mutates: "changes",
+    optIn: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        from: {
+          type: "string",
+          enum: ["linear", "csv", "jira", "github", "asana", "shortcut", "trello"],
+          description: "The tracker the files come from.",
+        },
+        files: {
+          type: "array",
+          items: { type: "string" },
+          description: "Absolute paths of the export files, read together as one import.",
+        },
+        map: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "For from:csv, which column fills which field, each as FIELD=COLUMN such as \"title=Summary\". Fields: id, title, details, status, priority, owner, labels, estimate, due, created, completed, project, parent, url. Fields left out are found by their usual headers.",
+        },
+        copy: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "What to copy beside the tasks, any of labels, projects, milestones, cycles, initiatives, comments, documents, views. Everything when left out.",
+        },
+        include: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Which tasks, any of active (open, touched in six months), stale (open, older), completed, all. All when left out.",
+        },
+        label: {
+          type: "string",
+          description: "The label every new task gets; \"none\" for no label. Migrated when left out.",
+        },
+        keep_numbers: {
+          type: "boolean",
+          description: "Give each task the number it had there (ENG-12 becomes S-12). Refused unless Sona has no tasks.",
+        },
+        update_existing: {
+          type: "boolean",
+          description: "Refresh tasks an earlier import brought in instead of skipping them.",
+        },
+        me: {
+          type: "array",
+          items: { type: "string" },
+          description: "Names the user goes by there: tasks assigned to them become theirs and their comments stay theirs.",
+        },
+        dry_run: DRY_RUN,
+        operation_id: OPERATION_ID,
+      },
+      required: ["from", "files"],
+      additionalProperties: false,
+    },
+    argv: (input, agent) => {
+      const pairs = input.map === undefined || input.map === null ? [] : strings(input, "map");
+      const map: Record<string, string> = {};
+      for (const pair of pairs) {
+        const split = pair.indexOf("=");
+        if (split <= 0) throw new SonaInputError("map entries are FIELD=COLUMN, such as title=Summary.");
+        map[pair.slice(0, split).trim()] = pair.slice(split + 1).trim();
+      }
+      const me = input.me === undefined || input.me === null ? [] : strings(input, "me");
+      return [
+        "work",
+        "import",
+        ...assigned("--from", text(input, "from", true)),
+        ...(pairs.length === 0 ? [] : [`--map=${JSON.stringify(map)}`]),
+        ...joined("--copy", input, "copy"),
+        ...joined("--include", input, "include"),
+        ...assigned("--label", text(input, "label")),
+        ...(flag(input, "keep_numbers") ? ["--keep-numbers"] : []),
+        ...(flag(input, "update_existing") ? ["--update-existing"] : []),
+        ...me.map((name) => `--me=${name}`),
+        ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+        ...writing(input, agent),
+        "--json",
+        "--",
+        ...strings(input, "files"),
+      ];
+    },
+  },
+  listing(
+    "sona_work_imports",
+    "imports",
+    "List imports into Sona",
+    "List every import from another tracker, newest first: its id, source, file names, when it ran, whether it was undone, and how many tasks, projects, milestones, labels, initiatives, comments, notes and views it made, archived, matched or skipped.",
+  ),
+  {
+    name: "sona_work_import_revert",
+    title: "Undo an import into Sona",
+    description: `Undo an import: its tasks and projects go to the bin, where they can be restored for 30 days; milestones it added to existing projects, labels no other task carries, initiatives, saved views and notes nobody changed since are removed. An import already undone changes nothing. ${PLANNING_WRITES}`,
+    mutates: "destroys",
+    optIn: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        import: { type: "string", description: "The import's id, from sona_work_imports or sona_work_import." },
+        dry_run: DRY_RUN,
+        operation_id: OPERATION_ID,
+      },
+      required: ["import"],
+      additionalProperties: false,
+    },
+    argv: (input, agent) => [
+      "work",
+      "import-revert",
+      ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+      ...writing(input, agent),
+      "--json",
+      "--",
+      text(input, "import", true),
+    ],
+  },
+  listing(
+    "sona_work_import_template",
+    "import-template",
+    "Get Sona's CSV import template",
+    "Return Sona's CSV import template: the header row sona_work_import reads with from:csv (ID, Title, Details, Status, Priority, Owner, Labels, Estimate, Due, Created, Completed, Project, Parent, Link) and one example row.",
+  ),
+  {
     name: "sona_person_list",
     title: "List people in Sona",
     description:

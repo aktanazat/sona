@@ -1002,6 +1002,7 @@ pub(crate) fn apply_all(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
         crate::planning::work::favorites::FAVORITE_CYCLES_NOTES_MIGRATION,
         crate::planning::work::routines::LABEL_EXTRAS_MIGRATION,
         crate::planning::work::reactions::REACTIONS_MIGRATION,
+        crate::planning::work::import::IMPORTS_MIGRATION,
     ] {
         conn.execute_batch(migration)?;
     }

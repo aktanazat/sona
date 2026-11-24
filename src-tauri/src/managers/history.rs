@@ -366,6 +366,7 @@ pub(crate) static MIGRATIONS: &[M] = &[
     M::up(crate::planning::work::favorites::FAVORITE_CYCLES_NOTES_MIGRATION),
     M::up(crate::planning::work::routines::LABEL_EXTRAS_MIGRATION),
     M::up(crate::planning::work::reactions::REACTIONS_MIGRATION),
+    M::up(crate::planning::work::import::IMPORTS_MIGRATION),
 ];
 
 const MAX_HISTORY_PAGE_SIZE: usize = 100;

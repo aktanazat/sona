@@ -80,6 +80,8 @@ struct SettingsScreen: View {
             PrivacyView(store: model.privacy)
         case .importing:
             ImportView(store: model.imports, openLink: model.open(link:))
+        case .workImport:
+            WorkImportView(store: model.workImport)
         case .documents:
             DocumentsView(store: model.documents)
         case .about:

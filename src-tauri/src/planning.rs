@@ -128,6 +128,9 @@ pub(crate) fn failure(error: anyhow::Error) -> String {
         Some(store::Refusal::DependencyLoop) => {
             "A project cannot wait on itself, or on a project that already waits on it."
         }
+        Some(store::Refusal::HasTasks) => {
+            "Numbers are kept only when Sona has no tasks yet, deleted ones included. Import without keeping them."
+        }
         None => {
             log::error!("Planning database operation failed");
             "Plans could not be saved or read. Try again."

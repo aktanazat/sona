@@ -48,6 +48,7 @@ pub(crate) enum Refusal {
     LabelScope,
     LabelGroup,
     DependencyLoop,
+    HasTasks,
 }
 
 impl fmt::Display for Refusal {
@@ -74,6 +75,7 @@ impl fmt::Display for Refusal {
             Self::LabelScope => "label is kept to the other kind of item",
             Self::LabelGroup => "an item would hold two labels from a one-label group",
             Self::DependencyLoop => "a project cannot wait on itself or on a project waiting on it",
+            Self::HasTasks => "numbers are kept only while there are no tasks",
         })
     }
 }

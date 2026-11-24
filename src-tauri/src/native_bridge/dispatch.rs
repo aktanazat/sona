@@ -6780,6 +6780,67 @@ pub(super) async fn call(
                 .await,
             )
         }
+        "work_import_preview" | "work_import" => {
+            use crate::planning::work::import;
+            let mut args = Args::parse(params)?;
+            let source = args.take("source")?;
+            let paths: Vec<std::path::PathBuf> =
+                args.take::<Option<_>>("paths")?.unwrap_or_default();
+            let map: import::sheets::CsvMap = args.take::<Option<_>>("map")?.unwrap_or_default();
+            let live: bool = args.take::<Option<_>>("live")?.unwrap_or(false);
+            let options: import::ImportOptions = args.take("options")?;
+            let origin = import::Origin::of(&paths, &map, live);
+            if method == "work_import" {
+                let operation_id: String = args.take("operationId")?;
+                reply(
+                    import::import_as(
+                        app,
+                        crate::planning::work::types::WorkActor::Me,
+                        &operation_id,
+                        source,
+                        origin,
+                        &options,
+                    )
+                    .await,
+                )
+            } else {
+                reply(import::preview(app, source, origin, &options).await)
+            }
+        }
+        "work_import_linear_key" => reply(Ok::<_, String>(
+            crate::planning::work::import::linear_key_state(app).await,
+        )),
+        "work_import_linear_key_set" => {
+            let mut args = Args::parse(params)?;
+            let token: String = args.take("token")?;
+            reply(crate::planning::work::import::linear_key_set(app, token).await)
+        }
+        "work_import_linear_key_remove" => {
+            reply(crate::planning::work::import::linear_key_remove(app).await)
+        }
+        "work_imports" => {
+            let handle = app.clone();
+            off_main_thread(move || reply(crate::planning::work::import::imports_read(&handle)))
+                .await?
+        }
+        "work_import_revert" => {
+            let mut args = Args::parse(params)?;
+            let operation_id: String = args.take("operationId")?;
+            let id: String = args.take("id")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::planning::work::import::revert_as(
+                    &handle,
+                    crate::planning::work::types::WorkActor::Me,
+                    &operation_id,
+                    &id,
+                ))
+            })
+            .await?
+        }
+        "work_import_template" => reply(Ok::<_, String>(
+            crate::planning::work::import::sheets::template(),
+        )),
         "work_label_scope" => {
             let mut args = Args::parse(params)?;
             let operation_id: String = args.take("operationId")?;
