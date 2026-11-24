@@ -726,10 +726,22 @@ final class WorkKeys {
         let key = (event.charactersIgnoringModifiers ?? "").lowercased()
         if let pressed = goPressedAt {
             goPressedAt = nil
-            if event.timestamp - pressed < 1.5, flags.isEmpty, let place = Self.destinations[key] {
-                model.workFocus.peeking = false
-                model.go(place)
-                return true
+            if event.timestamp - pressed < 1.5, flags.isEmpty {
+                if key == "v" {
+                    let focus = model.workFocus
+                    focus.open(nil, in: .tasks)
+                    focus.switchTab(.cycle)
+                    focus.cycleOpened = nil
+                    focus.cycleListShown = false
+                    focus.peeking = false
+                    model.go(.tasks)
+                    return true
+                }
+                if let place = Self.destinations[key] {
+                    model.workFocus.peeking = false
+                    model.go(place)
+                    return true
+                }
             }
         }
         if let pressed = openPressedAt {
