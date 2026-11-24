@@ -15,11 +15,13 @@ impl MeetingSessionManager {
         display_name: String,
         edit: PersonProfileEdit,
     ) -> Result<PeopleMutationResult, MeetingCommandError> {
-        let result = self
-            .store()
-            .await?
+        let store = self.store().await?;
+        let result = store
             .create_person_profile(display_name, edit, now_utc_ms())
             .map_err(map_store_error)?;
+        if let Some(person) = &result.person {
+            self.record_person_saved(store, None, person);
+        }
         self.emit_artifact_changed(None, result.revision);
         Ok(result)
     }
@@ -29,11 +31,14 @@ impl MeetingSessionManager {
         person_id: PersonId,
         edit: PersonProfileEdit,
     ) -> Result<PeopleMutationResult, MeetingCommandError> {
-        let result = self
-            .store()
-            .await?
+        let store = self.store().await?;
+        let before = Self::person_before(&store, person_id);
+        let result = store
             .update_person_profile(person_id, edit, now_utc_ms())
             .map_err(map_store_error)?;
+        if let Some(person) = &result.person {
+            self.record_person_saved(store, before.as_ref(), person);
+        }
         self.emit_artifact_changed(None, result.revision);
         Ok(result)
     }
@@ -92,9 +97,9 @@ impl MeetingSessionManager {
         &self,
         request: PersonRenameRequest,
     ) -> Result<PeopleMutationResult, MeetingCommandError> {
-        let result = self
-            .store()
-            .await?
+        let store = self.store().await?;
+        let was = Self::person_before(&store, request.person_id);
+        let result = store
             .rename_person(
                 request.person_id,
                 request.display_name,
@@ -102,6 +107,9 @@ impl MeetingSessionManager {
                 now_utc_ms(),
             )
             .map_err(map_store_error)?;
+        if let Some(person) = &result.person {
+            self.record_person_saved(store, was.as_ref(), person);
+        }
         self.emit_artifact_changed(None, result.revision);
         Ok(result)
     }
@@ -111,6 +119,7 @@ impl MeetingSessionManager {
         request: PersonMergeRequest,
     ) -> Result<PeopleMutationResult, MeetingCommandError> {
         let store = self.store().await?;
+        let was = Self::person_before(&store, request.target_person_id);
         let before = store
             .transcript_correction_people_snapshot(&[
                 request.source_person_id,
@@ -131,6 +140,9 @@ impl MeetingSessionManager {
                 .transcript_correction_projection_changes(before)
                 .map_err(map_store_error)?,
         );
+        if let Some(person) = &result.person {
+            self.record_person_saved(store, was.as_ref(), person);
+        }
         self.emit_artifact_changed(None, result.revision);
         Ok(result)
     }

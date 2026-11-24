@@ -1636,6 +1636,30 @@ static MIGRATIONS: &[M] = &[
         "ALTER TABLE saved_prompts ADD COLUMN skill INTEGER NOT NULL DEFAULT 0 CHECK (skill IN (0, 1));",
     ),
     M::up(include_str!("store/person_link_transcript.sql")),
+    // Saving a person under new names re-reads recent meetings for them. Its
+    // event kind widens the workflow event constraint; no workflow is added.
+    M::up(rebuilt_workflow_tables!(
+        workflow_ids: "
+            'person_linking', 'pre_meeting_briefing', 'continuity',
+            'vocabulary_mining', 'document_linking', 'meeting_activity',
+            'spoken_punctuation', 'correction_learning', 'mode_habits',
+            'capture_advisor', 'series_priming', 'daily_digest'
+        ",
+        seeded: "('person_linking', 1) ON CONFLICT(workflow_id) DO NOTHING",
+        event_kinds: "
+            'meeting_finalized', 'meeting_started', 'speaker_renamed',
+            'audio_imported', 'doc_ingested', 'calendar_meeting_detected',
+            'agent_hook_event', 'meeting_prompt_recorded',
+            'meeting_prompt_ignored', 'meeting_auto_record_started',
+            'meeting_auto_record_stopped', 'dictation_corpus_swept',
+            'dictation_correction_recorded', 'daily_digest_due',
+            'meeting_prep_presented', 'meeting_prep_record_armed',
+            'meeting_prep_brief_opened', 'meeting_prep_dismissed',
+            'meeting_wrap_presented', 'meeting_wrap_notes_opened',
+            'meeting_wrap_follow_up_copied', 'meeting_wrap_done',
+            'person_saved'
+        ",
+    )),
 ];
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StoreError {

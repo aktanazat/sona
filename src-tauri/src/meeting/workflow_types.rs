@@ -281,6 +281,10 @@ pub enum WorkflowEventKind {
     MeetingFinalized,
     MeetingStarted,
     SpeakerRenamed,
+    /// A person was saved under names they did not have before. Payload is
+    /// the person; the dedupe key is the person and that set of names, so
+    /// saving the same names again raises nothing.
+    PersonSaved,
     AudioImported,
     DocumentIngested,
     CalendarMeetingDetected,
@@ -318,6 +322,7 @@ impl WorkflowEventKind {
             Self::MeetingFinalized => "meeting_finalized",
             Self::MeetingStarted => "meeting_started",
             Self::SpeakerRenamed => "speaker_renamed",
+            Self::PersonSaved => "person_saved",
             Self::AudioImported => "audio_imported",
             Self::DocumentIngested => "doc_ingested",
             Self::CalendarMeetingDetected => "calendar_meeting_detected",
@@ -345,6 +350,7 @@ impl WorkflowEventKind {
             "meeting_finalized" => Some(Self::MeetingFinalized),
             "meeting_started" => Some(Self::MeetingStarted),
             "speaker_renamed" => Some(Self::SpeakerRenamed),
+            "person_saved" => Some(Self::PersonSaved),
             "audio_imported" => Some(Self::AudioImported),
             "doc_ingested" => Some(Self::DocumentIngested),
             "calendar_meeting_detected" => Some(Self::CalendarMeetingDetected),
