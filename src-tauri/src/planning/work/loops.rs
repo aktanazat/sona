@@ -1,3 +1,6 @@
+use super::doc_proposals::{self, DocProposalKind};
+use super::initiatives::InitiativeStatus;
+use super::items;
 use super::sessions::{self, ActivityInput, WorkSessionActivityKind};
 use super::types::{WorkActor, WorkItemInput, WorkPatch, WorkStatus};
 use super::{now_ms, tasks_changed};
@@ -6,7 +9,7 @@ use crate::meeting::session::MeetingSessionManager;
 use crate::meeting::store::MeetingStore;
 use crate::meeting::types::MeetingSessionId;
 use crate::planning::store::{self, Refusal};
-use crate::planning::types::{EvidenceSourceKind, EvidenceTargetKind, ProjectStatus};
+use crate::planning::types::{EvidenceSourceKind, EvidenceTargetKind, ProjectHealth, ProjectStatus};
 use crate::query::KeptLocal;
 use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension, Row, Transaction};
@@ -68,7 +71,11 @@ CREATE INDEX planning_loop_runs_loop ON planning_loop_runs(loop_id, queued_at_ms
 CREATE INDEX planning_loop_runs_waiting ON planning_loop_runs(status, queued_at_ms)
     WHERE status IN ('queued', 'running');";
 
-pub(crate) const LOOP_TOOLS: [(&str, &str, &[&str]); 11] = [
+/// How hard the in-app agent thinks on a run, kept with each version.
+pub(crate) const REASONING_MIGRATION: &str = "ALTER TABLE planning_loops ADD COLUMN reasoning TEXT;
+ALTER TABLE planning_loop_versions ADD COLUMN reasoning TEXT;";
+
+pub(crate) const LOOP_TOOLS: [(&str, &str, &[&str]); 14] = [
     ("sona_search", "Search", &["search", "dictation"]),
     ("sona_meetings", "List meetings", &["recent"]),
     ("sona_meeting", "Read a meeting", &["meeting"]),
@@ -80,10 +87,16 @@ pub(crate) const LOOP_TOOLS: [(&str, &str, &[&str]); 11] = [
     ("sona_skills", "Use your skills", &["skill"]),
     (PROPOSE_NEW, "Propose new tasks for Triage", &[]),
     (PROPOSE_CHANGE, "Propose task changes for Triage", &[]),
+    (PROPOSE_NOTE, "Propose additions to notes", &[]),
+    (PROPOSE_DESCRIPTION, "Propose project descriptions", &[]),
+    (PROPOSE_UPDATE, "Draft project updates", &[]),
 ];
 
 const PROPOSE_NEW: &str = "sona_work_create";
 const PROPOSE_CHANGE: &str = "sona_work_update";
+const PROPOSE_NOTE: &str = "sona_scratchpad_update_body";
+const PROPOSE_DESCRIPTION: &str = "sona_project_save";
+const PROPOSE_UPDATE: &str = "sona_project_update_save";
 const OFFER_FENCE: &str = "```sona-proposals";
 const OFFER_LIMIT: usize = 10;
 const KEPT_HERE: &str =
@@ -134,6 +147,33 @@ impl LoopDay {
     }
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LoopReasoning {
+    Low,
+    Medium,
+    High,
+}
+
+impl LoopReasoning {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
+
+    fn parse(text: &str) -> Option<Self> {
+        match text {
+            "low" => Some(Self::Low),
+            "medium" => Some(Self::Medium),
+            "high" => Some(Self::High),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(
     tag = "kind",
@@ -164,11 +204,22 @@ pub enum LoopTrigger {
         to: Option<ProjectStatus>,
     },
     MeetingEnded,
+    InitiativeStatusChanged {
+        #[serde(default)]
+        to: Option<InitiativeStatus>,
+    },
+    CycleStarted,
+    CycleEnded,
+    MilestoneDone,
+    ProjectUpdatePosted,
 }
 
 impl LoopTrigger {
     const fn reads_changes(&self) -> bool {
-        !matches!(self, Self::Schedule { .. } | Self::MeetingEnded)
+        !matches!(
+            self,
+            Self::Schedule { .. } | Self::MeetingEnded | Self::CycleStarted | Self::CycleEnded
+        )
     }
 
     const fn on_tasks(&self) -> bool {
@@ -180,6 +231,22 @@ impl LoopTrigger {
                 | Self::Assigned
                 | Self::CommentAdded
         )
+    }
+
+    const fn on_projects(&self) -> bool {
+        matches!(
+            self,
+            Self::ProjectStatusChanged { .. } | Self::MilestoneDone | Self::ProjectUpdatePosted
+        )
+    }
+
+    /// The cycle day column a cycle trigger waits on.
+    const fn cycle_day(&self) -> Option<&'static str> {
+        match self {
+            Self::CycleStarted => Some("start_day"),
+            Self::CycleEnded => Some("end_day"),
+            _ => None,
+        }
     }
 }
 
@@ -207,6 +274,8 @@ pub struct LoopInput {
     pub conditions: LoopConditions,
     #[serde(default)]
     pub tools: Vec<String>,
+    #[serde(default)]
+    pub reasoning: Option<LoopReasoning>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -271,6 +340,7 @@ pub struct WorkLoop {
     pub trigger: LoopTrigger,
     pub conditions: LoopConditions,
     pub tools: Vec<String>,
+    pub reasoning: Option<LoopReasoning>,
     pub version: i64,
     pub next_run_at_ms: Option<i64>,
     pub last_run: Option<WorkLoopRun>,
@@ -286,6 +356,7 @@ impl WorkLoop {
             trigger: self.trigger.clone(),
             conditions: self.conditions.clone(),
             tools: self.tools.clone(),
+            reasoning: self.reasoning,
         }
     }
 }
@@ -299,6 +370,7 @@ pub struct WorkLoopVersion {
     pub trigger: LoopTrigger,
     pub conditions: LoopConditions,
     pub tools: Vec<String>,
+    pub reasoning: Option<LoopReasoning>,
     pub saved_at_ms: i64,
     pub saved_by: String,
     pub restored_from: Option<i64>,
@@ -368,7 +440,7 @@ fn json<T: DeserializeOwned>(text: &str) -> Result<T> {
     Ok(serde_json::from_str(text)?)
 }
 
-const LOOP_COLUMNS: &str = "id, name, prompt, enabled, trigger_json, conditions_json, tools_json, version, next_run_at_ms, created_at_ms, updated_at_ms";
+const LOOP_COLUMNS: &str = "id, name, prompt, enabled, trigger_json, conditions_json, tools_json, version, next_run_at_ms, created_at_ms, updated_at_ms, reasoning";
 const RUN_COLUMNS: &str = "id, loop_id, version, cause, task_id, meeting_id, status, queued_at_ms, started_at_ms, ended_at_ms, output, error, refused_json, session_id";
 
 type LoopRow = (
@@ -383,6 +455,7 @@ type LoopRow = (
     Option<i64>,
     i64,
     i64,
+    Option<String>,
 );
 
 fn loop_row(row: &Row<'_>) -> rusqlite::Result<LoopRow> {
@@ -398,11 +471,12 @@ fn loop_row(row: &Row<'_>) -> rusqlite::Result<LoopRow> {
         row.get(8)?,
         row.get(9)?,
         row.get(10)?,
+        row.get(11)?,
     ))
 }
 
 fn loop_of(conn: &Connection, row: LoopRow) -> Result<WorkLoop> {
-    let (id, name, prompt, enabled, trigger, conditions, tools, version, next, created, updated) =
+    let (id, name, prompt, enabled, trigger, conditions, tools, version, next, created, updated, reasoning) =
         row;
     let last_run = runs(conn, &id, 1)?.into_iter().next();
     Ok(WorkLoop {
@@ -412,6 +486,7 @@ fn loop_of(conn: &Connection, row: LoopRow) -> Result<WorkLoop> {
         trigger: json(&trigger)?,
         conditions: json(&conditions)?,
         tools: json(&tools)?,
+        reasoning: reasoning.as_deref().and_then(LoopReasoning::parse),
         version,
         next_run_at_ms: next,
         last_run,
@@ -495,7 +570,7 @@ pub(crate) fn get(conn: &Connection, id: &str) -> Result<WorkLoop> {
 
 pub(crate) fn versions(conn: &Connection, id: &str) -> Result<Vec<WorkLoopVersion>> {
     let mut statement = conn.prepare(
-        "SELECT version, name, prompt, trigger_json, conditions_json, tools_json, saved_at_ms, saved_by, restored_from
+        "SELECT version, name, prompt, trigger_json, conditions_json, tools_json, saved_at_ms, saved_by, restored_from, reasoning
          FROM planning_loop_versions WHERE loop_id = ?1 ORDER BY version DESC",
     )?;
     let rows = statement
@@ -510,6 +585,7 @@ pub(crate) fn versions(conn: &Connection, id: &str) -> Result<Vec<WorkLoopVersio
                 row.get::<_, i64>(6)?,
                 row.get::<_, String>(7)?,
                 row.get::<_, Option<i64>>(8)?,
+                row.get::<_, Option<String>>(9)?,
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -525,6 +601,7 @@ pub(crate) fn versions(conn: &Connection, id: &str) -> Result<Vec<WorkLoopVersio
                 saved_at_ms,
                 saved_by,
                 restored_from,
+                reasoning,
             )| {
                 Ok(WorkLoopVersion {
                     version,
@@ -533,6 +610,7 @@ pub(crate) fn versions(conn: &Connection, id: &str) -> Result<Vec<WorkLoopVersio
                     trigger: json(&trigger)?,
                     conditions: json(&conditions)?,
                     tools: json(&tools)?,
+                    reasoning: reasoning.as_deref().and_then(LoopReasoning::parse),
                     saved_at_ms,
                     saved_by,
                     restored_from,
@@ -715,15 +793,14 @@ fn checked(
         return refuse("An automation can have at most 8 conditions.");
     }
     if conditions.count() > 0 && !trigger.on_tasks() {
-        let project_only = matches!(trigger, LoopTrigger::ProjectStatusChanged { .. })
+        let project_only = trigger.on_projects()
             && conditions.labels.is_empty()
             && conditions.statuses.is_empty();
         if !project_only {
-            return refuse(match trigger {
-                LoopTrigger::ProjectStatusChanged { .. } => {
-                    "A project trigger can only check which project it is."
-                }
-                _ => "Conditions apply only to task and project triggers.",
+            return refuse(if trigger.on_projects() {
+                "A project trigger can only check which project it is."
+            } else {
+                "Conditions apply only to task and project triggers."
             });
         }
     }
@@ -760,6 +837,7 @@ fn checked(
         trigger,
         conditions,
         tools,
+        reasoning: input.reasoning,
     })
 }
 
@@ -788,8 +866,8 @@ fn add_version(
 ) -> Result<()> {
     conn.execute(
         "INSERT INTO planning_loop_versions
-            (loop_id, version, name, prompt, trigger_json, conditions_json, tools_json, saved_at_ms, saved_by, restored_from)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            (loop_id, version, name, prompt, trigger_json, conditions_json, tools_json, saved_at_ms, saved_by, restored_from, reasoning)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
             id,
             version,
@@ -801,6 +879,7 @@ fn add_version(
             now,
             by,
             restored_from,
+            input.reasoning.map(LoopReasoning::as_str),
         ],
     )?;
     Ok(())
@@ -825,7 +904,8 @@ fn rewrite(
         "UPDATE planning_loops SET name = ?2, prompt = ?3, trigger_json = ?4, conditions_json = ?5,
             tools_json = ?6, version = ?7, next_run_at_ms = ?8, updated_at_ms = ?9,
             change_cursor = CASE WHEN ?10 THEN ?11 ELSE change_cursor END,
-            armed_at_ms = CASE WHEN ?10 THEN ?9 ELSE armed_at_ms END
+            armed_at_ms = CASE WHEN ?10 THEN ?9 ELSE armed_at_ms END,
+            reasoning = ?12
          WHERE id = ?1",
         params![
             current.id,
@@ -839,6 +919,7 @@ fn rewrite(
             now,
             rearm,
             change_head(conn)?,
+            input.reasoning.map(LoopReasoning::as_str),
         ],
     )?;
     add_version(conn, &current.id, version, input, by, restored_from, now)
@@ -859,8 +940,8 @@ pub(crate) fn save(
             conn.execute(
                 "INSERT INTO planning_loops
                     (id, name, prompt, enabled, trigger_json, conditions_json, tools_json, version,
-                     next_run_at_ms, change_cursor, armed_at_ms, created_at_ms, updated_at_ms)
-                 VALUES (?1, ?2, ?3, 1, ?4, ?5, ?6, 1, ?7, ?8, ?9, ?9, ?9)",
+                     next_run_at_ms, change_cursor, armed_at_ms, created_at_ms, updated_at_ms, reasoning)
+                 VALUES (?1, ?2, ?3, 1, ?4, ?5, ?6, 1, ?7, ?8, ?9, ?9, ?9, ?10)",
                 params![
                     id,
                     input.name,
@@ -871,6 +952,7 @@ pub(crate) fn save(
                     next_run(&input.trigger, now),
                     change_head(conn)?,
                     now,
+                    input.reasoning.map(LoopReasoning::as_str),
                 ],
             )?;
             add_version(conn, &id, 1, &input, by, None, now)?;
@@ -912,6 +994,7 @@ pub(crate) fn restore(
             trigger: old.trigger,
             conditions: old.conditions,
             tools: old.tools,
+            reasoning: old.reasoning,
         },
         false,
         now,
@@ -922,6 +1005,46 @@ pub(crate) fn restore(
     name_taken(conn, &input.name, Some(id))?;
     rewrite(conn, &current, &input, by, Some(version), now)?;
     get(conn, id)
+}
+
+/// A copy of `id` under `name`, or "Copy of …" when none is given, left
+/// turned off so one event never runs both until the copy is turned on.
+pub(crate) fn copy(
+    conn: &Connection,
+    id: &str,
+    name: Option<&str>,
+    by: &str,
+    now: i64,
+) -> Result<WorkLoop> {
+    let source = get(conn, id)?;
+    let mut input = source.content();
+    input.name = match name.map(str::trim).filter(|name| !name.is_empty()) {
+        Some(name) => name.to_owned(),
+        None => copy_name(conn, &source.name)?,
+    };
+    if let LoopTrigger::Schedule {
+        first_run_at_ms, ..
+    } = &mut input.trigger
+    {
+        if let Some(next) = next_run(&source.trigger, now) {
+            *first_run_at_ms = next;
+        }
+    }
+    let made = save(conn, None, &input, by, now)?;
+    enable(conn, &made.id, false, now)
+}
+
+fn copy_name(conn: &Connection, name: &str) -> Result<String> {
+    for n in 1..100 {
+        let suffix = if n == 1 { String::new() } else { format!(" ({n})") };
+        let room = NAME_LIMIT - "Copy of ".len() - suffix.chars().count();
+        let base: String = name.chars().take(room).collect();
+        let candidate = format!("Copy of {base}{suffix}");
+        if name_taken(conn, &candidate, None).is_ok() {
+            return Ok(candidate);
+        }
+    }
+    refuse("Name the copy: every \"Copy of\" name is taken.")
 }
 
 pub(crate) fn enable(conn: &Connection, id: &str, enabled: bool, now: i64) -> Result<WorkLoop> {
@@ -1040,10 +1163,15 @@ impl Change {
     }
 }
 
+/// The tracker changes after `cursor` that automations react to: all but
+/// those a batch of Sona's own wrote (see `batches::quiet_since`).
 fn changes_after(conn: &Connection, cursor: i64) -> Result<Vec<Change>> {
     let mut statement = conn.prepare(
         "SELECT seq, entity, entity_id, task_id, action, updated_from
-         FROM planning_changes WHERE seq > ?1 ORDER BY seq LIMIT ?2",
+         FROM planning_changes c WHERE seq > ?1
+           AND NOT EXISTS (SELECT 1 FROM planning_quiet_changes q
+               WHERE c.seq BETWEEN q.first_seq AND q.last_seq)
+         ORDER BY seq LIMIT ?2",
     )?;
     let rows = statement
         .query_map(params![cursor, CHANGE_PAGE], |row| {
@@ -1099,6 +1227,8 @@ fn current(conn: &Connection, change: &Change, field: &str) -> Result<Value> {
             Ok(Value::from(labels))
         }
         ("project", "status") => text("SELECT status FROM planning_projects WHERE id = ?1"),
+        ("initiative", "status") => text("SELECT status FROM planning_initiatives WHERE id = ?1"),
+        ("milestone", "status") => text("SELECT status FROM planning_milestones WHERE id = ?1"),
         _ => Ok(Value::Null),
     }
 }
@@ -1217,6 +1347,27 @@ fn what_happened(
             to.is_none_or(|to| to.as_str() == now)
                 .then(|| format!("moved to {}", status_words(now)))
         }
+        LoopTrigger::InitiativeStatusChanged { to }
+            if change.entity == "initiative"
+                && change.action == "update"
+                && change.had("status") =>
+        {
+            let now = after(conn, change, "status")?;
+            let now = now.as_str().unwrap_or_default();
+            to.is_none_or(|to| to.as_str() == now)
+                .then(|| format!("moved to {}", status_words(now)))
+        }
+        LoopTrigger::MilestoneDone
+            if change.entity == "milestone" && change.action == "update" && change.had("status") =>
+        {
+            (after(conn, change, "status")?.as_str() == Some("done"))
+                .then(|| "was finished".to_owned())
+        }
+        LoopTrigger::ProjectUpdatePosted
+            if change.entity == "project_update" && change.action == "create" =>
+        {
+            Some("got an update".to_owned())
+        }
         _ => None,
     })
 }
@@ -1230,18 +1381,38 @@ fn fired(
     let Some(happened) = what_happened(conn, trigger, change)? else {
         return Ok(None);
     };
-    if let LoopTrigger::ProjectStatusChanged { .. } = trigger {
-        if !conditions.projects.is_empty() && !conditions.projects.contains(&change.entity_id) {
+    if !trigger.on_tasks() {
+        let sql = match trigger {
+            LoopTrigger::ProjectStatusChanged { .. } => {
+                "SELECT 'Project ' || title, id FROM planning_projects WHERE id = ?1"
+            }
+            LoopTrigger::MilestoneDone => {
+                "SELECT 'Milestone ' || m.title || ' in ' || p.title, p.id
+                 FROM planning_milestones m JOIN planning_projects p ON p.id = m.project_id
+                 WHERE m.id = ?1"
+            }
+            LoopTrigger::ProjectUpdatePosted => {
+                "SELECT 'Project ' || p.title, p.id
+                 FROM planning_project_updates u JOIN planning_projects p ON p.id = u.project_id
+                 WHERE u.id = ?1"
+            }
+            LoopTrigger::InitiativeStatusChanged { .. } => {
+                "SELECT 'Initiative ' || name, NULL FROM planning_initiatives WHERE id = ?1"
+            }
+            _ => return Ok(None),
+        };
+        let found: Option<(String, Option<String>)> = conn
+            .query_row(sql, [&change.entity_id], |row| Ok((row.get(0)?, row.get(1)?)))
+            .optional()?;
+        let Some((subject, project_id)) = found else {
+            return Ok(None);
+        };
+        if !conditions.projects.is_empty()
+            && !project_id.is_some_and(|project| conditions.projects.contains(&project))
+        {
             return Ok(None);
         }
-        let name: Option<String> = conn
-            .query_row(
-                "SELECT title FROM planning_projects WHERE id = ?1",
-                [&change.entity_id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        return Ok(name.map(|name| (format!("Project {name} {happened}"), None)));
+        return Ok(Some((format!("{subject} {happened}"), None)));
     }
     let Some(task_id) = change.task() else {
         return Ok(None);
@@ -1302,11 +1473,63 @@ pub(crate) fn enqueue(conn: &mut Connection, now: i64) -> Result<usize> {
     Ok(queued)
 }
 
+/// Queues one run for each cycle that started, or ended, on a day after the
+/// automation was armed and no later than today.
+fn queue_cycles(
+    tx: &Transaction<'_>,
+    loop_id: &str,
+    version: i64,
+    day: &str,
+    armed_at_ms: i64,
+    now: i64,
+) -> Result<usize> {
+    let today = items::local_today(now)?.format("%Y-%m-%d").to_string();
+    let armed = items::local_today(armed_at_ms)?
+        .format("%Y-%m-%d")
+        .to_string();
+    let edge = if day == "start_day" { "started" } else { "ended" };
+    let cycles = {
+        let mut statement = tx.prepare(&format!(
+            "SELECT number, name FROM planning_cycles
+             WHERE archived_at_ms IS NULL AND {day} <= ?1 AND {day} > ?2 ORDER BY number"
+        ))?;
+        let rows = statement
+            .query_map(params![today, armed], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    };
+    let mut queued = 0;
+    for (number, name) in cycles {
+        let label = match name {
+            Some(name) => format!("Cycle {number} ({name})"),
+            None => format!("Cycle {number}"),
+        };
+        let run = queue(
+            tx,
+            Queue {
+                loop_id,
+                version,
+                cause_key: format!("cycle-{edge}:{number}"),
+                cause: format!("{label} {edge}"),
+                task_id: None,
+                meeting_id: None,
+            },
+            now,
+        )?;
+        if run.is_some() {
+            queued += 1;
+        }
+    }
+    Ok(queued)
+}
+
 fn enqueue_in(tx: &Transaction<'_>, now: i64) -> Result<usize> {
     let mut queued = 0;
     let armed = {
         let mut statement = tx.prepare(
-            "SELECT id, version, trigger_json, conditions_json, next_run_at_ms, change_cursor
+            "SELECT id, version, trigger_json, conditions_json, next_run_at_ms, change_cursor, armed_at_ms
              FROM planning_loops WHERE enabled = 1",
         )?;
         let rows = statement
@@ -1318,12 +1541,13 @@ fn enqueue_in(tx: &Transaction<'_>, now: i64) -> Result<usize> {
                     row.get::<_, String>(3)?,
                     row.get::<_, Option<i64>>(4)?,
                     row.get::<_, i64>(5)?,
+                    row.get::<_, i64>(6)?,
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         rows
     };
-    for (id, version, trigger, conditions, next_run_at_ms, cursor) in armed {
+    for (id, version, trigger, conditions, next_run_at_ms, cursor, armed_at_ms) in armed {
         let trigger: LoopTrigger = json(&trigger)?;
         let conditions: LoopConditions = json(&conditions)?;
         if let Some(due) = next_run_at_ms.filter(|due| *due <= now) {
@@ -1347,6 +1571,10 @@ fn enqueue_in(tx: &Transaction<'_>, now: i64) -> Result<usize> {
                 "UPDATE planning_loops SET next_run_at_ms = ?2 WHERE id = ?1",
                 params![id, next_run(&trigger, now)],
             )?;
+        }
+        if let Some(day) = trigger.cycle_day() {
+            queued += queue_cycles(tx, &id, version, day, armed_at_ms, now)?;
+            continue;
         }
         if !trigger.reads_changes() {
             continue;
@@ -1461,6 +1689,8 @@ struct Claimed {
     cause: String,
     task_id: Option<String>,
     meeting_id: Option<String>,
+    reasoning: Option<LoopReasoning>,
+    documents: String,
 }
 
 /// Whether a meeting is kept on this Mac. A store that cannot say counts as
@@ -1492,9 +1722,10 @@ fn claim(conn: &mut Connection, now: i64) -> Result<Option<Claimed>> {
         String,
         Option<String>,
         Option<String>,
+        Option<String>,
     )> = tx
         .query_row(
-            "SELECT r.id, l.name, l.prompt, l.tools_json, r.cause, r.task_id, r.meeting_id
+            "SELECT r.id, l.name, l.prompt, l.tools_json, r.cause, r.task_id, r.meeting_id, l.reasoning
              FROM planning_loop_runs r JOIN planning_loops l ON l.id = r.loop_id
              WHERE r.status = 'queued' ORDER BY r.queued_at_ms, r.rowid LIMIT 1",
             [],
@@ -1507,11 +1738,13 @@ fn claim(conn: &mut Connection, now: i64) -> Result<Option<Claimed>> {
                     row.get(4)?,
                     row.get(5)?,
                     row.get(6)?,
+                    row.get(7)?,
                 ))
             },
         )
         .optional()?;
-    let Some((run_id, loop_name, prompt, tools, cause, task_id, meeting_id)) = next else {
+    let Some((run_id, loop_name, prompt, tools, cause, task_id, meeting_id, reasoning)) = next
+    else {
         return Ok(None);
     };
     tx.execute(
@@ -1526,16 +1759,57 @@ fn claim(conn: &mut Connection, now: i64) -> Result<Option<Claimed>> {
             )?;
         }
     }
+    let tools: Vec<String> = json(&tools)?;
+    let documents = documents_brief(&tx, &tools)?;
     tx.commit()?;
     Ok(Some(Claimed {
         run_id,
         loop_name,
         prompt,
-        tools: json(&tools)?,
+        tools,
         cause,
         task_id,
         meeting_id,
+        reasoning: reasoning.as_deref().and_then(LoopReasoning::parse),
+        documents,
     }))
+}
+
+/// The projects and notes a run may name in its document proposals, newest
+/// first, when its tools allow any.
+fn documents_brief(conn: &Connection, tools: &[String]) -> Result<String> {
+    let allows = |tool: &str| tools.iter().any(|name| name == tool);
+    let mut text = String::new();
+    let listed = |sql: &str| -> Result<Vec<(String, String)>> {
+        let mut statement = conn.prepare(sql)?;
+        let rows = statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    };
+    if allows(PROPOSE_DESCRIPTION) || allows(PROPOSE_UPDATE) {
+        text += "\n\nProjects you may name, by id: ";
+        text += &listed(
+            "SELECT id, title FROM planning_projects
+             WHERE archived_at_ms IS NULL AND trashed_at_ms IS NULL
+             ORDER BY updated_at_ms DESC LIMIT 30",
+        )?
+        .iter()
+        .map(|(id, title)| format!("{id} ({title})"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    }
+    if allows(PROPOSE_NOTE) {
+        text += "\n\nNotes you may add to, by id: ";
+        text += &listed(
+            "SELECT id, title FROM scratch_notes ORDER BY updated_at_ms DESC LIMIT 15",
+        )?
+        .iter()
+        .map(|(id, title)| format!("{id} ({title})"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    }
+    Ok(text)
 }
 
 fn skip_waiting(conn: &Connection, reason: &str, now: i64) -> Result<usize> {
@@ -1686,34 +1960,45 @@ fn brief(claimed: &Claimed) -> String {
     if let Some(meeting_id) = &claimed.meeting_id {
         message += &format!("\nThe meeting's id: {meeting_id}");
     }
-    let new = claimed.tools.iter().any(|tool| tool == PROPOSE_NEW);
-    let change = claimed.tools.iter().any(|tool| tool == PROPOSE_CHANGE);
-    if !new && !change {
+    let allows = |tool: &str| claimed.tools.iter().any(|name| name == tool);
+    let offered: Vec<(&str, &str)> = [
+        (PROPOSE_NEW, "new tasks", NEW_EXAMPLE),
+        (PROPOSE_CHANGE, "changes to existing tasks", CHANGE_EXAMPLE),
+        (PROPOSE_NOTE, "text to add to the end of a note", NOTE_EXAMPLE),
+        (PROPOSE_DESCRIPTION, "a project's new description", DESCRIPTION_EXAMPLE),
+        (PROPOSE_UPDATE, "a project update", UPDATE_EXAMPLE),
+    ]
+    .into_iter()
+    .filter(|(tool, _, _)| allows(tool))
+    .map(|(_, what, example)| (what, example))
+    .collect();
+    if offered.is_empty() {
         return message;
     }
-    let mut what = Vec::new();
-    let mut example = Vec::new();
-    if new {
-        what.push("new tasks");
-        example.push(NEW_EXAMPLE);
-    }
-    if change {
-        what.push("changes to existing tasks");
-        example.push(CHANGE_EXAMPLE);
-    }
     message += &format!(
-        "\n\nYou can't change Sona's tasks yourself, but you may propose {}. Each waits in Triage until the user accepts or declines it. To propose, end your reply with one block:\n{OFFER_FENCE}\n{{{}}}\n```\nLeave the block out when there is nothing to propose; at most {OFFER_LIMIT} of each. Priority: 0 none, 1 urgent, 2 high, 3 medium, 4 low. Status: backlog, not_started, in_progress, done or canceled. Name a task by its number, such as S-12.",
-        what.join(" or "),
-        example.join(", ")
+        "\n\nYou can't change Sona's tasks, notes or projects yourself, but you may propose {}. Each waits until the user accepts or declines it. To propose, end your reply with one block:\n{OFFER_FENCE}\n{{{}}}\n```\nLeave the block out when there is nothing to propose; at most {OFFER_LIMIT} of each.",
+        offered.iter().map(|(what, _)| *what).collect::<Vec<_>>().join(", "),
+        offered.iter().map(|(_, example)| *example).collect::<Vec<_>>().join(", ")
     );
+    if allows(PROPOSE_NEW) || allows(PROPOSE_CHANGE) {
+        message += " Priority: 0 none, 1 urgent, 2 high, 3 medium, 4 low. Status: backlog, not_started, in_progress, done or canceled. Name a task by its number, such as S-12.";
+    }
+    if allows(PROPOSE_UPDATE) {
+        message += " Health: onTrack, atRisk or offTrack.";
+    }
+    message += &claimed.documents;
     message
 }
 
 const NEW_EXAMPLE: &str = r#""newTasks": [{"title": "Send Priya the deck", "details": "She asked for it before Friday.", "priority": 2}]"#;
 const CHANGE_EXAMPLE: &str = r#""changes": [{"task": "S-12", "status": "done"}]"#;
+const NOTE_EXAMPLE: &str =
+    r#""noteAdditions": [{"note": "<note id>", "text": "- Decided to ship Friday"}]"#;
+const DESCRIPTION_EXAMPLE: &str = r#""projectDescriptions": [{"project": "<project id>", "description": "The full new description"}]"#;
+const UPDATE_EXAMPLE: &str = r#""projectUpdates": [{"project": "<project id>", "health": "onTrack", "body": "What moved this week"}]"#;
 
-/// What a run may leave in Triage: tasks it proposes, and changes to
-/// existing tasks that wait for the user field by field.
+/// What a run may propose: tasks for Triage, changes to existing tasks that
+/// wait for the user field by field, and edits to notes and projects.
 #[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Offers {
@@ -1721,6 +2006,12 @@ struct Offers {
     new_tasks: Vec<NewTaskOffer>,
     #[serde(default)]
     changes: Vec<ChangeOffer>,
+    #[serde(default)]
+    note_additions: Vec<NoteOffer>,
+    #[serde(default)]
+    project_descriptions: Vec<DescriptionOffer>,
+    #[serde(default)]
+    project_updates: Vec<UpdateOffer>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -1747,6 +2038,28 @@ struct ChangeOffer {
     priority: Option<u8>,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct NoteOffer {
+    note: String,
+    text: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct DescriptionOffer {
+    project: String,
+    description: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct UpdateOffer {
+    project: String,
+    health: ProjectHealth,
+    body: String,
+}
+
 /// The reply without its proposals block, and what the block proposed.
 fn split_offers(reply: &str) -> Result<(String, Offers), String> {
     let Some(start) = reply.rfind(OFFER_FENCE) else {
@@ -1765,13 +2078,15 @@ fn split_offers(reply: &str) -> Result<(String, Offers), String> {
 }
 
 /// Files a run's offers in one change: new tasks in Triage with the meeting
-/// as their evidence, and changes as proposals, whatever Settings > Agents
-/// lets agents apply. Returns a line for each task touched.
+/// as their evidence, changes as proposals, whatever Settings > Agents lets
+/// agents apply, and note, description and update proposals for review.
+/// Returns a line for each thing proposed.
 fn file_offers(
     tx: &Connection,
     meetings: Option<&Connection>,
     change: super::Change<'_>,
     meeting_id: Option<&str>,
+    run_id: &str,
     offers: &Offers,
 ) -> Result<super::Done<Vec<String>>> {
     let mut effects = super::Effects::default();
@@ -1845,6 +2160,44 @@ fn file_offers(
             ),
         });
     }
+    let documents = offers
+        .note_additions
+        .iter()
+        .map(|offer| (DocProposalKind::Note, &offer.note, &offer.text, None))
+        .chain(offers.project_descriptions.iter().map(|offer| {
+            (
+                DocProposalKind::ProjectDescription,
+                &offer.project,
+                &offer.description,
+                None,
+            )
+        }))
+        .chain(offers.project_updates.iter().map(|offer| {
+            (
+                DocProposalKind::ProjectUpdate,
+                &offer.project,
+                &offer.body,
+                Some(offer.health),
+            )
+        }));
+    for (kind, target, body, health) in documents {
+        let proposal = doc_proposals::propose(
+            tx,
+            &doc_proposals::NewDocProposal {
+                kind,
+                target,
+                agent: LOOP_AGENT,
+                body,
+                health,
+                run_id: Some(run_id),
+            },
+            change.at_ms,
+        )?;
+        lines.push(match proposal {
+            Some(proposal) => format!("Waiting for you: {}", proposal.summary()),
+            None => format!("{target} isn't a {}, so nothing was proposed for it.", kind.noun()),
+        });
+    }
     Ok(super::Done {
         value: lines,
         effects,
@@ -1859,6 +2212,7 @@ async fn offer(app: &AppHandle, claimed: &Claimed, offers: &Offers) -> Result<Ve
     .to_string();
     let change = super::Change::now(&operation_id, WorkActor::Agent);
     let meeting_id = claimed.meeting_id.as_deref();
+    let run_id = claimed.run_id.as_str();
     super::run_with_meetings(app, |history, meetings| {
         store::mutate(
             history,
@@ -1866,7 +2220,7 @@ async fn offer(app: &AppHandle, claimed: &Claimed, offers: &Offers) -> Result<Ve
             "work_loop_offer",
             &(&claimed.run_id, offers),
             change.at_ms,
-            |tx| file_offers(tx, meetings, change, meeting_id, offers),
+            |tx| file_offers(tx, meetings, change, meeting_id, run_id, offers),
         )
     })
     .await
@@ -1883,20 +2237,41 @@ async fn settle_reply(
 ) -> Result<String, String> {
     let (answer, mut offers) = split_offers(reply)?;
     let allows = |tool: &str| claimed.tools.iter().any(|name| name == tool);
-    if !offers.new_tasks.is_empty() && !allows(PROPOSE_NEW) {
-        refused.push(PROPOSE_NEW.to_owned());
+    let mut refuse_unless = |tool: &str, offered: bool| {
+        let refuse = offered && !allows(tool);
+        if refuse {
+            refused.push(tool.to_owned());
+        }
+        refuse
+    };
+    if refuse_unless(PROPOSE_NEW, !offers.new_tasks.is_empty()) {
         offers.new_tasks.clear();
     }
-    if !offers.changes.is_empty() && !allows(PROPOSE_CHANGE) {
-        refused.push(PROPOSE_CHANGE.to_owned());
+    if refuse_unless(PROPOSE_CHANGE, !offers.changes.is_empty()) {
         offers.changes.clear();
     }
-    if offers.new_tasks.is_empty() && offers.changes.is_empty() {
+    if refuse_unless(PROPOSE_NOTE, !offers.note_additions.is_empty()) {
+        offers.note_additions.clear();
+    }
+    if refuse_unless(PROPOSE_DESCRIPTION, !offers.project_descriptions.is_empty()) {
+        offers.project_descriptions.clear();
+    }
+    if refuse_unless(PROPOSE_UPDATE, !offers.project_updates.is_empty()) {
+        offers.project_updates.clear();
+    }
+    let counts = [
+        offers.new_tasks.len(),
+        offers.changes.len(),
+        offers.note_additions.len(),
+        offers.project_descriptions.len(),
+        offers.project_updates.len(),
+    ];
+    if counts.iter().all(|count| *count == 0) {
         return Ok(answer);
     }
-    if offers.new_tasks.len() > OFFER_LIMIT || offers.changes.len() > OFFER_LIMIT {
+    if counts.iter().any(|count| *count > OFFER_LIMIT) {
         return Err(format!(
-            "The agent proposed more than {OFFER_LIMIT} new tasks or changes, so none were kept."
+            "The agent proposed more than {OFFER_LIMIT} of one kind, so none were kept."
         ));
     }
     if closed_gate(app).is_some() {
@@ -1925,7 +2300,14 @@ async fn execute(app: &AppHandle, history: &HistoryManager, claimed: Claimed) {
     }
     let message = brief(&claimed);
     let lookups = lookups(&claimed.tools);
-    let turn = crate::agent_panel::run_loop_turn(app, &message, &lookups, RUN_DEADLINE).await;
+    let turn = crate::agent_panel::run_loop_turn(
+        app,
+        &message,
+        &lookups,
+        claimed.reasoning.map(LoopReasoning::as_str),
+        RUN_DEADLINE,
+    )
+    .await;
     let mut refused = turn.refused;
     let answer = match turn.answer {
         Ok(reply) => settle_reply(app, &claimed, &reply, &mut refused).await,
@@ -1954,6 +2336,7 @@ pub(crate) fn start(app: AppHandle) {
             log::warn!("Interrupted loop runs could not be closed: {error:#}");
         }
         loop {
+            super::triage_auto::tick(&app).await;
             match history.with_connection(|conn| enqueue(conn, now_ms())) {
                 Ok(0) => {}
                 Ok(_) => tasks_changed(&app, Vec::new()),
@@ -2085,6 +2468,22 @@ pub(crate) fn delete_as(app: &AppHandle, operation_id: &str, id: &str) -> Result
     })
 }
 
+pub(crate) fn copy_as(
+    app: &AppHandle,
+    operation_id: &str,
+    id: &str,
+    name: Option<&str>,
+    by: &str,
+) -> Result<WorkLoop, String> {
+    change(
+        app,
+        operation_id,
+        "work_loop_copy",
+        &(id, name, by),
+        |tx, at| copy(tx, id, name, by, at),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2131,6 +2530,7 @@ mod tests {
                 },
                 conditions: LoopConditions::default(),
                 tools: Vec::new(),
+                reasoning: None,
             },
             "you",
             1,
@@ -2179,6 +2579,7 @@ mod tests {
                 trigger: LoopTrigger::MeetingEnded,
                 conditions: LoopConditions::default(),
                 tools: Vec::new(),
+                reasoning: None,
             },
             "you",
             1,
@@ -2237,6 +2638,7 @@ mod tests {
                 trigger: LoopTrigger::ProjectStatusChanged { to: None },
                 conditions: LoopConditions::default(),
                 tools: Vec::new(),
+                reasoning: None,
             },
             "you",
             1,
@@ -2331,6 +2733,7 @@ mod tests {
                 },
                 conditions: LoopConditions::default(),
                 tools: Vec::new(),
+                reasoning: None,
             },
             "you",
             1,
@@ -2391,6 +2794,7 @@ mod tests {
                 at_ms: 5,
             },
             Some(&meeting),
+            "run-1",
             &offers,
         )
         .expect("the proposals filed");
@@ -2427,5 +2831,84 @@ mod tests {
         );
         assert_eq!(waiting, [("status".to_owned(), LOOP_AGENT.to_owned())]);
         assert_eq!(filed.value.len(), 2);
+    }
+
+    fn local_noon(month: u32, day: u32) -> i64 {
+        use chrono::TimeZone;
+        chrono::Local
+            .with_ymd_and_hms(2026, month, day, 12, 0, 0)
+            .single()
+            .expect("a local noon")
+            .timestamp_millis()
+    }
+
+    #[test]
+    fn a_cycle_start_queues_one_run_per_cycle_begun_since_the_automation_was_armed() {
+        let mut conn = Connection::open_in_memory().expect("a history database");
+        schema::apply_all(&conn).expect("the planner schema");
+        for (number, start, end) in [
+            (1, "2026-01-05", "2026-01-18"),
+            (2, "2026-01-19", "2026-02-01"),
+            (3, "2026-02-02", "2026-02-15"),
+        ] {
+            conn.execute(
+                "INSERT INTO planning_cycles (number, start_day, end_day, created_at_ms) VALUES (?1, ?2, ?3, 0)",
+                params![number, start, end],
+            )
+            .expect("a cycle");
+        }
+        let watcher = save(
+            &conn,
+            None,
+            &LoopInput {
+                name: "Cycle kickoff".to_owned(),
+                prompt: "Say what the new cycle holds.".to_owned(),
+                trigger: LoopTrigger::CycleStarted,
+                conditions: LoopConditions::default(),
+                tools: Vec::new(),
+                reasoning: None,
+            },
+            "you",
+            local_noon(1, 10),
+        )
+        .expect("a saved loop");
+
+        let queued = [
+            enqueue(&mut conn, local_noon(1, 25)).expect("a read in cycle 2"),
+            enqueue(&mut conn, local_noon(1, 26)).expect("a later read in cycle 2"),
+        ];
+        let causes: Vec<_> = runs(&conn, &watcher.id, 10)
+            .expect("the runs")
+            .into_iter()
+            .map(|run| run.cause)
+            .collect();
+
+        assert_eq!(queued, [1, 0]);
+        assert_eq!(causes, ["Cycle 2 started"]);
+    }
+
+    #[test]
+    fn an_automation_s_reasoning_comes_back_with_its_version_and_goes_with_a_copy() {
+        let conn = Connection::open_in_memory().expect("a history database");
+        schema::apply_all(&conn).expect("the planner schema");
+        let input = |reasoning| LoopInput {
+            name: "Weekly review".to_owned(),
+            prompt: "Sum up the week.".to_owned(),
+            trigger: LoopTrigger::MeetingEnded,
+            conditions: LoopConditions::default(),
+            tools: Vec::new(),
+            reasoning,
+        };
+        let first = save(&conn, None, &input(Some(LoopReasoning::High)), "you", 1).expect("a saved loop");
+        save(&conn, Some(&first.id), &input(Some(LoopReasoning::Low)), "you", 2).expect("a second version");
+
+        let restored = restore(&conn, &first.id, 1, "you", 3).expect("version 1 restored");
+        let copied = copy(&conn, &first.id, None, "you", 4).expect("a copy");
+
+        assert_eq!(restored.reasoning, Some(LoopReasoning::High));
+        assert_eq!(
+            (copied.name.as_str(), copied.reasoning, copied.enabled),
+            ("Copy of Weekly review", Some(LoopReasoning::High), false)
+        );
     }
 }

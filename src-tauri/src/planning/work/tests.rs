@@ -10,8 +10,8 @@ use super::types::{
     WorkOwner, WorkPatch, WorkPlace, WorkQuery, WorkRelationKind, WorkStatus,
 };
 use super::{
-    accept, bulk_update, close_parents, create, follow_loop_with, keep, list, mark_duplicate,
-    set_archived, update, Change,
+    accept, apply_parent_rules, bulk_update, create, follow_loop_with, keep, list, mark_duplicate,
+    set_archived, update, Change, Effects, ParentRules,
 };
 use super::{bin, inbox, live, sync};
 use crate::meeting::ledger::{
@@ -418,6 +418,147 @@ fn the_tracker_migration_keeps_every_task_and_the_commitment_it_tracks() {
     )
     .expect("an item outside any project");
     assert_eq!((loose.number, loose.project_id), (4, None));
+}
+
+#[test]
+fn the_inbox_and_housekeeping_rebuilds_keep_every_notice_of_every_kind() {
+    let mut conn = Connection::open_in_memory().expect("history");
+    conn.pragma_update(None, "foreign_keys", false)
+        .expect("the migration runner turns foreign keys off");
+    let all = crate::managers::history::MIGRATIONS.to_vec();
+    let step = |migration: &'static str| {
+        all.iter()
+            .position(|step| *step == rusqlite_migration::M::up(migration))
+            .expect("the migration")
+    };
+    let subjects = step(inbox::INBOX_SUBJECTS_MIGRATION);
+    let housekeeping = step(inbox::HOUSEKEEPING_NOTICES_MIGRATION);
+    assert!(subjects < housekeeping);
+    let migrations = rusqlite_migration::Migrations::new(all);
+    migrations
+        .to_version(&mut conn, subjects)
+        .expect("every migration before the inbox subjects");
+    conn.execute_batch(
+        "INSERT INTO planning_notifications (id, task_id, kind, actor, agent, activity_id,
+            comment_id, field, run_id, event_key, from_value, to_value, digest, created_at_ms,
+            read_at_ms, snoozed_until_ms, archived_at_ms) VALUES
+            ('status', 't', 'status', 'agent', 'codex', 'a1', NULL, NULL, NULL, NULL, 'todo',
+                'done', NULL, 1, 2, NULL, NULL),
+            ('comment', 't', 'comment', 'agent', 'codex', NULL, 'c1', NULL, NULL, NULL, NULL,
+                NULL, NULL, 2, NULL, 9, NULL),
+            ('mention', 't', 'mention', 'agent', 'codex', NULL, 'c2', NULL, NULL, NULL, NULL,
+                NULL, NULL, 3, NULL, NULL, 8),
+            ('assigned', 't', 'assigned', 'agent', 'codex', 'a2', NULL, NULL, NULL, NULL, NULL,
+                NULL, NULL, 4, NULL, NULL, NULL),
+            ('changed', 't', 'changed', 'agent', 'codex', 'a3', NULL, 'priority', NULL, NULL,
+                '0', '2', NULL, 5, NULL, NULL, NULL),
+            ('reminder', 't', 'reminder', 'sona', NULL, NULL, NULL, NULL, NULL, 'reminder:t',
+                NULL, NULL, NULL, 6, NULL, NULL, NULL),
+            ('due', 't', 'due', 'sona', NULL, NULL, NULL, NULL, NULL, 'due:t', NULL, NULL, NULL,
+                7, NULL, NULL, NULL),
+            ('automation', NULL, 'automation', 'sona', NULL, NULL, NULL, NULL, 'run', 'run:run',
+                NULL, 'done', NULL, 8, NULL, NULL, NULL),
+            ('digest', NULL, 'digest', 'sona', NULL, NULL, NULL, NULL, NULL, 'digest:w', NULL,
+                NULL, '[]', 9, NULL, NULL, NULL);",
+    )
+    .expect("notices of every kind before subjects");
+    migrations
+        .to_version(&mut conn, housekeeping)
+        .expect("the inbox subjects and every migration before housekeeping");
+    conn.execute_batch(
+        "INSERT INTO planning_notifications (id, task_id, kind, actor, agent, field, to_value,
+            subject_kind, subject_id, created_at_ms) VALUES
+            ('question', 't', 'question', 'agent', 'codex', NULL, 'Which venue?', NULL, NULL, 10),
+            ('project', NULL, 'project', 'agent', 'codex', 'status', 'paused', 'project', 'p', 11),
+            ('view', 't', 'view', 'agent', 'codex', 'added', NULL, 'view', 'v', 12),
+            ('note', NULL, 'note', 'agent', 'codex', NULL, NULL, 'note', 'n', 13),
+            ('initiative', NULL, 'reminder', 'sona', NULL, NULL, NULL, 'initiative', 'i', 14);",
+    )
+    .expect("notices about subjects");
+    let read = |conn: &Connection| {
+        let mut statement = conn
+            .prepare(
+                "SELECT id, task_id, kind, actor, agent, activity_id, comment_id, field, run_id,
+                    event_key, from_value, to_value, digest, subject_kind, subject_id,
+                    created_at_ms, read_at_ms, snoozed_until_ms, archived_at_ms
+                 FROM planning_notifications ORDER BY rowid",
+            )
+            .expect("the notices");
+        statement
+            .query_map([], |row| {
+                (0..19)
+                    .map(|column| row.get::<_, rusqlite::types::Value>(column))
+                    .collect::<rusqlite::Result<Vec<_>>>()
+            })
+            .expect("the notices")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("the notices")
+    };
+    let before = read(&conn);
+    assert_eq!(before.len(), 14);
+
+    migrations
+        .to_latest(&mut conn)
+        .expect("the housekeeping rebuild and every one after it");
+
+    assert_eq!(read(&conn), before);
+    let triggers = conn
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' AND sql LIKE '%planning_notifications%' ORDER BY name")
+        .expect("the triggers")
+        .query_map([], |row| row.get::<_, String>(0))
+        .expect("the triggers")
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .expect("the triggers");
+    assert_eq!(
+        triggers,
+        [
+            "planning_notifications_initiative_delete",
+            "planning_notifications_note_delete",
+            "planning_notifications_project_delete",
+            "planning_notifications_run_delete",
+            "planning_notifications_view_delete",
+            "planning_task_lifecycle_delete",
+        ]
+    );
+    conn.execute_batch(
+        "INSERT INTO planning_notifications (id, task_id, kind, actor, event_key, to_value,
+            created_at_ms) VALUES
+            ('day', NULL, 'housekeeping', 'sona', 'housekeeping:day', 'Closed 2 tasks', 15),
+            ('parent', 't', 'housekeeping', 'sona', 'cascade:t', 'Canceled 1 sub-task', 16);",
+    )
+    .expect("housekeeping notices, with and without a task");
+}
+
+#[test]
+fn the_housekeeping_rebuild_runs_when_another_branch_already_dropped_a_trigger() {
+    let mut conn = Connection::open_in_memory().expect("history");
+    conn.pragma_update(None, "foreign_keys", false)
+        .expect("the migration runner turns foreign keys off");
+    let all = crate::managers::history::MIGRATIONS.to_vec();
+    let housekeeping = all
+        .iter()
+        .position(|step| *step == rusqlite_migration::M::up(inbox::HOUSEKEEPING_NOTICES_MIGRATION))
+        .expect("the housekeeping migration");
+    let migrations = rusqlite_migration::Migrations::new(all);
+    migrations
+        .to_version(&mut conn, housekeeping)
+        .expect("every migration before housekeeping");
+    conn.execute_batch("DROP TRIGGER planning_notifications_initiative_delete;")
+        .expect("the initiative trigger gone, as an earlier merge may leave it");
+
+    migrations
+        .to_latest(&mut conn)
+        .expect("the housekeeping rebuild and every one after it");
+
+    let made_again: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'trigger'
+                AND name = 'planning_notifications_initiative_delete')",
+            [],
+            |row| row.get(0),
+        )
+        .expect("the trigger lookup");
+    assert!(made_again);
 }
 
 #[test]
@@ -1826,6 +1967,246 @@ fn a_parent_closes_once_its_last_open_sub_task_does() {
     assert_eq!(closed_by, Some(WorkActor::Sona));
 }
 
+#[test]
+fn closing_a_parent_closes_its_open_subtasks_recursively_when_enabled() {
+    let mut desk = desk(&[]);
+    let launch = typed_item(&mut desk, "Ship the launch");
+    let sub = typed_item(&mut desk, "Finish the deck");
+    let sub = sub_task_of(&mut desk, &sub, &launch.id);
+    let leaf = typed_item(&mut desk, "Export the slides");
+    let leaf = sub_task_of(&mut desk, &leaf, &sub.id);
+    let already_done = typed_item(&mut desk, "Book the room");
+    let already_done = sub_task_of(&mut desk, &already_done, &launch.id);
+    let at = desk.tick();
+    update(
+        &mut desk.history,
+        None,
+        by_me(&operation(), at),
+        &already_done.id,
+        already_done.revision,
+        &status(WorkStatus::Done),
+    )
+    .expect("done");
+
+    let launch = desk.item(&launch.id);
+    let at = desk.tick();
+    let mut done = update(
+        &mut desk.history,
+        None,
+        by_me(&operation(), at),
+        &launch.id,
+        launch.revision,
+        &status(WorkStatus::Canceled),
+    )
+    .expect("parent canceled");
+    apply_parent_rules(
+        &mut desk.history,
+        None,
+        ParentRules {
+            close_parents: true,
+            close_subtasks: true,
+            ..ParentRules::default()
+        },
+        &mut done.effects,
+    )
+    .expect("subtasks closed");
+
+    assert_eq!(desk.item(&launch.id).status, WorkStatus::Canceled);
+    assert_eq!(desk.item(&sub.id).status, WorkStatus::Canceled);
+    assert_eq!(desk.item(&leaf.id).status, WorkStatus::Canceled);
+    assert_eq!(desk.item(&already_done.id).status, WorkStatus::Done);
+    let closed_by = items::activity(&desk.history, &sub.id)
+        .expect("sub history")
+        .last()
+        .map(|entry| entry.actor);
+    assert_eq!(closed_by, Some(WorkActor::Sona));
+}
+
+#[test]
+fn a_done_parent_cancels_its_accepted_subtasks_with_a_notice_that_undoes_it() {
+    let mut desk = desk(&[]);
+    let launch = typed_item(&mut desk, "Ship the launch");
+    let started = typed_item(&mut desk, "Finish the deck");
+    let started = sub_task_of(&mut desk, &started, &launch.id);
+    let proposed = typed_item(&mut desk, "Order banners");
+    let proposed = sub_task_of(&mut desk, &proposed, &launch.id);
+    desk.history
+        .execute(
+            "UPDATE planning_tasks SET status = 'triage' WHERE id = ?1",
+            [&proposed.id],
+        )
+        .expect("a sub-task still in triage");
+    let at = desk.tick();
+    update(
+        &mut desk.history,
+        None,
+        by_me(&operation(), at),
+        &started.id,
+        started.revision,
+        &status(WorkStatus::InProgress),
+    )
+    .expect("started");
+
+    let launch = desk.item(&launch.id);
+    let at = desk.tick();
+    let mut done = update(
+        &mut desk.history,
+        None,
+        by_me(&operation(), at),
+        &launch.id,
+        launch.revision,
+        &status(WorkStatus::Done),
+    )
+    .expect("parent done");
+    apply_parent_rules(
+        &mut desk.history,
+        None,
+        ParentRules {
+            close_subtasks: true,
+            ..ParentRules::default()
+        },
+        &mut done.effects,
+    )
+    .expect("subtasks closed");
+    let canceled = desk.item(&started.id).status;
+    let left = desk.item(&proposed.id).status;
+    let notices = inbox::notifications(&desk.history, inbox::Shown::default(), desk.now)
+        .expect("the inbox");
+    let notice = notices
+        .iter()
+        .find(|notice| notice.kind == inbox::NotificationKind::Housekeeping)
+        .expect("a notice for the closed sub-tasks");
+    let at = desk.tick();
+    let undone = super::batches::undo(
+        &desk.history,
+        None,
+        by_me(&operation(), at),
+        &notice.id,
+        &mut Effects::default(),
+    )
+    .expect("the batch undone");
+
+    assert_eq!(canceled, WorkStatus::Canceled);
+    assert_eq!(left, WorkStatus::Triage);
+    assert_eq!(notice.item_id.as_deref(), Some(launch.id.as_str()));
+    assert!(notice
+        .to
+        .as_deref()
+        .is_some_and(|to| to.contains("Finish the deck") && !to.contains("Order banners")));
+    assert_eq!(undone.restored, 1);
+    assert_eq!(desk.item(&started.id).status, WorkStatus::InProgress);
+}
+
+#[test]
+fn a_closed_parent_s_one_notice_covers_and_undoes_grandchildren_without_status_noise() {
+    let mut desk = desk(&[]);
+    let launch = typed_item(&mut desk, "Ship the launch");
+    let deck = typed_item(&mut desk, "Finish the deck");
+    let deck = sub_task_of(&mut desk, &deck, &launch.id);
+    let charts = typed_item(&mut desk, "Draw the charts");
+    let charts = sub_task_of(&mut desk, &charts, &deck.id);
+    for id in [&deck.id, &charts.id] {
+        inbox::subscribe(&desk.history, id, inbox::SubscribeReason::Subscribed, desk.now)
+            .expect("following the sub-task");
+    }
+
+    let at = desk.tick();
+    let mut done = update(
+        &mut desk.history,
+        None,
+        by_me(&operation(), at),
+        &launch.id,
+        launch.revision,
+        &status(WorkStatus::Done),
+    )
+    .expect("parent done");
+    apply_parent_rules(
+        &mut desk.history,
+        None,
+        ParentRules {
+            close_subtasks: true,
+            ..ParentRules::default()
+        },
+        &mut done.effects,
+    )
+    .expect("sub-tasks closed");
+    let notices = inbox::notifications(&desk.history, inbox::Shown::default(), desk.now)
+        .expect("the inbox");
+    let at = desk.tick();
+    let undone = super::batches::undo(
+        &desk.history,
+        None,
+        by_me(&operation(), at),
+        &notices[0].id,
+        &mut Effects::default(),
+    )
+    .expect("the batch undone");
+
+    assert_eq!(
+        notices
+            .iter()
+            .map(|notice| (notice.kind, notice.item_id.clone()))
+            .collect::<Vec<_>>(),
+        [(inbox::NotificationKind::Housekeeping, Some(launch.id.clone()))]
+    );
+    assert_eq!(undone.restored, 2);
+    assert_eq!(desk.item(&charts.id).status, charts.status);
+}
+
+#[test]
+fn starting_a_subtask_starts_waiting_parents_up_the_chain_when_enabled() {
+    let mut desk = desk(&[]);
+    let goal = typed_item(&mut desk, "Quarterly launch");
+    let launch = typed_item(&mut desk, "Ship the launch");
+    let launch = sub_task_of(&mut desk, &launch, &goal.id);
+    let leaf = typed_item(&mut desk, "Draft the post");
+    let leaf = sub_task_of(&mut desk, &leaf, &launch.id);
+
+    let at = desk.tick();
+    let mut done = update(
+        &mut desk.history,
+        None,
+        by_me(&operation(), at),
+        &leaf.id,
+        leaf.revision,
+        &status(WorkStatus::InProgress),
+    )
+    .expect("subtask started");
+    apply_parent_rules(
+        &mut desk.history,
+        None,
+        ParentRules {
+            start_parent: true,
+            ..ParentRules::default()
+        },
+        &mut done.effects,
+    )
+    .expect("parents started");
+
+    assert_eq!(desk.item(&launch.id).status, WorkStatus::InProgress);
+    assert_eq!(desk.item(&goal.id).status, WorkStatus::InProgress);
+    let started_by = items::activity(&desk.history, &launch.id)
+        .expect("launch history")
+        .last()
+        .map(|entry| entry.actor);
+    assert_eq!(started_by, Some(WorkActor::Sona));
+}
+
+fn closing(close_parents: bool) -> ParentRules {
+    ParentRules {
+        close_parents,
+        ..ParentRules::default()
+    }
+}
+
+fn close_parents(
+    history: &mut Connection,
+    meetings: Option<&Connection>,
+    effects: &mut Effects,
+) -> anyhow::Result<()> {
+    apply_parent_rules(history, meetings, closing(true), effects)
+}
+
 fn typed_item(desk: &mut Desk, title: &str) -> WorkItem {
     let at = desk.tick();
     create(
@@ -1899,7 +2280,7 @@ fn a_parent_closes_when_resolving_its_commitment_closes_its_last_sub_task() {
         let at = desk.tick();
         desk.both(|history, meetings| {
             let tx = history.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            follow_loop_with(&tx, meetings, &loop_id, close, at)?;
+            follow_loop_with(&tx, meetings, &loop_id, closing(close), at)?;
             tx.commit()?;
             Ok(())
         })

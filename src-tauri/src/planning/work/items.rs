@@ -246,6 +246,38 @@ pub(crate) fn sub_tasks_finished(conn: &Connection, parent_id: &str) -> Result<b
     Ok(finished.unwrap_or(false))
 }
 
+/// Live sub-tasks under `parent_id` that were accepted and are still open,
+/// with their status, for closing them when their parent closes.
+pub(crate) fn open_sub_tasks(
+    conn: &Connection,
+    parent_id: &str,
+) -> Result<Vec<(String, WorkStatus)>> {
+    let mut statement = conn.prepare_cached(
+        "SELECT id, status FROM planning_tasks
+         WHERE parent_id = ?1 AND archived_at_ms IS NULL AND trashed_at_ms IS NULL
+           AND status IN ('backlog', 'not_started', 'in_progress')
+         ORDER BY number",
+    )?;
+    let ids = statement
+        .query_map([parent_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(ids)
+}
+
+/// Whether `parent_id` is live and waiting to start (backlog or todo).
+pub(crate) fn parent_can_start(conn: &Connection, parent_id: &str) -> Result<bool> {
+    let waiting = conn
+        .query_row(
+            "SELECT status IN ('backlog', 'not_started')
+             FROM planning_tasks
+             WHERE id = ?1 AND archived_at_ms IS NULL",
+            [parent_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(waiting.unwrap_or(false))
+}
+
 /// The owner a new sub-task takes when none is given: the user when the
 /// parent is theirs, else the one owner every sub-task already shares, else
 /// nobody.

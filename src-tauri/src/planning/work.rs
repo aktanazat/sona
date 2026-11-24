@@ -6,6 +6,7 @@ pub(crate) mod agents;
 pub(crate) mod ask;
 pub(crate) mod attachments;
 pub(crate) mod bin;
+pub(crate) mod batches;
 pub(crate) mod blocks;
 pub(crate) mod capture;
 pub(crate) mod changes;
@@ -14,13 +15,14 @@ pub(crate) mod command;
 pub(crate) mod comments;
 pub(crate) mod cycles;
 pub(crate) mod digest;
+pub(crate) mod doc_proposals;
 pub(crate) mod export;
 pub(crate) mod favorites;
 pub(crate) mod feed;
 pub(crate) mod filter;
 pub(crate) mod follow;
 pub(crate) mod follows;
-mod hygiene;
+pub(crate) mod hygiene;
 pub(crate) mod inbox;
 pub(crate) mod inbox_settings;
 pub(crate) mod initiatives;
@@ -39,6 +41,7 @@ pub(crate) mod sessions;
 pub(crate) mod sync;
 #[cfg(test)]
 mod tests;
+pub(crate) mod triage_auto;
 pub(crate) mod triage_hints;
 pub mod types;
 pub(crate) mod versions;
@@ -86,9 +89,15 @@ pub(super) struct Effects {
     pub(super) items: Vec<String>,
     pub(super) projects: Vec<String>,
     pub(super) loops: Vec<MeetingLoopId>,
-    /// Parents whose sub-task this change closed, for [`close_parents`].
+    /// Parents whose sub-task this change closed, for [`apply_parent_rules`].
     #[serde(skip)]
     pub(super) parents: Vec<String>,
+    /// Tasks that just closed, for closing their sub-tasks.
+    #[serde(skip)]
+    pub(super) closed_parents: Vec<String>,
+    /// Parents whose sub-task just moved to in progress, for starting parents.
+    #[serde(skip)]
+    pub(super) started_parents: Vec<String>,
 }
 
 impl Effects {
@@ -109,6 +118,14 @@ impl Effects {
         if !changed.before.status.is_closed() && changed.after.status.is_closed() {
             if let Some(parent_id) = &changed.after.parent_id {
                 self.parents.push(parent_id.clone());
+            }
+            self.closed_parents.push(changed.after.id.clone());
+        }
+        if changed.before.status != WorkStatus::InProgress
+            && changed.after.status == WorkStatus::InProgress
+        {
+            if let Some(parent_id) = &changed.after.parent_id {
+                self.started_parents.push(parent_id.clone());
             }
         }
     }
@@ -238,6 +255,27 @@ fn in_both<T>(
     })
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct ParentRules {
+    pub(super) close_parents: bool,
+    pub(super) close_subtasks: bool,
+    pub(super) start_parent: bool,
+}
+
+impl ParentRules {
+    fn from_settings(settings: &crate::settings::AppSettings) -> Self {
+        Self {
+            close_parents: settings.work_close_parents,
+            close_subtasks: settings.work_close_subtasks,
+            start_parent: settings.work_start_parent,
+        }
+    }
+
+    fn any(self) -> bool {
+        self.close_parents || self.close_subtasks || self.start_parent
+    }
+}
+
 /// Runs a tracker change through [`with_meetings`], then tells every window.
 async fn run_with_meetings<T: Send>(
     app: &AppHandle,
@@ -245,11 +283,11 @@ async fn run_with_meetings<T: Send>(
 ) -> Result<T, String> {
     let history = app.state::<Arc<HistoryManager>>();
     let meetings = app.state::<Arc<MeetingSessionManager>>();
-    let close = crate::settings::get_settings(app).work_close_parents;
+    let rules = ParentRules::from_settings(&crate::settings::get_settings(app));
     let done = with_meetings(&history, &meetings, |conn, meeting_conn| {
         let mut done = work(conn, meeting_conn)?;
-        if close {
-            close_parents(conn, meeting_conn, &mut done.effects)?;
+        if rules.any() {
+            apply_parent_rules(conn, meeting_conn, rules, &mut done.effects)?;
         }
         Ok(done)
     })
@@ -263,11 +301,11 @@ fn run_history<T>(
     app: &AppHandle,
     work: impl FnOnce(&mut Connection) -> StorageResult<Done<T>>,
 ) -> Result<T, String> {
-    let close = crate::settings::get_settings(app).work_close_parents;
+    let rules = ParentRules::from_settings(&crate::settings::get_settings(app));
     let done = super::history(&app.state::<Arc<HistoryManager>>(), |conn| {
         let mut done = work(conn)?;
-        if close {
-            close_parents(conn, None, &mut done.effects)?;
+        if rules.any() {
+            apply_parent_rules(conn, None, rules, &mut done.effects)?;
         }
         Ok(done)
     })?;
@@ -275,48 +313,108 @@ fn run_history<T>(
     Ok(done.value)
 }
 
-/// Closes as done, for Sona, each parent whose last open sub-task this
-/// change closed, and so on up, while Settings asks for it.
-fn close_parents(
+/// Runs enabled parent/sub-task automations for Sona in one transaction.
+fn apply_parent_rules(
     history: &mut Connection,
     meetings: Option<&Connection>,
+    rules: ParentRules,
     effects: &mut Effects,
 ) -> StorageResult<()> {
-    if effects.parents.is_empty() {
+    let pending = (rules.close_parents && !effects.parents.is_empty())
+        || (rules.close_subtasks && !effects.closed_parents.is_empty())
+        || (rules.start_parent && !effects.started_parents.is_empty());
+    if !pending {
         return Ok(());
     }
     let tx = history.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    close_parents_in(&tx, meetings, effects)?;
+    apply_parent_rules_in(&tx, meetings, rules, effects)?;
     tx.commit()?;
     Ok(())
 }
 
-/// [`close_parents`] inside the caller's transaction.
-fn close_parents_in(
+/// [`apply_parent_rules`] inside the caller's transaction.
+fn apply_parent_rules_in(
     history: &Connection,
     meetings: Option<&Connection>,
+    rules: ParentRules,
     effects: &mut Effects,
 ) -> StorageResult<()> {
     let change = Change::now("", WorkActor::Sona);
-    let done = WorkPatch {
+    let done_patch = WorkPatch {
         status: Some(WorkStatus::Done),
         ..WorkPatch::default()
     };
-    while let Some(parent_id) = effects.parents.pop() {
-        if items::sub_tasks_finished(history, &parent_id)? {
-            edit(history, meetings, change, &parent_id, &done, effects)?;
+    let canceled_patch = WorkPatch {
+        status: Some(WorkStatus::Canceled),
+        ..WorkPatch::default()
+    };
+    let started_patch = WorkPatch {
+        status: Some(WorkStatus::InProgress),
+        ..WorkPatch::default()
+    };
+    let mut cascade_of: HashMap<String, (String, String)> = HashMap::new();
+    loop {
+        let mut progressed = false;
+        if rules.close_parents {
+            while let Some(parent_id) = effects.parents.pop() {
+                progressed = true;
+                if items::sub_tasks_finished(history, &parent_id)? {
+                    edit(history, meetings, change, &parent_id, &done_patch, effects)?;
+                }
+            }
+        }
+        if rules.close_subtasks {
+            while let Some(parent_id) = effects.closed_parents.pop() {
+                progressed = true;
+                let children = items::open_sub_tasks(history, &parent_id)?;
+                if children.is_empty() {
+                    continue;
+                }
+                let (batch, top) = cascade_of.get(&parent_id).cloned().unwrap_or_else(|| {
+                    (format!("subtasks:{parent_id}:{}", change.at_ms), parent_id.clone())
+                });
+                let before = batches::last_change(history)?;
+                for (child_id, status) in children {
+                    edit(history, meetings, change, &child_id, &canceled_patch, effects)?;
+                    inbox::withdraw_sona_notices(history, &child_id, change.at_ms)?;
+                    batches::record(
+                        history,
+                        &batch,
+                        batches::MoveKind::ClosedSubtask,
+                        &child_id,
+                        Some(status),
+                        change.at_ms,
+                    )?;
+                    cascade_of.insert(child_id, (batch.clone(), top.clone()));
+                }
+                batches::quiet_since(history, before)?;
+                batches::post(history, Some(&top), &batch, change.at_ms)?;
+            }
+        }
+        if rules.start_parent {
+            while let Some(parent_id) = effects.started_parents.pop() {
+                progressed = true;
+                if items::parent_can_start(history, &parent_id)? {
+                    let before = batches::last_change(history)?;
+                    edit(history, meetings, change, &parent_id, &started_patch, effects)?;
+                    batches::quiet_since(history, before)?;
+                }
+            }
+        }
+        if !progressed {
+            break;
         }
     }
     Ok(())
 }
 
-/// What a loop's tracker items moving changed, with the parents they
-/// finished closed when `close_parents` is set.
+/// What a loop's tracker items moving changed, with parent/sub-task rules
+/// applied when enabled.
 fn followed_effects(
     history: &Connection,
     meetings: &Connection,
     followed: sync::Followed,
-    close_parents: bool,
+    rules: ParentRules,
 ) -> StorageResult<Effects> {
     let mut effects = Effects {
         loops: followed.loops,
@@ -325,23 +423,23 @@ fn followed_effects(
     for changed in &followed.changed {
         effects.changed(changed);
     }
-    if close_parents {
-        close_parents_in(history, Some(meetings), &mut effects)?;
+    if rules.any() {
+        apply_parent_rules_in(history, Some(meetings), rules, &mut effects)?;
     }
     Ok(effects)
 }
 
 /// What `sona --loop-resolve` and a meeting page's resolve do to the
-/// tracker: moves the item behind the loop, then its finished parents.
+/// tracker: moves the item behind the loop, then applies parent rules.
 fn follow_loop_with(
     history: &Connection,
     meetings: &Connection,
     loop_id: &MeetingLoopId,
-    close_parents: bool,
+    rules: ParentRules,
     now_ms: i64,
 ) -> StorageResult<Effects> {
     let followed = sync::follow_loop_in(history, meetings, loop_id, now_ms)?;
-    followed_effects(history, meetings, followed, close_parents)
+    followed_effects(history, meetings, followed, rules)
 }
 
 /// Brings a just-processed meeting's open commitments into triage.
@@ -392,10 +490,10 @@ pub(crate) fn follow_loop(
     let Some(history) = app.try_state::<Arc<HistoryManager>>() else {
         return Vec::new();
     };
-    let close = crate::settings::get_settings(app).work_close_parents;
+    let rules = ParentRules::from_settings(&crate::settings::get_settings(app));
     let now = now_ms();
     match in_both(store, &history, |history, meetings| {
-        follow_loop_with(history, meetings, loop_id, close, now)
+        follow_loop_with(history, meetings, loop_id, rules, now)
     }) {
         Ok(effects) => {
             if !effects.items.is_empty() {
@@ -423,7 +521,8 @@ pub(crate) fn catch_up(app: AppHandle, store: Arc<MeetingStore>) {
         };
         let user_name = store.user_name();
         let settings = crate::settings::get_settings(&app);
-        let (sona, close) = (settings.work_sona_changes, settings.work_close_parents);
+        let sona = settings.work_sona_changes;
+        let rules = ParentRules::from_settings(&settings);
         let now = now_ms();
         let sessions = match in_both(&store, &history, |_, meetings| {
             sync::meetings_since(meetings, now - sync::BACKFILL_MS)
@@ -459,7 +558,7 @@ pub(crate) fn catch_up(app: AppHandle, store: Arc<MeetingStore>) {
         }
         match in_both(&store, &history, |history, meetings| {
             let followed = sync::reconcile(history, meetings, now)?;
-            followed_effects(history, meetings, followed, close)
+            followed_effects(history, meetings, followed, rules)
         }) {
             Ok(followed) => {
                 effects.items.extend(followed.items);
@@ -821,6 +920,8 @@ fn list(
     let listed: HashSet<&str> = rows.iter().map(|row| row.item.id.as_str()).collect();
     let mut proposals = agents::open_proposals(history)?;
     proposals.retain(|id, _| listed.contains(id.as_str()));
+    let mut auto_applied = triage_auto::applied(history)?;
+    auto_applied.retain(|id, _| listed.contains(id.as_str()));
     Ok(WorkList {
         items: rows,
         labels: items::labels(history)?,
@@ -830,6 +931,8 @@ fn list(
         proposals,
         conversations_available: meetings.is_some(),
         cycles: cycles::all(history, now_ms)?,
+        document_proposals: doc_proposals::open(history)?,
+        auto_applied,
     })
 }
 

@@ -1,8 +1,9 @@
 use super::{now_ms, pick, refusal, Board, StatusArg, Tracker, WorkAnswer, WriteArgs};
 use crate::planning;
+use crate::planning::work::initiatives::InitiativeStatus;
 use crate::planning::work::loops::{
-    self, LoopConditions, LoopDay, LoopEvery, LoopInput, LoopRunStatus, LoopTool, LoopTrigger,
-    WorkLoop, WorkLoopDetail, WorkLoopRun,
+    self, LoopConditions, LoopDay, LoopEvery, LoopInput, LoopReasoning, LoopRunStatus, LoopTool,
+    LoopTrigger, WorkLoop, WorkLoopDetail, WorkLoopRun,
 };
 use crate::planning::ProjectStatus;
 use crate::query::external::{local_time, ExternalError};
@@ -74,6 +75,11 @@ pub enum EventArg {
     CommentAdded,
     ProjectStatusChanged,
     MeetingEnded,
+    InitiativeStatus,
+    CycleStarted,
+    CycleEnded,
+    MilestoneDone,
+    ProjectUpdate,
 }
 
 impl EventArg {
@@ -87,8 +93,47 @@ impl EventArg {
             LoopTrigger::CommentAdded => Some(Self::CommentAdded),
             LoopTrigger::ProjectStatusChanged { .. } => Some(Self::ProjectStatusChanged),
             LoopTrigger::MeetingEnded => Some(Self::MeetingEnded),
+            LoopTrigger::InitiativeStatusChanged { .. } => Some(Self::InitiativeStatus),
+            LoopTrigger::CycleStarted => Some(Self::CycleStarted),
+            LoopTrigger::CycleEnded => Some(Self::CycleEnded),
+            LoopTrigger::MilestoneDone => Some(Self::MilestoneDone),
+            LoopTrigger::ProjectUpdatePosted => Some(Self::ProjectUpdate),
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum ReasoningArg {
+    Default,
+    Low,
+    Medium,
+    High,
+}
+
+impl ReasoningArg {
+    const fn reasoning(self) -> Option<LoopReasoning> {
+        match self {
+            Self::Default => None,
+            Self::Low => Some(LoopReasoning::Low),
+            Self::Medium => Some(LoopReasoning::Medium),
+            Self::High => Some(LoopReasoning::High),
+        }
+    }
+}
+
+#[derive(Args, Clone, Debug, Eq, PartialEq)]
+pub struct LoopCopyArgs {
+    /// The automation to copy, by name or id.
+    #[arg(value_name = "AUTOMATION")]
+    pub name: String,
+    /// The copy's name; left out, "Copy of" and the original's name.
+    #[arg(long = "name", value_name = "NAME")]
+    pub copy_name: Option<String>,
+    /// Print what would change and write nothing.
+    #[arg(long)]
+    pub dry_run: bool,
+    #[command(flatten)]
+    pub write: WriteArgs,
 }
 
 #[derive(Args, Clone, Debug, Eq, PartialEq)]
@@ -115,11 +160,13 @@ pub struct LoopSaveArgs {
     /// The days a weekly schedule runs, comma-separated: mon,wed,fri.
     #[arg(long, value_delimiter = ',', value_name = "DAY")]
     pub days: Option<Vec<String>>,
-    /// Run when this happens.
+    /// Run when this happens. initiative-status, cycle-started, cycle-ended,
+    /// milestone-done and project-update watch projects and plans.
     #[arg(long, value_enum, value_name = "EVENT")]
     pub on: Option<EventArg>,
     /// With status-changed, a task status; with project-status-changed, a
-    /// project status. "" means any.
+    /// project status; with initiative-status, an initiative status. ""
+    /// means any.
     #[arg(long, value_name = "STATUS")]
     pub to: Option<String>,
     /// With label-added, the label by name or id. "" means any.
@@ -140,6 +187,10 @@ pub struct LoopSaveArgs {
     /// tasks and changes into Triage. "" clears. automation-list names them.
     #[arg(long, value_delimiter = ',', value_name = "TOOL")]
     pub tools: Option<Vec<String>>,
+    /// How hard the agent thinks on a run: low, medium or high; default
+    /// leaves it to the model.
+    #[arg(long, value_enum, value_name = "LEVEL")]
+    pub reasoning: Option<ReasoningArg>,
     /// Print what would change and write nothing.
     #[arg(long)]
     pub dry_run: bool,
@@ -169,6 +220,7 @@ pub enum LoopAction {
     Enabled,
     Disabled,
     Restored,
+    Copied,
     Deleted,
 }
 
@@ -224,6 +276,14 @@ fn project_status(value: &str) -> Result<ProjectStatus, ExternalError> {
     })
 }
 
+fn initiative_status(value: &str) -> Result<InitiativeStatus, ExternalError> {
+    serde_json::from_value(Value::String(value.to_lowercase())).map_err(|_| {
+        ExternalError::invalid(format!(
+            "{value:?} is not an initiative status. Use planned, active or completed."
+        ))
+    })
+}
+
 fn picked(value: Option<&String>) -> Option<&str> {
     value
         .map(|value| value.trim())
@@ -236,10 +296,14 @@ fn event(
     on: EventArg,
     old: Option<&LoopTrigger>,
 ) -> Result<LoopTrigger, ExternalError> {
-    if args.to.is_some() && !matches!(on, EventArg::StatusChanged | EventArg::ProjectStatusChanged)
+    if args.to.is_some()
+        && !matches!(
+            on,
+            EventArg::StatusChanged | EventArg::ProjectStatusChanged | EventArg::InitiativeStatus
+        )
     {
         return Err(ExternalError::invalid(
-            "--to goes with --on status-changed or project-status-changed.",
+            "--to goes with --on status-changed, project-status-changed or initiative-status.",
         ));
     }
     if args.label.is_some() && on != EventArg::LabelAdded {
@@ -252,6 +316,10 @@ fn event(
         EventArg::Assigned => LoopTrigger::Assigned,
         EventArg::CommentAdded => LoopTrigger::CommentAdded,
         EventArg::MeetingEnded => LoopTrigger::MeetingEnded,
+        EventArg::CycleStarted => LoopTrigger::CycleStarted,
+        EventArg::CycleEnded => LoopTrigger::CycleEnded,
+        EventArg::MilestoneDone => LoopTrigger::MilestoneDone,
+        EventArg::ProjectUpdate => LoopTrigger::ProjectUpdatePosted,
         EventArg::StatusChanged => LoopTrigger::StatusChanged {
             to: match (&args.to, old) {
                 (Some(_), _) => picked(args.to.as_ref()).map(task_status).transpose()?,
@@ -263,6 +331,13 @@ fn event(
             to: match (&args.to, old) {
                 (Some(_), _) => picked(args.to.as_ref()).map(project_status).transpose()?,
                 (None, Some(LoopTrigger::ProjectStatusChanged { to })) => *to,
+                (None, _) => None,
+            },
+        },
+        EventArg::InitiativeStatus => LoopTrigger::InitiativeStatusChanged {
+            to: match (&args.to, old) {
+                (Some(_), _) => picked(args.to.as_ref()).map(initiative_status).transpose()?,
+                (None, Some(LoopTrigger::InitiativeStatusChanged { to })) => *to,
                 (None, _) => None,
             },
         },
@@ -458,6 +533,10 @@ impl Tracker<'_> {
                 Some(tools) => listed(tools).map(str::to_owned).collect(),
                 None => existing.map(|item| item.tools.clone()).unwrap_or_default(),
             },
+            reasoning: match args.reasoning {
+                Some(reasoning) => reasoning.reasoning(),
+                None => existing.and_then(|item| item.reasoning),
+            },
         };
         let id = existing.map(|item| item.id.as_str());
         let operation_id = match existing {
@@ -587,6 +666,22 @@ impl Tracker<'_> {
             found.clone(),
         ))
     }
+
+    pub(super) fn loop_copy(&self, args: &LoopCopyArgs) -> Result<WorkAnswer, ExternalError> {
+        let all = self.all_loops()?;
+        let found = Self::loop_named(&all, &args.name)?;
+        let operation_id = args.write.fresh_operation_id();
+        let by = args.write.agent();
+        let name = args.copy_name.as_deref();
+        let item = if args.dry_run {
+            self.rehearse_loop(|tx, at| loops::copy(tx, &found.id, name, &by, at))?
+        } else {
+            self.applies("copying an automation")?;
+            loops::copy_as(self.app, &operation_id, &found.id, name, &by)
+                .map_err(|message| self.write_refusal(message, &operation_id, "The automation"))?
+        };
+        Ok(self.loop_change(LoopAction::Copied, args.dry_run, operation_id, item))
+    }
 }
 
 fn day_word(day: LoopDay) -> &'static str {
@@ -645,6 +740,17 @@ fn trigger_words(trigger: &LoopTrigger) -> String {
             "When a project changes status".to_owned()
         }
         LoopTrigger::MeetingEnded => "When a meeting ends".to_owned(),
+        LoopTrigger::InitiativeStatusChanged { to: Some(to) } => format!(
+            "When an initiative moves to {}",
+            loops::status_words(to.as_str())
+        ),
+        LoopTrigger::InitiativeStatusChanged { to: None } => {
+            "When an initiative changes status".to_owned()
+        }
+        LoopTrigger::CycleStarted => "When a cycle starts".to_owned(),
+        LoopTrigger::CycleEnded => "When a cycle ends".to_owned(),
+        LoopTrigger::MilestoneDone => "When a milestone is finished".to_owned(),
+        LoopTrigger::ProjectUpdatePosted => "When a project gets an update".to_owned(),
     }
 }
 
@@ -667,6 +773,9 @@ fn loop_line(text: &mut String, item: &WorkLoop) {
         trigger_words(&item.trigger),
         item.version
     );
+    if let Some(reasoning) = item.reasoning {
+        let _ = writeln!(text, "  Thinks {}.", reasoning.as_str());
+    }
     if let Some(next) = item.next_run_at_ms {
         let _ = writeln!(text, "  Next run {}.", local_time(next));
     }
@@ -750,6 +859,8 @@ pub(super) fn text(answer: &WorkAnswer, text: &mut String) {
                 (LoopAction::Restored, true) => "Would restore",
                 (LoopAction::Deleted, false) => "Deleted",
                 (LoopAction::Deleted, true) => "Would delete",
+                (LoopAction::Copied, false) => "Copied to",
+                (LoopAction::Copied, true) => "Would copy to",
             };
             let _ = write!(text, "{verb} ");
             loop_line(text, &change.item);

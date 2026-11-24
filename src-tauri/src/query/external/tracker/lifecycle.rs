@@ -184,7 +184,7 @@ pub struct InboxArgs {
     pub priority: bool,
     /// Only these kinds, comma-separated: status, comment, mention,
     /// assigned, changed, reminder, due, automation, digest, question,
-    /// project, view, note.
+    /// project, view, note, housekeeping.
     #[arg(long, value_delimiter = ',', value_parser = notice_kind, value_name = "KINDS")]
     pub kind: Vec<NotificationKind>,
     /// Only notices about tasks in this project, or about the project, by
@@ -774,12 +774,17 @@ pub(super) fn text(answer: &WorkAnswer, text: &mut String) {
             for notice in &inbox.notifications {
                 let what = match (&notice.field, &notice.automation) {
                     (Some(field), _) => format!("{:?} {field}", notice.kind),
-                    (None, Some(_)) => format!(
+                    (None, _)
+                        if notice.automation.is_some()
+                            || notice.kind == NotificationKind::Housekeeping =>
+                    {
+                        format!(
                         "{:?} {}",
                         notice.kind,
                         notice.to.as_deref().unwrap_or_default()
-                    ),
-                    (None, None) => format!("{:?}", notice.kind),
+                        )
+                    }
+                    (None, _) => format!("{:?}", notice.kind),
                 };
                 let _ = writeln!(
                     text,

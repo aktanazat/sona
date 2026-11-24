@@ -352,6 +352,10 @@ private struct InboxRow: View {
                 Image(systemName: "chart.bar.doc.horizontal").font(.system(size: 12))
                     .foregroundStyle(Theme.inkSecondary)
                     .frame(width: 14)
+            } else if notice.kind == .housekeeping {
+                Image(systemName: "archivebox").font(.system(size: 12))
+                    .foregroundStyle(Theme.inkSecondary)
+                    .frame(width: 14)
             }
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
@@ -403,6 +407,7 @@ private struct InboxRow: View {
         }
         if notice.itemId == nil, let automation = notice.automation { return automation.name }
         if notice.digest != nil { return "Weekly project digest" }
+        if notice.kind == .housekeeping { return "Housekeeping" }
         return "A task deleted for good"
     }
 
@@ -425,6 +430,12 @@ private struct InboxRow: View {
 
     private var actions: some View {
         HStack(spacing: 2) {
+            if undoable {
+                WorkBarButton(icon: "arrow.uturn.backward", help: "Undo") {
+                    Task { await model.work.undoBatch(notice) }
+                }
+                .accessibilityLabel("Undo")
+            }
             Menu {
                 snoozeChoices
             } label: {
@@ -439,6 +450,11 @@ private struct InboxRow: View {
             WorkBarButton(icon: "checkmark", help: "Archive  ⌫") { model.work.mark([notice.id], .archive) }
                 .accessibilityLabel("Archive")
         }
+    }
+
+    /// A housekeeping notice still standing can take back what it reports.
+    private var undoable: Bool {
+        notice.kind == .housekeeping && notice.archivedAtMs == nil
     }
 
     @ViewBuilder
@@ -468,6 +484,11 @@ private struct InboxRow: View {
             Button("Open automation", systemImage: "arrow.up.right.square") { model.openNotice(notice) }
         } else if notice.digest != nil {
             Button("Open digest", systemImage: "arrow.up.right.square") { model.openNotice(notice) }
+        }
+        if undoable {
+            Button("Undo", systemImage: "arrow.uturn.backward") {
+                Task { await store.undoBatch(notice) }
+            }
         }
         if notice.readAtMs == nil {
             Button("Mark read", systemImage: "envelope.open") { store.mark([notice.id], .read) }

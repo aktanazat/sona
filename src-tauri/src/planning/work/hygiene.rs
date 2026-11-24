@@ -3,13 +3,231 @@
 //! commitment of its own; either way the item that came first goes on, and
 //! the later meeting becomes one more of its receipts.
 
+use super::batches::{self, MoveKind};
+use super::comments;
+use super::inbox;
 use super::items;
 use super::sync::{same_words, settle, MeetingReader};
-use super::types::{WorkActor, WorkItem, WorkStatus};
+use super::types::{
+    WorkActivityKind, WorkActor, WorkCommentSubject, WorkItem, WorkPatch, WorkStatus,
+};
+use crate::managers::history::HistoryManager;
 use crate::meeting::loop_types::{MeetingLoopDirection, MeetingLoopKind, MeetingLoopRow};
 use anyhow::Result;
-use rusqlite::{params, Connection};
+use chrono::Days;
+use rusqlite::{params, Connection, TransactionBehavior};
 use std::collections::HashSet;
+use tauri::AppHandle;
+
+pub(crate) const CYCLES_ARCHIVE_MIGRATION: &str =
+    "ALTER TABLE planning_cycles ADD COLUMN archived_at_ms INTEGER;";
+
+const DAY_MS: i64 = 86_400_000;
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct HousekeepingReport {
+    pub(crate) closed_tasks: Vec<String>,
+    pub(crate) archived_tasks: Vec<String>,
+    pub(crate) archived_projects: Vec<String>,
+    pub(crate) archived_cycles: Vec<i64>,
+}
+
+impl HousekeepingReport {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.closed_tasks.is_empty()
+            && self.archived_tasks.is_empty()
+            && self.archived_projects.is_empty()
+            && self.archived_cycles.is_empty()
+    }
+}
+
+/// Auto-closes untouched waiting tasks that are the user's or no one's as
+/// canceled, and archives old done/canceled tasks, completed projects, and
+/// ended cycles. A task counts as touched by an edit, a comment or an
+/// agent session's activity. Everything one day moves is one batch: one
+/// inbox notice whose counts add up across the day's runs, with an undo.
+/// Work the user took back from an earlier batch is left alone.
+pub(crate) fn run_housekeeping(
+    conn: &mut Connection,
+    auto_close_stale_days: Option<u32>,
+    auto_archive_days: Option<u32>,
+    now_ms: i64,
+) -> Result<HousekeepingReport> {
+    if auto_close_stale_days.is_none() && auto_archive_days.is_none() {
+        return Ok(HousekeepingReport::default());
+    }
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let mut report = HousekeepingReport::default();
+    let day = items::local_today(now_ms)
+        .map(|d| d.format("%Y-%m-%d").to_string())
+        .unwrap_or_else(|_| (now_ms / DAY_MS).to_string());
+    let batch = format!("housekeeping:{day}");
+    let before = batches::last_change(&tx)?;
+
+    if let Some(days) = auto_close_stale_days.filter(|d| *d > 0) {
+        let cutoff = now_ms - i64::from(days) * DAY_MS;
+        let stale: Vec<(String, WorkStatus)> = {
+            let mut stmt = tx.prepare(
+                "SELECT t.id, t.status FROM planning_tasks t
+                 WHERE t.archived_at_ms IS NULL AND t.trashed_at_ms IS NULL
+                   AND t.status IN ('backlog', 'not_started')
+                   AND (t.owner_is_self = 1 OR t.owner_person_id IS NULL)
+                   AND (t.snoozed_until_ms IS NULL OR t.snoozed_until_ms <= ?2)
+                   AND MAX(t.updated_at_ms,
+                       COALESCE((SELECT MAX(c.created_at_ms) FROM planning_task_comments c
+                           WHERE c.task_id = t.id), 0),
+                       COALESCE((SELECT MAX(MAX(s.created_at_ms, COALESCE(s.heartbeat_at_ms, 0)))
+                           FROM planning_agent_sessions s WHERE s.task_id = t.id), 0),
+                       COALESCE((SELECT MAX(a.at_ms) FROM planning_agent_activities a
+                           JOIN planning_agent_sessions s ON s.id = a.session_id
+                           WHERE s.task_id = t.id), 0)) <= ?1
+                   AND NOT EXISTS (SELECT 1 FROM planning_sona_moves m
+                       WHERE m.target_id = t.id AND m.kind = 'closed_stale'
+                         AND m.undone_at_ms IS NOT NULL)
+                 ORDER BY t.number",
+            )?;
+            let rows = stmt
+                .query_map(params![cutoff, now_ms], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows
+        };
+        let note = format!("Auto-closed after {days} days untouched");
+        let patch = WorkPatch {
+            status: Some(WorkStatus::Canceled),
+            ..WorkPatch::default()
+        };
+        for (id, status) in stale {
+            items::apply(
+                &tx,
+                &id,
+                &patch,
+                WorkActivityKind::Status,
+                WorkActor::Sona,
+                now_ms,
+            )?;
+            comments::add(
+                &tx,
+                WorkCommentSubject::Task,
+                &id,
+                None,
+                comments::Author {
+                    actor: WorkActor::Sona,
+                    agent: None,
+                },
+                &note,
+                now_ms,
+            )?;
+            inbox::withdraw_sona_notices(&tx, &id, now_ms)?;
+            batches::record(&tx, &batch, MoveKind::ClosedStale, &id, Some(status), now_ms)?;
+            report.closed_tasks.push(id);
+        }
+    }
+
+    if let Some(days) = auto_archive_days.filter(|d| *d > 0) {
+        let cutoff = now_ms - i64::from(days) * DAY_MS;
+        let task_ids: Vec<String> = {
+            let mut stmt = tx.prepare(
+                "SELECT t.id FROM planning_tasks t
+                 WHERE t.archived_at_ms IS NULL AND t.trashed_at_ms IS NULL
+                   AND t.status IN ('done', 'canceled', 'duplicate')
+                   AND COALESCE(t.completed_at_ms, t.updated_at_ms) <= ?1
+                   AND NOT EXISTS (SELECT 1 FROM planning_sona_moves m
+                       WHERE m.target_id = t.id AND m.kind = 'archived_task'
+                         AND m.undone_at_ms IS NOT NULL)
+                 ORDER BY t.number",
+            )?;
+            let rows = stmt
+                .query_map([cutoff], |row| row.get(0))?
+                .collect::<rusqlite::Result<Vec<String>>>()?;
+            rows
+        };
+        for id in task_ids {
+            items::set_archived(&tx, &id, true, WorkActor::Sona, now_ms)?;
+            batches::record(&tx, &batch, MoveKind::ArchivedTask, &id, None, now_ms)?;
+            report.archived_tasks.push(id);
+        }
+
+        let project_ids: Vec<String> = {
+            let mut stmt = tx.prepare(
+                "SELECT p.id FROM planning_projects p
+                 WHERE p.archived_at_ms IS NULL AND p.trashed_at_ms IS NULL
+                   AND p.status IN ('completed', 'canceled')
+                   AND p.updated_at_ms <= ?1
+                   AND NOT EXISTS (SELECT 1 FROM planning_sona_moves m
+                       WHERE m.target_id = p.id AND m.kind = 'archived_project'
+                         AND m.undone_at_ms IS NOT NULL)
+                 ORDER BY p.title",
+            )?;
+            let rows = stmt
+                .query_map([cutoff], |row| row.get(0))?
+                .collect::<rusqlite::Result<Vec<String>>>()?;
+            rows
+        };
+        for id in project_ids {
+            tx.execute(
+                "UPDATE planning_projects SET archived_at_ms = ?2, updated_at_ms = ?2 WHERE id = ?1",
+                params![id, now_ms],
+            )?;
+            batches::record(&tx, &batch, MoveKind::ArchivedProject, &id, None, now_ms)?;
+            report.archived_projects.push(id);
+        }
+
+        if let Ok(today) = items::local_today(now_ms) {
+            if let Some(cutoff_day) = today.checked_sub_days(Days::new(u64::from(days))) {
+                let cutoff_text = cutoff_day.format("%Y-%m-%d").to_string();
+                let cycle_numbers: Vec<i64> = {
+                    let mut stmt = tx.prepare(
+                        "SELECT c.number FROM planning_cycles c
+                         WHERE c.archived_at_ms IS NULL AND c.end_day <= ?1
+                           AND NOT EXISTS (SELECT 1 FROM planning_sona_moves m
+                               WHERE m.target_id = CAST(c.number AS TEXT)
+                                 AND m.kind = 'archived_cycle' AND m.undone_at_ms IS NOT NULL)
+                         ORDER BY c.number",
+                    )?;
+                    let rows = stmt
+                        .query_map([cutoff_text], |row| row.get(0))?
+                        .collect::<rusqlite::Result<Vec<i64>>>()?;
+                    rows
+                };
+                for number in cycle_numbers {
+                    tx.execute(
+                        "UPDATE planning_cycles SET archived_at_ms = ?2 WHERE number = ?1",
+                        params![number, now_ms],
+                    )?;
+                    let target = number.to_string();
+                    batches::record(&tx, &batch, MoveKind::ArchivedCycle, &target, None, now_ms)?;
+                    report.archived_cycles.push(number);
+                }
+            }
+        }
+    }
+
+    if !report.is_empty() {
+        batches::quiet_since(&tx, before)?;
+        batches::post(&tx, None, &batch, now_ms)?;
+    }
+    tx.commit()?;
+    Ok(report)
+}
+
+pub(crate) fn run_housekeeping_tick(
+    app: &AppHandle,
+    history: &HistoryManager,
+    now_ms: i64,
+) -> Result<HousekeepingReport> {
+    let settings = crate::settings::get_settings(app);
+    if settings.work_auto_close_stale_days.is_none() && settings.work_auto_archive_days.is_none() {
+        return Ok(HousekeepingReport::default());
+    }
+    history.with_connection(|conn| {
+        run_housekeeping(
+            conn,
+            settings.work_auto_close_stale_days,
+            settings.work_auto_archive_days,
+            now_ms,
+        )
+    })
+}
 
 fn words(text: &str) -> HashSet<String> {
     text.split(|ch: char| !ch.is_alphanumeric())
@@ -190,4 +408,220 @@ pub(crate) fn fold_repeats(
         }
     }
     Ok(changed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::planning::schema;
+    use crate::planning::work::items::NewItem;
+    use crate::planning::work::types::WorkOwner;
+
+    fn open_db() -> Connection {
+        let conn = Connection::open_in_memory().expect("memory db");
+        schema::apply_all(&conn).expect("schema");
+        conn
+    }
+
+    fn make_task(conn: &Connection, title: &str, status: WorkStatus, at_ms: i64) -> WorkItem {
+        items::insert(
+            conn,
+            &NewItem {
+                title,
+                details: None,
+                status,
+                priority: 0,
+                project_id: None,
+                milestone_id: None,
+                owner: &WorkOwner::Nobody,
+                due_at_ms: None,
+                label_ids: &[],
+                source_loop_id: None,
+                recurrence: None,
+            },
+            WorkActor::Me,
+            at_ms,
+        )
+        .expect("task")
+    }
+
+    #[test]
+    fn housekeeping_auto_closes_stale_and_archives_completed_and_posts_inbox_notice() {
+        let mut conn = open_db();
+        let now = 1_780_000_000_000i64;
+        let old = now - 40 * DAY_MS;
+        let recent = now - 5 * DAY_MS;
+
+        let stale = make_task(&conn, "Forgotten task", WorkStatus::NotStarted, old);
+        let fresh = make_task(&conn, "Active task", WorkStatus::NotStarted, recent);
+        let finished = make_task(&conn, "Old done task", WorkStatus::Done, old);
+
+        conn.execute(
+            "INSERT INTO planning_projects (id, title, status, revision, created_at_ms, updated_at_ms)
+             VALUES ('proj-old', 'Done project', 'completed', 1, ?1, ?1)",
+            [old],
+        )
+        .expect("project");
+        conn.execute(
+            "INSERT INTO planning_cycles (number, start_day, end_day, created_at_ms)
+             VALUES (1, '2020-01-01', '2020-01-15', ?1)",
+            [old],
+        )
+        .expect("cycle");
+
+        let report = run_housekeeping(&mut conn, Some(30), Some(30), now).expect("housekeeping");
+        assert_eq!(report.closed_tasks, vec![stale.id.clone()]);
+        assert_eq!(report.archived_tasks, vec![finished.id.clone()]);
+        assert_eq!(report.archived_projects, vec!["proj-old".to_owned()]);
+        assert_eq!(report.archived_cycles, vec![1]);
+
+        let stale_after = items::item(&conn, &stale.id).expect("stale after");
+        assert_eq!(stale_after.status, WorkStatus::Canceled);
+        let fresh_after = items::item(&conn, &fresh.id).expect("fresh after");
+        assert_eq!(fresh_after.status, WorkStatus::NotStarted);
+        let finished_after = items::item(&conn, &finished.id).expect("finished after");
+        assert!(finished_after.archived_at_ms.is_some());
+
+        let notices = inbox::notifications(&conn, inbox::Shown::default(), now).expect("inbox");
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].kind, inbox::NotificationKind::Housekeeping);
+        assert!(notices[0]
+            .to
+            .as_deref()
+            .unwrap_or("")
+            .contains("closed 1 stale task"));
+
+        // Running again on the same day does nothing and does not duplicate the notice.
+        let second = run_housekeeping(&mut conn, Some(30), Some(30), now + 60_000).expect("second");
+        assert!(second.is_empty());
+        assert_eq!(
+            inbox::notifications(&conn, inbox::Shown::default(), now + 60_000)
+                .expect("inbox")
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_later_run_the_same_day_adds_its_closes_to_the_day_s_one_notice() {
+        let mut conn = open_db();
+        let now = 1_780_000_000_000i64;
+        let old = now - 40 * DAY_MS;
+        make_task(&conn, "Forgotten task", WorkStatus::NotStarted, old);
+        let later = make_task(&conn, "Old idea", WorkStatus::Backlog, now - 20 * DAY_MS);
+        run_housekeeping(&mut conn, Some(30), None, now).expect("first run");
+        let first = inbox::notifications(&conn, inbox::Shown::default(), now).expect("inbox");
+        inbox::mark(&conn, &first[0].id, inbox::Mark::Read, now).expect("read");
+
+        let next = now + 60_000;
+        conn.execute(
+            "UPDATE planning_tasks SET updated_at_ms = ?2 WHERE id = ?1",
+            params![later.id, old],
+        )
+        .expect("the idea goes stale");
+        let second = run_housekeeping(&mut conn, Some(30), None, next).expect("second run");
+        let notices = inbox::notifications(&conn, inbox::Shown::default(), next).expect("inbox");
+
+        assert_eq!(second.closed_tasks, vec![later.id]);
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].to.as_deref(), Some("closed 2 stale tasks"));
+        assert!(notices[0].read_at_ms.is_none());
+    }
+
+    #[test]
+    fn auto_close_leaves_started_work_others_work_and_tasks_with_recent_comments() {
+        let mut conn = open_db();
+        let now = 1_780_000_000_000i64;
+        let old = now - 40 * DAY_MS;
+        make_task(&conn, "Half done", WorkStatus::InProgress, old);
+        let theirs = make_task(&conn, "Dana's part", WorkStatus::NotStarted, old);
+        conn.execute(
+            "UPDATE planning_tasks SET owner_person_id = 'dana' WHERE id = ?1",
+            [&theirs.id],
+        )
+        .expect("owned by Dana");
+        let discussed = make_task(&conn, "Still argued about", WorkStatus::NotStarted, old);
+        comments::add(
+            &conn,
+            WorkCommentSubject::Task,
+            &discussed.id,
+            None,
+            comments::Author {
+                actor: WorkActor::Me,
+                agent: None,
+            },
+            "Picking this up next week",
+            now - DAY_MS,
+        )
+        .expect("a recent comment");
+        let stale = make_task(&conn, "Forgotten task", WorkStatus::NotStarted, old);
+
+        let report = run_housekeeping(&mut conn, Some(30), None, now).expect("housekeeping");
+
+        assert_eq!(report.closed_tasks, vec![stale.id]);
+    }
+
+    #[test]
+    fn undoing_a_day_of_housekeeping_puts_work_back_and_keeps_it_back() {
+        let mut conn = open_db();
+        let now = 1_780_000_000_000i64;
+        let old = now - 40 * DAY_MS;
+        let stale = make_task(&conn, "Forgotten task", WorkStatus::Backlog, old);
+        let finished = make_task(&conn, "Old done task", WorkStatus::Done, old);
+        run_housekeeping(&mut conn, Some(30), Some(30), now).expect("housekeeping");
+        let notice = inbox::notifications(&conn, inbox::Shown::default(), now).expect("inbox")[0]
+            .id
+            .clone();
+
+        let undone = batches::undo(
+            &conn,
+            None,
+            super::super::Change {
+                operation_id: "undo",
+                actor: WorkActor::Me,
+                at_ms: now + 1,
+            },
+            &notice,
+            &mut super::super::Effects::default(),
+        )
+        .expect("undone");
+        let again =
+            run_housekeeping(&mut conn, Some(30), Some(30), now + 31 * DAY_MS).expect("rerun");
+
+        assert_eq!(undone.restored, 2);
+        assert_eq!(items::item(&conn, &stale.id).expect("stale").status, WorkStatus::Backlog);
+        assert!(items::item(&conn, &finished.id)
+            .expect("finished")
+            .archived_at_ms
+            .is_none());
+        assert!(again.is_empty());
+    }
+
+    #[test]
+    fn what_housekeeping_closes_sets_off_no_automation() {
+        use crate::planning::work::loops::{self, LoopConditions, LoopInput, LoopTrigger};
+        let mut conn = open_db();
+        let now = 1_780_000_000_000i64;
+        make_task(&conn, "Forgotten task", WorkStatus::NotStarted, now - 40 * DAY_MS);
+        loops::save(
+            &conn,
+            None,
+            &LoopInput {
+                name: "Closed watch".to_owned(),
+                prompt: "Say why it closed.".to_owned(),
+                trigger: LoopTrigger::StatusChanged { to: None },
+                conditions: LoopConditions::default(),
+                tools: Vec::new(),
+                reasoning: None,
+            },
+            "you",
+            now - 1,
+        )
+        .expect("an automation");
+
+        run_housekeeping(&mut conn, Some(30), None, now).expect("housekeeping");
+        let queued = loops::enqueue(&mut conn, now + 1).expect("triggers read");
+
+        assert_eq!(queued, 0);
+    }
 }

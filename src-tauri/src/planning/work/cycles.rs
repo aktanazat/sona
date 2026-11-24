@@ -36,6 +36,7 @@ struct Span {
     start: NaiveDate,
     end: NaiveDate,
     name: Option<String>,
+    archived: bool,
 }
 
 fn day_text(day: NaiveDate) -> String {
@@ -48,23 +49,27 @@ fn plus(day: NaiveDate, days: u64) -> Result<NaiveDate> {
 }
 
 fn spans(conn: &Connection) -> Result<Vec<Span>> {
-    let mut statement = conn
-        .prepare("SELECT number, start_day, end_day, name FROM planning_cycles ORDER BY number")?;
+    let mut statement = conn.prepare(
+        "SELECT number, start_day, end_day, name, archived_at_ms IS NOT NULL
+         FROM planning_cycles ORDER BY number",
+    )?;
     let rows = statement.query_map([], |row| {
         Ok((
             row.get::<_, i64>(0)?,
             row.get::<_, String>(1)?,
             row.get::<_, String>(2)?,
             row.get::<_, Option<String>>(3)?,
+            row.get::<_, bool>(4)?,
         ))
     })?;
     rows.map(|row| {
-        let (number, start, end, name) = row?;
+        let (number, start, end, name, archived) = row?;
         Ok(Span {
             number,
             start: NaiveDate::parse_from_str(&start, DAY)?,
             end: NaiveDate::parse_from_str(&end, DAY)?,
             name,
+            archived,
         })
     })
     .collect()
@@ -175,6 +180,7 @@ pub(crate) fn advance(conn: &Connection, now_ms: i64) -> Result<Advanced> {
                 start,
                 end,
                 name: None,
+                archived: false,
             });
         }
     }
@@ -189,6 +195,7 @@ pub(crate) fn advance(conn: &Connection, now_ms: i64) -> Result<Advanced> {
             start,
             end,
             name: None,
+            archived: false,
         });
     }
     for span in all.iter().filter(|span| span.end <= today) {
@@ -574,6 +581,7 @@ pub(crate) fn all(conn: &Connection, now_ms: i64) -> Result<Vec<WorkCycle>> {
     let made = spans(conn)?;
     let mut added = added_after_start(conn, &made, today)?;
     made.iter()
+        .filter(|span| !span.archived)
         .map(|span| {
             shown(
                 span,
@@ -1391,6 +1399,7 @@ mod tests {
             start: monday,
             end: plus(monday, 14).expect("two weeks on"),
             name: None,
+            archived: false,
         };
 
         let pace: Vec<f64> = target(&span, 10)

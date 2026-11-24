@@ -1687,11 +1687,29 @@ pub struct AppSettings {
     /// at least one is done. Off by default.
     #[serde(default)]
     pub work_close_parents: bool,
+    /// Whether closing a task also closes its open sub-tasks. Off by default.
+    #[serde(default)]
+    pub work_close_subtasks: bool,
+    /// Whether starting a sub-task moves its backlog or todo parent to in progress.
+    /// Off by default.
+    #[serde(default)]
+    pub work_start_parent: bool,
     /// Whether a digest of the user's projects reaches the inbox each week.
     #[serde(default = "default_work_digest_enabled")]
     pub work_digest_enabled: bool,
     #[serde(default)]
     pub work_digest_day: DigestDay,
+    /// Days untouched before open tasks auto-close as canceled. None = off.
+    #[serde(default)]
+    pub work_auto_close_stale_days: Option<u32>,
+    /// Days after completion before closed tasks, completed projects, and ended
+    /// cycles auto-archive. None = off.
+    #[serde(default)]
+    pub work_auto_archive_days: Option<u32>,
+    /// The fields Triage fills by itself from Sona's sure suggestions. Empty
+    /// means none.
+    #[serde(default)]
+    pub work_triage_auto_apply: Vec<crate::planning::work::triage_auto::TriageAutoField>,
 }
 
 fn default_work_digest_enabled() -> bool {
@@ -2401,8 +2419,13 @@ pub fn get_default_settings() -> AppSettings {
         work_agent_changes: WorkAutonomy::Suggest,
         work_sona_changes: WorkAutonomy::Suggest,
         work_close_parents: false,
+        work_close_subtasks: false,
+        work_start_parent: false,
         work_digest_enabled: default_work_digest_enabled(),
         work_digest_day: DigestDay::Monday,
+        work_auto_close_stale_days: None,
+        work_auto_archive_days: None,
+        work_triage_auto_apply: Vec::new(),
     };
     settings.modes = default_modes(&settings);
     ensure_mode_settings(&mut settings);
@@ -3485,6 +3508,24 @@ pub fn change_work_close_parents_setting(app: AppHandle, enabled: bool) -> Resul
 
 #[tauri::command]
 #[specta::specta]
+pub fn change_work_close_subtasks_setting(app: AppHandle, enabled: bool) -> Result<(), String> {
+    update_settings(&app, |settings| {
+        settings.work_close_subtasks = enabled;
+    })?;
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn change_work_start_parent_setting(app: AppHandle, enabled: bool) -> Result<(), String> {
+    update_settings(&app, |settings| {
+        settings.work_start_parent = enabled;
+    })?;
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
 pub fn change_work_digest_setting(
     app: AppHandle,
     enabled: bool,
@@ -3493,6 +3534,45 @@ pub fn change_work_digest_setting(
     update_settings(&app, |settings| {
         settings.work_digest_enabled = enabled;
         settings.work_digest_day = day;
+    })?;
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn change_work_housekeeping_setting(
+    app: AppHandle,
+    auto_close_stale_days: Option<u32>,
+    auto_archive_days: Option<u32>,
+) -> Result<(), String> {
+    for (label, value) in [
+        ("auto-close-stale-days", auto_close_stale_days),
+        ("auto-archive-days", auto_archive_days),
+    ] {
+        if let Some(days) = value {
+            if !(1..=3650).contains(&days) {
+                return Err(format!("{label} must be between 1 and 3650 days."));
+            }
+        }
+    }
+    update_settings(&app, |settings| {
+        settings.work_auto_close_stale_days = auto_close_stale_days;
+        settings.work_auto_archive_days = auto_archive_days;
+    })?;
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn change_work_triage_auto_apply_setting(
+    app: AppHandle,
+    fields: Vec<crate::planning::work::triage_auto::TriageAutoField>,
+) -> Result<(), String> {
+    let mut fields = fields;
+    fields.sort();
+    fields.dedup();
+    update_settings(&app, |settings| {
+        settings.work_triage_auto_apply = fields;
     })?;
     Ok(())
 }

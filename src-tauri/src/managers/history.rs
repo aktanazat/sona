@@ -351,6 +351,14 @@ pub(crate) static MIGRATIONS: &[M] = &[
     M::up(crate::planning::work::routines::SUBJECT_REMINDERS_MIGRATION),
     M::up(crate::planning::work::feed::FEEDS_MIGRATION),
     M::up(crate::planning::work::inbox::NOTE_NOTICES_MIGRATION),
+    M::up(crate::planning::work::hygiene::CYCLES_ARCHIVE_MIGRATION),
+    M::up(crate::planning::work::inbox::HOUSEKEEPING_NOTICES_MIGRATION),
+    M::up(crate::planning::work::inbox::NOTE_NOTICES_MIGRATION),
+    M::up(crate::planning::work::loops::REASONING_MIGRATION),
+    M::up(crate::planning::work::doc_proposals::DOC_PROPOSALS_MIGRATION),
+    M::up(crate::planning::work::doc_proposals::NOTE_DOC_PROPOSALS_MIGRATION),
+    M::up(crate::planning::work::triage_auto::TRIAGE_AUTO_MIGRATION),
+    M::up(crate::planning::work::batches::BATCHES_MIGRATION),
 ];
 
 const MAX_HISTORY_PAGE_SIZE: usize = 100;

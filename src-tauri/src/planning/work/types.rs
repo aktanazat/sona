@@ -720,6 +720,10 @@ pub struct WorkFieldSuggestion {
     pub meeting_id: Option<String>,
     #[serde(skip)]
     pub drawn_from: Vec<String>,
+    /// Every one of at least three like tasks agrees, so Triage may fill
+    /// the field by itself when Settings lets it.
+    #[serde(skip)]
+    pub sure: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
@@ -952,6 +956,12 @@ pub struct WorkList {
     pub conversations_available: bool,
     /// Every cycle, oldest first, so a row's number reads as a cycle.
     pub cycles: Vec<WorkCycle>,
+    /// Note, description and update edits automations proposed, oldest first.
+    #[serde(default)]
+    pub document_proposals: Vec<super::doc_proposals::DocProposal>,
+    /// Fields Sona filled by itself on listed items in Triage, by item id.
+    #[serde(default)]
+    pub auto_applied: BTreeMap<String, Vec<super::triage_auto::WorkAutoApplied>>,
 }
 
 /// How long a cycle runs, 1 to 8 weeks, the weekday each starts on, 1 for

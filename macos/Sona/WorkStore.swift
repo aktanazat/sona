@@ -17,6 +17,10 @@ final class WorkStore {
     private(set) var suggestions: [String: [WorkFieldSuggestion]] = [:]
     /// Changes agents proposed for each item, by item id, oldest first.
     private(set) var proposals: [String: [WorkProposal]] = [:]
+    /// Note, description and update edits automations proposed, oldest first.
+    private(set) var documentProposals: [WorkDocProposal] = []
+    /// Fields Sona filled by itself on items in Triage, by item id.
+    private(set) var autoApplied: [String: [WorkAutoApplied]] = [:]
     /// False while the conversations cannot be opened: the list holds every
     /// item, but no meeting details and no people to choose.
     private(set) var conversationsAvailable = true
@@ -545,6 +549,48 @@ final class WorkStore {
 
     func dismissSuggestion(_ suggestion: WorkFieldSuggestion, on id: String) async {
         await decide("work_suggestion_dismiss", suggestion, on: id)
+    }
+
+    /// Accepts or declines an automation's proposed note or project edit;
+    /// an accepted one lands in the automation's name.
+    func decideDocProposal(_ proposal: WorkDocProposal, accept: Bool) async {
+        documentProposals.removeAll { $0.id == proposal.id }
+        do {
+            let _: WorkDocProposal = try await core.request(
+                accept ? "work_doc_proposal_accept" : "work_doc_proposal_reject",
+                OperationIdParams(operationId: Self.newId(), id: proposal.id))
+            mutationError = nil
+        } catch {
+            mutationError = error.localizedDescription
+        }
+        await refresh()
+    }
+
+    /// Puts back a field Sona filled by itself, and stops it filling that
+    /// suggestion again.
+    func undoAutoApplied(_ applied: WorkAutoApplied) async {
+        autoApplied[applied.taskId]?.removeAll { $0.id == applied.id }
+        do {
+            let _: WorkItem = try await core.request(
+                "work_triage_undo", OperationIdParams(operationId: Self.newId(), id: applied.id))
+            mutationError = nil
+        } catch {
+            mutationError = error.localizedDescription
+        }
+        await refresh()
+    }
+
+    /// Puts back what one housekeeping notice reports Sona closed or
+    /// archived; the notice moves to the archive.
+    func undoBatch(_ notice: WorkNotification) async {
+        do {
+            let _: JSONValue = try await core.request(
+                "work_housekeeping_undo", OperationIdParams(operationId: Self.newId(), id: notice.id))
+            mutationError = nil
+        } catch {
+            mutationError = error.localizedDescription
+        }
+        await refresh()
     }
 
     private func decide(_ method: String, _ suggestion: WorkFieldSuggestion, on id: String) async {
@@ -1348,6 +1394,8 @@ final class WorkStore {
                 people = listed.people
                 suggestions = listed.suggestions
                 proposals = listed.proposals
+                documentProposals = listed.documentProposals
+                autoApplied = listed.autoApplied
                 conversationsAvailable = listed.conversationsAvailable
                 counts = counted
                 views = savedViews

@@ -130,6 +130,11 @@ The MCP column says whether an agent over MCP can do it; `—` means no tool.
 | Decline with a reason kept in history | `work_triage_decline` (`reason`: the decline picker reads what is typed into it as the reason) | `work decline --reason TEXT`; `work show` prints it | `sona_work_triage` (`reason`) | both |
 | Duplicate of | `work_mark_duplicate` | `work duplicate TASK --of TASK [--dry-run]` | `sona_work_triage` (`duplicate`, `dry_run`) | both |
 | Snooze | `work_bulk_update` | `work snooze --until DAY` | `sona_work_update` (`snooze_until`) | both |
+| Proposed document edits group: a note addition, project description or project update an automation proposed, with what it adds or replaces | `work_list` (`documentProposals`) | `work doc-proposals` | `sona_doc_proposal_list` | both |
+| Accept or decline a proposed document edit (an accepted one lands in the automation's name; a description is refused once the project's changed) | `work_doc_proposal_accept`, `work_doc_proposal_reject` | — | — | UI-only by design: human approval gate |
+| Fields Sona filled by itself in Triage ("applied automatically"), with Undo | `work_list` (`autoApplied`), `work_triage_undo` | `work triage-applied`, `work triage-undo ID [--dry-run]` | `sona_triage_applied`, `sona_triage_undo` | both |
+| Triage routing rules: words, a meeting title or a folder send new tasks to a project, a label or an owner (Settings › Tasks › Triage routing) | `work_triage_rules`, `work_triage_rule_save`, `work_triage_rule_delete` | `work triage-rules`, `work triage-rule-save VALUE [--match words\|meeting\|folder] [--rule ID] [--project] [--label] [--owner] [--dry-run]`, `work triage-rule-delete ID [--dry-run]` | `sona_triage_rule_list`, `sona_triage_rule_save`, `sona_triage_rule_delete` *(destructive)* | both |
+| Fill project, labels or owner by themselves when every similar task agrees (Settings › Tasks › Triage routing, off by default) | `change_work_triage_auto_apply_setting` | `work setting triage-auto-apply project,labels,owner\|off` | `sona_setting` (`triage-auto-apply`) | both |
 | Ask every conversation; take answer lines into Triage | `work_ask`, `work_take_lines` | `work ask "Q"`, `work ask "Q" --take=1,3 [--dry-run]` | `sona_work_ask`, `sona_work_take` (`dry_run`) | both |
 | Agents' proposals group | `work_proposals_accept`, `work_proposals_reject` | — | — | UI-only by design: human approval gate |
 
@@ -344,6 +349,8 @@ The MCP column says whether an agent over MCP can do it; `—` means no tool.
 | Dictation history: process again, transcribe again | `reprocess_history_entry`, `retry_history_entry_transcription` | — | — | window-bound: both rerun the app's speech and cleanup models on the recording, which the CLI process does not load |
 | Evening digest settings; evening card; filing | `change_meeting_digest_enabled_setting`, `change_meeting_digest_minute_of_day_setting`, `home_evening`, `home_evening_write`, `filing_decide` | `work setting evening-digest true\|false`, `work setting evening-digest-time HH:MM`, `work evening`, `work filing ID [--decline]` | `sona_setting`, `sona_evening`, `sona_filing` | both (setting and its time, card, filing; the card leaves out lines, recordings and suggestions from a meeting kept on this Mac, and a place only such a meeting saved); writing the lines now is window-bound: the local AI model runs inside the app |
 | Close a task when its sub-tasks are done (off by default) | `change_work_close_parents_setting` (Settings › Agents › Changes to your tasks) | `work setting auto-close-parents true\|false` | `sona_setting` (`auto-close-parents`) | both |
+| Cancel a closed parent's accepted open sub-tasks (triage ones stay) with one inbox notice naming them and an Undo; start a backlog or todo parent when a sub-task starts (both off by default) | `change_work_close_subtasks_setting`, `change_work_start_parent_setting` (Settings › Agents › Changes to your tasks); Inbox › Undo (`work_housekeeping_undo`) | `work setting close-subtasks-with-parent true\|false`, `work setting start-parent-with-subtask true\|false`, `work housekeeping-undo NOTICE_ID [--dry-run]` | `sona_setting` (`close-subtasks-with-parent`, `start-parent-with-subtask`), `sona_housekeeping_undo` | both |
+| Housekeeping: close untouched waiting tasks that are yours or no one's as canceled after N days (a comment or agent session counts as a touch); archive done or canceled tasks, completed projects and ended cycles after N days; one inbox notice a day that adds up the day's runs, with Undo (both off by default) | `change_work_housekeeping_setting` (Settings › Tasks › Housekeeping), `work_inbox`, Inbox › Undo (`work_housekeeping_undo`) | `work setting auto-close-stale-days N\|off`, `work setting auto-archive-days N\|off`, `work inbox`, `work housekeeping-undo NOTICE_ID [--dry-run]` | `sona_setting` (`auto-close-stale-days`, `auto-archive-days`), `sona_work_inbox`, `sona_housekeeping_undo` | both |
 | Weekly project digest in the inbox: each planned, active or paused project's status, latest update, tasks done that week and risks (on by default, Monday 9:00; work from meetings kept on this Mac left out) | Inbox row "Weekly project digest", Return or Space opens it beside the list (`work_inbox`); Settings › Tasks › Weekly digest (`change_work_digest_setting`) | `work digest [--dry-run]`, `work inbox`; `work setting project-digest true\|false`, `work setting project-digest-day monday…sunday` | `sona_work_digest` (`dry_run`) *(opt-in)*, `sona_work_inbox`; `sona_setting` (`project-digest`, `project-digest-day`) | both |
 | Recording and meeting retention | `update_recording_retention_period`, `meeting_retention_set` | — | — | UI-only by design: privacy retention |
 | Play a turn, listen with context, receipts reel | `conversation_audio_clip`, `conversation_reel_for_loop` | — | — | window-bound: audio output |
@@ -422,13 +429,15 @@ Meetings. The core keeps its loop names (`work_loop*`, `planning_loop*`).
 |---|---|---|---|---|
 | Open Automations: each automation, on or off, its trigger, next and last run | `work_loops` | `work automation-list` | `sona_automation_list` | both |
 | Open an automation: prompt, trigger, conditions, tools, versions, runs | `work_loop` | `work automation-show AUTOMATION` | `sona_automation_show` | both |
-| New automation, edit an automation: name, prompt, schedule or event, conditions, tools | `work_loop_save` | `work automation-save NAME [--automation] [--prompt] (--schedule EVERY --first-run "YYYY-MM-DD HH:MM" [--timezone] [--days] \| --on EVENT [--to] [--label]) [--if-label] [--if-project] [--if-status] [--tools]` | `sona_automation_save` | both |
+| New automation, edit an automation: name, prompt, schedule or event (task, project, initiative status, cycle start or end, finished milestone, project update, meeting), conditions, tools, reasoning | `work_loop_save` | `work automation-save NAME [--automation] [--prompt] (--schedule EVERY --first-run "YYYY-MM-DD HH:MM" [--timezone] [--days] \| --on EVENT [--to] [--label]) [--if-label] [--if-project] [--if-status] [--tools] [--reasoning default\|low\|medium\|high]` | `sona_automation_save` (`on`, `reasoning`) | both |
 | Run now | `work_loop_run` | `work automation-run AUTOMATION` | `sona_automation_run` *(opt-in)* | both |
 | On/off switch | `work_loop_enable` | `work automation-enable AUTOMATION`, `work automation-disable AUTOMATION` | `sona_automation_enable`, `sona_automation_disable` | both |
 | Restore an earlier version | `work_loop_restore_version` | `work automation-restore-version AUTOMATION VERSION` | `sona_automation_restore_version` | both |
 | Delete an automation | `work_loop_delete` | `work automation-delete AUTOMATION` | `sona_automation_delete` *(opt-in)* | both |
+| Duplicate an automation: the copy starts turned off | `work_loop_copy` | `work automation-copy AUTOMATION [--name NAME] [--dry-run]` | `sona_automation_copy` | both |
 | Tool picker: the tools an automation may use | `work_loops` (`tools`) | `work automation-list` (`tools`); `automation-save --tools` refuses a name Sona does not offer | `sona_automation_list` (`tools`) | both |
 | An automation proposes into Triage: with "Propose new tasks for Triage" or "Propose task changes for Triage" ticked in its tools, a run leaves new tasks and field changes waiting in Triage, never applied; the run's output lists them | `work_loop_save` (`tools`), `work_loop` (run output) | `work automation-save --tools sona_work_create,sona_work_update`; `work automation-show` (run output) | `sona_automation_save` (`tools`), `sona_automation_show` | both |
+| An automation proposes document edits: with "Propose additions to notes", "Propose project descriptions" or "Draft project updates" ticked, a run leaves them waiting in Triage's proposed document edits | `work_loop_save` (`tools`) | `work automation-save --tools sona_scratchpad_update_body,sona_project_save,sona_project_update_save` | `sona_automation_save` (`tools`) | both |
 
 ## Rest (Home, Today, rituals, brief, watches)
 
@@ -567,12 +576,12 @@ and line.
 
 | status | main tables | inventory rows below | total |
 |---|---|---|---|
-| both | 245 | 23 | 268 |
+| both | 253 | 23 | 276 |
 | CLI only | 20 | 0 | 20 |
 | missing | 0 | 0 | 0 |
-| UI-only by design | 28 | 34 | 62 |
+| UI-only by design | 29 | 34 | 63 |
 | window-bound | 34 | 25 | 59 |
-| total | 327 | 82 | 409 |
+| total | 336 | 82 | 418 |
 
 Rows are grouped: one row can cover several buttons that call the same
 method. The inventories beside this file list every button.

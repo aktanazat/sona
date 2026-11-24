@@ -68,6 +68,18 @@ struct AgentBridgeView: View {
                     isOn: Binding(
                         get: { store.closeParents },
                         set: { enabled in Task { await store.setCloseParents(enabled) } }))
+                ToggleRow(
+                    title: "Cancel open sub-tasks when their parent closes",
+                    detail: "Sub-tasks still in Triage stay. The inbox lists the rest, with Undo.",
+                    isOn: Binding(
+                        get: { store.closeSubtasks },
+                        set: { enabled in Task { await store.setCloseSubtasks(enabled) } }))
+                ToggleRow(
+                    title: "Start a parent when a sub-task starts",
+                    detail: "Only a parent still in Backlog or Todo.",
+                    isOn: Binding(
+                        get: { store.startParent },
+                        set: { enabled in Task { await store.setStartParent(enabled) } }))
             }
             .disabled(store.autonomyBusy)
         }

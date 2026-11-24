@@ -194,10 +194,15 @@ struct TasksSettingsView: View {
             .padding(.bottom, Space.l)
             ProjectDigestSettings()
             InboxNotificationSettings()
+            HousekeepingSettings()
+            TriageRoutingSettings()
             labels
             templates
         }
-        .task { await model.routines.loadTemplates() }
+        .task {
+            await model.routines.loadTemplates()
+            await model.routines.loadTriageRules()
+        }
     }
 
     private func showRepeating() {
@@ -241,6 +246,172 @@ struct TasksSettingsView: View {
                     TemplateSettingsRow(template: template)
                 }
             }
+        }
+    }
+}
+
+private struct TriageRoutingSettings: View {
+    @Environment(AppModel.self) private var model
+    @State private var draft = WorkTriageRuleInput(matches: .words, value: "")
+
+    var body: some View {
+        let agents = model.agents
+        PageSection("Triage routing") {
+            Text("Sona fills these on new tasks in Triage when at least three similar tasks agree, with Undo.").metaText(Theme.inkSecondary)
+                .padding(.bottom, Space.xs)
+            Card {
+                ForEach(WorkAutoField.allCases) { field in
+                    ToggleRow(
+                        title: title(field),
+                        isOn: Binding(
+                            get: { agents.triageAutoApply.contains(field) },
+                            set: { on in Task { await agents.setTriageAutoApply(field, on) } }))
+                }
+            }
+            .disabled(agents.settingsUnread || agents.autonomyBusy)
+            Text("Rules fill only empty fields, before Sona's own guesses.").metaText(Theme.inkSecondary)
+                .padding(.top, Space.xs)
+            Card {
+                if model.routines.triageRules.isEmpty {
+                    CardLine("No rules yet.")
+                }
+                ForEach(model.routines.triageRules) { rule in
+                    CardRow {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("\(rule.matches.label) “\(rule.value)”").bodyText(13)
+                            Text(outcome(projectId: rule.projectId, labelId: rule.labelId, owner: rule.owner)).metaText()
+                        }
+                    } trailing: {
+                        Button {
+                            Task { await model.routines.deleteTriageRule(rule) }
+                        } label: {
+                            Image(systemName: "trash")
+                        }
+                        .buttonStyle(.icon)
+                        .help("Delete rule")
+                        .accessibilityLabel("Delete rule")
+                    }
+                }
+            }
+            Card {
+                ChoiceRow(title: "When", choices: WorkTriageMatch.allCases, label: \.label, selection: $draft.matches)
+                CardRow {
+                    Text(draft.matches == .folder ? "Folder" : "Words").bodyText()
+                } trailing: {
+                    InputField(prompt: draft.matches == .folder ? "Folder name" : "Words", text: $draft.value)
+                        .frame(width: 220)
+                }
+                ChoiceRow(title: "Project", choices: [nil] + model.work.projects.map { Optional.some($0.id) },
+                          label: projectName, selection: $draft.projectId)
+                ChoiceRow(title: "Label", choices: [nil] + model.work.labels.filter { !$0.retired }.map { Optional.some($0.id) },
+                          label: labelName, selection: $draft.labelId)
+                ChoiceRow(title: "Owner", choices: [nil, .myself] + model.work.people.map { Optional.some(WorkOwner.person($0.id)) },
+                          label: ownerName, selection: $draft.owner)
+                HStack {
+                    Spacer(minLength: 0)
+                    Button("Add rule") {
+                        Task {
+                            if await model.routines.saveTriageRule(draft) {
+                                draft = WorkTriageRuleInput(matches: draft.matches, value: "")
+                            }
+                        }
+                    }
+                    .buttonStyle(.secondary)
+                    .disabled(!addable)
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+            }
+        }
+    }
+
+    private var addable: Bool {
+        !draft.value.trimmingCharacters(in: .whitespaces).isEmpty
+            && (draft.projectId != nil || draft.labelId != nil || draft.owner != nil)
+    }
+
+    private func title(_ field: WorkAutoField) -> String {
+        switch field {
+        case .project: "Fill in the project"
+        case .labels: "Add labels"
+        case .owner: "Fill in the owner"
+        }
+    }
+
+    private func outcome(projectId: String?, labelId: String?, owner: WorkOwner?) -> String {
+        var parts: [String] = []
+        if let projectId { parts.append("Project \(projectName(projectId))") }
+        if let labelId { parts.append("Label \(labelName(labelId))") }
+        if let owner { parts.append("Owner \(ownerName(owner))") }
+        return parts.joined(separator: ", ")
+    }
+
+    private func projectName(_ id: String?) -> String {
+        guard let id else { return "No project" }
+        return model.work.projects.first { $0.id == id }?.title ?? "Unknown project"
+    }
+
+    private func labelName(_ id: String?) -> String {
+        guard let id else { return "No label" }
+        return model.work.labels.first { $0.id == id }?.name ?? "Unknown label"
+    }
+
+    private func ownerName(_ owner: WorkOwner?) -> String {
+        switch owner {
+        case nil, .nobody: "No owner"
+        case .myself: "Me"
+        case let .person(id): model.work.people.first { $0.id == id }?.name ?? "Unknown person"
+        }
+    }
+}
+
+private struct HousekeepingSettings: View {
+    @Environment(AppModel.self) private var model
+    @State private var error: String?
+
+    private static let presets: [Int?] = [nil, 14, 30, 60, 90, 180, 365]
+
+    var body: some View {
+        PageSection("Housekeeping") {
+            ErrorNote(error ?? (model.agents.settingsUnread ? "Couldn't load housekeeping settings." : nil))
+            Card {
+                ChoiceRow(
+                    title: "Close stale tasks",
+                    detail: "Cancels your untouched backlog and to-do tasks. One inbox notice a day lists them, with Undo.",
+                    choices: choices(including: model.agents.autoCloseStaleDays),
+                    label: Self.label,
+                    selection: Binding(
+                        get: { model.agents.autoCloseStaleDays },
+                        set: { picked in Task { await save(picked, model.agents.autoArchiveDays) } }))
+                ChoiceRow(
+                    title: "Archive finished work",
+                    detail: "Done and canceled tasks, completed projects and ended cycles.",
+                    choices: choices(including: model.agents.autoArchiveDays),
+                    label: Self.label,
+                    selection: Binding(
+                        get: { model.agents.autoArchiveDays },
+                        set: { picked in Task { await save(model.agents.autoCloseStaleDays, picked) } }))
+            }
+            .disabled(model.agents.settingsUnread)
+        }
+    }
+
+    private func choices(including current: Int?) -> [Int?] {
+        guard let current, !Self.presets.contains(current) else { return Self.presets }
+        return Self.presets + [current]
+    }
+
+    private static func label(_ days: Int?) -> String {
+        guard let days else { return "Off" }
+        return days == 1 ? "After 1 day" : "After \(days) days"
+    }
+
+    private func save(_ closeDays: Int?, _ archiveDays: Int?) async {
+        do {
+            try await model.agents.setHousekeeping(autoCloseStaleDays: closeDays, autoArchiveDays: archiveDays)
+            error = nil
+        } catch {
+            self.error = "Couldn't save housekeeping settings."
         }
     }
 }

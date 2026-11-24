@@ -32,6 +32,7 @@ use crate::meeting::workflow_types::{
 };
 use crate::modes::{self, ModeDefinition, RequestedEngine};
 use crate::planning;
+use crate::planning::work::triage_auto::TriageAutoField;
 use crate::query::external::{
     beacon, command_error, kept_local, meeting_refusal, person_id, session_id, store,
     visible_meeting, ExternalError, ExternalErrorCode, ExternalScope, READ_SCOPES, WRITE_SCOPES,
@@ -183,10 +184,23 @@ pub enum SettingKey {
     /// Close a task as done once its sub-tasks are all closed and at least
     /// one is done: true or false.
     AutoCloseParents,
+    /// Close open sub-tasks when their parent closes: true or false.
+    CloseSubtasksWithParent,
+    /// Move a backlog or todo parent to in progress when a sub-task starts:
+    /// true or false.
+    StartParentWithSubtask,
     /// The weekly project digest in the inbox: true or false.
     ProjectDigest,
     /// The day it arrives: monday to sunday.
     ProjectDigestDay,
+    /// Auto-close untouched open tasks after N days, or off.
+    AutoCloseStaleDays,
+    /// Auto-archive done/canceled tasks, completed projects, and ended cycles
+    /// after N days, or off.
+    AutoArchiveDays,
+    /// Fields Triage fills by itself when every similar task agrees: a comma
+    /// list of project, labels and owner, or off.
+    TriageAutoApply,
     /// Snippet expansion: true or false.
     Snippets,
     /// Text replacements: true or false.
@@ -683,6 +697,37 @@ fn flag(value: &str) -> Result<bool, String> {
     }
 }
 
+fn optional_days(value: &str, key: &str) -> Result<Option<u32>, String> {
+    let trimmed = value.trim().to_ascii_lowercase();
+    if matches!(trimmed.as_str(), "off" | "none" | "0" | "false") {
+        return Ok(None);
+    }
+    let days: u32 = trimmed
+        .parse()
+        .map_err(|_| format!("{value} is not a number of days or 'off' for {key}."))?;
+    if !(1..=3650).contains(&days) {
+        return Err(format!("{key} must be between 1 and 3650 days, or off."));
+    }
+    Ok(Some(days))
+}
+
+fn auto_fields(value: &str) -> Result<Vec<TriageAutoField>, String> {
+    let trimmed = value.trim();
+    if trimmed.eq_ignore_ascii_case("off") {
+        return Ok(Vec::new());
+    }
+    let mut fields = trimmed
+        .split(',')
+        .map(|field| {
+            TriageAutoField::parse(field)
+                .ok_or_else(|| format!("{field} is not project, labels or owner."))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    fields.sort();
+    fields.dedup();
+    Ok(fields)
+}
+
 fn parsed<T: serde::de::DeserializeOwned>(what: &str, value: &str) -> Result<T, String> {
     serde_json::from_str(value).map_err(|error| format!("{what} is not valid JSON for it: {error}"))
 }
@@ -954,6 +999,14 @@ fn setting_change<'a>(args: &'a SettingArgs) -> SettingsChange<'a> {
             show(|s| json!(s.work_close_parents)),
             apply(move |s| Ok(s.work_close_parents = flag(value)?)),
         ),
+        SettingKey::CloseSubtasksWithParent => (
+            show(|s| json!(s.work_close_subtasks)),
+            apply(move |s| Ok(s.work_close_subtasks = flag(value)?)),
+        ),
+        SettingKey::StartParentWithSubtask => (
+            show(|s| json!(s.work_start_parent)),
+            apply(move |s| Ok(s.work_start_parent = flag(value)?)),
+        ),
         SettingKey::ProjectDigest => (
             show(|s| json!(s.work_digest_enabled)),
             apply(move |s| Ok(s.work_digest_enabled = flag(value)?)),
@@ -967,6 +1020,24 @@ fn setting_change<'a>(args: &'a SettingArgs) -> SettingsChange<'a> {
                 )?;
                 Ok(())
             }),
+        ),
+        SettingKey::AutoCloseStaleDays => (
+            show(|s| json!(s.work_auto_close_stale_days)),
+            apply(move |s| {
+                s.work_auto_close_stale_days = optional_days(value, "auto-close-stale-days")?;
+                Ok(())
+            }),
+        ),
+        SettingKey::AutoArchiveDays => (
+            show(|s| json!(s.work_auto_archive_days)),
+            apply(move |s| {
+                s.work_auto_archive_days = optional_days(value, "auto-archive-days")?;
+                Ok(())
+            }),
+        ),
+        SettingKey::TriageAutoApply => (
+            show(|s| json!(s.work_triage_auto_apply)),
+            apply(move |s| Ok(s.work_triage_auto_apply = auto_fields(value)?)),
         ),
         SettingKey::Snippets => (
             show(|s| json!(s.snippets_enabled)),
@@ -1148,8 +1219,13 @@ struct SettingsView<'a> {
     evening_digest: bool,
     evening_digest_time: String,
     auto_close_parents: bool,
+    close_subtasks_with_parent: bool,
+    start_parent_with_subtask: bool,
     project_digest: bool,
     project_digest_day: DigestDay,
+    auto_close_stale_days: Option<u32>,
+    auto_archive_days: Option<u32>,
+    triage_auto_apply: &'a [TriageAutoField],
     keyword_trackers: &'a [KeywordTracker],
     meeting_prep: &'a PrepPreferences,
     profile_photo: bool,
@@ -1231,8 +1307,13 @@ fn settings_view(
         evening_digest: settings.meeting_digest_enabled,
         evening_digest_time: clock(settings.meeting_digest_minute_of_day),
         auto_close_parents: settings.work_close_parents,
+        close_subtasks_with_parent: settings.work_close_subtasks,
+        start_parent_with_subtask: settings.work_start_parent,
         project_digest: settings.work_digest_enabled,
         project_digest_day: settings.work_digest_day,
+        auto_close_stale_days: settings.work_auto_close_stale_days,
+        auto_archive_days: settings.work_auto_archive_days,
+        triage_auto_apply: &settings.work_triage_auto_apply,
         keyword_trackers: &settings.trackers_list,
         meeting_prep: &settings.meeting_prep,
         profile_photo,

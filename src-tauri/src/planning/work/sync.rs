@@ -694,6 +694,7 @@ pub(crate) fn suggestions(
             at_ms: None,
             meeting_id: None,
             drawn_from: Vec::new(),
+            sure: false,
         });
     }
     super::triage_hints::extend(history, reader, item, &mut suggestions)?;
@@ -731,6 +732,7 @@ pub(crate) fn fill_suggestions(
         at_ms: i64::try_from(row.at_ms).ok().filter(|_| retained),
         meeting_id: Some(meeting_id.clone()),
         drawn_from: Vec::new(),
+        sure: false,
     };
     let mut suggestions = Vec::new();
     if item.owner() == WorkOwner::Nobody {

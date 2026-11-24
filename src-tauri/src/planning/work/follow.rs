@@ -460,6 +460,7 @@ fn said(notice: &Notification) -> String {
             _ => "added a task to it".to_owned(),
         },
         NotificationKind::Note => "edited it".to_owned(),
+        NotificationKind::Housekeeping => notice.to.clone().unwrap_or_default(),
     }
 }
 
@@ -1149,6 +1150,12 @@ fn tick(app: &AppHandle, prompts: &dyn PromptPresenter, now_ms: i64) -> Result<(
     }
     if super::digest::post_weekly(app, &history, store.as_deref(), now_ms)? {
         super::tasks_changed(app, Vec::new());
+    }
+    let housekeeping = super::hygiene::run_housekeeping_tick(app, &history, now_ms)?;
+    if !housekeeping.is_empty() {
+        let mut changed = housekeeping.closed_tasks;
+        changed.extend(housekeeping.archived_tasks);
+        super::tasks_changed(app, changed);
     }
     Ok(())
 }
